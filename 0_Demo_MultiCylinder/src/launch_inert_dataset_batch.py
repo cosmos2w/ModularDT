@@ -29,12 +29,12 @@ from multicyl_common import (
 
 # ------------------------------ Editable settings -------------------------------
 
-NUM_CYLINDER_OPTIONS = [1, 3, 5, 7]
-RE_OPTIONS = [20.0, 50.0, 100.0, 160.0, 200.0]
+# NUM_CYLINDER_OPTIONS = [1, 3, 5, 7]
+# RE_OPTIONS = [20.0, 50.0, 100.0, 160.0, 200.0]
 
-# NUM_CYLINDER_OPTIONS = [2, 4, 6]
-# RE_OPTIONS = [80.0, 120.0, 180.0]
-REPEATS_PER_COMBINATION = 3
+NUM_CYLINDER_OPTIONS = [2, 4, 6]
+RE_OPTIONS = [80.0, 120.0, 180.0]
+REPEATS_PER_COMBINATION = 2
 
 TEMPLATE_CONFIG_NAME = "config_inert.json"
 GENERATED_CONFIG_SUBDIR = "Config_bk"

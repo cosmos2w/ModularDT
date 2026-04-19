@@ -21,7 +21,7 @@ SRC_DIR = Path(__file__).resolve().parent
 DEMO_DIR = SRC_DIR.parent
 DEFAULT_DATA_DIR = DEMO_DIR / "Data_Saved"
 DEFAULT_CONFIG_DIR = DEMO_DIR / "Configs"
-DEFAULT_CONFIG_BK_DIR = DEMO_DIR / "Config_bk"
+DEFAULT_CONFIG_BK_DIR = DEFAULT_CONFIG_DIR / "Config_bk"
 DEFAULT_DOMAIN_SHAPE_DIR = DEMO_DIR / "Domain_shape"
 
 
@@ -177,7 +177,7 @@ def default_config_dir() -> Path:
 
 
 def default_config_backup_dir() -> Path:
-    """Return the config backup directory under 0_Demo_MultiCylinder."""
+    """Return the config backup directory under Configs/."""
     return DEFAULT_CONFIG_BK_DIR
 
 
@@ -221,7 +221,7 @@ def resolve_config_path(path_like: str | Path) -> Path:
 
 
 def backup_config_file(config_path: Path, case_id: str, stamp: str | None = None) -> Path:
-    """Copy a config file into Config_bk with case id and timestamp in the name."""
+    """Copy a config file into Configs/Config_bk with case id and timestamp in the name."""
     timestamp = stamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_case_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in case_id)
     backup_name = f"{config_path.stem}_case_{safe_case_id}_{timestamp}{config_path.suffix}"
