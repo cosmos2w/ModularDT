@@ -221,13 +221,18 @@ def resolve_config_path(path_like: str | Path) -> Path:
 
 
 def backup_config_file(config_path: Path, case_id: str, stamp: str | None = None) -> Path:
-    """Copy a config file into Configs/Config_bk with case id and timestamp in the name."""
+    """Copy a config file into Configs/Config_bk unless it already lives there."""
+    resolved_config_path = config_path.expanduser().resolve()
+    resolved_backup_dir = DEFAULT_CONFIG_BK_DIR.resolve()
+    if resolved_backup_dir == resolved_config_path.parent or resolved_backup_dir in resolved_config_path.parents:
+        return resolved_config_path
+
     timestamp = stamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_case_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in case_id)
-    backup_name = f"{config_path.stem}_case_{safe_case_id}_{timestamp}{config_path.suffix}"
+    backup_name = f"{resolved_config_path.stem}_case_{safe_case_id}_{timestamp}{resolved_config_path.suffix}"
     backup_path = DEFAULT_CONFIG_BK_DIR / backup_name
     backup_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(config_path, backup_path)
+    shutil.copy2(resolved_config_path, backup_path)
     return backup_path
 
 

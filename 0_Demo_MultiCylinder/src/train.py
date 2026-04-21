@@ -97,6 +97,17 @@ def normalize_loss_scalar(value: torch.Tensor | float) -> float:
     return float(value)
 
 
+def round_to_significant_figures(value: torch.Tensor | float, digits: int = 6) -> float:
+    scalar = normalize_loss_scalar(value)
+    if not math.isfinite(scalar) or scalar == 0.0:
+        return scalar
+    return float(f"{scalar:.{digits}g}")
+
+
+def round_loss_metrics(metrics: Dict[str, float], *, digits: int = 6) -> Dict[str, float]:
+    return {key: round_to_significant_figures(value, digits) for key, value in metrics.items()}
+
+
 def current_timestamp() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -921,11 +932,12 @@ def main() -> None:
         min_points_per_sample=min_points_per_sample,
     )
     max_physical_queries = int(cfg["training"].get("max_physical_queries_per_step", 131072))
-    if effective_points_per_item > 0:
-        max_batch_from_queries = max(1, max_physical_queries // effective_points_per_item)
-        physical_batch_size = min(requested_batch_size, max_batch_from_queries)
-    else:
-        physical_batch_size = requested_batch_size
+    # if effective_points_per_item > 0:
+    #     max_batch_from_queries = max(1, max_physical_queries // effective_points_per_item)
+    #     physical_batch_size = min(requested_batch_size, max_batch_from_queries)
+    # else:
+    #     physical_batch_size = requested_batch_size
+    physical_batch_size = requested_batch_size
     accumulation_steps = max(1, math.ceil(requested_batch_size / max(physical_batch_size, 1)))
 
     train_loader = DataLoader(
@@ -1169,15 +1181,19 @@ def main() -> None:
 
         epoch_row = {
             "epoch": epoch,
-            "loss_total": epoch_train_metrics["loss_total"],
-            "loss_field": epoch_train_metrics["loss_field"],
-            "loss_mean": epoch_train_metrics["loss_mean"],
-            "loss_residual": epoch_train_metrics["loss_residual"],
-            "loss_freq": epoch_train_metrics["loss_freq"],
-            "loss_org_sparsity": epoch_train_metrics["loss_org_sparsity"],
-            "loss_org_entropy": epoch_train_metrics["loss_org_entropy"],
+            **round_loss_metrics(
+                {
+                    "loss_total": epoch_train_metrics["loss_total"],
+                    "loss_field": epoch_train_metrics["loss_field"],
+                    "loss_mean": epoch_train_metrics["loss_mean"],
+                    "loss_residual": epoch_train_metrics["loss_residual"],
+                    "loss_freq": epoch_train_metrics["loss_freq"],
+                    "loss_org_sparsity": epoch_train_metrics["loss_org_sparsity"],
+                    "loss_org_entropy": epoch_train_metrics["loss_org_entropy"],
+                }
+            ),
             "lr": float(optimizer.param_groups[0]["lr"]),
-            **val_metrics,
+            **round_loss_metrics(val_metrics),
         }
         history_rows.append(epoch_row)
         with history_csv.open("a", newline="", encoding="utf-8") as f:

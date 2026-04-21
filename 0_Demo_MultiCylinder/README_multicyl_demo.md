@@ -13,6 +13,12 @@ The training and evaluation scripts expect the HDF5 structure produced there,
 including per-case `sampled_points`, `mean_field`, `x_grid`, `y_grid`, and
 canonical-cycle data for validation and reconstruction.
 
+The default surrogate configuration is intentionally regularized to reduce
+coordinate memorization pressure: lower Fourier frequency counts, light
+dropout, stronger weight decay, and a behavior head that pools only learned
+hypergraph states instead of leaking raw global descriptors into the decoder
+path.
+
 ## Contents
 
 - `src/multicyl_common.py` - shared configuration, path handling, layout sampling, and utility helpers
@@ -212,6 +218,12 @@ Training configuration lives in `Config_Train/train_config_template.json`. The m
 - `training.max_physical_queries_per_step` - cap on the number of decoder queries in one physical forward pass
 - `training.*` - optimizer, scheduler, mixed precision, and epoch-level training settings
 - `validation.*` - canonical-cycle validation settings
+
+The shipped template currently uses `coord_fourier_frequencies=4`,
+`query_fourier_frequencies=4`, `structure_fourier_frequencies=1`,
+`dropout=0.05`, `weight_decay=1e-4`, and `organizer_entropy_weight=1e-3` to
+encourage the decoder to rely on organized latent state rather than exact
+coordinate memorization.
 
 Start training with:
 

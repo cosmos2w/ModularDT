@@ -169,13 +169,13 @@ class ModelConfig:
     behavior_dim: int = 128
     latent_dim: int = 128
     message_passing_steps: int = 2
-    coord_fourier_frequencies: int = 8
-    structure_fourier_frequencies: int = 6
-    query_fourier_frequencies: int = 8
+    coord_fourier_frequencies: int = 4
+    structure_fourier_frequencies: int = 1
+    query_fourier_frequencies: int = 4
     decoder_hidden_dim: int = 256
     decoder_num_layers: int = 4
     decoder_type: str = "mlp_fourier"  # "mlp_fourier" | "siren"
-    dropout: float = 0.0
+    dropout: float = 0.05
     use_layer_norm: bool = True
     future_module_feature_dim: int = 0
     future_global_feature_dim: int = 0
@@ -405,7 +405,7 @@ class BehaviorHead(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.cfg = cfg
-        pooled_dim = 3 * cfg.hidden_dim + 2 + cfg.future_global_feature_dim
+        pooled_dim = 3 * cfg.hidden_dim
         self.behavior_mlp = MLP(
             in_dim=pooled_dim,
             hidden_dim=cfg.hidden_dim,
@@ -423,14 +423,12 @@ class BehaviorHead(nn.Module):
         env_state = organized["env_state"]
         hyper_state = organized["hyper_state"]
         cyl_mask = organized["cyl_mask"]
-        global_features = organized["global_features"]
-
         # [B, D]
         module_pool = HypergraphOrganizer.masked_mean(module_state, cyl_mask, dim=1)
         env_pool = env_state.mean(dim=1)
         hyper_pool = hyper_state.mean(dim=1)
 
-        pooled = torch.cat([module_pool, env_pool, hyper_pool, global_features], dim=-1)
+        pooled = torch.cat([module_pool, env_pool, hyper_pool], dim=-1)
         behavior = self.behavior_mlp(pooled)
         mean_latent = self.mean_latent_head(behavior)
         dynamic_latent = self.dynamic_latent_head(behavior)
@@ -501,14 +499,12 @@ class NeuralFieldDecoder(nn.Module):
         self.hidden_dim = cfg.hidden_dim
 
         self.query_encoder = FourierEncoder(3, cfg.query_fourier_frequencies, include_input=True)
-        self.rel_env_encoder = FourierEncoder(2, 3, include_input=True)
-        self.rel_mod_encoder = FourierEncoder(2, 3, include_input=True)
 
         query_proj_in = self.query_encoder.output_dim + (2 * cfg.latent_dim) + 1
         self.query_proj = MLP(query_proj_in, cfg.hidden_dim, cfg.hidden_dim, num_layers=2, dropout=cfg.dropout)
 
-        self.env_agg = AttentionAggregator(cfg.hidden_dim, rel_dim=self.rel_env_encoder.output_dim)
-        self.mod_agg = AttentionAggregator(cfg.hidden_dim, rel_dim=self.rel_mod_encoder.output_dim)
+        self.env_agg = AttentionAggregator(cfg.hidden_dim, rel_dim=0)
+        self.mod_agg = AttentionAggregator(cfg.hidden_dim, rel_dim=0)
         self.hyp_agg = AttentionAggregator(cfg.hidden_dim, rel_dim=0)
 
         mean_in = cfg.hidden_dim * 4 + cfg.latent_dim
@@ -526,14 +522,6 @@ class NeuralFieldDecoder(nn.Module):
         xy[..., 0] = xy[..., 0] / max(self.cfg.domain_length_x, 1e-6)
         xy[..., 1] = xy[..., 1] / max(self.cfg.domain_length_y, 1e-6)
         return xy
-
-    @staticmethod
-    def _periodic_rel(query_xy_norm: torch.Tensor, context_xy_norm: torch.Tensor) -> torch.Tensor:
-        dx = query_xy_norm[:, :, None, 0] - context_xy_norm[:, None, :, 0]
-        dy = query_xy_norm[:, :, None, 1] - context_xy_norm[:, None, :, 1]
-        dx = (dx + 0.5) % 1.0 - 0.5
-        dy = (dy + 0.5) % 1.0 - 0.5
-        return torch.stack([dx, dy], dim=-1)
 
     def forward(
         self,
@@ -553,16 +541,11 @@ class NeuralFieldDecoder(nn.Module):
 
         query_state = self.query_proj(torch.cat([query_feat, mean_latent, dynamic_latent, freq_pred], dim=-1))
 
-        env_coords = organized["env_coords"]
-        mod_coords = organized["module_coords_norm"]
-        env_rel = self.rel_env_encoder(self._periodic_rel(query_xy_norm, env_coords))
-        mod_rel = self.rel_mod_encoder(self._periodic_rel(query_xy_norm, mod_coords))
-
-        env_ctx = self.env_agg(query_state, organized["env_state"], rel=env_rel)
+        env_ctx = self.env_agg(query_state, organized["env_state"], rel=None)
         mod_ctx = self.mod_agg(
             query_state,
             organized["module_state"],
-            rel=mod_rel,
+            rel=None,
             context_mask=organized["cyl_mask"],
         )
         hyp_ctx = self.hyp_agg(query_state, organized["hyper_state"], rel=None)

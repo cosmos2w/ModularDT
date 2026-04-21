@@ -36,7 +36,7 @@ python src/preprocess_inert_multicyl_dataset.py \
     --output-root ./Data_Saved/Processed_Inert_Dataset \
     --device cuda:0 \
     --phase-bins 24 \
-    --save-cycles 2 \
+    --save-cycles 1 \
     --points-per-phase-bin 0 \
     --sampling-mode uniform \
     --compute-pod \

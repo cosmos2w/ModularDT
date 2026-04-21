@@ -29,11 +29,11 @@ from multicyl_common import (
 
 # ------------------------------ Editable settings -------------------------------
 
-# NUM_CYLINDER_OPTIONS = [1, 3, 5, 7]
+# NUM_CYLINDER_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8]
 # RE_OPTIONS = [20.0, 50.0, 100.0, 160.0, 200.0]
 
 NUM_CYLINDER_OPTIONS = [2, 4, 6]
-RE_OPTIONS = [80.0, 120.0, 180.0]
+RE_OPTIONS = [40.0, 80.0, 150.0]
 REPEATS_PER_COMBINATION = 2
 
 TEMPLATE_CONFIG_NAME = "config_inert.json"
@@ -43,9 +43,9 @@ GENERATED_CONFIG_PREFIX = "config_inert"
 BASE_LAYOUT_SEED = 1000
 
 ENABLE_CPU = True
-CPU_CONCURRENT_SLOTS = 3
+CPU_CONCURRENT_SLOTS = 2
 GPU_IDS = [0, 1]
-MAX_CONCURRENT_PER_GPU = 3
+MAX_CONCURRENT_PER_GPU = 4
 
 POLL_INTERVAL_SEC = 1.0
 
