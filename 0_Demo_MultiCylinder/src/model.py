@@ -151,6 +151,50 @@ class SirenNet(nn.Module):
         return self.final(x)
 
 
+class DeepONetHead(nn.Module):
+    """Minimal DeepONet head with separate branch and trunk networks.
+
+    The trunk side is driven by query-only features, while the branch side
+    receives the complementary latent/context features assembled by the decoder.
+    """
+
+    def __init__(
+        self,
+        trunk_in_dim: int,
+        branch_in_dim: int,
+        hidden_dim: int,
+        num_layers: int,
+        out_dim: int,
+        dropout: float = 0.0,
+        basis_dim: Optional[int] = None,
+    ):
+        super().__init__()
+        self.out_dim = int(out_dim)
+        self.basis_dim = int(basis_dim if basis_dim is not None else hidden_dim)
+        joint_out_dim = self.out_dim * self.basis_dim
+        mlp_layers = max(int(num_layers), 1)
+        self.trunk = MLP(
+            trunk_in_dim,
+            hidden_dim,
+            joint_out_dim,
+            mlp_layers,
+            dropout=dropout,
+        )
+        self.branch = MLP(
+            branch_in_dim,
+            hidden_dim,
+            joint_out_dim,
+            mlp_layers,
+            dropout=dropout,
+        )
+        self.bias = nn.Parameter(torch.zeros(self.out_dim))
+
+    def forward(self, trunk_input: torch.Tensor, branch_input: torch.Tensor) -> torch.Tensor:
+        trunk = self.trunk(trunk_input).view(*trunk_input.shape[:-1], self.out_dim, self.basis_dim)
+        branch = self.branch(branch_input).view(*branch_input.shape[:-1], self.out_dim, self.basis_dim)
+        return (trunk * branch).sum(dim=-1) + self.bias
+
+
 # --------------------------- Configuration dataclass ---------------------------
 
 
@@ -174,7 +218,15 @@ class ModelConfig:
     query_fourier_frequencies: int = 4
     decoder_hidden_dim: int = 256
     decoder_num_layers: int = 4
-    decoder_type: str = "mlp_fourier"  # "mlp_fourier" | "siren"
+    decoder_type: str = "mlp_fourier"  # "mlp_fourier" | "siren" | "deeponet" | "structured_perceiver"
+    perceiver_num_layers: int = 1
+    perceiver_num_heads: int = 4
+    perceiver_head_dim: int = 16
+    perceiver_ffn_mult: int = 2
+    perceiver_dropout: float = 0.05
+    perceiver_num_global_tokens: int = 3
+    perceiver_use_relative_bias: bool = True
+    perceiver_chunk_query_attention: bool = True
     dropout: float = 0.05
     use_layer_norm: bool = True
     future_module_feature_dim: int = 0
@@ -244,10 +296,18 @@ class HypergraphOrganizer(nn.Module):
         self.hyperedge_context = nn.Linear(global_in_dim, cfg.hidden_dim)
 
         # Soft incidence scorers.
+        # rel_dim = 5  # dx, dy, dist, downstream(+x), upstream(-x)
+        # self.me_score = MLP(2 * cfg.hidden_dim + rel_dim, cfg.hidden_dim, 1, num_layers=3, dropout=cfg.dropout)
+        # self.mh_score = MLP(2 * cfg.hidden_dim, cfg.hidden_dim, 1, num_layers=2, dropout=cfg.dropout)
+        # self.eh_score = MLP(2 * cfg.hidden_dim, cfg.hidden_dim, 1, num_layers=2, dropout=cfg.dropout)
+
         rel_dim = 5  # dx, dy, dist, downstream(+x), upstream(-x)
         self.me_score = MLP(2 * cfg.hidden_dim + rel_dim, cfg.hidden_dim, 1, num_layers=3, dropout=cfg.dropout)
-        self.mh_score = MLP(2 * cfg.hidden_dim, cfg.hidden_dim, 1, num_layers=2, dropout=cfg.dropout)
-        self.eh_score = MLP(2 * cfg.hidden_dim, cfg.hidden_dim, 1, num_layers=2, dropout=cfg.dropout)
+        # physical anchoring for hypergraph assignments:
+        # - A_mh sees a compact module-neighborhood geometry summary
+        # - A_eh sees a compact environment-region geometry summary
+        self.mh_score = MLP(2 * cfg.hidden_dim + rel_dim, cfg.hidden_dim, 1, num_layers=2, dropout=cfg.dropout)
+        self.eh_score = MLP(2 * cfg.hidden_dim + rel_dim, cfg.hidden_dim, 1, num_layers=2, dropout=cfg.dropout)
 
         # Lightweight message-passing update blocks.
         self.module_update = MLP(3 * cfg.hidden_dim, cfg.hidden_dim, cfg.hidden_dim, num_layers=2, dropout=cfg.dropout)
@@ -278,8 +338,7 @@ class HypergraphOrganizer(nn.Module):
     def _periodic_relative_features(
         self,
         module_coords: torch.Tensor,
-        env_coords: torch.Tensor,
-    ) -> torch.Tensor:
+        env_coords: torch.Tensor,) -> torch.Tensor:
         """Compute periodic relative geometry features for module-env pairs.
 
         Args:
@@ -297,6 +356,31 @@ class HypergraphOrganizer(nn.Module):
         upstream = torch.clamp(dx, min=0.0)
         return torch.stack([dx, dy, dist, downstream, upstream], dim=-1)
 
+    def _pairwise_periodic_relative_features(
+        self,
+        src_coords: torch.Tensor,
+        dst_coords: torch.Tensor,) -> torch.Tensor:
+        """Periodic relative geometry features between any two token sets.
+
+        Args:
+            src_coords: [B, N_src, 2] normalized to [0, 1]
+            dst_coords: [B, N_dst, 2] normalized to [0, 1]
+
+        Returns:
+            rel: [B, N_src, N_dst, 5] with channels:
+                dx, dy, dist, downstream(+x flow), upstream
+        """
+        dx = src_coords[:, :, None, 0] - dst_coords[:, None, :, 0]
+        dy = src_coords[:, :, None, 1] - dst_coords[:, None, :, 1]
+        dx = (dx + 0.5) % 1.0 - 0.5
+        dy = (dy + 0.5) % 1.0 - 0.5
+        dist = torch.sqrt(dx.square() + dy.square() + 1e-8)
+
+        # Flow is along +x, so wakes are asymmetric in x.
+        downstream = torch.clamp(-dx, min=0.0)
+        upstream = torch.clamp(dx, min=0.0)
+        return torch.stack([dx, dy, dist, downstream, upstream], dim=-1)
+
     @staticmethod
     def masked_mean(values: torch.Tensor, mask: torch.Tensor, dim: int) -> torch.Tensor:
         mask = mask.to(values.dtype)
@@ -304,6 +388,15 @@ class HypergraphOrganizer(nn.Module):
             mask = mask.unsqueeze(-1)
         denom = mask.sum(dim=dim).clamp_min(1e-6)
         return (values * mask).sum(dim=dim) / denom
+
+    @staticmethod
+    def masked_max(values: torch.Tensor, mask: torch.Tensor, dim: int) -> torch.Tensor:
+        mask = mask.to(values.dtype)
+        while mask.ndim < values.ndim:
+            mask = mask.unsqueeze(-1)
+        very_neg = torch.full_like(values, -1e9)
+        masked = torch.where(mask > 0, values, very_neg)
+        return masked.max(dim=dim).values
 
     def _normalize_incidence(self, weights: torch.Tensor, dim: int, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         if mask is not None:
@@ -344,7 +437,19 @@ class HypergraphOrganizer(nn.Module):
         hyper_state = self.hyperedge_embeddings.unsqueeze(0).expand(batch_size, -1, -1)
         hyper_state = hyper_state + self.hyperedge_context(global_feats).unsqueeze(1)
 
-        rel_me = self._periodic_relative_features(module_coords_norm, env_coords)  # [B, N, M, 5]
+        # rel_me = self._periodic_relative_features(module_coords_norm, env_coords)  # [B, N, M, 5]
+        rel_me = self._pairwise_periodic_relative_features(module_coords_norm, env_coords)
+
+        rel_mm = self._pairwise_periodic_relative_features(module_coords_norm, module_coords_norm)  # [B, N, N, 5]
+        # Valid module-module pairs excluding self-pairs.
+        eye = torch.eye(n_max, device=device, dtype=module_coords_norm.dtype)[None, :, :]
+        pair_mask = cyl_mask[:, :, None] * cyl_mask[:, None, :] * (1.0 - eye)
+        # Distance-weighted neighborhood summary per module.
+        dist_mm = rel_mm[..., 2].clamp_min(1e-3)
+        pair_w = pair_mask / dist_mm
+        pair_w = pair_w / pair_w.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        # [B, N, 5]
+        module_geom_summary = torch.einsum("bnm,bnmf->bnf", pair_w, rel_mm)
 
         for _ in range(self.cfg.message_passing_steps):
             n_env = env_state.shape[1]
@@ -356,14 +461,34 @@ class HypergraphOrganizer(nn.Module):
             valid_pair_mask = cyl_mask[:, :, None].expand_as(me_logits)
             A_me = torch.softmax(me_logits.masked_fill(valid_pair_mask <= 0, -1e9), dim=-1)
 
+            # Convert module->env weights into env<-module weights.
+            env_from_mod = A_me.transpose(1, 2)  # [B, M_env, N]
+            env_from_mod = env_from_mod / env_from_mod.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+            # Environment-token summary of nearby module-neighborhood geometry.
+            env_geom_summary = torch.einsum("bmn,bnf->bmf", env_from_mod, module_geom_summary)  # [B, M_env, 5]
+
+            # module_h = module_state[:, :, None, :].expand(-1, -1, n_hyp, -1)
+            # hyper_h = hyper_state[:, None, :, :].expand(-1, n_max, -1, -1)
+            # mh_logits = self.mh_score(torch.cat([module_h, hyper_h], dim=-1)).squeeze(-1)
+            # A_mh = torch.softmax(mh_logits.masked_fill(cyl_mask[:, :, None] <= 0, -1e9), dim=-1)
+
+            # env_h = env_state[:, :, None, :].expand(-1, -1, n_hyp, -1)
+            # hyper_e = hyper_state[:, None, :, :].expand(-1, n_env, -1, -1)
+            # eh_logits = self.eh_score(torch.cat([env_h, hyper_e], dim=-1)).squeeze(-1)
+            # A_eh = torch.softmax(eh_logits, dim=-1)
+
             module_h = module_state[:, :, None, :].expand(-1, -1, n_hyp, -1)
             hyper_h = hyper_state[:, None, :, :].expand(-1, n_max, -1, -1)
-            mh_logits = self.mh_score(torch.cat([module_h, hyper_h], dim=-1)).squeeze(-1)
+            module_geom_h = module_geom_summary[:, :, None, :].expand(-1, -1, n_hyp, -1)
+
+            mh_logits = self.mh_score(torch.cat([module_h, hyper_h, module_geom_h], dim=-1)).squeeze(-1)
             A_mh = torch.softmax(mh_logits.masked_fill(cyl_mask[:, :, None] <= 0, -1e9), dim=-1)
 
             env_h = env_state[:, :, None, :].expand(-1, -1, n_hyp, -1)
             hyper_e = hyper_state[:, None, :, :].expand(-1, n_env, -1, -1)
-            eh_logits = self.eh_score(torch.cat([env_h, hyper_e], dim=-1)).squeeze(-1)
+            env_geom_h = env_geom_summary[:, :, None, :].expand(-1, -1, n_hyp, -1)
+
+            eh_logits = self.eh_score(torch.cat([env_h, hyper_e, env_geom_h], dim=-1)).squeeze(-1)
             A_eh = torch.softmax(eh_logits, dim=-1)
 
             # Aggregate messages.
@@ -405,7 +530,9 @@ class BehaviorHead(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.cfg = cfg
-        pooled_dim = 3 * cfg.hidden_dim
+        global_dim = 2 + cfg.future_global_feature_dim
+        # richer summary: mean + max for module/env/hyper + explicit globals
+        pooled_dim = (6 * cfg.hidden_dim) + global_dim
         self.behavior_mlp = MLP(
             in_dim=pooled_dim,
             hidden_dim=cfg.hidden_dim,
@@ -423,13 +550,31 @@ class BehaviorHead(nn.Module):
         env_state = organized["env_state"]
         hyper_state = organized["hyper_state"]
         cyl_mask = organized["cyl_mask"]
-        # [B, D]
-        module_pool = HypergraphOrganizer.masked_mean(module_state, cyl_mask, dim=1)
-        env_pool = env_state.mean(dim=1)
-        hyper_pool = hyper_state.mean(dim=1)
+        global_features = organized["global_features"]
 
-        pooled = torch.cat([module_pool, env_pool, hyper_pool], dim=-1)
+        module_mean = HypergraphOrganizer.masked_mean(module_state, cyl_mask, dim=1)
+        module_max = HypergraphOrganizer.masked_max(module_state, cyl_mask, dim=1)
+
+        env_mean = env_state.mean(dim=1)
+        env_max = env_state.max(dim=1).values
+
+        hyper_mean = hyper_state.mean(dim=1)
+        hyper_max = hyper_state.max(dim=1).values
+
+        pooled = torch.cat(
+            [
+                module_mean,
+                module_max,
+                env_mean,
+                env_max,
+                hyper_mean,
+                hyper_max,
+                global_features,
+            ],
+            dim=-1,
+        )
         behavior = self.behavior_mlp(pooled)
+
         mean_latent = self.mean_latent_head(behavior)
         dynamic_latent = self.dynamic_latent_head(behavior)
         freq_pred = F.softplus(self.freq_head(behavior))
@@ -481,6 +626,162 @@ class AttentionAggregator(nn.Module):
         return torch.einsum("bqn,bnd->bqd", weights, context)
 
 
+class RelativeGeometryBias(nn.Module):
+    """Affine query-to-token geometry bias.
+
+    The bias depends on five wrapped relative features:
+        dx, dy, dist, downstream, upstream
+
+    Using a direct affine form avoids allocating a larger [..., 5, D] tensor
+    while still letting attention logits react to structured relative geometry.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(5))
+        self.bias = nn.Parameter(torch.zeros(1))
+
+    def forward(
+        self,
+        dx: torch.Tensor,
+        dy: torch.Tensor,
+        dist: torch.Tensor,
+        downstream: torch.Tensor,
+        upstream: torch.Tensor,
+    ) -> torch.Tensor:
+        return (
+            self.weight[0] * dx
+            + self.weight[1] * dy
+            + self.weight[2] * dist
+            + self.weight[3] * downstream
+            + self.weight[4] * upstream
+            + self.bias
+        )
+
+
+class MultiHeadCrossAttention(nn.Module):
+    """Memory-safe multi-head cross-attention.
+
+    Shapes
+    ------
+    query:        [B, Q, D]
+    context:      [B, N_ctx, D]
+    attn_bias:    optional [B, Q, N_ctx]
+    context_mask: optional [B, N_ctx]
+    output:       [B, Q, D]
+
+    The implementation keeps logits at [B, H, Q, N_ctx] and optionally slices
+    over Q so the new decoder remains compatible with point-chunk batching.
+    """
+
+    def __init__(self, model_dim: int, num_heads: int, head_dim: int, dropout: float = 0.0):
+        super().__init__()
+        self.model_dim = int(model_dim)
+        self.num_heads = int(num_heads)
+        self.head_dim = int(head_dim)
+        inner_dim = self.num_heads * self.head_dim
+
+        self.query_proj = nn.Linear(model_dim, inner_dim, bias=False)
+        self.key_proj = nn.Linear(model_dim, inner_dim, bias=False)
+        self.value_proj = nn.Linear(model_dim, inner_dim, bias=False)
+        self.out_proj = nn.Linear(inner_dim, model_dim, bias=False)
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+        self.scale = self.head_dim ** -0.5
+
+    def _attend(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_bias: Optional[torch.Tensor],
+        context_mask: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        logits = torch.einsum("bhqd,bhnd->bhqn", query, key) * self.scale
+        if attn_bias is not None:
+            logits = logits + attn_bias[:, None, :, :]
+
+        mask = None
+        if context_mask is not None:
+            mask = context_mask[:, None, None, :].to(dtype=logits.dtype, device=logits.device)
+            logits = logits.masked_fill(mask <= 0, -1e9)
+
+        weights = torch.softmax(logits, dim=-1)
+        if mask is not None:
+            weights = weights * mask
+            weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        weights = self.dropout(weights)
+        return torch.einsum("bhqn,bhnd->bhqd", weights, value)
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        context: torch.Tensor,
+        *,
+        attn_bias: Optional[torch.Tensor] = None,
+        context_mask: Optional[torch.Tensor] = None,
+        query_chunk_size: Optional[int] = None,
+    ) -> torch.Tensor:
+        batch_size, num_queries, _ = query.shape
+        num_context = context.shape[1]
+
+        q = self.query_proj(query).view(batch_size, num_queries, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.key_proj(context).view(batch_size, num_context, self.num_heads, self.head_dim).transpose(1, 2)
+        v = self.value_proj(context).view(batch_size, num_context, self.num_heads, self.head_dim).transpose(1, 2)
+
+        if query_chunk_size is None or num_queries <= query_chunk_size:
+            attended = self._attend(q, k, v, attn_bias, context_mask)
+        else:
+            chunks = []
+            for start in range(0, num_queries, query_chunk_size):
+                end = min(start + query_chunk_size, num_queries)
+                bias_chunk = attn_bias[:, start:end, :] if attn_bias is not None else None
+                attended_chunk = self._attend(q[:, :, start:end, :], k, v, bias_chunk, context_mask)
+                chunks.append(attended_chunk)
+            attended = torch.cat(chunks, dim=2)
+
+        attended = attended.transpose(1, 2).reshape(batch_size, num_queries, self.num_heads * self.head_dim)
+        return self.out_proj(attended)
+
+
+class CrossAttentionBlock(nn.Module):
+    """Single structured-Perceiver update: cross-attention then feedforward."""
+
+    def __init__(self, model_dim: int, num_heads: int, head_dim: int, ffn_mult: int, dropout: float):
+        super().__init__()
+        self.attn_norm = nn.LayerNorm(model_dim)
+        self.attn = MultiHeadCrossAttention(model_dim, num_heads, head_dim, dropout=dropout)
+        self.attn_dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+        self.ffn_norm = nn.LayerNorm(model_dim)
+        self.ffn = MLP(
+            model_dim,
+            model_dim * max(int(ffn_mult), 1),
+            model_dim,
+            num_layers=2,
+            dropout=dropout,
+        )
+        self.ffn_dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        context: torch.Tensor,
+        *,
+        attn_bias: Optional[torch.Tensor] = None,
+        context_mask: Optional[torch.Tensor] = None,
+        query_chunk_size: Optional[int] = None,
+    ) -> torch.Tensor:
+        attn_out = self.attn(
+            self.attn_norm(query),
+            context,
+            attn_bias=attn_bias,
+            context_mask=context_mask,
+            query_chunk_size=query_chunk_size,
+        )
+        query = query + self.attn_dropout(attn_out)
+        ffn_out = self.ffn(self.ffn_norm(query))
+        return query + self.ffn_dropout(ffn_out)
+
+
 class NeuralFieldDecoder(nn.Module):
     """Phase-conditioned neural field decoder.
 
@@ -491,6 +792,21 @@ class NeuralFieldDecoder(nn.Module):
     Returns:
         pred_mean:  [B, Q, 4]
         pred_field: [B, Q, 4]
+
+    Decoder modes
+    -------------
+    mlp_fourier:
+        Standard MLP decoder on query-conditioned latent features.
+    siren:
+        SIREN alternative for the same concatenated decoder inputs.
+    deeponet:
+        Uses query_encoder(query_xy, tau) as the trunk-side query representation
+        and feeds aggregated latent/context features to branch nets.
+    structured_perceiver:
+        Builds typed memory tokens from organized module/env/hyper states plus a
+        few global behavior tokens, then updates mean/residual query states via
+        shallow cross-attention. Only the updated query states are read out by
+        the final heads, which avoids a raw-coordinate bypass into the output.
     """
 
     def __init__(self, cfg: ModelConfig):
@@ -507,21 +823,230 @@ class NeuralFieldDecoder(nn.Module):
         self.mod_agg = AttentionAggregator(cfg.hidden_dim, rel_dim=0)
         self.hyp_agg = AttentionAggregator(cfg.hidden_dim, rel_dim=0)
 
+        # self.env_agg = AttentionAggregator(cfg.hidden_dim, rel_dim=5)
+        # self.mod_agg = AttentionAggregator(cfg.hidden_dim, rel_dim=5)
+        # self.hyp_agg = AttentionAggregator(cfg.hidden_dim, rel_dim=0)
+
         mean_in = cfg.hidden_dim * 4 + cfg.latent_dim
         residual_in = cfg.hidden_dim * 4 + cfg.latent_dim + 1
 
-        if cfg.decoder_type == "siren":
+        if cfg.decoder_type == "structured_perceiver":
+            perceiver_dropout = float(cfg.perceiver_dropout)
+            num_global_tokens = max(int(cfg.perceiver_num_global_tokens), 1)
+            query_chunk_size = 1024 if bool(cfg.perceiver_chunk_query_attention) else None
+            self.perceiver_query_chunk_size = query_chunk_size
+
+            self.module_memory_proj = nn.Linear(cfg.hidden_dim, cfg.hidden_dim)
+            self.env_memory_proj = nn.Linear(cfg.hidden_dim, cfg.hidden_dim)
+            self.hyper_memory_proj = nn.Linear(cfg.hidden_dim, cfg.hidden_dim)
+            self.memory_type_embeddings = nn.Parameter(torch.randn(4, cfg.hidden_dim) * 0.02)
+            self.global_slot_embeddings = nn.Parameter(torch.randn(num_global_tokens, cfg.hidden_dim) * 0.02)
+            global_token_in = cfg.behavior_dim + (2 * cfg.latent_dim) + 1
+            self.global_token_mlp = MLP(
+                global_token_in,
+                cfg.hidden_dim,
+                num_global_tokens * cfg.hidden_dim,
+                num_layers=2,
+                dropout=perceiver_dropout,
+            )
+            self.memory_norm = nn.LayerNorm(cfg.hidden_dim)
+
+            mean_query_in = self.query_encoder.output_dim + cfg.behavior_dim + cfg.latent_dim
+            residual_query_in = self.query_encoder.output_dim + cfg.behavior_dim + cfg.latent_dim + 1
+            self.mean_query_proj = MLP(
+                mean_query_in,
+                cfg.hidden_dim,
+                cfg.hidden_dim,
+                num_layers=2,
+                dropout=perceiver_dropout,
+            )
+            self.residual_query_proj = MLP(
+                residual_query_in,
+                cfg.hidden_dim,
+                cfg.hidden_dim,
+                num_layers=2,
+                dropout=perceiver_dropout,
+            )
+
+            self.mean_blocks = nn.ModuleList(
+                [
+                    CrossAttentionBlock(
+                        cfg.hidden_dim,
+                        cfg.perceiver_num_heads,
+                        cfg.perceiver_head_dim,
+                        cfg.perceiver_ffn_mult,
+                        perceiver_dropout,
+                    )
+                    for _ in range(max(int(cfg.perceiver_num_layers), 1))
+                ]
+            )
+            self.residual_blocks = nn.ModuleList(
+                [
+                    CrossAttentionBlock(
+                        cfg.hidden_dim,
+                        cfg.perceiver_num_heads,
+                        cfg.perceiver_head_dim,
+                        cfg.perceiver_ffn_mult,
+                        perceiver_dropout,
+                    )
+                    for _ in range(max(int(cfg.perceiver_num_layers), 1))
+                ]
+            )
+
+            if cfg.perceiver_use_relative_bias:
+                self.module_relative_bias = RelativeGeometryBias()
+                self.env_relative_bias = RelativeGeometryBias()
+            else:
+                self.module_relative_bias = None
+                self.env_relative_bias = None
+
+            self.mean_head_norm = nn.LayerNorm(cfg.hidden_dim)
+            self.residual_head_norm = nn.LayerNorm(cfg.hidden_dim)
+            self.mean_decoder = MLP(cfg.hidden_dim, cfg.decoder_hidden_dim, 4, num_layers=2, dropout=perceiver_dropout)
+            self.residual_decoder = MLP(cfg.hidden_dim, cfg.decoder_hidden_dim, 4, num_layers=2, dropout=perceiver_dropout)
+        elif cfg.decoder_type == "siren":
             self.mean_decoder = SirenNet(mean_in, cfg.decoder_hidden_dim, 4, num_layers=max(cfg.decoder_num_layers, 2))
             self.residual_decoder = SirenNet(residual_in, cfg.decoder_hidden_dim, 4, num_layers=max(cfg.decoder_num_layers, 2))
-        else:
+        elif cfg.decoder_type == "deeponet":
+            self.mean_decoder = DeepONetHead(
+                trunk_in_dim=self.query_encoder.output_dim,
+                branch_in_dim=cfg.hidden_dim * 3 + cfg.latent_dim,
+                hidden_dim=cfg.decoder_hidden_dim,
+                num_layers=cfg.decoder_num_layers,
+                out_dim=4,
+                dropout=cfg.dropout,
+            )
+            self.residual_decoder = DeepONetHead(
+                trunk_in_dim=self.query_encoder.output_dim,
+                branch_in_dim=cfg.hidden_dim * 3 + cfg.latent_dim + 1,
+                hidden_dim=cfg.decoder_hidden_dim,
+                num_layers=cfg.decoder_num_layers,
+                out_dim=4,
+                dropout=cfg.dropout,
+            )
+        elif cfg.decoder_type == "mlp_fourier":
             self.mean_decoder = MLP(mean_in, cfg.decoder_hidden_dim, 4, cfg.decoder_num_layers, dropout=cfg.dropout)
             self.residual_decoder = MLP(residual_in, cfg.decoder_hidden_dim, 4, cfg.decoder_num_layers, dropout=cfg.dropout)
+        else:
+            raise ValueError(
+                f"Unsupported decoder_type='{cfg.decoder_type}'. "
+                "Expected one of {'mlp_fourier', 'siren', 'deeponet', 'structured_perceiver'}."
+            )
 
     def _normalize_query_xy(self, query_xy: torch.Tensor) -> torch.Tensor:
         xy = query_xy.clone()
         xy[..., 0] = xy[..., 0] / max(self.cfg.domain_length_x, 1e-6)
         xy[..., 1] = xy[..., 1] / max(self.cfg.domain_length_y, 1e-6)
         return xy
+
+    def _pairwise_periodic_relative_features(
+        self,
+        query_xy_norm: torch.Tensor,
+        token_xy_norm: torch.Tensor,) -> torch.Tensor:
+        """Relative geometry for query->token attention logits.
+
+        Args:
+            query_xy_norm: [B, Q, 2]
+            token_xy_norm: [B, N, 2]
+
+        Returns:
+            rel: [B, Q, N, 5] with channels:
+                dx, dy, dist, downstream, upstream
+        """
+        dx = query_xy_norm[:, :, None, 0] - token_xy_norm[:, None, :, 0]
+        dy = query_xy_norm[:, :, None, 1] - token_xy_norm[:, None, :, 1]
+        dx = (dx + 0.5) % 1.0 - 0.5
+        dy = (dy + 0.5) % 1.0 - 0.5
+        dist = torch.sqrt(dx.square() + dy.square() + 1e-8)
+
+        downstream = torch.clamp(-dx, min=0.0)
+        upstream = torch.clamp(dx, min=0.0)
+        return torch.stack([dx, dy, dist, downstream, upstream], dim=-1)
+
+    def _build_structured_memory(
+        self,
+        organized: Dict[str, torch.Tensor],
+        behavior: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Build typed memory tokens for the structured Perceiver decoder.
+
+        Memory layout:
+            [module tokens | env tokens | hyper tokens | global behavior tokens]
+
+        Shapes:
+            memory:      [B, N_total, D]
+            memory_mask: [B, N_total]
+        """
+        module_tokens = self.module_memory_proj(organized["module_state"]) + self.memory_type_embeddings[0]
+        env_tokens = self.env_memory_proj(organized["env_state"]) + self.memory_type_embeddings[1]
+        hyper_tokens = self.hyper_memory_proj(organized["hyper_state"]) + self.memory_type_embeddings[2]
+
+        global_features = torch.cat(
+            [
+                behavior["behavior_latent"],
+                behavior["mean_latent"],
+                behavior["dynamic_latent"],
+                behavior["freq_pred"],
+            ],
+            dim=-1,
+        )
+        batch_size = global_features.shape[0]
+        num_global_tokens = self.global_slot_embeddings.shape[0]
+        global_tokens = self.global_token_mlp(global_features).view(batch_size, num_global_tokens, self.hidden_dim)
+        global_tokens = global_tokens + self.global_slot_embeddings.unsqueeze(0) + self.memory_type_embeddings[3]
+
+        memory = torch.cat([module_tokens, env_tokens, hyper_tokens, global_tokens], dim=1)
+        memory = self.memory_norm(memory)
+
+        module_mask = organized["cyl_mask"]
+        env_mask = torch.ones(
+            organized["env_state"].shape[:2],
+            device=memory.device,
+            dtype=module_mask.dtype,
+        )
+        hyper_mask = torch.ones(
+            organized["hyper_state"].shape[:2],
+            device=memory.device,
+            dtype=module_mask.dtype,
+        )
+        global_mask = torch.ones(
+            (batch_size, num_global_tokens),
+            device=memory.device,
+            dtype=module_mask.dtype,
+        )
+        memory_mask = torch.cat([module_mask, env_mask, hyper_mask, global_mask], dim=1)
+        return memory, memory_mask
+
+    def _build_structured_attention_bias(
+        self,
+        organized: Dict[str, torch.Tensor],
+        query_xy_norm: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        if self.module_relative_bias is None or self.env_relative_bias is None:
+            return None
+
+        def relative_bias_fn(token_xy_norm: torch.Tensor, bias_module: RelativeGeometryBias) -> torch.Tensor:
+            dx = query_xy_norm[:, :, None, 0] - token_xy_norm[:, None, :, 0]
+            dy = query_xy_norm[:, :, None, 1] - token_xy_norm[:, None, :, 1]
+            dx = (dx + 0.5) % 1.0 - 0.5
+            dy = (dy + 0.5) % 1.0 - 0.5
+            bias = bias_module.bias.view(1, 1, 1)
+            bias = bias + bias_module.weight[0] * dx + bias_module.weight[1] * dy
+            dist = torch.sqrt(dx.square() + dy.square() + 1e-8)
+            bias = bias + bias_module.weight[2] * dist
+            bias = bias + bias_module.weight[3] * torch.clamp(-dx, min=0.0)
+            bias = bias + bias_module.weight[4] * torch.clamp(dx, min=0.0)
+            return bias
+
+        module_bias = relative_bias_fn(organized["module_coords_norm"], self.module_relative_bias)
+        env_bias = relative_bias_fn(organized["env_coords"], self.env_relative_bias)
+
+        batch_size, num_queries, _ = query_xy_norm.shape
+        num_hyper = organized["hyper_state"].shape[1]
+        num_global = self.global_slot_embeddings.shape[0]
+        zeros_hyper = torch.zeros(batch_size, num_queries, num_hyper, device=query_xy_norm.device, dtype=query_xy_norm.dtype)
+        zeros_global = torch.zeros(batch_size, num_queries, num_global, device=query_xy_norm.device, dtype=query_xy_norm.dtype)
+        return torch.cat([module_bias, env_bias, zeros_hyper, zeros_global], dim=-1)
 
     def forward(
         self,
@@ -539,6 +1064,46 @@ class NeuralFieldDecoder(nn.Module):
         dynamic_latent = behavior["dynamic_latent"][:, None, :].expand(batch_size, num_queries, -1)
         freq_pred = behavior["freq_pred"][:, None, :].expand(batch_size, num_queries, -1)
 
+        if self.cfg.decoder_type == "structured_perceiver":
+            memory, memory_mask = self._build_structured_memory(organized, behavior)
+            attn_bias = self._build_structured_attention_bias(organized, query_xy_norm)
+            behavior_latent = behavior["behavior_latent"][:, None, :].expand(batch_size, num_queries, -1)
+
+            # Each branch gets its own query-token initialization so the mean and
+            # residual paths can attend to the same memory for different goals.
+            mean_query = self.mean_query_proj(torch.cat([query_feat, behavior_latent, mean_latent], dim=-1))
+            residual_query = self.residual_query_proj(
+                torch.cat([query_feat, behavior_latent, dynamic_latent, freq_pred], dim=-1)
+            )
+
+            for block in self.mean_blocks:
+                mean_query = block(
+                    mean_query,
+                    memory,
+                    attn_bias=attn_bias,
+                    context_mask=memory_mask,
+                    query_chunk_size=self.perceiver_query_chunk_size,
+                )
+            for block in self.residual_blocks:
+                residual_query = block(
+                    residual_query,
+                    memory,
+                    attn_bias=attn_bias,
+                    context_mask=memory_mask,
+                    query_chunk_size=self.perceiver_query_chunk_size,
+                )
+
+            # Final heads only read the updated query states. They do not see raw
+            # query Fourier features or raw relative geometry directly.
+            pred_mean = self.mean_decoder(self.mean_head_norm(mean_query))
+            pred_residual = self.residual_decoder(self.residual_head_norm(residual_query))
+            pred_field = pred_mean + pred_residual
+            return {
+                "pred_mean": pred_mean,
+                "pred_residual": pred_residual,
+                "pred_field": pred_field,
+            }
+
         query_state = self.query_proj(torch.cat([query_feat, mean_latent, dynamic_latent, freq_pred], dim=-1))
 
         env_ctx = self.env_agg(query_state, organized["env_state"], rel=None)
@@ -550,11 +1115,33 @@ class NeuralFieldDecoder(nn.Module):
         )
         hyp_ctx = self.hyp_agg(query_state, organized["hyper_state"], rel=None)
 
-        mean_in = torch.cat([query_state, env_ctx, mod_ctx, hyp_ctx, mean_latent], dim=-1)
-        pred_mean = self.mean_decoder(mean_in)
+        # env_rel = self._pairwise_periodic_relative_features(query_xy_norm, organized["env_coords"])
+        # mod_rel = self._pairwise_periodic_relative_features(query_xy_norm, organized["module_coords_norm"])
+        # env_ctx = self.env_agg(
+        #     query_state,
+        #     organized["env_state"],
+        #     rel=env_rel,
+        # )
+        # mod_ctx = self.mod_agg(
+        #     query_state,
+        #     organized["module_state"],
+        #     rel=mod_rel,
+        #     context_mask=organized["cyl_mask"],
+        # )
+        # hyp_ctx = self.hyp_agg(query_state, organized["hyper_state"], rel=None)
 
-        residual_in = torch.cat([query_state, env_ctx, mod_ctx, hyp_ctx, dynamic_latent, freq_pred], dim=-1)
-        pred_residual = self.residual_decoder(residual_in)
+        if self.cfg.decoder_type == "deeponet":
+            mean_branch_in = torch.cat([env_ctx, mod_ctx, hyp_ctx, mean_latent], dim=-1)
+            pred_mean = self.mean_decoder(query_feat, mean_branch_in)
+
+            residual_branch_in = torch.cat([env_ctx, mod_ctx, hyp_ctx, dynamic_latent, freq_pred], dim=-1)
+            pred_residual = self.residual_decoder(query_feat, residual_branch_in)
+        else:
+            mean_in = torch.cat([query_state, env_ctx, mod_ctx, hyp_ctx, mean_latent], dim=-1)
+            pred_mean = self.mean_decoder(mean_in)
+
+            residual_in = torch.cat([query_state, env_ctx, mod_ctx, hyp_ctx, dynamic_latent, freq_pred], dim=-1)
+            pred_residual = self.residual_decoder(residual_in)
 
         pred_field = pred_mean + pred_residual
 

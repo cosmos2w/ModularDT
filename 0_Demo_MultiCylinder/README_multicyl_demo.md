@@ -17,7 +17,8 @@ The default surrogate configuration is intentionally regularized to reduce
 coordinate memorization pressure: lower Fourier frequency counts, light
 dropout, stronger weight decay, and a behavior head that pools only learned
 hypergraph states instead of leaking raw global descriptors into the decoder
-path.
+path. The decoder itself is selectable through `model.decoder_type`; the demo
+supports `mlp_fourier`, `siren`, `deeponet`, and `structured_perceiver`.
 
 ## Contents
 
@@ -215,15 +216,34 @@ Training configuration lives in `Config_Train/train_config_template.json`. The m
 - `dataset.min_points_per_sample` - lower bound on retained points per chunk after sub-sampling
 - `dataset.resample_each_epoch` - whether to refresh the random point subset every epoch
 - `model.*` - neural architecture parameters from [`src/model.py`](/home/wanglz/Desktop/src/ModularDT/0_Demo_MultiCylinder/src/model.py)
+  In particular, `model.decoder_type` can be set to `mlp_fourier`, `siren`, `deeponet`, or `structured_perceiver`.
+  For `deeponet`, the query-side trunk uses the Fourier-encoded `(x, y, tau)` features from `query_encoder`, while the branch net uses the concatenated organized context and latent features.
+  For `structured_perceiver`, the organizer output is treated as typed memory made of module, environment, hyperedge, and global behavior tokens. Each `(x, y, tau)` query becomes a query token, then shallow cross-attention updates separate mean and residual query states before the final heads reconstruct `pred_mean`, `pred_residual`, and `pred_field`.
+  The organizer and behavior head APIs stay unchanged, and the mean/residual decomposition is preserved.
+- `model.perceiver_*` - `structured_perceiver` controls. The main ones are:
+  `perceiver_num_layers`, `perceiver_num_heads`, `perceiver_head_dim`, `perceiver_ffn_mult`, `perceiver_dropout`, `perceiver_num_global_tokens`, `perceiver_use_relative_bias`, and `perceiver_chunk_query_attention`.
+  Relative geometry is used only as an attention-logit bias for query-to-module and query-to-environment reads; it is not concatenated into the final output heads. This is intentional so the decoder does not regain a raw-coordinate shortcut.
 - `training.max_physical_queries_per_step` - cap on the number of decoder queries in one physical forward pass
 - `training.*` - optimizer, scheduler, mixed precision, and epoch-level training settings
 - `validation.*` - canonical-cycle validation settings
 
-The shipped template currently uses `coord_fourier_frequencies=4`,
-`query_fourier_frequencies=4`, `structure_fourier_frequencies=1`,
-`dropout=0.05`, `weight_decay=1e-4`, and `organizer_entropy_weight=1e-3` to
-encourage the decoder to rely on organized latent state rather than exact
-coordinate memorization.
+The shipped template currently uses `decoder_type=structured_perceiver`,
+`coord_fourier_frequencies=4`, `query_fourier_frequencies=4`,
+`structure_fourier_frequencies=4`, `dropout=0.05`, `weight_decay=1e-4`,
+`perceiver_num_layers=1`, `perceiver_num_heads=4`, `perceiver_head_dim=16`,
+`perceiver_num_global_tokens=3`, and `perceiver_chunk_query_attention=true`
+to keep the decoder focused on organized latent state while keeping attention
+memory moderate.
+
+Recommended first run for the new decoder:
+
+- keep `hidden_dim`, `behavior_dim`, and `latent_dim` at `64`
+- keep `decoder_hidden_dim=128`
+- start with `perceiver_num_layers=1`
+- keep `perceiver_num_heads=4` and `perceiver_head_dim=16`
+- leave `query_fourier_frequencies=4` unless you have evidence the model is under-resolving phase or spatial detail
+
+Compared with `mlp_fourier`, `structured_perceiver` does not pass raw query encodings directly into the final output heads. The query features are used only to create query tokens, which then read the organized latent memory through cross-attention. This is designed to reduce coordinate memorization shortcuts while still letting the decoder adapt to local geometry.
 
 Start training with:
 
@@ -258,7 +278,7 @@ The current training script expects:
 
 ### 4. Evaluate a checkpoint and rebuild flow fields
 
-`evaluate.py` finds the most recent run directory matching `Saved_Model/Case{case_id}_*` and loads `best_model.pt` by default.
+`evaluate.py` finds the most recent run directory matching `Saved_Model/Case{case_id}_*` and loads `best_model.pt` by default. It reconstructs whichever decoder architecture was stored in the checkpoint config, including `deeponet` and `structured_perceiver`.
 
 Example:
 

@@ -5,6 +5,10 @@ from __future__ import annotations
 This script reads a packed HDF5 dataset, trains the organizer + behavior head +
 phase-conditioned neural field decoder end-to-end, and writes only the latest
 and best checkpoints to a run-specific directory.
+
+The decoder architecture is selected from the JSON model config through
+`model.decoder_type`, for example `mlp_fourier`, `siren`, `deeponet`, or
+`structured_perceiver`.
 """
 
 import argparse
@@ -458,7 +462,13 @@ def collate_point_chunks(batch: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, 
 # ------------------------------- Loss functions --------------------------------
 
 
-def compute_losses(batch: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor], loss_cfg: Dict) -> Dict[str, torch.Tensor]:
+def compute_losses(
+    batch: Dict[str, torch.Tensor],
+    outputs: Dict[str, torch.Tensor],
+    loss_cfg: Dict,
+    *,
+    organizer_scale: float = 1.0,
+) -> Dict[str, torch.Tensor]:
     pred_field = outputs["pred_field"]
     pred_mean = outputs["pred_mean"]
     pred_residual = outputs["pred_residual"]
@@ -481,17 +491,33 @@ def compute_losses(batch: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tens
     loss_residual = masked_mse(pred_residual, residual_targets)
     loss_freq = F.mse_loss(freq_pred, freq_target)
 
-    sparsity, entropy = compute_organizer_regularization(outputs, batch["cyl_mask"], device=pred_field.device, dtype=pred_field.dtype)
+    loss_org_concentration, loss_org_entropy = compute_organizer_regularization(
+        outputs,
+        batch["cyl_mask"],
+        device=pred_field.device,
+        dtype=pred_field.dtype,
+    )
 
-    total = combine_weighted_loss_terms(
+    base_total = combine_weighted_loss_terms(
         loss_cfg,
         loss_field=loss_field,
         loss_mean=loss_mean,
         loss_residual=loss_residual,
         loss_freq=loss_freq,
-        loss_org_sparsity=sparsity,
-        loss_org_entropy=entropy,
+        loss_org_sparsity=loss_org_concentration,
+        loss_org_entropy=loss_org_entropy,
     )
+
+    # Direct organizer supervision (already implemented in this file, but previously unused).
+    org_direct = organizer_direct_losses(
+        outputs,
+        batch,
+        me_weight=float(loss_cfg.get("organizer_me_weight", 0.0)),
+        mm_weight=float(loss_cfg.get("organizer_mm_weight", 0.0)),
+        consistency_weight=float(loss_cfg.get("organizer_consistency_weight", 0.0)),
+    )
+
+    total = base_total + float(organizer_scale) * org_direct["organizer_total"]
 
     return {
         "loss_total": total,
@@ -499,8 +525,12 @@ def compute_losses(batch: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tens
         "loss_mean": loss_mean,
         "loss_residual": loss_residual,
         "loss_freq": loss_freq,
-        "loss_org_sparsity": sparsity,
-        "loss_org_entropy": entropy,
+        "loss_org_sparsity": loss_org_concentration,
+        "loss_org_entropy": loss_org_entropy,
+        "loss_org_direct": org_direct["organizer_total"],
+        "loss_org_me": org_direct["organizer_me"],
+        "loss_org_mm": org_direct["organizer_mm"],
+        "loss_org_consistency": org_direct["organizer_consistency"],
     }
 
 
@@ -511,30 +541,45 @@ def compute_organizer_regularization(
     device: torch.device,
     dtype: torch.dtype,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    # Operate only on valid cylinder rows so padded slots do not bias organizer penalties.
+    """
+    Returns:
+        concentration_loss: lower when assignments are sharper / more selective
+        entropy_loss: lower when assignments are lower-entropy
+    """
     row_mask = cyl_mask.to(device=device, dtype=dtype)
-    A_me = outputs["A_me"].clamp_min(1e-8)
-    A_mh = outputs["A_mh"].clamp_min(1e-8)
-    A_eh = outputs["A_eh"].clamp_min(1e-8)
+    A_me = outputs["A_me"].clamp_min(1e-8)  # [B, N, M]
+    A_mh = outputs["A_mh"].clamp_min(1e-8)  # [B, N, K]
+    A_eh = outputs["A_eh"].clamp_min(1e-8)  # [B, M, K]
 
-    def masked_prob_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    def masked_mean_over_rows(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         mask = mask.to(device=values.device, dtype=values.dtype)
-        while mask.ndim < values.ndim:
+        while mask.ndim < values.ndim - 1:
             mask = mask.unsqueeze(-1)
-        denom = mask.sum().clamp_min(1.0) * values.shape[-1]
+        denom = mask.sum().clamp_min(1.0)
         return (values * mask).sum() / denom
 
-    def masked_entropy(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        entropy_term = -(values * values.log())
-        mask = mask.to(device=values.device, dtype=values.dtype)
-        while mask.ndim < entropy_term.ndim:
-            mask = mask.unsqueeze(-1)
-        denom = mask.sum().clamp_min(1.0) * entropy_term.shape[-1]
-        return (entropy_term * mask).sum() / denom
+    # Concentration surrogate: 1 - sum(p^2), lower when assignments are peaky.
+    me_conc = 1.0 - (A_me.square().sum(dim=-1))          # [B, N]
+    mh_conc = 1.0 - (A_mh.square().sum(dim=-1))          # [B, N]
+    eh_conc = 1.0 - (A_eh.square().sum(dim=-1)).mean()   # scalar-like over [B, M]
 
-    sparsity = masked_prob_mean(A_me, row_mask) + masked_prob_mean(A_mh, row_mask) + A_eh.mean()
-    entropy = masked_entropy(A_me, row_mask) + masked_entropy(A_mh, row_mask) - (A_eh * A_eh.log()).mean()
-    return sparsity, entropy
+    concentration_loss = (
+        masked_mean_over_rows(me_conc, row_mask)
+        + masked_mean_over_rows(mh_conc, row_mask)
+        + eh_conc
+    )
+
+    def masked_entropy(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        ent = -(values * values.log()).sum(dim=-1)  # sum over assignment dimension
+        return masked_mean_over_rows(ent, mask)
+
+    entropy_loss = (
+        masked_entropy(A_me, row_mask)
+        + masked_entropy(A_mh, row_mask)
+        + (-(A_eh * A_eh.log()).sum(dim=-1)).mean()
+    )
+
+    return concentration_loss, entropy_loss
 
 
 def combine_weighted_loss_terms(
@@ -576,6 +621,135 @@ def estimate_effective_points_per_item(points_per_item: int, point_fraction: flo
     return min(points_per_item, max(min_points_per_sample, int(math.ceil(points_per_item * point_fraction))))
 
 
+def pairwise_periodic_relative_features(src_xy: torch.Tensor, dst_xy: torch.Tensor) -> torch.Tensor:
+    """
+    src_xy: [B, N_src, 2] normalized to [0,1]
+    dst_xy: [B, N_dst, 2] normalized to [0,1]
+    returns: [B, N_src, N_dst, 5] = dx, dy, dist, downstream, upstream
+    """
+    dx = src_xy[:, :, None, 0] - dst_xy[:, None, :, 0]
+    dy = src_xy[:, :, None, 1] - dst_xy[:, None, :, 1]
+    dx = (dx + 0.5) % 1.0 - 0.5
+    dy = (dy + 0.5) % 1.0 - 0.5
+    dist = torch.sqrt(dx.square() + dy.square() + 1e-8)
+    downstream = torch.clamp(-dx, min=0.0)
+    upstream = torch.clamp(dx, min=0.0)
+    return torch.stack([dx, dy, dist, downstream, upstream], dim=-1)
+
+
+def normalize_rows(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    return x / x.sum(dim=-1, keepdim=True).clamp_min(eps)
+
+
+def build_module_env_prior(
+    module_coords_norm: torch.Tensor,
+    env_coords: torch.Tensor,
+    cyl_mask: torch.Tensor,
+    re_values: torch.Tensor,
+    sigma_y_base: float = 0.05,
+    sigma_y_growth: float = 0.20,
+    decay_x: float = 0.35,
+    near_radius: float = 0.08,) -> torch.Tensor:
+    """
+    Soft wake-like module->environment prior.
+    Output: [B, N, M_env], row-normalized over env tokens.
+    """
+    rel = pairwise_periodic_relative_features(module_coords_norm, env_coords)
+    dx = rel[..., 0]
+    dy = rel[..., 1]
+    dist = rel[..., 2]
+    downstream = rel[..., 3]
+    re_values = re_values.to(device=module_coords_norm.device, dtype=module_coords_norm.dtype)
+
+    # Optional mild Re effect on wake width.
+    re_scale = (re_values / 200.0).clamp(min=0.1, max=1.5)[:, None, None]
+    sigma_y = sigma_y_base + sigma_y_growth * downstream * re_scale
+
+    wake = torch.exp(-0.5 * (dy / sigma_y.clamp_min(1e-4)).square()) * torch.exp(-downstream / decay_x)
+    wake = wake * (downstream > 0).to(wake.dtype)
+
+    near = torch.exp(-0.5 * (dist / near_radius).square())
+    prior = wake + 0.25 * near
+
+    prior = prior * cyl_mask[:, :, None]
+    return normalize_rows(prior)
+
+
+def build_module_module_affinity_prior(
+    module_coords_norm: torch.Tensor,
+    cyl_mask: torch.Tensor,
+    sigma_d: float = 0.16,
+    sigma_x: float = 0.25,
+    sigma_y: float = 0.12,) -> torch.Tensor:
+    """
+    Soft symmetric module-module interaction affinity.
+    Output: [B, N, N], values in [0,1].
+    """
+    rel = pairwise_periodic_relative_features(module_coords_norm, module_coords_norm)
+    dx = rel[..., 0].abs()
+    dy = rel[..., 1].abs()
+    dist = rel[..., 2]
+
+    affinity = (
+        0.5 * torch.exp(-dist / sigma_d)
+        + 0.25 * torch.exp(-dx / sigma_x)
+        + 0.25 * torch.exp(-dy / sigma_y)
+    )
+
+    bsz, n, _ = affinity.shape
+    eye = torch.eye(n, device=affinity.device, dtype=affinity.dtype)[None, :, :]
+    valid = cyl_mask[:, :, None] * cyl_mask[:, None, :] * (1.0 - eye)
+    affinity = affinity * valid
+    return affinity
+
+
+def organizer_direct_losses(
+    outputs: Dict[str, torch.Tensor],
+    structure: Dict[str, torch.Tensor],
+    me_weight: float = 0.05,
+    mm_weight: float = 0.03,
+    consistency_weight: float = 0.05,) -> Dict[str, torch.Tensor]:
+    """
+    Direct organizer supervision for inert cases.
+    Returns dict of scalar losses.
+    """
+    A_me = outputs["A_me"]                                # [B, N, M]
+    A_mh = outputs["A_mh"]                                # [B, N, K]
+    A_eh = outputs["A_eh"]                                # [B, M, K]
+    module_coords_norm = outputs["module_coords_norm"]    # [B, N, 2]
+    env_coords = outputs["env_coords"]                    # [B, M, 2]
+    cyl_mask = structure["cyl_mask"]                      # [B, N]
+    re_values = structure["re_values"]                    # [B, 1]
+
+    # A) weak geometry-based module->environment prior
+    prior_me = build_module_env_prior(module_coords_norm, env_coords, cyl_mask, re_values)
+    kl_me = F.kl_div((A_me.clamp_min(1e-6)).log(), prior_me, reduction="none").sum(dim=-1)
+    loss_me = (kl_me * cyl_mask).sum() / cyl_mask.sum().clamp_min(1.0)
+
+    # B) permutation-safe hyperedge supervision via module-module affinity
+    pred_mm = torch.matmul(A_mh, A_mh.transpose(1, 2))  # [B, N, N]
+    prior_mm = build_module_module_affinity_prior(module_coords_norm, cyl_mask)
+
+    n = pred_mm.shape[1]
+    eye = torch.eye(n, device=pred_mm.device, dtype=pred_mm.dtype)[None, :, :]
+    valid_mm = cyl_mask[:, :, None] * cyl_mask[:, None, :] * (1.0 - eye)
+    loss_mm = (((pred_mm - prior_mm) ** 2) * valid_mm).sum() / valid_mm.sum().clamp_min(1.0)
+
+    # C) hypergraph should factorize module-env organization
+    pred_me_from_h = torch.matmul(A_mh, A_eh.transpose(1, 2))  # [B, N, M]
+    pred_me_from_h = normalize_rows(pred_me_from_h)
+    loss_cons = (((pred_me_from_h - A_me) ** 2) * cyl_mask[:, :, None]).sum() / (
+        cyl_mask[:, :, None].sum().clamp_min(1.0)
+    )
+
+    total = me_weight * loss_me + mm_weight * loss_mm + consistency_weight * loss_cons
+    return {
+        "organizer_total": total,
+        "organizer_me": loss_me,
+        "organizer_mm": loss_mm,
+        "organizer_consistency": loss_cons,
+    }
+
 # ---------------------------- Validation routine -------------------------------
 
 
@@ -604,8 +778,7 @@ def evaluate_canonical_cases(
     max_cases: int,
     query_batch_size: int,
     phase_bins_to_eval: int,
-    show_progress: bool = False,
-) -> Dict[str, float]:
+    show_progress: bool = False,) -> Dict[str, float]:
     model.eval()
     if len(dataset) == 0:
         return {
@@ -677,7 +850,7 @@ def evaluate_canonical_cases(
             device=device,
             dtype=out_once["freq_pred"].dtype,
         )
-        loss_total = combine_weighted_loss_terms(
+        base_total = combine_weighted_loss_terms(
             loss_cfg,
             loss_field=loss_field,
             loss_mean=loss_mean,
@@ -686,7 +859,16 @@ def evaluate_canonical_cases(
             loss_org_sparsity=loss_org_sparsity,
             loss_org_entropy=loss_org_entropy,
         )
+        org_direct = organizer_direct_losses(
+            out_once,
+            structure,
+            me_weight=float(loss_cfg.get("organizer_me_weight", 0.0)),
+            mm_weight=float(loss_cfg.get("organizer_mm_weight", 0.0)),
+            consistency_weight=float(loss_cfg.get("organizer_consistency_weight", 0.0)),
+        )
+        loss_total = base_total + org_direct["organizer_total"]
         total_losses.append(float(loss_total.item() if isinstance(loss_total, torch.Tensor) else loss_total))
+        
         if val_bar is not None:
             val_bar.set_postfix(
                 total=f"{total_losses[-1]:.3e}",
@@ -747,11 +929,24 @@ def evaluate_point_chunks(
         query_xy = batch["query_xy"].to(device=device)
         query_tau = batch["query_tau"].to(device=device)
 
-        for key in ["field_targets", "mean_targets", "residual_targets", "point_mask", "freq_target", "cyl_mask"]:
+        for key in [
+            "re_values",
+            "field_targets",
+            "mean_targets",
+            "residual_targets",
+            "point_mask",
+            "freq_target",
+            "cyl_mask",
+        ]:
             batch[key] = batch[key].to(device=device)
 
         outputs = model(structure=structure, query_xy=query_xy, query_tau=query_tau, return_aux=True)
-        losses = compute_losses(batch, outputs, loss_cfg)
+        losses = compute_losses(
+            batch,
+            outputs,
+            loss_cfg,
+            organizer_scale=1.0,
+        )
         row = {
             "val_total_loss": normalize_loss_scalar(losses["loss_total"]),
             "val_field_mse": normalize_loss_scalar(losses["loss_field"]),
@@ -772,6 +967,9 @@ def evaluate_point_chunks(
 
     return average_metric_dicts(metric_buffer)
 
+def organizer_ramp_scale(loss_cfg: Dict, epoch: int) -> float:
+    ramp_epochs = max(1, int(loss_cfg.get("organizer_ramp_epochs", 1)))
+    return min(1.0, float(epoch) / float(ramp_epochs))
 
 # ------------------------------- Plotting --------------------------------------
 
@@ -882,6 +1080,17 @@ def main() -> None:
     max_num_cylinders = int(dataset_cfg.get("max_num_cylinders", model_cfg.max_num_cylinders))
     if model_cfg.max_num_cylinders != max_num_cylinders:
         model_cfg.max_num_cylinders = max_num_cylinders
+    print(f"[setup] decoder_type={model_cfg.decoder_type}")
+    if model_cfg.decoder_type == "structured_perceiver":
+        print(
+            "[setup] structured_perceiver: "
+            f"layers={model_cfg.perceiver_num_layers}, "
+            f"heads={model_cfg.perceiver_num_heads}, "
+            f"head_dim={model_cfg.perceiver_head_dim}, "
+            f"global_tokens={model_cfg.perceiver_num_global_tokens}, "
+            f"relative_bias={model_cfg.perceiver_use_relative_bias}, "
+            f"chunk_query_attention={model_cfg.perceiver_chunk_query_attention}"
+        )
 
     train_dataset = PackedPointChunkDataset(
         packed_h5_path,
@@ -997,6 +1206,10 @@ def main() -> None:
         "loss_freq",
         "loss_org_sparsity",
         "loss_org_entropy",
+        "loss_org_direct",
+        "loss_org_me",
+        "loss_org_mm",
+        "loss_org_consistency",
         "lr",
         "val_total_loss",
         "val_field_mse",
@@ -1045,6 +1258,11 @@ def main() -> None:
             "[warn] Large physical queries-per-forward can still be slow. If the first batch remains sluggish, "
             "reduce training.batch_size, training.max_physical_queries_per_step, or dataset.points_per_item."
         )
+    if model_cfg.decoder_type == "structured_perceiver" and physical_queries_per_step >= 32768:
+        print(
+            "[warn] structured_perceiver adds cross-attention over organizer memory. If GPU memory is tight, "
+            "lower dataset.points_per_item or training.batch_size before increasing model width."
+        )
 
     history_rows: List[Dict[str, float]] = []
     best_val_metric = float("inf")
@@ -1080,12 +1298,26 @@ def main() -> None:
             query_xy = batch["query_xy"].to(device=device)
             query_tau = batch["query_tau"].to(device=device)
 
-            for key in ["field_targets", "mean_targets", "residual_targets", "point_mask", "freq_target", "cyl_mask"]:
+            for key in [
+                "re_values",
+                "field_targets",
+                "mean_targets",
+                "residual_targets",
+                "point_mask",
+                "freq_target",
+                "cyl_mask",
+            ]:
                 batch[key] = batch[key].to(device=device)
 
+            org_scale = organizer_ramp_scale(cfg["loss"], epoch)
             with autocast_context(device, enabled=scaler.is_enabled()):
                 outputs = model(structure=structure, query_xy=query_xy, query_tau=query_tau, return_aux=True)
-                losses = compute_losses(batch, outputs, cfg["loss"])
+                losses = compute_losses(
+                    batch,
+                    outputs,
+                    cfg["loss"],
+                    organizer_scale=org_scale,
+                )
                 total_loss = losses["loss_total"] / float(active_accum_steps)
 
             scaler.scale(total_loss).backward()
@@ -1098,6 +1330,10 @@ def main() -> None:
                     "loss_freq": normalize_loss_scalar(losses["loss_freq"]),
                     "loss_org_sparsity": normalize_loss_scalar(losses["loss_org_sparsity"]),
                     "loss_org_entropy": normalize_loss_scalar(losses["loss_org_entropy"]),
+                    "loss_org_direct": normalize_loss_scalar(losses["loss_org_direct"]),
+                    "loss_org_me": normalize_loss_scalar(losses["loss_org_me"]),
+                    "loss_org_mm": normalize_loss_scalar(losses["loss_org_mm"]),
+                    "loss_org_consistency": normalize_loss_scalar(losses["loss_org_consistency"]),
                 }
             )
             train_bar.set_postfix(
@@ -1128,7 +1364,7 @@ def main() -> None:
         epoch_train_metrics = average_metric_dicts(epoch_metric_buffer)
         print(
             f"[epoch] {epoch:03d}/{total_epochs:03d} training finished | "
-            f"{format_metrics(epoch_train_metrics, keys=['loss_total', 'loss_field', 'loss_mean', 'loss_residual', 'loss_freq'])}"
+            f"{format_metrics(epoch_train_metrics, keys=['loss_total', 'loss_field', 'loss_mean', 'loss_residual', 'loss_freq', 'loss_org_direct'])}"
         )
 
         if scheduler is not None:
@@ -1190,6 +1426,10 @@ def main() -> None:
                     "loss_freq": epoch_train_metrics["loss_freq"],
                     "loss_org_sparsity": epoch_train_metrics["loss_org_sparsity"],
                     "loss_org_entropy": epoch_train_metrics["loss_org_entropy"],
+                    "loss_org_direct": epoch_train_metrics["loss_org_direct"],
+                    "loss_org_me": epoch_train_metrics["loss_org_me"],
+                    "loss_org_mm": epoch_train_metrics["loss_org_mm"],
+                    "loss_org_consistency": epoch_train_metrics["loss_org_consistency"],
                 }
             ),
             "lr": float(optimizer.param_groups[0]["lr"]),

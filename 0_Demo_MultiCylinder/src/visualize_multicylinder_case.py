@@ -5,7 +5,10 @@ The script reads the scene-compatible `.npz` arrays produced by the simulation
 script, generates selected frame plots, optionally writes a GIF, and extracts a
 small set of physically meaningful quantities of interest (QoIs).
 
-python src/visualize_multicylinder_case.py --case_dir 0001 --save-gif
+If you pass train/0001 or test/0001, it searches only inside that split.
+If you pass just 0001, it searches in this order: Data_Saved/, then Data_Saved/train/, then Data_Saved/test/.
+
+python src/visualize_multicylinder_case.py --case_dir train/0160 --save-gif
 
 """
 from __future__ import annotations
@@ -14,6 +17,7 @@ import argparse
 import json
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
+import warnings
 
 import imageio.v2 as imageio
 import matplotlib.pyplot as plt
@@ -37,6 +41,7 @@ def resolve_case_dir(case_arg: str) -> Path:
 
     Accepted forms:
     - bare case id, e.g. `0001`
+    - split-qualified case id, e.g. `train/0001` or `test/0001`
     - case directory name, e.g. `case_0001_20260417_142729_multicyl`
     - path relative to `Data_Saved/`
     - absolute path
@@ -45,11 +50,19 @@ def resolve_case_dir(case_arg: str) -> Path:
     if (direct_path / "case_config.json").exists():
         return direct_path
 
-    case_id = case_arg.strip()
+    case_path = Path(case_arg).expanduser()
+    case_id = case_path.name.strip()
     if case_id.isdigit():
         data_root = default_data_dir().resolve()
-        matches = sorted(data_root.glob(f"case_{case_id}_*"))
-        matches = [path for path in matches if (path / "case_config.json").exists()]
+        normalized_parts = [part for part in case_path.parts if part not in {"", "."}]
+        requested_split = normalized_parts[0] if normalized_parts and normalized_parts[0] in {"train", "test"} else None
+
+        search_roots = [data_root / requested_split] if requested_split else [data_root, data_root / "train", data_root / "test"]
+        matches: List[Path] = []
+        for root in search_roots:
+            root_matches = sorted(root.glob(f"case_{case_id}_*"))
+            matches.extend(path for path in root_matches if (path / "case_config.json").exists())
+
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
@@ -58,6 +71,11 @@ def resolve_case_dir(case_arg: str) -> Path:
                 + ", ".join(path.name for path in matches)
             )
 
+    warnings.warn(
+        f"Could not find case '{case_arg}' in {default_data_dir()}, "
+        f"{default_data_dir() / 'train'}, or {default_data_dir() / 'test'}.",
+        stacklevel=2,
+    )
     raise FileNotFoundError(
         f"Could not resolve case '{case_arg}'. "
         "Pass a case id like '0001', a full case directory name, or an absolute path."
