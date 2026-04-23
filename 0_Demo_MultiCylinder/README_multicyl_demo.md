@@ -1,67 +1,205 @@
 # Multi-cylinder PhiFlow Demo
 
-This demo covers the full inert multi-cylinder workflow:
+This demo covers the inert multi-cylinder wake workflow:
 
 1. simulate wake fields with PhiFlow
 2. preprocess raw cases into a packed HDF5 dataset
-3. train a PyTorch forward surrogate model
-4. evaluate checkpoints by reconstructing full flow fields
+3. train a hypergraph-organized neural field surrogate
+4. reconstruct full flow fields from saved checkpoints
 
-The current surrogate-model path is built around the packed dataset written by
-[`src/preprocess_inert_multicyl_dataset.py`]
-The training and evaluation scripts expect the HDF5 structure produced there,
-including per-case `sampled_points`, `mean_field`, `x_grid`, `y_grid`, and
-canonical-cycle data for validation and reconstruction.
+The current surrogate path is built around the packed dataset written by
+`src/preprocess_inert_multicyl_dataset.py`. The training and evaluation scripts
+still use the same packed-HDF5 / point-chunk pipeline; this revision focuses on
+model architecture and training objectives, not on rewriting the dataset path.
 
-The default surrogate configuration is intentionally regularized to reduce
-coordinate memorization pressure: lower Fourier frequency counts, light
-dropout, stronger weight decay, and a behavior head that pools only learned
-hypergraph states instead of leaking raw global descriptors into the decoder
-path. The decoder itself is selectable through `model.decoder_type`; the demo
-supports `mlp_fourier`, `siren`, `deeponet`, and `structured_perceiver`.
+## What Changed
 
-## Contents
+This revision replaces the older multi-decoder setup with one clean primary
+architecture aimed at better dynamic wake reconstruction.
 
-- `src/multicyl_common.py` - shared configuration, path handling, layout sampling, and utility helpers
-- `src/simulate_multicylinder_phiflow.py` - raw PhiFlow simulation / data generation
-- `src/visualize_multicylinder_case.py` - visualization, GIF export, and QoI extraction for raw cases
-- `src/plot_domain_shape.py` - computational-domain preview from a selected config
-- `src/preprocess_inert_multicyl_dataset.py` - converts raw cases into processed per-case outputs and `packed_dataset.h5`
-- `src/inspect_packed_h5_case.py` - quick inspection utility for the packed HDF5 dataset
-- `src/model.py` - hypergraph-organized neural-field surrogate model
-- `src/train.py` - training loop with logging, validation, and checkpointing
-- `src/evaluate.py` - checkpoint loading and full-grid reconstruction / plotting
-- `Configs/` - simulation config files
-- `Config_Train/` - training config templates and training-config backups
+- The organizer still produces module, environment, and hyperedge states, but it
+  now also returns `hyper_coords` and `hyper_strength` so the decoder can treat
+  hyperedges as explicit local dynamic memory.
+- The old pooled dynamic summary is no longer the main residual carrier. The
+  behavior path now emits:
+  `behavior_latent`, `mean_latent`, `dynamic_global_token`,
+  `dynamic_hyper_tokens`, `freq_pred`, and optional `hyper_phase_offsets`.
+- The decoder is now split into:
+  a light global mean branch for smooth structure and
+  a hierarchical residual branch for localized, phase-sensitive wake dynamics.
+- `(x, y)` and `tau` are encoded separately.
+  Spatial queries use Fourier features; phase uses harmonic `sin/cos` features.
+- Default losses now emphasize `field + residual`, while `mean_mse_weight`
+  defaults to `0.0`.
+- Validation now logs `val_residual_mse` as a first-class metric and checkpoint
+  selection defaults to `validation.best_metric_name = "val_residual_focus"`,
+  which means:
+  `val_residual_mse + 0.25 * val_field_mse`.
 
-## Assumptions
+## Model Overview
 
-- The solver uses periodic boundaries for the computational domain.
-- Cylinders have fixed radius; the design varies through cylinder count and locations.
-- The current surrogate path targets inert cases only.
-- Preprocessing converts time-resolved simulations into a phase-aligned canonical-cycle representation and point samples for neural-field supervision.
+The forward model is now:
 
-## Environment
+`structure -> organizer -> organized memory -> behavior / dynamic token generation -> mean branch + residual branch -> pred_field`
 
-Install the required Python packages into your environment:
+### Organizer Outputs
 
-```bash
-pip install phiflow torch numpy pandas matplotlib imageio tqdm h5py scipy pillow
-```
+`src/model.py` keeps the organizer as the structure encoder. It returns:
 
-If your PyTorch install has CUDA support, both preprocessing and training can run on GPU.
+- `module_state`
+- `env_state`
+- `hyper_state`
+- `A_me`, `A_mh`, `A_eh`
+- `module_coords_norm`
+- `env_coords`
+- `hyper_coords`
+- `hyper_strength`
+- `global_features`
+- `cyl_mask`
 
-## Directory layout
+`hyper_coords` are derived from `A_mh`-weighted module coordinates. This gives
+the residual decoder a stable hyperedge location without concatenating raw
+geometry into the output heads.
 
-Run the commands below from `0_Demo_MultiCylinder/`.
+### Dynamic Memory
+
+The behavior head now keeps one smooth summary plus structured dynamic memory:
+
+- `behavior_latent`: compact global summary
+- `mean_latent`: smooth/global context for the mean branch
+- `dynamic_global_token`: one global residual-memory token
+- `dynamic_hyper_tokens`: one dynamic token per hyperedge
+- `freq_pred`: dominant-frequency prediction
+- `hyper_phase_offsets` (optional): lightweight per-hyperedge phase offsets
+
+The key design change is that residual decoding reads `dynamic_hyper_tokens`
+directly instead of depending mostly on one monolithic pooled latent.
+
+### Decoder Structure
+
+The decoder is a single hierarchical Perceiver-style path.
+
+Mean branch:
+
+- query init uses spatial encoding plus smooth/global context
+- one shallow global read over structured memory
+- predicts only the smooth mean field
+
+Residual branch:
+
+- query init uses spatial encoding, phase encoding, global dynamic context, and
+  a phase-aware summary of dynamic hyper tokens
+- Stage 1: global read over module / env / hyper / dynamic-hyper / global tokens
+- Stage 2: local refinement over gathered top-k nearby env tokens, top-k nearby
+  module tokens, all hyper tokens, all dynamic-hyper tokens, and the dynamic
+  global token
+
+Relative geometry is used only as attention bias for query-to-module and
+query-to-environment reads. Raw query coordinates and raw relative geometry are
+not re-injected into the final output heads.
+
+## Training Defaults
+
+The default config is in `Config_Train/train_config_template.json`.
+
+Recommended starting model settings:
+
+- `hidden_dim = 64`
+- `behavior_dim = 64`
+- `latent_dim = 64`
+- `dynamic_token_dim = 64`
+- `num_hyperedges = 4`
+- `num_env_tokens_x = 24`
+- `num_env_tokens_y = 8`
+- `message_passing_steps = 3`
+- `structure_fourier_frequencies = 1`
+- `spatial_query_fourier_frequencies = 3`
+- `phase_harmonics = 2`
+- `decoder_hidden_dim = 128`
+- `perceiver_num_layers_global = 1`
+- `perceiver_num_layers_local = 1`
+- `perceiver_num_heads = 4`
+- `perceiver_head_dim = 16`
+- `perceiver_ffn_mult = 2`
+- `perceiver_dropout = 0.05`
+- `perceiver_refine_topk_env = 16`
+- `perceiver_refine_topk_mod = 4`
+- `perceiver_query_chunk_size = 1024`
+- `use_dynamic_hyper_tokens = true`
+- `use_hyper_phase_offsets = true`
+
+Recommended starting loss weights:
+
+- `field_mse_weight = 1.0`
+- `mean_mse_weight = 0.0`
+- `residual_mse_weight = 1.25`
+- `freq_mse_weight = 0.05`
+- `organizer_sparsity_weight = 0.0`
+- `organizer_entropy_weight = 0.0`
+- `organizer_me_weight = 0.01`
+- `organizer_mm_weight = 0.05`
+- `organizer_consistency_weight = 0.05`
+
+The point of this revision is to improve representation and decoding, not to add
+more smoothing losses.
+
+## Validation And Checkpoint Selection
+
+Validation supports both point-chunk evaluation and canonical full-grid
+evaluation. Both now log:
+
+- `val_total_loss`
+- `val_field_mse`
+- `val_mean_mse`
+- `val_residual_mse`
+- `val_freq_mse`
+
+Best-checkpoint selection is configurable through:
+
+- `validation.best_metric_name`
+
+Supported default:
+
+- `val_residual_focus`
+
+which is computed as:
+
+`val_residual_mse + 0.25 * val_field_mse`
+
+This makes checkpoint selection visibly care about dynamic wake quality rather
+than selecting only by smooth global fit.
+
+## Memory Tuning Advice
+
+The new decoder is designed to stay moderate in memory use, but a few settings
+matter a lot:
+
+- `dataset.points_per_item` and `training.batch_size` control total query count
+  per forward pass
+- `model.perceiver_query_chunk_size` controls global-attention query chunking
+- `model.perceiver_refine_topk_env` and `model.perceiver_refine_topk_mod`
+  control local refinement cost
+- `validation.query_batch_size` controls full-grid reconstruction chunking
+
+If GPU memory is tight:
+
+1. reduce `dataset.points_per_item`
+2. reduce `training.batch_size`
+3. keep `perceiver_num_layers_global = 1`
+4. keep `perceiver_num_layers_local = 1`
+5. reduce `perceiver_refine_topk_env` before increasing model width
+
+## Directory Layout
+
+Run commands below from `0_Demo_MultiCylinder/`.
 
 ```text
 0_Demo_MultiCylinder/
 ├── Config_Train/
 ├── Configs/
 ├── Data_Saved/
-├── Domain_shape/
 ├── README_multicyl_demo.md
+├── MODEL_EXPLAIN.txt
 └── src/
 ```
 
@@ -87,57 +225,19 @@ Saved_Model/
     ├── latest_model.pt
     ├── loss_history.csv
     ├── loss_curve.png
-    ├── resolved_train_config.json
-    └── evaluation/
+    └── resolved_train_config.json
 ```
 
-## Data root and symlink
+## Environment
 
-`Data_Saved/` is designed to be the top-level location for simulation outputs and processed datasets. If you want the actual files stored elsewhere, create `Data_Saved` as a symbolic link.
-
-Example:
+Install the required Python packages:
 
 ```bash
-cd /home/wanglz/Desktop/src/ModularDT/0_Demo_MultiCylinder
-mkdir -p /data/wanglz/ModularDT/0_MultiCylinder
-ln -s /data/wanglz/ModularDT/0_MultiCylinder Data_Saved
+pip install phiflow torch numpy pandas matplotlib imageio tqdm h5py scipy pillow
 ```
 
-If `Data_Saved` already exists as a regular directory, rename or remove it first.
-
-## Simulation configs
-
-Default simulation configs are stored in `Configs/`:
-
-- `Configs/config_inert.json`
-- `Configs/config_active.json`
-
-The simulation script accepts a config filename or path with `--config-json`. Relative config names are resolved from `Configs/`.
-
-Whenever a config file is used in a simulation run, the script copies it into `Configs/Config_bk/` with the case id and timestamp in the filename.
-
-## Device selection
-
-You can select CPU or GPU either in the JSON config or from the command line.
-
-Example config block:
-
-```json
-"execution": {
-  "device": "cpu",
-  "gpu_id": 0
-}
-```
-
-Example CLI override:
-
-```bash
-python src/simulate_multicylinder_phiflow.py \
-  --config-json config_inert.json \
-  --device gpu \
-  --gpu-id 1 \
-  --case-id 0001
-```
+If your PyTorch build has CUDA support, preprocessing and training can run on
+GPU.
 
 ## Workflow
 
@@ -147,39 +247,7 @@ python src/simulate_multicylinder_phiflow.py \
 python src/simulate_multicylinder_phiflow.py --config-json config_inert.json
 ```
 
-You can also use direct overrides:
-
-```bash
-python src/simulate_multicylinder_phiflow.py \
-  --case-id 0001 \
-  --mode inert \
-  --num-cylinders 4 \
-  --re 100 \
-  --seed 7 \
-  --device cpu
-```
-
-Each run creates a case directory directly under `Data_Saved/`:
-
-```text
-Data_Saved/
-└── case_0001_20260417_132015_multicyl/
-    ├── case_config.json
-    ├── frame_index.csv
-    ├── plots/
-    └── scene/
-```
-
 ### 2. Preprocess raw cases into a packed dataset
-
-The preprocessing script converts raw PhiFlow outputs into:
-
-- per-case structure and summary files
-- canonical-cycle tensors
-- point-sampled training tuples
-- one packed HDF5 dataset at `Data_Saved/Processed_Inert_Dataset/packed_dataset.h5`
-
-Example:
 
 ```bash
 python src/preprocess_inert_multicyl_dataset.py \
@@ -193,148 +261,24 @@ python src/preprocess_inert_multicyl_dataset.py \
   --save-full-canonical-cycles
 ```
 
-Notes:
+Keep `--save-full-canonical-cycles` enabled if you want canonical-cycle
+validation and full-grid evaluation later.
 
-- `--save-full-canonical-cycles` should remain enabled if you want validation in `train.py` and reconstruction plots in `evaluate.py`.
-- If `input-root` contains `train/` and `test/` subdirectories, those split labels are preserved in the packed HDF5 metadata.
-- The packed HDF5 case groups contain `sampled_points`, `mean_field`, `rms_field`, `x_grid`, `y_grid`, and optionally `canonical_cycle` and `phase_bin_centers`.
-
-You can inspect a packed case with:
+### 3. Train the surrogate
 
 ```bash
-python src/inspect_packed_h5_case.py
+python src/train.py --config train_config_template.json --device cuda:0
 ```
 
-### 3. Train the surrogate model
+### 4. Evaluate / reconstruct full grids
 
-Training configuration lives in `Config_Train/train_config_template.json`. The main fields are:
-
-- `dataset.packed_h5_path` - path to the HDF5 dataset
-- `dataset.train_split` and `dataset.val_split` - split labels read from HDF5 case metadata
-- `dataset.points_per_item` - point-chunk size per dataset item
-- `dataset.train_point_fraction` - fraction of points kept from each training chunk for one epoch
-- `dataset.min_points_per_sample` - lower bound on retained points per chunk after sub-sampling
-- `dataset.resample_each_epoch` - whether to refresh the random point subset every epoch
-- `model.*` - neural architecture parameters from [`src/model.py`](/home/wanglz/Desktop/src/ModularDT/0_Demo_MultiCylinder/src/model.py)
-  In particular, `model.decoder_type` can be set to `mlp_fourier`, `siren`, `deeponet`, or `structured_perceiver`.
-  For `deeponet`, the query-side trunk uses the Fourier-encoded `(x, y, tau)` features from `query_encoder`, while the branch net uses the concatenated organized context and latent features.
-  For `structured_perceiver`, the organizer output is treated as typed memory made of module, environment, hyperedge, and global behavior tokens. Each `(x, y, tau)` query becomes a query token, then shallow cross-attention updates separate mean and residual query states before the final heads reconstruct `pred_mean`, `pred_residual`, and `pred_field`.
-  The organizer and behavior head APIs stay unchanged, and the mean/residual decomposition is preserved.
-- `model.perceiver_*` - `structured_perceiver` controls. The main ones are:
-  `perceiver_num_layers`, `perceiver_num_heads`, `perceiver_head_dim`, `perceiver_ffn_mult`, `perceiver_dropout`, `perceiver_num_global_tokens`, `perceiver_use_relative_bias`, and `perceiver_chunk_query_attention`.
-  Relative geometry is used only as an attention-logit bias for query-to-module and query-to-environment reads; it is not concatenated into the final output heads. This is intentional so the decoder does not regain a raw-coordinate shortcut.
-- `training.max_physical_queries_per_step` - cap on the number of decoder queries in one physical forward pass
-- `training.*` - optimizer, scheduler, mixed precision, and epoch-level training settings
-- `validation.*` - canonical-cycle validation settings
-
-The shipped template currently uses `decoder_type=structured_perceiver`,
-`coord_fourier_frequencies=4`, `query_fourier_frequencies=4`,
-`structure_fourier_frequencies=4`, `dropout=0.05`, `weight_decay=1e-4`,
-`perceiver_num_layers=1`, `perceiver_num_heads=4`, `perceiver_head_dim=16`,
-`perceiver_num_global_tokens=3`, and `perceiver_chunk_query_attention=true`
-to keep the decoder focused on organized latent state while keeping attention
-memory moderate.
-
-Recommended first run for the new decoder:
-
-- keep `hidden_dim`, `behavior_dim`, and `latent_dim` at `64`
-- keep `decoder_hidden_dim=128`
-- start with `perceiver_num_layers=1`
-- keep `perceiver_num_heads=4` and `perceiver_head_dim=16`
-- leave `query_fourier_frequencies=4` unless you have evidence the model is under-resolving phase or spatial detail
-
-Compared with `mlp_fourier`, `structured_perceiver` does not pass raw query encodings directly into the final output heads. The query features are used only to create query tokens, which then read the organized latent memory through cross-attention. This is designed to reduce coordinate memorization shortcuts while still letting the decoder adapt to local geometry.
-
-Start training with:
-
-```bash
-python src/train.py --config train_config_template.json
-```
-
-Or point to a custom config path:
-
-```bash
-python src/train.py --config /absolute/path/to/train_config.json --device cuda:0
-```
-
-Training behavior:
-
-- `train.py` reads chunked point samples from `sampled_points`
-- each training chunk can be randomly sub-sampled, which is useful for neural-field training when full chunk density is unnecessary
-- `mean_field` is sampled on the same grid locations to form `mean_targets`
-- the model predicts `pred_mean`, `pred_residual`, `pred_field`, and a dominant frequency
-- validation reconstructs selected canonical-cycle phases on full grids
-- loss history, loss curves, and checkpoints are written once per epoch
-- checkpoints are saved to `Saved_Model/Case{case_id}_{timestamp}/`
-- the resolved config is copied to both the run directory and `Config_Train/Configs_bk/`
-
-The current training script expects:
-
-- `cases/<case_id>/sampled_points/{x,y,tau,u,v,p,omega}`
-- `cases/<case_id>/mean_field`
-- `cases/<case_id>/x_grid`
-- `cases/<case_id>/y_grid`
-- validation cases to also contain `canonical_cycle` and `phase_bin_centers`
-
-### 4. Evaluate a checkpoint and rebuild flow fields
-
-`evaluate.py` finds the most recent run directory matching `Saved_Model/Case{case_id}_*` and loads `best_model.pt` by default. It reconstructs whichever decoder architecture was stored in the checkpoint config, including `deeponet` and `structured_perceiver`.
-
-Example:
-
-```bash
-python src/evaluate.py \
-  --case-id 0001 \
-  --dataset-case-id 0001 \
-  --dataset-split test \
-  --tau 0.25 \
-  --device cuda:0
-```
-
-Useful options:
-
-- `--latest` loads `latest_model.pt` instead of `best_model.pt`
-- `--dataset-case-id` selects which packed-dataset case to reconstruct
-- `--dataset-split` chooses the search split if `--dataset-case-id` is omitted
-- `--query-batch-size` controls decoder chunk size during full-grid reconstruction
-- `--output-dir` overrides the default output directory under the run folder
-
-Evaluation outputs:
-
-- a quicklook PNG comparing ground truth, prediction, and error for `u`, `v`, `p`, and `omega`
-- a GIF over the canonical cycle
-- a compressed `.npz` with reconstructed arrays
-- a JSON summary with the selected run, case id, phase index, MSE, and frequency comparison
-
-## Visualization and domain preview
-
-Visualize a raw case:
-
-```bash
-python src/visualize_multicylinder_case.py case_0001_YYYYMMDD_HHMMSS_multicyl
-```
-
-Preview the computational domain from a config:
-
-```bash
-python src/plot_domain_shape.py --config-json config_inert.json
-python src/plot_domain_shape.py --config-json config_active.json
-```
-
-The domain preview is saved into `Domain_shape/`.
+`src/evaluate.py` can load a saved checkpoint and call
+`reconstruct_full_grid(...)` on the revised model path.
 
 ## Notes
 
-- Relative simulation config names are resolved from `Configs/`.
-- Relative training config names are resolved from `Config_Train/`.
-- The training and evaluation scripts are now anchored to the demo directory, so they work when launched from either `0_Demo_MultiCylinder/` or the repo root.
-- If `packed_dataset.h5` was generated without canonical cycles, training can still use point samples, but canonical validation and `evaluate.py` reconstruction comparisons will not work.
-- GPU execution requires a CUDA-enabled PyTorch install and a working NVIDIA driver.
-
-## Recommended next steps
-
-1. Preview the domain with `plot_domain_shape.py`.
-2. Simulate a small inert batch and inspect one raw case.
-3. Preprocess into `packed_dataset.h5` and confirm the train/test split labels.
-4. Train with a short run first to validate loss curves and checkpoint writing.
-5. Use `evaluate.py` on a held-out packed-dataset case to confirm reconstruction quality.
+- This round does not try to preserve older decoder families or older config
+  schema.
+- The packed dataset / point-chunk interface is intentionally unchanged.
+- The residual branch is where sharp vortices should now be learned; the mean
+  branch is deliberately lightweight and smooth.

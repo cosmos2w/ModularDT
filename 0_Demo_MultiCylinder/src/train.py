@@ -2,13 +2,12 @@ from __future__ import annotations
 
 """Training script for the hypergraph-organized neural field model.
 
-This script reads a packed HDF5 dataset, trains the organizer + behavior head +
-phase-conditioned neural field decoder end-to-end, and writes only the latest
-and best checkpoints to a run-specific directory.
+This revision trains one primary architecture:
+organizer -> behavior / dynamic memory -> hierarchical mean/residual decoder.
 
-The decoder architecture is selected from the JSON model config through
-`model.decoder_type`, for example `mlp_fourier`, `siren`, `deeponet`, or
-`structured_perceiver`.
+The training objective is intentionally residual-focused. Field and residual
+reconstruction stay central, mean supervision is optional, and checkpoint
+selection can prioritize dynamic quality through a residual-aware metric.
 """
 
 import argparse
@@ -593,12 +592,12 @@ def combine_weighted_loss_terms(
     loss_org_entropy: torch.Tensor | float,
 ) -> torch.Tensor | float:
     return (
-        loss_cfg["field_mse_weight"] * loss_field
-        + loss_cfg["mean_mse_weight"] * loss_mean
-        + loss_cfg["residual_mse_weight"] * loss_residual
-        + loss_cfg["freq_mse_weight"] * loss_freq
-        + loss_cfg["organizer_sparsity_weight"] * loss_org_sparsity
-        + loss_cfg["organizer_entropy_weight"] * loss_org_entropy
+        float(loss_cfg.get("field_mse_weight", 1.0)) * loss_field
+        + float(loss_cfg.get("mean_mse_weight", 0.0)) * loss_mean
+        + float(loss_cfg.get("residual_mse_weight", 1.0)) * loss_residual
+        + float(loss_cfg.get("freq_mse_weight", 0.05)) * loss_freq
+        + float(loss_cfg.get("organizer_sparsity_weight", 0.0)) * loss_org_sparsity
+        + float(loss_cfg.get("organizer_entropy_weight", 0.0)) * loss_org_entropy
     )
 
 
@@ -785,6 +784,7 @@ def evaluate_canonical_cases(
             "val_total_loss": float("nan"),
             "val_field_mse": float("nan"),
             "val_mean_mse": float("nan"),
+            "val_residual_mse": float("nan"),
             "val_freq_mse": float("nan"),
         }
 
@@ -884,6 +884,7 @@ def evaluate_canonical_cases(
         "val_total_loss": float(np.mean(total_losses)),
         "val_field_mse": float(np.mean(field_losses)),
         "val_mean_mse": float(np.mean(mean_losses)),
+        "val_residual_mse": float(np.mean(residual_losses)),
         "val_freq_mse": float(np.mean(freq_losses)),
     }
 
@@ -903,6 +904,7 @@ def evaluate_point_chunks(
             "val_total_loss": float("nan"),
             "val_field_mse": float("nan"),
             "val_mean_mse": float("nan"),
+            "val_residual_mse": float("nan"),
             "val_freq_mse": float("nan"),
         }
 
@@ -951,6 +953,7 @@ def evaluate_point_chunks(
             "val_total_loss": normalize_loss_scalar(losses["loss_total"]),
             "val_field_mse": normalize_loss_scalar(losses["loss_field"]),
             "val_mean_mse": normalize_loss_scalar(losses["loss_mean"]),
+            "val_residual_mse": normalize_loss_scalar(losses["loss_residual"]),
             "val_freq_mse": normalize_loss_scalar(losses["loss_freq"]),
         }
         metric_buffer.append(row)
@@ -958,7 +961,7 @@ def evaluate_point_chunks(
             val_bar.set_postfix(
                 total=f"{row['val_total_loss']:.3e}",
                 field_mse=f"{row['val_field_mse']:.3e}",
-                mean_mse=f"{row['val_mean_mse']:.3e}",
+                residual_mse=f"{row['val_residual_mse']:.3e}",
                 freq_mse=f"{row['val_freq_mse']:.3e}",
             )
 
@@ -966,6 +969,30 @@ def evaluate_point_chunks(
         val_bar.close()
 
     return average_metric_dicts(metric_buffer)
+
+
+def compute_validation_selection_metric(val_metrics: Dict[str, float], validation_cfg: Dict) -> float:
+    """Residual-focused checkpoint selection metric.
+
+    Supported names:
+        val_residual_focus: val_residual_mse + 0.25 * val_field_mse
+        any direct metric key present in `val_metrics`
+    """
+
+    metric_name = str(validation_cfg.get("best_metric_name", "val_residual_focus")).strip()
+    if metric_name == "val_residual_focus":
+        residual = float(val_metrics.get("val_residual_mse", float("nan")))
+        field = float(val_metrics.get("val_field_mse", float("nan")))
+        if not (math.isfinite(residual) and math.isfinite(field)):
+            return float("nan")
+        return residual + (0.25 * field)
+    if metric_name in val_metrics:
+        return float(val_metrics[metric_name])
+    raise ValueError(
+        f"Unsupported validation.best_metric_name='{metric_name}'. "
+        "Use 'val_residual_focus' or a direct validation metric key."
+    )
+
 
 def organizer_ramp_scale(loss_cfg: Dict, epoch: int) -> float:
     ramp_epochs = max(1, int(loss_cfg.get("organizer_ramp_epochs", 1)))
@@ -990,9 +1017,9 @@ def save_loss_curve(history: List[Dict[str, float]], out_path: Path) -> None:
                 ys.append(y_float)
         return xs, ys
 
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), dpi=140, sharex=True)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5), dpi=140, sharex=True)
 
-    total_ax, field_ax = axes
+    total_ax, field_ax, residual_ax = axes
 
     train_total = [row.get("loss_total", float("nan")) for row in history]
     test_total = [row.get("val_total_loss", float("nan")) for row in history]
@@ -1018,19 +1045,19 @@ def save_loss_curve(history: List[Dict[str, float]], out_path: Path) -> None:
         total_ax.legend()
 
     train_field = [row.get("loss_field", float("nan")) for row in history]
-    test_field = [row.get("val_field_mse", float("nan")) for row in history]
+    val_field = [row.get("val_field_mse", float("nan")) for row in history]
     if any(math.isfinite(float(v)) for v in train_field):
         field_ax.plot(epochs, train_field, linestyle="-", linewidth=1.5, label="Train field")
-    test_field_epochs, test_field_vals = finite_xy(epochs, test_field)
-    if test_field_epochs:
+    val_field_epochs, val_field_vals = finite_xy(epochs, val_field)
+    if val_field_epochs:
         field_ax.plot(
-            test_field_epochs,
-            test_field_vals,
+            val_field_epochs,
+            val_field_vals,
             linestyle=":",
             linewidth=2.0,
             marker="o",
             markersize=3.5,
-            label="Test field",
+            label="Val field",
         )
     field_ax.set_title("Field Loss")
     field_ax.set_xlabel("Epoch")
@@ -1039,6 +1066,29 @@ def save_loss_curve(history: List[Dict[str, float]], out_path: Path) -> None:
     field_ax.grid(True, alpha=0.3)
     if field_ax.lines:
         field_ax.legend()
+
+    train_residual = [row.get("loss_residual", float("nan")) for row in history]
+    test_residual = [row.get("val_residual_mse", float("nan")) for row in history]
+    if any(math.isfinite(float(v)) for v in train_residual):
+        residual_ax.plot(epochs, train_residual, linestyle="-", linewidth=1.5, label="Train residual")
+    test_residual_epochs, test_residual_vals = finite_xy(epochs, test_residual)
+    if test_residual_epochs:
+        residual_ax.plot(
+            test_residual_epochs,
+            test_residual_vals,
+            linestyle=":",
+            linewidth=2.0,
+            marker="o",
+            markersize=3.5,
+            label="Val residual",
+        )
+    residual_ax.set_title("Residual Loss")
+    residual_ax.set_xlabel("Epoch")
+    residual_ax.set_ylabel("Loss")
+    residual_ax.set_yscale("log")
+    residual_ax.grid(True, alpha=0.3)
+    if residual_ax.lines:
+        residual_ax.legend()
 
     plt.tight_layout()
     plt.savefig(out_path)
@@ -1080,17 +1130,17 @@ def main() -> None:
     max_num_cylinders = int(dataset_cfg.get("max_num_cylinders", model_cfg.max_num_cylinders))
     if model_cfg.max_num_cylinders != max_num_cylinders:
         model_cfg.max_num_cylinders = max_num_cylinders
-    print(f"[setup] decoder_type={model_cfg.decoder_type}")
-    if model_cfg.decoder_type == "structured_perceiver":
-        print(
-            "[setup] structured_perceiver: "
-            f"layers={model_cfg.perceiver_num_layers}, "
-            f"heads={model_cfg.perceiver_num_heads}, "
-            f"head_dim={model_cfg.perceiver_head_dim}, "
-            f"global_tokens={model_cfg.perceiver_num_global_tokens}, "
-            f"relative_bias={model_cfg.perceiver_use_relative_bias}, "
-            f"chunk_query_attention={model_cfg.perceiver_chunk_query_attention}"
-        )
+    print(f"[setup] decoder={model_cfg.decoder_type}")
+    print(
+        "[setup] hierarchical_perceiver: "
+        f"global_layers={model_cfg.perceiver_num_layers_global}, "
+        f"local_layers={model_cfg.perceiver_num_layers_local}, "
+        f"heads={model_cfg.perceiver_num_heads}, "
+        f"head_dim={model_cfg.perceiver_head_dim}, "
+        f"topk_env={model_cfg.perceiver_refine_topk_env}, "
+        f"topk_mod={model_cfg.perceiver_refine_topk_mod}, "
+        f"query_chunk_size={model_cfg.perceiver_query_chunk_size}"
+    )
 
     train_dataset = PackedPointChunkDataset(
         packed_h5_path,
@@ -1106,6 +1156,7 @@ def main() -> None:
     val_mode = str(validation_cfg.get("mode", "point_chunks")).strip().lower()
     if val_mode not in {"point_chunks", "canonical_full_grid"}:
         raise ValueError("validation.mode must be either 'point_chunks' or 'canonical_full_grid'.")
+    best_metric_name = str(validation_cfg.get("best_metric_name", "val_residual_focus")).strip()
 
     val_dataset = None
     val_loader = None
@@ -1210,11 +1261,13 @@ def main() -> None:
         "loss_org_me",
         "loss_org_mm",
         "loss_org_consistency",
-        "lr",
+        # "lr",
         "val_total_loss",
         "val_field_mse",
         "val_mean_mse",
+        "val_residual_mse",
         "val_freq_mse",
+        "val_selection_metric",
     ]
     with history_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=log_fields)
@@ -1248,6 +1301,7 @@ def main() -> None:
         f"[setup] effective queries/optimizer-step~{format_large_int(queries_per_step)} | "
         f"physical queries/forward~{format_large_int(physical_queries_per_step)} | env_tokens={env_tokens}"
     )
+    print(f"[setup] best_metric_name={best_metric_name}")
     if accumulation_steps > 1:
         print(
             "[setup] Large requested batch detected, so gradient accumulation is enabled automatically to keep "
@@ -1258,10 +1312,10 @@ def main() -> None:
             "[warn] Large physical queries-per-forward can still be slow. If the first batch remains sluggish, "
             "reduce training.batch_size, training.max_physical_queries_per_step, or dataset.points_per_item."
         )
-    if model_cfg.decoder_type == "structured_perceiver" and physical_queries_per_step >= 32768:
+    if physical_queries_per_step >= 32768:
         print(
-            "[warn] structured_perceiver adds cross-attention over organizer memory. If GPU memory is tight, "
-            "lower dataset.points_per_item or training.batch_size before increasing model width."
+            "[warn] The hierarchical decoder uses global attention plus local top-k refinement. "
+            "If GPU memory is tight, lower dataset.points_per_item or training.batch_size before increasing model width."
         )
 
     history_rows: List[Dict[str, float]] = []
@@ -1338,7 +1392,7 @@ def main() -> None:
             )
             train_bar.set_postfix(
                 loss=f"{accumulation_buffer[-1]['loss_total']:.3e}",
-                field=f"{accumulation_buffer[-1]['loss_field']:.3e}",
+                residual=f"{accumulation_buffer[-1]['loss_residual']:.3e}",
                 freq=f"{accumulation_buffer[-1]['loss_freq']:.3e}",
                 accum=f"{micro_index + 1}/{active_accum_steps}",
                 lr=f"{optimizer.param_groups[0]['lr']:.2e}",
@@ -1375,6 +1429,7 @@ def main() -> None:
             "val_total_loss": float("nan"),
             "val_field_mse": float("nan"),
             "val_mean_mse": float("nan"),
+            "val_residual_mse": float("nan"),
             "val_freq_mse": float("nan"),
         }
         eval_every_epochs = max(1, int(validation_cfg.get("eval_every_epochs", 1)))
@@ -1407,12 +1462,17 @@ def main() -> None:
                     phase_bins_to_eval=int(validation_cfg.get("phase_bins_to_eval", 6)),
                     show_progress=True,
                 )
+            val_selection_metric = compute_validation_selection_metric(val_metrics, validation_cfg)
             print(
                 f"[val] epoch={epoch:03d} total={val_metrics['val_total_loss']:.6e} "
                 f"field_mse={val_metrics['val_field_mse']:.6e} "
-                f"mean_mse={val_metrics['val_mean_mse']:.6e} freq_mse={val_metrics['val_freq_mse']:.6e}"
+                f"residual_mse={val_metrics['val_residual_mse']:.6e} "
+                f"mean_mse={val_metrics['val_mean_mse']:.6e} "
+                f"freq_mse={val_metrics['val_freq_mse']:.6e} "
+                f"selection={val_selection_metric:.6e}"
             )
         else:
+            val_selection_metric = float("nan")
             print(f"[epoch] {epoch:03d}/{total_epochs:03d} validation skipped")
 
         epoch_row = {
@@ -1432,8 +1492,9 @@ def main() -> None:
                     "loss_org_consistency": epoch_train_metrics["loss_org_consistency"],
                 }
             ),
-            "lr": float(optimizer.param_groups[0]["lr"]),
+            # "lr": float(optimizer.param_groups[0]["lr"]),
             **round_loss_metrics(val_metrics),
+            "val_selection_metric": round_to_significant_figures(val_selection_metric),
         }
         history_rows.append(epoch_row)
         with history_csv.open("a", newline="", encoding="utf-8") as f:
@@ -1443,7 +1504,8 @@ def main() -> None:
         print(f"[save] wrote epoch summary to {history_csv}")
         print(f"[save] refreshed loss curve at {loss_curve_path}")
 
-        current_val = val_metrics["val_field_mse"]
+        # Checkpoint selection is configurable so we can prioritize residual fidelity.
+        current_val = val_selection_metric
         is_new_best = bool(math.isfinite(current_val) and current_val < best_val_metric)
         if math.isfinite(current_val) and current_val < best_val_metric:
             best_val_metric = current_val
@@ -1454,6 +1516,9 @@ def main() -> None:
             "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
             "config": cfg,
             "model_config": model_cfg.__dict__,
+            "best_metric_name": best_metric_name,
+            "val_metrics": val_metrics,
+            "val_selection_metric": val_selection_metric,
             "best_val_metric": best_val_metric,
         }
         torch.save(checkpoint, latest_path)
@@ -1461,7 +1526,7 @@ def main() -> None:
 
         if is_new_best:
             torch.save(checkpoint, best_path)
-            print(f"[save] new best checkpoint: {best_path} | val_field_mse={best_val_metric:.6e}")
+            print(f"[save] new best checkpoint: {best_path} | {best_metric_name}={best_val_metric:.6e}")
         else:
             print(
                 f"[save] best checkpoint unchanged | best_val_metric="
