@@ -3,20 +3,24 @@ from __future__ import annotations
 """
 PyTorch model for hypergraph-organized dynamic wake reconstruction.
 
+The PhiFlow benchmark uses periodic boundaries, so geometry stays periodic in
+both x and y throughout the model.
+
 1. Hypergraph organizer
    Produces module / environment / hyperedge states, soft incidences, and
-   explicit geometry including `hyper_coords` and `hyper_strength`.
+   explicit source-centered plus wake-centered hyperedge geometry.
 2. Behavior + dynamic token head
-   Produces a compact smooth-context summary plus dynamic memory tokens:
-   `dynamic_global_token` and `dynamic_hyper_tokens`.
+   Produces a compact smooth-context summary plus structured dynamic memory:
+   `dynamic_global_token`, `dynamic_hyper_base`, and lightweight harmonic
+   phase-conditioning coefficients.
 3. Hierarchical decoder
    Uses separate spatial `(x, y)` and phase `tau` encoders, then predicts
    `pred_mean` and `pred_residual` through:
      - a light global mean branch
-     - a dynamic residual branch with global read + top-k local refinement
+     - a dynamic residual branch with global read + wake-aware local refinement
 
-The residual branch is the main carrier for vivid, phase-sensitive wake structure. 
-Final output heads read only updated query states.
+The residual branch is the main carrier for vivid, phase-sensitive wake
+structure. Final output heads read only updated query states.
 """
 
 from dataclasses import dataclass
@@ -29,6 +33,123 @@ import torch.nn.functional as F
 
 
 # ----------------------------- Helper modules ---------------------------------
+
+
+TWO_PI = 2.0 * math.pi
+
+
+def periodic_delta_min_image(src: torch.Tensor, dst: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Return the minimum-image displacement from `src` to `dst` in normalized coords.
+
+    The sign convention is explicit:
+    - positive `dx` means `dst` lies downstream / to the right of `src`
+    - positive `dy` means `dst` lies above `src`
+    """
+
+    delta = torch.remainder(dst - src + 0.5, 1.0) - 0.5
+    return delta[..., 0], delta[..., 1]
+
+
+def periodic_distance_min_image(src: torch.Tensor, dst: torch.Tensor) -> torch.Tensor:
+    dx, dy = periodic_delta_min_image(src, dst)
+    return torch.sqrt(dx.square() + dy.square() + 1e-8)
+
+
+def directed_periodic_downstream_delta(src_x: torch.Tensor, dst_x: torch.Tensor) -> torch.Tensor:
+    """Return downstream displacement from `src_x` to `dst_x` along +x in [0, 1)."""
+
+    return torch.remainder(dst_x - src_x, 1.0)
+
+
+def periodic_relative_features(
+    src_xy: torch.Tensor,
+    dst_xy: torch.Tensor,
+    mode: str = "min_image",
+) -> torch.Tensor:
+    """Return explicit periodic relative features from `src_xy` to `dst_xy`.
+
+    Features are:
+      [dx, dy, distance, downstream, upstream]
+
+    `mode="min_image"` uses minimum-image `dx` for proximity.
+    `mode="directed_downstream"` uses directed periodic downstream distance in x
+    while keeping y as minimum-image.
+    """
+
+    _, dy = periodic_delta_min_image(src_xy, dst_xy)
+    if mode == "min_image":
+        dx, _ = periodic_delta_min_image(src_xy, dst_xy)
+        downstream = torch.clamp(dx, min=0.0)
+        upstream = torch.clamp(-dx, min=0.0)
+    elif mode == "directed_downstream":
+        dx = directed_periodic_downstream_delta(src_xy[..., 0], dst_xy[..., 0])
+        downstream = dx
+        upstream = torch.zeros_like(dx)
+    else:
+        raise ValueError(f"Unsupported periodic_relative_features mode: {mode}")
+
+    dist = torch.sqrt(dx.square() + dy.square() + 1e-8)
+    return torch.stack([dx, dy, dist, downstream, upstream], dim=-1)
+
+
+def periodic_weighted_mean(coords: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    """Circular weighted mean for periodic coords in [0, 1].
+
+    Args:
+        coords: [B, N, 2]
+        weights: [B, N, K]
+    Returns:
+        [B, K, 2]
+    """
+
+    if coords.ndim != 3 or coords.shape[-1] != 2:
+        raise ValueError("coords must have shape [B, N, 2].")
+    if weights.ndim != 3 or weights.shape[:2] != coords.shape[:2]:
+        raise ValueError("weights must have shape [B, N, K] matching coords.")
+
+    angles = TWO_PI * coords[:, None, :, :]
+    weight_t = weights.transpose(1, 2).unsqueeze(-1)
+    sin_sum = (weight_t * torch.sin(angles)).sum(dim=2)
+    cos_sum = (weight_t * torch.cos(angles)).sum(dim=2)
+    mean_angle = torch.atan2(sin_sum, cos_sum)
+    return torch.remainder(mean_angle / TWO_PI, 1.0)
+
+
+def periodic_weighted_rms_spread(
+    centers: torch.Tensor,
+    coords: torch.Tensor,
+    weights: torch.Tensor,
+) -> torch.Tensor:
+    """Weighted RMS spread of periodic coords around periodic centers.
+
+    Args:
+        centers: [B, K, 2]
+        coords: [B, N, 2]
+        weights: [B, N, K]
+    Returns:
+        [B, K, 1]
+    """
+
+    if centers.ndim != 3 or centers.shape[-1] != 2:
+        raise ValueError("centers must have shape [B, K, 2].")
+    dx, dy = periodic_delta_min_image(centers[:, :, None, :], coords[:, None, :, :])
+    dist_sq = dx.square() + dy.square()
+    weight_t = weights.transpose(1, 2)
+    denom = weight_t.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+    return torch.sqrt((weight_t * dist_sq).sum(dim=-1, keepdim=True) / denom + 1e-8)
+
+
+def masked_softmax(logits: torch.Tensor, mask: Optional[torch.Tensor], dim: int) -> torch.Tensor:
+    """Softmax with explicit zeroing for masked entries and fully masked rows."""
+
+    if mask is None:
+        return torch.softmax(logits, dim=dim)
+
+    mask = mask.to(device=logits.device, dtype=logits.dtype)
+    masked_logits = logits.masked_fill(mask <= 0, -1e9)
+    weights = torch.softmax(masked_logits, dim=dim)
+    weights = weights * mask
+    return weights / weights.sum(dim=dim, keepdim=True).clamp_min(1e-6)
 
 
 class FourierEncoder(nn.Module):
@@ -136,6 +257,35 @@ class RelativeGeometryBias(nn.Module):
             + self.weight[2] * dist
             + self.weight[3] * downstream
             + self.weight[4] * upstream
+            + self.bias
+        )
+
+
+class HyperWakeGeometryBias(nn.Module):
+    """Affine wake-aware geometry bias over hyperedges."""
+
+    def __init__(self):
+        super().__init__()
+        init = torch.tensor([-1.25, -1.00, 0.75, 0.25, 0.00, 0.50], dtype=torch.float32)
+        self.weight = nn.Parameter(init)
+        self.bias = nn.Parameter(torch.zeros(1))
+
+    def forward(
+        self,
+        wake_dist_scaled: torch.Tensor,
+        cross_scaled: torch.Tensor,
+        along_scaled: torch.Tensor,
+        downstream: torch.Tensor,
+        extent_log: torch.Tensor,
+        strength_log: torch.Tensor,
+    ) -> torch.Tensor:
+        return (
+            self.weight[0] * wake_dist_scaled
+            + self.weight[1] * cross_scaled
+            + self.weight[2] * along_scaled
+            + self.weight[3] * downstream
+            + self.weight[4] * extent_log
+            + self.weight[5] * strength_log
             + self.bias
         )
 
@@ -348,7 +498,7 @@ class ModelConfig:
     message_passing_steps: int = 3
     structure_fourier_frequencies: int = 1
     spatial_query_fourier_frequencies: int = 3
-    phase_harmonics: int = 2
+    phase_fourier_frequencies: int = 2
     decoder_hidden_dim: int = 128
     perceiver_num_layers_global: int = 1
     perceiver_num_layers_local: int = 1
@@ -361,6 +511,12 @@ class ModelConfig:
     perceiver_query_chunk_size: int = 1024
     use_dynamic_hyper_tokens: bool = True
     use_hyper_phase_offsets: bool = True
+    use_phase_conditioned_dynamic_tokens: bool = True
+    dynamic_phase_harmonics: int = 2
+    dynamic_phase_rank: int = 8
+    dynamic_phase_mode: str = "low_rank_harmonic"
+    phase_conditioning_dropout: float = 0.0
+    use_wake_centered_hyper_geometry: bool = True
     future_module_feature_dim: int = 0
     future_global_feature_dim: int = 0
     dropout: float = 0.05
@@ -372,8 +528,8 @@ class ModelConfig:
         data = dict(payload)
         if "query_fourier_frequencies" in data and "spatial_query_fourier_frequencies" not in data:
             data["spatial_query_fourier_frequencies"] = data["query_fourier_frequencies"]
-        if "phase_fourier_frequencies" in data and "phase_harmonics" not in data:
-            data["phase_harmonics"] = data["phase_fourier_frequencies"]
+        if "phase_harmonics" in data and "phase_fourier_frequencies" not in data:
+            data["phase_fourier_frequencies"] = data["phase_harmonics"]
         valid = {field.name for field in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
         filtered = {k: v for k, v in data.items() if k in valid}
         return cls(**filtered)
@@ -463,18 +619,9 @@ class HypergraphOrganizer(nn.Module):
             mask = mask.unsqueeze(-1)
         very_neg = torch.full_like(values, -1e9)
         masked = torch.where(mask > 0, values, very_neg)
-        return masked.max(dim=dim).values
-
-    @staticmethod
-    def pairwise_periodic_relative_features(src_coords: torch.Tensor, dst_coords: torch.Tensor) -> torch.Tensor:
-        dx = src_coords[:, :, None, 0] - dst_coords[:, None, :, 0]
-        dy = src_coords[:, :, None, 1] - dst_coords[:, None, :, 1]
-        dx = (dx + 0.5) % 1.0 - 0.5
-        dy = (dy + 0.5) % 1.0 - 0.5
-        dist = torch.sqrt(dx.square() + dy.square() + 1e-8)
-        downstream = torch.clamp(-dx, min=0.0)
-        upstream = torch.clamp(dx, min=0.0)
-        return torch.stack([dx, dy, dist, downstream, upstream], dim=-1)
+        max_vals = masked.max(dim=dim).values
+        has_valid = mask.sum(dim=dim) > 0
+        return torch.where(has_valid, max_vals, torch.zeros_like(max_vals))
 
     def forward(
         self,
@@ -509,8 +656,8 @@ class HypergraphOrganizer(nn.Module):
         hyper_state = self.hyperedge_embeddings.unsqueeze(0).expand(batch_size, -1, -1)
         hyper_state = hyper_state + self.hyperedge_context(global_feats).unsqueeze(1)
 
-        rel_me = self.pairwise_periodic_relative_features(module_coords_norm, env_coords)
-        rel_mm = self.pairwise_periodic_relative_features(module_coords_norm, module_coords_norm)
+        rel_me = periodic_relative_features(module_coords_norm[:, :, None, :], env_coords[:, None, :, :])
+        rel_mm = periodic_relative_features(module_coords_norm[:, :, None, :], module_coords_norm[:, None, :, :])
 
         eye = torch.eye(n_max, device=device, dtype=module_coords_norm.dtype)[None, :, :]
         pair_mask = cyl_mask[:, :, None] * cyl_mask[:, None, :] * (1.0 - eye)
@@ -528,7 +675,7 @@ class HypergraphOrganizer(nn.Module):
             env_expand = env_state[:, None, :, :].expand(-1, n_max, -1, -1)
             me_logits = self.me_score(torch.cat([module_expand, env_expand, rel_me], dim=-1)).squeeze(-1)
             valid_pair_mask = cyl_mask[:, :, None].expand_as(me_logits)
-            A_me = torch.softmax(me_logits.masked_fill(valid_pair_mask <= 0, -1e9), dim=-1)
+            A_me = masked_softmax(me_logits, valid_pair_mask, dim=-1)
 
             env_from_mod = A_me.transpose(1, 2)
             env_from_mod = env_from_mod / env_from_mod.sum(dim=-1, keepdim=True).clamp_min(1e-6)
@@ -538,7 +685,7 @@ class HypergraphOrganizer(nn.Module):
             hyper_h = hyper_state[:, None, :, :].expand(-1, n_max, -1, -1)
             module_geom_h = module_geom_summary[:, :, None, :].expand(-1, -1, n_hyp, -1)
             mh_logits = self.mh_score(torch.cat([module_h, hyper_h, module_geom_h], dim=-1)).squeeze(-1)
-            A_mh = torch.softmax(mh_logits.masked_fill(cyl_mask[:, :, None] <= 0, -1e9), dim=-1)
+            A_mh = masked_softmax(mh_logits, cyl_mask[:, :, None], dim=-1)
 
             env_h = env_state[:, :, None, :].expand(-1, -1, n_hyp, -1)
             hyper_e = hyper_state[:, None, :, :].expand(-1, n_env, -1, -1)
@@ -561,10 +708,28 @@ class HypergraphOrganizer(nn.Module):
             hyp_delta = self.hyper_update(torch.cat([hyper_state, mod_to_hyp, env_to_hyp], dim=-1))
             hyper_state = hyper_state + hyp_delta
 
-        # Derive representative hyperedge geometry from soft module membership.
-        hyper_weights = A_mh * cyl_mask[:, :, None]
-        hyper_weights = hyper_weights / hyper_weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
-        hyper_coords = torch.einsum("bnk,bnd->bkd", hyper_weights, module_coords_norm)
+        module_weights = A_mh * cyl_mask[:, :, None]
+        module_weights = module_weights / module_weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
+        hyper_source_coords = periodic_weighted_mean(module_coords_norm, module_weights)
+
+        if self.cfg.use_wake_centered_hyper_geometry:
+            env_weights = A_eh / A_eh.sum(dim=1, keepdim=True).clamp_min(1e-6)
+            hyper_wake_coords = periodic_weighted_mean(env_coords, env_weights)
+            hyper_wake_extent = periodic_weighted_rms_spread(hyper_wake_coords, env_coords, env_weights)
+        else:
+            hyper_wake_coords = hyper_source_coords
+            hyper_wake_extent = periodic_weighted_rms_spread(hyper_source_coords, module_coords_norm, module_weights)
+
+        wake_dx, wake_dy = periodic_delta_min_image(hyper_source_coords, hyper_wake_coords)
+        hyper_wake_axis = torch.stack([wake_dx, wake_dy], dim=-1)
+        axis_norm = torch.linalg.norm(hyper_wake_axis, dim=-1, keepdim=True)
+        default_axis = torch.zeros_like(hyper_wake_axis)
+        default_axis[..., 0] = 1.0
+        hyper_wake_axis = torch.where(
+            axis_norm > 1e-6,
+            hyper_wake_axis / axis_norm.clamp_min(1e-6),
+            default_axis,
+        )
 
         module_mass = (A_mh * cyl_mask[:, :, None]).sum(dim=1)
         module_mass = module_mass / cyl_mask.sum(dim=1, keepdim=True).clamp_min(1e-6)
@@ -580,7 +745,10 @@ class HypergraphOrganizer(nn.Module):
             "A_eh": A_eh,
             "env_coords": env_coords,
             "module_coords_norm": module_coords_norm,
-            "hyper_coords": hyper_coords,
+            "hyper_source_coords": hyper_source_coords,
+            "hyper_wake_coords": hyper_wake_coords,
+            "hyper_wake_axis": hyper_wake_axis,
+            "hyper_wake_extent": hyper_wake_extent,
             "hyper_strength": hyper_strength.unsqueeze(-1),
             "global_features": global_feats,
             "cyl_mask": cyl_mask,
@@ -629,7 +797,18 @@ class BehaviorHead(nn.Module):
             dropout=cfg.dropout,
             layer_norm=cfg.use_layer_norm,
         )
-        self.hyper_phase_head = nn.Linear(cfg.dynamic_token_dim, cfg.phase_harmonics)
+        if cfg.use_phase_conditioned_dynamic_tokens:
+            phase_out_dim = cfg.dynamic_phase_harmonics * cfg.dynamic_phase_rank
+            self.hyper_phase_sin_head = nn.Linear(cfg.dynamic_token_dim, phase_out_dim)
+            self.hyper_phase_cos_head = nn.Linear(cfg.dynamic_token_dim, phase_out_dim)
+        else:
+            self.hyper_phase_sin_head = None
+            self.hyper_phase_cos_head = None
+
+        if cfg.use_hyper_phase_offsets:
+            self.hyper_phase_head = nn.Linear(cfg.dynamic_token_dim, cfg.dynamic_phase_harmonics)
+        else:
+            self.hyper_phase_head = None
 
     def forward(self, organized: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         module_state = organized["module_state"]
@@ -672,13 +851,20 @@ class BehaviorHead(nn.Module):
         behavior_expand = behavior_latent[:, None, :].expand(batch_size, num_hyper, -1)
         mean_expand = mean_latent[:, None, :].expand(batch_size, num_hyper, -1)
         dynamic_hyper_inputs = torch.cat([hyper_state, behavior_expand, mean_expand, hyper_strength], dim=-1)
-        dynamic_hyper_tokens = self.dynamic_hyper_head(dynamic_hyper_inputs)
+        dynamic_hyper_base = self.dynamic_hyper_head(dynamic_hyper_inputs)
         if self.cfg.use_dynamic_hyper_tokens:
-            dynamic_hyper_tokens = dynamic_hyper_tokens + 0.25 * dynamic_global_token.expand(-1, num_hyper, -1)
+            dynamic_hyper_base = dynamic_hyper_base + 0.25 * dynamic_global_token.expand(-1, num_hyper, -1)
 
         hyper_phase_offsets = None
-        if self.cfg.use_hyper_phase_offsets:
-            hyper_phase_offsets = math.pi * torch.tanh(self.hyper_phase_head(dynamic_hyper_tokens))
+        if self.hyper_phase_head is not None:
+            hyper_phase_offsets = math.pi * torch.tanh(self.hyper_phase_head(dynamic_hyper_base))
+
+        hyper_phase_sin_coeff = None
+        hyper_phase_cos_coeff = None
+        if self.hyper_phase_sin_head is not None and self.hyper_phase_cos_head is not None:
+            coeff_shape = (batch_size, num_hyper, self.cfg.dynamic_phase_harmonics, self.cfg.dynamic_phase_rank)
+            hyper_phase_sin_coeff = self.hyper_phase_sin_head(dynamic_hyper_base).view(*coeff_shape)
+            hyper_phase_cos_coeff = self.hyper_phase_cos_head(dynamic_hyper_base).view(*coeff_shape)
 
         out = {
             "behavior_latent": behavior_latent,
@@ -686,12 +872,130 @@ class BehaviorHead(nn.Module):
             # [B, 1, D_dyn] global residual-memory token shared across queries.
             "dynamic_global_token": dynamic_global_token,
             # [B, K_h, D_dyn] hyperedge-local dynamic memory read directly by residual decoding.
-            "dynamic_hyper_tokens": dynamic_hyper_tokens,
+            "dynamic_hyper_base": dynamic_hyper_base,
+            "dynamic_hyper_tokens": dynamic_hyper_base,
             "freq_pred": freq_pred,
         }
         if hyper_phase_offsets is not None:
             out["hyper_phase_offsets"] = hyper_phase_offsets
+        if hyper_phase_sin_coeff is not None and hyper_phase_cos_coeff is not None:
+            out["hyper_phase_sin_coeff"] = hyper_phase_sin_coeff
+            out["hyper_phase_cos_coeff"] = hyper_phase_cos_coeff
         return out
+
+
+class PhaseConditionedHyperContext(nn.Module):
+    """Low-rank harmonic hyper-context without materializing [B, Q, K, D]."""
+
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        self.cfg = cfg
+        if cfg.dynamic_phase_mode != "low_rank_harmonic":
+            raise ValueError(f"Unsupported dynamic_phase_mode={cfg.dynamic_phase_mode!r}")
+
+        self.geometry_bias = HyperWakeGeometryBias()
+        self.rank_to_model = nn.Linear(cfg.dynamic_phase_rank, cfg.dynamic_token_dim, bias=False)
+        self.dropout = nn.Dropout(cfg.phase_conditioning_dropout) if cfg.phase_conditioning_dropout > 0.0 else nn.Identity()
+
+        harmonics = torch.arange(1, cfg.dynamic_phase_harmonics + 1, dtype=torch.float32)
+        self.register_buffer("harmonics", harmonics, persistent=False)
+
+    def geometry_logits(
+        self,
+        query_xy_norm: torch.Tensor,
+        organized: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        hyper_source_coords = organized["hyper_source_coords"]
+        hyper_wake_coords = organized["hyper_wake_coords"]
+        hyper_wake_axis = organized["hyper_wake_axis"]
+        hyper_wake_extent = organized["hyper_wake_extent"].squeeze(-1).clamp_min(0.02)
+        hyper_strength = organized["hyper_strength"].squeeze(-1)
+
+        wake_dx, wake_dy = periodic_delta_min_image(
+            hyper_wake_coords[:, None, :, :],
+            query_xy_norm[:, :, None, :],
+        )
+        wake_dist = torch.sqrt(wake_dx.square() + wake_dy.square() + 1e-8)
+
+        source_dx, source_dy = periodic_delta_min_image(
+            hyper_source_coords[:, None, :, :],
+            query_xy_norm[:, :, None, :],
+        )
+        downstream = directed_periodic_downstream_delta(
+            hyper_source_coords[:, None, :, 0],
+            query_xy_norm[:, :, None, 0],
+        )
+
+        axis_x = hyper_wake_axis[:, None, :, 0]
+        axis_y = hyper_wake_axis[:, None, :, 1]
+        along = source_dx * axis_x + source_dy * axis_y
+        cross = torch.abs((-source_dx * axis_y) + (source_dy * axis_x))
+
+        extent = hyper_wake_extent[:, None, :]
+        wake_dist_scaled = wake_dist / extent
+        cross_scaled = cross / (extent + 0.25 * downstream + 1e-3)
+        along_scaled = along / (extent + 0.25 * downstream + 1e-3)
+        extent_log = torch.log(extent)
+        strength_log = torch.log1p(4.0 * hyper_strength[:, None, :])
+
+        return self.geometry_bias(
+            wake_dist_scaled,
+            cross_scaled,
+            along_scaled,
+            downstream,
+            extent_log,
+            strength_log,
+        )
+
+    def forward(
+        self,
+        query_xy_norm: torch.Tensor,
+        query_tau: torch.Tensor,
+        behavior: Dict[str, torch.Tensor],
+        organized: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        dynamic_hyper_base = behavior["dynamic_hyper_base"]
+        num_hyper = dynamic_hyper_base.shape[1]
+        if num_hyper == 0:
+            empty = torch.zeros(
+                query_tau.shape[0],
+                query_tau.shape[1],
+                self.cfg.dynamic_token_dim,
+                device=query_tau.device,
+                dtype=query_tau.dtype,
+            )
+            return empty, torch.zeros(query_tau.shape[0], query_tau.shape[1], 0, device=query_tau.device, dtype=query_tau.dtype)
+
+        logits = self.geometry_logits(query_xy_norm, organized)
+        weights = torch.softmax(logits, dim=-1)
+
+        base_ctx = torch.einsum("bqk,bkd->bqd", weights, dynamic_hyper_base)
+        if not self.cfg.use_phase_conditioned_dynamic_tokens:
+            return base_ctx, logits
+
+        view_shape = [1] * (query_tau.ndim - 1) + [self.cfg.dynamic_phase_harmonics]
+        harmonics = self.harmonics.view(*view_shape).to(device=query_tau.device, dtype=query_tau.dtype)
+        angles = TWO_PI * query_tau * harmonics
+        sin_basis = torch.sin(angles)
+        cos_basis = torch.cos(angles)
+
+        sin_coeff = behavior["hyper_phase_sin_coeff"]
+        cos_coeff = behavior["hyper_phase_cos_coeff"]
+        if "hyper_phase_offsets" in behavior:
+            phase_offsets = behavior["hyper_phase_offsets"]
+            cos_off = torch.cos(phase_offsets)[..., None]
+            sin_off = torch.sin(phase_offsets)[..., None]
+            base_sin_coeff = sin_coeff
+            base_cos_coeff = cos_coeff
+            sin_coeff = (base_sin_coeff * cos_off) + (base_cos_coeff * sin_off)
+            cos_coeff = (base_cos_coeff * cos_off) - (base_sin_coeff * sin_off)
+
+        harmonic_rank_ctx = (
+            torch.einsum("bqk,bqh,bkhr->bqr", weights, sin_basis, sin_coeff)
+            + torch.einsum("bqk,bqh,bkhr->bqr", weights, cos_basis, cos_coeff)
+        )
+        harmonic_ctx = self.rank_to_model(self.dropout(harmonic_rank_ctx))
+        return base_ctx + harmonic_ctx, logits
 
 
 # ----------------------------- Neural field decoder ----------------------------
@@ -707,7 +1011,8 @@ class HierarchicalPerceiverDecoder(nn.Module):
 
         self.spatial_query_encoder = FourierEncoder(2, cfg.spatial_query_fourier_frequencies, include_input=True)
         # Spatial and phase are encoded separately by design.
-        self.phase_encoder = PhaseHarmonicEncoder(cfg.phase_harmonics)
+        self.phase_encoder = PhaseHarmonicEncoder(cfg.phase_fourier_frequencies)
+        self.phase_hyper_context = PhaseConditionedHyperContext(cfg)
 
         self.structured_token_proj = nn.Linear(cfg.hidden_dim, cfg.hidden_dim)
         self.dynamic_token_proj = nn.Linear(cfg.dynamic_token_dim, cfg.hidden_dim)
@@ -741,6 +1046,7 @@ class HierarchicalPerceiverDecoder(nn.Module):
             layer_norm=cfg.use_layer_norm,
         )
         self.phase_film = nn.Linear(self.phase_encoder.output_dim, 2 * cfg.hidden_dim)
+        self.phase_context_film = nn.Linear(cfg.dynamic_token_dim, 2 * cfg.hidden_dim)
 
         self.mean_global_blocks = nn.ModuleList(
             [
@@ -795,13 +1101,10 @@ class HierarchicalPerceiverDecoder(nn.Module):
 
     @staticmethod
     def _relative_parts(query_xy_norm: torch.Tensor, token_xy_norm: torch.Tensor) -> Tuple[torch.Tensor, ...]:
-        dx = query_xy_norm[:, :, None, 0] - token_xy_norm[:, None, :, 0]
-        dy = query_xy_norm[:, :, None, 1] - token_xy_norm[:, None, :, 1]
-        dx = (dx + 0.5) % 1.0 - 0.5
-        dy = (dy + 0.5) % 1.0 - 0.5
+        dx, dy = periodic_delta_min_image(token_xy_norm[:, None, :, :], query_xy_norm[:, :, None, :])
         dist = torch.sqrt(dx.square() + dy.square() + 1e-8)
-        downstream = torch.clamp(-dx, min=0.0)
-        upstream = torch.clamp(dx, min=0.0)
+        downstream = torch.clamp(dx, min=0.0)
+        upstream = torch.clamp(-dx, min=0.0)
         return dx, dy, dist, downstream, upstream
 
     def _build_relative_attention_bias_parts(
@@ -865,42 +1168,12 @@ class HierarchicalPerceiverDecoder(nn.Module):
             dtype=query_xy_norm.dtype,
         )
 
-    def _phase_summary(
-        self,
-        behavior: Dict[str, torch.Tensor],
-        organized: Dict[str, torch.Tensor],
-        query_tau: torch.Tensor,
-    ) -> torch.Tensor:
-        dynamic_hyper_tokens = behavior["dynamic_hyper_tokens"]
-        num_hyper = dynamic_hyper_tokens.shape[1]
-        if num_hyper == 0:
-            return torch.zeros(
-                query_tau.shape[0],
-                query_tau.shape[1],
-                self.cfg.dynamic_token_dim,
-                device=query_tau.device,
-                dtype=query_tau.dtype,
-            )
-
-        if "hyper_phase_offsets" in behavior:
-            angles = self.phase_encoder.phase_angles(query_tau)
-            offsets = behavior["hyper_phase_offsets"][:, None, :, :]
-            phase_scores = torch.cos(angles[:, :, None, :] - offsets).mean(dim=-1)
-        else:
-            phase_scores = torch.zeros(
-                query_tau.shape[0],
-                query_tau.shape[1],
-                num_hyper,
-                device=query_tau.device,
-                dtype=query_tau.dtype,
-            )
-
-        strength = organized["hyper_strength"].squeeze(-1)
-        phase_weights = torch.softmax(phase_scores + strength[:, None, :], dim=-1)
-        return torch.einsum("bqk,bkd->bqd", phase_weights, dynamic_hyper_tokens)
-
     def _apply_phase_modulation(self, residual_query: torch.Tensor, phase_feat: torch.Tensor) -> torch.Tensor:
         scale, bias = self.phase_film(phase_feat).chunk(2, dim=-1)
+        return residual_query * (1.0 + 0.1 * torch.tanh(scale)) + (0.1 * bias)
+
+    def _apply_phase_context_modulation(self, residual_query: torch.Tensor, phase_context: torch.Tensor) -> torch.Tensor:
+        scale, bias = self.phase_context_film(phase_context).chunk(2, dim=-1)
         return residual_query * (1.0 + 0.1 * torch.tanh(scale)) + (0.1 * bias)
 
     @staticmethod
@@ -923,6 +1196,7 @@ class HierarchicalPerceiverDecoder(nn.Module):
         memory: Dict[str, torch.Tensor],
         module_bias_chunk: torch.Tensor,
         env_bias_chunk: torch.Tensor,
+        hyper_bias_chunk: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size, chunk_queries, _ = query_xy_chunk_norm.shape
 
@@ -959,8 +1233,8 @@ class HierarchicalPerceiverDecoder(nn.Module):
             [
                 mod_bias,
                 env_bias,
-                torch.zeros(batch_size, chunk_queries, hyper_tokens.shape[2], device=query_xy_chunk_norm.device, dtype=query_xy_chunk_norm.dtype),
-                torch.zeros(batch_size, chunk_queries, dynamic_hyper_tokens.shape[2], device=query_xy_chunk_norm.device, dtype=query_xy_chunk_norm.dtype),
+                hyper_bias_chunk,
+                hyper_bias_chunk,
                 torch.zeros(batch_size, chunk_queries, 1, device=query_xy_chunk_norm.device, dtype=query_xy_chunk_norm.dtype),
             ],
             dim=-1,
@@ -976,6 +1250,7 @@ class HierarchicalPerceiverDecoder(nn.Module):
         memory: Dict[str, torch.Tensor],
         module_bias: torch.Tensor,
         env_bias: torch.Tensor,
+        hyper_bias: torch.Tensor,
     ) -> torch.Tensor:
         if not self.residual_local_blocks:
             return residual_query
@@ -988,12 +1263,14 @@ class HierarchicalPerceiverDecoder(nn.Module):
             xy_chunk = query_xy_norm[:, start:end, :]
             module_bias_chunk = module_bias[:, start:end, :]
             env_bias_chunk = env_bias[:, start:end, :]
+            hyper_bias_chunk = hyper_bias[:, start:end, :]
             local_context, local_bias, local_mask = self._build_local_context(
                 xy_chunk,
                 organized,
                 memory,
                 module_bias_chunk,
                 env_bias_chunk,
+                hyper_bias_chunk,
             )
             for block in self.residual_local_blocks:
                 query_chunk = block(
@@ -1020,13 +1297,14 @@ class HierarchicalPerceiverDecoder(nn.Module):
         behavior_latent = behavior["behavior_latent"][:, None, :].expand(batch_size, num_queries, -1)
         mean_latent = behavior["mean_latent"][:, None, :].expand(batch_size, num_queries, -1)
         dynamic_global_token = behavior["dynamic_global_token"].expand(batch_size, num_queries, -1)
-        phase_summary = self._phase_summary(behavior, organized, query_tau)
+        phase_hyper_context, hyper_bias = self.phase_hyper_context(query_xy_norm, query_tau, behavior, organized)
 
         mean_query = self.mean_query_proj(torch.cat([spatial_feat, behavior_latent, mean_latent], dim=-1))
         residual_query = self.residual_query_proj(
-            torch.cat([spatial_feat, phase_feat, dynamic_global_token, phase_summary], dim=-1)
+            torch.cat([spatial_feat, phase_feat, dynamic_global_token, phase_hyper_context], dim=-1)
         )
         residual_query = self._apply_phase_modulation(residual_query, phase_feat)
+        residual_query = self._apply_phase_context_modulation(residual_query, phase_hyper_context)
 
         memory = self._build_memory_tokens(organized, behavior)
         module_bias, env_bias = self._build_relative_attention_bias_parts(organized, query_xy_norm)
@@ -1081,8 +1359,8 @@ class HierarchicalPerceiverDecoder(nn.Module):
             [
                 module_bias,
                 env_bias,
-                self._zero_bias(query_xy_norm, memory["hyper_tokens"].shape[1]),
-                self._zero_bias(query_xy_norm, memory["dynamic_hyper_tokens"].shape[1]),
+                hyper_bias,
+                hyper_bias,
                 self._zero_bias(query_xy_norm, 1),
             ],
             dim=-1,
@@ -1115,6 +1393,7 @@ class HierarchicalPerceiverDecoder(nn.Module):
             memory,
             module_bias,
             env_bias,
+            hyper_bias,
         )
 
         pred_mean = self.mean_head(self.mean_head_norm(mean_query))
@@ -1170,6 +1449,7 @@ class HypergraphNeuralFieldModel(nn.Module):
                 "behavior_latent": behavior["behavior_latent"],
                 "mean_latent": behavior["mean_latent"],
                 "dynamic_global_token": behavior["dynamic_global_token"],
+                "dynamic_hyper_base": behavior["dynamic_hyper_base"],
                 "dynamic_hyper_tokens": behavior["dynamic_hyper_tokens"],
                 "A_me": organized["A_me"],
                 "A_mh": organized["A_mh"],
@@ -1179,13 +1459,20 @@ class HypergraphNeuralFieldModel(nn.Module):
                 "hyper_state": organized["hyper_state"],
                 "env_coords": organized["env_coords"],
                 "module_coords_norm": organized["module_coords_norm"],
-                "hyper_coords": organized["hyper_coords"],
+                "hyper_source_coords": organized["hyper_source_coords"],
+                "hyper_wake_coords": organized["hyper_wake_coords"],
+                "hyper_wake_axis": organized["hyper_wake_axis"],
+                "hyper_wake_extent": organized["hyper_wake_extent"],
                 "hyper_strength": organized["hyper_strength"],
                 "global_features": organized["global_features"],
                 "cyl_mask": organized["cyl_mask"],
             }
             if "hyper_phase_offsets" in behavior:
                 aux["hyper_phase_offsets"] = behavior["hyper_phase_offsets"]
+            if "hyper_phase_sin_coeff" in behavior:
+                aux["hyper_phase_sin_coeff"] = behavior["hyper_phase_sin_coeff"]
+            if "hyper_phase_cos_coeff" in behavior:
+                aux["hyper_phase_cos_coeff"] = behavior["hyper_phase_cos_coeff"]
             out.update(aux)
         return out
 

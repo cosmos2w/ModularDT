@@ -179,22 +179,48 @@ class PackedPointChunkDataset(Dataset):
         h5_path: Path,
         split: str,
         *,
+        is_training: bool,
         points_per_item: int,
         max_num_cylinders: int,
         train_point_fraction: float = 1.0,
         min_points_per_sample: int = 1,
         resample_each_epoch: bool = False,
         base_seed: int = 42,
+        randomize_cylinder_order: bool = False,
+        point_sampling_mode: str = "uniform",
+        wake_uniform_fraction: float = 0.35,
+        wake_near_cylinder_fraction: float = 0.20,
+        wake_downstream_fraction: float = 0.30,
+        wake_high_omega_fraction: float = 0.15,
+        wake_near_radius: float = 1.25,
+        wake_sigma_y_base: float = 0.50,
+        wake_sigma_y_growth: float = 0.20,
+        wake_streamwise_decay: float = 8.0,
+        wake_high_omega_quantile: float = 0.75,
+        wake_sampling_train_only: bool = True,
     ):
         super().__init__()
         self.h5_path = Path(h5_path).expanduser().resolve()
         self.split = split
+        self.is_training = bool(is_training)
         self.points_per_item = int(points_per_item)
         self.max_num_cylinders = int(max_num_cylinders)
         self.train_point_fraction = float(train_point_fraction)
         self.min_points_per_sample = int(min_points_per_sample)
         self.resample_each_epoch = bool(resample_each_epoch)
         self.base_seed = int(base_seed)
+        self.randomize_cylinder_order = bool(randomize_cylinder_order)
+        self.point_sampling_mode = str(point_sampling_mode).strip().lower()
+        self.wake_uniform_fraction = float(wake_uniform_fraction)
+        self.wake_near_cylinder_fraction = float(wake_near_cylinder_fraction)
+        self.wake_downstream_fraction = float(wake_downstream_fraction)
+        self.wake_high_omega_fraction = float(wake_high_omega_fraction)
+        self.wake_near_radius = float(wake_near_radius)
+        self.wake_sigma_y_base = float(wake_sigma_y_base)
+        self.wake_sigma_y_growth = float(wake_sigma_y_growth)
+        self.wake_streamwise_decay = float(wake_streamwise_decay)
+        self.wake_high_omega_quantile = float(wake_high_omega_quantile)
+        self.wake_sampling_train_only = bool(wake_sampling_train_only)
         self.current_epoch = 0
         self._h5: Optional[h5py.File] = None
 
@@ -202,6 +228,8 @@ class PackedPointChunkDataset(Dataset):
             raise ValueError("train_point_fraction must be in (0, 1].")
         if self.min_points_per_sample < 1:
             raise ValueError("min_points_per_sample must be >= 1.")
+        if self.point_sampling_mode not in {"uniform", "wake_focused"}:
+            raise ValueError("point_sampling_mode must be 'uniform' or 'wake_focused'.")
 
         self.case_meta: List[CaseChunkMeta] = []
         self.case_ids: List[str] = []
@@ -233,6 +261,8 @@ class PackedPointChunkDataset(Dataset):
                 dy = float(np.mean(np.diff(y_grid[:, 0]))) if y_grid.shape[0] > 1 else 1.0
                 x0 = float(x_grid[0, 0])
                 y0 = float(y_grid[0, 0])
+                lx = float((x_grid.max() - x_grid.min()) + dx)
+                ly = float((y_grid.max() - y_grid.min()) + dy)
 
                 self.case_lookup[case_id] = {
                     "centers": centers,
@@ -244,6 +274,8 @@ class PackedPointChunkDataset(Dataset):
                     "y_grid": y_grid,
                     "grid_origin": (x0, y0),
                     "grid_spacing": (dx, dy),
+                    "domain_lengths": (lx, ly),
+                    "domain_origin": (float(x_grid.min()), float(y_grid.min())),
                 }
                 self.case_ids.append(case_id)
 
@@ -285,20 +317,161 @@ class PackedPointChunkDataset(Dataset):
     def set_epoch(self, epoch: int) -> None:
         self.current_epoch = int(epoch)
 
-    def _maybe_subsample_indices(self, idx: int, num_points: int) -> np.ndarray:
-        if self.train_point_fraction >= 1.0:
-            return np.arange(num_points, dtype=np.int64)
+    def _rng_for_item(self, idx: int, *, include_epoch: bool) -> np.random.Generator:
+        epoch_offset = self.current_epoch if include_epoch else 0
+        rng_seed = self.base_seed + (1000003 * idx) + (9176 * epoch_offset)
+        return np.random.default_rng(rng_seed)
 
+    def _compute_keep_count(self, num_points: int) -> int:
+        if self.train_point_fraction >= 1.0:
+            return num_points
         keep_count = max(self.min_points_per_sample, int(math.ceil(num_points * self.train_point_fraction)))
-        keep_count = min(keep_count, num_points)
+        return min(keep_count, num_points)
+
+    def _uniform_subsample_indices(self, idx: int, num_points: int) -> np.ndarray:
+        keep_count = self._compute_keep_count(num_points)
+        if keep_count >= num_points:
+            return np.arange(num_points, dtype=np.int64)
+        rng = self._rng_for_item(idx, include_epoch=self.resample_each_epoch)
+        chosen = np.sort(rng.choice(num_points, size=keep_count, replace=False))
+        return chosen.astype(np.int64, copy=False)
+
+    @staticmethod
+    def _sample_without_replacement(
+        rng: np.random.Generator,
+        candidate_idx: np.ndarray,
+        count: int,
+        selected_mask: np.ndarray,
+        weights: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        if count <= 0 or candidate_idx.size == 0:
+            return np.empty((0,), dtype=np.int64)
+        available = candidate_idx[~selected_mask[candidate_idx]]
+        if available.size == 0:
+            return np.empty((0,), dtype=np.int64)
+
+        take = min(int(count), int(available.size))
+        probs = None
+        if weights is not None:
+            weight_values = np.asarray(weights[available], dtype=np.float64)
+            weight_values = np.clip(weight_values, a_min=0.0, a_max=None)
+            total = float(weight_values.sum())
+            if total > 0.0:
+                probs = weight_values / total
+        picked = rng.choice(available, size=take, replace=False, p=probs)
+        selected_mask[picked] = True
+        return picked.astype(np.int64, copy=False)
+
+    def _wake_sampling_counts(self, keep_count: int) -> Dict[str, int]:
+        fractions = {
+            "uniform": max(self.wake_uniform_fraction, 0.0),
+            "near": max(self.wake_near_cylinder_fraction, 0.0),
+            "downstream": max(self.wake_downstream_fraction, 0.0),
+            "high_omega": max(self.wake_high_omega_fraction, 0.0),
+        }
+        total_fraction = sum(fractions.values())
+        if total_fraction <= 0.0:
+            return {"uniform": keep_count, "near": 0, "downstream": 0, "high_omega": 0}
+
+        raw = {key: keep_count * value / total_fraction for key, value in fractions.items()}
+        counts = {key: int(math.floor(value)) for key, value in raw.items()}
+        remainder = keep_count - sum(counts.values())
+        for key, _ in sorted(raw.items(), key=lambda item: item[1] - math.floor(item[1]), reverse=True):
+            if remainder <= 0:
+                break
+            counts[key] += 1
+            remainder -= 1
+        return counts
+
+    def _wake_focused_subsample_indices(
+        self,
+        idx: int,
+        case_static: Dict,
+        chunk_x: np.ndarray,
+        chunk_y: np.ndarray,
+        chunk_omega: np.ndarray,
+    ) -> np.ndarray:
+        num_points = int(chunk_x.shape[0])
+        keep_count = self._compute_keep_count(num_points)
         if keep_count >= num_points:
             return np.arange(num_points, dtype=np.int64)
 
-        epoch_offset = self.current_epoch if self.resample_each_epoch else 0
-        rng_seed = self.base_seed + (1000003 * idx) + (9176 * epoch_offset)
-        rng = np.random.default_rng(rng_seed)
-        chosen = np.sort(rng.choice(num_points, size=keep_count, replace=False))
-        return chosen.astype(np.int64, copy=False)
+        if self.wake_sampling_train_only and not self.is_training:
+            return self._uniform_subsample_indices(idx, num_points)
+
+        rng = self._rng_for_item(idx, include_epoch=self.resample_each_epoch)
+        selected_mask = np.zeros((num_points,), dtype=bool)
+        counts = self._wake_sampling_counts(keep_count)
+        centers = np.asarray(case_static["centers"], dtype=np.float32)
+        lx, ly = case_static["domain_lengths"]
+
+        point_idx = np.arange(num_points, dtype=np.int64)
+        point_x = chunk_x[None, :]
+        point_y = chunk_y[None, :]
+        center_x = centers[:, 0:1]
+        center_y = centers[:, 1:2]
+
+        dist_to_cyl = periodic_distance_min_image_np(center_x, center_y, point_x, point_y, lx, ly)
+        min_dist = dist_to_cyl.min(axis=0)
+        near_pool = np.flatnonzero(min_dist <= self.wake_near_radius)
+
+        dx_down = directed_periodic_downstream_delta_np(center_x, point_x, lx)
+        dy = periodic_delta_min_image_np(center_y, point_y, ly)
+        sigma_y = self.wake_sigma_y_base + self.wake_sigma_y_growth * dx_down
+        wake_score = np.exp(-0.5 * (dy / np.maximum(sigma_y, 1e-4)) ** 2) * np.exp(
+            -dx_down / max(self.wake_streamwise_decay, 1e-6)
+        )
+        wake_score = wake_score * (dx_down > 0.0)
+        wake_score_max = wake_score.max(axis=0)
+        downstream_pool = np.flatnonzero(wake_score_max > 1e-6)
+
+        omega_mag = np.abs(chunk_omega)
+        omega_threshold = float(np.quantile(omega_mag, self.wake_high_omega_quantile))
+        high_omega_pool = np.flatnonzero(omega_mag >= omega_threshold)
+
+        chosen = [
+            self._sample_without_replacement(rng, point_idx, counts["uniform"], selected_mask),
+            self._sample_without_replacement(rng, near_pool, counts["near"], selected_mask),
+            self._sample_without_replacement(
+                rng,
+                downstream_pool,
+                counts["downstream"],
+                selected_mask,
+                weights=wake_score_max,
+            ),
+            self._sample_without_replacement(
+                rng,
+                high_omega_pool,
+                counts["high_omega"],
+                selected_mask,
+                weights=omega_mag,
+            ),
+        ]
+
+        chosen_idx = np.concatenate([arr for arr in chosen if arr.size > 0], axis=0) if any(arr.size > 0 for arr in chosen) else np.empty((0,), dtype=np.int64)
+        if chosen_idx.size < keep_count:
+            fill = self._sample_without_replacement(rng, point_idx, keep_count - chosen_idx.size, selected_mask)
+            if fill.size > 0:
+                chosen_idx = np.concatenate([chosen_idx, fill], axis=0)
+
+        chosen_idx = np.unique(chosen_idx.astype(np.int64, copy=False))
+        if chosen_idx.size < keep_count:
+            remaining = point_idx[~selected_mask]
+            extra = remaining[: keep_count - chosen_idx.size]
+            chosen_idx = np.concatenate([chosen_idx, extra], axis=0)
+        return np.sort(chosen_idx[:keep_count]).astype(np.int64, copy=False)
+
+    def _subsample_indices(
+        self,
+        idx: int,
+        case_static: Dict,
+        chunk_x: np.ndarray,
+        chunk_y: np.ndarray,
+        chunk_omega: np.ndarray,
+    ) -> np.ndarray:
+        if self.point_sampling_mode != "wake_focused":
+            return self._uniform_subsample_indices(idx, int(chunk_x.shape[0]))
+        return self._wake_focused_subsample_indices(idx, case_static, chunk_x, chunk_y, chunk_omega)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         meta = self.case_meta[idx]
@@ -306,39 +479,41 @@ class PackedPointChunkDataset(Dataset):
         grp = h5_file["cases"][meta.case_id]
         sampled = grp["sampled_points"]
         sl = slice(meta.start_idx, meta.end_idx)
-        local_size = meta.end_idx - meta.start_idx
-        local_indices = self._maybe_subsample_indices(idx, local_size)
+        case_static = self.case_lookup[meta.case_id]
 
-        # 1. Fetch the contiguous block from disk into RAM first (Lightning Fast)
-        chunk_x = sampled["x"][sl]
-        chunk_y = sampled["y"][sl]
-        chunk_tau = sampled["tau"][sl]
-        chunk_u = sampled["u"][sl]
-        chunk_v = sampled["v"][sl]
-        chunk_p = sampled["p"][sl]
-        chunk_omega = sampled["omega"][sl]
+        chunk_x = np.asarray(sampled["x"][sl], dtype=np.float32)
+        chunk_y = np.asarray(sampled["y"][sl], dtype=np.float32)
+        chunk_tau = np.asarray(sampled["tau"][sl], dtype=np.float32)
+        chunk_u = np.asarray(sampled["u"][sl], dtype=np.float32)
+        chunk_v = np.asarray(sampled["v"][sl], dtype=np.float32)
+        chunk_p = np.asarray(sampled["p"][sl], dtype=np.float32)
+        chunk_omega = np.asarray(sampled["omega"][sl], dtype=np.float32)
 
-        # 2. Subsample the arrays in memory (Instantaneous)
-        x = np.asarray(chunk_x[local_indices], dtype=np.float32)
-        y = np.asarray(chunk_y[local_indices], dtype=np.float32)
-        tau = np.asarray(chunk_tau[local_indices], dtype=np.float32)
-        
+        local_indices = self._subsample_indices(idx, case_static, chunk_x, chunk_y, chunk_omega)
+
+        x = chunk_x[local_indices]
+        y = chunk_y[local_indices]
+        tau = chunk_tau[local_indices]
         targets = np.stack(
             [
-                np.asarray(chunk_u[local_indices], dtype=np.float32),
-                np.asarray(chunk_v[local_indices], dtype=np.float32),
-                np.asarray(chunk_p[local_indices], dtype=np.float32),
-                np.asarray(chunk_omega[local_indices], dtype=np.float32),
+                chunk_u[local_indices],
+                chunk_v[local_indices],
+                chunk_p[local_indices],
+                chunk_omega[local_indices],
             ],
             axis=-1,
-        )
+        ).astype(np.float32, copy=False)
 
-        case_static = self.case_lookup[meta.case_id]
-        centers = case_static["centers"]
+        centers = np.asarray(case_static["centers"], dtype=np.float32)
+        centers_valid = centers.copy()
+        if self.is_training and self.randomize_cylinder_order and centers_valid.shape[0] > 1:
+            rng = self._rng_for_item(idx, include_epoch=True)
+            centers_valid = centers_valid[rng.permutation(centers_valid.shape[0])]
+
         padded_centers = np.zeros((self.max_num_cylinders, 2), dtype=np.float32)
         cyl_mask = np.zeros((self.max_num_cylinders,), dtype=np.float32)
-        padded_centers[: centers.shape[0]] = centers
-        cyl_mask[: centers.shape[0]] = 1.0
+        padded_centers[: centers_valid.shape[0]] = centers_valid
+        cyl_mask[: centers_valid.shape[0]] = 1.0
 
         # Sample mean-field targets at the same spatial points using nearest grid lookup.
         mean_field = case_static["mean_field"]
@@ -620,19 +795,52 @@ def estimate_effective_points_per_item(points_per_item: int, point_fraction: flo
     return min(points_per_item, max(min_points_per_sample, int(math.ceil(points_per_item * point_fraction))))
 
 
+def find_nonfinite_tensors(tensors: Dict[str, torch.Tensor]) -> Dict[str, int]:
+    bad: Dict[str, int] = {}
+    for name, tensor in tensors.items():
+        if not isinstance(tensor, torch.Tensor):
+            continue
+        nonfinite = ~torch.isfinite(tensor)
+        count = int(nonfinite.sum().item())
+        if count > 0:
+            bad[name] = count
+    return bad
+
+
+def periodic_delta_min_image_np(src: np.ndarray, dst: np.ndarray, period: float) -> np.ndarray:
+    return np.remainder(dst - src + 0.5 * period, period) - 0.5 * period
+
+
+def periodic_distance_min_image_np(
+    src_x: np.ndarray,
+    src_y: np.ndarray,
+    dst_x: np.ndarray,
+    dst_y: np.ndarray,
+    lx: float,
+    ly: float,
+) -> np.ndarray:
+    dx = periodic_delta_min_image_np(src_x, dst_x, lx)
+    dy = periodic_delta_min_image_np(src_y, dst_y, ly)
+    return np.sqrt(dx * dx + dy * dy)
+
+
+def directed_periodic_downstream_delta_np(src_x: np.ndarray, dst_x: np.ndarray, period: float) -> np.ndarray:
+    return np.remainder(dst_x - src_x, period)
+
+
 def pairwise_periodic_relative_features(src_xy: torch.Tensor, dst_xy: torch.Tensor) -> torch.Tensor:
     """
     src_xy: [B, N_src, 2] normalized to [0,1]
     dst_xy: [B, N_dst, 2] normalized to [0,1]
     returns: [B, N_src, N_dst, 5] = dx, dy, dist, downstream, upstream
     """
-    dx = src_xy[:, :, None, 0] - dst_xy[:, None, :, 0]
-    dy = src_xy[:, :, None, 1] - dst_xy[:, None, :, 1]
+    dx = dst_xy[:, None, :, 0] - src_xy[:, :, None, 0]
+    dy = dst_xy[:, None, :, 1] - src_xy[:, :, None, 1]
     dx = (dx + 0.5) % 1.0 - 0.5
     dy = (dy + 0.5) % 1.0 - 0.5
     dist = torch.sqrt(dx.square() + dy.square() + 1e-8)
-    downstream = torch.clamp(-dx, min=0.0)
-    upstream = torch.clamp(dx, min=0.0)
+    downstream = torch.clamp(dx, min=0.0)
+    upstream = torch.clamp(-dx, min=0.0)
     return torch.stack([dx, dy, dist, downstream, upstream], dim=-1)
 
 
@@ -659,6 +867,7 @@ def build_module_env_prior(
     dist = rel[..., 2]
     downstream = rel[..., 3]
     re_values = re_values.to(device=module_coords_norm.device, dtype=module_coords_norm.dtype)
+    re_values = re_values.reshape(module_coords_norm.shape[0], -1)[:, 0]
 
     # Optional mild Re effect on wake width.
     re_scale = (re_values / 200.0).clamp(min=0.1, max=1.5)[:, None, None]
@@ -671,7 +880,10 @@ def build_module_env_prior(
     prior = wake + 0.25 * near
 
     prior = prior * cyl_mask[:, :, None]
-    return normalize_rows(prior)
+    prior = normalize_rows(prior)
+    if prior.ndim != 3:
+        raise RuntimeError(f"build_module_env_prior produced invalid shape {tuple(prior.shape)}; expected [B, N, M].")
+    return prior
 
 
 def build_module_module_affinity_prior(
@@ -722,12 +934,20 @@ def organizer_direct_losses(
 
     # A) weak geometry-based module->environment prior
     prior_me = build_module_env_prior(module_coords_norm, env_coords, cyl_mask, re_values)
+    if prior_me.shape != A_me.shape:
+        raise RuntimeError(
+            f"build_module_env_prior shape mismatch: prior_me={tuple(prior_me.shape)} vs A_me={tuple(A_me.shape)}"
+        )
     kl_me = F.kl_div((A_me.clamp_min(1e-6)).log(), prior_me, reduction="none").sum(dim=-1)
     loss_me = (kl_me * cyl_mask).sum() / cyl_mask.sum().clamp_min(1.0)
 
     # B) permutation-safe hyperedge supervision via module-module affinity
     pred_mm = torch.matmul(A_mh, A_mh.transpose(1, 2))  # [B, N, N]
     prior_mm = build_module_module_affinity_prior(module_coords_norm, cyl_mask)
+    if prior_mm.shape != pred_mm.shape:
+        raise RuntimeError(
+            f"build_module_module_affinity_prior shape mismatch: prior_mm={tuple(prior_mm.shape)} vs pred_mm={tuple(pred_mm.shape)}"
+        )
 
     n = pred_mm.shape[1]
     eye = torch.eye(n, device=pred_mm.device, dtype=pred_mm.dtype)[None, :, :]
@@ -737,9 +957,8 @@ def organizer_direct_losses(
     # C) hypergraph should factorize module-env organization
     pred_me_from_h = torch.matmul(A_mh, A_eh.transpose(1, 2))  # [B, N, M]
     pred_me_from_h = normalize_rows(pred_me_from_h)
-    loss_cons = (((pred_me_from_h - A_me) ** 2) * cyl_mask[:, :, None]).sum() / (
-        cyl_mask[:, :, None].sum().clamp_min(1.0)
-    )
+    valid_me = cyl_mask[:, :, None].expand_as(A_me)
+    loss_cons = (((pred_me_from_h - A_me) ** 2) * valid_me).sum() / valid_me.sum().clamp_min(1.0)
 
     total = me_weight * loss_me + mm_weight * loss_mm + consistency_weight * loss_cons
     return {
@@ -773,6 +992,7 @@ def evaluate_canonical_cases(
     *,
     device: torch.device,
     loss_cfg: Dict,
+    validation_cfg: Dict,
     max_num_cylinders: int,
     max_cases: int,
     query_batch_size: int,
@@ -786,6 +1006,7 @@ def evaluate_canonical_cases(
             "val_mean_mse": float("nan"),
             "val_residual_mse": float("nan"),
             "val_freq_mse": float("nan"),
+            "val_residual_focus": float("nan"),
         }
 
     case_ids = dataset.case_ids[:max_cases] if max_cases > 0 else dataset.case_ids
@@ -880,13 +1101,15 @@ def evaluate_canonical_cases(
     if val_bar is not None:
         val_bar.close()
 
-    return {
+    metrics = {
         "val_total_loss": float(np.mean(total_losses)),
         "val_field_mse": float(np.mean(field_losses)),
         "val_mean_mse": float(np.mean(mean_losses)),
         "val_residual_mse": float(np.mean(residual_losses)),
         "val_freq_mse": float(np.mean(freq_losses)),
     }
+    metrics["val_residual_focus"] = compute_residual_focus_metric(metrics, validation_cfg)
+    return metrics
 
 
 @torch.no_grad()
@@ -896,6 +1119,7 @@ def evaluate_point_chunks(
     *,
     device: torch.device,
     loss_cfg: Dict,
+    validation_cfg: Dict,
     show_progress: bool = False,
 ) -> Dict[str, float]:
     model.eval()
@@ -906,6 +1130,7 @@ def evaluate_point_chunks(
             "val_mean_mse": float("nan"),
             "val_residual_mse": float("nan"),
             "val_freq_mse": float("nan"),
+            "val_residual_focus": float("nan"),
         }
 
     metric_buffer: List[Dict[str, float]] = []
@@ -943,12 +1168,28 @@ def evaluate_point_chunks(
             batch[key] = batch[key].to(device=device)
 
         outputs = model(structure=structure, query_xy=query_xy, query_tau=query_tau, return_aux=True)
+        bad_outputs = find_nonfinite_tensors(
+            {
+                "pred_field": outputs["pred_field"],
+                "pred_mean": outputs["pred_mean"],
+                "pred_residual": outputs["pred_residual"],
+                "freq_pred": outputs["freq_pred"],
+                "A_me": outputs["A_me"],
+                "A_mh": outputs["A_mh"],
+                "A_eh": outputs["A_eh"],
+            }
+        )
+        if bad_outputs:
+            raise RuntimeError(f"Non-finite validation outputs detected: {bad_outputs}")
         losses = compute_losses(
             batch,
             outputs,
             loss_cfg,
             organizer_scale=1.0,
         )
+        bad_losses = find_nonfinite_tensors(losses)
+        if bad_losses:
+            raise RuntimeError(f"Non-finite validation losses detected: {bad_losses}")
         row = {
             "val_total_loss": normalize_loss_scalar(losses["loss_total"]),
             "val_field_mse": normalize_loss_scalar(losses["loss_field"]),
@@ -956,12 +1197,14 @@ def evaluate_point_chunks(
             "val_residual_mse": normalize_loss_scalar(losses["loss_residual"]),
             "val_freq_mse": normalize_loss_scalar(losses["loss_freq"]),
         }
+        row["val_residual_focus"] = compute_residual_focus_metric(row, validation_cfg)
         metric_buffer.append(row)
         if val_bar is not None:
             val_bar.set_postfix(
                 total=f"{row['val_total_loss']:.3e}",
                 field_mse=f"{row['val_field_mse']:.3e}",
                 residual_mse=f"{row['val_residual_mse']:.3e}",
+                residual_focus=f"{row['val_residual_focus']:.3e}",
                 freq_mse=f"{row['val_freq_mse']:.3e}",
             )
 
@@ -975,17 +1218,13 @@ def compute_validation_selection_metric(val_metrics: Dict[str, float], validatio
     """Residual-focused checkpoint selection metric.
 
     Supported names:
-        val_residual_focus: val_residual_mse + 0.25 * val_field_mse
+        val_residual_focus: val_residual_mse + residual_focus_field_weight * val_field_mse
         any direct metric key present in `val_metrics`
     """
 
     metric_name = str(validation_cfg.get("best_metric_name", "val_residual_focus")).strip()
     if metric_name == "val_residual_focus":
-        residual = float(val_metrics.get("val_residual_mse", float("nan")))
-        field = float(val_metrics.get("val_field_mse", float("nan")))
-        if not (math.isfinite(residual) and math.isfinite(field)):
-            return float("nan")
-        return residual + (0.25 * field)
+        return compute_residual_focus_metric(val_metrics, validation_cfg)
     if metric_name in val_metrics:
         return float(val_metrics[metric_name])
     raise ValueError(
@@ -997,6 +1236,15 @@ def compute_validation_selection_metric(val_metrics: Dict[str, float], validatio
 def organizer_ramp_scale(loss_cfg: Dict, epoch: int) -> float:
     ramp_epochs = max(1, int(loss_cfg.get("organizer_ramp_epochs", 1)))
     return min(1.0, float(epoch) / float(ramp_epochs))
+
+
+def compute_residual_focus_metric(metrics: Dict[str, float], validation_cfg: Dict) -> float:
+    residual = float(metrics.get("val_residual_mse", float("nan")))
+    field = float(metrics.get("val_field_mse", float("nan")))
+    if not (math.isfinite(residual) and math.isfinite(field)):
+        return float("nan")
+    field_weight = float(validation_cfg.get("residual_focus_field_weight", 0.25))
+    return residual + (field_weight * field)
 
 # ------------------------------- Plotting --------------------------------------
 
@@ -1022,19 +1270,19 @@ def save_loss_curve(history: List[Dict[str, float]], out_path: Path) -> None:
     total_ax, field_ax, residual_ax = axes
 
     train_total = [row.get("loss_total", float("nan")) for row in history]
-    test_total = [row.get("val_total_loss", float("nan")) for row in history]
+    val_total = [row.get("val_total_loss", float("nan")) for row in history]
     if any(math.isfinite(float(v)) for v in train_total):
         total_ax.plot(epochs, train_total, linestyle="-", linewidth=1.5, label="Train total")
-    test_total_epochs, test_total_vals = finite_xy(epochs, test_total)
-    if test_total_epochs:
+    val_total_epochs, val_total_vals = finite_xy(epochs, val_total)
+    if val_total_epochs:
         total_ax.plot(
-            test_total_epochs,
-            test_total_vals,
+            val_total_epochs,
+            val_total_vals,
             linestyle=":",
             linewidth=2.0,
             marker="o",
             markersize=3.5,
-            label="Test total",
+            label="Val total",
         )
     total_ax.set_title("Total Loss")
     total_ax.set_xlabel("Epoch")
@@ -1068,14 +1316,14 @@ def save_loss_curve(history: List[Dict[str, float]], out_path: Path) -> None:
         field_ax.legend()
 
     train_residual = [row.get("loss_residual", float("nan")) for row in history]
-    test_residual = [row.get("val_residual_mse", float("nan")) for row in history]
+    val_residual = [row.get("val_residual_mse", float("nan")) for row in history]
     if any(math.isfinite(float(v)) for v in train_residual):
         residual_ax.plot(epochs, train_residual, linestyle="-", linewidth=1.5, label="Train residual")
-    test_residual_epochs, test_residual_vals = finite_xy(epochs, test_residual)
-    if test_residual_epochs:
+    val_residual_epochs, val_residual_vals = finite_xy(epochs, val_residual)
+    if val_residual_epochs:
         residual_ax.plot(
-            test_residual_epochs,
-            test_residual_vals,
+            val_residual_epochs,
+            val_residual_vals,
             linestyle=":",
             linewidth=2.0,
             marker="o",
@@ -1145,18 +1393,32 @@ def main() -> None:
     train_dataset = PackedPointChunkDataset(
         packed_h5_path,
         split=dataset_cfg.get("train_split", "train"),
+        is_training=True,
         points_per_item=int(dataset_cfg.get("points_per_item", 4096)),
         max_num_cylinders=max_num_cylinders,
         train_point_fraction=float(dataset_cfg.get("train_point_fraction", 1.0)),
         min_points_per_sample=int(dataset_cfg.get("min_points_per_sample", 256)),
         resample_each_epoch=bool(dataset_cfg.get("resample_each_epoch", True)),
         base_seed=int(cfg["training"].get("seed", 42)),
+        randomize_cylinder_order=bool(dataset_cfg.get("randomize_cylinder_order", False)),
+        point_sampling_mode=str(dataset_cfg.get("point_sampling_mode", "uniform")),
+        wake_uniform_fraction=float(dataset_cfg.get("wake_uniform_fraction", 0.35)),
+        wake_near_cylinder_fraction=float(dataset_cfg.get("wake_near_cylinder_fraction", 0.20)),
+        wake_downstream_fraction=float(dataset_cfg.get("wake_downstream_fraction", 0.30)),
+        wake_high_omega_fraction=float(dataset_cfg.get("wake_high_omega_fraction", 0.15)),
+        wake_near_radius=float(dataset_cfg.get("wake_near_radius", 1.25)),
+        wake_sigma_y_base=float(dataset_cfg.get("wake_sigma_y_base", 0.50)),
+        wake_sigma_y_growth=float(dataset_cfg.get("wake_sigma_y_growth", 0.20)),
+        wake_streamwise_decay=float(dataset_cfg.get("wake_streamwise_decay", 8.0)),
+        wake_high_omega_quantile=float(dataset_cfg.get("wake_high_omega_quantile", 0.75)),
+        wake_sampling_train_only=bool(dataset_cfg.get("wake_sampling_train_only", True)),
     )
     validation_cfg = cfg["validation"]
     val_mode = str(validation_cfg.get("mode", "point_chunks")).strip().lower()
     if val_mode not in {"point_chunks", "canonical_full_grid"}:
         raise ValueError("validation.mode must be either 'point_chunks' or 'canonical_full_grid'.")
     best_metric_name = str(validation_cfg.get("best_metric_name", "val_residual_focus")).strip()
+    early_stopping_patience = max(0, int(validation_cfg.get("early_stopping_patience", 0)))
 
     val_dataset = None
     val_loader = None
@@ -1165,12 +1427,25 @@ def main() -> None:
         val_dataset = PackedPointChunkDataset(
             packed_h5_path,
             split=dataset_cfg.get("val_split", "test"),
+            is_training=False,
             points_per_item=int(validation_cfg.get("points_per_item", dataset_cfg.get("points_per_item", 4096))),
             max_num_cylinders=max_num_cylinders,
             train_point_fraction=float(validation_cfg.get("point_fraction", 1.0)),
             min_points_per_sample=int(validation_cfg.get("min_points_per_sample", dataset_cfg.get("min_points_per_sample", 256))),
             resample_each_epoch=bool(validation_cfg.get("resample_each_eval", False)),
             base_seed=int(validation_cfg.get("seed", cfg["training"].get("seed", 42))),
+            randomize_cylinder_order=bool(dataset_cfg.get("randomize_cylinder_order_val", False)),
+            point_sampling_mode=str(validation_cfg.get("point_sampling_mode", "uniform")),
+            wake_uniform_fraction=float(validation_cfg.get("wake_uniform_fraction", dataset_cfg.get("wake_uniform_fraction", 0.35))),
+            wake_near_cylinder_fraction=float(validation_cfg.get("wake_near_cylinder_fraction", dataset_cfg.get("wake_near_cylinder_fraction", 0.20))),
+            wake_downstream_fraction=float(validation_cfg.get("wake_downstream_fraction", dataset_cfg.get("wake_downstream_fraction", 0.30))),
+            wake_high_omega_fraction=float(validation_cfg.get("wake_high_omega_fraction", dataset_cfg.get("wake_high_omega_fraction", 0.15))),
+            wake_near_radius=float(validation_cfg.get("wake_near_radius", dataset_cfg.get("wake_near_radius", 1.25))),
+            wake_sigma_y_base=float(validation_cfg.get("wake_sigma_y_base", dataset_cfg.get("wake_sigma_y_base", 0.50))),
+            wake_sigma_y_growth=float(validation_cfg.get("wake_sigma_y_growth", dataset_cfg.get("wake_sigma_y_growth", 0.20))),
+            wake_streamwise_decay=float(validation_cfg.get("wake_streamwise_decay", dataset_cfg.get("wake_streamwise_decay", 8.0))),
+            wake_high_omega_quantile=float(validation_cfg.get("wake_high_omega_quantile", dataset_cfg.get("wake_high_omega_quantile", 0.75))),
+            wake_sampling_train_only=bool(validation_cfg.get("wake_sampling_train_only", dataset_cfg.get("wake_sampling_train_only", True))),
         )
     else:
         canonical_val_dataset = CanonicalCycleValidationDataset(
@@ -1191,8 +1466,8 @@ def main() -> None:
         point_fraction=train_point_fraction,
         min_points_per_sample=min_points_per_sample,
     )
-    max_physical_queries = int(cfg["training"].get("max_physical_queries_per_step", 131072))
-    # if effective_points_per_item > 0:
+    # max_physical_queries = int(cfg["training"].get("max_physical_queries_per_step", 131072))
+    # if effective_points_per_item > 0 and max_physical_queries > 0:
     #     max_batch_from_queries = max(1, max_physical_queries // effective_points_per_item)
     #     physical_batch_size = min(requested_batch_size, max_batch_from_queries)
     # else:
@@ -1267,6 +1542,7 @@ def main() -> None:
         "val_mean_mse",
         "val_residual_mse",
         "val_freq_mse",
+        "val_residual_focus",
         "val_selection_metric",
     ]
     with history_csv.open("w", newline="", encoding="utf-8") as f:
@@ -1302,6 +1578,29 @@ def main() -> None:
         f"physical queries/forward~{format_large_int(physical_queries_per_step)} | env_tokens={env_tokens}"
     )
     print(f"[setup] best_metric_name={best_metric_name}")
+    risky_dropouts = []
+    if float(model_cfg.dropout) <= 0.0:
+        risky_dropouts.append("model.dropout")
+    if float(model_cfg.perceiver_dropout) <= 0.0:
+        risky_dropouts.append("model.perceiver_dropout")
+    if float(model_cfg.phase_conditioning_dropout) <= 0.0:
+        risky_dropouts.append("model.phase_conditioning_dropout")
+    if risky_dropouts:
+        print(
+            "[warn] Zero dropout detected in "
+            + ", ".join(risky_dropouts)
+            + ". The current recommended settings keep these at 0.05 for better stability."
+        )
+    if float(cfg["loss"].get("organizer_sparsity_weight", 0.0)) > 0.0 or float(cfg["loss"].get("organizer_entropy_weight", 0.0)) > 0.0:
+        print(
+            "[warn] organizer_sparsity_weight / organizer_entropy_weight are nonzero. "
+            "The current template disables both because they were not helping stability."
+        )
+    if requested_batch_size >= 512:
+        print(
+            "[warn] training.batch_size is large. The updated template defaults to 256 so accumulation can keep "
+            "forwards smaller and more stable."
+        )
     if accumulation_steps > 1:
         print(
             "[setup] Large requested batch detected, so gradient accumulation is enabled automatically to keep "
@@ -1320,6 +1619,7 @@ def main() -> None:
 
     history_rows: List[Dict[str, float]] = []
     best_val_metric = float("inf")
+    epochs_without_improvement = 0
 
     for epoch in range(1, total_epochs + 1):
         model.train()
@@ -1366,15 +1666,44 @@ def main() -> None:
             org_scale = organizer_ramp_scale(cfg["loss"], epoch)
             with autocast_context(device, enabled=scaler.is_enabled()):
                 outputs = model(structure=structure, query_xy=query_xy, query_tau=query_tau, return_aux=True)
+                bad_outputs = find_nonfinite_tensors(
+                    {
+                        "pred_field": outputs["pred_field"],
+                        "pred_mean": outputs["pred_mean"],
+                        "pred_residual": outputs["pred_residual"],
+                        "freq_pred": outputs["freq_pred"],
+                        "A_me": outputs["A_me"],
+                        "A_mh": outputs["A_mh"],
+                        "A_eh": outputs["A_eh"],
+                    }
+                )
+                if bad_outputs:
+                    raise RuntimeError(
+                        f"Non-finite model outputs detected at epoch={epoch}, step={step_in_epoch}: {bad_outputs}"
+                    )
                 losses = compute_losses(
                     batch,
                     outputs,
                     cfg["loss"],
                     organizer_scale=org_scale,
                 )
+                bad_losses = find_nonfinite_tensors(losses)
+                if bad_losses:
+                    raise RuntimeError(
+                        f"Non-finite losses detected at epoch={epoch}, step={step_in_epoch}: {bad_losses}"
+                    )
                 total_loss = losses["loss_total"] / float(active_accum_steps)
 
             scaler.scale(total_loss).backward()
+            bad_grads = {
+                name: int((~torch.isfinite(param.grad)).sum().item())
+                for name, param in model.named_parameters()
+                if param.grad is not None and not torch.isfinite(param.grad).all()
+            }
+            if bad_grads:
+                raise RuntimeError(
+                    f"Non-finite gradients detected at epoch={epoch}, step={step_in_epoch}: {bad_grads}"
+                )
             accumulation_buffer.append(
                 {
                     "loss_total": normalize_loss_scalar(losses["loss_total"]),
@@ -1431,6 +1760,7 @@ def main() -> None:
             "val_mean_mse": float("nan"),
             "val_residual_mse": float("nan"),
             "val_freq_mse": float("nan"),
+            "val_residual_focus": float("nan"),
         }
         eval_every_epochs = max(1, int(validation_cfg.get("eval_every_epochs", 1)))
         should_run_validation = (epoch == 1) or (epoch % eval_every_epochs == 0)
@@ -1446,6 +1776,7 @@ def main() -> None:
                     val_loader=val_loader,
                     device=device,
                     loss_cfg=cfg["loss"],
+                    validation_cfg=validation_cfg,
                     show_progress=True,
                 )
             else:
@@ -1456,6 +1787,7 @@ def main() -> None:
                     dataset=canonical_val_dataset,
                     device=device,
                     loss_cfg=cfg["loss"],
+                    validation_cfg=validation_cfg,
                     max_num_cylinders=max_num_cylinders,
                     max_cases=int(validation_cfg.get("max_cases", len(canonical_val_dataset))),
                     query_batch_size=int(validation_cfg.get("query_batch_size", 32768)),
@@ -1467,6 +1799,7 @@ def main() -> None:
                 f"[val] epoch={epoch:03d} total={val_metrics['val_total_loss']:.6e} "
                 f"field_mse={val_metrics['val_field_mse']:.6e} "
                 f"residual_mse={val_metrics['val_residual_mse']:.6e} "
+                f"residual_focus={val_metrics['val_residual_focus']:.6e} "
                 f"mean_mse={val_metrics['val_mean_mse']:.6e} "
                 f"freq_mse={val_metrics['val_freq_mse']:.6e} "
                 f"selection={val_selection_metric:.6e}"
@@ -1509,6 +1842,9 @@ def main() -> None:
         is_new_best = bool(math.isfinite(current_val) and current_val < best_val_metric)
         if math.isfinite(current_val) and current_val < best_val_metric:
             best_val_metric = current_val
+            epochs_without_improvement = 0
+        elif should_run_validation and math.isfinite(current_val):
+            epochs_without_improvement += 1
         checkpoint = {
             "epoch": epoch,
             "model_state_dict": (model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()),
@@ -1532,6 +1868,13 @@ def main() -> None:
                 f"[save] best checkpoint unchanged | best_val_metric="
                 f"{best_val_metric:.6e}" if math.isfinite(best_val_metric) else "[save] best checkpoint unchanged | best_val_metric=nan"
             )
+
+        if early_stopping_patience > 0 and epochs_without_improvement >= early_stopping_patience:
+            print(
+                f"[stop] early stopping triggered after {epochs_without_improvement} validation epochs "
+                f"without improvement in {best_metric_name}"
+            )
+            break
 
     train_dataset.close()
     if val_dataset is not None:

@@ -12,7 +12,7 @@ matches one of the decoder types supported by `src/model.py`, including
 `deeponet`.
 
 Run it like:
-python src/evaluate.py --case-id 0004 --dataset-case-id 0161 
+python src/evaluate.py --case-id 0001 --dataset-case-id 0161 --dataset-split train --latest
 
 """
 
@@ -192,6 +192,14 @@ def _env_coords_to_physical(env_coords_norm: np.ndarray, case: Dict) -> np.ndarr
     return env_xy
 
 
+def _coords_norm_to_physical(coords_norm: np.ndarray, case: Dict) -> np.ndarray:
+    bounds = _grid_domain_bounds(case)
+    coords_xy = coords_norm.copy()
+    coords_xy[..., 0] = bounds["x_min"] + coords_xy[..., 0] * bounds["lx"]
+    coords_xy[..., 1] = bounds["y_min"] + coords_xy[..., 1] * bounds["ly"]
+    return coords_xy
+
+
 def _compute_hyperedge_centroids(env_xy: np.ndarray, A_eh: np.ndarray) -> np.ndarray:
     """Weighted physical centroids of hyperedges in environment space."""
     num_hyper = A_eh.shape[1]
@@ -220,13 +228,18 @@ def render_soft_organization(
     num_cyl = centers.shape[0]
     cylinder_radius = float(case.get("cylinder_radius", 0.5))
 
-    A_me = out["A_me"][0].detach().cpu().numpy()[:num_cyl]         # [N, M_env]
-    A_mh = out["A_mh"][0].detach().cpu().numpy()[:num_cyl]         # [N, K_h]
-    A_eh = out["A_eh"][0].detach().cpu().numpy()                   # [M_env, K_h]
-    env_coords_norm = out["env_coords"][0].detach().cpu().numpy()  # [M_env, 2]
+    A_me = out["A_me"][0].detach().cpu().numpy()[:num_cyl]                   # [N, M_env]
+    A_mh = out["A_mh"][0].detach().cpu().numpy()[:num_cyl]                   # [N, K_h]
+    A_eh = out["A_eh"][0].detach().cpu().numpy()                             # [M_env, K_h]
+    env_coords_norm = out["env_coords"][0].detach().cpu().numpy()            # [M_env, 2]
+    hyper_source_norm = out["hyper_source_coords"][0].detach().cpu().numpy() # [K_h, 2]
+    hyper_wake_norm = out["hyper_wake_coords"][0].detach().cpu().numpy()     # [K_h, 2]
+    hyper_wake_axis = out["hyper_wake_axis"][0].detach().cpu().numpy()       # [K_h, 2]
+    hyper_strength = out["hyper_strength"][0].detach().cpu().numpy().reshape(-1)
 
     env_xy = _env_coords_to_physical(env_coords_norm, case)
-    centroids = _compute_hyperedge_centroids(env_xy, A_eh)
+    hyper_source_xy = _coords_norm_to_physical(hyper_source_norm, case)
+    hyper_wake_xy = _coords_norm_to_physical(hyper_wake_norm, case)
 
     token_group = np.argmax(A_eh, axis=1)
     token_conf = np.max(A_eh, axis=1)
@@ -263,21 +276,64 @@ def render_soft_organization(
                 linewidths=0.0,
             )
 
-    # Hyperedge centroids.
+    bounds = _grid_domain_bounds(case)
+    arrow_len = 0.08 * min(bounds["lx"], bounds["ly"])
+    axis_phys = np.stack(
+        [
+            hyper_wake_axis[:, 0] * bounds["lx"],
+            hyper_wake_axis[:, 1] * bounds["ly"],
+        ],
+        axis=-1,
+    )
+    axis_norm = np.linalg.norm(axis_phys, axis=1, keepdims=True)
+    axis_phys = np.where(axis_norm > 1e-8, axis_phys / np.maximum(axis_norm, 1e-8), np.array([[1.0, 0.0]], dtype=np.float32))
+
+    # Hyperedge source and wake geometry.
     for k in range(num_hyper):
         ax.scatter(
-            centroids[k, 0],
-            centroids[k, 1],
-            s=180,
+            hyper_source_xy[k, 0],
+            hyper_source_xy[k, 1],
+            s=90,
+            marker="X",
+            c=[colors[k]],
+            edgecolors="k",
+            linewidths=0.7,
+            zorder=4,
+        )
+        ax.scatter(
+            hyper_wake_xy[k, 0],
+            hyper_wake_xy[k, 1],
+            s=140 + 140 * float(hyper_strength[k]),
             marker="*",
             c=[colors[k]],
             edgecolors="k",
             linewidths=0.7,
             zorder=4,
         )
+        ax.plot(
+            [hyper_source_xy[k, 0], hyper_wake_xy[k, 0]],
+            [hyper_source_xy[k, 1], hyper_wake_xy[k, 1]],
+            linestyle=":",
+            color=colors[k],
+            alpha=0.7,
+            linewidth=1.2,
+            zorder=3,
+        )
+        ax.arrow(
+            hyper_wake_xy[k, 0],
+            hyper_wake_xy[k, 1],
+            arrow_len * axis_phys[k, 0],
+            arrow_len * axis_phys[k, 1],
+            color=colors[k],
+            width=0.0,
+            head_width=0.10,
+            head_length=0.18,
+            length_includes_head=True,
+            zorder=5,
+        )
         ax.text(
-            centroids[k, 0],
-            centroids[k, 1],
+            hyper_wake_xy[k, 0],
+            hyper_wake_xy[k, 1],
             f"H{k}",
             fontsize=9,
             ha="left",
@@ -310,8 +366,8 @@ def render_soft_organization(
             if w < threshold:
                 continue
             ax.plot(
-                [centers[i, 0], centroids[k, 0]],
-                [centers[i, 1], centroids[k, 1]],
+                [centers[i, 0], hyper_wake_xy[k, 0]],
+                [centers[i, 1], hyper_wake_xy[k, 1]],
                 linestyle="--",
                 color=colors[k],
                 alpha=0.15 + 0.65 * w,
@@ -341,7 +397,7 @@ def render_soft_organization(
         module_pos[int(i)] = (0.08, float(module_y[rank]))
 
     # Hyperedge and environment-group nodes use physical centroid y.
-    hyper_y = np.clip((centroids[:, 1] - bounds["y_min"]) / max(bounds["ly"], 1e-6), 0.08, 0.92)
+    hyper_y = np.clip((hyper_wake_xy[:, 1] - bounds["y_min"]) / max(bounds["ly"], 1e-6), 0.08, 0.92)
     hyper_pos = {k: (0.50, float(hyper_y[k])) for k in range(num_hyper)}
     env_group_pos = {k: (0.90, float(hyper_y[k])) for k in range(num_hyper)}
 
@@ -549,6 +605,11 @@ def main() -> None:
         tau=np.asarray([tau_value], dtype=np.float32),
         predicted_frequency=np.asarray([freq_pred], dtype=np.float32),
         gt_frequency=np.asarray([case["dominant_frequency"]], dtype=np.float32),
+        hyper_source_coords=out["hyper_source_coords"][0].detach().cpu().numpy().astype(np.float32),
+        hyper_wake_coords=out["hyper_wake_coords"][0].detach().cpu().numpy().astype(np.float32),
+        hyper_wake_axis=out["hyper_wake_axis"][0].detach().cpu().numpy().astype(np.float32),
+        hyper_wake_extent=out["hyper_wake_extent"][0].detach().cpu().numpy().astype(np.float32),
+        hyper_strength=out["hyper_strength"][0].detach().cpu().numpy().astype(np.float32),
     )
 
     with (output_dir / f"evaluation_summary_case_{case['case_id']}.json").open("w", encoding="utf-8") as f:
@@ -564,6 +625,7 @@ def main() -> None:
                 "field_mse": mse,
                 "predicted_frequency": freq_pred,
                 "gt_frequency": case["dominant_frequency"],
+                "num_hyperedges": int(out["A_eh"].shape[-1]),
                 "quicklook_path": str(fig_path),
                 "organization_path": str(org_path),
             },
