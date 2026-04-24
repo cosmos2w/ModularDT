@@ -1,11 +1,30 @@
 # Multi-cylinder PhiFlow Demo
 
+Updated: 2026-04-24
+
 This demo covers the periodic multi-cylinder inert wake workflow:
 
 1. simulate wake fields with PhiFlow
 2. preprocess raw cases into a packed HDF5 dataset
 3. train a hypergraph-organized neural field surrogate
 4. reconstruct full flow fields from saved checkpoints
+
+## Current Dynamic-Residual Upgrade
+
+This revision targets the residual-dynamics plateau with four scoped changes:
+
+1. Local top-k refinement is now wake-aware. Module and environment tokens are
+   ranked by periodic proximity, hyperedge wake relevance, and learned local
+   attention bias.
+2. Dynamic mode capacity was increased modestly with more hyperedges, wider
+   dynamic tokens, and a second local refinement layer.
+3. A single dynamic-energy loss matches masked residual energy, defaulting to
+   the omega channel, to discourage residual/vorticity amplitude collapse.
+4. Phase-window batches replace part of each training item with the same xy
+   locations sampled across multiple tau values from `canonical_cycle`, so the
+   residual branch sees phase-dependent motion rather than isolated snapshots.
+5. `loss_curve.png` is now a 2x2 figure: total, field, residual, and dynamic
+   energy.
 
 ## Periodic Boundary Assumption
 
@@ -89,10 +108,12 @@ Residual branch:
 - spatial encoding + phase encoding + dynamic global token + phase-conditioned
   hyper context
 - wake-aware global attention over all memory
-- top-k local refinement over nearby module/env tokens plus all hyper tokens
+- top-k local refinement over wake-relevant module/env tokens plus all hyper
+  tokens
 
-Local module/env gathering still uses periodic minimum-image distance, while
-hyperedge relevance uses wake-centered geometry.
+Local module/env gathering still preserves periodic minimum-image distance, but
+the default ranking also uses hyperedge wake relevance and learned attention
+bias. Hyperedge relevance uses wake-centered geometry.
 
 ## Training Changes
 
@@ -127,6 +148,7 @@ The objective stays intentionally simple:
 - `field_mse`
 - `residual_mse`
 - light `freq_mse`
+- dynamic-energy loss on residual energy, defaulting to omega
 - light direct organizer supervision
 
 Recommended defaults:
@@ -135,11 +157,13 @@ Recommended defaults:
 - `residual_mse_weight = 1.25`
 - `mean_mse_weight = 0.0`
 - `freq_mse_weight = 0.05`
+- `dynamic_energy_weight = 0.02`
 - `organizer_me_weight = 0.01`
 - `organizer_mm_weight = 0.05`
 - `organizer_consistency_weight = 0.05`
 
-No large extra loss stack was added in this revision.
+No spectral, gradient, adversarial, diffusion, or flow-matching loss was added
+in this revision.
 
 ## Validation And Checkpoint Selection
 
@@ -150,6 +174,7 @@ Validation logs:
 - `val_mean_mse`
 - `val_residual_mse`
 - `val_freq_mse`
+- `val_dynamic_energy`
 - `val_residual_focus`
 
 By default:
@@ -167,14 +192,19 @@ Important defaults in this revision:
 
 - `num_env_tokens_x = 24`
 - `num_env_tokens_y = 8`
-- `num_hyperedges = 4`
+- `num_hyperedges = 6`
+- `hidden_dim / behavior_dim / latent_dim / dynamic_token_dim = 80`
 - `phase_fourier_frequencies = 2`
 - `use_phase_conditioned_dynamic_tokens = true`
-- `dynamic_phase_harmonics = 2`
-- `dynamic_phase_rank = 8`
+- `dynamic_phase_harmonics = 3`
+- `dynamic_phase_rank = 12`
 - `use_wake_centered_hyper_geometry = true`
+- `perceiver_num_layers_local = 2`
+- `perceiver_refine_topk_env = 24`
+- `dynamic_energy_weight = 0.02`
 - `randomize_cylinder_order = true`
 - `point_sampling_mode = "wake_focused"`
+- `use_phase_window_batches = true`
 - `best_metric_name = "val_residual_focus"`
 - `residual_focus_field_weight = 0.25`
 

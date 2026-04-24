@@ -490,32 +490,38 @@ class ModelConfig:
     re_scale: float = 200.0
     num_env_tokens_x: int = 24
     num_env_tokens_y: int = 8
-    num_hyperedges: int = 4
-    hidden_dim: int = 64
-    behavior_dim: int = 64
-    latent_dim: int = 64
-    dynamic_token_dim: int = 64
+    num_hyperedges: int = 6
+    hidden_dim: int = 80
+    behavior_dim: int = 80
+    latent_dim: int = 80
+    dynamic_token_dim: int = 80
     message_passing_steps: int = 3
     structure_fourier_frequencies: int = 1
     spatial_query_fourier_frequencies: int = 3
     phase_fourier_frequencies: int = 2
-    decoder_hidden_dim: int = 128
+    decoder_hidden_dim: int = 160
     perceiver_num_layers_global: int = 1
-    perceiver_num_layers_local: int = 1
+    perceiver_num_layers_local: int = 2
     perceiver_num_heads: int = 4
-    perceiver_head_dim: int = 16
+    perceiver_head_dim: int = 20
     perceiver_ffn_mult: int = 2
     perceiver_dropout: float = 0.05
-    perceiver_refine_topk_env: int = 16
-    perceiver_refine_topk_mod: int = 4
+    perceiver_refine_topk_env: int = 24
+    perceiver_refine_topk_mod: int = 5
     perceiver_query_chunk_size: int = 1024
+    local_topk_mode: str = "wake_relevance"
+    local_topk_distance_weight: float = 1.0
+    local_topk_hyper_weight: float = 1.0
+    local_topk_attention_bias_weight: float = 0.25
+    local_topk_use_softmax_hyper_weights: bool = True
+    local_topk_detach_scores: bool = True
     use_dynamic_hyper_tokens: bool = True
     use_hyper_phase_offsets: bool = True
     use_phase_conditioned_dynamic_tokens: bool = True
-    dynamic_phase_harmonics: int = 2
-    dynamic_phase_rank: int = 8
+    dynamic_phase_harmonics: int = 3
+    dynamic_phase_rank: int = 12
     dynamic_phase_mode: str = "low_rank_harmonic"
-    phase_conditioning_dropout: float = 0.0
+    phase_conditioning_dropout: float = 0.05
     use_wake_centered_hyper_geometry: bool = True
     future_module_feature_dim: int = 0
     future_global_feature_dim: int = 0
@@ -1196,21 +1202,61 @@ class HierarchicalPerceiverDecoder(nn.Module):
         memory: Dict[str, torch.Tensor],
         module_bias_chunk: torch.Tensor,
         env_bias_chunk: torch.Tensor,
-        hyper_bias_chunk: torch.Tensor,
+        hyper_wake_logits_chunk: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size, chunk_queries, _ = query_xy_chunk_norm.shape
 
         _, _, module_dist, _, _ = self._relative_parts(query_xy_chunk_norm, organized["module_coords_norm"])
-        module_dist = module_dist.masked_fill(organized["cyl_mask"][:, None, :] <= 0, float("inf"))
         topk_mod = max(1, min(int(self.cfg.perceiver_refine_topk_mod), module_dist.shape[-1]))
-        mod_indices = torch.topk(module_dist, k=topk_mod, dim=-1, largest=False).indices
+
+        _, _, env_dist, _, _ = self._relative_parts(query_xy_chunk_norm, organized["env_coords"])
+        topk_env = max(1, min(int(self.cfg.perceiver_refine_topk_env), env_dist.shape[-1]))
+
+        module_valid = organized["cyl_mask"][:, None, :] > 0
+        local_topk_mode = str(self.cfg.local_topk_mode).strip().lower()
+        if local_topk_mode == "distance":
+            module_rank = module_dist.masked_fill(~module_valid, float("inf"))
+            env_rank = env_dist
+            mod_indices = torch.topk(module_rank, k=topk_mod, dim=-1, largest=False).indices
+            env_indices = torch.topk(env_rank, k=topk_env, dim=-1, largest=False).indices
+        elif local_topk_mode == "wake_relevance":
+            if self.cfg.local_topk_use_softmax_hyper_weights:
+                hyper_weights = torch.softmax(hyper_wake_logits_chunk, dim=-1)
+            else:
+                hyper_weights = hyper_wake_logits_chunk
+            module_hyper_relevance = torch.einsum("bqk,bnk->bqn", hyper_weights, organized["A_mh"])
+            env_hyper_relevance = torch.einsum("bqk,bmk->bqm", hyper_weights, organized["A_eh"])
+
+            distance_weight = float(self.cfg.local_topk_distance_weight)
+            hyper_weight = float(self.cfg.local_topk_hyper_weight)
+            attention_bias_weight = float(self.cfg.local_topk_attention_bias_weight)
+            module_score = (
+                -distance_weight * module_dist
+                + hyper_weight * module_hyper_relevance
+                + attention_bias_weight * module_bias_chunk
+            )
+            env_score = (
+                -distance_weight * env_dist
+                + hyper_weight * env_hyper_relevance
+                + attention_bias_weight * env_bias_chunk
+            )
+            score_floor = torch.finfo(module_score.dtype).min
+            module_score = module_score.masked_fill(~module_valid, score_floor)
+            if self.cfg.local_topk_detach_scores:
+                module_score = module_score.detach()
+                env_score = env_score.detach()
+            mod_indices = torch.topk(module_score, k=topk_mod, dim=-1, largest=True).indices
+            env_indices = torch.topk(env_score, k=topk_env, dim=-1, largest=True).indices
+        else:
+            raise ValueError(
+                f"Unsupported local_topk_mode={self.cfg.local_topk_mode!r}; "
+                "expected 'wake_relevance' or 'distance'."
+            )
+
         mod_tokens = self._gather_token_subset(memory["module_tokens"], mod_indices)
         mod_bias = self._gather_bias_subset(module_bias_chunk, mod_indices)
         mod_mask = self._gather_token_subset(memory["module_mask"].unsqueeze(-1), mod_indices).squeeze(-1)
 
-        _, _, env_dist, _, _ = self._relative_parts(query_xy_chunk_norm, organized["env_coords"])
-        topk_env = max(1, min(int(self.cfg.perceiver_refine_topk_env), env_dist.shape[-1]))
-        env_indices = torch.topk(env_dist, k=topk_env, dim=-1, largest=False).indices
         env_tokens = self._gather_token_subset(memory["env_tokens"], env_indices)
         env_bias = self._gather_bias_subset(env_bias_chunk, env_indices)
         env_mask = torch.ones(batch_size, chunk_queries, topk_env, device=query_xy_chunk_norm.device, dtype=query_xy_chunk_norm.dtype)
@@ -1233,8 +1279,8 @@ class HierarchicalPerceiverDecoder(nn.Module):
             [
                 mod_bias,
                 env_bias,
-                hyper_bias_chunk,
-                hyper_bias_chunk,
+                hyper_wake_logits_chunk,
+                hyper_wake_logits_chunk,
                 torch.zeros(batch_size, chunk_queries, 1, device=query_xy_chunk_norm.device, dtype=query_xy_chunk_norm.dtype),
             ],
             dim=-1,
@@ -1250,7 +1296,7 @@ class HierarchicalPerceiverDecoder(nn.Module):
         memory: Dict[str, torch.Tensor],
         module_bias: torch.Tensor,
         env_bias: torch.Tensor,
-        hyper_bias: torch.Tensor,
+        hyper_wake_logits: torch.Tensor,
     ) -> torch.Tensor:
         if not self.residual_local_blocks:
             return residual_query
@@ -1263,14 +1309,14 @@ class HierarchicalPerceiverDecoder(nn.Module):
             xy_chunk = query_xy_norm[:, start:end, :]
             module_bias_chunk = module_bias[:, start:end, :]
             env_bias_chunk = env_bias[:, start:end, :]
-            hyper_bias_chunk = hyper_bias[:, start:end, :]
+            hyper_wake_logits_chunk = hyper_wake_logits[:, start:end, :]
             local_context, local_bias, local_mask = self._build_local_context(
                 xy_chunk,
                 organized,
                 memory,
                 module_bias_chunk,
                 env_bias_chunk,
-                hyper_bias_chunk,
+                hyper_wake_logits_chunk,
             )
             for block in self.residual_local_blocks:
                 query_chunk = block(
@@ -1297,7 +1343,7 @@ class HierarchicalPerceiverDecoder(nn.Module):
         behavior_latent = behavior["behavior_latent"][:, None, :].expand(batch_size, num_queries, -1)
         mean_latent = behavior["mean_latent"][:, None, :].expand(batch_size, num_queries, -1)
         dynamic_global_token = behavior["dynamic_global_token"].expand(batch_size, num_queries, -1)
-        phase_hyper_context, hyper_bias = self.phase_hyper_context(query_xy_norm, query_tau, behavior, organized)
+        phase_hyper_context, hyper_wake_logits = self.phase_hyper_context(query_xy_norm, query_tau, behavior, organized)
 
         mean_query = self.mean_query_proj(torch.cat([spatial_feat, behavior_latent, mean_latent], dim=-1))
         residual_query = self.residual_query_proj(
@@ -1359,8 +1405,8 @@ class HierarchicalPerceiverDecoder(nn.Module):
             [
                 module_bias,
                 env_bias,
-                hyper_bias,
-                hyper_bias,
+                hyper_wake_logits,
+                hyper_wake_logits,
                 self._zero_bias(query_xy_norm, 1),
             ],
             dim=-1,
@@ -1393,7 +1439,7 @@ class HierarchicalPerceiverDecoder(nn.Module):
             memory,
             module_bias,
             env_bias,
-            hyper_bias,
+            hyper_wake_logits,
         )
 
         pred_mean = self.mean_head(self.mean_head_norm(mean_query))

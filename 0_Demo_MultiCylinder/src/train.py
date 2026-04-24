@@ -198,6 +198,14 @@ class PackedPointChunkDataset(Dataset):
         wake_streamwise_decay: float = 8.0,
         wake_high_omega_quantile: float = 0.75,
         wake_sampling_train_only: bool = True,
+        use_phase_window_batches: bool = False,
+        phase_window_train_only: bool = True,
+        phase_window_fraction: float = 0.25,
+        phase_window_num_phases: int = 4,
+        phase_window_num_xy: int = 256,
+        phase_window_phase_mode: str = "stratified_cycle",
+        phase_window_xy_sampling: str = "omega_variance",
+        phase_window_require_canonical_cycle: bool = False,
     ):
         super().__init__()
         self.h5_path = Path(h5_path).expanduser().resolve()
@@ -210,6 +218,7 @@ class PackedPointChunkDataset(Dataset):
         self.resample_each_epoch = bool(resample_each_epoch)
         self.base_seed = int(base_seed)
         self.randomize_cylinder_order = bool(randomize_cylinder_order)
+        
         self.point_sampling_mode = str(point_sampling_mode).strip().lower()
         self.wake_uniform_fraction = float(wake_uniform_fraction)
         self.wake_near_cylinder_fraction = float(wake_near_cylinder_fraction)
@@ -221,6 +230,15 @@ class PackedPointChunkDataset(Dataset):
         self.wake_streamwise_decay = float(wake_streamwise_decay)
         self.wake_high_omega_quantile = float(wake_high_omega_quantile)
         self.wake_sampling_train_only = bool(wake_sampling_train_only)
+        
+        self.use_phase_window_batches = bool(use_phase_window_batches)
+        self.phase_window_train_only = bool(phase_window_train_only)
+        self.phase_window_fraction = float(phase_window_fraction)
+        self.phase_window_num_phases = int(phase_window_num_phases)
+        self.phase_window_num_xy = int(phase_window_num_xy)
+        self.phase_window_phase_mode = str(phase_window_phase_mode).strip().lower()
+        self.phase_window_xy_sampling = str(phase_window_xy_sampling).strip().lower()
+        self.phase_window_require_canonical_cycle = bool(phase_window_require_canonical_cycle)
         self.current_epoch = 0
         self._h5: Optional[h5py.File] = None
 
@@ -230,6 +248,14 @@ class PackedPointChunkDataset(Dataset):
             raise ValueError("min_points_per_sample must be >= 1.")
         if self.point_sampling_mode not in {"uniform", "wake_focused"}:
             raise ValueError("point_sampling_mode must be 'uniform' or 'wake_focused'.")
+        if self.phase_window_num_phases < 1:
+            raise ValueError("phase_window_num_phases must be >= 1.")
+        if self.phase_window_num_xy < 1:
+            raise ValueError("phase_window_num_xy must be >= 1.")
+        if self.phase_window_phase_mode not in {"stratified_cycle", "local_window"}:
+            raise ValueError("phase_window_phase_mode must be 'stratified_cycle' or 'local_window'.")
+        if self.phase_window_xy_sampling not in {"uniform", "omega_variance", "wake_focused"}:
+            raise ValueError("phase_window_xy_sampling must be 'uniform', 'omega_variance', or 'wake_focused'.")
 
         self.case_meta: List[CaseChunkMeta] = []
         self.case_ids: List[str] = []
@@ -263,6 +289,10 @@ class PackedPointChunkDataset(Dataset):
                 y0 = float(y_grid[0, 0])
                 lx = float((x_grid.max() - x_grid.min()) + dx)
                 ly = float((y_grid.max() - y_grid.min()) + dy)
+                has_canonical_cycle = "canonical_cycle" in grp and "phase_bin_centers" in grp
+                phase_bin_centers = (
+                    np.asarray(grp["phase_bin_centers"], dtype=np.float32) if has_canonical_cycle else None
+                )
 
                 self.case_lookup[case_id] = {
                     "centers": centers,
@@ -276,6 +306,9 @@ class PackedPointChunkDataset(Dataset):
                     "grid_spacing": (dx, dy),
                     "domain_lengths": (lx, ly),
                     "domain_origin": (float(x_grid.min()), float(y_grid.min())),
+                    "has_canonical_cycle": has_canonical_cycle,
+                    "canonical_cycle": None,
+                    "phase_bin_centers": phase_bin_centers,
                 }
                 self.case_ids.append(case_id)
 
@@ -317,9 +350,9 @@ class PackedPointChunkDataset(Dataset):
     def set_epoch(self, epoch: int) -> None:
         self.current_epoch = int(epoch)
 
-    def _rng_for_item(self, idx: int, *, include_epoch: bool) -> np.random.Generator:
+    def _rng_for_item(self, idx: int, *, include_epoch: bool, salt: int = 0) -> np.random.Generator:
         epoch_offset = self.current_epoch if include_epoch else 0
-        rng_seed = self.base_seed + (1000003 * idx) + (9176 * epoch_offset)
+        rng_seed = self.base_seed + (1000003 * idx) + (9176 * epoch_offset) + int(salt)
         return np.random.default_rng(rng_seed)
 
     def _compute_keep_count(self, num_points: int) -> int:
@@ -328,8 +361,16 @@ class PackedPointChunkDataset(Dataset):
         keep_count = max(self.min_points_per_sample, int(math.ceil(num_points * self.train_point_fraction)))
         return min(keep_count, num_points)
 
-    def _uniform_subsample_indices(self, idx: int, num_points: int) -> np.ndarray:
-        keep_count = self._compute_keep_count(num_points)
+    def _uniform_subsample_indices(
+        self,
+        idx: int,
+        num_points: int,
+        keep_count_override: Optional[int] = None,
+    ) -> np.ndarray:
+        keep_count = self._compute_keep_count(num_points) if keep_count_override is None else int(keep_count_override)
+        keep_count = max(0, min(keep_count, num_points))
+        if keep_count <= 0:
+            return np.empty((0,), dtype=np.int64)
         if keep_count >= num_points:
             return np.arange(num_points, dtype=np.int64)
         rng = self._rng_for_item(idx, include_epoch=self.resample_each_epoch)
@@ -390,14 +431,18 @@ class PackedPointChunkDataset(Dataset):
         chunk_x: np.ndarray,
         chunk_y: np.ndarray,
         chunk_omega: np.ndarray,
+        keep_count_override: Optional[int] = None,
     ) -> np.ndarray:
         num_points = int(chunk_x.shape[0])
-        keep_count = self._compute_keep_count(num_points)
+        keep_count = self._compute_keep_count(num_points) if keep_count_override is None else int(keep_count_override)
+        keep_count = max(0, min(keep_count, num_points))
+        if keep_count <= 0:
+            return np.empty((0,), dtype=np.int64)
         if keep_count >= num_points:
             return np.arange(num_points, dtype=np.int64)
 
         if self.wake_sampling_train_only and not self.is_training:
-            return self._uniform_subsample_indices(idx, num_points)
+            return self._uniform_subsample_indices(idx, num_points, keep_count_override=keep_count)
 
         rng = self._rng_for_item(idx, include_epoch=self.resample_each_epoch)
         selected_mask = np.zeros((num_points,), dtype=bool)
@@ -468,10 +513,157 @@ class PackedPointChunkDataset(Dataset):
         chunk_x: np.ndarray,
         chunk_y: np.ndarray,
         chunk_omega: np.ndarray,
+        keep_count_override: Optional[int] = None,
     ) -> np.ndarray:
         if self.point_sampling_mode != "wake_focused":
-            return self._uniform_subsample_indices(idx, int(chunk_x.shape[0]))
-        return self._wake_focused_subsample_indices(idx, case_static, chunk_x, chunk_y, chunk_omega)
+            return self._uniform_subsample_indices(idx, int(chunk_x.shape[0]), keep_count_override=keep_count_override)
+        return self._wake_focused_subsample_indices(
+            idx,
+            case_static,
+            chunk_x,
+            chunk_y,
+            chunk_omega,
+            keep_count_override=keep_count_override,
+        )
+
+    @staticmethod
+    def _weighted_grid_choice(
+        rng: np.random.Generator,
+        weights: Optional[np.ndarray],
+        count: int,
+        num_cells: int,
+    ) -> np.ndarray:
+        if count <= 0 or num_cells <= 0:
+            return np.empty((0,), dtype=np.int64)
+        take = min(int(count), int(num_cells))
+        probs = None
+        if weights is not None:
+            flat = np.asarray(weights, dtype=np.float64).reshape(-1)
+            if flat.shape[0] != num_cells:
+                raise ValueError("phase-window grid weights must match the flattened grid size.")
+            flat = np.clip(flat, a_min=0.0, a_max=None)
+            total = float(flat.sum())
+            if total > 0.0:
+                probs = flat / total
+        return rng.choice(num_cells, size=take, replace=False, p=probs).astype(np.int64, copy=False)
+
+    def _phase_window_xy_weights(self, case_static: Dict, canonical_cycle: np.ndarray) -> Optional[np.ndarray]:
+        mode = self.phase_window_xy_sampling
+        if mode == "uniform":
+            return None
+
+        omega_variance = np.var(canonical_cycle[..., 3], axis=0).astype(np.float64, copy=False)
+        if mode == "omega_variance":
+            return omega_variance
+
+        x_grid = np.asarray(case_static["x_grid"], dtype=np.float32)
+        y_grid = np.asarray(case_static["y_grid"], dtype=np.float32)
+        centers = np.asarray(case_static["centers"], dtype=np.float32)
+        if centers.size == 0:
+            return omega_variance
+        lx, ly = case_static["domain_lengths"]
+
+        flat_x = x_grid.reshape(-1)[None, :]
+        flat_y = y_grid.reshape(-1)[None, :]
+        center_x = centers[:, 0:1]
+        center_y = centers[:, 1:2]
+
+        dist_to_cyl = periodic_distance_min_image_np(center_x, center_y, flat_x, flat_y, lx, ly)
+        near_score = np.exp(-0.5 * (dist_to_cyl / max(self.wake_near_radius, 1e-6)) ** 2).max(axis=0)
+
+        dx_down = directed_periodic_downstream_delta_np(center_x, flat_x, lx)
+        dy = periodic_delta_min_image_np(center_y, flat_y, ly)
+        sigma_y = self.wake_sigma_y_base + self.wake_sigma_y_growth * dx_down
+        wake_score = np.exp(-0.5 * (dy / np.maximum(sigma_y, 1e-4)) ** 2) * np.exp(
+            -dx_down / max(self.wake_streamwise_decay, 1e-6)
+        )
+        wake_score = (wake_score * (dx_down > 0.0)).max(axis=0)
+
+        dyn = omega_variance.reshape(-1)
+        dyn_norm = dyn / max(float(dyn.max()), 1e-12)
+        weights = dyn_norm + 0.5 * near_score + wake_score
+        return weights.reshape(x_grid.shape)
+
+    def _sample_phase_window_points(
+        self,
+        idx: int,
+        case_static: Dict,
+        h5_case_group: h5py.Group,
+        requested_count: int,
+    ) -> Optional[Dict[str, np.ndarray]]:
+        if requested_count <= 0:
+            return None
+
+        canonical_cycle = case_static.get("canonical_cycle")
+        phase_bin_centers = case_static.get("phase_bin_centers")
+        if canonical_cycle is None and "canonical_cycle" in h5_case_group and "phase_bin_centers" in h5_case_group:
+            canonical_cycle = np.asarray(h5_case_group["canonical_cycle"], dtype=np.float32)
+            phase_bin_centers = np.asarray(h5_case_group["phase_bin_centers"], dtype=np.float32)
+
+        if canonical_cycle is None or phase_bin_centers is None:
+            if self.phase_window_require_canonical_cycle:
+                raise RuntimeError(
+                    f"Case is missing canonical_cycle/phase_bin_centers, required for phase-window batches."
+                )
+            return None
+
+        canonical_cycle = np.asarray(canonical_cycle, dtype=np.float32)
+        phase_bin_centers = np.asarray(phase_bin_centers, dtype=np.float32).reshape(-1)
+        if canonical_cycle.ndim != 4 or canonical_cycle.shape[-1] != 4:
+            raise ValueError("canonical_cycle must have shape [phase, H, W, 4].")
+
+        num_phase_bins = int(canonical_cycle.shape[0])
+        if num_phase_bins <= 0:
+            return None
+
+        n_phases = max(1, min(int(self.phase_window_num_phases), num_phase_bins))
+        n_xy = min(int(self.phase_window_num_xy), int(requested_count) // n_phases)
+        height, width = canonical_cycle.shape[1:3]
+        num_cells = int(height * width)
+        n_xy = min(n_xy, num_cells)
+        if n_xy <= 0:
+            return None
+
+        rng = self._rng_for_item(idx, include_epoch=self.resample_each_epoch, salt=7919)
+        base = int(rng.integers(0, num_phase_bins))
+        if self.phase_window_phase_mode == "stratified_cycle":
+            stride = max(1, num_phase_bins // n_phases)
+            phase_idx = (base + np.arange(n_phases, dtype=np.int64) * stride) % num_phase_bins
+        else:
+            phase_idx = (base + np.arange(n_phases, dtype=np.int64)) % num_phase_bins
+
+        weights = self._phase_window_xy_weights(case_static, canonical_cycle)
+        flat_idx = self._weighted_grid_choice(rng, weights, n_xy, num_cells)
+        if flat_idx.size == 0:
+            return None
+        iy, ix = np.unravel_index(flat_idx, (height, width))
+
+        x_grid = np.asarray(case_static["x_grid"], dtype=np.float32)
+        y_grid = np.asarray(case_static["y_grid"], dtype=np.float32)
+        mean_field = np.asarray(case_static["mean_field"], dtype=np.float32)
+
+        xy_count = int(flat_idx.size)
+        repeated_ix = np.repeat(ix, n_phases)
+        repeated_iy = np.repeat(iy, n_phases)
+        tiled_phase = np.tile(phase_idx, xy_count)
+
+        x = x_grid[repeated_iy, repeated_ix].astype(np.float32, copy=False)
+        y = y_grid[repeated_iy, repeated_ix].astype(np.float32, copy=False)
+        tau = phase_bin_centers[tiled_phase].astype(np.float32, copy=False)
+        targets = canonical_cycle[tiled_phase, repeated_iy, repeated_ix, :].astype(np.float32, copy=False)
+        mean_targets = mean_field[repeated_iy, repeated_ix, :].astype(np.float32, copy=False)
+        residual_targets = targets - mean_targets
+        phase_window_mask = np.ones((targets.shape[0],), dtype=np.float32)
+
+        return {
+            "x": x,
+            "y": y,
+            "tau": tau,
+            "targets": targets,
+            "mean_targets": mean_targets,
+            "residual_targets": residual_targets,
+            "phase_window_mask": phase_window_mask,
+        }
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         meta = self.case_meta[idx]
@@ -489,12 +681,42 @@ class PackedPointChunkDataset(Dataset):
         chunk_p = np.asarray(sampled["p"][sl], dtype=np.float32)
         chunk_omega = np.asarray(sampled["omega"][sl], dtype=np.float32)
 
-        local_indices = self._subsample_indices(idx, case_static, chunk_x, chunk_y, chunk_omega)
+        total_keep_count = self._compute_keep_count(int(chunk_x.shape[0]))
+        phase_window_points = None
+        phase_window_active = self.use_phase_window_batches and (
+            self.is_training or not self.phase_window_train_only
+        )
+        if phase_window_active:
+            fraction = min(max(self.phase_window_fraction, 0.0), 1.0)
+            window_count = int(total_keep_count * fraction)
+            n_phases = max(1, int(self.phase_window_num_phases))
+            window_count = (window_count // n_phases) * n_phases
+            phase_window_points = self._sample_phase_window_points(
+                idx,
+                case_static,
+                grp,
+                requested_count=window_count,
+            )
 
-        x = chunk_x[local_indices]
-        y = chunk_y[local_indices]
-        tau = chunk_tau[local_indices]
-        targets = np.stack(
+        window_actual = (
+            int(phase_window_points["targets"].shape[0])
+            if phase_window_points is not None
+            else 0
+        )
+        normal_count = max(0, total_keep_count - window_actual)
+        local_indices = self._subsample_indices(
+            idx,
+            case_static,
+            chunk_x,
+            chunk_y,
+            chunk_omega,
+            keep_count_override=normal_count,
+        )
+
+        x_normal = chunk_x[local_indices]
+        y_normal = chunk_y[local_indices]
+        tau_normal = chunk_tau[local_indices]
+        targets_normal = np.stack(
             [
                 chunk_u[local_indices],
                 chunk_v[local_indices],
@@ -519,10 +741,45 @@ class PackedPointChunkDataset(Dataset):
         mean_field = case_static["mean_field"]
         x0, y0 = case_static["grid_origin"]
         dx, dy = case_static["grid_spacing"]
-        ix = np.clip(np.rint((x - x0) / max(dx, 1e-6)).astype(np.int64), 0, mean_field.shape[1] - 1)
-        iy = np.clip(np.rint((y - y0) / max(dy, 1e-6)).astype(np.int64), 0, mean_field.shape[0] - 1)
-        mean_targets = mean_field[iy, ix]
-        residual_targets = targets - mean_targets
+        ix = np.clip(np.rint((x_normal - x0) / max(dx, 1e-6)).astype(np.int64), 0, mean_field.shape[1] - 1)
+        iy = np.clip(np.rint((y_normal - y0) / max(dy, 1e-6)).astype(np.int64), 0, mean_field.shape[0] - 1)
+        mean_targets_normal = mean_field[iy, ix].astype(np.float32, copy=False)
+        residual_targets_normal = targets_normal - mean_targets_normal
+
+        x_parts = [x_normal.astype(np.float32, copy=False)]
+        y_parts = [y_normal.astype(np.float32, copy=False)]
+        tau_parts = [tau_normal.astype(np.float32, copy=False)]
+        target_parts = [targets_normal]
+        mean_parts = [mean_targets_normal]
+        residual_parts = [residual_targets_normal]
+        phase_window_parts = [np.zeros((x_normal.shape[0],), dtype=np.float32)]
+        if phase_window_points is not None:
+            x_parts.append(phase_window_points["x"])
+            y_parts.append(phase_window_points["y"])
+            tau_parts.append(phase_window_points["tau"])
+            target_parts.append(phase_window_points["targets"])
+            mean_parts.append(phase_window_points["mean_targets"])
+            residual_parts.append(phase_window_points["residual_targets"])
+            phase_window_parts.append(phase_window_points["phase_window_mask"])
+
+        x = np.concatenate(x_parts, axis=0).astype(np.float32, copy=False)
+        y = np.concatenate(y_parts, axis=0).astype(np.float32, copy=False)
+        tau = np.concatenate(tau_parts, axis=0).astype(np.float32, copy=False)
+        targets = np.concatenate(target_parts, axis=0).astype(np.float32, copy=False)
+        mean_targets = np.concatenate(mean_parts, axis=0).astype(np.float32, copy=False)
+        residual_targets = np.concatenate(residual_parts, axis=0).astype(np.float32, copy=False)
+        phase_window_mask = np.concatenate(phase_window_parts, axis=0).astype(np.float32, copy=False)
+
+        if x.shape[0] > 1:
+            rng = self._rng_for_item(idx, include_epoch=self.resample_each_epoch, salt=1543)
+            order = rng.permutation(x.shape[0])
+            x = x[order]
+            y = y[order]
+            tau = tau[order]
+            targets = targets[order]
+            mean_targets = mean_targets[order]
+            residual_targets = residual_targets[order]
+            phase_window_mask = phase_window_mask[order]
 
         return {
             "case_id": meta.case_id,
@@ -535,6 +792,7 @@ class PackedPointChunkDataset(Dataset):
             "field_targets": torch.from_numpy(targets),
             "mean_targets": torch.from_numpy(mean_targets),
             "residual_targets": torch.from_numpy(residual_targets),
+            "phase_window_mask": torch.from_numpy(phase_window_mask),
             "freq_target": torch.tensor([case_static["freq"]], dtype=torch.float32),
         }
 
@@ -597,6 +855,7 @@ def collate_point_chunks(batch: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, 
         field_targets:  [B, Q_max, 4]
         mean_targets:   [B, Q_max, 4]
         residual_targets:[B, Q_max, 4]
+        phase_window_mask:[B, Q_max]
         point_mask:     [B, Q_max]
         freq_target:    [B, 1]
     """
@@ -623,6 +882,13 @@ def collate_point_chunks(batch: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, 
         "field_targets": torch.stack([pad_points(item["field_targets"]) for item in batch], dim=0),
         "mean_targets": torch.stack([pad_points(item["mean_targets"]) for item in batch], dim=0),
         "residual_targets": torch.stack([pad_points(item["residual_targets"]) for item in batch], dim=0),
+        "phase_window_mask": torch.stack(
+            [
+                pad_points(item.get("phase_window_mask", torch.zeros(item["query_xy"].shape[0], dtype=torch.float32)))
+                for item in batch
+            ],
+            dim=0,
+        ),
         "freq_target": torch.stack([item["freq_target"] for item in batch], dim=0),
     }
 
@@ -634,6 +900,47 @@ def collate_point_chunks(batch: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, 
 
 
 # ------------------------------- Loss functions --------------------------------
+
+
+def compute_dynamic_energy_loss(
+    pred_residual: torch.Tensor,
+    target_residual: torch.Tensor,
+    point_mask: torch.Tensor,
+    channels: Sequence[int],
+    eps: float,
+    log_space: bool,
+    use_smooth_l1: bool,
+) -> torch.Tensor:
+    channel_list = [int(ch) for ch in channels]
+    if not channel_list:
+        return pred_residual.new_zeros(())
+    if min(channel_list) < 0 or max(channel_list) >= pred_residual.shape[-1]:
+        raise ValueError(
+            f"dynamic_energy_channels={channel_list} is incompatible with residual channel count "
+            f"{pred_residual.shape[-1]}."
+        )
+
+    energy_dtype = torch.float32 if pred_residual.dtype in {torch.float16, torch.bfloat16} else pred_residual.dtype
+    selected_pred = pred_residual[..., channel_list].to(dtype=energy_dtype)
+    selected_tgt = target_residual[..., channel_list].to(device=pred_residual.device, dtype=energy_dtype)
+    mask = point_mask.to(device=pred_residual.device, dtype=energy_dtype)
+    if mask.ndim == pred_residual.ndim - 1:
+        mask = mask.unsqueeze(-1)
+
+    denom = mask.sum(dim=1).clamp_min(1.0) * float(len(channel_list))
+    pred_energy = (selected_pred.square() * mask).sum(dim=(1, 2)) / denom.squeeze(-1)
+    tgt_energy = (selected_tgt.square() * mask).sum(dim=(1, 2)) / denom.squeeze(-1)
+
+    if log_space:
+        pred_metric = torch.log(pred_energy + float(eps))
+        tgt_metric = torch.log(tgt_energy + float(eps))
+    else:
+        pred_metric = pred_energy
+        tgt_metric = tgt_energy
+
+    if use_smooth_l1:
+        return F.smooth_l1_loss(pred_metric, tgt_metric)
+    return F.mse_loss(pred_metric, tgt_metric)
 
 
 def compute_losses(
@@ -648,7 +955,8 @@ def compute_losses(
     pred_residual = outputs["pred_residual"]
     freq_pred = outputs["freq_pred"]
 
-    point_mask = batch["point_mask"].to(device=pred_field.device, dtype=pred_field.dtype).unsqueeze(-1)  # [B, Q, 1]
+    point_mask_2d = batch["point_mask"].to(device=pred_field.device, dtype=pred_field.dtype)
+    point_mask = point_mask_2d.unsqueeze(-1)  # [B, Q, 1]
 
     field_targets = batch["field_targets"]
     mean_targets = batch["mean_targets"]
@@ -664,6 +972,15 @@ def compute_losses(
     loss_mean = masked_mse(pred_mean, mean_targets)
     loss_residual = masked_mse(pred_residual, residual_targets)
     loss_freq = F.mse_loss(freq_pred, freq_target)
+    loss_dynamic_energy = compute_dynamic_energy_loss(
+        pred_residual,
+        residual_targets,
+        point_mask_2d,
+        channels=loss_cfg.get("dynamic_energy_channels", [3]),
+        eps=float(loss_cfg.get("dynamic_energy_eps", 1.0e-8)),
+        log_space=bool(loss_cfg.get("dynamic_energy_log_space", True)),
+        use_smooth_l1=bool(loss_cfg.get("dynamic_energy_use_smooth_l1", True)),
+    )
 
     loss_org_concentration, loss_org_entropy = compute_organizer_regularization(
         outputs,
@@ -678,6 +995,7 @@ def compute_losses(
         loss_mean=loss_mean,
         loss_residual=loss_residual,
         loss_freq=loss_freq,
+        loss_dynamic_energy=loss_dynamic_energy,
         loss_org_sparsity=loss_org_concentration,
         loss_org_entropy=loss_org_entropy,
     )
@@ -699,6 +1017,7 @@ def compute_losses(
         "loss_mean": loss_mean,
         "loss_residual": loss_residual,
         "loss_freq": loss_freq,
+        "loss_dynamic_energy": loss_dynamic_energy,
         "loss_org_sparsity": loss_org_concentration,
         "loss_org_entropy": loss_org_entropy,
         "loss_org_direct": org_direct["organizer_total"],
@@ -763,6 +1082,7 @@ def combine_weighted_loss_terms(
     loss_mean: torch.Tensor | float,
     loss_residual: torch.Tensor | float,
     loss_freq: torch.Tensor | float,
+    loss_dynamic_energy: torch.Tensor | float,
     loss_org_sparsity: torch.Tensor | float,
     loss_org_entropy: torch.Tensor | float,
 ) -> torch.Tensor | float:
@@ -771,6 +1091,7 @@ def combine_weighted_loss_terms(
         + float(loss_cfg.get("mean_mse_weight", 0.0)) * loss_mean
         + float(loss_cfg.get("residual_mse_weight", 1.0)) * loss_residual
         + float(loss_cfg.get("freq_mse_weight", 0.05)) * loss_freq
+        + float(loss_cfg.get("dynamic_energy_weight", 0.0)) * loss_dynamic_energy
         + float(loss_cfg.get("organizer_sparsity_weight", 0.0)) * loss_org_sparsity
         + float(loss_cfg.get("organizer_entropy_weight", 0.0)) * loss_org_entropy
     )
@@ -1006,11 +1327,12 @@ def evaluate_canonical_cases(
             "val_mean_mse": float("nan"),
             "val_residual_mse": float("nan"),
             "val_freq_mse": float("nan"),
+            "val_dynamic_energy": float("nan"),
             "val_residual_focus": float("nan"),
         }
 
     case_ids = dataset.case_ids[:max_cases] if max_cases > 0 else dataset.case_ids
-    total_losses, field_losses, mean_losses, residual_losses, freq_losses = [], [], [], [], []
+    total_losses, field_losses, mean_losses, residual_losses, freq_losses, dynamic_energy_losses = [], [], [], [], [], []
 
     val_iter = case_ids
     val_bar = None
@@ -1054,6 +1376,21 @@ def evaluate_canonical_cases(
         gt_residual = gt_stack - gt_mean.unsqueeze(0)
         loss_residual = F.mse_loss(pred_residual, gt_residual)
         residual_losses.append(loss_residual.item())
+        flat_mask = torch.ones(
+            (1, pred_residual.shape[0] * pred_residual.shape[1] * pred_residual.shape[2]),
+            device=device,
+            dtype=pred_residual.dtype,
+        )
+        loss_dynamic_energy = compute_dynamic_energy_loss(
+            pred_residual.reshape(1, -1, pred_residual.shape[-1]),
+            gt_residual.reshape(1, -1, gt_residual.shape[-1]),
+            flat_mask,
+            channels=loss_cfg.get("dynamic_energy_channels", [3]),
+            eps=float(loss_cfg.get("dynamic_energy_eps", 1.0e-8)),
+            log_space=bool(loss_cfg.get("dynamic_energy_log_space", True)),
+            use_smooth_l1=bool(loss_cfg.get("dynamic_energy_use_smooth_l1", True)),
+        )
+        dynamic_energy_losses.append(loss_dynamic_energy.item())
 
         # Frequency prediction from the behavior head.
         out_once = model.forward(
@@ -1077,6 +1414,7 @@ def evaluate_canonical_cases(
             loss_mean=loss_mean,
             loss_residual=loss_residual,
             loss_freq=loss_freq,
+            loss_dynamic_energy=loss_dynamic_energy,
             loss_org_sparsity=loss_org_sparsity,
             loss_org_entropy=loss_org_entropy,
         )
@@ -1095,6 +1433,7 @@ def evaluate_canonical_cases(
                 total=f"{total_losses[-1]:.3e}",
                 field_mse=f"{field_losses[-1]:.3e}",
                 mean_mse=f"{mean_losses[-1]:.3e}",
+                dynamic_energy=f"{dynamic_energy_losses[-1]:.3e}",
                 freq_mse=f"{freq_losses[-1]:.3e}",
             )
 
@@ -1107,6 +1446,7 @@ def evaluate_canonical_cases(
         "val_mean_mse": float(np.mean(mean_losses)),
         "val_residual_mse": float(np.mean(residual_losses)),
         "val_freq_mse": float(np.mean(freq_losses)),
+        "val_dynamic_energy": float(np.mean(dynamic_energy_losses)),
     }
     metrics["val_residual_focus"] = compute_residual_focus_metric(metrics, validation_cfg)
     return metrics
@@ -1130,6 +1470,7 @@ def evaluate_point_chunks(
             "val_mean_mse": float("nan"),
             "val_residual_mse": float("nan"),
             "val_freq_mse": float("nan"),
+            "val_dynamic_energy": float("nan"),
             "val_residual_focus": float("nan"),
         }
 
@@ -1196,6 +1537,7 @@ def evaluate_point_chunks(
             "val_mean_mse": normalize_loss_scalar(losses["loss_mean"]),
             "val_residual_mse": normalize_loss_scalar(losses["loss_residual"]),
             "val_freq_mse": normalize_loss_scalar(losses["loss_freq"]),
+            "val_dynamic_energy": normalize_loss_scalar(losses["loss_dynamic_energy"]),
         }
         row["val_residual_focus"] = compute_residual_focus_metric(row, validation_cfg)
         metric_buffer.append(row)
@@ -1204,6 +1546,7 @@ def evaluate_point_chunks(
                 total=f"{row['val_total_loss']:.3e}",
                 field_mse=f"{row['val_field_mse']:.3e}",
                 residual_mse=f"{row['val_residual_mse']:.3e}",
+                dynamic_energy=f"{row['val_dynamic_energy']:.3e}",
                 residual_focus=f"{row['val_residual_focus']:.3e}",
                 freq_mse=f"{row['val_freq_mse']:.3e}",
             )
@@ -1260,83 +1603,56 @@ def save_loss_curve(history: List[Dict[str, float]], out_path: Path) -> None:
         ys: List[float] = []
         for x, y in zip(x_values, y_values):
             y_float = float(y)
-            if math.isfinite(y_float):
+            if math.isfinite(y_float) and y_float > 0.0:
                 xs.append(float(x))
                 ys.append(y_float)
         return xs, ys
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5), dpi=140, sharex=True)
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8), dpi=140, sharex=True)
 
-    total_ax, field_ax, residual_ax = axes
+    def plot_panel(
+        ax,
+        title: str,
+        train_key: str,
+        val_key: str,
+        train_label: str,
+        val_label: str,
+    ) -> None:
+        train_values = [row.get(train_key, float("nan")) for row in history]
+        train_epochs, train_vals = finite_xy(epochs, train_values)
+        if train_epochs:
+            ax.plot(train_epochs, train_vals, linestyle="-", linewidth=1.5, label=train_label)
+        val_values = [row.get(val_key, float("nan")) for row in history]
+        val_epochs, val_vals = finite_xy(epochs, val_values)
+        if val_epochs:
+            ax.plot(
+                val_epochs,
+                val_vals,
+                linestyle=":",
+                linewidth=2.0,
+                marker="o",
+                markersize=3.5,
+                label=val_label,
+            )
+        ax.set_title(title)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.set_yscale("log")
+        ax.grid(True, alpha=0.3)
+        if ax.lines:
+            ax.legend()
 
-    train_total = [row.get("loss_total", float("nan")) for row in history]
-    val_total = [row.get("val_total_loss", float("nan")) for row in history]
-    if any(math.isfinite(float(v)) for v in train_total):
-        total_ax.plot(epochs, train_total, linestyle="-", linewidth=1.5, label="Train total")
-    val_total_epochs, val_total_vals = finite_xy(epochs, val_total)
-    if val_total_epochs:
-        total_ax.plot(
-            val_total_epochs,
-            val_total_vals,
-            linestyle=":",
-            linewidth=2.0,
-            marker="o",
-            markersize=3.5,
-            label="Val total",
-        )
-    total_ax.set_title("Total Loss")
-    total_ax.set_xlabel("Epoch")
-    total_ax.set_ylabel("Loss")
-    total_ax.set_yscale("log")
-    total_ax.grid(True, alpha=0.3)
-    if total_ax.lines:
-        total_ax.legend()
-
-    train_field = [row.get("loss_field", float("nan")) for row in history]
-    val_field = [row.get("val_field_mse", float("nan")) for row in history]
-    if any(math.isfinite(float(v)) for v in train_field):
-        field_ax.plot(epochs, train_field, linestyle="-", linewidth=1.5, label="Train field")
-    val_field_epochs, val_field_vals = finite_xy(epochs, val_field)
-    if val_field_epochs:
-        field_ax.plot(
-            val_field_epochs,
-            val_field_vals,
-            linestyle=":",
-            linewidth=2.0,
-            marker="o",
-            markersize=3.5,
-            label="Val field",
-        )
-    field_ax.set_title("Field Loss")
-    field_ax.set_xlabel("Epoch")
-    field_ax.set_ylabel("Loss")
-    field_ax.set_yscale("log")
-    field_ax.grid(True, alpha=0.3)
-    if field_ax.lines:
-        field_ax.legend()
-
-    train_residual = [row.get("loss_residual", float("nan")) for row in history]
-    val_residual = [row.get("val_residual_mse", float("nan")) for row in history]
-    if any(math.isfinite(float(v)) for v in train_residual):
-        residual_ax.plot(epochs, train_residual, linestyle="-", linewidth=1.5, label="Train residual")
-    val_residual_epochs, val_residual_vals = finite_xy(epochs, val_residual)
-    if val_residual_epochs:
-        residual_ax.plot(
-            val_residual_epochs,
-            val_residual_vals,
-            linestyle=":",
-            linewidth=2.0,
-            marker="o",
-            markersize=3.5,
-            label="Val residual",
-        )
-    residual_ax.set_title("Residual Loss")
-    residual_ax.set_xlabel("Epoch")
-    residual_ax.set_ylabel("Loss")
-    residual_ax.set_yscale("log")
-    residual_ax.grid(True, alpha=0.3)
-    if residual_ax.lines:
-        residual_ax.legend()
+    plot_panel(axes[0, 0], "Total Loss", "loss_total", "val_total_loss", "Train total", "Val total")
+    plot_panel(axes[0, 1], "Field Loss", "loss_field", "val_field_mse", "Train field", "Val field")
+    plot_panel(axes[1, 0], "Residual Loss", "loss_residual", "val_residual_mse", "Train residual", "Val residual")
+    plot_panel(
+        axes[1, 1],
+        "Dynamic Energy Loss",
+        "loss_dynamic_energy",
+        "val_dynamic_energy",
+        "Train dynamic energy",
+        "Val dynamic energy",
+    )
 
     plt.tight_layout()
     plt.savefig(out_path)
@@ -1387,7 +1703,8 @@ def main() -> None:
         f"head_dim={model_cfg.perceiver_head_dim}, "
         f"topk_env={model_cfg.perceiver_refine_topk_env}, "
         f"topk_mod={model_cfg.perceiver_refine_topk_mod}, "
-        f"query_chunk_size={model_cfg.perceiver_query_chunk_size}"
+        f"query_chunk_size={model_cfg.perceiver_query_chunk_size}, "
+        f"local_topk_mode={model_cfg.local_topk_mode}"
     )
 
     train_dataset = PackedPointChunkDataset(
@@ -1402,6 +1719,7 @@ def main() -> None:
         base_seed=int(cfg["training"].get("seed", 42)),
         randomize_cylinder_order=bool(dataset_cfg.get("randomize_cylinder_order", False)),
         point_sampling_mode=str(dataset_cfg.get("point_sampling_mode", "uniform")),
+
         wake_uniform_fraction=float(dataset_cfg.get("wake_uniform_fraction", 0.35)),
         wake_near_cylinder_fraction=float(dataset_cfg.get("wake_near_cylinder_fraction", 0.20)),
         wake_downstream_fraction=float(dataset_cfg.get("wake_downstream_fraction", 0.30)),
@@ -1412,6 +1730,15 @@ def main() -> None:
         wake_streamwise_decay=float(dataset_cfg.get("wake_streamwise_decay", 8.0)),
         wake_high_omega_quantile=float(dataset_cfg.get("wake_high_omega_quantile", 0.75)),
         wake_sampling_train_only=bool(dataset_cfg.get("wake_sampling_train_only", True)),
+
+        use_phase_window_batches=bool(dataset_cfg.get("use_phase_window_batches", False)),
+        phase_window_train_only=bool(dataset_cfg.get("phase_window_train_only", True)),
+        phase_window_fraction=float(dataset_cfg.get("phase_window_fraction", 0.25)),
+        phase_window_num_phases=int(dataset_cfg.get("phase_window_num_phases", 4)),
+        phase_window_num_xy=int(dataset_cfg.get("phase_window_num_xy", 256)),
+        phase_window_phase_mode=str(dataset_cfg.get("phase_window_phase_mode", "stratified_cycle")),
+        phase_window_xy_sampling=str(dataset_cfg.get("phase_window_xy_sampling", "omega_variance")),
+        phase_window_require_canonical_cycle=bool(dataset_cfg.get("phase_window_require_canonical_cycle", False)),
     )
     validation_cfg = cfg["validation"]
     val_mode = str(validation_cfg.get("mode", "point_chunks")).strip().lower()
@@ -1436,6 +1763,7 @@ def main() -> None:
             base_seed=int(validation_cfg.get("seed", cfg["training"].get("seed", 42))),
             randomize_cylinder_order=bool(dataset_cfg.get("randomize_cylinder_order_val", False)),
             point_sampling_mode=str(validation_cfg.get("point_sampling_mode", "uniform")),
+            
             wake_uniform_fraction=float(validation_cfg.get("wake_uniform_fraction", dataset_cfg.get("wake_uniform_fraction", 0.35))),
             wake_near_cylinder_fraction=float(validation_cfg.get("wake_near_cylinder_fraction", dataset_cfg.get("wake_near_cylinder_fraction", 0.20))),
             wake_downstream_fraction=float(validation_cfg.get("wake_downstream_fraction", dataset_cfg.get("wake_downstream_fraction", 0.30))),
@@ -1446,6 +1774,15 @@ def main() -> None:
             wake_streamwise_decay=float(validation_cfg.get("wake_streamwise_decay", dataset_cfg.get("wake_streamwise_decay", 8.0))),
             wake_high_omega_quantile=float(validation_cfg.get("wake_high_omega_quantile", dataset_cfg.get("wake_high_omega_quantile", 0.75))),
             wake_sampling_train_only=bool(validation_cfg.get("wake_sampling_train_only", dataset_cfg.get("wake_sampling_train_only", True))),
+            
+            use_phase_window_batches=bool(validation_cfg.get("use_phase_window_batches", dataset_cfg.get("use_phase_window_batches", False))),
+            phase_window_train_only=bool(validation_cfg.get("phase_window_train_only", dataset_cfg.get("phase_window_train_only", True))),
+            phase_window_fraction=float(validation_cfg.get("phase_window_fraction", dataset_cfg.get("phase_window_fraction", 0.25))),
+            phase_window_num_phases=int(validation_cfg.get("phase_window_num_phases", dataset_cfg.get("phase_window_num_phases", 4))),
+            phase_window_num_xy=int(validation_cfg.get("phase_window_num_xy", dataset_cfg.get("phase_window_num_xy", 256))),
+            phase_window_phase_mode=str(validation_cfg.get("phase_window_phase_mode", dataset_cfg.get("phase_window_phase_mode", "stratified_cycle"))),
+            phase_window_xy_sampling=str(validation_cfg.get("phase_window_xy_sampling", dataset_cfg.get("phase_window_xy_sampling", "omega_variance"))),
+            phase_window_require_canonical_cycle=bool(validation_cfg.get("phase_window_require_canonical_cycle", dataset_cfg.get("phase_window_require_canonical_cycle", False))),
         )
     else:
         canonical_val_dataset = CanonicalCycleValidationDataset(
@@ -1530,6 +1867,7 @@ def main() -> None:
         "loss_mean",
         "loss_residual",
         "loss_freq",
+        "loss_dynamic_energy",
         "loss_org_sparsity",
         "loss_org_entropy",
         "loss_org_direct",
@@ -1542,6 +1880,7 @@ def main() -> None:
         "val_mean_mse",
         "val_residual_mse",
         "val_freq_mse",
+        "val_dynamic_energy",
         "val_residual_focus",
         "val_selection_metric",
     ]
@@ -1572,6 +1911,12 @@ def main() -> None:
         f"[setup] train_point_fraction={train_point_fraction:.3f} | "
         f"min_points_per_sample={min_points_per_sample} | "
         f"effective_points_per_item~{effective_points_per_item}"
+    )
+    print(
+        f"[setup] phase_window_batches={bool(dataset_cfg.get('use_phase_window_batches', False))} | "
+        f"fraction={float(dataset_cfg.get('phase_window_fraction', 0.0)):.3f} | "
+        f"num_phases={int(dataset_cfg.get('phase_window_num_phases', 1))} | "
+        f"xy_sampling={dataset_cfg.get('phase_window_xy_sampling', 'uniform')}"
     )
     print(
         f"[setup] effective queries/optimizer-step~{format_large_int(queries_per_step)} | "
@@ -1711,6 +2056,7 @@ def main() -> None:
                     "loss_mean": normalize_loss_scalar(losses["loss_mean"]),
                     "loss_residual": normalize_loss_scalar(losses["loss_residual"]),
                     "loss_freq": normalize_loss_scalar(losses["loss_freq"]),
+                    "loss_dynamic_energy": normalize_loss_scalar(losses["loss_dynamic_energy"]),
                     "loss_org_sparsity": normalize_loss_scalar(losses["loss_org_sparsity"]),
                     "loss_org_entropy": normalize_loss_scalar(losses["loss_org_entropy"]),
                     "loss_org_direct": normalize_loss_scalar(losses["loss_org_direct"]),
@@ -1722,6 +2068,7 @@ def main() -> None:
             train_bar.set_postfix(
                 loss=f"{accumulation_buffer[-1]['loss_total']:.3e}",
                 residual=f"{accumulation_buffer[-1]['loss_residual']:.3e}",
+                dyn_energy=f"{accumulation_buffer[-1]['loss_dynamic_energy']:.3e}",
                 freq=f"{accumulation_buffer[-1]['loss_freq']:.3e}",
                 accum=f"{micro_index + 1}/{active_accum_steps}",
                 lr=f"{optimizer.param_groups[0]['lr']:.2e}",
@@ -1747,7 +2094,7 @@ def main() -> None:
         epoch_train_metrics = average_metric_dicts(epoch_metric_buffer)
         print(
             f"[epoch] {epoch:03d}/{total_epochs:03d} training finished | "
-            f"{format_metrics(epoch_train_metrics, keys=['loss_total', 'loss_field', 'loss_mean', 'loss_residual', 'loss_freq', 'loss_org_direct'])}"
+            f"{format_metrics(epoch_train_metrics, keys=['loss_total', 'loss_field', 'loss_mean', 'loss_residual', 'loss_dynamic_energy', 'loss_freq', 'loss_org_direct'])}"
         )
 
         if scheduler is not None:
@@ -1760,6 +2107,7 @@ def main() -> None:
             "val_mean_mse": float("nan"),
             "val_residual_mse": float("nan"),
             "val_freq_mse": float("nan"),
+            "val_dynamic_energy": float("nan"),
             "val_residual_focus": float("nan"),
         }
         eval_every_epochs = max(1, int(validation_cfg.get("eval_every_epochs", 1)))
@@ -1799,6 +2147,7 @@ def main() -> None:
                 f"[val] epoch={epoch:03d} total={val_metrics['val_total_loss']:.6e} "
                 f"field_mse={val_metrics['val_field_mse']:.6e} "
                 f"residual_mse={val_metrics['val_residual_mse']:.6e} "
+                f"dynamic_energy={val_metrics['val_dynamic_energy']:.6e} "
                 f"residual_focus={val_metrics['val_residual_focus']:.6e} "
                 f"mean_mse={val_metrics['val_mean_mse']:.6e} "
                 f"freq_mse={val_metrics['val_freq_mse']:.6e} "
@@ -1817,6 +2166,7 @@ def main() -> None:
                     "loss_mean": epoch_train_metrics["loss_mean"],
                     "loss_residual": epoch_train_metrics["loss_residual"],
                     "loss_freq": epoch_train_metrics["loss_freq"],
+                    "loss_dynamic_energy": epoch_train_metrics["loss_dynamic_energy"],
                     "loss_org_sparsity": epoch_train_metrics["loss_org_sparsity"],
                     "loss_org_entropy": epoch_train_metrics["loss_org_entropy"],
                     "loss_org_direct": epoch_train_metrics["loss_org_direct"],
