@@ -59,7 +59,7 @@ import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -148,6 +148,36 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=24,
         help="Number of bins in the canonical periodic attractor representation.",
+    )
+    parser.add_argument(
+        "--canonical-cycle-method",
+        choices=["contiguous", "legacy_tau_sort", "time_full_span"],
+        default="contiguous",
+        help="Method used to build canonical_cycle. 'contiguous' preserves raw-time continuity.",
+    )
+    parser.add_argument(
+        "--min-cycle-frames",
+        type=int,
+        default=8,
+        help="Minimum number of raw frames preferred for a contiguous canonical cycle window.",
+    )
+    parser.add_argument(
+        "--prefer-late-cycle",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Prefer later candidate cycle windows when scores are similar.",
+    )
+    parser.add_argument(
+        "--max-allowed-tau-sort-time-jump-factor",
+        type=float,
+        default=4.0,
+        help="Warn when tau sorting would create adjacent time jumps larger than this factor times median dt.",
+    )
+    parser.add_argument(
+        "--canonical-diagnostic",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Save canonical-cycle diagnostics and metadata for auditing preprocessing quality.",
     )
     parser.add_argument(
         "--save-cycles",
@@ -523,40 +553,548 @@ def estimate_phase(case_data: CaseData) -> Tuple[np.ndarray, np.ndarray, float, 
 # --------------------------- Canonical cycle -----------------------------------
 
 
-def build_canonical_cycle(tensor: torch.Tensor, tau: np.ndarray, num_bins: int) -> Tuple[np.ndarray, torch.Tensor]:
-    """Interpolate the case trajectory onto a uniform phase grid."""
+def _json_sanitize(value: Any) -> Any:
+    """Convert numpy/torch scalar containers into JSON-friendly Python values."""
+    if isinstance(value, dict):
+        return {str(k): _json_sanitize(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_sanitize(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return [_json_sanitize(v) for v in value.tolist()]
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+
+def compute_phase_quality(
+    times: np.ndarray,
+    tau: np.ndarray,
+    phase_unwrapped: np.ndarray,
+    tensor: Optional[torch.Tensor] = None,
+) -> Dict[str, float]:
+    """Compute scalar diagnostics for phase reliability and raw-time continuity."""
+    times_np = np.asarray(times, dtype=np.float64)
+    tau_np = np.asarray(tau, dtype=np.float64)
+    phase_np = np.asarray(phase_unwrapped, dtype=np.float64)
+    num_frames = int(times_np.size)
+    time_diffs = np.diff(times_np) if num_frames > 1 else np.asarray([], dtype=np.float64)
+    tau_diffs = np.diff(tau_np) if tau_np.size > 1 else np.asarray([], dtype=np.float64)
+    phase_diffs = np.diff(phase_np) if phase_np.size > 1 else np.asarray([], dtype=np.float64)
+
+    if num_frames > 1 and tau_np.size == num_frames:
+        order = np.argsort(tau_np)
+        tau_sorted_time_jumps = np.abs(np.diff(times_np[order]))
+        largest_time_jump_after_tau_sort = float(np.max(tau_sorted_time_jumps)) if tau_sorted_time_jumps.size else 0.0
+    else:
+        largest_time_jump_after_tau_sort = 0.0
+
+    quality: Dict[str, float] = {
+        "num_frames": float(num_frames),
+        "time_span": float(times_np[-1] - times_np[0]) if num_frames > 1 else 0.0,
+        "median_dt": float(np.median(time_diffs)) if time_diffs.size else 0.0,
+        "tau_negative_time_diffs": float(np.sum(tau_diffs < -1e-6)) if tau_diffs.size else 0.0,
+        "phase_unwrapped_negative_diffs": float(np.sum(phase_diffs < -1e-6)) if phase_diffs.size else 0.0,
+        "max_abs_phase_step": float(np.max(np.abs(phase_diffs))) if phase_diffs.size else 0.0,
+        "mean_abs_phase_step": float(np.mean(np.abs(phase_diffs))) if phase_diffs.size else 0.0,
+        "estimated_cycles": float((phase_np[-1] - phase_np[0]) / (2.0 * np.pi)) if phase_np.size > 1 else 0.0,
+        "phase_monotonic_fraction": float(np.mean(phase_diffs >= -1e-6)) if phase_diffs.size else 1.0,
+        "largest_time_jump_after_tau_sort": largest_time_jump_after_tau_sort,
+    }
+
+    if tensor is not None and tensor.ndim == 4 and tensor.shape[0] > 1 and tensor.shape[-1] > 3:
+        omega = tensor[..., 3]
+        jump_mse = torch.mean((omega[1:] - omega[:-1]).square(), dim=tuple(range(1, omega.ndim)))
+        quality["raw_consecutive_omega_jump_mse_mean"] = float(jump_mse.mean().detach().cpu().item())
+        quality["raw_consecutive_omega_jump_mse_max"] = float(jump_mse.max().detach().cpu().item())
+
+    return quality
+
+
+def _field_jump_stats(tensor: torch.Tensor, start_idx: int, end_idx: int) -> Dict[str, float]:
+    """Return closure and consecutive-jump diagnostics for an inclusive frame window."""
+    start_idx = int(start_idx)
+    end_idx = int(end_idx)
+    window = tensor[start_idx : end_idx + 1]
+    if window.shape[0] == 0:
+        return {
+            "closure_mse_omega": float("inf"),
+            "closure_mse_all": float("inf"),
+            "consecutive_jump_mse_mean_omega": float("inf"),
+            "consecutive_jump_mse_max_omega": float("inf"),
+        }
+
+    closure_all = torch.mean((window[-1] - window[0]).square())
+    if window.shape[-1] > 3:
+        omega = window[..., 3]
+        closure_omega = torch.mean((omega[-1] - omega[0]).square())
+        if omega.shape[0] > 1:
+            omega_jumps = torch.mean((omega[1:] - omega[:-1]).square(), dim=tuple(range(1, omega.ndim)))
+            jump_mean = omega_jumps.mean()
+            jump_max = omega_jumps.max()
+        else:
+            jump_mean = torch.zeros((), dtype=window.dtype, device=window.device)
+            jump_max = torch.zeros((), dtype=window.dtype, device=window.device)
+    else:
+        closure_omega = closure_all
+        if window.shape[0] > 1:
+            jumps = torch.mean((window[1:] - window[:-1]).square(), dim=tuple(range(1, window.ndim)))
+            jump_mean = jumps.mean()
+            jump_max = jumps.max()
+        else:
+            jump_mean = torch.zeros((), dtype=window.dtype, device=window.device)
+            jump_max = torch.zeros((), dtype=window.dtype, device=window.device)
+
+    return {
+        "closure_mse_omega": float(closure_omega.detach().cpu().item()),
+        "closure_mse_all": float(closure_all.detach().cpu().item()),
+        "consecutive_jump_mse_mean_omega": float(jump_mean.detach().cpu().item()),
+        "consecutive_jump_mse_max_omega": float(jump_max.detach().cpu().item()),
+    }
+
+
+def _detect_upward_crossings(signal_values: Optional[np.ndarray], times: np.ndarray) -> List[Dict[str, float]]:
+    if signal_values is None:
+        return []
+    signal = np.asarray(signal_values, dtype=np.float64)
+    times_np = np.asarray(times, dtype=np.float64)
+    if signal.size != times_np.size or signal.size < 2 or not np.all(np.isfinite(signal)):
+        return []
+
+    centered = signal - np.mean(signal)
+    crossings: List[Dict[str, float]] = []
+    for i in range(centered.size - 1):
+        a = centered[i]
+        b = centered[i + 1]
+        if a < 0.0 <= b:
+            denom = b - a
+            alpha = 0.0 if abs(denom) < 1e-12 else float(-a / denom)
+            crossings.append(
+                {
+                    "position": float(i + alpha),
+                    "time": float(times_np[i] + alpha * (times_np[i + 1] - times_np[i])),
+                }
+            )
+    return crossings
+
+
+def _estimate_period_from_inputs(
+    times: np.ndarray,
+    phase_unwrapped: Optional[np.ndarray],
+    crossings: Sequence[Dict[str, float]],
+) -> float:
+    if len(crossings) >= 2:
+        durations = np.diff(np.asarray([c["time"] for c in crossings], dtype=np.float64))
+        durations = durations[np.isfinite(durations) & (durations > 0.0)]
+        if durations.size:
+            return float(np.median(durations))
+
+    if phase_unwrapped is not None:
+        phase_np = np.asarray(phase_unwrapped, dtype=np.float64)
+        times_np = np.asarray(times, dtype=np.float64)
+        if phase_np.size > 1 and times_np.size == phase_np.size:
+            cycles = float((phase_np[-1] - phase_np[0]) / (2.0 * np.pi))
+            span = float(times_np[-1] - times_np[0])
+            if np.isfinite(cycles) and cycles > 1e-6 and span > 0.0:
+                return span / cycles
+    return float("nan")
+
+
+def _candidate_cycle_windows(
+    times: np.ndarray,
+    num_bins: int,
+    min_cycle_frames: int,
+    phase_unwrapped: Optional[np.ndarray],
+    signal_values: Optional[np.ndarray],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, float]], float]:
+    times_np = np.asarray(times, dtype=np.float64)
+    num_frames = times_np.size
+    crossings = _detect_upward_crossings(signal_values, times_np)
+    candidates: List[Dict[str, Any]] = []
+
+    for left, right in zip(crossings[:-1], crossings[1:]):
+        start_idx = int(np.ceil(left["position"]))
+        end_idx = int(np.floor(right["position"]))
+        if 0 <= start_idx < end_idx < num_frames:
+            candidates.append(
+                {
+                    "method": "contiguous_zero_crossing",
+                    "start_idx": start_idx,
+                    "end_idx": end_idx,
+                    "boundary_start_time": float(left["time"]),
+                    "boundary_end_time": float(right["time"]),
+                }
+            )
+
+    if phase_unwrapped is not None and len(candidates) == 0:
+        phase_np = np.asarray(phase_unwrapped, dtype=np.float64)
+        if phase_np.size == num_frames and num_frames > 1:
+            diffs = np.diff(phase_np)
+            start = 0
+            for i, diff in enumerate(diffs):
+                if diff < -1e-6:
+                    if i + 1 - start >= max(2, min_cycle_frames):
+                        candidates.append({"method": "contiguous_phase", "start_idx": start, "end_idx": i})
+                    start = i + 1
+            if num_frames - start >= max(2, min_cycle_frames):
+                candidates.append({"method": "contiguous_phase", "start_idx": start, "end_idx": num_frames - 1})
+
+    estimated_period = _estimate_period_from_inputs(times_np, phase_unwrapped, crossings)
+    if len(candidates) == 0 and np.isfinite(estimated_period) and estimated_period > 0.0 and num_frames > 1:
+        end_time = float(times_np[-1])
+        start_time = max(float(times_np[0]), end_time - estimated_period)
+        start_idx = int(np.searchsorted(times_np, start_time, side="left"))
+        end_idx = num_frames - 1
+        if start_idx < end_idx:
+            candidates.append(
+                {
+                    "method": "time_period_fallback",
+                    "start_idx": start_idx,
+                    "end_idx": end_idx,
+                    "boundary_start_time": start_time,
+                    "boundary_end_time": end_time,
+                }
+            )
+
+    if len(candidates) == 0 and num_frames > 1:
+        candidates.append({"method": "time_full_span_fallback", "start_idx": 0, "end_idx": num_frames - 1})
+
+    preferred_count = max(int(num_bins), int(min_cycle_frames), 8)
+    good = [c for c in candidates if (int(c["end_idx"]) - int(c["start_idx"]) + 1) >= preferred_count]
+    if good:
+        candidates = good
+    else:
+        usable = [c for c in candidates if (int(c["end_idx"]) - int(c["start_idx"]) + 1) >= max(2, int(min_cycle_frames))]
+        if usable:
+            candidates = usable
+
+    return candidates, crossings, estimated_period
+
+
+def _score_candidate(
+    candidate: Dict[str, Any],
+    tensor: torch.Tensor,
+    times: np.ndarray,
+    signal_values: Optional[np.ndarray],
+    estimated_period: float,
+    median_dt: float,
+    prefer_late_cycle: bool,
+) -> Dict[str, Any]:
+    start_idx = int(candidate["start_idx"])
+    end_idx = int(candidate["end_idx"])
+    num_frames = int(end_idx - start_idx + 1)
+    duration = float(times[end_idx] - times[start_idx]) if end_idx > start_idx else 0.0
+    internal_dt = np.diff(times[start_idx : end_idx + 1])
+    max_internal_gap = float(np.max(internal_dt)) if internal_dt.size else 0.0
+    stats = _field_jump_stats(tensor, start_idx, end_idx)
+
+    if np.isfinite(estimated_period) and estimated_period > 0.0 and duration > 0.0:
+        duration_penalty = abs(duration - estimated_period) / estimated_period
+    else:
+        duration_penalty = 0.0
+
+    if signal_values is not None:
+        signal = np.asarray(signal_values, dtype=np.float64)
+        global_std = float(np.std(signal)) + 1e-12
+        signal_amplitude = float(np.std(signal[start_idx : end_idx + 1]) / global_std)
+    else:
+        signal_amplitude = 0.0
+
+    gap_limit = 4.0 * median_dt if median_dt > 0.0 else float("inf")
+    gap_penalty = max(0.0, max_internal_gap / gap_limit - 1.0) if np.isfinite(gap_limit) and gap_limit > 0.0 else 0.0
+    smooth_mean = stats["consecutive_jump_mse_mean_omega"] + 1e-12
+    closure_ratio = stats["closure_mse_omega"] / smooth_mean
+    max_jump_ratio = stats["consecutive_jump_mse_max_omega"] / smooth_mean
+    late_bonus = (end_idx / max(tensor.shape[0] - 1, 1)) if prefer_late_cycle else 0.0
+
+    score = (
+        closure_ratio
+        + 0.10 * max_jump_ratio
+        + 0.25 * duration_penalty
+        + 2.0 * gap_penalty
+        - 0.05 * min(signal_amplitude, 4.0)
+        - 0.05 * late_bonus
+    )
+
+    enriched = dict(candidate)
+    enriched.update(stats)
+    enriched.update(
+        {
+            "source_num_frames": num_frames,
+            "source_duration": duration,
+            "max_internal_time_gap": max_internal_gap,
+            "duration_penalty": float(duration_penalty),
+            "signal_amplitude_ratio": float(signal_amplitude),
+            "candidate_score": float(score),
+        }
+    )
+    return enriched
+
+
+def _select_cycle_window(
+    tensor: torch.Tensor,
+    times: np.ndarray,
+    num_bins: int,
+    min_cycle_frames: int,
+    phase_unwrapped: Optional[np.ndarray],
+    signal_values: Optional[np.ndarray],
+    prefer_late_cycle: bool,
+) -> Tuple[Dict[str, Any], List[Dict[str, Any]], List[Dict[str, float]], float]:
+    times_np = np.asarray(times, dtype=np.float64)
+    candidates, crossings, estimated_period = _candidate_cycle_windows(
+        times=times_np,
+        num_bins=num_bins,
+        min_cycle_frames=min_cycle_frames,
+        phase_unwrapped=phase_unwrapped,
+        signal_values=signal_values,
+    )
+    if not candidates:
+        raise RuntimeError("No candidate canonical-cycle windows could be constructed.")
+
+    median_dt = float(np.median(np.diff(times_np))) if times_np.size > 1 else 0.0
+    scored = [
+        _score_candidate(c, tensor, times_np, signal_values, estimated_period, median_dt, prefer_late_cycle)
+        for c in candidates
+    ]
+    scored.sort(key=lambda c: (float(c["candidate_score"]), -int(c["end_idx"]) if prefer_late_cycle else 0))
+    return scored[0], scored, crossings, estimated_period
+
+
+def _interpolate_time_ordered(
+    flat: torch.Tensor,
+    local_phase: np.ndarray,
+    phase_centers: np.ndarray,
+    output_shape: Tuple[int, int, int, int],
+) -> torch.Tensor:
+    """Linearly interpolate flattened fields along a monotone local phase axis."""
+    local_phase_np = np.asarray(local_phase, dtype=np.float64)
+    finite = np.isfinite(local_phase_np)
+    if not np.all(finite):
+        keep = np.flatnonzero(finite)
+        local_phase_np = local_phase_np[keep]
+        flat = flat.index_select(0, torch.as_tensor(keep, device=flat.device, dtype=torch.long))
+
+    if local_phase_np.size == 0:
+        raise ValueError("Cannot interpolate canonical cycle from an empty local phase axis.")
+
+    unique_mask = np.ones(local_phase_np.shape, dtype=bool)
+    unique_mask[1:] = np.diff(local_phase_np) > 1e-9
+    if not np.all(unique_mask):
+        keep = np.flatnonzero(unique_mask)
+        local_phase_np = local_phase_np[keep]
+        flat = flat.index_select(0, torch.as_tensor(keep, device=flat.device, dtype=torch.long))
+
+    if local_phase_np.size == 1:
+        canonical = flat[:1].repeat(len(phase_centers), 1)
+        return canonical.reshape(output_shape)
+
+    canonical_flat = torch.empty((len(phase_centers), flat.shape[1]), dtype=flat.dtype, device=flat.device)
+    for i, phase_bin in enumerate(phase_centers):
+        right = int(np.searchsorted(local_phase_np, float(phase_bin), side="right"))
+        right = min(max(right, 1), len(local_phase_np) - 1)
+        left = right - 1
+        phase_left = local_phase_np[left]
+        phase_right = local_phase_np[right]
+        if phase_right <= phase_left + 1e-12:
+            canonical_flat[i] = flat[left]
+        else:
+            weight = float((float(phase_bin) - phase_left) / (phase_right - phase_left))
+            canonical_flat[i] = ((1.0 - weight) * flat[left]) + (weight * flat[right])
+    return canonical_flat.reshape(output_shape)
+
+
+def _legacy_tau_sort_canonical_cycle(
+    tensor: torch.Tensor,
+    tau: np.ndarray,
+    num_bins: int,
+) -> Tuple[np.ndarray, torch.Tensor, Dict[str, Any]]:
+    """Original global folded-tau interpolation, kept only for debug comparison."""
     num_frames, height, width, channels = tensor.shape
     flat = tensor.reshape(num_frames, -1)
     phase_centers = (np.arange(num_bins, dtype=np.float32) + 0.5) / float(num_bins)
 
-    order = np.argsort(tau)
-    tau_sorted = tau[order].astype(np.float64)
+    order = np.argsort(np.asarray(tau, dtype=np.float64))
+    tau_sorted = np.asarray(tau, dtype=np.float64)[order]
     order_torch = torch.as_tensor(order, device=tensor.device, dtype=torch.long)
     flat_sorted = flat.index_select(0, order_torch)
 
     if np.allclose(tau_sorted, tau_sorted[0]):
         canonical = flat_sorted[:1].repeat(num_bins, 1)
-        return phase_centers, canonical.reshape(num_bins, height, width, channels)
+        return phase_centers, canonical.reshape(num_bins, height, width, channels), {
+            "canonical_method": "legacy_tau_sort",
+            "source_start_frame": int(order[0]) if order.size else 0,
+            "source_end_frame": int(order[-1]) if order.size else 0,
+        }
 
     tau_ext = np.concatenate([tau_sorted[-1:] - 1.0, tau_sorted, tau_sorted[:1] + 1.0])
     flat_ext = torch.cat([flat_sorted[-1:], flat_sorted, flat_sorted[:1]], dim=0)
+    canonical = _interpolate_time_ordered(
+        flat_ext,
+        tau_ext,
+        phase_centers,
+        (num_bins, height, width, channels),
+    )
+    meta = {
+        "canonical_method": "legacy_tau_sort",
+        "source_start_frame": int(order[0]) if order.size else 0,
+        "source_end_frame": int(order[-1]) if order.size else 0,
+    }
+    return phase_centers, canonical, meta
 
-    canonical_flat = torch.empty((num_bins, flat.shape[1]), dtype=flat.dtype, device=tensor.device)
-    for i, tau_bin in enumerate(phase_centers):
-        right = int(np.searchsorted(tau_ext, tau_bin, side="right"))
-        left = max(0, right - 1)
-        if right >= len(tau_ext):
-            right = len(tau_ext) - 1
 
-        tau_left = tau_ext[left]
-        tau_right = tau_ext[right]
-        if tau_right <= tau_left + 1e-12:
-            canonical_flat[i] = flat_ext[left]
+def _time_full_span_canonical_cycle(
+    tensor: torch.Tensor,
+    num_bins: int,
+    times: Optional[np.ndarray],
+    frame_ids: Optional[np.ndarray],
+    method_name: str = "time_full_span",
+) -> Tuple[np.ndarray, torch.Tensor, Dict[str, Any]]:
+    num_frames, height, width, channels = tensor.shape
+    phase_centers = (np.arange(num_bins, dtype=np.float32) + 0.5) / float(num_bins)
+    if times is None:
+        times_np = np.arange(num_frames, dtype=np.float64)
+    else:
+        times_np = np.asarray(times, dtype=np.float64)
+    local_phase = (times_np - times_np[0]) / max(float(times_np[-1] - times_np[0]), 1e-12)
+    flat = tensor.reshape(num_frames, -1)
+    canonical = _interpolate_time_ordered(flat, local_phase, phase_centers, (num_bins, height, width, channels))
+    stats = _field_jump_stats(tensor, 0, num_frames - 1)
+    source_start_frame = int(frame_ids[0]) if frame_ids is not None and len(frame_ids) else 0
+    source_end_frame = int(frame_ids[-1]) if frame_ids is not None and len(frame_ids) else num_frames - 1
+    meta = {
+        "canonical_method": method_name,
+        "source_start_frame": source_start_frame,
+        "source_end_frame": source_end_frame,
+        "source_start_index": 0,
+        "source_end_index": int(num_frames - 1),
+        "source_start_time": float(times_np[0]),
+        "source_end_time": float(times_np[-1]),
+        "source_num_frames": int(num_frames),
+        "source_duration": float(times_np[-1] - times_np[0]) if num_frames > 1 else 0.0,
+        **stats,
+    }
+    return phase_centers, canonical, meta
+
+
+def build_canonical_cycle(
+    tensor: torch.Tensor,
+    tau: np.ndarray,
+    num_bins: int,
+    *,
+    times: Optional[np.ndarray] = None,
+    phase_unwrapped: Optional[np.ndarray] = None,
+    signal_values: Optional[np.ndarray] = None,
+    frame_ids: Optional[np.ndarray] = None,
+    method: str = "contiguous_cycle",
+    min_cycle_frames: int = 8,
+    prefer_late_cycle: bool = True,
+) -> Tuple[np.ndarray, torch.Tensor, Dict[str, Any]]:
+    """Build a canonical cycle without scrambling raw-time continuity.
+
+    The old default sorted every frame by folded tau in [0, 1).  That is unsafe
+    when the probe phase is noisy: adjacent tau-sorted samples may come from raw
+    times many seconds apart, creating a discontinuous ground-truth cycle.  The
+    default path now extracts one contiguous raw-time window, then interpolates
+    phase bins inside that window only.  The legacy builder remains available for
+    diagnostics and backwards comparisons, but should not be used for training
+    data unless the phase estimate is known to be reliable.
+    """
+    normalized_method = method.strip().lower()
+    if normalized_method in {"legacy_tau_sort", "legacy"}:
+        return _legacy_tau_sort_canonical_cycle(tensor, tau, num_bins)
+    if normalized_method in {"time_full_span", "full_span"}:
+        return _time_full_span_canonical_cycle(tensor, num_bins, times, frame_ids, method_name="time_full_span")
+
+    if times is None:
+        return _time_full_span_canonical_cycle(
+            tensor,
+            num_bins,
+            np.arange(tensor.shape[0], dtype=np.float64),
+            frame_ids,
+            method_name="time_full_span_fallback",
+        )
+
+    times_np = np.asarray(times, dtype=np.float64)
+    num_frames, height, width, channels = tensor.shape
+    phase_centers = (np.arange(num_bins, dtype=np.float32) + 0.5) / float(num_bins)
+
+    selected, candidates, crossings, estimated_period = _select_cycle_window(
+        tensor=tensor,
+        times=times_np,
+        num_bins=num_bins,
+        min_cycle_frames=min_cycle_frames,
+        phase_unwrapped=phase_unwrapped,
+        signal_values=signal_values,
+        prefer_late_cycle=prefer_late_cycle,
+    )
+
+    start_idx = int(selected["start_idx"])
+    end_idx = int(selected["end_idx"])
+    segment_times = times_np[start_idx : end_idx + 1]
+    segment = tensor[start_idx : end_idx + 1]
+
+    local_phase_source = "time"
+    if phase_unwrapped is not None:
+        phase_segment = np.asarray(phase_unwrapped, dtype=np.float64)[start_idx : end_idx + 1]
+        phase_diffs = np.diff(phase_segment)
+        phase_span = float(phase_segment[-1] - phase_segment[0]) if phase_segment.size > 1 else 0.0
+        if phase_segment.size > 1 and phase_span > 1e-8 and np.all(phase_diffs >= -1e-6):
+            local_phase = (phase_segment - phase_segment[0]) / phase_span
+            local_phase_source = "phase_unwrapped"
         else:
-            weight = float((tau_bin - tau_left) / (tau_right - tau_left))
-            canonical_flat[i] = ((1.0 - weight) * flat_ext[left]) + (weight * flat_ext[right])
+            local_phase = (segment_times - segment_times[0]) / max(float(segment_times[-1] - segment_times[0]), 1e-12)
+    else:
+        local_phase = (segment_times - segment_times[0]) / max(float(segment_times[-1] - segment_times[0]), 1e-12)
 
-    return phase_centers, canonical_flat.reshape(num_bins, height, width, channels)
+    flat = segment.reshape(segment.shape[0], -1)
+    canonical = _interpolate_time_ordered(flat, local_phase, phase_centers, (num_bins, height, width, channels))
+
+    canonical_jumps: Dict[str, float] = {}
+    if canonical.shape[0] > 1 and canonical.shape[-1] > 3:
+        omega = canonical[..., 3]
+        jumps = torch.mean((omega[1:] - omega[:-1]).square(), dim=tuple(range(1, omega.ndim)))
+        canonical_jumps = {
+            "canonical_consecutive_jump_mse_mean_omega": float(jumps.mean().detach().cpu().item()),
+            "canonical_consecutive_jump_mse_max_omega": float(jumps.max().detach().cpu().item()),
+            "canonical_closure_mse_omega": float(torch.mean((omega[-1] - omega[0]).square()).detach().cpu().item()),
+        }
+
+    source_start_frame = int(frame_ids[start_idx]) if frame_ids is not None and len(frame_ids) > start_idx else start_idx
+    source_end_frame = int(frame_ids[end_idx]) if frame_ids is not None and len(frame_ids) > end_idx else end_idx
+    meta: Dict[str, Any] = {
+        "canonical_method": str(selected["method"]),
+        "local_phase_source": local_phase_source,
+        "source_start_frame": source_start_frame,
+        "source_end_frame": source_end_frame,
+        "source_start_index": int(start_idx),
+        "source_end_index": int(end_idx),
+        "source_start_time": float(times_np[start_idx]),
+        "source_end_time": float(times_np[end_idx]),
+        "source_num_frames": int(end_idx - start_idx + 1),
+        "source_duration": float(times_np[end_idx] - times_np[start_idx]),
+        "estimated_period": float(estimated_period) if np.isfinite(estimated_period) else float("nan"),
+        "num_upward_zero_crossings": int(len(crossings)),
+        "num_candidate_cycles": int(len(candidates)),
+        "candidate_score": float(selected.get("candidate_score", float("nan"))),
+        "candidate_summaries": [
+            {
+                "method": str(c.get("method", "")),
+                "start_idx": int(c["start_idx"]),
+                "end_idx": int(c["end_idx"]),
+                "source_num_frames": int(c.get("source_num_frames", int(c["end_idx"]) - int(c["start_idx"]) + 1)),
+                "source_duration": float(c.get("source_duration", 0.0)),
+                "closure_mse_omega": float(c.get("closure_mse_omega", float("nan"))),
+                "consecutive_jump_mse_mean_omega": float(c.get("consecutive_jump_mse_mean_omega", float("nan"))),
+                "candidate_score": float(c.get("candidate_score", float("nan"))),
+            }
+            for c in candidates[:8]
+        ],
+        **{k: selected[k] for k in selected if k.startswith("closure_") or k.startswith("consecutive_")},
+        **canonical_jumps,
+    }
+
+    return phase_centers, canonical, meta
 
 
 # ------------------------- Behavior descriptors --------------------------------
@@ -772,6 +1310,8 @@ def save_structure_json(
     probe: ProbeInfo,
     dominant_frequency: float,
     save_cycles: int,
+    phase_quality: Optional[Dict[str, float]] = None,
+    canonical_meta: Optional[Dict[str, Any]] = None,
 ) -> None:
     payload = {
         "case_id": str(case_data.cfg.save.case_id),
@@ -799,6 +1339,10 @@ def save_structure_json(
         "dominant_frequency": float(dominant_frequency),
         "source_case_dir": str(case_data.record.case_dir.resolve()),
     }
+    if phase_quality is not None:
+        payload["phase_quality"] = _json_sanitize(phase_quality)
+    if canonical_meta is not None:
+        payload["canonical_cycle"] = _json_sanitize(canonical_meta)
     with (out_dir / "structure.json").open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
 
@@ -828,18 +1372,37 @@ def save_phase_metadata(
     phase_unwrapped: np.ndarray,
     signal_values: np.ndarray,
     dominant_frequency: float,
+    phase_quality: Optional[Dict[str, float]] = None,
+    canonical_meta: Optional[Dict[str, Any]] = None,
+    save_diagnostics: bool = True,
 ) -> None:
-    df = pd.DataFrame(
-        {
-            "saved_frame": case_data.frame_ids,
-            "time": case_data.times,
-            "tau": tau,
-            "phase_unwrapped": phase_unwrapped,
-            "probe_signal_v": signal_values,
-            "dominant_frequency": np.full_like(tau, dominant_frequency, dtype=np.float32),
-        }
-    )
+    payload = {
+        "saved_frame": case_data.frame_ids,
+        "time": case_data.times,
+        "tau": tau,
+        "phase_unwrapped": phase_unwrapped,
+        "probe_signal_v": signal_values,
+        "dominant_frequency": np.full_like(tau, dominant_frequency, dtype=np.float32),
+    }
+    if save_diagnostics and canonical_meta is not None:
+        selected = np.zeros_like(case_data.frame_ids, dtype=np.int32)
+        start_idx = int(canonical_meta.get("source_start_index", -1))
+        end_idx = int(canonical_meta.get("source_end_index", -1))
+        if 0 <= start_idx <= end_idx < selected.size:
+            selected[start_idx : end_idx + 1] = 1
+        payload["selected_canonical_window"] = selected
+    if save_diagnostics and phase_quality is not None:
+        for key, value in phase_quality.items():
+            if isinstance(value, (int, float, np.integer, np.floating)):
+                payload[f"phase_quality_{key}"] = np.full_like(tau, float(value), dtype=np.float32)
+
+    df = pd.DataFrame(payload)
     df.to_csv(out_dir / "phase_metadata.csv", index=False)
+
+
+def save_canonical_metadata(out_dir: Path, canonical_meta: Dict[str, Any]) -> None:
+    with (out_dir / "canonical_cycle_metadata.json").open("w", encoding="utf-8") as f:
+        json.dump(_json_sanitize(canonical_meta), f, indent=2)
 
 
 def save_sampled_points(out_dir: Path, case_data: CaseData, sampled_points: Dict[str, np.ndarray]) -> None:
@@ -860,6 +1423,10 @@ def save_quicklook_plots(
     rms_field: np.ndarray,
     signal_values: np.ndarray,
     tau: np.ndarray,
+    phase_unwrapped: Optional[np.ndarray] = None,
+    canonical_cycle: Optional[np.ndarray] = None,
+    canonical_meta: Optional[Dict[str, Any]] = None,
+    legacy_cycle: Optional[np.ndarray] = None,
 ) -> None:
     quicklook_dir = out_dir / "quicklooks"
     quicklook_dir.mkdir(parents=True, exist_ok=True)
@@ -884,19 +1451,74 @@ def save_quicklook_plots(
     fig.savefig(quicklook_dir / "mean_and_rms_fields.png")
     plt.close(fig)
 
-    fig, axes = plt.subplots(2, 1, figsize=(10, 6), constrained_layout=True, dpi=140)
+    fig, axes = plt.subplots(3, 1, figsize=(10, 8), constrained_layout=True, dpi=140, sharex=True)
     axes[0].plot(case_data.times, signal_values, lw=1.8)
-    axes[0].set_xlabel("time")
     axes[0].set_ylabel("probe v")
     axes[0].set_title("Probe signal")
     axes[0].grid(True, alpha=0.3)
 
     axes[1].plot(case_data.times, tau, lw=1.8)
-    axes[1].set_xlabel("time")
     axes[1].set_ylabel("tau")
     axes[1].set_title("Estimated phase")
     axes[1].grid(True, alpha=0.3)
+
+    if phase_unwrapped is not None:
+        axes[2].plot(case_data.times, phase_unwrapped, lw=1.8)
+    axes[2].set_xlabel("time")
+    axes[2].set_ylabel("unwrapped phase")
+    axes[2].set_title("Unwrapped phase")
+    axes[2].grid(True, alpha=0.3)
+
+    if canonical_meta is not None:
+        start_time = canonical_meta.get("source_start_time")
+        end_time = canonical_meta.get("source_end_time")
+        if start_time is not None and end_time is not None:
+            for ax in axes:
+                ax.axvspan(float(start_time), float(end_time), color="tab:green", alpha=0.16)
     fig.savefig(quicklook_dir / "phase_signal.png")
+    plt.close(fig)
+
+    if canonical_cycle is None:
+        return
+
+    raw_jump_mean = raw_jump_max = 0.0
+    fig, axes = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True, dpi=140)
+    if case_data.tensor.shape[0] > 1 and case_data.tensor.shape[-1] > 3:
+        omega = case_data.tensor[..., 3]
+        raw_jumps_t = torch.mean((omega[1:] - omega[:-1]).square(), dim=tuple(range(1, omega.ndim)))
+        raw_jumps = raw_jumps_t.detach().cpu().numpy()
+        raw_jump_mean = float(raw_jumps.mean())
+        raw_jump_max = float(raw_jumps.max())
+        axes[0].plot(np.arange(raw_jumps.size), raw_jumps, lw=1.4, label="raw time order")
+        axes[0].set_ylabel("omega jump MSE")
+        axes[0].set_title(f"Raw consecutive jumps | mean={raw_jump_mean:.3e}, max={raw_jump_max:.3e}")
+        axes[0].grid(True, alpha=0.3)
+        if canonical_meta is not None:
+            start_idx = int(canonical_meta.get("source_start_index", -1))
+            end_idx = int(canonical_meta.get("source_end_index", -1))
+            if 0 <= start_idx <= end_idx:
+                axes[0].axvspan(start_idx, max(start_idx, end_idx - 1), color="tab:green", alpha=0.16)
+
+    canonical_omega = canonical_cycle[..., 3] if canonical_cycle.shape[-1] > 3 else canonical_cycle[..., 0]
+    if canonical_omega.shape[0] > 1:
+        canonical_jumps = np.mean((canonical_omega[1:] - canonical_omega[:-1]) ** 2, axis=tuple(range(1, canonical_omega.ndim)))
+    else:
+        canonical_jumps = np.zeros((0,), dtype=np.float32)
+    if canonical_jumps.size:
+        axes[1].plot(np.arange(canonical_jumps.size), canonical_jumps, lw=1.4, label="contiguous canonical")
+    if legacy_cycle is not None:
+        legacy_omega = legacy_cycle[..., 3] if legacy_cycle.shape[-1] > 3 else legacy_cycle[..., 0]
+        if legacy_omega.shape[0] > 1:
+            legacy_jumps = np.mean((legacy_omega[1:] - legacy_omega[:-1]) ** 2, axis=tuple(range(1, legacy_omega.ndim)))
+            axes[1].plot(np.arange(legacy_jumps.size), legacy_jumps, lw=1.1, alpha=0.75, label="legacy tau sort")
+    can_mean = float(canonical_jumps.mean()) if canonical_jumps.size else 0.0
+    can_max = float(canonical_jumps.max()) if canonical_jumps.size else 0.0
+    axes[1].set_xlabel("phase-bin edge index")
+    axes[1].set_ylabel("omega jump MSE")
+    axes[1].set_title(f"Canonical consecutive jumps | mean={can_mean:.3e}, max={can_max:.3e}")
+    axes[1].grid(True, alpha=0.3)
+    axes[1].legend(loc="best")
+    fig.savefig(quicklook_dir / "canonical_continuity.png")
     plt.close(fig)
 
 
@@ -915,6 +1537,8 @@ def write_case_to_h5(
     pod: Optional[Dict[str, np.ndarray]],
     save_full_canonical_cycles: bool,
     save_cycles: int,
+    phase_quality: Optional[Dict[str, float]] = None,
+    canonical_meta: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Append one case into the packed HDF5 dataset."""
     cases_group = h5_file.require_group("cases")
@@ -931,6 +1555,11 @@ def write_case_to_h5(
     grp.attrs["probe_cylinder_index"] = int(probe.cylinder_index)
     grp.attrs["source_case_dir"] = str(case_data.record.case_dir.resolve())
     grp.attrs["save_cycles"] = int(save_cycles)
+    if canonical_meta is not None:
+        grp.attrs["canonical_method"] = str(canonical_meta.get("canonical_method", "unknown"))
+        grp.attrs["canonical_cycle_metadata_json"] = json.dumps(_json_sanitize(canonical_meta))
+    if phase_quality is not None:
+        grp.attrs["phase_quality_json"] = json.dumps(_json_sanitize(phase_quality))
 
     grp.create_dataset("times", data=case_data.times, compression="gzip")
     grp.create_dataset("tau", data=tau.astype(np.float32), compression="gzip")
@@ -980,9 +1609,65 @@ def process_case(
 
     report_state(f"[INFO] [{case_label}] Estimating phase signal and dominant frequency.", progress_bar)
     tau, phase_unwrapped, dominant_frequency, probe, signal_values = estimate_phase(case_data)
+    phase_quality = compute_phase_quality(case_data.times, tau, phase_unwrapped, tensor=case_data.tensor)
+
+    median_dt = float(phase_quality.get("median_dt", 0.0))
+    tau_sort_jump = float(phase_quality.get("largest_time_jump_after_tau_sort", 0.0))
+    max_tau_sort_jump = float(args.max_allowed_tau_sort_time_jump_factor) * median_dt if median_dt > 0.0 else float("inf")
+    if float(phase_quality.get("phase_unwrapped_negative_diffs", 0.0)) > 0.0:
+        report_state(
+            (
+                f"[WARN] case {case_data.cfg.save.case_id}: Hilbert phase is nonmonotone "
+                f"({int(phase_quality['phase_unwrapped_negative_diffs'])} negative steps)."
+            ),
+            progress_bar,
+        )
+    if tau_sort_jump > max_tau_sort_jump:
+        report_state(
+            (
+                f"[WARN] case {case_data.cfg.save.case_id}: folded-tau sorting would create a "
+                f"{tau_sort_jump:.3g}s adjacent time jump (> {args.max_allowed_tau_sort_time_jump_factor:.1f}x median dt)."
+            ),
+            progress_bar,
+        )
 
     report_state(f"[INFO] [{case_label}] Building canonical cycle with {args.phase_bins} phase bins.", progress_bar)
-    phase_centers, canonical_cycle_t = build_canonical_cycle(case_data.tensor, tau, args.phase_bins)
+    phase_centers, canonical_cycle_t, canonical_meta = build_canonical_cycle(
+        case_data.tensor,
+        tau,
+        args.phase_bins,
+        times=case_data.times,
+        phase_unwrapped=phase_unwrapped,
+        signal_values=signal_values,
+        frame_ids=case_data.frame_ids,
+        method=args.canonical_cycle_method,
+        min_cycle_frames=int(args.min_cycle_frames),
+        prefer_late_cycle=bool(args.prefer_late_cycle),
+    )
+    canonical_meta["phase_quality"] = phase_quality
+    report_state(
+        (
+            f"[INFO] [{case_label}] Canonical cycle method={canonical_meta.get('canonical_method')} "
+            f"frames={canonical_meta.get('source_start_frame')}-{canonical_meta.get('source_end_frame')} "
+            f"duration={float(canonical_meta.get('source_duration', 0.0)):.3g}."
+        ),
+        progress_bar,
+    )
+    raw_jump_mean = float(phase_quality.get("raw_consecutive_omega_jump_mse_mean", 0.0))
+    closure = float(canonical_meta.get("closure_mse_omega", canonical_meta.get("canonical_closure_mse_omega", 0.0)))
+    if raw_jump_mean > 0.0 and closure > 25.0 * raw_jump_mean:
+        report_state(
+            (
+                f"[WARN] case {case_data.cfg.save.case_id}: selected cycle closure is high "
+                f"(omega MSE={closure:.3e}, raw jump mean={raw_jump_mean:.3e})."
+            ),
+            progress_bar,
+        )
+    if str(canonical_meta.get("canonical_method", "")).endswith("fallback") or args.canonical_cycle_method == "time_full_span":
+        report_state(
+            f"[WARN] case {case_data.cfg.save.case_id}: using canonical-cycle fallback method {canonical_meta.get('canonical_method')}.",
+            progress_bar,
+        )
 
     report_state(f"[INFO] [{case_label}] Computing behavior statistics.", progress_bar)
     behavior = compute_case_statistics(case_data, mean_field_t, residual_t, rms_field_t)
@@ -995,6 +1680,22 @@ def process_case(
     mean_field = behavior["mean_field"]
     rms_field = behavior["rms_field"]
     canonical_cycle = canonical_cycle_t.detach().cpu().numpy().astype(np.float32, copy=False)
+    legacy_cycle_for_quicklook = None
+    if args.quicklook and args.canonical_diagnostic and args.canonical_cycle_method != "legacy_tau_sort":
+        _, legacy_cycle_t, legacy_meta = build_canonical_cycle(
+            case_data.tensor,
+            tau,
+            args.phase_bins,
+            method="legacy_tau_sort",
+        )
+        legacy_cycle_for_quicklook = legacy_cycle_t.detach().cpu().numpy().astype(np.float32, copy=False)
+        if legacy_cycle_for_quicklook.shape[0] > 1 and legacy_cycle_for_quicklook.shape[-1] > 3:
+            legacy_omega = legacy_cycle_for_quicklook[..., 3]
+            legacy_jumps = np.mean((legacy_omega[1:] - legacy_omega[:-1]) ** 2, axis=tuple(range(1, legacy_omega.ndim)))
+            canonical_meta["legacy_tau_sort_omega_jump_mse_mean"] = float(legacy_jumps.mean())
+            canonical_meta["legacy_tau_sort_omega_jump_mse_max"] = float(legacy_jumps.max())
+        canonical_meta["legacy_tau_sort_metadata"] = legacy_meta
+
     canonical_cycle = np.tile(canonical_cycle, (int(args.save_cycles), 1, 1, 1))
     phase_centers = np.concatenate(
         [phase_centers + float(cycle_idx) for cycle_idx in range(int(args.save_cycles))],
@@ -1016,15 +1717,46 @@ def process_case(
     )
 
     report_state(f"[INFO] [{case_label}] Saving processed outputs to {out_dir}.", progress_bar)
-    save_structure_json(out_dir, case_data, probe, dominant_frequency, save_cycles=args.save_cycles)
+    save_structure_json(
+        out_dir,
+        case_data,
+        probe,
+        dominant_frequency,
+        save_cycles=args.save_cycles,
+        phase_quality=phase_quality,
+        canonical_meta=canonical_meta,
+    )
     save_behavior_summary(out_dir, behavior, pod)
     save_canonical_cycle(out_dir, canonical_cycle, phase_centers, save_full=args.save_full_canonical_cycles)
-    save_phase_metadata(out_dir, case_data, tau, phase_unwrapped, signal_values, dominant_frequency)
+    if args.canonical_diagnostic:
+        save_canonical_metadata(out_dir, canonical_meta)
+    save_phase_metadata(
+        out_dir,
+        case_data,
+        tau,
+        phase_unwrapped,
+        signal_values,
+        dominant_frequency,
+        phase_quality=phase_quality,
+        canonical_meta=canonical_meta,
+        save_diagnostics=bool(args.canonical_diagnostic),
+    )
     save_sampled_points(out_dir, case_data, sampled_points)
 
     if args.quicklook:
         report_state(f"[INFO] [{case_label}] Writing quicklook plots.", progress_bar)
-        save_quicklook_plots(out_dir, case_data, mean_field, rms_field, signal_values, tau)
+        save_quicklook_plots(
+            out_dir,
+            case_data,
+            mean_field,
+            rms_field,
+            signal_values,
+            tau,
+            phase_unwrapped=phase_unwrapped,
+            canonical_cycle=canonical_cycle,
+            canonical_meta=canonical_meta,
+            legacy_cycle=legacy_cycle_for_quicklook,
+        )
 
     report_state(f"[INFO] [{case_label}] Appending case to packed HDF5 dataset.", progress_bar)
     write_case_to_h5(
@@ -1042,6 +1774,8 @@ def process_case(
         pod=pod,
         save_full_canonical_cycles=args.save_full_canonical_cycles,
         save_cycles=args.save_cycles,
+        phase_quality=phase_quality,
+        canonical_meta=canonical_meta,
     )
 
     report_state(
@@ -1059,6 +1793,12 @@ def process_case(
         "phase_bins": int(args.phase_bins),
         "save_cycles": int(args.save_cycles),
         "dominant_frequency": float(dominant_frequency),
+        "canonical_method": str(canonical_meta.get("canonical_method", "")),
+        "canonical_source_start_frame": int(canonical_meta.get("source_start_frame", -1)),
+        "canonical_source_end_frame": int(canonical_meta.get("source_end_frame", -1)),
+        "canonical_closure_mse_omega": float(canonical_meta.get("closure_mse_omega", canonical_meta.get("canonical_closure_mse_omega", float("nan")))),
+        "phase_unwrapped_negative_diffs": int(phase_quality.get("phase_unwrapped_negative_diffs", 0)),
+        "largest_time_jump_after_tau_sort": float(phase_quality.get("largest_time_jump_after_tau_sort", 0.0)),
         "fluctuation_energy": float(behavior["fluctuation_energy"][0]),
         "sampled_points": int(sampled_points["tau"].size),
         "output_dir": str(out_dir.resolve()),
@@ -1106,6 +1846,7 @@ def main() -> None:
         h5_file.attrs["channel_order"] = json.dumps(FIELD_CHANNEL_ORDER)
         h5_file.attrs["input_root"] = str(args.input_root)
         h5_file.attrs["output_root"] = str(args.output_root)
+        h5_file.attrs["canonical_cycle_method"] = str(args.canonical_cycle_method)
 
         with tqdm(
             total=len(case_records),

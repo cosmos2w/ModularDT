@@ -184,6 +184,50 @@ By default:
 Best-checkpoint selection now follows `validation.best_metric_name`, which
 defaults to `val_residual_focus`.
 
+## Organizer Visualization Diagnostics
+
+`src/evaluate.py` writes several organization diagnostics for each evaluated
+case. The old ambiguous physical-plus-tripartite figure has been split into
+clearer outputs:
+
+1. `organization_physical_*.png`
+   - physical-domain overlay plus a hyperedge summary table
+   - cylinder locations, environment tokens, source centers, wake centers, and
+     learned wake-axis arrows
+   - source-to-wake and cylinder-to-hyperedge links use periodic shortest-image
+     geometry
+
+2. `organization_matrices_*.png`
+   - `A_mh` heatmap for cylinder/module to hyperedge assignment
+   - `A_eh` heatmap for environment-token to hyperedge assignment
+   - per-hyperedge spatial maps showing where each hyperedge owns environment
+     tokens
+
+3. `organization_sankey_*.png`
+   - abstract tripartite graph for topology/debugging
+   - `C_i` means cylinder/module
+   - `H_k` means learned interaction hyperedge/group
+   - `EnvGroup_k` means environment tokens dominated by `H_k`
+   - hyperedge and environment-group rows use collision-avoiding vertical
+     layout, so labels do not all inherit the same wake-center y coordinate
+
+4. `organization_summary_*.csv` and `organization_summary_*.json`
+   - machine-readable hyperedge summary with strength, source/wake centers,
+     wake axis, extent, top cylinders, and top environment tokens
+
+Useful evaluator arguments:
+
+- `--organization-view {all,physical,matrices,sankey}` selects which diagnostic
+  figures to render; the default is `all`
+- `--organization-threshold` controls which soft assignment edges are drawn
+- `--topk-me-links` controls optional light cylinder-to-environment links
+- `--organization-topk-cylinders` controls how many cylinder memberships appear
+  in the summary table/export
+- `--organization-topk-env` controls how many environment tokens appear in the
+  summary table/export
+- `--organization-min-gap` controls vertical spacing in the Sankey layout
+- `--no-organization-table` hides the side table in the physical view
+
 ## Default Config Highlights
 
 The default config lives in `Config_Train/train_config_template.json`.
@@ -238,6 +282,34 @@ python src/train.py --config train_config_template.json --device cuda:0
 ```bash
 python src/evaluate.py --case-id 0002 --dataset-case-id 0161 --dataset-split test
 ```
+
+### 5. Evaluate the generative model
+
+Stage-2 generative evaluation has two modes. Snapshot mode preserves the old
+single-phase workflow:
+
+```bash
+python src/evaluate_gen.py --stage 2 --case-id gen001 --split test --phase-index 0 --n-samples 4
+```
+
+Cycle mode evaluates one case across selected canonical phase bins and writes a
+compressed `cycle_reconstruction.npz`, `cycle_metrics.json`,
+`per_phase_metrics.csv`, `cycle_omega.gif`, `cycle_omega_gt_generated.gif`,
+and `cycle_montage_omega.png`:
+
+```bash
+python src/evaluate_gen.py --stage 2 --case-id gen001 --split test --cycle --n-samples 4
+```
+
+The stage-2 rectified-flow model is trained on phase snapshots, so cycle mode
+generates one tau-conditioned stochastic field per phase. `--cycle-noise-mode`
+controls the initial latent coupling across phases:
+
+- `independent`: fresh latent noise for every phase
+- `shared`: one latent noise field reused for all phases in a sample
+- `harmonic`: sinusoidal latent interpolation over tau for smoother samples
+
+For memory control, use `--phase-chunk-size` and `--sample-chunk-size`.
 
 ## Directory Layout
 

@@ -17,6 +17,7 @@ python src/evaluate.py --case-id 0001 --dataset-case-id 0161 --dataset-split tra
 """
 
 import argparse
+import csv
 from datetime import datetime
 from pathlib import Path
 import json
@@ -27,6 +28,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.lines import Line2D
+from matplotlib.patches import FancyArrowPatch
 
 from model import HypergraphNeuralFieldModel, ModelConfig
 
@@ -58,6 +61,16 @@ def parse_args() -> argparse.Namespace:
                         help="Minimum soft weight used when drawing organization edges.")
     parser.add_argument("--topk-me-links", type=int, default=3,
                         help="Number of strongest module-environment links to draw per cylinder.")
+    parser.add_argument("--organization-view", choices=["all", "physical", "matrices", "sankey"], default="all",
+                        help="Which organization diagnostic view to render.")
+    parser.add_argument("--organization-topk-cylinders", type=int, default=3,
+                        help="Number of top cylinder memberships to list for each hyperedge.")
+    parser.add_argument("--organization-topk-env", type=int, default=5,
+                        help="Number of top environment tokens to list for each hyperedge.")
+    parser.add_argument("--organization-min-gap", type=float, default=0.08,
+                        help="Minimum normalized vertical gap for Sankey node layout.")
+    parser.add_argument("--organization-table", action=argparse.BooleanOptionalAction, default=True,
+                        help="Show the hyperedge summary table in the physical organization view.")
 
     return parser.parse_args()
 
@@ -200,256 +213,617 @@ def _coords_norm_to_physical(coords_norm: np.ndarray, case: Dict) -> np.ndarray:
     return coords_xy
 
 
-def _compute_hyperedge_centroids(env_xy: np.ndarray, A_eh: np.ndarray) -> np.ndarray:
-    """Weighted physical centroids of hyperedges in environment space."""
-    num_hyper = A_eh.shape[1]
-    centroids = np.zeros((num_hyper, 2), dtype=np.float32)
-    for k in range(num_hyper):
-        w = A_eh[:, k]
-        w_sum = float(np.sum(w)) + 1e-8
-        centroids[k] = np.sum(env_xy * w[:, None], axis=0) / w_sum
-    return centroids
+def _as_numpy_first(out: Dict, key: str, default: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+    if key not in out:
+        return default
+    value = out[key]
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu().numpy()
+    value = np.asarray(value)
+    if value.ndim >= 3:
+        return value[0]
+    if value.ndim == 2 and key in {"hyper_strength", "hyper_wake_extent"}:
+        return value[0]
+    return value
 
 
-def render_soft_organization(
-    save_path: Path,
-    out: Dict,
-    case: Dict,
-    *,
-    threshold: float = 0.15,
-    topk_me_links: int = 3,
-) -> None:
-    """
-    Visualize the learned soft organization in two views:
-      (1) domain-space soft overlay
-      (2) abstract tripartite hypergraph
-    """
+def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
     centers = np.asarray(case["centers"], dtype=np.float32)
     num_cyl = centers.shape[0]
-    cylinder_radius = float(case.get("cylinder_radius", 0.5))
+    A_me = _as_numpy_first(out, "A_me")
+    A_mh = _as_numpy_first(out, "A_mh")
+    A_eh = _as_numpy_first(out, "A_eh")
+    env_coords_norm = _as_numpy_first(out, "env_coords")
+    hyper_source_norm = _as_numpy_first(out, "hyper_source_coords")
+    hyper_wake_norm = _as_numpy_first(out, "hyper_wake_coords", hyper_source_norm)
+    hyper_wake_axis = _as_numpy_first(out, "hyper_wake_axis")
 
-    A_me = out["A_me"][0].detach().cpu().numpy()[:num_cyl]                   # [N, M_env]
-    A_mh = out["A_mh"][0].detach().cpu().numpy()[:num_cyl]                   # [N, K_h]
-    A_eh = out["A_eh"][0].detach().cpu().numpy()                             # [M_env, K_h]
-    env_coords_norm = out["env_coords"][0].detach().cpu().numpy()            # [M_env, 2]
-    hyper_source_norm = out["hyper_source_coords"][0].detach().cpu().numpy() # [K_h, 2]
-    hyper_wake_norm = out["hyper_wake_coords"][0].detach().cpu().numpy()     # [K_h, 2]
-    hyper_wake_axis = out["hyper_wake_axis"][0].detach().cpu().numpy()       # [K_h, 2]
-    hyper_strength = out["hyper_strength"][0].detach().cpu().numpy().reshape(-1)
+    if A_me is None or A_mh is None or A_eh is None or env_coords_norm is None or hyper_source_norm is None:
+        raise KeyError("Organization outputs are missing one of A_me, A_mh, A_eh, env_coords, hyper_source_coords.")
+
+    A_me = np.asarray(A_me[:num_cyl], dtype=np.float32)
+    A_mh = np.asarray(A_mh[:num_cyl], dtype=np.float32)
+    A_eh = np.asarray(A_eh, dtype=np.float32)
+    env_coords_norm = np.asarray(env_coords_norm, dtype=np.float32)
+    hyper_source_norm = np.asarray(hyper_source_norm, dtype=np.float32)
+    hyper_wake_norm = np.asarray(hyper_wake_norm, dtype=np.float32)
+    num_hyper = A_eh.shape[1]
+
+    if hyper_wake_axis is None:
+        hyper_wake_axis = hyper_wake_norm - hyper_source_norm
+    hyper_wake_axis = np.asarray(hyper_wake_axis, dtype=np.float32).reshape(num_hyper, 2)
+
+    hyper_wake_extent = _as_numpy_first(out, "hyper_wake_extent")
+    if hyper_wake_extent is None:
+        hyper_wake_extent = np.full((num_hyper,), np.nan, dtype=np.float32)
+    hyper_wake_extent = np.asarray(hyper_wake_extent, dtype=np.float32).reshape(-1)[:num_hyper]
+
+    hyper_strength = _as_numpy_first(out, "hyper_strength")
+    if hyper_strength is None:
+        module_mass = A_mh.sum(axis=0) / max(float(num_cyl), 1.0)
+        env_mass = A_eh.mean(axis=0)
+        hyper_strength = 0.5 * (module_mass + env_mass)
+    hyper_strength = np.asarray(hyper_strength, dtype=np.float32).reshape(-1)[:num_hyper]
 
     env_xy = _env_coords_to_physical(env_coords_norm, case)
     hyper_source_xy = _coords_norm_to_physical(hyper_source_norm, case)
     hyper_wake_xy = _coords_norm_to_physical(hyper_wake_norm, case)
-
     token_group = np.argmax(A_eh, axis=1)
     token_conf = np.max(A_eh, axis=1)
-
-    num_hyper = A_eh.shape[1]
+    bounds = _grid_domain_bounds(case)
     colors = plt.get_cmap("tab10")(np.arange(num_hyper) % 10)
 
-    bounds = _grid_domain_bounds(case)
+    return {
+        "centers": centers,
+        "cylinder_radius": float(case.get("cylinder_radius", 0.5)),
+        "A_me": A_me,
+        "A_mh": A_mh,
+        "A_eh": A_eh,
+        "env_coords_norm": env_coords_norm,
+        "env_xy": env_xy,
+        "hyper_source_norm": hyper_source_norm,
+        "hyper_wake_norm": hyper_wake_norm,
+        "hyper_source_xy": hyper_source_xy,
+        "hyper_wake_xy": hyper_wake_xy,
+        "hyper_wake_axis": hyper_wake_axis,
+        "hyper_wake_extent": hyper_wake_extent,
+        "hyper_strength": hyper_strength,
+        "token_group": token_group,
+        "token_conf": token_conf,
+        "bounds": bounds,
+        "colors": colors,
+    }
+
+
+def periodic_min_image_delta_physical(p0: np.ndarray, p1: np.ndarray, bounds: Dict[str, float]) -> tuple[float, float]:
+    p0 = np.asarray(p0, dtype=np.float64)
+    p1 = np.asarray(p1, dtype=np.float64)
+    dx = float(p1[0] - p0[0])
+    dy = float(p1[1] - p0[1])
+    lx = float(bounds["lx"])
+    ly = float(bounds["ly"])
+    if lx > 0.0:
+        dx = ((dx + 0.5 * lx) % lx) - 0.5 * lx
+    if ly > 0.0:
+        dy = ((dy + 0.5 * ly) % ly) - 0.5 * ly
+    return dx, dy
+
+
+def periodic_shifted_endpoint(p0: np.ndarray, p1: np.ndarray, bounds: Dict[str, float]) -> np.ndarray:
+    dx, dy = periodic_min_image_delta_physical(p0, p1, bounds)
+    p0 = np.asarray(p0, dtype=np.float64)
+    return np.asarray([p0[0] + dx, p0[1] + dy], dtype=np.float64)
+
+
+def _wrap_point_to_bounds(point: np.ndarray, bounds: Dict[str, float]) -> np.ndarray:
+    wrapped = np.asarray(point, dtype=np.float64).copy()
+    wrapped[0] = bounds["x_min"] + ((wrapped[0] - bounds["x_min"]) % bounds["lx"])
+    wrapped[1] = bounds["y_min"] + ((wrapped[1] - bounds["y_min"]) % bounds["ly"])
+    return wrapped
+
+
+def draw_periodic_segment(ax, p0: np.ndarray, p1: np.ndarray, bounds: Dict[str, float], **plot_kwargs) -> None:
+    shifted = periodic_shifted_endpoint(p0, p1, bounds)
+    p0 = np.asarray(p0, dtype=np.float64)
+    p1 = np.asarray(p1, dtype=np.float64)
+    wraps = bool(np.linalg.norm(shifted - p1) > 1e-6)
+    kwargs = dict(plot_kwargs)
+    if wraps:
+        kwargs["alpha"] = min(float(kwargs.get("alpha", 1.0)), 0.55)
+    ax.plot([p0[0], shifted[0]], [p0[1], shifted[1]], **kwargs)
+    if wraps:
+        mid = _wrap_point_to_bounds(0.5 * (p0 + shifted), bounds)
+        ax.scatter(
+            [mid[0]],
+            [mid[1]],
+            marker="x",
+            s=24,
+            c=[kwargs.get("color", "k")],
+            linewidths=0.8,
+            alpha=0.75,
+            zorder=kwargs.get("zorder", 3) + 1,
+        )
+
+
+def topk_cylinder_members(A_mh: np.ndarray, k: int, top_n: int = 3) -> List[Dict]:
+    top_idx = np.argsort(-A_mh[:, k])[:max(0, top_n)]
+    return [{"id": int(i), "weight": float(A_mh[i, k])} for i in top_idx]
+
+
+def topk_env_members(A_eh: np.ndarray, k: int, env_xy: np.ndarray, top_n: int = 5) -> List[Dict]:
+    top_idx = np.argsort(-A_eh[:, k])[:max(0, top_n)]
+    return [
+        {"id": int(j), "weight": float(A_eh[j, k]), "x": float(env_xy[j, 0]), "y": float(env_xy[j, 1])}
+        for j in top_idx
+    ]
+
+
+def compute_hyperedge_summary(
+    org: Dict,
+    *,
+    case_id: str,
+    tau_value: float,
+    topk_cylinders: int = 3,
+    topk_env: int = 5,
+) -> List[Dict]:
+    A_mh = org["A_mh"]
+    A_eh = org["A_eh"]
+    env_xy = org["env_xy"]
+    token_group = org["token_group"]
+    summaries = []
+    for k in range(A_eh.shape[1]):
+        top_cyl = topk_cylinder_members(A_mh, k, top_n=topk_cylinders)
+        top_env = topk_env_members(A_eh, k, env_xy, top_n=topk_env)
+        env_token_count = int(np.sum(token_group == k))
+        env_mass_sum = float(np.sum(A_eh[:, k]))
+        summaries.append(
+            {
+                "case_id": str(case_id),
+                "tau": float(tau_value),
+                "hyperedge_id": int(k),
+                "strength": float(org["hyper_strength"][k]),
+                "source": {
+                    "x": float(org["hyper_source_xy"][k, 0]),
+                    "y": float(org["hyper_source_xy"][k, 1]),
+                },
+                "wake": {
+                    "x": float(org["hyper_wake_xy"][k, 0]),
+                    "y": float(org["hyper_wake_xy"][k, 1]),
+                },
+                "wake_axis": {
+                    "x": float(org["hyper_wake_axis"][k, 0]),
+                    "y": float(org["hyper_wake_axis"][k, 1]),
+                },
+                "wake_extent": float(org["hyper_wake_extent"][k]),
+                "top_cylinders": top_cyl,
+                "env_token_count": env_token_count,
+                "env_mass_sum": env_mass_sum,
+                "env_mass_mean": float(np.mean(A_eh[:, k])),
+                "top_env_tokens": top_env,
+            }
+        )
+    return summaries
+
+
+def _format_members(prefix: str, members: List[Dict], limit: Optional[int] = None) -> str:
+    shown = members if limit is None else members[:limit]
+    return ", ".join(f"{prefix}{m['id']}:{m['weight']:.2f}" for m in shown)
+
+
+def write_organization_summary(save_csv: Path, save_json: Path, summaries: List[Dict]) -> None:
+    rows = []
+    for item in summaries:
+        rows.append(
+            {
+                "case_id": item["case_id"],
+                "tau": item["tau"],
+                "hyperedge_id": item["hyperedge_id"],
+                "strength": item["strength"],
+                "source_x": item["source"]["x"],
+                "source_y": item["source"]["y"],
+                "wake_x": item["wake"]["x"],
+                "wake_y": item["wake"]["y"],
+                "axis_x": item["wake_axis"]["x"],
+                "axis_y": item["wake_axis"]["y"],
+                "extent": item["wake_extent"],
+                "env_token_count": item["env_token_count"],
+                "env_mass_sum": item["env_mass_sum"],
+                "env_mass_mean": item["env_mass_mean"],
+                "top_cylinders": ",".join(f"C{m['id']}" for m in item["top_cylinders"]),
+                "top_cylinder_weights": ",".join(f"{m['weight']:.6g}" for m in item["top_cylinders"]),
+                "top_env_tokens": ",".join(f"E{m['id']}" for m in item["top_env_tokens"]),
+                "top_env_weights": ",".join(f"{m['weight']:.6g}" for m in item["top_env_tokens"]),
+            }
+        )
+    with save_csv.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else [])
+        writer.writeheader()
+        writer.writerows(rows)
+    with save_json.open("w", encoding="utf-8") as f:
+        json.dump({"hyperedges": summaries}, f, indent=2)
+
+
+def render_organization_physical_summary(
+    save_path: Path,
+    org: Dict,
+    summaries: List[Dict],
+    case: Dict,
+    *,
+    threshold: float = 0.15,
+    topk_me_links: int = 3,
+    show_table: bool = True,
+) -> None:
+    bounds = org["bounds"]
     extent = (bounds["x_min"], bounds["x_min"] + bounds["lx"], bounds["y_min"], bounds["y_min"] + bounds["ly"])
-
-    fig, axes = plt.subplots(1, 2, figsize=(13, 5.8), dpi=150, constrained_layout=True)
-
-    # ------------------------------------------------------------------
-    # Panel 1: physical-domain overlay
-    # ------------------------------------------------------------------
-    ax = axes[0]
-    ax.set_title("Soft organization in physical domain")
+    num_hyper = org["A_eh"].shape[1]
+    num_cyl = org["centers"].shape[0]
+    fig, axes = plt.subplots(
+        1,
+        2 if show_table else 1,
+        figsize=(16, 7) if show_table else (9, 7),
+        dpi=150,
+        constrained_layout=True,
+        gridspec_kw={"width_ratios": [1.55, 1.0]} if show_table else None,
+    )
+    ax = axes[0] if show_table else axes
+    ax.set_title("Physical organizer overlay")
     ax.set_xlim(extent[0], extent[1])
     ax.set_ylim(extent[2], extent[3])
     ax.set_aspect("equal")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
 
-    # Environment tokens colored by dominant hyperedge assignment.
     for k in range(num_hyper):
-        mask = token_group == k
+        mask = org["token_group"] == k
         if np.any(mask):
             ax.scatter(
-                env_xy[mask, 0],
-                env_xy[mask, 1],
-                s=20 + 80 * token_conf[mask],
-                c=[colors[k]],
-                alpha=0.15 + 0.65 * token_conf[mask],
+                org["env_xy"][mask, 0],
+                org["env_xy"][mask, 1],
+                s=16 + 80 * org["token_conf"][mask],
+                c=[org["colors"][k]],
+                alpha=0.12 + 0.62 * org["token_conf"][mask],
                 linewidths=0.0,
+                zorder=1,
             )
 
-    bounds = _grid_domain_bounds(case)
-    arrow_len = 0.08 * min(bounds["lx"], bounds["ly"])
+    arrow_len = 0.09 * min(bounds["lx"], bounds["ly"])
     axis_phys = np.stack(
-        [
-            hyper_wake_axis[:, 0] * bounds["lx"],
-            hyper_wake_axis[:, 1] * bounds["ly"],
-        ],
+        [org["hyper_wake_axis"][:, 0] * bounds["lx"], org["hyper_wake_axis"][:, 1] * bounds["ly"]],
         axis=-1,
     )
     axis_norm = np.linalg.norm(axis_phys, axis=1, keepdims=True)
-    axis_phys = np.where(axis_norm > 1e-8, axis_phys / np.maximum(axis_norm, 1e-8), np.array([[1.0, 0.0]], dtype=np.float32))
+    axis_phys = np.where(axis_norm > 1e-8, axis_phys / np.maximum(axis_norm, 1e-8), np.array([[1.0, 0.0]]))
 
-    # Hyperedge source and wake geometry.
     for k in range(num_hyper):
-        ax.scatter(
-            hyper_source_xy[k, 0],
-            hyper_source_xy[k, 1],
-            s=90,
-            marker="X",
-            c=[colors[k]],
-            edgecolors="k",
-            linewidths=0.7,
-            zorder=4,
-        )
-        ax.scatter(
-            hyper_wake_xy[k, 0],
-            hyper_wake_xy[k, 1],
-            s=140 + 140 * float(hyper_strength[k]),
-            marker="*",
-            c=[colors[k]],
-            edgecolors="k",
-            linewidths=0.7,
-            zorder=4,
-        )
-        ax.plot(
-            [hyper_source_xy[k, 0], hyper_wake_xy[k, 0]],
-            [hyper_source_xy[k, 1], hyper_wake_xy[k, 1]],
+        color = org["colors"][k]
+        draw_periodic_segment(
+            ax,
+            org["hyper_source_xy"][k],
+            org["hyper_wake_xy"][k],
+            bounds,
             linestyle=":",
-            color=colors[k],
-            alpha=0.7,
-            linewidth=1.2,
+            color=color,
+            alpha=0.75,
+            linewidth=1.4,
             zorder=3,
         )
+        ax.scatter(org["hyper_source_xy"][k, 0], org["hyper_source_xy"][k, 1], s=100, marker="X", c=[color], edgecolors="k", linewidths=0.7, zorder=5)
+        ax.scatter(org["hyper_wake_xy"][k, 0], org["hyper_wake_xy"][k, 1], s=130 + 180 * float(org["hyper_strength"][k]), marker="*", c=[color], edgecolors="k", linewidths=0.7, zorder=5)
         ax.arrow(
-            hyper_wake_xy[k, 0],
-            hyper_wake_xy[k, 1],
+            org["hyper_wake_xy"][k, 0],
+            org["hyper_wake_xy"][k, 1],
             arrow_len * axis_phys[k, 0],
             arrow_len * axis_phys[k, 1],
-            color=colors[k],
+            color=color,
             width=0.0,
             head_width=0.10,
             head_length=0.18,
             length_includes_head=True,
-            zorder=5,
+            zorder=6,
         )
-        ax.text(
-            hyper_wake_xy[k, 0],
-            hyper_wake_xy[k, 1],
-            f"H{k}",
-            fontsize=9,
-            ha="left",
-            va="bottom",
-            color="k",
-            zorder=5,
-        )
+        ax.text(org["hyper_source_xy"][k, 0], org["hyper_source_xy"][k, 1], f"S{k}", fontsize=8, ha="right", va="top", zorder=7)
+        ax.text(org["hyper_wake_xy"][k, 0], org["hyper_wake_xy"][k, 1], f"H{k}", fontsize=9, ha="left", va="bottom", zorder=7)
 
-    # Strong cylinder -> environment links from A_me.
     for i in range(num_cyl):
-        top_idx = np.argsort(-A_me[i])[:max(1, topk_me_links)]
+        top_idx = np.argsort(-org["A_me"][i])[:max(0, topk_me_links)]
         for j in top_idx:
-            w = float(A_me[i, j])
+            w = float(org["A_me"][i, j])
             if w < 0.5 * threshold:
                 continue
-            k = int(token_group[j])
-            ax.plot(
-                [centers[i, 0], env_xy[j, 0]],
-                [centers[i, 1], env_xy[j, 1]],
-                color=colors[k],
-                alpha=0.10 + 0.45 * w,
-                linewidth=0.6 + 2.0 * w,
-                zorder=1,
-            )
-
-    # Strong cylinder -> hyperedge links from A_mh.
-    for i in range(num_cyl):
-        for k in range(num_hyper):
-            w = float(A_mh[i, k])
-            if w < threshold:
-                continue
-            ax.plot(
-                [centers[i, 0], hyper_wake_xy[k, 0]],
-                [centers[i, 1], hyper_wake_xy[k, 1]],
-                linestyle="--",
-                color=colors[k],
-                alpha=0.15 + 0.65 * w,
-                linewidth=0.8 + 2.8 * w,
+            k = int(org["token_group"][j])
+            draw_periodic_segment(
+                ax,
+                org["centers"][i],
+                org["env_xy"][j],
+                bounds,
+                color=org["colors"][k],
+                alpha=0.08 + 0.35 * w,
+                linewidth=0.4 + 1.5 * w,
                 zorder=2,
             )
 
-    # Cylinders.
-    for i, (cx, cy) in enumerate(centers):
-        ax.add_patch(plt.Circle((cx, cy), cylinder_radius, fill=False, color="k", lw=1.2, zorder=6))
-        ax.text(cx, cy, f"C{i}", fontsize=8, ha="center", va="center", zorder=7)
+    for i in range(num_cyl):
+        for k in range(num_hyper):
+            w = float(org["A_mh"][i, k])
+            if w < threshold:
+                continue
+            draw_periodic_segment(
+                ax,
+                org["centers"][i],
+                org["hyper_source_xy"][k],
+                bounds,
+                linestyle="--",
+                color=org["colors"][k],
+                alpha=0.18 + 0.62 * w,
+                linewidth=0.8 + 3.0 * w,
+                zorder=4,
+            )
 
-    # ------------------------------------------------------------------
-    # Panel 2: abstract tripartite hypergraph
-    # ------------------------------------------------------------------
-    ax = axes[1]
-    ax.set_title("Abstract tripartite hypergraph view")
+    for i, (cx, cy) in enumerate(org["centers"]):
+        ax.add_patch(plt.Circle((cx, cy), org["cylinder_radius"], fill=False, color="k", lw=1.2, zorder=8))
+        ax.text(cx, cy, f"C{i}", fontsize=8, ha="center", va="center", zorder=9)
+
+    legend_items = [
+        Line2D([0], [0], marker="o", color="k", markerfacecolor="white", lw=0, label="cylinder"),
+        Line2D([0], [0], marker="o", color="gray", lw=0, label="env token"),
+        Line2D([0], [0], marker="X", color="k", lw=0, label="source center"),
+        Line2D([0], [0], marker="*", color="k", lw=0, label="wake center"),
+        Line2D([0], [0], color="k", lw=1.4, label="wake axis"),
+        Line2D([0], [0], color="k", lw=1.4, linestyle="--", label="cylinder->hyperedge"),
+        Line2D([0], [0], color="k", lw=1.4, linestyle=":", label="source->wake"),
+    ]
+    ax.legend(handles=legend_items, loc="upper right", fontsize=7, framealpha=0.85)
+    ax.text(0.01, 0.01, "Periodic shortest-image links are used.\nWake arrows show learned wake-axis direction in periodic coordinates.", transform=ax.transAxes, fontsize=8, va="bottom", bbox={"facecolor": "white", "alpha": 0.7, "edgecolor": "none"})
+
+    if show_table:
+        table_ax = axes[1]
+        table_ax.axis("off")
+        table_ax.set_title("Hyperedge summary")
+        lines = []
+        for item in summaries:
+            k = item["hyperedge_id"]
+            lines.extend(
+                [
+                    f"H{k}  strength={item['strength']:.3f}",
+                    f"  src=({item['source']['x']:.2f},{item['source']['y']:.2f})  wake=({item['wake']['x']:.2f},{item['wake']['y']:.2f})",
+                    f"  axis=({item['wake_axis']['x']:.2f},{item['wake_axis']['y']:.2f})  extent={item['wake_extent']:.3f}",
+                    f"  cyl: {_format_members('C', item['top_cylinders'])}",
+                    f"  env: n={item['env_token_count']}  mass={item['env_mass_sum']:.2f}  top {_format_members('E', item['top_env_tokens'], limit=3)}",
+                    "",
+                ]
+            )
+        table_ax.text(0.0, 0.98, "\n".join(lines), ha="left", va="top", fontsize=8.2, family="monospace", transform=table_ax.transAxes)
+
+    fig.suptitle(f"Case {case['case_id']} | tau organization diagnostics")
+    fig.savefig(save_path)
+    plt.close(fig)
+
+
+def render_organization_matrices(save_path: Path, org: Dict, summaries: List[Dict]) -> None:
+    A_mh = org["A_mh"]
+    A_eh = org["A_eh"]
+    num_hyper = A_eh.shape[1]
+    cols = max(2, int(np.ceil(np.sqrt(num_hyper))))
+    rows = int(np.ceil(num_hyper / cols))
+    fig = plt.figure(figsize=(max(13, cols * 3.1), 7.2 + rows * 2.7), dpi=150, constrained_layout=True)
+    gs = fig.add_gridspec(2 + rows, cols)
+    ax_mh = fig.add_subplot(gs[0, : max(1, cols // 2)])
+    ax_eh = fig.add_subplot(gs[0, max(1, cols // 2) :])
+
+    im = ax_mh.imshow(A_mh, aspect="auto", vmin=0.0, vmax=max(1.0, float(A_mh.max())), cmap="viridis")
+    ax_mh.set_title("Module -> Hyperedge assignment A_mh")
+    ax_mh.set_xlabel("hyperedge")
+    ax_mh.set_ylabel("cylinder")
+    ax_mh.set_xticks(np.arange(num_hyper), labels=[f"H{k}" for k in range(num_hyper)])
+    ax_mh.set_yticks(np.arange(A_mh.shape[0]), labels=[f"C{i}" for i in range(A_mh.shape[0])])
+    if A_mh.size <= 80:
+        for i in range(A_mh.shape[0]):
+            for k in range(num_hyper):
+                ax_mh.text(k, i, f"{A_mh[i, k]:.2f}", ha="center", va="center", fontsize=7, color="white" if A_mh[i, k] > 0.5 else "black")
+    fig.colorbar(im, ax=ax_mh, fraction=0.046, pad=0.03)
+
+    im = ax_eh.imshow(A_eh, aspect="auto", vmin=0.0, vmax=max(1.0, float(A_eh.max())), cmap="viridis")
+    ax_eh.set_title("Environment -> Hyperedge assignment A_eh")
+    ax_eh.set_xlabel("hyperedge")
+    ax_eh.set_ylabel("env token index")
+    ax_eh.set_xticks(np.arange(num_hyper), labels=[f"H{k}" for k in range(num_hyper)])
+    if A_eh.shape[0] <= 32:
+        ax_eh.set_yticks(np.arange(A_eh.shape[0]))
+    else:
+        tick_idx = np.linspace(0, A_eh.shape[0] - 1, min(9, A_eh.shape[0])).astype(int)
+        ax_eh.set_yticks(tick_idx, labels=[str(i) for i in tick_idx])
+    fig.colorbar(im, ax=ax_eh, fraction=0.046, pad=0.03)
+
+    bounds = org["bounds"]
+    extent = (bounds["x_min"], bounds["x_min"] + bounds["lx"], bounds["y_min"], bounds["y_min"] + bounds["ly"])
+    for k in range(num_hyper):
+        ax = fig.add_subplot(gs[1 + (k // cols), k % cols])
+        weights = A_eh[:, k]
+        sc = ax.scatter(org["env_xy"][:, 0], org["env_xy"][:, 1], c=weights, s=16 + 70 * weights, cmap="viridis", vmin=0.0, vmax=max(1.0, float(A_eh.max())), linewidths=0.0)
+        for cx, cy in org["centers"]:
+            ax.add_patch(plt.Circle((cx, cy), org["cylinder_radius"], fill=False, color="k", lw=0.8))
+        ax.scatter(org["hyper_source_xy"][k, 0], org["hyper_source_xy"][k, 1], marker="X", s=70, c=[org["colors"][k]], edgecolors="k")
+        ax.scatter(org["hyper_wake_xy"][k, 0], org["hyper_wake_xy"][k, 1], marker="*", s=100, c=[org["colors"][k]], edgecolors="k")
+        ax.set_xlim(extent[0], extent[1])
+        ax.set_ylim(extent[2], extent[3])
+        ax.set_aspect("equal")
+        ax.set_title(f"H{k}: strength={summaries[k]['strength']:.2f}, n={summaries[k]['env_token_count']}", fontsize=9)
+        ax.set_xticks([])
+        ax.set_yticks([])
+    if num_hyper:
+        fig.colorbar(sc, ax=fig.axes[-num_hyper:], fraction=0.025, pad=0.01)
+    fig.suptitle("Organization matrix diagnostics")
+    fig.savefig(save_path)
+    plt.close(fig)
+
+
+def spread_positions(desired_y: np.ndarray, min_gap: float = 0.08, y_min: float = 0.08, y_max: float = 0.92) -> np.ndarray:
+    desired_y = np.asarray(desired_y, dtype=np.float64)
+    n = desired_y.size
+    if n == 0:
+        return desired_y
+    if n == 1:
+        return np.asarray([float(np.clip(desired_y[0], y_min, y_max))])
+    order = np.argsort(desired_y)
+    sorted_y = np.clip(desired_y[order], y_min, y_max)
+    span = y_max - y_min
+    gap = min(float(min_gap), span / max(n - 1, 1))
+    for i in range(1, n):
+        sorted_y[i] = max(sorted_y[i], sorted_y[i - 1] + gap)
+    overflow = sorted_y[-1] - y_max
+    if overflow > 0:
+        sorted_y -= overflow
+    for i in range(n - 2, -1, -1):
+        sorted_y[i] = min(sorted_y[i], sorted_y[i + 1] - gap)
+    underflow = y_min - sorted_y[0]
+    if underflow > 0:
+        sorted_y += underflow
+    sorted_y = np.clip(sorted_y, y_min, y_max)
+    out = np.empty_like(sorted_y)
+    out[order] = sorted_y
+    return out
+
+
+def _curved_edge(ax, p0: tuple[float, float], p1: tuple[float, float], *, color, linewidth: float, alpha: float, rad: float) -> None:
+    patch = FancyArrowPatch(
+        p0,
+        p1,
+        arrowstyle="-",
+        connectionstyle=f"arc3,rad={rad}",
+        linewidth=linewidth,
+        color=color,
+        alpha=alpha,
+        shrinkA=8,
+        shrinkB=8,
+        zorder=1,
+    )
+    ax.add_patch(patch)
+
+
+def render_organization_sankey(save_path: Path, org: Dict, summaries: List[Dict], *, threshold: float = 0.15, min_gap: float = 0.08) -> None:
+    centers = org["centers"]
+    A_mh = org["A_mh"]
+    A_eh = org["A_eh"]
+    bounds = org["bounds"]
+    num_cyl = centers.shape[0]
+    num_hyper = A_eh.shape[1]
+    fig, ax = plt.subplots(figsize=(13, 7), dpi=150, constrained_layout=True)
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
+    ax.set_title("Sankey-style organizer topology\nC_i = cylinder/module, H_k = interaction hyperedge, EnvGroup_k = dominated environment tokens")
 
-    # Module node vertical layout sorted by physical y for readability.
-    cyl_order = np.argsort(centers[:, 1])
-    module_y = np.linspace(0.1, 0.9, num_cyl) if num_cyl > 1 else np.array([0.5], dtype=np.float32)
-    module_pos = {}
-    for rank, i in enumerate(cyl_order):
-        module_pos[int(i)] = (0.08, float(module_y[rank]))
+    cyl_desired = np.clip((centers[:, 1] - bounds["y_min"]) / max(bounds["ly"], 1e-6), 0.08, 0.92)
+    hyper_desired = np.clip((org["hyper_wake_xy"][:, 1] - bounds["y_min"]) / max(bounds["ly"], 1e-6), 0.08, 0.92)
+    env_desired = np.clip(hyper_desired + 0.035 * np.where(np.arange(num_hyper) % 2 == 0, 1.0, -1.0), 0.08, 0.92)
+    cyl_y = spread_positions(cyl_desired, min_gap=min_gap * 0.75)
+    hyper_y = spread_positions(hyper_desired, min_gap=min_gap)
+    env_y = spread_positions(env_desired, min_gap=min_gap)
 
-    # Hyperedge and environment-group nodes use physical centroid y.
-    hyper_y = np.clip((hyper_wake_xy[:, 1] - bounds["y_min"]) / max(bounds["ly"], 1e-6), 0.08, 0.92)
+    module_pos = {i: (0.10, float(cyl_y[i])) for i in range(num_cyl)}
     hyper_pos = {k: (0.50, float(hyper_y[k])) for k in range(num_hyper)}
-    env_group_pos = {k: (0.90, float(hyper_y[k])) for k in range(num_hyper)}
+    env_pos = {k: (0.88, float(env_y[k])) for k in range(num_hyper)}
 
-    # Draw module->hyperedge edges.
     for i in range(num_cyl):
-        x0, y0 = module_pos[i]
         for k in range(num_hyper):
             w = float(A_mh[i, k])
             if w < threshold:
                 continue
-            x1, y1 = hyper_pos[k]
-            ax.plot(
-                [x0, x1],
-                [y0, y1],
-                color=colors[k],
-                alpha=0.15 + 0.75 * w,
-                linewidth=0.8 + 3.2 * w,
+            _curved_edge(
+                ax,
+                module_pos[i],
+                hyper_pos[k],
+                color=org["colors"][k],
+                linewidth=0.7 + 4.2 * w,
+                alpha=min(0.95, 0.15 + 0.85 * w),
+                rad=0.10 if (i + k) % 2 == 0 else -0.10,
             )
 
-    # Draw hyperedge->environment-group edges using total token mass.
-    token_assign = np.argmax(A_eh, axis=1)
     for k in range(num_hyper):
-        mass = float(np.mean(A_eh[:, k]))
-        x0, y0 = hyper_pos[k]
-        x1, y1 = env_group_pos[k]
-        ax.plot(
-            [x0, x1],
-            [y0, y1],
-            color=colors[k],
-            alpha=0.2 + 0.75 * mass,
-            linewidth=1.2 + 10.0 * mass,
-        )
+        mass = float(A_eh[:, k].mean())
+        n_tokens = summaries[k]["env_token_count"]
+        width = 1.0 + 8.0 * max(mass, n_tokens / max(float(A_eh.shape[0]), 1.0))
+        _curved_edge(ax, hyper_pos[k], env_pos[k], color=org["colors"][k], linewidth=width, alpha=0.35 + 0.5 * min(1.0, width / 8.0), rad=-0.08)
 
-    # Draw nodes.
+    bbox = {"facecolor": "white", "alpha": 0.78, "edgecolor": "none", "pad": 1.0}
     for i in range(num_cyl):
         x, y = module_pos[i]
-        ax.scatter([x], [y], s=120, c="white", edgecolors="k", zorder=3)
-        ax.text(x - 0.03, y, f"C{i}", ha="right", va="center", fontsize=9)
+        ax.scatter([x], [y], s=130, c="white", edgecolors="k", zorder=4)
+        ax.text(x - 0.035, y, f"C{i}", ha="right", va="center", fontsize=9, bbox=bbox, zorder=5)
 
     for k in range(num_hyper):
         x, y = hyper_pos[k]
-        ax.scatter([x], [y], s=180, marker="*", c=[colors[k]], edgecolors="k", zorder=4)
-        ax.text(x, y + 0.04, f"H{k}", ha="center", va="bottom", fontsize=9)
+        ax.scatter([x], [y], s=180, marker="*", c=[org["colors"][k]], edgecolors="k", zorder=4)
+        ax.text(x, y + 0.035, f"H{k}", ha="center", va="bottom", fontsize=9, bbox=bbox, zorder=5)
 
     for k in range(num_hyper):
-        x, y = env_group_pos[k]
-        n_tokens = int(np.sum(token_assign == k))
-        ax.scatter([x], [y], s=130, marker="s", c=[colors[k]], edgecolors="k", zorder=4)
-        ax.text(x + 0.03, y, f"E{k}\n(n={n_tokens})", ha="left", va="center", fontsize=8)
+        x, y = env_pos[k]
+        ax.scatter([x], [y], s=145, marker="s", c=[org["colors"][k]], edgecolors="k", zorder=4)
+        ax.text(
+            x + 0.035,
+            y,
+            f"EnvGroup_{k}\nn={summaries[k]['env_token_count']}\nmass={summaries[k]['env_mass_sum']:.1f}",
+            ha="left",
+            va="center",
+            fontsize=8,
+            bbox=bbox,
+            zorder=5,
+        )
 
+    ax.text(0.03, 0.965, "Line width is proportional to soft assignment weight.", ha="left", va="top", fontsize=9)
+    _curved_edge(ax, (0.35, 0.055), (0.44, 0.055), color="0.25", linewidth=0.7 + 4.2 * 0.2, alpha=0.75, rad=0.0)
+    _curved_edge(ax, (0.55, 0.055), (0.64, 0.055), color="0.25", linewidth=0.7 + 4.2 * 0.8, alpha=0.75, rad=0.0)
+    ax.text(0.395, 0.025, "w=0.2", ha="center", va="center", fontsize=8)
+    ax.text(0.595, 0.025, "w=0.8", ha="center", va="center", fontsize=8)
+    ax.text(0.10, 0.99, "Modules", ha="center", va="top", fontsize=10, weight="bold")
+    ax.text(0.50, 0.99, "Interaction hyperedges", ha="center", va="top", fontsize=10, weight="bold")
+    ax.text(0.88, 0.99, "Environment groups", ha="center", va="top", fontsize=10, weight="bold")
     fig.savefig(save_path)
     plt.close(fig)
+
+
+def render_soft_organization(
+    output_dir: Path,
+    out: Dict,
+    case: Dict,
+    *,
+    tau_value: float,
+    phase_idx: int,
+    threshold: float = 0.15,
+    topk_me_links: int = 3,
+    organization_view: str = "all",
+    topk_cylinders: int = 3,
+    topk_env: int = 5,
+    min_gap: float = 0.08,
+    show_table: bool = True,
+) -> Dict[str, str]:
+    org = extract_organization_arrays(out, case)
+    summaries = compute_hyperedge_summary(
+        org,
+        case_id=case["case_id"],
+        tau_value=tau_value,
+        topk_cylinders=topk_cylinders,
+        topk_env=topk_env,
+    )
+    base = f"case_{case['case_id']}_tau_{phase_idx:03d}"
+    csv_path = output_dir / f"organization_summary_{base}.csv"
+    json_path = output_dir / f"organization_summary_{base}.json"
+    write_organization_summary(csv_path, json_path, summaries)
+
+    paths = {"summary_csv": str(csv_path), "summary_json": str(json_path)}
+    if organization_view in {"all", "physical"}:
+        path = output_dir / f"organization_physical_{base}.png"
+        render_organization_physical_summary(path, org, summaries, case, threshold=threshold, topk_me_links=topk_me_links, show_table=show_table)
+        paths["physical"] = str(path)
+    if organization_view in {"all", "matrices"}:
+        path = output_dir / f"organization_matrices_{base}.png"
+        render_organization_matrices(path, org, summaries)
+        paths["matrices"] = str(path)
+    if organization_view in {"all", "sankey"}:
+        path = output_dir / f"organization_sankey_{base}.png"
+        render_organization_sankey(path, org, summaries, threshold=threshold, min_gap=min_gap)
+        paths["sankey"] = str(path)
+    return paths
 
 def render_quicklook(
     save_path: Path,
@@ -590,12 +964,25 @@ def main() -> None:
     fig_path = output_dir / f"quicklook_case_{case['case_id']}_tau_{phase_idx:03d}.png"
     render_quicklook(fig_path, pred_field, gt_field, case["x_grid"], case["y_grid"], tau_value, case)
 
-    org_path = output_dir / f"organization_case_{case['case_id']}_tau_{phase_idx:03d}.png"
-    render_soft_organization( org_path, out, case, threshold=args.organization_threshold, topk_me_links=args.topk_me_links)
+    org_paths = render_soft_organization(
+        output_dir,
+        out,
+        case,
+        tau_value=tau_value,
+        phase_idx=phase_idx,
+        threshold=args.organization_threshold,
+        topk_me_links=args.topk_me_links,
+        organization_view=args.organization_view,
+        topk_cylinders=args.organization_topk_cylinders,
+        topk_env=args.organization_topk_env,
+        min_gap=args.organization_min_gap,
+        show_table=args.organization_table,
+    )
 
     gif_path = output_dir / f"animation_case_{case['case_id']}_tau_{phase_idx:03d}.gif"
     render_animation(gif_path, model, structure, case, device, args.query_batch_size)
 
+    org_arrays = extract_organization_arrays(out, case)
     np.savez_compressed(
         output_dir / f"reconstruction_case_{case['case_id']}_tau_{phase_idx:03d}.npz",
         pred_field=pred_field.astype(np.float32),
@@ -605,11 +992,11 @@ def main() -> None:
         tau=np.asarray([tau_value], dtype=np.float32),
         predicted_frequency=np.asarray([freq_pred], dtype=np.float32),
         gt_frequency=np.asarray([case["dominant_frequency"]], dtype=np.float32),
-        hyper_source_coords=out["hyper_source_coords"][0].detach().cpu().numpy().astype(np.float32),
-        hyper_wake_coords=out["hyper_wake_coords"][0].detach().cpu().numpy().astype(np.float32),
-        hyper_wake_axis=out["hyper_wake_axis"][0].detach().cpu().numpy().astype(np.float32),
-        hyper_wake_extent=out["hyper_wake_extent"][0].detach().cpu().numpy().astype(np.float32),
-        hyper_strength=out["hyper_strength"][0].detach().cpu().numpy().astype(np.float32),
+        hyper_source_coords=org_arrays["hyper_source_norm"].astype(np.float32),
+        hyper_wake_coords=org_arrays["hyper_wake_norm"].astype(np.float32),
+        hyper_wake_axis=org_arrays["hyper_wake_axis"].astype(np.float32),
+        hyper_wake_extent=org_arrays["hyper_wake_extent"].astype(np.float32),
+        hyper_strength=org_arrays["hyper_strength"].astype(np.float32),
     )
 
     with (output_dir / f"evaluation_summary_case_{case['case_id']}.json").open("w", encoding="utf-8") as f:
@@ -627,7 +1014,7 @@ def main() -> None:
                 "gt_frequency": case["dominant_frequency"],
                 "num_hyperedges": int(out["A_eh"].shape[-1]),
                 "quicklook_path": str(fig_path),
-                "organization_path": str(org_path),
+                "organization_paths": org_paths,
             },
             f,
             indent=2,

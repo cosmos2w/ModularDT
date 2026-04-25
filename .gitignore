@@ -5,6 +5,7 @@ Domain_shape/
 Configs/
 Config_Train/
 Saved_Model/
+Saved_Model_Gen/
 
 *.pt
 *.pth

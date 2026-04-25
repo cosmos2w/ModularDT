@@ -111,7 +111,10 @@ def periodic_weighted_mean(coords: torch.Tensor, weights: torch.Tensor) -> torch
     weight_t = weights.transpose(1, 2).unsqueeze(-1)
     sin_sum = (weight_t * torch.sin(angles)).sum(dim=2)
     cos_sum = (weight_t * torch.cos(angles)).sum(dim=2)
-    mean_angle = torch.atan2(sin_sum, cos_sum)
+    resultant_sq = sin_sum.square() + cos_sum.square()
+    safe_sin = torch.where(resultant_sq > 1e-12, sin_sum, torch.zeros_like(sin_sum))
+    safe_cos = torch.where(resultant_sq > 1e-12, cos_sum, torch.ones_like(cos_sum))
+    mean_angle = torch.atan2(safe_sin, safe_cos)
     return torch.remainder(mean_angle / TWO_PI, 1.0)
 
 
@@ -146,7 +149,7 @@ def masked_softmax(logits: torch.Tensor, mask: Optional[torch.Tensor], dim: int)
         return torch.softmax(logits, dim=dim)
 
     mask = mask.to(device=logits.device, dtype=logits.dtype)
-    masked_logits = logits.masked_fill(mask <= 0, -1e9)
+    masked_logits = logits.masked_fill(mask <= 0, torch.finfo(logits.dtype).min)
     weights = torch.softmax(masked_logits, dim=dim)
     weights = weights * mask
     return weights / weights.sum(dim=dim, keepdim=True).clamp_min(1e-6)
@@ -623,7 +626,7 @@ class HypergraphOrganizer(nn.Module):
         mask = mask.to(values.dtype)
         while mask.ndim < values.ndim:
             mask = mask.unsqueeze(-1)
-        very_neg = torch.full_like(values, -1e9)
+        very_neg = torch.full_like(values, torch.finfo(values.dtype).min)
         masked = torch.where(mask > 0, values, very_neg)
         max_vals = masked.max(dim=dim).values
         has_valid = mask.sum(dim=dim) > 0
@@ -728,12 +731,12 @@ class HypergraphOrganizer(nn.Module):
 
         wake_dx, wake_dy = periodic_delta_min_image(hyper_source_coords, hyper_wake_coords)
         hyper_wake_axis = torch.stack([wake_dx, wake_dy], dim=-1)
-        axis_norm = torch.linalg.norm(hyper_wake_axis, dim=-1, keepdim=True)
+        axis_norm = torch.sqrt(hyper_wake_axis.square().sum(dim=-1, keepdim=True).clamp_min(1e-12))
         default_axis = torch.zeros_like(hyper_wake_axis)
         default_axis[..., 0] = 1.0
         hyper_wake_axis = torch.where(
             axis_norm > 1e-6,
-            hyper_wake_axis / axis_norm.clamp_min(1e-6),
+            hyper_wake_axis / axis_norm,
             default_axis,
         )
 
