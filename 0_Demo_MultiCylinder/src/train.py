@@ -1007,6 +1007,19 @@ def compute_losses(
         me_weight=float(loss_cfg.get("organizer_me_weight", 0.0)),
         mm_weight=float(loss_cfg.get("organizer_mm_weight", 0.0)),
         consistency_weight=float(loss_cfg.get("organizer_consistency_weight", 0.0)),
+        eh_factor_weight=float(loss_cfg.get("organizer_eh_factor_weight", 0.0)),
+        eh_factor_target_source=str(loss_cfg.get("organizer_eh_factor_target_source", "prior_me")),
+        eh_factor_detach_mh=bool(loss_cfg.get("organizer_eh_factor_detach_mh", True)),
+        eh_factor_eps=float(loss_cfg.get("organizer_eh_factor_eps", 1.0e-6)),
+        mass_align_weight=float(loss_cfg.get("organizer_mass_align_weight", 0.0)),
+        mass_align_log_space=bool(loss_cfg.get("organizer_mass_align_log_space", True)),
+        mass_align_detach_module=bool(loss_cfg.get("organizer_mass_align_detach_module", True)),
+        mass_align_eps=float(loss_cfg.get("organizer_mass_align_eps", 1.0e-6)),
+    )
+    org_diag = organizer_mass_diagnostics(
+        outputs,
+        batch,
+        eps=float(loss_cfg.get("organizer_mass_align_eps", 1.0e-6)),
     )
 
     total = base_total + float(organizer_scale) * org_direct["organizer_total"]
@@ -1024,6 +1037,9 @@ def compute_losses(
         "loss_org_me": org_direct["organizer_me"],
         "loss_org_mm": org_direct["organizer_mm"],
         "loss_org_consistency": org_direct["organizer_consistency"],
+        "loss_org_eh_factor": org_direct["organizer_eh_factor"],
+        "loss_org_mass_align": org_direct["organizer_mass_align"],
+        **org_diag,
     }
 
 
@@ -1235,12 +1251,125 @@ def build_module_module_affinity_prior(
     return affinity
 
 
+def compute_hyperedge_masses(
+    outputs: Dict[str, torch.Tensor],
+    structure: Dict[str, torch.Tensor],
+    eps: float = 1e-6,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    A_mh = outputs["A_mh"]
+    A_eh = outputs["A_eh"]
+    cyl_mask = structure["cyl_mask"].to(device=A_mh.device, dtype=A_mh.dtype)
+
+    module_mass_raw = (A_mh * cyl_mask[:, :, None]).sum(dim=1)
+    module_mass_raw = module_mass_raw / cyl_mask.sum(dim=1, keepdim=True).clamp_min(eps)
+    env_mass_raw = A_eh.mean(dim=1)
+
+    module_mass = module_mass_raw / module_mass_raw.sum(dim=-1, keepdim=True).clamp_min(eps)
+    env_mass = env_mass_raw / env_mass_raw.sum(dim=-1, keepdim=True).clamp_min(eps)
+    return module_mass_raw, env_mass_raw, module_mass, env_mass
+
+
+def build_eh_factor_target(
+    outputs: Dict[str, torch.Tensor],
+    structure: Dict[str, torch.Tensor],
+    *,
+    target_source: str = "prior_me",
+    detach_mh: bool = True,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    A_me = outputs["A_me"]
+    A_mh = outputs["A_mh"]
+    module_coords_norm = outputs["module_coords_norm"]
+    env_coords = outputs["env_coords"]
+    cyl_mask = structure["cyl_mask"].to(device=A_mh.device, dtype=A_mh.dtype)
+    re_values = structure["re_values"].to(device=A_mh.device, dtype=A_mh.dtype)
+
+    source = str(target_source).strip().lower()
+    if source == "prior_me":
+        me_for_target = build_module_env_prior(module_coords_norm, env_coords, cyl_mask, re_values)
+    elif source == "learned_me":
+        me_for_target = A_me.detach()
+    else:
+        raise ValueError("organizer_eh_factor_target_source must be 'prior_me' or 'learned_me'.")
+
+    mh = A_mh.detach() if detach_mh else A_mh
+    raw = torch.einsum("bnm,bnk->bmk", me_for_target, mh)
+    denom = raw.sum(dim=-1, keepdim=True)
+
+    _, _, module_mass, _ = compute_hyperedge_masses(outputs, structure, eps=eps)
+    fallback = module_mass[:, None, :].expand_as(raw)
+    target_eh = torch.where(denom > eps, raw / denom.clamp_min(eps), fallback)
+    target_eh = target_eh.clamp_min(eps)
+    return target_eh / target_eh.sum(dim=-1, keepdim=True).clamp_min(eps)
+
+
+def organizer_eh_factor_loss(
+    outputs: Dict[str, torch.Tensor],
+    structure: Dict[str, torch.Tensor],
+    *,
+    target_source: str = "prior_me",
+    detach_mh: bool = True,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    A_eh = outputs["A_eh"].clamp_min(eps)
+    target_eh = build_eh_factor_target(
+        outputs,
+        structure,
+        target_source=target_source,
+        detach_mh=detach_mh,
+        eps=eps,
+    ).detach()
+    return F.kl_div(A_eh.log(), target_eh, reduction="none").sum(dim=-1).mean()
+
+
+def organizer_mass_align_loss(
+    outputs: Dict[str, torch.Tensor],
+    structure: Dict[str, torch.Tensor],
+    *,
+    log_space: bool = True,
+    detach_module: bool = True,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    _, _, module_mass, env_mass = compute_hyperedge_masses(outputs, structure, eps=eps)
+    module_target = module_mass.detach() if detach_module else module_mass
+    if log_space:
+        return F.smooth_l1_loss(torch.log(env_mass + eps), torch.log(module_target + eps))
+    return F.smooth_l1_loss(env_mass, module_target)
+
+
+def organizer_mass_diagnostics(
+    outputs: Dict[str, torch.Tensor],
+    structure: Dict[str, torch.Tensor],
+    eps: float = 1e-6,
+) -> Dict[str, torch.Tensor]:
+    _, _, module_mass, env_mass = compute_hyperedge_masses(outputs, structure, eps=eps)
+    env_entropy = -(env_mass.clamp_min(eps) * env_mass.clamp_min(eps).log()).sum(dim=-1)
+    module_entropy = -(module_mass.clamp_min(eps) * module_mass.clamp_min(eps).log()).sum(dim=-1)
+    return {
+        "org_env_mass_max": env_mass.max(dim=-1).values.mean(),
+        "org_module_mass_max": module_mass.max(dim=-1).values.mean(),
+        "org_mass_l1": (env_mass - module_mass).abs().mean(),
+        "org_env_effective_hyperedges": torch.exp(env_entropy).mean(),
+        "org_module_effective_hyperedges": torch.exp(module_entropy).mean(),
+        "org_env_mass_entropy": env_entropy.mean(),
+        "org_module_mass_entropy": module_entropy.mean(),
+    }
+
+
 def organizer_direct_losses(
     outputs: Dict[str, torch.Tensor],
     structure: Dict[str, torch.Tensor],
     me_weight: float = 0.05,
     mm_weight: float = 0.03,
-    consistency_weight: float = 0.05,) -> Dict[str, torch.Tensor]:
+    consistency_weight: float = 0.05,
+    eh_factor_weight: float = 0.05,
+    eh_factor_target_source: str = "prior_me",
+    eh_factor_detach_mh: bool = True,
+    eh_factor_eps: float = 1.0e-6,
+    mass_align_weight: float = 0.02,
+    mass_align_log_space: bool = True,
+    mass_align_detach_module: bool = True,
+    mass_align_eps: float = 1.0e-6,) -> Dict[str, torch.Tensor]:
     """
     Direct organizer supervision for inert cases.
     Returns dict of scalar losses.
@@ -1281,12 +1410,40 @@ def organizer_direct_losses(
     valid_me = cyl_mask[:, :, None].expand_as(A_me)
     loss_cons = (((pred_me_from_h - A_me) ** 2) * valid_me).sum() / valid_me.sum().clamp_min(1.0)
 
-    total = me_weight * loss_me + mm_weight * loss_mm + consistency_weight * loss_cons
+    # D) direct A_eh supervision: environment token e should choose hyperedge k
+    # when modules that influence e also belong to k.
+    loss_eh_factor = organizer_eh_factor_loss(
+        outputs,
+        structure,
+        target_source=eh_factor_target_source,
+        detach_mh=eh_factor_detach_mh,
+        eps=eh_factor_eps,
+    )
+
+    # E) discourage one-sided collapse by matching normalized module and
+    # environment mass per hyperedge.
+    loss_mass_align = organizer_mass_align_loss(
+        outputs,
+        structure,
+        log_space=mass_align_log_space,
+        detach_module=mass_align_detach_module,
+        eps=mass_align_eps,
+    )
+
+    total = (
+        me_weight * loss_me
+        + mm_weight * loss_mm
+        + consistency_weight * loss_cons
+        + eh_factor_weight * loss_eh_factor
+        + mass_align_weight * loss_mass_align
+    )
     return {
         "organizer_total": total,
         "organizer_me": loss_me,
         "organizer_mm": loss_mm,
         "organizer_consistency": loss_cons,
+        "organizer_eh_factor": loss_eh_factor,
+        "organizer_mass_align": loss_mass_align,
     }
 
 # ---------------------------- Validation routine -------------------------------
@@ -1329,10 +1486,18 @@ def evaluate_canonical_cases(
             "val_freq_mse": float("nan"),
             "val_dynamic_energy": float("nan"),
             "val_residual_focus": float("nan"),
+            "val_loss_org_eh_factor": float("nan"),
+            "val_loss_org_mass_align": float("nan"),
+            "val_org_env_mass_max": float("nan"),
+            "val_org_module_mass_max": float("nan"),
+            "val_org_mass_l1": float("nan"),
+            "val_org_env_effective_hyperedges": float("nan"),
+            "val_org_module_effective_hyperedges": float("nan"),
         }
 
     case_ids = dataset.case_ids[:max_cases] if max_cases > 0 else dataset.case_ids
     total_losses, field_losses, mean_losses, residual_losses, freq_losses, dynamic_energy_losses = [], [], [], [], [], []
+    org_diag_buffer: List[Dict[str, float]] = []
 
     val_iter = case_ids
     val_bar = None
@@ -1424,6 +1589,30 @@ def evaluate_canonical_cases(
             me_weight=float(loss_cfg.get("organizer_me_weight", 0.0)),
             mm_weight=float(loss_cfg.get("organizer_mm_weight", 0.0)),
             consistency_weight=float(loss_cfg.get("organizer_consistency_weight", 0.0)),
+            eh_factor_weight=float(loss_cfg.get("organizer_eh_factor_weight", 0.0)),
+            eh_factor_target_source=str(loss_cfg.get("organizer_eh_factor_target_source", "prior_me")),
+            eh_factor_detach_mh=bool(loss_cfg.get("organizer_eh_factor_detach_mh", True)),
+            eh_factor_eps=float(loss_cfg.get("organizer_eh_factor_eps", 1.0e-6)),
+            mass_align_weight=float(loss_cfg.get("organizer_mass_align_weight", 0.0)),
+            mass_align_log_space=bool(loss_cfg.get("organizer_mass_align_log_space", True)),
+            mass_align_detach_module=bool(loss_cfg.get("organizer_mass_align_detach_module", True)),
+            mass_align_eps=float(loss_cfg.get("organizer_mass_align_eps", 1.0e-6)),
+        )
+        org_diag = organizer_mass_diagnostics(
+            out_once,
+            structure,
+            eps=float(loss_cfg.get("organizer_mass_align_eps", 1.0e-6)),
+        )
+        org_diag_buffer.append(
+            {
+                "val_loss_org_eh_factor": normalize_loss_scalar(org_direct["organizer_eh_factor"]),
+                "val_loss_org_mass_align": normalize_loss_scalar(org_direct["organizer_mass_align"]),
+                "val_org_env_mass_max": normalize_loss_scalar(org_diag["org_env_mass_max"]),
+                "val_org_module_mass_max": normalize_loss_scalar(org_diag["org_module_mass_max"]),
+                "val_org_mass_l1": normalize_loss_scalar(org_diag["org_mass_l1"]),
+                "val_org_env_effective_hyperedges": normalize_loss_scalar(org_diag["org_env_effective_hyperedges"]),
+                "val_org_module_effective_hyperedges": normalize_loss_scalar(org_diag["org_module_effective_hyperedges"]),
+            }
         )
         loss_total = base_total + org_direct["organizer_total"]
         total_losses.append(float(loss_total.item() if isinstance(loss_total, torch.Tensor) else loss_total))
@@ -1448,6 +1637,7 @@ def evaluate_canonical_cases(
         "val_freq_mse": float(np.mean(freq_losses)),
         "val_dynamic_energy": float(np.mean(dynamic_energy_losses)),
     }
+    metrics.update(average_metric_dicts(org_diag_buffer))
     metrics["val_residual_focus"] = compute_residual_focus_metric(metrics, validation_cfg)
     return metrics
 
@@ -1472,6 +1662,13 @@ def evaluate_point_chunks(
             "val_freq_mse": float("nan"),
             "val_dynamic_energy": float("nan"),
             "val_residual_focus": float("nan"),
+            "val_loss_org_eh_factor": float("nan"),
+            "val_loss_org_mass_align": float("nan"),
+            "val_org_env_mass_max": float("nan"),
+            "val_org_module_mass_max": float("nan"),
+            "val_org_mass_l1": float("nan"),
+            "val_org_env_effective_hyperedges": float("nan"),
+            "val_org_module_effective_hyperedges": float("nan"),
         }
 
     metric_buffer: List[Dict[str, float]] = []
@@ -1538,6 +1735,13 @@ def evaluate_point_chunks(
             "val_residual_mse": normalize_loss_scalar(losses["loss_residual"]),
             "val_freq_mse": normalize_loss_scalar(losses["loss_freq"]),
             "val_dynamic_energy": normalize_loss_scalar(losses["loss_dynamic_energy"]),
+            "val_loss_org_eh_factor": normalize_loss_scalar(losses["loss_org_eh_factor"]),
+            "val_loss_org_mass_align": normalize_loss_scalar(losses["loss_org_mass_align"]),
+            "val_org_env_mass_max": normalize_loss_scalar(losses["org_env_mass_max"]),
+            "val_org_module_mass_max": normalize_loss_scalar(losses["org_module_mass_max"]),
+            "val_org_mass_l1": normalize_loss_scalar(losses["org_mass_l1"]),
+            "val_org_env_effective_hyperedges": normalize_loss_scalar(losses["org_env_effective_hyperedges"]),
+            "val_org_module_effective_hyperedges": normalize_loss_scalar(losses["org_module_effective_hyperedges"]),
         }
         row["val_residual_focus"] = compute_residual_focus_metric(row, validation_cfg)
         metric_buffer.append(row)
@@ -1874,6 +2078,13 @@ def main() -> None:
         "loss_org_me",
         "loss_org_mm",
         "loss_org_consistency",
+        "loss_org_eh_factor",
+        "loss_org_mass_align",
+        "org_env_mass_max",
+        "org_module_mass_max",
+        "org_mass_l1",
+        "org_env_effective_hyperedges",
+        "org_module_effective_hyperedges",
         # "lr",
         "val_total_loss",
         "val_field_mse",
@@ -1882,6 +2093,13 @@ def main() -> None:
         "val_freq_mse",
         "val_dynamic_energy",
         "val_residual_focus",
+        "val_loss_org_eh_factor",
+        "val_loss_org_mass_align",
+        "val_org_env_mass_max",
+        "val_org_module_mass_max",
+        "val_org_mass_l1",
+        "val_org_env_effective_hyperedges",
+        "val_org_module_effective_hyperedges",
         "val_selection_metric",
     ]
     with history_csv.open("w", newline="", encoding="utf-8") as f:
@@ -2063,12 +2281,21 @@ def main() -> None:
                     "loss_org_me": normalize_loss_scalar(losses["loss_org_me"]),
                     "loss_org_mm": normalize_loss_scalar(losses["loss_org_mm"]),
                     "loss_org_consistency": normalize_loss_scalar(losses["loss_org_consistency"]),
+                    "loss_org_eh_factor": normalize_loss_scalar(losses["loss_org_eh_factor"]),
+                    "loss_org_mass_align": normalize_loss_scalar(losses["loss_org_mass_align"]),
+                    "org_env_mass_max": normalize_loss_scalar(losses["org_env_mass_max"]),
+                    "org_module_mass_max": normalize_loss_scalar(losses["org_module_mass_max"]),
+                    "org_mass_l1": normalize_loss_scalar(losses["org_mass_l1"]),
+                    "org_env_effective_hyperedges": normalize_loss_scalar(losses["org_env_effective_hyperedges"]),
+                    "org_module_effective_hyperedges": normalize_loss_scalar(losses["org_module_effective_hyperedges"]),
                 }
             )
             train_bar.set_postfix(
                 loss=f"{accumulation_buffer[-1]['loss_total']:.3e}",
                 residual=f"{accumulation_buffer[-1]['loss_residual']:.3e}",
                 dyn_energy=f"{accumulation_buffer[-1]['loss_dynamic_energy']:.3e}",
+                org_l1=f"{accumulation_buffer[-1]['org_mass_l1']:.2e}",
+                env_effH=f"{accumulation_buffer[-1]['org_env_effective_hyperedges']:.2f}",
                 freq=f"{accumulation_buffer[-1]['loss_freq']:.3e}",
                 accum=f"{micro_index + 1}/{active_accum_steps}",
                 lr=f"{optimizer.param_groups[0]['lr']:.2e}",
@@ -2094,7 +2321,8 @@ def main() -> None:
         epoch_train_metrics = average_metric_dicts(epoch_metric_buffer)
         print(
             f"[epoch] {epoch:03d}/{total_epochs:03d} training finished | "
-            f"{format_metrics(epoch_train_metrics, keys=['loss_total', 'loss_field', 'loss_mean', 'loss_residual', 'loss_dynamic_energy', 'loss_freq', 'loss_org_direct'])}"
+            f"{format_metrics(epoch_train_metrics, keys=['loss_total', 'loss_field', 'loss_mean', 'loss_residual', 'loss_dynamic_energy', 'loss_freq', 'loss_org_direct'])} | "
+            f"{format_metrics(epoch_train_metrics, keys=['org_mass_l1', 'org_env_effective_hyperedges', 'org_module_effective_hyperedges', 'org_env_mass_max', 'org_module_mass_max'])}"
         )
 
         if scheduler is not None:
@@ -2109,6 +2337,13 @@ def main() -> None:
             "val_freq_mse": float("nan"),
             "val_dynamic_energy": float("nan"),
             "val_residual_focus": float("nan"),
+            "val_loss_org_eh_factor": float("nan"),
+            "val_loss_org_mass_align": float("nan"),
+            "val_org_env_mass_max": float("nan"),
+            "val_org_module_mass_max": float("nan"),
+            "val_org_mass_l1": float("nan"),
+            "val_org_env_effective_hyperedges": float("nan"),
+            "val_org_module_effective_hyperedges": float("nan"),
         }
         eval_every_epochs = max(1, int(validation_cfg.get("eval_every_epochs", 1)))
         should_run_validation = (epoch == 1) or (epoch % eval_every_epochs == 0)
@@ -2151,6 +2386,11 @@ def main() -> None:
                 f"residual_focus={val_metrics['val_residual_focus']:.6e} "
                 f"mean_mse={val_metrics['val_mean_mse']:.6e} "
                 f"freq_mse={val_metrics['val_freq_mse']:.6e} "
+                f"org_mass_l1={val_metrics.get('val_org_mass_l1', float('nan')):.6e} "
+                f"env_effH={val_metrics.get('val_org_env_effective_hyperedges', float('nan')):.3f} "
+                f"mod_effH={val_metrics.get('val_org_module_effective_hyperedges', float('nan')):.3f} "
+                f"env_max={val_metrics.get('val_org_env_mass_max', float('nan')):.3f} "
+                f"mod_max={val_metrics.get('val_org_module_mass_max', float('nan')):.3f} "
                 f"selection={val_selection_metric:.6e}"
             )
         else:
@@ -2173,6 +2413,13 @@ def main() -> None:
                     "loss_org_me": epoch_train_metrics["loss_org_me"],
                     "loss_org_mm": epoch_train_metrics["loss_org_mm"],
                     "loss_org_consistency": epoch_train_metrics["loss_org_consistency"],
+                    "loss_org_eh_factor": epoch_train_metrics["loss_org_eh_factor"],
+                    "loss_org_mass_align": epoch_train_metrics["loss_org_mass_align"],
+                    "org_env_mass_max": epoch_train_metrics["org_env_mass_max"],
+                    "org_module_mass_max": epoch_train_metrics["org_module_mass_max"],
+                    "org_mass_l1": epoch_train_metrics["org_mass_l1"],
+                    "org_env_effective_hyperedges": epoch_train_metrics["org_env_effective_hyperedges"],
+                    "org_module_effective_hyperedges": epoch_train_metrics["org_module_effective_hyperedges"],
                 }
             ),
             # "lr": float(optimizer.param_groups[0]["lr"]),

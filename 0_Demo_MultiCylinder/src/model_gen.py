@@ -662,7 +662,15 @@ def build_global_condition_vector(det_outputs: Dict[str, torch.Tensor], structur
         mask = cyl_mask if key == "module_state" else None
         pieces.extend(_safe_pool(val, mask=mask))
 
-    for key in ["hyper_strength", "hyper_source_coords", "hyper_wake_coords", "hyper_wake_axis", "hyper_wake_extent"]:
+    for key in [
+        "hyper_module_mass",
+        "hyper_env_mass",
+        "hyper_strength",
+        "hyper_source_coords",
+        "hyper_wake_coords",
+        "hyper_wake_axis",
+        "hyper_wake_extent",
+    ]:
         val = det_outputs.get(key)
         if val is not None:
             pieces.extend(_safe_pool(val, mask=None))

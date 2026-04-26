@@ -1,6 +1,6 @@
 # Multi-cylinder PhiFlow Demo
 
-Updated: 2026-04-24
+Updated: 2026-04-26
 
 This demo covers the periodic multi-cylinder inert wake workflow:
 
@@ -25,6 +25,35 @@ This revision targets the residual-dynamics plateau with four scoped changes:
    residual branch sees phase-dependent motion rather than isolated snapshots.
 5. `loss_curve.png` is now a 2x2 figure: total, field, residual, and dynamic
    energy.
+
+## Organizer Collapse Fix
+
+Updated: 2026-04-26
+
+The organizer previously allowed a bad but low-entropy solution: `A_mh` could
+split cylinders/modules across several hyperedges while `A_eh` assigned nearly
+all environment tokens to one hyperedge. That made a hyperedge look strong even
+when it had environment support but almost no cylinder/module support.
+
+The correction has four parts:
+
+1. `A_eh` receives direct factor supervision from `A_me` and `A_mh`:
+
+   `A_eh_target[e,k] proportional to sum_i A_me[i,e] * A_mh[i,k]`
+
+2. normalized environment hyperedge mass is aligned with normalized module
+   hyperedge mass.
+3. `hyper_strength` is now joint source/environment support:
+
+   `sqrt(module_mass * env_mass)`
+
+4. env-to-hyperedge scoring now sees hyperedge-specific periodic relative
+   geometry from each environment token to the provisional `A_mh` source center.
+
+The old organizer sparsity/entropy regularizers are disabled in the template
+because a collapsed `A_eh` can look confidently sparse. The new losses instead
+encourage each interaction hyperedge to own both a cylinder/module group and a
+corresponding wake/environment region.
 
 ## Periodic Boundary Assumption
 
@@ -58,6 +87,8 @@ Key outputs from `src/model.py`:
 - `hyper_wake_coords`
 - `hyper_wake_axis`
 - `hyper_wake_extent`
+- `hyper_module_mass`
+- `hyper_env_mass`
 - `hyper_strength`
 - `dynamic_global_token`
 - `dynamic_hyper_base`
@@ -75,6 +106,10 @@ geometry.
 - `hyper_wake_axis` points from source center to wake center under periodic
   geometry
 - `hyper_wake_extent` is a lightweight weighted wake spread
+- `hyper_module_mass` and `hyper_env_mass` expose normalized hyperedge usage on
+  both sides of the interaction
+- `hyper_strength = sqrt(hyper_module_mass * hyper_env_mass)`, so one-sided
+  environment or module collapse is not treated as a strong interaction
 
 This makes hyperedges represent interaction regions rather than only
 source-cylinder clusters.
@@ -161,6 +196,8 @@ Recommended defaults:
 - `organizer_me_weight = 0.01`
 - `organizer_mm_weight = 0.05`
 - `organizer_consistency_weight = 0.05`
+- `organizer_eh_factor_weight = 0.05`
+- `organizer_mass_align_weight = 0.02`
 
 No spectral, gradient, adversarial, diffusion, or flow-matching loss was added
 in this revision.
@@ -213,7 +250,24 @@ clearer outputs:
 
 4. `organization_summary_*.csv` and `organization_summary_*.json`
    - machine-readable hyperedge summary with strength, source/wake centers,
-     wake axis, extent, top cylinders, and top environment tokens
+     wake axis, extent, module mass, environment mass, top cylinders, and top
+     environment tokens
+
+Training logs also include organizer collapse diagnostics:
+
+- `loss_org_eh_factor`
+- `loss_org_mass_align`
+- `org_mass_l1`
+- `org_env_effective_hyperedges`
+- `org_module_effective_hyperedges`
+- `org_env_mass_max`
+- `org_module_mass_max`
+
+Generative stage-2 models share the same organizer semantics whenever they
+condition on deterministic aux outputs from `src/model.py`. Stage-2 models
+trained or conditioned with an older deterministic checkpoint will still reflect
+the old organizer behavior; retrain or condition on a deterministic checkpoint
+trained after this fix to benefit from the revised organizer.
 
 Useful evaluator arguments:
 

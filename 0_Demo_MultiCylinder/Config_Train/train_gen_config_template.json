@@ -3,7 +3,7 @@
   "comments":"Repeated 0001, altered model sizes & utilized corrected processed dataset",
 
   "generation": {
-    "training_stage": 1,
+    "training_stage": 2,
     "target_mode": "residual",
     "det_query_batch_size": 32768,
     "comment": "Stage 1 trains the residual AE. Stage 2 trains the latent rectified-flow generator conditioned on the deterministic modular-DT model."
@@ -36,7 +36,7 @@
     },
     "training": {
       "epochs": 10000,
-      "batch_size": 256,
+      "batch_size": 384,
       "learning_rate": 0.0002,
       "weight_decay": 0.00001,
       "scheduler_t_max": 500,
@@ -58,7 +58,7 @@
       "comment": "Dense condition maps include deterministic mean, residual, field, xy, tau, and Re. Global condition vector pools deterministic organizer aux outputs."
     },
     "architecture": {
-      "base_ch": 192,
+      "base_ch": 128,
       "ch_mult": [1, 2],
       "num_res_blocks": 2,
       "num_heads": 4,
@@ -69,7 +69,7 @@
     },
     "training": {
       "epochs": 10000,
-      "batch_size": 128,
+      "batch_size": 108,
       "learning_rate": 0.0001,
       "weight_decay": 0.00001,
       "gradient_clip_norm": 1.0,

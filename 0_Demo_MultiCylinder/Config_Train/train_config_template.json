@@ -1,6 +1,6 @@
 {
-  "case_id": "0004",
-  "comments":"Repeated 0003, altered model sizes & utilized corrected processed dataset",
+  "case_id": "0007",
+  "comments":"Repeated 0005, larger model",
 
   "dataset": {
     "packed_h5_path": "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5",
@@ -51,10 +51,10 @@
     "num_env_tokens_y": 8,
     "num_hyperedges": 4,
 
-    "hidden_dim": 64,
-    "behavior_dim": 64,
-    "latent_dim": 64,
-    "dynamic_token_dim": 64,
+    "hidden_dim": 72,
+    "behavior_dim": 72,
+    "latent_dim": 72,
+    "dynamic_token_dim": 72,
 
     "message_passing_steps": 3,
     "structure_fourier_frequencies": 1,
@@ -86,7 +86,11 @@
     "dynamic_phase_rank": 12,
     "dynamic_phase_mode": "low_rank_harmonic",
     "phase_conditioning_dropout": 0.05,
+
     "use_wake_centered_hyper_geometry": true,
+    "use_hyper_specific_eh_geometry": true,
+
+    "organizer_eh_prior_logit_weight": 0.0,
     "future_module_feature_dim": 0,
     "future_global_feature_dim": 0,
     "dropout": 0.05,
@@ -94,9 +98,9 @@
   },
   "training": {
     "epochs": 10000,
-    "batch_size": 384,
+    "batch_size": 256,
     "learning_rate": 2.0e-4,
-    "weight_decay": 1.0e-4,
+    "weight_decay": 1.0e-5,
     "gradient_clip_norm": 1.0,
     "scheduler": "cosine",
     "scheduler_t_max": 800,
@@ -118,11 +122,20 @@
     "dynamic_energy_eps": 1.0e-8,
     "dynamic_energy_use_smooth_l1": true,
 
-    "organizer_sparsity_weight": 0.01,
-    "organizer_entropy_weight": 0.01,
+    "organizer_sparsity_weight": 0.0,
+    "organizer_entropy_weight": 0.0,
     "organizer_me_weight": 0.01,
     "organizer_mm_weight": 0.05,
     "organizer_consistency_weight": 0.05,
+    "organizer_eh_factor_weight": 0.05,
+    "organizer_eh_factor_target_source": "prior_me",
+    "organizer_eh_factor_detach_mh": true,
+    "organizer_eh_factor_eps": 1.0e-6,
+    "organizer_mass_align_weight": 0.02,
+
+    "organizer_mass_align_log_space": true,
+    "organizer_mass_align_detach_module": true,
+    "organizer_mass_align_eps": 1.0e-6,
     "organizer_ramp_epochs": 50
   },
   "validation": {
@@ -132,10 +145,10 @@
     "early_stopping_patience": 200,
     "eval_every_epochs": 1,
     "max_cases": 18,
-    "batch_size": 256,
+    "batch_size": 128,
     "num_workers": 4,
     "points_per_item": 4096,
-    "point_fraction": 0.20,
+    "point_fraction": 0.15,
     "min_points_per_sample": 1024,
     "resample_each_eval": false,
     "seed": 42,

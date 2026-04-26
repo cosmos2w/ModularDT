@@ -222,7 +222,7 @@ def _as_numpy_first(out: Dict, key: str, default: Optional[np.ndarray] = None) -
     value = np.asarray(value)
     if value.ndim >= 3:
         return value[0]
-    if value.ndim == 2 and key in {"hyper_strength", "hyper_wake_extent"}:
+    if value.ndim == 2 and key in {"hyper_strength", "hyper_wake_extent", "hyper_module_mass", "hyper_env_mass"}:
         return value[0]
     return value
 
@@ -259,11 +259,18 @@ def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
     hyper_wake_extent = np.asarray(hyper_wake_extent, dtype=np.float32).reshape(-1)[:num_hyper]
 
     hyper_strength = _as_numpy_first(out, "hyper_strength")
+    hyper_module_mass = _as_numpy_first(out, "hyper_module_mass")
+    hyper_env_mass = _as_numpy_first(out, "hyper_env_mass")
+    if hyper_module_mass is None or hyper_env_mass is None:
+        module_mass_raw = A_mh.sum(axis=0) / max(float(num_cyl), 1.0)
+        env_mass_raw = A_eh.mean(axis=0)
+        hyper_module_mass = module_mass_raw / max(float(np.sum(module_mass_raw)), 1e-6)
+        hyper_env_mass = env_mass_raw / max(float(np.sum(env_mass_raw)), 1e-6)
     if hyper_strength is None:
-        module_mass = A_mh.sum(axis=0) / max(float(num_cyl), 1.0)
-        env_mass = A_eh.mean(axis=0)
-        hyper_strength = 0.5 * (module_mass + env_mass)
+        hyper_strength = np.sqrt(np.asarray(hyper_module_mass) * np.asarray(hyper_env_mass) + 1e-6)
     hyper_strength = np.asarray(hyper_strength, dtype=np.float32).reshape(-1)[:num_hyper]
+    hyper_module_mass = np.asarray(hyper_module_mass, dtype=np.float32).reshape(-1)[:num_hyper]
+    hyper_env_mass = np.asarray(hyper_env_mass, dtype=np.float32).reshape(-1)[:num_hyper]
 
     env_xy = _env_coords_to_physical(env_coords_norm, case)
     hyper_source_xy = _coords_norm_to_physical(hyper_source_norm, case)
@@ -287,6 +294,8 @@ def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
         "hyper_wake_xy": hyper_wake_xy,
         "hyper_wake_axis": hyper_wake_axis,
         "hyper_wake_extent": hyper_wake_extent,
+        "hyper_module_mass": hyper_module_mass,
+        "hyper_env_mass": hyper_env_mass,
         "hyper_strength": hyper_strength,
         "token_group": token_group,
         "token_conf": token_conf,
@@ -382,6 +391,8 @@ def compute_hyperedge_summary(
                 "tau": float(tau_value),
                 "hyperedge_id": int(k),
                 "strength": float(org["hyper_strength"][k]),
+                "module_mass": float(org["hyper_module_mass"][k]),
+                "env_mass": float(org["hyper_env_mass"][k]),
                 "source": {
                     "x": float(org["hyper_source_xy"][k, 0]),
                     "y": float(org["hyper_source_xy"][k, 1]),
@@ -419,6 +430,8 @@ def write_organization_summary(save_csv: Path, save_json: Path, summaries: List[
                 "tau": item["tau"],
                 "hyperedge_id": item["hyperedge_id"],
                 "strength": item["strength"],
+                "module_mass": item["module_mass"],
+                "env_mass": item["env_mass"],
                 "source_x": item["source"]["x"],
                 "source_y": item["source"]["y"],
                 "wake_x": item["wake"]["x"],
@@ -584,7 +597,7 @@ def render_organization_physical_summary(
             k = item["hyperedge_id"]
             lines.extend(
                 [
-                    f"H{k}  strength={item['strength']:.3f}",
+                    f"H{k}  strength={item['strength']:.3f}  mod_mass={item['module_mass']:.3f}  env_mass={item['env_mass']:.3f}",
                     f"  src=({item['source']['x']:.2f},{item['source']['y']:.2f})  wake=({item['wake']['x']:.2f},{item['wake']['y']:.2f})",
                     f"  axis=({item['wake_axis']['x']:.2f},{item['wake_axis']['y']:.2f})  extent={item['wake_extent']:.3f}",
                     f"  cyl: {_format_members('C', item['top_cylinders'])}",
@@ -647,7 +660,10 @@ def render_organization_matrices(save_path: Path, org: Dict, summaries: List[Dic
         ax.set_xlim(extent[0], extent[1])
         ax.set_ylim(extent[2], extent[3])
         ax.set_aspect("equal")
-        ax.set_title(f"H{k}: strength={summaries[k]['strength']:.2f}, n={summaries[k]['env_token_count']}", fontsize=9)
+        ax.set_title(
+            f"H{k}: str={summaries[k]['strength']:.2f}, mod={summaries[k]['module_mass']:.2f}, env={summaries[k]['env_mass']:.2f}",
+            fontsize=9,
+        )
         ax.set_xticks([])
         ax.set_yticks([])
     if num_hyper:
@@ -762,7 +778,7 @@ def render_organization_sankey(save_path: Path, org: Dict, summaries: List[Dict]
         ax.text(
             x + 0.035,
             y,
-            f"EnvGroup_{k}\nn={summaries[k]['env_token_count']}\nmass={summaries[k]['env_mass_sum']:.1f}",
+            f"EnvGroup_{k}\nn={summaries[k]['env_token_count']}\nmod={summaries[k]['module_mass']:.2f} env={summaries[k]['env_mass']:.2f}",
             ha="left",
             va="center",
             fontsize=8,
@@ -1017,6 +1033,8 @@ def main() -> None:
         hyper_wake_coords=org_arrays["hyper_wake_norm"].astype(np.float32),
         hyper_wake_axis=org_arrays["hyper_wake_axis"].astype(np.float32),
         hyper_wake_extent=org_arrays["hyper_wake_extent"].astype(np.float32),
+        hyper_module_mass=org_arrays["hyper_module_mass"].astype(np.float32),
+        hyper_env_mass=org_arrays["hyper_env_mass"].astype(np.float32),
         hyper_strength=org_arrays["hyper_strength"].astype(np.float32),
     )
 

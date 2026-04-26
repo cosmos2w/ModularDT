@@ -92,21 +92,32 @@ def periodic_relative_features(
     return torch.stack([dx, dy, dist, downstream, upstream], dim=-1)
 
 
-def periodic_weighted_mean(coords: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-    """Circular weighted mean for periodic coords in [0, 1].
+def periodic_weighted_mean(coords: torch.Tensor, weights: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Circular weighted mean for periodic coords in [0, 1).
 
     Args:
         coords: [B, N, 2]
-        weights: [B, N, K]
+        weights: [B, N, K] or [B, N]
     Returns:
-        [B, K, 2]
+        [B, K, 2] or [B, 2]
     """
 
     if coords.ndim != 3 or coords.shape[-1] != 2:
         raise ValueError("coords must have shape [B, N, 2].")
-    if weights.ndim != 3 or weights.shape[:2] != coords.shape[:2]:
-        raise ValueError("weights must have shape [B, N, K] matching coords.")
+    squeeze_hyper = False
+    if weights.ndim == 2:
+        if weights.shape != coords.shape[:2]:
+            raise ValueError("2D weights must have shape [B, N] matching coords.")
+        weights = weights.unsqueeze(-1)
+        squeeze_hyper = True
+    elif weights.ndim != 3 or weights.shape[:2] != coords.shape[:2]:
+        raise ValueError("weights must have shape [B, N, K] or [B, N] matching coords.")
 
+    # The PhiFlow domain wraps periodically, so arithmetic centroids can jump
+    # across a boundary.  Circular means keep learned source/wake centers inside
+    # the same periodic geometry used by attention and priors.
+    denom = weights.sum(dim=1, keepdim=True).clamp_min(eps)
+    weights = weights / denom
     angles = TWO_PI * coords[:, None, :, :]
     weight_t = weights.transpose(1, 2).unsqueeze(-1)
     sin_sum = (weight_t * torch.sin(angles)).sum(dim=2)
@@ -115,7 +126,8 @@ def periodic_weighted_mean(coords: torch.Tensor, weights: torch.Tensor) -> torch
     safe_sin = torch.where(resultant_sq > 1e-12, sin_sum, torch.zeros_like(sin_sum))
     safe_cos = torch.where(resultant_sq > 1e-12, cos_sum, torch.ones_like(cos_sum))
     mean_angle = torch.atan2(safe_sin, safe_cos)
-    return torch.remainder(mean_angle / TWO_PI, 1.0)
+    mean = torch.remainder(mean_angle / TWO_PI, 1.0)
+    return mean[:, 0, :] if squeeze_hyper else mean
 
 
 def periodic_weighted_rms_spread(
@@ -526,6 +538,8 @@ class ModelConfig:
     dynamic_phase_mode: str = "low_rank_harmonic"
     phase_conditioning_dropout: float = 0.05
     use_wake_centered_hyper_geometry: bool = True
+    use_hyper_specific_eh_geometry: bool = True
+    organizer_eh_prior_logit_weight: float = 0.0
     future_module_feature_dim: int = 0
     future_global_feature_dim: int = 0
     dropout: float = 0.05
@@ -586,7 +600,8 @@ class HypergraphOrganizer(nn.Module):
         rel_dim = 5
         self.me_score = MLP(2 * cfg.hidden_dim + rel_dim, cfg.hidden_dim, 1, num_layers=3, dropout=cfg.dropout)
         self.mh_score = MLP(2 * cfg.hidden_dim + rel_dim, cfg.hidden_dim, 1, num_layers=2, dropout=cfg.dropout)
-        self.eh_score = MLP(2 * cfg.hidden_dim + rel_dim, cfg.hidden_dim, 1, num_layers=2, dropout=cfg.dropout)
+        eh_geom_dim = 2 * rel_dim if cfg.use_hyper_specific_eh_geometry else rel_dim
+        self.eh_score = MLP(2 * cfg.hidden_dim + eh_geom_dim, cfg.hidden_dim, 1, num_layers=2, dropout=cfg.dropout)
 
         self.module_update = MLP(3 * cfg.hidden_dim, cfg.hidden_dim, cfg.hidden_dim, num_layers=2, dropout=cfg.dropout)
         self.env_update = MLP(3 * cfg.hidden_dim, cfg.hidden_dim, cfg.hidden_dim, num_layers=2, dropout=cfg.dropout)
@@ -696,10 +711,37 @@ class HypergraphOrganizer(nn.Module):
             mh_logits = self.mh_score(torch.cat([module_h, hyper_h, module_geom_h], dim=-1)).squeeze(-1)
             A_mh = masked_softmax(mh_logits, cyl_mask[:, :, None], dim=-1)
 
+            module_weights = A_mh * cyl_mask[:, :, None]
+            module_weights = module_weights / module_weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
+            hyper_source_coords_tmp = periodic_weighted_mean(module_coords_norm, module_weights)
+
             env_h = env_state[:, :, None, :].expand(-1, -1, n_hyp, -1)
             hyper_e = hyper_state[:, None, :, :].expand(-1, n_env, -1, -1)
             env_geom_h = env_geom_summary[:, :, None, :].expand(-1, -1, n_hyp, -1)
-            eh_logits = self.eh_score(torch.cat([env_h, hyper_e, env_geom_h], dim=-1)).squeeze(-1)
+            eh_inputs = [env_h, hyper_e, env_geom_h]
+            if self.cfg.use_hyper_specific_eh_geometry:
+                # A_eh needs to know where each provisional interaction source is;
+                # otherwise all environment tokens can pick one generic hyperedge
+                # even when A_mh has found several module groups.
+                rel_eh = periodic_relative_features(
+                    hyper_source_coords_tmp[:, :, None, :],
+                    env_coords[:, None, :, :],
+                ).transpose(1, 2)
+                eh_inputs.append(rel_eh)
+            eh_logits = self.eh_score(torch.cat(eh_inputs, dim=-1)).squeeze(-1)
+            prior_weight = float(self.cfg.organizer_eh_prior_logit_weight)
+            if prior_weight != 0.0:
+                target_eh = torch.einsum("bnm,bnk->bmk", A_me.detach(), A_mh.detach())
+                module_mass_tmp = (A_mh.detach() * cyl_mask[:, :, None]).sum(dim=1)
+                module_mass_tmp = module_mass_tmp / cyl_mask.sum(dim=1, keepdim=True).clamp_min(1e-6)
+                module_mass_tmp = module_mass_tmp / module_mass_tmp.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+                denom = target_eh.sum(dim=-1, keepdim=True)
+                target_eh = torch.where(
+                    denom > 1e-6,
+                    target_eh / denom.clamp_min(1e-6),
+                    module_mass_tmp[:, None, :].expand_as(target_eh),
+                )
+                eh_logits = eh_logits + prior_weight * torch.log(target_eh.clamp_min(1e-6))
             A_eh = torch.softmax(eh_logits, dim=-1)
 
             env_to_module = torch.einsum("bnm,bmd->bnd", A_me, env_state)
@@ -721,13 +763,9 @@ class HypergraphOrganizer(nn.Module):
         module_weights = module_weights / module_weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
         hyper_source_coords = periodic_weighted_mean(module_coords_norm, module_weights)
 
-        if self.cfg.use_wake_centered_hyper_geometry:
-            env_weights = A_eh / A_eh.sum(dim=1, keepdim=True).clamp_min(1e-6)
-            hyper_wake_coords = periodic_weighted_mean(env_coords, env_weights)
-            hyper_wake_extent = periodic_weighted_rms_spread(hyper_wake_coords, env_coords, env_weights)
-        else:
-            hyper_wake_coords = hyper_source_coords
-            hyper_wake_extent = periodic_weighted_rms_spread(hyper_source_coords, module_coords_norm, module_weights)
+        env_weights = A_eh / A_eh.sum(dim=1, keepdim=True).clamp_min(1e-6)
+        hyper_wake_coords = periodic_weighted_mean(env_coords, env_weights)
+        hyper_wake_extent = periodic_weighted_rms_spread(hyper_wake_coords, env_coords, env_weights).squeeze(-1)
 
         wake_dx, wake_dy = periodic_delta_min_image(hyper_source_coords, hyper_wake_coords)
         hyper_wake_axis = torch.stack([wake_dx, wake_dy], dim=-1)
@@ -740,10 +778,15 @@ class HypergraphOrganizer(nn.Module):
             default_axis,
         )
 
-        module_mass = (A_mh * cyl_mask[:, :, None]).sum(dim=1)
-        module_mass = module_mass / cyl_mask.sum(dim=1, keepdim=True).clamp_min(1e-6)
-        env_mass = A_eh.mean(dim=1)
-        hyper_strength = 0.5 * (module_mass + env_mass)
+        module_mass_raw = (A_mh * cyl_mask[:, :, None]).sum(dim=1)
+        module_mass_raw = module_mass_raw / cyl_mask.sum(dim=1, keepdim=True).clamp_min(1e-6)
+        env_mass_raw = A_eh.mean(dim=1)
+        module_mass = module_mass_raw / module_mass_raw.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        env_mass = env_mass_raw / env_mass_raw.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+        # A hyperedge is physically strong only when it owns both source modules
+        # and a matching environment/wake region; one-sided collapse should be
+        # visible as weak strength instead of being rewarded.
+        hyper_strength = torch.sqrt(module_mass * env_mass + 1e-6)
 
         return {
             "module_state": module_state,
@@ -758,7 +801,9 @@ class HypergraphOrganizer(nn.Module):
             "hyper_wake_coords": hyper_wake_coords,
             "hyper_wake_axis": hyper_wake_axis,
             "hyper_wake_extent": hyper_wake_extent,
-            "hyper_strength": hyper_strength.unsqueeze(-1),
+            "hyper_module_mass": module_mass,
+            "hyper_env_mass": env_mass,
+            "hyper_strength": hyper_strength,
             "global_features": global_feats,
             "cyl_mask": cyl_mask,
         }
@@ -826,6 +871,8 @@ class BehaviorHead(nn.Module):
         cyl_mask = organized["cyl_mask"]
         global_features = organized["global_features"]
         hyper_strength = organized["hyper_strength"]
+        if hyper_strength.ndim == 2:
+            hyper_strength = hyper_strength.unsqueeze(-1)
 
         module_mean = HypergraphOrganizer.masked_mean(module_state, cyl_mask, dim=1)
         module_max = HypergraphOrganizer.masked_max(module_state, cyl_mask, dim=1)
@@ -917,8 +964,13 @@ class PhaseConditionedHyperContext(nn.Module):
         hyper_source_coords = organized["hyper_source_coords"]
         hyper_wake_coords = organized["hyper_wake_coords"]
         hyper_wake_axis = organized["hyper_wake_axis"]
-        hyper_wake_extent = organized["hyper_wake_extent"].squeeze(-1).clamp_min(0.02)
-        hyper_strength = organized["hyper_strength"].squeeze(-1)
+        hyper_wake_extent = organized["hyper_wake_extent"]
+        if hyper_wake_extent.ndim == 3:
+            hyper_wake_extent = hyper_wake_extent.squeeze(-1)
+        hyper_wake_extent = hyper_wake_extent.clamp_min(0.02)
+        hyper_strength = organized["hyper_strength"]
+        if hyper_strength.ndim == 3:
+            hyper_strength = hyper_strength.squeeze(-1)
 
         wake_dx, wake_dy = periodic_delta_min_image(
             hyper_wake_coords[:, None, :, :],
@@ -1512,6 +1564,8 @@ class HypergraphNeuralFieldModel(nn.Module):
                 "hyper_wake_coords": organized["hyper_wake_coords"],
                 "hyper_wake_axis": organized["hyper_wake_axis"],
                 "hyper_wake_extent": organized["hyper_wake_extent"],
+                "hyper_module_mass": organized["hyper_module_mass"],
+                "hyper_env_mass": organized["hyper_env_mass"],
                 "hyper_strength": organized["hyper_strength"],
                 "global_features": organized["global_features"],
                 "cyl_mask": organized["cyl_mask"],
