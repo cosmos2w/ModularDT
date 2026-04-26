@@ -1,26 +1,55 @@
-
+# Python/runtime caches
 __pycache__/
-Data_Saved/
-Domain_shape/
-Configs/
-Config_Train/
-Saved_Model/
-Saved_Model_Gen/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
+# Local agent/editor state
+.codex/
+.codex
+.vscode/
+.idea/
+
+# Local notes not needed for running the demo
+Notes.txt
+MODEL_EXPLAIN.txt
+0_Demo_MultiCylinder/MODEL_EXPLAIN.txt
+
+# Frontend dependency/build output
+node_modules/
+0_Demo_MultiCylinder/web_demo/frontend/dist/
+0_Demo_MultiCylinder/web_demo/frontend/.vite/
+
+# Web demo generated inference cache
+0_Demo_MultiCylinder/web_demo/storage/cache/
+
+# Large datasets, training outputs, and generated visualizations
+Data_Saved/
+0_Demo_MultiCylinder/Data_Saved/
+0_Demo_MultiCylinder/Saved_Model/
+0_Demo_MultiCylinder/Saved_Model_Gen/
+0_Demo_MultiCylinder/Domain_shape/
+
+# Per-run generated config backups; keep active configs and templates tracked.
+0_Demo_MultiCylinder/Configs/Config_bk/
+0_Demo_MultiCylinder/Config_Train/Configs_bk/
+0_Demo_MultiCylinder/Config_Train/Configs_gen_bk/
+
+# Heavy/intermediate artifacts
 *.pt
 *.pth
-*.png
-*.gif
-*.csv
 *.h5
-*.tar
-*.pt
-*.yaml
-*.txt
-*.svg
-*.json
-*.codex
+*.hdf5
 *.npz
+*.npy
+*.tar
+*.zip
 *.log
+*.codex
 
-.codex
+# Generated reports/plots/history files from runs
+loss_history.csv
+loss_history.json
+loss_curve.png
+Evaluation*/

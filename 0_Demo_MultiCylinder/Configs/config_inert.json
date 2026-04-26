@@ -1,0 +1,74 @@
+{
+  "mode": "inert",
+  "domain": {
+    "nx": 256,
+    "ny": 128,
+    "lx": 24.0,
+    "ly": 12.0,
+    "cylinder_radius": 0.5,
+    "min_gap": 0.35,
+    "edge_margin": 2.0
+  },
+  "flow": {
+    "re": 120.0,
+    "u_bulk": 1.0,
+    "dt": 0.01,
+    "forcing_relaxation": 12.0,
+    "warmup_cycles": 4.0,
+    "save_cycles": 4.0,
+    "frames_per_cycle": 36,
+    "pressure_rank_deficiency": 0,
+    "diffusion_substeps": 1
+  },
+  "thermal": {
+    "enabled": false,
+    "pr": 0.71,
+    "ambient_temperature": 0.0,
+    "source_sigma": 0.12,
+    "power_min": 0.5,
+    "power_max": 1.5,
+    "diffusion_substeps": 1
+  },
+  "layout": {
+    "num_cylinders": 4,
+    "seed": 42,
+    "centers": [
+      [
+        14.50,
+        9.18
+      ],
+      [
+        17.51,
+        3.80
+      ],
+      [
+        8.00,
+        8.98
+      ],
+      [
+        2.10,
+        8.57
+      ]
+    ],
+    "heat_powers": [
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "save": {
+    "root_dir": "./Data_Saved",
+    "case_id": "0001",
+    "tag": "multicyl",
+    "save_pressure": true,
+    "save_temperature": false,
+    "save_vorticity": true,
+    "save_cylinder_mask": true
+  },
+  "execution": {
+    "device": "gpu",
+    "gpu_id": 1
+  },
+  "generated_at": "2026-04-17T16:08:58"
+}

@@ -1,0 +1,47 @@
+{
+  "models": [
+    {
+      "id": "det_case0004",
+      "label": "Deterministic Case0004",
+      "mode": "deterministic",
+      "run_dir": "~/Desktop/src/ModularDT/0_Demo_MultiCylinder/Saved_Model/Case0004_20260425_135831",
+      "checkpoint_name": "latest_model.pt",
+      "config_name": "resolved_train_config.json",
+      "preload": true,
+      "enabled": true,
+      "default_phase_bins": 36,
+      "max_phase_bins": 36,
+      "phase_bin_policy": "cap"
+    },
+    {
+      "id": "gen_stage1_pending",
+      "label": "Generative Stage 1 AE only",
+      "mode": "generative",
+      "stage": 1,
+      "run_dir": "~/Desktop/src/ModularDT/0_Demo_MultiCylinder/Saved_Model_Gen/Gen_Casegen002_Stage1_20260425_131600",
+      "checkpoint_name": "best_model.pt",
+      "config_name": "resolved_train_gen_config.json",
+      "preload": false,
+      "enabled": false,
+      "default_phase_bins": 36,
+      "max_phase_bins": 36,
+      "phase_bin_policy": "cap",
+      "note": "Stage-2 latent flow checkpoint pending; this entry is not yet available for generative inference."
+    },
+    {
+      "id": "gen_stage2_casegen001",
+      "label": "Generative Stage 2 Case gen001",
+      "mode": "generative",
+      "stage": 2,
+      "run_dir": "~/Desktop/src/ModularDT/0_Demo_MultiCylinder/Saved_Model_Gen/Gen_Casegen001_Stage2_20260425_013132",
+      "checkpoint_name": "latest_model.pt",
+      "config_name": "resolved_train_gen_config.json",
+      "preload": false,
+      "enabled": true,
+      "default_phase_bins": 36,
+      "max_phase_bins": 36,
+      "phase_bin_policy": "cap",
+      "note": "Stage-2 latent rectified-flow sampler; renders ensemble mean and exports all generated samples."
+    }
+  ]
+}

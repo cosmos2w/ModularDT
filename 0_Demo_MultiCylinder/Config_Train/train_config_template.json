@@ -1,0 +1,149 @@
+{
+  "case_id": "0004",
+  "comments":"Repeated 0003, altered model sizes & utilized corrected processed dataset",
+
+  "dataset": {
+    "packed_h5_path": "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5",
+    "train_split": "train",
+    "val_split": "test",
+
+    "max_num_cylinders": 8,
+    "points_per_item": 4096,
+    "train_point_fraction": 0.20,
+    "min_points_per_sample": 1024,
+
+    "resample_each_epoch": true,
+    "randomize_cylinder_order": true,
+    "randomize_cylinder_order_val": false,
+
+    "use_phase_window_batches": false,
+    "phase_window_train_only": true,
+    "phase_window_fraction": 0.25,
+    "phase_window_num_phases": 4,
+    "phase_window_num_xy": 512,
+    "phase_window_phase_mode": "stratified_cycle",
+    "phase_window_xy_sampling": "omega_variance",
+    "phase_window_require_canonical_cycle": false,
+
+    "point_sampling_mode": "wake_focused",
+    "wake_uniform_fraction": 0.35,
+    "wake_near_cylinder_fraction": 0.20,
+    "wake_downstream_fraction": 0.30,
+    "wake_high_omega_fraction": 0.15,
+    "wake_near_radius": 1.25,
+    "wake_sigma_y_base": 0.50,
+    "wake_sigma_y_growth": 0.20,
+    "wake_streamwise_decay": 8.0,
+    "wake_high_omega_quantile": 0.75,
+
+    "wake_sampling_train_only": true,
+    "shuffle_train_chunks": true,
+    "train_num_workers": 4,
+    "val_num_workers": 4
+  },
+  "model": {
+    "max_num_cylinders": 8,
+    "domain_length_x": 24.0,
+    "domain_length_y": 12.0,
+    "re_scale": 200.0,
+
+    "num_env_tokens_x": 16,
+    "num_env_tokens_y": 8,
+    "num_hyperedges": 4,
+
+    "hidden_dim": 64,
+    "behavior_dim": 64,
+    "latent_dim": 64,
+    "dynamic_token_dim": 64,
+
+    "message_passing_steps": 3,
+    "structure_fourier_frequencies": 1,
+    "spatial_query_fourier_frequencies": 4,
+    "phase_fourier_frequencies": 4,
+
+    "decoder_hidden_dim": 128,
+    "perceiver_num_layers_global": 1,
+    "perceiver_num_layers_local": 2,
+    "perceiver_num_heads": 4,
+    "perceiver_head_dim": 16,
+    "perceiver_ffn_mult": 2,
+    "perceiver_dropout": 0.05,
+    "perceiver_refine_topk_env": 16,
+    "perceiver_refine_topk_mod": 5,
+    "perceiver_query_chunk_size": 1024,
+
+    "local_topk_mode": "wake_relevance",
+    "local_topk_distance_weight": 1.0,
+    "local_topk_hyper_weight": 1.0,
+    "local_topk_attention_bias_weight": 0.25,
+    "local_topk_use_softmax_hyper_weights": true,
+    "local_topk_detach_scores": true,
+
+    "use_dynamic_hyper_tokens": true,
+    "use_hyper_phase_offsets": true,
+    "use_phase_conditioned_dynamic_tokens": true,
+    "dynamic_phase_harmonics": 3,
+    "dynamic_phase_rank": 12,
+    "dynamic_phase_mode": "low_rank_harmonic",
+    "phase_conditioning_dropout": 0.05,
+    "use_wake_centered_hyper_geometry": true,
+    "future_module_feature_dim": 0,
+    "future_global_feature_dim": 0,
+    "dropout": 0.05,
+    "use_layer_norm": true
+  },
+  "training": {
+    "epochs": 10000,
+    "batch_size": 384,
+    "learning_rate": 2.0e-4,
+    "weight_decay": 1.0e-4,
+    "gradient_clip_norm": 1.0,
+    "scheduler": "cosine",
+    "scheduler_t_max": 800,
+    "scheduler_min_lr": 1.0e-5,
+    "mixed_precision": false,
+    "use_data_parallel": false,
+    "max_physical_queries_per_step": 131072,
+    "seed": 42
+  },
+  "loss": {
+    "field_mse_weight": 1.0,
+    "mean_mse_weight": 0.0,
+    "residual_mse_weight": 1.5,
+    "freq_mse_weight": 0.05,
+
+    "dynamic_energy_weight": 0.05,
+    "dynamic_energy_channels": [3],
+    "dynamic_energy_log_space": true,
+    "dynamic_energy_eps": 1.0e-8,
+    "dynamic_energy_use_smooth_l1": true,
+
+    "organizer_sparsity_weight": 0.01,
+    "organizer_entropy_weight": 0.01,
+    "organizer_me_weight": 0.01,
+    "organizer_mm_weight": 0.05,
+    "organizer_consistency_weight": 0.05,
+    "organizer_ramp_epochs": 50
+  },
+  "validation": {
+    "mode": "point_chunks",
+    "best_metric_name": "val_residual_focus",
+    "residual_focus_field_weight": 0.25,
+    "early_stopping_patience": 200,
+    "eval_every_epochs": 1,
+    "max_cases": 18,
+    "batch_size": 256,
+    "num_workers": 4,
+    "points_per_item": 4096,
+    "point_fraction": 0.20,
+    "min_points_per_sample": 1024,
+    "resample_each_eval": false,
+    "seed": 42,
+    "query_batch_size": 32768,
+    "phase_bins_to_eval": 36
+  },
+  "paths": {
+    "config_train_dir": "./Config_Train",
+    "saved_model_dir": "./Saved_Model"
+  }
+}

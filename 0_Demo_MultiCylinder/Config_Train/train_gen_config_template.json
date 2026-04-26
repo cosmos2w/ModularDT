@@ -1,0 +1,97 @@
+{
+  "case_id": "gen002",
+  "comments":"Repeated 0001, altered model sizes & utilized corrected processed dataset",
+
+  "generation": {
+    "training_stage": 1,
+    "target_mode": "residual",
+    "det_query_batch_size": 32768,
+    "comment": "Stage 1 trains the residual AE. Stage 2 trains the latent rectified-flow generator conditioned on the deterministic modular-DT model."
+  },
+  "dataset": {
+    "packed_h5_path": "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5",
+    "train_split": "train",
+    "val_split": "test",
+    "max_num_cylinders": 8,
+    "train_phase_stride": 1,
+    "val_phase_stride": 2,
+    "train_max_cases": 0,
+    "val_max_cases": 16,
+    "randomize_cylinder_order": true,
+    "num_workers": 4,
+    "comment": "The generative dataset uses canonical_cycle full-grid snapshots, not point chunks. Cylinder-order randomization is kept for train split to preserve set/permutation semantics."
+  },
+  "deterministic_model": {
+    "checkpoint_path": "auto",
+    "comment": "Required for stage 2. The frozen deterministic model provides organized-state and dense field conditioning."
+  },
+  "stage1": {
+    "stats_max_items": 0,
+    "architecture": {
+      "base_ch": 48,
+      "latent_ch": 96,
+      "n_levels": 3,
+      "num_res_blocks": 1,
+      "comment": "AE latent size is roughly H/8 x W/8. Increase latent_ch or decrease n_levels if AE reconstructions blur too much."
+    },
+    "training": {
+      "epochs": 10000,
+      "batch_size": 256,
+      "learning_rate": 0.0002,
+      "weight_decay": 0.00001,
+      "scheduler_t_max": 500,
+      "scheduler_min_lr": 0.00001,
+      "eval_every_epochs": 1
+    },
+    "loss": {
+      "mse_weight": 1.0,
+      "l1_weight": 0.25,
+      "grad_clip": 1.0,
+      "comment": "Stage-1 AE loss is intentionally simple: MSE+L1 on normalized residual grids."
+    }
+  },
+
+  "stage2": {
+    "stage1_checkpoint_path": "auto",
+    "conditioning": {
+      "include_pred_field": true,
+      "comment": "Dense condition maps include deterministic mean, residual, field, xy, tau, and Re. Global condition vector pools deterministic organizer aux outputs."
+    },
+    "architecture": {
+      "base_ch": 192,
+      "ch_mult": [1, 2],
+      "num_res_blocks": 2,
+      "num_heads": 4,
+      "dropout": 0.0,
+      "ema_decay": 0.999,
+      "cond_downsample_mode": "area",
+      "comment": "Velocity UNet operates in AE latent space. Global organizer condition is injected through adaptive GroupNorm FiLM."
+    },
+    "training": {
+      "epochs": 10000,
+      "batch_size": 128,
+      "learning_rate": 0.0001,
+      "weight_decay": 0.00001,
+      "gradient_clip_norm": 1.0,
+      "scheduler_t_max": 1000,
+      "scheduler_min_lr": 0.00001,
+      "eval_every_epochs": 1
+    },
+    "sampling": {
+      "n_steps": 8,
+      "ode_solver": "euler",
+      "cycle_noise_mode": "independent",
+      "phase_chunk_size": 8,
+      "sample_chunk_size": 1,
+      "comment": "Use euler for speed during early experiments; heun gives a stronger but slower check. Evaluation cycle mode samples each tau-conditioned phase; cycle_noise_mode may be independent, shared, or harmonic."
+    }
+  },
+  "training": {
+    "seed": 42,
+    "reload": false
+  },
+  "paths": {
+    "config_train_dir": "./Config_Train",
+    "saved_model_dir": "./Saved_Model_Gen"
+  }
+}
