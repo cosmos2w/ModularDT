@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
                         help="Minimum soft weight used when drawing organization edges.")
     parser.add_argument("--topk-me-links", type=int, default=3,
                         help="Number of strongest module-environment links to draw per cylinder.")
-    parser.add_argument("--organization-view", choices=["all", "physical", "matrices", "sankey"], default="all",
+    parser.add_argument("--organization-view", choices=["all", "physical", "matrices", "sankey", "schematic"], default="all",
                         help="Which organization diagnostic view to render.")
     parser.add_argument("--organization-topk-cylinders", type=int, default=3,
                         help="Number of top cylinder memberships to list for each hyperedge.")
@@ -824,6 +824,27 @@ def render_soft_organization(
         render_organization_sankey(path, org, summaries, threshold=threshold, min_gap=min_gap)
         paths["sankey"] = str(path)
     return paths
+
+
+# Use the shared organizer renderer below for both deterministic and generative
+# evaluators. The legacy local helpers above are kept for backward import safety.
+from organizer_viz import (
+    compute_hyperedge_summary,
+    draw_periodic_segment,
+    extract_organization_arrays,
+    periodic_min_image_delta_physical,
+    periodic_shifted_endpoint,
+    render_organization_hypergraph_schematic,
+    render_organization_matrices,
+    render_organization_physical_summary,
+    render_organization_sankey,
+    render_soft_organization,
+    spread_positions,
+    topk_cylinder_members,
+    topk_env_members,
+    write_organization_summary,
+)
+
 
 def render_quicklook(
     save_path: Path,

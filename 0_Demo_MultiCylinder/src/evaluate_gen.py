@@ -56,6 +56,7 @@ from train_gen import (
     resolve_demo_path,
     safe_torch_load,
 )
+from organizer_viz import render_soft_organization
 
 
 # -----------------------------------------------------------------------------
@@ -98,6 +99,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gif-fps", type=float, default=6.0, help="Frames per second for cycle GIF output.")
     parser.add_argument("--viz-channel", type=int, default=3, help="Field channel used for quicklooks and cycle GIFs; omega is channel 3.")
     parser.add_argument("--output-dir", type=str, default=None, help="Optional output directory.")
+    parser.add_argument("--organization-threshold", type=float, default=0.15, help="Minimum soft weight used when drawing organization edges.")
+    parser.add_argument("--topk-me-links", type=int, default=3, help="Reserved for deterministic compatibility; env-token links are suppressed in the refined organizer overlay.")
+    parser.add_argument("--organization-view", choices=["all", "physical", "matrices", "sankey", "schematic"], default="all", help="Which deterministic-backbone organizer diagnostic view to render in stage-2 snapshot mode.")
+    parser.add_argument("--organization-topk-cylinders", type=int, default=3, help="Number of top cylinder memberships to list for each hyperedge.")
+    parser.add_argument("--organization-topk-env", type=int, default=5, help="Number of top environment tokens to list for each hyperedge.")
+    parser.add_argument("--organization-min-gap", type=float, default=0.08, help="Minimum normalized vertical gap for Sankey node layout.")
+    parser.add_argument("--organization-table", action=argparse.BooleanOptionalAction, default=True, help="Show the hyperedge summary table in the physical organization view.")
     args = parser.parse_args()
     if args.cycle:
         args.mode = "cycle"
@@ -1271,6 +1279,20 @@ def main() -> None:
             channel=3,
             channel_name="omega",
         )
+        organization_paths = render_soft_organization(
+            out_dir,
+            det_out,
+            sample,
+            tau_value=float(sample["tau"]),
+            phase_idx=int(sample["phase_index"]),
+            threshold=float(args.organization_threshold),
+            topk_me_links=int(args.topk_me_links),
+            organization_view=str(args.organization_view),
+            topk_cylinders=int(args.organization_topk_cylinders),
+            topk_env=int(args.organization_topk_env),
+            min_gap=float(args.organization_min_gap),
+            show_table=bool(args.organization_table),
+        )
 
         np.savez_compressed(
             out_dir / "gen_reconstruction.npz",
@@ -1303,6 +1325,7 @@ def main() -> None:
             "sample_diversity_mean_std": float(gen_samples.std(axis=0).mean()),
             "checkpoint": str(checkpoint_path),
             "deterministic_checkpoint": str(det_ckpt_path),
+            "organization_paths": organization_paths,
         }
 
     with (out_dir / "evaluation_summary.json").open("w", encoding="utf-8") as f:
