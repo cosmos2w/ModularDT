@@ -76,6 +76,86 @@ def sort_case_ids(case_ids: Iterable[str]) -> List[str]:
     return sorted(case_ids, key=key_fn)
 
 
+INERT_CHANNEL_ORDER = ("u", "v", "p", "omega")
+ACTIVE_CHANNEL_ORDER = ("u", "v", "p", "omega", "temperature")
+
+
+def decode_string_array(values) -> List[str]:
+    arr = np.asarray(values)
+    out: List[str] = []
+    for item in arr.reshape(-1):
+        if isinstance(item, bytes):
+            out.append(item.decode("utf-8"))
+        else:
+            out.append(str(item))
+    return out
+
+
+def channel_order_from_attr(value) -> Optional[List[str]]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text == "mixed":
+            return None
+        try:
+            payload = json.loads(text)
+            if isinstance(payload, (list, tuple)):
+                return [str(v) for v in payload]
+        except json.JSONDecodeError:
+            pass
+        return [piece.strip() for piece in text.split(",") if piece.strip()]
+    return decode_string_array(value)
+
+
+def get_case_channel_order(grp: h5py.Group, h5_file: h5py.File) -> List[str]:
+    if "channel_order" in grp:
+        return decode_string_array(grp["channel_order"][...])
+    root_order = channel_order_from_attr(h5_file.attrs.get("channel_order"))
+    if root_order is not None:
+        return root_order
+    field_dim = int(grp.attrs.get("field_dim", grp["mean_field"].shape[-1] if "mean_field" in grp else 4))
+    return list(ACTIVE_CHANNEL_ORDER if field_dim == 5 else INERT_CHANNEL_ORDER)
+
+
+def infer_dataset_field_metadata(h5_path: Path, split: str = "all") -> Tuple[List[str], int]:
+    with h5py.File(h5_path, "r") as h5_file:
+        cases_group = h5_file["cases"]
+        for case_id in sort_case_ids(cases_group.keys()):
+            grp = cases_group[case_id]
+            case_split = grp.attrs.get("split", "all")
+            if split not in {"all", case_split}:
+                continue
+            order = get_case_channel_order(grp, h5_file)
+            field_dim = int(grp.attrs.get("field_dim", len(order)))
+            if "mean_field" in grp:
+                field_dim = int(grp["mean_field"].shape[-1])
+            if not order:
+                order = list(ACTIVE_CHANNEL_ORDER if field_dim == 5 else INERT_CHANNEL_ORDER)
+            if len(order) != field_dim:
+                order = order[:field_dim]
+            return order, field_dim
+    return list(INERT_CHANNEL_ORDER), 4
+
+
+def resolve_dynamic_energy_channels(loss_cfg: Dict, channel_order: Sequence[str], field_dim: int) -> List[int]:
+    names = loss_cfg.get("dynamic_energy_channel_names")
+    if names:
+        name_to_idx = {name: idx for idx, name in enumerate(channel_order)}
+        missing = [str(name) for name in names if str(name) not in name_to_idx]
+        if missing:
+            raise ValueError(f"Unknown dynamic_energy_channel_names={missing}; channel_order={list(channel_order)}.")
+        channels = [name_to_idx[str(name)] for name in names]
+    else:
+        channels = [int(ch) for ch in loss_cfg.get("dynamic_energy_channels", [3])]
+    invalid = [ch for ch in channels if ch < 0 or ch >= int(field_dim)]
+    if invalid:
+        raise ValueError(f"dynamic_energy_channels={channels} is incompatible with field_dim={field_dim}.")
+    return channels
+
+
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -206,6 +286,8 @@ class PackedPointChunkDataset(Dataset):
         phase_window_phase_mode: str = "stratified_cycle",
         phase_window_xy_sampling: str = "omega_variance",
         phase_window_require_canonical_cycle: bool = False,
+        use_heat_power_module_feature: bool = False,
+        heat_power_scale: str | float = "auto",
     ):
         super().__init__()
         self.h5_path = Path(h5_path).expanduser().resolve()
@@ -239,6 +321,11 @@ class PackedPointChunkDataset(Dataset):
         self.phase_window_phase_mode = str(phase_window_phase_mode).strip().lower()
         self.phase_window_xy_sampling = str(phase_window_xy_sampling).strip().lower()
         self.phase_window_require_canonical_cycle = bool(phase_window_require_canonical_cycle)
+        self.use_heat_power_module_feature = bool(use_heat_power_module_feature)
+        self.heat_power_scale_config = heat_power_scale
+        self.heat_power_scale = 1.0
+        self.channel_order: List[str] = list(INERT_CHANNEL_ORDER)
+        self.field_dim = 4
         self.current_epoch = 0
         self._h5: Optional[h5py.File] = None
 
@@ -260,8 +347,10 @@ class PackedPointChunkDataset(Dataset):
         self.case_meta: List[CaseChunkMeta] = []
         self.case_ids: List[str] = []
         self.case_lookup: Dict[str, Dict] = {}
+        max_abs_heat_power = 0.0
 
         with h5py.File(self.h5_path, "r") as h5_file:
+            self.channel_order, self.field_dim = infer_dataset_field_metadata(self.h5_path, split=split)
             cases_group = h5_file["cases"]
             for case_id in sort_case_ids(cases_group.keys()):
                 grp = cases_group[case_id]
@@ -276,6 +365,17 @@ class PackedPointChunkDataset(Dataset):
                     )
 
                 sampled = grp["sampled_points"]
+                channel_order = get_case_channel_order(grp, h5_file)
+                field_dim = int(grp.attrs.get("field_dim", len(channel_order)))
+                if "mean_field" in grp:
+                    field_dim = int(grp["mean_field"].shape[-1])
+                channel_order = channel_order[:field_dim]
+                if field_dim != self.field_dim or tuple(channel_order) != tuple(self.channel_order):
+                    raise ValueError(
+                        f"Mixed field metadata is not supported in one training dataset. "
+                        f"Expected {self.channel_order} (C={self.field_dim}), got case {case_id} "
+                        f"{channel_order} (C={field_dim})."
+                    )
                 num_points = int(sampled["tau"].shape[0])
                 re_value = float(grp.attrs["re"])
                 num_cylinders = int(grp.attrs["num_cylinders"])
@@ -293,13 +393,31 @@ class PackedPointChunkDataset(Dataset):
                 phase_bin_centers = (
                     np.asarray(grp["phase_bin_centers"], dtype=np.float32) if has_canonical_cycle else None
                 )
+                if "heat_powers" in grp:
+                    heat_powers = np.asarray(grp["heat_powers"], dtype=np.float32).reshape(-1)
+                else:
+                    heat_powers = np.zeros((num_cylinders,), dtype=np.float32)
+                if heat_powers.shape[0] != centers.shape[0]:
+                    raise ValueError(
+                        f"Case {case_id} heat_powers length {heat_powers.shape[0]} does not match "
+                        f"num cylinders {centers.shape[0]}."
+                    )
+                max_abs_heat_power = max(max_abs_heat_power, float(np.max(np.abs(heat_powers))) if heat_powers.size else 0.0)
+                max_abs_heat_power = max(
+                    max_abs_heat_power,
+                    abs(float(grp.attrs.get("thermal_power_min", 0.0))),
+                    abs(float(grp.attrs.get("thermal_power_max", 0.0))),
+                )
 
                 self.case_lookup[case_id] = {
                     "centers": centers,
+                    "heat_powers": heat_powers,
                     "re": re_value,
                     "num_cylinders": num_cylinders,
                     "freq": freq,
                     "mean_field": mean_field,
+                    "channel_order": channel_order,
+                    "field_dim": field_dim,
                     "x_grid": x_grid,
                     "y_grid": y_grid,
                     "grid_origin": (x0, y0),
@@ -338,6 +456,11 @@ class PackedPointChunkDataset(Dataset):
                                 re_value=re_value,
                             )
                         )
+
+        if str(self.heat_power_scale_config).strip().lower() == "auto":
+            self.heat_power_scale = max(float(max_abs_heat_power), 1.0)
+        else:
+            self.heat_power_scale = max(float(self.heat_power_scale_config), 1e-12)
 
     def __len__(self) -> int:
         return len(self.case_meta)
@@ -609,8 +732,8 @@ class PackedPointChunkDataset(Dataset):
 
         canonical_cycle = np.asarray(canonical_cycle, dtype=np.float32)
         phase_bin_centers = np.asarray(phase_bin_centers, dtype=np.float32).reshape(-1)
-        if canonical_cycle.ndim != 4 or canonical_cycle.shape[-1] != 4:
-            raise ValueError("canonical_cycle must have shape [phase, H, W, 4].")
+        if canonical_cycle.ndim != 4 or canonical_cycle.shape[-1] != self.field_dim:
+            raise ValueError(f"canonical_cycle must have shape [phase, H, W, {self.field_dim}].")
 
         num_phase_bins = int(canonical_cycle.shape[0])
         if num_phase_bins <= 0:
@@ -650,8 +773,8 @@ class PackedPointChunkDataset(Dataset):
         x = x_grid[repeated_iy, repeated_ix].astype(np.float32, copy=False)
         y = y_grid[repeated_iy, repeated_ix].astype(np.float32, copy=False)
         tau = phase_bin_centers[tiled_phase].astype(np.float32, copy=False)
-        targets = canonical_cycle[tiled_phase, repeated_iy, repeated_ix, :].astype(np.float32, copy=False)
-        mean_targets = mean_field[repeated_iy, repeated_ix, :].astype(np.float32, copy=False)
+        targets = canonical_cycle[tiled_phase, repeated_iy, repeated_ix, : self.field_dim].astype(np.float32, copy=False)
+        mean_targets = mean_field[repeated_iy, repeated_ix, : self.field_dim].astype(np.float32, copy=False)
         residual_targets = targets - mean_targets
         phase_window_mask = np.ones((targets.shape[0],), dtype=np.float32)
 
@@ -676,10 +799,14 @@ class PackedPointChunkDataset(Dataset):
         chunk_x = np.asarray(sampled["x"][sl], dtype=np.float32)
         chunk_y = np.asarray(sampled["y"][sl], dtype=np.float32)
         chunk_tau = np.asarray(sampled["tau"][sl], dtype=np.float32)
-        chunk_u = np.asarray(sampled["u"][sl], dtype=np.float32)
-        chunk_v = np.asarray(sampled["v"][sl], dtype=np.float32)
-        chunk_p = np.asarray(sampled["p"][sl], dtype=np.float32)
-        chunk_omega = np.asarray(sampled["omega"][sl], dtype=np.float32)
+        channel_order = case_static["channel_order"]
+        chunk_fields = []
+        for channel_name in channel_order:
+            if channel_name not in sampled:
+                raise KeyError(f"Case {meta.case_id} sampled_points is missing channel {channel_name!r}.")
+            chunk_fields.append(np.asarray(sampled[channel_name][sl], dtype=np.float32))
+        omega_idx = channel_order.index("omega") if "omega" in channel_order else min(3, len(channel_order) - 1)
+        chunk_omega = chunk_fields[omega_idx]
 
         total_keep_count = self._compute_keep_count(int(chunk_x.shape[0]))
         phase_window_points = None
@@ -717,25 +844,27 @@ class PackedPointChunkDataset(Dataset):
         y_normal = chunk_y[local_indices]
         tau_normal = chunk_tau[local_indices]
         targets_normal = np.stack(
-            [
-                chunk_u[local_indices],
-                chunk_v[local_indices],
-                chunk_p[local_indices],
-                chunk_omega[local_indices],
-            ],
+            [values[local_indices] for values in chunk_fields],
             axis=-1,
         ).astype(np.float32, copy=False)
 
         centers = np.asarray(case_static["centers"], dtype=np.float32)
+        heat_powers = np.asarray(case_static.get("heat_powers", np.zeros((centers.shape[0],), dtype=np.float32)), dtype=np.float32)
         centers_valid = centers.copy()
+        heat_powers_valid = heat_powers.copy()
         if self.is_training and self.randomize_cylinder_order and centers_valid.shape[0] > 1:
             rng = self._rng_for_item(idx, include_epoch=True)
-            centers_valid = centers_valid[rng.permutation(centers_valid.shape[0])]
+            perm = rng.permutation(centers_valid.shape[0])
+            centers_valid = centers_valid[perm]
+            heat_powers_valid = heat_powers_valid[perm]
 
         padded_centers = np.zeros((self.max_num_cylinders, 2), dtype=np.float32)
         cyl_mask = np.zeros((self.max_num_cylinders,), dtype=np.float32)
         padded_centers[: centers_valid.shape[0]] = centers_valid
         cyl_mask[: centers_valid.shape[0]] = 1.0
+        padded_heat_powers = np.zeros((self.max_num_cylinders, 1), dtype=np.float32)
+        if heat_powers_valid.size:
+            padded_heat_powers[: heat_powers_valid.shape[0], 0] = heat_powers_valid / float(self.heat_power_scale)
 
         # Sample mean-field targets at the same spatial points using nearest grid lookup.
         mean_field = case_static["mean_field"]
@@ -743,7 +872,7 @@ class PackedPointChunkDataset(Dataset):
         dx, dy = case_static["grid_spacing"]
         ix = np.clip(np.rint((x_normal - x0) / max(dx, 1e-6)).astype(np.int64), 0, mean_field.shape[1] - 1)
         iy = np.clip(np.rint((y_normal - y0) / max(dy, 1e-6)).astype(np.int64), 0, mean_field.shape[0] - 1)
-        mean_targets_normal = mean_field[iy, ix].astype(np.float32, copy=False)
+        mean_targets_normal = mean_field[iy, ix, : self.field_dim].astype(np.float32, copy=False)
         residual_targets_normal = targets_normal - mean_targets_normal
 
         x_parts = [x_normal.astype(np.float32, copy=False)]
@@ -781,7 +910,7 @@ class PackedPointChunkDataset(Dataset):
             residual_targets = residual_targets[order]
             phase_window_mask = phase_window_mask[order]
 
-        return {
+        item = {
             "case_id": meta.case_id,
             "re_values": torch.tensor([meta.re_value], dtype=torch.float32),
             "num_cylinders": torch.tensor([meta.num_cylinders], dtype=torch.float32),
@@ -795,6 +924,9 @@ class PackedPointChunkDataset(Dataset):
             "phase_window_mask": torch.from_numpy(phase_window_mask),
             "freq_target": torch.tensor([case_static["freq"]], dtype=torch.float32),
         }
+        if self.use_heat_power_module_feature:
+            item["extra_module"] = torch.from_numpy(padded_heat_powers)
+        return item
 
     def close(self) -> None:
         if self._h5 is not None:
@@ -817,6 +949,7 @@ class CanonicalCycleValidationDataset(Dataset):
                 if split in {"all", case_split}:
                     if "canonical_cycle" in grp:
                         self.case_ids.append(case_id)
+            self.channel_order, self.field_dim = infer_dataset_field_metadata(self.h5_path, split=split)
 
     def __len__(self) -> int:
         return len(self.case_ids)
@@ -825,12 +958,20 @@ class CanonicalCycleValidationDataset(Dataset):
         with h5py.File(self.h5_path, "r") as h5_file:
             grp = h5_file["cases"][case_id]
             centers = np.asarray(grp["cylinder_centers"], dtype=np.float32)
+            if "heat_powers" in grp:
+                heat_powers = np.asarray(grp["heat_powers"], dtype=np.float32)
+            else:
+                heat_powers = np.zeros((centers.shape[0],), dtype=np.float32)
+            channel_order = get_case_channel_order(grp, h5_file)
             return {
                 "case_id": case_id,
                 "re": float(grp.attrs["re"]),
                 "num_cylinders": int(grp.attrs["num_cylinders"]),
                 "dominant_frequency": float(grp.attrs["dominant_frequency"]),
                 "centers": centers,
+                "heat_powers": heat_powers,
+                "channel_order": channel_order,
+                "field_dim": int(grp.attrs.get("field_dim", grp["canonical_cycle"].shape[-1])),
                 "canonical_cycle": np.asarray(grp["canonical_cycle"], dtype=np.float32),
                 "phase_bin_centers": np.asarray(grp["phase_bin_centers"], dtype=np.float32),
                 "x_grid": np.asarray(grp["x_grid"], dtype=np.float32),
@@ -852,9 +993,9 @@ def collate_point_chunks(batch: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, 
         cyl_mask:       [B, N_max]
         query_xy:       [B, Q_max, 2]
         query_tau:      [B, Q_max, 1]
-        field_targets:  [B, Q_max, 4]
-        mean_targets:   [B, Q_max, 4]
-        residual_targets:[B, Q_max, 4]
+        field_targets:  [B, Q_max, C]
+        mean_targets:   [B, Q_max, C]
+        residual_targets:[B, Q_max, C]
         phase_window_mask:[B, Q_max]
         point_mask:     [B, Q_max]
         freq_target:    [B, 1]
@@ -891,6 +1032,15 @@ def collate_point_chunks(batch: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, 
         ),
         "freq_target": torch.stack([item["freq_target"] for item in batch], dim=0),
     }
+    if any("extra_module" in item for item in batch):
+        template = next(item["extra_module"] for item in batch if "extra_module" in item)
+        out["extra_module"] = torch.stack(
+            [
+                item.get("extra_module", torch.zeros_like(template))
+                for item in batch
+            ],
+            dim=0,
+        )
 
     point_mask = torch.zeros((batch_size, max_points), dtype=torch.float32)
     for i, item in enumerate(batch):
@@ -1465,18 +1615,31 @@ def organizer_direct_losses(
 # ---------------------------- Validation routine -------------------------------
 
 
-def build_structure_tensors(case: Dict, max_num_cylinders: int, device: torch.device) -> Dict[str, torch.Tensor]:
+def build_structure_tensors(
+    case: Dict,
+    max_num_cylinders: int,
+    device: torch.device,
+    *,
+    use_heat_power_module_feature: bool = False,
+    heat_power_scale: float = 1.0,
+) -> Dict[str, torch.Tensor]:
     centers = case["centers"]
     padded = np.zeros((1, max_num_cylinders, 2), dtype=np.float32)
     mask = np.zeros((1, max_num_cylinders), dtype=np.float32)
     padded[0, : centers.shape[0]] = centers
     mask[0, : centers.shape[0]] = 1.0
-    return {
+    structure = {
         "re_values": torch.tensor([[case["re"]]], dtype=torch.float32, device=device),
         "num_cylinders": torch.tensor([[case["num_cylinders"]]], dtype=torch.float32, device=device),
         "centers": torch.from_numpy(padded).to(device=device),
         "cyl_mask": torch.from_numpy(mask).to(device=device),
     }
+    if use_heat_power_module_feature:
+        powers = np.asarray(case.get("heat_powers", np.zeros((centers.shape[0],), dtype=np.float32)), dtype=np.float32).reshape(-1)
+        padded_powers = np.zeros((1, max_num_cylinders, 1), dtype=np.float32)
+        padded_powers[0, : min(powers.shape[0], max_num_cylinders), 0] = powers[:max_num_cylinders] / max(float(heat_power_scale), 1e-12)
+        structure["extra_module"] = torch.from_numpy(padded_powers).to(device=device)
+    return structure
 
 
 @torch.no_grad()
@@ -1491,6 +1654,8 @@ def evaluate_canonical_cases(
     max_cases: int,
     query_batch_size: int,
     phase_bins_to_eval: int,
+    use_heat_power_module_feature: bool = False,
+    heat_power_scale: float = 1.0,
     show_progress: bool = False,) -> Dict[str, float]:
     model.eval()
     if len(dataset) == 0:
@@ -1533,7 +1698,13 @@ def evaluate_canonical_cases(
 
     for case_id in val_iter:
         case = dataset.get_case(case_id)
-        structure = build_structure_tensors(case, max_num_cylinders=max_num_cylinders, device=device)
+        structure = build_structure_tensors(
+            case,
+            max_num_cylinders=max_num_cylinders,
+            device=device,
+            use_heat_power_module_feature=use_heat_power_module_feature,
+            heat_power_scale=heat_power_scale,
+        )
         x_grid = torch.from_numpy(case["x_grid"]).to(device=device)
         y_grid = torch.from_numpy(case["y_grid"]).to(device=device)
         canonical = torch.from_numpy(case["canonical_cycle"]).to(device=device)
@@ -1722,6 +1893,8 @@ def evaluate_point_chunks(
             "centers": batch["centers"].to(device=device),
             "cyl_mask": batch["cyl_mask"].to(device=device),
         }
+        if "extra_module" in batch:
+            structure["extra_module"] = batch["extra_module"].to(device=device)
         query_xy = batch["query_xy"].to(device=device)
         query_tau = batch["query_tau"].to(device=device)
 
@@ -1733,8 +1906,10 @@ def evaluate_point_chunks(
             "point_mask",
             "freq_target",
             "cyl_mask",
+            "extra_module",
         ]:
-            batch[key] = batch[key].to(device=device)
+            if key in batch:
+                batch[key] = batch[key].to(device=device)
 
         outputs = model(structure=structure, query_xy=query_xy, query_tau=query_tau, return_aux=True)
         bad_outputs = find_nonfinite_tensors(
@@ -1930,10 +2105,35 @@ def main() -> None:
     if not packed_h5_path.exists():
         raise FileNotFoundError(f"Packed HDF5 dataset not found: {packed_h5_path}")
 
+    dataset_channel_order, dataset_field_dim = infer_dataset_field_metadata(
+        packed_h5_path,
+        split=dataset_cfg.get("train_split", "train"),
+    )
+    cfg.setdefault("dataset", {})["channel_order"] = dataset_channel_order
+    cfg["dataset"]["field_dim"] = int(dataset_field_dim)
+    model_payload = cfg.setdefault("model", {})
+    if "field_dim" not in model_payload or str(model_payload.get("field_dim")).strip().lower() == "auto":
+        model_payload["field_dim"] = int(dataset_field_dim)
+    elif int(model_payload.get("field_dim", dataset_field_dim)) != int(dataset_field_dim):
+        raise ValueError(
+            f"model.field_dim={model_payload.get('field_dim')} does not match dataset field_dim={dataset_field_dim} "
+            f"for channel_order={dataset_channel_order}."
+        )
+    if bool(dataset_cfg.get("use_heat_power_module_feature", False)) and int(model_payload.get("future_module_feature_dim", 0)) <= 0:
+        model_payload["future_module_feature_dim"] = 1
+    cfg["loss"]["dynamic_energy_channels"] = resolve_dynamic_energy_channels(
+        cfg["loss"],
+        channel_order=dataset_channel_order,
+        field_dim=dataset_field_dim,
+    )
+    write_json(backup_path, cfg)
+    write_json(run_dir / "resolved_train_config.json", cfg)
+
     model_cfg = ModelConfig.from_dict(cfg["model"])
     max_num_cylinders = int(dataset_cfg.get("max_num_cylinders", model_cfg.max_num_cylinders))
     if model_cfg.max_num_cylinders != max_num_cylinders:
         model_cfg.max_num_cylinders = max_num_cylinders
+    print(f"[setup] dataset field_dim={dataset_field_dim} channel_order={dataset_channel_order}")
     print(f"[setup] decoder={model_cfg.decoder_type}")
     print(
         "[setup] hierarchical_perceiver: "
@@ -1979,6 +2179,8 @@ def main() -> None:
         phase_window_phase_mode=str(dataset_cfg.get("phase_window_phase_mode", "stratified_cycle")),
         phase_window_xy_sampling=str(dataset_cfg.get("phase_window_xy_sampling", "omega_variance")),
         phase_window_require_canonical_cycle=bool(dataset_cfg.get("phase_window_require_canonical_cycle", False)),
+        use_heat_power_module_feature=bool(dataset_cfg.get("use_heat_power_module_feature", False)),
+        heat_power_scale=dataset_cfg.get("heat_power_scale", "auto"),
     )
     validation_cfg = cfg["validation"]
     val_mode = str(validation_cfg.get("mode", "point_chunks")).strip().lower()
@@ -2023,6 +2225,8 @@ def main() -> None:
             phase_window_phase_mode=str(validation_cfg.get("phase_window_phase_mode", dataset_cfg.get("phase_window_phase_mode", "stratified_cycle"))),
             phase_window_xy_sampling=str(validation_cfg.get("phase_window_xy_sampling", dataset_cfg.get("phase_window_xy_sampling", "omega_variance"))),
             phase_window_require_canonical_cycle=bool(validation_cfg.get("phase_window_require_canonical_cycle", dataset_cfg.get("phase_window_require_canonical_cycle", False))),
+            use_heat_power_module_feature=bool(dataset_cfg.get("use_heat_power_module_feature", False)),
+            heat_power_scale=dataset_cfg.get("heat_power_scale", "auto"),
         )
     else:
         canonical_val_dataset = CanonicalCycleValidationDataset(
@@ -2273,6 +2477,8 @@ def main() -> None:
                 "centers": batch["centers"].to(device=device),
                 "cyl_mask": batch["cyl_mask"].to(device=device),
             }
+            if "extra_module" in batch:
+                structure["extra_module"] = batch["extra_module"].to(device=device)
             query_xy = batch["query_xy"].to(device=device)
             query_tau = batch["query_tau"].to(device=device)
 
@@ -2284,8 +2490,10 @@ def main() -> None:
                 "point_mask",
                 "freq_target",
                 "cyl_mask",
+                "extra_module",
             ]:
-                batch[key] = batch[key].to(device=device)
+                if key in batch:
+                    batch[key] = batch[key].to(device=device)
 
             org_scale = organizer_ramp_scale(cfg["loss"], epoch)
             with autocast_context(device, enabled=scaler.is_enabled()):
@@ -2450,6 +2658,8 @@ def main() -> None:
                     max_cases=int(validation_cfg.get("max_cases", len(canonical_val_dataset))),
                     query_batch_size=int(validation_cfg.get("query_batch_size", 32768)),
                     phase_bins_to_eval=int(validation_cfg.get("phase_bins_to_eval", 6)),
+                    use_heat_power_module_feature=bool(dataset_cfg.get("use_heat_power_module_feature", False)),
+                    heat_power_scale=float(getattr(train_dataset, "heat_power_scale", 1.0)),
                     show_progress=True,
                 )
             val_selection_metric = compute_validation_selection_metric(val_metrics, validation_cfg)

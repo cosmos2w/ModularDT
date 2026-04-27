@@ -98,6 +98,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sample-chunk-size", type=int, default=1, help="Number of stochastic samples processed together in cycle mode.")
     parser.add_argument("--gif-fps", type=float, default=6.0, help="Frames per second for cycle GIF output.")
     parser.add_argument("--viz-channel", type=int, default=3, help="Field channel used for quicklooks and cycle GIFs; omega is channel 3.")
+    parser.add_argument("--viz-field", type=str, default=None, help="Field name used for quicklooks/GIFs, e.g. omega or temperature. Overrides --viz-channel.")
     parser.add_argument("--output-dir", type=str, default=None, help="Optional output directory.")
     parser.add_argument("--organization-threshold", type=float, default=0.15, help="Minimum soft weight used when drawing organization edges.")
     parser.add_argument("--topk-me-links", type=int, default=3, help="Reserved for deterministic compatibility; env-token links are suppressed in the refined organizer overlay.")
@@ -131,6 +132,72 @@ def sort_case_ids(case_ids):
         except Exception:
             return (1, str(case_id))
     return sorted(case_ids, key=key_fn)
+
+
+INERT_CHANNEL_ORDER = ("u", "v", "p", "omega")
+ACTIVE_CHANNEL_ORDER = ("u", "v", "p", "omega", "temperature")
+
+
+def decode_string_array(values) -> list[str]:
+    arr = np.asarray(values)
+    out = []
+    for item in arr.reshape(-1):
+        out.append(item.decode("utf-8") if isinstance(item, bytes) else str(item))
+    return out
+
+
+def channel_order_from_attr(value) -> Optional[list[str]]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text == "mixed":
+            return None
+        try:
+            payload = json.loads(text)
+            if isinstance(payload, (list, tuple)):
+                return [str(v) for v in payload]
+        except json.JSONDecodeError:
+            pass
+        return [piece.strip() for piece in text.split(",") if piece.strip()]
+    return decode_string_array(value)
+
+
+def get_case_channel_order(grp: h5py.Group, h5_file: h5py.File) -> list[str]:
+    if "channel_order" in grp:
+        return decode_string_array(grp["channel_order"][...])
+    root_order = channel_order_from_attr(h5_file.attrs.get("channel_order"))
+    if root_order is not None:
+        return root_order
+    field_dim = int(grp.attrs.get("field_dim", grp["canonical_cycle"].shape[-1] if "canonical_cycle" in grp else 4))
+    return list(ACTIVE_CHANNEL_ORDER if field_dim == 5 else INERT_CHANNEL_ORDER)
+
+
+def resolve_viz_channel(args: argparse.Namespace, channel_order: list[str], field_dim: int) -> tuple[int, str]:
+    if args.viz_field is not None:
+        field_name = str(args.viz_field).strip()
+        if field_name not in channel_order:
+            raise ValueError(f"--viz-field={field_name!r} is not in channel_order={channel_order}.")
+        return int(channel_order.index(field_name)), field_name
+    channel = int(args.viz_channel)
+    if channel < 0 or channel >= int(field_dim):
+        raise ValueError(f"--viz-channel={channel} is out of range for field_dim={field_dim}.")
+    return channel, channel_order[channel] if channel < len(channel_order) else f"channel {channel}"
+
+
+def add_extra_module_if_needed(sample: Dict, future_module_feature_dim: int, heat_power_scale: float = 1.0) -> None:
+    future_dim = int(future_module_feature_dim)
+    if future_dim <= 0:
+        return
+    structure = sample["structure"]
+    centers = structure["centers"]
+    max_num_cylinders = centers.shape[1]
+    powers = np.asarray(sample.get("heat_powers", np.zeros((int(sample.get("num_cylinders", 0)),), dtype=np.float32)), dtype=np.float32).reshape(-1)
+    padded = np.zeros((1, max_num_cylinders, future_dim), dtype=np.float32)
+    padded[0, : min(powers.shape[0], max_num_cylinders), 0] = powers[:max_num_cylinders] / max(float(heat_power_scale), 1e-12)
+    structure["extra_module"] = torch.from_numpy(padded)
 
 
 def load_config(config_arg: Optional[str]) -> Dict:
@@ -281,6 +348,8 @@ def load_case_snapshot(packed_h5_path: Path, split: str, case_id: Optional[str],
             raise IndexError(f"phase_index={phase_index} out of range for {len(phase_bins)} bins.")
 
         field = np.asarray(grp["canonical_cycle"][phase_index], dtype=np.float32)  # [H,W,C]
+        field_dim = int(grp.attrs.get("field_dim", field.shape[-1]))
+        channel_order = get_case_channel_order(grp, h5)[:field_dim]
         mean = np.asarray(grp["mean_field"], dtype=np.float32)
         residual = field - mean
         x_grid = np.asarray(grp["x_grid"], dtype=np.float32)
@@ -288,6 +357,17 @@ def load_case_snapshot(packed_h5_path: Path, split: str, case_id: Optional[str],
         centers = np.asarray(grp["cylinder_centers"], dtype=np.float32)
         if centers.shape[0] > max_num_cylinders:
             raise ValueError(f"Case {case_id} has {centers.shape[0]} cylinders but max_num_cylinders={max_num_cylinders}.")
+        heat_powers = (
+            np.asarray(grp["heat_powers"], dtype=np.float32)
+            if "heat_powers" in grp
+            else np.zeros((centers.shape[0],), dtype=np.float32)
+        )
+        heat_power_scale = max(
+            float(np.max(np.abs(heat_powers))) if heat_powers.size else 0.0,
+            abs(float(grp.attrs.get("thermal_power_min", 0.0))),
+            abs(float(grp.attrs.get("thermal_power_max", 0.0))),
+            1.0,
+        )
 
         padded = np.zeros((max_num_cylinders, 2), dtype=np.float32)
         mask = np.zeros((max_num_cylinders,), dtype=np.float32)
@@ -298,6 +378,8 @@ def load_case_snapshot(packed_h5_path: Path, split: str, case_id: Optional[str],
             "case_id": str(case_id),
             "phase_index": int(phase_index),
             "tau": float(phase_bins[phase_index]),
+            "field_dim": field_dim,
+            "channel_order": channel_order,
             "field_grid": torch.from_numpy(np.moveaxis(field, -1, 0)).unsqueeze(0),
             "mean_grid": torch.from_numpy(np.moveaxis(mean, -1, 0)).unsqueeze(0),
             "residual_grid": torch.from_numpy(np.moveaxis(residual, -1, 0)).unsqueeze(0),
@@ -310,6 +392,8 @@ def load_case_snapshot(packed_h5_path: Path, split: str, case_id: Optional[str],
                 "cyl_mask": torch.from_numpy(mask).unsqueeze(0),
             },
             "centers_np": centers,
+            "heat_powers": heat_powers,
+            "heat_power_scale": heat_power_scale,
             "re": float(grp.attrs["re"]),
             "num_cylinders": int(grp.attrs["num_cylinders"]),
         }
@@ -354,6 +438,8 @@ def load_case_cycle(
             raise IndexError(f"Selected phase index is out of range for {len(phase_bins)} bins.")
 
         cycle = np.asarray(grp["canonical_cycle"][phase_indices], dtype=np.float32)  # [T,H,W,C]
+        field_dim = int(grp.attrs.get("field_dim", cycle.shape[-1]))
+        channel_order = get_case_channel_order(grp, h5)[:field_dim]
         mean = np.asarray(grp["mean_field"], dtype=np.float32)
         residual = cycle - mean[None, ...]
         x_grid = np.asarray(grp["x_grid"], dtype=np.float32)
@@ -361,6 +447,17 @@ def load_case_cycle(
         centers = np.asarray(grp["cylinder_centers"], dtype=np.float32)
         if centers.shape[0] > max_num_cylinders:
             raise ValueError(f"Case {case_id} has {centers.shape[0]} cylinders but max_num_cylinders={max_num_cylinders}.")
+        heat_powers = (
+            np.asarray(grp["heat_powers"], dtype=np.float32)
+            if "heat_powers" in grp
+            else np.zeros((centers.shape[0],), dtype=np.float32)
+        )
+        heat_power_scale = max(
+            float(np.max(np.abs(heat_powers))) if heat_powers.size else 0.0,
+            abs(float(grp.attrs.get("thermal_power_min", 0.0))),
+            abs(float(grp.attrs.get("thermal_power_max", 0.0))),
+            1.0,
+        )
 
         padded = np.zeros((max_num_cylinders, 2), dtype=np.float32)
         mask = np.zeros((max_num_cylinders,), dtype=np.float32)
@@ -371,6 +468,8 @@ def load_case_cycle(
             "case_id": str(case_id),
             "phase_indices": phase_indices.astype(np.int64),
             "tau_values": phase_bins[phase_indices].astype(np.float32),
+            "field_dim": field_dim,
+            "channel_order": channel_order,
             "field_cycle": torch.from_numpy(np.moveaxis(cycle, -1, 1)),  # [T,C,H,W]
             "mean_grid": torch.from_numpy(np.moveaxis(mean, -1, 0)).unsqueeze(0),
             "residual_cycle": torch.from_numpy(np.moveaxis(residual, -1, 1)),
@@ -383,6 +482,8 @@ def load_case_cycle(
                 "cyl_mask": torch.from_numpy(mask).unsqueeze(0),
             },
             "centers_np": centers,
+            "heat_powers": heat_powers,
+            "heat_power_scale": heat_power_scale,
             "re": float(grp.attrs["re"]),
             "num_cylinders": int(grp.attrs["num_cylinders"]),
         }
@@ -467,7 +568,7 @@ def rel_l2_np(a: np.ndarray, b: np.ndarray) -> float:
 
 def _channel_cmap(channel: int) -> str:
     """Match deterministic evaluate.py channel colormaps."""
-    cmaps = ["coolwarm", "coolwarm", "magma", "RdBu_r"]
+    cmaps = ["coolwarm", "coolwarm", "magma", "RdBu_r", "inferno"]
     return cmaps[int(channel)] if 0 <= int(channel) < len(cmaps) else "coolwarm"
 
 
@@ -996,15 +1097,24 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
     det_model, det_model_cfg, det_ckpt_path = load_deterministic_model({"checkpoint_path": deterministic_checkpoint_path}, device)
     if args.disable_edge is not None and hasattr(det_model, "set_edge_disable_runtime"):
         det_model.set_edge_disable_runtime(bool(args.disable_edge))
+    det_field_dim = int(det_model_cfg.get("field_dim", getattr(det_model, "cfg", object()).field_dim if hasattr(getattr(det_model, "cfg", None), "field_dim") else sample["field_dim"]))
+    if det_field_dim != int(sample["field_dim"]):
+        raise ValueError(
+            f"Deterministic checkpoint field_dim={det_field_dim} does not match dataset field_dim={sample['field_dim']} "
+            f"for channel_order={sample['channel_order']}."
+        )
+    add_extra_module_if_needed(
+        sample,
+        future_module_feature_dim=int(det_model_cfg.get("future_module_feature_dim", 0)),
+        heat_power_scale=float(sample.get("heat_power_scale", 1.0)),
+    )
 
     phase_chunk_size = int(args.phase_chunk_size)
     sample_chunk_size = int(args.sample_chunk_size)
     n_steps = int(args.n_steps if args.n_steps is not None else cfg["stage2"].get("sampling", {}).get("n_steps", 16))
     ode_solver = str(args.ode_solver if args.ode_solver is not None else cfg["stage2"].get("sampling", {}).get("ode_solver", "euler"))
-    omega_channel = int(args.viz_channel)
     T, C, H, W = sample["field_cycle"].shape
-    if omega_channel < 0 or omega_channel >= C:
-        raise ValueError(f"--viz-channel={omega_channel} is out of range for C={C}.")
+    omega_channel, channel_name = resolve_viz_channel(args, list(sample["channel_order"]), C)
 
     with torch.no_grad():
         det_mean_t, det_res_t, det_field_t, global_cond_t = _run_deterministic_cycle(
@@ -1101,6 +1211,10 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
             "sample_chunk_size": sample_chunk_size,
             "checkpoint": str(checkpoint_path),
             "deterministic_checkpoint": str(det_ckpt_path),
+            "field_dim": int(C),
+            "channel_order": list(sample["channel_order"]),
+            "viz_channel": int(omega_channel),
+            "viz_field": channel_name,
             "cycle_mode_note": "Stage-2 was trained on phase snapshots. Cycle mode samples each tau-conditioned phase; independent noise is not temporally coherent, while shared/harmonic modes correlate the initial latent noise across phases.",
         }
     )
@@ -1124,6 +1238,7 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
         x_grid=x_np,
         y_grid=y_np,
         centers=sample["centers_np"],
+        channel_order=np.asarray(sample["channel_order"]),
         re=np.array(sample["re"], dtype=np.float32),
         num_cylinders=np.array(sample["num_cylinders"], dtype=np.int64),
         n_steps=np.array(n_steps, dtype=np.int64),
@@ -1132,7 +1247,7 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
     )
 
     save_cycle_gif(
-        out_dir / "cycle_omega.gif",
+        out_dir / f"cycle_{channel_name}.gif",
         gt_cycle,
         det_cycle,
         generated_samples,
@@ -1144,11 +1259,11 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
         y_np,
         sample["centers_np"],
         channel=omega_channel,
-        channel_name="omega" if omega_channel == 3 else f"channel {omega_channel}",
+        channel_name=channel_name,
         fps=float(args.gif_fps),
     )
     save_gt_generated_cycle_gif(
-        out_dir / "cycle_omega_gt_generated.gif",
+        out_dir / f"cycle_{channel_name}_gt_generated.gif",
         gt_cycle,
         generated_mean,
         sample["tau_values"],
@@ -1157,11 +1272,11 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
         y_np,
         sample["centers_np"],
         channel=omega_channel,
-        channel_name="omega" if omega_channel == 3 else f"channel {omega_channel}",
+        channel_name=channel_name,
         fps=float(args.gif_fps),
     )
     save_cycle_montage(
-        out_dir / "cycle_montage_omega.png",
+        out_dir / f"cycle_montage_{channel_name}.png",
         gt_cycle,
         det_cycle,
         generated_samples,
@@ -1173,7 +1288,7 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
         y_np,
         sample["centers_np"],
         channel=omega_channel,
-        channel_name="omega" if omega_channel == 3 else f"channel {omega_channel}",
+        channel_name=channel_name,
     )
 
     print(f"Output directory: {out_dir}")
@@ -1222,6 +1337,7 @@ def main() -> None:
         phase_index=int(args.phase_index),
         max_num_cylinders=int(cfg["dataset"].get("max_num_cylinders", 8)),
     )
+    viz_channel, viz_field = resolve_viz_channel(args, list(sample["channel_order"]), int(sample["field_dim"]))
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if args.output_dir is None:
@@ -1252,7 +1368,7 @@ def main() -> None:
         y_np = sample["y_grid"].numpy()[0]
 
         save_stage1_quicklook(
-            out_dir / "quicklook_stage1_omega.png",
+            out_dir / f"quicklook_stage1_{viz_field}.png",
             gt_field=gt_field,
             mean_field=mean_field,
             target_grid=target_np,
@@ -1262,6 +1378,8 @@ def main() -> None:
             y_grid=y_np,
             centers=sample["centers_np"],
             target_mode=target_mode,
+            channel=viz_channel,
+            channel_name=viz_field,
         )
 
         np.savez_compressed(
@@ -1275,6 +1393,7 @@ def main() -> None:
             y_grid=y_np,
             centers=sample["centers_np"],
             tau=np.array([sample["tau"]], dtype=np.float32),
+            channel_order=np.asarray(sample["channel_order"]),
         )
 
         metrics = {
@@ -1284,11 +1403,15 @@ def main() -> None:
             "tau": float(sample["tau"]),
             "re": float(sample["re"]),
             "num_cylinders": int(sample["num_cylinders"]),
+            "field_dim": int(sample["field_dim"]),
+            "channel_order": list(sample["channel_order"]),
+            "viz_channel": int(viz_channel),
+            "viz_field": viz_field,
             "target_mode": target_mode,
             "latent_shape": list(latent.shape),
             "field_mse": mse_np(recon_field_np, gt_field),
             "field_rel_l2": rel_l2_np(recon_field_np, gt_field),
-            "omega_mse": mse_np(recon_field_np[3], gt_field[3]),
+            "selected_channel_mse": mse_np(recon_field_np[viz_channel], gt_field[viz_channel]),
             "target_mse": mse_np(recon_target_np, target_np),
             "target_rel_l2": rel_l2_np(recon_target_np, target_np),
             "checkpoint": str(checkpoint_path),
@@ -1305,6 +1428,17 @@ def main() -> None:
         )
         if args.disable_edge is not None and hasattr(det_model, "set_edge_disable_runtime"):
             det_model.set_edge_disable_runtime(bool(args.disable_edge))
+        det_field_dim = int(det_model_cfg.get("field_dim", getattr(det_model, "cfg", object()).field_dim if hasattr(getattr(det_model, "cfg", None), "field_dim") else sample["field_dim"]))
+        if det_field_dim != int(sample["field_dim"]):
+            raise ValueError(
+                f"Deterministic checkpoint field_dim={det_field_dim} does not match dataset field_dim={sample['field_dim']} "
+                f"for channel_order={sample['channel_order']}."
+            )
+        add_extra_module_if_needed(
+            sample,
+            future_module_feature_dim=int(det_model_cfg.get("future_module_feature_dim", 0)),
+            heat_power_scale=float(sample.get("heat_power_scale", 1.0)),
+        )
 
         # Move structure and grids to device.
         structure = {k: v.to(device) for k, v in sample["structure"].items()}
@@ -1358,15 +1492,15 @@ def main() -> None:
         y_np = sample["y_grid"].numpy()[0]
 
         save_quicklook(
-            out_dir / "quicklook_omega.png",
+            out_dir / f"quicklook_{viz_field}.png",
             gt_field=gt_field,
             det_field=det_field,
             samples=gen_samples,
             x_grid=x_np,
             y_grid=y_np,
             centers=sample["centers_np"],
-            channel=3,
-            channel_name="omega",
+            channel=viz_channel,
+            channel_name=viz_field,
         )
         organization_paths = render_soft_organization(
             out_dir,
@@ -1394,6 +1528,7 @@ def main() -> None:
             y_grid=y_np,
             centers=sample["centers_np"],
             tau=np.array([sample["tau"]], dtype=np.float32),
+            channel_order=np.asarray(sample["channel_order"]),
         )
 
         ens_mean = gen_samples.mean(axis=0)
@@ -1404,6 +1539,10 @@ def main() -> None:
             "tau": float(sample["tau"]),
             "re": float(sample["re"]),
             "num_cylinders": int(sample["num_cylinders"]),
+            "field_dim": int(sample["field_dim"]),
+            "channel_order": list(sample["channel_order"]),
+            "viz_channel": int(viz_channel),
+            "viz_field": viz_field,
             "n_samples": int(args.n_samples),
             "n_steps": int(n_steps),
             "ode_solver": ode_solver,
@@ -1411,8 +1550,8 @@ def main() -> None:
             "gen_mean_mse": mse_np(ens_mean, gt_field),
             "det_rel_l2": rel_l2_np(det_field, gt_field),
             "gen_mean_rel_l2": rel_l2_np(ens_mean, gt_field),
-            "det_omega_mse": mse_np(det_field[3], gt_field[3]),
-            "gen_mean_omega_mse": mse_np(ens_mean[3], gt_field[3]),
+            "det_selected_channel_mse": mse_np(det_field[viz_channel], gt_field[viz_channel]),
+            "gen_mean_selected_channel_mse": mse_np(ens_mean[viz_channel], gt_field[viz_channel]),
             "sample_diversity_mean_std": float(gen_samples.std(axis=0).mean()),
             "checkpoint": str(checkpoint_path),
             "deterministic_checkpoint": str(det_ckpt_path),

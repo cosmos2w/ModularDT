@@ -152,6 +152,47 @@ def sort_case_ids(case_ids: Iterable[str]) -> List[str]:
     return sorted(case_ids, key=key_fn)
 
 
+INERT_CHANNEL_ORDER = ("u", "v", "p", "omega")
+ACTIVE_CHANNEL_ORDER = ("u", "v", "p", "omega", "temperature")
+
+
+def decode_string_array(values) -> List[str]:
+    arr = np.asarray(values)
+    out: List[str] = []
+    for item in arr.reshape(-1):
+        out.append(item.decode("utf-8") if isinstance(item, bytes) else str(item))
+    return out
+
+
+def channel_order_from_attr(value) -> Optional[List[str]]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text == "mixed":
+            return None
+        try:
+            payload = json.loads(text)
+            if isinstance(payload, (list, tuple)):
+                return [str(v) for v in payload]
+        except json.JSONDecodeError:
+            pass
+        return [piece.strip() for piece in text.split(",") if piece.strip()]
+    return decode_string_array(value)
+
+
+def get_case_channel_order(grp: h5py.Group, h5_file: h5py.File) -> List[str]:
+    if "channel_order" in grp:
+        return decode_string_array(grp["channel_order"][...])
+    root_order = channel_order_from_attr(h5_file.attrs.get("channel_order"))
+    if root_order is not None:
+        return root_order
+    field_dim = int(grp.attrs.get("field_dim", grp["canonical_cycle"].shape[-1] if "canonical_cycle" in grp else 4))
+    return list(ACTIVE_CHANNEL_ORDER if field_dim == 5 else INERT_CHANNEL_ORDER)
+
+
 def normalize_loss_scalar(value: torch.Tensor | float) -> float:
     if isinstance(value, torch.Tensor):
         return float(value.detach().cpu().item())
@@ -207,6 +248,8 @@ class CanonicalResidualGridDataset(Dataset):
         max_cases: int = 0,
         randomize_cylinder_order: bool = False,
         base_seed: int = 42,
+        use_heat_power_module_feature: bool = False,
+        heat_power_scale: str | float = "auto",
     ):
         super().__init__()
         self.h5_path = Path(h5_path).expanduser().resolve()
@@ -217,10 +260,16 @@ class CanonicalResidualGridDataset(Dataset):
         self.max_cases = int(max_cases)
         self.randomize_cylinder_order = bool(randomize_cylinder_order)
         self.base_seed = int(base_seed)
+        self.use_heat_power_module_feature = bool(use_heat_power_module_feature)
+        self.heat_power_scale_config = heat_power_scale
+        self.heat_power_scale = 1.0
+        self.channel_order: List[str] = list(INERT_CHANNEL_ORDER)
+        self.field_dim = 4
         self.current_epoch = 0
         self._h5: Optional[h5py.File] = None
         self.items: list[GenCaseMeta] = []
         self.case_static: Dict[str, Dict] = {}
+        max_abs_heat_power = 0.0
 
         if self.target_mode not in {"residual", "field"}:
             raise ValueError("target_mode must be 'residual' or 'field'.")
@@ -247,12 +296,36 @@ class CanonicalResidualGridDataset(Dataset):
                 phase_bins = np.asarray(grp["phase_bin_centers"], dtype=np.float32)
                 re_value = float(grp.attrs["re"])
                 num_cyl = int(grp.attrs["num_cylinders"])
+                channel_order = get_case_channel_order(grp, h5)
+                field_dim = int(grp.attrs.get("field_dim", grp["canonical_cycle"].shape[-1]))
+                channel_order = channel_order[:field_dim]
+                if not self.items and not self.case_static:
+                    self.channel_order = list(channel_order)
+                    self.field_dim = int(field_dim)
+                elif field_dim != self.field_dim or tuple(channel_order) != tuple(self.channel_order):
+                    raise ValueError(
+                        f"Mixed channel metadata is not supported in one generative dataset. "
+                        f"Expected {self.channel_order} (C={self.field_dim}), got case {case_id} {channel_order} (C={field_dim})."
+                    )
+                if "heat_powers" in grp:
+                    heat_powers = np.asarray(grp["heat_powers"], dtype=np.float32).reshape(-1)
+                else:
+                    heat_powers = np.zeros((num_cyl,), dtype=np.float32)
+                max_abs_heat_power = max(max_abs_heat_power, float(np.max(np.abs(heat_powers))) if heat_powers.size else 0.0)
+                max_abs_heat_power = max(
+                    max_abs_heat_power,
+                    abs(float(grp.attrs.get("thermal_power_min", 0.0))),
+                    abs(float(grp.attrs.get("thermal_power_max", 0.0))),
+                )
                 self.case_static[case_id] = {
                     "centers": centers,
+                    "heat_powers": heat_powers,
                     "re": re_value,
                     "num_cylinders": num_cyl,
                     "dominant_frequency": float(grp.attrs.get("dominant_frequency", 0.0)),
                     "x_grid_shape": tuple(grp["x_grid"].shape),
+                    "channel_order": channel_order,
+                    "field_dim": field_dim,
                 }
                 for phase_idx in range(0, len(phase_bins), self.phase_stride):
                     self.items.append(
@@ -265,6 +338,10 @@ class CanonicalResidualGridDataset(Dataset):
                             num_cylinders=num_cyl,
                         )
                     )
+        if str(self.heat_power_scale_config).strip().lower() == "auto":
+            self.heat_power_scale = max(float(max_abs_heat_power), 1.0)
+        else:
+            self.heat_power_scale = max(float(self.heat_power_scale_config), 1e-12)
 
     def __len__(self) -> int:
         return len(self.items)
@@ -281,22 +358,31 @@ class CanonicalResidualGridDataset(Dataset):
     def _structure_tensors(self, meta: GenCaseMeta) -> Dict[str, torch.Tensor]:
         static = self.case_static[meta.case_id]
         centers = static["centers"].copy()
+        heat_powers = np.asarray(static.get("heat_powers", np.zeros((centers.shape[0],), dtype=np.float32)), dtype=np.float32).copy()
         if self.randomize_cylinder_order and centers.shape[0] > 1:
             rng_seed = self.base_seed + 1000003 * self.current_epoch + 9176 * int(meta.phase_idx)
             rng = np.random.default_rng(rng_seed)
-            centers = centers[rng.permutation(centers.shape[0])]
+            perm = rng.permutation(centers.shape[0])
+            centers = centers[perm]
+            heat_powers = heat_powers[perm]
 
         padded = np.zeros((self.max_num_cylinders, 2), dtype=np.float32)
         mask = np.zeros((self.max_num_cylinders,), dtype=np.float32)
         padded[: centers.shape[0]] = centers
         mask[: centers.shape[0]] = 1.0
-        return {
+        out = {
             "re_values": torch.tensor([meta.re_value], dtype=torch.float32),
             "num_cylinders": torch.tensor([meta.num_cylinders], dtype=torch.float32),
             "centers": torch.from_numpy(padded),
             "cyl_mask": torch.from_numpy(mask),
             "freq_target": torch.tensor([static["dominant_frequency"]], dtype=torch.float32),
         }
+        if self.use_heat_power_module_feature:
+            padded_powers = np.zeros((self.max_num_cylinders, 1), dtype=np.float32)
+            if heat_powers.size:
+                padded_powers[: heat_powers.shape[0], 0] = heat_powers / float(self.heat_power_scale)
+            out["extra_module"] = torch.from_numpy(padded_powers)
+        return out
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor | str]:
         meta = self.items[idx]
@@ -346,6 +432,8 @@ def collate_gen_grid(batch: Sequence[Dict[str, torch.Tensor | str]]) -> Dict[str
         "phase_idx", "tau", "target_grid", "field_grid", "mean_grid", "x_grid", "y_grid",
         "re_values", "num_cylinders", "centers", "cyl_mask", "freq_target",
     ]
+    if any("extra_module" in item for item in batch):
+        keys_tensor.append("extra_module")
     out: Dict[str, torch.Tensor | List[str]] = {"case_id": [str(item["case_id"]) for item in batch]}
     for key in keys_tensor:
         out[key] = torch.stack([item[key] for item in batch], dim=0)  # type: ignore[index]
@@ -390,12 +478,15 @@ def compute_grid_stats(dataset: CanonicalResidualGridDataset, max_items: int = 0
 
 
 def build_structure_from_batch(batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
-    return {
+    structure = {
         "re_values": batch["re_values"].to(device=device),
         "num_cylinders": batch["num_cylinders"].to(device=device),
         "centers": batch["centers"].to(device=device),
         "cyl_mask": batch["cyl_mask"].to(device=device),
     }
+    if "extra_module" in batch:
+        structure["extra_module"] = batch["extra_module"].to(device=device)
+    return structure
 
 
 @torch.no_grad()
@@ -473,6 +564,13 @@ def build_stage2_conditions(
 ) -> tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
     """Compute dense and global conditions for one generative training batch."""
     structure = build_structure_from_batch(batch, device)
+    if int(det_model_cfg.get("future_module_feature_dim", 0)) > 0 and "extra_module" not in structure:
+        bsz, n_max = structure["centers"].shape[:2]
+        structure["extra_module"] = torch.zeros(
+            (bsz, n_max, int(det_model_cfg.get("future_module_feature_dim", 1))),
+            device=device,
+            dtype=structure["centers"].dtype,
+        )
     x_grid = batch["x_grid"].to(device=device)
     y_grid = batch["y_grid"].to(device=device)
     tau = batch["tau"].to(device=device)
@@ -855,6 +953,8 @@ def main() -> None:
         max_cases=int(dataset_cfg.get("train_max_cases", 0)),
         randomize_cylinder_order=bool(dataset_cfg.get("randomize_cylinder_order", True)),
         base_seed=int(cfg["training"].get("seed", 42)),
+        use_heat_power_module_feature=bool(dataset_cfg.get("use_heat_power_module_feature", False)),
+        heat_power_scale=dataset_cfg.get("heat_power_scale", "auto"),
     )
     val_set = CanonicalResidualGridDataset(
         packed_path,
@@ -865,10 +965,20 @@ def main() -> None:
         max_cases=int(dataset_cfg.get("val_max_cases", 16)),
         randomize_cylinder_order=False,
         base_seed=int(cfg["training"].get("seed", 42)),
+        use_heat_power_module_feature=bool(dataset_cfg.get("use_heat_power_module_feature", False)),
+        heat_power_scale=dataset_cfg.get("heat_power_scale", "auto"),
     )
     if len(train_set) == 0:
         raise RuntimeError("No generative training snapshots found.")
     n_fields, num_y, num_x = infer_grid_shape(train_set)
+    channel_order = list(getattr(train_set, "channel_order", ACTIVE_CHANNEL_ORDER if n_fields == 5 else INERT_CHANNEL_ORDER))
+    requested_field_dim = dataset_cfg.get("field_dim", "auto")
+    if str(requested_field_dim).strip().lower() not in {"auto", str(n_fields)}:
+        raise ValueError(f"dataset.field_dim={requested_field_dim} does not match packed dataset field_dim={n_fields}.")
+    cfg.setdefault("dataset", {})["field_dim"] = int(n_fields)
+    cfg["dataset"]["channel_order"] = channel_order
+    dataset_cfg["field_dim"] = int(n_fields)
+    dataset_cfg["channel_order"] = channel_order
 
     batch_size = int((cfg["stage1"] if stage == 1 else cfg["stage2"])["training"].get("batch_size", 4))
     num_workers = int(dataset_cfg.get("num_workers", 0))
@@ -912,6 +1022,9 @@ def main() -> None:
             )
         if int(stage1_ckpt.get("n_fields", n_fields)) != n_fields or int(stage1_ckpt["num_y"]) != num_y or int(stage1_ckpt["num_x"]) != num_x:
             raise ValueError("Stage-1 checkpoint grid shape does not match the current dataset/config.")
+        ckpt_channel_order = [str(v) for v in stage1_ckpt.get("channel_order", channel_order)]
+        if ckpt_channel_order != channel_order:
+            raise ValueError(f"Stage-1 checkpoint channel_order={ckpt_channel_order} does not match dataset channel_order={channel_order}.")
         stats = GridStats(mean=stage1_ckpt["stats"]["mean"], std=stage1_ckpt["stats"]["std"])
 
     latest_path = run_dir / "latest_model.pt"
@@ -931,6 +1044,12 @@ def main() -> None:
         ema = None
     else:
         det_model, det_model_cfg, det_ckpt_path = load_deterministic_model(cfg["deterministic_model"], device)
+        det_field_dim = int(det_model_cfg.get("field_dim", getattr(det_model, "cfg", ModelConfig()).field_dim))
+        if det_field_dim != int(n_fields):
+            raise ValueError(
+                f"Deterministic checkpoint field_dim={det_field_dim} does not match generative dataset field_dim={n_fields} "
+                f"for channel_order={channel_order}."
+            )
         if stage1_ckpt is None:
             assert stage1_path is not None
             stage1_ckpt = safe_torch_load(stage1_path, map_location="cpu")
@@ -1018,6 +1137,8 @@ def main() -> None:
                 "config": cfg,
                 "stats": {"mean": stats.mean.cpu(), "std": stats.std.cpu()},
                 "n_fields": n_fields,
+                "field_dim": n_fields,
+                "channel_order": channel_order,
                 "num_y": num_y,
                 "num_x": num_x,
                 "ae_config": {"base_ch": ae.base_ch, "latent_ch": ae.latent_ch, "n_levels": ae.n_levels, "num_res_blocks": ae.num_res_blocks},
@@ -1036,6 +1157,8 @@ def main() -> None:
                 "config": cfg,
                 "stats": {"mean": stats.mean.cpu(), "std": stats.std.cpu()},
                 "n_fields": n_fields,
+                "field_dim": n_fields,
+                "channel_order": channel_order,
                 "num_y": num_y,
                 "num_x": num_x,
                 "ae_config": {"base_ch": ae.base_ch, "latent_ch": ae.latent_ch, "n_levels": ae.n_levels, "num_res_blocks": ae.num_res_blocks},

@@ -4,6 +4,9 @@
 
   "dataset": {
     "packed_h5_path": "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5",
+    "include_temperature": "auto",
+    "use_heat_power_module_feature": false,
+    "heat_power_scale": "auto",
     "train_split": "train",
     "val_split": "test",
 
@@ -46,6 +49,7 @@
     "domain_length_x": 24.0,
     "domain_length_y": 12.0,
     "re_scale": 200.0,
+    "field_dim": 4,
 
     "num_env_tokens_x": 20,
     "num_env_tokens_y": 10,
@@ -136,6 +140,7 @@
 
     "dynamic_energy_weight": 0.05,
     "dynamic_energy_channels": [3],
+    "dynamic_energy_channel_names_comment": "Default [3] is omega. For active temperature emphasis, use [3,4] or set dynamic_energy_channel_names to [\"omega\", \"temperature\"].",
     "dynamic_energy_log_space": true,
     "dynamic_energy_eps": 1.0e-8,
     "dynamic_energy_use_smooth_l1": true,

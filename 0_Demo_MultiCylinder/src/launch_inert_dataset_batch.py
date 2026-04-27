@@ -1,5 +1,9 @@
 """
-Batch launcher for inert multi-cylinder dataset generation.
+Batch launcher for inert or active multi-cylinder dataset generation.
+
+Defaults remain inert for backward compatibility. Set DATASET_MODE="active"
+and TEMPLATE_CONFIG_NAME/GENERATED_CONFIG_PREFIX to the active names below to
+sample active heated/cooled cases.
 """
 
 from __future__ import annotations
@@ -20,9 +24,12 @@ from multicyl_common import (
     SimulationConfig,
     config_from_dict,
     dataclass_to_dict,
+    default_config_backup_dir,
+    default_config_backup_log_dir,
     default_config_dir,
     default_data_dir,
     materialize_layout,
+    validate_mode_name,
     write_json,
 )
 
@@ -36,9 +43,9 @@ NUM_CYLINDER_OPTIONS = [2, 4, 6]
 RE_OPTIONS = [30.0, 120.0, 170.0]
 REPEATS_PER_COMBINATION = 6
 
-TEMPLATE_CONFIG_NAME = "config_inert.json"
-GENERATED_CONFIG_SUBDIR = "Config_bk"
-GENERATED_CONFIG_PREFIX = "config_inert"
+DATASET_MODE = "inert"  # "inert" | "active"
+TEMPLATE_CONFIG_NAME = "config_inert.json"  # for active: "config_active.json"
+GENERATED_CONFIG_PREFIX = "config_inert"  # for active: "config_active"
 
 BASE_LAYOUT_SEED = 1000
 
@@ -88,11 +95,11 @@ def demo_dir() -> Path:
 
 
 def generated_config_dir() -> Path:
-    return default_config_dir() / GENERATED_CONFIG_SUBDIR
+    return default_config_backup_dir(validate_mode_name(DATASET_MODE))
 
 
 def generated_log_dir() -> Path:
-    return generated_config_dir() / "logs"
+    return default_config_backup_log_dir(validate_mode_name(DATASET_MODE))
 
 
 def simulation_script_path() -> Path:
@@ -138,7 +145,8 @@ def build_job_config(
     layout_seed: int,
 ) -> SimulationConfig:
     cfg = config_from_dict(dataclass_to_dict(template))
-    cfg.mode = "inert"
+    mode = validate_mode_name(DATASET_MODE)
+    cfg.mode = mode
     cfg.layout.num_cylinders = num_cylinders
     cfg.layout.seed = layout_seed
     cfg.layout.centers = None
@@ -176,6 +184,7 @@ def create_jobs() -> List[BatchJob]:
                 config_name = f"{GENERATED_CONFIG_PREFIX}_{case_id}.json"
                 config_path = config_dir / config_name
                 write_json(config_path, dataclass_to_dict(cfg))
+                config_arg = config_path.relative_to(default_config_dir()).as_posix()
 
                 jobs.append(
                     BatchJob(
@@ -185,7 +194,7 @@ def create_jobs() -> List[BatchJob]:
                         replicate_idx=replicate_idx,
                         layout_seed=layout_seed,
                         config_path=config_path,
-                        config_arg=f"{GENERATED_CONFIG_SUBDIR}/{config_name}",
+                        config_arg=config_arg,
                         log_path=log_dir / f"case_{case_id}.log",
                     )
                 )

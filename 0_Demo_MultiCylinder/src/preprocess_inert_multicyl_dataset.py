@@ -83,7 +83,9 @@ from multicyl_common import build_uniform_grid, config_from_dict, periodic_offse
 # ------------------------------- Data classes ----------------------------------
 
 
-FIELD_CHANNEL_ORDER = ("u", "v", "p", "omega")
+INERT_FIELD_CHANNEL_ORDER = ("u", "v", "p", "omega")
+ACTIVE_FIELD_CHANNEL_ORDER = ("u", "v", "p", "omega", "temperature")
+FIELD_CHANNEL_ORDER = INERT_FIELD_CHANNEL_ORDER
 
 
 @dataclass
@@ -114,6 +116,7 @@ class CaseData:
     times: np.ndarray
     frame_ids: np.ndarray
     tensor: torch.Tensor  # [T, H, W, C] on the selected torch device
+    channel_order: Tuple[str, ...]
     cylinder_mask: Optional[np.ndarray]  # [H, W]
     available_fields: Dict[str, bool]
     x_grid: np.ndarray  # [H, W]
@@ -134,8 +137,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("./Data_Saved/Processed_Inert_Dataset"),
+        default=Path("./Data_Saved/Processed_Active_Dataset"),
         help="Root directory where processed per-case outputs and the packed HDF5 file will be written.",
+    )
+    parser.add_argument(
+        "--include-temperature",
+        choices=["auto", "true", "false"],
+        default="auto",
+        help="Include temperature as a fifth field channel: auto detects active cases or saved temperature files.",
+    )
+    parser.add_argument(
+        "--missing-temperature-action",
+        choices=["fail", "zeros"],
+        default="fail",
+        help="When temperature is requested but a frame is missing it, either skip the case or fill zeros.",
     )
     parser.add_argument(
         "--device",
@@ -309,6 +324,31 @@ def load_npz_array(path: Path) -> np.ndarray:
         return np.asarray(data[key])
 
 
+def resolve_include_temperature(mode: str, first_temperature_path: Optional[Path], include_temperature: str) -> bool:
+    """Resolve the temperature-channel policy for one case."""
+    policy = str(include_temperature).strip().lower()
+    if policy == "true":
+        return True
+    if policy == "false":
+        return False
+    if policy != "auto":
+        raise ValueError("--include-temperature must be one of auto, true, false.")
+    return str(mode).strip().lower() == "active" or first_temperature_path is not None
+
+
+def heat_powers_for_case(cfg: object) -> np.ndarray:
+    num_cylinders = int(cfg.layout.num_cylinders)
+    powers = cfg.layout.heat_powers
+    if powers is None:
+        return np.zeros((num_cylinders,), dtype=np.float32)
+    arr = np.asarray(powers, dtype=np.float32).reshape(-1)
+    if arr.shape[0] != num_cylinders:
+        raise ValueError(
+            f"layout.heat_powers length {arr.shape[0]} does not match num_cylinders={num_cylinders}."
+        )
+    return arr.astype(np.float32, copy=False)
+
+
 def normalize_scalar_field(arr: np.ndarray, nx: int, ny: int) -> np.ndarray:
     """Normalize saved scalar fields into [H, W] = [ny, nx]."""
     if arr.shape == (ny, nx):
@@ -336,7 +376,7 @@ def normalize_vector_field(arr: np.ndarray, nx: int, ny: int) -> np.ndarray:
     raise ValueError(f"Unsupported vector field shape {arr.shape}. Expected {(ny, nx, 2)} or {(nx, ny, 2)}.")
 
 
-def load_case(record: CaseRecord, device: torch.device) -> Optional[CaseData]:
+def load_case(record: CaseRecord, device: torch.device, args: argparse.Namespace) -> Optional[CaseData]:
     """Load one case directory into a consistent tensor format."""
     case_dir = record.case_dir
     try:
@@ -367,9 +407,28 @@ def load_case(record: CaseRecord, device: torch.device) -> Optional[CaseData]:
     nx = int(cfg.domain.nx)
     ny = int(cfg.domain.ny)
     tensors: List[np.ndarray] = []
-    available_fields = {"velocity": True, "pressure": False, "vorticity": False, "cylindermask": False}
+    first_temperature_path = find_field_path(scene_dir, "temperature", int(frame_ids[0]))
+    include_temperature = resolve_include_temperature(
+        mode=str(cfg.mode),
+        first_temperature_path=first_temperature_path,
+        include_temperature=str(args.include_temperature),
+    )
+    channel_order = ACTIVE_FIELD_CHANNEL_ORDER if include_temperature else INERT_FIELD_CHANNEL_ORDER
+    try:
+        heat_powers_for_case(cfg)
+    except ValueError as exc:
+        print(f"[WARN] Invalid heat_powers in {case_dir.name}: {exc}; skipping case.")
+        return None
+    available_fields = {
+        "velocity": True,
+        "pressure": False,
+        "vorticity": False,
+        "temperature": False,
+        "cylindermask": False,
+    }
     pressure_missing_warned = False
     vorticity_missing_warned = False
+    temperature_missing_warned = False
 
     for frame_id in frame_ids:
         vel_path = find_field_path(scene_dir, "velocity", frame_id)
@@ -398,14 +457,29 @@ def load_case(record: CaseRecord, device: torch.device) -> Optional[CaseData]:
                 print(f"[WARN] Vorticity missing in {case_dir.name}; filling vorticity with zeros.")
                 vorticity_missing_warned = True
 
-        frame_tensor = np.concatenate(
-            [
-                velocity,
-                pressure[..., None],
-                vorticity[..., None],
-            ],
-            axis=-1,
-        ).astype(np.float32, copy=False)
+        temperature = None
+        if include_temperature:
+            temperature_path = find_field_path(scene_dir, "temperature", frame_id)
+            if temperature_path is not None:
+                temperature = normalize_scalar_field(load_npz_array(temperature_path), nx=nx, ny=ny)
+                available_fields["temperature"] = True
+            else:
+                message = f"Temperature missing in {case_dir.name} frame {frame_id:06d}"
+                if str(args.missing_temperature_action) == "zeros":
+                    temperature = np.zeros((ny, nx), dtype=np.float32)
+                    if not temperature_missing_warned:
+                        print(f"[WARN] {message}; filling temperature with zeros.")
+                        temperature_missing_warned = True
+                else:
+                    print(f"[WARN] {message}; skipping case.")
+                    return None
+
+        field_parts = [velocity, pressure[..., None], vorticity[..., None]]
+        if include_temperature:
+            if temperature is None:
+                raise RuntimeError("Internal error: include_temperature=True but temperature field was not prepared.")
+            field_parts.append(temperature[..., None])
+        frame_tensor = np.concatenate(field_parts, axis=-1).astype(np.float32, copy=False)
         tensors.append(frame_tensor)
 
     cylinder_mask = None
@@ -422,6 +496,7 @@ def load_case(record: CaseRecord, device: torch.device) -> Optional[CaseData]:
         times=times,
         frame_ids=frame_ids,
         tensor=torch.from_numpy(np.stack(tensors, axis=0)).to(device=device, dtype=torch.float32),
+        channel_order=channel_order,
         cylinder_mask=cylinder_mask,
         available_fields=available_fields,
         x_grid=x_grid.astype(np.float32, copy=False),
@@ -1217,7 +1292,7 @@ def sample_phase_points(
     wake_ratio: float,
 ) -> Dict[str, np.ndarray]:
     """Sample pointwise neural-field tuples from the canonical cycle."""
-    num_bins, height, width, _ = canonical_cycle.shape
+    num_bins, height, width, field_dim = canonical_cycle.shape
     x_flat = case_data.x_grid.reshape(-1)
     y_flat = case_data.y_grid.reshape(-1)
     masks = build_sampling_masks(case_data)
@@ -1226,7 +1301,7 @@ def sample_phase_points(
     all_indices = np.arange(height * width, dtype=np.int64)
     rng = np.random.default_rng(int(case_data.cfg.layout.seed) + 12345)
 
-    sampled_blocks = {key: [] for key in ("phase_bin", "tau", "x", "y", "u", "v", "p", "omega")}
+    sampled_blocks = {key: [] for key in ("phase_bin", "tau", "x", "y", *case_data.channel_order)}
 
     for phase_idx in range(num_bins):
         field_flat = canonical_cycle[phase_idx].reshape(-1, canonical_cycle.shape[-1])
@@ -1271,10 +1346,12 @@ def sample_phase_points(
         sampled_blocks["tau"].append(np.full(chosen.size, phase_centers[phase_idx], dtype=np.float32))
         sampled_blocks["x"].append(x_flat[chosen].astype(np.float32))
         sampled_blocks["y"].append(y_flat[chosen].astype(np.float32))
-        sampled_blocks["u"].append(values[:, 0].astype(np.float32))
-        sampled_blocks["v"].append(values[:, 1].astype(np.float32))
-        sampled_blocks["p"].append(values[:, 2].astype(np.float32))
-        sampled_blocks["omega"].append(values[:, 3].astype(np.float32))
+        for channel_idx, channel_name in enumerate(case_data.channel_order):
+            if channel_idx >= field_dim:
+                raise ValueError(
+                    f"channel_order={case_data.channel_order} is incompatible with canonical_cycle field_dim={field_dim}."
+                )
+            sampled_blocks[channel_name].append(values[:, channel_idx].astype(np.float32))
 
     return {key: np.concatenate(val, axis=0) if val else np.zeros((0,), dtype=np.float32) for key, val in sampled_blocks.items()}
 
@@ -1318,6 +1395,8 @@ def save_structure_json(
         "case_dir_name": case_data.record.case_dir.name,
         "split": case_data.record.split,
         "mode": case_data.cfg.mode,
+        "field_dim": int(len(case_data.channel_order)),
+        "channel_order": list(case_data.channel_order),
         "re": float(case_data.cfg.flow.re),
         "num_cylinders": int(case_data.cfg.layout.num_cylinders),
         "cylinder_radius": float(case_data.cfg.domain.cylinder_radius),
@@ -1328,6 +1407,15 @@ def save_structure_json(
             "ly": float(case_data.cfg.domain.ly),
         },
         "cylinder_centers": case_data.cfg.layout.centers,
+        "heat_powers": heat_powers_for_case(case_data.cfg).tolist(),
+        "thermal": {
+            "enabled": bool(case_data.cfg.thermal.enabled),
+            "pr": float(case_data.cfg.thermal.pr),
+            "ambient_temperature": float(case_data.cfg.thermal.ambient_temperature),
+            "source_sigma": float(case_data.cfg.thermal.source_sigma),
+            "power_min": float(case_data.cfg.thermal.power_min),
+            "power_max": float(case_data.cfg.thermal.power_max),
+        },
         "available_fields": case_data.available_fields,
         "save_cycles": int(save_cycles),
         "probe": {
@@ -1354,14 +1442,20 @@ def save_behavior_summary(out_dir: Path, behavior: Dict[str, np.ndarray], pod: O
     np.savez_compressed(out_dir / "behavior_summary.npz", **payload)
 
 
-def save_canonical_cycle(out_dir: Path, canonical_cycle: np.ndarray, phase_centers: np.ndarray, save_full: bool) -> None:
+def save_canonical_cycle(
+    out_dir: Path,
+    canonical_cycle: np.ndarray,
+    phase_centers: np.ndarray,
+    channel_order: Sequence[str],
+    save_full: bool,
+) -> None:
     if not save_full:
         return
     np.savez_compressed(
         out_dir / "canonical_cycle.npz",
         canonical_cycle=canonical_cycle.astype(np.float32),
         phase_bin_centers=phase_centers.astype(np.float32),
-        channel_order=np.asarray(FIELD_CHANNEL_ORDER),
+        channel_order=np.asarray(tuple(channel_order)),
     )
 
 
@@ -1412,6 +1506,8 @@ def save_sampled_points(out_dir: Path, case_data: CaseData, sampled_points: Dict
         re=np.asarray(float(case_data.cfg.flow.re), dtype=np.float32),
         num_cylinders=np.asarray(int(case_data.cfg.layout.num_cylinders), dtype=np.int32),
         cylinder_centers=np.asarray(case_data.cfg.layout.centers, dtype=np.float32),
+        heat_powers=heat_powers_for_case(case_data.cfg),
+        channel_order=np.asarray(case_data.channel_order),
         **sampled_points,
     )
 
@@ -1432,9 +1528,20 @@ def save_quicklook_plots(
     quicklook_dir.mkdir(parents=True, exist_ok=True)
     extent = (0.0, case_data.cfg.domain.lx, 0.0, case_data.cfg.domain.ly)
 
-    fig, axes = plt.subplots(2, 4, figsize=(16, 7), constrained_layout=True, dpi=140)
-    channel_titles = ["u", "v", "p", "omega"]
-    channel_cmaps = ["coolwarm", "coolwarm", "magma", "RdBu_r"]
+    channel_titles = list(case_data.channel_order)
+    cmap_lookup = {
+        "u": "coolwarm",
+        "v": "coolwarm",
+        "p": "magma",
+        "omega": "RdBu_r",
+        "temperature": "coolwarm" if np.nanmin(mean_field[..., -1]) < 0.0 else "inferno",
+    }
+    channel_cmaps = [cmap_lookup.get(name, "coolwarm") for name in channel_titles]
+    fig_width = max(4 * len(channel_titles), 12)
+    fig, axes = plt.subplots(2, len(channel_titles), figsize=(fig_width, 7), constrained_layout=True, dpi=140)
+    axes = np.asarray(axes)
+    if axes.ndim == 1:
+        axes = axes[:, None]
 
     for idx, (title, cmap) in enumerate(zip(channel_titles, channel_cmaps)):
         im0 = axes[0, idx].imshow(mean_field[..., idx], origin="lower", extent=extent, cmap=cmap, aspect="equal")
@@ -1551,6 +1658,14 @@ def write_case_to_h5(
     grp.attrs["split"] = case_data.record.split
     grp.attrs["re"] = float(case_data.cfg.flow.re)
     grp.attrs["num_cylinders"] = int(case_data.cfg.layout.num_cylinders)
+    grp.attrs["mode"] = str(case_data.cfg.mode)
+    grp.attrs["field_dim"] = int(len(case_data.channel_order))
+    grp.attrs["thermal_enabled"] = bool(case_data.cfg.thermal.enabled)
+    grp.attrs["thermal_pr"] = float(case_data.cfg.thermal.pr)
+    grp.attrs["thermal_ambient_temperature"] = float(case_data.cfg.thermal.ambient_temperature)
+    grp.attrs["thermal_source_sigma"] = float(case_data.cfg.thermal.source_sigma)
+    grp.attrs["thermal_power_min"] = float(case_data.cfg.thermal.power_min)
+    grp.attrs["thermal_power_max"] = float(case_data.cfg.thermal.power_max)
     grp.attrs["dominant_frequency"] = float(dominant_frequency)
     grp.attrs["probe_cylinder_index"] = int(probe.cylinder_index)
     grp.attrs["source_case_dir"] = str(case_data.record.case_dir.resolve())
@@ -1565,9 +1680,10 @@ def write_case_to_h5(
     grp.create_dataset("tau", data=tau.astype(np.float32), compression="gzip")
     grp.create_dataset("phase_unwrapped", data=phase_unwrapped.astype(np.float32), compression="gzip")
     grp.create_dataset("cylinder_centers", data=np.asarray(case_data.cfg.layout.centers, dtype=np.float32))
+    grp.create_dataset("heat_powers", data=heat_powers_for_case(case_data.cfg), compression="gzip")
     grp.create_dataset("mean_field", data=mean_field.astype(np.float32), compression="gzip")
     grp.create_dataset("rms_field", data=rms_field.astype(np.float32), compression="gzip")
-    grp.create_dataset("channel_order", data=np.asarray(FIELD_CHANNEL_ORDER, dtype=h5py.string_dtype(encoding="utf-8")))
+    grp.create_dataset("channel_order", data=np.asarray(case_data.channel_order, dtype=h5py.string_dtype(encoding="utf-8")))
     grp.create_dataset("x_grid", data=case_data.x_grid.astype(np.float32), compression="gzip")
     grp.create_dataset("y_grid", data=case_data.y_grid.astype(np.float32), compression="gzip")
 
@@ -1727,7 +1843,13 @@ def process_case(
         canonical_meta=canonical_meta,
     )
     save_behavior_summary(out_dir, behavior, pod)
-    save_canonical_cycle(out_dir, canonical_cycle, phase_centers, save_full=args.save_full_canonical_cycles)
+    save_canonical_cycle(
+        out_dir,
+        canonical_cycle,
+        phase_centers,
+        channel_order=case_data.channel_order,
+        save_full=args.save_full_canonical_cycles,
+    )
     if args.canonical_diagnostic:
         save_canonical_metadata(out_dir, canonical_meta)
     save_phase_metadata(
@@ -1787,6 +1909,9 @@ def process_case(
         "case_id": str(case_data.cfg.save.case_id),
         "case_dir_name": case_data.record.case_dir.name,
         "split": case_data.record.split,
+        "mode": str(case_data.cfg.mode),
+        "field_dim": int(len(case_data.channel_order)),
+        "channel_order": ",".join(case_data.channel_order),
         "re": float(case_data.cfg.flow.re),
         "num_cylinders": int(case_data.cfg.layout.num_cylinders),
         "num_frames": int(case_data.tensor.shape[0]),
@@ -1839,14 +1964,17 @@ def main() -> None:
     skipped_cases: List[Tuple[str, str]] = []
 
     with h5py.File(packed_h5_path, "a") as h5_file:
-        h5_file.attrs["dataset_type"] = "inert_multicylinder_periodic_attractor"
+        h5_file.attrs["dataset_type"] = "multicylinder_periodic_attractor"
         h5_file.attrs["phase_bins"] = int(args.phase_bins)
         h5_file.attrs["save_cycles"] = int(args.save_cycles)
         h5_file.attrs["sampling_mode"] = args.sampling_mode
-        h5_file.attrs["channel_order"] = json.dumps(FIELD_CHANNEL_ORDER)
+        h5_file.attrs["include_temperature"] = str(args.include_temperature)
+        h5_file.attrs["channel_order"] = json.dumps(INERT_FIELD_CHANNEL_ORDER)
+        h5_file.attrs["field_dim"] = 4
         h5_file.attrs["input_root"] = str(args.input_root)
         h5_file.attrs["output_root"] = str(args.output_root)
         h5_file.attrs["canonical_cycle_method"] = str(args.canonical_cycle_method)
+        processed_channel_orders: set[Tuple[str, ...]] = set()
 
         with tqdm(
             total=len(case_records),
@@ -1860,7 +1988,7 @@ def main() -> None:
                     f"[INFO] Loading case: split={record.split}, case_dir={record.case_dir.name}",
                     case_bar,
                 )
-                case_data = load_case(record, device=device)
+                case_data = load_case(record, device=device, args=args)
                 if case_data is None:
                     skipped_cases.append((record.case_dir.name, "load_failed"))
                     report_state(f"[WARN] Skipped case after load failure: {record.case_dir.name}", case_bar)
@@ -1879,6 +2007,7 @@ def main() -> None:
                 try:
                     row = process_case(case_data, args, h5_file, progress_bar=case_bar)
                     global_index_rows.append(row)
+                    processed_channel_orders.add(tuple(case_data.channel_order))
                 except Exception as exc:
                     report_state(f"[WARN] Failed to preprocess {record.case_dir.name}: {exc}", case_bar)
                     skipped_cases.append((record.case_dir.name, str(exc)))
@@ -1890,6 +2019,13 @@ def main() -> None:
             del index_group["rows"]
         index_payload = pd.DataFrame(global_index_rows).to_json(orient="records")
         index_group.create_dataset("rows", data=np.asarray(index_payload, dtype=h5py.string_dtype(encoding="utf-8")))
+        if len(processed_channel_orders) == 1:
+            only_order = next(iter(processed_channel_orders))
+            h5_file.attrs["channel_order"] = json.dumps(only_order)
+            h5_file.attrs["field_dim"] = int(len(only_order))
+        elif len(processed_channel_orders) > 1:
+            h5_file.attrs["channel_order"] = "mixed"
+            h5_file.attrs["field_dim"] = 0
 
     global_index_df = pd.DataFrame(global_index_rows)
     global_index_df.to_csv(args.output_root / "global_case_index.csv", index=False)

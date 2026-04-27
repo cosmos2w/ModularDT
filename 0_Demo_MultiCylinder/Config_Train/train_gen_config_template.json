@@ -6,10 +6,15 @@
     "training_stage": 2,
     "target_mode": "residual",
     "det_query_batch_size": 32768,
-    "comment": "Stage 1 trains the residual AE. Stage 2 trains the latent rectified-flow generator conditioned on the deterministic modular-DT model."
+    "comment": "Stage 1 trains the residual AE with dataset field_dim. Stage 2 trains the latent rectified-flow generator conditioned on a deterministic modular-DT model with matching field_dim."
   },
   "dataset": {
     "packed_h5_path": "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5",
+    "field_dim": "auto",
+    "channel_order": "auto",
+    "include_temperature": "auto",
+    "use_heat_power_module_feature": false,
+    "heat_power_scale": "auto",
     "train_split": "train",
     "val_split": "test",
     "max_num_cylinders": 8,
@@ -19,7 +24,7 @@
     "val_max_cases": 16,
     "randomize_cylinder_order": true,
     "num_workers": 4,
-    "comment": "The generative dataset uses canonical_cycle full-grid snapshots, not point chunks. Cylinder-order randomization is kept for train split to preserve set/permutation semantics."
+    "comment": "The generative dataset uses canonical_cycle full-grid snapshots, not point chunks. field_dim/channel_order are inferred from packed HDF5; inert uses 4 channels and active thermal data uses 5 with temperature."
   },
   "deterministic_model": {
     "checkpoint_path": "auto",

@@ -499,6 +499,7 @@ class LocalCrossAttentionBlock(nn.Module):
 class ModelConfig:
     """Configuration for the hypergraph-organized neural field model."""
 
+    field_dim: int = 4
     max_num_cylinders: int = 8
     domain_length_x: float = 24.0
     domain_length_y: float = 12.0
@@ -1312,8 +1313,8 @@ class HierarchicalPerceiverDecoder(nn.Module):
 
         self.mean_head_norm = nn.LayerNorm(cfg.hidden_dim)
         self.residual_head_norm = nn.LayerNorm(cfg.hidden_dim)
-        self.mean_head = MLP(cfg.hidden_dim, cfg.decoder_hidden_dim, 4, num_layers=2, dropout=cfg.dropout)
-        self.residual_head = MLP(cfg.hidden_dim, cfg.decoder_hidden_dim, 4, num_layers=2, dropout=cfg.dropout)
+        self.mean_head = MLP(cfg.hidden_dim, cfg.decoder_hidden_dim, cfg.field_dim, num_layers=2, dropout=cfg.dropout)
+        self.residual_head = MLP(cfg.hidden_dim, cfg.decoder_hidden_dim, cfg.field_dim, num_layers=2, dropout=cfg.dropout)
 
     def _normalize_query_xy(self, query_xy: torch.Tensor) -> torch.Tensor:
         xy = query_xy.clone()
@@ -1801,9 +1802,9 @@ class HypergraphNeuralFieldModel(nn.Module):
                 }
 
         result = {
-            "pred_field": torch.cat(field_chunks, dim=1).reshape(1, height, width, 4),
-            "pred_mean": torch.cat(mean_chunks, dim=1).reshape(1, height, width, 4),
-            "pred_residual": torch.cat(residual_chunks, dim=1).reshape(1, height, width, 4),
+            "pred_field": torch.cat(field_chunks, dim=1).reshape(1, height, width, self.cfg.field_dim),
+            "pred_mean": torch.cat(mean_chunks, dim=1).reshape(1, height, width, self.cfg.field_dim),
+            "pred_residual": torch.cat(residual_chunks, dim=1).reshape(1, height, width, self.cfg.field_dim),
         }
         if aux_cache is not None:
             result.update(aux_cache)

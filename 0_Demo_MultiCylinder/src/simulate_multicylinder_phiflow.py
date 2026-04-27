@@ -120,7 +120,7 @@ def load_config(args: argparse.Namespace) -> SimulationConfig:
     config = materialize_layout(config.finalize())
 
     if loaded_config_path is not None:
-        backup_path = backup_config_file(loaded_config_path, case_id=config.save.case_id)
+        backup_path = backup_config_file(loaded_config_path, case_id=config.save.case_id, mode=config.mode)
         tqdm.write(f"Backed up config to: {backup_path}")
 
     tqdm.write(

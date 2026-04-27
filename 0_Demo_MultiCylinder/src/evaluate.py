@@ -56,6 +56,12 @@ def parse_args() -> argparse.Namespace:
                         help="Optional directory for evaluation figures and arrays.")
     parser.add_argument("--query-batch-size", type=int, default=32768, 
                         help="Number of spatial queries per decoder chunk.")
+    parser.add_argument(
+        "--animation-field",
+        choices=["omega", "temperature", "u", "v", "p"],
+        default="omega",
+        help="Field to animate in the cycle GIF. Defaults to omega.",
+    )
 
     parser.add_argument("--organization-threshold", type=float, default=0.15,
                         help="Minimum soft weight used when drawing organization edges.")
@@ -99,6 +105,57 @@ def sort_case_ids(case_ids: List[str]) -> List[str]:
             return (1, str(case_id))
 
     return sorted(case_ids, key=key_fn)
+
+
+INERT_CHANNEL_ORDER = ("u", "v", "p", "omega")
+ACTIVE_CHANNEL_ORDER = ("u", "v", "p", "omega", "temperature")
+
+
+def decode_string_array(values) -> List[str]:
+    arr = np.asarray(values)
+    out: List[str] = []
+    for item in arr.reshape(-1):
+        out.append(item.decode("utf-8") if isinstance(item, bytes) else str(item))
+    return out
+
+
+def channel_order_from_attr(value) -> Optional[List[str]]:
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text or text == "mixed":
+            return None
+        try:
+            payload = json.loads(text)
+            if isinstance(payload, (list, tuple)):
+                return [str(v) for v in payload]
+        except json.JSONDecodeError:
+            pass
+        return [piece.strip() for piece in text.split(",") if piece.strip()]
+    return decode_string_array(value)
+
+
+def get_case_channel_order(grp: h5py.Group, h5_file: h5py.File) -> List[str]:
+    if "channel_order" in grp:
+        return decode_string_array(grp["channel_order"][...])
+    root_order = channel_order_from_attr(h5_file.attrs.get("channel_order"))
+    if root_order is not None:
+        return root_order
+    field_dim = int(grp.attrs.get("field_dim", grp["canonical_cycle"].shape[-1] if "canonical_cycle" in grp else 4))
+    return list(ACTIVE_CHANNEL_ORDER if field_dim == 5 else INERT_CHANNEL_ORDER)
+
+
+def channel_cmap(name: str) -> str:
+    return {
+        "u": "coolwarm",
+        "v": "coolwarm",
+        "p": "magma",
+        "omega": "RdBu_r",
+        "temperature": "inferno",
+    }.get(name, "coolwarm")
 
 
 def find_latest_run(case_id: str, saved_model_dir: Path) -> Path:
@@ -156,14 +213,32 @@ def load_dataset_case(h5_path: Path, case_id: str) -> Dict:
                 f"Case {case_id} does not contain 'canonical_cycle' and 'phase_bin_centers'. "
                 "Re-run preprocessing with --save-full-canonical-cycles."
             )
+        channel_order = get_case_channel_order(grp, h5_file)
+        field_dim = int(grp.attrs.get("field_dim", grp["canonical_cycle"].shape[-1]))
+        channel_order = channel_order[:field_dim]
+        heat_powers = (
+            np.asarray(grp["heat_powers"], dtype=np.float32)
+            if "heat_powers" in grp
+            else np.zeros((int(grp.attrs["num_cylinders"]),), dtype=np.float32)
+        )
+        heat_power_scale = max(
+            float(np.max(np.abs(heat_powers))) if heat_powers.size else 0.0,
+            abs(float(grp.attrs.get("thermal_power_min", 0.0))),
+            abs(float(grp.attrs.get("thermal_power_max", 0.0))),
+            1.0,
+        )
         return {
             "case_id": case_id,
             "split": grp.attrs.get("split", "all"),
             "re": float(grp.attrs["re"]),
             "num_cylinders": int(grp.attrs["num_cylinders"]),
+            "field_dim": field_dim,
+            "channel_order": channel_order,
             "dominant_frequency": float(grp.attrs["dominant_frequency"]),
             "cylinder_radius": float(grp.attrs.get("cylinder_radius", 0.5)),
             "centers": np.asarray(grp["cylinder_centers"], dtype=np.float32),
+            "heat_powers": heat_powers,
+            "heat_power_scale": heat_power_scale,
             "x_grid": np.asarray(grp["x_grid"], dtype=np.float32),
             "y_grid": np.asarray(grp["y_grid"], dtype=np.float32),
             "phase_bin_centers": np.asarray(grp["phase_bin_centers"], dtype=np.float32),
@@ -179,12 +254,19 @@ def build_structure_tensors(case: Dict, max_num_cylinders: int, device: torch.de
     mask = np.zeros((1, max_num_cylinders), dtype=np.float32)
     padded[0, : centers.shape[0]] = centers
     mask[0, : centers.shape[0]] = 1.0
-    return {
+    structure = {
         "re_values": torch.tensor([[case["re"]]], dtype=torch.float32, device=device),
         "num_cylinders": torch.tensor([[case["num_cylinders"]]], dtype=torch.float32, device=device),
         "centers": torch.from_numpy(padded).to(device=device),
         "cyl_mask": torch.from_numpy(mask).to(device=device),
     }
+    future_dim = int(getattr(case.get("model_cfg", object()), "future_module_feature_dim", 0))
+    if future_dim > 0:
+        powers = np.asarray(case.get("heat_powers", np.zeros((centers.shape[0],), dtype=np.float32)), dtype=np.float32).reshape(-1)
+        padded_powers = np.zeros((1, max_num_cylinders, future_dim), dtype=np.float32)
+        padded_powers[0, : min(powers.shape[0], max_num_cylinders), 0] = powers[:max_num_cylinders] / max(float(case.get("heat_power_scale", 1.0)), 1e-12)
+        structure["extra_module"] = torch.from_numpy(padded_powers).to(device=device)
+    return structure
 
 def _grid_domain_bounds(case: Dict) -> Dict[str, float]:
     x_grid = case["x_grid"]
@@ -877,11 +959,14 @@ def render_quicklook(
     tau_value: float,
     case: Dict,
 ) -> None:
-    channels = ["u", "v", "p", "omega"]
-    cmaps = ["coolwarm", "coolwarm", "magma", "RdBu_r"]
+    channels = list(case.get("channel_order", INERT_CHANNEL_ORDER))[: pred_field.shape[-1]]
+    cmaps = [channel_cmap(name) for name in channels]
     extent = (float(x_grid.min()), float(x_grid.max()), float(y_grid.min()), float(y_grid.max()))
 
-    fig, axes = plt.subplots(4, 3, figsize=(13, 14), dpi=150, constrained_layout=True)
+    fig, axes = plt.subplots(len(channels), 3, figsize=(13, max(3.5 * len(channels), 8)), dpi=150, constrained_layout=True)
+    axes = np.asarray(axes)
+    if axes.ndim == 1:
+        axes = axes[None, :]
     cylinder_radius = float(case.get("cylinder_radius", 0.5))
     for i, (name, cmap) in enumerate(zip(channels, cmaps)):
         pred = pred_field[..., i]
@@ -917,6 +1002,7 @@ def render_animation(
     case: Dict,
     device: torch.device,
     query_batch_size: int = 32768,
+    animation_field: str = "omega",
 ) -> None:
     print("Generating canonical cycle animation...")
     x_grid_t = torch.from_numpy(case["x_grid"]).to(device)
@@ -932,27 +1018,35 @@ def render_animation(
         frames_pred.append(out["pred_field"][0].detach().cpu().numpy())
         frames_gt.append(case["canonical_cycle"][frame_idx])
     
-    # Omega is channel 3
-    omega_preds = np.stack([f[..., 3] for f in frames_pred])
-    omega_gts = np.stack([f[..., 3] for f in frames_gt])
-    vmax = float(np.percentile(np.abs(omega_gts), 99.0))
-    vmin = -vmax
+    channel_order = list(case.get("channel_order", INERT_CHANNEL_ORDER))
+    if animation_field not in channel_order:
+        raise ValueError(f"animation field {animation_field!r} is not in channel_order={channel_order}.")
+    channel_idx = channel_order.index(animation_field)
+    field_preds = np.stack([f[..., channel_idx] for f in frames_pred])
+    field_gts = np.stack([f[..., channel_idx] for f in frames_gt])
+    if animation_field == "omega":
+        vmax = float(np.percentile(np.abs(field_gts), 99.0))
+        vmin = -vmax
+    else:
+        vmin = float(np.percentile(field_gts, 1.0))
+        vmax = float(np.percentile(field_gts, 99.0))
+    cmap = channel_cmap(animation_field)
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 5), dpi=120, constrained_layout=True)
     extent = (float(case["x_grid"].min()), float(case["x_grid"].max()), float(case["y_grid"].min()), float(case["y_grid"].max()))
     
-    im_gt = axes[0].imshow(omega_gts[0], origin="lower", extent=extent, cmap="RdBu_r", vmin=vmin, vmax=vmax, aspect="equal")
-    axes[0].set_title("GT Vorticity")
-    im_pred = axes[1].imshow(omega_preds[0], origin="lower", extent=extent, cmap="RdBu_r", vmin=vmin, vmax=vmax, aspect="equal")
-    axes[1].set_title("Pred Vorticity")
+    im_gt = axes[0].imshow(field_gts[0], origin="lower", extent=extent, cmap=cmap, vmin=vmin, vmax=vmax, aspect="equal")
+    axes[0].set_title(f"GT {animation_field}")
+    im_pred = axes[1].imshow(field_preds[0], origin="lower", extent=extent, cmap=cmap, vmin=vmin, vmax=vmax, aspect="equal")
+    axes[1].set_title(f"Pred {animation_field}")
 
     for ax in axes:
         for cx, cy in case["centers"]:
             ax.add_patch(plt.Circle((cx, cy), float(case.get("cylinder_radius", 0.5)), fill=False, color="k", lw=1.0))
 
     def update(frame_idx):
-        im_gt.set_data(omega_gts[frame_idx])
-        im_pred.set_data(omega_preds[frame_idx])
+        im_gt.set_data(field_gts[frame_idx])
+        im_pred.set_data(field_preds[frame_idx])
         fig.suptitle(f"Phase Tau: {phase_bins[frame_idx]:.3f}")
         return [im_gt, im_pred]
 
@@ -974,6 +1068,12 @@ def main() -> None:
     packed_h5_path = resolve_demo_config_path(train_cfg["dataset"]["packed_h5_path"])
     dataset_case_id = choose_dataset_case(packed_h5_path, args.dataset_case_id, args.dataset_split)
     case = load_dataset_case(packed_h5_path, dataset_case_id)
+    case["model_cfg"] = model.cfg
+    if int(model.cfg.field_dim) != int(case["field_dim"]):
+        raise ValueError(
+            f"Checkpoint field_dim={model.cfg.field_dim} does not match dataset case field_dim={case['field_dim']} "
+            f"for channel_order={case['channel_order']}."
+        )
 
     tau_value = float(case["phase_bin_centers"][0]) if args.tau is None else float(args.tau)
     phase_idx = int(np.argmin(np.abs(case["phase_bin_centers"] - tau_value)))
@@ -1026,8 +1126,8 @@ def main() -> None:
         visualize_disabled_edges=bool(model.cfg.DISABLE_EDGE and model.cfg.disable_edge_apply_to_visualization),
     )
 
-    gif_path = output_dir / f"animation_case_{case['case_id']}_tau_{phase_idx:03d}.gif"
-    render_animation(gif_path, model, structure, case, device, args.query_batch_size)
+    gif_path = output_dir / f"animation_case_{case['case_id']}_{args.animation_field}_tau_{phase_idx:03d}.gif"
+    render_animation(gif_path, model, structure, case, device, args.query_batch_size, animation_field=args.animation_field)
 
     org_arrays = extract_organization_arrays(out, case)
     np.savez_compressed(
@@ -1039,6 +1139,7 @@ def main() -> None:
         tau=np.asarray([tau_value], dtype=np.float32),
         predicted_frequency=np.asarray([freq_pred], dtype=np.float32),
         gt_frequency=np.asarray([case["dominant_frequency"]], dtype=np.float32),
+        channel_order=np.asarray(case["channel_order"]),
         hyper_source_coords=org_arrays["hyper_source_norm"].astype(np.float32),
         hyper_wake_coords=org_arrays["hyper_wake_norm"].astype(np.float32),
         hyper_wake_axis=org_arrays["hyper_wake_axis"].astype(np.float32),
@@ -1058,8 +1159,11 @@ def main() -> None:
                 "decoder_type": model.cfg.decoder_type,
                 "dataset_case_id": case["case_id"],
                 "split": case["split"],
+                "field_dim": int(case["field_dim"]),
+                "channel_order": case["channel_order"],
                 "tau": tau_value,
                 "phase_idx": phase_idx,
+                "animation_field": args.animation_field,
                 "field_mse": mse,
                 "predicted_frequency": freq_pred,
                 "gt_frequency": case["dominant_frequency"],

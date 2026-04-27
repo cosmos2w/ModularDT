@@ -120,7 +120,13 @@ class SimulationConfig:
     def finalize(self) -> "SimulationConfig":
         """Synchronize mode-dependent options and derived defaults."""
         self.mode = self.mode.lower().strip()
+        if self.mode not in {"inert", "active"}:
+            raise ValueError("mode must be 'inert' or 'active'.")
         self.thermal.enabled = self.mode == "active"
+        if float(self.thermal.power_min) > float(self.thermal.power_max):
+            raise ValueError("thermal.power_min must be <= thermal.power_max. Negative values are allowed for cooling.")
+        if self.layout.heat_powers is not None and len(self.layout.heat_powers) != int(self.layout.num_cylinders):
+            raise ValueError("layout.heat_powers length must match layout.num_cylinders.")
         self.execution.device = self.execution.device.lower().strip()
         if self.execution.device not in {"cpu", "gpu"}:
             raise ValueError("execution.device must be 'cpu' or 'gpu'.")
@@ -176,9 +182,24 @@ def default_config_dir() -> Path:
     return DEFAULT_CONFIG_DIR
 
 
-def default_config_backup_dir() -> Path:
+def validate_mode_name(mode: str) -> str:
+    """Normalize and validate a simulation mode name."""
+    mode_name = mode.lower().strip()
+    if mode_name not in {"inert", "active"}:
+        raise ValueError("mode must be 'inert' or 'active'.")
+    return mode_name
+
+
+def default_config_backup_dir(mode: str | None = None) -> Path:
     """Return the config backup directory under Configs/."""
-    return DEFAULT_CONFIG_BK_DIR
+    if mode is None:
+        return DEFAULT_CONFIG_BK_DIR
+    return DEFAULT_CONFIG_BK_DIR / f"Configs_{validate_mode_name(mode)}"
+
+
+def default_config_backup_log_dir(mode: str) -> Path:
+    """Return the launcher log backup directory under Configs/Config_bk."""
+    return DEFAULT_CONFIG_BK_DIR / f"logs_{validate_mode_name(mode)}"
 
 
 def default_domain_shape_dir() -> Path:
@@ -220,17 +241,18 @@ def resolve_config_path(path_like: str | Path) -> Path:
     return path.resolve()
 
 
-def backup_config_file(config_path: Path, case_id: str, stamp: str | None = None) -> Path:
-    """Copy a config file into Configs/Config_bk unless it already lives there."""
+def backup_config_file(config_path: Path, case_id: str, stamp: str | None = None, mode: str | None = None) -> Path:
+    """Copy a config file into the mode-specific Configs/Config_bk folder."""
     resolved_config_path = config_path.expanduser().resolve()
-    resolved_backup_dir = DEFAULT_CONFIG_BK_DIR.resolve()
+    backup_dir = default_config_backup_dir(mode)
+    resolved_backup_dir = backup_dir.resolve()
     if resolved_backup_dir == resolved_config_path.parent or resolved_backup_dir in resolved_config_path.parents:
         return resolved_config_path
 
     timestamp = stamp or datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_case_id = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in case_id)
     backup_name = f"{resolved_config_path.stem}_case_{safe_case_id}_{timestamp}{resolved_config_path.suffix}"
-    backup_path = DEFAULT_CONFIG_BK_DIR / backup_name
+    backup_path = backup_dir / backup_name
     backup_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(resolved_config_path, backup_path)
     return backup_path

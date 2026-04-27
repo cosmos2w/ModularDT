@@ -1,13 +1,69 @@
 # Multi-cylinder PhiFlow Demo
 
-Updated: 2026-04-26
+Updated: 2026-04-27
 
-This demo covers the periodic multi-cylinder inert wake workflow:
+This demo covers the periodic multi-cylinder inert and active thermal wake workflow:
 
 1. simulate wake fields with PhiFlow
 2. preprocess raw cases into a packed HDF5 dataset
 3. train a hypergraph-organized neural field surrogate
 4. reconstruct full flow fields from saved checkpoints
+
+## Active Thermal Cases
+
+Updated: 2026-04-27
+
+The active workflow reuses the existing simulator, preprocessing, deterministic
+model, and generative model. It is not a separate active-only framework.
+
+Active simulation mode adds one-way temperature advection/diffusion on top of
+the flow solve. Each cylinder contributes a Gaussian shell heat source controlled
+by `layout.heat_powers`; positive values heat and negative values are allowed
+for cooling when `thermal.power_min` / `thermal.power_max` include them.
+
+`src/launch_inert_dataset_batch.py` remains backward compatible; its default
+constants launch inert cases. To batch active cases, set `DATASET_MODE =
+"active"`, use `config_active.json`, and let `layout.heat_powers = null` so
+`materialize_layout()` samples powers from `thermal.power_min/max`.
+
+Packed HDF5 datasets now carry explicit field metadata:
+
+- inert: `channel_order = ["u", "v", "p", "omega"]`, `field_dim = 4`
+- active: `channel_order = ["u", "v", "p", "omega", "temperature"]`, `field_dim = 5`
+
+Old inert packed datasets remain valid. If `channel_order`, `field_dim`,
+temperature, or `heat_powers` are missing, loaders fall back to the inert
+four-channel convention and zero heat powers.
+
+Preprocessing is still launched by `src/preprocess_inert_multicyl_dataset.py`
+for compatibility, but it is mode-aware:
+
+```bash
+python src/preprocess_inert_multicyl_dataset.py \
+  --input-root ./Data_Saved \
+  --output-root ./Data_Saved/Processed_Active_Dataset \
+  --include-temperature auto
+```
+
+Deterministic training uses the same organizer and decoder; only decoder output
+width changes with `model.field_dim`. Active cases can pass normalized
+per-cylinder heat powers through `extra_module` by setting:
+
+```json
+"dataset": {
+  "use_heat_power_module_feature": true,
+  "heat_power_scale": "auto"
+},
+"model": {
+  "field_dim": 5,
+  "future_module_feature_dim": 1
+}
+```
+
+Generative Stage 1 infers the AE input/output channel count from the packed
+dataset. Stage 2 requires the deterministic conditioner checkpoint to have the
+same `field_dim` as the generative target dataset, and it raises a clear error
+on mismatch.
 
 ## Current Dynamic-Residual Upgrade
 

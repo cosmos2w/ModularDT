@@ -164,7 +164,8 @@ class ConvResidualAE(nn.Module):
 
     Expected input:
         x: [B, C, H, W]
-           C=4 for [u, v, p, omega] unless the dataset is changed.
+           C is inferred from the dataset, for example 4 for inert fields or
+           5 when active temperature is present.
 
     Encoder output:
         z: [B, latent_ch, h, w]
