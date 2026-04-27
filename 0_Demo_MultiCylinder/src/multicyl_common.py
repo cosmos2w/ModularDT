@@ -72,6 +72,15 @@ class ThermalConfig:
     power_min: float = 0.5
     power_max: float = 1.5
     diffusion_substeps: int = 1
+    # Compatibility note: old active configs heated from step 0.  The activation
+    # gate is therefore opt-in at the config level, even though new active
+    # dataset configs should enable it.
+    activate_after_warmup: bool = False
+    reset_temperature_at_activation: bool = True
+    save_only_after_thermal_activation: bool = False
+    thermal_start_step: Optional[int] = None
+    thermal_start_time: Optional[float] = None
+    thermal_start_after_flow_warmup: bool = True
 
 
 @dataclass

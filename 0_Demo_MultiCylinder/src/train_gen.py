@@ -217,6 +217,7 @@ class GenCaseMeta:
     split: str
     phase_idx: int
     tau: float
+    query_time: float
     re_value: float
     num_cylinders: int
 
@@ -250,6 +251,12 @@ class CanonicalResidualGridDataset(Dataset):
         base_seed: int = 42,
         use_heat_power_module_feature: bool = False,
         heat_power_scale: str | float = "auto",
+        promote_to_active: bool = False,
+        target_channel_order: Optional[Sequence[str]] = None,
+        target_field_dim: Optional[int] = None,
+        inert_temperature_value: float = 0.0,
+        inert_thermal_time_mode: str = "random_active_range",
+        active_max_thermal_time: float = 1.0,
     ):
         super().__init__()
         self.h5_path = Path(h5_path).expanduser().resolve()
@@ -263,6 +270,12 @@ class CanonicalResidualGridDataset(Dataset):
         self.use_heat_power_module_feature = bool(use_heat_power_module_feature)
         self.heat_power_scale_config = heat_power_scale
         self.heat_power_scale = 1.0
+        self.promote_to_active = bool(promote_to_active)
+        self.target_channel_order = list(target_channel_order) if target_channel_order is not None else None
+        self.target_field_dim = int(target_field_dim) if target_field_dim is not None else None
+        self.inert_temperature_value = float(inert_temperature_value)
+        self.inert_thermal_time_mode = str(inert_thermal_time_mode).strip().lower()
+        self.active_max_thermal_time = max(float(active_max_thermal_time), 0.0)
         self.channel_order: List[str] = list(INERT_CHANNEL_ORDER)
         self.field_dim = 4
         self.current_epoch = 0
@@ -273,6 +286,8 @@ class CanonicalResidualGridDataset(Dataset):
 
         if self.target_mode not in {"residual", "field"}:
             raise ValueError("target_mode must be 'residual' or 'field'.")
+        if self.inert_thermal_time_mode not in {"zero", "random_active_range", "tau"}:
+            raise ValueError("inert_thermal_time_mode must be 'zero', 'random_active_range', or 'tau'.")
 
         with h5py.File(self.h5_path, "r") as h5:
             cases = h5["cases"]
@@ -294,11 +309,36 @@ class CanonicalResidualGridDataset(Dataset):
                 if centers.shape[0] > self.max_num_cylinders:
                     raise ValueError(f"Case {case_id} has too many cylinders.")
                 phase_bins = np.asarray(grp["phase_bin_centers"], dtype=np.float32)
+                phase_tau_bins = (
+                    np.asarray(grp["phase_tau_centers"], dtype=np.float32)
+                    if "phase_tau_centers" in grp
+                    else phase_bins
+                )
+                query_time_bins = (
+                    np.asarray(grp["thermal_time_centers"], dtype=np.float32)
+                    if "thermal_time_centers" in grp
+                    else (
+                        np.asarray(grp["tau_abs_centers"], dtype=np.float32)
+                        if "tau_abs_centers" in grp
+                        else phase_bins
+                    )
+                )
                 re_value = float(grp.attrs["re"])
                 num_cyl = int(grp.attrs["num_cylinders"])
                 channel_order = get_case_channel_order(grp, h5)
                 field_dim = int(grp.attrs.get("field_dim", grp["canonical_cycle"].shape[-1]))
-                channel_order = channel_order[:field_dim]
+                source_channel_order = channel_order[:field_dim]
+                source_field_dim = int(field_dim)
+                if self.promote_to_active:
+                    if self.target_channel_order is None or self.target_field_dim is None:
+                        raise ValueError("promote_to_active requires target_channel_order and target_field_dim.")
+                    missing_base = [name for name in INERT_CHANNEL_ORDER if name not in source_channel_order]
+                    if missing_base:
+                        raise ValueError(f"Cannot promote case {case_id}; missing inert channels {missing_base}.")
+                    channel_order = list(self.target_channel_order)[: int(self.target_field_dim)]
+                    field_dim = int(self.target_field_dim)
+                else:
+                    channel_order = source_channel_order
                 if not self.items and not self.case_static:
                     self.channel_order = list(channel_order)
                     self.field_dim = int(field_dim)
@@ -311,6 +351,8 @@ class CanonicalResidualGridDataset(Dataset):
                     heat_powers = np.asarray(grp["heat_powers"], dtype=np.float32).reshape(-1)
                 else:
                     heat_powers = np.zeros((num_cyl,), dtype=np.float32)
+                if self.promote_to_active:
+                    heat_powers = np.zeros((centers.shape[0],), dtype=np.float32)
                 max_abs_heat_power = max(max_abs_heat_power, float(np.max(np.abs(heat_powers))) if heat_powers.size else 0.0)
                 max_abs_heat_power = max(
                     max_abs_heat_power,
@@ -325,15 +367,28 @@ class CanonicalResidualGridDataset(Dataset):
                     "dominant_frequency": float(grp.attrs.get("dominant_frequency", 0.0)),
                     "x_grid_shape": tuple(grp["x_grid"].shape),
                     "channel_order": channel_order,
+                    "source_channel_order": source_channel_order,
+                    "source_field_dim": source_field_dim,
                     "field_dim": field_dim,
                 }
                 for phase_idx in range(0, len(phase_bins), self.phase_stride):
+                    tau_value = float(phase_tau_bins[phase_idx])
+                    query_time_value = float(query_time_bins[phase_idx])
+                    if self.promote_to_active:
+                        if self.inert_thermal_time_mode == "zero":
+                            query_time_value = 0.0
+                        elif self.inert_thermal_time_mode == "tau":
+                            query_time_value = tau_value
+                        else:
+                            rng = np.random.default_rng(self.base_seed + 137 * int(phase_idx) + 1009 * len(self.items))
+                            query_time_value = float(rng.uniform(0.0, self.active_max_thermal_time))
                     self.items.append(
                         GenCaseMeta(
                             case_id=case_id,
                             split=str(grp.attrs.get("split", "all")),
                             phase_idx=int(phase_idx),
-                            tau=float(phase_bins[phase_idx]),
+                            tau=tau_value,
+                            query_time=query_time_value,
                             re_value=re_value,
                             num_cylinders=num_cyl,
                         )
@@ -354,6 +409,21 @@ class CanonicalResidualGridDataset(Dataset):
     def set_epoch(self, epoch: int) -> None:
         # Used for deterministic cylinder-order randomization per epoch.
         self.current_epoch = int(epoch)
+
+    def _promote_last_dim(self, values: np.ndarray, source_channel_order: Sequence[str]) -> np.ndarray:
+        if not self.promote_to_active:
+            return values
+        if values.shape[-1] == self.field_dim:
+            return values
+        promoted = np.zeros((*values.shape[:-1], self.field_dim), dtype=np.float32)
+        for out_idx, name in enumerate(self.channel_order):
+            if name in source_channel_order:
+                promoted[..., out_idx] = values[..., source_channel_order.index(name)]
+            elif name == "temperature":
+                promoted[..., out_idx] = self.inert_temperature_value
+            else:
+                raise KeyError(f"Cannot promote missing channel {name!r}.")
+        return promoted
 
     def _structure_tensors(self, meta: GenCaseMeta) -> Dict[str, torch.Tensor]:
         static = self.case_static[meta.case_id]
@@ -388,9 +458,12 @@ class CanonicalResidualGridDataset(Dataset):
         meta = self.items[idx]
         h5 = self._get_h5()
         grp = h5["cases"][meta.case_id]
+        static = self.case_static[meta.case_id]
 
         field = np.asarray(grp["canonical_cycle"][meta.phase_idx], dtype=np.float32)  # [H,W,C]
         mean = np.asarray(grp["mean_field"], dtype=np.float32)                        # [H,W,C]
+        field = self._promote_last_dim(field, static.get("source_channel_order", static["channel_order"]))
+        mean = self._promote_last_dim(mean, static.get("source_channel_order", static["channel_order"]))
         if self.target_mode == "residual":
             target = field - mean
         else:
@@ -407,6 +480,7 @@ class CanonicalResidualGridDataset(Dataset):
             "case_id": meta.case_id,
             "phase_idx": torch.tensor([meta.phase_idx], dtype=torch.long),
             "tau": torch.tensor([meta.tau], dtype=torch.float32),
+            "query_time": torch.tensor([meta.query_time], dtype=torch.float32),
             "target_grid": target_chw,
             "field_grid": field_chw,
             "mean_grid": mean_chw,
@@ -429,7 +503,7 @@ def collate_gen_grid(batch: Sequence[Dict[str, torch.Tensor | str]]) -> Dict[str
     packed multi-cylinder demo dataset.
     """
     keys_tensor = [
-        "phase_idx", "tau", "target_grid", "field_grid", "mean_grid", "x_grid", "y_grid",
+        "phase_idx", "tau", "query_time", "target_grid", "field_grid", "mean_grid", "x_grid", "y_grid",
         "re_values", "num_cylinders", "centers", "cyl_mask", "freq_target",
     ]
     if any("extra_module" in item for item in batch):
@@ -438,6 +512,40 @@ def collate_gen_grid(batch: Sequence[Dict[str, torch.Tensor | str]]) -> Dict[str
     for key in keys_tensor:
         out[key] = torch.stack([item[key] for item in batch], dim=0)  # type: ignore[index]
     return out
+
+
+class MultiSourceGridDataset(Dataset):
+    def __init__(self, datasets: Sequence[Dataset]):
+        self.datasets = [ds for ds in datasets if ds is not None and len(ds) > 0]
+        if not self.datasets:
+            raise ValueError("MultiSourceGridDataset requires at least one non-empty child dataset.")
+        self.offsets: List[int] = []
+        total = 0
+        for ds in self.datasets:
+            self.offsets.append(total)
+            total += len(ds)
+        self.total_len = total
+        primary = self.datasets[0]
+        self.channel_order = list(getattr(primary, "channel_order", INERT_CHANNEL_ORDER))
+        self.field_dim = int(getattr(primary, "field_dim", len(self.channel_order)))
+
+    def __len__(self) -> int:
+        return self.total_len
+
+    def __getitem__(self, idx: int):
+        idx = int(idx)
+        child_idx = max(i for i, offset in enumerate(self.offsets) if offset <= idx)
+        return self.datasets[child_idx][idx - self.offsets[child_idx]]
+
+    def set_epoch(self, epoch: int) -> None:
+        for ds in self.datasets:
+            if hasattr(ds, "set_epoch"):
+                ds.set_epoch(epoch)  # type: ignore[attr-defined]
+
+    def close(self) -> None:
+        for ds in self.datasets:
+            if hasattr(ds, "close"):
+                ds.close()  # type: ignore[attr-defined]
 
 
 # -----------------------------------------------------------------------------
@@ -496,6 +604,7 @@ def deterministic_grid_forward(
     x_grid: torch.Tensor,
     y_grid: torch.Tensor,
     tau: torch.Tensor,
+    query_time: Optional[torch.Tensor] = None,
     *,
     query_batch_size: int,
 ) -> Dict[str, torch.Tensor]:
@@ -507,6 +616,10 @@ def deterministic_grid_forward(
     B, H, W = x_grid.shape
     xy = torch.stack([x_grid.reshape(B, -1), y_grid.reshape(B, -1)], dim=-1)
     tau_full = tau.reshape(B, 1, 1).expand(B, xy.shape[1], 1)
+    if query_time is None:
+        query_time_full = tau_full
+    else:
+        query_time_full = query_time.reshape(B, 1, 1).expand(B, xy.shape[1], 1)
     pred_field_chunks, pred_mean_chunks, pred_res_chunks = [], [], []
     aux = None
     for start in range(0, xy.shape[1], int(query_batch_size)):
@@ -515,6 +628,7 @@ def deterministic_grid_forward(
             structure=structure,
             query_xy=xy[:, start:end],
             query_tau=tau_full[:, start:end],
+            query_time=query_time_full[:, start:end],
             return_aux=(aux is None),
         )
         pred_field_chunks.append(out["pred_field"])
@@ -574,12 +688,14 @@ def build_stage2_conditions(
     x_grid = batch["x_grid"].to(device=device)
     y_grid = batch["y_grid"].to(device=device)
     tau = batch["tau"].to(device=device)
+    query_time = batch.get("query_time", batch["tau"]).to(device=device)
     det_out = deterministic_grid_forward(
         det_model,
         structure,
         x_grid,
         y_grid,
         tau,
+        query_time=query_time,
         query_batch_size=query_batch_size,
     )
     cond_grid = build_dense_condition_grid(
@@ -589,6 +705,7 @@ def build_stage2_conditions(
         x_grid=x_grid,
         y_grid=y_grid,
         tau=tau,
+        thermal_time=query_time,
         re_values=structure["re_values"],
         stats=stats.to(device, dtype=det_out["pred_mean"].dtype),
         domain_length_x=float(det_model_cfg.get("domain_length_x", 24.0)),
@@ -941,6 +1058,33 @@ def main() -> None:
     packed_path = resolve_demo_path(dataset_cfg["packed_h5_path"])
     if not packed_path.exists():
         raise FileNotFoundError(f"Packed dataset not found: {packed_path}")
+    use_inert_effective = bool(dataset_cfg.get("USE_INERT", False))
+    inert_packed_path: Optional[Path] = None
+    active_max_thermal_time = 1.0
+    if use_inert_effective:
+        from train import check_inert_active_dataset_compatibility, infer_active_max_thermal_time
+
+        inert_packed_path = resolve_demo_path(dataset_cfg.get("inert_packed_h5_path", "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5"))
+        if not inert_packed_path.exists():
+            message = f"USE_INERT requested but inert packed dataset was not found: {inert_packed_path}"
+            if bool(dataset_cfg.get("fallback_to_active_only_on_mismatch", True)):
+                print(f"[WARN] {message}; falling back to active-only generative training.")
+                use_inert_effective = False
+            else:
+                raise FileNotFoundError(message)
+        if use_inert_effective and inert_packed_path is not None:
+            ok, warnings = check_inert_active_dataset_compatibility(packed_path, inert_packed_path)
+            for warning in warnings:
+                print(f"[dataset-compat] {warning}")
+            if not ok:
+                if bool(dataset_cfg.get("fallback_to_active_only_on_mismatch", True)):
+                    print("[WARN] Active/inert datasets are incompatible; falling back to active-only generative training.")
+                    use_inert_effective = False
+                else:
+                    raise ValueError("Active/inert datasets are incompatible for combined generative training.")
+        if use_inert_effective:
+            configured_max = dataset_cfg.get("active_max_thermal_time", "auto")
+            active_max_thermal_time = infer_active_max_thermal_time(packed_path) if str(configured_max).strip().lower() == "auto" else float(configured_max)
 
     # Build train/validation datasets.  Stage 2 uses the same target grids as
     # stage 1 but adds deterministic conditioning in the epoch loop.
@@ -968,6 +1112,49 @@ def main() -> None:
         use_heat_power_module_feature=bool(dataset_cfg.get("use_heat_power_module_feature", False)),
         heat_power_scale=dataset_cfg.get("heat_power_scale", "auto"),
     )
+    if use_inert_effective:
+        assert inert_packed_path is not None
+        inert_train_set = CanonicalResidualGridDataset(
+            inert_packed_path,
+            split=dataset_cfg.get("inert_split", "all"),
+            max_num_cylinders=int(dataset_cfg.get("max_num_cylinders", 8)),
+            target_mode=target_mode,
+            phase_stride=int(dataset_cfg.get("train_phase_stride", 1)),
+            max_cases=int(dataset_cfg.get("inert_train_max_cases", 0)),
+            randomize_cylinder_order=bool(dataset_cfg.get("randomize_cylinder_order", True)),
+            base_seed=int(cfg["training"].get("seed", 42)) + 777,
+            use_heat_power_module_feature=bool(dataset_cfg.get("use_heat_power_module_feature", False)),
+            heat_power_scale=dataset_cfg.get("heat_power_scale", "auto"),
+            promote_to_active=bool(dataset_cfg.get("promote_inert_to_active", True)),
+            target_channel_order=getattr(train_set, "channel_order", ACTIVE_CHANNEL_ORDER),
+            target_field_dim=int(getattr(train_set, "field_dim", 5)),
+            inert_temperature_value=float(dataset_cfg.get("inert_temperature_value", 0.0)),
+            inert_thermal_time_mode=str(dataset_cfg.get("inert_thermal_time_mode", "random_active_range")),
+            active_max_thermal_time=active_max_thermal_time,
+        )
+        train_set = MultiSourceGridDataset([train_set, inert_train_set])
+        if bool(dataset_cfg.get("use_inert_for_val", False)):
+            inert_val_set = CanonicalResidualGridDataset(
+                inert_packed_path,
+                split=dataset_cfg.get("inert_split", "all"),
+                max_num_cylinders=int(dataset_cfg.get("max_num_cylinders", 8)),
+                target_mode=target_mode,
+                phase_stride=int(dataset_cfg.get("val_phase_stride", 2)),
+                max_cases=int(dataset_cfg.get("inert_val_max_cases", dataset_cfg.get("val_max_cases", 16))),
+                randomize_cylinder_order=False,
+                base_seed=int(cfg["training"].get("seed", 42)) + 777,
+                use_heat_power_module_feature=bool(dataset_cfg.get("use_heat_power_module_feature", False)),
+                heat_power_scale=dataset_cfg.get("heat_power_scale", "auto"),
+                promote_to_active=bool(dataset_cfg.get("promote_inert_to_active", True)),
+                target_channel_order=getattr(train_set, "channel_order", ACTIVE_CHANNEL_ORDER),
+                target_field_dim=int(getattr(train_set, "field_dim", 5)),
+                inert_temperature_value=float(dataset_cfg.get("inert_temperature_value", 0.0)),
+                inert_thermal_time_mode=str(dataset_cfg.get("inert_thermal_time_mode", "random_active_range")),
+                active_max_thermal_time=active_max_thermal_time,
+            )
+            val_set = MultiSourceGridDataset([val_set, inert_val_set])
+        else:
+            print("[setup] generative validation remains active-only (use_inert_for_val=false).")
     if len(train_set) == 0:
         raise RuntimeError("No generative training snapshots found.")
     n_fields, num_y, num_x = infer_grid_shape(train_set)

@@ -13,6 +13,16 @@
     "field_dim": "auto",
     "channel_order": "auto",
     "include_temperature": "auto",
+    "USE_INERT": false,
+    "inert_packed_h5_path": "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5",
+    "inert_split": "all",
+    "use_inert_for_val": false,
+    "inert_temperature_value": 0.0,
+    "promote_inert_to_active": true,
+    "inert_thermal_time_mode": "random_active_range",
+    "active_max_thermal_time": "auto",
+    "require_dataset_compatibility": true,
+    "fallback_to_active_only_on_mismatch": true,
     "use_heat_power_module_feature": false,
     "heat_power_scale": "auto",
     "train_split": "train",
@@ -60,7 +70,7 @@
     "stage1_checkpoint_path": "auto",
     "conditioning": {
       "include_pred_field": true,
-      "comment": "Dense condition maps include deterministic mean, residual, field, xy, tau, and Re. Global condition vector pools deterministic organizer aux outputs."
+      "comment": "Dense condition maps include deterministic mean, residual, field, xy, phase_tau, thermal_time, and Re. Global condition vector pools deterministic organizer aux outputs."
     },
     "architecture": {
       "base_ch": 128,

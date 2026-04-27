@@ -242,6 +242,10 @@ def load_dataset_case(h5_path: Path, case_id: str) -> Dict:
             "x_grid": np.asarray(grp["x_grid"], dtype=np.float32),
             "y_grid": np.asarray(grp["y_grid"], dtype=np.float32),
             "phase_bin_centers": np.asarray(grp["phase_bin_centers"], dtype=np.float32),
+            "phase_tau_centers": np.asarray(grp["phase_tau_centers"], dtype=np.float32) if "phase_tau_centers" in grp else None,
+            "tau_abs_centers": np.asarray(grp["tau_abs_centers"], dtype=np.float32) if "tau_abs_centers" in grp else None,
+            "thermal_time_centers": np.asarray(grp["thermal_time_centers"], dtype=np.float32) if "thermal_time_centers" in grp else None,
+            "cycle_index_centers": np.asarray(grp["cycle_index_centers"], dtype=np.float32) if "cycle_index_centers" in grp else None,
             "canonical_cycle": np.asarray(grp["canonical_cycle"], dtype=np.float32),
             "mean_field": np.asarray(grp["mean_field"], dtype=np.float32),
             "rms_field": np.asarray(grp["rms_field"], dtype=np.float32),
@@ -1008,13 +1012,19 @@ def render_animation(
     x_grid_t = torch.from_numpy(case["x_grid"]).to(device)
     y_grid_t = torch.from_numpy(case["y_grid"]).to(device)
     phase_bins = case["phase_bin_centers"]
+    phase_tau = case.get("phase_tau_centers")
+    thermal_time = case.get("thermal_time_centers")
+    cycle_index = case.get("cycle_index_centers")
     
     # Pre-compute all frames to find global min/max for stable colors
     frames_pred, frames_gt = [], []
     for frame_idx, tau_val in enumerate(phase_bins):
-        tau_t = torch.tensor([tau_val], dtype=torch.float32, device=device)
+        tau_for_model = float(phase_tau[frame_idx]) if phase_tau is not None else float(tau_val)
+        time_for_model = float(thermal_time[frame_idx]) if thermal_time is not None else float(tau_val)
+        tau_t = torch.tensor([tau_for_model], dtype=torch.float32, device=device)
+        time_t = torch.tensor([time_for_model], dtype=torch.float32, device=device)
         with torch.no_grad():
-            out = model.reconstruct_full_grid(structure, x_grid_t, y_grid_t, tau_t, query_batch_size)
+            out = model.reconstruct_full_grid(structure, x_grid_t, y_grid_t, tau_t, query_time=time_t, query_batch_size=query_batch_size)
         frames_pred.append(out["pred_field"][0].detach().cpu().numpy())
         frames_gt.append(case["canonical_cycle"][frame_idx])
     
@@ -1047,7 +1057,10 @@ def render_animation(
     def update(frame_idx):
         im_gt.set_data(field_gts[frame_idx])
         im_pred.set_data(field_preds[frame_idx])
-        fig.suptitle(f"Phase Tau: {phase_bins[frame_idx]:.3f}")
+        tau_label = float(phase_tau[frame_idx]) if phase_tau is not None else float(phase_bins[frame_idx])
+        time_label = float(thermal_time[frame_idx]) if thermal_time is not None else float(phase_bins[frame_idx])
+        cycle_label = float(cycle_index[frame_idx]) if cycle_index is not None else float(np.floor(phase_bins[frame_idx]))
+        fig.suptitle(f"phase_tau={tau_label:.3f} | thermal_time={time_label:.3f} | cycle={cycle_label:.0f}")
         return [im_gt, im_pred]
 
     anim = FuncAnimation(fig, update, frames=len(phase_bins), blit=False)
@@ -1078,14 +1091,37 @@ def main() -> None:
     tau_value = float(case["phase_bin_centers"][0]) if args.tau is None else float(args.tau)
     phase_idx = int(np.argmin(np.abs(case["phase_bin_centers"] - tau_value)))
     tau_value = float(case["phase_bin_centers"][phase_idx])
+    phase_tau_value = (
+        float(case["phase_tau_centers"][phase_idx])
+        if case.get("phase_tau_centers") is not None
+        else tau_value
+    )
+    query_time_value = (
+        float(case["thermal_time_centers"][phase_idx])
+        if case.get("thermal_time_centers") is not None
+        else tau_value
+    )
+    cycle_index_value = (
+        float(case["cycle_index_centers"][phase_idx])
+        if case.get("cycle_index_centers") is not None
+        else float(np.floor(tau_value))
+    )
 
     structure = build_structure_tensors(case, max_num_cylinders=model.cfg.max_num_cylinders, device=device)
     x_grid_t = torch.from_numpy(case["x_grid"]).to(device=device)
     y_grid_t = torch.from_numpy(case["y_grid"]).to(device=device)
-    tau_t = torch.tensor([tau_value], dtype=torch.float32, device=device)
+    tau_t = torch.tensor([phase_tau_value], dtype=torch.float32, device=device)
+    query_time_t = torch.tensor([query_time_value], dtype=torch.float32, device=device)
 
     with torch.no_grad():
-        out = model.reconstruct_full_grid(structure, x_grid_t, y_grid_t, tau=tau_t, query_batch_size=args.query_batch_size)
+        out = model.reconstruct_full_grid(
+            structure,
+            x_grid_t,
+            y_grid_t,
+            tau=tau_t,
+            query_time=query_time_t,
+            query_batch_size=args.query_batch_size,
+        )
 
     pred_field = out["pred_field"][0].detach().cpu().numpy()
     gt_field = case["canonical_cycle"][phase_idx]
@@ -1094,7 +1130,9 @@ def main() -> None:
     freq_pred = float(out["freq_pred"].reshape(-1)[0].detach().cpu().item()) if "freq_pred" in out else float("nan")
     print(
         f"Loaded run: {run_dir.name}\n"
-        f"Dataset case: {case['case_id']} | split={case['split']} | tau={tau_value:.3f} | phase_idx={phase_idx}\n"
+        f"Dataset case: {case['case_id']} | split={case['split']} | "
+        f"phase_tau={phase_tau_value:.3f} | thermal_time={query_time_value:.3f} | "
+        f"cycle={cycle_index_value:.0f} | phase_idx={phase_idx}\n"
         f"Field MSE: {mse:.6e}\n"
         f"Predicted frequency: {freq_pred:.6e} | GT frequency: {case['dominant_frequency']:.6e}"
     )
@@ -1113,7 +1151,7 @@ def main() -> None:
         output_dir,
         out,
         case,
-        tau_value=tau_value,
+        tau_value=phase_tau_value,
         phase_idx=phase_idx,
         threshold=args.organization_threshold,
         topk_me_links=args.topk_me_links,
@@ -1140,6 +1178,9 @@ def main() -> None:
         predicted_frequency=np.asarray([freq_pred], dtype=np.float32),
         gt_frequency=np.asarray([case["dominant_frequency"]], dtype=np.float32),
         channel_order=np.asarray(case["channel_order"]),
+        phase_tau=np.asarray([phase_tau_value], dtype=np.float32),
+        query_time=np.asarray([query_time_value], dtype=np.float32),
+        cycle_index=np.asarray([cycle_index_value], dtype=np.float32),
         hyper_source_coords=org_arrays["hyper_source_norm"].astype(np.float32),
         hyper_wake_coords=org_arrays["hyper_wake_norm"].astype(np.float32),
         hyper_wake_axis=org_arrays["hyper_wake_axis"].astype(np.float32),
@@ -1162,6 +1203,9 @@ def main() -> None:
                 "field_dim": int(case["field_dim"]),
                 "channel_order": case["channel_order"],
                 "tau": tau_value,
+                "phase_tau": phase_tau_value,
+                "query_time": query_time_value,
+                "cycle_index": cycle_index_value,
                 "phase_idx": phase_idx,
                 "animation_field": args.animation_field,
                 "field_mse": mse,

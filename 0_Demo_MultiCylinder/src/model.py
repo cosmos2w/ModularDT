@@ -214,6 +214,34 @@ class PhaseHarmonicEncoder(nn.Module):
         return torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
 
 
+class NonPeriodicTimeEncoder(nn.Module):
+    """Non-periodic thermal-age features; includes raw scaled time."""
+
+    def __init__(self, num_frequencies: int, time_scale: float = 1.0):
+        super().__init__()
+        self.num_frequencies = max(int(num_frequencies), 0)
+        self.time_scale = max(float(time_scale), 1.0e-8)
+        if self.num_frequencies > 0:
+            freqs = torch.arange(1, self.num_frequencies + 1, dtype=torch.float32)
+        else:
+            freqs = torch.zeros((0,), dtype=torch.float32)
+        self.register_buffer("freqs", freqs, persistent=False)
+
+    @property
+    def output_dim(self) -> int:
+        return 1 + 2 * self.num_frequencies
+
+    def forward(self, query_time: torch.Tensor) -> torch.Tensor:
+        scaled = query_time / self.time_scale
+        pieces = [scaled]
+        if self.num_frequencies > 0:
+            shape = [1] * (query_time.ndim - 1) + [self.num_frequencies]
+            freqs = self.freqs.view(*shape).to(device=query_time.device, dtype=query_time.dtype)
+            angles = 2.0 * math.pi * scaled * freqs
+            pieces.extend([torch.sin(angles), torch.cos(angles)])
+        return torch.cat(pieces, dim=-1)
+
+
 class MLP(nn.Module):
     """Simple configurable MLP block used across organizer and decoder heads."""
 
@@ -500,6 +528,12 @@ class ModelConfig:
     """Configuration for the hypergraph-organized neural field model."""
 
     field_dim: int = 4
+    use_nonperiodic_query_time: bool = False
+    thermal_time_scale: float = 4.0
+    temperature_channel_index: int = 4
+    use_temperature_time_head: bool = False
+    flow_channels_periodic_only: bool = True
+    thermal_time_fourier_frequencies: int = 2
     max_num_cylinders: int = 8
     domain_length_x: float = 24.0
     domain_length_y: float = 12.0
@@ -1315,6 +1349,27 @@ class HierarchicalPerceiverDecoder(nn.Module):
         self.residual_head_norm = nn.LayerNorm(cfg.hidden_dim)
         self.mean_head = MLP(cfg.hidden_dim, cfg.decoder_hidden_dim, cfg.field_dim, num_layers=2, dropout=cfg.dropout)
         self.residual_head = MLP(cfg.hidden_dim, cfg.decoder_hidden_dim, cfg.field_dim, num_layers=2, dropout=cfg.dropout)
+        self.use_temperature_time_head = (
+            bool(cfg.use_nonperiodic_query_time)
+            and bool(cfg.use_temperature_time_head)
+            and int(cfg.field_dim) > int(cfg.temperature_channel_index)
+        )
+        if self.use_temperature_time_head:
+            self.thermal_time_encoder = NonPeriodicTimeEncoder(
+                cfg.thermal_time_fourier_frequencies,
+                time_scale=cfg.thermal_time_scale,
+            )
+            self.temperature_time_head = MLP(
+                cfg.hidden_dim + self.thermal_time_encoder.output_dim + cfg.behavior_dim,
+                cfg.decoder_hidden_dim,
+                1,
+                num_layers=2,
+                dropout=cfg.dropout,
+                layer_norm=cfg.use_layer_norm,
+            )
+        else:
+            self.thermal_time_encoder = None
+            self.temperature_time_head = None
 
     def _normalize_query_xy(self, query_xy: torch.Tensor) -> torch.Tensor:
         xy = query_xy.clone()
@@ -1561,11 +1616,14 @@ class HierarchicalPerceiverDecoder(nn.Module):
         behavior: Dict[str, torch.Tensor],
         query_xy: torch.Tensor,
         query_tau: torch.Tensor,
+        query_time: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         batch_size, num_queries, _ = query_xy.shape
         query_xy_norm = self._normalize_query_xy(query_xy)
         spatial_feat = self.spatial_query_encoder(query_xy_norm)
         phase_feat = self.phase_encoder(query_tau)
+        if query_time is None:
+            query_time = query_tau
 
         behavior_latent = behavior["behavior_latent"][:, None, :].expand(batch_size, num_queries, -1)
         mean_latent = behavior["mean_latent"][:, None, :].expand(batch_size, num_queries, -1)
@@ -1669,8 +1727,16 @@ class HierarchicalPerceiverDecoder(nn.Module):
             hyper_wake_logits,
         )
 
-        pred_mean = self.mean_head(self.mean_head_norm(mean_query))
-        pred_residual = self.residual_head(self.residual_head_norm(residual_query))
+        mean_state = self.mean_head_norm(mean_query)
+        residual_state = self.residual_head_norm(residual_query)
+        pred_mean = self.mean_head(mean_state)
+        pred_residual = self.residual_head(residual_state)
+        if self.use_temperature_time_head and self.thermal_time_encoder is not None and self.temperature_time_head is not None:
+            temp_idx = int(self.cfg.temperature_channel_index)
+            thermal_feat = self.thermal_time_encoder(query_time.to(device=query_tau.device, dtype=query_tau.dtype))
+            temp_correction = self.temperature_time_head(torch.cat([residual_state, thermal_feat, behavior_latent], dim=-1))
+            pred_residual = pred_residual.clone()
+            pred_residual[..., temp_idx : temp_idx + 1] = pred_residual[..., temp_idx : temp_idx + 1] + temp_correction
         pred_field = pred_mean + pred_residual
 
         return {
@@ -1703,6 +1769,7 @@ class HypergraphNeuralFieldModel(nn.Module):
         structure: Dict[str, torch.Tensor],
         query_xy: torch.Tensor,
         query_tau: torch.Tensor,
+        query_time: Optional[torch.Tensor] = None,
         return_aux: bool = True,
     ) -> Dict[str, torch.Tensor]:
         organized = self.organizer(
@@ -1714,7 +1781,7 @@ class HypergraphNeuralFieldModel(nn.Module):
             extra_module=structure.get("extra_module"),
         )
         behavior = self.behavior_head(organized)
-        decoded = self.decoder(organized, behavior, query_xy=query_xy, query_tau=query_tau)
+        decoded = self.decoder(organized, behavior, query_xy=query_xy, query_tau=query_tau, query_time=query_time)
 
         out = {
             "pred_field": decoded["pred_field"],
@@ -1768,6 +1835,7 @@ class HypergraphNeuralFieldModel(nn.Module):
         x_grid: torch.Tensor,
         y_grid: torch.Tensor,
         tau: torch.Tensor,
+        query_time: Optional[torch.Tensor] = None,
         query_batch_size: int = 16384,
     ) -> Dict[str, torch.Tensor]:
         if x_grid.ndim != 2 or y_grid.ndim != 2:
@@ -1778,6 +1846,11 @@ class HypergraphNeuralFieldModel(nn.Module):
         xy = torch.stack([x_grid.reshape(-1), y_grid.reshape(-1)], dim=-1)[None, ...]
         tau = tau.reshape(1, 1).to(device=device, dtype=xy.dtype)
         tau_full = tau[:, None, :].expand(1, xy.shape[1], 1)
+        if query_time is None:
+            query_time_full = tau_full
+        else:
+            query_time_t = query_time.reshape(1, 1).to(device=device, dtype=xy.dtype)
+            query_time_full = query_time_t[:, None, :].expand(1, xy.shape[1], 1)
 
         field_chunks = []
         mean_chunks = []
@@ -1789,6 +1862,7 @@ class HypergraphNeuralFieldModel(nn.Module):
                 structure,
                 xy[:, start:end],
                 tau_full[:, start:end],
+                query_time=query_time_full[:, start:end],
                 return_aux=(aux_cache is None),
             )
             field_chunks.append(chunk_out["pred_field"])

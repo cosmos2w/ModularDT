@@ -709,13 +709,15 @@ def build_dense_condition_grid(
     include_field: bool = True,
     include_coords: bool = True,
     include_re_tau: bool = True,
+    thermal_time: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Build dense spatial condition maps for the latent velocity network.
 
     Args:
         det_mean/residual/field: [B, C, H, W] deterministic predictions.
         x_grid/y_grid:           [B, H, W] physical coordinates.
-        tau:                     [B, 1] or [B] phase values.
+        tau:                     [B, 1] or [B] periodic phase values.
+        thermal_time:            [B, 1] or [B] non-periodic active thermal age.
         re_values:               [B, 1] Reynolds numbers.
         stats:                   normalization stats for field-like channels.
 
@@ -742,7 +744,10 @@ def build_dense_condition_grid(
 
     if include_re_tau:
         tau_map = tau.reshape(B, 1, 1, 1).to(device=device, dtype=dtype).expand(B, 1, H, W)
+        if thermal_time is None:
+            thermal_time = tau
+        thermal_time_map = thermal_time.reshape(B, 1, 1, 1).to(device=device, dtype=dtype).expand(B, 1, H, W)
         re_map = (re_values.reshape(B, 1, 1, 1).to(device=device, dtype=dtype) / max(float(re_scale), 1e-6)).expand(B, 1, H, W)
-        pieces.extend([tau_map, re_map])
+        pieces.extend([tau_map, thermal_time_map, re_map])
 
     return torch.cat(pieces, dim=1)

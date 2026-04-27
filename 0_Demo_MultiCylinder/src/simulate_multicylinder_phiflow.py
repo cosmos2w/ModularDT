@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -310,7 +311,52 @@ def build_heat_source_field(cfg: SimulationConfig, api: Dict[str, Any]):
     )
 
 
-def step_simulation(velocity, pressure, temperature, forcing_field, heat_source, obstacles, cfg: SimulationConfig, api: Dict[str, Any]):
+def compute_thermal_activation(cfg: SimulationConfig, runtime: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve when active thermal physics starts, without affecting inert runs."""
+    if not cfg.thermal.enabled:
+        return {
+            "thermal_start_step": 0,
+            "thermal_start_time": 0.0,
+            "activate_after_warmup": False,
+            "reset_temperature_at_activation": False,
+            "save_only_after_thermal_activation": False,
+        }
+
+    dt = max(float(cfg.flow.dt), 1e-12)
+    explicit_step = cfg.thermal.thermal_start_step
+    explicit_time = cfg.thermal.thermal_start_time
+
+    if explicit_step is not None:
+        start_step = max(0, int(explicit_step))
+    elif explicit_time is not None:
+        start_step = max(0, int(math.ceil(float(explicit_time) / dt)))
+    elif bool(cfg.thermal.activate_after_warmup) and bool(cfg.thermal.thermal_start_after_flow_warmup):
+        start_step = max(0, int(math.ceil(float(runtime.get("warmup_time", 0.0)) / dt)))
+    else:
+        start_step = 0
+
+    start_time = float(start_step) * dt
+    return {
+        "thermal_start_step": int(start_step),
+        "thermal_start_time": start_time,
+        "activate_after_warmup": bool(cfg.thermal.activate_after_warmup),
+        "reset_temperature_at_activation": bool(cfg.thermal.reset_temperature_at_activation),
+        "save_only_after_thermal_activation": bool(cfg.thermal.save_only_after_thermal_activation),
+    }
+
+
+def step_simulation(
+    velocity,
+    pressure,
+    temperature,
+    forcing_field,
+    heat_source,
+    obstacles,
+    cfg: SimulationConfig,
+    api: Dict[str, Any],
+    *,
+    thermal_active: bool = True,
+):
     """Advance one time step.
 
     This function is isolated so later experiments can swap in alternative
@@ -335,7 +381,7 @@ def step_simulation(velocity, pressure, temperature, forcing_field, heat_source,
         Solve(x0=pressure, rank_deficiency=cfg.flow.pressure_rank_deficiency),
     )
 
-    if cfg.thermal.enabled and temperature is not None and heat_source is not None:
+    if cfg.thermal.enabled and thermal_active and temperature is not None and heat_source is not None:
         alpha = thermal_diffusivity(cfg)
         temperature = advect.mac_cormack(temperature, velocity, dt=dt)
         temperature = diffuse.explicit(temperature, alpha, dt=dt, substeps=cfg.thermal.diffusion_substeps)
@@ -371,12 +417,23 @@ def run_case(cfg: SimulationConfig) -> Path:
     tqdm.write(f"Created case directory: {case_dir}")
 
     runtime = derive_runtime(cfg)
-    write_json(case_dir / "case_config.json", dataclass_to_dict(cfg))
+    thermal_activation = compute_thermal_activation(cfg, runtime)
+    config_payload = dataclass_to_dict(cfg)
+    config_payload["runtime"].update(thermal_activation)
+    config_payload["thermal_activation"] = dict(thermal_activation)
+    write_json(case_dir / "case_config.json", config_payload)
     tqdm.write(
         "Runtime summary: "
         f"num_steps={runtime['num_steps']}, warmup_time={runtime['warmup_time']:.3f}, "
         f"save_stride={runtime['save_stride']}, expected_saved_frames={runtime['expected_saved_frames']}"
     )
+    if cfg.thermal.enabled:
+        tqdm.write(
+            "Thermal activation: "
+            f"start_step={thermal_activation['thermal_start_step']}, "
+            f"start_time={thermal_activation['thermal_start_time']:.4f}, "
+            f"activate_after_warmup={thermal_activation['activate_after_warmup']}"
+        )
 
     scene = api["Scene"].at(str(scene_dir))
     objects = build_case_objects(cfg, api)
@@ -389,8 +446,20 @@ def run_case(cfg: SimulationConfig) -> Path:
     cylinder_mask = build_cylinder_mask_field(cfg, api) if cfg.save.save_cylinder_mask else None
     expected_saved_frames = max(1, int(runtime["expected_saved_frames"]))
 
+    frame_index_fields = ["saved_frame", "step", "time", "is_warmup_complete"]
+    if cfg.thermal.enabled:
+        frame_index_fields.extend(
+            [
+                "thermal_time",
+                "thermal_active",
+                "thermal_start_time",
+                "thermal_start_step",
+                "physical_time_since_start",
+            ]
+        )
+
     with (case_dir / "frame_index.csv").open("w", newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=["saved_frame", "step", "time", "is_warmup_complete"])
+        writer = csv.DictWriter(csvfile, fieldnames=frame_index_fields)
         writer.writeheader()
 
         saved_frame = 0
@@ -411,6 +480,13 @@ def run_case(cfg: SimulationConfig) -> Path:
                 for step in range(runtime["num_steps"]):
                     step_number = step + 1
                     physical_time = step_number * cfg.flow.dt
+                    thermal_active = cfg.thermal.enabled and step_number >= int(thermal_activation["thermal_start_step"])
+                    if (
+                        cfg.thermal.enabled
+                        and bool(cfg.thermal.reset_temperature_at_activation)
+                        and step_number == int(thermal_activation["thermal_start_step"])
+                    ):
+                        temperature = make_scalar_grid(cfg.thermal.ambient_temperature, cfg, api)
                     velocity, pressure, temperature = step_simulation(
                         velocity,
                         pressure,
@@ -420,10 +496,17 @@ def run_case(cfg: SimulationConfig) -> Path:
                         objects["obstacles"],
                         cfg,
                         api,
+                        thermal_active=thermal_active,
                     )
 
                     warmup_complete = physical_time >= runtime["warmup_time"]
                     should_save = warmup_complete and (step_number % runtime["save_stride"] == 0)
+                    if (
+                        cfg.thermal.enabled
+                        and bool(cfg.thermal.save_only_after_thermal_activation)
+                        and step_number < int(thermal_activation["thermal_start_step"])
+                    ):
+                        should_save = False
                     if should_save:
                         save_frame(
                             scene,
@@ -437,14 +520,24 @@ def run_case(cfg: SimulationConfig) -> Path:
                             cfg=cfg,
                             api=api,
                         )
-                        writer.writerow(
-                            {
-                                "saved_frame": saved_frame,
-                                "step": step_number,
-                                "time": f"{physical_time:.8f}",
-                                "is_warmup_complete": int(warmup_complete),
-                            }
-                        )
+                        row = {
+                            "saved_frame": saved_frame,
+                            "step": step_number,
+                            "time": f"{physical_time:.8f}",
+                            "is_warmup_complete": int(warmup_complete),
+                        }
+                        if cfg.thermal.enabled:
+                            thermal_time = physical_time - float(thermal_activation["thermal_start_time"])
+                            row.update(
+                                {
+                                    "thermal_time": f"{max(thermal_time, 0.0):.8f}",
+                                    "thermal_active": int(thermal_active),
+                                    "thermal_start_time": f"{float(thermal_activation['thermal_start_time']):.8f}",
+                                    "thermal_start_step": int(thermal_activation["thermal_start_step"]),
+                                    "physical_time_since_start": f"{physical_time:.8f}",
+                                }
+                            )
+                        writer.writerow(row)
                         saved_frame += 1
                         save_bar.update(1)
                         tqdm.write(

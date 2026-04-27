@@ -114,6 +114,8 @@ class CaseData:
     cfg: object
     frame_index: pd.DataFrame
     times: np.ndarray
+    thermal_times: np.ndarray
+    thermal_active: np.ndarray
     frame_ids: np.ndarray
     tensor: torch.Tensor  # [T, H, W, C] on the selected torch device
     channel_order: Tuple[str, ...]
@@ -145,6 +147,36 @@ def parse_args() -> argparse.Namespace:
         choices=["auto", "true", "false"],
         default="auto",
         help="Include temperature as a fifth field channel: auto detects active cases or saved temperature files.",
+    )
+    parser.add_argument(
+        "--active-time-mode",
+        choices=["periodic", "multicycle_absolute"],
+        default="periodic",
+        help="For active cases, either keep the legacy periodic one-cycle representation or preserve contiguous multi-cycle thermal age.",
+    )
+    parser.add_argument(
+        "--active-save-contiguous-cycles",
+        type=int,
+        default=None,
+        help="Number of contiguous active cycles to save in multicycle_absolute mode. Defaults to --save-cycles.",
+    )
+    parser.add_argument(
+        "--active-warmup-cycles",
+        type=int,
+        default=0,
+        help="Number of detected active cycles to skip before selecting multicycle_absolute training frames.",
+    )
+    parser.add_argument(
+        "--thermal-time-normalization",
+        choices=["tau_abs", "physical_time", "normalized_0_1"],
+        default="tau_abs",
+        help="Coordinate written to thermal_time_centers / sampled_points/thermal_time for active multicycle data.",
+    )
+    parser.add_argument(
+        "--use-thermal-time",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Write sampled_points/thermal_time. Defaults to true for active multicycle preprocessing and false otherwise.",
     )
     parser.add_argument(
         "--missing-temperature-action",
@@ -402,6 +434,34 @@ def load_case(record: CaseRecord, device: torch.device, args: argparse.Namespace
 
     frame_ids = frame_index["saved_frame"].to_numpy(dtype=int)
     times = frame_index["time"].to_numpy(dtype=np.float64)
+    if "thermal_time" in frame_index:
+        thermal_times = frame_index["thermal_time"].to_numpy(dtype=np.float64)
+    else:
+        activation_meta = raw_cfg.get("thermal_activation", {}) if isinstance(raw_cfg, dict) else {}
+        runtime_meta = raw_cfg.get("runtime", {}) if isinstance(raw_cfg, dict) else {}
+        start_time = float(activation_meta.get("thermal_start_time", runtime_meta.get("thermal_start_time", 0.0)))
+        thermal_times = np.maximum(times - start_time, 0.0).astype(np.float64, copy=False)
+    if "thermal_active" in frame_index:
+        thermal_active = frame_index["thermal_active"].to_numpy(dtype=np.float32) > 0.5
+    else:
+        if str(cfg.mode).strip().lower() == "active":
+            activation_meta = raw_cfg.get("thermal_activation", {}) if isinstance(raw_cfg, dict) else {}
+            runtime_meta = raw_cfg.get("runtime", {}) if isinstance(raw_cfg, dict) else {}
+            start_time = float(activation_meta.get("thermal_start_time", runtime_meta.get("thermal_start_time", 0.0)))
+            thermal_active = times >= (start_time - 1.0e-9)
+        else:
+            thermal_active = np.zeros_like(times, dtype=bool)
+
+    if str(cfg.mode).strip().lower() == "active" and str(args.active_time_mode) == "multicycle_absolute":
+        keep = np.flatnonzero(thermal_active)
+        if keep.size < 2:
+            print(f"[WARN] No usable thermally active frames found for {case_dir.name}; skipping case.")
+            return None
+        frame_index = frame_index.iloc[keep].reset_index(drop=True)
+        frame_ids = frame_ids[keep]
+        times = times[keep]
+        thermal_times = thermal_times[keep]
+        thermal_active = thermal_active[keep]
     scene_dir = case_dir / "scene"
 
     nx = int(cfg.domain.nx)
@@ -494,6 +554,8 @@ def load_case(record: CaseRecord, device: torch.device, args: argparse.Namespace
         cfg=cfg,
         frame_index=frame_index,
         times=times,
+        thermal_times=thermal_times.astype(np.float32, copy=False),
+        thermal_active=thermal_active.astype(np.float32, copy=False),
         frame_ids=frame_ids,
         tensor=torch.from_numpy(np.stack(tensors, axis=0)).to(device=device, dtype=torch.float32),
         channel_order=channel_order,
@@ -1172,6 +1234,225 @@ def build_canonical_cycle(
     return phase_centers, canonical, meta
 
 
+def _fallback_cycle_boundaries_from_phase(times: np.ndarray, phase_unwrapped: Optional[np.ndarray]) -> List[Dict[str, float]]:
+    """Build cycle time windows from monotone unwrapped phase when zero crossings are unavailable."""
+    if phase_unwrapped is None:
+        return []
+    times_np = np.asarray(times, dtype=np.float64)
+    phase_np = np.asarray(phase_unwrapped, dtype=np.float64)
+    if times_np.size < 2 or phase_np.size != times_np.size:
+        return []
+    phase_cycles = (phase_np - phase_np[0]) / (2.0 * np.pi)
+    if not np.all(np.isfinite(phase_cycles)) or float(phase_cycles[-1] - phase_cycles[0]) <= 1.0e-6:
+        return []
+    order = np.argsort(phase_cycles)
+    phase_sorted = phase_cycles[order]
+    time_sorted = times_np[order]
+    first_cycle = int(math.ceil(float(phase_sorted[0])))
+    last_cycle = int(math.floor(float(phase_sorted[-1])))
+    if last_cycle <= first_cycle:
+        return []
+    boundaries = np.arange(first_cycle, last_cycle + 1, dtype=np.float64)
+    boundary_times = np.interp(boundaries, phase_sorted, time_sorted)
+    return [
+        {"start_time": float(t0), "end_time": float(t1), "method": "phase_unwrapped"}
+        for t0, t1 in zip(boundary_times[:-1], boundary_times[1:])
+        if float(t1) > float(t0)
+    ]
+
+
+def _fallback_cycle_boundaries_from_period(times: np.ndarray, phase_unwrapped: Optional[np.ndarray]) -> List[Dict[str, float]]:
+    times_np = np.asarray(times, dtype=np.float64)
+    if times_np.size < 2:
+        return []
+    estimated_period = _estimate_period_from_inputs(times_np, phase_unwrapped, [])
+    if not np.isfinite(estimated_period) or estimated_period <= 0.0:
+        span = float(times_np[-1] - times_np[0])
+        estimated_period = span if span > 0.0 else float("nan")
+    if not np.isfinite(estimated_period) or estimated_period <= 0.0:
+        return []
+    starts = np.arange(float(times_np[0]), float(times_np[-1]), estimated_period, dtype=np.float64)
+    out: List[Dict[str, float]] = []
+    for start_time in starts:
+        end_time = float(start_time + estimated_period)
+        if end_time <= times_np[-1] + 1.0e-9:
+            out.append({"start_time": float(start_time), "end_time": end_time, "method": "period_fallback"})
+    return out
+
+
+def _active_cycle_boundaries(
+    times: np.ndarray,
+    phase_unwrapped: Optional[np.ndarray],
+    signal_values: Optional[np.ndarray],
+) -> List[Dict[str, float]]:
+    crossings = _detect_upward_crossings(signal_values, times)
+    if len(crossings) >= 2:
+        return [
+            {"start_time": float(left["time"]), "end_time": float(right["time"]), "method": "zero_crossing"}
+            for left, right in zip(crossings[:-1], crossings[1:])
+            if float(right["time"]) > float(left["time"])
+        ]
+    phase_boundaries = _fallback_cycle_boundaries_from_phase(times, phase_unwrapped)
+    if phase_boundaries:
+        return phase_boundaries
+    return _fallback_cycle_boundaries_from_period(times, phase_unwrapped)
+
+
+def _interpolate_cycle_window(
+    tensor: torch.Tensor,
+    times: np.ndarray,
+    start_time: float,
+    end_time: float,
+    phase_centers: np.ndarray,
+) -> torch.Tensor:
+    duration = max(float(end_time - start_time), 1.0e-12)
+    times_np = np.asarray(times, dtype=np.float64)
+    keep = np.flatnonzero((times_np >= start_time - 1.0e-9) & (times_np <= end_time + 1.0e-9))
+    if keep.size < 2:
+        left = max(0, int(np.searchsorted(times_np, start_time, side="right")) - 1)
+        right = min(times_np.size - 1, int(np.searchsorted(times_np, end_time, side="left")))
+        keep = np.arange(left, right + 1, dtype=np.int64)
+    if keep.size < 2:
+        raise ValueError("Need at least two saved frames to interpolate an active cycle window.")
+
+    segment = tensor.index_select(0, torch.as_tensor(keep, device=tensor.device, dtype=torch.long))
+    local_phase = (times_np[keep] - float(start_time)) / duration
+    flat = segment.reshape(segment.shape[0], -1)
+    return _interpolate_time_ordered(
+        flat,
+        local_phase,
+        phase_centers,
+        (len(phase_centers), tensor.shape[1], tensor.shape[2], tensor.shape[3]),
+    )
+
+
+def _thermal_time_centers_for_cycles(
+    cycle_windows: Sequence[Dict[str, float]],
+    phase_centers: np.ndarray,
+    thermal_start_time: float,
+    normalization: str,
+) -> Tuple[np.ndarray, np.ndarray]:
+    physical_parts: List[np.ndarray] = []
+    tau_abs_parts: List[np.ndarray] = []
+    for cycle_idx, window in enumerate(cycle_windows):
+        start_time = float(window["start_time"])
+        end_time = float(window["end_time"])
+        duration = max(end_time - start_time, 1.0e-12)
+        physical_parts.append((start_time - thermal_start_time) + phase_centers * duration)
+        tau_abs_parts.append(float(cycle_idx) + phase_centers)
+    physical = np.concatenate(physical_parts, axis=0).astype(np.float32)
+    tau_abs = np.concatenate(tau_abs_parts, axis=0).astype(np.float32)
+
+    mode = str(normalization).strip().lower()
+    if mode == "physical_time":
+        thermal = physical
+    elif mode == "normalized_0_1":
+        lo = float(np.min(physical)) if physical.size else 0.0
+        hi = float(np.max(physical)) if physical.size else lo
+        thermal = (physical - lo) / max(hi - lo, 1.0e-12)
+    else:
+        thermal = tau_abs
+    return thermal.astype(np.float32, copy=False), physical.astype(np.float32, copy=False)
+
+
+def build_active_multicycle_canonical(
+    case_data: CaseData,
+    phase_unwrapped: np.ndarray,
+    signal_values: np.ndarray,
+    num_bins: int,
+    *,
+    active_save_contiguous_cycles: int,
+    active_warmup_cycles: int,
+    thermal_time_normalization: str,
+) -> Tuple[np.ndarray, torch.Tensor, Dict[str, Any], Dict[str, np.ndarray]]:
+    """Preserve real active temperature evolution over consecutive flow cycles."""
+    times_np = np.asarray(case_data.times, dtype=np.float64)
+    phase_centers = (np.arange(num_bins, dtype=np.float32) + 0.5) / float(num_bins)
+    boundaries = _active_cycle_boundaries(times_np, phase_unwrapped, signal_values)
+    warmup_cycles = max(0, int(active_warmup_cycles))
+    requested_cycles = max(1, int(active_save_contiguous_cycles))
+    selected = boundaries[warmup_cycles : warmup_cycles + requested_cycles]
+    if len(selected) < requested_cycles:
+        span = float(times_np[-1] - times_np[0]) if times_np.size > 1 else 0.0
+        if span > 0.0:
+            duration = span / float(requested_cycles + warmup_cycles)
+            fallback_boundaries = [
+                {
+                    "start_time": float(times_np[0] + i * duration),
+                    "end_time": float(times_np[0] + (i + 1) * duration),
+                    "method": "equal_time_span_fallback",
+                }
+                for i in range(requested_cycles + warmup_cycles)
+            ]
+            selected = fallback_boundaries[warmup_cycles : warmup_cycles + requested_cycles]
+    if len(selected) < requested_cycles:
+        raise RuntimeError(
+            f"Active multicycle preprocessing requested {requested_cycles} contiguous cycles after "
+            f"{warmup_cycles} warmup cycles, but only {len(selected)} usable cycles were detected."
+        )
+
+    cycle_tensors = [
+        _interpolate_cycle_window(
+            case_data.tensor,
+            times_np,
+            float(window["start_time"]),
+            float(window["end_time"]),
+            phase_centers,
+        )
+        for window in selected
+    ]
+    canonical = torch.cat(cycle_tensors, dim=0)
+
+    phase_tau_centers = np.tile(phase_centers, len(selected)).astype(np.float32, copy=False)
+    tau_abs_centers = np.concatenate(
+        [phase_centers + float(cycle_idx) for cycle_idx in range(len(selected))],
+        axis=0,
+    ).astype(np.float32, copy=False)
+    cycle_index_centers = np.concatenate(
+        [np.full(num_bins, cycle_idx, dtype=np.float32) for cycle_idx in range(len(selected))],
+        axis=0,
+    )
+    thermal_start_time = float(case_data.times[0] - case_data.thermal_times[0]) if case_data.thermal_times.size else float(case_data.times[0])
+    thermal_time_centers, physical_time_centers = _thermal_time_centers_for_cycles(
+        selected,
+        phase_centers,
+        thermal_start_time=thermal_start_time,
+        normalization=thermal_time_normalization,
+    )
+    meta = {
+        "canonical_method": "active_multicycle_absolute",
+        "active_time_mode": "multicycle_absolute",
+        "active_save_contiguous_cycles": int(len(selected)),
+        "active_warmup_cycles": int(warmup_cycles),
+        "thermal_time_normalization": str(thermal_time_normalization),
+        "num_detected_cycles": int(len(boundaries)),
+        "cycle_boundary_method": str(selected[0].get("method", "unknown")) if selected else "unknown",
+        "source_start_time": float(selected[0]["start_time"]),
+        "source_end_time": float(selected[-1]["end_time"]),
+        "source_duration": float(selected[-1]["end_time"] - selected[0]["start_time"]),
+        "source_start_frame": int(case_data.frame_ids[0]) if case_data.frame_ids.size else 0,
+        "source_end_frame": int(case_data.frame_ids[-1]) if case_data.frame_ids.size else 0,
+        "cycle_windows": [
+            {
+                "cycle_index": int(i),
+                "start_time": float(window["start_time"]),
+                "end_time": float(window["end_time"]),
+                "duration": float(window["end_time"] - window["start_time"]),
+                "method": str(window.get("method", "unknown")),
+            }
+            for i, window in enumerate(selected)
+        ],
+    }
+    time_meta = {
+        "phase_tau_centers": phase_tau_centers,
+        "tau_abs_centers": tau_abs_centers,
+        "thermal_time_centers": thermal_time_centers,
+        "physical_time_centers": physical_time_centers,
+        "cycle_index_centers": cycle_index_centers.astype(np.float32, copy=False),
+    }
+    return tau_abs_centers, canonical, meta, time_meta
+
+
 # ------------------------- Behavior descriptors --------------------------------
 
 
@@ -1290,6 +1571,12 @@ def sample_phase_points(
     sampling_mode: str,
     annulus_ratio: float,
     wake_ratio: float,
+    *,
+    phase_tau_centers: Optional[np.ndarray] = None,
+    tau_abs_centers: Optional[np.ndarray] = None,
+    thermal_time_centers: Optional[np.ndarray] = None,
+    cycle_index_centers: Optional[np.ndarray] = None,
+    use_thermal_time: bool = False,
 ) -> Dict[str, np.ndarray]:
     """Sample pointwise neural-field tuples from the canonical cycle."""
     num_bins, height, width, field_dim = canonical_cycle.shape
@@ -1301,7 +1588,27 @@ def sample_phase_points(
     all_indices = np.arange(height * width, dtype=np.int64)
     rng = np.random.default_rng(int(case_data.cfg.layout.seed) + 12345)
 
-    sampled_blocks = {key: [] for key in ("phase_bin", "tau", "x", "y", *case_data.channel_order)}
+    phase_tau_arr = np.asarray(phase_tau_centers if phase_tau_centers is not None else phase_centers, dtype=np.float32)
+    tau_abs_arr = np.asarray(tau_abs_centers if tau_abs_centers is not None else phase_centers, dtype=np.float32)
+    cycle_idx_arr = np.asarray(
+        cycle_index_centers if cycle_index_centers is not None else np.floor(tau_abs_arr),
+        dtype=np.float32,
+    )
+    thermal_time_arr = np.asarray(
+        thermal_time_centers if thermal_time_centers is not None else tau_abs_arr,
+        dtype=np.float32,
+    )
+    if phase_tau_arr.shape[0] != num_bins:
+        raise ValueError("phase_tau_centers length must match canonical_cycle phase dimension.")
+
+    sampled_keys = ["phase_bin", "tau", "x", "y", *case_data.channel_order]
+    if tau_abs_centers is not None:
+        sampled_keys.append("tau_abs")
+    if use_thermal_time or thermal_time_centers is not None:
+        sampled_keys.append("thermal_time")
+    if cycle_index_centers is not None:
+        sampled_keys.append("cycle_index")
+    sampled_blocks = {key: [] for key in sampled_keys}
 
     for phase_idx in range(num_bins):
         field_flat = canonical_cycle[phase_idx].reshape(-1, canonical_cycle.shape[-1])
@@ -1343,9 +1650,15 @@ def sample_phase_points(
 
         values = field_flat[chosen]
         sampled_blocks["phase_bin"].append(np.full(chosen.size, phase_idx, dtype=np.int32))
-        sampled_blocks["tau"].append(np.full(chosen.size, phase_centers[phase_idx], dtype=np.float32))
+        sampled_blocks["tau"].append(np.full(chosen.size, phase_tau_arr[phase_idx], dtype=np.float32))
         sampled_blocks["x"].append(x_flat[chosen].astype(np.float32))
         sampled_blocks["y"].append(y_flat[chosen].astype(np.float32))
+        if "tau_abs" in sampled_blocks:
+            sampled_blocks["tau_abs"].append(np.full(chosen.size, tau_abs_arr[phase_idx], dtype=np.float32))
+        if "thermal_time" in sampled_blocks:
+            sampled_blocks["thermal_time"].append(np.full(chosen.size, thermal_time_arr[phase_idx], dtype=np.float32))
+        if "cycle_index" in sampled_blocks:
+            sampled_blocks["cycle_index"].append(np.full(chosen.size, cycle_idx_arr[phase_idx], dtype=np.float32))
         for channel_idx, channel_name in enumerate(case_data.channel_order):
             if channel_idx >= field_dim:
                 raise ValueError(
@@ -1389,6 +1702,9 @@ def save_structure_json(
     save_cycles: int,
     phase_quality: Optional[Dict[str, float]] = None,
     canonical_meta: Optional[Dict[str, Any]] = None,
+    active_time_mode: str = "periodic",
+    thermal_time_normalization: str = "tau_abs",
+    active_save_contiguous_cycles: Optional[int] = None,
 ) -> None:
     payload = {
         "case_id": str(case_data.cfg.save.case_id),
@@ -1415,9 +1731,18 @@ def save_structure_json(
             "source_sigma": float(case_data.cfg.thermal.source_sigma),
             "power_min": float(case_data.cfg.thermal.power_min),
             "power_max": float(case_data.cfg.thermal.power_max),
+            "activate_after_warmup": bool(getattr(case_data.cfg.thermal, "activate_after_warmup", False)),
+            "reset_temperature_at_activation": bool(getattr(case_data.cfg.thermal, "reset_temperature_at_activation", True)),
+            "save_only_after_thermal_activation": bool(getattr(case_data.cfg.thermal, "save_only_after_thermal_activation", False)),
+            "thermal_start_step": getattr(case_data.cfg.thermal, "thermal_start_step", None),
+            "thermal_start_time": getattr(case_data.cfg.thermal, "thermal_start_time", None),
+            "thermal_start_after_flow_warmup": bool(getattr(case_data.cfg.thermal, "thermal_start_after_flow_warmup", True)),
         },
         "available_fields": case_data.available_fields,
         "save_cycles": int(save_cycles),
+        "active_time_mode": str(active_time_mode),
+        "thermal_time_normalization": str(thermal_time_normalization),
+        "active_save_contiguous_cycles": int(active_save_contiguous_cycles if active_save_contiguous_cycles is not None else save_cycles),
         "probe": {
             "cylinder_index": probe.cylinder_index,
             "cylinder_center": list(probe.cylinder_center),
@@ -1448,14 +1773,22 @@ def save_canonical_cycle(
     phase_centers: np.ndarray,
     channel_order: Sequence[str],
     save_full: bool,
+    time_metadata: Optional[Dict[str, np.ndarray]] = None,
 ) -> None:
     if not save_full:
         return
+    payload = {
+        "canonical_cycle": canonical_cycle.astype(np.float32),
+        "phase_bin_centers": phase_centers.astype(np.float32),
+        "channel_order": np.asarray(tuple(channel_order)),
+    }
+    if time_metadata is not None:
+        for key in ("phase_tau_centers", "tau_abs_centers", "thermal_time_centers", "cycle_index_centers", "physical_time_centers"):
+            if key in time_metadata and time_metadata[key] is not None:
+                payload[key] = np.asarray(time_metadata[key], dtype=np.float32)
     np.savez_compressed(
         out_dir / "canonical_cycle.npz",
-        canonical_cycle=canonical_cycle.astype(np.float32),
-        phase_bin_centers=phase_centers.astype(np.float32),
-        channel_order=np.asarray(tuple(channel_order)),
+        **payload,
     )
 
 
@@ -1473,6 +1806,8 @@ def save_phase_metadata(
     payload = {
         "saved_frame": case_data.frame_ids,
         "time": case_data.times,
+        "thermal_time": case_data.thermal_times,
+        "thermal_active": case_data.thermal_active,
         "tau": tau,
         "phase_unwrapped": phase_unwrapped,
         "probe_signal_v": signal_values,
@@ -1523,6 +1858,7 @@ def save_quicklook_plots(
     canonical_cycle: Optional[np.ndarray] = None,
     canonical_meta: Optional[Dict[str, Any]] = None,
     legacy_cycle: Optional[np.ndarray] = None,
+    time_metadata: Optional[Dict[str, np.ndarray]] = None,
 ) -> None:
     quicklook_dir = out_dir / "quicklooks"
     quicklook_dir.mkdir(parents=True, exist_ok=True)
@@ -1588,6 +1924,44 @@ def save_quicklook_plots(
     if canonical_cycle is None:
         return
 
+    if time_metadata is not None and "temperature" in case_data.channel_order:
+        temp_idx = list(case_data.channel_order).index("temperature")
+        thermal_axis = np.asarray(
+            time_metadata.get("thermal_time_centers", np.arange(canonical_cycle.shape[0], dtype=np.float32)),
+            dtype=np.float32,
+        )
+        phase_tau = np.asarray(
+            time_metadata.get("phase_tau_centers", np.mod(np.arange(canonical_cycle.shape[0]), 1.0)),
+            dtype=np.float32,
+        )
+        cycle_index = np.asarray(
+            time_metadata.get("cycle_index_centers", np.floor(np.arange(canonical_cycle.shape[0]) / max(args_cache.get("phase_bins", 1), 1))),
+            dtype=np.float32,
+        )
+        temp = canonical_cycle[..., temp_idx]
+        temp_mean = np.mean(temp, axis=(1, 2))
+        temp_anom = temp - temp.mean(axis=(1, 2), keepdims=True)
+        temp_rms = np.sqrt(np.mean(temp_anom ** 2, axis=(1, 2)))
+        fig, axes = plt.subplots(3, 1, figsize=(10, 8), constrained_layout=True, dpi=140)
+        axes[0].plot(thermal_axis, temp_mean, lw=1.6)
+        axes[0].set_title("Mean temperature over thermal age")
+        axes[0].set_xlabel("thermal_time")
+        axes[0].set_ylabel("mean T")
+        axes[0].grid(True, alpha=0.3)
+        axes[1].plot(thermal_axis, temp_rms, lw=1.6)
+        axes[1].set_title("Temperature anomaly RMS over thermal age")
+        axes[1].set_xlabel("thermal_time")
+        axes[1].set_ylabel("RMS T'")
+        axes[1].grid(True, alpha=0.3)
+        axes[2].plot(thermal_axis, phase_tau, lw=1.2, label="phase_tau")
+        axes[2].plot(thermal_axis, cycle_index, lw=1.2, label="cycle_index")
+        axes[2].set_title("Active multicycle time coordinates")
+        axes[2].set_xlabel("thermal_time")
+        axes[2].legend(loc="best")
+        axes[2].grid(True, alpha=0.3)
+        fig.savefig(quicklook_dir / "active_temperature_time_diagnostics.png")
+        plt.close(fig)
+
     raw_jump_mean = raw_jump_max = 0.0
     fig, axes = plt.subplots(2, 1, figsize=(10, 7), constrained_layout=True, dpi=140)
     if case_data.tensor.shape[0] > 1 and case_data.tensor.shape[-1] > 3:
@@ -1646,6 +2020,10 @@ def write_case_to_h5(
     save_cycles: int,
     phase_quality: Optional[Dict[str, float]] = None,
     canonical_meta: Optional[Dict[str, Any]] = None,
+    time_metadata: Optional[Dict[str, np.ndarray]] = None,
+    active_time_mode: str = "periodic",
+    thermal_time_normalization: str = "tau_abs",
+    active_save_contiguous_cycles: Optional[int] = None,
 ) -> None:
     """Append one case into the packed HDF5 dataset."""
     cases_group = h5_file.require_group("cases")
@@ -1658,6 +2036,12 @@ def write_case_to_h5(
     grp.attrs["split"] = case_data.record.split
     grp.attrs["re"] = float(case_data.cfg.flow.re)
     grp.attrs["num_cylinders"] = int(case_data.cfg.layout.num_cylinders)
+    grp.attrs["nx"] = int(case_data.cfg.domain.nx)
+    grp.attrs["ny"] = int(case_data.cfg.domain.ny)
+    grp.attrs["lx"] = float(case_data.cfg.domain.lx)
+    grp.attrs["ly"] = float(case_data.cfg.domain.ly)
+    grp.attrs["cylinder_radius"] = float(case_data.cfg.domain.cylinder_radius)
+    grp.attrs["max_num_cylinders"] = int(case_data.cfg.layout.num_cylinders)
     grp.attrs["mode"] = str(case_data.cfg.mode)
     grp.attrs["field_dim"] = int(len(case_data.channel_order))
     grp.attrs["thermal_enabled"] = bool(case_data.cfg.thermal.enabled)
@@ -1670,6 +2054,18 @@ def write_case_to_h5(
     grp.attrs["probe_cylinder_index"] = int(probe.cylinder_index)
     grp.attrs["source_case_dir"] = str(case_data.record.case_dir.resolve())
     grp.attrs["save_cycles"] = int(save_cycles)
+    grp.attrs["active_time_mode"] = str(active_time_mode)
+    grp.attrs["thermal_time_normalization"] = str(thermal_time_normalization)
+    grp.attrs["active_save_contiguous_cycles"] = int(active_save_contiguous_cycles if active_save_contiguous_cycles is not None else save_cycles)
+    if "thermal_start_step" in case_data.frame_index:
+        grp.attrs["thermal_start_step"] = int(case_data.frame_index["thermal_start_step"].iloc[0])
+    if "thermal_start_time" in case_data.frame_index:
+        grp.attrs["thermal_start_time"] = float(case_data.frame_index["thermal_start_time"].iloc[0])
+    elif case_data.thermal_times.size:
+        grp.attrs["thermal_start_time"] = float(case_data.times[0] - case_data.thermal_times[0])
+    grp.attrs["thermal_activate_after_warmup"] = bool(getattr(case_data.cfg.thermal, "activate_after_warmup", False))
+    grp.attrs["thermal_reset_temperature_at_activation"] = bool(getattr(case_data.cfg.thermal, "reset_temperature_at_activation", True))
+    grp.attrs["thermal_save_only_after_thermal_activation"] = bool(getattr(case_data.cfg.thermal, "save_only_after_thermal_activation", False))
     if canonical_meta is not None:
         grp.attrs["canonical_method"] = str(canonical_meta.get("canonical_method", "unknown"))
         grp.attrs["canonical_cycle_metadata_json"] = json.dumps(_json_sanitize(canonical_meta))
@@ -1677,6 +2073,8 @@ def write_case_to_h5(
         grp.attrs["phase_quality_json"] = json.dumps(_json_sanitize(phase_quality))
 
     grp.create_dataset("times", data=case_data.times, compression="gzip")
+    grp.create_dataset("thermal_times", data=case_data.thermal_times.astype(np.float32), compression="gzip")
+    grp.create_dataset("thermal_active", data=case_data.thermal_active.astype(np.float32), compression="gzip")
     grp.create_dataset("tau", data=tau.astype(np.float32), compression="gzip")
     grp.create_dataset("phase_unwrapped", data=phase_unwrapped.astype(np.float32), compression="gzip")
     grp.create_dataset("cylinder_centers", data=np.asarray(case_data.cfg.layout.centers, dtype=np.float32))
@@ -1693,6 +2091,11 @@ def write_case_to_h5(
     if save_full_canonical_cycles:
         grp.create_dataset("canonical_cycle", data=canonical_cycle.astype(np.float32), compression="gzip")
         grp.create_dataset("phase_bin_centers", data=phase_centers.astype(np.float32), compression="gzip")
+        if time_metadata is not None:
+            for key in ("phase_tau_centers", "tau_abs_centers", "thermal_time_centers", "cycle_index_centers", "physical_time_centers"):
+                values = time_metadata.get(key)
+                if values is not None:
+                    grp.create_dataset(key, data=np.asarray(values, dtype=np.float32), compression="gzip")
 
     sampled_group = grp.create_group("sampled_points")
     for key, values in sampled_points.items():
@@ -1747,19 +2150,43 @@ def process_case(
             progress_bar,
         )
 
-    report_state(f"[INFO] [{case_label}] Building canonical cycle with {args.phase_bins} phase bins.", progress_bar)
-    phase_centers, canonical_cycle_t, canonical_meta = build_canonical_cycle(
-        case_data.tensor,
-        tau,
-        args.phase_bins,
-        times=case_data.times,
-        phase_unwrapped=phase_unwrapped,
-        signal_values=signal_values,
-        frame_ids=case_data.frame_ids,
-        method=args.canonical_cycle_method,
-        min_cycle_frames=int(args.min_cycle_frames),
-        prefer_late_cycle=bool(args.prefer_late_cycle),
+    active_multicycle = (
+        str(case_data.cfg.mode).strip().lower() == "active"
+        and str(args.active_time_mode).strip().lower() == "multicycle_absolute"
     )
+    time_metadata: Optional[Dict[str, np.ndarray]] = None
+    if active_multicycle:
+        active_cycles = int(args.active_save_contiguous_cycles)
+        report_state(
+            (
+                f"[INFO] [{case_label}] Building active multicycle trajectory with "
+                f"{active_cycles} contiguous cycles x {args.phase_bins} phase bins."
+            ),
+            progress_bar,
+        )
+        phase_centers, canonical_cycle_t, canonical_meta, time_metadata = build_active_multicycle_canonical(
+            case_data=case_data,
+            phase_unwrapped=phase_unwrapped,
+            signal_values=signal_values,
+            num_bins=int(args.phase_bins),
+            active_save_contiguous_cycles=active_cycles,
+            active_warmup_cycles=int(args.active_warmup_cycles),
+            thermal_time_normalization=str(args.thermal_time_normalization),
+        )
+    else:
+        report_state(f"[INFO] [{case_label}] Building canonical cycle with {args.phase_bins} phase bins.", progress_bar)
+        phase_centers, canonical_cycle_t, canonical_meta = build_canonical_cycle(
+            case_data.tensor,
+            tau,
+            args.phase_bins,
+            times=case_data.times,
+            phase_unwrapped=phase_unwrapped,
+            signal_values=signal_values,
+            frame_ids=case_data.frame_ids,
+            method=args.canonical_cycle_method,
+            min_cycle_frames=int(args.min_cycle_frames),
+            prefer_late_cycle=bool(args.prefer_late_cycle),
+        )
     canonical_meta["phase_quality"] = phase_quality
     report_state(
         (
@@ -1779,7 +2206,7 @@ def process_case(
             ),
             progress_bar,
         )
-    if str(canonical_meta.get("canonical_method", "")).endswith("fallback") or args.canonical_cycle_method == "time_full_span":
+    if (not active_multicycle) and (str(canonical_meta.get("canonical_method", "")).endswith("fallback") or args.canonical_cycle_method == "time_full_span"):
         report_state(
             f"[WARN] case {case_data.cfg.save.case_id}: using canonical-cycle fallback method {canonical_meta.get('canonical_method')}.",
             progress_bar,
@@ -1812,11 +2239,19 @@ def process_case(
             canonical_meta["legacy_tau_sort_omega_jump_mse_max"] = float(legacy_jumps.max())
         canonical_meta["legacy_tau_sort_metadata"] = legacy_meta
 
-    canonical_cycle = np.tile(canonical_cycle, (int(args.save_cycles), 1, 1, 1))
-    phase_centers = np.concatenate(
-        [phase_centers + float(cycle_idx) for cycle_idx in range(int(args.save_cycles))],
-        axis=0,
-    ).astype(np.float32, copy=False)
+    if not active_multicycle:
+        canonical_cycle = np.tile(canonical_cycle, (int(args.save_cycles), 1, 1, 1))
+        phase_centers = np.concatenate(
+            [phase_centers + float(cycle_idx) for cycle_idx in range(int(args.save_cycles))],
+            axis=0,
+        ).astype(np.float32, copy=False)
+        time_metadata = {
+            "phase_tau_centers": np.mod(phase_centers, 1.0).astype(np.float32, copy=False),
+            "tau_abs_centers": phase_centers.astype(np.float32, copy=False),
+            "thermal_time_centers": phase_centers.astype(np.float32, copy=False),
+            "cycle_index_centers": np.floor(phase_centers).astype(np.float32, copy=False),
+            "physical_time_centers": phase_centers.astype(np.float32, copy=False),
+        }
 
     report_state(
         f"[INFO] [{case_label}] Sampling neural-field points using mode='{args.sampling_mode}'.",
@@ -1830,6 +2265,11 @@ def process_case(
         sampling_mode=args.sampling_mode,
         annulus_ratio=args.annulus_ratio,
         wake_ratio=args.wake_ratio,
+        phase_tau_centers=time_metadata["phase_tau_centers"] if active_multicycle and time_metadata is not None else None,
+        tau_abs_centers=time_metadata["tau_abs_centers"] if active_multicycle and time_metadata is not None else None,
+        thermal_time_centers=time_metadata["thermal_time_centers"] if active_multicycle and time_metadata is not None else None,
+        cycle_index_centers=time_metadata["cycle_index_centers"] if active_multicycle and time_metadata is not None else None,
+        use_thermal_time=bool(args.use_thermal_time),
     )
 
     report_state(f"[INFO] [{case_label}] Saving processed outputs to {out_dir}.", progress_bar)
@@ -1841,6 +2281,9 @@ def process_case(
         save_cycles=args.save_cycles,
         phase_quality=phase_quality,
         canonical_meta=canonical_meta,
+        active_time_mode=str(args.active_time_mode),
+        thermal_time_normalization=str(args.thermal_time_normalization),
+        active_save_contiguous_cycles=int(args.active_save_contiguous_cycles),
     )
     save_behavior_summary(out_dir, behavior, pod)
     save_canonical_cycle(
@@ -1849,6 +2292,7 @@ def process_case(
         phase_centers,
         channel_order=case_data.channel_order,
         save_full=args.save_full_canonical_cycles,
+        time_metadata=time_metadata,
     )
     if args.canonical_diagnostic:
         save_canonical_metadata(out_dir, canonical_meta)
@@ -1878,6 +2322,7 @@ def process_case(
             canonical_cycle=canonical_cycle,
             canonical_meta=canonical_meta,
             legacy_cycle=legacy_cycle_for_quicklook,
+            time_metadata=time_metadata,
         )
 
     report_state(f"[INFO] [{case_label}] Appending case to packed HDF5 dataset.", progress_bar)
@@ -1898,6 +2343,10 @@ def process_case(
         save_cycles=args.save_cycles,
         phase_quality=phase_quality,
         canonical_meta=canonical_meta,
+        time_metadata=time_metadata,
+        active_time_mode=str(args.active_time_mode),
+        thermal_time_normalization=str(args.thermal_time_normalization),
+        active_save_contiguous_cycles=int(args.active_save_contiguous_cycles),
     )
 
     report_state(
@@ -1917,6 +2366,9 @@ def process_case(
         "num_frames": int(case_data.tensor.shape[0]),
         "phase_bins": int(args.phase_bins),
         "save_cycles": int(args.save_cycles),
+        "active_time_mode": str(args.active_time_mode),
+        "active_save_contiguous_cycles": int(args.active_save_contiguous_cycles),
+        "thermal_time_normalization": str(args.thermal_time_normalization),
         "dominant_frequency": float(dominant_frequency),
         "canonical_method": str(canonical_meta.get("canonical_method", "")),
         "canonical_source_start_frame": int(canonical_meta.get("source_start_frame", -1)),
@@ -1938,6 +2390,10 @@ def main() -> None:
     args = parse_args()
     args.input_root = args.input_root.expanduser().resolve()
     args.output_root = resolve_data_path(args.output_root)
+    if args.active_save_contiguous_cycles is None:
+        args.active_save_contiguous_cycles = int(args.save_cycles)
+    if args.use_thermal_time is None:
+        args.use_thermal_time = str(args.active_time_mode).strip().lower() == "multicycle_absolute"
     args.output_root.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
     print(f"[INFO] Using torch device: {device}")
@@ -1948,6 +2404,7 @@ def main() -> None:
         "annulus_outer_radius_factor": float(args.annulus_outer_radius_factor),
         "wake_length_diameters": float(args.wake_length_diameters),
         "wake_half_width_diameters": float(args.wake_half_width_diameters),
+        "phase_bins": float(args.phase_bins),
     }
 
     case_records = discover_case_directories(args.input_root)
@@ -1969,6 +2426,11 @@ def main() -> None:
         h5_file.attrs["save_cycles"] = int(args.save_cycles)
         h5_file.attrs["sampling_mode"] = args.sampling_mode
         h5_file.attrs["include_temperature"] = str(args.include_temperature)
+        h5_file.attrs["active_time_mode"] = str(args.active_time_mode)
+        h5_file.attrs["active_save_contiguous_cycles"] = int(args.active_save_contiguous_cycles)
+        h5_file.attrs["active_warmup_cycles"] = int(args.active_warmup_cycles)
+        h5_file.attrs["thermal_time_normalization"] = str(args.thermal_time_normalization)
+        h5_file.attrs["use_thermal_time"] = bool(args.use_thermal_time)
         h5_file.attrs["channel_order"] = json.dumps(INERT_FIELD_CHANNEL_ORDER)
         h5_file.attrs["field_dim"] = 4
         h5_file.attrs["input_root"] = str(args.input_root)

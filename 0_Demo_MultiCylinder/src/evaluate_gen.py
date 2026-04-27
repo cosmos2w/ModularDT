@@ -344,6 +344,13 @@ def load_case_snapshot(packed_h5_path: Path, split: str, case_id: Optional[str],
             case_id = matched[0]
         grp = cases[str(case_id)]
         phase_bins = np.asarray(grp["phase_bin_centers"], dtype=np.float32)
+        phase_tau_bins = np.asarray(grp["phase_tau_centers"], dtype=np.float32) if "phase_tau_centers" in grp else phase_bins
+        query_time_bins = (
+            np.asarray(grp["thermal_time_centers"], dtype=np.float32)
+            if "thermal_time_centers" in grp
+            else (np.asarray(grp["tau_abs_centers"], dtype=np.float32) if "tau_abs_centers" in grp else phase_bins)
+        )
+        cycle_index_bins = np.asarray(grp["cycle_index_centers"], dtype=np.float32) if "cycle_index_centers" in grp else np.floor(phase_bins)
         if phase_index < 0 or phase_index >= len(phase_bins):
             raise IndexError(f"phase_index={phase_index} out of range for {len(phase_bins)} bins.")
 
@@ -377,7 +384,10 @@ def load_case_snapshot(packed_h5_path: Path, split: str, case_id: Optional[str],
         return {
             "case_id": str(case_id),
             "phase_index": int(phase_index),
-            "tau": float(phase_bins[phase_index]),
+            "tau": float(phase_tau_bins[phase_index]),
+            "tau_abs": float(phase_bins[phase_index]),
+            "query_time": float(query_time_bins[phase_index]),
+            "cycle_index": float(cycle_index_bins[phase_index]),
             "field_dim": field_dim,
             "channel_order": channel_order,
             "field_grid": torch.from_numpy(np.moveaxis(field, -1, 0)).unsqueeze(0),
@@ -434,6 +444,13 @@ def load_case_cycle(
     with h5py.File(packed_h5_path, "r") as h5:
         case_id, grp = _select_case_group(h5, split, case_id)
         phase_bins = np.asarray(grp["phase_bin_centers"], dtype=np.float32)
+        phase_tau_bins = np.asarray(grp["phase_tau_centers"], dtype=np.float32) if "phase_tau_centers" in grp else phase_bins
+        query_time_bins = (
+            np.asarray(grp["thermal_time_centers"], dtype=np.float32)
+            if "thermal_time_centers" in grp
+            else (np.asarray(grp["tau_abs_centers"], dtype=np.float32) if "tau_abs_centers" in grp else phase_bins)
+        )
+        cycle_index_bins = np.asarray(grp["cycle_index_centers"], dtype=np.float32) if "cycle_index_centers" in grp else np.floor(phase_bins)
         if phase_indices.min() < 0 or phase_indices.max() >= len(phase_bins):
             raise IndexError(f"Selected phase index is out of range for {len(phase_bins)} bins.")
 
@@ -467,7 +484,10 @@ def load_case_cycle(
         return {
             "case_id": str(case_id),
             "phase_indices": phase_indices.astype(np.int64),
-            "tau_values": phase_bins[phase_indices].astype(np.float32),
+            "tau_values": phase_tau_bins[phase_indices].astype(np.float32),
+            "tau_abs_values": phase_bins[phase_indices].astype(np.float32),
+            "query_time_values": query_time_bins[phase_indices].astype(np.float32),
+            "cycle_index_values": cycle_index_bins[phase_indices].astype(np.float32),
             "field_dim": field_dim,
             "channel_order": channel_order,
             "field_cycle": torch.from_numpy(np.moveaxis(cycle, -1, 1)),  # [T,C,H,W]
@@ -1037,6 +1057,7 @@ def _run_deterministic_cycle(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return deterministic mean/residual/field and global conditions as CPU tensors."""
     tau_values = sample["tau_values"]
+    query_time_values = sample.get("query_time_values", tau_values)
     T = len(tau_values)
     x_base = sample["x_grid"].to(device)
     y_base = sample["y_grid"].to(device)
@@ -1048,12 +1069,14 @@ def _run_deterministic_cycle(
         x_grid = x_base.expand(tc, -1, -1).contiguous()
         y_grid = y_base.expand(tc, -1, -1).contiguous()
         tau = torch.from_numpy(tau_values[start:end]).to(device=device, dtype=torch.float32).view(tc, 1)
+        query_time = torch.from_numpy(query_time_values[start:end]).to(device=device, dtype=torch.float32).view(tc, 1)
         det_out = deterministic_grid_forward(
             det_model,
             structure,
             x_grid,
             y_grid,
             tau,
+            query_time=query_time,
             query_batch_size=int(cfg["generation"].get("det_query_batch_size", 32768)),
         )
         global_cond = _build_checkpoint_global_condition_vector(det_out, structure, expected_dim=global_cond_dim)
@@ -1144,6 +1167,7 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
                     x_grid = sample["x_grid"].to(device).expand(tc, -1, -1).contiguous()
                     y_grid = sample["y_grid"].to(device).expand(tc, -1, -1).contiguous()
                     tau = torch.from_numpy(sample["tau_values"][start:end]).to(device=device, dtype=torch.float32).view(tc, 1)
+                    query_time = torch.from_numpy(sample.get("query_time_values", sample["tau_values"])[start:end]).to(device=device, dtype=torch.float32).view(tc, 1)
                     structure = _repeat_structure(sample["structure"], tc, device)
                     cond_grid = build_dense_condition_grid(
                         det_mean=det_mean,
@@ -1152,6 +1176,7 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
                         x_grid=x_grid,
                         y_grid=y_grid,
                         tau=tau,
+                        thermal_time=query_time,
                         re_values=structure["re_values"],
                         stats=stats.to(device, dtype=det_mean.dtype),
                         domain_length_x=float(det_model_cfg.get("domain_length_x", 24.0)),
@@ -1445,6 +1470,7 @@ def main() -> None:
         x_grid = sample["x_grid"].to(device)
         y_grid = sample["y_grid"].to(device)
         tau = torch.tensor([[sample["tau"]]], dtype=torch.float32, device=device)
+        query_time = torch.tensor([[sample.get("query_time", sample["tau"])]], dtype=torch.float32, device=device)
 
         with torch.no_grad():
             det_out = deterministic_grid_forward(
@@ -1453,6 +1479,7 @@ def main() -> None:
                 x_grid,
                 y_grid,
                 tau,
+                query_time=query_time,
                 query_batch_size=int(cfg["generation"].get("det_query_batch_size", 32768)),
             )
             cond_grid = build_dense_condition_grid(
@@ -1462,6 +1489,7 @@ def main() -> None:
                 x_grid=x_grid,
                 y_grid=y_grid,
                 tau=tau,
+                thermal_time=query_time,
                 re_values=structure["re_values"],
                 stats=stats.to(device, dtype=det_out["pred_mean"].dtype),
                 domain_length_x=float(det_model_cfg.get("domain_length_x", 24.0)),

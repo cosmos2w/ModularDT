@@ -21,6 +21,24 @@ the flow solve. Each cylinder contributes a Gaussian shell heat source controlle
 by `layout.heat_powers`; positive values heat and negative values are allowed
 for cooling when `thermal.power_min` / `thermal.power_max` include them.
 
+New active configs can delay all thermal physics until the flow warmup has
+finished:
+
+```json
+"thermal": {
+  "activate_after_warmup": true,
+  "reset_temperature_at_activation": true,
+  "save_only_after_thermal_activation": true,
+  "thermal_start_after_flow_warmup": true
+}
+```
+
+Before `thermal_start_step`, the flow evolves as an inert incompressible wake
+and temperature remains ambient. At activation, temperature can be reset to the
+ambient scalar field, then advection/diffusion/source terms begin. Saved active
+`frame_index.csv` files include `thermal_time`, `thermal_active`,
+`thermal_start_time`, and `thermal_start_step`.
+
 `src/launch_inert_dataset_batch.py` remains backward compatible; its default
 constants launch inert cases. To batch active cases, set `DATASET_MODE =
 "active"`, use `config_active.json`, and let `layout.heat_powers = null` so
@@ -40,10 +58,28 @@ for compatibility, but it is mode-aware:
 
 ```bash
 python src/preprocess_inert_multicyl_dataset.py \
-  --input-root ./Data_Saved \
+  --input-root ./Data_Saved/Active_Raw \
   --output-root ./Data_Saved/Processed_Active_Dataset \
-  --include-temperature auto
+  --include-temperature auto \
+  --phase-bins 36 \
+  --save-cycles 4 \
+  --active-time-mode multicycle_absolute \
+  --active-save-contiguous-cycles 4 \
+  --active-warmup-cycles 1
 ```
+
+With `--active-time-mode multicycle_absolute`, preprocessing does not tile one
+canonical cycle. It identifies contiguous post-activation wake cycles, bins each
+cycle by flow phase, and concatenates the real cycles. The packed dataset stores:
+
+- `phase_tau_centers`: periodic flow phase in `[0, 1)`
+- `tau_abs_centers`: `cycle_index + phase_tau`
+- `thermal_time_centers`: non-periodic active thermal age
+- `cycle_index_centers`: selected active cycle index
+
+Training batches use `query_tau` for periodic flow quantities and `query_time`
+for temperature age. Thus `u, v, p, omega` can remain phase-periodic while
+temperature is not forced to repeat from cycle to cycle.
 
 Deterministic training uses the same organizer and decoder; only decoder output
 width changes with `model.field_dim`. Active cases can pass normalized
@@ -56,9 +92,18 @@ per-cylinder heat powers through `extra_module` by setting:
 },
 "model": {
   "field_dim": 5,
-  "future_module_feature_dim": 1
+  "future_module_feature_dim": 1,
+  "use_nonperiodic_query_time": true,
+  "use_temperature_time_head": true,
+  "temperature_channel_index": 4
 }
 ```
+
+Optional combined active+inert training is controlled by `dataset.USE_INERT`.
+Before mixing, the trainer checks grid/domain/channel compatibility. Compatible
+inert samples are promoted to active shape by filling temperature with
+`inert_temperature_value`, heat powers with zero, and residual temperature with
+zero. By default validation remains active-only (`use_inert_for_val=false`).
 
 Generative Stage 1 infers the AE input/output channel count from the packed
 dataset. Stage 2 requires the deterministic conditioner checkpoint to have the

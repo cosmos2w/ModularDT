@@ -288,6 +288,12 @@ class PackedPointChunkDataset(Dataset):
         phase_window_require_canonical_cycle: bool = False,
         use_heat_power_module_feature: bool = False,
         heat_power_scale: str | float = "auto",
+        promote_to_active: bool = False,
+        target_channel_order: Optional[Sequence[str]] = None,
+        target_field_dim: Optional[int] = None,
+        inert_temperature_value: float = 0.0,
+        inert_thermal_time_mode: str = "random_active_range",
+        active_max_thermal_time: float = 1.0,
     ):
         super().__init__()
         self.h5_path = Path(h5_path).expanduser().resolve()
@@ -324,6 +330,12 @@ class PackedPointChunkDataset(Dataset):
         self.use_heat_power_module_feature = bool(use_heat_power_module_feature)
         self.heat_power_scale_config = heat_power_scale
         self.heat_power_scale = 1.0
+        self.promote_to_active = bool(promote_to_active)
+        self.target_channel_order = list(target_channel_order) if target_channel_order is not None else None
+        self.target_field_dim = int(target_field_dim) if target_field_dim is not None else None
+        self.inert_temperature_value = float(inert_temperature_value)
+        self.inert_thermal_time_mode = str(inert_thermal_time_mode).strip().lower()
+        self.active_max_thermal_time = max(float(active_max_thermal_time), 0.0)
         self.channel_order: List[str] = list(INERT_CHANNEL_ORDER)
         self.field_dim = 4
         self.current_epoch = 0
@@ -343,6 +355,8 @@ class PackedPointChunkDataset(Dataset):
             raise ValueError("phase_window_phase_mode must be 'stratified_cycle' or 'local_window'.")
         if self.phase_window_xy_sampling not in {"uniform", "omega_variance", "wake_focused"}:
             raise ValueError("phase_window_xy_sampling must be 'uniform', 'omega_variance', or 'wake_focused'.")
+        if self.inert_thermal_time_mode not in {"zero", "random_active_range", "tau"}:
+            raise ValueError("inert_thermal_time_mode must be 'zero', 'random_active_range', or 'tau'.")
 
         self.case_meta: List[CaseChunkMeta] = []
         self.case_ids: List[str] = []
@@ -351,6 +365,11 @@ class PackedPointChunkDataset(Dataset):
 
         with h5py.File(self.h5_path, "r") as h5_file:
             self.channel_order, self.field_dim = infer_dataset_field_metadata(self.h5_path, split=split)
+            if self.promote_to_active:
+                if self.target_channel_order is None or self.target_field_dim is None:
+                    raise ValueError("promote_to_active requires target_channel_order and target_field_dim.")
+                self.channel_order = list(self.target_channel_order)[: int(self.target_field_dim)]
+                self.field_dim = int(self.target_field_dim)
             cases_group = h5_file["cases"]
             for case_id in sort_case_ids(cases_group.keys()):
                 grp = cases_group[case_id]
@@ -369,8 +388,17 @@ class PackedPointChunkDataset(Dataset):
                 field_dim = int(grp.attrs.get("field_dim", len(channel_order)))
                 if "mean_field" in grp:
                     field_dim = int(grp["mean_field"].shape[-1])
-                channel_order = channel_order[:field_dim]
-                if field_dim != self.field_dim or tuple(channel_order) != tuple(self.channel_order):
+                source_field_dim = int(field_dim)
+                source_channel_order = channel_order[:field_dim]
+                if self.promote_to_active:
+                    missing_base = [name for name in INERT_CHANNEL_ORDER if name not in source_channel_order]
+                    if missing_base:
+                        raise ValueError(f"Cannot promote case {case_id}; missing inert channels {missing_base}.")
+                    channel_order = list(self.channel_order)
+                    field_dim = int(self.field_dim)
+                else:
+                    channel_order = source_channel_order
+                if (not self.promote_to_active) and (field_dim != self.field_dim or tuple(channel_order) != tuple(self.channel_order)):
                     raise ValueError(
                         f"Mixed field metadata is not supported in one training dataset. "
                         f"Expected {self.channel_order} (C={self.field_dim}), got case {case_id} "
@@ -381,6 +409,16 @@ class PackedPointChunkDataset(Dataset):
                 num_cylinders = int(grp.attrs["num_cylinders"])
                 freq = float(grp.attrs["dominant_frequency"])
                 mean_field = np.asarray(grp["mean_field"], dtype=np.float32)
+                if self.promote_to_active and mean_field.shape[-1] != self.field_dim:
+                    promoted_mean = np.zeros((*mean_field.shape[:2], self.field_dim), dtype=np.float32)
+                    for out_idx, name in enumerate(self.channel_order):
+                        if name in source_channel_order:
+                            promoted_mean[..., out_idx] = mean_field[..., source_channel_order.index(name)]
+                        elif name == "temperature":
+                            promoted_mean[..., out_idx] = self.inert_temperature_value
+                        else:
+                            raise KeyError(f"Cannot promote mean_field for missing channel {name!r}.")
+                    mean_field = promoted_mean
                 x_grid = np.asarray(grp["x_grid"], dtype=np.float32)
                 y_grid = np.asarray(grp["y_grid"], dtype=np.float32)
                 dx = float(np.mean(np.diff(x_grid[0]))) if x_grid.shape[1] > 1 else 1.0
@@ -393,10 +431,24 @@ class PackedPointChunkDataset(Dataset):
                 phase_bin_centers = (
                     np.asarray(grp["phase_bin_centers"], dtype=np.float32) if has_canonical_cycle else None
                 )
+                phase_tau_centers = (
+                    np.asarray(grp["phase_tau_centers"], dtype=np.float32) if has_canonical_cycle and "phase_tau_centers" in grp else None
+                )
+                tau_abs_centers = (
+                    np.asarray(grp["tau_abs_centers"], dtype=np.float32) if has_canonical_cycle and "tau_abs_centers" in grp else None
+                )
+                thermal_time_centers = (
+                    np.asarray(grp["thermal_time_centers"], dtype=np.float32) if has_canonical_cycle and "thermal_time_centers" in grp else None
+                )
+                cycle_index_centers = (
+                    np.asarray(grp["cycle_index_centers"], dtype=np.float32) if has_canonical_cycle and "cycle_index_centers" in grp else None
+                )
                 if "heat_powers" in grp:
                     heat_powers = np.asarray(grp["heat_powers"], dtype=np.float32).reshape(-1)
                 else:
                     heat_powers = np.zeros((num_cylinders,), dtype=np.float32)
+                if self.promote_to_active:
+                    heat_powers = np.zeros((centers.shape[0],), dtype=np.float32)
                 if heat_powers.shape[0] != centers.shape[0]:
                     raise ValueError(
                         f"Case {case_id} heat_powers length {heat_powers.shape[0]} does not match "
@@ -417,6 +469,8 @@ class PackedPointChunkDataset(Dataset):
                     "freq": freq,
                     "mean_field": mean_field,
                     "channel_order": channel_order,
+                    "source_channel_order": source_channel_order,
+                    "source_field_dim": source_field_dim,
                     "field_dim": field_dim,
                     "x_grid": x_grid,
                     "y_grid": y_grid,
@@ -427,6 +481,10 @@ class PackedPointChunkDataset(Dataset):
                     "has_canonical_cycle": has_canonical_cycle,
                     "canonical_cycle": None,
                     "phase_bin_centers": phase_bin_centers,
+                    "phase_tau_centers": phase_tau_centers,
+                    "tau_abs_centers": tau_abs_centers,
+                    "thermal_time_centers": thermal_time_centers,
+                    "cycle_index_centers": cycle_index_centers,
                 }
                 self.case_ids.append(case_id)
 
@@ -472,6 +530,32 @@ class PackedPointChunkDataset(Dataset):
 
     def set_epoch(self, epoch: int) -> None:
         self.current_epoch = int(epoch)
+
+    def _promote_last_dim(self, values: np.ndarray, source_channel_order: Sequence[str]) -> np.ndarray:
+        if not self.promote_to_active:
+            return values
+        if values.shape[-1] == self.field_dim:
+            return values
+        promoted = np.zeros((*values.shape[:-1], self.field_dim), dtype=np.float32)
+        for out_idx, name in enumerate(self.channel_order):
+            if name in source_channel_order:
+                promoted[..., out_idx] = values[..., source_channel_order.index(name)]
+            elif name == "temperature":
+                promoted[..., out_idx] = self.inert_temperature_value
+            else:
+                raise KeyError(f"Cannot promote missing channel {name!r}.")
+        return promoted
+
+    def _query_time_for_inert(self, tau: np.ndarray, idx: int, salt: int = 0) -> np.ndarray:
+        tau = np.asarray(tau, dtype=np.float32)
+        if not self.promote_to_active:
+            return tau.astype(np.float32, copy=False)
+        if self.inert_thermal_time_mode == "zero":
+            return np.zeros_like(tau, dtype=np.float32)
+        if self.inert_thermal_time_mode == "tau":
+            return tau.astype(np.float32, copy=False)
+        rng = self._rng_for_item(idx, include_epoch=self.resample_each_epoch, salt=4451 + int(salt))
+        return rng.uniform(0.0, self.active_max_thermal_time, size=tau.shape).astype(np.float32)
 
     def _rng_for_item(self, idx: int, *, include_epoch: bool, salt: int = 0) -> np.random.Generator:
         epoch_offset = self.current_epoch if include_epoch else 0
@@ -731,6 +815,7 @@ class PackedPointChunkDataset(Dataset):
             return None
 
         canonical_cycle = np.asarray(canonical_cycle, dtype=np.float32)
+        canonical_cycle = self._promote_last_dim(canonical_cycle, case_static.get("source_channel_order", case_static["channel_order"]))
         phase_bin_centers = np.asarray(phase_bin_centers, dtype=np.float32).reshape(-1)
         if canonical_cycle.ndim != 4 or canonical_cycle.shape[-1] != self.field_dim:
             raise ValueError(f"canonical_cycle must have shape [phase, H, W, {self.field_dim}].")
@@ -772,7 +857,23 @@ class PackedPointChunkDataset(Dataset):
 
         x = x_grid[repeated_iy, repeated_ix].astype(np.float32, copy=False)
         y = y_grid[repeated_iy, repeated_ix].astype(np.float32, copy=False)
-        tau = phase_bin_centers[tiled_phase].astype(np.float32, copy=False)
+        phase_tau_centers = case_static.get("phase_tau_centers")
+        tau_abs_centers = case_static.get("tau_abs_centers")
+        thermal_time_centers = case_static.get("thermal_time_centers")
+        if phase_tau_centers is not None:
+            phase_tau_arr = np.asarray(phase_tau_centers, dtype=np.float32).reshape(-1)
+        else:
+            phase_tau_arr = phase_bin_centers
+        if thermal_time_centers is not None:
+            query_time_arr = np.asarray(thermal_time_centers, dtype=np.float32).reshape(-1)
+        elif tau_abs_centers is not None:
+            query_time_arr = np.asarray(tau_abs_centers, dtype=np.float32).reshape(-1)
+        else:
+            query_time_arr = phase_bin_centers
+        tau = phase_tau_arr[tiled_phase].astype(np.float32, copy=False)
+        query_time = query_time_arr[tiled_phase].astype(np.float32, copy=False)
+        if self.promote_to_active:
+            query_time = self._query_time_for_inert(tau, idx, salt=321)
         targets = canonical_cycle[tiled_phase, repeated_iy, repeated_ix, : self.field_dim].astype(np.float32, copy=False)
         mean_targets = mean_field[repeated_iy, repeated_ix, : self.field_dim].astype(np.float32, copy=False)
         residual_targets = targets - mean_targets
@@ -782,6 +883,7 @@ class PackedPointChunkDataset(Dataset):
             "x": x,
             "y": y,
             "tau": tau,
+            "query_time": query_time,
             "targets": targets,
             "mean_targets": mean_targets,
             "residual_targets": residual_targets,
@@ -799,12 +901,24 @@ class PackedPointChunkDataset(Dataset):
         chunk_x = np.asarray(sampled["x"][sl], dtype=np.float32)
         chunk_y = np.asarray(sampled["y"][sl], dtype=np.float32)
         chunk_tau = np.asarray(sampled["tau"][sl], dtype=np.float32)
+        if "thermal_time" in sampled:
+            chunk_query_time = np.asarray(sampled["thermal_time"][sl], dtype=np.float32)
+        elif "tau_abs" in sampled:
+            chunk_query_time = np.asarray(sampled["tau_abs"][sl], dtype=np.float32)
+        else:
+            chunk_query_time = chunk_tau.astype(np.float32, copy=False)
         channel_order = case_static["channel_order"]
+        source_channel_order = case_static.get("source_channel_order", channel_order)
         chunk_fields = []
         for channel_name in channel_order:
             if channel_name not in sampled:
+                if self.promote_to_active and channel_name == "temperature":
+                    chunk_fields.append(np.full(chunk_tau.shape, self.inert_temperature_value, dtype=np.float32))
+                    continue
                 raise KeyError(f"Case {meta.case_id} sampled_points is missing channel {channel_name!r}.")
             chunk_fields.append(np.asarray(sampled[channel_name][sl], dtype=np.float32))
+        if self.promote_to_active:
+            chunk_query_time = self._query_time_for_inert(chunk_tau, idx, salt=0)
         omega_idx = channel_order.index("omega") if "omega" in channel_order else min(3, len(channel_order) - 1)
         chunk_omega = chunk_fields[omega_idx]
 
@@ -843,6 +957,7 @@ class PackedPointChunkDataset(Dataset):
         x_normal = chunk_x[local_indices]
         y_normal = chunk_y[local_indices]
         tau_normal = chunk_tau[local_indices]
+        query_time_normal = chunk_query_time[local_indices]
         targets_normal = np.stack(
             [values[local_indices] for values in chunk_fields],
             axis=-1,
@@ -878,6 +993,7 @@ class PackedPointChunkDataset(Dataset):
         x_parts = [x_normal.astype(np.float32, copy=False)]
         y_parts = [y_normal.astype(np.float32, copy=False)]
         tau_parts = [tau_normal.astype(np.float32, copy=False)]
+        query_time_parts = [query_time_normal.astype(np.float32, copy=False)]
         target_parts = [targets_normal]
         mean_parts = [mean_targets_normal]
         residual_parts = [residual_targets_normal]
@@ -886,6 +1002,7 @@ class PackedPointChunkDataset(Dataset):
             x_parts.append(phase_window_points["x"])
             y_parts.append(phase_window_points["y"])
             tau_parts.append(phase_window_points["tau"])
+            query_time_parts.append(phase_window_points.get("query_time", phase_window_points["tau"]))
             target_parts.append(phase_window_points["targets"])
             mean_parts.append(phase_window_points["mean_targets"])
             residual_parts.append(phase_window_points["residual_targets"])
@@ -894,6 +1011,7 @@ class PackedPointChunkDataset(Dataset):
         x = np.concatenate(x_parts, axis=0).astype(np.float32, copy=False)
         y = np.concatenate(y_parts, axis=0).astype(np.float32, copy=False)
         tau = np.concatenate(tau_parts, axis=0).astype(np.float32, copy=False)
+        query_time = np.concatenate(query_time_parts, axis=0).astype(np.float32, copy=False)
         targets = np.concatenate(target_parts, axis=0).astype(np.float32, copy=False)
         mean_targets = np.concatenate(mean_parts, axis=0).astype(np.float32, copy=False)
         residual_targets = np.concatenate(residual_parts, axis=0).astype(np.float32, copy=False)
@@ -905,6 +1023,7 @@ class PackedPointChunkDataset(Dataset):
             x = x[order]
             y = y[order]
             tau = tau[order]
+            query_time = query_time[order]
             targets = targets[order]
             mean_targets = mean_targets[order]
             residual_targets = residual_targets[order]
@@ -918,6 +1037,7 @@ class PackedPointChunkDataset(Dataset):
             "cyl_mask": torch.from_numpy(cyl_mask),
             "query_xy": torch.from_numpy(np.stack([x, y], axis=-1)),
             "query_tau": torch.from_numpy(tau[:, None]),
+            "query_time": torch.from_numpy(query_time[:, None]),
             "field_targets": torch.from_numpy(targets),
             "mean_targets": torch.from_numpy(mean_targets),
             "residual_targets": torch.from_numpy(residual_targets),
@@ -932,6 +1052,145 @@ class PackedPointChunkDataset(Dataset):
         if self._h5 is not None:
             self._h5.close()
             self._h5 = None
+
+
+class MultiSourcePointChunkDataset(Dataset):
+    """Concatenate compatible active and promoted-inert point datasets."""
+
+    def __init__(self, datasets: Sequence[Dataset]):
+        self.datasets = [ds for ds in datasets if ds is not None and len(ds) > 0]
+        if not self.datasets:
+            raise ValueError("MultiSourcePointChunkDataset requires at least one non-empty child dataset.")
+        self.offsets: List[int] = []
+        total = 0
+        for ds in self.datasets:
+            self.offsets.append(total)
+            total += len(ds)
+        self.total_len = total
+        primary = self.datasets[0]
+        self.channel_order = list(getattr(primary, "channel_order", INERT_CHANNEL_ORDER))
+        self.field_dim = int(getattr(primary, "field_dim", len(self.channel_order)))
+        self.heat_power_scale = float(getattr(primary, "heat_power_scale", 1.0))
+
+    def __len__(self) -> int:
+        return self.total_len
+
+    def __getitem__(self, idx: int):
+        idx = int(idx)
+        if idx < 0:
+            idx += self.total_len
+        if idx < 0 or idx >= self.total_len:
+            raise IndexError(idx)
+        child_idx = max(i for i, offset in enumerate(self.offsets) if offset <= idx)
+        return self.datasets[child_idx][idx - self.offsets[child_idx]]
+
+    def set_epoch(self, epoch: int) -> None:
+        for ds in self.datasets:
+            if hasattr(ds, "set_epoch"):
+                ds.set_epoch(epoch)  # type: ignore[attr-defined]
+
+    def close(self) -> None:
+        for ds in self.datasets:
+            if hasattr(ds, "close"):
+                ds.close()  # type: ignore[attr-defined]
+
+
+def _first_matching_case(h5_file: h5py.File, split: str = "all") -> Optional[h5py.Group]:
+    for case_id in sort_case_ids(h5_file["cases"].keys()):
+        grp = h5_file["cases"][case_id]
+        case_split = grp.attrs.get("split", "all")
+        if split in {"all", case_split}:
+            return grp
+    return None
+
+
+def _max_num_cylinders_in_h5(h5_file: h5py.File) -> int:
+    max_count = 0
+    for case_id in h5_file["cases"].keys():
+        grp = h5_file["cases"][case_id]
+        max_count = max(max_count, int(grp.attrs.get("num_cylinders", grp["cylinder_centers"].shape[0])))
+    return max_count
+
+
+def check_inert_active_dataset_compatibility(active_h5: Path, inert_h5: Path) -> Tuple[bool, List[str]]:
+    """Check geometry/channel compatibility before using inert samples as active auxiliaries."""
+    warnings: List[str] = []
+    ok = True
+    with h5py.File(active_h5, "r") as active_file, h5py.File(inert_h5, "r") as inert_file:
+        active_grp = _first_matching_case(active_file, "all")
+        inert_grp = _first_matching_case(inert_file, "all")
+        if active_grp is None or inert_grp is None:
+            return False, ["active or inert packed dataset contains no cases."]
+
+        active_order = get_case_channel_order(active_grp, active_file)
+        inert_order = get_case_channel_order(inert_grp, inert_file)
+        if not all(name in inert_order for name in INERT_CHANNEL_ORDER):
+            ok = False
+            warnings.append(f"inert channel_order must include {INERT_CHANNEL_ORDER}, got {inert_order}.")
+        if not all(name in active_order for name in ACTIVE_CHANNEL_ORDER):
+            ok = False
+            warnings.append(f"active channel_order must include {ACTIVE_CHANNEL_ORDER}, got {active_order}.")
+
+        active_x = np.asarray(active_grp["x_grid"], dtype=np.float32)
+        active_y = np.asarray(active_grp["y_grid"], dtype=np.float32)
+        inert_x = np.asarray(inert_grp["x_grid"], dtype=np.float32)
+        inert_y = np.asarray(inert_grp["y_grid"], dtype=np.float32)
+        if active_x.shape != inert_x.shape or active_y.shape != inert_y.shape:
+            ok = False
+            warnings.append(f"grid shape mismatch: active x/y {active_x.shape}/{active_y.shape}, inert {inert_x.shape}/{inert_y.shape}.")
+        elif not (np.allclose(active_x, inert_x, rtol=1e-5, atol=1e-6) and np.allclose(active_y, inert_y, rtol=1e-5, atol=1e-6)):
+            ok = False
+            warnings.append("x_grid/y_grid values differ beyond tolerance.")
+
+        for attr in ("lx", "ly", "nx", "ny", "cylinder_radius"):
+            a_val = active_grp.attrs.get(attr)
+            i_val = inert_grp.attrs.get(attr)
+            if a_val is None or i_val is None:
+                warnings.append(f"metadata attr {attr!r} missing in one dataset; inferred grid checks were used.")
+                continue
+            if abs(float(a_val) - float(i_val)) > 1e-5:
+                ok = False
+                warnings.append(f"{attr} mismatch: active={a_val}, inert={i_val}.")
+
+        active_max = _max_num_cylinders_in_h5(active_file)
+        inert_max = _max_num_cylinders_in_h5(inert_file)
+        if inert_max > active_max:
+            warnings.append(
+                f"inert max_num_cylinders={inert_max} exceeds active max={active_max}; training max_num_cylinders must cover both."
+            )
+
+        active_re = [float(active_file["cases"][cid].attrs.get("re", 0.0)) for cid in active_file["cases"].keys()]
+        inert_re = [float(inert_file["cases"][cid].attrs.get("re", 0.0)) for cid in inert_file["cases"].keys()]
+        if active_re and inert_re:
+            a_min, a_max = min(active_re), max(active_re)
+            i_min, i_max = min(inert_re), max(inert_re)
+            if i_max < a_min or i_min > a_max:
+                warnings.append(f"Re ranges do not overlap: active=[{a_min:g}, {a_max:g}], inert=[{i_min:g}, {i_max:g}].")
+
+        active_mode = str(active_grp.attrs.get("active_time_mode", active_file.attrs.get("active_time_mode", "periodic")))
+        inert_mode = str(inert_grp.attrs.get("active_time_mode", inert_file.attrs.get("active_time_mode", "periodic")))
+        if active_mode not in {"periodic", "multicycle_absolute"} or inert_mode not in {"periodic", "multicycle_absolute"}:
+            warnings.append(f"unrecognized coordinate conventions: active={active_mode}, inert={inert_mode}.")
+    return ok, warnings
+
+
+def infer_active_max_thermal_time(h5_path: Path) -> float:
+    max_value = 1.0
+    with h5py.File(h5_path, "r") as h5_file:
+        for case_id in h5_file["cases"].keys():
+            grp = h5_file["cases"][case_id]
+            candidates = []
+            if "thermal_time_centers" in grp:
+                candidates.append(np.asarray(grp["thermal_time_centers"], dtype=np.float32))
+            sampled = grp.get("sampled_points")
+            if sampled is not None and "thermal_time" in sampled:
+                candidates.append(np.asarray(sampled["thermal_time"], dtype=np.float32))
+            if sampled is not None and "tau_abs" in sampled:
+                candidates.append(np.asarray(sampled["tau_abs"], dtype=np.float32))
+            for arr in candidates:
+                if arr.size:
+                    max_value = max(max_value, float(np.nanmax(arr)))
+    return max_value
 
 
 class CanonicalCycleValidationDataset(Dataset):
@@ -974,6 +1233,10 @@ class CanonicalCycleValidationDataset(Dataset):
                 "field_dim": int(grp.attrs.get("field_dim", grp["canonical_cycle"].shape[-1])),
                 "canonical_cycle": np.asarray(grp["canonical_cycle"], dtype=np.float32),
                 "phase_bin_centers": np.asarray(grp["phase_bin_centers"], dtype=np.float32),
+                "phase_tau_centers": np.asarray(grp["phase_tau_centers"], dtype=np.float32) if "phase_tau_centers" in grp else None,
+                "tau_abs_centers": np.asarray(grp["tau_abs_centers"], dtype=np.float32) if "tau_abs_centers" in grp else None,
+                "thermal_time_centers": np.asarray(grp["thermal_time_centers"], dtype=np.float32) if "thermal_time_centers" in grp else None,
+                "cycle_index_centers": np.asarray(grp["cycle_index_centers"], dtype=np.float32) if "cycle_index_centers" in grp else None,
                 "x_grid": np.asarray(grp["x_grid"], dtype=np.float32),
                 "y_grid": np.asarray(grp["y_grid"], dtype=np.float32),
                 "mean_field": np.asarray(grp["mean_field"], dtype=np.float32),
@@ -993,6 +1256,7 @@ def collate_point_chunks(batch: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, 
         cyl_mask:       [B, N_max]
         query_xy:       [B, Q_max, 2]
         query_tau:      [B, Q_max, 1]
+        query_time:     [B, Q_max, 1]
         field_targets:  [B, Q_max, C]
         mean_targets:   [B, Q_max, C]
         residual_targets:[B, Q_max, C]
@@ -1020,6 +1284,7 @@ def collate_point_chunks(batch: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, 
         "cyl_mask": torch.stack([item["cyl_mask"] for item in batch], dim=0),
         "query_xy": torch.stack([pad_points(item["query_xy"]) for item in batch], dim=0),
         "query_tau": torch.stack([pad_points(item["query_tau"]) for item in batch], dim=0),
+        "query_time": torch.stack([pad_points(item.get("query_time", item["query_tau"])) for item in batch], dim=0),
         "field_targets": torch.stack([pad_points(item["field_targets"]) for item in batch], dim=0),
         "mean_targets": torch.stack([pad_points(item["mean_targets"]) for item in batch], dim=0),
         "residual_targets": torch.stack([pad_points(item["residual_targets"]) for item in batch], dim=0),
@@ -1113,14 +1378,30 @@ def compute_losses(
     residual_targets = batch["residual_targets"]
     freq_target = batch["freq_target"]
 
-    def masked_mse(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    def channel_weights(name: str, channels: int) -> Optional[torch.Tensor]:
+        values = loss_cfg.get(name)
+        if values is None:
+            return None
+        if len(values) != channels:
+            raise ValueError(f"loss.{name} length {len(values)} must equal field_dim={channels}.")
+        return torch.as_tensor(values, device=pred_field.device, dtype=pred_field.dtype).reshape(1, 1, channels)
+
+    def masked_mse(pred: torch.Tensor, target: torch.Tensor, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
         diff = ((pred - target) ** 2) * point_mask
-        denom = point_mask.sum().clamp_min(1.0) * pred.shape[-1]
+        if weights is not None:
+            diff = diff * weights
+            denom = (point_mask * weights).sum().clamp_min(1.0)
+        else:
+            denom = point_mask.sum().clamp_min(1.0) * pred.shape[-1]
         return diff.sum() / denom
 
-    loss_field = masked_mse(pred_field, field_targets)
-    loss_mean = masked_mse(pred_mean, mean_targets)
-    loss_residual = masked_mse(pred_residual, residual_targets)
+    field_weights = channel_weights("field_channel_weights", pred_field.shape[-1])
+    mean_weights = channel_weights("mean_channel_weights", pred_mean.shape[-1])
+    residual_weights = channel_weights("residual_channel_weights", pred_residual.shape[-1])
+
+    loss_field = masked_mse(pred_field, field_targets, field_weights)
+    loss_mean = masked_mse(pred_mean, mean_targets, mean_weights)
+    loss_residual = masked_mse(pred_residual, residual_targets, residual_weights)
     loss_freq = F.mse_loss(freq_pred, freq_target)
     loss_dynamic_energy = compute_dynamic_energy_loss(
         pred_residual,
@@ -1716,7 +1997,18 @@ def evaluate_canonical_cases(
         gt_fields = []
         for idx in chosen_indices:
             tau_val = torch.tensor([phase_bins[idx]], dtype=torch.float32, device=device)
-            out = model.reconstruct_full_grid(structure, x_grid, y_grid, tau=tau_val, query_batch_size=query_batch_size)
+            phase_tau = case.get("phase_tau_centers")
+            thermal_time = case.get("thermal_time_centers")
+            tau_for_model = float(phase_tau[idx]) if phase_tau is not None else float(phase_bins[idx])
+            time_for_model = float(thermal_time[idx]) if thermal_time is not None else float(phase_bins[idx])
+            out = model.reconstruct_full_grid(
+                structure,
+                x_grid,
+                y_grid,
+                tau=torch.tensor([tau_for_model], dtype=torch.float32, device=device),
+                query_time=torch.tensor([time_for_model], dtype=torch.float32, device=device),
+                query_batch_size=query_batch_size,
+            )
             pred_fields.append(out["pred_field"][0])
             gt_fields.append(canonical[idx])
         pred_stack = torch.stack(pred_fields, dim=0)
@@ -1750,10 +2042,22 @@ def evaluate_canonical_cases(
         dynamic_energy_losses.append(loss_dynamic_energy.item())
 
         # Frequency prediction from the behavior head.
+        first_phase_idx = chosen_indices[0]
+        first_phase_tau = (
+            float(case["phase_tau_centers"][first_phase_idx])
+            if case.get("phase_tau_centers") is not None
+            else float(phase_bins[first_phase_idx])
+        )
+        first_query_time = (
+            float(case["thermal_time_centers"][first_phase_idx])
+            if case.get("thermal_time_centers") is not None
+            else float(phase_bins[first_phase_idx])
+        )
         out_once = model.forward(
             structure=structure,
             query_xy=torch.stack([x_grid.reshape(-1), y_grid.reshape(-1)], dim=-1)[None, :1024, :],
-            query_tau=torch.full((1, 1024, 1), phase_bins[chosen_indices[0]], device=device),
+            query_tau=torch.full((1, 1024, 1), first_phase_tau, device=device),
+            query_time=torch.full((1, 1024, 1), first_query_time, device=device),
             return_aux=True,
         )
         loss_freq = F.mse_loss(out_once["freq_pred"], torch.tensor([[case["dominant_frequency"]]], device=device))
@@ -1897,6 +2201,7 @@ def evaluate_point_chunks(
             structure["extra_module"] = batch["extra_module"].to(device=device)
         query_xy = batch["query_xy"].to(device=device)
         query_tau = batch["query_tau"].to(device=device)
+        query_time = batch.get("query_time", batch["query_tau"]).to(device=device)
 
         for key in [
             "re_values",
@@ -1911,7 +2216,7 @@ def evaluate_point_chunks(
             if key in batch:
                 batch[key] = batch[key].to(device=device)
 
-        outputs = model(structure=structure, query_xy=query_xy, query_tau=query_tau, return_aux=True)
+        outputs = model(structure=structure, query_xy=query_xy, query_tau=query_tau, query_time=query_time, return_aux=True)
         bad_outputs = find_nonfinite_tensors(
             {
                 "pred_field": outputs["pred_field"],
@@ -2134,6 +2439,41 @@ def main() -> None:
     if model_cfg.max_num_cylinders != max_num_cylinders:
         model_cfg.max_num_cylinders = max_num_cylinders
     print(f"[setup] dataset field_dim={dataset_field_dim} channel_order={dataset_channel_order}")
+    use_inert_effective = bool(dataset_cfg.get("USE_INERT", False))
+    inert_packed_h5_path: Optional[Path] = None
+    active_max_thermal_time = 1.0
+    if use_inert_effective:
+        inert_packed_h5_path = resolve_demo_config_path(dataset_cfg.get("inert_packed_h5_path", "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5"))
+        if not inert_packed_h5_path.exists():
+            message = f"USE_INERT requested but inert packed HDF5 was not found: {inert_packed_h5_path}"
+            if bool(dataset_cfg.get("fallback_to_active_only_on_mismatch", True)):
+                print(f"[WARN] {message}; falling back to active-only training.")
+                use_inert_effective = False
+            else:
+                raise FileNotFoundError(message)
+        if use_inert_effective and inert_packed_h5_path is not None:
+            ok, compatibility_warnings = check_inert_active_dataset_compatibility(packed_h5_path, inert_packed_h5_path)
+            for warning in compatibility_warnings:
+                print(f"[dataset-compat] {warning}")
+            if not ok:
+                message = "Active/inert packed datasets are not compatible for combined training."
+                if bool(dataset_cfg.get("fallback_to_active_only_on_mismatch", True)):
+                    print(f"[WARN] {message} Falling back to active-only training.")
+                    use_inert_effective = False
+                else:
+                    raise ValueError(message)
+        if use_inert_effective:
+            configured_max = dataset_cfg.get("active_max_thermal_time", "auto")
+            active_max_thermal_time = (
+                infer_active_max_thermal_time(packed_h5_path)
+                if str(configured_max).strip().lower() == "auto"
+                else float(configured_max)
+            )
+            print(
+                f"[setup] USE_INERT enabled | inert_path={inert_packed_h5_path} | "
+                f"inert_query_time_mode={dataset_cfg.get('inert_thermal_time_mode', 'random_active_range')} | "
+                f"active_max_thermal_time={active_max_thermal_time:.4g}"
+            )
     print(f"[setup] decoder={model_cfg.decoder_type}")
     print(
         "[setup] hierarchical_perceiver: "
@@ -2182,6 +2522,49 @@ def main() -> None:
         use_heat_power_module_feature=bool(dataset_cfg.get("use_heat_power_module_feature", False)),
         heat_power_scale=dataset_cfg.get("heat_power_scale", "auto"),
     )
+    if use_inert_effective:
+        assert inert_packed_h5_path is not None
+        inert_train_dataset = PackedPointChunkDataset(
+            inert_packed_h5_path,
+            split=dataset_cfg.get("inert_split", "all"),
+            is_training=True,
+            points_per_item=int(dataset_cfg.get("points_per_item", 4096)),
+            max_num_cylinders=max_num_cylinders,
+            train_point_fraction=float(dataset_cfg.get("train_point_fraction", 1.0)),
+            min_points_per_sample=int(dataset_cfg.get("min_points_per_sample", 256)),
+            resample_each_epoch=bool(dataset_cfg.get("resample_each_epoch", True)),
+            base_seed=int(cfg["training"].get("seed", 42)) + 777,
+            randomize_cylinder_order=bool(dataset_cfg.get("randomize_cylinder_order", False)),
+            point_sampling_mode=str(dataset_cfg.get("point_sampling_mode", "uniform")),
+            wake_uniform_fraction=float(dataset_cfg.get("wake_uniform_fraction", 0.35)),
+            wake_near_cylinder_fraction=float(dataset_cfg.get("wake_near_cylinder_fraction", 0.20)),
+            wake_downstream_fraction=float(dataset_cfg.get("wake_downstream_fraction", 0.30)),
+            wake_high_omega_fraction=float(dataset_cfg.get("wake_high_omega_fraction", 0.15)),
+            wake_near_radius=float(dataset_cfg.get("wake_near_radius", 1.25)),
+            wake_sigma_y_base=float(dataset_cfg.get("wake_sigma_y_base", 0.50)),
+            wake_sigma_y_growth=float(dataset_cfg.get("wake_sigma_y_growth", 0.20)),
+            wake_streamwise_decay=float(dataset_cfg.get("wake_streamwise_decay", 8.0)),
+            wake_high_omega_quantile=float(dataset_cfg.get("wake_high_omega_quantile", 0.75)),
+            wake_sampling_train_only=bool(dataset_cfg.get("wake_sampling_train_only", True)),
+            use_phase_window_batches=bool(dataset_cfg.get("use_phase_window_batches", False)),
+            phase_window_train_only=bool(dataset_cfg.get("phase_window_train_only", True)),
+            phase_window_fraction=float(dataset_cfg.get("phase_window_fraction", 0.25)),
+            phase_window_num_phases=int(dataset_cfg.get("phase_window_num_phases", 4)),
+            phase_window_num_xy=int(dataset_cfg.get("phase_window_num_xy", 256)),
+            phase_window_phase_mode=str(dataset_cfg.get("phase_window_phase_mode", "stratified_cycle")),
+            phase_window_xy_sampling=str(dataset_cfg.get("phase_window_xy_sampling", "omega_variance")),
+            phase_window_require_canonical_cycle=bool(dataset_cfg.get("phase_window_require_canonical_cycle", False)),
+            use_heat_power_module_feature=bool(dataset_cfg.get("use_heat_power_module_feature", False)),
+            heat_power_scale=dataset_cfg.get("heat_power_scale", "auto"),
+            promote_to_active=bool(dataset_cfg.get("promote_inert_to_active", True)),
+            target_channel_order=dataset_channel_order,
+            target_field_dim=dataset_field_dim,
+            inert_temperature_value=float(dataset_cfg.get("inert_temperature_value", 0.0)),
+            inert_thermal_time_mode=str(dataset_cfg.get("inert_thermal_time_mode", "random_active_range")),
+            active_max_thermal_time=active_max_thermal_time,
+        )
+        train_dataset = MultiSourcePointChunkDataset([train_dataset, inert_train_dataset])
+        print(f"[setup] combined train chunks={len(train_dataset)} (active + promoted inert)")
     validation_cfg = cfg["validation"]
     val_mode = str(validation_cfg.get("mode", "point_chunks")).strip().lower()
     if val_mode not in {"point_chunks", "canonical_full_grid"}:
@@ -2228,6 +2611,50 @@ def main() -> None:
             use_heat_power_module_feature=bool(dataset_cfg.get("use_heat_power_module_feature", False)),
             heat_power_scale=dataset_cfg.get("heat_power_scale", "auto"),
         )
+        if use_inert_effective and bool(dataset_cfg.get("use_inert_for_val", False)):
+            assert inert_packed_h5_path is not None
+            inert_val_dataset = PackedPointChunkDataset(
+                inert_packed_h5_path,
+                split=dataset_cfg.get("inert_split", "all"),
+                is_training=False,
+                points_per_item=int(validation_cfg.get("points_per_item", dataset_cfg.get("points_per_item", 4096))),
+                max_num_cylinders=max_num_cylinders,
+                train_point_fraction=float(validation_cfg.get("point_fraction", 1.0)),
+                min_points_per_sample=int(validation_cfg.get("min_points_per_sample", dataset_cfg.get("min_points_per_sample", 256))),
+                resample_each_epoch=bool(validation_cfg.get("resample_each_eval", False)),
+                base_seed=int(validation_cfg.get("seed", cfg["training"].get("seed", 42))) + 777,
+                randomize_cylinder_order=False,
+                point_sampling_mode=str(validation_cfg.get("point_sampling_mode", "uniform")),
+                wake_uniform_fraction=float(validation_cfg.get("wake_uniform_fraction", dataset_cfg.get("wake_uniform_fraction", 0.35))),
+                wake_near_cylinder_fraction=float(validation_cfg.get("wake_near_cylinder_fraction", dataset_cfg.get("wake_near_cylinder_fraction", 0.20))),
+                wake_downstream_fraction=float(validation_cfg.get("wake_downstream_fraction", dataset_cfg.get("wake_downstream_fraction", 0.30))),
+                wake_high_omega_fraction=float(validation_cfg.get("wake_high_omega_fraction", dataset_cfg.get("wake_high_omega_fraction", 0.15))),
+                wake_near_radius=float(validation_cfg.get("wake_near_radius", dataset_cfg.get("wake_near_radius", 1.25))),
+                wake_sigma_y_base=float(validation_cfg.get("wake_sigma_y_base", dataset_cfg.get("wake_sigma_y_base", 0.50))),
+                wake_sigma_y_growth=float(validation_cfg.get("wake_sigma_y_growth", dataset_cfg.get("wake_sigma_y_growth", 0.20))),
+                wake_streamwise_decay=float(validation_cfg.get("wake_streamwise_decay", dataset_cfg.get("wake_streamwise_decay", 8.0))),
+                wake_high_omega_quantile=float(validation_cfg.get("wake_high_omega_quantile", dataset_cfg.get("wake_high_omega_quantile", 0.75))),
+                wake_sampling_train_only=bool(validation_cfg.get("wake_sampling_train_only", dataset_cfg.get("wake_sampling_train_only", True))),
+                use_phase_window_batches=bool(validation_cfg.get("use_phase_window_batches", dataset_cfg.get("use_phase_window_batches", False))),
+                phase_window_train_only=bool(validation_cfg.get("phase_window_train_only", dataset_cfg.get("phase_window_train_only", True))),
+                phase_window_fraction=float(validation_cfg.get("phase_window_fraction", dataset_cfg.get("phase_window_fraction", 0.25))),
+                phase_window_num_phases=int(validation_cfg.get("phase_window_num_phases", dataset_cfg.get("phase_window_num_phases", 4))),
+                phase_window_num_xy=int(validation_cfg.get("phase_window_num_xy", dataset_cfg.get("phase_window_num_xy", 256))),
+                phase_window_phase_mode=str(validation_cfg.get("phase_window_phase_mode", dataset_cfg.get("phase_window_phase_mode", "stratified_cycle"))),
+                phase_window_xy_sampling=str(validation_cfg.get("phase_window_xy_sampling", dataset_cfg.get("phase_window_xy_sampling", "omega_variance"))),
+                phase_window_require_canonical_cycle=bool(validation_cfg.get("phase_window_require_canonical_cycle", dataset_cfg.get("phase_window_require_canonical_cycle", False))),
+                use_heat_power_module_feature=bool(dataset_cfg.get("use_heat_power_module_feature", False)),
+                heat_power_scale=dataset_cfg.get("heat_power_scale", "auto"),
+                promote_to_active=bool(dataset_cfg.get("promote_inert_to_active", True)),
+                target_channel_order=dataset_channel_order,
+                target_field_dim=dataset_field_dim,
+                inert_temperature_value=float(dataset_cfg.get("inert_temperature_value", 0.0)),
+                inert_thermal_time_mode=str(dataset_cfg.get("inert_thermal_time_mode", "random_active_range")),
+                active_max_thermal_time=active_max_thermal_time,
+            )
+            val_dataset = MultiSourcePointChunkDataset([val_dataset, inert_val_dataset])
+        elif use_inert_effective:
+            print("[setup] validation remains active-only (use_inert_for_val=false).")
     else:
         canonical_val_dataset = CanonicalCycleValidationDataset(
             packed_h5_path,
@@ -2481,6 +2908,7 @@ def main() -> None:
                 structure["extra_module"] = batch["extra_module"].to(device=device)
             query_xy = batch["query_xy"].to(device=device)
             query_tau = batch["query_tau"].to(device=device)
+            query_time = batch.get("query_time", batch["query_tau"]).to(device=device)
 
             for key in [
                 "re_values",
@@ -2497,7 +2925,13 @@ def main() -> None:
 
             org_scale = organizer_ramp_scale(cfg["loss"], epoch)
             with autocast_context(device, enabled=scaler.is_enabled()):
-                outputs = model(structure=structure, query_xy=query_xy, query_tau=query_tau, return_aux=True)
+                outputs = model(
+                    structure=structure,
+                    query_xy=query_xy,
+                    query_tau=query_tau,
+                    query_time=query_time,
+                    return_aux=True,
+                )
                 bad_outputs = find_nonfinite_tensors(
                     {
                         "pred_field": outputs["pred_field"],
