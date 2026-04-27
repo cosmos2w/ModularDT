@@ -82,8 +82,12 @@ def _as_numpy_first(out: Dict, key: str, default: Optional[np.ndarray] = None) -
         "hyper_active_mask",
         "hyper_collapsed_mask",
         "hyper_duplicate_mask",
+        "hyper_parent_index",
         "hyper_edge_score",
         "hyper_env_token_count",
+        "hyper_effective_env_token_count",
+        "hyper_effective_module_mass",
+        "hyper_effective_env_mass",
     }:
         return value[0]
     return value
@@ -96,19 +100,25 @@ def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
     num_cyl = centers.shape[0]
 
     A_me = _as_numpy_first(out, "A_me")
-    A_mh = _as_numpy_first(out, "A_mh")
-    A_eh = _as_numpy_first(out, "A_eh")
+    A_mh_raw = _as_numpy_first(out, "A_mh")
+    A_eh_raw = _as_numpy_first(out, "A_eh")
+    A_mh_effective = _as_numpy_first(out, "A_mh_effective", A_mh_raw)
+    A_eh_effective = _as_numpy_first(out, "A_eh_effective", A_eh_raw)
     env_coords_norm = _as_numpy_first(out, "env_coords")
     hyper_source_norm = _as_numpy_first(out, "hyper_source_coords")
     hyper_wake_norm = _as_numpy_first(out, "hyper_wake_coords", hyper_source_norm)
     hyper_wake_axis = _as_numpy_first(out, "hyper_wake_axis")
 
-    if A_me is None or A_mh is None or A_eh is None or env_coords_norm is None or hyper_source_norm is None:
+    if A_me is None or A_mh_raw is None or A_eh_raw is None or env_coords_norm is None or hyper_source_norm is None:
         raise KeyError("Organization outputs are missing one of A_me, A_mh, A_eh, env_coords, hyper_source_coords.")
 
     A_me = np.asarray(A_me[:num_cyl], dtype=np.float32)
-    A_mh = np.asarray(A_mh[:num_cyl], dtype=np.float32)
-    A_eh = np.asarray(A_eh, dtype=np.float32)
+    A_mh_raw = np.asarray(A_mh_raw[:num_cyl], dtype=np.float32)
+    A_eh_raw = np.asarray(A_eh_raw, dtype=np.float32)
+    A_mh_effective = np.asarray(A_mh_effective[:num_cyl], dtype=np.float32)
+    A_eh_effective = np.asarray(A_eh_effective, dtype=np.float32)
+    A_mh = A_mh_effective
+    A_eh = A_eh_effective
     env_coords_norm = np.asarray(env_coords_norm, dtype=np.float32)
     hyper_source_norm = np.asarray(hyper_source_norm, dtype=np.float32)
     hyper_wake_norm = np.asarray(hyper_wake_norm, dtype=np.float32)
@@ -136,27 +146,44 @@ def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
     hyper_strength = np.asarray(hyper_strength, dtype=np.float32).reshape(-1)[:num_hyper]
     hyper_module_mass = np.asarray(hyper_module_mass, dtype=np.float32).reshape(-1)[:num_hyper]
     hyper_env_mass = np.asarray(hyper_env_mass, dtype=np.float32).reshape(-1)[:num_hyper]
-    hard_env_token_count = np.asarray([(np.argmax(A_eh, axis=1) == k).sum() for k in range(num_hyper)], dtype=np.float32)
+    hard_env_token_count_raw = np.asarray([(np.argmax(A_eh_raw, axis=1) == k).sum() for k in range(num_hyper)], dtype=np.float32)
+    hard_env_token_count_effective = np.asarray([(np.argmax(A_eh_effective, axis=1) == k).sum() for k in range(num_hyper)], dtype=np.float32)
     hyper_active_mask = _as_numpy_first(out, "hyper_active_mask")
     hyper_collapsed_mask = _as_numpy_first(out, "hyper_collapsed_mask")
     hyper_duplicate_mask = _as_numpy_first(out, "hyper_duplicate_mask")
+    hyper_parent_index = _as_numpy_first(out, "hyper_parent_index")
     hyper_edge_score = _as_numpy_first(out, "hyper_edge_score")
     hyper_env_token_count = _as_numpy_first(out, "hyper_env_token_count")
+    hyper_effective_env_token_count = _as_numpy_first(out, "hyper_effective_env_token_count")
+    hyper_effective_module_mass = _as_numpy_first(out, "hyper_effective_module_mass")
+    hyper_effective_env_mass = _as_numpy_first(out, "hyper_effective_env_mass")
     if hyper_active_mask is None:
         hyper_active_mask = np.ones((num_hyper,), dtype=np.float32)
     if hyper_collapsed_mask is None:
         hyper_collapsed_mask = np.zeros((num_hyper,), dtype=bool)
     if hyper_duplicate_mask is None:
         hyper_duplicate_mask = np.zeros((num_hyper,), dtype=bool)
+    if hyper_parent_index is None:
+        hyper_parent_index = np.arange(num_hyper, dtype=np.int64)
     if hyper_env_token_count is None:
-        hyper_env_token_count = hard_env_token_count
+        hyper_env_token_count = hard_env_token_count_raw
+    if hyper_effective_env_token_count is None:
+        hyper_effective_env_token_count = hard_env_token_count_effective
+    if hyper_effective_module_mass is None:
+        hyper_effective_module_mass = A_mh_effective.sum(axis=0) / max(float(num_cyl), 1.0)
+    if hyper_effective_env_mass is None:
+        hyper_effective_env_mass = A_eh_effective.mean(axis=0)
     if hyper_edge_score is None:
-        hyper_edge_score = hyper_strength + 0.05 * (hard_env_token_count / max(float(A_eh.shape[0]), 1.0))
+        hyper_edge_score = hyper_strength + 0.05 * (hard_env_token_count_raw / max(float(A_eh.shape[0]), 1.0))
     hyper_active_mask = np.asarray(hyper_active_mask, dtype=np.float32).reshape(-1)[:num_hyper]
     hyper_collapsed_mask = np.asarray(hyper_collapsed_mask, dtype=bool).reshape(-1)[:num_hyper]
     hyper_duplicate_mask = np.asarray(hyper_duplicate_mask, dtype=bool).reshape(-1)[:num_hyper]
+    hyper_parent_index = np.asarray(hyper_parent_index, dtype=np.int64).reshape(-1)[:num_hyper]
     hyper_edge_score = np.asarray(hyper_edge_score, dtype=np.float32).reshape(-1)[:num_hyper]
     hyper_env_token_count = np.asarray(hyper_env_token_count, dtype=np.float32).reshape(-1)[:num_hyper]
+    hyper_effective_env_token_count = np.asarray(hyper_effective_env_token_count, dtype=np.float32).reshape(-1)[:num_hyper]
+    hyper_effective_module_mass = np.asarray(hyper_effective_module_mass, dtype=np.float32).reshape(-1)[:num_hyper]
+    hyper_effective_env_mass = np.asarray(hyper_effective_env_mass, dtype=np.float32).reshape(-1)[:num_hyper]
 
     env_xy = _env_coords_to_physical(env_coords_norm, case)
     hyper_source_xy = _coords_norm_to_physical(hyper_source_norm, case)
@@ -172,6 +199,10 @@ def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
         "A_me": A_me,
         "A_mh": A_mh,
         "A_eh": A_eh,
+        "A_mh_raw": A_mh_raw,
+        "A_eh_raw": A_eh_raw,
+        "A_mh_effective": A_mh_effective,
+        "A_eh_effective": A_eh_effective,
         "env_coords_norm": env_coords_norm,
         "env_xy": env_xy,
         "hyper_source_norm": hyper_source_norm,
@@ -186,8 +217,13 @@ def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
         "hyper_active_mask": hyper_active_mask,
         "hyper_collapsed_mask": hyper_collapsed_mask,
         "hyper_duplicate_mask": hyper_duplicate_mask,
+        "hyper_parent_index": hyper_parent_index,
         "hyper_edge_score": hyper_edge_score,
         "hyper_env_token_count": hyper_env_token_count,
+        "hyper_effective_env_token_count": hyper_effective_env_token_count,
+        "hyper_effective_module_mass": hyper_effective_module_mass,
+        "hyper_effective_env_mass": hyper_effective_env_mass,
+        "raw_env_token_count": hard_env_token_count_raw,
         "token_group": token_group,
         "token_conf": token_conf,
         "bounds": _grid_domain_bounds(case),
@@ -257,9 +293,13 @@ def compute_hyperedge_summary(
 ) -> List[Dict]:
     A_mh = org["A_mh"]
     A_eh = org["A_eh"]
+    A_mh_raw = org.get("A_mh_raw", A_mh)
+    A_eh_raw = org.get("A_eh_raw", A_eh)
     summaries = []
     for k in range(A_eh.shape[1]):
-        env_token_count = int(np.sum(org["token_group"] == k))
+        effective_env_token_count = int(np.sum(org["token_group"] == k))
+        raw_env_token_count = int(round(float(org.get("raw_env_token_count", np.zeros(A_eh.shape[1]))[k])))
+        parent = int(org.get("hyper_parent_index", np.arange(A_eh.shape[1]))[k])
         summaries.append(
             {
                 "case_id": str(case_id),
@@ -272,12 +312,19 @@ def compute_hyperedge_summary(
                 "active": bool(org["hyper_active_mask"][k] > 0.5),
                 "collapsed": bool(org["hyper_collapsed_mask"][k]),
                 "duplicate": bool(org["hyper_duplicate_mask"][k]),
+                "parent": parent,
                 "source": {"x": float(org["hyper_source_xy"][k, 0]), "y": float(org["hyper_source_xy"][k, 1])},
                 "wake": {"x": float(org["hyper_wake_xy"][k, 0]), "y": float(org["hyper_wake_xy"][k, 1])},
                 "wake_axis": {"x": float(org["hyper_wake_axis"][k, 0]), "y": float(org["hyper_wake_axis"][k, 1])},
                 "wake_extent": float(org["hyper_wake_extent"][k]),
                 "top_cylinders": topk_cylinder_members(A_mh, k, top_n=topk_cylinders),
-                "env_token_count": int(round(float(org["hyper_env_token_count"][k]))) if "hyper_env_token_count" in org else env_token_count,
+                "raw_env_token_count": raw_env_token_count,
+                "effective_env_token_count": int(round(float(org["hyper_effective_env_token_count"][k]))) if "hyper_effective_env_token_count" in org else effective_env_token_count,
+                "env_token_count": int(round(float(org["hyper_effective_env_token_count"][k]))) if "hyper_effective_env_token_count" in org else effective_env_token_count,
+                "env_mass_sum_raw": float(np.sum(A_eh_raw[:, k])),
+                "env_mass_sum_effective": float(np.sum(A_eh[:, k])),
+                "module_mass_sum_raw": float(np.sum(A_mh_raw[:, k])),
+                "module_mass_sum_effective": float(np.sum(A_mh[:, k])),
                 "env_mass_sum": float(np.sum(A_eh[:, k])),
                 "env_mass_mean": float(np.mean(A_eh[:, k])),
                 "top_env_tokens": topk_env_members(A_eh, k, org["env_xy"], top_n=topk_env),
@@ -306,6 +353,7 @@ def write_organization_summary(save_csv: Path, save_json: Path, summaries: List[
                 "active": int(bool(item["active"])),
                 "collapsed": int(bool(item["collapsed"])),
                 "duplicate": int(bool(item["duplicate"])),
+                "parent": item["parent"],
                 "source_x": item["source"]["x"],
                 "source_y": item["source"]["y"],
                 "wake_x": item["wake"]["x"],
@@ -314,7 +362,11 @@ def write_organization_summary(save_csv: Path, save_json: Path, summaries: List[
                 "axis_y": item["wake_axis"]["y"],
                 "extent": item["wake_extent"],
                 "env_token_count": item["env_token_count"],
+                "raw_env_token_count": item["raw_env_token_count"],
+                "effective_env_token_count": item["effective_env_token_count"],
                 "env_mass_sum": item["env_mass_sum"],
+                "env_mass_sum_raw": item["env_mass_sum_raw"],
+                "env_mass_sum_effective": item["env_mass_sum_effective"],
                 "env_mass_mean": item["env_mass_mean"],
                 "top_cylinders": ",".join(f"C{m['id']}" for m in item["top_cylinders"]),
                 "top_cylinder_weights": ",".join(f"{m['weight']:.6g}" for m in item["top_cylinders"]),
@@ -565,9 +617,14 @@ def render_organization_physical_summary(
             draw, color, alpha_scale, _ = _edge_draw_style(org, k, show_disabled_edges=True)
             y -= row_h
             table_ax.add_patch(Rectangle((0.0, y), 1.0, row_h * 0.86, transform=table_ax.transAxes, facecolor=color, edgecolor=color, alpha=0.16 * alpha_scale, linewidth=1.0))
-            status = "on" if item["active"] else "off"
+            if item["duplicate"] and item["parent"] >= 0:
+                status = f"duplicate -> H{item['parent']}"
+            elif item["collapsed"]:
+                status = "collapsed"
+            else:
+                status = "on" if item["active"] else "off"
             text = (
-                f"H{k} {status} score={item['edge_score']:.3f} strength={item['strength']:.3f} mod={item['module_mass']:.3f} env={item['env_mass']:.3f} n={item['env_token_count']}\n"
+                f"H{k} {status} score={item['edge_score']:.3f} strength={item['strength']:.3f} mod={item['module_mass']:.3f} env={item['env_mass']:.3f} n_eff={item['effective_env_token_count']} n_raw={item['raw_env_token_count']}\n"
                 f"collapsed={int(item['collapsed'])} duplicate={int(item['duplicate'])} "
                 f"src=({item['source']['x']:.2f},{item['source']['y']:.2f}) wake=({item['wake']['x']:.2f},{item['wake']['y']:.2f}) "
                 f"axis=({item['wake_axis']['x']:.2f},{item['wake_axis']['y']:.2f}) extent={item['wake_extent']:.3f}\n"
@@ -613,7 +670,7 @@ def render_organization_matrices(
     ax_eh = fig.add_subplot(eh_gs[0, 1])
 
     im_mh = ax_mh.imshow(A_mh, aspect="auto", vmin=0.0, vmax=max(1.0, float(A_mh.max())), cmap="viridis")
-    ax_mh.set_title("Module -> Hyperedge assignment A_mh")
+    ax_mh.set_title("Module -> Hyperedge assignment A_mh (effective)")
     ax_mh.set_xlabel("hyperedge")
     ax_mh.set_ylabel("cylinder")
     ax_mh.set_xticks(np.arange(num_hyper), labels=[f"H{k}" for k in range(num_hyper)])
@@ -635,7 +692,7 @@ def render_organization_matrices(
     ax_strip.set_yticks([])
 
     im_eh = ax_eh.imshow(A_eh_sorted, aspect="auto", vmin=0.0, vmax=max(1.0, float(A_eh.max())), cmap="viridis")
-    ax_eh.set_title("Environment -> Hyperedge assignment A_eh (group-sorted)")
+    ax_eh.set_title("Environment -> Hyperedge assignment A_eh (effective, group-sorted)")
     ax_eh.set_xlabel("hyperedge")
     ax_eh.set_ylabel("env token row")
     ax_eh.set_xticks(np.arange(num_hyper), labels=[f"H{k}" for k in range(num_hyper)])
@@ -801,7 +858,11 @@ def render_organization_sankey(
             continue
         x, y = hyper_pos[k]
         ax.scatter([x], [y], s=180, marker="*", c=[color], edgecolors="k", alpha=alpha_scale, zorder=4)
-        ax.text(x, y + 0.035, f"H{k}{'' if summaries[k]['active'] else ' (off)'}", ha="center", va="bottom", fontsize=9, bbox=bbox, zorder=5)
+        if summaries[k]["duplicate"] and summaries[k]["parent"] >= 0:
+            label = f"H{k} -> H{summaries[k]['parent']}"
+        else:
+            label = f"H{k}{'' if summaries[k]['active'] else ' (off)'}"
+        ax.text(x, y + 0.035, label, ha="center", va="bottom", fontsize=9, bbox=bbox, zorder=5)
     for k in range(num_hyper):
         draw, color, alpha_scale, _ = _edge_draw_style(org, k, show_disabled_edges=show_disabled_edges)
         if visualize_disabled_edges and not draw:

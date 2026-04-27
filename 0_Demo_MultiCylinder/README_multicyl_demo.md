@@ -129,7 +129,7 @@ This revision targets the residual-dynamics plateau with four scoped changes:
 
 ## Organizer Collapse Fix
 
-Updated: 2026-04-26
+Updated: 2026-04-27
 
 The organizer previously allowed a bad but low-entropy solution: `A_mh` could
 split cylinders/modules across several hyperedges while `A_eh` assigned nearly
@@ -158,20 +158,30 @@ corresponding wake/environment region.
 
 ## Optional Active-Edge Masking
 
-Updated: 2026-04-26
+Updated: 2026-04-27
 
 Hyperedge slots are intentionally overcomplete: `num_hyperedges` is capacity,
 not a promise that every slot maps to a distinct physical interaction. After the
-collapse fix, some runs may still learn redundant slots. A collapsed edge has
-weak source/environment support or no hard-dominant env tokens. A duplicate edge
-has a very similar `A_mh/A_eh` signature and nearby source/wake geometry to a
-stronger edge. A weak physical edge can still be valid, so masking is optional.
+collapse fix, some runs may still learn redundant slots. `DISABLE_EDGE` now
+performs active-edge compression, not naive deletion. A duplicate edge has a
+very similar `A_mh/A_eh` signature and nearby source/wake geometry to a stronger
+representative; it is disabled as a decoder token, but its incidence mass is
+merged into the representative through `A_mh_effective` and `A_eh_effective`.
+A truly collapsed edge is weak by soft strength/module/environment mass and has
+no active representative parent.
 
 Set `model.DISABLE_EDGE = true` to compute `hyper_active_mask` and use it in the
 decoder memory, dynamic hyperedge memory, phase-conditioned hyper context, and
-organization visualizations. Tensor dimensions are not deleted or renormalized;
-raw `A_mh` and `A_eh` remain available for losses, old checkpoints, and
-diagnostics.
+organization visualizations. Tensor dimensions are not deleted. Raw `A_mh` and
+`A_eh` remain available for losses, old checkpoints, raw diagnostics, and raw
+visualization checks. Effective `A_mh_effective` and `A_eh_effective` are used
+for active-edge visualization and downstream relevance scoring so active views
+retain environmental coverage after duplicate compression.
+
+Hard environment-token count is diagnostic unless soft environment mass is also
+weak. An edge with zero hard-dominant tokens but meaningful soft mass can remain
+active or be merged into a representative instead of disappearing from the
+active organizer view.
 
 The compatibility default is:
 

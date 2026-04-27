@@ -626,14 +626,78 @@ def _default_hyperedge_mask_info(
         token_group = A_eh.argmax(dim=-1)
         counts = torch.stack([(token_group == k).sum(dim=1) for k in range(num_hyper)], dim=1).to(dtype=A_eh.dtype)
     edge_score = hyper_strength + 0.05 * (counts / max(float(num_env), 1.0))
+    parent_index = torch.arange(num_hyper, device=A_eh.device, dtype=torch.long).unsqueeze(0).expand(batch_size, -1)
     return {
         "hyper_active_mask": active,
         "hyper_collapsed_mask": inactive,
         "hyper_duplicate_mask": inactive.clone(),
+        "hyper_parent_index": parent_index,
         "hyper_edge_score": edge_score,
         "hyper_env_token_count": counts,
         "hyper_disable_reason_code": torch.zeros((batch_size, num_hyper), device=A_eh.device, dtype=torch.long),
     }
+
+
+def _normalize_effective_incidence(
+    effective: torch.Tensor,
+    raw: torch.Tensor,
+    active_mask: torch.Tensor,
+    *,
+    row_valid: Optional[torch.Tensor] = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    active = active_mask.to(device=effective.device, dtype=effective.dtype).unsqueeze(1)
+    effective = effective * active
+    denom = effective.sum(dim=-1, keepdim=True)
+    normalized = effective / denom.clamp_min(eps)
+
+    raw_active = raw * active
+    raw_denom = raw_active.sum(dim=-1, keepdim=True)
+    raw_fallback = raw_active / raw_denom.clamp_min(eps)
+
+    active_count = active.sum(dim=-1, keepdim=True).clamp_min(1.0)
+    uniform = active.expand_as(raw) / active_count
+    fallback = torch.where(raw_denom > eps, raw_fallback, uniform)
+    normalized = torch.where(denom > eps, normalized, fallback)
+    if row_valid is not None:
+        normalized = normalized * row_valid.to(device=effective.device, dtype=effective.dtype).unsqueeze(-1)
+    return normalized
+
+
+def build_effective_hyperedge_incidence(
+    organized: Dict[str, torch.Tensor],
+    parent_index: torch.Tensor,
+    active_mask: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    A_mh = organized["A_mh"]
+    A_eh = organized["A_eh"]
+    batch_size, num_modules, num_hyper = A_mh.shape
+    num_env = A_eh.shape[1]
+    A_mh_effective = torch.zeros_like(A_mh)
+    A_eh_effective = torch.zeros_like(A_eh)
+
+    if num_hyper == 0:
+        return A_mh_effective, A_eh_effective
+
+    for k in range(num_hyper):
+        parent = parent_index[:, k]
+        valid = parent >= 0
+        parent_safe = parent.clamp_min(0)
+        mh_index = parent_safe.view(batch_size, 1, 1).expand(batch_size, num_modules, 1)
+        eh_index = parent_safe.view(batch_size, 1, 1).expand(batch_size, num_env, 1)
+        A_mh_effective.scatter_add_(2, mh_index, A_mh[:, :, k : k + 1] * valid[:, None, None].to(dtype=A_mh.dtype))
+        A_eh_effective.scatter_add_(2, eh_index, A_eh[:, :, k : k + 1] * valid[:, None, None].to(dtype=A_eh.dtype))
+
+    cyl_mask = organized.get("cyl_mask")
+    row_valid = None
+    if cyl_mask is not None:
+        row_valid = cyl_mask.to(device=A_mh.device, dtype=torch.bool) > 0
+    else:
+        row_valid = A_mh.sum(dim=-1) > 1e-6
+
+    A_mh_effective = _normalize_effective_incidence(A_mh_effective, A_mh, active_mask, row_valid=row_valid)
+    A_eh_effective = _normalize_effective_incidence(A_eh_effective, A_eh, active_mask, row_valid=None)
+    return A_mh_effective, A_eh_effective
 
 
 def compute_hyperedge_active_mask(organized: Dict[str, torch.Tensor], cfg: ModelConfig) -> Dict[str, torch.Tensor]:
@@ -670,10 +734,14 @@ def compute_hyperedge_active_mask(organized: Dict[str, torch.Tensor], cfg: Model
     active = soft_active.clone()
     if bool(cfg.disable_edge_use_hard_env_count):
         hard_ok = hyper_env_token_count >= float(cfg.disable_edge_min_env_tokens)
-        collapsed = collapsed | ~hard_ok
-        active = active & hard_ok
+        collapsed = collapsed | (~hard_ok & (hyper_env_mass < float(cfg.disable_edge_env_mass_threshold)))
 
     duplicate = torch.zeros_like(active, dtype=torch.bool)
+    parent_index = torch.where(
+        active,
+        torch.arange(num_hyper, device=A_eh.device, dtype=torch.long).unsqueeze(0).expand(batch_size, -1),
+        torch.full((batch_size, num_hyper), -1, device=A_eh.device, dtype=torch.long),
+    )
     reason_code = torch.zeros((batch_size, num_hyper), device=A_eh.device, dtype=torch.long)
     reason_code = torch.where(collapsed, torch.ones_like(reason_code), reason_code)
 
@@ -719,11 +787,42 @@ def compute_hyperedge_active_mask(organized: Dict[str, torch.Tensor], cfg: Model
                     if not is_dup:
                         continue
                     drop = j if float(scores_np[b, i].detach().cpu()) >= float(scores_np[b, j].detach().cpu()) else i
+                    keep = i if drop == j else j
                     active[b, drop] = False
                     duplicate[b, drop] = True
+                    collapsed[b, drop] = False
+                    parent_index[b, drop] = keep
                     reason_code[b, drop] = 2
                     if drop == i:
                         break
+
+        for b in range(batch_size):
+            active_reps = torch.nonzero(active[b], as_tuple=False).flatten()
+            if active_reps.numel() == 0:
+                continue
+            for k in range(num_hyper):
+                if bool(active[b, k]) or int(parent_index[b, k].item()) >= 0:
+                    continue
+                best_parent = -1
+                best_score = -float("inf")
+                for j_t in active_reps:
+                    j = int(j_t.item())
+                    is_dup = (
+                        float(signature_cos[b, k, j].detach().cpu()) > sim_thr
+                        and float(source_dist[b, k, j].detach().cpu()) < src_thr
+                        and float(wake_dist[b, k, j].detach().cpu()) < wake_thr
+                        and float(axis_cos[b, k, j].detach().cpu()) > axis_thr
+                    )
+                    if is_dup:
+                        score = float(scores_np[b, j].detach().cpu())
+                        if score > best_score:
+                            best_score = score
+                            best_parent = j
+                if best_parent >= 0:
+                    duplicate[b, k] = True
+                    collapsed[b, k] = False
+                    parent_index[b, k] = best_parent
+                    reason_code[b, k] = 2
 
     min_active = max(0, min(int(cfg.disable_edge_min_active_edges), num_hyper))
     if min_active > 0:
@@ -732,11 +831,24 @@ def compute_hyperedge_active_mask(organized: Dict[str, torch.Tensor], cfg: Model
         for b in range(batch_size):
             if int(active_counts[b].item()) < min_active:
                 active[b, top_idx[b]] = True
+                duplicate[b, top_idx[b]] = False
+                collapsed[b, top_idx[b]] = False
+                parent_index[b, top_idx[b]] = top_idx[b]
+                reason_code[b, top_idx[b]] = 0
+
+    for b in range(batch_size):
+        for k in range(num_hyper):
+            if bool(active[b, k]):
+                parent_index[b, k] = k
+            elif not bool(duplicate[b, k]):
+                parent_index[b, k] = -1
+    collapsed = (~active) & (~duplicate)
 
     return {
         "hyper_active_mask": active.to(dtype=A_eh.dtype),
         "hyper_collapsed_mask": collapsed,
         "hyper_duplicate_mask": duplicate,
+        "hyper_parent_index": parent_index,
         "hyper_edge_score": edge_score.detach() if bool(cfg.disable_edge_detach_scores) else edge_score,
         "hyper_env_token_count": hyper_env_token_count,
         "hyper_disable_reason_code": reason_code,
@@ -993,6 +1105,28 @@ class HypergraphOrganizer(nn.Module):
             organized.update(compute_hyperedge_active_mask(organized, self.cfg))
         else:
             organized.update(_default_hyperedge_mask_info(A_eh, hyper_strength))
+        A_mh_effective, A_eh_effective = build_effective_hyperedge_incidence(
+            organized,
+            organized["hyper_parent_index"],
+            organized["hyper_active_mask"],
+        )
+        effective_module_mass = (A_mh_effective * cyl_mask[:, :, None]).sum(dim=1)
+        effective_module_mass = effective_module_mass / cyl_mask.sum(dim=1, keepdim=True).clamp_min(1e-6)
+        effective_env_mass = A_eh_effective.mean(dim=1)
+        effective_token_group = A_eh_effective.argmax(dim=-1) if n_hyp > 0 else torch.zeros((A_eh.shape[0], A_eh.shape[1]), device=A_eh.device, dtype=torch.long)
+        effective_env_token_count = torch.stack(
+            [(effective_token_group == k).sum(dim=1) for k in range(n_hyp)],
+            dim=1,
+        ).to(dtype=A_eh.dtype) if n_hyp > 0 else torch.zeros((A_eh.shape[0], 0), device=A_eh.device, dtype=A_eh.dtype)
+        organized.update(
+            {
+                "A_mh_effective": A_mh_effective,
+                "A_eh_effective": A_eh_effective,
+                "hyper_effective_env_token_count": effective_env_token_count,
+                "hyper_effective_module_mass": effective_module_mass,
+                "hyper_effective_env_mass": effective_env_mass,
+            }
+        )
         return organized
 
 
@@ -1505,8 +1639,13 @@ class HierarchicalPerceiverDecoder(nn.Module):
                 hyper_weights = torch.softmax(hyper_wake_logits_chunk, dim=-1)
             else:
                 hyper_weights = hyper_wake_logits_chunk
-            module_hyper_relevance = torch.einsum("bqk,bnk->bqn", hyper_weights, organized["A_mh"])
-            env_hyper_relevance = torch.einsum("bqk,bmk->bqm", hyper_weights, organized["A_eh"])
+            A_mh_relevance = organized["A_mh"]
+            A_eh_relevance = organized["A_eh"]
+            if bool(self.cfg.DISABLE_EDGE):
+                A_mh_relevance = organized.get("A_mh_effective", A_mh_relevance)
+                A_eh_relevance = organized.get("A_eh_effective", A_eh_relevance)
+            module_hyper_relevance = torch.einsum("bqk,bnk->bqn", hyper_weights, A_mh_relevance)
+            env_hyper_relevance = torch.einsum("bqk,bmk->bqm", hyper_weights, A_eh_relevance)
 
             distance_weight = float(self.cfg.local_topk_distance_weight)
             hyper_weight = float(self.cfg.local_topk_hyper_weight)
@@ -1799,6 +1938,8 @@ class HypergraphNeuralFieldModel(nn.Module):
                 "A_me": organized["A_me"],
                 "A_mh": organized["A_mh"],
                 "A_eh": organized["A_eh"],
+                "A_mh_effective": organized["A_mh_effective"],
+                "A_eh_effective": organized["A_eh_effective"],
                 "module_state": organized["module_state"],
                 "env_state": organized["env_state"],
                 "hyper_state": organized["hyper_state"],
@@ -1814,8 +1955,12 @@ class HypergraphNeuralFieldModel(nn.Module):
                 "hyper_active_mask": organized["hyper_active_mask"],
                 "hyper_collapsed_mask": organized["hyper_collapsed_mask"],
                 "hyper_duplicate_mask": organized["hyper_duplicate_mask"],
+                "hyper_parent_index": organized["hyper_parent_index"],
                 "hyper_edge_score": organized["hyper_edge_score"],
                 "hyper_env_token_count": organized["hyper_env_token_count"],
+                "hyper_effective_env_token_count": organized["hyper_effective_env_token_count"],
+                "hyper_effective_module_mass": organized["hyper_effective_module_mass"],
+                "hyper_effective_env_mass": organized["hyper_effective_env_mass"],
                 "hyper_disable_reason_code": organized["hyper_disable_reason_code"],
                 "global_features": organized["global_features"],
                 "cyl_mask": organized["cyl_mask"],

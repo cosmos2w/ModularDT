@@ -1189,7 +1189,13 @@ def main() -> None:
         hyper_env_mass=org_arrays["hyper_env_mass"].astype(np.float32),
         hyper_strength=org_arrays["hyper_strength"].astype(np.float32),
         hyper_active_mask=org_arrays["hyper_active_mask"].astype(np.float32),
+        hyper_parent_index=org_arrays["hyper_parent_index"].astype(np.int64),
         hyper_edge_score=org_arrays["hyper_edge_score"].astype(np.float32),
+        A_mh=org_arrays["A_mh_raw"].astype(np.float32),
+        A_eh=org_arrays["A_eh_raw"].astype(np.float32),
+        A_mh_effective=org_arrays["A_mh_effective"].astype(np.float32),
+        A_eh_effective=org_arrays["A_eh_effective"].astype(np.float32),
+        hyper_effective_env_token_count=org_arrays["hyper_effective_env_token_count"].astype(np.float32),
     )
 
     with (output_dir / f"evaluation_summary_case_{case['case_id']}.json").open("w", encoding="utf-8") as f:
@@ -1214,6 +1220,9 @@ def main() -> None:
                 "num_hyperedges": int(out["A_eh"].shape[-1]),
                 "disable_edge": bool(model.cfg.DISABLE_EDGE),
                 "show_disabled_edges": bool(args.show_disabled_edges),
+                "hyper_parent_index": org_arrays["hyper_parent_index"].astype(int).tolist(),
+                "hyper_effective_env_token_count": org_arrays["hyper_effective_env_token_count"].astype(float).tolist(),
+                "effective_env_coverage": float(np.mean(np.max(org_arrays["A_eh_effective"], axis=1) > 1e-6)),
                 "quicklook_path": str(fig_path),
                 "organization_paths": org_paths,
             },

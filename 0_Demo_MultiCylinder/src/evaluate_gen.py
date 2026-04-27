@@ -56,7 +56,7 @@ from train_gen import (
     resolve_demo_path,
     safe_torch_load,
 )
-from organizer_viz import render_soft_organization
+from organizer_viz import extract_organization_arrays, render_soft_organization
 
 
 # -----------------------------------------------------------------------------
@@ -1546,6 +1546,7 @@ def main() -> None:
             show_disabled_edges=bool(args.show_disabled_edges),
             visualize_disabled_edges=bool(getattr(det_model, "cfg", None) is not None and det_model.cfg.DISABLE_EDGE and det_model.cfg.disable_edge_apply_to_visualization),
         )
+        org_arrays = extract_organization_arrays(det_out, sample)
 
         np.savez_compressed(
             out_dir / "gen_reconstruction.npz",
@@ -1557,6 +1558,12 @@ def main() -> None:
             centers=sample["centers_np"],
             tau=np.array([sample["tau"]], dtype=np.float32),
             channel_order=np.asarray(sample["channel_order"]),
+            hyper_parent_index=org_arrays["hyper_parent_index"].astype(np.int64),
+            A_mh=org_arrays["A_mh_raw"].astype(np.float32),
+            A_eh=org_arrays["A_eh_raw"].astype(np.float32),
+            A_mh_effective=org_arrays["A_mh_effective"].astype(np.float32),
+            A_eh_effective=org_arrays["A_eh_effective"].astype(np.float32),
+            hyper_effective_env_token_count=org_arrays["hyper_effective_env_token_count"].astype(np.float32),
         )
 
         ens_mean = gen_samples.mean(axis=0)
@@ -1583,6 +1590,9 @@ def main() -> None:
             "sample_diversity_mean_std": float(gen_samples.std(axis=0).mean()),
             "checkpoint": str(checkpoint_path),
             "deterministic_checkpoint": str(det_ckpt_path),
+            "hyper_parent_index": org_arrays["hyper_parent_index"].astype(int).tolist(),
+            "hyper_effective_env_token_count": org_arrays["hyper_effective_env_token_count"].astype(float).tolist(),
+            "effective_env_coverage": float(np.mean(np.max(org_arrays["A_eh_effective"], axis=1) > 1e-6)),
             "organization_paths": organization_paths,
         }
 

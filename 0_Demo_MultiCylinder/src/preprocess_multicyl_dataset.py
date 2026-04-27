@@ -31,7 +31,7 @@ Usage example
 -------------
 Run from ``0_Demo_MultiCylinder/``:
 
-python src/preprocess_inert_multicyl_dataset.py \
+python src/preprocess_multicyl_dataset.py \
     --input-root ./Data_Saved \
     --output-root ./Data_Saved/Processed_Inert_Dataset \
     --device cuda:0 \

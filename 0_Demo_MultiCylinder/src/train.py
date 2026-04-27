@@ -1800,6 +1800,16 @@ def organizer_mass_diagnostics(
                 "org_mean_edge_score": edge_score.mean(),
             }
         )
+    A_eh_effective = outputs.get("A_eh_effective")
+    if A_eh_effective is not None:
+        A_eh_effective = A_eh_effective.to(device=module_mass.device, dtype=module_mass.dtype)
+        effective_env_mass = A_eh_effective.mean(dim=1)
+        diag.update(
+            {
+                "org_effective_active_hyperedges": (effective_env_mass > eps).to(dtype=module_mass.dtype).sum(dim=-1).mean(),
+                "org_effective_env_coverage": (A_eh_effective.max(dim=-1).values > eps).to(dtype=module_mass.dtype).mean(),
+            }
+        )
     return diag
 
 
@@ -1960,6 +1970,8 @@ def evaluate_canonical_cases(
             "val_org_duplicate_hyperedges": float("nan"),
             "val_org_inactive_hyperedges": float("nan"),
             "val_org_mean_edge_score": float("nan"),
+            "val_org_effective_active_hyperedges": float("nan"),
+            "val_org_effective_env_coverage": float("nan"),
         }
 
     case_ids = dataset.case_ids[:max_cases] if max_cases > 0 else dataset.case_ids
@@ -2113,6 +2125,8 @@ def evaluate_canonical_cases(
                 "val_org_duplicate_hyperedges": normalize_loss_scalar(org_diag["org_duplicate_hyperedges"]),
                 "val_org_inactive_hyperedges": normalize_loss_scalar(org_diag["org_inactive_hyperedges"]),
                 "val_org_mean_edge_score": normalize_loss_scalar(org_diag["org_mean_edge_score"]),
+                "val_org_effective_active_hyperedges": normalize_loss_scalar(org_diag["org_effective_active_hyperedges"]),
+                "val_org_effective_env_coverage": normalize_loss_scalar(org_diag["org_effective_env_coverage"]),
             }
         )
         loss_total = base_total + org_direct["organizer_total"]
@@ -2258,6 +2272,8 @@ def evaluate_point_chunks(
             "val_org_duplicate_hyperedges": normalize_loss_scalar(losses["org_duplicate_hyperedges"]),
             "val_org_inactive_hyperedges": normalize_loss_scalar(losses["org_inactive_hyperedges"]),
             "val_org_mean_edge_score": normalize_loss_scalar(losses["org_mean_edge_score"]),
+            "val_org_effective_active_hyperedges": normalize_loss_scalar(losses["org_effective_active_hyperedges"]),
+            "val_org_effective_env_coverage": normalize_loss_scalar(losses["org_effective_env_coverage"]),
         }
         row["val_residual_focus"] = compute_residual_focus_metric(row, validation_cfg)
         metric_buffer.append(row)
@@ -2757,6 +2773,8 @@ def main() -> None:
         "org_duplicate_hyperedges",
         "org_inactive_hyperedges",
         "org_mean_edge_score",
+        "org_effective_active_hyperedges",
+        "org_effective_env_coverage",
         # "lr",
         "val_total_loss",
         "val_field_mse",
@@ -2777,6 +2795,8 @@ def main() -> None:
         "val_org_duplicate_hyperedges",
         "val_org_inactive_hyperedges",
         "val_org_mean_edge_score",
+        "val_org_effective_active_hyperedges",
+        "val_org_effective_env_coverage",
         "val_selection_metric",
     ]
     with history_csv.open("w", newline="", encoding="utf-8") as f:
@@ -2996,6 +3016,8 @@ def main() -> None:
                     "org_duplicate_hyperedges": normalize_loss_scalar(losses["org_duplicate_hyperedges"]),
                     "org_inactive_hyperedges": normalize_loss_scalar(losses["org_inactive_hyperedges"]),
                     "org_mean_edge_score": normalize_loss_scalar(losses["org_mean_edge_score"]),
+                    "org_effective_active_hyperedges": normalize_loss_scalar(losses["org_effective_active_hyperedges"]),
+                    "org_effective_env_coverage": normalize_loss_scalar(losses["org_effective_env_coverage"]),
                 }
             )
             train_bar.set_postfix(
@@ -3061,6 +3083,8 @@ def main() -> None:
             "val_org_duplicate_hyperedges": float("nan"),
             "val_org_inactive_hyperedges": float("nan"),
             "val_org_mean_edge_score": float("nan"),
+            "val_org_effective_active_hyperedges": float("nan"),
+            "val_org_effective_env_coverage": float("nan"),
         }
         eval_every_epochs = max(1, int(validation_cfg.get("eval_every_epochs", 1)))
         should_run_validation = (epoch == 1) or (epoch % eval_every_epochs == 0)

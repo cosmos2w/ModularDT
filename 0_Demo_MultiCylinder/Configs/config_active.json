@@ -16,7 +16,7 @@
     "forcing_relaxation": 12.0,
     "warmup_cycles": 4.0,
     "save_cycles": 4.0,
-    "frames_per_cycle": 36,
+    "frames_per_cycle": 24,
     "pressure_rank_deficiency": 0,
     "diffusion_substeps": 1
   },
@@ -28,6 +28,7 @@
     "power_min": 0.5,
     "power_max": 1.5,
     "diffusion_substeps": 1,
+    
     "activate_after_warmup": true,
     "reset_temperature_at_activation": true,
     "save_only_after_thermal_activation": true,

@@ -41,18 +41,19 @@ from multicyl_common import (
 
 NUM_CYLINDER_OPTIONS = [2, 4, 6]
 RE_OPTIONS = [30.0, 120.0, 170.0]
-REPEATS_PER_COMBINATION = 6
+REPEATS_PER_COMBINATION = 1
 
-DATASET_MODE = "inert"  # "inert" | "active"
-TEMPLATE_CONFIG_NAME = "config_inert.json"  # for active: "config_active.json"
-GENERATED_CONFIG_PREFIX = "config_inert"  # for active: "config_active"
+# !!! Check carefully
+DATASET_MODE = "active"  # "inert" | "active"
+TEMPLATE_CONFIG_NAME = f"config_{DATASET_MODE}.json"  # for inert: "config_inert.json"
+GENERATED_CONFIG_PREFIX = "config_{DATASET_MODE}"  # for inert: "config_inert"
 
-BASE_LAYOUT_SEED = 1000
+BASE_LAYOUT_SEED = 100
 
-ENABLE_CPU = True
+ENABLE_CPU = False
 CPU_CONCURRENT_SLOTS = 2
-GPU_IDS = [0, 1]
-MAX_CONCURRENT_PER_GPU = 8
+GPU_IDS = [0]
+MAX_CONCURRENT_PER_GPU = 16
 
 POLL_INTERVAL_SEC = 1.0
 

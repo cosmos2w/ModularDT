@@ -1,6 +1,6 @@
 {
-  "case_id": "0008",
-  "comments":"Add edge disabling from epoch 100",
+  "case_id": "0009",
+  "comments":"Add edge disabling from epoch 100 with Corrected merging logic",
 
   "dataset": {
     "packed_h5_path": "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5",
