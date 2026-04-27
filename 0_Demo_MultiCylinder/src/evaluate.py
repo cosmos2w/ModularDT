@@ -71,6 +71,12 @@ def parse_args() -> argparse.Namespace:
                         help="Minimum normalized vertical gap for Sankey node layout.")
     parser.add_argument("--organization-table", action=argparse.BooleanOptionalAction, default=True,
                         help="Show the hyperedge summary table in the physical organization view.")
+    parser.add_argument("--disable-edge", dest="disable_edge", action="store_true", default=None,
+                        help="Enable active-edge masking for this evaluation run only.")
+    parser.add_argument("--no-disable-edge", dest="disable_edge", action="store_false",
+                        help="Disable active-edge masking for this evaluation run only.")
+    parser.add_argument("--show-disabled-edges", action="store_true",
+                        help="Draw disabled hyperedges in grey dashed style instead of hiding them in organization views.")
 
     return parser.parse_args()
 
@@ -961,6 +967,8 @@ def main() -> None:
     checkpoint = load_checkpoint(run_dir, latest=args.latest)
     device = select_device(args.device)
     model = build_model_from_checkpoint(checkpoint, device=device)
+    if args.disable_edge is not None:
+        model.set_edge_disable_runtime(bool(args.disable_edge))
 
     train_cfg = checkpoint["config"]
     packed_h5_path = resolve_demo_config_path(train_cfg["dataset"]["packed_h5_path"])
@@ -1014,6 +1022,8 @@ def main() -> None:
         topk_env=args.organization_topk_env,
         min_gap=args.organization_min_gap,
         show_table=args.organization_table,
+        show_disabled_edges=bool(args.show_disabled_edges),
+        visualize_disabled_edges=bool(model.cfg.DISABLE_EDGE and model.cfg.disable_edge_apply_to_visualization),
     )
 
     gif_path = output_dir / f"animation_case_{case['case_id']}_tau_{phase_idx:03d}.gif"
@@ -1036,6 +1046,8 @@ def main() -> None:
         hyper_module_mass=org_arrays["hyper_module_mass"].astype(np.float32),
         hyper_env_mass=org_arrays["hyper_env_mass"].astype(np.float32),
         hyper_strength=org_arrays["hyper_strength"].astype(np.float32),
+        hyper_active_mask=org_arrays["hyper_active_mask"].astype(np.float32),
+        hyper_edge_score=org_arrays["hyper_edge_score"].astype(np.float32),
     )
 
     with (output_dir / f"evaluation_summary_case_{case['case_id']}.json").open("w", encoding="utf-8") as f:
@@ -1052,6 +1064,8 @@ def main() -> None:
                 "predicted_frequency": freq_pred,
                 "gt_frequency": case["dominant_frequency"],
                 "num_hyperedges": int(out["A_eh"].shape[-1]),
+                "disable_edge": bool(model.cfg.DISABLE_EDGE),
+                "show_disabled_edges": bool(args.show_disabled_edges),
                 "quicklook_path": str(fig_path),
                 "organization_paths": org_paths,
             },

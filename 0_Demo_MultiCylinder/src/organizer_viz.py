@@ -74,7 +74,17 @@ def _as_numpy_first(out: Dict, key: str, default: Optional[np.ndarray] = None) -
     value = _to_numpy(out[key])
     if value.ndim >= 3:
         return value[0]
-    if value.ndim == 2 and key in {"hyper_strength", "hyper_wake_extent", "hyper_module_mass", "hyper_env_mass"}:
+    if value.ndim == 2 and key in {
+        "hyper_strength",
+        "hyper_wake_extent",
+        "hyper_module_mass",
+        "hyper_env_mass",
+        "hyper_active_mask",
+        "hyper_collapsed_mask",
+        "hyper_duplicate_mask",
+        "hyper_edge_score",
+        "hyper_env_token_count",
+    }:
         return value[0]
     return value
 
@@ -126,6 +136,27 @@ def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
     hyper_strength = np.asarray(hyper_strength, dtype=np.float32).reshape(-1)[:num_hyper]
     hyper_module_mass = np.asarray(hyper_module_mass, dtype=np.float32).reshape(-1)[:num_hyper]
     hyper_env_mass = np.asarray(hyper_env_mass, dtype=np.float32).reshape(-1)[:num_hyper]
+    hard_env_token_count = np.asarray([(np.argmax(A_eh, axis=1) == k).sum() for k in range(num_hyper)], dtype=np.float32)
+    hyper_active_mask = _as_numpy_first(out, "hyper_active_mask")
+    hyper_collapsed_mask = _as_numpy_first(out, "hyper_collapsed_mask")
+    hyper_duplicate_mask = _as_numpy_first(out, "hyper_duplicate_mask")
+    hyper_edge_score = _as_numpy_first(out, "hyper_edge_score")
+    hyper_env_token_count = _as_numpy_first(out, "hyper_env_token_count")
+    if hyper_active_mask is None:
+        hyper_active_mask = np.ones((num_hyper,), dtype=np.float32)
+    if hyper_collapsed_mask is None:
+        hyper_collapsed_mask = np.zeros((num_hyper,), dtype=bool)
+    if hyper_duplicate_mask is None:
+        hyper_duplicate_mask = np.zeros((num_hyper,), dtype=bool)
+    if hyper_env_token_count is None:
+        hyper_env_token_count = hard_env_token_count
+    if hyper_edge_score is None:
+        hyper_edge_score = hyper_strength + 0.05 * (hard_env_token_count / max(float(A_eh.shape[0]), 1.0))
+    hyper_active_mask = np.asarray(hyper_active_mask, dtype=np.float32).reshape(-1)[:num_hyper]
+    hyper_collapsed_mask = np.asarray(hyper_collapsed_mask, dtype=bool).reshape(-1)[:num_hyper]
+    hyper_duplicate_mask = np.asarray(hyper_duplicate_mask, dtype=bool).reshape(-1)[:num_hyper]
+    hyper_edge_score = np.asarray(hyper_edge_score, dtype=np.float32).reshape(-1)[:num_hyper]
+    hyper_env_token_count = np.asarray(hyper_env_token_count, dtype=np.float32).reshape(-1)[:num_hyper]
 
     env_xy = _env_coords_to_physical(env_coords_norm, case)
     hyper_source_xy = _coords_norm_to_physical(hyper_source_norm, case)
@@ -152,6 +183,11 @@ def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
         "hyper_module_mass": hyper_module_mass,
         "hyper_env_mass": hyper_env_mass,
         "hyper_strength": hyper_strength,
+        "hyper_active_mask": hyper_active_mask,
+        "hyper_collapsed_mask": hyper_collapsed_mask,
+        "hyper_duplicate_mask": hyper_duplicate_mask,
+        "hyper_edge_score": hyper_edge_score,
+        "hyper_env_token_count": hyper_env_token_count,
         "token_group": token_group,
         "token_conf": token_conf,
         "bounds": _grid_domain_bounds(case),
@@ -232,12 +268,16 @@ def compute_hyperedge_summary(
                 "strength": float(org["hyper_strength"][k]),
                 "module_mass": float(org["hyper_module_mass"][k]),
                 "env_mass": float(org["hyper_env_mass"][k]),
+                "edge_score": float(org["hyper_edge_score"][k]),
+                "active": bool(org["hyper_active_mask"][k] > 0.5),
+                "collapsed": bool(org["hyper_collapsed_mask"][k]),
+                "duplicate": bool(org["hyper_duplicate_mask"][k]),
                 "source": {"x": float(org["hyper_source_xy"][k, 0]), "y": float(org["hyper_source_xy"][k, 1])},
                 "wake": {"x": float(org["hyper_wake_xy"][k, 0]), "y": float(org["hyper_wake_xy"][k, 1])},
                 "wake_axis": {"x": float(org["hyper_wake_axis"][k, 0]), "y": float(org["hyper_wake_axis"][k, 1])},
                 "wake_extent": float(org["hyper_wake_extent"][k]),
                 "top_cylinders": topk_cylinder_members(A_mh, k, top_n=topk_cylinders),
-                "env_token_count": env_token_count,
+                "env_token_count": int(round(float(org["hyper_env_token_count"][k]))) if "hyper_env_token_count" in org else env_token_count,
                 "env_mass_sum": float(np.sum(A_eh[:, k])),
                 "env_mass_mean": float(np.mean(A_eh[:, k])),
                 "top_env_tokens": topk_env_members(A_eh, k, org["env_xy"], top_n=topk_env),
@@ -262,6 +302,10 @@ def write_organization_summary(save_csv: Path, save_json: Path, summaries: List[
                 "strength": item["strength"],
                 "module_mass": item["module_mass"],
                 "env_mass": item["env_mass"],
+                "edge_score": item["edge_score"],
+                "active": int(bool(item["active"])),
+                "collapsed": int(bool(item["collapsed"])),
+                "duplicate": int(bool(item["duplicate"])),
                 "source_x": item["source"]["x"],
                 "source_y": item["source"]["y"],
                 "wake_x": item["wake"]["x"],
@@ -358,6 +402,19 @@ def _axis_unit_vectors(org: Dict) -> np.ndarray:
     return np.where(axis_norm > 1e-8, axis_phys / np.maximum(axis_norm, 1e-8), np.array([[1.0, 0.0]]))
 
 
+def _edge_is_active(org: Dict, k: int) -> bool:
+    return bool(np.asarray(org.get("hyper_active_mask", np.ones((k + 1,), dtype=np.float32)))[k] > 0.5)
+
+
+def _edge_draw_style(org: Dict, k: int, *, show_disabled_edges: bool) -> tuple[bool, object, float, str]:
+    active = _edge_is_active(org, k)
+    if active:
+        return True, org["colors"][k], 1.0, "-"
+    if not show_disabled_edges:
+        return False, "0.65", 0.0, "--"
+    return True, "0.62", 0.32, "--"
+
+
 def render_organization_physical_summary(
     save_path: Path,
     org: Dict,
@@ -367,6 +424,8 @@ def render_organization_physical_summary(
     threshold: float = 0.15,
     topk_me_links: int = 3,
     show_table: bool = True,
+    show_disabled_edges: bool = False,
+    visualize_disabled_edges: bool = True,
 ) -> None:
     del topk_me_links
     bounds = org["bounds"]
@@ -390,11 +449,17 @@ def render_organization_physical_summary(
     pad = 0.045 * min(bounds["lx"], bounds["ly"])
 
     for k in range(num_hyper):
+        draw, color, alpha_scale, _ = _edge_draw_style(org, k, show_disabled_edges=show_disabled_edges)
+        if visualize_disabled_edges and not draw:
+            continue
         mask = org["token_group"] == k
         if np.any(mask):
-            _add_region(ax, org["env_xy"][mask], org["colors"][k], pad, alpha=0.13, zorder=0)
+            _add_region(ax, org["env_xy"][mask], color, pad, alpha=0.13 * alpha_scale, zorder=0)
 
     for k in range(num_hyper):
+        draw, color, alpha_scale, _ = _edge_draw_style(org, k, show_disabled_edges=show_disabled_edges)
+        if visualize_disabled_edges and not draw:
+            continue
         mask = org["token_group"] == k
         if not np.any(mask):
             continue
@@ -403,32 +468,37 @@ def render_organization_physical_summary(
             org["env_xy"][mask, 0],
             org["env_xy"][mask, 1],
             s=18 + 95 * conf,
-            c=[org["colors"][k]],
-            alpha=np.clip(0.18 + 0.70 * conf, 0.18, 0.88),
+            c=[color],
+            alpha=np.clip((0.18 + 0.70 * conf) * alpha_scale, 0.10, 0.88),
             linewidths=0.0,
             zorder=2,
         )
 
     for item in summaries:
         k = item["hyperedge_id"]
+        draw, color, alpha_scale, _ = _edge_draw_style(org, k, show_disabled_edges=show_disabled_edges)
+        if visualize_disabled_edges and not draw:
+            continue
         for member in item["top_env_tokens"]:
             j = member["id"]
             ax.scatter(
                 org["env_xy"][j, 0],
                 org["env_xy"][j, 1],
                 s=92 + 70 * float(member["weight"]),
-                facecolors=[org["colors"][k]],
+                facecolors=[color],
                 edgecolors="k",
                 linewidths=0.65,
-                alpha=0.92,
+                alpha=0.92 * alpha_scale,
                 zorder=6,
             )
 
     arrow_len = 0.09 * min(bounds["lx"], bounds["ly"])
     axis_phys = _axis_unit_vectors(org)
     for k in range(num_hyper):
-        color = org["colors"][k]
-        draw_periodic_segment(ax, org["hyper_source_xy"][k], org["hyper_wake_xy"][k], bounds, linestyle=":", color=color, alpha=0.78, linewidth=1.5, zorder=3)
+        draw, color, alpha_scale, linestyle = _edge_draw_style(org, k, show_disabled_edges=show_disabled_edges)
+        if visualize_disabled_edges and not draw:
+            continue
+        draw_periodic_segment(ax, org["hyper_source_xy"][k], org["hyper_wake_xy"][k], bounds, linestyle=":" if _edge_is_active(org, k) else linestyle, color=color, alpha=0.78 * alpha_scale, linewidth=1.5, zorder=3)
         ax.scatter(org["hyper_source_xy"][k, 0], org["hyper_source_xy"][k, 1], s=105, marker="X", c=[color], edgecolors="k", linewidths=0.75, zorder=7)
         ax.scatter(org["hyper_wake_xy"][k, 0], org["hyper_wake_xy"][k, 1], s=130 + 180 * float(org["hyper_strength"][k]), marker="*", c=[color], edgecolors="k", linewidths=0.75, zorder=7)
         ax.arrow(
@@ -437,21 +507,26 @@ def render_organization_physical_summary(
             arrow_len * axis_phys[k, 0],
             arrow_len * axis_phys[k, 1],
             color=color,
+            alpha=max(0.15, alpha_scale),
             width=0.0,
             head_width=0.10,
             head_length=0.18,
             length_includes_head=True,
             zorder=8,
         )
+        suffix = "" if _edge_is_active(org, k) else " (off)"
         ax.text(org["hyper_source_xy"][k, 0], org["hyper_source_xy"][k, 1], f"S{k}", fontsize=8, ha="right", va="top", zorder=9)
-        ax.text(org["hyper_wake_xy"][k, 0], org["hyper_wake_xy"][k, 1], f"H{k}", fontsize=9, ha="left", va="bottom", zorder=9)
+        ax.text(org["hyper_wake_xy"][k, 0], org["hyper_wake_xy"][k, 1], f"H{k}{suffix}", fontsize=9, ha="left", va="bottom", zorder=9)
 
     for i in range(org["centers"].shape[0]):
         for k in range(num_hyper):
+            draw, color, alpha_scale, linestyle = _edge_draw_style(org, k, show_disabled_edges=show_disabled_edges)
+            if visualize_disabled_edges and not draw:
+                continue
             w = float(org["A_mh"][i, k])
             if w < threshold:
                 continue
-            draw_periodic_segment(ax, org["centers"][i], org["hyper_source_xy"][k], bounds, linestyle="--", color=org["colors"][k], alpha=0.16 + 0.60 * w, linewidth=0.8 + 3.0 * w, zorder=4)
+            draw_periodic_segment(ax, org["centers"][i], org["hyper_source_xy"][k], bounds, linestyle=linestyle if not _edge_is_active(org, k) else "--", color=color, alpha=(0.16 + 0.60 * w) * alpha_scale, linewidth=0.8 + 3.0 * w, zorder=4)
 
     for i, (cx, cy) in enumerate(org["centers"]):
         ax.add_patch(plt.Circle((cx, cy), org["cylinder_radius"], fill=False, color="k", lw=1.25, zorder=10))
@@ -466,6 +541,8 @@ def render_organization_physical_summary(
         Line2D([0], [0], color="k", lw=1.4, linestyle="--", label="cylinder->hyperedge"),
         Line2D([0], [0], color="k", lw=1.4, linestyle=":", label="source->wake"),
     ]
+    if visualize_disabled_edges:
+        legend_items.append(Line2D([0], [0], color="0.62", lw=1.4, linestyle="--", label="inactive / disabled hyperedge"))
     ax.legend(handles=legend_items, loc="upper right", fontsize=7, framealpha=0.88)
     ax.text(
         0.01,
@@ -485,11 +562,13 @@ def render_organization_physical_summary(
         y = 0.98
         for item in summaries:
             k = item["hyperedge_id"]
-            color = org["colors"][k]
+            draw, color, alpha_scale, _ = _edge_draw_style(org, k, show_disabled_edges=True)
             y -= row_h
-            table_ax.add_patch(Rectangle((0.0, y), 1.0, row_h * 0.86, transform=table_ax.transAxes, facecolor=color, edgecolor=color, alpha=0.16, linewidth=1.0))
+            table_ax.add_patch(Rectangle((0.0, y), 1.0, row_h * 0.86, transform=table_ax.transAxes, facecolor=color, edgecolor=color, alpha=0.16 * alpha_scale, linewidth=1.0))
+            status = "on" if item["active"] else "off"
             text = (
-                f"H{k}  strength={item['strength']:.3f}  mod_mass={item['module_mass']:.3f}  env_mass={item['env_mass']:.3f}  env n={item['env_token_count']}\n"
+                f"H{k} {status} score={item['edge_score']:.3f} strength={item['strength']:.3f} mod={item['module_mass']:.3f} env={item['env_mass']:.3f} n={item['env_token_count']}\n"
+                f"collapsed={int(item['collapsed'])} duplicate={int(item['duplicate'])} "
                 f"src=({item['source']['x']:.2f},{item['source']['y']:.2f}) wake=({item['wake']['x']:.2f},{item['wake']['y']:.2f}) "
                 f"axis=({item['wake_axis']['x']:.2f},{item['wake_axis']['y']:.2f}) extent={item['wake_extent']:.3f}\n"
                 f"cyl: {_format_members('C', item['top_cylinders'])}\n"
@@ -511,7 +590,14 @@ def _sorted_env_order(org: Dict) -> tuple[np.ndarray, np.ndarray]:
     return order, sorted_groups
 
 
-def render_organization_matrices(save_path: Path, org: Dict, summaries: List[Dict]) -> None:
+def render_organization_matrices(
+    save_path: Path,
+    org: Dict,
+    summaries: List[Dict],
+    *,
+    show_disabled_edges: bool = False,
+    visualize_disabled_edges: bool = True,
+) -> None:
     A_mh = org["A_mh"]
     A_eh = org["A_eh"]
     num_hyper = A_eh.shape[1]
@@ -536,6 +622,10 @@ def render_organization_matrices(save_path: Path, org: Dict, summaries: List[Dic
         for i in range(A_mh.shape[0]):
             for k in range(num_hyper):
                 ax_mh.text(k, i, f"{A_mh[i, k]:.2f}", ha="center", va="center", fontsize=7, color="white" if A_mh[i, k] > 0.5 else "black")
+    if visualize_disabled_edges:
+        for k in range(num_hyper):
+            if not _edge_is_active(org, k):
+                ax_mh.axvspan(k - 0.5, k + 0.5, color="0.75", alpha=0.35, hatch="//")
     fig.colorbar(im_mh, ax=ax_mh, fraction=0.046, pad=0.03)
 
     group_cmap = ListedColormap(org["colors"])
@@ -558,12 +648,21 @@ def render_organization_matrices(save_path: Path, org: Dict, summaries: List[Dic
     for y in boundaries:
         ax_eh.axhline(y, color="white", lw=1.1, alpha=0.95)
         ax_strip.axhline(y, color="white", lw=1.1, alpha=0.95)
+    if visualize_disabled_edges:
+        for k in range(num_hyper):
+            if not _edge_is_active(org, k):
+                ax_eh.axvspan(k - 0.5, k + 0.5, color="0.75", alpha=0.35, hatch="//")
     fig.colorbar(im_eh, ax=ax_eh, fraction=0.046, pad=0.03)
 
     bounds = org["bounds"]
     extent = (bounds["x_min"], bounds["x_min"] + bounds["lx"], bounds["y_min"], bounds["y_min"] + bounds["ly"])
     for k in range(num_hyper):
         ax = fig.add_subplot(gs[1 + (k // cols), k % cols])
+        draw, color, alpha_scale, _ = _edge_draw_style(org, k, show_disabled_edges=show_disabled_edges)
+        if visualize_disabled_edges and not draw:
+            ax.axis("off")
+            ax.set_title(f"H{k} (off)", fontsize=8.2, color="0.45")
+            continue
         weights = np.clip(A_eh[:, k], 0.0, None)
         dominated = org["token_group"] == k
         ax.scatter(org["env_xy"][:, 0], org["env_xy"][:, 1], c="0.78", s=14, alpha=0.45, linewidths=0.0)
@@ -571,23 +670,23 @@ def render_organization_matrices(save_path: Path, org: Dict, summaries: List[Dic
             ax.scatter(
                 org["env_xy"][dominated, 0],
                 org["env_xy"][dominated, 1],
-                c=[org["colors"][k]],
+                c=[color],
                 s=18 + 85 * weights[dominated],
-                alpha=np.clip(0.28 + 0.68 * weights[dominated], 0.28, 0.92),
+                alpha=np.clip((0.28 + 0.68 * weights[dominated]) * alpha_scale, 0.12, 0.92),
                 linewidths=0.0,
             )
         for member in summaries[k]["top_env_tokens"]:
             j = member["id"]
-            ax.scatter(org["env_xy"][j, 0], org["env_xy"][j, 1], s=88 + 65 * float(member["weight"]), facecolors=[org["colors"][k]], edgecolors="k", linewidths=0.6)
+            ax.scatter(org["env_xy"][j, 0], org["env_xy"][j, 1], s=88 + 65 * float(member["weight"]), facecolors=[color], edgecolors="k", linewidths=0.6, alpha=alpha_scale)
         for cx, cy in org["centers"]:
             ax.add_patch(plt.Circle((cx, cy), org["cylinder_radius"], fill=False, color="k", lw=0.8))
-        ax.scatter(org["hyper_source_xy"][k, 0], org["hyper_source_xy"][k, 1], marker="X", s=70, c=[org["colors"][k]], edgecolors="k")
-        ax.scatter(org["hyper_wake_xy"][k, 0], org["hyper_wake_xy"][k, 1], marker="*", s=100, c=[org["colors"][k]], edgecolors="k")
+        ax.scatter(org["hyper_source_xy"][k, 0], org["hyper_source_xy"][k, 1], marker="X", s=70, c=[color], edgecolors="k", alpha=alpha_scale)
+        ax.scatter(org["hyper_wake_xy"][k, 0], org["hyper_wake_xy"][k, 1], marker="*", s=100, c=[color], edgecolors="k", alpha=alpha_scale)
         ax.set_xlim(extent[0], extent[1])
         ax.set_ylim(extent[2], extent[3])
         ax.set_aspect("equal")
         ax.set_title(
-            f"H{k} | str={summaries[k]['strength']:.2f} | mod={summaries[k]['module_mass']:.2f} | env={summaries[k]['env_mass']:.2f}",
+            f"H{k}{'' if summaries[k]['active'] else ' (off)'} | score={summaries[k]['edge_score']:.2f} | mod={summaries[k]['module_mass']:.2f} | env={summaries[k]['env_mass']:.2f}",
             fontsize=8.2,
         )
         ax.set_xticks([])
@@ -641,7 +740,16 @@ def _curved_edge(ax, p0: tuple[float, float], p1: tuple[float, float], *, color,
     )
 
 
-def render_organization_sankey(save_path: Path, org: Dict, summaries: List[Dict], *, threshold: float = 0.15, min_gap: float = 0.08) -> None:
+def render_organization_sankey(
+    save_path: Path,
+    org: Dict,
+    summaries: List[Dict],
+    *,
+    threshold: float = 0.15,
+    min_gap: float = 0.08,
+    show_disabled_edges: bool = False,
+    visualize_disabled_edges: bool = True,
+) -> None:
     centers = org["centers"]
     A_mh = org["A_mh"]
     A_eh = org["A_eh"]
@@ -666,15 +774,21 @@ def render_organization_sankey(save_path: Path, org: Dict, summaries: List[Dict]
 
     for i in range(num_cyl):
         for k in range(num_hyper):
+            draw, color, alpha_scale, _ = _edge_draw_style(org, k, show_disabled_edges=show_disabled_edges)
+            if visualize_disabled_edges and not draw:
+                continue
             w = float(A_mh[i, k])
             if w < threshold:
                 continue
-            _curved_edge(ax, module_pos[i], hyper_pos[k], color=org["colors"][k], linewidth=0.7 + 4.2 * w, alpha=min(0.95, 0.15 + 0.85 * w), rad=0.10 if (i + k) % 2 == 0 else -0.10)
+            _curved_edge(ax, module_pos[i], hyper_pos[k], color=color, linewidth=0.7 + 4.2 * w, alpha=min(0.95, 0.15 + 0.85 * w) * alpha_scale, rad=0.10 if (i + k) % 2 == 0 else -0.10)
     for k in range(num_hyper):
+        draw, color, alpha_scale, _ = _edge_draw_style(org, k, show_disabled_edges=show_disabled_edges)
+        if visualize_disabled_edges and not draw:
+            continue
         mass = float(A_eh[:, k].mean())
         n_tokens = summaries[k]["env_token_count"]
         width = 1.0 + 8.0 * max(mass, n_tokens / max(float(A_eh.shape[0]), 1.0))
-        _curved_edge(ax, hyper_pos[k], env_pos[k], color=org["colors"][k], linewidth=width, alpha=0.35 + 0.5 * min(1.0, width / 8.0), rad=-0.08)
+        _curved_edge(ax, hyper_pos[k], env_pos[k], color=color, linewidth=width, alpha=(0.35 + 0.5 * min(1.0, width / 8.0)) * alpha_scale, rad=-0.08)
 
     bbox = {"facecolor": "white", "alpha": 0.78, "edgecolor": "none", "pad": 1.0}
     for i in range(num_cyl):
@@ -682,12 +796,18 @@ def render_organization_sankey(save_path: Path, org: Dict, summaries: List[Dict]
         ax.scatter([x], [y], s=130, c="white", edgecolors="k", zorder=4)
         ax.text(x - 0.035, y, f"C{i}", ha="right", va="center", fontsize=9, bbox=bbox, zorder=5)
     for k in range(num_hyper):
+        draw, color, alpha_scale, _ = _edge_draw_style(org, k, show_disabled_edges=show_disabled_edges)
+        if visualize_disabled_edges and not draw:
+            continue
         x, y = hyper_pos[k]
-        ax.scatter([x], [y], s=180, marker="*", c=[org["colors"][k]], edgecolors="k", zorder=4)
-        ax.text(x, y + 0.035, f"H{k}", ha="center", va="bottom", fontsize=9, bbox=bbox, zorder=5)
+        ax.scatter([x], [y], s=180, marker="*", c=[color], edgecolors="k", alpha=alpha_scale, zorder=4)
+        ax.text(x, y + 0.035, f"H{k}{'' if summaries[k]['active'] else ' (off)'}", ha="center", va="bottom", fontsize=9, bbox=bbox, zorder=5)
     for k in range(num_hyper):
+        draw, color, alpha_scale, _ = _edge_draw_style(org, k, show_disabled_edges=show_disabled_edges)
+        if visualize_disabled_edges and not draw:
+            continue
         x, y = env_pos[k]
-        ax.scatter([x], [y], s=145, marker="s", c=[org["colors"][k]], edgecolors="k", zorder=4)
+        ax.scatter([x], [y], s=145, marker="s", c=[color], edgecolors="k", alpha=alpha_scale, zorder=4)
         ax.text(
             x + 0.035,
             y,
@@ -725,7 +845,15 @@ def _schematic_node_positions(centers: np.ndarray) -> np.ndarray:
     return pos
 
 
-def render_organization_hypergraph_schematic(save_path: Path, org: Dict, summaries: List[Dict], *, threshold: float = 0.15) -> None:
+def render_organization_hypergraph_schematic(
+    save_path: Path,
+    org: Dict,
+    summaries: List[Dict],
+    *,
+    threshold: float = 0.15,
+    show_disabled_edges: bool = False,
+    visualize_disabled_edges: bool = True,
+) -> None:
     A_mh = org["A_mh"]
     num_cyl, num_hyper = A_mh.shape
     node_pos = _schematic_node_positions(org["centers"])
@@ -737,6 +865,9 @@ def render_organization_hypergraph_schematic(save_path: Path, org: Dict, summari
 
     label_items = []
     for k in range(num_hyper):
+        draw, color, alpha_scale, _ = _edge_draw_style(org, k, show_disabled_edges=show_disabled_edges)
+        if visualize_disabled_edges and not draw:
+            continue
         weights = A_mh[:, k]
         members = np.where(weights >= threshold)[0]
         if members.size == 0 and num_cyl:
@@ -750,9 +881,9 @@ def render_organization_hypergraph_schematic(save_path: Path, org: Dict, summari
         pts = node_pos[members]
         jitter = np.array([0.018 * ((k % 3) - 1), 0.018 * (((k + 1) % 3) - 1)])
         region_pts = np.clip(pts + jitter, 0.05, 0.95)
-        _add_region(ax, region_pts, org["colors"][k], pad=0.065 + 0.01 * (k % 2), alpha=0.20, zorder=1 + k)
+        _add_region(ax, region_pts, color, pad=0.065 + 0.01 * (k % 2), alpha=0.20 * alpha_scale, zorder=1 + k)
         label_xy = np.clip(region_pts.mean(axis=0) + np.array([0.0, 0.095 + 0.015 * ((k % 2) * 2 - 1)]), 0.08, 0.92)
-        label_items.append((k, label_xy))
+        label_items.append((k, label_xy, color, alpha_scale))
 
     if label_items:
         raw_y = np.asarray([item[1][1] for item in label_items], dtype=np.float64)
@@ -760,18 +891,18 @@ def render_organization_hypergraph_schematic(save_path: Path, org: Dict, summari
     else:
         spread_y = np.asarray([], dtype=np.float64)
 
-    for idx, (k, label_xy) in enumerate(label_items):
+    for idx, (k, label_xy, color, alpha_scale) in enumerate(label_items):
         label_x = float(np.clip(label_xy[0] + 0.04 * ((idx % 3) - 1), 0.10, 0.90))
         label_y = float(spread_y[idx])
         ax.text(
             label_x,
             label_y,
-            f"H{k}\nmod={summaries[k]['module_mass']:.2f}\nenv={summaries[k]['env_mass']:.2f}",
+            f"H{k}{'' if summaries[k]['active'] else ' off'}\nmod={summaries[k]['module_mass']:.2f}\nenv={summaries[k]['env_mass']:.2f}",
             ha="center",
             va="center",
             fontsize=8.3,
             color="black",
-            bbox={"boxstyle": "round,pad=0.22", "facecolor": "white", "edgecolor": org["colors"][k], "alpha": 0.88},
+            bbox={"boxstyle": "round,pad=0.22", "facecolor": "white", "edgecolor": color, "alpha": 0.88 * alpha_scale},
             zorder=20 + k,
         )
 
@@ -798,6 +929,8 @@ def render_soft_organization(
     topk_env: int = 5,
     min_gap: float = 0.08,
     show_table: bool = True,
+    show_disabled_edges: bool = False,
+    visualize_disabled_edges: bool = True,
 ) -> Dict[str, str]:
     org = extract_organization_arrays(out, case)
     case_id = str(case.get("case_id", "?"))
@@ -808,6 +941,10 @@ def render_soft_organization(
         topk_cylinders=topk_cylinders,
         topk_env=topk_env,
     )
+    render_org = org
+    if not visualize_disabled_edges:
+        render_org = dict(org)
+        render_org["hyper_active_mask"] = np.ones_like(org["hyper_active_mask"], dtype=np.float32)
     base = f"case_{case_id}_tau_{phase_idx:03d}"
     csv_path = output_dir / f"organization_summary_{base}.csv"
     json_path = output_dir / f"organization_summary_{base}.json"
@@ -816,18 +953,28 @@ def render_soft_organization(
     paths = {"summary_csv": str(csv_path), "summary_json": str(json_path)}
     if organization_view in {"all", "physical"}:
         path = output_dir / f"organization_physical_{base}.png"
-        render_organization_physical_summary(path, org, summaries, case, threshold=threshold, topk_me_links=topk_me_links, show_table=show_table)
+        render_organization_physical_summary(
+            path,
+            render_org,
+            summaries,
+            case,
+            threshold=threshold,
+            topk_me_links=topk_me_links,
+            show_table=show_table,
+            show_disabled_edges=show_disabled_edges,
+            visualize_disabled_edges=visualize_disabled_edges,
+        )
         paths["physical"] = str(path)
     if organization_view in {"all", "matrices"}:
         path = output_dir / f"organization_matrices_{base}.png"
-        render_organization_matrices(path, org, summaries)
+        render_organization_matrices(path, render_org, summaries, show_disabled_edges=show_disabled_edges, visualize_disabled_edges=visualize_disabled_edges)
         paths["matrices"] = str(path)
     if organization_view in {"all", "sankey"}:
         path = output_dir / f"organization_sankey_{base}.png"
-        render_organization_sankey(path, org, summaries, threshold=threshold, min_gap=min_gap)
+        render_organization_sankey(path, render_org, summaries, threshold=threshold, min_gap=min_gap, show_disabled_edges=show_disabled_edges, visualize_disabled_edges=visualize_disabled_edges)
         paths["sankey"] = str(path)
     if organization_view in {"all", "schematic"}:
         path = output_dir / f"organization_hypergraph_schematic_{base}.png"
-        render_organization_hypergraph_schematic(path, org, summaries, threshold=threshold)
+        render_organization_hypergraph_schematic(path, render_org, summaries, threshold=threshold, show_disabled_edges=show_disabled_edges, visualize_disabled_edges=visualize_disabled_edges)
         paths["schematic"] = str(path)
     return paths

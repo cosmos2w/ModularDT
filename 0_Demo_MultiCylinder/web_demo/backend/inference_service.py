@@ -24,12 +24,102 @@ def _model_dump(model) -> Dict:
     return model.dict()
 
 
+def _legacy_safe_pool(values, mask=None):
+    import torch
+
+    if values is None:
+        return []
+    if values.ndim == 2:
+        return [values]
+    if mask is None:
+        return [values.mean(dim=1), values.max(dim=1).values]
+    m = mask.to(dtype=values.dtype, device=values.device).unsqueeze(-1)
+    raw_count = m.sum(dim=1)
+    denom = raw_count.clamp_min(1.0)
+    mean = (values * m).sum(dim=1) / denom
+    masked = values.masked_fill(m <= 0, -1e9)
+    max_val = masked.max(dim=1).values
+    valid_any = raw_count > 0
+    max_val = torch.where(valid_any, max_val, torch.zeros_like(max_val))
+    return [mean, max_val]
+
+
+def _build_legacy_global_condition_vector(det_outputs: Dict, structure: Dict):
+    import torch
+
+    pieces = []
+
+    for key in ["behavior_latent", "mean_latent", "dynamic_global_token", "freq_pred"]:
+        val = det_outputs.get(key)
+        if val is None:
+            continue
+        if val.ndim == 3 and val.shape[1] == 1:
+            val = val[:, 0]
+        pieces.append(val.reshape(val.shape[0], -1))
+
+    cyl_mask = structure.get("cyl_mask")
+    for key in ["module_state", "env_state", "hyper_state", "dynamic_hyper_base", "dynamic_hyper_tokens"]:
+        val = det_outputs.get(key)
+        if val is None:
+            continue
+        mask = cyl_mask if key == "module_state" else None
+        pieces.extend(_legacy_safe_pool(val, mask=mask))
+
+    for key in [
+        "hyper_module_mass",
+        "hyper_env_mass",
+        "hyper_strength",
+        "hyper_source_coords",
+        "hyper_wake_coords",
+        "hyper_wake_axis",
+        "hyper_wake_extent",
+    ]:
+        val = det_outputs.get(key)
+        if val is not None:
+            pieces.extend(_legacy_safe_pool(val, mask=None))
+
+    for key in ["re_values", "num_cylinders"]:
+        if key in structure:
+            pieces.append(structure[key].reshape(structure[key].shape[0], -1))
+
+    if not pieces:
+        raise RuntimeError("No deterministic-condition features were available.")
+    return torch.cat(pieces, dim=-1)
+
+
+def _build_checkpoint_global_condition_vector(det_outputs: Dict, structure: Dict, expected_dim: int):
+    from model_gen import build_global_condition_vector
+
+    global_cond = build_global_condition_vector(det_outputs, structure)
+    if int(global_cond.shape[-1]) == int(expected_dim):
+        return global_cond
+
+    legacy_global_cond = _build_legacy_global_condition_vector(det_outputs, structure)
+    if int(legacy_global_cond.shape[-1]) == int(expected_dim):
+        return legacy_global_cond
+
+    raise ValueError(
+        "Global condition width does not match the stage-2 checkpoint: "
+        f"current={int(global_cond.shape[-1])}, legacy={int(legacy_global_cond.shape[-1])}, "
+        f"checkpoint={int(expected_dim)}. Re-train stage 2 or update the checkpoint condition layout."
+    )
+
+
 def _request_with_phase_bins(request: DesignRequest, phase_bins: int) -> DesignRequest:
     if int(request.phase_bins) == int(phase_bins):
         return request
     if hasattr(request, "model_copy"):
         return request.model_copy(update={"phase_bins": int(phase_bins)})
     return request.copy(update={"phase_bins": int(phase_bins)})
+
+
+def _request_with_grid(request: DesignRequest, nx: int, ny: int) -> DesignRequest:
+    if int(request.resolution_nx) == int(nx) and int(request.resolution_ny) == int(ny):
+        return request
+    update = {"resolution_nx": int(nx), "resolution_ny": int(ny)}
+    if hasattr(request, "model_copy"):
+        return request.model_copy(update=update)
+    return request.copy(update=update)
 
 
 class InferenceService:
@@ -96,7 +186,7 @@ class InferenceService:
 
     def _infer_generative(self, request: DesignRequest, entry, req_hash: str, validation) -> Dict:
         import torch
-        from model_gen import build_dense_condition_grid, build_global_condition_vector, denormalize_grid
+        from model_gen import build_dense_condition_grid, denormalize_grid
 
         artifact = self.gen_service.load(entry)
         model_cfg = dict(artifact.deterministic_model_config)
@@ -114,6 +204,11 @@ class InferenceService:
             raise ValueError("Invalid design: " + "; ".join(model_validation.warnings))
 
         effective_request = _request_with_phase_bins(request, validation.effective_phase_bins)
+        effective_request = _request_with_grid(
+            effective_request,
+            int(artifact.checkpoint["num_x"]),
+            int(artifact.checkpoint["num_y"]),
+        )
 
         job_id = new_job_id()
         job_dir = settings.cache_dir / job_id
@@ -165,7 +260,11 @@ class InferenceService:
                     re_scale=float(model_cfg.get("re_scale", 200.0)),
                     include_field=include_field,
                 )
-                global_cond = build_global_condition_vector(det_out, structure)
+                global_cond = _build_checkpoint_global_condition_vector(
+                    det_out,
+                    structure,
+                    expected_dim=int(artifact.checkpoint["global_cond_dim"]),
+                )
                 cond_grid = cond_grid.repeat(n_samples, 1, 1, 1)
                 global_cond = global_cond.repeat(n_samples, 1)
                 det_mean_rep = det_mean.repeat(n_samples, 1, 1, 1)
@@ -189,10 +288,11 @@ class InferenceService:
                     initial_latent=initial_latent,
                 )
                 gen_res = denormalize_grid(gen_res_norm, artifact.stats.to(artifact.device, dtype=gen_res_norm.dtype))
-                generated_cycle.append((det_mean_rep + gen_res).detach().cpu().numpy().astype(np.float32))
-                det_field_cycle.append(det_field[0].detach().cpu().numpy().astype(np.float32))
-                det_mean_cycle.append(det_mean[0].detach().cpu().numpy().astype(np.float32))
-                det_residual_cycle.append(det_residual[0].detach().cpu().numpy().astype(np.float32))
+                gen_field = (det_mean_rep + gen_res).permute(0, 2, 3, 1).contiguous()
+                generated_cycle.append(gen_field.detach().cpu().numpy().astype(np.float32))
+                det_field_cycle.append(det_field[0].permute(1, 2, 0).contiguous().detach().cpu().numpy().astype(np.float32))
+                det_mean_cycle.append(det_mean[0].permute(1, 2, 0).contiguous().detach().cpu().numpy().astype(np.float32))
+                det_residual_cycle.append(det_residual[0].permute(1, 2, 0).contiguous().detach().cpu().numpy().astype(np.float32))
                 if aux is None:
                     aux = {key: value for key, value in det_out.items() if key not in {"pred_field", "pred_mean", "pred_residual"}}
 

@@ -545,6 +545,23 @@ class ModelConfig:
     dropout: float = 0.05
     use_layer_norm: bool = True
     decoder_type: str = "hierarchical_perceiver"
+    DISABLE_EDGE: bool = False
+    disable_edge_strength_threshold: float = 0.05
+    disable_edge_module_mass_threshold: float = 0.03
+    disable_edge_env_mass_threshold: float = 0.03
+    disable_edge_use_hard_env_count: bool = True
+    disable_edge_min_env_tokens: int = 1
+    disable_edge_prune_duplicates: bool = True
+    disable_edge_duplicate_similarity_threshold: float = 0.985
+    disable_edge_duplicate_source_distance_threshold: float = 0.20
+    disable_edge_duplicate_wake_distance_threshold: float = 0.25
+    disable_edge_duplicate_axis_cos_threshold: float = 0.90
+    disable_edge_min_active_edges: int = 1
+    disable_edge_detach_scores: bool = True
+    disable_edge_apply_to_decoder: bool = True
+    disable_edge_apply_to_phase_context: bool = True
+    disable_edge_apply_to_visualization: bool = True
+    disable_edge_start_epoch: int = 0
 
     @classmethod
     def from_dict(cls, payload: Dict) -> "ModelConfig":
@@ -559,6 +576,136 @@ class ModelConfig:
 
 
 # --------------------------- Organizer / Encoder ------------------------------
+
+
+def _default_hyperedge_mask_info(
+    A_eh: torch.Tensor,
+    hyper_strength: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    batch_size, num_env, num_hyper = A_eh.shape
+    active = torch.ones((batch_size, num_hyper), device=A_eh.device, dtype=A_eh.dtype)
+    inactive = torch.zeros((batch_size, num_hyper), device=A_eh.device, dtype=torch.bool)
+    if num_hyper == 0:
+        counts = torch.zeros((batch_size, 0), device=A_eh.device, dtype=A_eh.dtype)
+    else:
+        token_group = A_eh.argmax(dim=-1)
+        counts = torch.stack([(token_group == k).sum(dim=1) for k in range(num_hyper)], dim=1).to(dtype=A_eh.dtype)
+    edge_score = hyper_strength + 0.05 * (counts / max(float(num_env), 1.0))
+    return {
+        "hyper_active_mask": active,
+        "hyper_collapsed_mask": inactive,
+        "hyper_duplicate_mask": inactive.clone(),
+        "hyper_edge_score": edge_score,
+        "hyper_env_token_count": counts,
+        "hyper_disable_reason_code": torch.zeros((batch_size, num_hyper), device=A_eh.device, dtype=torch.long),
+    }
+
+
+def compute_hyperedge_active_mask(organized: Dict[str, torch.Tensor], cfg: ModelConfig) -> Dict[str, torch.Tensor]:
+    """Diagnose collapsed/duplicate hyperedges and return a non-destructive active mask.
+
+    Raw incidence tensors are left untouched; the mask is intended for downstream
+    attention/context consumers when DISABLE_EDGE is enabled.
+    """
+
+    A_mh = organized["A_mh"]
+    A_eh = organized["A_eh"]
+    hyper_module_mass = organized["hyper_module_mass"]
+    hyper_env_mass = organized["hyper_env_mass"]
+    hyper_strength = organized["hyper_strength"]
+    if hyper_strength.ndim == 3:
+        hyper_strength = hyper_strength.squeeze(-1)
+
+    batch_size, num_env, num_hyper = A_eh.shape
+    if num_hyper == 0:
+        return _default_hyperedge_mask_info(A_eh, hyper_strength)
+
+    token_group = A_eh.argmax(dim=-1)
+    hyper_env_token_count = torch.stack([(token_group == k).sum(dim=1) for k in range(num_hyper)], dim=1).to(dtype=A_eh.dtype)
+    hard_fraction = hyper_env_token_count / max(float(num_env), 1.0)
+    edge_score = hyper_strength + 0.05 * hard_fraction
+    score_for_selection = edge_score.detach() if bool(cfg.disable_edge_detach_scores) else edge_score
+
+    soft_active = (
+        (hyper_strength >= float(cfg.disable_edge_strength_threshold))
+        & (hyper_module_mass >= float(cfg.disable_edge_module_mass_threshold))
+        & (hyper_env_mass >= float(cfg.disable_edge_env_mass_threshold))
+    )
+    collapsed = ~soft_active
+    active = soft_active.clone()
+    if bool(cfg.disable_edge_use_hard_env_count):
+        hard_ok = hyper_env_token_count >= float(cfg.disable_edge_min_env_tokens)
+        collapsed = collapsed | ~hard_ok
+        active = active & hard_ok
+
+    duplicate = torch.zeros_like(active, dtype=torch.bool)
+    reason_code = torch.zeros((batch_size, num_hyper), device=A_eh.device, dtype=torch.long)
+    reason_code = torch.where(collapsed, torch.ones_like(reason_code), reason_code)
+
+    if bool(cfg.disable_edge_prune_duplicates) and num_hyper > 1:
+        cyl_mask = organized.get("cyl_mask")
+        if cyl_mask is not None:
+            module_sig = A_mh * cyl_mask.to(device=A_mh.device, dtype=A_mh.dtype).unsqueeze(-1)
+        else:
+            module_sig = A_mh
+        signatures = torch.cat([module_sig.transpose(1, 2), A_eh.transpose(1, 2)], dim=-1)
+        signatures = F.normalize(signatures, dim=-1, eps=1e-8)
+        signature_cos = torch.matmul(signatures, signatures.transpose(1, 2))
+        source_dist = periodic_distance_min_image(
+            organized["hyper_source_coords"][:, :, None, :],
+            organized["hyper_source_coords"][:, None, :, :],
+        )
+        wake_dist = periodic_distance_min_image(
+            organized["hyper_wake_coords"][:, :, None, :],
+            organized["hyper_wake_coords"][:, None, :, :],
+        )
+        axis = F.normalize(organized["hyper_wake_axis"], dim=-1, eps=1e-8)
+        axis_cos = torch.matmul(axis, axis.transpose(1, 2))
+
+        sim_thr = float(cfg.disable_edge_duplicate_similarity_threshold)
+        src_thr = float(cfg.disable_edge_duplicate_source_distance_threshold)
+        wake_thr = float(cfg.disable_edge_duplicate_wake_distance_threshold)
+        axis_thr = float(cfg.disable_edge_duplicate_axis_cos_threshold)
+        scores_np = score_for_selection.detach()
+
+        for b in range(batch_size):
+            for i in range(num_hyper):
+                if not bool(active[b, i]):
+                    continue
+                for j in range(i + 1, num_hyper):
+                    if not bool(active[b, j]):
+                        continue
+                    is_dup = (
+                        float(signature_cos[b, i, j].detach().cpu()) > sim_thr
+                        and float(source_dist[b, i, j].detach().cpu()) < src_thr
+                        and float(wake_dist[b, i, j].detach().cpu()) < wake_thr
+                        and float(axis_cos[b, i, j].detach().cpu()) > axis_thr
+                    )
+                    if not is_dup:
+                        continue
+                    drop = j if float(scores_np[b, i].detach().cpu()) >= float(scores_np[b, j].detach().cpu()) else i
+                    active[b, drop] = False
+                    duplicate[b, drop] = True
+                    reason_code[b, drop] = 2
+                    if drop == i:
+                        break
+
+    min_active = max(0, min(int(cfg.disable_edge_min_active_edges), num_hyper))
+    if min_active > 0:
+        active_counts = active.sum(dim=1)
+        top_idx = torch.topk(score_for_selection, k=min_active, dim=-1, largest=True).indices
+        for b in range(batch_size):
+            if int(active_counts[b].item()) < min_active:
+                active[b, top_idx[b]] = True
+
+    return {
+        "hyper_active_mask": active.to(dtype=A_eh.dtype),
+        "hyper_collapsed_mask": collapsed,
+        "hyper_duplicate_mask": duplicate,
+        "hyper_edge_score": edge_score.detach() if bool(cfg.disable_edge_detach_scores) else edge_score,
+        "hyper_env_token_count": hyper_env_token_count,
+        "hyper_disable_reason_code": reason_code,
+    }
 
 
 class HypergraphOrganizer(nn.Module):
@@ -788,7 +935,7 @@ class HypergraphOrganizer(nn.Module):
         # visible as weak strength instead of being rewarded.
         hyper_strength = torch.sqrt(module_mass * env_mass + 1e-6)
 
-        return {
+        organized = {
             "module_state": module_state,
             "env_state": env_state,
             "hyper_state": hyper_state,
@@ -807,6 +954,11 @@ class HypergraphOrganizer(nn.Module):
             "global_features": global_feats,
             "cyl_mask": cyl_mask,
         }
+        if bool(self.cfg.DISABLE_EDGE):
+            organized.update(compute_hyperedge_active_mask(organized, self.cfg))
+        else:
+            organized.update(_default_hyperedge_mask_info(A_eh, hyper_strength))
+        return organized
 
 
 # ----------------------------- Behavior head ----------------------------------
@@ -1028,7 +1180,16 @@ class PhaseConditionedHyperContext(nn.Module):
             return empty, torch.zeros(query_tau.shape[0], query_tau.shape[1], 0, device=query_tau.device, dtype=query_tau.dtype)
 
         logits = self.geometry_logits(query_xy_norm, organized)
+        if bool(self.cfg.DISABLE_EDGE) and bool(self.cfg.disable_edge_apply_to_phase_context):
+            active_mask = organized.get("hyper_active_mask")
+            if active_mask is None:
+                active_mask = torch.ones(dynamic_hyper_base.shape[:2], device=logits.device, dtype=logits.dtype)
+            active_mask = active_mask.to(device=logits.device, dtype=logits.dtype)
+            logits = logits.masked_fill(active_mask[:, None, :] <= 0, -1e9)
         weights = torch.softmax(logits, dim=-1)
+        if bool(self.cfg.DISABLE_EDGE) and bool(self.cfg.disable_edge_apply_to_phase_context):
+            weights = weights * active_mask[:, None, :]
+            weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-6)
 
         base_ctx = torch.einsum("bqk,bkd->bqd", weights, dynamic_hyper_base)
         if not self.cfg.use_phase_conditioned_dynamic_tokens:
@@ -1182,6 +1343,15 @@ class HierarchicalPerceiverDecoder(nn.Module):
     def _concat_memory(self, pieces: Sequence[torch.Tensor]) -> torch.Tensor:
         return self.memory_norm(torch.cat(list(pieces), dim=1))
 
+    def _decoder_hyper_mask(self, organized: Dict[str, torch.Tensor], dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        fallback = torch.ones(organized["hyper_state"].shape[:2], device=device, dtype=dtype)
+        if not (bool(self.cfg.DISABLE_EDGE) and bool(self.cfg.disable_edge_apply_to_decoder)):
+            return fallback
+        active_mask = organized.get("hyper_active_mask")
+        if active_mask is None:
+            return fallback
+        return active_mask.to(device=device, dtype=dtype)
+
     def _build_memory_tokens(
         self,
         organized: Dict[str, torch.Tensor],
@@ -1202,7 +1372,7 @@ class HierarchicalPerceiverDecoder(nn.Module):
         batch_size = module_tokens.shape[0]
         module_mask = organized["cyl_mask"]
         env_mask = torch.ones(organized["env_state"].shape[:2], device=module_tokens.device, dtype=module_mask.dtype)
-        hyper_mask = torch.ones(organized["hyper_state"].shape[:2], device=module_tokens.device, dtype=module_mask.dtype)
+        hyper_mask = self._decoder_hyper_mask(organized, module_mask.dtype, module_tokens.device)
         mean_global_mask = torch.ones((batch_size, 1), device=module_tokens.device, dtype=module_mask.dtype)
         dynamic_global_mask = torch.ones((batch_size, 1), device=module_tokens.device, dtype=module_mask.dtype)
 
@@ -1322,8 +1492,9 @@ class HierarchicalPerceiverDecoder(nn.Module):
         dynamic_hyper_tokens = memory["dynamic_hyper_tokens"][:, None, :, :].expand(-1, chunk_queries, -1, -1)
         dynamic_global_token = memory["dynamic_global_token"][:, None, :, :].expand(-1, chunk_queries, -1, -1)
 
-        hyper_mask = torch.ones(hyper_tokens.shape[:3], device=query_xy_chunk_norm.device, dtype=query_xy_chunk_norm.dtype)
-        dynamic_hyper_mask = torch.ones(dynamic_hyper_tokens.shape[:3], device=query_xy_chunk_norm.device, dtype=query_xy_chunk_norm.dtype)
+        base_hyper_mask = memory["hyper_mask"][:, None, :].expand(-1, chunk_queries, -1)
+        hyper_mask = base_hyper_mask.to(device=query_xy_chunk_norm.device, dtype=query_xy_chunk_norm.dtype)
+        dynamic_hyper_mask = base_hyper_mask.to(device=query_xy_chunk_norm.device, dtype=query_xy_chunk_norm.dtype)
         dynamic_global_mask = torch.ones(dynamic_global_token.shape[:3], device=query_xy_chunk_norm.device, dtype=query_xy_chunk_norm.dtype)
 
         local_context = torch.cat(
@@ -1521,6 +1692,11 @@ class HypergraphNeuralFieldModel(nn.Module):
         self.behavior_head = BehaviorHead(cfg)
         self.decoder = HierarchicalPerceiverDecoder(cfg)
 
+    def set_edge_disable_runtime(self, enabled: bool) -> None:
+        """Temporarily toggle active-edge masking without changing tensor shapes."""
+
+        self.cfg.DISABLE_EDGE = bool(enabled)
+
     def forward(
         self,
         structure: Dict[str, torch.Tensor],
@@ -1567,6 +1743,12 @@ class HypergraphNeuralFieldModel(nn.Module):
                 "hyper_module_mass": organized["hyper_module_mass"],
                 "hyper_env_mass": organized["hyper_env_mass"],
                 "hyper_strength": organized["hyper_strength"],
+                "hyper_active_mask": organized["hyper_active_mask"],
+                "hyper_collapsed_mask": organized["hyper_collapsed_mask"],
+                "hyper_duplicate_mask": organized["hyper_duplicate_mask"],
+                "hyper_edge_score": organized["hyper_edge_score"],
+                "hyper_env_token_count": organized["hyper_env_token_count"],
+                "hyper_disable_reason_code": organized["hyper_disable_reason_code"],
                 "global_features": organized["global_features"],
                 "cyl_mask": organized["cyl_mask"],
             }

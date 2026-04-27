@@ -655,14 +655,19 @@ def build_global_condition_vector(det_outputs: Dict[str, torch.Tensor], structur
         pieces.append(val.reshape(val.shape[0], -1))
 
     cyl_mask = structure.get("cyl_mask")
+    hyper_active_mask = det_outputs.get("hyper_active_mask")
+    if hyper_active_mask is not None:
+        hyper_active_mask = hyper_active_mask.to(dtype=torch.float32)
     for key in ["module_state", "env_state", "hyper_state", "dynamic_hyper_base", "dynamic_hyper_tokens"]:
         val = det_outputs.get(key)
         if val is None:
             continue
-        mask = cyl_mask if key == "module_state" else None
+        mask = cyl_mask if key == "module_state" else hyper_active_mask if key in {"hyper_state", "dynamic_hyper_base", "dynamic_hyper_tokens"} else None
         pieces.extend(_safe_pool(val, mask=mask))
 
     for key in [
+        "hyper_active_mask",
+        "hyper_edge_score",
         "hyper_module_mass",
         "hyper_env_mass",
         "hyper_strength",
@@ -673,6 +678,8 @@ def build_global_condition_vector(det_outputs: Dict[str, torch.Tensor], structur
     ]:
         val = det_outputs.get(key)
         if val is not None:
+            if val.ndim == 2 and key in {"hyper_edge_score", "hyper_module_mass", "hyper_env_mass", "hyper_strength"} and hyper_active_mask is not None:
+                pieces.extend(_safe_pool(val.unsqueeze(-1), mask=hyper_active_mask))
             pieces.extend(_safe_pool(val, mask=None))
 
     # Always append simple scalar structure descriptors so the flow model knows

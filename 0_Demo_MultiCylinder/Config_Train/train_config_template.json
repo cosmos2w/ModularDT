@@ -1,6 +1,6 @@
 {
-  "case_id": "0007",
-  "comments":"Repeated 0005, larger model",
+  "case_id": "0008",
+  "comments":"Add edge disabling from epoch 100",
 
   "dataset": {
     "packed_h5_path": "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5",
@@ -47,9 +47,9 @@
     "domain_length_y": 12.0,
     "re_scale": 200.0,
 
-    "num_env_tokens_x": 16,
-    "num_env_tokens_y": 8,
-    "num_hyperedges": 4,
+    "num_env_tokens_x": 20,
+    "num_env_tokens_y": 10,
+    "num_hyperedges": 6,
 
     "hidden_dim": 72,
     "behavior_dim": 72,
@@ -90,6 +90,24 @@
     "use_wake_centered_hyper_geometry": true,
     "use_hyper_specific_eh_geometry": true,
 
+    "DISABLE_EDGE": true,
+    "disable_edge_strength_threshold": 0.05,
+    "disable_edge_module_mass_threshold": 0.03,
+    "disable_edge_env_mass_threshold": 0.03,
+    "disable_edge_use_hard_env_count": true,
+    "disable_edge_min_env_tokens": 1,
+    "disable_edge_prune_duplicates": true,
+    "disable_edge_duplicate_similarity_threshold": 0.985,
+    "disable_edge_duplicate_source_distance_threshold": 0.20,
+    "disable_edge_duplicate_wake_distance_threshold": 0.25,
+    "disable_edge_duplicate_axis_cos_threshold": 0.90,
+    "disable_edge_min_active_edges": 1,
+    "disable_edge_detach_scores": true,
+    "disable_edge_apply_to_decoder": true,
+    "disable_edge_apply_to_phase_context": true,
+    "disable_edge_apply_to_visualization": true,
+    "disable_edge_start_epoch": 100,
+
     "organizer_eh_prior_logit_weight": 0.0,
     "future_module_feature_dim": 0,
     "future_global_feature_dim": 0,
@@ -98,7 +116,7 @@
   },
   "training": {
     "epochs": 10000,
-    "batch_size": 256,
+    "batch_size": 268,
     "learning_rate": 2.0e-4,
     "weight_decay": 1.0e-5,
     "gradient_clip_norm": 1.0,
@@ -142,7 +160,7 @@
     "mode": "point_chunks",
     "best_metric_name": "val_residual_focus",
     "residual_focus_field_weight": 0.25,
-    "early_stopping_patience": 200,
+    "early_stopping_patience": 500,
     "eval_every_epochs": 1,
     "max_cases": 18,
     "batch_size": 128,

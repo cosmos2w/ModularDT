@@ -106,6 +106,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--organization-topk-env", type=int, default=5, help="Number of top environment tokens to list for each hyperedge.")
     parser.add_argument("--organization-min-gap", type=float, default=0.08, help="Minimum normalized vertical gap for Sankey node layout.")
     parser.add_argument("--organization-table", action=argparse.BooleanOptionalAction, default=True, help="Show the hyperedge summary table in the physical organization view.")
+    parser.add_argument("--disable-edge", dest="disable_edge", action="store_true", default=None, help="Enable deterministic active-edge masking for this evaluation run only.")
+    parser.add_argument("--no-disable-edge", dest="disable_edge", action="store_false", help="Disable deterministic active-edge masking for this evaluation run only.")
+    parser.add_argument("--show-disabled-edges", action="store_true", help="Draw disabled deterministic hyperedges in grey dashed style instead of hiding them.")
     args = parser.parse_args()
     if args.cycle:
         args.mode = "cycle"
@@ -136,6 +139,86 @@ def load_config(config_arg: Optional[str]) -> Dict:
     config_path = resolve_config_path(config_arg)
     with config_path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _legacy_safe_pool(values: Optional[torch.Tensor], mask: Optional[torch.Tensor] = None) -> list[torch.Tensor]:
+    if values is None:
+        return []
+    if values.ndim == 2:
+        return [values]
+    if mask is None:
+        return [values.mean(dim=1), values.max(dim=1).values]
+    m = mask.to(dtype=values.dtype, device=values.device).unsqueeze(-1)
+    raw_count = m.sum(dim=1)
+    denom = raw_count.clamp_min(1.0)
+    mean = (values * m).sum(dim=1) / denom
+    masked = values.masked_fill(m <= 0, -1e9)
+    max_val = masked.max(dim=1).values
+    valid_any = raw_count > 0
+    max_val = torch.where(valid_any, max_val, torch.zeros_like(max_val))
+    return [mean, max_val]
+
+
+def _build_legacy_global_condition_vector(det_outputs: Dict[str, torch.Tensor], structure: Dict[str, torch.Tensor]) -> torch.Tensor:
+    """Recreate the global-condition layout used by older stage-2 checkpoints."""
+    pieces: list[torch.Tensor] = []
+
+    for key in ["behavior_latent", "mean_latent", "dynamic_global_token", "freq_pred"]:
+        val = det_outputs.get(key)
+        if val is None:
+            continue
+        if val.ndim == 3 and val.shape[1] == 1:
+            val = val[:, 0]
+        pieces.append(val.reshape(val.shape[0], -1))
+
+    cyl_mask = structure.get("cyl_mask")
+    for key in ["module_state", "env_state", "hyper_state", "dynamic_hyper_base", "dynamic_hyper_tokens"]:
+        val = det_outputs.get(key)
+        if val is None:
+            continue
+        mask = cyl_mask if key == "module_state" else None
+        pieces.extend(_legacy_safe_pool(val, mask=mask))
+
+    for key in [
+        "hyper_module_mass",
+        "hyper_env_mass",
+        "hyper_strength",
+        "hyper_source_coords",
+        "hyper_wake_coords",
+        "hyper_wake_axis",
+        "hyper_wake_extent",
+    ]:
+        val = det_outputs.get(key)
+        if val is not None:
+            pieces.extend(_legacy_safe_pool(val, mask=None))
+
+    for key in ["re_values", "num_cylinders"]:
+        if key in structure:
+            pieces.append(structure[key].reshape(structure[key].shape[0], -1))
+
+    if not pieces:
+        raise RuntimeError("No deterministic-condition features were available.")
+    return torch.cat(pieces, dim=-1)
+
+
+def _build_checkpoint_global_condition_vector(
+    det_outputs: Dict[str, torch.Tensor],
+    structure: Dict[str, torch.Tensor],
+    expected_dim: int,
+) -> torch.Tensor:
+    global_cond = build_global_condition_vector(det_outputs, structure)
+    if int(global_cond.shape[-1]) == int(expected_dim):
+        return global_cond
+
+    legacy_global_cond = _build_legacy_global_condition_vector(det_outputs, structure)
+    if int(legacy_global_cond.shape[-1]) == int(expected_dim):
+        return legacy_global_cond
+
+    raise ValueError(
+        "Global condition width does not match the stage-2 checkpoint: "
+        f"current={int(global_cond.shape[-1])}, legacy={int(legacy_global_cond.shape[-1])}, "
+        f"checkpoint={int(expected_dim)}. Re-train stage 2 or update the checkpoint condition layout."
+    )
 
 
 def find_latest_gen_run(save_root: Path, case_id: str, stage: int) -> Path:
@@ -849,6 +932,7 @@ def _run_deterministic_cycle(
     stats: GridStats,
     device: torch.device,
     phase_chunk_size: int,
+    global_cond_dim: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return deterministic mean/residual/field and global conditions as CPU tensors."""
     tau_values = sample["tau_values"]
@@ -871,7 +955,7 @@ def _run_deterministic_cycle(
             tau,
             query_batch_size=int(cfg["generation"].get("det_query_batch_size", 32768)),
         )
-        global_cond = build_global_condition_vector(det_out, structure)
+        global_cond = _build_checkpoint_global_condition_vector(det_out, structure, expected_dim=global_cond_dim)
         det_means.append(det_out["pred_mean"].detach().cpu())
         det_residuals.append(det_out["pred_residual"].detach().cpu())
         det_fields.append(det_out["pred_field"].detach().cpu())
@@ -910,6 +994,8 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
     if not deterministic_checkpoint_path:
         raise KeyError("No deterministic checkpoint path was found in the stage-2 checkpoint or config.")
     det_model, det_model_cfg, det_ckpt_path = load_deterministic_model({"checkpoint_path": deterministic_checkpoint_path}, device)
+    if args.disable_edge is not None and hasattr(det_model, "set_edge_disable_runtime"):
+        det_model.set_edge_disable_runtime(bool(args.disable_edge))
 
     phase_chunk_size = int(args.phase_chunk_size)
     sample_chunk_size = int(args.sample_chunk_size)
@@ -929,6 +1015,7 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
             stats,
             device,
             phase_chunk_size,
+            int(ckpt["global_cond_dim"]),
         )
 
         generated = torch.empty((int(args.n_samples), T, C, H, W), dtype=torch.float32)
@@ -1216,6 +1303,8 @@ def main() -> None:
             {"checkpoint_path": deterministic_checkpoint_path},
             device,
         )
+        if args.disable_edge is not None and hasattr(det_model, "set_edge_disable_runtime"):
+            det_model.set_edge_disable_runtime(bool(args.disable_edge))
 
         # Move structure and grids to device.
         structure = {k: v.to(device) for k, v in sample["structure"].items()}
@@ -1246,7 +1335,7 @@ def main() -> None:
                 re_scale=float(det_model_cfg.get("re_scale", 200.0)),
                 include_field=bool(cfg["stage2"]["conditioning"].get("include_pred_field", True)),
             )
-            global_cond = build_global_condition_vector(det_out, structure)
+            global_cond = _build_checkpoint_global_condition_vector(det_out, structure, expected_dim=int(ckpt["global_cond_dim"]))
 
             n_steps = int(args.n_steps if args.n_steps is not None else cfg["stage2"].get("sampling", {}).get("n_steps", 16))
             ode_solver = str(args.ode_solver if args.ode_solver is not None else cfg["stage2"].get("sampling", {}).get("ode_solver", "euler"))
@@ -1292,6 +1381,8 @@ def main() -> None:
             topk_env=int(args.organization_topk_env),
             min_gap=float(args.organization_min_gap),
             show_table=bool(args.organization_table),
+            show_disabled_edges=bool(args.show_disabled_edges),
+            visualize_disabled_edges=bool(getattr(det_model, "cfg", None) is not None and det_model.cfg.DISABLE_EDGE and det_model.cfg.disable_edge_apply_to_visualization),
         )
 
         np.savez_compressed(

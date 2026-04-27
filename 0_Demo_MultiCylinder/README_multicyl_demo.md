@@ -55,6 +55,48 @@ because a collapsed `A_eh` can look confidently sparse. The new losses instead
 encourage each interaction hyperedge to own both a cylinder/module group and a
 corresponding wake/environment region.
 
+## Optional Active-Edge Masking
+
+Updated: 2026-04-26
+
+Hyperedge slots are intentionally overcomplete: `num_hyperedges` is capacity,
+not a promise that every slot maps to a distinct physical interaction. After the
+collapse fix, some runs may still learn redundant slots. A collapsed edge has
+weak source/environment support or no hard-dominant env tokens. A duplicate edge
+has a very similar `A_mh/A_eh` signature and nearby source/wake geometry to a
+stronger edge. A weak physical edge can still be valid, so masking is optional.
+
+Set `model.DISABLE_EDGE = true` to compute `hyper_active_mask` and use it in the
+decoder memory, dynamic hyperedge memory, phase-conditioned hyper context, and
+organization visualizations. Tensor dimensions are not deleted or renormalized;
+raw `A_mh` and `A_eh` remain available for losses, old checkpoints, and
+diagnostics.
+
+The compatibility default is:
+
+```json
+"DISABLE_EDGE": false
+```
+
+Recommended experimental setting:
+
+```json
+"DISABLE_EDGE": true,
+"disable_edge_min_active_edges": 2,
+"disable_edge_prune_duplicates": true
+```
+
+Evaluation accepts `--disable-edge`, `--no-disable-edge`, and
+`--show-disabled-edges`. Inactive hyperedges are greyed or hidden in physical,
+matrix, sankey, and schematic organization views.
+
+Stage-2 generative conditioning consumes deterministic organizer aux outputs.
+When active masks are present, pooled hyperedge conditioning uses active-edge
+masking. Stage-2 checkpoints trained with an old deterministic conditioner do
+not automatically gain the new active-edge semantics; to fully benefit, train or
+condition the generative model with a deterministic checkpoint trained/evaluated
+using the revised organizer behavior.
+
 ## Periodic Boundary Assumption
 
 The PhiFlow simulator in this demo uses periodic boundaries. The surrogate keeps

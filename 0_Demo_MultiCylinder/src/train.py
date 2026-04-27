@@ -1345,7 +1345,7 @@ def organizer_mass_diagnostics(
     _, _, module_mass, env_mass = compute_hyperedge_masses(outputs, structure, eps=eps)
     env_entropy = -(env_mass.clamp_min(eps) * env_mass.clamp_min(eps).log()).sum(dim=-1)
     module_entropy = -(module_mass.clamp_min(eps) * module_mass.clamp_min(eps).log()).sum(dim=-1)
-    return {
+    diag = {
         "org_env_mass_max": env_mass.max(dim=-1).values.mean(),
         "org_module_mass_max": module_mass.max(dim=-1).values.mean(),
         "org_mass_l1": (env_mass - module_mass).abs().mean(),
@@ -1354,6 +1354,22 @@ def organizer_mass_diagnostics(
         "org_env_mass_entropy": env_entropy.mean(),
         "org_module_mass_entropy": module_entropy.mean(),
     }
+    active_mask = outputs.get("hyper_active_mask")
+    if active_mask is not None:
+        active = active_mask.to(device=module_mass.device, dtype=module_mass.dtype)
+        collapsed = outputs.get("hyper_collapsed_mask", torch.zeros_like(active, dtype=torch.bool)).to(device=module_mass.device)
+        duplicate = outputs.get("hyper_duplicate_mask", torch.zeros_like(active, dtype=torch.bool)).to(device=module_mass.device)
+        edge_score = outputs.get("hyper_edge_score", torch.zeros_like(active)).to(device=module_mass.device, dtype=module_mass.dtype)
+        diag.update(
+            {
+                "org_active_hyperedges": active.sum(dim=-1).mean(),
+                "org_collapsed_hyperedges": collapsed.to(dtype=module_mass.dtype).sum(dim=-1).mean(),
+                "org_duplicate_hyperedges": duplicate.to(dtype=module_mass.dtype).sum(dim=-1).mean(),
+                "org_inactive_hyperedges": (1.0 - active).sum(dim=-1).mean(),
+                "org_mean_edge_score": edge_score.mean(),
+            }
+        )
+    return diag
 
 
 def organizer_direct_losses(
@@ -1493,6 +1509,11 @@ def evaluate_canonical_cases(
             "val_org_mass_l1": float("nan"),
             "val_org_env_effective_hyperedges": float("nan"),
             "val_org_module_effective_hyperedges": float("nan"),
+            "val_org_active_hyperedges": float("nan"),
+            "val_org_collapsed_hyperedges": float("nan"),
+            "val_org_duplicate_hyperedges": float("nan"),
+            "val_org_inactive_hyperedges": float("nan"),
+            "val_org_mean_edge_score": float("nan"),
         }
 
     case_ids = dataset.case_ids[:max_cases] if max_cases > 0 else dataset.case_ids
@@ -1612,6 +1633,11 @@ def evaluate_canonical_cases(
                 "val_org_mass_l1": normalize_loss_scalar(org_diag["org_mass_l1"]),
                 "val_org_env_effective_hyperedges": normalize_loss_scalar(org_diag["org_env_effective_hyperedges"]),
                 "val_org_module_effective_hyperedges": normalize_loss_scalar(org_diag["org_module_effective_hyperedges"]),
+                "val_org_active_hyperedges": normalize_loss_scalar(org_diag["org_active_hyperedges"]),
+                "val_org_collapsed_hyperedges": normalize_loss_scalar(org_diag["org_collapsed_hyperedges"]),
+                "val_org_duplicate_hyperedges": normalize_loss_scalar(org_diag["org_duplicate_hyperedges"]),
+                "val_org_inactive_hyperedges": normalize_loss_scalar(org_diag["org_inactive_hyperedges"]),
+                "val_org_mean_edge_score": normalize_loss_scalar(org_diag["org_mean_edge_score"]),
             }
         )
         loss_total = base_total + org_direct["organizer_total"]
@@ -1669,6 +1695,11 @@ def evaluate_point_chunks(
             "val_org_mass_l1": float("nan"),
             "val_org_env_effective_hyperedges": float("nan"),
             "val_org_module_effective_hyperedges": float("nan"),
+            "val_org_active_hyperedges": float("nan"),
+            "val_org_collapsed_hyperedges": float("nan"),
+            "val_org_duplicate_hyperedges": float("nan"),
+            "val_org_inactive_hyperedges": float("nan"),
+            "val_org_mean_edge_score": float("nan"),
         }
 
     metric_buffer: List[Dict[str, float]] = []
@@ -1742,6 +1773,11 @@ def evaluate_point_chunks(
             "val_org_mass_l1": normalize_loss_scalar(losses["org_mass_l1"]),
             "val_org_env_effective_hyperedges": normalize_loss_scalar(losses["org_env_effective_hyperedges"]),
             "val_org_module_effective_hyperedges": normalize_loss_scalar(losses["org_module_effective_hyperedges"]),
+            "val_org_active_hyperedges": normalize_loss_scalar(losses["org_active_hyperedges"]),
+            "val_org_collapsed_hyperedges": normalize_loss_scalar(losses["org_collapsed_hyperedges"]),
+            "val_org_duplicate_hyperedges": normalize_loss_scalar(losses["org_duplicate_hyperedges"]),
+            "val_org_inactive_hyperedges": normalize_loss_scalar(losses["org_inactive_hyperedges"]),
+            "val_org_mean_edge_score": normalize_loss_scalar(losses["org_mean_edge_score"]),
         }
         row["val_residual_focus"] = compute_residual_focus_metric(row, validation_cfg)
         metric_buffer.append(row)
@@ -2085,6 +2121,11 @@ def main() -> None:
         "org_mass_l1",
         "org_env_effective_hyperedges",
         "org_module_effective_hyperedges",
+        "org_active_hyperedges",
+        "org_collapsed_hyperedges",
+        "org_duplicate_hyperedges",
+        "org_inactive_hyperedges",
+        "org_mean_edge_score",
         # "lr",
         "val_total_loss",
         "val_field_mse",
@@ -2100,6 +2141,11 @@ def main() -> None:
         "val_org_mass_l1",
         "val_org_env_effective_hyperedges",
         "val_org_module_effective_hyperedges",
+        "val_org_active_hyperedges",
+        "val_org_collapsed_hyperedges",
+        "val_org_duplicate_hyperedges",
+        "val_org_inactive_hyperedges",
+        "val_org_mean_edge_score",
         "val_selection_metric",
     ]
     with history_csv.open("w", newline="", encoding="utf-8") as f:
@@ -2183,10 +2229,25 @@ def main() -> None:
     history_rows: List[Dict[str, float]] = []
     best_val_metric = float("inf")
     epochs_without_improvement = 0
+    requested_disable_edge = bool(model_cfg.DISABLE_EDGE)
+    disable_edge_start_epoch = max(0, int(model_cfg.disable_edge_start_epoch))
+    if requested_disable_edge:
+        print(
+            "[warn] DISABLE_EDGE is enabled. Hard active-edge masking is usually best after organizer losses "
+            "have stabilized, or with conservative thresholds."
+        )
 
     for epoch in range(1, total_epochs + 1):
+        runtime_disable_edge = requested_disable_edge and epoch >= disable_edge_start_epoch
+        runtime_model = model.module if isinstance(model, nn.DataParallel) else model
+        runtime_model.set_edge_disable_runtime(runtime_disable_edge)
         model.train()
         train_dataset.set_epoch(epoch)
+        if requested_disable_edge:
+            print(
+                f"[edge-disable] epoch={epoch:03d} active_masking={'on' if runtime_disable_edge else 'off'} "
+                f"(start_epoch={disable_edge_start_epoch})"
+            )
         print(f"[epoch] {epoch:03d}/{total_epochs:03d} training started")
         train_bar = tqdm(
             train_loader,
@@ -2288,6 +2349,11 @@ def main() -> None:
                     "org_mass_l1": normalize_loss_scalar(losses["org_mass_l1"]),
                     "org_env_effective_hyperedges": normalize_loss_scalar(losses["org_env_effective_hyperedges"]),
                     "org_module_effective_hyperedges": normalize_loss_scalar(losses["org_module_effective_hyperedges"]),
+                    "org_active_hyperedges": normalize_loss_scalar(losses["org_active_hyperedges"]),
+                    "org_collapsed_hyperedges": normalize_loss_scalar(losses["org_collapsed_hyperedges"]),
+                    "org_duplicate_hyperedges": normalize_loss_scalar(losses["org_duplicate_hyperedges"]),
+                    "org_inactive_hyperedges": normalize_loss_scalar(losses["org_inactive_hyperedges"]),
+                    "org_mean_edge_score": normalize_loss_scalar(losses["org_mean_edge_score"]),
                 }
             )
             train_bar.set_postfix(
@@ -2296,6 +2362,7 @@ def main() -> None:
                 dyn_energy=f"{accumulation_buffer[-1]['loss_dynamic_energy']:.3e}",
                 org_l1=f"{accumulation_buffer[-1]['org_mass_l1']:.2e}",
                 env_effH=f"{accumulation_buffer[-1]['org_env_effective_hyperedges']:.2f}",
+                activeH=f"{accumulation_buffer[-1]['org_active_hyperedges']:.1f}",
                 freq=f"{accumulation_buffer[-1]['loss_freq']:.3e}",
                 accum=f"{micro_index + 1}/{active_accum_steps}",
                 lr=f"{optimizer.param_groups[0]['lr']:.2e}",
@@ -2322,7 +2389,10 @@ def main() -> None:
         print(
             f"[epoch] {epoch:03d}/{total_epochs:03d} training finished | "
             f"{format_metrics(epoch_train_metrics, keys=['loss_total', 'loss_field', 'loss_mean', 'loss_residual', 'loss_dynamic_energy', 'loss_freq', 'loss_org_direct'])} | "
-            f"{format_metrics(epoch_train_metrics, keys=['org_mass_l1', 'org_env_effective_hyperedges', 'org_module_effective_hyperedges', 'org_env_mass_max', 'org_module_mass_max'])}"
+            f"{format_metrics(epoch_train_metrics, keys=['org_mass_l1', 'org_env_effective_hyperedges', 'org_module_effective_hyperedges', 'org_env_mass_max', 'org_module_mass_max'])} | "
+            f"activeH={epoch_train_metrics.get('org_active_hyperedges', float('nan')):.2f} "
+            f"collapsedH={epoch_train_metrics.get('org_collapsed_hyperedges', float('nan')):.2f} "
+            f"duplicateH={epoch_train_metrics.get('org_duplicate_hyperedges', float('nan')):.2f}"
         )
 
         if scheduler is not None:
@@ -2344,6 +2414,11 @@ def main() -> None:
             "val_org_mass_l1": float("nan"),
             "val_org_env_effective_hyperedges": float("nan"),
             "val_org_module_effective_hyperedges": float("nan"),
+            "val_org_active_hyperedges": float("nan"),
+            "val_org_collapsed_hyperedges": float("nan"),
+            "val_org_duplicate_hyperedges": float("nan"),
+            "val_org_inactive_hyperedges": float("nan"),
+            "val_org_mean_edge_score": float("nan"),
         }
         eval_every_epochs = max(1, int(validation_cfg.get("eval_every_epochs", 1)))
         should_run_validation = (epoch == 1) or (epoch % eval_every_epochs == 0)
@@ -2391,6 +2466,9 @@ def main() -> None:
                 f"mod_effH={val_metrics.get('val_org_module_effective_hyperedges', float('nan')):.3f} "
                 f"env_max={val_metrics.get('val_org_env_mass_max', float('nan')):.3f} "
                 f"mod_max={val_metrics.get('val_org_module_mass_max', float('nan')):.3f} "
+                f"activeH={val_metrics.get('val_org_active_hyperedges', float('nan')):.2f} "
+                f"collapsedH={val_metrics.get('val_org_collapsed_hyperedges', float('nan')):.2f} "
+                f"duplicateH={val_metrics.get('val_org_duplicate_hyperedges', float('nan')):.2f} "
                 f"selection={val_selection_metric:.6e}"
             )
         else:
@@ -2420,6 +2498,11 @@ def main() -> None:
                     "org_mass_l1": epoch_train_metrics["org_mass_l1"],
                     "org_env_effective_hyperedges": epoch_train_metrics["org_env_effective_hyperedges"],
                     "org_module_effective_hyperedges": epoch_train_metrics["org_module_effective_hyperedges"],
+                    "org_active_hyperedges": epoch_train_metrics["org_active_hyperedges"],
+                    "org_collapsed_hyperedges": epoch_train_metrics["org_collapsed_hyperedges"],
+                    "org_duplicate_hyperedges": epoch_train_metrics["org_duplicate_hyperedges"],
+                    "org_inactive_hyperedges": epoch_train_metrics["org_inactive_hyperedges"],
+                    "org_mean_edge_score": epoch_train_metrics["org_mean_edge_score"],
                 }
             ),
             # "lr": float(optimizer.param_groups[0]["lr"]),
@@ -2448,7 +2531,7 @@ def main() -> None:
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
             "config": cfg,
-            "model_config": model_cfg.__dict__,
+            "model_config": {**model_cfg.__dict__, "DISABLE_EDGE": requested_disable_edge},
             "best_metric_name": best_metric_name,
             "val_metrics": val_metrics,
             "val_selection_metric": val_selection_metric,

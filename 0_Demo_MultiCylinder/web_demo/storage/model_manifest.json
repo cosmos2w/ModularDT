@@ -42,11 +42,11 @@
       "note": "Stage-2 latent flow checkpoint pending; this entry is not yet available for generative inference."
     },
     {
-      "id": "gen_stage2_casegen001",
+      "id": "gen_stage2_casegen002",
       "label": "Generative Stage 2 Case gen002",
       "mode": "generative",
       "stage": 2,
-      "run_dir": "~/Desktop/src/ModularDT/0_Demo_MultiCylinder/Saved_Model_Gen/Gen_Casegen001_Stage2_20260425_013132",
+      "run_dir": "~/Desktop/src/ModularDT/0_Demo_MultiCylinder/Saved_Model_Gen/Gen_Casegen002_Stage2_20260426_094023",
       "checkpoint_name": "latest_model.pt",
       "config_name": "resolved_train_gen_config.json",
       "preload": false,
