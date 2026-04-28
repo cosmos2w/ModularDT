@@ -69,6 +69,8 @@ def parse_args() -> argparse.Namespace:
                         help="Number of strongest module-environment links to draw per cylinder.")
     parser.add_argument("--organization-view", choices=["all", "physical", "matrices", "sankey", "schematic"], default="all",
                         help="Which organization diagnostic view to render.")
+    parser.add_argument("--organization-assignment-view", choices=["raw", "effective", "both"], default="raw",
+                        help="Which organizer assignments to visualize: learned raw assignments, DISABLE_EDGE effective assignments, or both.")
     parser.add_argument("--organization-topk-cylinders", type=int, default=3,
                         help="Number of top cylinder memberships to list for each hyperedge.")
     parser.add_argument("--organization-topk-env", type=int, default=5,
@@ -83,6 +85,8 @@ def parse_args() -> argparse.Namespace:
                         help="Disable active-edge masking for this evaluation run only.")
     parser.add_argument("--show-disabled-edges", action="store_true",
                         help="Draw disabled hyperedges in grey dashed style instead of hiding them in organization views.")
+    parser.add_argument("--disable-edge-merge-strategy", choices=["mask_only", "parent_sum"], default=None,
+                        help="Override the checkpoint DISABLE_EDGE effective-assignment merge strategy for this evaluation.")
 
     return parser.parse_args()
 
@@ -1112,8 +1116,12 @@ def main() -> None:
     checkpoint = load_checkpoint(run_dir, latest=args.latest)
     device = select_device(args.device)
     model = build_model_from_checkpoint(checkpoint, device=device)
+    if args.disable_edge_merge_strategy is not None:
+        model.cfg.disable_edge_merge_strategy = str(args.disable_edge_merge_strategy)
     if args.disable_edge is not None:
         model.set_edge_disable_runtime(bool(args.disable_edge))
+    else:
+        model.set_edge_disable_runtime(bool(model.cfg.DISABLE_EDGE and model.cfg.disable_edge_during_evaluation))
 
     train_cfg = checkpoint["config"]
     packed_h5_path = resolve_demo_config_path(train_cfg["dataset"]["packed_h5_path"])
@@ -1200,6 +1208,8 @@ def main() -> None:
         show_table=args.organization_table,
         show_disabled_edges=bool(args.show_disabled_edges),
         visualize_disabled_edges=bool(model.cfg.DISABLE_EDGE and model.cfg.disable_edge_apply_to_visualization),
+        assignment_view=str(args.organization_assignment_view),
+        merge_strategy=str(model.cfg.disable_edge_merge_strategy),
     )
 
     animation_fields = [args.animation_field] if args.animation_field is not None else default_animation_fields(case)

@@ -1,5 +1,5 @@
 {
-  "case_id": "0009",
+  "case_id": "0010",
   "comments":"Add edge disabling from epoch 100 with Corrected merging logic",
 
   "dataset": {
@@ -22,7 +22,7 @@
 
     "max_num_cylinders": 8,
     "points_per_item": 4096,
-    "train_point_fraction": 0.20,
+    "train_point_fraction": 0.15,
     "min_points_per_sample": 1024,
 
     "resample_each_epoch": true,
@@ -111,20 +111,29 @@
     "use_hyper_specific_eh_geometry": true,
 
     "DISABLE_EDGE": true,
+    "disable_edge_during_training": false,
+    "disable_edge_during_evaluation": true,
+    "disable_edge_merge_strategy": "mask_only",
     "disable_edge_strength_threshold": 0.05,
     "disable_edge_module_mass_threshold": 0.03,
     "disable_edge_env_mass_threshold": 0.03,
     "disable_edge_use_hard_env_count": true,
     "disable_edge_min_env_tokens": 1,
+
     "disable_edge_prune_duplicates": true,
-    "disable_edge_duplicate_similarity_threshold": 0.985,
-    "disable_edge_duplicate_source_distance_threshold": 0.20,
-    "disable_edge_duplicate_wake_distance_threshold": 0.25,
-    "disable_edge_duplicate_axis_cos_threshold": 0.90,
-    "disable_edge_min_active_edges": 1,
+    "disable_edge_duplicate_similarity_threshold": 0.995,
+    "disable_edge_duplicate_source_distance_threshold": 0.10,
+    "disable_edge_duplicate_wake_distance_threshold": 0.12,
+    "disable_edge_duplicate_axis_cos_threshold": 0.97,
+    "disable_edge_duplicate_top_cylinder_jaccard_threshold": 0.60,
+    "disable_edge_duplicate_top_env_jaccard_threshold": 0.60,
+    "disable_edge_duplicate_topk_cylinders": 3,
+    "disable_edge_duplicate_topk_env": 16,
+
+    "disable_edge_min_active_edges": 2,
     "disable_edge_detach_scores": true,
-    "disable_edge_apply_to_decoder": true,
-    "disable_edge_apply_to_phase_context": true,
+    "disable_edge_apply_to_decoder": false,
+    "disable_edge_apply_to_phase_context": false,
     "disable_edge_apply_to_visualization": true,
     "disable_edge_start_epoch": 100,
 
@@ -144,7 +153,7 @@
     "scheduler_t_max": 800,
     "scheduler_min_lr": 1.0e-5,
     "mixed_precision": false,
-    "use_data_parallel": false,
+    "use_data_parallel": true,
     "max_physical_queries_per_step": 131072,
     "seed": 42
   },

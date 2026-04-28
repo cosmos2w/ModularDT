@@ -103,6 +103,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--organization-threshold", type=float, default=0.15, help="Minimum soft weight used when drawing organization edges.")
     parser.add_argument("--topk-me-links", type=int, default=3, help="Reserved for deterministic compatibility; env-token links are suppressed in the refined organizer overlay.")
     parser.add_argument("--organization-view", choices=["all", "physical", "matrices", "sankey", "schematic"], default="all", help="Which deterministic-backbone organizer diagnostic view to render in stage-2 snapshot mode.")
+    parser.add_argument("--organization-assignment-view", choices=["raw", "effective", "both"], default="raw", help="Which deterministic organizer assignments to visualize.")
     parser.add_argument("--organization-topk-cylinders", type=int, default=3, help="Number of top cylinder memberships to list for each hyperedge.")
     parser.add_argument("--organization-topk-env", type=int, default=5, help="Number of top environment tokens to list for each hyperedge.")
     parser.add_argument("--organization-min-gap", type=float, default=0.08, help="Minimum normalized vertical gap for Sankey node layout.")
@@ -110,6 +111,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-edge", dest="disable_edge", action="store_true", default=None, help="Enable deterministic active-edge masking for this evaluation run only.")
     parser.add_argument("--no-disable-edge", dest="disable_edge", action="store_false", help="Disable deterministic active-edge masking for this evaluation run only.")
     parser.add_argument("--show-disabled-edges", action="store_true", help="Draw disabled deterministic hyperedges in grey dashed style instead of hiding them.")
+    parser.add_argument("--disable-edge-merge-strategy", choices=["mask_only", "parent_sum"], default=None, help="Override the deterministic checkpoint DISABLE_EDGE effective-assignment merge strategy.")
     args = parser.parse_args()
     if args.cycle:
         args.mode = "cycle"
@@ -1174,8 +1176,12 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
     if not deterministic_checkpoint_path:
         raise KeyError("No deterministic checkpoint path was found in the stage-2 checkpoint or config.")
     det_model, det_model_cfg, det_ckpt_path = load_deterministic_model({"checkpoint_path": deterministic_checkpoint_path}, device)
+    if args.disable_edge_merge_strategy is not None and getattr(det_model, "cfg", None) is not None:
+        det_model.cfg.disable_edge_merge_strategy = str(args.disable_edge_merge_strategy)
     if args.disable_edge is not None and hasattr(det_model, "set_edge_disable_runtime"):
         det_model.set_edge_disable_runtime(bool(args.disable_edge))
+    elif hasattr(det_model, "set_edge_disable_runtime") and getattr(det_model, "cfg", None) is not None:
+        det_model.set_edge_disable_runtime(bool(det_model.cfg.DISABLE_EDGE and det_model.cfg.disable_edge_during_evaluation))
     det_field_dim = int(det_model_cfg.get("field_dim", getattr(det_model, "cfg", object()).field_dim if hasattr(getattr(det_model, "cfg", None), "field_dim") else sample["field_dim"]))
     if det_field_dim != int(sample["field_dim"]):
         raise ValueError(
@@ -1516,8 +1522,12 @@ def main() -> None:
             {"checkpoint_path": deterministic_checkpoint_path},
             device,
         )
+        if args.disable_edge_merge_strategy is not None and getattr(det_model, "cfg", None) is not None:
+            det_model.cfg.disable_edge_merge_strategy = str(args.disable_edge_merge_strategy)
         if args.disable_edge is not None and hasattr(det_model, "set_edge_disable_runtime"):
             det_model.set_edge_disable_runtime(bool(args.disable_edge))
+        elif hasattr(det_model, "set_edge_disable_runtime") and getattr(det_model, "cfg", None) is not None:
+            det_model.set_edge_disable_runtime(bool(det_model.cfg.DISABLE_EDGE and det_model.cfg.disable_edge_during_evaluation))
         det_field_dim = int(det_model_cfg.get("field_dim", getattr(det_model, "cfg", object()).field_dim if hasattr(getattr(det_model, "cfg", None), "field_dim") else sample["field_dim"]))
         if det_field_dim != int(sample["field_dim"]):
             raise ValueError(
@@ -1611,6 +1621,8 @@ def main() -> None:
             show_table=bool(args.organization_table),
             show_disabled_edges=bool(args.show_disabled_edges),
             visualize_disabled_edges=bool(getattr(det_model, "cfg", None) is not None and det_model.cfg.DISABLE_EDGE and det_model.cfg.disable_edge_apply_to_visualization),
+            assignment_view=str(args.organization_assignment_view),
+            merge_strategy=str(getattr(det_model.cfg, "disable_edge_merge_strategy", "mask_only")) if getattr(det_model, "cfg", None) is not None else "mask_only",
         )
         org_arrays = extract_organization_arrays(det_out, sample)
 

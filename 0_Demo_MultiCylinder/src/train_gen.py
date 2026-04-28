@@ -143,6 +143,25 @@ def select_device(device_arg: str | None) -> torch.device:
     return torch.device(device_arg)
 
 
+def unwrap_model(model: nn.Module) -> nn.Module:
+    return model.module if isinstance(model, nn.DataParallel) else model
+
+
+def data_parallel_device_ids(device: torch.device) -> Optional[List[int]]:
+    if device.type != "cuda" or torch.cuda.device_count() <= 1:
+        return None
+    start = 0 if device.index is None else int(device.index)
+    return list(range(start, torch.cuda.device_count()))
+
+
+def maybe_data_parallel(model: nn.Module, device: torch.device, enabled: bool, label: str) -> nn.Module:
+    device_ids = data_parallel_device_ids(device) if enabled else None
+    if device_ids and len(device_ids) > 1:
+        print(f"[setup] using DataParallel for {label} on cuda devices {device_ids}")
+        return nn.DataParallel(model, device_ids=device_ids, output_device=device_ids[0])
+    return model
+
+
 def sort_case_ids(case_ids: Iterable[str]) -> List[str]:
     def key_fn(case_id: str):
         try:
@@ -851,7 +870,8 @@ def train_or_eval_flow_epoch(
     flow.velocity_net.train(training)
     rows = []
     pbar = tqdm(loader, desc=f"Flow epoch {epoch:04d} {'train' if training else 'val'}", leave=False)
-    ema_context = ema.average_parameters(flow.velocity_net) if (not training and ema is not None) else contextlib.nullcontext()
+    velocity_core = unwrap_model(flow.velocity_net)
+    ema_context = ema.average_parameters(velocity_core) if (not training and ema is not None) else contextlib.nullcontext()
     with ema_context:
         for batch in pbar:
             target = batch["target_grid"].to(device=device)
@@ -876,7 +896,7 @@ def train_or_eval_flow_epoch(
                     nn.utils.clip_grad_norm_(flow.velocity_net.parameters(), grad_clip)
                 optimizer.step()  # type: ignore[union-attr]
                 if ema is not None:
-                    ema.update(flow.velocity_net)
+                    ema.update(velocity_core)
             row = {"loss": normalize_loss_scalar(loss), "target_rms": info["target_rms"], "pred_rms": info["pred_rms"]}
             rows.append(row)
             pbar.set_postfix(loss=f"{row['loss']:.3e}", pred_rms=f"{row['pred_rms']:.3e}")
@@ -1223,6 +1243,8 @@ def main() -> None:
     if stage == 1:
         ae = build_ae_from_cfg(cfg, n_fields=n_fields, num_y=num_y, num_x=num_x).to(device)
         training_cfg = cfg["stage1"]["training"]
+        use_data_parallel = bool(training_cfg.get("use_data_parallel", cfg.get("training", {}).get("use_data_parallel", True)))
+        ae = maybe_data_parallel(ae, device, use_data_parallel, "stage-1 autoencoder")
         optimizer = torch.optim.AdamW(ae.parameters(), lr=float(training_cfg.get("learning_rate", 2e-4)), weight_decay=float(training_cfg.get("weight_decay", 1e-5)))
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(training_cfg.get("scheduler_t_max", training_cfg.get("epochs", 500))), eta_min=float(training_cfg.get("scheduler_min_lr", 1e-6)))
         flow = None
@@ -1231,7 +1253,9 @@ def main() -> None:
         ema = None
     else:
         det_model, det_model_cfg, det_ckpt_path = load_deterministic_model(cfg["deterministic_model"], device)
-        det_field_dim = int(det_model_cfg.get("field_dim", getattr(det_model, "cfg", ModelConfig()).field_dim))
+        use_data_parallel = bool(cfg.get("stage2", {}).get("training", {}).get("use_data_parallel", cfg.get("training", {}).get("use_data_parallel", True)))
+        det_model = maybe_data_parallel(det_model, device, use_data_parallel, "deterministic conditioner")
+        det_field_dim = int(det_model_cfg.get("field_dim", getattr(unwrap_model(det_model), "cfg", ModelConfig()).field_dim))
         if det_field_dim != int(n_fields):
             raise ValueError(
                 f"Deterministic checkpoint field_dim={det_field_dim} does not match generative dataset field_dim={n_fields} "
@@ -1246,9 +1270,11 @@ def main() -> None:
         cond_ch, global_cond_dim = infer_condition_dims(cfg, train_set, det_model, det_model_cfg, stats, device)
         flow = build_flow_from_cfg(cfg, ae, cond_ch=cond_ch, global_cond_dim=global_cond_dim).to(device)
         training_cfg = cfg["stage2"]["training"]
+        use_data_parallel = bool(training_cfg.get("use_data_parallel", cfg.get("training", {}).get("use_data_parallel", True)))
+        flow.velocity_net = maybe_data_parallel(flow.velocity_net, device, use_data_parallel, "stage-2 velocity network")
         optimizer = torch.optim.AdamW(flow.velocity_net.parameters(), lr=float(training_cfg.get("learning_rate", 1e-4)), weight_decay=float(training_cfg.get("weight_decay", 1e-5)))
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(training_cfg.get("scheduler_t_max", training_cfg.get("epochs", 1000))), eta_min=float(training_cfg.get("scheduler_min_lr", 1e-6)))
-        ema = LatentEMA(flow.velocity_net, decay=float(cfg["stage2"]["architecture"].get("ema_decay", 0.999)))
+        ema = LatentEMA(unwrap_model(flow.velocity_net), decay=float(cfg["stage2"]["architecture"].get("ema_decay", 0.999)))
         print(f"[setup] inferred cond_ch={cond_ch}, global_cond_dim={global_cond_dim}")
 
     if reload_requested and latest_path.exists():
@@ -1258,15 +1284,16 @@ def main() -> None:
         if "stats" in resume_ckpt:
             stats = GridStats(mean=resume_ckpt["stats"]["mean"].detach().cpu(), std=resume_ckpt["stats"]["std"].detach().cpu())
         if stage == 1:
-            ae.load_state_dict(resume_ckpt["ae_state_dict"])
+            unwrap_model(ae).load_state_dict(resume_ckpt["ae_state_dict"])
         else:
-            if int(resume_ckpt.get("cond_ch", flow.velocity_net.cond_ch)) != flow.velocity_net.cond_ch:
+            velocity_core = unwrap_model(flow.velocity_net)
+            if int(resume_ckpt.get("cond_ch", velocity_core.cond_ch)) != velocity_core.cond_ch:
                 raise ValueError("Cannot resume: checkpoint cond_ch differs from the current deterministic conditioner.")
-            if int(resume_ckpt.get("global_cond_dim", flow.velocity_net.global_cond_dim)) != flow.velocity_net.global_cond_dim:
+            if int(resume_ckpt.get("global_cond_dim", velocity_core.global_cond_dim)) != velocity_core.global_cond_dim:
                 raise ValueError("Cannot resume: checkpoint global_cond_dim differs from the current deterministic conditioner.")
-            flow.velocity_net.load_state_dict(resume_ckpt["velocity_state_dict"])
+            velocity_core.load_state_dict(resume_ckpt["velocity_state_dict"])
             if "ae_state_dict" in resume_ckpt:
-                ae.load_state_dict(resume_ckpt["ae_state_dict"])
+                unwrap_model(ae).load_state_dict(resume_ckpt["ae_state_dict"])
             if ema is not None and resume_ckpt.get("ema_state_dict") is not None:
                 ema.load_state_dict(resume_ckpt["ema_state_dict"])
         optimizer.load_state_dict(resume_ckpt["optimizer_state_dict"])
@@ -1314,10 +1341,11 @@ def main() -> None:
             best_val = row["val_loss"]
 
         if stage == 1:
+            ae_core = unwrap_model(ae)
             checkpoint = {
                 "stage": 1,
                 "epoch": epoch,
-                "ae_state_dict": ae.state_dict(),
+                "ae_state_dict": ae_core.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "best_val_loss": best_val,
@@ -1328,16 +1356,18 @@ def main() -> None:
                 "channel_order": channel_order,
                 "num_y": num_y,
                 "num_x": num_x,
-                "ae_config": {"base_ch": ae.base_ch, "latent_ch": ae.latent_ch, "n_levels": ae.n_levels, "num_res_blocks": ae.num_res_blocks},
+                "ae_config": {"base_ch": ae_core.base_ch, "latent_ch": ae_core.latent_ch, "n_levels": ae_core.n_levels, "num_res_blocks": ae_core.num_res_blocks},
                 "method": "ConvResidualAE",
             }
         else:
+            ae_core = unwrap_model(ae)
+            velocity_core = unwrap_model(flow.velocity_net)
             checkpoint = {
                 "stage": 2,
                 "epoch": epoch,
-                "velocity_state_dict": flow.velocity_net.state_dict(),
+                "velocity_state_dict": velocity_core.state_dict(),
                 "ema_state_dict": ema.state_dict() if ema is not None else None,
-                "ae_state_dict": ae.state_dict(),
+                "ae_state_dict": ae_core.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
                 "best_val_loss": best_val,
@@ -1348,9 +1378,9 @@ def main() -> None:
                 "channel_order": channel_order,
                 "num_y": num_y,
                 "num_x": num_x,
-                "ae_config": {"base_ch": ae.base_ch, "latent_ch": ae.latent_ch, "n_levels": ae.n_levels, "num_res_blocks": ae.num_res_blocks},
-                "cond_ch": flow.velocity_net.cond_ch,
-                "global_cond_dim": flow.velocity_net.global_cond_dim,
+                "ae_config": {"base_ch": ae_core.base_ch, "latent_ch": ae_core.latent_ch, "n_levels": ae_core.n_levels, "num_res_blocks": ae_core.num_res_blocks},
+                "cond_ch": velocity_core.cond_ch,
+                "global_cond_dim": velocity_core.global_cond_dim,
                 "deterministic_checkpoint_path": str(det_ckpt_path),
                 "method": "LatentRectifiedFlow_ModularDT",
             }

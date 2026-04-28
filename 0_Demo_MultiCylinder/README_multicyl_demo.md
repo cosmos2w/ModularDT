@@ -158,25 +158,27 @@ corresponding wake/environment region.
 
 ## Optional Active-Edge Masking
 
-Updated: 2026-04-27
+Updated: 2026-04-28
 
 Hyperedge slots are intentionally overcomplete: `num_hyperedges` is capacity,
 not a promise that every slot maps to a distinct physical interaction. After the
-collapse fix, some runs may still learn redundant slots. `DISABLE_EDGE` now
-performs active-edge compression, not naive deletion. A duplicate edge has a
-very similar `A_mh/A_eh` signature and nearby source/wake geometry to a stronger
-representative; it is disabled as a decoder token, but its incidence mass is
-merged into the representative through `A_mh_effective` and `A_eh_effective`.
-A truly collapsed edge is weak by soft strength/module/environment mass and has
-no active representative parent.
+collapse fix, some runs may still learn redundant slots. Raw organizer outputs
+(`A_mh_raw`, `A_eh_raw`, raw mass/strength fields) are now kept as the canonical
+record of what the model learned. `DISABLE_EDGE` is a separate postprocess that
+computes `hyper_active_mask`, duplicate/collapsed flags, and optional effective
+assignments for visualization or inference experiments.
 
-Set `model.DISABLE_EDGE = true` to compute `hyper_active_mask` and use it in the
-decoder memory, dynamic hyperedge memory, phase-conditioned hyper context, and
-organization visualizations. Tensor dimensions are not deleted. Raw `A_mh` and
-`A_eh` remain available for losses, old checkpoints, raw diagnostics, and raw
-visualization checks. Effective `A_mh_effective` and `A_eh_effective` are used
-for active-edge visualization and downstream relevance scoring so active views
-retain environmental coverage after duplicate compression.
+The default effective merge strategy is `disable_edge_merge_strategy:
+"mask_only"`. It masks inactive columns in `A_mh_effective/A_eh_effective` but
+does not transfer disabled child mass into a parent. The legacy
+`"parent_sum"` mode is still available for experiments, but it can make one
+surviving parent appear to cover almost the whole field when several disabled
+duplicates had substantial raw environment ownership.
+
+By default, `DISABLE_EDGE=false`, `disable_edge_during_training=false`,
+`disable_edge_apply_to_decoder=false`, and
+`disable_edge_apply_to_phase_context=false`. This keeps training and the core
+reconstruction objective on the raw organizer unless explicitly configured.
 
 Hard environment-token count is diagnostic unless soft environment mass is also
 weak. An edge with zero hard-dominant tokens but meaningful soft mass can remain
@@ -193,13 +195,19 @@ Recommended experimental setting:
 
 ```json
 "DISABLE_EDGE": true,
-"disable_edge_min_active_edges": 2,
-"disable_edge_prune_duplicates": true
+"disable_edge_during_training": false,
+"disable_edge_merge_strategy": "mask_only",
+"disable_edge_min_active_edges": 3,
+"disable_edge_prune_duplicates": true,
+"disable_edge_apply_to_visualization": true
 ```
 
 Evaluation accepts `--disable-edge`, `--no-disable-edge`, and
-`--show-disabled-edges`. Inactive hyperedges are greyed or hidden in physical,
-matrix, sankey, and schematic organization views.
+`--organization-assignment-view {raw,effective,both}`. Use the default
+`--organization-assignment-view raw` for organizer diagnostics; use
+`effective` or `both` only when inspecting the DISABLE_EDGE postprocess.
+Inactive hyperedges are greyed or hidden in effective physical, matrix, sankey,
+and schematic organization views.
 
 Stage-2 generative conditioning consumes deterministic organizer aux outputs.
 When active masks are present, pooled hyperedge conditioning uses active-edge
@@ -380,20 +388,20 @@ defaults to `val_residual_focus`.
 case. The old ambiguous physical-plus-tripartite figure has been split into
 clearer outputs:
 
-1. `organization_physical_*.png`
+1. `organization_raw_physical_*.png` or `organization_effective_physical_*.png`
    - physical-domain overlay plus a hyperedge summary table
    - cylinder locations, environment tokens, source centers, wake centers, and
      learned wake-axis arrows
    - source-to-wake and cylinder-to-hyperedge links use periodic shortest-image
      geometry
 
-2. `organization_matrices_*.png`
+2. `organization_raw_matrices_*.png` or `organization_effective_matrices_*.png`
    - `A_mh` heatmap for cylinder/module to hyperedge assignment
    - `A_eh` heatmap for environment-token to hyperedge assignment
    - per-hyperedge spatial maps showing where each hyperedge owns environment
      tokens
 
-3. `organization_sankey_*.png`
+3. `organization_raw_sankey_*.png` or `organization_effective_sankey_*.png`
    - abstract tripartite graph for topology/debugging
    - `C_i` means cylinder/module
    - `H_k` means learned interaction hyperedge/group
@@ -401,10 +409,11 @@ clearer outputs:
    - hyperedge and environment-group rows use collision-avoiding vertical
      layout, so labels do not all inherit the same wake-center y coordinate
 
-4. `organization_summary_*.csv` and `organization_summary_*.json`
-   - machine-readable hyperedge summary with strength, source/wake centers,
-     wake axis, extent, module mass, environment mass, top cylinders, and top
-     environment tokens
+4. `organization_raw_summary_*.csv/json` or
+   `organization_effective_summary_*.csv/json`
+   - machine-readable hyperedge summary with raw and effective token counts,
+     raw and effective mass sums, active/collapsed/duplicate flags, parent
+     index, source/wake centers, top cylinders, and top environment tokens
 
 Training logs also include organizer collapse diagnostics:
 
@@ -413,7 +422,10 @@ Training logs also include organizer collapse diagnostics:
 - `org_mass_l1`
 - `org_env_effective_hyperedges`
 - `org_module_effective_hyperedges`
+- `org_raw_env_effective_hyperedges`
+- `org_effective_active_hyperedges`
 - `org_env_mass_max`
+- `org_effective_max_env_mass`
 - `org_module_mass_max`
 
 Generative stage-2 models share the same organizer semantics whenever they
@@ -426,6 +438,8 @@ Useful evaluator arguments:
 
 - `--organization-view {all,physical,matrices,sankey}` selects which diagnostic
   figures to render; the default is `all`
+- `--organization-assignment-view {raw,effective,both}` selects whether figures
+  show learned raw assignments, postprocessed DISABLE_EDGE assignments, or both
 - `--organization-threshold` controls which soft assignment edges are drawn
 - `--topk-me-links` controls optional light cylinder-to-environment links
 - `--organization-topk-cylinders` controls how many cylinder memberships appear
@@ -434,6 +448,8 @@ Useful evaluator arguments:
   summary table/export
 - `--organization-min-gap` controls vertical spacing in the Sankey layout
 - `--no-organization-table` hides the side table in the physical view
+- `--disable-edge-merge-strategy {mask_only,parent_sum}` overrides the
+  checkpoint merge strategy for an evaluation run
 
 ## Default Config Highlights
 

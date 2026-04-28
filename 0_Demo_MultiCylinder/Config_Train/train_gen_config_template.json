@@ -103,7 +103,8 @@
   },
   "training": {
     "seed": 42,
-    "reload": false
+    "reload": false,
+    "use_data_parallel": true
   },
   "paths": {
     "config_train_dir": "./Config_Train",

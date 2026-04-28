@@ -79,12 +79,16 @@ def _as_numpy_first(out: Dict, key: str, default: Optional[np.ndarray] = None) -
         "hyper_wake_extent",
         "hyper_module_mass",
         "hyper_env_mass",
+        "hyper_module_mass_raw",
+        "hyper_env_mass_raw",
+        "hyper_strength_raw",
         "hyper_active_mask",
         "hyper_collapsed_mask",
         "hyper_duplicate_mask",
         "hyper_parent_index",
         "hyper_edge_score",
         "hyper_env_token_count",
+        "hyper_env_token_count_raw",
         "hyper_effective_env_token_count",
         "hyper_effective_module_mass",
         "hyper_effective_env_mass",
@@ -93,15 +97,23 @@ def _as_numpy_first(out: Dict, key: str, default: Optional[np.ndarray] = None) -
     return value
 
 
-def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
+def _dominant_token_count(A_eh: np.ndarray, eps: float = 1e-8) -> np.ndarray:
+    if A_eh.size == 0:
+        return np.zeros((A_eh.shape[1],), dtype=np.float32)
+    groups = np.argmax(A_eh, axis=1)
+    valid = np.max(A_eh, axis=1) > eps
+    return np.asarray([np.sum(valid & (groups == k)) for k in range(A_eh.shape[1])], dtype=np.float32)
+
+
+def extract_organization_arrays(out: Dict, case: Dict, *, assignment_view: str = "raw", merge_strategy: str = "mask_only") -> Dict:
     centers = _case_array(case, "centers", "centers_np").astype(np.float32)
     if centers.ndim == 3:
         centers = centers[0]
     num_cyl = centers.shape[0]
 
     A_me = _as_numpy_first(out, "A_me")
-    A_mh_raw = _as_numpy_first(out, "A_mh")
-    A_eh_raw = _as_numpy_first(out, "A_eh")
+    A_mh_raw = _as_numpy_first(out, "A_mh_raw", _as_numpy_first(out, "A_mh"))
+    A_eh_raw = _as_numpy_first(out, "A_eh_raw", _as_numpy_first(out, "A_eh"))
     A_mh_effective = _as_numpy_first(out, "A_mh_effective", A_mh_raw)
     A_eh_effective = _as_numpy_first(out, "A_eh_effective", A_eh_raw)
     env_coords_norm = _as_numpy_first(out, "env_coords")
@@ -117,8 +129,15 @@ def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
     A_eh_raw = np.asarray(A_eh_raw, dtype=np.float32)
     A_mh_effective = np.asarray(A_mh_effective[:num_cyl], dtype=np.float32)
     A_eh_effective = np.asarray(A_eh_effective, dtype=np.float32)
-    A_mh = A_mh_effective
-    A_eh = A_eh_effective
+    view = str(assignment_view).strip().lower()
+    if view not in {"raw", "effective"}:
+        raise ValueError("assignment_view must be 'raw' or 'effective' for array extraction.")
+    if view == "raw":
+        A_mh = A_mh_raw
+        A_eh = A_eh_raw
+    else:
+        A_mh = A_mh_effective
+        A_eh = A_eh_effective
     env_coords_norm = np.asarray(env_coords_norm, dtype=np.float32)
     hyper_source_norm = np.asarray(hyper_source_norm, dtype=np.float32)
     hyper_wake_norm = np.asarray(hyper_wake_norm, dtype=np.float32)
@@ -136,6 +155,9 @@ def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
     hyper_strength = _as_numpy_first(out, "hyper_strength")
     hyper_module_mass = _as_numpy_first(out, "hyper_module_mass")
     hyper_env_mass = _as_numpy_first(out, "hyper_env_mass")
+    hyper_module_mass_raw = _as_numpy_first(out, "hyper_module_mass_raw", hyper_module_mass)
+    hyper_env_mass_raw = _as_numpy_first(out, "hyper_env_mass_raw", hyper_env_mass)
+    hyper_strength_raw = _as_numpy_first(out, "hyper_strength_raw", hyper_strength)
     if hyper_module_mass is None or hyper_env_mass is None:
         module_mass_raw = A_mh.sum(axis=0) / max(float(num_cyl), 1.0)
         env_mass_raw = A_eh.mean(axis=0)
@@ -146,14 +168,18 @@ def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
     hyper_strength = np.asarray(hyper_strength, dtype=np.float32).reshape(-1)[:num_hyper]
     hyper_module_mass = np.asarray(hyper_module_mass, dtype=np.float32).reshape(-1)[:num_hyper]
     hyper_env_mass = np.asarray(hyper_env_mass, dtype=np.float32).reshape(-1)[:num_hyper]
-    hard_env_token_count_raw = np.asarray([(np.argmax(A_eh_raw, axis=1) == k).sum() for k in range(num_hyper)], dtype=np.float32)
-    hard_env_token_count_effective = np.asarray([(np.argmax(A_eh_effective, axis=1) == k).sum() for k in range(num_hyper)], dtype=np.float32)
+    hyper_module_mass_raw = np.asarray(hyper_module_mass_raw, dtype=np.float32).reshape(-1)[:num_hyper]
+    hyper_env_mass_raw = np.asarray(hyper_env_mass_raw, dtype=np.float32).reshape(-1)[:num_hyper]
+    hyper_strength_raw = np.asarray(hyper_strength_raw, dtype=np.float32).reshape(-1)[:num_hyper]
+    hard_env_token_count_raw = _dominant_token_count(A_eh_raw)
+    hard_env_token_count_effective = _dominant_token_count(A_eh_effective)
     hyper_active_mask = _as_numpy_first(out, "hyper_active_mask")
     hyper_collapsed_mask = _as_numpy_first(out, "hyper_collapsed_mask")
     hyper_duplicate_mask = _as_numpy_first(out, "hyper_duplicate_mask")
     hyper_parent_index = _as_numpy_first(out, "hyper_parent_index")
     hyper_edge_score = _as_numpy_first(out, "hyper_edge_score")
     hyper_env_token_count = _as_numpy_first(out, "hyper_env_token_count")
+    hyper_env_token_count_raw = _as_numpy_first(out, "hyper_env_token_count_raw")
     hyper_effective_env_token_count = _as_numpy_first(out, "hyper_effective_env_token_count")
     hyper_effective_module_mass = _as_numpy_first(out, "hyper_effective_module_mass")
     hyper_effective_env_mass = _as_numpy_first(out, "hyper_effective_env_mass")
@@ -167,6 +193,8 @@ def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
         hyper_parent_index = np.arange(num_hyper, dtype=np.int64)
     if hyper_env_token_count is None:
         hyper_env_token_count = hard_env_token_count_raw
+    if hyper_env_token_count_raw is None:
+        hyper_env_token_count_raw = hard_env_token_count_raw
     if hyper_effective_env_token_count is None:
         hyper_effective_env_token_count = hard_env_token_count_effective
     if hyper_effective_module_mass is None:
@@ -181,6 +209,7 @@ def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
     hyper_parent_index = np.asarray(hyper_parent_index, dtype=np.int64).reshape(-1)[:num_hyper]
     hyper_edge_score = np.asarray(hyper_edge_score, dtype=np.float32).reshape(-1)[:num_hyper]
     hyper_env_token_count = np.asarray(hyper_env_token_count, dtype=np.float32).reshape(-1)[:num_hyper]
+    hyper_env_token_count_raw = np.asarray(hyper_env_token_count_raw, dtype=np.float32).reshape(-1)[:num_hyper]
     hyper_effective_env_token_count = np.asarray(hyper_effective_env_token_count, dtype=np.float32).reshape(-1)[:num_hyper]
     hyper_effective_module_mass = np.asarray(hyper_effective_module_mass, dtype=np.float32).reshape(-1)[:num_hyper]
     hyper_effective_env_mass = np.asarray(hyper_effective_env_mass, dtype=np.float32).reshape(-1)[:num_hyper]
@@ -214,16 +243,23 @@ def extract_organization_arrays(out: Dict, case: Dict) -> Dict:
         "hyper_module_mass": hyper_module_mass,
         "hyper_env_mass": hyper_env_mass,
         "hyper_strength": hyper_strength,
+        "hyper_module_mass_raw": hyper_module_mass_raw,
+        "hyper_env_mass_raw": hyper_env_mass_raw,
+        "hyper_strength_raw": hyper_strength_raw,
         "hyper_active_mask": hyper_active_mask,
         "hyper_collapsed_mask": hyper_collapsed_mask,
         "hyper_duplicate_mask": hyper_duplicate_mask,
         "hyper_parent_index": hyper_parent_index,
         "hyper_edge_score": hyper_edge_score,
         "hyper_env_token_count": hyper_env_token_count,
+        "hyper_env_token_count_raw": hyper_env_token_count_raw,
         "hyper_effective_env_token_count": hyper_effective_env_token_count,
         "hyper_effective_module_mass": hyper_effective_module_mass,
         "hyper_effective_env_mass": hyper_effective_env_mass,
         "raw_env_token_count": hard_env_token_count_raw,
+        "effective_env_token_count": hard_env_token_count_effective,
+        "assignment_view": view,
+        "merge_strategy": str(merge_strategy).strip().lower(),
         "token_group": token_group,
         "token_conf": token_conf,
         "bounds": _grid_domain_bounds(case),
@@ -270,16 +306,17 @@ def draw_periodic_segment(ax, p0: np.ndarray, p1: np.ndarray, bounds: Dict[str, 
         ax.scatter([mid[0]], [mid[1]], marker="x", s=24, c=[kwargs.get("color", "k")], linewidths=0.8, alpha=0.75, zorder=kwargs.get("zorder", 3) + 1)
 
 
-def topk_cylinder_members(A_mh: np.ndarray, k: int, top_n: int = 3) -> List[Dict]:
+def topk_cylinder_members(A_mh: np.ndarray, k: int, top_n: int = 3, *, min_weight: float = 0.0) -> List[Dict]:
     top_idx = np.argsort(-A_mh[:, k])[:max(0, top_n)]
-    return [{"id": int(i), "weight": float(A_mh[i, k])} for i in top_idx]
+    return [{"id": int(i), "weight": float(A_mh[i, k])} for i in top_idx if float(A_mh[i, k]) > min_weight]
 
 
-def topk_env_members(A_eh: np.ndarray, k: int, env_xy: np.ndarray, top_n: int = 5) -> List[Dict]:
+def topk_env_members(A_eh: np.ndarray, k: int, env_xy: np.ndarray, top_n: int = 5, *, min_weight: float = 0.0) -> List[Dict]:
     top_idx = np.argsort(-A_eh[:, k])[:max(0, top_n)]
     return [
         {"id": int(j), "weight": float(A_eh[j, k]), "x": float(env_xy[j, 0]), "y": float(env_xy[j, 1])}
         for j in top_idx
+        if float(A_eh[j, k]) > min_weight
     ]
 
 
@@ -290,16 +327,21 @@ def compute_hyperedge_summary(
     tau_value: float,
     topk_cylinders: int = 3,
     topk_env: int = 5,
+    show_disabled_edges: bool = False,
 ) -> List[Dict]:
     A_mh = org["A_mh"]
     A_eh = org["A_eh"]
     A_mh_raw = org.get("A_mh_raw", A_mh)
     A_eh_raw = org.get("A_eh_raw", A_eh)
+    A_mh_effective = org.get("A_mh_effective", A_mh)
+    A_eh_effective = org.get("A_eh_effective", A_eh)
     summaries = []
     for k in range(A_eh.shape[1]):
         effective_env_token_count = int(np.sum(org["token_group"] == k))
         raw_env_token_count = int(round(float(org.get("raw_env_token_count", np.zeros(A_eh.shape[1]))[k])))
         parent = int(org.get("hyper_parent_index", np.arange(A_eh.shape[1]))[k])
+        inactive_effective = org.get("assignment_view", "raw") == "effective" and not bool(org["hyper_active_mask"][k] > 0.5)
+        min_member_weight = 1e-8 if inactive_effective and not show_disabled_edges else 0.0
         summaries.append(
             {
                 "case_id": str(case_id),
@@ -317,17 +359,17 @@ def compute_hyperedge_summary(
                 "wake": {"x": float(org["hyper_wake_xy"][k, 0]), "y": float(org["hyper_wake_xy"][k, 1])},
                 "wake_axis": {"x": float(org["hyper_wake_axis"][k, 0]), "y": float(org["hyper_wake_axis"][k, 1])},
                 "wake_extent": float(org["hyper_wake_extent"][k]),
-                "top_cylinders": topk_cylinder_members(A_mh, k, top_n=topk_cylinders),
+                "top_cylinders": topk_cylinder_members(A_mh, k, top_n=topk_cylinders, min_weight=min_member_weight),
                 "raw_env_token_count": raw_env_token_count,
                 "effective_env_token_count": int(round(float(org["hyper_effective_env_token_count"][k]))) if "hyper_effective_env_token_count" in org else effective_env_token_count,
                 "env_token_count": int(round(float(org["hyper_effective_env_token_count"][k]))) if "hyper_effective_env_token_count" in org else effective_env_token_count,
                 "env_mass_sum_raw": float(np.sum(A_eh_raw[:, k])),
-                "env_mass_sum_effective": float(np.sum(A_eh[:, k])),
+                "env_mass_sum_effective": float(np.sum(A_eh_effective[:, k])),
                 "module_mass_sum_raw": float(np.sum(A_mh_raw[:, k])),
-                "module_mass_sum_effective": float(np.sum(A_mh[:, k])),
+                "module_mass_sum_effective": float(np.sum(A_mh_effective[:, k])),
                 "env_mass_sum": float(np.sum(A_eh[:, k])),
                 "env_mass_mean": float(np.mean(A_eh[:, k])),
-                "top_env_tokens": topk_env_members(A_eh, k, org["env_xy"], top_n=topk_env),
+                "top_env_tokens": topk_env_members(A_eh, k, org["env_xy"], top_n=topk_env, min_weight=min_member_weight),
             }
         )
     return summaries
@@ -367,6 +409,8 @@ def write_organization_summary(save_csv: Path, save_json: Path, summaries: List[
                 "env_mass_sum": item["env_mass_sum"],
                 "env_mass_sum_raw": item["env_mass_sum_raw"],
                 "env_mass_sum_effective": item["env_mass_sum_effective"],
+                "module_mass_sum_raw": item["module_mass_sum_raw"],
+                "module_mass_sum_effective": item["module_mass_sum_effective"],
                 "env_mass_mean": item["env_mass_mean"],
                 "top_cylinders": ",".join(f"C{m['id']}" for m in item["top_cylinders"]),
                 "top_cylinder_weights": ",".join(f"{m['weight']:.6g}" for m in item["top_cylinders"]),
@@ -492,7 +536,9 @@ def render_organization_physical_summary(
         gridspec_kw={"width_ratios": [1.55, 1.0]} if show_table else None,
     )
     ax = axes[0] if show_table else axes
-    ax.set_title("Physical organizer overlay")
+    view = str(org.get("assignment_view", "raw"))
+    merge_strategy = str(org.get("merge_strategy", "mask_only"))
+    ax.set_title(f"Physical organizer overlay ({view}{'' if view == 'raw' else ', ' + merge_strategy})")
     ax.set_xlim(extent[0], extent[1])
     ax.set_ylim(extent[2], extent[3])
     ax.set_aspect("equal")
@@ -634,7 +680,7 @@ def render_organization_physical_summary(
             table_ax.text(0.02, y + row_h * 0.78, text, ha="left", va="top", fontsize=7.6, family="monospace", transform=table_ax.transAxes)
 
     case_id = case.get("case_id", "?")
-    fig.suptitle(f"Case {case_id} | tau organization diagnostics")
+    fig.suptitle(f"Case {case_id} | tau organization diagnostics ({view})")
     fig.savefig(save_path)
     plt.close(fig)
 
@@ -669,8 +715,11 @@ def render_organization_matrices(
     ax_strip = fig.add_subplot(eh_gs[0, 0])
     ax_eh = fig.add_subplot(eh_gs[0, 1])
 
+    view = str(org.get("assignment_view", "raw"))
+    merge_strategy = str(org.get("merge_strategy", "mask_only"))
+    title_suffix = "raw" if view == "raw" else f"effective, {merge_strategy}"
     im_mh = ax_mh.imshow(A_mh, aspect="auto", vmin=0.0, vmax=max(1.0, float(A_mh.max())), cmap="viridis")
-    ax_mh.set_title("Module -> Hyperedge assignment A_mh (effective)")
+    ax_mh.set_title(f"Module -> Hyperedge assignment A_mh ({title_suffix})")
     ax_mh.set_xlabel("hyperedge")
     ax_mh.set_ylabel("cylinder")
     ax_mh.set_xticks(np.arange(num_hyper), labels=[f"H{k}" for k in range(num_hyper)])
@@ -692,7 +741,7 @@ def render_organization_matrices(
     ax_strip.set_yticks([])
 
     im_eh = ax_eh.imshow(A_eh_sorted, aspect="auto", vmin=0.0, vmax=max(1.0, float(A_eh.max())), cmap="viridis")
-    ax_eh.set_title("Environment -> Hyperedge assignment A_eh (effective, group-sorted)")
+    ax_eh.set_title(f"Environment -> Hyperedge assignment A_eh ({title_suffix}, group-sorted)")
     ax_eh.set_xlabel("hyperedge")
     ax_eh.set_ylabel("env token row")
     ax_eh.set_xticks(np.arange(num_hyper), labels=[f"H{k}" for k in range(num_hyper)])
@@ -748,7 +797,7 @@ def render_organization_matrices(
         )
         ax.set_xticks([])
         ax.set_yticks([])
-    fig.suptitle("Organization matrix diagnostics")
+    fig.suptitle(f"Organization matrix diagnostics ({title_suffix})")
     fig.savefig(save_path)
     plt.close(fig)
 
@@ -817,7 +866,10 @@ def render_organization_sankey(
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
-    ax.set_title("Sankey-style organizer topology\nC_i = cylinder/module, H_k = interaction hyperedge, EnvGroup_k = dominated environment tokens")
+    view = str(org.get("assignment_view", "raw"))
+    merge_strategy = str(org.get("merge_strategy", "mask_only"))
+    title_suffix = "raw" if view == "raw" else f"effective, {merge_strategy}"
+    ax.set_title(f"Sankey-style organizer topology ({title_suffix})\nC_i = cylinder/module, H_k = interaction hyperedge, EnvGroup_k = dominated environment tokens")
 
     cyl_desired = np.clip((centers[:, 1] - bounds["y_min"]) / max(bounds["ly"], 1e-6), 0.08, 0.92)
     hyper_desired = np.clip((org["hyper_wake_xy"][:, 1] - bounds["y_min"]) / max(bounds["ly"], 1e-6), 0.08, 0.92)
@@ -922,7 +974,9 @@ def render_organization_hypergraph_schematic(
     ax.set_xlim(0.0, 1.0)
     ax.set_ylim(0.0, 1.0)
     ax.axis("off")
-    ax.set_title("Conceptual hypergraph organizer schematic")
+    view = str(org.get("assignment_view", "raw"))
+    merge_strategy = str(org.get("merge_strategy", "mask_only"))
+    ax.set_title("Conceptual hypergraph organizer schematic" if view == "raw" else f"Effective hypergraph after DISABLE_EDGE ({merge_strategy})")
 
     label_items = []
     for k in range(num_hyper):
@@ -992,8 +1046,37 @@ def render_soft_organization(
     show_table: bool = True,
     show_disabled_edges: bool = False,
     visualize_disabled_edges: bool = True,
+    assignment_view: str = "raw",
+    merge_strategy: str = "mask_only",
 ) -> Dict[str, str]:
-    org = extract_organization_arrays(out, case)
+    requested_view = str(assignment_view).strip().lower()
+    if requested_view not in {"raw", "effective", "both"}:
+        raise ValueError("assignment_view must be one of: raw, effective, both.")
+    if requested_view == "both":
+        paths: Dict[str, str] = {}
+        for subview in ("raw", "effective"):
+            subpaths = render_soft_organization(
+                output_dir,
+                out,
+                case,
+                tau_value=tau_value,
+                phase_idx=phase_idx,
+                threshold=threshold,
+                topk_me_links=topk_me_links,
+                organization_view=organization_view,
+                topk_cylinders=topk_cylinders,
+                topk_env=topk_env,
+                min_gap=min_gap,
+                show_table=show_table,
+                show_disabled_edges=show_disabled_edges,
+                visualize_disabled_edges=visualize_disabled_edges,
+                assignment_view=subview,
+                merge_strategy=merge_strategy,
+            )
+            paths.update({f"{subview}_{key}": value for key, value in subpaths.items()})
+        return paths
+
+    org = extract_organization_arrays(out, case, assignment_view=requested_view, merge_strategy=merge_strategy)
     case_id = str(case.get("case_id", "?"))
     summaries = compute_hyperedge_summary(
         org,
@@ -1001,19 +1084,22 @@ def render_soft_organization(
         tau_value=tau_value,
         topk_cylinders=topk_cylinders,
         topk_env=topk_env,
+        show_disabled_edges=show_disabled_edges,
     )
     render_org = org
-    if not visualize_disabled_edges:
+    effective_visualization = requested_view == "effective" and visualize_disabled_edges
+    if requested_view == "raw" or not effective_visualization:
         render_org = dict(org)
         render_org["hyper_active_mask"] = np.ones_like(org["hyper_active_mask"], dtype=np.float32)
     base = f"case_{case_id}_tau_{phase_idx:03d}"
-    csv_path = output_dir / f"organization_summary_{base}.csv"
-    json_path = output_dir / f"organization_summary_{base}.json"
+    prefix = f"organization_{requested_view}"
+    csv_path = output_dir / f"{prefix}_summary_{base}.csv"
+    json_path = output_dir / f"{prefix}_summary_{base}.json"
     write_organization_summary(csv_path, json_path, summaries)
 
     paths = {"summary_csv": str(csv_path), "summary_json": str(json_path)}
     if organization_view in {"all", "physical"}:
-        path = output_dir / f"organization_physical_{base}.png"
+        path = output_dir / f"{prefix}_physical_{base}.png"
         render_organization_physical_summary(
             path,
             render_org,
@@ -1027,15 +1113,15 @@ def render_soft_organization(
         )
         paths["physical"] = str(path)
     if organization_view in {"all", "matrices"}:
-        path = output_dir / f"organization_matrices_{base}.png"
+        path = output_dir / f"{prefix}_matrices_{base}.png"
         render_organization_matrices(path, render_org, summaries, show_disabled_edges=show_disabled_edges, visualize_disabled_edges=visualize_disabled_edges)
         paths["matrices"] = str(path)
     if organization_view in {"all", "sankey"}:
-        path = output_dir / f"organization_sankey_{base}.png"
+        path = output_dir / f"{prefix}_sankey_{base}.png"
         render_organization_sankey(path, render_org, summaries, threshold=threshold, min_gap=min_gap, show_disabled_edges=show_disabled_edges, visualize_disabled_edges=visualize_disabled_edges)
         paths["sankey"] = str(path)
     if organization_view in {"all", "schematic"}:
-        path = output_dir / f"organization_hypergraph_schematic_{base}.png"
+        path = output_dir / f"{prefix}_hypergraph_schematic_{base}.png"
         render_organization_hypergraph_schematic(path, render_org, summaries, threshold=threshold, show_disabled_edges=show_disabled_edges, visualize_disabled_edges=visualize_disabled_edges)
         paths["schematic"] = str(path)
     return paths
