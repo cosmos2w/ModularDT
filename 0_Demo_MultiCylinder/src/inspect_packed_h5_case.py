@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
 import h5py
 import matplotlib.pyplot as plt
@@ -88,6 +88,46 @@ def safe_percentile_limits(field: np.ndarray, low: float = 1.0, high: float = 99
     hi = float(np.percentile(finite_values, high))
     vmax = max(abs(lo), abs(hi), 1e-6)
     return -vmax, vmax
+
+
+def format_heat_power(value: float) -> str:
+    return f"{value:+.2f}" if abs(value) < 100.0 else f"{value:+.2e}"
+
+
+def overlay_cylinders_with_heat(
+    ax,
+    centers: Optional[np.ndarray],
+    heat_powers: Optional[np.ndarray],
+    cylinder_radius: float,
+) -> None:
+    if centers is None:
+        return
+    centers = np.asarray(centers, dtype=np.float32).reshape(-1, 2)
+    powers = (
+        np.asarray(heat_powers, dtype=np.float32).reshape(-1)
+        if heat_powers is not None
+        else np.zeros((centers.shape[0],), dtype=np.float32)
+    )
+    max_abs_power = float(np.max(np.abs(powers))) if powers.size else 0.0
+    show_heat = powers.size >= centers.shape[0] and max_abs_power > 0.0
+
+    for idx, (cx, cy) in enumerate(centers):
+        qdot = float(powers[idx]) if idx < powers.size else 0.0
+        color = "#b2182b" if show_heat and qdot > 0.0 else "#2166ac" if show_heat and qdot < 0.0 else "k"
+        ax.add_patch(plt.Circle((cx, cy), cylinder_radius, fill=False, color=color, lw=1.7 if show_heat else 1.0))
+        if show_heat:
+            ax.text(
+                cx,
+                cy + 1.35 * cylinder_radius,
+                f"C{idx} q={format_heat_power(qdot)}",
+                ha="center",
+                va="bottom",
+                fontsize=7.0,
+                color=color,
+                weight="bold",
+                bbox={"facecolor": "white", "edgecolor": color, "alpha": 0.82, "boxstyle": "round,pad=0.18", "linewidth": 0.7},
+                zorder=20,
+            )
 
 
 def print_root_summary(h5_file: h5py.File) -> None:
@@ -170,6 +210,9 @@ def plot_vorticity_gif(
     phase_bin_centers = case_group["phase_bin_centers"][...]
     x_grid = case_group["x_grid"][...]
     y_grid = case_group["y_grid"][...]
+    centers = case_group["cylinder_centers"][...] if "cylinder_centers" in case_group else None
+    heat_powers = case_group["heat_powers"][...] if "heat_powers" in case_group else None
+    cylinder_radius = float(case_group.attrs.get("cylinder_radius", 0.5))
 
     omega_idx = channel_order.index("omega")
     omega_cycle = canonical_cycle[..., omega_idx]
@@ -200,6 +243,7 @@ def plot_vorticity_gif(
     colorbar.set_label("Vorticity")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
+    overlay_cylinders_with_heat(ax, centers, heat_powers, cylinder_radius)
 
     def update(frame_idx: int):
         image.set_data(omega_cycle[frame_idx])

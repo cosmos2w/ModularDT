@@ -14,9 +14,11 @@
     "u_bulk": 1.0,
     "dt": 0.01,
     "forcing_relaxation": 12.0,
-    "warmup_cycles": 4.0,
-    "save_cycles": 4.0,
-    "frames_per_cycle": 24,
+
+    "warmup_cycles": 8.0,
+    "save_cycles": 6.0,
+    "frames_per_cycle": 36,
+    
     "pressure_rank_deficiency": 0,
     "diffusion_substeps": 1
   },
@@ -25,10 +27,10 @@
     "pr": 0.71,
     "ambient_temperature": 0.0,
     "source_sigma": 0.12,
-    "power_min": 0.5,
-    "power_max": 1.5,
+    "power_min": -2.5,
+    "power_max": 2.5,
     "diffusion_substeps": 1,
-    
+
     "activate_after_warmup": true,
     "reset_temperature_at_activation": true,
     "save_only_after_thermal_activation": true,
@@ -59,9 +61,9 @@
     ],
     "heat_powers": [
       1.3559938173285948,
-      1.132275155269566,
+      -1.132275155269566,
       0.6179055569596408,
-      0.8506326861768085
+      -0.8506326861768085
     ]
   },
   "save": {

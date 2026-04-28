@@ -36,27 +36,27 @@ from multicyl_common import (
 
 # ------------------------------ Editable settings -------------------------------
 
-# NUM_CYLINDER_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8]
-# RE_OPTIONS = [20.0, 50.0, 100.0, 160.0, 200.0]
+NUM_CYLINDER_OPTIONS = [1, 2, 3, 4, 5, 6]
+RE_OPTIONS = [20.0, 50.0, 80.0, 120.0, 160.0, 180]
 
-NUM_CYLINDER_OPTIONS = [2, 4, 6]
-RE_OPTIONS = [30.0, 120.0, 170.0]
-REPEATS_PER_COMBINATION = 1
+# NUM_CYLINDER_OPTIONS = [2, 3, 4]
+# RE_OPTIONS = [40.0, 90.0, 140.0]
+
+REPEATS_PER_COMBINATION = 6
 
 # !!! Check carefully
 DATASET_MODE = "active"  # "inert" | "active"
 TEMPLATE_CONFIG_NAME = f"config_{DATASET_MODE}.json"  # for inert: "config_inert.json"
-GENERATED_CONFIG_PREFIX = "config_{DATASET_MODE}"  # for inert: "config_inert"
+GENERATED_CONFIG_PREFIX = f"config_{DATASET_MODE}"  # for inert: "config_inert"
 
 BASE_LAYOUT_SEED = 100
 
 ENABLE_CPU = False
-CPU_CONCURRENT_SLOTS = 2
-GPU_IDS = [0]
+CPU_CONCURRENT_SLOTS = 4
+GPU_IDS = [0, 1]
 MAX_CONCURRENT_PER_GPU = 16
 
 POLL_INTERVAL_SEC = 1.0
-
 
 # ------------------------------- Data classes ----------------------------------
 

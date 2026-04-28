@@ -59,8 +59,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--animation-field",
         choices=["omega", "temperature", "u", "v", "p"],
-        default="omega",
-        help="Field to animate in the cycle GIF. Defaults to omega.",
+        default=None,
+        help="Field to animate in the cycle GIF. Default: omega for inert; temperature and omega for active when both are available.",
     )
 
     parser.add_argument("--organization-threshold", type=float, default=0.15,
@@ -156,6 +156,48 @@ def channel_cmap(name: str) -> str:
         "omega": "RdBu_r",
         "temperature": "inferno",
     }.get(name, "coolwarm")
+
+
+def _format_heat_power(value: float) -> str:
+    return f"{value:+.2f}" if abs(value) < 100.0 else f"{value:+.2e}"
+
+
+def overlay_cylinder_heat_powers(ax, case: Dict, *, linewidth: float = 1.2, fontsize: float = 7.5) -> None:
+    centers = np.asarray(case.get("centers", []), dtype=np.float32)
+    if centers.size == 0:
+        return
+    centers = centers.reshape(-1, 2)
+    heat_powers = np.asarray(case.get("heat_powers", np.zeros((centers.shape[0],), dtype=np.float32)), dtype=np.float32).reshape(-1)
+    max_abs_power = float(np.max(np.abs(heat_powers))) if heat_powers.size else 0.0
+    show_heat = heat_powers.size >= centers.shape[0] and (max_abs_power > 0.0 or "temperature" in case.get("channel_order", []))
+    radius = float(case.get("cylinder_radius", 0.5))
+
+    for idx, (cx, cy) in enumerate(centers):
+        qdot = float(heat_powers[idx]) if idx < heat_powers.size else 0.0
+        color = "#b2182b" if show_heat and qdot > 0.0 else "#2166ac" if show_heat and qdot < 0.0 else "k"
+        ax.add_patch(plt.Circle((cx, cy), radius, fill=False, color=color, lw=linewidth + (0.7 if show_heat else 0.0)))
+        if show_heat:
+            ax.text(
+                cx,
+                cy + 1.35 * radius,
+                f"C{idx} q={_format_heat_power(qdot)}",
+                ha="center",
+                va="bottom",
+                fontsize=fontsize,
+                color=color,
+                weight="bold",
+                bbox={"facecolor": "white", "edgecolor": color, "alpha": 0.82, "boxstyle": "round,pad=0.18", "linewidth": 0.7},
+                zorder=20,
+            )
+
+
+def default_animation_fields(case: Dict) -> List[str]:
+    channel_order = list(case.get("channel_order", INERT_CHANNEL_ORDER))
+    if "temperature" in channel_order and "omega" in channel_order:
+        return ["temperature", "omega"]
+    if "omega" in channel_order:
+        return ["omega"]
+    return [channel_order[0]]
 
 
 def find_latest_run(case_id: str, saved_model_dir: Path) -> Path:
@@ -971,7 +1013,6 @@ def render_quicklook(
     axes = np.asarray(axes)
     if axes.ndim == 1:
         axes = axes[None, :]
-    cylinder_radius = float(case.get("cylinder_radius", 0.5))
     for i, (name, cmap) in enumerate(zip(channels, cmaps)):
         pred = pred_field[..., i]
         gt = gt_field[..., i]
@@ -989,10 +1030,8 @@ def render_quicklook(
             ax.set_ylabel("y")
             ax.set_title(title)
             fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
-        for cx, cy in case["centers"]:
-            for j in range(3):
-                circle = plt.Circle((cx, cy), cylinder_radius, fill=False, color="k", lw=1.0)
-                axes[i, j].add_patch(circle)
+        for j in range(3):
+            overlay_cylinder_heat_powers(axes[i, j], case, linewidth=1.0, fontsize=7.0)
 
     fig.suptitle(f"Case {case['case_id']} | split={case['split']} | tau={tau_value:.3f}")
     fig.savefig(save_path)
@@ -1051,8 +1090,7 @@ def render_animation(
     axes[1].set_title(f"Pred {animation_field}")
 
     for ax in axes:
-        for cx, cy in case["centers"]:
-            ax.add_patch(plt.Circle((cx, cy), float(case.get("cylinder_radius", 0.5)), fill=False, color="k", lw=1.0))
+        overlay_cylinder_heat_powers(ax, case, linewidth=1.0, fontsize=7.0)
 
     def update(frame_idx):
         im_gt.set_data(field_gts[frame_idx])
@@ -1164,8 +1202,10 @@ def main() -> None:
         visualize_disabled_edges=bool(model.cfg.DISABLE_EDGE and model.cfg.disable_edge_apply_to_visualization),
     )
 
-    gif_path = output_dir / f"animation_case_{case['case_id']}_{args.animation_field}_tau_{phase_idx:03d}.gif"
-    render_animation(gif_path, model, structure, case, device, args.query_batch_size, animation_field=args.animation_field)
+    animation_fields = [args.animation_field] if args.animation_field is not None else default_animation_fields(case)
+    for animation_field in animation_fields:
+        gif_path = output_dir / f"animation_case_{case['case_id']}_{animation_field}_tau_{phase_idx:03d}.gif"
+        render_animation(gif_path, model, structure, case, device, args.query_batch_size, animation_field=animation_field)
 
     org_arrays = extract_organization_arrays(out, case)
     np.savez_compressed(
@@ -1213,7 +1253,8 @@ def main() -> None:
                 "query_time": query_time_value,
                 "cycle_index": cycle_index_value,
                 "phase_idx": phase_idx,
-                "animation_field": args.animation_field,
+                "animation_field": animation_fields[0] if len(animation_fields) == 1 else "auto",
+                "animation_fields": animation_fields,
                 "field_mse": mse,
                 "predicted_frequency": freq_pred,
                 "gt_frequency": case["dominant_frequency"],

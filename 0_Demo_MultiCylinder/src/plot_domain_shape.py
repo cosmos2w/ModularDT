@@ -110,14 +110,14 @@ def save_domain_plot(cfg: SimulationConfig, config_path: Path) -> Path:
         ax.add_patch(arrow)
 
     powers = cfg.layout.heat_powers or [0.0 for _ in range(cfg.layout.num_cylinders)]
-    power_max = max(max(powers), 1e-8)
+    power_max = max(max(abs(float(power)) for power in powers), 1e-8)
     active_mode = cfg.thermal.enabled
 
     for idx, ((cx, cy), qdot) in enumerate(zip(cfg.layout.centers or [], powers)):
         if active_mode:
             heat_level = float(qdot) / power_max
-            glow_color = plt.cm.inferno(0.28 + 0.62 * heat_level)
-            halo_radius = cfg.domain.cylinder_radius * (1.85 + 0.25 * heat_level)
+            glow_color = plt.cm.coolwarm(0.5 + 0.5 * heat_level)
+            halo_radius = cfg.domain.cylinder_radius * (1.85 + 0.25 * abs(heat_level))
             halo = Circle((cx, cy), halo_radius, color=glow_color, alpha=0.24, ec="none")
             ax.add_patch(halo)
             face_color = glow_color

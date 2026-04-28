@@ -97,7 +97,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--phase-chunk-size", type=int, default=8, help="Number of phase bins processed at once in cycle mode.")
     parser.add_argument("--sample-chunk-size", type=int, default=1, help="Number of stochastic samples processed together in cycle mode.")
     parser.add_argument("--gif-fps", type=float, default=6.0, help="Frames per second for cycle GIF output.")
-    parser.add_argument("--viz-channel", type=int, default=3, help="Field channel used for quicklooks and cycle GIFs; omega is channel 3.")
+    parser.add_argument("--viz-channel", type=int, default=None, help="Field channel used for quicklooks and cycle GIFs; omega is channel 3.")
     parser.add_argument("--viz-field", type=str, default=None, help="Field name used for quicklooks/GIFs, e.g. omega or temperature. Overrides --viz-channel.")
     parser.add_argument("--output-dir", type=str, default=None, help="Optional output directory.")
     parser.add_argument("--organization-threshold", type=float, default=0.15, help="Minimum soft weight used when drawing organization edges.")
@@ -181,10 +181,21 @@ def resolve_viz_channel(args: argparse.Namespace, channel_order: list[str], fiel
         if field_name not in channel_order:
             raise ValueError(f"--viz-field={field_name!r} is not in channel_order={channel_order}.")
         return int(channel_order.index(field_name)), field_name
+    if args.viz_channel is None:
+        channel = channel_order.index("omega") if "omega" in channel_order else 0
+        return channel, channel_order[channel] if channel < len(channel_order) else f"channel {channel}"
     channel = int(args.viz_channel)
     if channel < 0 or channel >= int(field_dim):
         raise ValueError(f"--viz-channel={channel} is out of range for field_dim={field_dim}.")
     return channel, channel_order[channel] if channel < len(channel_order) else f"channel {channel}"
+
+
+def default_cycle_viz_channels(args: argparse.Namespace, channel_order: list[str], field_dim: int) -> list[tuple[int, str]]:
+    if args.viz_field is not None or args.viz_channel is not None:
+        return [resolve_viz_channel(args, channel_order, field_dim)]
+    if "temperature" in channel_order and "omega" in channel_order:
+        return [(channel_order.index("temperature"), "temperature"), (channel_order.index("omega"), "omega")]
+    return [resolve_viz_channel(args, channel_order, field_dim)]
 
 
 def add_extra_module_if_needed(sample: Dict, future_module_feature_dim: int, heat_power_scale: float = 1.0) -> None:
@@ -602,6 +613,47 @@ def _grid_extent(x_grid: np.ndarray, y_grid: np.ndarray) -> tuple[float, float, 
     return (float(x_grid.min()), float(x_grid.max()), float(y_grid.min()), float(y_grid.max()))
 
 
+def _format_heat_power(value: float) -> str:
+    return f"{value:+.2f}" if abs(value) < 100.0 else f"{value:+.2e}"
+
+
+def _overlay_cylinders_with_heat(
+    ax,
+    centers: np.ndarray,
+    heat_powers: Optional[np.ndarray] = None,
+    *,
+    cylinder_radius: float = 0.5,
+    linewidth: float = 1.0,
+    fontsize: float = 7.0,
+) -> None:
+    centers = np.asarray(centers, dtype=np.float32).reshape(-1, 2)
+    powers = (
+        np.asarray(heat_powers, dtype=np.float32).reshape(-1)
+        if heat_powers is not None
+        else np.zeros((centers.shape[0],), dtype=np.float32)
+    )
+    max_abs_power = float(np.max(np.abs(powers))) if powers.size else 0.0
+    show_heat = powers.size >= centers.shape[0] and max_abs_power > 0.0
+
+    for idx, (cx, cy) in enumerate(centers):
+        qdot = float(powers[idx]) if idx < powers.size else 0.0
+        color = "#b2182b" if show_heat and qdot > 0.0 else "#2166ac" if show_heat and qdot < 0.0 else "k"
+        ax.add_patch(plt.Circle((cx, cy), cylinder_radius, fill=False, color=color, linewidth=linewidth + (0.7 if show_heat else 0.0)))
+        if show_heat:
+            ax.text(
+                cx,
+                cy + 1.35 * cylinder_radius,
+                f"C{idx} q={_format_heat_power(qdot)}",
+                ha="center",
+                va="bottom",
+                fontsize=fontsize,
+                color=color,
+                weight="bold",
+                bbox={"facecolor": "white", "edgecolor": color, "alpha": 0.82, "boxstyle": "round,pad=0.18", "linewidth": 0.7},
+                zorder=20,
+            )
+
+
 def _plot_field(
     ax,
     data: np.ndarray,
@@ -614,6 +666,7 @@ def _plot_field(
     cmap: str = "coolwarm",
     cylinder_radius: float = 0.5,
     show_ticks: bool = False,
+    heat_powers: Optional[np.ndarray] = None,
 ):
     im = ax.imshow(
         data,
@@ -627,9 +680,7 @@ def _plot_field(
     ax.set_title(title)
     ax.set_xlabel("x")
     ax.set_ylabel("y")
-    for cx, cy in centers:
-        circ = plt.Circle((cx, cy), cylinder_radius, fill=False, color="k", linewidth=1.0)
-        ax.add_patch(circ)
+    _overlay_cylinders_with_heat(ax, centers, heat_powers, cylinder_radius=cylinder_radius, linewidth=1.0, fontsize=7.0)
     return im
 
 
@@ -643,6 +694,7 @@ def save_quicklook(
     centers: np.ndarray,
     channel: int = 3,
     channel_name: str = "omega",
+    heat_powers: Optional[np.ndarray] = None,
 ) -> None:
     """Save a 2x3 figure comparing GT, deterministic, sample, and ensemble."""
     sample0 = samples[0]
@@ -660,12 +712,12 @@ def save_quicklook(
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 8), dpi=150, constrained_layout=True)
     ims = []
-    ims.append(_plot_field(axes[0, 0], gt, f"GT {channel_name}", x_grid, y_grid, centers, vmin, vmax, cmap=cmap))
-    ims.append(_plot_field(axes[0, 1], det, f"Deterministic {channel_name}", x_grid, y_grid, centers, vmin, vmax, cmap=cmap))
-    ims.append(_plot_field(axes[0, 2], gen, f"Generated sample {channel_name}", x_grid, y_grid, centers, vmin, vmax, cmap=cmap))
-    ims.append(_plot_field(axes[1, 0], gen_mean, f"Generated ensemble mean {channel_name}", x_grid, y_grid, centers, vmin, vmax, cmap=cmap))
-    ims.append(_plot_field(axes[1, 1], gen_std, f"Generated ensemble std {channel_name}", x_grid, y_grid, centers, cmap="magma"))
-    ims.append(_plot_field(axes[1, 2], err, f"Ensemble mean - GT {channel_name}", x_grid, y_grid, centers, -err_abs, err_abs, cmap="coolwarm"))
+    ims.append(_plot_field(axes[0, 0], gt, f"GT {channel_name}", x_grid, y_grid, centers, vmin, vmax, cmap=cmap, heat_powers=heat_powers))
+    ims.append(_plot_field(axes[0, 1], det, f"Deterministic {channel_name}", x_grid, y_grid, centers, vmin, vmax, cmap=cmap, heat_powers=heat_powers))
+    ims.append(_plot_field(axes[0, 2], gen, f"Generated sample {channel_name}", x_grid, y_grid, centers, vmin, vmax, cmap=cmap, heat_powers=heat_powers))
+    ims.append(_plot_field(axes[1, 0], gen_mean, f"Generated ensemble mean {channel_name}", x_grid, y_grid, centers, vmin, vmax, cmap=cmap, heat_powers=heat_powers))
+    ims.append(_plot_field(axes[1, 1], gen_std, f"Generated ensemble std {channel_name}", x_grid, y_grid, centers, cmap="magma", heat_powers=heat_powers))
+    ims.append(_plot_field(axes[1, 2], err, f"Ensemble mean - GT {channel_name}", x_grid, y_grid, centers, -err_abs, err_abs, cmap="coolwarm", heat_powers=heat_powers))
     for ax, im in zip(axes.reshape(-1), ims):
         fig.colorbar(im, ax=ax, shrink=0.85)
     fig.savefig(out_path)
@@ -685,6 +737,7 @@ def save_stage1_quicklook(
     target_mode: str,
     channel: int = 3,
     channel_name: str = "omega",
+    heat_powers: Optional[np.ndarray] = None,
 ) -> None:
     """Save a 2x3 figure for stage-1 AE reconstruction."""
     gt = gt_field[channel]
@@ -700,15 +753,15 @@ def save_stage1_quicklook(
 
     fig, axes = plt.subplots(2, 3, figsize=(18, 8), dpi=150, constrained_layout=True)
     ims = []
-    ims.append(_plot_field(axes[0, 0], gt, f"GT {channel_name}", x_grid, y_grid, centers, field_vmin, field_vmax, cmap=cmap))
+    ims.append(_plot_field(axes[0, 0], gt, f"GT {channel_name}", x_grid, y_grid, centers, field_vmin, field_vmax, cmap=cmap, heat_powers=heat_powers))
     baseline_title = f"Mean {channel_name}" if target_mode == "residual" else "Zero baseline"
-    ims.append(_plot_field(axes[0, 1], baseline, baseline_title, x_grid, y_grid, centers, field_vmin, field_vmax, cmap=cmap))
-    ims.append(_plot_field(axes[0, 2], recon, f"AE reconstruction {channel_name}", x_grid, y_grid, centers, field_vmin, field_vmax, cmap=cmap))
+    ims.append(_plot_field(axes[0, 1], baseline, baseline_title, x_grid, y_grid, centers, field_vmin, field_vmax, cmap=cmap, heat_powers=heat_powers))
+    ims.append(_plot_field(axes[0, 2], recon, f"AE reconstruction {channel_name}", x_grid, y_grid, centers, field_vmin, field_vmax, cmap=cmap, heat_powers=heat_powers))
     target_title = f"Target residual {channel_name}" if target_mode == "residual" else f"Target field {channel_name}"
     recon_title = f"Reconstructed residual {channel_name}" if target_mode == "residual" else f"Reconstructed field {channel_name}"
-    ims.append(_plot_field(axes[1, 0], target, target_title, x_grid, y_grid, centers, target_vmin, target_vmax, cmap=cmap))
-    ims.append(_plot_field(axes[1, 1], recon_t, recon_title, x_grid, y_grid, centers, target_vmin, target_vmax, cmap=cmap))
-    ims.append(_plot_field(axes[1, 2], err, f"AE reconstruction - GT {channel_name}", x_grid, y_grid, centers, -err_abs, err_abs, cmap="coolwarm"))
+    ims.append(_plot_field(axes[1, 0], target, target_title, x_grid, y_grid, centers, target_vmin, target_vmax, cmap=cmap, heat_powers=heat_powers))
+    ims.append(_plot_field(axes[1, 1], recon_t, recon_title, x_grid, y_grid, centers, target_vmin, target_vmax, cmap=cmap, heat_powers=heat_powers))
+    ims.append(_plot_field(axes[1, 2], err, f"AE reconstruction - GT {channel_name}", x_grid, y_grid, centers, -err_abs, err_abs, cmap="coolwarm", heat_powers=heat_powers))
     for ax, im in zip(axes.reshape(-1), ims):
         fig.colorbar(im, ax=ax, shrink=0.85)
     fig.savefig(out_path)
@@ -815,6 +868,7 @@ def _imshow_with_cylinders(
     cmap: str = "coolwarm",
     cylinder_radius: float = 0.5,
     show_ticks: bool = False,
+    heat_powers: Optional[np.ndarray] = None,
 ):
     im = ax.imshow(
         data,
@@ -829,8 +883,7 @@ def _imshow_with_cylinders(
     if not show_ticks:
         ax.set_xticks([])
         ax.set_yticks([])
-    for cx, cy in centers:
-        ax.add_patch(plt.Circle((cx, cy), cylinder_radius, fill=False, color="k", linewidth=1.0))
+    _overlay_cylinders_with_heat(ax, centers, heat_powers, cylinder_radius=cylinder_radius, linewidth=1.0, fontsize=7.0)
     return im
 
 
@@ -850,6 +903,7 @@ def save_cycle_gif(
     channel: int = 3,
     channel_name: str = "omega",
     fps: float = 6.0,
+    heat_powers: Optional[np.ndarray] = None,
 ) -> None:
     """Write a 2x3 animated cycle diagnostic for one channel."""
     sample0 = generated_samples[0]
@@ -889,7 +943,7 @@ def save_cycle_gif(
     ims = []
     panel_cmaps = [field_cmap, field_cmap, field_cmap, field_cmap, "magma", "coolwarm"]
     for ax, data, title, (vmin, vmax), cmap in zip(axes_flat, initial, titles, limits, panel_cmaps):
-        ims.append(_imshow_with_cylinders(ax, data, title, x_grid, y_grid, centers, vmin, vmax, cmap=cmap))
+        ims.append(_imshow_with_cylinders(ax, data, title, x_grid, y_grid, centers, vmin, vmax, cmap=cmap, heat_powers=heat_powers))
     for ax, im in zip(axes_flat, ims):
         fig.colorbar(im, ax=ax, shrink=0.78)
 
@@ -931,6 +985,7 @@ def save_cycle_montage(
     *,
     channel: int = 3,
     channel_name: str = "omega",
+    heat_powers: Optional[np.ndarray] = None,
 ) -> None:
     T = gt_cycle.shape[0]
     selected = np.unique(np.clip(np.round(np.linspace(0, T - 1, num=min(4, T))).astype(int), 0, T - 1))
@@ -955,7 +1010,7 @@ def save_cycle_montage(
         for col, (data, title, vmin, vmax) in enumerate(panels):
             ax = axes[row, col]
             cmap = "magma" if col == 4 else ("coolwarm" if col == 5 else field_cmap)
-            im = _imshow_with_cylinders(ax, data, f"{title}\nphase {int(phase_indices[t])}, tau={tau_values[t]:.3f}", x_grid, y_grid, centers, vmin, vmax, cmap=cmap)
+            im = _imshow_with_cylinders(ax, data, f"{title}\nphase {int(phase_indices[t])}, tau={tau_values[t]:.3f}", x_grid, y_grid, centers, vmin, vmax, cmap=cmap, heat_powers=heat_powers)
             fig.colorbar(im, ax=ax, shrink=0.75)
     fig.savefig(out_path)
     plt.close(fig)
@@ -974,6 +1029,7 @@ def save_gt_generated_cycle_gif(
     channel: int = 3,
     channel_name: str = "omega",
     fps: float = 10.0,
+    heat_powers: Optional[np.ndarray] = None,
 ) -> None:
     """Simple deterministic-evaluator-style two-panel GT vs generated GIF."""
     gt = gt_cycle[:, channel]
@@ -982,8 +1038,8 @@ def save_gt_generated_cycle_gif(
     cmap = _channel_cmap(channel)
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 5), dpi=120, constrained_layout=True)
-    im_gt = _imshow_with_cylinders(axes[0], gt[0], f"GT {channel_name}", x_grid, y_grid, centers, vmin, vmax, cmap=cmap, show_ticks=True)
-    im_gen = _imshow_with_cylinders(axes[1], gen[0], f"Generated {channel_name}", x_grid, y_grid, centers, vmin, vmax, cmap=cmap, show_ticks=True)
+    im_gt = _imshow_with_cylinders(axes[0], gt[0], f"GT {channel_name}", x_grid, y_grid, centers, vmin, vmax, cmap=cmap, show_ticks=True, heat_powers=heat_powers)
+    im_gen = _imshow_with_cylinders(axes[1], gen[0], f"Generated {channel_name}", x_grid, y_grid, centers, vmin, vmax, cmap=cmap, show_ticks=True, heat_powers=heat_powers)
 
     def update(frame_idx: int):
         im_gt.set_data(gt[frame_idx])
@@ -1137,7 +1193,8 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
     n_steps = int(args.n_steps if args.n_steps is not None else cfg["stage2"].get("sampling", {}).get("n_steps", 16))
     ode_solver = str(args.ode_solver if args.ode_solver is not None else cfg["stage2"].get("sampling", {}).get("ode_solver", "euler"))
     T, C, H, W = sample["field_cycle"].shape
-    omega_channel, channel_name = resolve_viz_channel(args, list(sample["channel_order"]), C)
+    cycle_viz_channels = default_cycle_viz_channels(args, list(sample["channel_order"]), C)
+    omega_channel, channel_name = cycle_viz_channels[-1]
 
     with torch.no_grad():
         det_mean_t, det_res_t, det_field_t, global_cond_t = _run_deterministic_cycle(
@@ -1240,6 +1297,7 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
             "channel_order": list(sample["channel_order"]),
             "viz_channel": int(omega_channel),
             "viz_field": channel_name,
+            "cycle_viz_fields": [name for _, name in cycle_viz_channels],
             "cycle_mode_note": "Stage-2 was trained on phase snapshots. Cycle mode samples each tau-conditioned phase; independent noise is not temporally coherent, while shared/harmonic modes correlate the initial latent noise across phases.",
         }
     )
@@ -1266,55 +1324,60 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
         channel_order=np.asarray(sample["channel_order"]),
         re=np.array(sample["re"], dtype=np.float32),
         num_cylinders=np.array(sample["num_cylinders"], dtype=np.int64),
+        heat_powers=np.asarray(sample["heat_powers"], dtype=np.float32),
         n_steps=np.array(n_steps, dtype=np.int64),
         ode_solver=np.array(ode_solver),
         cycle_noise_mode=np.array(str(args.cycle_noise_mode)),
     )
 
-    save_cycle_gif(
-        out_dir / f"cycle_{channel_name}.gif",
-        gt_cycle,
-        det_cycle,
-        generated_samples,
-        generated_mean,
-        generated_std,
-        sample["tau_values"],
-        sample["phase_indices"],
-        x_np,
-        y_np,
-        sample["centers_np"],
-        channel=omega_channel,
-        channel_name=channel_name,
-        fps=float(args.gif_fps),
-    )
-    save_gt_generated_cycle_gif(
-        out_dir / f"cycle_{channel_name}_gt_generated.gif",
-        gt_cycle,
-        generated_mean,
-        sample["tau_values"],
-        sample["phase_indices"],
-        x_np,
-        y_np,
-        sample["centers_np"],
-        channel=omega_channel,
-        channel_name=channel_name,
-        fps=float(args.gif_fps),
-    )
-    save_cycle_montage(
-        out_dir / f"cycle_montage_{channel_name}.png",
-        gt_cycle,
-        det_cycle,
-        generated_samples,
-        generated_mean,
-        generated_std,
-        sample["tau_values"],
-        sample["phase_indices"],
-        x_np,
-        y_np,
-        sample["centers_np"],
-        channel=omega_channel,
-        channel_name=channel_name,
-    )
+    for viz_channel, viz_name in cycle_viz_channels:
+        save_cycle_gif(
+            out_dir / f"cycle_{viz_name}.gif",
+            gt_cycle,
+            det_cycle,
+            generated_samples,
+            generated_mean,
+            generated_std,
+            sample["tau_values"],
+            sample["phase_indices"],
+            x_np,
+            y_np,
+            sample["centers_np"],
+            channel=viz_channel,
+            channel_name=viz_name,
+            fps=float(args.gif_fps),
+            heat_powers=sample["heat_powers"],
+        )
+        save_gt_generated_cycle_gif(
+            out_dir / f"cycle_{viz_name}_gt_generated.gif",
+            gt_cycle,
+            generated_mean,
+            sample["tau_values"],
+            sample["phase_indices"],
+            x_np,
+            y_np,
+            sample["centers_np"],
+            channel=viz_channel,
+            channel_name=viz_name,
+            fps=float(args.gif_fps),
+            heat_powers=sample["heat_powers"],
+        )
+        save_cycle_montage(
+            out_dir / f"cycle_montage_{viz_name}.png",
+            gt_cycle,
+            det_cycle,
+            generated_samples,
+            generated_mean,
+            generated_std,
+            sample["tau_values"],
+            sample["phase_indices"],
+            x_np,
+            y_np,
+            sample["centers_np"],
+            channel=viz_channel,
+            channel_name=viz_name,
+            heat_powers=sample["heat_powers"],
+        )
 
     print(f"Output directory: {out_dir}")
     for k, v in cycle_metrics.items():
@@ -1405,6 +1468,7 @@ def main() -> None:
             target_mode=target_mode,
             channel=viz_channel,
             channel_name=viz_field,
+            heat_powers=sample["heat_powers"],
         )
 
         np.savez_compressed(
@@ -1417,6 +1481,7 @@ def main() -> None:
             x_grid=x_np,
             y_grid=y_np,
             centers=sample["centers_np"],
+            heat_powers=np.asarray(sample["heat_powers"], dtype=np.float32),
             tau=np.array([sample["tau"]], dtype=np.float32),
             channel_order=np.asarray(sample["channel_order"]),
         )
@@ -1529,6 +1594,7 @@ def main() -> None:
             centers=sample["centers_np"],
             channel=viz_channel,
             channel_name=viz_field,
+            heat_powers=sample["heat_powers"],
         )
         organization_paths = render_soft_organization(
             out_dir,
@@ -1556,6 +1622,7 @@ def main() -> None:
             x_grid=x_np,
             y_grid=y_np,
             centers=sample["centers_np"],
+            heat_powers=np.asarray(sample["heat_powers"], dtype=np.float32),
             tau=np.array([sample["tau"]], dtype=np.float32),
             channel_order=np.asarray(sample["channel_order"]),
             hyper_parent_index=org_arrays["hyper_parent_index"].astype(np.int64),

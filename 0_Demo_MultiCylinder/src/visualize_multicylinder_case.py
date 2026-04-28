@@ -259,7 +259,7 @@ def parse_args() -> argparse.Namespace:
         "--gif-field",
         choices=["vorticity", "speed", "temperature", "pressure"],
         default=None,
-        help="Field to animate. Default: vorticity for inert, temperature for active.",
+        help="Field to animate. Default: vorticity for inert; temperature and vorticity for active when both are available.",
     )
     parser.add_argument("--gif-dpi", type=int, default=90, help="DPI used when rendering GIF frames.")
     parser.add_argument("--fps", type=int, default=20, help="Frames per second for GIF output.")
@@ -527,9 +527,41 @@ def parse_frame_request(frame_ids: Sequence[int], frame_arg: Optional[str]) -> L
     return requested
 
 
-def overlay_cylinders(ax, cfg: SimulationConfig) -> None:
-    for cx, cy in cfg.layout.centers or []:
-        ax.add_patch(Circle((cx, cy), cfg.domain.cylinder_radius, fill=False, color="k", lw=1.5))
+def _format_heat_power(value: float) -> str:
+    return f"{value:+.2f}" if abs(value) < 100.0 else f"{value:+.2e}"
+
+
+def overlay_cylinders(ax, cfg: SimulationConfig, *, annotate_heat: bool = True) -> None:
+    centers = cfg.layout.centers or []
+    heat_powers = np.asarray(
+        cfg.layout.heat_powers if cfg.layout.heat_powers is not None else np.zeros((len(centers),), dtype=np.float32),
+        dtype=np.float32,
+    ).reshape(-1)
+    max_abs_power = float(np.max(np.abs(heat_powers))) if heat_powers.size else 0.0
+    show_heat = bool(annotate_heat and heat_powers.size >= len(centers) and (cfg.thermal.enabled or max_abs_power > 0.0))
+
+    for idx, (cx, cy) in enumerate(centers):
+        qdot = float(heat_powers[idx]) if idx < heat_powers.size else 0.0
+        edge_color = "k"
+        line_width = 1.5
+        if show_heat:
+            edge_color = "#b2182b" if qdot > 0.0 else "#2166ac" if qdot < 0.0 else "#2b2b2b"
+            line_width = 2.2
+        ax.add_patch(Circle((cx, cy), cfg.domain.cylinder_radius, fill=False, color=edge_color, lw=line_width))
+
+        if show_heat:
+            ax.text(
+                cx,
+                cy + 1.35 * cfg.domain.cylinder_radius,
+                f"C{idx} q={_format_heat_power(qdot)}",
+                ha="center",
+                va="bottom",
+                fontsize=7.5,
+                color=edge_color,
+                weight="bold",
+                bbox={"facecolor": "white", "edgecolor": edge_color, "alpha": 0.82, "boxstyle": "round,pad=0.18", "linewidth": 0.7},
+                zorder=20,
+            )
 
 
 def compute_qois(cfg: SimulationConfig, fields: Dict[str, Optional[np.ndarray]]) -> Dict[str, float]:
@@ -720,6 +752,21 @@ def render_gif(case: LoadedCase, frame_ids: Sequence[int], gif_field: str, fps: 
     return gif_path
 
 
+def default_gif_fields(case: LoadedCase) -> List[str]:
+    """Choose default GIF fields without surprising explicit --gif-field users."""
+    fields = load_fields_for_frame(case, case.frame_ids[0])
+    has_temperature = fields.get("temperature") is not None
+    has_vorticity = fields.get("vorticity") is not None
+
+    if case.cfg.thermal.enabled and has_temperature and has_vorticity:
+        return ["temperature", "vorticity"]
+    if case.cfg.thermal.enabled and has_temperature:
+        return ["temperature"]
+    if has_vorticity:
+        return ["vorticity"]
+    return ["speed"]
+
+
 def _row_fieldnames(rows: Sequence[Dict[str, Any]]) -> List[str]:
     fieldnames: List[str] = []
     for row in rows:
@@ -781,9 +828,9 @@ def main() -> None:
     save_qoi_outputs(case, selected_rows, csv_name="qoi_selected_frames.csv", plot_timeseries=False)
 
     if args.save_gif:
-        default_gif_field = "temperature" if case.cfg.thermal.enabled else "vorticity"
-        gif_field = args.gif_field or default_gif_field
-        render_gif(case, case.frame_ids, gif_field=gif_field, fps=args.fps, dpi=args.gif_dpi)
+        gif_fields = [args.gif_field] if args.gif_field is not None else default_gif_fields(case)
+        for gif_field in gif_fields:
+            render_gif(case, case.frame_ids, gif_field=gif_field, fps=args.fps, dpi=args.gif_dpi)
 
         full_rows: List[Dict[str, Any]] = []
         for frame in case.frame_ids:

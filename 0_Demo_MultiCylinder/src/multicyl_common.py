@@ -395,10 +395,29 @@ def sample_cylinder_centers(config: SimulationConfig) -> List[List[float]]:
 def sample_heat_powers(config: SimulationConfig) -> List[float]:
     """Sample per-cylinder heat-source strengths for the active mode."""
     rng = np.random.default_rng(config.layout.seed + 101)
+    power_min = float(config.thermal.power_min)
+    power_max = float(config.thermal.power_max)
+    num_cylinders = int(config.layout.num_cylinders)
+
+    if power_min < 0.0 < power_max:
+        signs = rng.choice(np.array([-1.0, 1.0]), size=num_cylinders)
+        if num_cylinders >= 2:
+            if not np.any(signs < 0.0):
+                signs[int(rng.integers(0, num_cylinders))] = -1.0
+            if not np.any(signs > 0.0):
+                signs[int(rng.integers(0, num_cylinders))] = 1.0
+
+        powers = np.empty(num_cylinders, dtype=float)
+        cooling = signs < 0.0
+        heating = ~cooling
+        powers[cooling] = -rng.uniform(0.0, abs(power_min), size=int(np.count_nonzero(cooling)))
+        powers[heating] = rng.uniform(0.0, power_max, size=int(np.count_nonzero(heating)))
+        return [float(v) for v in powers]
+
     powers = rng.uniform(
-        low=config.thermal.power_min,
-        high=config.thermal.power_max,
-        size=config.layout.num_cylinders,
+        low=power_min,
+        high=power_max,
+        size=num_cylinders,
     )
     return [float(v) for v in powers]
 
