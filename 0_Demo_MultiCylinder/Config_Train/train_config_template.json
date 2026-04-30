@@ -1,22 +1,27 @@
 {
-  "case_id": "0010",
-  "comments":"Add edge disabling from epoch 100 with Corrected merging logic",
+  "case_id": "0011",
+  "comments":"Test Active mode",
 
   "dataset": {
-    "packed_h5_path": "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5",
+    "packed_h5_path": "./Data_Saved/Processed_Active_Dataset/packed_dataset.h5",
     "include_temperature": "auto",
+
     "USE_INERT": false,
     "inert_packed_h5_path": "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5",
-    "inert_split": "all",
+    "inert_train_split": "train",
+    "inert_val_split": "test",
+
     "use_inert_for_val": false,
     "inert_temperature_value": 0.0,
     "promote_inert_to_active": true,
     "inert_thermal_time_mode": "random_active_range",
+
     "active_max_thermal_time": "auto",
     "require_dataset_compatibility": true,
     "fallback_to_active_only_on_mismatch": true,
     "use_heat_power_module_feature": false,
     "heat_power_scale": "auto",
+
     "train_split": "train",
     "val_split": "test",
 
@@ -59,7 +64,7 @@
     "domain_length_x": 24.0,
     "domain_length_y": 12.0,
     "re_scale": 200.0,
-    "field_dim": 4,
+    "field_dim": 5,
     "use_nonperiodic_query_time": false,
     "thermal_time_scale": 4.0,
     "temperature_channel_index": 4,
@@ -110,7 +115,7 @@
     "use_wake_centered_hyper_geometry": true,
     "use_hyper_specific_eh_geometry": true,
 
-    "DISABLE_EDGE": true,
+    "DISABLE_EDGE": false,
     "disable_edge_during_training": false,
     "disable_edge_during_evaluation": true,
     "disable_edge_merge_strategy": "mask_only",
@@ -145,7 +150,7 @@
   },
   "training": {
     "epochs": 10000,
-    "batch_size": 268,
+    "batch_size": 200,
     "learning_rate": 2.0e-4,
     "weight_decay": 1.0e-5,
     "gradient_clip_norm": 1.0,
@@ -153,7 +158,7 @@
     "scheduler_t_max": 800,
     "scheduler_min_lr": 1.0e-5,
     "mixed_precision": false,
-    "use_data_parallel": true,
+    "use_data_parallel": false,
     "max_physical_queries_per_step": 131072,
     "seed": 42
   },
@@ -196,7 +201,7 @@
     "early_stopping_patience": 500,
     "eval_every_epochs": 1,
     "max_cases": 18,
-    "batch_size": 128,
+    "batch_size": 144,
     "num_workers": 4,
     "points_per_item": 4096,
     "point_fraction": 0.15,

@@ -1,23 +1,10 @@
 {
   "models": [
     {
-      "id": "det_case0005",
-      "label": "Deterministic Case0005",
+      "id": "det_case0010",
+      "label": "Deterministic Case0010",
       "mode": "deterministic",
-      "run_dir": "~/Desktop/src/ModularDT/0_Demo_MultiCylinder/Saved_Model/Case0005_20260425_223110",
-      "checkpoint_name": "latest_model.pt",
-      "config_name": "resolved_train_config.json",
-      "preload": true,
-      "enabled": true,
-      "default_phase_bins": 32,
-      "max_phase_bins": 36,
-      "phase_bin_policy": "cap"
-    },
-    {
-      "id": "det_case0006",
-      "label": "Deterministic Case0006",
-      "mode": "deterministic",
-      "run_dir": "~/Desktop/src/ModularDT/0_Demo_MultiCylinder/Saved_Model/Case0006_20260425_231842",
+      "run_dir": "~/Desktop/src/ModularDT/0_Demo_MultiCylinder/Saved_Model/Case0010_20260428_084416",
       "checkpoint_name": "latest_model.pt",
       "config_name": "resolved_train_config.json",
       "preload": true,

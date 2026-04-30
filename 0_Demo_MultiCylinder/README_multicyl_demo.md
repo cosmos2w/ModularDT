@@ -103,7 +103,10 @@ Optional combined active+inert training is controlled by `dataset.USE_INERT`.
 Before mixing, the trainer checks grid/domain/channel compatibility. Compatible
 inert samples are promoted to active shape by filling temperature with
 `inert_temperature_value`, heat powers with zero, and residual temperature with
-zero. By default validation remains active-only (`use_inert_for_val=false`).
+zero. The active and inert sources use matching split names by default
+(`train` with `train`, `test` with `test`; override with
+`inert_train_split` / `inert_val_split`). By default validation remains
+active-only (`use_inert_for_val=false`).
 
 Generative Stage 1 infers the AE input/output channel count from the packed
 dataset. Stage 2 requires the deterministic conditioner checkpoint to have the

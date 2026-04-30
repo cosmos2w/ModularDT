@@ -29,7 +29,7 @@ After all cases are processed, the script also writes:
 
 Usage example
 -------------
-Run from ``0_Demo_MultiCylinder/``:
+Run from ``0_Demo_MultiCylinder/``: e.g.
 
 python src/preprocess_multicyl_dataset.py \
     --input-root ./Data_Saved \
@@ -37,6 +37,17 @@ python src/preprocess_multicyl_dataset.py \
     --device cuda:0 \
     --phase-bins 36 \
     --save-cycles 1 \
+    --points-per-phase-bin 0 \
+    --sampling-mode uniform \
+    --compute-pod \
+    --quicklook
+
+python src/preprocess_multicyl_dataset.py \
+    --input-root ./Data_Saved \
+    --output-root ./Data_Saved/Processed_Active_Dataset \
+    --device cuda:1 \
+    --phase-bins 36 \
+    --save-cycles 3 \
     --points-per-phase-bin 0 \
     --sampling-mode uniform \
     --compute-pod \

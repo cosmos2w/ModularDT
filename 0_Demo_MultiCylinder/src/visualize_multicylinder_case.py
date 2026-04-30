@@ -78,7 +78,7 @@ class LoadedCase:
 
 def default_processed_data_dir() -> Path:
     """Return the canonical processed inert dataset directory."""
-    return default_data_dir() / "Processed_Inert_Dataset"
+    return default_data_dir() / "Processed_Active_Dataset"
 
 
 def _is_raw_case_dir(path: Path) -> bool:

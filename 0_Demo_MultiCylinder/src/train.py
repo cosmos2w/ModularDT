@@ -1127,6 +1127,72 @@ def _max_num_cylinders_in_h5(h5_file: h5py.File) -> int:
     return max_count
 
 
+def max_num_cylinders_in_h5_path(h5_path: Path) -> int:
+    with h5py.File(h5_path, "r") as h5_file:
+        return _max_num_cylinders_in_h5(h5_file)
+
+
+def available_splits_in_h5(h5_path: Path) -> set[str]:
+    splits: set[str] = set()
+    with h5py.File(h5_path, "r") as h5_file:
+        for case_id in h5_file["cases"].keys():
+            splits.add(str(h5_file["cases"][case_id].attrs.get("split", "all")))
+    return splits
+
+
+def resolve_h5_split(h5_path: Path, requested_split: str, *, label: str) -> str:
+    """Resolve a split request while supporting legacy unsplit packed datasets."""
+    requested = str(requested_split).strip() or "all"
+    splits = available_splits_in_h5(h5_path)
+    if requested == "all" or requested in splits:
+        return requested
+    if splits == {"all"}:
+        print(f"[setup] {label}: requested split='{requested}' but dataset is unsplit; using split='all'.")
+        return "all"
+    raise ValueError(
+        f"{label}: requested split='{requested}' was not found in {h5_path}. "
+        f"Available splits: {sorted(splits)}."
+    )
+
+
+def dataset_has_nonperiodic_time(h5_path: Path, split: str = "all") -> bool:
+    with h5py.File(h5_path, "r") as h5_file:
+        root_mode = str(h5_file.attrs.get("active_time_mode", "")).strip().lower()
+        if root_mode == "multicycle_absolute":
+            return True
+        for case_id in sort_case_ids(h5_file["cases"].keys()):
+            grp = h5_file["cases"][case_id]
+            case_split = str(grp.attrs.get("split", "all"))
+            if split not in {"all", case_split}:
+                continue
+            case_mode = str(grp.attrs.get("active_time_mode", root_mode)).strip().lower()
+            if case_mode == "multicycle_absolute":
+                return True
+            sampled = grp.get("sampled_points")
+            if "thermal_time_centers" in grp or (sampled is not None and "thermal_time" in sampled):
+                return True
+    return False
+
+
+def dataset_has_nonzero_heat_powers(h5_path: Path, split: str = "all", eps: float = 1.0e-8) -> bool:
+    with h5py.File(h5_path, "r") as h5_file:
+        for case_id in sort_case_ids(h5_file["cases"].keys()):
+            grp = h5_file["cases"][case_id]
+            case_split = str(grp.attrs.get("split", "all"))
+            if split not in {"all", case_split}:
+                continue
+            if "heat_powers" in grp:
+                heat_powers = np.asarray(grp["heat_powers"], dtype=np.float32)
+                if heat_powers.size and float(np.max(np.abs(heat_powers))) > eps:
+                    return True
+            if (
+                abs(float(grp.attrs.get("thermal_power_min", 0.0))) > eps
+                or abs(float(grp.attrs.get("thermal_power_max", 0.0))) > eps
+            ):
+                return True
+    return False
+
+
 def check_inert_active_dataset_compatibility(active_h5: Path, inert_h5: Path) -> Tuple[bool, List[str]]:
     """Check geometry/channel compatibility before using inert samples as active auxiliaries."""
     warnings: List[str] = []
@@ -2457,10 +2523,22 @@ def main() -> None:
     packed_h5_path = resolve_demo_config_path(dataset_cfg["packed_h5_path"])
     if not packed_h5_path.exists():
         raise FileNotFoundError(f"Packed HDF5 dataset not found: {packed_h5_path}")
+    train_split = resolve_h5_split(
+        packed_h5_path,
+        str(dataset_cfg.get("train_split", "train")),
+        label="active train dataset",
+    )
+    val_split = resolve_h5_split(
+        packed_h5_path,
+        str(dataset_cfg.get("val_split", "test")),
+        label="active validation dataset",
+    )
+    dataset_cfg["train_split"] = train_split
+    dataset_cfg["val_split"] = val_split
 
     dataset_channel_order, dataset_field_dim = infer_dataset_field_metadata(
         packed_h5_path,
-        split=dataset_cfg.get("train_split", "train"),
+        split=train_split,
     )
     cfg.setdefault("dataset", {})["channel_order"] = dataset_channel_order
     cfg["dataset"]["field_dim"] = int(dataset_field_dim)
@@ -2472,6 +2550,30 @@ def main() -> None:
             f"model.field_dim={model_payload.get('field_dim')} does not match dataset field_dim={dataset_field_dim} "
             f"for channel_order={dataset_channel_order}."
         )
+    if "temperature" in dataset_channel_order and dataset_has_nonperiodic_time(packed_h5_path, split=train_split):
+        temp_idx = int(dataset_channel_order.index("temperature"))
+        if not bool(model_payload.get("use_nonperiodic_query_time", False)):
+            print(
+                "[setup] active multicycle dataset detected; enabling model.use_nonperiodic_query_time "
+                "so query_time is used for temperature development."
+            )
+            model_payload["use_nonperiodic_query_time"] = True
+        if not bool(model_payload.get("use_temperature_time_head", False)):
+            print(
+                "[setup] active multicycle dataset detected; enabling model.use_temperature_time_head "
+                "for the temperature channel."
+            )
+            model_payload["use_temperature_time_head"] = True
+        model_payload["temperature_channel_index"] = temp_idx
+        if str(model_payload.get("thermal_time_scale", "auto")).strip().lower() == "auto":
+            model_payload["thermal_time_scale"] = max(infer_active_max_thermal_time(packed_h5_path), 1.0)
+    if "temperature" in dataset_channel_order and dataset_has_nonzero_heat_powers(packed_h5_path, split=train_split):
+        if not bool(dataset_cfg.get("use_heat_power_module_feature", False)):
+            print(
+                "[setup] active heat powers detected; enabling dataset.use_heat_power_module_feature "
+                "so cylinder heating is visible to the model."
+            )
+            dataset_cfg["use_heat_power_module_feature"] = True
     if bool(dataset_cfg.get("use_heat_power_module_feature", False)) and int(model_payload.get("future_module_feature_dim", 0)) <= 0:
         model_payload["future_module_feature_dim"] = 1
     cfg["loss"]["dynamic_energy_channels"] = resolve_dynamic_energy_channels(
@@ -2486,9 +2588,12 @@ def main() -> None:
     max_num_cylinders = int(dataset_cfg.get("max_num_cylinders", model_cfg.max_num_cylinders))
     if model_cfg.max_num_cylinders != max_num_cylinders:
         model_cfg.max_num_cylinders = max_num_cylinders
+        model_payload["max_num_cylinders"] = max_num_cylinders
     print(f"[setup] dataset field_dim={dataset_field_dim} channel_order={dataset_channel_order}")
     use_inert_effective = bool(dataset_cfg.get("USE_INERT", False))
     inert_packed_h5_path: Optional[Path] = None
+    inert_train_split: Optional[str] = None
+    inert_val_split: Optional[str] = None
     active_max_thermal_time = 1.0
     if use_inert_effective:
         inert_packed_h5_path = resolve_demo_config_path(dataset_cfg.get("inert_packed_h5_path", "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5"))
@@ -2511,6 +2616,18 @@ def main() -> None:
                 else:
                     raise ValueError(message)
         if use_inert_effective:
+            inert_train_split = resolve_h5_split(
+                inert_packed_h5_path,
+                str(dataset_cfg.get("inert_train_split", train_split)),
+                label="inert train dataset",
+            )
+            inert_val_split = resolve_h5_split(
+                inert_packed_h5_path,
+                str(dataset_cfg.get("inert_val_split", val_split)),
+                label="inert validation dataset",
+            )
+            dataset_cfg["inert_train_split"] = inert_train_split
+            dataset_cfg["inert_val_split"] = inert_val_split
             configured_max = dataset_cfg.get("active_max_thermal_time", "auto")
             active_max_thermal_time = (
                 infer_active_max_thermal_time(packed_h5_path)
@@ -2519,9 +2636,24 @@ def main() -> None:
             )
             print(
                 f"[setup] USE_INERT enabled | inert_path={inert_packed_h5_path} | "
+                f"inert_train_split={inert_train_split} | inert_val_split={inert_val_split} | "
                 f"inert_query_time_mode={dataset_cfg.get('inert_thermal_time_mode', 'random_active_range')} | "
                 f"active_max_thermal_time={active_max_thermal_time:.4g}"
             )
+    required_max_num_cylinders = max(max_num_cylinders, max_num_cylinders_in_h5_path(packed_h5_path))
+    if use_inert_effective and inert_packed_h5_path is not None:
+        required_max_num_cylinders = max(required_max_num_cylinders, max_num_cylinders_in_h5_path(inert_packed_h5_path))
+    if required_max_num_cylinders != max_num_cylinders:
+        print(
+            f"[setup] raising max_num_cylinders from {max_num_cylinders} to {required_max_num_cylinders} "
+            "to cover all active/inert cases."
+        )
+        max_num_cylinders = required_max_num_cylinders
+        model_cfg.max_num_cylinders = required_max_num_cylinders
+        model_payload["max_num_cylinders"] = required_max_num_cylinders
+        dataset_cfg["max_num_cylinders"] = required_max_num_cylinders
+    write_json(backup_path, cfg)
+    write_json(run_dir / "resolved_train_config.json", cfg)
     print(f"[setup] decoder={model_cfg.decoder_type}")
     print(
         "[setup] hierarchical_perceiver: "
@@ -2537,7 +2669,7 @@ def main() -> None:
 
     train_dataset = PackedPointChunkDataset(
         packed_h5_path,
-        split=dataset_cfg.get("train_split", "train"),
+        split=train_split,
         is_training=True,
         points_per_item=int(dataset_cfg.get("points_per_item", 4096)),
         max_num_cylinders=max_num_cylinders,
@@ -2572,9 +2704,10 @@ def main() -> None:
     )
     if use_inert_effective:
         assert inert_packed_h5_path is not None
+        assert inert_train_split is not None
         inert_train_dataset = PackedPointChunkDataset(
             inert_packed_h5_path,
-            split=dataset_cfg.get("inert_split", "all"),
+            split=inert_train_split,
             is_training=True,
             points_per_item=int(dataset_cfg.get("points_per_item", 4096)),
             max_num_cylinders=max_num_cylinders,
@@ -2626,7 +2759,7 @@ def main() -> None:
     if val_mode == "point_chunks":
         val_dataset = PackedPointChunkDataset(
             packed_h5_path,
-            split=dataset_cfg.get("val_split", "test"),
+            split=val_split,
             is_training=False,
             points_per_item=int(validation_cfg.get("points_per_item", dataset_cfg.get("points_per_item", 4096))),
             max_num_cylinders=max_num_cylinders,
@@ -2661,9 +2794,10 @@ def main() -> None:
         )
         if use_inert_effective and bool(dataset_cfg.get("use_inert_for_val", False)):
             assert inert_packed_h5_path is not None
+            assert inert_val_split is not None
             inert_val_dataset = PackedPointChunkDataset(
                 inert_packed_h5_path,
-                split=dataset_cfg.get("inert_split", "all"),
+                split=inert_val_split,
                 is_training=False,
                 points_per_item=int(validation_cfg.get("points_per_item", dataset_cfg.get("points_per_item", 4096))),
                 max_num_cylinders=max_num_cylinders,
@@ -2706,11 +2840,11 @@ def main() -> None:
     else:
         canonical_val_dataset = CanonicalCycleValidationDataset(
             packed_h5_path,
-            split=dataset_cfg.get("val_split", "test"),
+            split=val_split,
         )
     if len(train_dataset) == 0:
         raise RuntimeError(
-            f"No training chunks were found in {packed_h5_path} for split='{dataset_cfg.get('train_split', 'train')}'."
+            f"No training chunks were found in {packed_h5_path} for split='{train_split}'."
         )
 
     requested_batch_size = int(cfg["training"]["batch_size"])
