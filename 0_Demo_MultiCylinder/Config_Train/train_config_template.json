@@ -5,6 +5,7 @@
   "dataset": {
     "packed_h5_path": "./Data_Saved/Processed_Active_Dataset/packed_dataset.h5",
     "include_temperature": "auto",
+    "use_nonperiodic_query_time": true,
 
     "USE_INERT": false,
     "inert_packed_h5_path": "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5",
@@ -65,10 +66,10 @@
     "domain_length_y": 12.0,
     "re_scale": 200.0,
     "field_dim": 5,
-    "use_nonperiodic_query_time": false,
+    "use_nonperiodic_query_time": true,
     "thermal_time_scale": 4.0,
     "temperature_channel_index": 4,
-    "use_temperature_time_head": false,
+    "use_temperature_time_head": true,
     "flow_channels_periodic_only": true,
     "thermal_time_fourier_frequencies": 2,
 

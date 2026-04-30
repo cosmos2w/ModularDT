@@ -1,6 +1,6 @@
 # Multi-cylinder PhiFlow Demo
 
-Updated: 2026-04-27
+Updated: 2026-04-28
 
 This demo covers the periodic multi-cylinder inert and active thermal wake workflow:
 
@@ -11,7 +11,7 @@ This demo covers the periodic multi-cylinder inert and active thermal wake workf
 
 ## Active Thermal Cases
 
-Updated: 2026-04-27
+Updated: 2026-04-28
 
 The active workflow reuses the existing simulator, preprocessing, deterministic
 model, and generative model. It is not a separate active-only framework.
@@ -53,8 +53,9 @@ Old inert packed datasets remain valid. If `channel_order`, `field_dim`,
 temperature, or `heat_powers` are missing, loaders fall back to the inert
 four-channel convention and zero heat powers.
 
-Preprocessing is still launched by `src/preprocess_inert_multicyl_dataset.py`
-for compatibility, but it is mode-aware:
+Preprocessing can be launched through `src/preprocess_multicyl_dataset.py` or
+the compatibility entry point `src/preprocess_inert_multicyl_dataset.py`; the
+preprocessor is mode-aware:
 
 ```bash
 python src/preprocess_inert_multicyl_dataset.py \
@@ -62,24 +63,49 @@ python src/preprocess_inert_multicyl_dataset.py \
   --output-root ./Data_Saved/Processed_Active_Dataset \
   --include-temperature auto \
   --phase-bins 36 \
-  --save-cycles 4 \
-  --active-time-mode multicycle_absolute \
-  --active-save-contiguous-cycles 4 \
-  --active-warmup-cycles 1
+  --save-cycles 3 \
+  --active-time-mode hybrid_periodic_flow_thermal_trajectory \
+  --active-initial-temperature-mode synthesize_uniform_when_missing
 ```
 
-With `--active-time-mode multicycle_absolute`, preprocessing does not tile one
-canonical cycle. It identifies contiguous post-activation wake cycles, bins each
-cycle by flow phase, and concatenates the real cycles. The packed dataset stores:
+Active time modes are:
+
+- `periodic`: legacy one-cycle representation, tiled when `--save-cycles > 1`
+- `thermal_trajectory`: contiguous post-activation cycles for all channels
+- `hybrid_periodic_flow_thermal_trajectory`: periodic flow plus true thermal
+  trajectory aligned by one absolute coordinate
+
+The hybrid mode defines one master coordinate, `tau_abs = cycle_index +
+phase_tau`, where `phase_tau = tau_abs mod 1`. Flow channels `u, v, p, omega`
+are interpolated from one representative canonical flow cycle, usually the last
+full active cycle, and then repeated across `--save-cycles`. The temperature
+channel is not tiled: it is interpolated from raw thermal-active frames in
+thermal-time order over the selected cycles. The packed dataset stores:
 
 - `phase_tau_centers`: periodic flow phase in `[0, 1)`
 - `tau_abs_centers`: `cycle_index + phase_tau`
 - `thermal_time_centers`: non-periodic active thermal age
 - `cycle_index_centers`: selected active cycle index
+- legacy `phase_bin_centers`, equal to `phase_tau_centers` in hybrid mode
 
-Training batches use `query_tau` for periodic flow quantities and `query_time`
-for temperature age. Thus `u, v, p, omega` can remain phase-periodic while
-temperature is not forced to repeat from cycle to cycle.
+In sampled points, `tau` is the periodic `phase_tau`, while `tau_abs`,
+`thermal_time`, and `cycle_index` are saved alongside it. Training batches use
+`query_tau` for periodic flow quantities and `query_time` for temperature age.
+Thus `u, v, p, omega` can remain phase-periodic while temperature is not forced
+to repeat from cycle to cycle.
+
+If the simulator did not save the exact activation frame, use
+`--active-initial-temperature-mode synthesize_uniform_when_missing`. Hybrid
+preprocessing then anchors `tau_abs=0` at the recorded thermal activation time
+and inserts a uniform ambient-temperature frame before interpolating the raw
+thermal trajectory. This gives a uniform first processed temperature frame while
+keeping flow phase and thermal age aligned by the same `tau_abs` coordinate.
+
+This hybrid representation is appropriate for the current one-way coupled
+incompressible active cases: temperature is passively advected/diffused with
+sources and does not feed back into the flow. If future two-way thermal-flow
+coupling is added, the flow channels should no longer be repeated from a single
+canonical cycle.
 
 Deterministic training uses the same organizer and decoder; only decoder output
 width changes with `model.field_dim`. Active cases can pass normalized
@@ -103,7 +129,9 @@ Optional combined active+inert training is controlled by `dataset.USE_INERT`.
 Before mixing, the trainer checks grid/domain/channel compatibility. Compatible
 inert samples are promoted to active shape by filling temperature with
 `inert_temperature_value`, heat powers with zero, and residual temperature with
-zero. The active and inert sources use matching split names by default
+zero. With `inert_thermal_time_mode="random_active_range"`, promoted inert
+samples receive random `query_time` values across the active thermal range, so
+zero heat power teaches no thermal accumulation at any age. The active and inert sources use matching split names by default
 (`train` with `train`, `test` with `test`; override with
 `inert_train_split` / `inert_val_split`). By default validation remains
 active-only (`use_inert_for_val=false`).

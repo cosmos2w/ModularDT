@@ -333,6 +333,9 @@ class CanonicalResidualGridDataset(Dataset):
                     if "phase_tau_centers" in grp
                     else phase_bins
                 )
+                # Stage-2 conditioning mirrors deterministic training: tau is
+                # folded phase_tau; query_time is thermal_time when available,
+                # then tau_abs, then legacy tau for inert datasets.
                 query_time_bins = (
                     np.asarray(grp["thermal_time_centers"], dtype=np.float32)
                     if "thermal_time_centers" in grp
@@ -707,6 +710,8 @@ def build_stage2_conditions(
     x_grid = batch["x_grid"].to(device=device)
     y_grid = batch["y_grid"].to(device=device)
     tau = batch["tau"].to(device=device)
+    # The deterministic conditioner receives both aligned coordinates so its
+    # temperature head can follow active thermal age.
     query_time = batch.get("query_time", batch["tau"]).to(device=device)
     det_out = deterministic_grid_forward(
         det_model,

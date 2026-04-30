@@ -292,6 +292,8 @@ def load_dataset_case(h5_path: Path, case_id: str) -> Dict:
             "tau_abs_centers": np.asarray(grp["tau_abs_centers"], dtype=np.float32) if "tau_abs_centers" in grp else None,
             "thermal_time_centers": np.asarray(grp["thermal_time_centers"], dtype=np.float32) if "thermal_time_centers" in grp else None,
             "cycle_index_centers": np.asarray(grp["cycle_index_centers"], dtype=np.float32) if "cycle_index_centers" in grp else None,
+            "active_time_mode": str(grp.attrs.get("active_time_mode", h5_file.attrs.get("active_time_mode", "periodic"))),
+            "canonical_is_periodic": bool(grp.attrs.get("canonical_is_periodic", True)),
             "canonical_cycle": np.asarray(grp["canonical_cycle"], dtype=np.float32),
             "mean_field": np.asarray(grp["mean_field"], dtype=np.float32),
             "rms_field": np.asarray(grp["rms_field"], dtype=np.float32),
@@ -1056,12 +1058,15 @@ def render_animation(
     y_grid_t = torch.from_numpy(case["y_grid"]).to(device)
     phase_bins = case["phase_bin_centers"]
     phase_tau = case.get("phase_tau_centers")
+    tau_abs = case.get("tau_abs_centers")
     thermal_time = case.get("thermal_time_centers")
     cycle_index = case.get("cycle_index_centers")
     
     # Pre-compute all frames to find global min/max for stable colors
     frames_pred, frames_gt = [], []
     for frame_idx, tau_val in enumerate(phase_bins):
+        # Active hybrid datasets evaluate flow at folded phase_tau while the
+        # temperature head receives the aligned non-periodic thermal age.
         tau_for_model = float(phase_tau[frame_idx]) if phase_tau is not None else float(tau_val)
         time_for_model = float(thermal_time[frame_idx]) if thermal_time is not None else float(tau_val)
         tau_t = torch.tensor([tau_for_model], dtype=torch.float32, device=device)
@@ -1100,9 +1105,13 @@ def render_animation(
         im_gt.set_data(field_gts[frame_idx])
         im_pred.set_data(field_preds[frame_idx])
         tau_label = float(phase_tau[frame_idx]) if phase_tau is not None else float(phase_bins[frame_idx])
+        tau_abs_label = float(tau_abs[frame_idx]) if tau_abs is not None else float(phase_bins[frame_idx])
         time_label = float(thermal_time[frame_idx]) if thermal_time is not None else float(phase_bins[frame_idx])
         cycle_label = float(cycle_index[frame_idx]) if cycle_index is not None else float(np.floor(phase_bins[frame_idx]))
-        fig.suptitle(f"phase_tau={tau_label:.3f} | thermal_time={time_label:.3f} | cycle={cycle_label:.0f}")
+        fig.suptitle(
+            f"phase_tau={tau_label:.3f} | tau_abs={tau_abs_label:.3f} | "
+            f"thermal_time={time_label:.3f} | cycle_index={cycle_label:.0f}"
+        )
         return [im_gt, im_pred]
 
     anim = FuncAnimation(fig, update, frames=len(phase_bins), blit=False)
@@ -1147,6 +1156,11 @@ def main() -> None:
         if case.get("thermal_time_centers") is not None
         else tau_value
     )
+    tau_abs_value = (
+        float(case["tau_abs_centers"][phase_idx])
+        if case.get("tau_abs_centers") is not None
+        else tau_value
+    )
     cycle_index_value = (
         float(case["cycle_index_centers"][phase_idx])
         if case.get("cycle_index_centers") is not None
@@ -1160,6 +1174,8 @@ def main() -> None:
     query_time_t = torch.tensor([query_time_value], dtype=torch.float32, device=device)
 
     with torch.no_grad():
+        # Pass both aligned coordinates: phase_tau for periodic flow and
+        # query_time for active thermal accumulation.
         out = model.reconstruct_full_grid(
             structure,
             x_grid_t,
@@ -1177,8 +1193,9 @@ def main() -> None:
     print(
         f"Loaded run: {run_dir.name}\n"
         f"Dataset case: {case['case_id']} | split={case['split']} | "
-        f"phase_tau={phase_tau_value:.3f} | thermal_time={query_time_value:.3f} | "
-        f"cycle={cycle_index_value:.0f} | phase_idx={phase_idx}\n"
+        f"phase_tau={phase_tau_value:.3f} | tau_abs={tau_abs_value:.3f} | "
+        f"thermal_time={query_time_value:.3f} | cycle_index={cycle_index_value:.0f} | "
+        f"phase_idx={phase_idx}\n"
         f"Field MSE: {mse:.6e}\n"
         f"Predicted frequency: {freq_pred:.6e} | GT frequency: {case['dominant_frequency']:.6e}"
     )

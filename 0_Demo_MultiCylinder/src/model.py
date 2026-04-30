@@ -1804,8 +1804,12 @@ class HierarchicalPerceiverDecoder(nn.Module):
         batch_size, num_queries, _ = query_xy.shape
         query_xy_norm = self._normalize_query_xy(query_xy)
         spatial_feat = self.spatial_query_encoder(query_xy_norm)
+        # query_tau is the folded, periodic flow phase.  Active heat-transfer
+        # cases may also pass query_time below as monotone thermal age.
         phase_feat = self.phase_encoder(query_tau)
         if query_time is None:
+            # Old inert datasets/checkpoints only know tau; falling back keeps
+            # the previous 4-channel behavior exactly on the legacy path.
             query_time = query_tau
 
         behavior_latent = behavior["behavior_latent"][:, None, :].expand(batch_size, num_queries, -1)
@@ -1916,6 +1920,9 @@ class HierarchicalPerceiverDecoder(nn.Module):
         pred_residual = self.residual_head(residual_state)
         if self.use_temperature_time_head and self.thermal_time_encoder is not None and self.temperature_time_head is not None:
             temp_idx = int(self.cfg.temperature_channel_index)
+            # The non-periodic thermal age is injected through a temperature-only
+            # correction.  With flow_channels_periodic_only=true, u/v/p/omega
+            # remain conditioned directly on query_tau rather than thermal age.
             thermal_feat = self.thermal_time_encoder(query_time.to(device=query_tau.device, dtype=query_tau.dtype))
             temp_correction = self.temperature_time_head(torch.cat([residual_state, thermal_feat, behavior_latent], dim=-1))
             pred_residual = pred_residual.clone()
@@ -1958,6 +1965,8 @@ class HypergraphNeuralFieldModel(nn.Module):
         query_time: Optional[torch.Tensor] = None,
         return_aux: bool = True,
     ) -> Dict[str, torch.Tensor]:
+        # query_tau is the periodic flow phase. query_time is an optional
+        # monotone thermal age used by active temperature models.
         organized = self.organizer(
             re_values=structure["re_values"],
             num_cylinders=structure["num_cylinders"],
@@ -2037,6 +2046,8 @@ class HypergraphNeuralFieldModel(nn.Module):
         query_time: Optional[torch.Tensor] = None,
         query_batch_size: int = 16384,
     ) -> Dict[str, torch.Tensor]:
+        # Dense-grid inference mirrors point training: expand the periodic
+        # phase and, when present, the aligned non-periodic thermal age.
         if x_grid.ndim != 2 or y_grid.ndim != 2:
             raise ValueError("x_grid and y_grid must be rank-2 tensors [H, W].")
 

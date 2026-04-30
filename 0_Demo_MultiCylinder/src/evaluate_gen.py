@@ -358,10 +358,11 @@ def load_case_snapshot(packed_h5_path: Path, split: str, case_id: Optional[str],
         grp = cases[str(case_id)]
         phase_bins = np.asarray(grp["phase_bin_centers"], dtype=np.float32)
         phase_tau_bins = np.asarray(grp["phase_tau_centers"], dtype=np.float32) if "phase_tau_centers" in grp else phase_bins
+        tau_abs_bins = np.asarray(grp["tau_abs_centers"], dtype=np.float32) if "tau_abs_centers" in grp else phase_bins
         query_time_bins = (
             np.asarray(grp["thermal_time_centers"], dtype=np.float32)
             if "thermal_time_centers" in grp
-            else (np.asarray(grp["tau_abs_centers"], dtype=np.float32) if "tau_abs_centers" in grp else phase_bins)
+            else tau_abs_bins
         )
         cycle_index_bins = np.asarray(grp["cycle_index_centers"], dtype=np.float32) if "cycle_index_centers" in grp else np.floor(phase_bins)
         if phase_index < 0 or phase_index >= len(phase_bins):
@@ -398,7 +399,7 @@ def load_case_snapshot(packed_h5_path: Path, split: str, case_id: Optional[str],
             "case_id": str(case_id),
             "phase_index": int(phase_index),
             "tau": float(phase_tau_bins[phase_index]),
-            "tau_abs": float(phase_bins[phase_index]),
+            "tau_abs": float(tau_abs_bins[phase_index]),
             "query_time": float(query_time_bins[phase_index]),
             "cycle_index": float(cycle_index_bins[phase_index]),
             "field_dim": field_dim,
@@ -458,10 +459,11 @@ def load_case_cycle(
         case_id, grp = _select_case_group(h5, split, case_id)
         phase_bins = np.asarray(grp["phase_bin_centers"], dtype=np.float32)
         phase_tau_bins = np.asarray(grp["phase_tau_centers"], dtype=np.float32) if "phase_tau_centers" in grp else phase_bins
+        tau_abs_bins = np.asarray(grp["tau_abs_centers"], dtype=np.float32) if "tau_abs_centers" in grp else phase_bins
         query_time_bins = (
             np.asarray(grp["thermal_time_centers"], dtype=np.float32)
             if "thermal_time_centers" in grp
-            else (np.asarray(grp["tau_abs_centers"], dtype=np.float32) if "tau_abs_centers" in grp else phase_bins)
+            else tau_abs_bins
         )
         cycle_index_bins = np.asarray(grp["cycle_index_centers"], dtype=np.float32) if "cycle_index_centers" in grp else np.floor(phase_bins)
         if phase_indices.min() < 0 or phase_indices.max() >= len(phase_bins):
@@ -498,7 +500,7 @@ def load_case_cycle(
             "case_id": str(case_id),
             "phase_indices": phase_indices.astype(np.int64),
             "tau_values": phase_tau_bins[phase_indices].astype(np.float32),
-            "tau_abs_values": phase_bins[phase_indices].astype(np.float32),
+            "tau_abs_values": tau_abs_bins[phase_indices].astype(np.float32),
             "query_time_values": query_time_bins[phase_indices].astype(np.float32),
             "cycle_index_values": cycle_index_bins[phase_indices].astype(np.float32),
             "field_dim": field_dim,
@@ -906,6 +908,8 @@ def save_cycle_gif(
     channel_name: str = "omega",
     fps: float = 6.0,
     heat_powers: Optional[np.ndarray] = None,
+    tau_abs_values: Optional[np.ndarray] = None,
+    query_time_values: Optional[np.ndarray] = None,
 ) -> None:
     """Write a 2x3 animated cycle diagnostic for one channel."""
     sample0 = generated_samples[0]
@@ -960,8 +964,12 @@ def save_cycle_gif(
         ]
         for im, data in zip(ims, frame_data):
             im.set_data(data)
+        tau_abs = tau_values if tau_abs_values is None else tau_abs_values
+        query_time = tau_values if query_time_values is None else query_time_values
         fig.suptitle(
-            f"phase {int(phase_indices[frame_idx])} | tau={tau_values[frame_idx]:.4f} | avg L2 err={frame_l2[frame_idx]:.4e}",
+            f"phase {int(phase_indices[frame_idx])} | phase_tau={tau_values[frame_idx]:.4f} | "
+            f"tau_abs={tau_abs[frame_idx]:.4f} | thermal_time={query_time[frame_idx]:.4f} | "
+            f"avg L2 err={frame_l2[frame_idx]:.4e}",
             fontsize=12,
         )
         return ims
@@ -988,6 +996,8 @@ def save_cycle_montage(
     channel: int = 3,
     channel_name: str = "omega",
     heat_powers: Optional[np.ndarray] = None,
+    tau_abs_values: Optional[np.ndarray] = None,
+    query_time_values: Optional[np.ndarray] = None,
 ) -> None:
     T = gt_cycle.shape[0]
     selected = np.unique(np.clip(np.round(np.linspace(0, T - 1, num=min(4, T))).astype(int), 0, T - 1))
@@ -1009,10 +1019,23 @@ def save_cycle_montage(
             (generated_std[t, channel], f"Std {channel_name}", 0.0, std_vmax),
             (err[t], "Mean - GT", -err_abs, err_abs),
         ]
+        tau_abs = tau_values if tau_abs_values is None else tau_abs_values
+        query_time = tau_values if query_time_values is None else query_time_values
         for col, (data, title, vmin, vmax) in enumerate(panels):
             ax = axes[row, col]
             cmap = "magma" if col == 4 else ("coolwarm" if col == 5 else field_cmap)
-            im = _imshow_with_cylinders(ax, data, f"{title}\nphase {int(phase_indices[t])}, tau={tau_values[t]:.3f}", x_grid, y_grid, centers, vmin, vmax, cmap=cmap, heat_powers=heat_powers)
+            im = _imshow_with_cylinders(
+                ax,
+                data,
+                f"{title}\nphase {int(phase_indices[t])}, phase_tau={tau_values[t]:.3f}, thermal_time={query_time[t]:.3f}, tau_abs={tau_abs[t]:.3f}",
+                x_grid,
+                y_grid,
+                centers,
+                vmin,
+                vmax,
+                cmap=cmap,
+                heat_powers=heat_powers,
+            )
             fig.colorbar(im, ax=ax, shrink=0.75)
     fig.savefig(out_path)
     plt.close(fig)
@@ -1032,6 +1055,8 @@ def save_gt_generated_cycle_gif(
     channel_name: str = "omega",
     fps: float = 10.0,
     heat_powers: Optional[np.ndarray] = None,
+    tau_abs_values: Optional[np.ndarray] = None,
+    query_time_values: Optional[np.ndarray] = None,
 ) -> None:
     """Simple deterministic-evaluator-style two-panel GT vs generated GIF."""
     gt = gt_cycle[:, channel]
@@ -1046,7 +1071,12 @@ def save_gt_generated_cycle_gif(
     def update(frame_idx: int):
         im_gt.set_data(gt[frame_idx])
         im_gen.set_data(gen[frame_idx])
-        fig.suptitle(f"Phase {int(phase_indices[frame_idx])} | Tau: {tau_values[frame_idx]:.3f}")
+        tau_abs = tau_values if tau_abs_values is None else tau_abs_values
+        query_time = tau_values if query_time_values is None else query_time_values
+        fig.suptitle(
+            f"Phase {int(phase_indices[frame_idx])} | phase_tau={tau_values[frame_idx]:.3f} | "
+            f"tau_abs={tau_abs[frame_idx]:.3f} | thermal_time={query_time[frame_idx]:.3f}"
+        )
         return [im_gt, im_gen]
 
     update(0)
@@ -1127,6 +1157,8 @@ def _run_deterministic_cycle(
         x_grid = x_base.expand(tc, -1, -1).contiguous()
         y_grid = y_base.expand(tc, -1, -1).contiguous()
         tau = torch.from_numpy(tau_values[start:end]).to(device=device, dtype=torch.float32).view(tc, 1)
+        # Active generated trajectories condition deterministic temperature on
+        # thermal age while keeping flow on folded phase_tau.
         query_time = torch.from_numpy(query_time_values[start:end]).to(device=device, dtype=torch.float32).view(tc, 1)
         det_out = deterministic_grid_forward(
             det_model,
@@ -1323,6 +1355,8 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
         generated_mean=generated_mean,
         generated_std=generated_std,
         tau_values=sample["tau_values"],
+        tau_abs_values=sample["tau_abs_values"],
+        query_time_values=sample["query_time_values"],
         phase_indices=sample["phase_indices"],
         x_grid=x_np,
         y_grid=y_np,
@@ -1353,6 +1387,8 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
             channel_name=viz_name,
             fps=float(args.gif_fps),
             heat_powers=sample["heat_powers"],
+            tau_abs_values=sample["tau_abs_values"],
+            query_time_values=sample["query_time_values"],
         )
         save_gt_generated_cycle_gif(
             out_dir / f"cycle_{viz_name}_gt_generated.gif",
@@ -1367,6 +1403,8 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
             channel_name=viz_name,
             fps=float(args.gif_fps),
             heat_powers=sample["heat_powers"],
+            tau_abs_values=sample["tau_abs_values"],
+            query_time_values=sample["query_time_values"],
         )
         save_cycle_montage(
             out_dir / f"cycle_montage_{viz_name}.png",
@@ -1383,6 +1421,8 @@ def run_stage2_cycle(args: argparse.Namespace, cfg: Dict, checkpoint_path: Path,
             channel=viz_channel,
             channel_name=viz_name,
             heat_powers=sample["heat_powers"],
+            tau_abs_values=sample["tau_abs_values"],
+            query_time_values=sample["query_time_values"],
         )
 
     print(f"Output directory: {out_dir}")

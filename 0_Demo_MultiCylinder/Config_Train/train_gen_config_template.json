@@ -13,6 +13,7 @@
     "field_dim": "auto",
     "channel_order": "auto",
     "include_temperature": "auto",
+    "use_nonperiodic_query_time": true,
     "USE_INERT": false,
     "inert_packed_h5_path": "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5",
     "inert_split": "all",
@@ -34,7 +35,7 @@
     "val_max_cases": 16,
     "randomize_cylinder_order": true,
     "num_workers": 4,
-    "comment": "The generative dataset uses canonical_cycle full-grid snapshots, not point chunks. field_dim/channel_order are inferred from packed HDF5; inert uses 4 channels and active thermal data uses 5 with temperature."
+    "comment": "The generative dataset uses canonical_cycle full-grid snapshots, not point chunks. field_dim/channel_order are inferred from packed HDF5; inert uses 4 channels and active thermal data uses 5 with temperature. Active stage-2 conditioning passes phase_tau and thermal_time separately; inert falls back to tau."
   },
   "deterministic_model": {
     "checkpoint_path": "auto",

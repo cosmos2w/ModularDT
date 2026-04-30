@@ -916,6 +916,9 @@ class PackedPointChunkDataset(Dataset):
         chunk_x = np.asarray(sampled["x"][sl], dtype=np.float32)
         chunk_y = np.asarray(sampled["y"][sl], dtype=np.float32)
         chunk_tau = np.asarray(sampled["tau"][sl], dtype=np.float32)
+        # Active hybrid preprocessing writes sampled tau as folded phase_tau.
+        # query_time prefers monotone thermal_time, then tau_abs, and finally
+        # the legacy periodic tau for old inert packed datasets.
         if "thermal_time" in sampled:
             chunk_query_time = np.asarray(sampled["thermal_time"][sl], dtype=np.float32)
         elif "tau_abs" in sampled:
@@ -1156,9 +1159,14 @@ def resolve_h5_split(h5_path: Path, requested_split: str, *, label: str) -> str:
 
 
 def dataset_has_nonperiodic_time(h5_path: Path, split: str = "all") -> bool:
+    nonperiodic_modes = {
+        "multicycle_absolute",
+        "thermal_trajectory",
+        "hybrid_periodic_flow_thermal_trajectory",
+    }
     with h5py.File(h5_path, "r") as h5_file:
         root_mode = str(h5_file.attrs.get("active_time_mode", "")).strip().lower()
-        if root_mode == "multicycle_absolute":
+        if root_mode in nonperiodic_modes:
             return True
         for case_id in sort_case_ids(h5_file["cases"].keys()):
             grp = h5_file["cases"][case_id]
@@ -1166,7 +1174,7 @@ def dataset_has_nonperiodic_time(h5_path: Path, split: str = "all") -> bool:
             if split not in {"all", case_split}:
                 continue
             case_mode = str(grp.attrs.get("active_time_mode", root_mode)).strip().lower()
-            if case_mode == "multicycle_absolute":
+            if case_mode in nonperiodic_modes:
                 return True
             sampled = grp.get("sampled_points")
             if "thermal_time_centers" in grp or (sampled is not None and "thermal_time" in sampled):
@@ -1250,28 +1258,44 @@ def check_inert_active_dataset_compatibility(active_h5: Path, inert_h5: Path) ->
 
         active_mode = str(active_grp.attrs.get("active_time_mode", active_file.attrs.get("active_time_mode", "periodic")))
         inert_mode = str(inert_grp.attrs.get("active_time_mode", inert_file.attrs.get("active_time_mode", "periodic")))
-        if active_mode not in {"periodic", "multicycle_absolute"} or inert_mode not in {"periodic", "multicycle_absolute"}:
+        known_modes = {"periodic", "multicycle_absolute", "thermal_trajectory", "hybrid_periodic_flow_thermal_trajectory"}
+        if active_mode not in known_modes or inert_mode not in known_modes:
             warnings.append(f"unrecognized coordinate conventions: active={active_mode}, inert={inert_mode}.")
     return ok, warnings
 
 
 def infer_active_max_thermal_time(h5_path: Path) -> float:
-    max_value = 1.0
+    thermal_candidates = []
+    tau_abs_candidates = []
+    save_cycle_candidates = []
     with h5py.File(h5_path, "r") as h5_file:
+        if "save_cycles" in h5_file.attrs:
+            save_cycle_candidates.append(float(h5_file.attrs["save_cycles"]))
         for case_id in h5_file["cases"].keys():
             grp = h5_file["cases"][case_id]
-            candidates = []
+            if "save_cycles" in grp.attrs:
+                save_cycle_candidates.append(float(grp.attrs["save_cycles"]))
             if "thermal_time_centers" in grp:
-                candidates.append(np.asarray(grp["thermal_time_centers"], dtype=np.float32))
+                thermal_candidates.append(np.asarray(grp["thermal_time_centers"], dtype=np.float32))
+            if "tau_abs_centers" in grp:
+                tau_abs_candidates.append(np.asarray(grp["tau_abs_centers"], dtype=np.float32))
             sampled = grp.get("sampled_points")
             if sampled is not None and "thermal_time" in sampled:
-                candidates.append(np.asarray(sampled["thermal_time"], dtype=np.float32))
+                thermal_candidates.append(np.asarray(sampled["thermal_time"], dtype=np.float32))
             if sampled is not None and "tau_abs" in sampled:
-                candidates.append(np.asarray(sampled["tau_abs"], dtype=np.float32))
-            for arr in candidates:
-                if arr.size:
-                    max_value = max(max_value, float(np.nanmax(arr)))
-    return max_value
+                tau_abs_candidates.append(np.asarray(sampled["tau_abs"], dtype=np.float32))
+
+    for candidates in (thermal_candidates, tau_abs_candidates):
+        finite_max = [
+            float(np.nanmax(arr))
+            for arr in candidates
+            if arr.size and np.any(np.isfinite(arr))
+        ]
+        if finite_max:
+            return max(max(finite_max), 0.0)
+    if save_cycle_candidates:
+        return max(max(save_cycle_candidates), 0.0)
+    return 1.0
 
 
 class CanonicalCycleValidationDataset(Dataset):
@@ -2310,6 +2334,8 @@ def evaluate_point_chunks(
             structure["extra_module"] = batch["extra_module"].to(device=device)
         query_xy = batch["query_xy"].to(device=device)
         query_tau = batch["query_tau"].to(device=device)
+        # Always pass query_time when available.  Inert batches collate it as
+        # query_tau, while active batches carry non-periodic thermal age.
         query_time = batch.get("query_time", batch["query_tau"]).to(device=device)
 
         for key in [
@@ -3110,6 +3136,8 @@ def main() -> None:
                 structure["extra_module"] = batch["extra_module"].to(device=device)
             query_xy = batch["query_xy"].to(device=device)
             query_tau = batch["query_tau"].to(device=device)
+            # query_tau drives periodic flow structure; query_time is the
+            # aligned thermal-age coordinate for active temperature.
             query_time = batch.get("query_time", batch["query_tau"]).to(device=device)
 
             for key in [

@@ -743,6 +743,8 @@ def build_dense_condition_grid(
         pieces.extend([x_norm, y_norm])
 
     if include_re_tau:
+        # Dense generative conditions keep phase_tau and thermal_time separate:
+        # flow stays phase-periodic while active temperature can accumulate.
         tau_map = tau.reshape(B, 1, 1, 1).to(device=device, dtype=dtype).expand(B, 1, H, W)
         if thermal_time is None:
             thermal_time = tau
