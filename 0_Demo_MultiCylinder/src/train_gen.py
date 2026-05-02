@@ -1017,8 +1017,8 @@ def resolve_deterministic_checkpoint_path(det_cfg: Dict) -> Path:
     return ckpt_path
 
 
-def find_latest_stage1_checkpoint(save_root: Path, case_id: str) -> Optional[Path]:
-    prefix = f"Gen_Case{case_id}_Stage1_"
+def find_latest_stage1_checkpoint(save_root: Path, case_id: Optional[str] = None) -> Optional[Path]:
+    prefix = f"Gen_Case{case_id}_Stage1_" if case_id else "Gen_Case*_Stage1_"
     candidates: List[Tuple[str, float, Path]] = []
     for run_dir in save_root.glob(prefix + "*"):
         if not run_dir.is_dir():
@@ -1030,7 +1030,7 @@ def find_latest_stage1_checkpoint(save_root: Path, case_id: str) -> Optional[Pat
             candidates.append((run_dir.name, ckpt_path.stat().st_mtime, ckpt_path))
     if not candidates:
         return None
-    candidates.sort(key=lambda item: (item[0], item[1]))
+    candidates.sort(key=lambda item: (item[1], item[0]))
     return candidates[-1][2].resolve()
 
 
@@ -1047,13 +1047,62 @@ def resolve_stage1_checkpoint_path(stage2_cfg: Dict, save_root: Path, case_id: s
 
     stage1_path = find_latest_stage1_checkpoint(save_root, case_id)
     if stage1_path is None:
+        fallback_path = find_latest_stage1_checkpoint(save_root, None)
+        if fallback_path is not None:
+            print(
+                f"[WARN] No stage-1 checkpoint found for case_id={case_id!r}; "
+                f"falling back to newest available stage-1 checkpoint: {fallback_path}"
+            )
+            stage1_path = fallback_path
+
+    if stage1_path is None:
         raise FileNotFoundError(
-            f"No trained stage-1 checkpoint found under {save_root} for case_id={case_id!r}. "
+            f"No trained stage-1 checkpoint found under {save_root}. "
             "Run stage 1 first, or set stage2.stage1_checkpoint_path to a specific checkpoint."
         )
     stage2_cfg["stage1_checkpoint_path"] = str(stage1_path)
-    print(f"[setup] auto-selected newest stage-1 checkpoint: {stage1_path}")
+    print(f"[setup] auto-selected stage-1 checkpoint: {stage1_path}")
     return stage1_path
+
+
+def validate_stage1_checkpoint_compatibility(
+    stage1_ckpt: Dict,
+    stage1_path: Path,
+    target_mode: str,
+    n_fields: int,
+    num_y: int,
+    num_x: int,
+    channel_order: Sequence[str],
+) -> None:
+    """Exit cleanly when a reused stage-1 AE cannot support this stage-2 run."""
+    issues: List[str] = []
+    if int(stage1_ckpt.get("stage", 1)) != 1:
+        issues.append(f"expected a stage-1 AE checkpoint, got stage={stage1_ckpt.get('stage')}")
+
+    stage1_target_mode = str(stage1_ckpt.get("config", {}).get("generation", {}).get("target_mode", target_mode))
+    if stage1_target_mode != target_mode:
+        issues.append(f"target_mode mismatch: checkpoint={stage1_target_mode!r}, current={target_mode!r}")
+
+    ckpt_n_fields = int(stage1_ckpt.get("n_fields", stage1_ckpt.get("field_dim", n_fields)))
+    ckpt_num_y = int(stage1_ckpt.get("num_y", -1))
+    ckpt_num_x = int(stage1_ckpt.get("num_x", -1))
+    if ckpt_n_fields != n_fields or ckpt_num_y != num_y or ckpt_num_x != num_x:
+        issues.append(
+            "grid shape mismatch: "
+            f"checkpoint=(fields={ckpt_n_fields}, y={ckpt_num_y}, x={ckpt_num_x}), "
+            f"current=(fields={n_fields}, y={num_y}, x={num_x})"
+        )
+
+    ckpt_channel_order = [str(v) for v in stage1_ckpt.get("channel_order", channel_order)]
+    if ckpt_channel_order != list(channel_order):
+        issues.append(f"channel_order mismatch: checkpoint={ckpt_channel_order}, current={list(channel_order)}")
+
+    if issues:
+        print(f"[WARN] Stage-1 checkpoint is not compatible with the current stage-2 settings: {stage1_path}")
+        for issue in issues:
+            print(f"[WARN]   - {issue}")
+        print("[WARN] Exiting without starting stage-2 training.")
+        raise SystemExit(1)
 
 
 # -----------------------------------------------------------------------------
@@ -1225,18 +1274,15 @@ def main() -> None:
     else:
         assert stage1_path is not None
         stage1_ckpt = safe_torch_load(stage1_path, map_location="cpu")
-        if int(stage1_ckpt.get("stage", 1)) != 1:
-            raise ValueError(f"stage2.stage1_checkpoint_path must point to a stage-1 AE checkpoint, got stage={stage1_ckpt.get('stage')}.")
-        stage1_target_mode = str(stage1_ckpt.get("config", {}).get("generation", {}).get("target_mode", target_mode))
-        if stage1_target_mode != target_mode:
-            raise ValueError(
-                f"Stage-1 checkpoint target_mode={stage1_target_mode!r} does not match current target_mode={target_mode!r}."
-            )
-        if int(stage1_ckpt.get("n_fields", n_fields)) != n_fields or int(stage1_ckpt["num_y"]) != num_y or int(stage1_ckpt["num_x"]) != num_x:
-            raise ValueError("Stage-1 checkpoint grid shape does not match the current dataset/config.")
-        ckpt_channel_order = [str(v) for v in stage1_ckpt.get("channel_order", channel_order)]
-        if ckpt_channel_order != channel_order:
-            raise ValueError(f"Stage-1 checkpoint channel_order={ckpt_channel_order} does not match dataset channel_order={channel_order}.")
+        validate_stage1_checkpoint_compatibility(
+            stage1_ckpt=stage1_ckpt,
+            stage1_path=stage1_path,
+            target_mode=target_mode,
+            n_fields=n_fields,
+            num_y=num_y,
+            num_x=num_x,
+            channel_order=channel_order,
+        )
         stats = GridStats(mean=stage1_ckpt["stats"]["mean"], std=stage1_ckpt["stats"]["std"])
 
     latest_path = run_dir / "latest_model.pt"

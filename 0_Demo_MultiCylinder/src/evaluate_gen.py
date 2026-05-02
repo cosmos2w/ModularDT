@@ -830,6 +830,9 @@ def compute_cycle_metrics(
     gt_res_energy = float(np.mean(gt_residual ** 2)) + eps
     gt_enstrophy = float(np.mean(gt_cycle[:, omega_channel] ** 2)) + eps
     return {
+        "field_mse": mse_np(gen_mean, gt_cycle),
+        "deterministic_field_mse": mse_np(det_cycle, gt_cycle),
+        "generated_mean_field_mse": mse_np(gen_mean, gt_cycle),
         "det_cycle_mse": mse_np(det_cycle, gt_cycle),
         "gen_mean_cycle_mse": mse_np(gen_mean, gt_cycle),
         "det_cycle_rel_l2": rel_l2_np(det_cycle, gt_cycle),
@@ -1700,6 +1703,9 @@ def main() -> None:
             "n_samples": int(args.n_samples),
             "n_steps": int(n_steps),
             "ode_solver": ode_solver,
+            "field_mse": mse_np(ens_mean, gt_field),
+            "deterministic_field_mse": mse_np(det_field, gt_field),
+            "generated_mean_field_mse": mse_np(ens_mean, gt_field),
             "det_mse": mse_np(det_field, gt_field),
             "gen_mean_mse": mse_np(ens_mean, gt_field),
             "det_rel_l2": rel_l2_np(det_field, gt_field),

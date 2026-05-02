@@ -1,6 +1,6 @@
 {
-  "case_id": "gen002",
-  "comments":"Repeated 0001, altered model sizes & utilized corrected processed dataset",
+  "case_id": "gen003",
+  "comments":"Repeated 0002, altered model sizes & utilized corrected processed dataset",
 
   "generation": {
     "training_stage": 2,
@@ -14,6 +14,7 @@
     "channel_order": "auto",
     "include_temperature": "auto",
     "use_nonperiodic_query_time": true,
+
     "USE_INERT": false,
     "inert_packed_h5_path": "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5",
     "inert_split": "all",
@@ -26,6 +27,7 @@
     "fallback_to_active_only_on_mismatch": true,
     "use_heat_power_module_feature": false,
     "heat_power_scale": "auto",
+
     "train_split": "train",
     "val_split": "test",
     "max_num_cylinders": 8,
@@ -85,16 +87,16 @@
     },
     "training": {
       "epochs": 10000,
-      "batch_size": 108,
+      "batch_size": 144,
       "learning_rate": 0.0001,
       "weight_decay": 0.00001,
       "gradient_clip_norm": 1.0,
-      "scheduler_t_max": 1000,
+      "scheduler_t_max": 200,
       "scheduler_min_lr": 0.00001,
       "eval_every_epochs": 1
     },
     "sampling": {
-      "n_steps": 8,
+      "n_steps": 4,
       "ode_solver": "euler",
       "cycle_noise_mode": "independent",
       "phase_chunk_size": 8,
@@ -105,7 +107,7 @@
   "training": {
     "seed": 42,
     "reload": false,
-    "use_data_parallel": true
+    "use_data_parallel": false
   },
   "paths": {
     "config_train_dir": "./Config_Train",

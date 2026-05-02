@@ -1,0 +1,83 @@
+{
+  "case_id": "inv001",
+  "seed": 42,
+  "dataset": {
+    "packed_h5_path": "./Data_Saved/Processed_Inert_Dataset/packed_dataset.h5",
+    "train_split": "train",
+    "val_split": "test",
+    "max_num_cylinders": 8,
+    "sort_centers": true,
+    "require_inert": true
+  },
+  "forward_model": {
+    "run_dir": "./Saved_Model/Case0010_20260428_084416",
+    "checkpoint_name": "best_model.pt",
+    "config_name": "resolved_train_config.json",
+    "query_batch_size": 32768,
+    "freeze": true,
+    "rebuild_latent_cache": false
+  },
+  "target_kpis": {
+    "names": [
+      "mean_abs_omega",
+      "enstrophy",
+      "max_abs_omega",
+      "kinetic_energy",
+      "pressure_range",
+      "wake_deficit",
+      "wake_mixing",
+      "fluctuation_energy",
+      "downstream_omega_area",
+      "phase_signal_amplitude"
+    ],
+    "normalize": true,
+    "target_noise_std": 0.02
+  },
+  "inverse_model": {
+    "target_dim": "auto",
+    "design_dim": "auto",
+    "hidden_dim": 256,
+    "target_embed_dim": 128,
+    "behavior_latent_dim": "auto",
+    "organization_latent_dim": "auto",
+    "num_layers": 4,
+    "dropout": 0.05,
+    "use_count_head": true,
+    "generate_re": false,
+    "ode_solver": "heun",
+    "domain_length_x": "auto",
+    "domain_length_y": "auto",
+    "min_num_cylinders": 1,
+    "min_center_distance": 1.1,
+    "re_scale": 200.0
+  },
+  "loss": {
+    "flow_weight": 1.0,
+    "count_weight": 0.1,
+    "behavior_align_weight": 0.1,
+    "organization_align_weight": 0.1,
+    "validity_prior_weight": 0.0
+  },
+  "training": {
+    "epochs": 500,
+    "batch_size": 64,
+    "learning_rate": 1.0e-4,
+    "weight_decay": 1.0e-5,
+    "gradient_clip_norm": 1.0,
+    "scheduler_min_lr": 1.0e-6,
+    "num_workers": 2
+  },
+  "validation": {
+    "forward_verify_every_epochs": 25,
+    "forward_verify_num_targets": 8,
+    "forward_verify_num_samples": 8,
+    "forward_verify_phase_bins": 12,
+    "forward_verify_nx": 96,
+    "forward_verify_ny": 48,
+    "forward_verify_ode_steps": 16
+  },
+  "paths": {
+    "saved_model_dir": "./Saved_Model_Inverse",
+    "config_train_dir": "./Config_Train"
+  }
+}

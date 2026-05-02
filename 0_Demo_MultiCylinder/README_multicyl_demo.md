@@ -565,6 +565,51 @@ controls the initial latent coupling across phases:
 
 For memory control, use `--phase-chunk-size` and `--sample-chunk-size`.
 
+### 6. Generative inverse design
+
+The inverse target is a compact specification
+`T = KPI targets + constraints + preferences`. The first demo uses inert flow
+KPIs such as enstrophy, wake deficit, pressure range, fluctuation energy, and
+phase-signal amplitude, plus count/Re/spacing constraints.
+
+Conceptually the inverse path is behavior-first:
+
+```text
+target specification -> behavior / organization latent -> structure posterior
+```
+
+The implementation is one amortized conditional rectified-flow generator, not
+three separate inverse models. During training, a frozen deterministic forward
+model provides behavior and organizer latent targets. During evaluation, the
+same frozen forward model verifies generated layouts, computes achieved KPIs,
+checks latent self-consistency, and ranks candidates.
+
+This differs from gradient-based layout optimization in four useful ways:
+
+- it samples a posterior of plausible layouts instead of returning one optimum
+- it handles variable-cardinality designs with an object-centric design vector
+- it keeps an interpretable behavior/organization layer between targets and
+  structure
+- every sampled candidate is forward-verified before being reported
+
+Train the inverse generator from the packed inert dataset and a deterministic
+checkpoint:
+
+```bash
+python src/train_inverse.py --config train_inverse_config_template.json --device cuda:0
+```
+
+Evaluate a target JSON and verify/rank sampled layouts:
+
+```bash
+python src/evaluate_inverse.py \
+  --inverse-run Saved_Model_Inverse/CaseInv001_YYYYMMDD_HHMMSS \
+  --target-json inverse_targets/low_enstrophy.json \
+  --n-samples 64 \
+  --verify-top-k 16 \
+  --device cuda:0
+```
+
 ## Directory Layout
 
 ```text

@@ -47,6 +47,9 @@ Data_Saved/
 *.zip
 *.log
 *.codex
+*.gif
+*.png
+*.csv
 
 # Generated reports/plots/history files from runs
 loss_history.csv
