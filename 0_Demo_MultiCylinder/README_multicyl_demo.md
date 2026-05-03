@@ -578,11 +578,29 @@ Conceptually the inverse path is behavior-first:
 target specification -> behavior / organization latent -> structure posterior
 ```
 
-The implementation is one amortized conditional rectified-flow generator, not
-three separate inverse models. During training, a frozen deterministic forward
-model provides behavior and organizer latent targets. During evaluation, the
-same frozen forward model verifies generated layouts, computes achieved KPIs,
-checks latent self-consistency, and ranks candidates.
+The implementation is one amortized conditional rectified-flow generator over
+the design posterior `p(D | T)`, not three separate inverse models. During
+training, a frozen deterministic forward model provides behavior and organizer
+latent targets. This remains true even when a stochastic forward verifier is
+configured: the deterministic organizer is the latent teacher.
+
+During evaluation, the default verifier is the same frozen deterministic
+forward model. A stage-2 generative forward verifier can optionally be used
+later for KPI mean/std estimates and uncertainty-aware ranking, but Stage-1 AE
+checkpoints alone are not valid forward verifiers because they do not model the
+conditional field posterior.
+
+In inverse training logs, `forward_score` / `val_forward_score` means the
+validation-time physical mismatch after this forward verification loop. The
+inverse model first samples a candidate cylinder layout for a held-out target;
+the frozen forward surrogate then predicts that layout's canonical wake cycle;
+the code computes physical KPIs from the predicted fields and compares them to
+the requested KPI ranges, bounds, and design constraints. Lower is better. A
+score near zero means the forward-predicted flow satisfies the scored target
+envelope; a larger score means one or more KPIs, such as enstrophy, wake
+deficit, pressure range, or spacing/count constraints, are outside the target
+region after normalization by their KPI scales. It is not a CFD residual and it
+is not the inverse model's supervised loss.
 
 This differs from gradient-based layout optimization in four useful ways:
 
@@ -609,6 +627,11 @@ python src/evaluate_inverse.py \
   --verify-top-k 16 \
   --device cuda:0
 ```
+
+KPI target modes `range`, `max`, and `min` are constraint-style objectives and
+are preferred for the first demo config. `minimize` and `maximize` are ranking
+objectives; give them a meaningful `scale`, or rely on KPI statistics from the
+inverse run, so scores are not normalized by the candidate value itself.
 
 ## Directory Layout
 

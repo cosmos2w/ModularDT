@@ -263,12 +263,14 @@ def _parse_target_entry(name: str, entry: Any) -> Dict[str, float | str]:
         value = entry.get("value", entry.get("target"))
         low = entry.get("low", entry.get("lower"))
         high = entry.get("high", entry.get("upper"))
+        scale = entry.get("scale")
         return {
             "mode": mode,
             "value": _finite_float(value, float("nan")),
             "low": _finite_float(low, float("nan")),
             "high": _finite_float(high, float("nan")),
             "weight": weight,
+            "scale": _finite_float(scale, float("nan")),
         }
     return {
         "mode": "exact",
@@ -276,6 +278,7 @@ def _parse_target_entry(name: str, entry: Any) -> Dict[str, float | str]:
         "low": float("nan"),
         "high": float("nan"),
         "weight": 1.0,
+        "scale": float("nan"),
     }
 
 
@@ -424,14 +427,47 @@ def _scale_for_error(*values: float) -> float:
     return max(finite + [1.0])
 
 
+def _scale_for_target(
+    name: str,
+    names: Sequence[str],
+    stats: Optional[Mapping[str, Any]],
+    explicit_scale: float,
+    *target_values: float,
+) -> float:
+    """Return a meaningful target scale for ranking-style KPI objectives."""
+
+    if math.isfinite(float(explicit_scale)) and abs(float(explicit_scale)) > 1.0e-8:
+        return abs(float(explicit_scale))
+
+    if stats is not None:
+        try:
+            idx = list(names).index(str(name))
+        except ValueError:
+            idx = -1
+        if idx >= 0:
+            _, std = _stats_arrays(stats, len(names))
+            if idx < std.size and math.isfinite(float(std[idx])) and abs(float(std[idx])) > 1.0e-8:
+                return abs(float(std[idx]))
+
+    finite_targets = [abs(float(v)) for v in target_values if math.isfinite(float(v)) and abs(float(v)) > 1.0e-8]
+    return max(finite_targets + [1.0])
+
+
 def score_candidate_kpis(kpi_dict: Mapping[str, Any], target_spec: Mapping[str, Any]) -> Dict[str, Any]:
     """Score candidate KPIs against exact/range/bound targets.
 
     Lower ``total_score`` is better. Constraint penalties are additive and kept
     separate so callers can rank by validity first if desired.
+
+    ``range``, ``max``/``upper``, and ``min``/``lower`` are constraint-style
+    objectives: candidates inside the acceptable region receive zero KPI error.
+    ``minimize`` and ``maximize`` are ranking objectives: they keep ordering
+    candidates even when no hard acceptable bound is supplied, so they require a
+    meaningful scale from the target entry, KPI stats, or a target bound.
     """
 
     names = list(target_spec.get("kpi_names", DEFAULT_KPI_NAMES))
+    stats = target_spec.get("kpi_stats")
     target_entries = target_spec.get("kpi_targets")
     if target_entries is None and "kpis" in target_spec:
         target_entries = target_spec["kpis"]
@@ -468,6 +504,7 @@ def score_candidate_kpis(kpi_dict: Mapping[str, Any], target_spec: Mapping[str, 
         value = float(entry["value"])
         low = float(entry["low"])
         high = float(entry["high"])
+        scale = float(entry["scale"])
 
         if mode in {"range", "between"}:
             if math.isfinite(low) and candidate < low:
@@ -481,9 +518,13 @@ def score_candidate_kpis(kpi_dict: Mapping[str, Any], target_spec: Mapping[str, 
         elif mode in {"min", "lower", "at_least"}:
             error = max(0.0, low - candidate) / _scale_for_error(low)
         elif mode == "minimize":
-            error = candidate / _scale_for_error(candidate)
+            error = max(candidate, 0.0) / _scale_for_target(str(name), names, stats, scale, value, low, high)
         elif mode == "maximize":
-            error = -candidate / _scale_for_error(candidate)
+            denom = _scale_for_target(str(name), names, stats, scale, value, low, high)
+            if math.isfinite(low):
+                error = max(0.0, low - candidate) / denom
+            else:
+                error = -candidate / denom
         elif mode == "vector":
             # Vector scoring is mainly for exact supervised targets. Bound masks
             # are respected if present.

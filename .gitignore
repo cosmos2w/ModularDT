@@ -29,12 +29,14 @@ Data_Saved/
 0_Demo_MultiCylinder/Data_Saved/
 0_Demo_MultiCylinder/Saved_Model/
 0_Demo_MultiCylinder/Saved_Model_Gen/
+0_Demo_MultiCylinder/Saved_Model_Inverse/
 0_Demo_MultiCylinder/Domain_shape/
 
 # Per-run generated config backups; keep active configs and templates tracked.
 0_Demo_MultiCylinder/Configs/Config_bk/
 0_Demo_MultiCylinder/Config_Train/Configs_bk/
 0_Demo_MultiCylinder/Config_Train/Configs_gen_bk/
+0_Demo_MultiCylinder/Config_Train/Configs_inverse_bk/
 
 # Heavy/intermediate artifacts
 *.pt

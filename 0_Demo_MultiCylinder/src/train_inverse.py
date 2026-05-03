@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-"""Train the generative inverse-design model for the inert multi-cylinder demo."""
+"""
+Train the generative inverse-design model for the inert multi-cylinder demo.
+
+python src/train_inverse.py \
+  --config train_inverse_config_template.json \
+  --device cuda:0
+
+"""
 
 import argparse
 import csv
@@ -23,8 +30,8 @@ from torch.utils.data import DataLoader, Dataset
 
 try:
     from tqdm.auto import tqdm
-except Exception:  # pragma: no cover
-    tqdm = None  # type: ignore[assignment]
+except Exception:
+    tqdm = None
 
 from inverse_kpi import (
     DEFAULT_KPI_NAMES,
@@ -675,10 +682,95 @@ def run_forward_verification(
     device: torch.device,
     validation_cfg: Mapping[str, Any],
     query_batch_size: int,
+    full_config: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, float]:
+    """Forward-verify sampled inverse designs and return KPI-target mismatch.
+
+    ``val_forward_score`` is a physical validation metric, not a training loss:
+    for each held-out target we sample a cylinder layout, run that layout
+    through the frozen forward surrogate to reconstruct one canonical flow
+    cycle, compute flow KPIs from the predicted fields, and score those KPIs
+    against the requested target ranges/bounds. Lower is better; zero means the
+    verified flow satisfies all scored KPI targets and hard design constraints.
+    """
+
     num_targets = min(int(validation_cfg.get("forward_verify_num_targets", 0)), len(dataset))
     if num_targets <= 0:
         return {"val_forward_score": float("nan")}
+    verifier_cfg = dict(full_config.get("forward_verifier", {}) if isinstance(full_config, Mapping) and isinstance(full_config.get("forward_verifier", {}), Mapping) else {})
+    if isinstance(full_config, Mapping) and isinstance(full_config.get("forward_model", {}), Mapping):
+        forward_cfg = full_config.get("forward_model", {})
+        verifier_cfg = {**dict(forward_cfg), **verifier_cfg}
+    if str(verifier_cfg.get("backend", "deterministic")).lower() == "generative" and bool(verifier_cfg.get("generative_enabled", False)):
+        from evaluate_inverse import GEN_FORWARD_UNAVAILABLE, load_forward_verifier
+
+        try:
+            verifier = load_forward_verifier(full_config or {}, device)
+        except Exception as exc:
+            raise RuntimeError(GEN_FORWARD_UNAVAILABLE) from exc
+        num_samples = max(int(validation_cfg.get("forward_verify_num_samples", 1)), 1)
+        phase_bins = max(int(validation_cfg.get("forward_verify_phase_bins", 8)), 1)
+        nx = max(int(validation_cfg.get("forward_verify_nx", 48)), 4)
+        ny = max(int(validation_cfg.get("forward_verify_ny", 24)), 4)
+        scores: List[float] = []
+        uncertainties: List[float] = []
+        for idx in range(num_targets):
+            item = dataset[idx]
+            target_vec = item["target_spec_vector"].to(device=device)
+            samples = inverse_model.sample_designs(
+                target_vec,
+                n_samples=num_samples,
+                n_steps=int(validation_cfg.get("forward_verify_ode_steps", 16)),
+                seed=idx,
+                device=device,
+            )
+            record = dataset.records[idx]
+            target_spec = build_target_spec_vector(
+                record.kpi_dict,
+                dataset.kpi_names,
+                re_value=record.re,
+                num_cylinders_min=record.num_cylinders,
+                num_cylinders_max=record.num_cylinders,
+                min_center_distance=dataset.min_center_distance_default,
+                max_num_cylinders=dataset.max_num_cylinders,
+                return_spec=True,
+            )
+            for sample_idx, sample in enumerate(samples[: max(1, min(num_samples, 2))]):
+                result = verifier.predict_cycle_for_centers(
+                    sample["centers"],
+                    record.re,
+                    phase_bins,
+                    nx,
+                    ny,
+                    query_batch_size,
+                    seed=idx * 1000 + sample_idx,
+                )
+                channel_order = list(result.get("channel_order") or record.channel_order)
+                sample_cycles = np.asarray(result.get("cycle_samples"), dtype=np.float32)
+                sample_kpis = [
+                    compute_cycle_kpis(cycle, x_grid=None, y_grid=None, channel_order=channel_order, domain={"lx": record.domain_length_x, "ly": record.domain_length_y})
+                    for cycle in sample_cycles
+                ]
+                names = sorted({name for row in sample_kpis for name in row.keys()})
+                kpis = {name: float(np.nanmean([row.get(name, float("nan")) for row in sample_kpis])) for name in names}
+                kpis_std = {name: float(np.nanstd([row.get(name, float("nan")) for row in sample_kpis])) for name in names}
+                kpis["num_cylinders"] = int(sample["count"])
+                kpis["min_center_distance"] = float(sample["validity"].get("min_pair_distance", 0.0))
+                selected = [name for name in target_spec.get("kpi_targets", {}).keys() if name in kpis_std] or list(kpis_std.keys())
+                uncertainty = float(np.nanmean([kpis_std[name] for name in selected])) if selected else 0.0
+                base_score = score_candidate_kpis(kpis, target_spec)
+                total_score = float(base_score["total_score"]) + float(verifier_cfg.get("uncertainty_penalty_weight", 0.05)) * uncertainty
+                # Same physical score as the deterministic path, with an
+                # optional penalty for KPI uncertainty across stochastic
+                # forward-verifier samples.
+                scores.append(total_score)
+                uncertainties.append(uncertainty)
+        return {
+            "val_forward_score": float(np.mean(scores)) if scores else float("nan"),
+            "val_gen_forward_score_mean": float(np.mean(scores)) if scores else float("nan"),
+            "val_gen_forward_score_std": float(np.std(scores)) if scores else float("nan"),
+            "val_gen_kpi_uncertainty": float(np.mean(uncertainties)) if uncertainties else float("nan"),
+        }
     num_samples = max(int(validation_cfg.get("forward_verify_num_samples", 1)), 1)
     phase_bins = max(int(validation_cfg.get("forward_verify_phase_bins", 8)), 1)
     nx = max(int(validation_cfg.get("forward_verify_nx", 48)), 4)
@@ -724,6 +816,9 @@ def run_forward_verification(
                 return_spec=True,
             )
             score = score_candidate_kpis(kpis, target_spec)
+            # Physical meaning: this number measures how far the forward
+            # model's predicted wake for the sampled cylinder layout is from
+            # the target KPI envelope, after normalizing by each KPI scale.
             scores.append(float(score["total_score"]))
     return {"val_forward_score": float(np.mean(scores)) if scores else float("nan")}
 
@@ -747,15 +842,43 @@ def save_loss_curve(history: Sequence[Mapping[str, Any]], path: Path) -> None:
         return
     fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
     epochs = [int(row["epoch"]) for row in history]
-    for key, label in (("train_loss", "train"), ("val_loss", "validation"), ("val_forward_score", "forward score")):
+    has_series = False
+    for key, label in (("train_loss", "train"), ("val_loss", "validation")):
         vals = [float(row.get(key, float("nan"))) for row in history]
         if any(math.isfinite(v) and v > 0 for v in vals):
             ax.plot(epochs, vals, label=label)
+            has_series = True
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("Loss / score")
+    ax.set_ylabel("Loss")
     ax.set_yscale("log")
     ax.grid(True, alpha=0.3)
-    ax.legend()
+    if has_series:
+        ax.legend()
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def save_forward_score_curve(history: Sequence[Mapping[str, Any]], path: Path) -> None:
+    if not history:
+        return
+    fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
+    epochs = [int(row["epoch"]) for row in history]
+    has_series = False
+    for key, label in (
+        ("val_forward_score", "forward score"),
+        ("val_gen_forward_score_mean", "generative mean"),
+    ):
+        vals = [float(row.get(key, float("nan"))) for row in history]
+        if any(math.isfinite(v) and v > 0 for v in vals):
+            ax.plot(epochs, vals, label=label)
+            has_series = True
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Forward verification score")
+    ax.set_yscale("log")
+    ax.grid(True, alpha=0.3)
+    if has_series:
+        ax.legend()
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
@@ -832,7 +955,9 @@ def main() -> None:
     case_suffix = case_id[3:] if case_id.lower().startswith("inv") else case_id
     run_dir = ensure_dir(save_root / f"CaseInv{case_suffix}_{current_timestamp()}")
     config_train_dir = ensure_dir(resolve_demo_path(cfg["paths"].get("config_train_dir", "./Config_Train")))
-    backup_dir = ensure_dir(config_train_dir / "Configs_inverse_bk")
+    backup_dir = ensure_dir(
+        resolve_demo_path(cfg["paths"].get("config_backup_dir", str(config_train_dir / "Configs_inverse_bk")))
+    )
 
     forward_model, forward_model_cfg, forward_ckpt_path = load_forward_model(cfg["forward_model"], device)
     cache_path = run_dir / "inverse_forward_latent_cache.pt"
@@ -939,6 +1064,7 @@ def main() -> None:
                 device=device,
                 validation_cfg=validation_cfg,
                 query_batch_size=query_batch_size,
+                full_config=cfg,
             )
 
         row: Dict[str, Any] = {"epoch": epoch, "lr": optimizer.param_groups[0]["lr"]}
@@ -967,12 +1093,13 @@ def main() -> None:
             best_val = val_loss
             checkpoint["best_val_loss"] = best_val
             torch.save(checkpoint, best_path)
-            best_note = " new-best"
+            best_note = f"\nnew-best"
         else:
             best_note = ""
         save_history_csv(history, run_dir / "loss_history.csv")
         write_json(run_dir / "loss_history.json", {"history": history})
         save_loss_curve(history, run_dir / "loss_curve.png")
+        save_forward_score_curve(history, run_dir / "forward_score_curve.png")
         print(
             f"[epoch {epoch:04d}] train={row['train_loss']:.4e} val={row['val_loss']:.4e} "
             f"count_acc={row.get('val_count_accuracy', float('nan')):.3f} "
