@@ -4,12 +4,16 @@ from __future__ import annotations
 Sample, verify, and rank inverse-design candidates.
 
 python src/evaluate_inverse.py \
-  --inverse-run Saved_Model_Inverse/CaseInv_inert_case0010_demo002_20260502_202359 \
+  --inverse-run Saved_Model_Inverse/CaseInv_inert_case0010_demo003_20260502_212153 \
   --checkpoint latest_model.pt \
   --target-json inverse_targets/balanced_low_enstrophy_valid_wake_demo.json \
   --n-samples 64 \
   --verify-top-k 16 \
+  --save-verified-top-k 4 \
+  --simulation-verify \
+  --simulation-verify-top-k 1 \
   --device cuda:0
+
 
 """
 
@@ -21,12 +25,16 @@ import math
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.animation import FuncAnimation, PillowWriter
+from tqdm.auto import tqdm
 
 from inverse_kpi import (
     DEFAULT_KPI_NAMES,
@@ -48,6 +56,7 @@ from train_inverse import (
     select_device,
     write_json,
 )
+from multicyl_common import SimulationConfig, config_from_dict, dataclass_to_dict
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,6 +91,41 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--generative-n-steps", type=int, default=None, help="Generative verifier rectified-flow ODE steps.")
     parser.add_argument("--generative-ode-solver", choices=["euler", "heun"], default=None, help="Generative verifier ODE solver.")
     parser.add_argument("--uncertainty-penalty-weight", type=float, default=None, help="Weight for KPI uncertainty penalty in generative verification.")
+    parser.add_argument("--prefilter-diversity", action="store_true", help="Prefer candidates with broader layout spread before forward verification.")
+    parser.add_argument("--prefilter-min-x-span", type=float, default=None, help="Minimum preferred physical x-span before verification.")
+    parser.add_argument("--prefilter-min-y-span", type=float, default=None, help="Minimum preferred physical y-span before verification.")
+    parser.add_argument("--prefilter-cluster-penalty-weight", type=float, default=0.25, help="Weight for cluster penalty in pre-verification ranking.")
+    parser.add_argument(
+        "--save-verified-top-k",
+        type=int,
+        default=4,
+        help="Number of ranked forward-model verified candidates to save with cycle data and quicklook visualizations.",
+    )
+    parser.add_argument(
+        "--save-all-sampled-designs",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Also save one lightweight JSON design file for every raw sampled candidate. By default only selected verified candidates get subdirectories.",
+    )
+    parser.add_argument(
+        "--simulation-verify",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Run the real PhiFlow forward simulator for selected ranked candidates and compare simulated KPIs with generated KPIs.",
+    )
+    parser.add_argument("--simulation-verify-top-k", type=int, default=1, help="Number of ranked, model-verified candidates to simulate when --simulation-verify is enabled.")
+    parser.add_argument("--simulation-config-json", type=str, default=None, help="Optional base simulator config JSON. Candidate centers/Re/output paths are still overridden.")
+    parser.add_argument("--simulation-mode", choices=["inert", "active"], default="inert", help="Simulator mode for real forward verification.")
+    parser.add_argument("--simulation-device", choices=["cpu", "gpu"], default=None, help="Simulator runtime device. Defaults to gpu when --device is CUDA, otherwise cpu.")
+    parser.add_argument("--simulation-gpu-id", type=int, default=None, help="GPU id for real simulator verification.")
+    parser.add_argument("--simulation-preprocess-device", type=str, default=None, help="Torch device used by preprocessing after simulation. Defaults to --device.")
+    parser.add_argument("--simulation-nx", type=int, default=None, help="Override simulator grid nx for real verification.")
+    parser.add_argument("--simulation-ny", type=int, default=None, help="Override simulator grid ny for real verification.")
+    parser.add_argument("--simulation-phase-bins", type=int, default=None, help="Preprocessing phase bins for real simulation verification. Defaults to --phase-bins/effective verifier bins.")
+    parser.add_argument("--simulation-warmup-cycles", type=float, default=None, help="Override simulator warmup cycles for real verification.")
+    parser.add_argument("--simulation-save-cycles", type=float, default=None, help="Override simulator saved cycles for real verification.")
+    parser.add_argument("--simulation-frames-per-cycle", type=int, default=None, help="Override simulator saved frames per estimated shedding cycle.")
+    parser.add_argument("--simulation-dt", type=float, default=None, help="Override simulator time step for real verification.")
     return parser.parse_args()
 
 
@@ -90,6 +134,8 @@ def current_timestamp() -> str:
 
 
 def json_safe(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
     if isinstance(value, np.ndarray):
         return value.tolist()
     if isinstance(value, torch.Tensor):
@@ -103,6 +149,443 @@ def json_safe(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [json_safe(v) for v in value]
     return value
+
+
+def progress_enabled() -> bool:
+    return sys.stdout.isatty()
+
+
+def _cuda_device_index(device_arg: str) -> int:
+    text = str(device_arg or "").strip().lower()
+    if text.startswith("cuda:"):
+        try:
+            return max(0, int(text.split(":", 1)[1]))
+        except ValueError:
+            return 0
+    return 0
+
+
+def _candidate_output_dir(candidate_dirs: Mapping[int, Path], candidate: Mapping[str, Any], fallback: Path) -> Path:
+    sample_idx = int(candidate.get("sample_index", -1))
+    return candidate_dirs.get(sample_idx, fallback)
+
+
+def write_candidate_snapshot(candidate: Mapping[str, Any], out_dir: Path, name: str = "candidate_result.json") -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    write_json(out_dir / name, json_safe(candidate))
+
+
+def initialize_candidate_dirs(candidates: Sequence[Mapping[str, Any]], out_dir: Path) -> Dict[int, Path]:
+    root = out_dir / "candidates"
+    root.mkdir(parents=True, exist_ok=True)
+    dirs: Dict[int, Path] = {}
+    for candidate in candidates:
+        sample_idx = int(candidate.get("sample_index", len(dirs)))
+        rank = candidate.get("rank", "")
+        prefix = f"rank_{int(rank):03d}_" if str(rank) != "" else ""
+        cand_dir = root / f"{prefix}sample_{sample_idx:03d}"
+        cand_dir.mkdir(parents=True, exist_ok=True)
+        dirs[sample_idx] = cand_dir
+        write_candidate_snapshot(candidate, cand_dir, name="candidate_design.json")
+    return dirs
+
+
+def resolve_simulation_config_path(path_like: str) -> Path:
+    path = Path(path_like).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    for base in (Path.cwd(), DEMO_ROOT, DEMO_ROOT / "Configs"):
+        candidate = (base / path).resolve()
+        if candidate.exists():
+            return candidate
+    return (DEMO_ROOT / "Configs" / path).resolve()
+
+
+def _run_logged_subprocess(
+    cmd: Sequence[str],
+    *,
+    cwd: Path,
+    log_path: Path,
+    label: str,
+    echo_markers: Sequence[str],
+) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    with log_path.open("w", encoding="utf-8") as log_file:
+        proc = subprocess.Popen(
+            list(cmd),
+            cwd=str(cwd),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            log_file.write(line)
+            text = line.strip()
+            if text and any(marker in text for marker in echo_markers):
+                print(f"[{label}] {text}")
+        return_code = proc.wait()
+    if return_code != 0:
+        raise RuntimeError(f"{label} failed with exit code {return_code}. See log: {log_path}")
+
+
+def _load_simulation_base_config(args: argparse.Namespace) -> SimulationConfig:
+    if args.simulation_config_json:
+        config_path = resolve_simulation_config_path(args.simulation_config_json)
+        with config_path.open("r", encoding="utf-8") as f:
+            return config_from_dict(json.load(f))
+    return SimulationConfig().finalize()
+
+
+def write_simulation_config_for_candidate(
+    candidate: Mapping[str, Any],
+    *,
+    args: argparse.Namespace,
+    raw_root: Path,
+    re_value: float,
+    lx: float,
+    ly: float,
+) -> Path:
+    cfg = _load_simulation_base_config(args)
+    centers = np.asarray(candidate["centers"], dtype=np.float32).reshape(-1, 2)
+    cfg.mode = str(args.simulation_mode)
+    cfg.domain.lx = float(lx)
+    cfg.domain.ly = float(ly)
+    if args.simulation_nx is not None:
+        cfg.domain.nx = int(args.simulation_nx)
+    if args.simulation_ny is not None:
+        cfg.domain.ny = int(args.simulation_ny)
+    cfg.flow.re = float(re_value)
+    if args.simulation_warmup_cycles is not None:
+        cfg.flow.warmup_cycles = float(args.simulation_warmup_cycles)
+    if args.simulation_save_cycles is not None:
+        cfg.flow.save_cycles = float(args.simulation_save_cycles)
+    if args.simulation_frames_per_cycle is not None:
+        cfg.flow.frames_per_cycle = int(args.simulation_frames_per_cycle)
+    if args.simulation_dt is not None:
+        cfg.flow.dt = float(args.simulation_dt)
+    cfg.layout.centers = centers.astype(float).tolist()
+    cfg.layout.num_cylinders = int(centers.shape[0])
+    cfg.layout.heat_powers = None
+    cfg.save.root_dir = str(raw_root)
+    cfg.save.case_id = f"inv_s{int(candidate.get('sample_index', 0)):03d}"
+    cfg.save.tag = "simulation_verify"
+    sim_device = args.simulation_device or ("gpu" if str(args.device).lower().startswith("cuda") else "cpu")
+    cfg.execution.device = str(sim_device)
+    cfg.execution.gpu_id = int(args.simulation_gpu_id if args.simulation_gpu_id is not None else _cuda_device_index(str(args.device)))
+    cfg = cfg.finalize()
+    payload = dataclass_to_dict(cfg)
+    config_path = raw_root.parent / "simulation_config.json"
+    write_json(config_path, json_safe(payload))
+    return config_path
+
+
+def _find_single_case_dir(raw_root: Path) -> Path:
+    candidates = sorted([p for p in raw_root.iterdir() if p.is_dir() and (p / "case_config.json").exists()])
+    if len(candidates) != 1:
+        raise RuntimeError(f"Expected one simulated case under {raw_root}, found {len(candidates)}.")
+    return candidates[0]
+
+
+def _load_processed_cycle(processed_root: Path, case_dir: Path) -> Tuple[np.ndarray, List[str]]:
+    cycle_path = processed_root / case_dir.name / "canonical_cycle.npz"
+    if not cycle_path.exists():
+        raise FileNotFoundError(f"Preprocessed canonical cycle not found: {cycle_path}")
+    with np.load(cycle_path, allow_pickle=True) as data:
+        cycle = np.asarray(data["canonical_cycle"], dtype=np.float32)
+        order_arr = np.asarray(data["channel_order"]) if "channel_order" in data.files else np.asarray(["u", "v", "p", "omega"])
+        channel_order = [str(v) for v in order_arr.reshape(-1)]
+    return cycle, channel_order
+
+
+def _kpi_comparison(generated_kpis: Mapping[str, Any], simulation_kpis: Mapping[str, Any]) -> Dict[str, Dict[str, float]]:
+    comparison: Dict[str, Dict[str, float]] = {}
+    for name in sorted(set(generated_kpis.keys()) | set(simulation_kpis.keys())):
+        try:
+            generated = float(generated_kpis[name])
+            simulated = float(simulation_kpis[name])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (math.isfinite(generated) and math.isfinite(simulated)):
+            continue
+        comparison[name] = {
+            "generated": generated,
+            "simulation": simulated,
+            "abs_delta": abs(generated - simulated),
+            "rel_delta": abs(generated - simulated) / max(abs(simulated), 1.0e-12),
+        }
+    return comparison
+
+
+def write_kpi_comparison_csv(comparison: Mapping[str, Mapping[str, float]], path: Path) -> None:
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["kpi", "ml_prediction", "simulation", "abs_delta", "rel_delta"])
+        writer.writeheader()
+        for name, row in comparison.items():
+            writer.writerow(
+                {
+                    "kpi": name,
+                    "ml_prediction": row.get("generated", ""),
+                    "simulation": row.get("simulation", ""),
+                    "abs_delta": row.get("abs_delta", ""),
+                    "rel_delta": row.get("rel_delta", ""),
+                }
+            )
+
+
+def plot_kpi_ml_vs_simulation(
+    comparison: Mapping[str, Mapping[str, float]],
+    out_path: Path,
+    *,
+    target_payload: Mapping[str, Any],
+) -> None:
+    target_names = [str(name) for name in (target_payload.get("kpis") or {}).keys()]
+    names = [name for name in target_names if name in comparison]
+    if not names:
+        names = [name for name in DEFAULT_KPI_NAMES if name in comparison]
+    if not names:
+        names = list(comparison.keys())[:10]
+    if not names:
+        return
+
+    ml_vals = [float(comparison[name]["generated"]) for name in names]
+    sim_vals = [float(comparison[name]["simulation"]) for name in names]
+    x = np.arange(len(names))
+    width = 0.38
+    fig, ax = plt.subplots(figsize=(max(8.0, 1.25 * len(names)), 4.8), dpi=150)
+    ax.bar(x - 0.5 * width, ml_vals, width=width, label="ML prediction", color="#4c78a8")
+    ax.bar(x + 0.5 * width, sim_vals, width=width, label="Simulation", color="#f58518")
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, rotation=30, ha="right")
+    ax.set_ylabel("KPI value")
+    ax.grid(True, axis="y", alpha=0.25)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def plot_ml_simulation_field_comparison(
+    ml_cycle: np.ndarray,
+    sim_cycle: np.ndarray,
+    centers: np.ndarray,
+    out_path: Path,
+    *,
+    ml_channel_order: Sequence[str],
+    sim_channel_order: Sequence[str],
+    lx: float,
+    ly: float,
+) -> None:
+    ml_names = [str(name).lower() for name in ml_channel_order]
+    sim_names = [str(name).lower() for name in sim_channel_order]
+    channel_name = "omega" if "omega" in ml_names and "omega" in sim_names else (ml_names[0] if ml_names else "ch0")
+    ml_idx = ml_names.index(channel_name) if channel_name in ml_names else 0
+    sim_idx = sim_names.index(channel_name) if channel_name in sim_names else 0
+    ml_field = np.asarray(ml_cycle[0, ..., ml_idx], dtype=np.float32)
+    sim_field = np.asarray(sim_cycle[0, ..., sim_idx], dtype=np.float32)
+    diff_field = sim_field - ml_field if sim_field.shape == ml_field.shape else None
+    finite_stack = [ml_field[np.isfinite(ml_field)], sim_field[np.isfinite(sim_field)]]
+    combined = np.concatenate([arr.reshape(-1) for arr in finite_stack if arr.size > 0])
+    if combined.size:
+        vmin, vmax = _field_color_limits(combined, channel_name)
+    else:
+        vmin, vmax = None, None
+
+    cols = 3 if diff_field is not None else 2
+    fig, axes = plt.subplots(1, cols, figsize=(5.0 * cols, 4.0), dpi=150, constrained_layout=True)
+    axes_arr = np.asarray(axes).reshape(-1)
+    extent = (0.0, float(lx), 0.0, float(ly))
+    for ax, field, title in ((axes_arr[0], ml_field, "ML prediction"), (axes_arr[1], sim_field, "Simulation")):
+        im = ax.imshow(field, origin="lower", extent=extent, cmap=channel_cmap(channel_name), vmin=vmin, vmax=vmax, aspect="equal")
+        overlay_cylinders(ax, centers, linewidth=1.0)
+        ax.set_title(f"{title} {channel_name}")
+        ax.set_xlim(0, lx)
+        ax.set_ylim(0, ly)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+    if diff_field is not None:
+        dv = float(np.percentile(np.abs(diff_field[np.isfinite(diff_field)]), 99.0)) if np.any(np.isfinite(diff_field)) else 1.0
+        dv = max(dv, 1.0e-12)
+        im = axes_arr[2].imshow(diff_field, origin="lower", extent=extent, cmap="RdBu_r", vmin=-dv, vmax=dv, aspect="equal")
+        overlay_cylinders(axes_arr[2], centers, linewidth=1.0)
+        axes_arr[2].set_title(f"Simulation - ML {channel_name}")
+        axes_arr[2].set_xlim(0, lx)
+        axes_arr[2].set_ylim(0, ly)
+        fig.colorbar(im, ax=axes_arr[2], fraction=0.046, pad=0.03)
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def run_simulation_verification(
+    candidates: Sequence[Dict[str, Any]],
+    *,
+    args: argparse.Namespace,
+    out_dir: Path,
+    candidate_dirs: Mapping[int, Path],
+    target_spec: Mapping[str, Any],
+    target_payload: Mapping[str, Any],
+    re_value: float,
+    lx: float,
+    ly: float,
+    phase_bins: int,
+) -> None:
+    if not args.simulation_verify:
+        return
+    sim_k = min(max(int(args.simulation_verify_top_k), 0), len(candidates))
+    if sim_k <= 0:
+        print("[simulation] requested simulation verification, but no verified candidates are available.")
+        return
+
+    print(f"[simulation] running real forward verification for top {sim_k} candidate(s).")
+    bar = tqdm(candidates[:sim_k], desc="Simulation verification", unit="case", disable=not progress_enabled())
+    for sim_rank, candidate in enumerate(bar):
+        cand_dir = _candidate_output_dir(candidate_dirs, candidate, out_dir / f"simulation_candidate_{sim_rank:03d}")
+        cand_dir.mkdir(parents=True, exist_ok=True)
+        if progress_enabled():
+            bar.set_postfix_str(f"sample={int(candidate.get('sample_index', sim_rank)):03d}")
+        print(f"[simulation] candidate rank={candidate.get('rank', sim_rank)} sample={candidate.get('sample_index', sim_rank)}: preparing real simulator run.")
+
+        raw_root = cand_dir / "simulation_raw"
+        processed_root = cand_dir / "simulation_processed"
+        raw_root.mkdir(parents=True, exist_ok=True)
+        processed_root.mkdir(parents=True, exist_ok=True)
+        config_path = write_simulation_config_for_candidate(
+            candidate,
+            args=args,
+            raw_root=raw_root,
+            re_value=re_value,
+            lx=lx,
+            ly=ly,
+        )
+
+        sim_log = cand_dir / "simulation.log"
+        sim_runner = (
+            "import json, sys; "
+            "from pathlib import Path; "
+            "sys.path.insert(0, 'src'); "
+            "from multicyl_common import config_from_dict; "
+            "from simulate_multicylinder_phiflow import run_case; "
+            "cfg = config_from_dict(json.load(open(sys.argv[1], 'r', encoding='utf-8'))); "
+            "print(f'Prepared configuration: case_id={cfg.save.case_id}, mode={cfg.mode}, device={cfg.execution.device}, gpu_id={cfg.execution.gpu_id}, cylinders={cfg.layout.num_cylinders}, Re={cfg.flow.re}'); "
+            "case_dir = run_case(cfg); "
+            "print(f'Simulation complete. Saved case to: {case_dir}')"
+        )
+        _run_logged_subprocess(
+            [sys.executable, "-c", sim_runner, str(config_path)],
+            cwd=DEMO_ROOT,
+            log_path=sim_log,
+            label="simulation",
+            echo_markers=(
+                "Prepared configuration",
+                "Starting simulation",
+                "Created case directory",
+                "Runtime summary",
+                "Simulation complete",
+            ),
+        )
+        case_dir = _find_single_case_dir(raw_root)
+        print(f"[simulation] candidate sample={candidate.get('sample_index', sim_rank)}: preprocessing simulated frames.")
+        preprocess_phase_bins = int(args.simulation_phase_bins or phase_bins)
+        preprocess_device = str(args.simulation_preprocess_device or args.device)
+        preprocess_log = cand_dir / "simulation_preprocess.log"
+        _run_logged_subprocess(
+            [
+                sys.executable,
+                "src/preprocess_multicyl_dataset.py",
+                "--input-root",
+                str(raw_root),
+                "--output-root",
+                str(processed_root),
+                "--device",
+                preprocess_device,
+                "--phase-bins",
+                str(preprocess_phase_bins),
+                "--save-cycles",
+                "1",
+                "--points-per-phase-bin",
+                "0",
+                "--sampling-mode",
+                "uniform",
+                "--save-full-canonical-cycles",
+            ],
+            cwd=DEMO_ROOT,
+            log_path=preprocess_log,
+            label="preprocess",
+            echo_markers=(
+                "[INFO] Using torch device",
+                "[INFO] Discovered",
+                "[INFO] Loaded",
+                "Canonical cycle method",
+                "Saving processed outputs",
+                "Finished.",
+                "Preprocessing finished",
+                "Wrote packed dataset",
+            ),
+        )
+
+        sim_cycle, sim_channel_order = _load_processed_cycle(processed_root, case_dir)
+        sim_kpis = compute_cycle_kpis(sim_cycle, x_grid=None, y_grid=None, channel_order=sim_channel_order, domain={"lx": lx, "ly": ly})
+        sim_kpis["num_cylinders"] = int(candidate.get("num_cylinders", candidate.get("count", 0)))
+        sim_kpis["min_center_distance"] = float(candidate.get("min_pair_distance", 0.0))
+        sim_kpis["x_span"] = float(candidate.get("x_span", 0.0))
+        sim_kpis["y_span"] = float(candidate.get("y_span", 0.0))
+        sim_kpis["valid"] = bool(candidate.get("validity", {}).get("valid", True))
+        generated_kpis = candidate.get("kpis", {}) if isinstance(candidate.get("kpis", {}), Mapping) else {}
+        comparison = _kpi_comparison(generated_kpis, sim_kpis)
+        sim_score = score_candidate_kpis(sim_kpis, target_spec)
+        generated_score = float(candidate.get("score", float("nan")))
+        candidate["simulation_verified"] = True
+        candidate["simulation_verification"] = {
+            "case_dir": str(case_dir),
+            "processed_root": str(processed_root),
+            "simulation_log": str(sim_log),
+            "preprocess_log": str(preprocess_log),
+            "phase_bins": preprocess_phase_bins,
+            "channel_order": sim_channel_order,
+            "cycle_shape": list(sim_cycle.shape),
+            "generated_kpis": generated_kpis,
+            "ground_truth_kpis": sim_kpis,
+            "kpi_comparison": comparison,
+            "generated_score": generated_score,
+            "ground_truth_score": float(sim_score["total_score"]),
+            "ground_truth_per_kpi_errors": sim_score.get("per_kpi_errors", {}),
+            "score_delta": float(sim_score["total_score"] - generated_score) if math.isfinite(generated_score) else None,
+        }
+        np.savez_compressed(
+            cand_dir / "simulation_canonical_cycle.npz",
+            canonical_cycle=sim_cycle.astype(np.float32),
+            channel_order=np.asarray(sim_channel_order),
+        )
+        centers = np.asarray(candidate["centers"], dtype=np.float32).reshape(-1, 2)
+        plot_candidate_flow(sim_cycle, centers, cand_dir / "simulation_flow.png", channel_order=sim_channel_order, lx=lx, ly=ly)
+        try_save_cycle_gif(sim_cycle, cand_dir / "simulation_cycle.gif", sim_channel_order, centers, lx=lx, ly=ly)
+        plot_kpi_ml_vs_simulation(comparison, cand_dir / "simulation_kpi_comparison.png", target_payload=target_payload)
+        write_kpi_comparison_csv(comparison, cand_dir / "simulation_kpi_comparison.csv")
+        ml_cycle_path = cand_dir / "generated_verifier_cycle.npz"
+        if ml_cycle_path.exists():
+            with np.load(ml_cycle_path, allow_pickle=True) as data:
+                ml_cycle = np.asarray(data["cycle_mean"], dtype=np.float32)
+                ml_order = [str(v) for v in np.asarray(data["channel_order"]).reshape(-1)] if "channel_order" in data.files else ["u", "v", "p", "omega"]
+            plot_ml_simulation_field_comparison(
+                ml_cycle,
+                sim_cycle,
+                centers,
+                cand_dir / "ml_vs_simulation_field.png",
+                ml_channel_order=ml_order,
+                sim_channel_order=sim_channel_order,
+                lx=lx,
+                ly=ly,
+            )
+        write_json(cand_dir / "simulation_verification.json", json_safe(candidate["simulation_verification"]))
+        write_candidate_snapshot(candidate, cand_dir)
+        print(
+            "[simulation] candidate "
+            f"sample={candidate.get('sample_index', sim_rank)}: "
+            f"generated_score={generated_score:.4e}, ground_truth_score={float(sim_score['total_score']):.4e}."
+        )
 
 
 def parse_simple_kpi(entries: Sequence[str]) -> Dict[str, Any]:
@@ -153,6 +636,41 @@ GEN_FORWARD_UNAVAILABLE = (
     "Generative stage-2 forward verifier is unavailable. "
     "Use backend=deterministic or provide a valid stage-2 checkpoint."
 )
+
+
+def channel_cmap(name: str) -> str:
+    return {
+        "u": "coolwarm",
+        "v": "coolwarm",
+        "p": "magma",
+        "omega": "RdBu_r",
+        "temperature": "inferno",
+    }.get(str(name).lower(), "coolwarm")
+
+
+def _field_color_limits(values: np.ndarray, name: str) -> Tuple[Optional[float], Optional[float]]:
+    arr = np.asarray(values, dtype=np.float32)
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return None, None
+    name = str(name).lower()
+    if name in {"u", "v", "omega"}:
+        vmax = float(np.percentile(np.abs(finite), 99.0))
+        if not math.isfinite(vmax) or vmax <= 1.0e-12:
+            vmax = float(np.max(np.abs(finite)))
+        return -vmax, vmax
+    vmin = float(np.percentile(finite, 1.0))
+    vmax = float(np.percentile(finite, 99.0))
+    if not math.isfinite(vmin) or not math.isfinite(vmax) or abs(vmax - vmin) <= 1.0e-12:
+        return float(np.min(finite)), float(np.max(finite))
+    return vmin, vmax
+
+
+def overlay_cylinders(ax: plt.Axes, centers: np.ndarray, *, radius: float = 0.5, linewidth: float = 1.0) -> None:
+    centers_arr = np.asarray(centers, dtype=np.float32).reshape(-1, 2)
+    for idx, (cx, cy) in enumerate(centers_arr):
+        ax.add_patch(plt.Circle((float(cx), float(cy)), radius, fill=False, color="k", lw=linewidth, zorder=8))
+        ax.text(float(cx), float(cy), f"C{idx}", fontsize=7.5, ha="center", va="center", color="k", zorder=9)
 
 
 def apply_forward_cli_overrides(cfg: Dict[str, Any], args: argparse.Namespace) -> None:
@@ -484,7 +1002,7 @@ def target_spec_from_payload(
 ) -> Dict[str, Any]:
     preferences = payload.get("preferences", {}) if isinstance(payload.get("preferences", {}), Mapping) else {}
     min_center_distance = payload.get("min_center_distance", preferences.get("min_center_distance"))
-    return build_target_spec_vector(
+    spec = build_target_spec_vector(
         kpi_names=kpi_names,
         kpi_targets=payload.get("kpis", {}),
         stats=kpi_stats,
@@ -498,13 +1016,70 @@ def target_spec_from_payload(
         domain_length_scale=domain_length_scale,
         return_spec=True,
     )
+    spec["preferences"] = dict(preferences)
+    if "min_x_span" in preferences:
+        spec["constraints"]["min_x_span"] = float(preferences["min_x_span"])
+    if "min_y_span" in preferences:
+        spec["constraints"]["min_y_span"] = float(preferences["min_y_span"])
+    return spec
 
 
-def candidate_prefilter_key(candidate: Mapping[str, Any]) -> Tuple[int, float, int]:
+def layout_diagnostics(
+    centers: np.ndarray,
+    *,
+    lx: float,
+    ly: float,
+    min_center_distance: float,
+) -> Dict[str, float]:
+    arr = np.asarray(centers, dtype=np.float32).reshape(-1, 2)
+    if arr.shape[0] == 0:
+        return {
+            "min_pair_distance": 0.0,
+            "x_span": 0.0,
+            "y_span": 0.0,
+            "centroid_x": 0.0,
+            "centroid_y": 0.0,
+            "cluster_penalty": 1.0,
+            "spread_score": 0.0,
+        }
+    min_pair = periodic_min_distance(arr, lx, ly)
+    if not math.isfinite(min_pair):
+        min_pair = max(float(lx), float(ly))
+    x_span = float(np.max(arr[:, 0]) - np.min(arr[:, 0])) if arr.shape[0] > 1 else 0.0
+    y_span = float(np.max(arr[:, 1]) - np.min(arr[:, 1])) if arr.shape[0] > 1 else 0.0
+    cluster_penalty = max(0.0, float(min_center_distance) - float(min_pair)) / max(float(min_center_distance), 1.0e-8)
+    spread_score = 0.5 * (x_span / max(float(lx), 1.0e-8) + y_span / max(float(ly), 1.0e-8))
+    return {
+        "min_pair_distance": float(min_pair),
+        "x_span": x_span,
+        "y_span": y_span,
+        "centroid_x": float(np.mean(arr[:, 0])),
+        "centroid_y": float(np.mean(arr[:, 1])),
+        "cluster_penalty": float(cluster_penalty),
+        "spread_score": float(spread_score),
+    }
+
+
+def count_probabilities_summary(values: Any, top_k: int = 3) -> str:
+    probs = np.asarray(values, dtype=np.float64).reshape(-1)
+    if probs.size == 0:
+        return ""
+    order = np.argsort(probs)[::-1][: max(int(top_k), 1)]
+    return ";".join(f"{int(idx)}:{float(probs[idx]):.3f}" for idx in order)
+
+
+def candidate_prefilter_key(candidate: Mapping[str, Any]) -> Tuple[float, float, float, float, float, float]:
     validity = candidate.get("validity", {})
     valid = bool(validity.get("valid", False)) if isinstance(validity, Mapping) else False
-    min_dist = float(validity.get("min_pair_distance", 0.0)) if isinstance(validity, Mapping) else 0.0
-    return (0 if valid else 1, -min_dist, int(candidate.get("count", 0)))
+    min_dist = float(candidate.get("min_pair_distance", validity.get("min_pair_distance", 0.0) if isinstance(validity, Mapping) else 0.0))
+    x_deficit = max(0.0, float(candidate.get("prefilter_min_x_span", 0.0)) - float(candidate.get("x_span", 0.0)))
+    y_deficit = max(0.0, float(candidate.get("prefilter_min_y_span", 0.0)) - float(candidate.get("y_span", 0.0)))
+    cluster_weight = float(candidate.get("prefilter_cluster_penalty_weight", 0.25))
+    cluster_penalty = cluster_weight * float(candidate.get("cluster_penalty", 0.0))
+    span_penalty = x_deficit / max(float(candidate.get("prefilter_min_x_span", 0.0)), 1.0) + y_deficit / max(float(candidate.get("prefilter_min_y_span", 0.0)), 1.0)
+    count_error = float(candidate.get("target_count_error", abs(int(candidate.get("count", 0)))))
+    spread_bonus = float(candidate.get("spread_score", 0.0)) if bool(candidate.get("prefilter_diversity", False)) else 0.0
+    return (0.0 if valid else 1.0, span_penalty + cluster_penalty, -min_dist, count_error, -spread_bonus, float(candidate.get("sample_index", 0)))
 
 
 def plot_candidate_flow(
@@ -516,18 +1091,41 @@ def plot_candidate_flow(
     lx: float,
     ly: float,
 ) -> None:
-    frame = np.asarray(cycle[0], dtype=np.float32)
+    cycle_arr = np.asarray(cycle, dtype=np.float32)
+    frame = cycle_arr[0]
     names = list(channel_order)[: frame.shape[-1]]
-    fig, axes = plt.subplots(2, 2, figsize=(9, 5), dpi=150, constrained_layout=True)
-    cmaps = {"u": "coolwarm", "v": "coolwarm", "p": "magma", "omega": "RdBu_r"}
-    for ax, idx in zip(axes.reshape(-1), range(min(4, frame.shape[-1]))):
+    n_channels = min(len(names), frame.shape[-1])
+    if n_channels == 0:
+        return
+
+    cols = min(3, n_channels)
+    rows = int(math.ceil(n_channels / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(4.8 * cols, 3.7 * rows), dpi=150, constrained_layout=True)
+    axes_arr = np.asarray(axes).reshape(-1)
+    extent = (0.0, float(lx), 0.0, float(ly))
+    for idx, ax in enumerate(axes_arr):
+        if idx >= n_channels:
+            ax.axis("off")
+            continue
         name = names[idx] if idx < len(names) else f"ch{idx}"
-        im = ax.imshow(frame[..., idx], origin="lower", extent=[0, lx, 0, ly], cmap=cmaps.get(name, "viridis"), aspect="auto")
-        ax.scatter(centers[:, 0], centers[:, 1], s=24, c="white", edgecolors="black", linewidths=0.7)
-        ax.set_title(name)
+        vmin, vmax = _field_color_limits(cycle_arr[..., idx], name)
+        im = ax.imshow(
+            frame[..., idx],
+            origin="lower",
+            extent=extent,
+            cmap=channel_cmap(name),
+            vmin=vmin,
+            vmax=vmax,
+            aspect="equal",
+        )
+        overlay_cylinders(ax, centers, linewidth=1.0)
+        ax.set_title(f"Pred {name}")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
         ax.set_xlim(0, lx)
         ax.set_ylim(0, ly)
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+    fig.suptitle("Inverse candidate verified flow | phase=0")
     fig.savefig(out_path)
     plt.close(fig)
 
@@ -759,21 +1357,72 @@ def plot_diversity(candidates: Sequence[Mapping[str, Any]], out_path: Path, *, m
     plt.close(fig)
 
 
-def try_save_cycle_gif(cycle: np.ndarray, out_path: Path, channel_order: Sequence[str]) -> None:
-    try:
-        import imageio.v2 as imageio
-    except Exception:
-        return
+def try_save_cycle_gif(
+    cycle: np.ndarray,
+    out_path: Path,
+    channel_order: Sequence[str],
+    centers: Optional[np.ndarray] = None,
+    *,
+    lx: float = 26.0,
+    ly: float = 8.0,
+) -> None:
     names = [str(name).lower() for name in channel_order]
-    omega_idx = names.index("omega") if "omega" in names else min(3, cycle.shape[-1] - 1)
-    omega = cycle[..., omega_idx]
-    vmax = max(float(np.max(np.abs(omega))), 1.0e-8)
-    frames = []
-    for frame in omega:
-        normalized = np.clip(0.5 + 0.5 * frame / vmax, 0.0, 1.0)
-        rgba = plt.cm.RdBu_r(normalized)
-        frames.append((rgba[..., :3] * 255).astype(np.uint8))
-    imageio.mimsave(out_path, frames, duration=0.12)
+    channel_idx = names.index("omega") if "omega" in names else min(3, cycle.shape[-1] - 1)
+    channel_name = names[channel_idx] if channel_idx < len(names) else f"ch{channel_idx}"
+    field = np.asarray(cycle[..., channel_idx], dtype=np.float32)
+    vmin, vmax = _field_color_limits(field, channel_name)
+    extent = (0.0, float(lx), 0.0, float(ly))
+
+    fig, ax = plt.subplots(figsize=(10, 5), dpi=120, constrained_layout=True)
+    im = ax.imshow(field[0], origin="lower", extent=extent, cmap=channel_cmap(channel_name), vmin=vmin, vmax=vmax, aspect="equal")
+    ax.set_title(f"Pred {channel_name}")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_xlim(0, lx)
+    ax.set_ylim(0, ly)
+    if centers is not None:
+        overlay_cylinders(ax, centers, linewidth=1.0)
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+
+    phase_values = np.linspace(0.0, 1.0, field.shape[0], endpoint=False)
+
+    def update(frame_idx: int):
+        im.set_data(field[frame_idx])
+        fig.suptitle(f"phase_tau={phase_values[frame_idx]:.3f}")
+        return [im]
+
+    anim = FuncAnimation(fig, update, frames=field.shape[0], blit=False)
+    anim.save(out_path, writer=PillowWriter(fps=10))
+    plt.close(fig)
+
+
+def save_forward_candidate_artifacts(
+    candidate: Mapping[str, Any],
+    artifact: Mapping[str, Any],
+    out_dir: Path,
+    *,
+    lx: float,
+    ly: float,
+) -> None:
+    centers = np.asarray(candidate["centers"], dtype=np.float32).reshape(-1, 2)
+    cycle = np.asarray(artifact["cycle_mean"], dtype=np.float32)
+    channel_order = list(artifact.get("channel_order") or ["u", "v", "p", "omega"])
+    cycle_std = artifact.get("cycle_std")
+    np.savez_compressed(
+        out_dir / "generated_verifier_cycle.npz",
+        cycle_mean=cycle.astype(np.float32),
+        cycle_std=np.asarray(cycle_std, dtype=np.float32) if cycle_std is not None else np.asarray([], dtype=np.float32),
+        centers=centers.astype(np.float32),
+        channel_order=np.asarray(channel_order),
+        backend=np.asarray([str(artifact.get("backend", candidate.get("verifier_backend", "")))]),
+    )
+    plot_candidate_flow(cycle, centers, out_dir / "ml_flow.png", channel_order=channel_order, lx=lx, ly=ly)
+    aux = artifact.get("aux", {})
+    if isinstance(aux, Mapping):
+        if not try_plot_rich_organization(aux, centers, out_dir, rank_idx=int(candidate.get("rank", 0) or 0), lx=lx, ly=ly):
+            plot_organization(aux, centers, out_dir / "ml_organization.png", lx=lx, ly=ly)
+    try_save_cycle_gif(cycle, out_dir / "ml_cycle.gif", channel_order, centers, lx=lx, ly=ly)
+    write_candidate_snapshot(candidate, out_dir, name="candidate_result.json")
 
 
 def write_candidates_csv(candidates: Sequence[Mapping[str, Any]], path: Path) -> None:
@@ -783,6 +1432,11 @@ def write_candidates_csv(candidates: Sequence[Mapping[str, Any]], path: Path) ->
         "score",
         "uncertainty_penalty",
         "verifier_backend",
+        "simulation_verified",
+        "simulation_score",
+        "simulation_score_delta",
+        "simulation_case_dir",
+        "simulation_kpi_comparison_json",
         "constraint_penalty",
         "latent_consistency",
         "Re",
@@ -790,6 +1444,15 @@ def write_candidates_csv(candidates: Sequence[Mapping[str, Any]], path: Path) ->
         "centers_json",
         "valid",
         "min_pair_distance",
+        "x_span",
+        "y_span",
+        "centroid_x",
+        "centroid_y",
+        "cluster_penalty",
+        "spread_score",
+        "repaired",
+        "raw_count",
+        "count_probabilities_summary",
         "per_kpi_errors_json",
     ]
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -797,6 +1460,7 @@ def write_candidates_csv(candidates: Sequence[Mapping[str, Any]], path: Path) ->
         writer.writeheader()
         for candidate in candidates:
             validity = candidate.get("validity", {})
+            sim = candidate.get("simulation_verification", {}) if isinstance(candidate.get("simulation_verification", {}), Mapping) else {}
             writer.writerow(
                 {
                     "rank": candidate.get("rank", ""),
@@ -804,13 +1468,27 @@ def write_candidates_csv(candidates: Sequence[Mapping[str, Any]], path: Path) ->
                     "score": candidate.get("score", ""),
                     "uncertainty_penalty": candidate.get("uncertainty_penalty", ""),
                     "verifier_backend": candidate.get("verifier_backend", ""),
+                    "simulation_verified": bool(candidate.get("simulation_verified", False)),
+                    "simulation_score": sim.get("ground_truth_score", ""),
+                    "simulation_score_delta": sim.get("score_delta", ""),
+                    "simulation_case_dir": sim.get("case_dir", ""),
+                    "simulation_kpi_comparison_json": json.dumps(json_safe(sim.get("kpi_comparison", {}))),
                     "constraint_penalty": candidate.get("constraint_penalty", ""),
                     "latent_consistency": candidate.get("latent_consistency", ""),
                     "Re": candidate.get("Re", ""),
                     "num_cylinders": candidate.get("num_cylinders", candidate.get("count", "")),
                     "centers_json": json.dumps(json_safe(candidate.get("centers", []))),
                     "valid": validity.get("valid", ""),
-                    "min_pair_distance": validity.get("min_pair_distance", ""),
+                    "min_pair_distance": candidate.get("min_pair_distance", validity.get("min_pair_distance", "")),
+                    "x_span": candidate.get("x_span", ""),
+                    "y_span": candidate.get("y_span", ""),
+                    "centroid_x": candidate.get("centroid_x", ""),
+                    "centroid_y": candidate.get("centroid_y", ""),
+                    "cluster_penalty": candidate.get("cluster_penalty", ""),
+                    "spread_score": candidate.get("spread_score", ""),
+                    "repaired": candidate.get("repaired", validity.get("repaired", "")),
+                    "raw_count": candidate.get("raw_count", ""),
+                    "count_probabilities_summary": candidate.get("count_probabilities_summary", ""),
                     "per_kpi_errors_json": json.dumps(json_safe(candidate.get("per_kpi_errors", {}))),
                 }
             )
@@ -819,6 +1497,7 @@ def write_candidates_csv(candidates: Sequence[Mapping[str, Any]], path: Path) ->
 def main() -> None:
     args = parse_args()
     device = select_device(args.device)
+    args.device = str(device)
     inverse_run = resolve_demo_path(args.inverse_run)
     model, ckpt, inv_model_cfg, ckpt_path = load_inverse_checkpoint(inverse_run, args.checkpoint, device)
     cfg = ckpt.get("config", {})
@@ -860,6 +1539,12 @@ def main() -> None:
     query_batch_size = int(verifier_cfg.get("query_batch_size", cfg.get("forward_model", {}).get("query_batch_size", 32768)))
     lx = float(inv_model_cfg.get("domain_length_x", 24.0))
     ly = float(inv_model_cfg.get("domain_length_y", 12.0))
+    prefilter_min_x_span = float(args.prefilter_min_x_span if args.prefilter_min_x_span is not None else preferences.get("min_x_span", 0.0))
+    prefilter_min_y_span = float(args.prefilter_min_y_span if args.prefilter_min_y_span is not None else preferences.get("min_y_span", 0.0))
+    target_count_mid = 0.5 * (
+        float(target_payload.get("num_cylinders_min", target_payload.get("num_cylinders_max", 0)) or 0)
+        + float(target_payload.get("num_cylinders_max", target_payload.get("num_cylinders_min", int(inv_model_cfg.get("max_num_cylinders", 8)))) or int(inv_model_cfg.get("max_num_cylinders", 8)))
+    )
 
     out_dir = inverse_run / "evaluation" / f"inverse_eval_{current_timestamp()}"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -868,18 +1553,37 @@ def main() -> None:
     candidates: List[Dict[str, Any]] = []
     for idx, sample in enumerate(samples):
         candidate = dict(sample)
+        candidate.update(
+            layout_diagnostics(
+                np.asarray(sample["centers"], dtype=np.float32),
+                lx=lx,
+                ly=ly,
+                min_center_distance=min_center_distance,
+            )
+        )
         candidate["sample_index"] = idx
         candidate["Re"] = re_value
         candidate["num_cylinders"] = int(sample["count"])
         candidate["verified"] = False
         candidate["score"] = float("inf")
+        candidate["target_count_error"] = abs(float(candidate["num_cylinders"]) - target_count_mid)
+        candidate["prefilter_diversity"] = bool(args.prefilter_diversity)
+        candidate["prefilter_min_x_span"] = prefilter_min_x_span
+        candidate["prefilter_min_y_span"] = prefilter_min_y_span
+        candidate["prefilter_cluster_penalty_weight"] = float(args.prefilter_cluster_penalty_weight)
+        candidate["repaired"] = bool(candidate.get("validity", {}).get("repaired", False))
+        candidate["count_probabilities_summary"] = count_probabilities_summary(candidate.get("count_probabilities", []))
         candidates.append(candidate)
 
     verify_k = min(max(int(args.verify_top_k), 0), len(candidates))
     verify_indices = [c["sample_index"] for c in sorted(candidates, key=candidate_prefilter_key)[:verify_k]]
     verified_candidates: List[Dict[str, Any]] = []
-    for rank_idx, sample_idx in enumerate(verify_indices):
+    forward_artifacts: Dict[int, Dict[str, Any]] = {}
+    verify_iter = tqdm(verify_indices, desc="Model verification", unit="candidate", disable=not progress_enabled())
+    for rank_idx, sample_idx in enumerate(verify_iter):
         candidate = candidates[sample_idx]
+        if progress_enabled():
+            verify_iter.set_postfix_str(f"sample={sample_idx:03d}")
         centers = np.asarray(candidate["centers"], dtype=np.float32).reshape(-1, 2)
         verifier_result = verifier.predict_cycle_for_centers(
             centers,
@@ -903,6 +1607,8 @@ def main() -> None:
         )
         kpis["num_cylinders"] = int(candidate["num_cylinders"])
         kpis["min_center_distance"] = float(periodic_min_distance(centers, lx, ly))
+        kpis["x_span"] = float(candidate.get("x_span", 0.0))
+        kpis["y_span"] = float(candidate.get("y_span", 0.0))
         kpis["valid"] = bool(candidate.get("validity", {}).get("valid", True))
         if kpis_std:
             base_score = score_candidate_kpis(kpis, target_spec)
@@ -944,11 +1650,13 @@ def main() -> None:
             }
         )
         verified_candidates.append(candidate)
-        if rank_idx < 5:
-            plot_candidate_flow(cycle, centers, out_dir / f"candidate_{rank_idx:03d}_flow.png", channel_order=channel_order, lx=lx, ly=ly)
-            if not try_plot_rich_organization(aux, centers, out_dir, rank_idx=rank_idx, lx=lx, ly=ly):
-                plot_organization(aux, centers, out_dir / f"candidate_{rank_idx:03d}_organization.png", lx=lx, ly=ly)
-            try_save_cycle_gif(cycle, out_dir / f"candidate_{rank_idx:03d}_cycle.gif", channel_order)
+        forward_artifacts[int(candidate["sample_index"])] = {
+            "cycle_mean": cycle,
+            "cycle_std": verifier_result.get("cycle_std"),
+            "aux": aux,
+            "channel_order": channel_order,
+            "backend": str(verifier_result.get("backend", verifier.backend)),
+        }
 
     ranked = sorted(
         candidates,
@@ -963,6 +1671,41 @@ def main() -> None:
         candidate["rank"] = rank if candidate.get("verified", False) else ""
 
     verified_ranked = [c for c in ranked if c.get("verified", False)]
+    save_top_k = min(max(int(args.save_verified_top_k), 0), len(verified_ranked))
+    sim_top_k = min(max(int(args.simulation_verify_top_k), 0), len(verified_ranked)) if args.simulation_verify else 0
+    selected_for_dirs: List[Dict[str, Any]] = []
+    seen_samples: set[int] = set()
+    for candidate in list(verified_ranked[:save_top_k]) + list(verified_ranked[:sim_top_k]):
+        sample_idx = int(candidate.get("sample_index", -1))
+        if sample_idx not in seen_samples:
+            selected_for_dirs.append(candidate)
+            seen_samples.add(sample_idx)
+    candidate_dirs = initialize_candidate_dirs(selected_for_dirs, out_dir) if selected_for_dirs else {}
+    if args.save_all_sampled_designs:
+        sampled_design_dir = out_dir / "sampled_designs"
+        sampled_design_dir.mkdir(parents=True, exist_ok=True)
+        for candidate in candidates:
+            write_candidate_snapshot(candidate, sampled_design_dir, name=f"sample_{int(candidate['sample_index']):03d}.json")
+    if candidate_dirs:
+        print(f"[output] saving {len(candidate_dirs)} selected candidate folder(s) under {out_dir / 'candidates'}")
+    for candidate in selected_for_dirs:
+        sample_idx = int(candidate.get("sample_index", -1))
+        cand_dir = _candidate_output_dir(candidate_dirs, candidate, out_dir)
+        artifact = forward_artifacts.get(sample_idx)
+        if artifact is not None:
+            save_forward_candidate_artifacts(candidate, artifact, cand_dir, lx=lx, ly=ly)
+    run_simulation_verification(
+        verified_ranked,
+        args=args,
+        out_dir=out_dir,
+        candidate_dirs=candidate_dirs,
+        target_spec=target_spec,
+        target_payload=target_payload,
+        re_value=re_value,
+        lx=lx,
+        ly=ly,
+        phase_bins=phase_bins,
+    )
     write_candidates_csv(ranked, out_dir / "inverse_candidates.csv")
     write_json(
         out_dir / "inverse_candidates.json",

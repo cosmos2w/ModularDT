@@ -1,5 +1,5 @@
 {
-  "case_id": "inv_inert_case0010_demo002",
+  "case_id": "inv_inert_case0010_demo003",
   "description": "First demo inverse-design training config for inert multi-cylinder ModularDT. Trains an amortized rectified-flow posterior over cylinder layouts conditioned on KPI/constraint targets and aligned with the frozen deterministic forward model behavior/organization latents.",
   "seed": 42,
   "dataset": {
@@ -66,6 +66,20 @@
     "re_scale": 200.0,
     "domain_length_scale": 24.0
   },
+  "target_augmentation": {
+    "enabled": true,
+    "drop_probability": 0.35,
+    "exact_probability": 0.35,
+    "range_probability": 0.35,
+    "upper_probability": 0.15,
+    "lower_probability": 0.15,
+    "range_width_std_fraction": 0.35,
+    "min_active_kpis": 2,
+    "always_include": [
+      "enstrophy"
+    ],
+    "constraint_dropout_probability": 0.0
+  },
   "inverse_model": {
     "target_dim": 75,
     "design_dim": 24,
@@ -84,14 +98,15 @@
     "domain_length_y": 12.0,
     "min_num_cylinders": 1,
     "min_center_distance": 1.1,
-    "re_scale": 200.0
+    "re_scale": 200.0,
+    "center_decode_mode": "wrap"
   },
   "loss": {
     "flow_weight": 1.0,
     "count_weight": 0.1,
     "behavior_align_weight": 0.1,
     "organization_align_weight": 0.1,
-    "validity_prior_weight": 0.0
+    "validity_prior_weight": 0.02
   },
   "training": {
     "epochs": 10000,
@@ -112,14 +127,18 @@
     "forward_verify_phase_bins": 12,
     "forward_verify_nx": 96,
     "forward_verify_ny": 48,
+    "demo_target_json": "./inverse_targets/balanced_low_enstrophy_valid_wake_demo.json",
+    "demo_forward_verify_every_epochs": 50,
+    "demo_forward_verify_num_samples": 16,
+    "demo_forward_verify_top_k": 4,
     "best_metric_name": "val_loss"
   },
   "evaluation_demo_target": {
     "name": "balanced_low_enstrophy_valid_wake_demo",
     "Re": 100.0,
-    "num_cylinders_min": 4,
+    "num_cylinders_min": 5,
     "num_cylinders_max": 8,
-    "min_center_distance": 1.1,
+    "min_center_distance": 1.5,
     "kpis": {
       "enstrophy": {
         "mode": "range",
@@ -150,7 +169,10 @@
       }
     },
     "preferences": {
-      "description": "First inverse-demo target: valid 4-8 cylinder layouts at Re=100 with moderate enstrophy, bounded peak vorticity, bounded pressure variation, and non-degenerate wake behavior. Uses only range/max targets to avoid ambiguous minimize scaling in early inverse evaluation."
+      "min_center_distance": 1.5,
+      "min_x_span": 6.0,
+      "min_y_span": 2.5,
+      "description": "Balanced inverse-demo target with stronger geometric validity constraints."
     }
   },
   "paths": {

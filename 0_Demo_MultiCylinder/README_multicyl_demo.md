@@ -584,23 +584,36 @@ training, a frozen deterministic forward model provides behavior and organizer
 latent targets. This remains true even when a stochastic forward verifier is
 configured: the deterministic organizer is the latent teacher.
 
+The inverse design vector stores cylinder centers as normalized physical
+coordinates in `[0, 1]`, not as logits. `inverse_model.center_decode_mode`
+controls how sampled center channels are projected back into that normalized
+domain: `wrap` is the default for the periodic domain, `clamp` is available for
+bounded projection, and `sigmoid` is retained only as a compatibility mode.
+Mask entries remain score/logit-like and are still decoded with a sigmoid.
+
+The validity prior is applied to the rectified-flow predicted endpoint during
+training, so the generator receives a direct gradient when its sampled endpoint
+would create overlapping or clustered cylinders.
+
 During evaluation, the default verifier is the same frozen deterministic
 forward model. A stage-2 generative forward verifier can optionally be used
 later for KPI mean/std estimates and uncertainty-aware ranking, but Stage-1 AE
 checkpoints alone are not valid forward verifiers because they do not model the
 conditional field posterior.
 
-In inverse training logs, `forward_score` / `val_forward_score` means the
-validation-time physical mismatch after this forward verification loop. The
-inverse model first samples a candidate cylinder layout for a held-out target;
-the frozen forward surrogate then predicts that layout's canonical wake cycle;
-the code computes physical KPIs from the predicted fields and compares them to
-the requested KPI ranges, bounds, and design constraints. Lower is better. A
-score near zero means the forward-predicted flow satisfies the scored target
-envelope; a larger score means one or more KPIs, such as enstrophy, wake
-deficit, pressure range, or spacing/count constraints, are outside the target
-region after normalization by their KPI scales. It is not a CFD residual and it
-is not the inverse model's supervised loss.
+Target augmentation is enabled for the training split so the model sees partial
+KPI requests like the demo JSON, not only exact self-reconstruction targets. It
+randomly keeps a subset of KPIs, converts observed values to exact/range/max/min
+targets, and always keeps configured anchor KPIs such as enstrophy. Validation
+remains deterministic.
+
+In inverse training logs, `forward_score` / `val_forward_score` is kept for
+compatibility and is also logged as `val_self_target_forward_score`: it is the
+validation self-target physical mismatch, not the fixed demo-target score. The
+optional `validation.demo_target_json` loop periodically samples from the actual
+demo target JSON, forward-verifies the best prefiltered candidates, and logs
+`val_demo_target_forward_score`, best score, valid fraction, mean count, and
+mean minimum distance.
 
 This differs from gradient-based layout optimization in four useful ways:
 

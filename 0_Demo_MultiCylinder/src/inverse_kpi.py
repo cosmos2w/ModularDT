@@ -50,6 +50,20 @@ CONSTRAINT_NAMES: Tuple[str, ...] = (
     "min_center_distance_scaled",
 )
 
+NONNEGATIVE_KPI_NAMES = frozenset(
+    {
+        "mean_abs_omega",
+        "enstrophy",
+        "max_abs_omega",
+        "kinetic_energy",
+        "pressure_range",
+        "wake_mixing",
+        "fluctuation_energy",
+        "downstream_omega_area",
+        "phase_signal_amplitude",
+    }
+)
+
 
 def _as_numpy(array: Any) -> np.ndarray:
     if torch is not None and isinstance(array, torch.Tensor):
@@ -243,6 +257,75 @@ def denormalize_kpis(kpi_vector: Any, stats: Optional[Mapping[str, Any]]) -> np.
     vec = np.asarray(kpi_vector, dtype=np.float32)
     mean, std = _stats_arrays(stats, vec.size)
     return (vec.reshape(-1) * std + mean).astype(np.float32).reshape(vec.shape)
+
+
+def augment_kpi_targets_for_training(
+    kpi_dict: Mapping[str, Any],
+    kpi_names: Sequence[str],
+    kpi_stats: Optional[Mapping[str, Any]],
+    cfg: Mapping[str, Any],
+    rng: Any,
+) -> Dict[str, Dict[str, float | str]]:
+    """Create a partial KPI target spec from one observed training case."""
+
+    if not bool(cfg.get("enabled", False)):
+        return {
+            str(name): {"mode": "exact", "value": _finite_float(kpi_dict.get(name, 0.0), 0.0), "weight": 1.0}
+            for name in kpi_names
+            if name in kpi_dict
+        }
+
+    names = [str(name) for name in kpi_names if name in kpi_dict]
+    if not names:
+        return {}
+
+    always = {str(name) for name in cfg.get("always_include", [])}
+    drop_probability = min(max(_finite_float(cfg.get("drop_probability", 0.0), 0.0), 0.0), 1.0)
+    min_active = min(max(int(cfg.get("min_active_kpis", 1)), 0), len(names))
+    active = [name for name in names if name in always or float(rng.random()) >= drop_probability]
+    if len(active) < min_active:
+        missing = [name for name in names if name not in active]
+        if missing:
+            chosen = rng.choice(missing, size=min(min_active - len(active), len(missing)), replace=False)
+            active.extend([str(name) for name in np.asarray(chosen).reshape(-1)])
+
+    probs = np.asarray(
+        [
+            max(_finite_float(cfg.get("exact_probability", 1.0), 1.0), 0.0),
+            max(_finite_float(cfg.get("range_probability", 0.0), 0.0), 0.0),
+            max(_finite_float(cfg.get("upper_probability", 0.0), 0.0), 0.0),
+            max(_finite_float(cfg.get("lower_probability", 0.0), 0.0), 0.0),
+        ],
+        dtype=np.float64,
+    )
+    if float(np.sum(probs)) <= 0.0:
+        probs = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+    probs = probs / float(np.sum(probs))
+    modes = np.asarray(["exact", "range", "max", "min"], dtype=object)
+    _, std_arr = _stats_arrays(kpi_stats, len(kpi_names))
+    name_to_idx = {str(name): i for i, name in enumerate(kpi_names)}
+    width_fraction = max(_finite_float(cfg.get("range_width_std_fraction", 0.35), 0.35), 0.0)
+
+    targets: Dict[str, Dict[str, float | str]] = {}
+    for name in active:
+        value = _finite_float(kpi_dict.get(name, 0.0), 0.0)
+        mode = str(rng.choice(modes, p=probs))
+        idx = name_to_idx.get(name, -1)
+        std = float(std_arr[idx]) if 0 <= idx < std_arr.size else 1.0
+        width = max(abs(float(rng.normal(loc=width_fraction * std, scale=0.25 * width_fraction * std))), 1.0e-6)
+        low = value - 0.5 * width
+        high = value + 0.5 * width
+        if name in NONNEGATIVE_KPI_NAMES:
+            low = max(low, 0.0)
+        if mode == "range":
+            targets[name] = {"mode": "range", "low": float(low), "high": float(max(high, low)), "weight": 1.0}
+        elif mode == "max":
+            targets[name] = {"mode": "max", "high": float(max(high, value)), "weight": 1.0}
+        elif mode == "min":
+            targets[name] = {"mode": "min", "low": float(low), "weight": 1.0}
+        else:
+            targets[name] = {"mode": "exact", "value": float(value), "weight": 1.0}
+    return targets
 
 
 def _normalize_scalar(name: str, value: float, kpi_names: Sequence[str], stats: Optional[Mapping[str, Any]], normalize: bool) -> float:
@@ -563,6 +646,13 @@ def score_candidate_kpis(kpi_dict: Mapping[str, Any], target_spec: Mapping[str, 
         deficit = float(min_dist_target) - _finite_float(min_dist_actual, 0.0)
         if deficit > 0.0:
             constraint_penalty += deficit / max(float(min_dist_target), 1.0e-8)
+    for target_key, actual_key in (("min_x_span", "x_span"), ("min_y_span", "y_span")):
+        span_target = constraints.get(target_key) if isinstance(constraints, Mapping) else None
+        span_actual = kpi_dict.get(actual_key)
+        if span_target is not None and span_actual is not None:
+            deficit = float(span_target) - _finite_float(span_actual, 0.0)
+            if deficit > 0.0:
+                constraint_penalty += deficit / max(float(span_target), 1.0e-8)
     if bool(kpi_dict.get("valid", True)) is False:
         constraint_penalty += 10.0
 

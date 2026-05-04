@@ -154,6 +154,7 @@ class InverseModelConfig:
     min_num_cylinders: int = 1
     min_center_distance: float = 1.1
     re_scale: float = 200.0
+    center_decode_mode: str = "wrap"
 
     def __post_init__(self) -> None:
         self.max_num_cylinders = int(self.max_num_cylinders)
@@ -165,6 +166,9 @@ class InverseModelConfig:
             raise ValueError(f"design_dim must be max_num_cylinders*3={expected}, got {self.design_dim}.")
         if self.generate_re:
             raise NotImplementedError("generate_re=false is the supported first inverse-design mode.")
+        self.center_decode_mode = str(self.center_decode_mode).lower().strip()
+        if self.center_decode_mode not in {"wrap", "clamp", "sigmoid"}:
+            raise ValueError("center_decode_mode must be one of: wrap, clamp, sigmoid.")
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "InverseModelConfig":
@@ -399,8 +403,19 @@ class HypergraphInverseDesignFlow(nn.Module):
         condition["velocity"] = self.velocity(x_t, t, condition)
         return condition
 
+    def decode_centers_from_design_vec(self, x: torch.Tensor) -> torch.Tensor:
+        raw = x[:, : self.max_num_cylinders * 2].reshape(x.shape[0], self.max_num_cylinders, 2)
+        mode = str(self.cfg.center_decode_mode).lower()
+        if mode == "wrap":
+            return torch.remainder(raw, 1.0)
+        if mode == "clamp":
+            return raw.clamp(0.0, 1.0)
+        if mode == "sigmoid":
+            return torch.sigmoid(raw)
+        raise ValueError(f"Unsupported center_decode_mode={self.cfg.center_decode_mode!r}.")
+
     def _overlap_prior(self, x: torch.Tensor) -> torch.Tensor:
-        centers = torch.sigmoid(x[:, : self.max_num_cylinders * 2]).reshape(x.shape[0], self.max_num_cylinders, 2)
+        centers = self.decode_centers_from_design_vec(x)
         mask = torch.sigmoid(x[:, self.max_num_cylinders * 2 :]) > 0.5
         if self.max_num_cylinders < 2:
             return x.new_tensor(0.0)
@@ -410,7 +425,7 @@ class HypergraphInverseDesignFlow(nn.Module):
         pair_mask = mask[:, :, None] & mask[:, None, :]
         eye = torch.eye(self.max_num_cylinders, device=x.device, dtype=torch.bool)[None, :, :]
         pair_mask = pair_mask & (~eye)
-        threshold = 1.1 / max(float(max(self.cfg.domain_length_x, self.cfg.domain_length_y)), 1.0e-8)
+        threshold = float(self.cfg.min_center_distance) / max(float(max(self.cfg.domain_length_x, self.cfg.domain_length_y)), 1.0e-8)
         penalty = F.relu(threshold - dist).square()
         return penalty[pair_mask].mean() if torch.any(pair_mask) else x.new_tensor(0.0)
 
@@ -443,7 +458,8 @@ class HypergraphInverseDesignFlow(nn.Module):
 
         loss_behavior = F.mse_loss(condition["behavior_latent_hat"], batch["behavior_target"])
         loss_organization = F.mse_loss(condition["organization_latent_hat"], batch["organization_target"])
-        loss_validity = self._overlap_prior(x1)
+        x1_hat = x_t + (1.0 - t) * v_pred
+        loss_validity = self._overlap_prior(x1_hat)
 
         weights = {
             "flow_weight": 1.0,
@@ -537,7 +553,7 @@ class HypergraphInverseDesignFlow(nn.Module):
         n_min, n_max, min_dist_from_target = self._constraint_counts(target)
         raw_counts = raw_counts.clamp(n_min, n_max)
 
-        centers_norm = torch.sigmoid(x[:, : self.max_num_cylinders * 2]).reshape(int(n_samples), self.max_num_cylinders, 2)
+        centers_norm = self.decode_centers_from_design_vec(x)
         mask_scores = torch.sigmoid(x[:, self.max_num_cylinders * 2 :])
         outputs: List[Dict[str, Any]] = []
         np_rng = np.random.default_rng(seed)

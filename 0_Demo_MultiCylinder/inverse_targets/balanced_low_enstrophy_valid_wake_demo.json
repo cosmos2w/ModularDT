@@ -1,39 +1,19 @@
 {
   "name": "balanced_low_enstrophy_valid_wake_demo",
-  "Re": 100.0,
-  "num_cylinders_min": 2,
-  "num_cylinders_max": 8,
-  "min_center_distance": 1.1,
+  "Re": 120.0,
+  "num_cylinders_min": 3,
+  "num_cylinders_max": 6,
+  "min_center_distance": 1.5,
   "kpis": {
-    "enstrophy": {
-      "mode": "range",
-      "low": 0.08,
-      "high": 0.18,
-      "weight": 1.0
-    },
-    "max_abs_omega": {
-      "mode": "max",
-      "high": 5.0,
-      "weight": 0.7
-    },
-    "pressure_range": {
-      "mode": "max",
-      "high": 0.1,
-      "weight": 0.5
-    },
-    "wake_mixing": {
-      "mode": "range",
-      "low": 0.02,
-      "high": 0.2,
-      "weight": 0.5
-    },
-    "wake_deficit": {
-      "mode": "max",
-      "high": 0.4,
-      "weight": 0.4
-    }
+    "enstrophy": {"mode": "range", "low": 0.08, "high": 0.18, "weight": 1.0},
+    "max_abs_omega": {"mode": "max", "high": 5.0, "weight": 0.7},
+    "pressure_range": {"mode": "max", "high": 0.1, "weight": 0.5},
+    "wake_mixing": {"mode": "range", "low": 0.02, "high": 0.2, "weight": 0.5},
+    "wake_deficit": {"mode": "max", "high": 0.4, "weight": 0.4}
   },
   "preferences": {
-    "description": "First inverse-demo target: valid 2-8 cylinder layouts at Re=100 with moderate enstrophy, bounded peak vorticity, bounded pressure variation, and non-degenerate wake behavior. Uses only range/max targets to avoid ambiguous minimize scaling in early inverse evaluation."
+    "min_center_distance": 1.5,
+    "min_x_span": 6.0,
+    "min_y_span": 2.5
   }
 }

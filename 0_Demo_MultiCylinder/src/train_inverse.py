@@ -35,6 +35,7 @@ except Exception:
 
 from inverse_kpi import (
     DEFAULT_KPI_NAMES,
+    augment_kpi_targets_for_training,
     build_target_spec_vector,
     compute_cycle_kpis,
     kpi_vector_from_dict,
@@ -242,6 +243,7 @@ class InverseDesignDataset(Dataset):
         sort_centers: bool = True,
         normalize_kpis: bool = True,
         target_noise_std: float = 0.0,
+        target_augmentation: Optional[Mapping[str, Any]] = None,
         max_cases: int = 0,
         require_inert: bool = True,
         min_center_distance: float = 1.1,
@@ -254,6 +256,7 @@ class InverseDesignDataset(Dataset):
         self.sort_centers = bool(sort_centers)
         self.normalize_kpis = bool(normalize_kpis)
         self.target_noise_std = float(target_noise_std)
+        self.target_augmentation = dict(target_augmentation or {})
         self.min_center_distance_default = float(min_center_distance)
         self.re_scale = float(re_scale)
         self.kpi_stats: Optional[Dict[str, Any]] = None
@@ -339,15 +342,27 @@ class InverseDesignDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         record = self.records[int(idx)]
+        use_augmented_target = self.split == "train" and bool(self.target_augmentation.get("enabled", False))
+        kpi_targets = None
+        if use_augmented_target:
+            kpi_targets = augment_kpi_targets_for_training(
+                record.kpi_dict,
+                self.kpi_names,
+                self.kpi_stats,
+                self.target_augmentation,
+                np.random,
+            )
+        drop_constraints = use_augmented_target and float(np.random.random()) < float(self.target_augmentation.get("constraint_dropout_probability", 0.0))
         target_spec = build_target_spec_vector(
-            record.kpi_dict,
+            None if use_augmented_target else record.kpi_dict,
             self.kpi_names,
+            kpi_targets=kpi_targets,
             stats=self.kpi_stats,
             normalize=self.normalize_kpis,
-            re_value=record.re,
-            num_cylinders_min=record.num_cylinders,
-            num_cylinders_max=record.num_cylinders,
-            min_center_distance=self.min_center_distance_default,
+            re_value=None if drop_constraints else record.re,
+            num_cylinders_min=None if drop_constraints else record.num_cylinders,
+            num_cylinders_max=None if drop_constraints else record.num_cylinders,
+            min_center_distance=None if drop_constraints else self.min_center_distance_default,
             max_num_cylinders=self.max_num_cylinders,
             re_scale=self.re_scale,
             domain_length_scale=max(record.domain_length_x, record.domain_length_y),
@@ -696,7 +711,7 @@ def run_forward_verification(
 
     num_targets = min(int(validation_cfg.get("forward_verify_num_targets", 0)), len(dataset))
     if num_targets <= 0:
-        return {"val_forward_score": float("nan")}
+        return {"val_forward_score": float("nan"), "val_self_target_forward_score": float("nan")}
     verifier_cfg = dict(full_config.get("forward_verifier", {}) if isinstance(full_config, Mapping) and isinstance(full_config.get("forward_verifier", {}), Mapping) else {})
     if isinstance(full_config, Mapping) and isinstance(full_config.get("forward_model", {}), Mapping):
         forward_cfg = full_config.get("forward_model", {})
@@ -765,12 +780,14 @@ def run_forward_verification(
                 # forward-verifier samples.
                 scores.append(total_score)
                 uncertainties.append(uncertainty)
-        return {
+        result = {
             "val_forward_score": float(np.mean(scores)) if scores else float("nan"),
             "val_gen_forward_score_mean": float(np.mean(scores)) if scores else float("nan"),
             "val_gen_forward_score_std": float(np.std(scores)) if scores else float("nan"),
             "val_gen_kpi_uncertainty": float(np.mean(uncertainties)) if uncertainties else float("nan"),
         }
+        result["val_self_target_forward_score"] = result["val_forward_score"]
+        return result
     num_samples = max(int(validation_cfg.get("forward_verify_num_samples", 1)), 1)
     phase_bins = max(int(validation_cfg.get("forward_verify_phase_bins", 8)), 1)
     nx = max(int(validation_cfg.get("forward_verify_nx", 48)), 4)
@@ -820,7 +837,119 @@ def run_forward_verification(
             # model's predicted wake for the sampled cylinder layout is from
             # the target KPI envelope, after normalizing by each KPI scale.
             scores.append(float(score["total_score"]))
-    return {"val_forward_score": float(np.mean(scores)) if scores else float("nan")}
+    result = {"val_forward_score": float(np.mean(scores)) if scores else float("nan")}
+    result["val_self_target_forward_score"] = result["val_forward_score"]
+    return result
+
+
+@torch.no_grad()
+def run_demo_target_forward_verification(
+    inverse_model: HypergraphInverseDesignFlow,
+    forward_model: nn.Module,
+    forward_model_cfg: Mapping[str, Any],
+    *,
+    target_json_path: Path,
+    kpi_names: Sequence[str],
+    kpi_stats: Optional[Mapping[str, Any]],
+    normalize_kpis: bool,
+    max_num_cylinders: int,
+    re_scale: float,
+    lx: float,
+    ly: float,
+    device: torch.device,
+    validation_cfg: Mapping[str, Any],
+    query_batch_size: int,
+) -> Dict[str, float]:
+    if not target_json_path.exists():
+        return {
+            "val_demo_target_forward_score": float("nan"),
+            "val_demo_target_best_score": float("nan"),
+            "val_demo_target_valid_fraction": float("nan"),
+            "val_demo_target_mean_count": float("nan"),
+            "val_demo_target_min_distance_mean": float("nan"),
+        }
+    payload = read_json(target_json_path)
+    preferences = payload.get("preferences", {}) if isinstance(payload.get("preferences", {}), Mapping) else {}
+    min_center_distance = payload.get("min_center_distance", preferences.get("min_center_distance", 1.1))
+    target_spec = build_target_spec_vector(
+        kpi_names=kpi_names,
+        kpi_targets=payload.get("kpis", {}),
+        stats=kpi_stats,
+        normalize=normalize_kpis,
+        re_value=payload.get("Re", payload.get("re", 100.0)),
+        num_cylinders_min=payload.get("num_cylinders_min"),
+        num_cylinders_max=payload.get("num_cylinders_max"),
+        min_center_distance=min_center_distance,
+        max_num_cylinders=max_num_cylinders,
+        re_scale=re_scale,
+        domain_length_scale=max(lx, ly),
+        return_spec=True,
+    )
+    target_spec["preferences"] = dict(preferences)
+    if "min_x_span" in preferences:
+        target_spec["constraints"]["min_x_span"] = float(preferences["min_x_span"])
+    if "min_y_span" in preferences:
+        target_spec["constraints"]["min_y_span"] = float(preferences["min_y_span"])
+    num_samples = max(int(validation_cfg.get("demo_forward_verify_num_samples", 16)), 1)
+    top_k = min(max(int(validation_cfg.get("demo_forward_verify_top_k", 4)), 1), num_samples)
+    phase_bins = max(int(validation_cfg.get("forward_verify_phase_bins", 8)), 1)
+    nx = max(int(validation_cfg.get("forward_verify_nx", 48)), 4)
+    ny = max(int(validation_cfg.get("forward_verify_ny", 24)), 4)
+    target_vec = torch.from_numpy(np.asarray(target_spec["vector"], dtype=np.float32)).to(device=device)
+    samples = inverse_model.sample_designs(
+        target_vec,
+        n_samples=num_samples,
+        n_steps=int(validation_cfg.get("forward_verify_ode_steps", 16)),
+        seed=int(validation_cfg.get("demo_forward_verify_seed", 1729)),
+        min_center_distance=float(min_center_distance or 1.1),
+        device=device,
+    )
+    valid_flags = [bool(sample.get("validity", {}).get("valid", False)) for sample in samples]
+    counts = [float(sample.get("count", 0)) for sample in samples]
+    min_dists = [float(sample.get("validity", {}).get("min_pair_distance", 0.0)) for sample in samples]
+    ranked_samples = sorted(
+        samples,
+        key=lambda sample: (
+            0 if bool(sample.get("validity", {}).get("valid", False)) else 1,
+            max(0.0, float(preferences.get("min_x_span", 0.0)) - (float(np.ptp(np.asarray(sample["centers"], dtype=np.float32).reshape(-1, 2)[:, 0])) if np.asarray(sample["centers"]).size else 0.0)),
+            max(0.0, float(preferences.get("min_y_span", 0.0)) - (float(np.ptp(np.asarray(sample["centers"], dtype=np.float32).reshape(-1, 2)[:, 1])) if np.asarray(sample["centers"]).size else 0.0)),
+            -float(sample.get("validity", {}).get("min_pair_distance", 0.0)),
+            abs(float(sample.get("count", 0)) - 0.5 * (float(payload.get("num_cylinders_min", 0) or 0) + float(payload.get("num_cylinders_max", max_num_cylinders) or max_num_cylinders))),
+        ),
+    )
+    scores: List[float] = []
+    re_value = float(payload.get("Re", payload.get("re", 100.0)))
+    for sample in ranked_samples[:top_k]:
+        cycle, _ = predict_cycle_for_centers(
+            forward_model,
+            forward_model_cfg,
+            sample["centers"],
+            re_value=re_value,
+            max_num_cylinders=max_num_cylinders,
+            phase_bins=phase_bins,
+            nx=nx,
+            ny=ny,
+            lx=lx,
+            ly=ly,
+            query_batch_size=query_batch_size,
+            device=device,
+        )
+        kpis = compute_cycle_kpis(cycle, x_grid=None, y_grid=None, channel_order=INERT_CHANNEL_ORDER, domain={"lx": lx, "ly": ly})
+        kpis["num_cylinders"] = int(sample["count"])
+        kpis["min_center_distance"] = float(sample.get("validity", {}).get("min_pair_distance", 0.0))
+        kpis["valid"] = bool(sample.get("validity", {}).get("valid", True))
+        centers = np.asarray(sample["centers"], dtype=np.float32).reshape(-1, 2)
+        if centers.shape[0] > 1:
+            kpis["x_span"] = float(np.max(centers[:, 0]) - np.min(centers[:, 0]))
+            kpis["y_span"] = float(np.max(centers[:, 1]) - np.min(centers[:, 1]))
+        scores.append(float(score_candidate_kpis(kpis, target_spec)["total_score"]))
+    return {
+        "val_demo_target_forward_score": float(np.mean(scores)) if scores else float("nan"),
+        "val_demo_target_best_score": float(np.min(scores)) if scores else float("nan"),
+        "val_demo_target_valid_fraction": float(np.mean(valid_flags)) if valid_flags else float("nan"),
+        "val_demo_target_mean_count": float(np.mean(counts)) if counts else float("nan"),
+        "val_demo_target_min_distance_mean": float(np.mean(min_dists)) if min_dists else float("nan"),
+    }
 
 
 def save_history_csv(history: Sequence[Mapping[str, Any]], path: Path) -> None:
@@ -837,16 +966,37 @@ def save_history_csv(history: Sequence[Mapping[str, Any]], path: Path) -> None:
             writer.writerow(row)
 
 
+def finite_history_points(
+    history: Sequence[Mapping[str, Any]],
+    key: str,
+    *,
+    require_positive: bool = False,
+) -> List[Tuple[int, float]]:
+    points: List[Tuple[int, float]] = []
+    for row in history:
+        try:
+            epoch = int(row["epoch"])
+            value = float(row.get(key, float("nan")))
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(value):
+            continue
+        if require_positive and value <= 0.0:
+            continue
+        points.append((epoch, value))
+    return points
+
+
 def save_loss_curve(history: Sequence[Mapping[str, Any]], path: Path) -> None:
     if not history:
         return
     fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
-    epochs = [int(row["epoch"]) for row in history]
     has_series = False
     for key, label in (("train_loss", "train"), ("val_loss", "validation")):
-        vals = [float(row.get(key, float("nan"))) for row in history]
-        if any(math.isfinite(v) and v > 0 for v in vals):
-            ax.plot(epochs, vals, label=label)
+        points = finite_history_points(history, key, require_positive=True)
+        if points:
+            epochs, vals = zip(*points)
+            ax.plot(epochs, vals, marker="o", markersize=3, linewidth=1.5, label=label)
             has_series = True
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
@@ -863,19 +1013,22 @@ def save_forward_score_curve(history: Sequence[Mapping[str, Any]], path: Path) -
     if not history:
         return
     fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
-    epochs = [int(row["epoch"]) for row in history]
     has_series = False
+    all_positive = True
     for key, label in (
         ("val_forward_score", "forward score"),
         ("val_gen_forward_score_mean", "generative mean"),
     ):
-        vals = [float(row.get(key, float("nan"))) for row in history]
-        if any(math.isfinite(v) and v > 0 for v in vals):
-            ax.plot(epochs, vals, label=label)
+        points = finite_history_points(history, key)
+        if points:
+            epochs, vals = zip(*points)
+            ax.plot(epochs, vals, marker="o", markersize=4, linewidth=1.5, label=label)
+            all_positive = all_positive and all(v > 0.0 for v in vals)
             has_series = True
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Forward verification score")
-    ax.set_yscale("log")
+    if has_series and all_positive:
+        ax.set_yscale("log")
     ax.grid(True, alpha=0.3)
     if has_series:
         ax.legend()
@@ -900,6 +1053,7 @@ def main() -> None:
         cfg.setdefault("training", {})["epochs"] = int(args.epochs)
     if args.no_forward_verify:
         cfg.setdefault("validation", {})["forward_verify_every_epochs"] = 0
+        cfg.setdefault("validation", {})["demo_forward_verify_every_epochs"] = 0
     if args.train_max_cases is not None:
         cfg.setdefault("dataset", {})["train_max_cases"] = int(args.train_max_cases)
     if args.val_max_cases is not None:
@@ -928,6 +1082,7 @@ def main() -> None:
         sort_centers=bool(dataset_cfg.get("sort_centers", True)),
         normalize_kpis=bool(kpi_cfg.get("normalize", True)),
         target_noise_std=float(kpi_cfg.get("target_noise_std", 0.0)),
+        target_augmentation=cfg.get("target_augmentation", {}),
         max_cases=int(dataset_cfg.get("train_max_cases", 0)),
         require_inert=bool(dataset_cfg.get("require_inert", True)),
         min_center_distance=min_center_distance,
@@ -1022,6 +1177,7 @@ def main() -> None:
     loss_cfg = cfg.get("loss", {})
     validation_cfg = cfg.get("validation", {})
     forward_verify_every = int(validation_cfg.get("forward_verify_every_epochs", 0))
+    demo_verify_every = int(validation_cfg.get("demo_forward_verify_every_epochs", 0))
     query_batch_size = int(cfg["forward_model"].get("query_batch_size", 32768))
     grad_clip = float(training_cfg.get("gradient_clip_norm", 1.0))
 
@@ -1054,7 +1210,7 @@ def main() -> None:
         )
         scheduler.step()
 
-        verify_metrics = {"val_forward_score": float("nan")}
+        verify_metrics = {"val_forward_score": float("nan"), "val_self_target_forward_score": float("nan")}
         if forward_verify_every > 0 and epoch % forward_verify_every == 0:
             verify_metrics = run_forward_verification(
                 model,
@@ -1065,6 +1221,26 @@ def main() -> None:
                 validation_cfg=validation_cfg,
                 query_batch_size=query_batch_size,
                 full_config=cfg,
+            )
+        demo_target_json = str(validation_cfg.get("demo_target_json", "")).strip()
+        if demo_verify_every > 0 and demo_target_json and epoch % demo_verify_every == 0:
+            verify_metrics.update(
+                run_demo_target_forward_verification(
+                    model,
+                    forward_model,
+                    forward_model_cfg,
+                    target_json_path=resolve_demo_path(demo_target_json),
+                    kpi_names=kpi_names,
+                    kpi_stats=kpi_stats,
+                    normalize_kpis=bool(kpi_cfg.get("normalize", True)),
+                    max_num_cylinders=max_num_cylinders,
+                    re_scale=re_scale,
+                    lx=float(train_set.domain_length_x),
+                    ly=float(train_set.domain_length_y),
+                    device=device,
+                    validation_cfg=validation_cfg,
+                    query_batch_size=query_batch_size,
+                )
             )
 
         row: Dict[str, Any] = {"epoch": epoch, "lr": optimizer.param_groups[0]["lr"]}
