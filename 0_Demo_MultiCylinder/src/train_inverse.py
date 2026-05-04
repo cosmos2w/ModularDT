@@ -5,7 +5,7 @@ Train the generative inverse-design model for the inert multi-cylinder demo.
 
 python src/train_inverse.py \
   --config train_inverse_config_template.json \
-  --device cuda:0
+  --device cuda:2
 
 """
 
@@ -244,6 +244,8 @@ class InverseDesignDataset(Dataset):
         normalize_kpis: bool = True,
         target_noise_std: float = 0.0,
         target_augmentation: Optional[Mapping[str, Any]] = None,
+        samples_per_case: int = 1,
+        base_seed: int = 42,
         max_cases: int = 0,
         require_inert: bool = True,
         min_center_distance: float = 1.1,
@@ -257,6 +259,9 @@ class InverseDesignDataset(Dataset):
         self.normalize_kpis = bool(normalize_kpis)
         self.target_noise_std = float(target_noise_std)
         self.target_augmentation = dict(target_augmentation or {})
+        self.samples_per_case = max(int(samples_per_case), 1)
+        self.base_seed = int(base_seed)
+        self.current_epoch = 0
         self.min_center_distance_default = float(min_center_distance)
         self.re_scale = float(re_scale)
         self.kpi_stats: Optional[Dict[str, Any]] = None
@@ -337,22 +342,41 @@ class InverseDesignDataset(Dataset):
             raise KeyError(f"Forward latent cache is missing cases: {missing[:8]}")
         self.latent_cache = cache
 
+    def set_epoch(self, epoch: int) -> None:
+        self.current_epoch = int(epoch)
+
     def __len__(self) -> int:
-        return len(self.records)
+        return len(self.records) * self.samples_per_case
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        record = self.records[int(idx)]
+        item_idx = int(idx)
+        record_idx = item_idx // self.samples_per_case
+        view_idx = item_idx % self.samples_per_case
+        record = self.records[record_idx]
+        seed = (
+            self.base_seed
+            + int(self.current_epoch) * 1_000_003
+            + int(record_idx) * 9_176
+            + int(view_idx) * 131_071
+        ) % (2**32 - 1)
+        rng = np.random.default_rng(seed)
         use_augmented_target = self.split == "train" and bool(self.target_augmentation.get("enabled", False))
         kpi_targets = None
+        active_kpi_names = list(self.kpi_names)
+        active_kpi_mask = np.ones((len(self.kpi_names),), dtype=np.float32)
         if use_augmented_target:
-            kpi_targets = augment_kpi_targets_for_training(
+            augmented = augment_kpi_targets_for_training(
                 record.kpi_dict,
                 self.kpi_names,
                 self.kpi_stats,
                 self.target_augmentation,
-                np.random,
+                rng,
+                return_metadata=True,
             )
-        drop_constraints = use_augmented_target and float(np.random.random()) < float(self.target_augmentation.get("constraint_dropout_probability", 0.0))
+            kpi_targets = augmented["kpi_targets"]
+            active_kpi_names = list(augmented["active_kpi_names"])
+            active_kpi_mask = np.asarray(augmented["active_kpi_mask"], dtype=np.float32)
+        drop_constraints = use_augmented_target and float(rng.random()) < float(self.target_augmentation.get("constraint_dropout_probability", 0.0))
         target_spec = build_target_spec_vector(
             None if use_augmented_target else record.kpi_dict,
             self.kpi_names,
@@ -371,14 +395,18 @@ class InverseDesignDataset(Dataset):
         if self.target_noise_std > 0.0:
             k = len(self.kpi_names)
             value_mask = target_vec[k : 2 * k]
-            noise = np.random.normal(0.0, self.target_noise_std, size=(k,)).astype(np.float32)
+            noise = rng.normal(0.0, self.target_noise_std, size=(k,)).astype(np.float32)
             target_vec[:k] += noise * value_mask
 
         if self.latent_cache is None:
             raise RuntimeError("Forward latent cache has not been attached to InverseDesignDataset.")
         latent = self.latent_cache[record.case_id]
+        active_kpi_count = int(np.sum(active_kpi_mask > 0.5))
+        target_active_fraction = float(active_kpi_count) / max(float(len(self.kpi_names)), 1.0)
         return {
             "case_id": record.case_id,
+            "record_idx": torch.tensor(record_idx, dtype=torch.long),
+            "view_idx": torch.tensor(view_idx, dtype=torch.long),
             "target_spec_vector": torch.from_numpy(target_vec),
             "design_vec": torch.from_numpy(record.design_vec.astype(np.float32)),
             "true_count": torch.tensor(record.num_cylinders, dtype=torch.long),
@@ -387,12 +415,18 @@ class InverseDesignDataset(Dataset):
             "re": torch.tensor(record.re, dtype=torch.float32),
             "centers": record.centers.astype(np.float32),
             "kpi_vector": torch.from_numpy(record.kpi_vector.astype(np.float32)),
+            "active_kpi_count": torch.tensor(active_kpi_count, dtype=torch.float32),
+            "target_active_fraction": torch.tensor(target_active_fraction, dtype=torch.float32),
+            "active_kpi_mask": torch.from_numpy(active_kpi_mask),
+            "active_kpi_names": active_kpi_names,
         }
 
 
 def collate_inverse(batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     return {
         "case_id": [item["case_id"] for item in batch],
+        "record_idx": torch.stack([item["record_idx"] for item in batch], dim=0),
+        "view_idx": torch.stack([item["view_idx"] for item in batch], dim=0),
         "target_spec_vector": torch.stack([item["target_spec_vector"] for item in batch], dim=0),
         "design_vec": torch.stack([item["design_vec"] for item in batch], dim=0),
         "true_count": torch.stack([item["true_count"] for item in batch], dim=0),
@@ -400,6 +434,10 @@ def collate_inverse(batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "organization_target": torch.stack([item["organization_target"] for item in batch], dim=0),
         "re": torch.stack([item["re"] for item in batch], dim=0),
         "kpi_vector": torch.stack([item["kpi_vector"] for item in batch], dim=0),
+        "active_kpi_count": torch.stack([item["active_kpi_count"] for item in batch], dim=0),
+        "target_active_fraction": torch.stack([item["target_active_fraction"] for item in batch], dim=0),
+        "active_kpi_mask": torch.stack([item["active_kpi_mask"] for item in batch], dim=0),
+        "active_kpi_names": [item["active_kpi_names"] for item in batch],
     }
 
 
@@ -632,6 +670,7 @@ def run_supervised_epoch(
             "loss_organization": scalar(metrics["loss_organization"]),
             "loss_validity_prior": scalar(metrics["loss_validity_prior"]),
             "count_accuracy": scalar(metrics["count_accuracy"]),
+            "latent_align_weight_mean": scalar(metrics.get("latent_align_weight_mean", torch.tensor(float("nan")))),
         }
         rows.append(row)
         if tqdm is not None and hasattr(iterator, "set_postfix"):
@@ -1067,6 +1106,8 @@ def main() -> None:
     kpi_cfg = cfg["target_kpis"]
     kpi_names = list(kpi_cfg.get("names", DEFAULT_KPI_NAMES))
     max_num_cylinders = int(dataset_cfg.get("max_num_cylinders", 8))
+    samples_per_case = max(int(dataset_cfg.get("samples_per_case", 1)), 1)
+    seed = int(cfg.get("seed", cfg.get("training", {}).get("seed", 42)))
     re_scale = float(cfg.get("inverse_model", {}).get("re_scale", 200.0))
     min_center_distance = float(cfg.get("inverse_model", {}).get("min_center_distance", 1.1))
 
@@ -1083,7 +1124,9 @@ def main() -> None:
         normalize_kpis=bool(kpi_cfg.get("normalize", True)),
         target_noise_std=float(kpi_cfg.get("target_noise_std", 0.0)),
         target_augmentation=cfg.get("target_augmentation", {}),
-        max_cases=int(dataset_cfg.get("train_max_cases", 0)),
+        samples_per_case=samples_per_case,
+        base_seed=seed,
+        max_cases=int(dataset_cfg.get("train_max_cases", dataset_cfg.get("max_train_cases", 0))),
         require_inert=bool(dataset_cfg.get("require_inert", True)),
         min_center_distance=min_center_distance,
         re_scale=re_scale,
@@ -1096,7 +1139,9 @@ def main() -> None:
         sort_centers=bool(dataset_cfg.get("sort_centers", True)),
         normalize_kpis=bool(kpi_cfg.get("normalize", True)),
         target_noise_std=0.0,
-        max_cases=int(dataset_cfg.get("val_max_cases", 0)),
+        samples_per_case=1,
+        base_seed=seed,
+        max_cases=int(dataset_cfg.get("val_max_cases", dataset_cfg.get("max_val_cases", 0))),
         require_inert=bool(dataset_cfg.get("require_inert", True)),
         min_center_distance=min_center_distance,
         re_scale=re_scale,
@@ -1186,10 +1231,15 @@ def main() -> None:
     latest_path = run_dir / "latest_model.pt"
     best_path = run_dir / "best_model.pt"
     print(f"[setup] inverse run dir: {run_dir}")
-    print(f"[setup] train cases={len(train_set)} val cases={len(val_set)} target_dim={target_dim}")
+    print(f"[setup] physical train cases={len(train_set.records)} val cases={len(val_set.records)} target_dim={target_dim}")
+    print(
+        f"[setup] samples_per_case={train_set.samples_per_case} effective_train_items={len(train_set)} "
+        f"batch_size={int(training_cfg.get('batch_size', 64))} batches_per_epoch={len(train_loader)}"
+    )
     print(f"[setup] behavior_dim={cache['behavior_latent_dim']} organization_dim={cache['organization_latent_dim']}")
 
     for epoch in range(1, epochs + 1):
+        train_set.set_epoch(epoch)
         train_metrics = run_supervised_epoch(
             model,
             train_loader,
@@ -1199,6 +1249,7 @@ def main() -> None:
             grad_clip=grad_clip,
             desc=f"train {epoch}/{epochs}",
         )
+        val_set.set_epoch(epoch)
         val_metrics = run_supervised_epoch(
             model,
             val_loader,

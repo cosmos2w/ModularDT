@@ -1,0 +1,22 @@
+{
+  "name": "low_disturbance_array_demo",
+  "Re": 100.0,
+  "num_cylinders_min": 2,
+  "num_cylinders_max": 5,
+  "min_center_distance": 1.7,
+  "kpis": {
+    "enstrophy": {"mode": "max", "high": 0.14, "weight": 1.1},
+    "max_abs_omega": {"mode": "max", "high": 4.5, "weight": 0.8},
+    "pressure_range": {"mode": "max", "high": 0.08, "weight": 0.8},
+    "wake_deficit": {"mode": "max", "high": 0.22, "weight": 0.7},
+    "wake_shadow_area": {"mode": "max", "high": 0.28, "weight": 0.7},
+    "downstream_u_uniformity": {"mode": "max", "high": 0.11, "weight": 0.6},
+    "fluctuation_energy": {"mode": "max", "high": 0.08, "weight": 0.5}
+  },
+  "preferences": {
+    "min_center_distance": 1.7,
+    "min_x_span": 4.5,
+    "min_y_span": 2.0,
+    "description": "Low-disturbance array target for quieter wakes, smaller pressure excursions, and more uniform downstream flow."
+  }
+}

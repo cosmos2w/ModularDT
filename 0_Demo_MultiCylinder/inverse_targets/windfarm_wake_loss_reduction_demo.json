@@ -1,0 +1,22 @@
+{
+  "name": "windfarm_wake_loss_reduction_demo",
+  "Re": 120.0,
+  "num_cylinders_min": 4,
+  "num_cylinders_max": 7,
+  "min_center_distance": 1.6,
+  "kpis": {
+    "downstream_power_proxy": {"mode": "min", "low": 0.45, "weight": 1.2},
+    "wake_shadow_area": {"mode": "max", "high": 0.30, "weight": 1.0},
+    "wake_deficit": {"mode": "max", "high": 0.25, "weight": 0.8},
+    "wake_mixing": {"mode": "range", "low": 0.04, "high": 0.18, "weight": 0.6},
+    "pressure_range": {"mode": "max", "high": 0.10, "weight": 0.6},
+    "max_abs_omega": {"mode": "max", "high": 5.0, "weight": 0.4}
+  },
+  "preferences": {
+    "min_center_distance": 1.6,
+    "min_x_span": 7.0,
+    "min_y_span": 3.0,
+    "prefer_staggered_layout": true,
+    "description": "Mimics wake-loss-aware wind-farm layout: preserve downstream kinetic energy and avoid long wake-shadow chains."
+  }
+}

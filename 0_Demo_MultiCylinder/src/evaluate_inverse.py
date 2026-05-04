@@ -12,8 +12,7 @@ python src/evaluate_inverse.py \
   --save-verified-top-k 4 \
   --simulation-verify \
   --simulation-verify-top-k 1 \
-  --device cuda:0
-
+  --device cuda:2
 
 """
 
@@ -379,44 +378,101 @@ def plot_ml_simulation_field_comparison(
     sim_channel_order: Sequence[str],
     lx: float,
     ly: float,
+    gif_path: Optional[Path] = None,
 ) -> None:
     ml_names = [str(name).lower() for name in ml_channel_order]
     sim_names = [str(name).lower() for name in sim_channel_order]
     channel_name = "omega" if "omega" in ml_names and "omega" in sim_names else (ml_names[0] if ml_names else "ch0")
     ml_idx = ml_names.index(channel_name) if channel_name in ml_names else 0
     sim_idx = sim_names.index(channel_name) if channel_name in sim_names else 0
-    ml_field = np.asarray(ml_cycle[0, ..., ml_idx], dtype=np.float32)
-    sim_field = np.asarray(sim_cycle[0, ..., sim_idx], dtype=np.float32)
-    diff_field = sim_field - ml_field if sim_field.shape == ml_field.shape else None
-    finite_stack = [ml_field[np.isfinite(ml_field)], sim_field[np.isfinite(sim_field)]]
-    combined = np.concatenate([arr.reshape(-1) for arr in finite_stack if arr.size > 0])
+    sim_arr = np.asarray(sim_cycle, dtype=np.float32)
+    ml_arr = _resize_cycle_spatial(np.asarray(ml_cycle, dtype=np.float32), (sim_arr.shape[1], sim_arr.shape[2]))
+    ml_arr = _resample_cycle_time(ml_arr, sim_arr.shape[0])
+    ml_fields = np.asarray(ml_arr[..., ml_idx], dtype=np.float32)
+    sim_fields = np.asarray(sim_arr[..., sim_idx], dtype=np.float32)
+    best_shift, cycle_metrics, shift_scores = _best_cycle_phase_shift(ml_fields, sim_fields)
+    ml_aligned = np.roll(ml_fields, -best_shift, axis=0)
+    frame_metrics = [_field_error_metrics(ml_aligned[idx], sim_fields[idx]) for idx in range(sim_fields.shape[0])]
+    frame_rel = [row["relative_l2"] for row in frame_metrics]
+    sanitized_rel = [float(v) if math.isfinite(float(v)) else float("inf") for v in frame_rel]
+    best_frame = int(np.argmin(sanitized_rel)) if any(math.isfinite(v) for v in sanitized_rel) else 0
+    ml_field = ml_aligned[best_frame]
+    sim_field = sim_fields[best_frame]
+    diff_field = ml_field - sim_field
+    ml_mean = np.mean(ml_aligned, axis=0)
+    sim_mean = np.mean(sim_fields, axis=0)
+    mean_diff = ml_mean - sim_mean
+    mean_metrics = _field_error_metrics(ml_mean, sim_mean)
+    finite_stack = [ml_aligned[np.isfinite(ml_aligned)], sim_fields[np.isfinite(sim_fields)]]
+    finite_parts = [arr.reshape(-1) for arr in finite_stack if arr.size > 0]
+    combined = np.concatenate(finite_parts) if finite_parts else np.asarray([], dtype=np.float32)
     if combined.size:
         vmin, vmax = _field_color_limits(combined, channel_name)
     else:
         vmin, vmax = None, None
+    diff_parts = [
+        np.abs(diff_field[np.isfinite(diff_field)]).reshape(-1),
+        np.abs(mean_diff[np.isfinite(mean_diff)]).reshape(-1),
+    ]
+    diff_values = np.concatenate([arr for arr in diff_parts if arr.size > 0]) if any(arr.size > 0 for arr in diff_parts) else np.asarray([], dtype=np.float32)
+    dv = float(np.percentile(diff_values, 99.0)) if diff_values.size else 1.0
+    dv = max(dv, 1.0e-12)
 
-    cols = 3 if diff_field is not None else 2
-    fig, axes = plt.subplots(1, cols, figsize=(5.0 * cols, 4.0), dpi=150, constrained_layout=True)
-    axes_arr = np.asarray(axes).reshape(-1)
+    fig, axes = plt.subplots(2, 3, figsize=(15.5, 8.8), dpi=180, constrained_layout=True)
     extent = (0.0, float(lx), 0.0, float(ly))
-    for ax, field, title in ((axes_arr[0], ml_field, "ML prediction"), (axes_arr[1], sim_field, "Simulation")):
-        im = ax.imshow(field, origin="lower", extent=extent, cmap=channel_cmap(channel_name), vmin=vmin, vmax=vmax, aspect="equal")
+    panels = [
+        (axes[0, 0], ml_field, f"ML prediction | aligned frame {best_frame}", channel_cmap(channel_name), vmin, vmax),
+        (axes[0, 1], sim_field, f"Processed simulation | frame {best_frame}", channel_cmap(channel_name), vmin, vmax),
+        (axes[0, 2], diff_field, "ML - simulation error", "RdBu_r", -dv, dv),
+        (axes[1, 0], ml_mean, "ML cycle mean", channel_cmap(channel_name), vmin, vmax),
+        (axes[1, 1], sim_mean, "Simulation cycle mean", channel_cmap(channel_name), vmin, vmax),
+        (axes[1, 2], mean_diff, "Cycle-mean error", "RdBu_r", -dv, dv),
+    ]
+    for ax, field, title, cmap, panel_vmin, panel_vmax in panels:
+        im = _imshow_field(ax, field, extent=extent, cmap=cmap, vmin=panel_vmin, vmax=panel_vmax)
         overlay_cylinders(ax, centers, linewidth=1.0)
-        ax.set_title(f"{title} {channel_name}")
+        ax.set_title(title)
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
         ax.set_xlim(0, lx)
         ax.set_ylim(0, ly)
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
-    if diff_field is not None:
-        dv = float(np.percentile(np.abs(diff_field[np.isfinite(diff_field)]), 99.0)) if np.any(np.isfinite(diff_field)) else 1.0
-        dv = max(dv, 1.0e-12)
-        im = axes_arr[2].imshow(diff_field, origin="lower", extent=extent, cmap="RdBu_r", vmin=-dv, vmax=dv, aspect="equal")
-        overlay_cylinders(axes_arr[2], centers, linewidth=1.0)
-        axes_arr[2].set_title(f"Simulation - ML {channel_name}")
-        axes_arr[2].set_xlim(0, lx)
-        axes_arr[2].set_ylim(0, ly)
-        fig.colorbar(im, ax=axes_arr[2], fraction=0.046, pad=0.03)
+    fig.suptitle(
+        f"{channel_name} comparison | best circular ML phase shift={best_shift}/{sim_fields.shape[0]} | "
+        f"cycle rel L2={cycle_metrics['relative_l2']:.3e} | mean rel L2={mean_metrics['relative_l2']:.3e}"
+    )
     fig.savefig(out_path)
     plt.close(fig)
+    write_json(
+        out_path.with_name("ml_vs_simulation_metrics.json"),
+        json_safe(
+            {
+                "channel": channel_name,
+                "best_ml_phase_shift_frames": best_shift,
+                "num_frames": int(sim_fields.shape[0]),
+                "cycle_metrics_after_shift": cycle_metrics,
+                "cycle_mean_metrics": mean_metrics,
+                "best_frame_index": best_frame,
+                "best_frame_metrics": frame_metrics[best_frame],
+                "mean_frame_relative_l2_by_shift": shift_scores,
+            }
+        ),
+    )
+    if gif_path is not None:
+        try_save_ml_simulation_comparison_gif(
+            ml_aligned,
+            sim_fields,
+            centers,
+            gif_path,
+            channel_name=channel_name,
+            lx=lx,
+            ly=ly,
+            vmin=vmin,
+            vmax=vmax,
+            diff_vmax=dv,
+            frame_metrics=frame_metrics,
+            best_shift=best_shift,
+        )
 
 
 def run_simulation_verification(
@@ -578,6 +634,7 @@ def run_simulation_verification(
                 sim_channel_order=sim_channel_order,
                 lx=lx,
                 ly=ly,
+                gif_path=cand_dir / "ml_vs_simulation_cycle.gif",
             )
         write_json(cand_dir / "simulation_verification.json", json_safe(candidate["simulation_verification"]))
         write_candidate_snapshot(candidate, cand_dir)
@@ -648,6 +705,9 @@ def channel_cmap(name: str) -> str:
     }.get(str(name).lower(), "coolwarm")
 
 
+FIELD_IMAGE_KWARGS = {"interpolation": "bicubic", "resample": True}
+
+
 def _field_color_limits(values: np.ndarray, name: str) -> Tuple[Optional[float], Optional[float]]:
     arr = np.asarray(values, dtype=np.float32)
     finite = arr[np.isfinite(arr)]
@@ -664,6 +724,83 @@ def _field_color_limits(values: np.ndarray, name: str) -> Tuple[Optional[float],
     if not math.isfinite(vmin) or not math.isfinite(vmax) or abs(vmax - vmin) <= 1.0e-12:
         return float(np.min(finite)), float(np.max(finite))
     return vmin, vmax
+
+
+def _imshow_field(ax: plt.Axes, field: np.ndarray, *, extent: Tuple[float, float, float, float], cmap: str, vmin: Optional[float], vmax: Optional[float]):
+    return ax.imshow(
+        np.asarray(field, dtype=np.float32),
+        origin="lower",
+        extent=extent,
+        cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
+        aspect="equal",
+        **FIELD_IMAGE_KWARGS,
+    )
+
+
+def _resize_cycle_spatial(cycle: np.ndarray, target_hw: Tuple[int, int]) -> np.ndarray:
+    arr = np.asarray(cycle, dtype=np.float32)
+    if arr.ndim != 4:
+        raise ValueError(f"Expected cycle with shape [T, H, W, C], got {arr.shape}.")
+    target_h, target_w = int(target_hw[0]), int(target_hw[1])
+    if arr.shape[1] == target_h and arr.shape[2] == target_w:
+        return arr
+    tensor = torch.from_numpy(arr).permute(0, 3, 1, 2)
+    resized = torch.nn.functional.interpolate(tensor, size=(target_h, target_w), mode="bilinear", align_corners=False)
+    return resized.permute(0, 2, 3, 1).cpu().numpy().astype(np.float32)
+
+
+def _resample_cycle_time(cycle: np.ndarray, target_frames: int) -> np.ndarray:
+    arr = np.asarray(cycle, dtype=np.float32)
+    target_frames = int(target_frames)
+    if arr.shape[0] == target_frames:
+        return arr
+    if arr.shape[0] <= 0 or target_frames <= 0:
+        raise ValueError(f"Cannot resample cycle from {arr.shape[0]} to {target_frames} frames.")
+    pos = np.linspace(0.0, float(arr.shape[0]), target_frames, endpoint=False, dtype=np.float32)
+    i0 = np.floor(pos).astype(np.int64) % arr.shape[0]
+    i1 = (i0 + 1) % arr.shape[0]
+    alpha = (pos - np.floor(pos)).reshape((target_frames,) + (1,) * (arr.ndim - 1))
+    return ((1.0 - alpha) * arr[i0] + alpha * arr[i1]).astype(np.float32)
+
+
+def _field_error_metrics(pred: np.ndarray, ref: np.ndarray) -> Dict[str, float]:
+    pred_arr = np.asarray(pred, dtype=np.float64)
+    ref_arr = np.asarray(ref, dtype=np.float64)
+    mask = np.isfinite(pred_arr) & np.isfinite(ref_arr)
+    if not np.any(mask):
+        return {"relative_l2": float("nan"), "rmse": float("nan"), "mae": float("nan"), "max_abs": float("nan"), "corr": float("nan")}
+    diff = pred_arr[mask] - ref_arr[mask]
+    ref_vec = ref_arr[mask]
+    pred_vec = pred_arr[mask]
+    ref_norm = float(np.linalg.norm(ref_vec))
+    rel_l2 = float(np.linalg.norm(diff) / max(ref_norm, 1.0e-12))
+    rmse = float(np.sqrt(np.mean(diff * diff)))
+    mae = float(np.mean(np.abs(diff)))
+    max_abs = float(np.max(np.abs(diff)))
+    if pred_vec.size > 1 and float(np.std(pred_vec)) > 1.0e-12 and float(np.std(ref_vec)) > 1.0e-12:
+        corr = float(np.corrcoef(pred_vec, ref_vec)[0, 1])
+    else:
+        corr = float("nan")
+    return {"relative_l2": rel_l2, "rmse": rmse, "mae": mae, "max_abs": max_abs, "corr": corr}
+
+
+def _best_cycle_phase_shift(pred: np.ndarray, ref: np.ndarray) -> Tuple[int, Dict[str, float], List[float]]:
+    pred_arr = np.asarray(pred, dtype=np.float32)
+    ref_arr = np.asarray(ref, dtype=np.float32)
+    if pred_arr.shape[0] != ref_arr.shape[0]:
+        raise ValueError("Phase-shift search requires matching frame counts.")
+    shift_scores: List[float] = []
+    for shift in range(pred_arr.shape[0]):
+        shifted = np.roll(pred_arr, -shift, axis=0)
+        frame_scores = [_field_error_metrics(shifted[idx], ref_arr[idx])["relative_l2"] for idx in range(ref_arr.shape[0])]
+        finite_scores = [float(v) for v in frame_scores if math.isfinite(float(v))]
+        shift_scores.append(float(np.mean(finite_scores)) if finite_scores else float("inf"))
+    best_shift = int(np.argmin(shift_scores)) if shift_scores else 0
+    metrics = _field_error_metrics(np.roll(pred_arr, -best_shift, axis=0), ref_arr)
+    metrics["mean_frame_relative_l2"] = float(shift_scores[best_shift]) if shift_scores else float("nan")
+    return best_shift, metrics, shift_scores
 
 
 def overlay_cylinders(ax: plt.Axes, centers: np.ndarray, *, radius: float = 0.5, linewidth: float = 1.0) -> None:
@@ -1016,6 +1153,9 @@ def target_spec_from_payload(
         domain_length_scale=domain_length_scale,
         return_spec=True,
     )
+    raw_kpis = payload.get("kpis", {}) if isinstance(payload.get("kpis", {}), Mapping) else {}
+    for name, entry in raw_kpis.items():
+        spec["kpi_targets"].setdefault(str(name), entry)
     spec["preferences"] = dict(preferences)
     if "min_x_span" in preferences:
         spec["constraints"]["min_x_span"] = float(preferences["min_x_span"])
@@ -1041,6 +1181,7 @@ def layout_diagnostics(
             "centroid_y": 0.0,
             "cluster_penalty": 1.0,
             "spread_score": 0.0,
+            "inline_wake_overlap_proxy": 0.0,
         }
     min_pair = periodic_min_distance(arr, lx, ly)
     if not math.isfinite(min_pair):
@@ -1049,6 +1190,22 @@ def layout_diagnostics(
     y_span = float(np.max(arr[:, 1]) - np.min(arr[:, 1])) if arr.shape[0] > 1 else 0.0
     cluster_penalty = max(0.0, float(min_center_distance) - float(min_pair)) / max(float(min_center_distance), 1.0e-8)
     spread_score = 0.5 * (x_span / max(float(lx), 1.0e-8) + y_span / max(float(ly), 1.0e-8))
+    inline_overlap = 0.0
+    if arr.shape[0] > 1:
+        ordered_pairs = 0
+        overlapping_pairs = 0
+        for i in range(arr.shape[0]):
+            for j in range(arr.shape[0]):
+                if i == j:
+                    continue
+                dx = float((arr[j, 0] - arr[i, 0]) % float(lx))
+                if dx <= 1.0e-8 or dx > 0.65 * float(lx):
+                    continue
+                dy = float(((arr[j, 1] - arr[i, 1] + 0.5 * float(ly)) % float(ly)) - 0.5 * float(ly))
+                ordered_pairs += 1
+                if abs(dy) < float(min_center_distance):
+                    overlapping_pairs += 1
+        inline_overlap = float(overlapping_pairs) / max(float(ordered_pairs), 1.0)
     return {
         "min_pair_distance": float(min_pair),
         "x_span": x_span,
@@ -1057,6 +1214,7 @@ def layout_diagnostics(
         "centroid_y": float(np.mean(arr[:, 1])),
         "cluster_penalty": float(cluster_penalty),
         "spread_score": float(spread_score),
+        "inline_wake_overlap_proxy": float(inline_overlap),
     }
 
 
@@ -1100,7 +1258,7 @@ def plot_candidate_flow(
 
     cols = min(3, n_channels)
     rows = int(math.ceil(n_channels / cols))
-    fig, axes = plt.subplots(rows, cols, figsize=(4.8 * cols, 3.7 * rows), dpi=150, constrained_layout=True)
+    fig, axes = plt.subplots(rows, cols, figsize=(4.8 * cols, 3.7 * rows), dpi=180, constrained_layout=True)
     axes_arr = np.asarray(axes).reshape(-1)
     extent = (0.0, float(lx), 0.0, float(ly))
     for idx, ax in enumerate(axes_arr):
@@ -1109,15 +1267,7 @@ def plot_candidate_flow(
             continue
         name = names[idx] if idx < len(names) else f"ch{idx}"
         vmin, vmax = _field_color_limits(cycle_arr[..., idx], name)
-        im = ax.imshow(
-            frame[..., idx],
-            origin="lower",
-            extent=extent,
-            cmap=channel_cmap(name),
-            vmin=vmin,
-            vmax=vmax,
-            aspect="equal",
-        )
+        im = _imshow_field(ax, frame[..., idx], extent=extent, cmap=channel_cmap(name), vmin=vmin, vmax=vmax)
         overlay_cylinders(ax, centers, linewidth=1.0)
         ax.set_title(f"Pred {name}")
         ax.set_xlabel("x")
@@ -1221,22 +1371,63 @@ def try_plot_rich_organization(
         return False
 
 
-def plot_sampled_layouts(candidates: Sequence[Mapping[str, Any]], out_path: Path, *, lx: float, ly: float) -> None:
-    fig, ax = plt.subplots(figsize=(8, 4), dpi=150)
+def plot_sampled_layouts(
+    candidates: Sequence[Mapping[str, Any]],
+    out_path: Path,
+    *,
+    lx: float,
+    ly: float,
+    title: str = "Sampled layouts colored by verified score",
+) -> None:
+    if not candidates:
+        return
+    fig, ax = plt.subplots(figsize=(9.2, 5.2), dpi=170)
     scores = [float(c.get("score", float("nan"))) for c in candidates]
     finite_scores = [s for s in scores if math.isfinite(s)]
     fallback = max(finite_scores) if finite_scores else 1.0
+    score_min = min(finite_scores) if finite_scores else 0.0
+    score_max = max(finite_scores) if finite_scores else 1.0
+    if abs(score_max - score_min) <= 1.0e-12:
+        score_max = score_min + 1.0
+    norm = plt.Normalize(vmin=score_min, vmax=score_max)
     for idx, candidate in enumerate(candidates):
         centers = np.asarray(candidate["centers"], dtype=np.float32).reshape(-1, 2)
         score = scores[idx] if math.isfinite(scores[idx]) else fallback
-        color = plt.cm.viridis(1.0 - min(score / max(fallback, 1.0e-8), 1.0))
-        ax.scatter(centers[:, 0], centers[:, 1], s=14, color=color, alpha=0.65)
+        color = plt.cm.viridis_r(norm(score))
+        ax.scatter(centers[:, 0], centers[:, 1], s=16, color=color, alpha=0.58, edgecolors="none")
+    top = sorted(candidates, key=lambda c: float(c.get("score", float("inf"))))[: min(3, len(candidates))]
+    for rank_idx, candidate in enumerate(top):
+        centers = np.asarray(candidate["centers"], dtype=np.float32).reshape(-1, 2)
+        ax.scatter(
+            centers[:, 0],
+            centers[:, 1],
+            s=70 - 10 * rank_idx,
+            facecolors="none",
+            edgecolors=["#111111", "#666666", "#999999"][rank_idx],
+            linewidths=1.2,
+            label=f"top {rank_idx + 1} layout",
+        )
     ax.set_xlim(0, lx)
     ax.set_ylim(0, ly)
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, alpha=0.25)
-    ax.set_title("Sampled layouts colored by verified score")
-    fig.tight_layout()
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_title(title)
+    sm = plt.cm.ScalarMappable(norm=norm, cmap="viridis_r")
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.03)
+    cbar.set_label("Verified score (lower is better)")
+    ax.legend(loc="upper right", fontsize=8, frameon=True)
+    fig.text(
+        0.5,
+        0.015,
+        "Each dot is one cylinder center from one sampled layout. Dense regions show recurring posterior placement preferences, not separate physical clusters within a single design.",
+        ha="center",
+        va="bottom",
+        fontsize=8.5,
+    )
+    fig.subplots_adjust(bottom=0.14)
     fig.savefig(out_path)
     plt.close(fig)
 
@@ -1250,31 +1441,59 @@ def plot_kpi_target_vs_achieved(
     if not target_kpis or not verified:
         return
     top = verified[: min(5, len(verified))]
-    x = np.arange(len(target_kpis))
-    width = 0.8 / max(len(top), 1)
-    fig, ax = plt.subplots(figsize=(max(8, 1.2 * len(target_kpis)), 4.5), dpi=150)
-    for i, candidate in enumerate(top):
-        vals = [float(candidate.get("kpis", {}).get(name, 0.0)) for name in target_kpis]
-        ax.bar(x + i * width, vals, width=width, label=f"rank {i}")
+    cols = min(3, len(target_kpis))
+    rows = int(math.ceil(len(target_kpis) / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(4.8 * cols, 3.4 * rows), dpi=170, constrained_layout=True)
+    axes_arr = np.asarray(axes).reshape(-1)
+    colors = plt.cm.tab10(np.linspace(0.0, 1.0, max(len(top), 2)))
+    rank_labels = [f"rank {int(c.get('rank', i))}" if str(c.get("rank", "")) != "" else f"rank {i}" for i, c in enumerate(top)]
     for idx, name in enumerate(target_kpis):
+        ax = axes_arr[idx]
+        vals = [float(candidate.get("kpis", {}).get(name, float("nan"))) for candidate in top]
+        x = np.arange(len(vals))
+        ax.bar(x, vals, color=colors[: len(vals)], alpha=0.86)
+        ax.set_xticks(x)
+        ax.set_xticklabels(rank_labels, rotation=25, ha="right", fontsize=8)
+        ax.set_title(str(name))
+        ax.set_ylabel("value")
+        ax.grid(True, axis="y", alpha=0.25)
         spec = target_payload["kpis"][name]
+        target_values: List[float] = []
         if not isinstance(spec, Mapping):
-            ax.axhline(float(spec), color="black", lw=0.7, alpha=0.25)
-            continue
-        mode = str(spec.get("mode", "exact"))
-        if mode == "range":
-            ax.vlines(idx + 0.4, float(spec.get("low", 0.0)), float(spec.get("high", 0.0)), color="black", lw=2.0)
-        elif "value" in spec:
-            ax.scatter([idx + 0.4], [float(spec["value"])], color="black", s=18, zorder=5)
-        elif "high" in spec:
-            ax.scatter([idx + 0.4], [float(spec["high"])], color="black", marker="v", s=18, zorder=5)
-        elif "low" in spec:
-            ax.scatter([idx + 0.4], [float(spec["low"])], color="black", marker="^", s=18, zorder=5)
-    ax.set_xticks(x + 0.4)
-    ax.set_xticklabels(target_kpis, rotation=30, ha="right")
-    ax.set_ylabel("KPI value")
-    ax.legend(fontsize=8)
-    fig.tight_layout()
+            target = float(spec)
+            target_values.append(target)
+            ax.axhline(target, color="black", lw=1.1, alpha=0.85, label="target")
+        else:
+            mode = str(spec.get("mode", "exact"))
+            if mode == "range":
+                low = float(spec.get("low", 0.0))
+                high = float(spec.get("high", 0.0))
+                target_values.extend([low, high])
+                ax.axhspan(low, high, color="#2ca02c", alpha=0.14, label="target range")
+                ax.axhline(low, color="#2ca02c", lw=0.9, alpha=0.9)
+                ax.axhline(high, color="#2ca02c", lw=0.9, alpha=0.9)
+            elif "value" in spec:
+                target = float(spec["value"])
+                target_values.append(target)
+                ax.axhline(target, color="black", lw=1.1, alpha=0.85, label="target")
+            elif "high" in spec:
+                target = float(spec["high"])
+                target_values.append(target)
+                ax.axhline(target, color="#d62728", lw=1.1, alpha=0.85, label="upper target")
+            elif "low" in spec:
+                target = float(spec["low"])
+                target_values.append(target)
+                ax.axhline(target, color="#1f77b4", lw=1.1, alpha=0.85, label="lower target")
+        finite_vals = [float(v) for v in vals + target_values if math.isfinite(float(v))]
+        if finite_vals:
+            ymin = min(finite_vals)
+            ymax = max(finite_vals)
+            pad = 0.08 * max(abs(ymax - ymin), abs(ymax), abs(ymin), 1.0e-8)
+            ax.set_ylim(ymin - pad, ymax + pad)
+        ax.legend(fontsize=7, loc="best")
+    for ax in axes_arr[len(target_kpis) :]:
+        ax.axis("off")
+    fig.suptitle("KPI target vs achieved by ranked candidate")
     fig.savefig(out_path)
     plt.close(fig)
 
@@ -1373,8 +1592,8 @@ def try_save_cycle_gif(
     vmin, vmax = _field_color_limits(field, channel_name)
     extent = (0.0, float(lx), 0.0, float(ly))
 
-    fig, ax = plt.subplots(figsize=(10, 5), dpi=120, constrained_layout=True)
-    im = ax.imshow(field[0], origin="lower", extent=extent, cmap=channel_cmap(channel_name), vmin=vmin, vmax=vmax, aspect="equal")
+    fig, ax = plt.subplots(figsize=(10.5, 4.8), dpi=160, constrained_layout=True)
+    im = _imshow_field(ax, field[0], extent=extent, cmap=channel_cmap(channel_name), vmin=vmin, vmax=vmax)
     ax.set_title(f"Pred {channel_name}")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
@@ -1393,6 +1612,59 @@ def try_save_cycle_gif(
 
     anim = FuncAnimation(fig, update, frames=field.shape[0], blit=False)
     anim.save(out_path, writer=PillowWriter(fps=10))
+    plt.close(fig)
+
+
+def try_save_ml_simulation_comparison_gif(
+    ml_fields: np.ndarray,
+    sim_fields: np.ndarray,
+    centers: np.ndarray,
+    out_path: Path,
+    *,
+    channel_name: str,
+    lx: float,
+    ly: float,
+    vmin: Optional[float],
+    vmax: Optional[float],
+    diff_vmax: float,
+    frame_metrics: Sequence[Mapping[str, float]],
+    best_shift: int,
+) -> None:
+    ml_arr = np.asarray(ml_fields, dtype=np.float32)
+    sim_arr = np.asarray(sim_fields, dtype=np.float32)
+    if ml_arr.shape != sim_arr.shape or ml_arr.ndim != 3:
+        return
+    extent = (0.0, float(lx), 0.0, float(ly))
+    fig, axes = plt.subplots(1, 3, figsize=(15.0, 4.8), dpi=150, constrained_layout=True)
+    im_ml = _imshow_field(axes[0], ml_arr[0], extent=extent, cmap=channel_cmap(channel_name), vmin=vmin, vmax=vmax)
+    im_sim = _imshow_field(axes[1], sim_arr[0], extent=extent, cmap=channel_cmap(channel_name), vmin=vmin, vmax=vmax)
+    im_diff = _imshow_field(axes[2], ml_arr[0] - sim_arr[0], extent=extent, cmap="RdBu_r", vmin=-diff_vmax, vmax=diff_vmax)
+    for ax, title in zip(axes, ("ML prediction", "Processed simulation", "ML - simulation error")):
+        overlay_cylinders(ax, centers, linewidth=1.0)
+        ax.set_title(f"{title} | {channel_name}")
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        ax.set_xlim(0, lx)
+        ax.set_ylim(0, ly)
+    fig.colorbar(im_ml, ax=axes[0], fraction=0.046, pad=0.03)
+    fig.colorbar(im_sim, ax=axes[1], fraction=0.046, pad=0.03)
+    fig.colorbar(im_diff, ax=axes[2], fraction=0.046, pad=0.03)
+    phase_values = np.linspace(0.0, 1.0, ml_arr.shape[0], endpoint=False)
+
+    def update(frame_idx: int):
+        im_ml.set_data(ml_arr[frame_idx])
+        im_sim.set_data(sim_arr[frame_idx])
+        im_diff.set_data(ml_arr[frame_idx] - sim_arr[frame_idx])
+        rel_l2 = float(frame_metrics[frame_idx].get("relative_l2", float("nan"))) if frame_idx < len(frame_metrics) else float("nan")
+        rmse = float(frame_metrics[frame_idx].get("rmse", float("nan"))) if frame_idx < len(frame_metrics) else float("nan")
+        fig.suptitle(
+            f"phase_tau={phase_values[frame_idx]:.3f} | best ML phase shift={best_shift} frames | "
+            f"frame rel L2={rel_l2:.3e} | RMSE={rmse:.3e}"
+        )
+        return [im_ml, im_sim, im_diff]
+
+    anim = FuncAnimation(fig, update, frames=ml_arr.shape[0], blit=False)
+    anim.save(out_path, writer=PillowWriter(fps=8))
     plt.close(fig)
 
 
@@ -1450,8 +1722,13 @@ def write_candidates_csv(candidates: Sequence[Mapping[str, Any]], path: Path) ->
         "centroid_y",
         "cluster_penalty",
         "spread_score",
+        "inline_wake_overlap_proxy",
         "repaired",
         "raw_count",
+        "active_kpi_names",
+        "downstream_power_proxy",
+        "wake_shadow_area",
+        "downstream_u_uniformity",
         "count_probabilities_summary",
         "per_kpi_errors_json",
     ]
@@ -1486,8 +1763,13 @@ def write_candidates_csv(candidates: Sequence[Mapping[str, Any]], path: Path) ->
                     "centroid_y": candidate.get("centroid_y", ""),
                     "cluster_penalty": candidate.get("cluster_penalty", ""),
                     "spread_score": candidate.get("spread_score", ""),
+                    "inline_wake_overlap_proxy": candidate.get("inline_wake_overlap_proxy", ""),
                     "repaired": candidate.get("repaired", validity.get("repaired", "")),
                     "raw_count": candidate.get("raw_count", ""),
+                    "active_kpi_names": ",".join([str(name) for name in candidate.get("active_kpi_names", [])]),
+                    "downstream_power_proxy": candidate.get("kpis", {}).get("downstream_power_proxy", ""),
+                    "wake_shadow_area": candidate.get("kpis", {}).get("wake_shadow_area", ""),
+                    "downstream_u_uniformity": candidate.get("kpis", {}).get("downstream_u_uniformity", ""),
                     "count_probabilities_summary": candidate.get("count_probabilities_summary", ""),
                     "per_kpi_errors_json": json.dumps(json_safe(candidate.get("per_kpi_errors", {}))),
                 }
@@ -1520,6 +1802,7 @@ def main() -> None:
         re_scale=float(inv_model_cfg.get("re_scale", 200.0)),
         domain_length_scale=max(float(inv_model_cfg.get("domain_length_x", 24.0)), float(inv_model_cfg.get("domain_length_y", 12.0))),
     )
+    active_kpi_names = [str(name) for name in target_spec.get("kpi_targets", {}).keys()]
     target_vec = torch.from_numpy(np.asarray(target_spec["vector"], dtype=np.float32)).to(device=device)
     samples = model.sample_designs(
         target_vec,
@@ -1564,6 +1847,7 @@ def main() -> None:
         candidate["sample_index"] = idx
         candidate["Re"] = re_value
         candidate["num_cylinders"] = int(sample["count"])
+        candidate["active_kpi_names"] = list(active_kpi_names)
         candidate["verified"] = False
         candidate["score"] = float("inf")
         candidate["target_count_error"] = abs(float(candidate["num_cylinders"]) - target_count_mid)
@@ -1635,6 +1919,9 @@ def main() -> None:
             {
                 "verified": True,
                 "kpis": kpis,
+                "downstream_power_proxy": kpis.get("downstream_power_proxy"),
+                "wake_shadow_area": kpis.get("wake_shadow_area"),
+                "downstream_u_uniformity": kpis.get("downstream_u_uniformity"),
                 "kpis_std": kpis_std,
                 "score": float(score["total_score"]),
                 "uncertainty_penalty": float(uncertainty_penalty),
@@ -1720,7 +2007,12 @@ def main() -> None:
             }
         ),
     )
-    plot_sampled_layouts(ranked, out_dir / "sampled_layouts_by_score.png", lx=lx, ly=ly)
+    layout_title = "Sampled layouts colored by verified score"
+    target_name = str(target_payload.get("name", "")).lower()
+    target_kpi_payload = target_payload.get("kpis", {}) if isinstance(target_payload.get("kpis", {}), Mapping) else {}
+    if "windfarm" in target_name or "wind_farm" in target_name or "downstream_power_proxy" in target_kpi_payload:
+        layout_title = "Wind-farm wake-loss target: expect staggered / spread layouts"
+    plot_sampled_layouts(ranked, out_dir / "sampled_layouts_by_score.png", lx=lx, ly=ly, title=layout_title)
     plot_kpi_target_vs_achieved(verified_ranked, target_payload, out_dir / "kpi_target_vs_achieved.png")
     plot_diversity(ranked, out_dir / "layout_diversity.png", max_num_cylinders=int(inv_model_cfg.get("max_num_cylinders", 8)))
 

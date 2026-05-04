@@ -155,6 +155,7 @@ class InverseModelConfig:
     min_center_distance: float = 1.1
     re_scale: float = 200.0
     center_decode_mode: str = "wrap"
+    latent_align_completeness_power: float = 0.5
 
     def __post_init__(self) -> None:
         self.max_num_cylinders = int(self.max_num_cylinders)
@@ -456,8 +457,19 @@ class HypergraphInverseDesignFlow(nn.Module):
             loss_count = x1.new_tensor(0.0)
             count_accuracy = x1.new_tensor(float("nan"))
 
-        loss_behavior = F.mse_loss(condition["behavior_latent_hat"], batch["behavior_target"])
-        loss_organization = F.mse_loss(condition["organization_latent_hat"], batch["organization_target"])
+        target_active_fraction = batch.get("target_active_fraction")
+        if target_active_fraction is None:
+            loss_behavior = F.mse_loss(condition["behavior_latent_hat"], batch["behavior_target"])
+            loss_organization = F.mse_loss(condition["organization_latent_hat"], batch["organization_target"])
+            align_weight_mean = x1.new_tensor(1.0)
+        else:
+            align_weight = torch.as_tensor(target_active_fraction, device=x1.device, dtype=x1.dtype).reshape(-1).clamp(0.0, 1.0)
+            align_weight = align_weight.pow(max(float(self.cfg.latent_align_completeness_power), 0.0))
+            loss_behavior_i = torch.mean((condition["behavior_latent_hat"] - batch["behavior_target"]).square(), dim=-1)
+            loss_organization_i = torch.mean((condition["organization_latent_hat"] - batch["organization_target"]).square(), dim=-1)
+            loss_behavior = torch.mean(align_weight * loss_behavior_i)
+            loss_organization = torch.mean(align_weight * loss_organization_i)
+            align_weight_mean = align_weight.mean()
         x1_hat = x_t + (1.0 - t) * v_pred
         loss_validity = self._overlap_prior(x1_hat)
 
@@ -485,6 +497,7 @@ class HypergraphInverseDesignFlow(nn.Module):
             "loss_organization": loss_organization.detach(),
             "loss_validity_prior": loss_validity.detach(),
             "count_accuracy": count_accuracy.detach(),
+            "latent_align_weight_mean": align_weight_mean.detach(),
         }
         return total, metrics
 

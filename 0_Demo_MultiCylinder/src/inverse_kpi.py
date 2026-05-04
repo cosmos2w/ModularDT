@@ -32,6 +32,12 @@ DEFAULT_KPI_NAMES: Tuple[str, ...] = (
     "phase_signal_amplitude",
 )
 
+WIND_FARM_KPI_NAMES: Tuple[str, ...] = DEFAULT_KPI_NAMES + (
+    "downstream_power_proxy",
+    "wake_shadow_area",
+    "downstream_u_uniformity",
+)
+
 TARGET_BLOCKS: Tuple[str, ...] = (
     "values",
     "value_mask",
@@ -61,6 +67,9 @@ NONNEGATIVE_KPI_NAMES = frozenset(
         "fluctuation_energy",
         "downstream_omega_area",
         "phase_signal_amplitude",
+        "downstream_power_proxy",
+        "wake_shadow_area",
+        "downstream_u_uniformity",
     }
 )
 
@@ -196,9 +205,13 @@ def compute_cycle_kpis(
     reference_u = upstream_u if abs(upstream_u) > 1.0e-8 else global_u
     wake_deficit = reference_u - downstream_u
 
+    downstream_u_values = u[:, downstream]
     downstream_u_fluct = u[:, downstream] - np.mean(u[:, downstream], axis=0, keepdims=True)
     downstream_v = v[:, downstream]
     wake_mixing = float(np.mean(np.sqrt(np.square(downstream_v) + np.square(downstream_u_fluct))))
+    positive_downstream_u = np.maximum(downstream_u_values, 0.0)
+    shadow_threshold = _finite_float((domain or {}).get("wake_shadow_threshold", 0.20), 0.20) if isinstance(domain, Mapping) else 0.20
+    wake_shadow_cutoff = upstream_u * (1.0 - float(shadow_threshold))
 
     omega_threshold = 0.25 * float(np.max(omega_abs)) if omega_abs.size else 0.0
     downstream_area = float(np.mean(omega_abs[:, downstream] > omega_threshold)) if omega_threshold > 0.0 else 0.0
@@ -214,6 +227,9 @@ def compute_cycle_kpis(
         "fluctuation_energy": float(np.mean(np.square(arr - time_mean))),
         "downstream_omega_area": downstream_area,
         "phase_signal_amplitude": float(np.max(enstrophy_t) - np.min(enstrophy_t)),
+        "downstream_power_proxy": float(np.mean(np.power(positive_downstream_u, 3))),
+        "wake_shadow_area": float(np.mean(downstream_u_values < wake_shadow_cutoff)),
+        "downstream_u_uniformity": float(np.std(downstream_u_values)),
     }
 
 
@@ -265,29 +281,82 @@ def augment_kpi_targets_for_training(
     kpi_stats: Optional[Mapping[str, Any]],
     cfg: Mapping[str, Any],
     rng: Any,
-) -> Dict[str, Dict[str, float | str]]:
+    *,
+    return_metadata: bool = False,
+) -> Dict[str, Dict[str, float | str]] | Dict[str, Any]:
     """Create a partial KPI target spec from one observed training case."""
 
-    if not bool(cfg.get("enabled", False)):
+    def _with_metadata(targets: Dict[str, Dict[str, float | str]], names_all: Sequence[str]) -> Dict[str, Any]:
+        active = [str(name) for name in names_all if str(name) in targets]
+        active_set = set(active)
+        mask = [1.0 if str(name) in active_set else 0.0 for name in kpi_names]
+        if not return_metadata:
+            return targets
         return {
+            "kpi_targets": targets,
+            "active_kpi_names": active,
+            "active_kpi_count": len(active),
+            "target_active_fraction": float(len(active)) / max(float(len(kpi_names)), 1.0),
+            "active_kpi_mask": mask,
+        }
+
+    if not bool(cfg.get("enabled", False)):
+        targets = {
             str(name): {"mode": "exact", "value": _finite_float(kpi_dict.get(name, 0.0), 0.0), "weight": 1.0}
             for name in kpi_names
             if name in kpi_dict
         }
+        return _with_metadata(targets, kpi_names)
 
     names = [str(name) for name in kpi_names if name in kpi_dict]
     if not names:
-        return {}
+        return _with_metadata({}, kpi_names)
 
+    mode_name = str(cfg.get("mode", "independent_dropout")).lower().strip()
     always = {str(name) for name in cfg.get("always_include", [])}
     drop_probability = min(max(_finite_float(cfg.get("drop_probability", 0.0), 0.0), 0.0), 1.0)
-    min_active = min(max(int(cfg.get("min_active_kpis", 1)), 0), len(names))
-    active = [name for name in names if name in always or float(rng.random()) >= drop_probability]
-    if len(active) < min_active:
-        missing = [name for name in names if name not in active]
-        if missing:
-            chosen = rng.choice(missing, size=min(min_active - len(active), len(missing)), replace=False)
-            active.extend([str(name) for name in np.asarray(chosen).reshape(-1)])
+    min_active_cfg = min(max(int(cfg.get("min_active_kpis", 1)), 0), len(names))
+    max_active_raw = cfg.get("max_active_kpis", None)
+    max_active_cfg = len(names) if max_active_raw is None else min(max(int(max_active_raw), 0), len(names))
+    always_active = [name for name in names if name in always]
+    if mode_name == "bounded_subset":
+        max_drop_fraction = min(max(_finite_float(cfg.get("max_drop_fraction", 1.0), 1.0), 0.0), 1.0)
+        bounded_min = int(math.ceil(len(names) * (1.0 - max_drop_fraction)))
+        min_active = max(min_active_cfg, bounded_min, len(always_active))
+        min_active = min(min_active, max_active_cfg)
+        max_active = max(max_active_cfg, min_active)
+        removable = [name for name in names if name not in always]
+        drop_candidates = [name for name in removable if float(rng.random()) < drop_probability]
+        if drop_candidates:
+            drop_candidates = [str(name) for name in np.asarray(rng.permutation(drop_candidates)).reshape(-1)]
+        max_drops = max(len(names) - min_active, 0)
+        drop_set = set(drop_candidates[:max_drops])
+        active = [name for name in names if name not in drop_set]
+        if len(active) > max_active:
+            optional_active = [name for name in active if name not in always]
+            remove_count = min(len(active) - max_active, len(optional_active))
+            if remove_count > 0:
+                remove = set(str(name) for name in np.asarray(rng.choice(optional_active, size=remove_count, replace=False)).reshape(-1))
+                active = [name for name in active if name not in remove]
+        if len(active) < min_active:
+            missing = [name for name in names if name not in active]
+            if missing:
+                chosen = rng.choice(missing, size=min(min_active - len(active), len(missing)), replace=False)
+                active.extend([str(name) for name in np.asarray(chosen).reshape(-1)])
+    else:
+        min_active = min(max(min_active_cfg, len(always_active)), max_active_cfg)
+        active = [name for name in names if name in always or float(rng.random()) >= drop_probability]
+        if len(active) < min_active:
+            missing = [name for name in names if name not in active]
+            if missing:
+                chosen = rng.choice(missing, size=min(min_active - len(active), len(missing)), replace=False)
+                active.extend([str(name) for name in np.asarray(chosen).reshape(-1)])
+        if len(active) > max_active_cfg:
+            optional_active = [name for name in active if name not in always]
+            remove_count = min(len(active) - max_active_cfg, len(optional_active))
+            if remove_count > 0:
+                remove = set(str(name) for name in np.asarray(rng.choice(optional_active, size=remove_count, replace=False)).reshape(-1))
+                active = [name for name in active if name not in remove]
 
     probs = np.asarray(
         [
@@ -325,7 +394,7 @@ def augment_kpi_targets_for_training(
             targets[name] = {"mode": "min", "low": float(low), "weight": 1.0}
         else:
             targets[name] = {"mode": "exact", "value": float(value), "weight": 1.0}
-    return targets
+    return _with_metadata(targets, kpi_names)
 
 
 def _normalize_scalar(name: str, value: float, kpi_names: Sequence[str], stats: Optional[Mapping[str, Any]], normalize: bool) -> float:

@@ -570,7 +570,10 @@ For memory control, use `--phase-chunk-size` and `--sample-chunk-size`.
 The inverse target is a compact specification
 `T = KPI targets + constraints + preferences`. The first demo uses inert flow
 KPIs such as enstrophy, wake deficit, pressure range, fluctuation energy, and
-phase-signal amplitude, plus count/Re/spacing constraints.
+phase-signal amplitude, plus count/Re/spacing constraints. Wind-farm-inspired
+targets can also opt into downstream KPIs: `downstream_power_proxy` approximates
+available kinetic energy, `wake_shadow_area` approximates wake-loss area, and
+`downstream_u_uniformity` measures downstream velocity spread.
 
 Conceptually the inverse path is behavior-first:
 
@@ -602,10 +605,21 @@ checkpoints alone are not valid forward verifiers because they do not model the
 conditional field posterior.
 
 Target augmentation is enabled for the training split so the model sees partial
-KPI requests like the demo JSON, not only exact self-reconstruction targets. It
-randomly keeps a subset of KPIs, converts observed values to exact/range/max/min
-targets, and always keeps configured anchor KPIs such as enstrophy. Validation
-remains deterministic.
+KPI requests like the demo JSON, not only exact self-reconstruction targets. The
+target vector has value, bound, mask, and weight blocks so omitted KPIs truly
+become unknown instead of zero-valued requests. `dataset.samples_per_case`
+expands each physical case into several deterministic virtual target views per
+epoch; they share the same design and frozen forward latents, but expose
+different exact/range/max/min KPI subsets. `bounded_subset` keeps the active KPI
+count near the full target while still training on partial specifications and
+anchor KPIs such as enstrophy. Sparse targets can describe many plausible wake
+states, so the posterior is intentionally multimodal. Validation remains
+deterministic.
+
+Behavior and organization latent alignment is scaled by target completeness.
+Full KPI specifications strongly supervise the frozen-forward behavior and
+organizer state, while sparse specifications apply weaker latent alignment so
+multiple behavior/organization modes can remain viable.
 
 In inverse training logs, `forward_score` / `val_forward_score` is kept for
 compatibility and is also logged as `val_self_target_forward_score`: it is the
@@ -640,6 +654,11 @@ python src/evaluate_inverse.py \
   --verify-top-k 16 \
   --device cuda:0
 ```
+
+The wind-farm wake-loss preset treats cylinders as wake-generating objects and
+asks for preserved downstream kinetic energy with small wake-shadow area. A good
+layout is expected to spread and stagger cylinders rather than forming a compact
+inline chain.
 
 KPI target modes `range`, `max`, and `min` are constraint-style objectives and
 are preferred for the first demo config. `minimize` and `maximize` are ranking
