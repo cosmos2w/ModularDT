@@ -1,0 +1,51 @@
+{
+  "thermal": {
+    "enabled": true,
+    "t_in": 0.0,
+    "t_wall": 0.0,
+    "solid_alpha": 0.01,
+    "fluid_alpha": 0.02,
+    "solid_k": 1.0,
+    "fluid_k": 1.0,
+    "heat_power_min": 0.5,
+    "heat_power_max": 2.0,
+    "heat_start_time": 0.0,
+    "convergence_window": 20,
+    "convergence_tol": 1e-4
+  },
+  "layout": {
+    "num_modules": 1,
+    "seed": 11,
+    "centers": null,
+    "heat_powers": null
+  },
+  "save": {
+    "root_dir": "./Data_Saved/LocalModule_Raw",
+    "case_id": "local_0001",
+    "tag": "local_module_tiny",
+    "save_pressure": false,
+    "save_vorticity": false,
+    "save_temperature": true,
+    "save_internal_temperature": true,
+    "save_interface_response": true,
+    "final_window_frames": 1
+  },
+  "local_module": {
+    "local_grid_size": 32,
+    "n_interface_points": 32,
+    "q_min": 0.5,
+    "q_max": 2.0,
+    "h_min": 0.2,
+    "h_max": 3.0,
+    "t_env_min": -0.5,
+    "t_env_max": 0.5,
+    "n_boundary_modes": 4,
+    "solver_iterations": 800,
+    "solver_tolerance": 1e-6,
+    "relaxation": 1.25
+  },
+  "execution": {
+    "device": "cpu",
+    "gpu_id": 0
+  }
+}
