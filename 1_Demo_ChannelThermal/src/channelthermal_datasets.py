@@ -294,6 +294,21 @@ class GlobalChannelThermalDataset(Dataset):
             self.n_interface_points = int(h5.attrs.get("n_interface_points", 0))
             self.local_grid_size = int(h5.attrs.get("local_grid_size", 0))
             self.material_param_dim = 6
+            self.target_mode = _decode_scalar_string(h5.attrs.get("target_mode", "unknown"))
+            self.require_converged = bool(h5.attrs.get("require_converged", False))
+            converged_by_case: Dict[str, bool] = {}
+            for case_id in self.case_ids:
+                group = h5["cases"][case_id]
+                if "converged" in group.attrs:
+                    converged_by_case[case_id] = bool(group.attrs["converged"])
+                else:
+                    cfg = _read_case_config(group)
+                    runtime = cfg.get("runtime", {}) if isinstance(cfg, dict) else {}
+                    converged_by_case[case_id] = bool(runtime.get("converged", False))
+            self.converged_by_case = converged_by_case
+            self.selected_converged_flags = [self.converged_by_case.get(case_id, False) for case_id in self.selected_case_ids]
+            self.num_selected_converged = int(sum(1 for flag in self.selected_converged_flags if flag))
+            self.num_selected_unconverged = int(len(self.selected_converged_flags) - self.num_selected_converged)
 
     def __len__(self) -> int:
         return len(self.selected_case_ids)
@@ -438,4 +453,3 @@ class GlobalChannelThermalDataset(Dataset):
             sample["steady_field"] = group["steady_field"][...].astype(np.float32)
             sample["rms_field"] = group["rms_field"][...].astype(np.float32) if "rms_field" in group else np.zeros_like(sample["steady_field"])
         return sample
-

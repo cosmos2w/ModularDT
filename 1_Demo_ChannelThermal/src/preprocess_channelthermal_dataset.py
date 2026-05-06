@@ -132,6 +132,25 @@ class ProcessedCase:
     heat_powers: np.ndarray
     module_mask: np.ndarray
     exclude_module_interior_from_global_points: bool
+    converged: bool
+    converged_time: float
+    converged_step: int
+    final_delta_inf: float
+    final_delta_l2_rel: float
+    selected_frame_ids: np.ndarray
+    packed_unconverged: bool
+
+
+@dataclass
+class SelectionResult:
+    selected_rows: List[Dict[str, str]]
+    converged: bool
+    converged_time: float
+    converged_step: int
+    final_delta_inf: float
+    final_delta_l2_rel: float
+    packed_unconverged: bool
+    skip_reason: str = ""
 
 
 def parse_args() -> argparse.Namespace:
@@ -154,6 +173,27 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Sample global point targets from fluid cells only; use --no-exclude-module-interior-from-global-points for old behavior.",
     )
+    convergence_group = parser.add_mutually_exclusive_group()
+    convergence_group.add_argument(
+        "--require-converged",
+        dest="require_converged",
+        action="store_true",
+        default=True,
+        help="Skip raw cases without a converged saved frame (default).",
+    )
+    convergence_group.add_argument(
+        "--allow-unconverged",
+        dest="require_converged",
+        action="store_false",
+        help="Pack unconverged raw cases using the target-mode fallback.",
+    )
+    parser.add_argument(
+        "--target-mode",
+        choices=["converged_final", "converged_window_mean", "final_window_legacy"],
+        default="converged_final",
+        help="How to select steady training target frames.",
+    )
+    parser.add_argument("--min-final-window-frames", type=int, default=1, help="Minimum selected frames for window targets.")
     return parser.parse_args()
 
 
@@ -181,26 +221,147 @@ def discover_raw_cases(input_root: Path) -> List[RawCase]:
     return records
 
 
-def select_final_window(raw: RawCase, final_window_override: int | None) -> List[Dict[str, str]]:
-    """Select final frames after heat activation, with robust fallbacks.
+def _row_bool(row: Dict[str, str], key: str, default: bool = False) -> bool:
+    value = row.get(key, "")
+    if value == "":
+        return bool(default)
+    try:
+        return int(float(value)) != 0
+    except ValueError:
+        return str(value).strip().lower() in {"true", "yes", "y"}
 
-    The packed dataset is steady/quasi-steady. We therefore use only the final
-    heat-active frames, or warmup-complete frames if old raw data lacks explicit
-    heat flags.
-    """
+
+def _row_float(row: Dict[str, str], key: str, default: float = float("nan")) -> float:
+    try:
+        return float(row.get(key, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _runtime_float(runtime: Dict[str, Any], key: str, default: float = float("nan")) -> float:
+    value = runtime.get(key, default)
+    if value is None:
+        return float(default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _runtime_int(runtime: Dict[str, Any], key: str, default: int = -1) -> int:
+    value = runtime.get(key, default)
+    if value is None:
+        return int(default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _legacy_final_window(raw: RawCase, final_window_override: int | None) -> List[Dict[str, str]]:
+    """Select final frames using the historical heat-active fallback behavior."""
     heat_start = float(raw.cfg.thermal.heat_start_time)
     eligible: List[Dict[str, str]] = []
     for row in raw.frame_rows:
         time_value = float(row.get("time", "0.0"))
-        heat_active = int(float(row.get("heat_active", "1"))) == 1
+        heat_active = _row_bool(row, "heat_active", True)
         if heat_active and time_value >= heat_start:
             eligible.append(row)
     if not eligible:
-        eligible = [row for row in raw.frame_rows if int(float(row.get("warmup_complete", "1"))) == 1]
+        eligible = [row for row in raw.frame_rows if _row_bool(row, "warmup_complete", True)]
     if not eligible:
         eligible = list(raw.frame_rows)
     window = int(final_window_override or raw.cfg.save.final_window_frames)
     return eligible[-max(1, window) :]
+
+
+def _case_convergence_metadata(raw: RawCase) -> Tuple[bool, float, int, float, float]:
+    runtime = raw.cfg_payload.get("runtime", {}) if isinstance(raw.cfg_payload, dict) else {}
+    converged_rows = [row for row in raw.frame_rows if _row_bool(row, "converged", False)]
+    if converged_rows:
+        row = converged_rows[0]
+        converged = True
+        converged_time = _row_float(row, "time")
+        converged_step = int(_row_float(row, "step", -1))
+    else:
+        converged = bool(runtime.get("converged", False))
+        converged_time = _runtime_float(runtime, "converged_time")
+        converged_step = _runtime_int(runtime, "converged_step")
+    final_row = raw.frame_rows[-1] if raw.frame_rows else {}
+    final_delta_inf = _runtime_float(runtime, "final_delta_inf", _row_float(final_row, "delta_inf"))
+    final_delta_l2_rel = _runtime_float(runtime, "final_delta_l2_rel", _row_float(final_row, "delta_l2_rel"))
+    return converged, converged_time, converged_step, final_delta_inf, final_delta_l2_rel
+
+
+def select_final_window(
+    raw: RawCase,
+    final_window_override: int | None,
+    *,
+    target_mode: str,
+    require_converged: bool,
+    min_final_window_frames: int,
+) -> SelectionResult:
+    """Select target frames using convergence metadata by default."""
+    converged, converged_time, converged_step, final_delta_inf, final_delta_l2_rel = _case_convergence_metadata(raw)
+    min_frames = max(1, int(min_final_window_frames))
+
+    if target_mode == "final_window_legacy":
+        selected = _legacy_final_window(raw, final_window_override)
+        return SelectionResult(
+            selected_rows=selected,
+            converged=converged,
+            converged_time=converged_time,
+            converged_step=converged_step,
+            final_delta_inf=final_delta_inf,
+            final_delta_l2_rel=final_delta_l2_rel,
+            packed_unconverged=not converged,
+        )
+
+    converged_indices = [idx for idx, row in enumerate(raw.frame_rows) if _row_bool(row, "converged", False)]
+    if not converged_indices and converged:
+        if converged_step >= 0:
+            step_matches = [idx for idx, row in enumerate(raw.frame_rows) if int(_row_float(row, "step", -1)) == converged_step]
+            converged_indices.extend(step_matches)
+        if not converged_indices and np.isfinite(converged_time):
+            time_matches = [idx for idx, row in enumerate(raw.frame_rows) if _row_float(row, "time") >= converged_time]
+            if time_matches:
+                converged_indices.append(time_matches[0])
+    if not converged_indices:
+        if require_converged:
+            return SelectionResult([], converged, converged_time, converged_step, final_delta_inf, final_delta_l2_rel, False, "unconverged")
+        return SelectionResult(
+            selected_rows=[raw.frame_rows[-1]],
+            converged=converged,
+            converged_time=converged_time,
+            converged_step=converged_step,
+            final_delta_inf=final_delta_inf,
+            final_delta_l2_rel=final_delta_l2_rel,
+            packed_unconverged=True,
+        )
+
+    converged_idx = converged_indices[0]
+    if target_mode == "converged_final":
+        selected = [raw.frame_rows[converged_idx]]
+    elif target_mode == "converged_window_mean":
+        window = max(min_frames, int(final_window_override or raw.cfg.save.final_window_frames))
+        start = max(0, converged_idx - window + 1)
+        selected = list(raw.frame_rows[start : converged_idx + 1])
+        if len(selected) < min_frames:
+            return SelectionResult([], converged, converged_time, converged_step, final_delta_inf, final_delta_l2_rel, False, "insufficient_window")
+        if not all(_row_bool(row, "heat_active", False) for row in selected):
+            return SelectionResult([], converged, converged_time, converged_step, final_delta_inf, final_delta_l2_rel, False, "window_contains_heat_inactive")
+    else:
+        raise ValueError(f"Unsupported target_mode={target_mode!r}.")
+
+    return SelectionResult(
+        selected_rows=selected,
+        converged=converged,
+        converged_time=converged_time,
+        converged_step=converged_step,
+        final_delta_inf=final_delta_inf,
+        final_delta_l2_rel=final_delta_l2_rel,
+        packed_unconverged=False,
+    )
 
 
 def load_frame(case_dir: Path, row: Dict[str, str]) -> Dict[str, np.ndarray]:
@@ -353,18 +514,19 @@ def process_case(
     raw: RawCase,
     case_key: str,
     split: str,
-    final_window_override: int | None,
+    selection: SelectionResult,
     points_per_case: int,
     seed: int,
     exclude_module_interior_from_global_points: bool,
 ) -> ProcessedCase:
     """Convert one raw case folder into packed steady-window arrays."""
-    selected_rows = select_final_window(raw, final_window_override)
+    selected_rows = selection.selected_rows
 
     # Final-window averaging is the core steady/quasi-steady reduction. The raw
     # transient is not discarded on disk; only the packed dataset chooses this
     # first training target.
     tensor, last_payload, selected_times = stack_field_window(raw.case_dir, selected_rows)
+    selected_frame_ids = np.asarray([int(float(row.get("saved_frame", idx))) for idx, row in enumerate(selected_rows)], dtype=np.int32)
     steady_field = np.mean(tensor, axis=0).astype(np.float32)
     rms_field = np.sqrt(np.mean((tensor - steady_field[None, ...]) ** 2, axis=0)).astype(np.float32)
     x_grid, y_grid = build_uniform_grid(raw.cfg)
@@ -391,7 +553,7 @@ def process_case(
     internal_temperature = np.mean(np.stack(internal_frames, axis=0), axis=0).astype(np.float32)
     interface_response = np.mean(np.stack(interface_frames, axis=0), axis=0).astype(np.float32)
     internal_mask = last_payload["module_internal_mask"].astype(np.uint8)
-    feature_names = tuple(name.decode("utf-8") for name in last_payload["interface_feature_names"])
+    feature_names = tuple(name.decode("utf-8") if isinstance(name, bytes) else str(name) for name in last_payload["interface_feature_names"])
     interface_condition, interface_target = split_interface_response(interface_response, feature_names)
     centers = np.asarray(raw.cfg.layout.centers or [], dtype=np.float32)
     heat_powers = np.asarray(raw.cfg.layout.heat_powers or [], dtype=np.float32)
@@ -417,6 +579,13 @@ def process_case(
         heat_powers=heat_powers,
         module_mask=module_mask,
         exclude_module_interior_from_global_points=exclude_module_interior_from_global_points,
+        converged=bool(selection.converged),
+        converged_time=float(selection.converged_time),
+        converged_step=int(selection.converged_step),
+        final_delta_inf=float(selection.final_delta_inf),
+        final_delta_l2_rel=float(selection.final_delta_l2_rel),
+        selected_frame_ids=selected_frame_ids,
+        packed_unconverged=bool(selection.packed_unconverged),
     )
 
 
@@ -431,7 +600,19 @@ def write_global_case_index(output_root: Path, processed: Sequence[ProcessedCase
     """Write a small CSV summary next to the packed HDF5 file."""
     index_path = output_root / "global_case_index.csv"
     with index_path.open("w", newline="", encoding="utf-8") as f:
-        fieldnames = ["case_key", "split", "case_dir", "num_modules", "re", "heat_power_min", "heat_power_max"]
+        fieldnames = [
+            "case_key",
+            "split",
+            "case_dir",
+            "num_modules",
+            "re",
+            "heat_power_min",
+            "heat_power_max",
+            "converged",
+            "converged_time",
+            "final_delta_inf",
+            "final_delta_l2_rel",
+        ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for item in processed:
@@ -444,14 +625,44 @@ def write_global_case_index(output_root: Path, processed: Sequence[ProcessedCase
                     "re": item.cfg.flow.re,
                     "heat_power_min": float(np.min(item.heat_powers)) if len(item.heat_powers) else 0.0,
                     "heat_power_max": float(np.max(item.heat_powers)) if len(item.heat_powers) else 0.0,
+                    "converged": int(item.converged),
+                    "converged_time": item.converged_time,
+                    "final_delta_inf": item.final_delta_inf,
+                    "final_delta_l2_rel": item.final_delta_l2_rel,
                 }
             )
+
+
+def write_quality_report(output_root: Path, rows: Sequence[Dict[str, object]]) -> Path:
+    """Write per-case preprocessing convergence/packing status."""
+    output_root.mkdir(parents=True, exist_ok=True)
+    path = output_root / "preprocessing_case_quality.csv"
+    fieldnames = [
+        "case_key",
+        "converged",
+        "converged_time",
+        "final_delta_inf",
+        "final_delta_l2_rel",
+        "packed",
+        "skip_reason",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in fieldnames})
+    return path
 
 
 def _safe_mean_std(values: np.ndarray, axis: int | None = 0) -> Tuple[np.ndarray, np.ndarray]:
     if values.size == 0:
         return np.asarray([0.0], dtype=np.float32), np.asarray([0.0], dtype=np.float32)
     return np.asarray(np.mean(values, axis=axis), dtype=np.float32), np.asarray(np.std(values, axis=axis), dtype=np.float32)
+
+
+def _scalar_stat(value: np.ndarray) -> float:
+    arr = np.asarray(value, dtype=np.float32).reshape(-1)
+    return float(arr[0]) if arr.size else 0.0
 
 
 def write_normalization_group(h5, processed: Sequence[ProcessedCase]) -> None:
@@ -495,8 +706,8 @@ def write_normalization_group(h5, processed: Sequence[ProcessedCase]) -> None:
     norm.create_dataset("interface_condition_std", data=condition_std)
     norm.create_dataset("interface_target_mean", data=target_mean)
     norm.create_dataset("interface_target_std", data=target_std)
-    norm.create_dataset("internal_temperature_mean", data=np.asarray([float(internal_mean)], dtype=np.float32))
-    norm.create_dataset("internal_temperature_std", data=np.asarray([float(internal_std)], dtype=np.float32))
+    norm.create_dataset("internal_temperature_mean", data=np.asarray([_scalar_stat(internal_mean)], dtype=np.float32))
+    norm.create_dataset("internal_temperature_std", data=np.asarray([_scalar_stat(internal_std)], dtype=np.float32))
 
 
 def write_h5(
@@ -504,6 +715,9 @@ def write_h5(
     processed: Sequence[ProcessedCase],
     max_modules_arg: int,
     exclude_module_interior_from_global_points: bool,
+    *,
+    target_mode: str,
+    require_converged: bool,
 ) -> Path:
     """Write the packed global channel HDF5 file."""
     output_root.mkdir(parents=True, exist_ok=True)
@@ -516,6 +730,8 @@ def write_h5(
         h5.attrs["dataset_type"] = "channelthermal_steady"
         h5.attrs["dataset_role"] = "global_channelthermal"
         h5.attrs["target_kind"] = "steady_final_window"
+        h5.attrs["target_mode"] = str(target_mode)
+        h5.attrs["require_converged"] = bool(require_converged)
         h5.attrs["field_dim"] = len(CHANNEL_ORDER)
         h5.attrs["max_modules"] = max_modules
         h5.attrs["local_grid_size"] = local_grid_size
@@ -540,12 +756,20 @@ def write_h5(
             group.attrs["source_case_dir"] = str(item.case_dir)
             group.attrs["field_dim"] = len(CHANNEL_ORDER)
             group.attrs["channel_order"] = ",".join(CHANNEL_ORDER)
+            group.attrs["converged"] = bool(item.converged)
+            group.attrs["converged_time"] = float(item.converged_time)
+            group.attrs["converged_step"] = int(item.converged_step)
+            group.attrs["final_delta_inf"] = float(item.final_delta_inf)
+            group.attrs["final_delta_l2_rel"] = float(item.final_delta_l2_rel)
+            group.attrs["packed_unconverged"] = bool(item.packed_unconverged)
+            group.attrs["target_mode"] = str(target_mode)
             group.create_dataset("x_grid", data=item.x_grid, compression="gzip")
             group.create_dataset("y_grid", data=item.y_grid, compression="gzip")
             group.create_dataset("steady_field", data=item.steady_field, compression="gzip")
             group.create_dataset("rms_field", data=item.rms_field, compression="gzip")
             group.create_dataset("sampled_points", data=item.sampled_points, compression="gzip")
             group.create_dataset("selected_times", data=item.selected_times)
+            group.create_dataset("selected_frame_ids", data=item.selected_frame_ids)
             group.create_dataset("steady_time", data=np.asarray([float(np.mean(item.selected_times))], dtype=np.float32))
             group.create_dataset("module_mask", data=item.module_mask, compression="gzip")
             group.create_dataset("module_internal_mask", data=item.module_internal_mask, compression="gzip")
@@ -591,6 +815,15 @@ def write_h5(
     return h5_path
 
 
+def ensure_processed_train_split(processed: Sequence[ProcessedCase]) -> None:
+    """Keep a skipped-case preprocessing run from producing zero train cases."""
+    if not processed:
+        return
+    if any(item.split == "train" for item in processed):
+        return
+    processed[0].split = "train"
+
+
 def main() -> int:
     """CLI entry point for packing raw global cases."""
     args = parse_args()
@@ -603,29 +836,88 @@ def main() -> int:
 
     split_assignments = assign_unsplit_cases(raw_cases, args.train_fraction, args.seed)
     processed: List[ProcessedCase] = []
+    quality_rows: List[Dict[str, object]] = []
     existing_keys: set[str] = set()
+    skipped_unconverged = 0
+    packed_unconverged_if_allowed = 0
     for idx, raw in enumerate(tqdm(raw_cases, desc="Preprocessing cases", unit="case", dynamic_ncols=True)):
         base_key = str(raw.cfg.save.case_id) or raw.case_dir.name
         case_key = unique_case_key(base_key, existing_keys)
-        split = choose_split(idx, raw, split_assignments)
-        processed.append(
-            process_case(
-                raw,
-                case_key,
-                split,
-                args.final_window_frames,
-                args.points_per_case,
-                args.seed + idx,
-                bool(args.exclude_module_interior_from_global_points),
+        selection = select_final_window(
+            raw,
+            args.final_window_frames,
+            target_mode=args.target_mode,
+            require_converged=bool(args.require_converged),
+            min_final_window_frames=int(args.min_final_window_frames),
+        )
+        if selection.skip_reason:
+            if selection.skip_reason == "unconverged":
+                skipped_unconverged += 1
+            quality_rows.append(
+                {
+                    "case_key": case_key,
+                    "converged": int(selection.converged),
+                    "converged_time": selection.converged_time,
+                    "final_delta_inf": selection.final_delta_inf,
+                    "final_delta_l2_rel": selection.final_delta_l2_rel,
+                    "packed": 0,
+                    "skip_reason": selection.skip_reason,
+                }
             )
+            tqdm.write(f"Skipping case {case_key}: {selection.skip_reason}")
+            continue
+
+        if selection.packed_unconverged:
+            packed_unconverged_if_allowed += 1
+        split = choose_split(idx, raw, split_assignments)
+        item = process_case(
+            raw,
+            case_key,
+            split,
+            selection,
+            args.points_per_case,
+            args.seed + idx,
+            bool(args.exclude_module_interior_from_global_points),
+        )
+        processed.append(item)
+        quality_rows.append(
+            {
+                "case_key": case_key,
+                "converged": int(item.converged),
+                "converged_time": item.converged_time,
+                "final_delta_inf": item.final_delta_inf,
+                "final_delta_l2_rel": item.final_delta_l2_rel,
+                "packed": 1,
+                "skip_reason": "packed_unconverged" if item.packed_unconverged else "",
+            }
         )
 
+    quality_path = write_quality_report(output_root, quality_rows)
+    if not processed:
+        tqdm.write(
+            "Preprocessing summary: "
+            f"total_raw_cases={len(raw_cases)}, packed_cases=0, skipped_unconverged={skipped_unconverged}, "
+            f"packed_unconverged_if_allowed={packed_unconverged_if_allowed}"
+        )
+        tqdm.write(f"Wrote case quality report: {quality_path}")
+        tqdm.write("No cases were packed; no HDF5 file was written.")
+        return 1
+
+    ensure_processed_train_split(processed)
     h5_path = write_h5(
         output_root,
         processed,
         args.max_modules,
         bool(args.exclude_module_interior_from_global_points),
+        target_mode=args.target_mode,
+        require_converged=bool(args.require_converged),
     )
+    tqdm.write(
+        "Preprocessing summary: "
+        f"total_raw_cases={len(raw_cases)}, packed_cases={len(processed)}, skipped_unconverged={skipped_unconverged}, "
+        f"packed_unconverged_if_allowed={packed_unconverged_if_allowed}"
+    )
+    tqdm.write(f"Wrote case quality report: {quality_path}")
     tqdm.write(f"Packed {len(processed)} channel thermal cases into: {h5_path}")
     return 0
 

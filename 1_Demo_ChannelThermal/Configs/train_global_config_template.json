@@ -1,6 +1,6 @@
 {
-  "run_id": "channelthermal_stage_b",
-  "_note": "Set model.use_local_surrogate=false to train a global-only baseline before a local checkpoint exists.",
+  "Run_ID": "0001",
+  "_note": "Default is a global-only baseline. Set model.use_local_surrogate=true and provide a local checkpoint after Stage A is trained.",
   "dataset": {
     "packed_h5_path": "./Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
     "train_split": "train",
@@ -12,7 +12,8 @@
     "num_workers": 0,
     "random_point_sampling": true,
     "normalize_inputs": false,
-    "normalize_targets": false
+    "normalize_targets": false,
+    "require_converged": true
   },
   "model": {
     "field_dim": 5,
@@ -26,8 +27,8 @@
     "num_hyperedges": 6,
     "hidden_dim": 96,
     "latent_dim": 96,
-    "use_local_surrogate": true,
-    "local_surrogate_checkpoint_path": "./Saved_Model_LocalModule/YOUR_RUN/best_model.pt",
+    "use_local_surrogate": false,
+    "local_surrogate_checkpoint_path": null,
     "freeze_local_surrogate": true,
     "local_surrogate_latent_dim": 128,
     "future_global_feature_dim": 0,

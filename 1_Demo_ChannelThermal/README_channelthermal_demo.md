@@ -1,5 +1,7 @@
 # Demo 1: Channel Thermal Modular Design
 
+Updated: 2026-04-28
+
 ## Purpose
 
 This demo prepares data for the project direction:
@@ -45,8 +47,8 @@ python src/simulate_channelthermal.py --config-json config_channelthermal.json -
 ```
 
 The simulator is intentionally lightweight and reproducible. It is not a
-high-fidelity CFD solver. It builds a deterministic nonperiodic channel flow
-approximation with:
+high-fidelity CFD or full Navier-Stokes solver. It builds a deterministic
+nonperiodic analytic/diagnostic channel flow approximation with:
 
 - laminar inlet-like profile
 - no-slip module cells
@@ -54,12 +56,26 @@ approximation with:
 - pressure drop and local pressure perturbations
 - vorticity computed from the velocity field
 
-Temperature is evolved on one shared grid over fluid and solid cells:
+The flow field is saved with diagnostics such as max/mean divergence,
+wall/module no-slip error, inlet profile error, and outlet pressure mean. An
+optional simple grid projection can reduce analytic-flow divergence, but it is
+disabled by default and is still only a diagnostic cleanup, not a replacement
+for a CFD solver.
+
+Temperature is evolved dynamically on one shared grid over fluid and solid
+cells until convergence or the configured maximum solve time:
 
 - fluid cells: advection plus diffusion
 - solid module cells: diffusion plus internal heat generation
 - fluid/solid interface: approximate coupling by diffusion across neighboring
   grid cells
+
+Each saved raw frame records temperature convergence diagnostics in
+`frame_index.csv`: `delta_inf`, `delta_l2`, `delta_l2_rel`,
+`mean_temperature`, `max_temperature`, `converged`, and
+`convergence_window_ok`. The resolved `case_config.json` runtime block records
+whether convergence was reached, the converged step/time, final deltas, and the
+maximum solve settings.
 
 Raw global frames store:
 
@@ -111,18 +127,24 @@ with Robin boundary functions:
 modes. The solver uses a simple finite-difference SOR iteration on a square grid
 with a disk mask.
 
-## Why Steady / Quasi-Steady First
+## Steady Target Selection
 
-The global simulator saves transient raw frames, but the first packed global
-dataset averages the final heat-active window:
+The global simulator saves transient raw frames, but steady training targets
+must be selected from converged temperature states by default. The global
+preprocessor supports:
 
-- `steady_field`: mean over the final window
-- `rms_field`: RMS fluctuation over the final window
+- `converged_final`: use the converged saved frame. Recommended for first
+  steady forward-model training.
+- `converged_window_mean`: average a final window ending at the converged
+  frame.
+- `final_window_legacy`: reproduce the old behavior of averaging the final
+  heat-active window, even if convergence was not reached.
 
-This keeps the first forward-model training task focused on
-structure-conditioned thermal response rather than phase-cycle dynamics. Later
-versions can add transient states once the local surrogate and global organizer
-are stable.
+By default, `preprocess_channelthermal_dataset.py` requires convergence and
+skips unconverged cases. Use `--allow-unconverged` only for compatibility or
+debugging. Inspect convergence through each raw case's `frame_index.csv`, the
+raw visualization `convergence_temperature.png`, and the processed
+`preprocessing_case_quality.csv` report.
 
 ## Data Layout
 
@@ -322,7 +344,9 @@ Preprocess global cases:
 ```bash
 python src/preprocess_channelthermal_dataset.py \
   --input-root Data_Saved \
-  --output-root Data_Saved/Processed_ChannelThermal_Dataset
+  --output-root Data_Saved/Processed_ChannelThermal_Dataset \
+  --target-mode converged_final \
+  --require-converged
 ```
 
 Run one local module case:
@@ -364,6 +388,9 @@ Visualize the latest raw global case:
 python src/visualize_channelthermal_case.py
 ```
 
+This writes `convergence_temperature.png` alongside the field, internal
+temperature, and interface plots.
+
 Visualize a processed global case:
 
 ```bash
@@ -384,17 +411,19 @@ python src/visualize_local_module_thermal.py \
   --processed-h5 Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5
 ```
 
-Train the Stage B global model with the frozen local surrogate:
+Train the Stage B global model:
 
 ```bash
 python src/train.py --config Configs/train_global_config_template.json
 ```
 
-For a global-only baseline before a local checkpoint exists, edit the global
-template:
+The template defaults to a global-only baseline so smoke tests can run before a
+Stage-A checkpoint exists. To train with a frozen local surrogate after Stage A,
+edit the global template:
 
 ```json
-"use_local_surrogate": false
+"use_local_surrogate": true,
+"local_surrogate_checkpoint_path": "./Saved_Model_LocalModule/YOUR_RUN/best_model.pt"
 ```
 
 Evaluate a global checkpoint:

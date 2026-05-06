@@ -40,11 +40,11 @@ from channelthermal_common import (
 
 # ------------------------------ Editable settings -------------------------------
 
-NUM_LOCAL_CASES = 512
+NUM_LOCAL_CASES = 1024
 TEMPLATE_CONFIG_NAME = "config_local_module.json"
 GENERATED_CONFIG_PREFIX = "config_local_module"
 BASE_SEED = 5000
-CPU_CONCURRENT_SLOTS = 8
+CPU_CONCURRENT_SLOTS = 16
 POLL_INTERVAL_SEC = 0.5
 
 

@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 from channelthermal_datasets import CHANNEL_ORDER, GlobalChannelThermalDataset
-from channelthermal_model_utils import recursive_to_device, resolve_demo_path, select_device, strip_module_prefix, write_json
+from channelthermal_model_utils import current_timestamp, recursive_to_device, resolve_demo_path, select_device, strip_module_prefix, write_json
 from model import GlobalChannelThermalModel, GlobalChannelThermalModelConfig, load_local_surrogate_from_checkpoint
 
 LOCAL_SURROGATE_NORMALIZATION_ERROR = (
@@ -27,7 +27,14 @@ LOCAL_SURROGATE_NORMALIZATION_ERROR = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate the Demo 1 global Channel Thermal model.")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to best_model.pt or latest_model.pt.")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default="best",
+        help="Checkpoint selector: best, latest/lastest, or a direct .pt path.",
+    )
+    parser.add_argument("--Run_ID", dest="run_id", type=str, default=None, help="Numeric run serial used to find the latest matching saved model, e.g. 0001.")
+    parser.add_argument("--saved-root", type=str, default="./Saved_Model", help="Root directory containing global saved-model runs.")
     parser.add_argument("--dataset", type=str, default=None, help="Override packed global HDF5 path.")
     parser.add_argument("--split", type=str, default="test", help="Dataset split.")
     parser.add_argument("--case-id", type=str, default=None, help="Processed dataset case id.")
@@ -43,6 +50,46 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--mixed-teacher-ratio", type=float, default=0.5, help="Teacher-token ratio for mixed port evaluation.")
     return parser.parse_args()
+
+
+def checkpoint_file_name(selector: str) -> str:
+    cleaned = str(selector).strip().lower()
+    if cleaned == "best":
+        return "best_model.pt"
+    if cleaned in {"latest", "lastest"}:
+        return "latest_model.pt"
+    raise ValueError("--checkpoint must be 'best', 'latest'/'lastest', or a direct checkpoint path.")
+
+
+def normalize_run_id(value: str) -> str:
+    raw = str(value).strip()
+    if not raw.isdigit():
+        raise ValueError(f"Run_ID must be a numeric serial such as '0001'; got {raw!r}.")
+    return f"{int(raw):04d}"
+
+
+def latest_run_dir(saved_root: Path, run_id: str) -> Path:
+    normalized = normalize_run_id(run_id)
+    patterns = (f"Run_{normalized}_*", f"{normalized}_*", f"{normalized}*")
+    matches = sorted({path for pattern in patterns for path in saved_root.glob(pattern) if path.is_dir()})
+    if not matches:
+        raise FileNotFoundError(f"No saved global runs found under {saved_root} with Run_ID={normalized!r}.")
+    return matches[-1]
+
+
+def resolve_checkpoint_arg(args: argparse.Namespace) -> Path:
+    selector = str(args.checkpoint)
+    if args.run_id:
+        saved_root = resolve_demo_path(args.saved_root)
+        run_dir = latest_run_dir(saved_root, args.run_id)
+        return (run_dir / checkpoint_file_name(selector)).resolve()
+    candidate = resolve_demo_path(selector)
+    if candidate.suffix == ".pt" or candidate.exists():
+        return candidate
+    if selector.strip().lower() in {"best", "latest", "lastest"}:
+        raise ValueError("--Run_ID is required when --checkpoint is 'best' or 'latest'.")
+    saved_root = resolve_demo_path(args.saved_root)
+    return (latest_run_dir(saved_root, selector) / "best_model.pt").resolve()
 
 
 def numpy_to_batched_tensor(value: Any) -> Any:
@@ -148,6 +195,22 @@ def channel_cmap(name: str) -> str:
     return {"u": "coolwarm", "v": "coolwarm", "p": "magma", "omega": "RdBu_r", "temperature": "inferno"}.get(name, "viridis")
 
 
+def l2_error(prediction: np.ndarray, target: np.ndarray) -> float:
+    diff = np.asarray(prediction, dtype=np.float64) - np.asarray(target, dtype=np.float64)
+    return float(np.linalg.norm(diff.reshape(-1), ord=2))
+
+
+def safe_path_name(value: object) -> str:
+    raw = str(value).strip()
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw)
+    return safe or "case"
+
+
+def evaluation_output_dir(base_dir_arg: str | None, checkpoint_path: Path, case_id: object) -> Path:
+    base_dir = Path(base_dir_arg) if base_dir_arg else checkpoint_path.parent / "eval_global"
+    return resolve_demo_path(base_dir) / f"{safe_path_name(case_id)}_{current_timestamp()}"
+
+
 def plot_field_quicklook(output_path: Path, sample: Dict[str, Any], pred_field: np.ndarray, channel_order: list[str]) -> None:
     gt = sample["steady_field"][..., : pred_field.shape[-1]]
     preferred = [name for name in ["temperature", "u", "omega"] if name in channel_order]
@@ -161,10 +224,15 @@ def plot_field_quicklook(output_path: Path, sample: Dict[str, Any], pred_field: 
         gt_img = gt[..., idx]
         pred_img = pred_field[..., idx]
         err_img = np.abs(pred_img - gt_img)
+        channel_l2 = l2_error(pred_img, gt_img)
         vmin = float(np.nanmin(gt_img))
         vmax = float(np.nanmax(gt_img))
         for col, (image, title, cmap) in enumerate(
-            [(gt_img, f"GT {name}", channel_cmap(name)), (pred_img, f"Pred {name}", channel_cmap(name)), (err_img, f"Abs error {name}", "magma")]
+            [
+                (gt_img, f"GT {name}", channel_cmap(name)),
+                (pred_img, f"Pred {name}", channel_cmap(name)),
+                (err_img, f"Abs error {name}\nL2={channel_l2:.4e}", "magma"),
+            ]
         ):
             im = axes[row, col].imshow(
                 image,
@@ -203,10 +271,15 @@ def plot_internal(output_path: Path, sample: Dict[str, Any], pred_internal: np.n
         gt_img = raster_from_points(gt_points[module_idx], mask)
         pred_img = raster_from_points(pred_internal[module_idx, :, 0], mask)
         err_img = np.abs(pred_img - gt_img)
+        module_l2 = l2_error(pred_internal[module_idx, :, 0], gt_points[module_idx])
         vmin = float(np.nanmin(gt_img))
         vmax = float(np.nanmax(gt_img))
         for col, (image, title, cmap) in enumerate(
-            [(gt_img, f"M{module_idx} GT", "inferno"), (pred_img, f"M{module_idx} Pred", "inferno"), (err_img, f"M{module_idx} Error", "magma")]
+            [
+                (gt_img, f"M{module_idx} GT", "inferno"),
+                (pred_img, f"M{module_idx} Pred", "inferno"),
+                (err_img, f"M{module_idx} Error\nL2={module_l2:.4e}", "magma"),
+            ]
         ):
             im = axes[row, col].imshow(image, origin="lower", extent=(-1, 1, -1, 1), cmap=cmap, vmin=vmin if col < 2 else None, vmax=vmax if col < 2 else None)
             axes[row, col].set_title(title)
@@ -230,9 +303,10 @@ def plot_interface(output_path: Path, sample: Dict[str, Any], pred_interface: np
     for row, module_idx in enumerate(indices):
         for col, label in enumerate(["T_surface", "q_normal"]):
             ax = axes[row, col]
+            curve_l2 = l2_error(pred_interface[module_idx, :, col], gt[module_idx, :, col])
             ax.plot(theta, gt[module_idx, :, col], color="black", lw=1.7, label="GT")
             ax.plot(theta, pred_interface[module_idx, :, col], color="#d95f02", lw=1.4, label="Pred")
-            ax.set_title(f"M{module_idx} {label}")
+            ax.set_title(f"M{module_idx} {label} L2={curve_l2:.4e}")
             ax.set_xlabel("theta")
             ax.grid(True, alpha=0.25)
             if row == 0 and col == 0:
@@ -333,13 +407,23 @@ def summarize_prediction(
         "interface_curves": str(output_dir / f"interface_curves_{suffix}.png"),
         "npz": str(npz_path),
     }
+    field_channel_l2 = {
+        str(name): l2_error(pred_field[..., idx], gt_field[..., idx])
+        for idx, name in enumerate(channel_order[: pred_field.shape[-1]])
+    }
+    interface_l2_by_target = {
+        "T_surface": l2_error(pred_interface[..., 0], gt_interface[..., 0]),
+        "q_normal": l2_error(pred_interface[..., 1], gt_interface[..., 1]),
+    }
     return {
         "checkpoint": str(checkpoint_path),
         "case_id": str(raw_sample["case_id"]),
-        "field_mse": float(np.mean((pred_field - gt_field) ** 2)),
-        "temperature_mse": float(np.mean((pred_field[..., 4] - gt_field[..., 4]) ** 2)) if pred_field.shape[-1] >= 5 else None,
-        "internal_mse": float(np.mean((pred_internal.reshape(-1) - gt_internal.reshape(-1, 1)) ** 2)),
-        "interface_mse": float(np.mean((pred_interface - gt_interface) ** 2)),
+        "field_l2_error": l2_error(pred_field, gt_field),
+        "temperature_l2_error": l2_error(pred_field[..., 4], gt_field[..., 4]) if pred_field.shape[-1] >= 5 else None,
+        "internal_l2_error": l2_error(pred_internal.reshape(-1), gt_internal.reshape(-1)),
+        "interface_l2_error": l2_error(pred_interface, gt_interface),
+        "field_channel_l2_error": field_channel_l2,
+        "interface_l2_error_by_target": interface_l2_by_target,
         "channel_order": channel_order,
         "outputs": outputs,
     }
@@ -380,7 +464,9 @@ def evaluate_mode(
 
 def main() -> int:
     args = parse_args()
-    checkpoint_path = resolve_demo_path(args.checkpoint)
+    checkpoint_path = resolve_checkpoint_arg(args)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     device = select_device(args.device)
     model, checkpoint = load_model(checkpoint_path, device)
     train_cfg = checkpoint.get("train_config", {})
@@ -410,8 +496,7 @@ def main() -> int:
     sample = select_sample(dataset, args.case_id, args.case_index)
     raw_sample = select_sample(raw_dataset, str(sample["case_id"]), args.case_index)
 
-    output_dir = Path(args.output_dir) if args.output_dir else checkpoint_path.parent / "eval_global"
-    output_dir = resolve_demo_path(output_dir)
+    output_dir = evaluation_output_dir(args.output_dir, checkpoint_path, raw_sample["case_id"])
     output_dir.mkdir(parents=True, exist_ok=True)
     channel_order = dataset.channel_order or list(CHANNEL_ORDER)
     normalize_targets = bool(dataset_cfg.get("normalize_targets", False))
@@ -455,14 +540,14 @@ def main() -> int:
         predicted = mode_summaries["predicted"]
         summary.update(
             {
-                "teacher_field_mse": teacher["field_mse"],
-                "predicted_field_mse": predicted["field_mse"],
-                "teacher_temperature_mse": teacher["temperature_mse"],
-                "predicted_temperature_mse": predicted["temperature_mse"],
-                "teacher_internal_mse": teacher["internal_mse"],
-                "predicted_internal_mse": predicted["internal_mse"],
-                "teacher_interface_mse": teacher["interface_mse"],
-                "predicted_interface_mse": predicted["interface_mse"],
+                "teacher_field_l2_error": teacher["field_l2_error"],
+                "predicted_field_l2_error": predicted["field_l2_error"],
+                "teacher_temperature_l2_error": teacher["temperature_l2_error"],
+                "predicted_temperature_l2_error": predicted["temperature_l2_error"],
+                "teacher_internal_l2_error": teacher["internal_l2_error"],
+                "predicted_internal_l2_error": predicted["internal_l2_error"],
+                "teacher_interface_l2_error": teacher["interface_l2_error"],
+                "predicted_interface_l2_error": predicted["interface_l2_error"],
             }
         )
     else:
@@ -470,14 +555,14 @@ def main() -> int:
         only = mode_summaries[suffix]
         summary.update(
             {
-                "field_mse": only["field_mse"],
-                "temperature_mse": only["temperature_mse"],
-                "internal_mse": only["internal_mse"],
-                "interface_mse": only["interface_mse"],
-                f"{suffix}_field_mse": only["field_mse"],
-                f"{suffix}_temperature_mse": only["temperature_mse"],
-                f"{suffix}_internal_mse": only["internal_mse"],
-                f"{suffix}_interface_mse": only["interface_mse"],
+                "field_l2_error": only["field_l2_error"],
+                "temperature_l2_error": only["temperature_l2_error"],
+                "internal_l2_error": only["internal_l2_error"],
+                "interface_l2_error": only["interface_l2_error"],
+                f"{suffix}_field_l2_error": only["field_l2_error"],
+                f"{suffix}_temperature_l2_error": only["temperature_l2_error"],
+                f"{suffix}_internal_l2_error": only["internal_l2_error"],
+                f"{suffix}_interface_l2_error": only["interface_l2_error"],
             }
         )
     write_json(output_dir / "evaluation_summary.json", summary)

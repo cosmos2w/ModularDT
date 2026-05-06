@@ -1,14 +1,14 @@
 {
-  "run_id": "local_module_stage_a",
-  "_note": "JSON does not allow comments; keys beginning with _note document intended usage.",
+  "Run_ID": "0002",
+  "_note": "keys beginning with _note document intended usage.",
   "dataset": {
     "_note_normalization": "For the first Stage-B workflow, keep normalize_inputs=false and normalize_targets=false. Stage-B does not yet apply local-surrogate normalizers when loading a Stage-A checkpoint.",
     "packed_h5_path": "./Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5",
     "train_split": "train",
     "val_split": "test",
     "batch_size": 32,
-    "val_batch_size": 32,
-    "num_workers": 0,
+    "val_batch_size": 64,
+    "num_workers": 4,
     "normalize_inputs": false,
     "normalize_targets": false
   },
@@ -17,12 +17,12 @@
     "port_token_dim": "auto",
     "interface_target_dim": 2,
     "hidden_dim": 128,
-    "latent_dim": 128,
+    "latent_dim": 64,
     "num_port_latents": 8,
     "num_heads": 4,
-    "num_layers": 2,
+    "num_layers": 4,
     "coord_fourier_frequencies": 4,
-    "dropout": 0.05
+    "dropout": 0.0
   },
   "loss": {
     "internal_mse_weight": 1.0,
@@ -30,13 +30,13 @@
     "smoothness_weight": 0.0
   },
   "training": {
-    "epochs": 500,
-    "learning_rate": 0.0002,
+    "epochs": 10000,
+    "learning_rate": 0.0001,
     "weight_decay": 0.00001,
     "gradient_clip_norm": 1.0,
     "amp": false,
     "seed": 42,
-    "device": null,
+    "device": "cuda:1",
     "max_train_batches_per_epoch": null,
     "max_val_batches": null
   },

@@ -41,7 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=None, help="Override training epochs.")
     parser.add_argument("--max-train-batches", type=int, default=None, help="Stop each epoch after this many train batches.")
     parser.add_argument("--max-val-batches", type=int, default=None, help="Stop validation after this many batches.")
-    parser.add_argument("--run-name", type=str, default=None, help="Optional output run directory name.")
+    parser.add_argument("--run-name", type=str, default=None, help="Optional descriptive suffix after the numeric Run_ID.")
+    parser.add_argument("--Run_ID", dest="run_id", type=str, default=None, help="Numeric run serial, e.g. 0001.")
     return parser.parse_args()
 
 
@@ -64,6 +65,31 @@ def build_model_config(payload: Dict[str, Any], dataset: LocalModuleDataset) -> 
     model_cfg["port_token_dim"] = _auto_int(model_cfg.get("port_token_dim"), dataset.port_token_dim)
     model_cfg["interface_target_dim"] = _auto_int(model_cfg.get("interface_target_dim"), dataset.interface_target_dim)
     return LocalModuleConfig.from_dict(model_cfg)
+
+
+def normalize_run_id(value: Any, fallback: str = "0001") -> str:
+    raw = str(value or fallback).strip()
+    if not raw.isdigit():
+        raise ValueError(f"Run_ID must be a numeric serial such as '0001'; got {raw!r}.")
+    return f"{int(raw):04d}"
+
+
+def sanitize_run_suffix(value: Any) -> str:
+    raw = str(value or "").strip()
+    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw).strip("_")
+
+
+def resolve_run_id(args: argparse.Namespace, cfg: Dict[str, Any], fallback: str) -> str:
+    training_cfg = cfg.get("training", {})
+    return normalize_run_id(
+        args.run_id
+        or cfg.get("Run_ID")
+        or cfg.get("run_id")
+        or training_cfg.get("Run_ID")
+        or training_cfg.get("run_id")
+        or fallback,
+        fallback,
+    )
 
 
 def compute_losses(outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor], loss_cfg: Dict[str, Any]) -> Dict[str, torch.Tensor]:
@@ -221,7 +247,10 @@ def main() -> int:
     scaler = make_grad_scaler(device, bool(training_cfg.get("amp", False)))
 
     saved_root = ensure_dir(resolve_demo_path(cfg.get("paths", {}).get("saved_model_dir", "./Saved_Model_LocalModule")))
-    run_name = args.run_name or training_cfg.get("run_name") or f"LocalModule_{current_timestamp()}"
+    run_id = resolve_run_id(args, cfg, "0001")
+    cfg["Run_ID"] = run_id
+    run_suffix = sanitize_run_suffix(args.run_name or training_cfg.get("run_name"))
+    run_name = f"Run_{run_id}_{run_suffix}_{current_timestamp()}" if run_suffix else f"Run_{run_id}_{current_timestamp()}"
     run_dir = ensure_dir(saved_root / run_name)
     write_json(run_dir / "resolved_train_config.json", cfg)
     history_path = run_dir / "loss_history.csv"
@@ -292,6 +321,7 @@ def main() -> int:
                 epoch=epoch,
                 best_metric=best_metric,
             )
+            print("Improved! Saving best model.")
         save_checkpoint(
             run_dir / "latest_model.pt",
             model=model,

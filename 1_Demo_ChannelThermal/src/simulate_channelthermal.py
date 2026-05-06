@@ -213,7 +213,117 @@ def build_channel_flow(cfg: SimulationConfig, ids: np.ndarray) -> Tuple[np.ndarr
     p -= float(np.mean(p[:, -1]))
     omega = compute_vorticity(u, v, cfg)
     omega[ids >= 0] = 0.0
+    if bool(cfg.flow.apply_projection) or str(cfg.flow.flow_model) == "projected_analytic_wake":
+        u, v, p = project_flow_field(u, v, p, ids, cfg)
+        omega = compute_vorticity(u, v, cfg)
+        omega[ids >= 0] = 0.0
     return u.astype(np.float32), v.astype(np.float32), p.astype(np.float32), omega.astype(np.float32)
+
+
+def apply_flow_constraints(
+    u: np.ndarray,
+    v: np.ndarray,
+    p: np.ndarray,
+    ids: np.ndarray,
+    cfg: SimulationConfig,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Reapply simple channel constraints after optional projection."""
+    _, yy = build_uniform_grid(cfg)
+    ly = float(cfg.domain.ly)
+    eta = np.clip(yy[:, 0] / ly, 0.0, 1.0)
+    inlet_profile = float(cfg.flow.u_in) * 6.0 * eta * (1.0 - eta) * (np.sin(np.pi * eta) ** 0.75)
+    u[:, 0] = inlet_profile
+    v[:, 0] = 0.0
+    if u.shape[1] > 1:
+        u[:, -1] = u[:, -2]
+        v[:, -1] = v[:, -2]
+    u[0, :] = 0.0
+    u[-1, :] = 0.0
+    v[0, :] = 0.0
+    v[-1, :] = 0.0
+    u[ids >= 0] = 0.0
+    v[ids >= 0] = 0.0
+    p -= float(np.mean(p[:, -1]))
+    return u, v, p
+
+
+def project_flow_field(
+    u: np.ndarray,
+    v: np.ndarray,
+    p: np.ndarray,
+    ids: np.ndarray,
+    cfg: SimulationConfig,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Apply a lightweight pressure projection to reduce analytic-flow divergence.
+
+    This is deliberately an optional diagnostic cleanup, not a Navier-Stokes
+    solve. The default config leaves it disabled.
+    """
+    iterations = int(cfg.flow.projection_iterations)
+    if iterations <= 0:
+        return apply_flow_constraints(u, v, p, ids, cfg)
+
+    dx = float(cfg.domain.lx) / int(cfg.domain.nx)
+    dy = float(cfg.domain.ly) / int(cfg.domain.ny)
+    relaxation = min(max(float(cfg.flow.projection_relaxation), 0.05), 1.0)
+    fluid = ids < 0
+    dudx = np.gradient(u, dx, axis=1, edge_order=1)
+    dvdy = np.gradient(v, dy, axis=0, edge_order=1)
+    rhs = np.where(fluid, dudx + dvdy, 0.0)
+    phi = np.zeros_like(u, dtype=np.float64)
+    denom = 2.0 / (dx * dx) + 2.0 / (dy * dy)
+    for _ in range(iterations):
+        candidate = phi.copy()
+        candidate[1:-1, 1:-1] = (
+            (phi[1:-1, 2:] + phi[1:-1, :-2]) / (dx * dx)
+            + (phi[2:, 1:-1] + phi[:-2, 1:-1]) / (dy * dy)
+            - rhs[1:-1, 1:-1]
+        ) / denom
+        candidate[0, :] = candidate[1, :]
+        candidate[-1, :] = candidate[-2, :]
+        candidate[:, 0] = candidate[:, 1]
+        candidate[:, -1] = candidate[:, -2]
+        phi = np.where(fluid, (1.0 - relaxation) * phi + relaxation * candidate, phi)
+
+    grad_phi_x = np.gradient(phi, dx, axis=1, edge_order=1)
+    grad_phi_y = np.gradient(phi, dy, axis=0, edge_order=1)
+    u = u - grad_phi_x
+    v = v - grad_phi_y
+    p = p + phi
+    return apply_flow_constraints(u, v, p, ids, cfg)
+
+
+def compute_flow_diagnostics(
+    u: np.ndarray,
+    v: np.ndarray,
+    p: np.ndarray,
+    ids: np.ndarray,
+    cfg: SimulationConfig,
+) -> Dict[str, float]:
+    """Return coarse diagnostics for the lightweight analytic channel flow."""
+    dx = float(cfg.domain.lx) / int(cfg.domain.nx)
+    dy = float(cfg.domain.ly) / int(cfg.domain.ny)
+    fluid = ids < 0
+    divergence = np.gradient(u, dx, axis=1, edge_order=1) + np.gradient(v, dy, axis=0, edge_order=1)
+    fluid_div = np.abs(divergence[fluid]) if np.any(fluid) else np.abs(divergence.reshape(-1))
+
+    _, yy = build_uniform_grid(cfg)
+    eta = np.clip(yy[:, 0] / float(cfg.domain.ly), 0.0, 1.0)
+    expected_inlet = float(cfg.flow.u_in) * 6.0 * eta * (1.0 - eta) * (np.sin(np.pi * eta) ** 0.75)
+    inlet_error = np.sqrt(np.mean((u[:, 0] - expected_inlet) ** 2) + np.mean(v[:, 0] ** 2))
+    wall_error = max(
+        float(np.max(np.hypot(u[0, :], v[0, :]))),
+        float(np.max(np.hypot(u[-1, :], v[-1, :]))),
+    )
+    module_speed = np.hypot(u[ids >= 0], v[ids >= 0]) if np.any(ids >= 0) else np.asarray([0.0])
+    return {
+        "max_abs_divergence": float(np.max(fluid_div)) if fluid_div.size else 0.0,
+        "mean_abs_divergence": float(np.mean(fluid_div)) if fluid_div.size else 0.0,
+        "wall_no_slip_error": float(wall_error),
+        "module_no_slip_error": float(np.max(module_speed)) if module_speed.size else 0.0,
+        "inlet_profile_error": float(inlet_error),
+        "outlet_pressure_mean": float(np.mean(p[:, -1])),
+    }
 
 
 def enforce_temperature_boundaries(temperature: np.ndarray, cfg: SimulationConfig) -> np.ndarray:
@@ -312,6 +422,67 @@ def step_temperature(
         temperature = temperature + dt_sub * (rhs + source)
         temperature = enforce_temperature_boundaries(temperature, cfg)
     return temperature
+
+
+def compute_temperature_delta_metrics(
+    current: np.ndarray,
+    previous: np.ndarray,
+    eps: float = 1e-8,
+) -> Dict[str, float]:
+    """Compute saved-frame temperature convergence metrics."""
+    current_arr = np.asarray(current, dtype=np.float64)
+    previous_arr = np.asarray(previous, dtype=np.float64)
+    delta = current_arr - previous_arr
+    delta_l2 = float(np.sqrt(np.mean(delta * delta)))
+    previous_l2 = float(np.sqrt(np.mean(previous_arr * previous_arr)))
+    return {
+        "delta_inf": float(np.max(np.abs(delta))),
+        "delta_l2": delta_l2,
+        "delta_l2_rel": float(delta_l2 / max(previous_l2, eps)),
+        "mean_temperature": float(np.mean(current_arr)),
+        "max_temperature": float(np.max(current_arr)),
+    }
+
+
+def update_convergence_history(history: List[Dict[str, float]], metrics: Dict[str, float]) -> None:
+    """Append one saved-frame metric record to convergence history."""
+    history.append(dict(metrics))
+
+
+def convergence_window_ok(history: List[Dict[str, float]], cfg: SimulationConfig) -> bool:
+    """Return true when enough finite saved-frame deltas are available."""
+    window = int(cfg.thermal.convergence_window)
+    finite_records = [
+        item
+        for item in history
+        if math.isfinite(float(item.get("delta_inf", math.inf))) and math.isfinite(float(item.get("delta_l2_rel", math.inf)))
+    ]
+    return len(finite_records) >= window
+
+
+def check_converged(
+    history: List[Dict[str, float]],
+    cfg: SimulationConfig,
+    physical_time: float,
+    heat_active: bool,
+) -> bool:
+    """Check saved-frame convergence against absolute and relative tolerances."""
+    if bool(cfg.thermal.require_heat_active_for_convergence) and not heat_active:
+        return False
+    if float(physical_time) < float(cfg.thermal.min_solve_time):
+        return False
+    window = int(cfg.thermal.convergence_window)
+    finite_records = [
+        item
+        for item in history
+        if math.isfinite(float(item.get("delta_inf", math.inf))) and math.isfinite(float(item.get("delta_l2_rel", math.inf)))
+    ]
+    if len(finite_records) < window:
+        return False
+    recent = finite_records[-window:]
+    max_delta_inf = max(float(item["delta_inf"]) for item in recent)
+    max_delta_l2_rel = max(float(item["delta_l2_rel"]) for item in recent)
+    return max_delta_inf <= float(cfg.thermal.convergence_tol) and max_delta_l2_rel <= float(cfg.thermal.convergence_rel_tol)
 
 
 def extract_internal_temperatures(temperature: np.ndarray, cfg: SimulationConfig) -> Tuple[np.ndarray, np.ndarray]:
@@ -432,43 +603,91 @@ def run_case(cfg: SimulationConfig) -> Path:
     solid_mask = ids >= 0
     fluid_mask = ~solid_mask
     u, v, p, omega = build_channel_flow(cfg, ids)
+    flow_diagnostics = compute_flow_diagnostics(u, v, p, ids, cfg)
+    tqdm.write(
+        "Flow diagnostics: "
+        + ", ".join(f"{key}={value:.4e}" for key, value in flow_diagnostics.items())
+    )
     alpha = np.where(solid_mask, float(cfg.thermal.solid_alpha), float(cfg.thermal.fluid_alpha)).astype(np.float64)
     heat_source = heat_source_field(cfg, ids)
     n_substeps = stable_substeps(cfg, u, v, alpha)
     temperature = np.full((int(cfg.domain.ny), int(cfg.domain.nx)), float(cfg.thermal.t_in), dtype=np.float64)
     temperature = enforce_temperature_boundaries(temperature, cfg)
 
+    stop_on_convergence = bool(cfg.thermal.stop_on_convergence)
+    max_solve_time = float(cfg.thermal.max_solve_time) if cfg.thermal.max_solve_time is not None else float(cfg.flow.solve_time)
+    if cfg.thermal.max_steps is not None:
+        max_steps = int(cfg.thermal.max_steps)
+        max_solve_time = max_steps * float(cfg.flow.dt)
+    elif stop_on_convergence:
+        max_steps = max(1, int(math.ceil(max_solve_time / max(float(cfg.flow.dt), 1e-12))))
+    else:
+        max_steps = int(runtime["num_steps"])
+    if not stop_on_convergence:
+        max_solve_time = max_steps * float(cfg.flow.dt)
+
     config_payload = dataclass_to_dict(cfg)
-    config_payload["runtime"].update({"thermal_substeps": n_substeps})
+    config_payload["runtime"].update(
+        {
+            "thermal_substeps": n_substeps,
+            "stop_on_convergence": stop_on_convergence,
+            "max_solve_time": max_solve_time,
+            "max_steps": max_steps,
+            "converged": False,
+            "converged_step": None,
+            "converged_time": None,
+            "final_step": None,
+            "final_time": None,
+            "final_delta_inf": None,
+            "final_delta_l2_rel": None,
+            "convergence_window": int(cfg.thermal.convergence_window),
+            "convergence_tol": float(cfg.thermal.convergence_tol),
+            "convergence_rel_tol": float(cfg.thermal.convergence_rel_tol),
+        }
+    )
+    config_payload["flow_diagnostics"] = flow_diagnostics
     config_payload["physical_assumptions"] = [
         "NumPy nonperiodic channel-flow approximation; not a high-fidelity CFD solver.",
         "Velocity and pressure are deterministic steady fields with no-slip module masks and wake deficits.",
+        "Optional grid projection is a diagnostic divergence cleanup, not a full Navier-Stokes solve.",
         "One shared temperature grid is used across fluid and solid cells.",
         "Fluid cells advect and diffuse; solid cells diffuse and receive internal heat generation.",
         "Interface coupling is approximated by diffusion across neighboring grid cells.",
     ]
     config_payload["interface_feature_names"] = list(INTERFACE_FEATURE_NAMES)
-    write_json(case_dir / "case_config.json", config_payload)
 
     xx, yy = build_uniform_grid(cfg)
     np.savez_compressed(case_dir / "grid.npz", x_grid=xx.astype(np.float32), y_grid=yy.astype(np.float32))
 
     rows: List[Dict[str, object]] = []
     previous_saved_temperature: np.ndarray | None = None
+    convergence_history: List[Dict[str, float]] = []
+    final_metrics = {
+        "delta_inf": math.inf,
+        "delta_l2": math.inf,
+        "delta_l2_rel": math.inf,
+        "mean_temperature": float(np.mean(temperature)),
+        "max_temperature": float(np.max(temperature)),
+    }
     saved_frame = 0
+    converged = False
+    converged_step = None
+    converged_time = None
+    final_step = 0
+    final_time = 0.0
     tqdm.write(
         "Runtime summary: "
-        f"steps={runtime['num_steps']}, dt={cfg.flow.dt}, save_stride={cfg.flow.save_stride}, "
-        f"thermal_substeps={n_substeps}"
+        f"max_steps={max_steps}, dt={cfg.flow.dt}, save_stride={cfg.flow.save_stride}, "
+        f"thermal_substeps={n_substeps}, stop_on_convergence={int(stop_on_convergence)}"
     )
     with tqdm(
-        total=int(runtime["num_steps"]),
+        total=max_steps,
         desc="Channel thermal steps",
         unit="step",
         dynamic_ncols=True,
         disable=not progress_enabled(),
     ) as step_bar:
-        for step in range(int(runtime["num_steps"])):
+        for step in range(max_steps):
             step_number = step + 1
             physical_time = step_number * float(cfg.flow.dt)
             heat_active = bool(cfg.thermal.enabled and physical_time >= float(cfg.thermal.heat_start_time))
@@ -487,7 +706,9 @@ def run_case(cfg: SimulationConfig) -> Path:
                 n_substeps=n_substeps,
             )
 
-            should_save = (step_number % int(cfg.flow.save_stride) == 0) or step_number == int(runtime["num_steps"])
+            final_step = step_number
+            final_time = physical_time
+            should_save = (step_number % int(cfg.flow.save_stride) == 0) or step_number == max_steps
             if should_save:
                 # Frame saving keeps all arrays needed later by preprocessing:
                 # global fields, masks, local internal samples, and interface
@@ -504,9 +725,19 @@ def run_case(cfg: SimulationConfig) -> Path:
                     cfg=cfg,
                 )
                 if previous_saved_temperature is None:
-                    delta_inf = 0.0
+                    metrics = {
+                        "delta_inf": math.inf,
+                        "delta_l2": math.inf,
+                        "delta_l2_rel": math.inf,
+                        "mean_temperature": float(np.mean(temperature)),
+                        "max_temperature": float(np.max(temperature)),
+                    }
                 else:
-                    delta_inf = float(np.max(np.abs(temperature - previous_saved_temperature)))
+                    metrics = compute_temperature_delta_metrics(temperature, previous_saved_temperature)
+                update_convergence_history(convergence_history, metrics)
+                window_ok = convergence_window_ok(convergence_history, cfg)
+                converged_now = bool(stop_on_convergence and check_converged(convergence_history, cfg, physical_time, heat_active))
+                final_metrics = metrics
                 previous_saved_temperature = temperature.copy()
                 rows.append(
                     {
@@ -517,17 +748,29 @@ def run_case(cfg: SimulationConfig) -> Path:
                         "heat_active": int(heat_active),
                         "warmup_complete": int(physical_time >= float(cfg.flow.warmup_time)),
                         "thermal_substeps": n_substeps,
-                        "max_temperature": f"{float(np.max(temperature)):.8f}",
-                        "mean_temperature": f"{float(np.mean(temperature)):.8f}",
-                        "delta_inf": f"{delta_inf:.8e}",
+                        "delta_inf": f"{metrics['delta_inf']:.8e}",
+                        "delta_l2": f"{metrics['delta_l2']:.8e}",
+                        "delta_l2_rel": f"{metrics['delta_l2_rel']:.8e}",
+                        "mean_temperature": f"{metrics['mean_temperature']:.8f}",
+                        "max_temperature": f"{metrics['max_temperature']:.8f}",
+                        "converged": int(converged_now),
+                        "convergence_window_ok": int(window_ok),
                     }
                 )
                 saved_frame += 1
                 tqdm.write(
                     "Saved frame: "
                     f"frame={saved_frame - 1}, step={step_number}, time={physical_time:.4f}, "
-                    f"heat_active={int(heat_active)}"
+                    f"heat_active={int(heat_active)}, delta_inf={metrics['delta_inf']:.4e}, "
+                    f"delta_l2_rel={metrics['delta_l2_rel']:.4e}"
                 )
+                if converged_now:
+                    converged = True
+                    converged_step = step_number
+                    converged_time = physical_time
+                    if progress_enabled():
+                        step_bar.update(1)
+                    break
             if progress_enabled():
                 step_bar.set_postfix(saved=saved_frame, t=f"{physical_time:.2f}")
             step_bar.update(1)
@@ -537,6 +780,27 @@ def run_case(cfg: SimulationConfig) -> Path:
         writer.writeheader()
         writer.writerows(rows)
 
+    config_payload["runtime"].update(
+        {
+            "converged": bool(converged),
+            "converged_step": converged_step,
+            "converged_time": converged_time,
+            "final_step": int(final_step),
+            "final_time": float(final_time),
+            "final_delta_inf": float(final_metrics["delta_inf"]),
+            "final_delta_l2_rel": float(final_metrics["delta_l2_rel"]),
+        }
+    )
+    write_json(case_dir / "case_config.json", config_payload)
+    if converged:
+        tqdm.write(
+            "Thermal convergence reached at "
+            f"step {converged_step}, time {float(converged_time):.6f}, "
+            f"delta_inf={final_metrics['delta_inf']:.6e}, "
+            f"delta_l2_rel={final_metrics['delta_l2_rel']:.6e}"
+        )
+    else:
+        tqdm.write(f"WARNING: thermal convergence not reached by max time {max_solve_time:.6f}.")
     tqdm.write(f"Simulation complete. Saved {saved_frame} frames to: {case_dir}")
     return case_dir
 

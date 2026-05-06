@@ -48,7 +48,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=None, help="Override training epochs.")
     parser.add_argument("--max-train-batches", type=int, default=None, help="Stop each epoch after this many train batches.")
     parser.add_argument("--max-val-batches", type=int, default=None, help="Stop validation after this many batches.")
-    parser.add_argument("--run-name", type=str, default=None, help="Optional output run directory name.")
+    parser.add_argument("--run-name", type=str, default=None, help="Optional descriptive suffix after the numeric Run_ID.")
+    parser.add_argument("--Run_ID", dest="run_id", type=str, default=None, help="Numeric run serial, e.g. 0001.")
     return parser.parse_args()
 
 
@@ -96,6 +97,31 @@ def build_model_config(payload: Dict[str, Any], dataset: GlobalChannelThermalDat
     )
     model_cfg["material_param_dim"] = _auto_int(model_cfg.get("material_param_dim"), dataset.material_param_dim)
     return GlobalChannelThermalModelConfig.from_dict(model_cfg)
+
+
+def normalize_run_id(value: Any, fallback: str = "0001") -> str:
+    raw = str(value or fallback).strip()
+    if not raw.isdigit():
+        raise ValueError(f"Run_ID must be a numeric serial such as '0001'; got {raw!r}.")
+    return f"{int(raw):04d}"
+
+
+def sanitize_run_suffix(value: Any) -> str:
+    raw = str(value or "").strip()
+    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw).strip("_")
+
+
+def resolve_run_id(args: argparse.Namespace, cfg: Dict[str, Any], fallback: str) -> str:
+    training_cfg = cfg.get("training", {})
+    return normalize_run_id(
+        args.run_id
+        or cfg.get("Run_ID")
+        or cfg.get("run_id")
+        or training_cfg.get("Run_ID")
+        or training_cfg.get("run_id")
+        or fallback,
+        fallback,
+    )
 
 
 def field_loss(pred: torch.Tensor, target: torch.Tensor, loss_cfg: Dict[str, Any]) -> torch.Tensor:
@@ -305,6 +331,33 @@ def attach_local_surrogate_if_needed(
     model.set_local_surrogate(local_model, freeze=bool(model_config.freeze_local_surrogate))
 
 
+def print_dataset_quality(name: str, dataset: GlobalChannelThermalDataset) -> None:
+    """Print convergence metadata for a loaded global dataset split."""
+    print(
+        f"[dataset:{name}] target_mode={getattr(dataset, 'target_mode', 'unknown')} "
+        f"require_converged_attr={getattr(dataset, 'require_converged', False)} "
+        f"converged_cases={getattr(dataset, 'num_selected_converged', 0)} "
+        f"unconverged_cases={getattr(dataset, 'num_selected_unconverged', 0)}"
+    )
+
+
+def enforce_dataset_convergence(name: str, dataset: GlobalChannelThermalDataset, require_converged: bool) -> None:
+    """Raise clearly if config asks for converged cases but the split contains unconverged cases."""
+    if not require_converged:
+        return
+    unconverged = [
+        case_id
+        for case_id, flag in zip(getattr(dataset, "selected_case_ids", []), getattr(dataset, "selected_converged_flags", []))
+        if not flag
+    ]
+    if unconverged:
+        preview = ", ".join(str(case_id) for case_id in unconverged[:10])
+        raise ValueError(
+            f"dataset.require_converged=true but {name} split contains {len(unconverged)} unconverged cases. "
+            f"Examples: {preview}"
+        )
+
+
 def main() -> int:
     args = parse_args()
     config_path = resolve_config_path(args.config)
@@ -342,6 +395,10 @@ def main() -> int:
     )
     if len(val_dataset) == 0:
         val_dataset = train_dataset
+    require_converged = bool(dataset_cfg.get("require_converged", False))
+    print_dataset_quality("train", train_dataset)
+    print_dataset_quality("val", val_dataset)
+    enforce_dataset_convergence("train", train_dataset, require_converged)
 
     model_config = build_model_config(cfg, train_dataset)
     model = GlobalChannelThermalModel(model_config).to(device)
@@ -373,7 +430,10 @@ def main() -> int:
     epochs = int(args.epochs if args.epochs is not None else training_cfg.get("epochs", 200))
     scaler = make_grad_scaler(device, bool(training_cfg.get("amp", False)))
     saved_root = ensure_dir(resolve_demo_path(cfg.get("paths", {}).get("saved_model_dir", "./Saved_Model")))
-    run_name = args.run_name or training_cfg.get("run_name") or f"ChannelThermal_{current_timestamp()}"
+    run_id = resolve_run_id(args, cfg, "0001")
+    cfg["Run_ID"] = run_id
+    run_suffix = sanitize_run_suffix(args.run_name or training_cfg.get("run_name"))
+    run_name = f"Run_{run_id}_{run_suffix}_{current_timestamp()}" if run_suffix else f"Run_{run_id}_{current_timestamp()}"
     run_dir = ensure_dir(saved_root / run_name)
     write_json(run_dir / "resolved_train_config.json", cfg)
     history_path = run_dir / "loss_history.csv"

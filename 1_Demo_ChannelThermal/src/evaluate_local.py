@@ -15,19 +15,66 @@ import numpy as np
 import torch
 
 from channelthermal_datasets import LocalModuleDataset
-from channelthermal_model_utils import recursive_to_device, resolve_demo_path, select_device, strip_module_prefix, write_json
+from channelthermal_model_utils import current_timestamp, recursive_to_device, resolve_demo_path, select_device, strip_module_prefix, write_json
 from model_local import LocalModuleConfig, LocalModuleSurrogate
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a local module surrogate checkpoint.")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to best_model.pt or latest_model.pt.")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default="best",
+        help="Checkpoint selector: best, latest/lastest, or a direct .pt path.",
+    )
+    parser.add_argument("--Run_ID", dest="run_id", type=str, default=None, help="Numeric run serial used to find the latest matching saved model, e.g. 0001.")
+    parser.add_argument("--saved-root", type=str, default="./Saved_Model_LocalModule", help="Root directory containing local saved-model runs.")
     parser.add_argument("--dataset", type=str, default=None, help="Override packed local HDF5 path.")
     parser.add_argument("--split", type=str, default="test", help="Dataset split to use.")
     parser.add_argument("--case-index", type=int, default=0, help="Index within the selected split.")
     parser.add_argument("--device", type=str, default=None, help="Torch device override.")
     parser.add_argument("--output-dir", type=str, default=None, help="Directory for quicklook outputs.")
     return parser.parse_args()
+
+
+def checkpoint_file_name(selector: str) -> str:
+    cleaned = str(selector).strip().lower()
+    if cleaned == "best":
+        return "best_model.pt"
+    if cleaned in {"latest", "lastest"}:
+        return "latest_model.pt"
+    raise ValueError("--checkpoint must be 'best', 'latest'/'lastest', or a direct checkpoint path.")
+
+
+def normalize_run_id(value: str) -> str:
+    raw = str(value).strip()
+    if not raw.isdigit():
+        raise ValueError(f"Run_ID must be a numeric serial such as '0001'; got {raw!r}.")
+    return f"{int(raw):04d}"
+
+
+def latest_run_dir(saved_root: Path, run_id: str) -> Path:
+    normalized = normalize_run_id(run_id)
+    patterns = (f"Run_{normalized}_*", f"{normalized}_*", f"{normalized}*")
+    matches = sorted({path for pattern in patterns for path in saved_root.glob(pattern) if path.is_dir()})
+    if not matches:
+        raise FileNotFoundError(f"No saved local runs found under {saved_root} with Run_ID={normalized!r}.")
+    return matches[-1]
+
+
+def resolve_checkpoint_arg(args: argparse.Namespace) -> Path:
+    selector = str(args.checkpoint)
+    if args.run_id:
+        saved_root = resolve_demo_path(args.saved_root)
+        run_dir = latest_run_dir(saved_root, args.run_id)
+        return (run_dir / checkpoint_file_name(selector)).resolve()
+    candidate = resolve_demo_path(selector)
+    if candidate.suffix == ".pt" or candidate.exists():
+        return candidate
+    if selector.strip().lower() in {"best", "latest", "lastest"}:
+        raise ValueError("--Run_ID is required when --checkpoint is 'best' or 'latest'.")
+    saved_root = resolve_demo_path(args.saved_root)
+    return (latest_run_dir(saved_root, selector) / "best_model.pt").resolve()
 
 
 def tensorize_sample(sample: Dict, device: torch.device) -> Dict:
@@ -46,7 +93,23 @@ def raster_from_points(values: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return image
 
 
-def plot_internal(output_path: Path, sample: Dict, pred_internal: np.ndarray) -> None:
+def l2_error(prediction: np.ndarray, target: np.ndarray) -> float:
+    diff = np.asarray(prediction, dtype=np.float64) - np.asarray(target, dtype=np.float64)
+    return float(np.linalg.norm(diff.reshape(-1), ord=2))
+
+
+def safe_path_name(value: object) -> str:
+    raw = str(value).strip()
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw)
+    return safe or "case"
+
+
+def evaluation_output_dir(base_dir_arg: str | None, checkpoint_path: Path, case_id: object) -> Path:
+    base_dir = Path(base_dir_arg) if base_dir_arg else checkpoint_path.parent / "eval_local"
+    return resolve_demo_path(base_dir) / f"{safe_path_name(case_id)}_{current_timestamp()}"
+
+
+def plot_internal(output_path: Path, sample: Dict, pred_internal: np.ndarray, l2_norm_error: float) -> None:
     target = sample["internal_temperature_targets"].reshape(-1)
     pred = pred_internal.reshape(-1)
     mask = sample.get("local_mask")
@@ -58,12 +121,12 @@ def plot_internal(output_path: Path, sample: Dict, pred_internal: np.ndarray) ->
     vmin = float(np.nanmin(gt_img))
     vmax = float(np.nanmax(gt_img))
     fig, axes = plt.subplots(1, 3, figsize=(10.0, 3.2), constrained_layout=True)
-    for ax, image, title, cmap in [
+    for col, (ax, image, title, cmap) in enumerate([
         (axes[0], gt_img, "GT internal T", "inferno"),
         (axes[1], pred_img, "Pred internal T", "inferno"),
-        (axes[2], err_img, "Abs error", "magma"),
-    ]:
-        im = ax.imshow(image, origin="lower", extent=(-1, 1, -1, 1), cmap=cmap, vmin=vmin if title != "Abs error" else None, vmax=vmax if title != "Abs error" else None)
+        (axes[2], err_img, f"Abs error\nL2={l2_norm_error:.4e}", "magma"),
+    ]):
+        im = ax.imshow(image, origin="lower", extent=(-1, 1, -1, 1), cmap=cmap, vmin=vmin if col < 2 else None, vmax=vmax if col < 2 else None)
         ax.set_title(title)
         ax.set_xlabel("xi")
         ax.set_ylabel("eta")
@@ -78,9 +141,11 @@ def plot_interface(output_path: Path, sample: Dict, pred_interface: np.ndarray) 
     fig, axes = plt.subplots(2, 1, figsize=(7.0, 5.0), sharex=True, constrained_layout=True)
     labels = ["T_surface", "q_normal"]
     for idx, ax in enumerate(axes):
+        channel_l2 = l2_error(pred_interface[:, idx], target[:, idx])
         ax.plot(theta, target[:, idx], color="black", lw=1.8, label="GT")
         ax.plot(theta, pred_interface[:, idx], color="#d95f02", lw=1.5, label="Pred")
         ax.set_ylabel(labels[idx])
+        ax.set_title(f"{labels[idx]} L2={channel_l2:.4e}")
         ax.grid(True, alpha=0.25)
     axes[-1].set_xlabel("theta")
     axes[0].legend()
@@ -90,7 +155,9 @@ def plot_interface(output_path: Path, sample: Dict, pred_interface: np.ndarray) 
 
 def main() -> int:
     args = parse_args()
-    checkpoint_path = resolve_demo_path(args.checkpoint)
+    checkpoint_path = resolve_checkpoint_arg(args)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     train_cfg = checkpoint.get("train_config", {})
     dataset_cfg = train_cfg.get("dataset", {})
@@ -127,14 +194,16 @@ def main() -> int:
         pred_interface = dataset.normalizer.denormalize_interface_targets(pred_interface)
         target_internal = raw_sample["internal_temperature_targets"]
         target_interface = raw_sample["interface_targets"]
+    internal_l2 = l2_error(pred_internal.reshape(-1), target_internal.reshape(-1))
+    interface_l2 = l2_error(pred_interface, target_interface)
 
-    output_dir = Path(args.output_dir) if args.output_dir else checkpoint_path.parent / "eval_local"
-    output_dir = resolve_demo_path(output_dir)
+    output_dir = evaluation_output_dir(args.output_dir, checkpoint_path, raw_sample["case_id"])
     output_dir.mkdir(parents=True, exist_ok=True)
     plot_internal(
         output_dir / "internal_temperature_comparison.png",
         {**raw_sample, "internal_temperature_targets": target_internal},
         pred_internal,
+        internal_l2,
     )
     plot_interface(
         output_dir / "interface_curve_comparison.png",
@@ -144,8 +213,8 @@ def main() -> int:
     summary = {
         "checkpoint": str(checkpoint_path),
         "case_id": str(raw_sample["case_id"]),
-        "internal_mse": float(np.mean((pred_internal.reshape(-1) - target_internal.reshape(-1)) ** 2)),
-        "interface_mse": float(np.mean((pred_interface - target_interface) ** 2)),
+        "internal_l2_error": internal_l2,
+        "interface_l2_error": interface_l2,
         "outputs": {
             "internal_temperature_comparison": str(output_dir / "internal_temperature_comparison.png"),
             "interface_curve_comparison": str(output_dir / "interface_curve_comparison.png"),
@@ -158,4 +227,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

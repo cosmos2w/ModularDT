@@ -1,6 +1,8 @@
 Demo 1 Channel Thermal Forward Model
 ====================================
 
+Updated: 2026-04-28
+
 Stage A: local module surrogate
 -------------------------------
 The local surrogate learns one circular heated module in normalized local
@@ -44,6 +46,26 @@ It uses the global packed HDF5 case structure:
   sampled query points and field targets
   module internal temperature targets
   interface_condition and interface_target
+
+The global simulator that produces these targets is lightweight and
+approximate. The flow is analytic/diagnostic, not a full Navier-Stokes solve.
+It records flow diagnostics and can optionally run a simple projection cleanup,
+but projection is disabled by default.
+
+Temperature is advanced dynamically with explicit substeps until convergence or
+the configured maximum solve time. The preprocessor now packs steady targets
+from converged frames by default instead of blindly averaging the final frames
+of a fixed-duration transient.
+
+Global target modes:
+
+  converged_final: use the first saved frame marked converged; recommended for
+                   first steady forward-model training
+  converged_window_mean: average a final window ending at the converged frame
+  final_window_legacy: reproduce the old final heat-active window behavior
+
+Inspect convergence in raw case frame_index.csv, visualization output
+convergence_temperature.png, and processed preprocessing_case_quality.csv.
 
 The geometry is nonperiodic. Relative features use direct displacement:
 
@@ -179,8 +201,8 @@ forward-model numbers for design inference.
 
 Known simplifications
 ---------------------
-This first implementation is steady/quasi-steady only. There is no transient
-time, phase, or tau input in the global decoder.
+This first implementation is steady only at the training-target level. There
+is no transient time, phase, or tau input in the global decoder.
 
 The global model includes a simple baseline internal/interface head for
 use_local_surrogate=false. The intended Stage B path is to train Stage A first,

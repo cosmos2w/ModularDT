@@ -174,6 +174,84 @@ def load_raw_frame(case_dir: Path, frame_index: int) -> Tuple[Dict[str, np.ndarr
     return payload, row
 
 
+def row_float(row: Dict[str, str], key: str, default: float = np.nan) -> float:
+    try:
+        return float(row.get(key, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def plot_convergence_history(
+    frame_rows: Sequence[Dict[str, str]],
+    cfg_payload: Dict[str, object],
+    output_path: Path,
+    selected_times: np.ndarray | None = None,
+) -> None:
+    """Plot saved-frame temperature convergence diagnostics."""
+    if not frame_rows:
+        return
+    times = np.asarray([row_float(row, "time") for row in frame_rows], dtype=np.float64)
+    delta_inf = np.asarray([row_float(row, "delta_inf") for row in frame_rows], dtype=np.float64)
+    delta_l2_rel = np.asarray([row_float(row, "delta_l2_rel") for row in frame_rows], dtype=np.float64)
+    max_temperature = np.asarray([row_float(row, "max_temperature") for row in frame_rows], dtype=np.float64)
+    mean_temperature = np.asarray([row_float(row, "mean_temperature") for row in frame_rows], dtype=np.float64)
+    if not np.any(np.isfinite(times)):
+        return
+    runtime = cfg_payload.get("runtime", {}) if isinstance(cfg_payload, dict) else {}
+    converged_time = runtime.get("converged_time") if isinstance(runtime, dict) else None
+    try:
+        converged_time = float(converged_time) if converged_time is not None else np.nan
+    except (TypeError, ValueError):
+        converged_time = np.nan
+
+    fig, axes = plt.subplots(2, 2, figsize=(11.0, 7.2), constrained_layout=True)
+    series = [
+        (delta_inf, "delta_inf", True),
+        (delta_l2_rel, "delta_l2_rel", True),
+        (max_temperature, "max temperature", False),
+        (mean_temperature, "mean temperature", False),
+    ]
+    for ax, (values, label, use_log) in zip(axes.ravel(), series):
+        finite = np.isfinite(times) & np.isfinite(values)
+        if np.any(finite):
+            ax.plot(times[finite], values[finite], marker="o", linewidth=1.2)
+        if use_log and np.any(values[finite] > 0.0):
+            ax.set_yscale("log")
+        if np.isfinite(converged_time):
+            ax.axvline(converged_time, color="tab:green", linestyle="--", linewidth=1.1, label="converged")
+        if selected_times is not None and len(selected_times) > 0:
+            lo = float(np.min(selected_times))
+            hi = float(np.max(selected_times))
+            ax.axvspan(lo, hi, color="tab:orange", alpha=0.18, label="selected")
+        ax.set_xlabel("time")
+        ax.set_ylabel(label)
+        ax.grid(True, alpha=0.25)
+        if np.isfinite(converged_time) or (selected_times is not None and len(selected_times) > 0):
+            ax.legend(loc="best", fontsize=8)
+    fig.suptitle("Temperature Convergence")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
+def plot_processed_metadata(metadata: Dict[str, object], output_path: Path) -> None:
+    """Save a compact text panel for processed convergence metadata."""
+    fig, ax = plt.subplots(figsize=(8.0, 3.6), constrained_layout=True)
+    ax.axis("off")
+    lines = [
+        f"case_id: {metadata.get('case_id', '')}",
+        f"target_mode: {metadata.get('target_mode', '')}",
+        f"converged: {metadata.get('converged', '')}",
+        f"selected_times: {metadata.get('selected_times', '')}",
+        f"final_delta_inf: {metadata.get('final_delta_inf', '')}",
+        f"final_delta_l2_rel: {metadata.get('final_delta_l2_rel', '')}",
+    ]
+    ax.text(0.02, 0.95, "\n".join(lines), va="top", ha="left", family="monospace", fontsize=11)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
 def overlay_modules(ax: plt.Axes, centers: Sequence[Sequence[float]], radius: float) -> None:
     """Draw circular module outlines on global channel plots."""
     for idx, (cx, cy) in enumerate(centers):
@@ -314,6 +392,7 @@ def visualize_raw(
     plot_fields(fields, cfg_payload, f"Raw case {case_id}, frame {frame_id}", out_dir / f"raw_frame_{frame_id:06d}_fields.png")
     plot_internal_temperatures(payload, out_dir / f"raw_frame_{frame_id:06d}_internal_temperature.png")
     plot_interface_targets(payload, out_dir / f"raw_frame_{frame_id:06d}_interface_targets.png")
+    plot_convergence_history(read_frame_index(case_dir), cfg_payload, out_dir / "convergence_temperature.png")
     if save_gif:
         save_temperature_gif(case_dir, cfg_payload, out_dir / "temperature_transient.gif")
     print(f"Saved raw visualizations to: {out_dir}")
@@ -342,6 +421,11 @@ def visualize_processed(processed_h5_arg: Path, case_id: str | None, output_dir:
         cfg_payload = json.loads(decode_h5_string(group["case_config_json"][()]))
         steady = group["steady_field"][()]
         rms = group["rms_field"][()]
+        selected_times = group["selected_times"][()] if "selected_times" in group else np.asarray([], dtype=np.float32)
+        target_mode = decode_h5_string(h5.attrs.get("target_mode", group.attrs.get("target_mode", "unknown")))
+        converged = bool(group.attrs.get("converged", False))
+        final_delta_inf = float(group.attrs.get("final_delta_inf", np.nan))
+        final_delta_l2_rel = float(group.attrs.get("final_delta_l2_rel", np.nan))
         fields = {name: steady[..., idx] for idx, name in enumerate(FIELD_NAMES)}
         rms_fields = {name: rms[..., idx] for idx, name in enumerate(FIELD_NAMES)}
         payload = {
@@ -351,10 +435,29 @@ def visualize_processed(processed_h5_arg: Path, case_id: str | None, output_dir:
             "interface_feature_names": h5["interface_feature_names"][()],
         }
     out_dir = output_dir.expanduser().resolve() if output_dir is not None else h5_path.parent / "plots"
-    plot_fields(fields, cfg_payload, f"Processed steady case {key}", out_dir / f"processed_{key}_steady_fields.png")
-    plot_fields(rms_fields, cfg_payload, f"Processed RMS case {key}", out_dir / f"processed_{key}_rms_fields.png")
+    status = "converged" if converged else "unconverged"
+    detail = f"{status}, mode={target_mode}, selected_times={np.asarray(selected_times).tolist()}"
+    plot_fields(fields, cfg_payload, f"Processed steady case {key} ({detail})", out_dir / f"processed_{key}_steady_fields.png")
+    plot_fields(rms_fields, cfg_payload, f"Processed RMS case {key} ({detail})", out_dir / f"processed_{key}_rms_fields.png")
     plot_internal_temperatures(payload, out_dir / f"processed_{key}_internal_temperature.png")
     plot_interface_targets(payload, out_dir / f"processed_{key}_interface_targets.png")
+    plot_processed_metadata(
+        {
+            "case_id": key,
+            "target_mode": target_mode,
+            "converged": converged,
+            "selected_times": np.asarray(selected_times).tolist(),
+            "final_delta_inf": final_delta_inf,
+            "final_delta_l2_rel": final_delta_l2_rel,
+        },
+        out_dir / f"processed_{key}_metadata.png",
+    )
+    print(
+        "Processed case diagnostics: "
+        f"case_id={key}, converged={converged}, target_mode={target_mode}, "
+        f"selected_times={np.asarray(selected_times).tolist()}, "
+        f"final_delta_inf={final_delta_inf:.6e}, final_delta_l2_rel={final_delta_l2_rel:.6e}"
+    )
     print(f"Saved processed visualizations to: {out_dir}")
 
 

@@ -22,7 +22,7 @@
     "fluid_alpha": 0.02,
     "solid_k": 1.0,
     "fluid_k": 1.0,
-    "heat_power_min": 0.5,
+    "heat_power_min": 0.1,
     "heat_power_max": 2.0,
     "heat_start_time": 0.0,
     "convergence_window": 20,
@@ -55,7 +55,7 @@
     "t_env_min": -0.5,
     "t_env_max": 0.5,
     "n_boundary_modes": 6,
-    "solver_iterations": 3000,
+    "solver_iterations": 5000,
     "solver_tolerance": 1e-6,
     "relaxation": 1.25
   },

@@ -73,6 +73,10 @@ class FlowConfig:
     viscosity_scale: float = 1.0
     nu: Optional[float] = None
     pressure_rank_deficiency: int = 0
+    flow_model: str = "analytic_wake"
+    apply_projection: bool = False
+    projection_iterations: int = 200
+    projection_relaxation: float = 1.5
 
 
 @dataclass
@@ -95,8 +99,14 @@ class ThermalConfig:
     heat_power_min: float = 0.5
     heat_power_max: float = 2.0
     heat_start_time: float = 5.0
+    stop_on_convergence: bool = True
+    min_solve_time: float = 2.0
+    max_solve_time: Optional[float] = None
+    max_steps: Optional[int] = None
     convergence_window: int = 20
     convergence_tol: float = 1e-4
+    convergence_rel_tol: float = 1e-5
+    require_heat_active_for_convergence: bool = True
 
 
 @dataclass
@@ -186,6 +196,24 @@ class SimulationConfig:
             raise ValueError("flow.dt must be positive.")
         if self.flow.save_stride <= 0:
             raise ValueError("flow.save_stride must be positive.")
+        if self.flow.flow_model not in {"analytic_wake", "projected_analytic_wake"}:
+            raise ValueError("flow.flow_model must be 'analytic_wake' or 'projected_analytic_wake'.")
+        if self.flow.projection_iterations < 0:
+            raise ValueError("flow.projection_iterations must be non-negative.")
+        if self.flow.projection_relaxation <= 0.0:
+            raise ValueError("flow.projection_relaxation must be positive.")
+        if self.thermal.min_solve_time < 0.0:
+            raise ValueError("thermal.min_solve_time must be non-negative.")
+        if self.thermal.max_solve_time is not None and self.thermal.max_solve_time <= 0.0:
+            raise ValueError("thermal.max_solve_time must be positive when set.")
+        if self.thermal.max_steps is not None and self.thermal.max_steps <= 0:
+            raise ValueError("thermal.max_steps must be positive when set.")
+        if self.thermal.convergence_window <= 0:
+            raise ValueError("thermal.convergence_window must be positive.")
+        if self.thermal.convergence_tol < 0.0:
+            raise ValueError("thermal.convergence_tol must be non-negative.")
+        if self.thermal.convergence_rel_tol < 0.0:
+            raise ValueError("thermal.convergence_rel_tol must be non-negative.")
         if self.save.final_window_frames <= 0:
             raise ValueError("save.final_window_frames must be positive.")
         if self.local_module.local_grid_size < 8:
@@ -373,17 +401,23 @@ def derive_runtime(config: SimulationConfig) -> Dict[str, Any]:
     """Return simple time-step and save-cadence metadata."""
     warmup_time = max(0.0, float(config.flow.warmup_time))
     solve_time = max(0.0, float(config.flow.solve_time))
+    max_solve_time = float(config.thermal.max_solve_time) if config.thermal.max_solve_time is not None else solve_time
     total_time = warmup_time + solve_time
     num_steps = max(1, int(math.ceil(total_time / max(float(config.flow.dt), 1e-12))))
     expected_saved_frames = max(1, int(math.ceil(num_steps / max(1, int(config.flow.save_stride)))))
     return {
         "warmup_time": warmup_time,
         "solve_time": solve_time,
+        "max_solve_time": max_solve_time,
         "total_time": total_time,
         "num_steps": num_steps,
         "save_stride": int(config.flow.save_stride),
         "expected_saved_frames": expected_saved_frames,
         "nu": kinematic_viscosity(config),
+        "stop_on_convergence": bool(config.thermal.stop_on_convergence),
+        "convergence_window": int(config.thermal.convergence_window),
+        "convergence_tol": float(config.thermal.convergence_tol),
+        "convergence_rel_tol": float(config.thermal.convergence_rel_tol),
     }
 
 

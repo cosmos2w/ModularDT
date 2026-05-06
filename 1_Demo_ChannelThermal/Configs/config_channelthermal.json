@@ -26,12 +26,16 @@
     "re": 50.0,
     "u_in": 1.0,
     "dt": 0.01,
-    "warmup_time": 1.0,
-    "solve_time": 1.0,
-    "save_stride": 5,
+    "warmup_time": 10.0,
+    "solve_time": 50.0,
+    "save_stride": 50,
     "viscosity_scale": 1.0,
     "nu": null,
-    "pressure_rank_deficiency": 0
+    "pressure_rank_deficiency": 0,
+    "flow_model": "analytic_wake",
+    "apply_projection": false,
+    "projection_iterations": 200,
+    "projection_relaxation": 1.5
   },
   "thermal": {
     "enabled": true,
@@ -44,8 +48,14 @@
     "heat_power_min": 0.5,
     "heat_power_max": 2.0,
     "heat_start_time": 0.10,
-    "convergence_window": 20,
-    "convergence_tol": 1e-4
+    "stop_on_convergence": true,
+    "min_solve_time": 10.0,
+    "max_solve_time": 200.0,
+    "max_steps": null,
+    "convergence_window": 10,
+    "convergence_tol": 1e-4,
+    "convergence_rel_tol": 1e-5,
+    "require_heat_active_for_convergence": true
   },
   "layout": {
     "num_modules": 2,
@@ -62,7 +72,7 @@
     "save_temperature": true,
     "save_internal_temperature": true,
     "save_interface_response": true,
-    "final_window_frames": 4
+    "final_window_frames": 5
   },
   "local_module": {
     "local_grid_size": 64,
