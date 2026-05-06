@@ -8,10 +8,8 @@ This demo prepares data for the project direction:
 generative modular design by hypergraph organized neural fields
 ```
 
-It creates raw simulation data and packed HDF5 datasets for a 2-D channel with
-heated circular solid modules. The task here is only the data-generation and
-preprocessing layer. No `model.py`, `train.py`, or `evaluate.py` files are part
-of this demo yet.
+It creates raw simulation data, packed HDF5 datasets, and forward-model
+training/evaluation code for a 2-D channel with heated circular solid modules.
 
 The data is organized for two later training stages:
 
@@ -198,6 +196,80 @@ The local preprocessor also detects old raw files where `port_tokens` included
 `T_surface` or `q_normal`, prints a warning, and strips those target columns
 from model inputs.
 
+## Current Data Generation Status
+
+The demo has two canonical processed datasets when their preprocessors have
+been run:
+
+```bash
+Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5
+Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5
+```
+
+The local module dataset powers Stage A. The global channel dataset powers
+Stage B.
+
+## Data Leakage Prevention
+
+The packed datasets separate known inputs from solved outputs.
+
+Local surrogate inputs:
+
+```text
+module_params
+port_tokens[..., ["theta", "cos_theta", "sin_theta", "T_env", "h"]]
+```
+
+Local supervised outputs:
+
+```text
+internal_temperature_targets
+interface_targets[..., ["T_surface", "q_normal"]]
+```
+
+Global clean condition inputs:
+
+```text
+interface_condition[..., ["theta", "normal_x", "normal_y",
+                          "T_outside", "u_normal", "u_tangent", "h_proxy"]]
+```
+
+Global supervised interface outputs:
+
+```text
+interface_target[..., ["T_surface", "q_normal"]]
+```
+
+Target-derived local summaries are stored as diagnostics only and are not part
+of the local module input vector.
+
+## Nonperiodic Geometry
+
+This demo is not periodic. The global model uses direct channel geometry:
+
+```text
+dx = query_x - module_x
+dy = query_y - module_y
+distance = sqrt(dx^2 + dy^2)
+downstream = relu(dx)
+upstream = relu(-dx)
+wall, inlet, and outlet distances are direct distances to boundaries
+```
+
+There is no periodic wrapping or minimum-image distance.
+
+## Training Stages
+
+Stage A trains a local module thermal surrogate from the local dataset.
+
+Stage B trains a global hypergraph-organized neural-field model from the global
+dataset. When configured, it loads the frozen Stage A local surrogate and uses
+its module response latent and local/interface predictions.
+
+Stage C is a future joint fine-tuning path. The template only scaffolds it
+lightly: after Stage B is stable, set `freeze_local_surrogate=false` and use a
+lower learning rate.
+
 ## How To Run
 
 From this directory:
@@ -246,6 +318,19 @@ python src/preprocess_local_module_dataset.py \
   --output-root Data_Saved/Processed_LocalModule_Dataset
 ```
 
+Train the Stage A local surrogate:
+
+```bash
+python src/train_local.py --config Configs/train_local_config_template.json
+```
+
+Evaluate a local surrogate checkpoint:
+
+```bash
+python src/evaluate_local.py \
+  --checkpoint Saved_Model_LocalModule/YOUR_RUN/best_model.pt
+```
+
 Visualize the latest raw global case:
 
 ```bash
@@ -272,7 +357,55 @@ python src/visualize_local_module_thermal.py \
   --processed-h5 Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5
 ```
 
-## Future Training Plan
+Train the Stage B global model with the frozen local surrogate:
+
+```bash
+python src/train.py --config Configs/train_global_config_template.json
+```
+
+For a global-only baseline before a local checkpoint exists, edit the global
+template:
+
+```json
+"use_local_surrogate": false
+```
+
+Evaluate a global checkpoint:
+
+```bash
+python src/evaluate.py \
+  --checkpoint Saved_Model/YOUR_RUN/best_model.pt
+```
+
+## Forward Model Files
+
+Stage A:
+
+```text
+src/model_local.py
+src/train_local.py
+src/evaluate_local.py
+```
+
+Stage B:
+
+```text
+src/model.py
+src/train.py
+src/evaluate.py
+src/channelthermal_datasets.py
+src/channelthermal_model_utils.py
+```
+
+Templates and explanation:
+
+```text
+Configs/train_local_config_template.json
+Configs/train_global_config_template.json
+MODEL_EXPLAIN_channelthermal.txt
+```
+
+## Three-Stage Plan
 
 Stage A: train a small local module surrogate from `module_params` and
 `port_tokens` to internal temperature targets and interface targets.

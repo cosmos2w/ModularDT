@@ -46,16 +46,16 @@
     "final_window_frames": 1
   },
   "local_module": {
-    "local_grid_size": 32,
-    "n_interface_points": 32,
+    "local_grid_size": 64,
+    "n_interface_points": 64,
     "q_min": 0.5,
     "q_max": 2.0,
     "h_min": 0.2,
     "h_max": 3.0,
     "t_env_min": -0.5,
     "t_env_max": 0.5,
-    "n_boundary_modes": 4,
-    "solver_iterations": 800,
+    "n_boundary_modes": 6,
+    "solver_iterations": 3000,
     "solver_tolerance": 1e-6,
     "relaxation": 1.25
   },

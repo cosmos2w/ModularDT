@@ -1,0 +1,71 @@
+{
+  "run_id": "channelthermal_stage_b",
+  "_note": "Set model.use_local_surrogate=false to train a global-only baseline before a local checkpoint exists.",
+  "dataset": {
+    "packed_h5_path": "./Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
+    "train_split": "train",
+    "val_split": "test",
+    "points_per_case": 4096,
+    "val_points_per_case": 4096,
+    "batch_size": 4,
+    "val_batch_size": 4,
+    "num_workers": 0,
+    "random_point_sampling": true,
+    "normalize_inputs": false,
+    "normalize_targets": false
+  },
+  "model": {
+    "field_dim": 5,
+    "field_names": ["u", "v", "p", "omega", "temperature"],
+    "max_num_modules": "auto",
+    "domain_length_x": "auto",
+    "domain_length_y": "auto",
+    "module_radius": "auto",
+    "num_env_tokens_x": 16,
+    "num_env_tokens_y": 6,
+    "num_hyperedges": 6,
+    "hidden_dim": 96,
+    "latent_dim": 96,
+    "use_local_surrogate": true,
+    "local_surrogate_checkpoint_path": "./Saved_Model_LocalModule/YOUR_RUN/best_model.pt",
+    "freeze_local_surrogate": true,
+    "local_surrogate_latent_dim": 128,
+    "future_global_feature_dim": 0,
+    "dropout": 0.05,
+    "use_layer_norm": true,
+    "DISABLE_EDGE": false,
+    "disable_edge_strength_threshold": 0.05
+  },
+  "loss": {
+    "field_mse_weight": 1.0,
+    "temperature_weight": 1.0,
+    "internal_temperature_weight": 1.0,
+    "interface_weight": 0.2,
+    "port_condition_weight": 0.1,
+    "organizer_strength_weight": 0.0,
+    "field_channel_weights": null
+  },
+  "training": {
+    "epochs": 1000,
+    "learning_rate": 0.0002,
+    "weight_decay": 0.00001,
+    "gradient_clip_norm": 1.0,
+    "amp": false,
+    "seed": 42,
+    "device": null,
+    "local_port_condition_mode": "teacher",
+    "mixed_teacher_ratio": 0.5,
+    "max_train_batches_per_epoch": null,
+    "max_val_batches": null
+  },
+  "checkpointing": {
+    "save_best": true,
+    "save_latest": true
+  },
+  "paths": {
+    "saved_model_dir": "./Saved_Model"
+  },
+  "stage_c_future": {
+    "_note": "For later joint fine-tuning, set freeze_local_surrogate=false after Stage B is stable and lower the learning rate."
+  }
+}

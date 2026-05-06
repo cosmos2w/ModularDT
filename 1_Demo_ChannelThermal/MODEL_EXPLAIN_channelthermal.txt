@@ -1,0 +1,149 @@
+Demo 1 Channel Thermal Forward Model
+====================================
+
+Stage A: local module surrogate
+-------------------------------
+The local surrogate learns one circular heated module in normalized local
+coordinates. Inputs are known-before-solve module parameters and port condition
+tokens:
+
+  module_params = [q_internal, solid_k, solid_alpha, h_mean, h_std,
+                   T_env_mean, T_env_std]
+  port_tokens = [theta, cos_theta, sin_theta, T_env, h]
+
+The port tokens are boundary and condition inputs only. They do not include
+solved surface temperature or solved heat flux.
+
+The model encodes module parameters, encodes all port tokens, aggregates the
+boundary tokens with a small Perceiver-style cross-attention stack, and produces
+a compact module_response_latent. Two decoders are supervised:
+
+  internal_temperature(xi, eta)
+  interface_pred(theta) = [T_surface, q_normal]
+
+The module_response_latent is saved by the forward pass so the Stage B global
+model can use the learned local thermal response as a module token.
+
+
+Stage B: global channel thermal model
+-------------------------------------
+The global model predicts the steady channel field in nonperiodic coordinates:
+
+  [u, v, p, omega, temperature]
+
+It uses the global packed HDF5 case structure:
+
+  Re, U_in, material parameters
+  module_centers, heat_powers, module_present
+  sampled query points and field targets
+  module internal temperature targets
+  interface_condition and interface_target
+
+The geometry is nonperiodic. Relative features use direct displacement:
+
+  dx = query_x - module_x
+  dy = query_y - module_y
+  distance, downstream, upstream
+  bottom/top wall distances
+  inlet/outlet distances
+
+No minimum-image or periodic wrapping is used.
+
+
+Environment tokens
+------------------
+The model creates a fixed nonperiodic grid of environment tokens. Each token
+contains normalized x/y position, wall distance, inlet distance, outlet
+distance, and a simple channel-centerline encoding. These tokens are combined
+with the global operating token.
+
+
+Hypergraph organizer
+--------------------
+The organizer builds soft assignment matrices:
+
+  A_me: module-to-environment context
+  A_mh: module-to-hyperedge assignment
+  A_eh: environment-to-hyperedge assignment
+
+In this thermal channel demo, a hyperedge means a learned thermal/flow
+interaction group. It may represent a heat plume, a wall-influenced zone, or a
+broader module/environment coupling region. It is not limited to vortex or wake
+semantics.
+
+The organizer also exposes hyperedge state, source coordinates, thermal-region
+coordinates, and strength diagnostics for visualization.
+
+
+Port condition head
+-------------------
+The global model predicts per-module local-surrogate port condition tokens.
+The first three token columns are known geometry:
+
+  theta, cos_theta, sin_theta
+
+The head predicts only physical condition values:
+
+  T_env, h
+
+Training supervises these values against the global dataset's clean
+interface_condition columns T_outside and h_proxy.
+
+
+Local surrogate integration
+---------------------------
+When configured with use_local_surrogate=true, train.py loads a Stage A
+LocalModuleSurrogate checkpoint. If freeze_local_surrogate=true, the local
+model is held fixed.
+
+The global model can call the local surrogate with:
+
+  local_module_params
+  teacher-forced, predicted, or mixed port tokens
+  local internal query points
+
+The returned internal temperature, interface prediction, and
+module_response_latent are inserted into the global model. The first training
+default is teacher-forced port conditions so Stage B can learn a stable global
+organizer before relying on its own port predictions.
+
+
+Global neural-field decoder
+---------------------------
+The decoder receives query_xy, global operating context, organized module
+tokens, environment tokens, hyperedge tokens, and nearby nonperiodic module
+geometry. It predicts the steady field at arbitrary point queries.
+
+
+Losses
+------
+Stage A losses:
+
+  internal temperature MSE
+  interface target MSE
+  optional interface smoothness penalty
+
+Stage B losses:
+
+  global field MSE over [u, v, p, omega, temperature]
+  internal module temperature MSE over valid module disk points
+  interface MSE over [T_surface, q_normal]
+  port condition MSE over [T_env, h]
+  optional small organizer diagnostics
+
+
+Known simplifications
+---------------------
+This first implementation is steady/quasi-steady only. There is no transient
+time, phase, or tau input in the global decoder.
+
+The global model includes a simple baseline internal/interface head for
+use_local_surrogate=false. The intended Stage B path is to train Stage A first,
+then train Stage B with the local surrogate frozen.
+
+The local/global normalization helpers are implemented but the default configs
+leave normalization off to keep the first checkpoint interfaces transparent.
+
+Stage C joint fine-tuning is only scaffolded by configuration: later runs can
+unfreeze the local surrogate and reduce the learning rate after Stage B is
+stable.

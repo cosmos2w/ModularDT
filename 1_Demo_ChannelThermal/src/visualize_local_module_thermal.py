@@ -44,20 +44,68 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def latest_raw_case() -> Path:
+def raw_case_candidates() -> List[Path]:
+    """Return all raw local module case directories in deterministic order."""
     root = resolve_data_path("./Data_Saved/LocalModule_Raw")
-    candidates = sorted(
+    return sorted(
         path
         for path in root.glob("case_*")
         if path.is_dir() and (path / "case_config.json").exists() and ((path / "local_solution.npz").exists() or (path / "scene").exists())
     )
+
+
+def latest_raw_case() -> Path:
+    """Return the newest raw local module case."""
+    root = resolve_data_path("./Data_Saved/LocalModule_Raw")
+    candidates = raw_case_candidates()
     if not candidates:
         raise FileNotFoundError(f"No raw local module cases found under {root}.")
     return candidates[-1]
 
 
-def resolve_case_dir(path: Path | None) -> Path:
+def normalize_case_id(case_id: str) -> str:
+    """Normalize short numeric IDs to the local batch case-id convention."""
+    cleaned = str(case_id).strip()
+    if cleaned.isdigit():
+        return f"local_{int(cleaned):04d}"
+    if cleaned.startswith("case_local_"):
+        parts = cleaned.split("_")
+        if len(parts) >= 3 and parts[2].isdigit():
+            return f"local_{int(parts[2]):04d}"
+    return cleaned
+
+
+def resolve_raw_case_id(case_id: str) -> Path:
+    """Resolve a raw local case by config save.case_id or directory name.
+
+    Examples that resolve to the same case:
+        ``0010``, ``local_0010``, ``case_local_0010_...``.
+    """
+    candidates = raw_case_candidates()
+    if not candidates:
+        raise FileNotFoundError(f"No raw local module cases found under {resolve_data_path('./Data_Saved/LocalModule_Raw')}.")
+
+    normalized = normalize_case_id(case_id)
+    matches: List[Path] = []
+    for path in candidates:
+        cfg_payload = read_json(path / "case_config.json")
+        saved_case_id = str(cfg_payload.get("save", {}).get("case_id", ""))
+        if saved_case_id == normalized or path.name == case_id or path.name.startswith(f"case_{normalized}_"):
+            matches.append(path)
+
+    if not matches:
+        available = [str(read_json(path / "case_config.json").get("save", {}).get("case_id", path.name)) for path in candidates[-20:]]
+        raise FileNotFoundError(
+            f"No raw local module case matched --case-id {case_id!r} (normalized to {normalized!r}). "
+            f"Recent available IDs: {available}"
+        )
+    return matches[-1]
+
+
+def resolve_case_dir(path: Path | None, case_id: str | None = None) -> Path:
     if path is None:
+        if case_id is not None:
+            return resolve_raw_case_id(case_id)
         return latest_raw_case()
     expanded = path.expanduser()
     if expanded.is_absolute():
@@ -218,9 +266,9 @@ def plot_all(payload: Dict[str, np.ndarray], title_prefix: str, output_dir: Path
     plot_condition_coefficients(payload, f"{title_prefix}: boundary modes", output_dir / f"{stem}_condition_coefficients.png")
 
 
-def visualize_raw(case_dir_arg: Path | None, output_dir: Path | None) -> None:
+def visualize_raw(case_dir_arg: Path | None, output_dir: Path | None, case_id_arg: str | None = None) -> None:
     """Visualize one raw local case directory."""
-    case_dir = resolve_case_dir(case_dir_arg)
+    case_dir = resolve_case_dir(case_dir_arg, case_id_arg)
     payload = load_raw_payload(case_dir)
     cfg_payload = read_json(case_dir / "case_config.json")
     case_id = str(cfg_payload.get("save", {}).get("case_id", case_dir.name))
@@ -271,7 +319,7 @@ def visualize_processed(processed_h5_arg: Path, case_id: str | None, output_dir:
     h5_path = h5_path.resolve()
     with h5py.File(h5_path, "r") as h5:
         cases_group = h5["cases"]
-        key = case_id or sorted(cases_group.keys())[0]
+        key = normalize_case_id(case_id) if case_id is not None else sorted(cases_group.keys())[0]
         if key not in cases_group:
             raise KeyError(f"Case '{key}' not found in {h5_path}. Available: {sorted(cases_group.keys())}")
         payload = reconstruct_processed_payload(cases_group[key], h5)
@@ -283,10 +331,10 @@ def visualize_processed(processed_h5_arg: Path, case_id: str | None, output_dir:
 def main() -> int:
     args = parse_args()
     if args.case_dir is None and args.processed_h5 is None:
-        visualize_raw(None, args.output_dir)
+        visualize_raw(None, args.output_dir, args.case_id)
         return 0
     if args.case_dir is not None:
-        visualize_raw(args.case_dir, args.output_dir)
+        visualize_raw(args.case_dir, args.output_dir, args.case_id)
     if args.processed_h5 is not None:
         visualize_processed(args.processed_h5, args.case_id, args.output_dir)
     return 0

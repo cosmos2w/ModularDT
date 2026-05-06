@@ -256,6 +256,15 @@ def run_case(cfg: SimulationConfig) -> Path:
     q_internal = float(conditions["q_internal"])
     # 2. Solve the steady disk conduction problem.
     temperature, xi, eta, iterations, residual = solve_disk_conduction(cfg, theta, t_env, h_theta, q_internal)
+    solver_limit = int(cfg.local_module.solver_iterations)
+    solver_tolerance = float(cfg.local_module.solver_tolerance)
+    converged = bool(residual < solver_tolerance)
+    tqdm.write(
+        "Local module solver report: "
+        f"converged={int(converged)}, "
+        f"solver_iterations_used={iterations}/{solver_limit}, "
+        f"residual={residual:.3e}, tolerance={solver_tolerance:.3e}"
+    )
     disk_mask = (xi * xi + eta * eta <= 1.0).astype(np.uint8)
 
     # 3. Sample boundary inputs and solved targets on the same theta ports.
@@ -293,6 +302,10 @@ def run_case(cfg: SimulationConfig) -> Path:
         "T_base": float(conditions["T_base"]),
         "h_base": float(conditions["h_base"]),
         "iterations": int(iterations),
+        "solver_iterations_used": int(iterations),
+        "solver_iterations_limit": solver_limit,
+        "solver_tolerance": solver_tolerance,
+        "converged": converged,
         "residual": residual,
         "physics": "steady disk conduction with Robin interface boundary functions",
     }
@@ -302,7 +315,19 @@ def run_case(cfg: SimulationConfig) -> Path:
     with (case_dir / "frame_index.csv").open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,
-            fieldnames=["saved_frame", "file", "iterations", "residual", "q_internal", "mean_temperature", "max_temperature"],
+            fieldnames=[
+                "saved_frame",
+                "file",
+                "iterations",
+                "solver_iterations_used",
+                "solver_iterations_limit",
+                "solver_tolerance",
+                "converged",
+                "residual",
+                "q_internal",
+                "mean_temperature",
+                "max_temperature",
+            ],
         )
         writer.writeheader()
         writer.writerow(
@@ -310,6 +335,10 @@ def run_case(cfg: SimulationConfig) -> Path:
                 "saved_frame": 0,
                 "file": "frame_000000.npz",
                 "iterations": iterations,
+                "solver_iterations_used": iterations,
+                "solver_iterations_limit": solver_limit,
+                "solver_tolerance": f"{solver_tolerance:.8e}",
+                "converged": int(converged),
                 "residual": f"{residual:.8e}",
                 "q_internal": f"{q_internal:.8f}",
                 "mean_temperature": f"{float(np.mean(temperature[disk_mask.astype(bool)])):.8f}",
@@ -319,7 +348,9 @@ def run_case(cfg: SimulationConfig) -> Path:
 
     tqdm.write(
         "Local module case complete: "
-        f"case_dir={case_dir}, iterations={iterations}, residual={residual:.3e}, q={q_internal:.3f}"
+        f"case_dir={case_dir}, converged={int(converged)}, "
+        f"solver_iterations_used={iterations}/{solver_limit}, "
+        f"residual={residual:.3e}, q={q_internal:.3f}"
     )
     return case_dir
 
