@@ -14,6 +14,12 @@ tokens:
 The port tokens are boundary and condition inputs only. They do not include
 solved surface temperature or solved heat flux.
 
+For the current Stage-B workflow, train this local surrogate with
+normalize_inputs=false and normalize_targets=false. Stage B calls the local
+surrogate with raw-scale module_params and port_tokens and now raises an
+explicit error if a normalized Stage-A checkpoint is attached before local
+normalizer transfer is implemented.
+
 The model encodes module parameters, encodes all port tokens, aggregates the
 boundary tokens with a small Perceiver-style cross-attention stack, and produces
 a compact module_response_latent. Two decoders are supervised:
@@ -107,6 +113,17 @@ module_response_latent are inserted into the global model. The first training
 default is teacher-forced port conditions so Stage B can learn a stable global
 organizer before relying on its own port predictions.
 
+The recommended curriculum is teacher -> mixed -> predicted:
+
+  teacher_epochs: use dataset-derived local port tokens
+  mixed interval: linearly blend teacher and predicted port tokens
+  predicted after the curriculum: use only model-predicted port tokens
+
+This matches the evaluation distinction. Teacher mode is a debugging aid
+because it supplies exact dataset port conditions to the local surrogate.
+Predicted mode is the realistic forward-design mode because, during autonomous
+inference, no solved teacher port tokens are available.
+
 
 Global neural-field decoder
 ---------------------------
@@ -129,7 +146,35 @@ Stage B losses:
   internal module temperature MSE over valid module disk points
   interface MSE over [T_surface, q_normal]
   port condition MSE over [T_env, h]
-  optional small organizer diagnostics
+  diag_organizer_strength_mean for organizer monitoring
+
+diag_organizer_strength_mean is logged only. It is not added to the total loss;
+a positive organizer_strength_weight historically penalized strong hyperedges
+and should usually remain 0.0.
+
+
+Global samples and local targets
+--------------------------------
+The Stage-B packed dataset stores global sampled_points for the fluid/channel
+field and separate module_internal_temperature targets for solid interiors. The
+global preprocessor now excludes module-interior cells from sampled_points by
+default, so the global field loss and local solid-temperature loss supervise
+different physical regions. The compatibility flag
+--no-exclude-module-interior-from-global-points restores the old behavior.
+
+
+Evaluation modes
+----------------
+evaluate.py supports:
+
+  --local-port-condition-mode teacher
+  --local-port-condition-mode predicted
+  --local-port-condition-mode mixed
+  --local-port-condition-mode both
+
+The default both mode writes teacher and predicted quicklooks and metrics in
+one evaluation_summary.json. The predicted metrics are the fair autonomous
+forward-model numbers for design inference.
 
 
 Known simplifications

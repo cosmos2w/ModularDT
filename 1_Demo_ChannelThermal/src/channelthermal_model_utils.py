@@ -251,7 +251,10 @@ def save_loss_curve(csv_path: str | Path, png_path: str | Path, *, title: str = 
     for name in names:
         if name == "epoch":
             continue
-        values = np.asarray(rows[name], dtype=float)
+        try:
+            values = np.asarray(rows[name], dtype=float)
+        except (TypeError, ValueError):
+            continue
         if np.any(np.isfinite(values)):
             plt.plot(rows["epoch"], values, label=name)
     plt.yscale("log")
@@ -263,4 +266,3 @@ def save_loss_curve(csv_path: str | Path, png_path: str | Path, *, title: str = 
     plt.tight_layout()
     plt.savefig(png_path, dpi=160)
     plt.close()
-

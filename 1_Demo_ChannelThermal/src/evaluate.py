@@ -18,6 +18,12 @@ from channelthermal_datasets import CHANNEL_ORDER, GlobalChannelThermalDataset
 from channelthermal_model_utils import recursive_to_device, resolve_demo_path, select_device, strip_module_prefix, write_json
 from model import GlobalChannelThermalModel, GlobalChannelThermalModelConfig, load_local_surrogate_from_checkpoint
 
+LOCAL_SURROGATE_NORMALIZATION_ERROR = (
+    "Local surrogate normalization is not yet supported inside Stage-B. "
+    "Re-train local surrogate with normalize_inputs=false and normalize_targets=false, "
+    "or implement local normalizer application."
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate the Demo 1 global Channel Thermal model.")
@@ -29,6 +35,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default=None, help="Torch device override.")
     parser.add_argument("--output-dir", type=str, default=None, help="Directory for evaluation outputs.")
     parser.add_argument("--query-batch-size", type=int, default=32768, help="Grid query chunk size.")
+    parser.add_argument(
+        "--local-port-condition-mode",
+        choices=["teacher", "predicted", "mixed", "both"],
+        default="both",
+        help="Evaluate teacher-forced, model-predicted, mixed, or both teacher and predicted port conditions.",
+    )
+    parser.add_argument("--mixed-teacher-ratio", type=float, default=0.5, help="Teacher-token ratio for mixed port evaluation.")
     return parser.parse_args()
 
 
@@ -53,7 +66,10 @@ def attach_local_surrogate(model: GlobalChannelThermalModel, checkpoint: Dict[st
     local_path = train_cfg.get("model", {}).get("local_surrogate_checkpoint_path")
     if not local_path:
         raise ValueError("Checkpoint config uses the local surrogate but does not include local_surrogate_checkpoint_path.")
-    local_model, _ = load_local_surrogate_from_checkpoint(resolve_demo_path(local_path), map_location=device)
+    local_model, local_checkpoint = load_local_surrogate_from_checkpoint(resolve_demo_path(local_path), map_location=device)
+    dataset_cfg = local_checkpoint.get("train_config", {}).get("dataset", {})
+    if bool(dataset_cfg.get("normalize_inputs", False)) or bool(dataset_cfg.get("normalize_targets", False)):
+        raise ValueError(LOCAL_SURROGATE_NORMALIZATION_ERROR)
     local_model.to(device)
     model.set_local_surrogate(local_model, freeze=bool(model.config.freeze_local_surrogate))
 
@@ -85,6 +101,8 @@ def predict_case(
     device: torch.device,
     *,
     query_batch_size: int,
+    local_port_condition_mode: str,
+    mixed_teacher_ratio: float,
 ) -> Dict[str, Any]:
     x_grid = sample["x_grid"]
     y_grid = sample["y_grid"]
@@ -102,7 +120,12 @@ def predict_case(
                 local_module_params=batch["local_module_params"],
                 teacher_port_tokens=batch["teacher_port_tokens"],
                 local_query_points=batch["module_internal_query_points"],
-                local_port_condition_mode="teacher",
+                # Teacher mode is useful for debugging the global field with
+                # exact boundary tokens. Predicted mode is the autonomous
+                # forward-design setting because no solved teacher tokens are
+                # available at inference time.
+                local_port_condition_mode=local_port_condition_mode,
+                mixed_teacher_ratio=float(mixed_teacher_ratio),
             )
             pred_chunks.append(outputs["pred_field"].detach().cpu().numpy()[0])
             if first_outputs is None:
@@ -261,6 +284,100 @@ def plot_organizer(output_path: Path, sample: Dict[str, Any], aux: Dict[str, Any
     plt.close(fig)
 
 
+def mode_suffix(mode: str) -> str:
+    return "predicted" if str(mode).lower() == "predicted" else str(mode).lower()
+
+
+def denormalize_predictions(
+    predictions: Dict[str, Any],
+    dataset: GlobalChannelThermalDataset,
+    normalize_targets: bool,
+) -> Dict[str, Any]:
+    if not normalize_targets:
+        return predictions
+    out = dict(predictions)
+    out["pred_field_grid"] = dataset.normalizer.denormalize_fields(out["pred_field_grid"])
+    out["pred_internal_temperature"] = dataset.normalizer.denormalize_internal_temperature(out["pred_internal_temperature"])
+    out["pred_interface"] = dataset.normalizer.denormalize_interface_targets(out["pred_interface"])
+    return out
+
+
+def summarize_prediction(
+    checkpoint_path: Path,
+    raw_sample: Dict[str, Any],
+    predictions: Dict[str, Any],
+    output_dir: Path,
+    suffix: str,
+    channel_order: list[str],
+) -> Dict[str, Any]:
+    pred_field = predictions["pred_field_grid"]
+    gt_field = raw_sample["steady_field"][..., : pred_field.shape[-1]]
+    pred_internal = predictions["pred_internal_temperature"]
+    gt_internal = raw_sample["module_internal_temperature_points"]
+    pred_interface = predictions["pred_interface"]
+    gt_interface = raw_sample["interface_target"]
+    npz_path = output_dir / f"evaluation_outputs_{suffix}.npz"
+    np.savez_compressed(
+        npz_path,
+        pred_field_grid=pred_field.astype(np.float32),
+        gt_field_grid=gt_field.astype(np.float32),
+        pred_internal_temperature=pred_internal.astype(np.float32),
+        gt_internal_temperature=gt_internal.astype(np.float32),
+        pred_interface=pred_interface.astype(np.float32),
+        gt_interface=gt_interface.astype(np.float32),
+        pred_port_condition=predictions["pred_port_condition"].astype(np.float32),
+    )
+    outputs = {
+        "global_field_quicklook": str(output_dir / f"global_field_quicklook_{suffix}.png"),
+        "module_internal_temperature": str(output_dir / f"module_internal_temperature_{suffix}.png"),
+        "interface_curves": str(output_dir / f"interface_curves_{suffix}.png"),
+        "npz": str(npz_path),
+    }
+    return {
+        "checkpoint": str(checkpoint_path),
+        "case_id": str(raw_sample["case_id"]),
+        "field_mse": float(np.mean((pred_field - gt_field) ** 2)),
+        "temperature_mse": float(np.mean((pred_field[..., 4] - gt_field[..., 4]) ** 2)) if pred_field.shape[-1] >= 5 else None,
+        "internal_mse": float(np.mean((pred_internal.reshape(-1) - gt_internal.reshape(-1, 1)) ** 2)),
+        "interface_mse": float(np.mean((pred_interface - gt_interface) ** 2)),
+        "channel_order": channel_order,
+        "outputs": outputs,
+    }
+
+
+def evaluate_mode(
+    *,
+    mode: str,
+    model: GlobalChannelThermalModel,
+    sample: Dict[str, Any],
+    raw_sample: Dict[str, Any],
+    dataset: GlobalChannelThermalDataset,
+    checkpoint_path: Path,
+    output_dir: Path,
+    device: torch.device,
+    query_batch_size: int,
+    mixed_teacher_ratio: float,
+    normalize_targets: bool,
+    channel_order: list[str],
+) -> Dict[str, Any]:
+    suffix = mode_suffix(mode)
+    predictions = predict_case(
+        model,
+        sample,
+        device,
+        query_batch_size=query_batch_size,
+        local_port_condition_mode=mode,
+        mixed_teacher_ratio=mixed_teacher_ratio,
+    )
+    predictions = denormalize_predictions(predictions, dataset, normalize_targets)
+    plot_field_quicklook(output_dir / f"global_field_quicklook_{suffix}.png", raw_sample, predictions["pred_field_grid"], channel_order)
+    plot_internal(output_dir / f"module_internal_temperature_{suffix}.png", raw_sample, predictions["pred_internal_temperature"])
+    plot_interface(output_dir / f"interface_curves_{suffix}.png", raw_sample, predictions["pred_interface"])
+    summary = summarize_prediction(checkpoint_path, raw_sample, predictions, output_dir, suffix, channel_order)
+    summary["_organizer_aux"] = predictions["organizer_aux"]
+    return summary
+
+
 def main() -> int:
     args = parse_args()
     checkpoint_path = resolve_demo_path(args.checkpoint)
@@ -278,47 +395,91 @@ def main() -> int:
         random_point_sampling=False,
         include_grid=True,
     )
+    raw_dataset = GlobalChannelThermalDataset(
+        dataset_path,
+        split=args.split,
+        points_per_case=1,
+        normalize_inputs=False,
+        normalize_targets=False,
+        random_point_sampling=False,
+        include_grid=True,
+    )
     if len(dataset) == 0:
         dataset = GlobalChannelThermalDataset(dataset_path, split="all", points_per_case=1, include_grid=True)
+        raw_dataset = GlobalChannelThermalDataset(dataset_path, split="all", points_per_case=1, include_grid=True)
     sample = select_sample(dataset, args.case_id, args.case_index)
-    predictions = predict_case(model, sample, device, query_batch_size=args.query_batch_size)
-    pred_field = predictions["pred_field_grid"]
-    if bool(dataset_cfg.get("normalize_targets", False)):
-        pred_field = dataset.normalizer.denormalize_fields(pred_field)
+    raw_sample = select_sample(raw_dataset, str(sample["case_id"]), args.case_index)
 
     output_dir = Path(args.output_dir) if args.output_dir else checkpoint_path.parent / "eval_global"
     output_dir = resolve_demo_path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     channel_order = dataset.channel_order or list(CHANNEL_ORDER)
-    plot_field_quicklook(output_dir / "global_field_quicklook.png", sample, pred_field, channel_order)
-    plot_internal(output_dir / "module_internal_temperature.png", sample, predictions["pred_internal_temperature"])
-    plot_interface(output_dir / "interface_curves.png", sample, predictions["pred_interface"])
-    plot_organizer(output_dir / "organizer_visualization.png", sample, predictions["organizer_aux"], model)
+    normalize_targets = bool(dataset_cfg.get("normalize_targets", False))
+    requested_modes = ["teacher", "predicted"] if args.local_port_condition_mode == "both" else [args.local_port_condition_mode]
+    mode_summaries: Dict[str, Dict[str, Any]] = {}
+    first_aux: Optional[Dict[str, Any]] = None
+    for mode in requested_modes:
+        mode_summary = evaluate_mode(
+            mode=mode,
+            model=model,
+            sample=sample,
+            raw_sample=raw_sample,
+            dataset=dataset,
+            checkpoint_path=checkpoint_path,
+            output_dir=output_dir,
+            device=device,
+            query_batch_size=args.query_batch_size,
+            mixed_teacher_ratio=float(args.mixed_teacher_ratio),
+            normalize_targets=normalize_targets,
+            channel_order=channel_order,
+        )
+        if first_aux is None:
+            first_aux = mode_summary.pop("_organizer_aux", None)
+        else:
+            mode_summary.pop("_organizer_aux", None)
+        mode_summaries[mode_suffix(mode)] = mode_summary
 
-    npz_path = output_dir / "evaluation_outputs.npz"
-    np.savez_compressed(
-        npz_path,
-        pred_field_grid=pred_field.astype(np.float32),
-        gt_field_grid=sample["steady_field"].astype(np.float32),
-        pred_internal_temperature=predictions["pred_internal_temperature"].astype(np.float32),
-        gt_internal_temperature=sample["module_internal_temperature_points"].astype(np.float32),
-        pred_interface=predictions["pred_interface"].astype(np.float32),
-        gt_interface=sample["interface_target"].astype(np.float32),
-    )
-    gt_field = sample["steady_field"][..., : pred_field.shape[-1]]
+    if first_aux is not None:
+        plot_organizer(output_dir / "organizer_visualization.png", raw_sample, first_aux, model)
+
     summary = {
         "checkpoint": str(checkpoint_path),
-        "case_id": str(sample["case_id"]),
-        "field_mse": float(np.mean((pred_field - gt_field) ** 2)),
-        "temperature_mse": float(np.mean((pred_field[..., 4] - gt_field[..., 4]) ** 2)) if pred_field.shape[-1] >= 5 else None,
-        "outputs": {
-            "global_field_quicklook": str(output_dir / "global_field_quicklook.png"),
-            "module_internal_temperature": str(output_dir / "module_internal_temperature.png"),
-            "interface_curves": str(output_dir / "interface_curves.png"),
-            "organizer_visualization": str(output_dir / "organizer_visualization.png"),
-            "npz": str(npz_path),
-        },
+        "case_id": str(raw_sample["case_id"]),
+        "local_port_condition_mode": args.local_port_condition_mode,
+        "mixed_teacher_ratio": float(args.mixed_teacher_ratio),
+        "outputs": {"organizer_visualization": str(output_dir / "organizer_visualization.png")},
+        "modes": mode_summaries,
     }
+    if args.local_port_condition_mode == "both":
+        teacher = mode_summaries["teacher"]
+        predicted = mode_summaries["predicted"]
+        summary.update(
+            {
+                "teacher_field_mse": teacher["field_mse"],
+                "predicted_field_mse": predicted["field_mse"],
+                "teacher_temperature_mse": teacher["temperature_mse"],
+                "predicted_temperature_mse": predicted["temperature_mse"],
+                "teacher_internal_mse": teacher["internal_mse"],
+                "predicted_internal_mse": predicted["internal_mse"],
+                "teacher_interface_mse": teacher["interface_mse"],
+                "predicted_interface_mse": predicted["interface_mse"],
+            }
+        )
+    else:
+        suffix = mode_suffix(args.local_port_condition_mode)
+        only = mode_summaries[suffix]
+        summary.update(
+            {
+                "field_mse": only["field_mse"],
+                "temperature_mse": only["temperature_mse"],
+                "internal_mse": only["internal_mse"],
+                "interface_mse": only["interface_mse"],
+                f"{suffix}_field_mse": only["field_mse"],
+                f"{suffix}_temperature_mse": only["temperature_mse"],
+                f"{suffix}_internal_mse": only["internal_mse"],
+                f"{suffix}_interface_mse": only["interface_mse"],
+            }
+        )
     write_json(output_dir / "evaluation_summary.json", summary)
     print(json.dumps(summary, indent=2))
     return 0
@@ -326,4 +487,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

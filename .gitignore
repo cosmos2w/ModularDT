@@ -67,3 +67,6 @@ loss_history.csv
 loss_history.json
 loss_curve.png
 Evaluation*/
+
+# Any smoke tests
+Saved_Model_LocalModule/

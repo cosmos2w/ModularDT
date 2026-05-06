@@ -1,5 +1,5 @@
 {
-  "description": "Tiny local module smoke-test config. Generates one raw Robin-conduction case for preprocessing into Processed_LocalModule_Dataset/packed_dataset.h5.",
+  "description": "Local module smoke-test config. Generates one raw Robin-conduction case for preprocessing into Processed_LocalModule_Dataset/packed_dataset.h5.",
   "data_contract": {
     "port_inputs": [
       "theta",

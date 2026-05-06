@@ -1,5 +1,5 @@
 {
-  "description": "Tiny global channel thermal smoke-test config. Generates raw global frames for preprocessing into Processed_ChannelThermal_Dataset/packed_dataset.h5.",
+  "description": "Global channel thermal test config. Generates raw global frames for preprocessing into Processed_ChannelThermal_Dataset/packed_dataset.h5.",
   "data_contract": {
     "global_channels": [
       "u",
@@ -12,8 +12,8 @@
     "preferred_interface_targets": "preprocessed interface_target"
   },
   "domain": {
-    "nx": 64,
-    "ny": 32,
+    "nx": 128,
+    "ny": 64,
     "lx": 12.0,
     "ly": 4.0,
     "module_radius": 0.45,
@@ -25,9 +25,9 @@
   "flow": {
     "re": 50.0,
     "u_in": 1.0,
-    "dt": 0.02,
-    "warmup_time": 0.10,
-    "solve_time": 0.50,
+    "dt": 0.01,
+    "warmup_time": 1.0,
+    "solve_time": 1.0,
     "save_stride": 5,
     "viscosity_scale": 1.0,
     "nu": null,
@@ -56,7 +56,7 @@
   "save": {
     "root_dir": "./Data_Saved",
     "case_id": "0001",
-    "tag": "channelthermal_tiny",
+    "tag": "channelthermal",
     "save_pressure": true,
     "save_vorticity": true,
     "save_temperature": true,
@@ -65,8 +65,8 @@
     "final_window_frames": 4
   },
   "local_module": {
-    "local_grid_size": 32,
-    "n_interface_points": 32,
+    "local_grid_size": 64,
+    "n_interface_points": 64,
     "q_min": 0.5,
     "q_max": 2.0,
     "h_min": 0.2,
@@ -74,7 +74,7 @@
     "t_env_min": -0.5,
     "t_env_max": 0.5,
     "n_boundary_modes": 4,
-    "solver_iterations": 1000,
+    "solver_iterations": 3000,
     "solver_tolerance": 1e-6,
     "relaxation": 1.25
   },

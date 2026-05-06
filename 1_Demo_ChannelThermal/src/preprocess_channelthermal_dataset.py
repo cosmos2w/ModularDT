@@ -8,23 +8,63 @@ writes the canonical Stage-B dataset:
 
 ``Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5``.
 
+Generated HDF5 structure
+------------------------
+The root records dataset metadata and feature names:
+
+* ``case_ids`` and ``splits`` list the cases and train/test assignments.
+* ``channel_order`` names the field channels in ``steady_field`` and
+  ``rms_field``: ``u, v, p, omega, temperature``.
+* ``sampled_point_feature_names`` names rows of ``sampled_points``:
+  ``x, y, u, v, p, omega, temperature``.
+* ``interface_condition_feature_names`` and ``interface_target_names`` define
+  the clean input/target split for module-boundary coupling.
+* ``normalization/`` stores dataset-level means and standard deviations.
+
+Each case is stored under ``cases/<case_key>/`` with:
+
+* ``x_grid`` and ``y_grid``: fixed Eulerian coordinates of the channel domain.
+* ``steady_field``: final-window mean flow/thermal state on the grid.
+* ``rms_field``: final-window fluctuation magnitude for the same channels.
+* ``sampled_points``: sparse point supervision sampled from ``steady_field``;
+  by default, these are fluid-domain points outside module interiors.
+* ``module_mask``: channel cells occupied by solid modules.
+* ``module_internal_temperature`` and ``module_internal_mask``: local solid
+  temperature fields and valid disk masks, padded to ``max_modules``.
+* ``interface_response``: legacy full interface array preserved for
+  compatibility.
+* ``interface_condition``: known boundary-condition inputs at module surfaces.
+* ``interface_target``: solved coupling targets at module surfaces.
+* ``module_centers``, ``heat_powers``, and ``module_present``: padded module
+  layout and source metadata.
+* ``material_parameters`` and ``case_config_json``: physical constants and the
+  original simulation configuration.
+
+Physical meaning
+----------------
+The processed case represents a quasi-steady forced-convection problem: fluid
+flows through a channel around internally heated circular solid modules. The
+field channels describe velocity, pressure, vorticity, and temperature in the
+global channel. ``heat_powers`` are known internal heat generation strengths.
+``interface_condition`` carries quantities known from the fluid side and local
+geometry, while ``interface_target`` carries solved solid/fluid exchange values:
+surface temperature ``T_surface`` and outward normal heat flux ``q_normal``.
+This separation keeps training inputs free of target leakage.
+
 Data flow
 ---------
 For each case, frames after heat activation are filtered, the final window is
 averaged into ``steady_field``, and an ``rms_field`` is computed over that same
 window. Global point samples, module-internal temperature targets, and
-interface arrays are then packed for future neural-field training.
+interface arrays are then packed for future neural-field training. Global point
+sampling excludes module interiors by default because solid temperatures are
+supervised separately through ``module_internal_temperature``.
 
 Leakage guard
 -------------
 The raw ``interface_response`` is preserved for compatibility, but the packed
 HDF5 also writes ``interface_condition`` and ``interface_target`` so future
 training scripts can use clean inputs and targets by default.
-
-This first Demo 1 preprocessing pass is deliberately not phase-cycle based.
-For each raw case it selects saved frames after heat activation, averages the
-final window, stores an RMS field over that window, and adds point samples for
-neural-field training.
 """
 from __future__ import annotations
 
@@ -91,6 +131,7 @@ class ProcessedCase:
     module_centers: np.ndarray
     heat_powers: np.ndarray
     module_mask: np.ndarray
+    exclude_module_interior_from_global_points: bool
 
 
 def parse_args() -> argparse.Namespace:
@@ -107,6 +148,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-modules", type=int, default=8, help="Pad module arrays to at least this module count.")
     parser.add_argument("--train-fraction", type=float, default=0.8, help="Train split fraction for unsplit raw folders.")
     parser.add_argument("--seed", type=int, default=123, help="Sampling and split RNG seed.")
+    parser.add_argument(
+        "--exclude-module-interior-from-global-points",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Sample global point targets from fluid cells only; use --no-exclude-module-interior-from-global-points for old behavior.",
+    )
     return parser.parse_args()
 
 
@@ -207,36 +254,56 @@ def sample_global_points(
     module_mask: np.ndarray,
     points_per_case: int,
     rng: np.random.Generator,
+    *,
+    exclude_module_interior_from_global_points: bool = True,
 ) -> np.ndarray:
     """Sample uniform, near-module, and temperature-gradient-focused points.
 
     These samples become point-supervision tuples for the global environment
-    neural field. Module-interior and interface targets are stored separately.
+    neural field. Module-interior and interface targets are stored separately,
+    so the default candidate universe is fluid cells only.
     """
     h, w, _ = steady_field.shape
     yy, xx = np.indices((h, w))
     flat_indices = np.arange(h * w)
-    if points_per_case <= 0 or points_per_case >= h * w:
-        chosen = flat_indices
+    candidate_mask = np.ones((h, w), dtype=bool)
+    if exclude_module_interior_from_global_points:
+        candidate_mask &= ~np.asarray(module_mask, dtype=bool)
+    candidate_indices = np.flatnonzero(candidate_mask.reshape(-1))
+    if len(candidate_indices) == 0:
+        print("Warning: no fluid cells available for global point sampling; falling back to all grid cells.")
+        candidate_indices = flat_indices
+
+    if points_per_case <= 0 or points_per_case >= len(candidate_indices):
+        chosen = candidate_indices
     else:
         n_uniform = points_per_case // 2
         n_near = points_per_case // 4
         n_grad = points_per_case - n_uniform - n_near
 
-        chosen_parts: List[np.ndarray] = [rng.choice(flat_indices, size=n_uniform, replace=h * w < n_uniform)]
+        # Uniform, near-module, and gradient-focused samples all draw from the
+        # same candidate universe, so the global field loss does not silently
+        # include solid interior cells unless the compatibility flag is off.
+        chosen_parts: List[np.ndarray] = [
+            rng.choice(candidate_indices, size=n_uniform, replace=len(candidate_indices) < n_uniform)
+        ]
 
         near_mask = np.zeros((h, w), dtype=bool)
         radius = float(cfg.domain.module_radius) + 2.0 * float(cfg.domain.min_gap)
         for cx, cy in cfg.layout.centers or []:
             near_mask |= np.hypot(x_grid - float(cx), y_grid - float(cy)) <= radius
-        near_candidates = np.flatnonzero(near_mask & ~module_mask)
+        near_candidates = np.intersect1d(np.flatnonzero(near_mask.reshape(-1)), candidate_indices, assume_unique=False)
         if len(near_candidates) > 0 and n_near > 0:
             chosen_parts.append(rng.choice(near_candidates, size=n_near, replace=len(near_candidates) < n_near))
 
         temp = steady_field[..., CHANNEL_ORDER.index("temperature")]
         grad_y, grad_x = np.gradient(temp)
         grad_mag = np.hypot(grad_x, grad_y)
-        grad_candidates = np.flatnonzero(grad_mag >= np.quantile(grad_mag, 0.80))
+        grad_candidates = np.intersect1d(
+            np.flatnonzero((grad_mag >= np.quantile(grad_mag, 0.80)).reshape(-1)),
+            candidate_indices,
+            assume_unique=False,
+        )
         if len(grad_candidates) > 0 and n_grad > 0:
             weights = grad_mag.reshape(-1)[grad_candidates].astype(np.float64)
             weights = weights + 1e-8
@@ -245,7 +312,11 @@ def sample_global_points(
 
         chosen = np.unique(np.concatenate(chosen_parts))
         if len(chosen) < points_per_case:
-            fill = rng.choice(flat_indices, size=points_per_case - len(chosen), replace=h * w < points_per_case)
+            fill = rng.choice(
+                candidate_indices,
+                size=points_per_case - len(chosen),
+                replace=len(candidate_indices) < points_per_case,
+            )
             chosen = np.concatenate([chosen, fill])
         chosen = chosen[:points_per_case]
 
@@ -285,6 +356,7 @@ def process_case(
     final_window_override: int | None,
     points_per_case: int,
     seed: int,
+    exclude_module_interior_from_global_points: bool,
 ) -> ProcessedCase:
     """Convert one raw case folder into packed steady-window arrays."""
     selected_rows = select_final_window(raw, final_window_override)
@@ -298,7 +370,16 @@ def process_case(
     x_grid, y_grid = build_uniform_grid(raw.cfg)
     module_mask = last_payload["module_mask"].astype(np.uint8)
     rng = np.random.default_rng(seed)
-    sampled_points = sample_global_points(steady_field, x_grid, y_grid, raw.cfg, module_mask.astype(bool), points_per_case, rng)
+    sampled_points = sample_global_points(
+        steady_field,
+        x_grid,
+        y_grid,
+        raw.cfg,
+        module_mask.astype(bool),
+        points_per_case,
+        rng,
+        exclude_module_interior_from_global_points=exclude_module_interior_from_global_points,
+    )
 
     internal_frames: List[np.ndarray] = []
     interface_frames: List[np.ndarray] = []
@@ -335,6 +416,7 @@ def process_case(
         module_centers=centers,
         heat_powers=heat_powers,
         module_mask=module_mask,
+        exclude_module_interior_from_global_points=exclude_module_interior_from_global_points,
     )
 
 
@@ -417,7 +499,12 @@ def write_normalization_group(h5, processed: Sequence[ProcessedCase]) -> None:
     norm.create_dataset("internal_temperature_std", data=np.asarray([float(internal_std)], dtype=np.float32))
 
 
-def write_h5(output_root: Path, processed: Sequence[ProcessedCase], max_modules_arg: int) -> Path:
+def write_h5(
+    output_root: Path,
+    processed: Sequence[ProcessedCase],
+    max_modules_arg: int,
+    exclude_module_interior_from_global_points: bool,
+) -> Path:
     """Write the packed global channel HDF5 file."""
     output_root.mkdir(parents=True, exist_ok=True)
     h5_path = output_root / "packed_dataset.h5"
@@ -434,6 +521,7 @@ def write_h5(output_root: Path, processed: Sequence[ProcessedCase], max_modules_
         h5.attrs["local_grid_size"] = local_grid_size
         h5.attrs["n_interface_points"] = n_interface_points
         h5.attrs["state_id"] = "steady_final_window"
+        h5.attrs["exclude_module_interior_from_global_points"] = bool(exclude_module_interior_from_global_points)
         h5.create_dataset("field_dim", data=np.asarray([len(CHANNEL_ORDER)], dtype=np.int32))
         h5.create_dataset("channel_order", data=np.asarray(CHANNEL_ORDER, dtype=string_dtype))
         h5.create_dataset("sampled_point_feature_names", data=np.asarray(SAMPLED_POINT_FEATURES, dtype=string_dtype))
@@ -528,10 +616,16 @@ def main() -> int:
                 args.final_window_frames,
                 args.points_per_case,
                 args.seed + idx,
+                bool(args.exclude_module_interior_from_global_points),
             )
         )
 
-    h5_path = write_h5(output_root, processed, args.max_modules)
+    h5_path = write_h5(
+        output_root,
+        processed,
+        args.max_modules,
+        bool(args.exclude_module_interior_from_global_points),
+    )
     tqdm.write(f"Packed {len(processed)} channel thermal cases into: {h5_path}")
     return 0
 

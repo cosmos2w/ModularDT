@@ -139,9 +139,11 @@ def save_checkpoint(
     model: LocalModuleSurrogate,
     model_config: LocalModuleConfig,
     train_config: Dict[str, Any],
+    dataset: LocalModuleDataset,
     epoch: int,
     best_metric: float,
 ) -> None:
+    dataset_cfg = train_config.get("dataset", {})
     torch.save(
         {
             "epoch": int(epoch),
@@ -149,6 +151,15 @@ def save_checkpoint(
             "model_config": model_config.to_dict(),
             "model_state_dict": model.state_dict(),
             "train_config": train_config,
+            "dataset_feature_names": {
+                "module_param_names": list(dataset.module_param_names),
+                "port_input_feature_names": list(dataset.port_input_feature_names),
+                "interface_target_names": list(dataset.interface_target_names),
+            },
+            "local_normalization_config": {
+                "normalize_inputs": bool(dataset_cfg.get("normalize_inputs", False)),
+                "normalize_targets": bool(dataset_cfg.get("normalize_targets", False)),
+            },
         },
         path,
     )
@@ -272,8 +283,24 @@ def main() -> int:
         metric = float(row["val_loss_total"])
         if math.isfinite(metric) and metric < best_metric:
             best_metric = metric
-            save_checkpoint(run_dir / "best_model.pt", model=model, model_config=model_config, train_config=cfg, epoch=epoch, best_metric=best_metric)
-        save_checkpoint(run_dir / "latest_model.pt", model=model, model_config=model_config, train_config=cfg, epoch=epoch, best_metric=best_metric)
+            save_checkpoint(
+                run_dir / "best_model.pt",
+                model=model,
+                model_config=model_config,
+                train_config=cfg,
+                dataset=train_dataset,
+                epoch=epoch,
+                best_metric=best_metric,
+            )
+        save_checkpoint(
+            run_dir / "latest_model.pt",
+            model=model,
+            model_config=model_config,
+            train_config=cfg,
+            dataset=train_dataset,
+            epoch=epoch,
+            best_metric=best_metric,
+        )
         save_loss_curve(history_path, run_dir / "loss_curve.png", title="Local Module Surrogate Loss")
         print(
             f"[epoch {epoch:04d}] loss={row['loss_total']:.4e} "
@@ -287,4 +314,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

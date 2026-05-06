@@ -8,13 +8,48 @@ cases produced by ``simulate_local_module_thermal.py`` from
 
 ``Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5``.
 
+Generated HDF5 structure
+------------------------
+The root stores uniform, stacked arrays for direct surrogate training:
+
+* ``case_ids`` and ``splits`` list the cases and train/test assignments.
+* ``module_param_names`` names ``module_params``:
+  ``q_internal, solid_k, solid_alpha, h_mean, h_std, T_env_mean, T_env_std``.
+* ``port_input_feature_names`` names each row of ``port_tokens``:
+  ``theta, cos_theta, sin_theta, T_env, h``.
+* ``interface_target_names`` names each row of ``interface_targets``:
+  ``T_surface, q_normal``.
+* ``local_target_stat_names`` names diagnostic summaries in
+  ``local_target_stats``.
+* ``normalization/`` stores dataset-level means and standard deviations.
+
+The same per-case arrays are also copied under ``cases/<case_key>/`` together
+with ``case_config_json`` and source-path metadata.
+
+Physical meaning
+----------------
+Each case is a steady 2-D conduction solve on a single circular solid module.
+``q_internal`` is the known internal heat generation strength, while
+``solid_k`` and ``solid_alpha`` are material properties. ``port_tokens``
+describe Robin boundary conditions around the module perimeter: angular
+location ``theta``, its sinusoidal embedding, outside/environment temperature
+``T_env``, and local heat-transfer coefficient ``h``.
+
+The learning targets are deliberately separate. ``internal_query_points`` are
+coordinates inside the disk, and ``internal_temperature_targets`` are the solved
+temperatures at those coordinates. ``interface_targets`` are the solved module
+surface temperature ``T_surface`` and outward normal heat flux ``q_normal``.
+``local_grid`` and ``local_mask`` preserve the full square grid and disk mask so
+visualization and reconstruction use the same geometry as the solver.
+
 Data contract
 -------------
 The packed file separates known inputs from solved targets:
 
 * ``module_params`` contains only known-before-solve scalar inputs.
 * ``port_tokens`` contains only boundary/interface condition inputs.
-* ``interface_targets`` contains solved ``T_surface`` and ``q_normal``.
+* ``internal_temperature_targets`` and ``interface_targets`` contain solved
+  temperatures and fluxes.
 * ``local_target_stats`` stores solved-temperature summaries for analysis, not
   model inputs.
 
@@ -95,7 +130,7 @@ def parse_args() -> argparse.Namespace:
         default=Path("./Data_Saved/Processed_LocalModule_Dataset"),
         help="Processed local dataset root.",
     )
-    parser.add_argument("--train-fraction", type=float, default=0.8, help="Train split fraction for unsplit raw folders.")
+    parser.add_argument("--train-fraction", type=float, default=0.90, help="Train split fraction for unsplit raw folders.")
     parser.add_argument("--seed", type=int, default=321, help="Split RNG seed.")
     return parser.parse_args()
 

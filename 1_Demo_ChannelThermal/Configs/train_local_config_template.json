@@ -2,6 +2,7 @@
   "run_id": "local_module_stage_a",
   "_note": "JSON does not allow comments; keys beginning with _note document intended usage.",
   "dataset": {
+    "_note_normalization": "For the first Stage-B workflow, keep normalize_inputs=false and normalize_targets=false. Stage-B does not yet apply local-surrogate normalizers when loading a Stage-A checkpoint.",
     "packed_h5_path": "./Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5",
     "train_split": "train",
     "val_split": "test",

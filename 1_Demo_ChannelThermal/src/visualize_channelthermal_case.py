@@ -46,10 +46,31 @@ try:
 except ImportError:  # pragma: no cover - only needed for processed views
     h5py = None
 
-from channelthermal_common import config_from_dict, read_json, resolve_data_path
+from channelthermal_common import config_from_dict, find_case_dirs, read_json, resolve_data_path
 
 
 FIELD_NAMES = ("u", "v", "p", "omega", "temperature")
+
+
+def domain_extent(cfg_payload: Dict[str, object]) -> Tuple[List[float], float, float]:
+    """Return imshow extent plus physical domain dimensions."""
+    cfg = config_from_dict(cfg_payload)
+    lx = float(cfg.domain.lx)
+    ly = float(cfg.domain.ly)
+    return [0.0, lx, 0.0, ly], lx, ly
+
+
+def set_domain_aspect(ax: plt.Axes, lx: float, ly: float) -> None:
+    """Render physical domain coordinates without stretching."""
+    ax.set_xlim(0.0, lx)
+    ax.set_ylim(0.0, ly)
+    ax.set_aspect("equal", adjustable="box")
+
+
+def single_domain_figsize(lx: float, ly: float, width: float = 8.5) -> Tuple[float, float]:
+    """Choose a figure size that follows the channel's physical aspect ratio."""
+    height = max(2.4, width * ly / max(lx, 1e-12) + 1.0)
+    return width, height
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,19 +84,68 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def raw_case_candidates() -> List[Path]:
+    """Return all raw global channel case directories in deterministic order."""
+    root = resolve_data_path("./Data_Saved")
+    return sorted(
+        path
+        for _split, path in find_case_dirs(root)
+        if (path / "scene").exists() and (path / "frame_index.csv").exists()
+    )
+
+
 def latest_raw_case() -> Path:
     """Return the most recent raw global case under ``Data_Saved``."""
     root = resolve_data_path("./Data_Saved")
-    candidates = sorted(
-        path for path in root.glob("case_*") if path.is_dir() and (path / "scene").exists() and (path / "case_config.json").exists()
-    )
+    candidates = raw_case_candidates()
     if not candidates:
         raise FileNotFoundError(f"No raw channel thermal cases found under {root}.")
     return candidates[-1]
 
 
-def resolve_case_dir(path: Path | None) -> Path:
+def normalize_case_id(case_id: str) -> str:
+    """Normalize short numeric IDs to the global batch case-id convention."""
+    cleaned = str(case_id).strip()
+    if cleaned.isdigit():
+        return f"{int(cleaned):04d}"
+    if cleaned.startswith("case_"):
+        parts = cleaned.split("_")
+        if len(parts) >= 2 and parts[1].isdigit():
+            return f"{int(parts[1]):04d}"
+    return cleaned
+
+
+def resolve_raw_case_id(case_id: str) -> Path:
+    """Resolve a raw global case by config save.case_id or directory name.
+
+    Examples that resolve to the same case:
+        ``1``, ``0001``, ``case_0001_20260506_161815_channelthermal``.
+    """
+    candidates = raw_case_candidates()
+    if not candidates:
+        raise FileNotFoundError(f"No raw channel thermal cases found under {resolve_data_path('./Data_Saved')}.")
+
+    normalized = normalize_case_id(case_id)
+    matches: List[Path] = []
+    for path in candidates:
+        cfg_payload = read_json(path / "case_config.json")
+        saved_case_id = str(cfg_payload.get("save", {}).get("case_id", ""))
+        if saved_case_id == normalized or path.name == case_id or path.name.startswith(f"case_{normalized}_"):
+            matches.append(path)
+
+    if not matches:
+        available = [str(read_json(path / "case_config.json").get("save", {}).get("case_id", path.name)) for path in candidates[-20:]]
+        raise FileNotFoundError(
+            f"No raw channel thermal case matched --case-id {case_id!r} (normalized to {normalized!r}). "
+            f"Recent available IDs: {available}"
+        )
+    return matches[-1]
+
+
+def resolve_case_dir(path: Path | None, case_id: str | None = None) -> Path:
     if path is None:
+        if case_id is not None:
+            return resolve_raw_case_id(case_id)
         return latest_raw_case()
     expanded = path.expanduser()
     if expanded.is_absolute():
@@ -120,12 +190,13 @@ def plot_fields(
 ) -> None:
     """Plot a five-channel global field tensor as small multiples."""
     cfg = config_from_dict(cfg_payload)
-    extent = [0.0, float(cfg.domain.lx), 0.0, float(cfg.domain.ly)]
+    extent, lx, ly = domain_extent(cfg_payload)
     fig, axes = plt.subplots(2, 3, figsize=(13, 6.5), constrained_layout=True)
     axes_flat = axes.ravel()
     for ax, name in zip(axes_flat, FIELD_NAMES):
-        image = ax.imshow(fields[name], origin="lower", extent=extent, aspect="auto", cmap="viridis")
+        image = ax.imshow(fields[name], origin="lower", extent=extent, aspect="equal", cmap="viridis")
         overlay_modules(ax, cfg.layout.centers or [], float(cfg.domain.module_radius))
+        set_domain_aspect(ax, lx, ly)
         ax.set_title(name)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
@@ -157,7 +228,8 @@ def plot_internal_temperatures(payload: Dict[str, np.ndarray], output_path: Path
         if idx >= count:
             ax.axis("off")
             continue
-        image = ax.imshow(internal[idx], origin="lower", extent=[-1, 1, -1, 1], cmap="inferno")
+        image = ax.imshow(internal[idx], origin="lower", extent=[-1, 1, -1, 1], aspect="equal", cmap="inferno")
+        ax.set_aspect("equal", adjustable="box")
         ax.set_title(f"module {idx}")
         fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
     fig.suptitle("Module Internal Temperature")
@@ -197,7 +269,7 @@ def save_temperature_gif(case_dir: Path, cfg_payload: Dict[str, object], output_
 
     rows = read_frame_index(case_dir)
     cfg = config_from_dict(cfg_payload)
-    extent = [0.0, float(cfg.domain.lx), 0.0, float(cfg.domain.ly)]
+    extent, lx, ly = domain_extent(cfg_payload)
     frames = []
     for row in rows:
         file_name = row.get("file") or f"frame_{int(row['saved_frame']):06d}.npz"
@@ -205,9 +277,10 @@ def save_temperature_gif(case_dir: Path, cfg_payload: Dict[str, object], output_
             frames.append(data["temperature"].astype(np.float32))
     vmin = min(float(np.min(frame)) for frame in frames)
     vmax = max(float(np.max(frame)) for frame in frames)
-    fig, ax = plt.subplots(figsize=(8, 3), constrained_layout=True)
-    image = ax.imshow(frames[0], origin="lower", extent=extent, aspect="auto", cmap="inferno", vmin=vmin, vmax=vmax)
+    fig, ax = plt.subplots(figsize=single_domain_figsize(lx, ly), constrained_layout=True)
+    image = ax.imshow(frames[0], origin="lower", extent=extent, aspect="equal", cmap="inferno", vmin=vmin, vmax=vmax)
     overlay_modules(ax, cfg.layout.centers or [], float(cfg.domain.module_radius))
+    set_domain_aspect(ax, lx, ly)
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
@@ -223,15 +296,22 @@ def save_temperature_gif(case_dir: Path, cfg_payload: Dict[str, object], output_
     plt.close(fig)
 
 
-def visualize_raw(case_dir_arg: Path | None, frame_index: int, output_dir: Path | None, save_gif: bool) -> None:
+def visualize_raw(
+    case_dir_arg: Path | None,
+    frame_index: int,
+    output_dir: Path | None,
+    save_gif: bool,
+    case_id_arg: str | None = None,
+) -> None:
     """Visualize one raw global case frame."""
-    case_dir = resolve_case_dir(case_dir_arg)
+    case_dir = resolve_case_dir(case_dir_arg, case_id_arg)
     cfg_payload = read_json(case_dir / "case_config.json")
     payload, row = load_raw_frame(case_dir, frame_index)
+    case_id = str(cfg_payload.get("save", {}).get("case_id", case_dir.name))
     out_dir = output_dir.expanduser().resolve() if output_dir is not None else case_dir / "plots"
     fields = {name: payload[name] for name in FIELD_NAMES}
     frame_id = int(row.get("saved_frame", 0))
-    plot_fields(fields, cfg_payload, f"Raw case {case_dir.name}, frame {frame_id}", out_dir / f"raw_frame_{frame_id:06d}_fields.png")
+    plot_fields(fields, cfg_payload, f"Raw case {case_id}, frame {frame_id}", out_dir / f"raw_frame_{frame_id:06d}_fields.png")
     plot_internal_temperatures(payload, out_dir / f"raw_frame_{frame_id:06d}_internal_temperature.png")
     plot_interface_targets(payload, out_dir / f"raw_frame_{frame_id:06d}_interface_targets.png")
     if save_gif:
@@ -255,7 +335,9 @@ def visualize_processed(processed_h5_arg: Path, case_id: str | None, output_dir:
     h5_path = h5_path.resolve()
     with h5py.File(h5_path, "r") as h5:
         cases_group = h5["cases"]
-        key = case_id or sorted(cases_group.keys())[0]
+        key = normalize_case_id(case_id) if case_id is not None else sorted(cases_group.keys())[0]
+        if key not in cases_group:
+            raise KeyError(f"Case '{key}' not found in {h5_path}. Available: {sorted(cases_group.keys())}")
         group = cases_group[key]
         cfg_payload = json.loads(decode_h5_string(group["case_config_json"][()]))
         steady = group["steady_field"][()]
@@ -279,10 +361,10 @@ def visualize_processed(processed_h5_arg: Path, case_id: str | None, output_dir:
 def main() -> int:
     args = parse_args()
     if args.case_dir is None and args.processed_h5 is None:
-        visualize_raw(None, args.frame, args.output_dir, args.save_gif)
+        visualize_raw(None, args.frame, args.output_dir, args.save_gif, args.case_id)
         return 0
     if args.case_dir is not None:
-        visualize_raw(args.case_dir, args.frame, args.output_dir, args.save_gif)
+        visualize_raw(args.case_dir, args.frame, args.output_dir, args.save_gif, args.case_id)
     if args.processed_h5 is not None:
         visualize_processed(args.processed_h5, args.case_id, args.output_dir)
     return 0

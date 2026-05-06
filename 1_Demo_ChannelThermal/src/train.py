@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -33,6 +34,11 @@ from model import GlobalChannelThermalModel, GlobalChannelThermalModelConfig, lo
 
 
 DEFAULT_CONFIG_PATH = "./Configs/train_global_config_template.json"
+LOCAL_SURROGATE_NORMALIZATION_ERROR = (
+    "Local surrogate normalization is not yet supported inside Stage-B. "
+    "Re-train local surrogate with normalize_inputs=false and normalize_targets=false, "
+    "or implement local normalizer application."
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,6 +110,36 @@ def field_loss(pred: torch.Tensor, target: torch.Tensor, loss_cfg: Dict[str, Any
     return ((pred - target).square() * weights).mean()
 
 
+def effective_port_condition_settings(epoch: int, training_cfg: Dict[str, Any]) -> tuple[str, float]:
+    """Resolve the Stage-B local-port curriculum for this epoch.
+
+    Stage B can first learn with teacher boundary tokens, then gradually move
+    the local surrogate toward the model-predicted port conditions that are
+    available during autonomous design inference.
+    """
+    schedule = str(training_cfg.get("port_condition_schedule", "none")).lower()
+    base_mode = str(training_cfg.get("local_port_condition_mode", "teacher")).lower()
+    base_ratio = float(training_cfg.get("mixed_teacher_ratio", 0.5))
+    if schedule == "none":
+        return base_mode, base_ratio
+    if schedule != "teacher_to_predicted":
+        raise ValueError(f"Unsupported port_condition_schedule={schedule!r}.")
+
+    teacher_epochs = int(training_cfg.get("teacher_epochs", 100))
+    mixed_epochs = int(training_cfg.get("mixed_epochs", 200))
+    predicted_after_epoch = int(training_cfg.get("predicted_after_epoch", teacher_epochs + mixed_epochs))
+    ratio_start = float(training_cfg.get("mixed_teacher_ratio_start", 1.0))
+    ratio_end = float(training_cfg.get("mixed_teacher_ratio_end", 0.0))
+    if int(epoch) <= teacher_epochs:
+        return "teacher", 1.0
+    if int(epoch) <= predicted_after_epoch:
+        span = max(predicted_after_epoch - teacher_epochs, 1)
+        progress = (int(epoch) - teacher_epochs) / span
+        ratio = ratio_start + (ratio_end - ratio_start) * progress
+        return "mixed", float(min(max(ratio, 0.0), 1.0))
+    return "predicted", 0.0
+
+
 def compute_losses(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dict[str, Any]) -> Dict[str, torch.Tensor]:
     structure = batch["structure"]
     module_present = structure["module_present"]
@@ -131,16 +167,15 @@ def compute_losses(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dic
 
     aux = outputs.get("organizer_aux", {})
     if isinstance(aux, dict) and "hyper_strength" in aux:
-        losses["loss_organizer_strength"] = aux["hyper_strength"].mean()
+        losses["diag_organizer_strength_mean"] = aux["hyper_strength"].mean()
     else:
-        losses["loss_organizer_strength"] = pred_port.new_tensor(0.0)
+        losses["diag_organizer_strength_mean"] = pred_port.new_tensor(0.0)
 
     total = (
         float(loss_cfg.get("field_mse_weight", 1.0)) * losses["loss_field"]
         + float(loss_cfg.get("internal_temperature_weight", 1.0)) * losses["loss_internal_temperature"]
         + float(loss_cfg.get("interface_weight", 0.2)) * losses["loss_interface"]
         + float(loss_cfg.get("port_condition_weight", 0.1)) * losses["loss_port_condition"]
-        + float(loss_cfg.get("organizer_strength_weight", 0.0)) * losses["loss_organizer_strength"]
     )
     losses["loss_total"] = total
     return losses
@@ -157,6 +192,8 @@ def run_epoch(
     scaler=None,
     amp: bool = False,
     max_batches: Optional[int] = None,
+    local_port_condition_mode: str = "teacher",
+    mixed_teacher_ratio: float = 0.5,
 ) -> Dict[str, float]:
     training = optimizer is not None
     model.train(training)
@@ -179,8 +216,8 @@ def run_epoch(
                 local_module_params=batch["local_module_params"],
                 teacher_port_tokens=batch["teacher_port_tokens"],
                 local_query_points=batch["module_internal_query_points"],
-                local_port_condition_mode=training_cfg.get("local_port_condition_mode", "teacher"),
-                mixed_teacher_ratio=float(training_cfg.get("mixed_teacher_ratio", 0.5)),
+                local_port_condition_mode=local_port_condition_mode,
+                mixed_teacher_ratio=float(mixed_teacher_ratio),
             )
             losses = compute_losses(outputs, batch, loss_cfg)
         if training:
@@ -209,6 +246,7 @@ def run_epoch(
                 "loss_internal_temperature",
                 "loss_interface",
                 "loss_port_condition",
+                "diag_organizer_strength_mean",
             ]
         }
     return {key: value / count for key, value in sums.items()}
@@ -220,19 +258,31 @@ def save_checkpoint(
     model: GlobalChannelThermalModel,
     model_config: GlobalChannelThermalModelConfig,
     train_config: Dict[str, Any],
+    dataset: GlobalChannelThermalDataset,
     epoch: int,
     best_metric: float,
 ) -> None:
     torch.save(
         {
+            "stage": "global_channelthermal_stage_b",
             "epoch": int(epoch),
             "best_metric": float(best_metric),
             "model_config": model_config.to_dict(),
             "model_state_dict": model.state_dict(),
             "train_config": train_config,
+            "channel_order": list(dataset.channel_order),
+            "field_dim": int(dataset.field_dim),
+            "interface_condition_feature_names": list(dataset.interface_condition_feature_names),
+            "interface_target_names": list(dataset.interface_target_names),
         },
         path,
     )
+
+
+def check_local_surrogate_normalization(checkpoint: Dict[str, Any]) -> None:
+    dataset_cfg = checkpoint.get("train_config", {}).get("dataset", {})
+    if bool(dataset_cfg.get("normalize_inputs", False)) or bool(dataset_cfg.get("normalize_targets", False)):
+        raise ValueError(LOCAL_SURROGATE_NORMALIZATION_ERROR)
 
 
 def attach_local_surrogate_if_needed(
@@ -249,7 +299,8 @@ def attach_local_surrogate_if_needed(
             "model.use_local_surrogate=true requires model.local_surrogate_checkpoint_path. "
             "Set use_local_surrogate=false for the global-only baseline."
         )
-    local_model, _ = load_local_surrogate_from_checkpoint(resolve_demo_path(checkpoint_path), map_location=device)
+    local_model, local_checkpoint = load_local_surrogate_from_checkpoint(resolve_demo_path(checkpoint_path), map_location=device)
+    check_local_surrogate_normalization(local_checkpoint)
     local_model.to(device)
     model.set_local_surrogate(local_model, freeze=bool(model_config.freeze_local_surrogate))
 
@@ -261,6 +312,13 @@ def main() -> int:
     dataset_cfg = cfg.get("dataset", {})
     training_cfg = cfg.get("training", {})
     loss_cfg = cfg.get("loss", {})
+    if float(loss_cfg.get("organizer_strength_weight", 0.0)) != 0.0:
+        warnings.warn(
+            "organizer_strength_weight is ignored; hyperedge strength is logged as "
+            "diag_organizer_strength_mean. Positive organizer_strength_weight used "
+            "to penalize strong hyperedges and should usually stay 0.0.",
+            stacklevel=2,
+        )
     set_seed(int(training_cfg.get("seed", 42)))
     device = select_device(args.device or training_cfg.get("device"))
 
@@ -326,11 +384,15 @@ def main() -> int:
         "loss_internal_temperature",
         "loss_interface",
         "loss_port_condition",
+        "diag_organizer_strength_mean",
+        "effective_local_port_condition_mode",
+        "effective_mixed_teacher_ratio",
         "val_loss_total",
         "val_loss_field",
         "val_loss_internal_temperature",
         "val_loss_interface",
         "val_loss_port_condition",
+        "val_diag_organizer_strength_mean",
     ]
     with history_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -345,6 +407,7 @@ def main() -> int:
 
     best_metric = math.inf
     for epoch in range(1, epochs + 1):
+        effective_mode, effective_ratio = effective_port_condition_settings(epoch, training_cfg)
         train_metrics = run_epoch(
             model,
             train_loader,
@@ -355,6 +418,8 @@ def main() -> int:
             scaler=scaler,
             amp=bool(training_cfg.get("amp", False)),
             max_batches=max_train_batches,
+            local_port_condition_mode=effective_mode,
+            mixed_teacher_ratio=effective_ratio,
         )
         val_metrics = run_epoch(
             model,
@@ -366,6 +431,8 @@ def main() -> int:
             scaler=None,
             amp=bool(training_cfg.get("amp", False)),
             max_batches=max_val_batches,
+            local_port_condition_mode=effective_mode,
+            mixed_teacher_ratio=effective_ratio,
         )
         row = {
             "epoch": epoch,
@@ -374,24 +441,45 @@ def main() -> int:
             "loss_internal_temperature": train_metrics.get("loss_internal_temperature", math.nan),
             "loss_interface": train_metrics.get("loss_interface", math.nan),
             "loss_port_condition": train_metrics.get("loss_port_condition", math.nan),
+            "diag_organizer_strength_mean": train_metrics.get("diag_organizer_strength_mean", math.nan),
+            "effective_local_port_condition_mode": effective_mode,
+            "effective_mixed_teacher_ratio": effective_ratio,
             "val_loss_total": val_metrics.get("loss_total", math.nan),
             "val_loss_field": val_metrics.get("loss_field", math.nan),
             "val_loss_internal_temperature": val_metrics.get("loss_internal_temperature", math.nan),
             "val_loss_interface": val_metrics.get("loss_interface", math.nan),
             "val_loss_port_condition": val_metrics.get("loss_port_condition", math.nan),
+            "val_diag_organizer_strength_mean": val_metrics.get("diag_organizer_strength_mean", math.nan),
         }
         with history_path.open("a", newline="", encoding="utf-8") as f:
             csv.DictWriter(f, fieldnames=fieldnames).writerow(row)
         metric = float(row["val_loss_total"])
         if math.isfinite(metric) and metric < best_metric:
             best_metric = metric
-            save_checkpoint(run_dir / "best_model.pt", model=model, model_config=model_config, train_config=cfg, epoch=epoch, best_metric=best_metric)
-        save_checkpoint(run_dir / "latest_model.pt", model=model, model_config=model_config, train_config=cfg, epoch=epoch, best_metric=best_metric)
+            save_checkpoint(
+                run_dir / "best_model.pt",
+                model=model,
+                model_config=model_config,
+                train_config=cfg,
+                dataset=train_dataset,
+                epoch=epoch,
+                best_metric=best_metric,
+            )
+        save_checkpoint(
+            run_dir / "latest_model.pt",
+            model=model,
+            model_config=model_config,
+            train_config=cfg,
+            dataset=train_dataset,
+            epoch=epoch,
+            best_metric=best_metric,
+        )
         save_loss_curve(history_path, run_dir / "loss_curve.png", title="Global Channel Thermal Loss")
         print(
             f"[epoch {epoch:04d}] loss={row['loss_total']:.4e} field={row['loss_field']:.4e} "
             f"internal={row['loss_internal_temperature']:.4e} interface={row['loss_interface']:.4e} "
-            f"port={row['loss_port_condition']:.4e} val={row['val_loss_total']:.4e}"
+            f"port={row['loss_port_condition']:.4e} mode={effective_mode} ratio={effective_ratio:.3f} "
+            f"val={row['val_loss_total']:.4e}"
         )
 
     print(f"[done] saved global model run: {run_dir}")
@@ -400,4 +488,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
