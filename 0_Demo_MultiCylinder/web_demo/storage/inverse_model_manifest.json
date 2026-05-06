@@ -1,0 +1,14 @@
+{
+  "inverse_models": [
+    {
+      "id": "inv_case0010_demo",
+      "label": "Inverse Case0010 demo",
+      "run_dir": "~/Desktop/src/ModularDT/0_Demo_MultiCylinder/Saved_Model_Inverse/CaseInv_inert_case0010_demo004_20260504_155658",
+      "checkpoint_name": "latest_model.pt",
+      "config_name": "resolved_train_inverse_config.json",
+      "enabled": true,
+      "preload": false,
+      "default_forward_verifier_id": "det_case0010"
+    }
+  ]
+}

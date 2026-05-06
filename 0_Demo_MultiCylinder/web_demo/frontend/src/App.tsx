@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import DomainCanvas from "./components/DomainCanvas";
 import FlowViewer from "./components/FlowViewer";
+import InverseDesignPanel from "./components/inverse/InverseDesignPanel";
 import KpiPanel from "./components/KpiPanel";
 import ParameterPanel from "./components/ParameterPanel";
 import { getExampleDesigns, getJobResult, getModelConfig, getModels, runInference, validateDesign } from "./api";
 import type {
   Cylinder,
+  DemoMode,
   DesignRequest,
   ExampleDesign,
   FieldName,
@@ -79,6 +81,7 @@ function randomDesign(count: number, config: ModelConfig | null): Cylinder[] {
 }
 
 export default function App() {
+  const [demoMode, setDemoMode] = useState<DemoMode>("forward");
   const [models, setModels] = useState<ModelEntry[]>([]);
   const [exampleDesigns, setExampleDesigns] = useState<ExampleDesign[]>([]);
   const [selectedModelId, setSelectedModelId] = useState("");
@@ -294,70 +297,109 @@ export default function App() {
     setRunError(null);
   }, [config, exampleDesigns]);
 
+  const useInverseCandidateInForward = useCallback(
+    (candidate: { centers: number[][] }, re: number, cylinders: Cylinder[], verifierModelId: string) => {
+      const model = models.find((item) => item.id === verifierModelId);
+      const nextMode = model?.mode ?? "deterministic";
+      setDemoMode("forward");
+      setSelectedModelId(verifierModelId);
+      setMode(nextMode);
+      setDesign((current) => ({
+        ...current,
+        model_id: verifierModelId,
+        mode: nextMode,
+        re,
+        cylinders,
+      }));
+      setSelectedCylinder(0);
+      setResult(null);
+      setFrame(0);
+      setIsPlaying(false);
+      setRunError(null);
+      void candidate;
+    },
+    [models],
+  );
+
   const safeFrame = result ? Math.min(frame, Math.max(result.render.frame_count - 1, 0)) : frame;
 
   return (
-    <main className="app-shell">
-      <ParameterPanel
-        models={models}
-        selectedModelId={selectedModelId}
-        mode={mode}
-        config={config}
-        design={design}
-        validation={validation}
-        exampleDesigns={exampleDesigns}
-        isRunning={isRunning}
-        runError={runError ?? loadError}
-        selectedCylinder={selectedCylinder}
-        onModelChange={handleModelChange}
-        onModeChange={handleModeChange}
-        onDesignChange={updateDesign}
-        onCylinderChange={updateCylinder}
-        onAddCylinder={addCylinder}
-        onDeleteCylinder={deleteCylinder}
-        onSelectCylinder={setSelectedCylinder}
-        onExampleSelect={applyExampleDesign}
-        onRun={handleRun}
-        onReset={resetDesign}
-        onRandomize={randomizeDesign}
-      />
+    <main className={`app-shell ${demoMode === "inverse" ? "inverse-shell" : ""}`}>
+      <div className="demo-mode-toggle" aria-label="Demo mode selector">
+        <button type="button" className={demoMode === "forward" ? "active" : ""} onClick={() => setDemoMode("forward")}>
+          Forward test
+        </button>
+        <button type="button" className={demoMode === "inverse" ? "active" : ""} onClick={() => setDemoMode("inverse")}>
+          Inverse design
+        </button>
+      </div>
 
-      <section className="center-stack">
-        <DomainCanvas
-          cylinders={design.cylinders}
-          config={config}
-          re={design.re}
-          validation={validation}
-          selectedCylinder={selectedCylinder}
-          onCylinderChange={updateCylinder}
-          onAddCylinder={addCylinder}
-          onDeleteCylinder={deleteCylinder}
-          onSelectCylinder={setSelectedCylinder}
-        />
-        <FlowViewer
-          result={result}
-          field={field}
-          frame={safeFrame}
-          isPlaying={isPlaying}
-          speed={speed}
-          showHypergraph={showHypergraph}
-          mode={mode}
-          onFieldChange={(nextField) => {
-            setField(nextField);
-            setDesign((current) => ({ ...current, field: nextField }));
-          }}
-          onFrameChange={setFrame}
-          onPlayingChange={setIsPlaying}
-          onSpeedChange={setSpeed}
-          onShowHypergraphChange={setShowHypergraph}
-        />
-      </section>
+      {demoMode === "forward" ? (
+        <>
+          <ParameterPanel
+            models={models}
+            selectedModelId={selectedModelId}
+            mode={mode}
+            config={config}
+            design={design}
+            validation={validation}
+            exampleDesigns={exampleDesigns}
+            isRunning={isRunning}
+            runError={runError ?? loadError}
+            selectedCylinder={selectedCylinder}
+            onModelChange={handleModelChange}
+            onModeChange={handleModeChange}
+            onDesignChange={updateDesign}
+            onCylinderChange={updateCylinder}
+            onAddCylinder={addCylinder}
+            onDeleteCylinder={deleteCylinder}
+            onSelectCylinder={setSelectedCylinder}
+            onExampleSelect={applyExampleDesign}
+            onRun={handleRun}
+            onReset={resetDesign}
+            onRandomize={randomizeDesign}
+          />
 
-      <KpiPanel
-        kpis={result?.kpis}
-        frame={safeFrame}
-        frameCount={result?.render.frame_count ?? 0}
-      />
+          <section className="center-stack">
+            <DomainCanvas
+              cylinders={design.cylinders}
+              config={config}
+              re={design.re}
+              validation={validation}
+              selectedCylinder={selectedCylinder}
+              onCylinderChange={updateCylinder}
+              onAddCylinder={addCylinder}
+              onDeleteCylinder={deleteCylinder}
+              onSelectCylinder={setSelectedCylinder}
+            />
+            <FlowViewer
+              result={result}
+              field={field}
+              frame={safeFrame}
+              isPlaying={isPlaying}
+              speed={speed}
+              showHypergraph={showHypergraph}
+              mode={mode}
+              onFieldChange={(nextField) => {
+                setField(nextField);
+                setDesign((current) => ({ ...current, field: nextField }));
+              }}
+              onFrameChange={setFrame}
+              onPlayingChange={setIsPlaying}
+              onSpeedChange={setSpeed}
+              onShowHypergraphChange={setShowHypergraph}
+            />
+          </section>
+
+          <KpiPanel
+            kpis={result?.kpis}
+            frame={safeFrame}
+            frameCount={result?.render.frame_count ?? 0}
+          />
+        </>
+      ) : (
+        <InverseDesignPanel forwardModels={models} onUseCandidateInForward={useInverseCandidateInForward} />
+      )}
     </main>
   );
 }

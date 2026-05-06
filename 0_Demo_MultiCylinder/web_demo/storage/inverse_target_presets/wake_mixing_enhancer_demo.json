@@ -1,0 +1,22 @@
+{
+  "name": "wake_mixing_enhancer_demo",
+  "Re": 120.0,
+  "num_cylinders_min": 3,
+  "num_cylinders_max": 7,
+  "min_center_distance": 1.5,
+  "kpis": {
+    "wake_mixing": {"mode": "min", "low": 0.14, "weight": 1.1},
+    "downstream_u_uniformity": {"mode": "max", "high": 0.16, "weight": 0.9},
+    "wake_shadow_area": {"mode": "max", "high": 0.38, "weight": 0.7},
+    "downstream_power_proxy": {"mode": "min", "low": 0.35, "weight": 0.6},
+    "enstrophy": {"mode": "range", "low": 0.10, "high": 0.28, "weight": 0.6},
+    "max_abs_omega": {"mode": "max", "high": 6.0, "weight": 0.4}
+  },
+  "preferences": {
+    "min_center_distance": 1.5,
+    "min_x_span": 5.5,
+    "min_y_span": 3.0,
+    "prefer_staggered_layout": true,
+    "description": "Encourages controlled wake mixing without allowing a large downstream wake-shadow region."
+  }
+}

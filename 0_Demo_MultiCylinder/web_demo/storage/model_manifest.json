@@ -14,7 +14,7 @@
       "phase_bin_policy": "cap"
     },
     {
-      "id": "gen_stage1_pending",
+      "id": "gen_stage1",
       "label": "Generative Stage 1 AE only",
       "mode": "generative",
       "stage": 1,
@@ -29,15 +29,17 @@
       "note": "Stage-2 latent flow checkpoint pending; this entry is not yet available for generative inference."
     },
     {
-      "id": "gen_stage2_casegen002",
-      "label": "Generative Stage 2 Case gen002",
+      "id": "gen_stage2_casegen003",
+      "label": "Generative Stage 2 Case gen003",
       "mode": "generative",
       "stage": 2,
-      "run_dir": "~/Desktop/src/ModularDT/0_Demo_MultiCylinder/Saved_Model_Gen/Gen_Casegen002_Stage2_20260426_094023",
+      "run_dir": "~/Desktop/src/ModularDT/0_Demo_MultiCylinder/Saved_Model_Gen/Gen_Casegen003_Stage2_20260430_150600",
       "checkpoint_name": "latest_model.pt",
       "config_name": "resolved_train_gen_config.json",
       "preload": false,
       "enabled": true,
+      "default_resolution_nx": 256,
+      "default_resolution_ny": 128,
       "default_phase_bins": 36,
       "max_phase_bins": 36,
       "phase_bin_policy": "cap",

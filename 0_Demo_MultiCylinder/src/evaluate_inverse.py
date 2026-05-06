@@ -4,7 +4,7 @@ from __future__ import annotations
 Sample, verify, and rank inverse-design candidates.
 
 python src/evaluate_inverse.py \
-  --inverse-run Saved_Model_Inverse/CaseInv_inert_case0010_demo003_20260502_212153 \
+  --inverse-run Saved_Model_Inverse/CaseInv_inert_case0010_demo004_20260504_155658 \
   --checkpoint latest_model.pt \
   --target-json inverse_targets/balanced_low_enstrophy_valid_wake_demo.json \
   --n-samples 64 \
@@ -26,6 +26,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
@@ -63,6 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--inverse-run", type=str, required=True, help="Inverse run directory containing best_model.pt/latest_model.pt.")
     parser.add_argument("--checkpoint", type=str, default="best_model.pt", help="Inverse checkpoint filename.")
     parser.add_argument("--target-json", type=str, default=None, help="Target KPI JSON file.")
+    parser.add_argument("--output-dir", type=str, default=None, help="Optional output directory for all inverse evaluation artifacts.")
     parser.add_argument("--n-samples", type=int, default=64, help="Number of inverse candidates to sample.")
     parser.add_argument("--verify-top-k", type=int, default=16, help="Number of sampled candidates to forward-verify.")
     parser.add_argument("--device", type=str, default="cuda:0", help="Torch device.")
@@ -84,8 +86,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--refine-top-k", type=int, default=0, help="Reserved for optional post-sampling refinement; default disabled.")
     parser.add_argument("--refine-steps", type=int, default=0, help="Reserved for optional post-sampling refinement; default disabled.")
     parser.add_argument("--forward-backend", choices=["deterministic", "generative"], default=None, help="Forward verifier backend.")
+    parser.add_argument("--deterministic-run", type=str, default=None, help="Deterministic forward verifier run directory.")
+    parser.add_argument("--deterministic-checkpoint", type=str, default=None, help="Deterministic forward verifier checkpoint filename.")
+    parser.add_argument("--deterministic-config", type=str, default=None, help="Deterministic forward verifier resolved config filename.")
     parser.add_argument("--generative-run", type=str, default=None, help="Stage-2 generative forward verifier run directory.")
     parser.add_argument("--generative-checkpoint", type=str, default=None, help="Stage-2 generative forward verifier checkpoint filename.")
+    parser.add_argument("--generative-config", type=str, default=None, help="Stage-2 generative forward verifier resolved config filename.")
     parser.add_argument("--generative-num-samples", type=int, default=None, help="Number of generative verifier samples per candidate.")
     parser.add_argument("--generative-n-steps", type=int, default=None, help="Generative verifier rectified-flow ODE steps.")
     parser.add_argument("--generative-ode-solver", choices=["euler", "heun"], default=None, help="Generative verifier ODE solver.")
@@ -814,11 +820,20 @@ def apply_forward_cli_overrides(cfg: Dict[str, Any], args: argparse.Namespace) -
     verifier_cfg = cfg.setdefault("forward_verifier", {})
     if args.forward_backend is not None:
         verifier_cfg["backend"] = str(args.forward_backend)
+    if args.deterministic_run is not None:
+        verifier_cfg["deterministic_run_dir"] = str(args.deterministic_run)
+    if args.deterministic_checkpoint is not None:
+        verifier_cfg["deterministic_checkpoint_name"] = str(args.deterministic_checkpoint)
+    if args.deterministic_config is not None:
+        verifier_cfg["deterministic_config_name"] = str(args.deterministic_config)
     if args.generative_run is not None:
         verifier_cfg["generative_run_dir"] = str(args.generative_run)
         verifier_cfg["generative_enabled"] = True
     if args.generative_checkpoint is not None:
         verifier_cfg["generative_checkpoint_name"] = str(args.generative_checkpoint)
+        verifier_cfg["generative_enabled"] = True
+    if args.generative_config is not None:
+        verifier_cfg["generative_config_name"] = str(args.generative_config)
         verifier_cfg["generative_enabled"] = True
     if args.generative_num_samples is not None:
         verifier_cfg["generative_num_samples"] = int(args.generative_num_samples)
@@ -1111,7 +1126,20 @@ def load_inverse_checkpoint(inverse_run: Path, checkpoint_name: str, device: tor
         ckpt_path = inverse_run / "latest_model.pt"
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Inverse checkpoint not found: {ckpt_path}")
-    ckpt = safe_torch_load(ckpt_path, map_location="cpu")
+    last_exc: Optional[Exception] = None
+    for attempt in range(3):
+        try:
+            ckpt = safe_torch_load(ckpt_path, map_location="cpu")
+            break
+        except RuntimeError as exc:
+            last_exc = exc
+            message = str(exc)
+            if "PytorchStreamReader failed reading file" not in message or attempt == 2:
+                raise
+            time.sleep(0.35 * float(attempt + 1))
+    else:
+        assert last_exc is not None
+        raise last_exc
     model_cfg = ckpt.get("inverse_model_config")
     if model_cfg is None:
         model_cfg = ckpt.get("config", {}).get("inverse_model")
@@ -1829,7 +1857,7 @@ def main() -> None:
         + float(target_payload.get("num_cylinders_max", target_payload.get("num_cylinders_min", int(inv_model_cfg.get("max_num_cylinders", 8)))) or int(inv_model_cfg.get("max_num_cylinders", 8)))
     )
 
-    out_dir = inverse_run / "evaluation" / f"inverse_eval_{current_timestamp()}"
+    out_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else inverse_run / "evaluation" / f"inverse_eval_{current_timestamp()}"
     out_dir.mkdir(parents=True, exist_ok=True)
     write_json(out_dir / "target_spec.json", json_safe({"payload": target_payload, "target_spec": target_spec}))
 

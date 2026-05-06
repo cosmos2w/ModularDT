@@ -6,15 +6,20 @@ This demo is an interactive dashboard for the ModularDT multi-cylinder emulator.
 
 The deterministic path is always available when its checkpoint exists. Generative inference is available for Stage-2 latent-flow checkpoints produced by `src/train_gen.py`; the included Stage-1 AE-only entry remains visible as a disabled placeholder.
 
+The web demo also includes an inverse-design mode. It wraps `src/evaluate_inverse.py` in an asynchronous backend job, lets a user define partial KPI targets and geometry preferences, ranks sampled designs with the learned forward verifier, and can launch real PhiFlow validation for a selected candidate.
+
 ## 2. Architecture
 
 ```text
 React/Vite frontend
   -> FastAPI backend
     -> model manifest and example designs
+    -> inverse model manifest and inverse target presets
     -> existing 0_Demo_MultiCylinder/src/model.py
+    -> existing 0_Demo_MultiCylinder/src/evaluate_inverse.py
     -> Saved_Model / Saved_Model_Gen checkpoints
-    -> rendered PNG frames and KPI JSON under storage/cache
+    -> Saved_Model_Inverse checkpoints
+    -> rendered PNG frames, inverse jobs, and KPI JSON under storage/cache
 ```
 
 The backend does not depend on `packed_dataset.h5` for web inference. It builds structure tensors directly from the user-defined cylinders and evaluates the existing ModularDT neural field over a generated physical grid.
@@ -38,6 +43,8 @@ web_demo/
     hypergraph_service.py
     render_service.py
     cache.py
+    inverse_registry.py
+    inverse_service.py
     requirements.txt
   frontend/
     package.json
@@ -48,8 +55,11 @@ web_demo/
       styles.css
   storage/
     model_manifest.json
+    inverse_model_manifest.json
+    inverse_target_presets/
     example_designs.json
     cache/
+      inverse_jobs/
 ```
 
 ## 4. Model Manifest
@@ -246,8 +256,22 @@ The backend hook in `backend/generative_service.py` loads the Stage-2 checkpoint
 - `GET /api/jobs/{job_id}/result`
 - `GET /api/jobs/{job_id}/frames/{field}/{frame_id}`
 - `GET /api/jobs/{job_id}/export.npz`
+- `GET /api/inverse/models`
+- `GET /api/inverse/target-presets`
+- `GET /api/inverse/kpis`
+- `POST /api/inverse/run`
+- `GET /api/inverse/jobs/{job_id}`
+- `GET /api/inverse/jobs/{job_id}/result`
+- `GET /api/inverse/jobs/{job_id}/candidates`
+- `GET /api/inverse/jobs/{job_id}/candidates/{candidate_id}`
+- `POST /api/inverse/jobs/{job_id}/candidates/{candidate_id}/quick-validate`
+- `POST /api/inverse/jobs/{job_id}/candidates/{candidate_id}/simulation-validate`
+- `GET /api/inverse/jobs/{job_id}/candidates/{candidate_id}/simulation-status`
+- `GET /api/inverse/jobs/{job_id}/files/{relative_path}`
 
 `/api/models` reports `available`, `enabled`, `mode`, `stage`, `checkpoint_exists`, `config_exists`, and `reason_unavailable`.
+
+`/api/inverse/run` writes `request.json`, `target.json`, `command.json`, `status.json`, `stdout.log`, `result.json`, and `candidates.json` under `storage/cache/inverse_jobs/{job_id}`. Candidate quicklook images and evaluator outputs are exposed through the safe file endpoint.
 
 ## 15. Troubleshooting
 
@@ -258,6 +282,12 @@ The backend hook in `backend/generative_service.py` loads the Stage-2 checkpoint
 - Config missing: confirm `config_name` matches the saved resolved config file.
 - Generative inference disabled: expected until a Stage-2 checkpoint is available.
 - Very slow inference: reduce `phase_bins`, `resolution_nx`, and `resolution_ny` in the parameter panel.
+- Inverse model not found: edit `storage/inverse_model_manifest.json` and confirm `run_dir`, `checkpoint_name`, and `config_name` exist.
+- Forward verifier missing: confirm the inverse request's verifier id exists in `storage/model_manifest.json`.
+- Target KPI has no active rows: enable at least one KPI row in inverse mode before launching.
+- Simulation is slow: real PhiFlow validation is intentionally separate from inverse sampling; reduce simulation grid/phase settings or let the polling view continue.
+- CUDA device selection: set `MODULARDT_WEB_DEMO_DEVICE=cuda:0` before launching the backend. The inverse wrapper uses the same setting and falls back to CPU when CUDA is unavailable.
+- Generative verifier grid mismatch: Stage-2 generative checkpoints require their AE grid. Add `default_resolution_nx` and `default_resolution_ny` to the generative entry in `storage/model_manifest.json`; the backend also reads `num_x`/`num_y` from the checkpoint and normalizes inverse requests before launch.
 
 ## 16. How To Add New Checkpoints
 
@@ -281,3 +311,52 @@ Structure
 ```
 
 The user layout becomes structure tensors: Reynolds number, cylinder count, centers, and mask. The model organizer forms module/environment/hyperedge states. The behavior head maps organized structure to dynamic memory. The decoder reconstructs `u`, `v`, `p`, and `omega` across phase `tau`.
+
+## 18. Inverse Design Mode
+
+Open the `Inverse design` mode from the top toggle. The workflow is:
+
+1. Select an inverse model from `storage/inverse_model_manifest.json`.
+2. Select the learned forward verifier from the existing forward model manifest.
+3. Load a target preset or enable individual KPI rows manually.
+4. Set constraints and preferences: `Re`, cylinder count range, minimum center distance, and optional x/y span.
+5. Set sampling and verification controls: `n_samples`, `verify_top_k`, `save_verified_top_k`, `phase_bins`, `nx`, `ny`, inverse steps, seed, and deterministic/generative verifier options.
+6. Run inverse design and poll the async job status.
+7. Inspect one ranked candidate at a time in the carousel. The UI shows the design, validity, KPI comparison, saved quicklook images/GIFs, and action buttons.
+8. Use `Quick validate` to return cached learned-forward verification when available, or run the selected forward verifier for an unverified candidate.
+9. Use `Simulation validate` to launch real PhiFlow validation for the selected candidate. Only one simulation job is allowed at a time by default.
+10. Use `Use in forward` to move the candidate layout back into forward test mode.
+
+Inverse target presets live in:
+
+```text
+web_demo/storage/inverse_target_presets/
+```
+
+The inverse model manifest format is:
+
+```json
+{
+  "inverse_models": [
+    {
+      "id": "inv_case0010_demo",
+      "label": "Inverse Case0010 demo",
+      "run_dir": "~/Desktop/src/ModularDT/0_Demo_MultiCylinder/Saved_Model_Inverse/<RUN>",
+      "checkpoint_name": "best_model.pt",
+      "config_name": "resolved_train_inverse_config.json",
+      "enabled": true,
+      "preload": false,
+      "default_forward_verifier_id": "det_case0010"
+    }
+  ]
+}
+```
+
+Backend limits are controlled in `backend/settings.py` and can be overridden with environment variables:
+
+```bash
+export MODULARDT_WEB_DEMO_MAX_INVERSE_N_SAMPLES=512
+export MODULARDT_WEB_DEMO_MAX_INVERSE_VERIFY_TOP_K=64
+export MODULARDT_WEB_DEMO_MAX_INVERSE_SAVE_TOP_K=16
+export MODULARDT_WEB_DEMO_MAX_SIMULATION_JOBS=1
+```

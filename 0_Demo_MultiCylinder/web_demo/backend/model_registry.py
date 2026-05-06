@@ -164,6 +164,8 @@ class ModelEntry:
                     "domain_length_x": model_cfg.get("domain_length_x"),
                     "domain_length_y": model_cfg.get("domain_length_y"),
                     "re_scale": model_cfg.get("re_scale"),
+                    "default_resolution_nx": self.raw.get("default_resolution_nx"),
+                    "default_resolution_ny": self.raw.get("default_resolution_ny"),
                     **resolve_phase_bin_config(cfg, self.raw),
                 }
             )
