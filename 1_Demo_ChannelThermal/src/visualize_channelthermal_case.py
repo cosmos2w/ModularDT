@@ -1,4 +1,29 @@
-"""Visualize raw and processed channel thermal demo cases."""
+"""Visualize raw and processed global channel thermal cases.
+
+Scope
+-----
+This script handles the **global channel** visualization layer for Demo 1. It
+can read either raw case folders produced by ``simulate_channelthermal.py`` or
+the packed HDF5 written by ``preprocess_channelthermal_dataset.py``.
+
+Outputs
+-------
+The script writes PNG plots under each case or processed dataset ``plots/``
+folder by default:
+
+* raw frame fields ``u, v, p, omega, temperature``
+* processed ``steady_field`` and ``rms_field``
+* module internal temperature grids
+* interface target curves ``T_surface(theta)`` and ``q_normal(theta)``
+* optional GIF for raw temperature transients
+
+Training role
+-------------
+These plots are smoke checks for the Stage-B global channel dataset. They keep
+using the legacy full ``interface_response`` for visualization, while future
+training should prefer the clean ``interface_condition`` and ``interface_target``
+datasets.
+"""
 from __future__ import annotations
 
 import argparse
@@ -39,6 +64,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def latest_raw_case() -> Path:
+    """Return the most recent raw global case under ``Data_Saved``."""
     root = resolve_data_path("./Data_Saved")
     candidates = sorted(
         path for path in root.glob("case_*") if path.is_dir() and (path / "scene").exists() and (path / "case_config.json").exists()
@@ -66,6 +92,7 @@ def read_frame_index(case_dir: Path) -> List[Dict[str, str]]:
 
 
 def load_raw_frame(case_dir: Path, frame_index: int) -> Tuple[Dict[str, np.ndarray], Dict[str, str]]:
+    """Load one raw frame payload and its frame-index row."""
     rows = read_frame_index(case_dir)
     if frame_index < 0:
         row = rows[frame_index]
@@ -78,6 +105,7 @@ def load_raw_frame(case_dir: Path, frame_index: int) -> Tuple[Dict[str, np.ndarr
 
 
 def overlay_modules(ax: plt.Axes, centers: Sequence[Sequence[float]], radius: float) -> None:
+    """Draw circular module outlines on global channel plots."""
     for idx, (cx, cy) in enumerate(centers):
         circle = plt.Circle((float(cx), float(cy)), radius, fill=False, color="white", linewidth=1.2)
         ax.add_patch(circle)
@@ -90,6 +118,7 @@ def plot_fields(
     title: str,
     output_path: Path,
 ) -> None:
+    """Plot a five-channel global field tensor as small multiples."""
     cfg = config_from_dict(cfg_payload)
     extent = [0.0, float(cfg.domain.lx), 0.0, float(cfg.domain.ly)]
     fig, axes = plt.subplots(2, 3, figsize=(13, 6.5), constrained_layout=True)
@@ -109,10 +138,17 @@ def plot_fields(
 
 
 def plot_internal_temperatures(payload: Dict[str, np.ndarray], output_path: Path) -> None:
+    """Plot module-local internal temperature targets, ignoring padded modules."""
     internal = payload.get("module_internal_temperature")
     if internal is None or internal.shape[0] == 0:
         return
-    count = min(int(internal.shape[0]), 8)
+    present = payload.get("module_present")
+    if present is not None:
+        count = min(int(np.count_nonzero(present)), int(internal.shape[0]), 8)
+    else:
+        count = min(int(internal.shape[0]), 8)
+    if count == 0:
+        return
     cols = min(count, 4)
     rows = int(np.ceil(count / cols))
     fig, axes = plt.subplots(rows, cols, figsize=(3.0 * cols, 3.0 * rows), squeeze=False, constrained_layout=True)
@@ -130,27 +166,33 @@ def plot_internal_temperatures(payload: Dict[str, np.ndarray], output_path: Path
     plt.close(fig)
 
 
-def plot_interface_flux(payload: Dict[str, np.ndarray], output_path: Path) -> None:
+def plot_interface_targets(payload: Dict[str, np.ndarray], output_path: Path) -> None:
+    """Plot solved interface target curves from the full response array."""
     response = payload.get("interface_response")
     names = payload.get("interface_feature_names")
     if response is None or response.shape[0] == 0 or names is None:
         return
     decoded = [name.decode("utf-8") if isinstance(name, bytes) else str(name) for name in names]
     theta_idx = decoded.index("theta")
+    temp_idx = decoded.index("T_surface")
     flux_idx = decoded.index("q_normal")
-    fig, ax = plt.subplots(figsize=(8, 4), constrained_layout=True)
+    fig, axes = plt.subplots(2, 1, figsize=(8.5, 6.4), sharex=True, constrained_layout=True)
     for module_idx in range(response.shape[0]):
-        ax.plot(response[module_idx, :, theta_idx], response[module_idx, :, flux_idx], label=f"module {module_idx}")
-    ax.set_xlabel("theta")
-    ax.set_ylabel("q_normal")
-    ax.set_title("Interface Normal Heat Flux")
-    ax.legend(loc="best", fontsize=8)
+        axes[0].plot(response[module_idx, :, theta_idx], response[module_idx, :, temp_idx], label=f"module {module_idx}")
+        axes[1].plot(response[module_idx, :, theta_idx], response[module_idx, :, flux_idx], label=f"module {module_idx}")
+    axes[0].set_ylabel("target: T_surface")
+    axes[0].legend(loc="best", fontsize=8)
+    axes[1].axhline(0.0, color="0.25", linewidth=0.8)
+    axes[1].set_xlabel("theta")
+    axes[1].set_ylabel("target: q_normal")
+    fig.suptitle("Interface Targets")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
 
 
 def save_temperature_gif(case_dir: Path, cfg_payload: Dict[str, object], output_path: Path) -> None:
+    """Save an optional raw-frame temperature transient GIF."""
     from matplotlib.animation import FuncAnimation, PillowWriter
 
     rows = read_frame_index(case_dir)
@@ -182,6 +224,7 @@ def save_temperature_gif(case_dir: Path, cfg_payload: Dict[str, object], output_
 
 
 def visualize_raw(case_dir_arg: Path | None, frame_index: int, output_dir: Path | None, save_gif: bool) -> None:
+    """Visualize one raw global case frame."""
     case_dir = resolve_case_dir(case_dir_arg)
     cfg_payload = read_json(case_dir / "case_config.json")
     payload, row = load_raw_frame(case_dir, frame_index)
@@ -190,7 +233,7 @@ def visualize_raw(case_dir_arg: Path | None, frame_index: int, output_dir: Path 
     frame_id = int(row.get("saved_frame", 0))
     plot_fields(fields, cfg_payload, f"Raw case {case_dir.name}, frame {frame_id}", out_dir / f"raw_frame_{frame_id:06d}_fields.png")
     plot_internal_temperatures(payload, out_dir / f"raw_frame_{frame_id:06d}_internal_temperature.png")
-    plot_interface_flux(payload, out_dir / f"raw_frame_{frame_id:06d}_interface_flux.png")
+    plot_interface_targets(payload, out_dir / f"raw_frame_{frame_id:06d}_interface_targets.png")
     if save_gif:
         save_temperature_gif(case_dir, cfg_payload, out_dir / "temperature_transient.gif")
     print(f"Saved raw visualizations to: {out_dir}")
@@ -203,6 +246,7 @@ def decode_h5_string(value) -> str:
 
 
 def visualize_processed(processed_h5_arg: Path, case_id: str | None, output_dir: Path | None) -> None:
+    """Visualize one processed global HDF5 case."""
     if h5py is None:
         raise ImportError("h5py is required for processed HDF5 visualization.")
     h5_path = processed_h5_arg.expanduser()
@@ -215,16 +259,20 @@ def visualize_processed(processed_h5_arg: Path, case_id: str | None, output_dir:
         group = cases_group[key]
         cfg_payload = json.loads(decode_h5_string(group["case_config_json"][()]))
         steady = group["steady_field"][()]
+        rms = group["rms_field"][()]
         fields = {name: steady[..., idx] for idx, name in enumerate(FIELD_NAMES)}
+        rms_fields = {name: rms[..., idx] for idx, name in enumerate(FIELD_NAMES)}
         payload = {
             "module_internal_temperature": group["module_internal_temperature"][()],
+            "module_present": group["module_present"][()],
             "interface_response": group["interface_response"][()],
             "interface_feature_names": h5["interface_feature_names"][()],
         }
     out_dir = output_dir.expanduser().resolve() if output_dir is not None else h5_path.parent / "plots"
     plot_fields(fields, cfg_payload, f"Processed steady case {key}", out_dir / f"processed_{key}_steady_fields.png")
+    plot_fields(rms_fields, cfg_payload, f"Processed RMS case {key}", out_dir / f"processed_{key}_rms_fields.png")
     plot_internal_temperatures(payload, out_dir / f"processed_{key}_internal_temperature.png")
-    plot_interface_flux(payload, out_dir / f"processed_{key}_interface_flux.png")
+    plot_interface_targets(payload, out_dir / f"processed_{key}_interface_targets.png")
     print(f"Saved processed visualizations to: {out_dir}")
 
 

@@ -1,4 +1,28 @@
-"""Generate one cheap local thermal-module surrogate case.
+"""Generate one raw local thermal-module surrogate case.
+
+Scope
+-----
+This script handles the **local module** part of Demo 1. It reads
+``Configs/config_local_module.json`` by default, samples known-before-solve
+boundary conditions, solves a steady conduction problem inside one circular
+solid module, and writes a raw local case under
+``Data_Saved/LocalModule_Raw/case_*``.
+
+Outputs
+-------
+Each case contains ``case_config.json``, ``frame_index.csv``, and
+``local_solution.npz`` plus a scene-compatible ``scene/frame_000000.npz``. The
+raw arrays are intentionally split into leakage-free inputs and targets:
+
+* ``port_tokens`` contains only interface input/condition features.
+* ``interface_targets`` contains solved ``T_surface`` and ``q_normal``.
+* ``q_internal`` is saved once as a module-level scalar.
+
+Training role
+-------------
+These raw cases are packed by ``preprocess_local_module_dataset.py`` for the
+future Stage-A local module surrogate. Stage-A should learn internal
+temperature and interface response from module parameters plus port inputs.
 
 The local problem solves steady conduction inside a unit disk with uniform
 internal heat generation and a Robin boundary condition:
@@ -38,7 +62,8 @@ from channelthermal_common import (
 
 
 CONDITION_COEFFICIENT_NAMES = ("mode", "T_cos", "T_sin", "h_cos", "h_sin")
-PORT_FEATURE_NAMES = ("theta", "cos_theta", "sin_theta", "T_env", "h", "T_surface", "q_normal")
+PORT_INPUT_FEATURE_NAMES = ("theta", "cos_theta", "sin_theta", "T_env", "h")
+INTERFACE_TARGET_NAMES = ("T_surface", "q_normal")
 
 
 def parse_args() -> argparse.Namespace:
@@ -62,6 +87,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_config(args: argparse.Namespace) -> SimulationConfig:
+    """Load JSON config and apply command-line overrides.
+
+    The local simulator does not need a global channel layout, but it reuses the
+    shared dataclass schema for path handling, material parameters, and seeds.
+    The template config is backed up for the same traceability convention used
+    by the global simulator.
+    """
     config_path = resolve_config_path(args.config_json)
     cfg = config_from_dict(read_json(config_path))
     cfg.save.root_dir = str(resolve_data_path(cfg.save.root_dir))
@@ -81,7 +113,13 @@ def load_config(args: argparse.Namespace) -> SimulationConfig:
 
 
 def sample_boundary_conditions(cfg: SimulationConfig) -> Dict[str, np.ndarray | float]:
-    """Sample q, T_env(theta), h(theta), and compact Fourier coefficients."""
+    """Sample q, T_env(theta), h(theta), and compact Fourier coefficients.
+
+    This block generates **known-before-solve** inputs only. The Fourier
+    coefficients are saved for analysis/visualization; the actual model-facing
+    interface inputs are the evaluated ``T_env`` and ``h`` arrays in
+    ``port_tokens``.
+    """
     local = cfg.local_module
     rng = np.random.default_rng(int(cfg.layout.seed))
     n_theta = int(local.n_interface_points)
@@ -137,7 +175,13 @@ def solve_disk_conduction(
     h_theta: np.ndarray,
     q_internal: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, float]:
-    """Solve the masked disk conduction problem by SOR iteration."""
+    """Solve the masked disk conduction problem by SOR iteration.
+
+    The square grid keeps the implementation cheap. Cells outside the disk are
+    handled through a Robin ghost-value approximation using local ``h(theta)``
+    and ``T_env(theta)``. The loop stops when the max point update falls below
+    ``local_module.solver_tolerance`` or the iteration budget is exhausted.
+    """
     size = int(cfg.local_module.local_grid_size)
     xi, eta, mask = local_disk_grid(size)
     dx = 2.0 / max(size - 1, 1)
@@ -188,27 +232,37 @@ def extract_boundary_targets(
     t_env: np.ndarray,
     h_theta: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Sample T_surface and Robin flux around the disk boundary."""
+    """Build separated interface inputs and targets around the disk boundary."""
     sample_radius = 0.995
     xi = sample_radius * np.cos(theta)
     eta = sample_radius * np.sin(theta)
     t_surface = local_bilinear_sample(temperature, xi, eta, fill_value=0.0)
     q_normal = h_theta * (t_surface - t_env)
-    port_tokens = np.stack([theta, np.cos(theta), np.sin(theta), t_env, h_theta, t_surface, q_normal], axis=-1)
+
+    # Leakage guard: port_tokens are model inputs, so they contain only
+    # condition features that are available before solving the temperature.
+    port_tokens = np.stack([theta, np.cos(theta), np.sin(theta), t_env, h_theta], axis=-1)
     interface_targets = np.stack([t_surface, q_normal], axis=-1)
     return t_surface.astype(np.float32), q_normal.astype(np.float32), port_tokens.astype(np.float32), interface_targets.astype(np.float32)
 
 
 def run_case(cfg: SimulationConfig) -> Path:
+    """Run one local case and save raw arrays for preprocessing."""
+    # 1. Sample boundary-condition functions and a scalar heat generation rate.
     conditions = sample_boundary_conditions(cfg)
     theta = conditions["theta"].astype(np.float64)
     t_env = conditions["T_env"].astype(np.float64)
     h_theta = conditions["h"].astype(np.float64)
     q_internal = float(conditions["q_internal"])
+    # 2. Solve the steady disk conduction problem.
     temperature, xi, eta, iterations, residual = solve_disk_conduction(cfg, theta, t_env, h_theta, q_internal)
     disk_mask = (xi * xi + eta * eta <= 1.0).astype(np.uint8)
+
+    # 3. Sample boundary inputs and solved targets on the same theta ports.
     t_surface, q_normal, port_tokens, interface_targets = extract_boundary_targets(temperature, theta, t_env, h_theta)
 
+    # 4. Save one raw frame. These names are consumed directly by the local
+    # preprocessor; keep additions backward-compatible.
     case_dir = make_case_dir(cfg.save)
     scene_dir = case_dir / "scene"
     payload = {
@@ -225,8 +279,10 @@ def run_case(cfg: SimulationConfig) -> Path:
         "condition_coefficients": conditions["condition_coefficients"].astype(np.float32),
         "condition_coefficient_names": string_array(CONDITION_COEFFICIENT_NAMES),
         "port_tokens": port_tokens,
-        "port_feature_names": string_array(PORT_FEATURE_NAMES),
+        "port_input_feature_names": string_array(PORT_INPUT_FEATURE_NAMES),
+        "port_feature_names": string_array(PORT_INPUT_FEATURE_NAMES),
         "interface_targets": interface_targets,
+        "interface_target_names": string_array(INTERFACE_TARGET_NAMES),
     }
     np.savez_compressed(scene_dir / "frame_000000.npz", **payload)
     np.savez_compressed(case_dir / "local_solution.npz", **payload)
@@ -242,6 +298,7 @@ def run_case(cfg: SimulationConfig) -> Path:
     }
     write_json(case_dir / "case_config.json", config_payload)
 
+    # 5. Write a one-row frame index for consistency with global cases.
     with (case_dir / "frame_index.csv").open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,

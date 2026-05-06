@@ -1,4 +1,24 @@
-"""Run a 2-D nonperiodic channel thermal modular-design case.
+"""Run one raw 2-D nonperiodic channel thermal modular-design case.
+
+Scope
+-----
+This script handles the **global channel** simulator for Demo 1. It reads
+``Configs/config_channelthermal.json`` by default, materializes a channel/module
+layout, advances a lightweight thermal solve, and writes a raw case under
+``Data_Saved/case_*``.
+
+Outputs
+-------
+Each raw case contains ``case_config.json``, ``frame_index.csv``, ``grid.npz``,
+and compressed frames under ``scene/frame_*.npz``. Frames store global fields,
+module masks, module-internal local temperature grids, and full legacy
+``interface_response`` arrays. The preprocessor later splits interface response
+into condition and target arrays for leakage-free Stage-B training.
+
+Training role
+-------------
+The output is packed by ``preprocess_channelthermal_dataset.py`` into the future
+Stage-B global hypergraph-organizer dataset. No training code is created here.
 
 This first Demo 1 simulator is intentionally lightweight and reproducible. It
 does not attempt high-fidelity CFD. Instead, it builds a steady laminar channel
@@ -317,7 +337,13 @@ def extract_interface_response(
     v: np.ndarray,
     cfg: SimulationConfig,
 ) -> np.ndarray:
-    """Sample temperature, flux, and velocity response around every module."""
+    """Sample temperature, flux, and velocity response around every module.
+
+    The raw frame stores a full response tensor for visualization and backward
+    compatibility. During preprocessing, condition columns (geometry, outside
+    temperature, velocity, h proxy) are separated from target columns
+    (surface temperature and normal heat flux).
+    """
     n_theta = int(cfg.local_module.n_interface_points)
     theta = np.linspace(0.0, 2.0 * np.pi, n_theta, endpoint=False, dtype=np.float64)
     normals_x = np.cos(theta)
@@ -339,6 +365,8 @@ def extract_interface_response(
         yb = cy + radius * normals_y
         xo = cx + (radius + delta) * normals_x
         yo = cy + (radius + delta) * normals_y
+        # Surface and outside samples approximate an interface jump/flux from
+        # the shared fluid-solid temperature grid.
         t_surface = bilinear_sample(temperature, xb, yb, cfg, fill_value=np.nan)
         t_outside = bilinear_sample(temperature, xo, yo, cfg, fill_value=np.nan)
         u_out = bilinear_sample(u, xo, yo, cfg, fill_value=0.0)
@@ -444,6 +472,9 @@ def run_case(cfg: SimulationConfig) -> Path:
             step_number = step + 1
             physical_time = step_number * float(cfg.flow.dt)
             heat_active = bool(cfg.thermal.enabled and physical_time >= float(cfg.thermal.heat_start_time))
+
+            # Numerical solve loop: the velocity/pressure approximation is
+            # steady, while temperature is advanced with explicit substeps.
             temperature = step_temperature(
                 temperature,
                 u.astype(np.float64),
@@ -458,6 +489,9 @@ def run_case(cfg: SimulationConfig) -> Path:
 
             should_save = (step_number % int(cfg.flow.save_stride) == 0) or step_number == int(runtime["num_steps"])
             if should_save:
+                # Frame saving keeps all arrays needed later by preprocessing:
+                # global fields, masks, local internal samples, and interface
+                # response samples.
                 frame_path = scene_dir / f"frame_{saved_frame:06d}.npz"
                 save_frame(
                     frame_path,

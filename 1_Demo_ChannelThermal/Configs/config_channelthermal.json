@@ -1,4 +1,16 @@
 {
+  "description": "Tiny global channel thermal smoke-test config. Generates raw global frames for preprocessing into Processed_ChannelThermal_Dataset/packed_dataset.h5.",
+  "data_contract": {
+    "global_channels": [
+      "u",
+      "v",
+      "p",
+      "omega",
+      "temperature"
+    ],
+    "preferred_interface_inputs": "preprocessed interface_condition",
+    "preferred_interface_targets": "preprocessed interface_target"
+  },
   "domain": {
     "nx": 64,
     "ny": 32,

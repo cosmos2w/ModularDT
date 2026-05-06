@@ -5,6 +5,11 @@ local conduction data contract:
 
 * raw ``local_solution.npz`` or ``scene/frame_000000.npz`` cases
 * processed ``Processed_LocalModule_Dataset/packed_dataset.h5`` cases
+
+It produces plots for the local temperature field, disk mask, condition inputs
+(``T_env`` and ``h``), and solved interface targets (``T_surface`` and
+``q_normal``). This makes the input/target separation visible when checking
+future Stage-A surrogate datasets.
 """
 from __future__ import annotations
 
@@ -88,6 +93,7 @@ def mask_temperature(temperature: np.ndarray, mask: np.ndarray) -> np.ndarray:
 
 
 def plot_temperature_map(payload: Dict[str, np.ndarray], title: str, output_path: Path) -> None:
+    """Plot the solved local temperature field on the disk."""
     local_x = payload["local_x"]
     local_y = payload["local_y"]
     temperature = mask_temperature(payload["temperature"], payload["disk_mask"])
@@ -110,21 +116,43 @@ def plot_temperature_map(payload: Dict[str, np.ndarray], title: str, output_path
     plt.close(fig)
 
 
+def plot_disk_mask(payload: Dict[str, np.ndarray], title: str, output_path: Path) -> None:
+    """Plot the binary disk mask used for internal query/target extraction."""
+    local_x = payload["local_x"]
+    local_y = payload["local_y"]
+    fig, ax = plt.subplots(figsize=(4.8, 4.4), constrained_layout=True)
+    image = ax.imshow(
+        payload["disk_mask"],
+        origin="lower",
+        extent=[float(np.min(local_x)), float(np.max(local_x)), float(np.min(local_y)), float(np.max(local_y))],
+        cmap="gray_r",
+    )
+    ax.set_aspect("equal")
+    ax.set_xlabel("xi")
+    ax.set_ylabel("eta")
+    ax.set_title(title)
+    fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label="inside disk")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
+
+
 def plot_boundary_conditions(payload: Dict[str, np.ndarray], title: str, output_path: Path) -> None:
+    """Plot condition inputs separately from solved interface targets."""
     theta = payload["theta"]
     fig, axes = plt.subplots(3, 1, figsize=(8.5, 7.0), sharex=True, constrained_layout=True)
-    axes[0].plot(theta, payload["T_env"], label="T_env", color="tab:blue")
-    axes[0].plot(theta, payload["T_surface"], label="T_surface", color="tab:red")
+    axes[0].plot(theta, payload["T_env"], label="input: T_env", color="tab:blue")
+    axes[0].plot(theta, payload["T_surface"], label="target: T_surface", color="tab:red")
     axes[0].set_ylabel("temperature")
     axes[0].legend(loc="best")
 
     axes[1].plot(theta, payload["h"], color="tab:green")
-    axes[1].set_ylabel("h")
+    axes[1].set_ylabel("input: h")
 
     axes[2].plot(theta, payload["q_normal"], color="tab:purple")
     axes[2].axhline(0.0, color="0.25", linewidth=0.8)
     axes[2].set_xlabel("theta")
-    axes[2].set_ylabel("q_normal")
+    axes[2].set_ylabel("target: q_normal")
     fig.suptitle(title)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=160)
@@ -132,6 +160,7 @@ def plot_boundary_conditions(payload: Dict[str, np.ndarray], title: str, output_
 
 
 def plot_port_phase(payload: Dict[str, np.ndarray], title: str, output_path: Path) -> None:
+    """Plot target heat flux around the circular port/interface."""
     theta = payload["theta"]
     fig, ax = plt.subplots(figsize=(5.5, 5.2), constrained_layout=True)
     scatter = ax.scatter(
@@ -156,6 +185,7 @@ def plot_port_phase(payload: Dict[str, np.ndarray], title: str, output_path: Pat
 
 
 def plot_condition_coefficients(payload: Dict[str, np.ndarray], title: str, output_path: Path) -> None:
+    """Plot Fourier coefficients used to generate raw boundary conditions."""
     coeffs = payload.get("condition_coefficients")
     names = payload.get("condition_coefficient_names")
     if coeffs is None or names is None:
@@ -182,12 +212,14 @@ def plot_condition_coefficients(payload: Dict[str, np.ndarray], title: str, outp
 
 def plot_all(payload: Dict[str, np.ndarray], title_prefix: str, output_dir: Path, stem: str) -> None:
     plot_temperature_map(payload, f"{title_prefix}: internal temperature", output_dir / f"{stem}_temperature.png")
+    plot_disk_mask(payload, f"{title_prefix}: disk mask", output_dir / f"{stem}_disk_mask.png")
     plot_boundary_conditions(payload, f"{title_prefix}: boundary and interface", output_dir / f"{stem}_boundary_interface.png")
     plot_port_phase(payload, f"{title_prefix}: interface flux around disk", output_dir / f"{stem}_port_flux.png")
     plot_condition_coefficients(payload, f"{title_prefix}: boundary modes", output_dir / f"{stem}_condition_coefficients.png")
 
 
 def visualize_raw(case_dir_arg: Path | None, output_dir: Path | None) -> None:
+    """Visualize one raw local case directory."""
     case_dir = resolve_case_dir(case_dir_arg)
     payload = load_raw_payload(case_dir)
     cfg_payload = read_json(case_dir / "case_config.json")
@@ -198,18 +230,22 @@ def visualize_raw(case_dir_arg: Path | None, output_dir: Path | None) -> None:
 
 
 def reconstruct_processed_payload(group, h5) -> Dict[str, np.ndarray]:
+    """Reconstruct plotting arrays from a processed HDF5 case group."""
     local_grid = group["local_grid"][()]
     local_mask = group["local_mask"][()].astype(bool)
     temperature = np.zeros(local_mask.shape, dtype=np.float32)
     temperature[local_mask] = group["internal_temperature_targets"][()]
 
     port_tokens = group["port_tokens"][()]
-    port_names = decode_names(h5["port_feature_names"][()])
+    port_name_key = "port_input_feature_names" if "port_input_feature_names" in h5 else "port_feature_names"
+    port_names = decode_names(h5[port_name_key][()])
+    interface_target_names = decode_names(h5["interface_target_names"][()])
+    interface_targets = group["interface_targets"][()]
     theta = port_tokens[:, port_names.index("theta")]
     t_env = port_tokens[:, port_names.index("T_env")]
     h_theta = port_tokens[:, port_names.index("h")]
-    t_surface = port_tokens[:, port_names.index("T_surface")]
-    q_normal = port_tokens[:, port_names.index("q_normal")]
+    t_surface = interface_targets[:, interface_target_names.index("T_surface")]
+    q_normal = interface_targets[:, interface_target_names.index("q_normal")]
 
     payload = {
         "local_x": local_grid[..., 0],
@@ -222,16 +258,11 @@ def reconstruct_processed_payload(group, h5) -> Dict[str, np.ndarray]:
         "T_surface": t_surface,
         "q_normal": q_normal,
     }
-
-    cfg_json = group.get("case_config_json")
-    if cfg_json is not None:
-        cfg_payload = json.loads(decode_h5_string(cfg_json[()]))
-        coeffs = cfg_payload.get("local_solution", {})
-        _ = coeffs
     return payload
 
 
 def visualize_processed(processed_h5_arg: Path, case_id: str | None, output_dir: Path | None) -> None:
+    """Visualize one processed local HDF5 case."""
     if h5py is None:
         raise ImportError("h5py is required for processed HDF5 visualization.")
     h5_path = processed_h5_arg.expanduser()

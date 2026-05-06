@@ -1,4 +1,17 @@
-"""Batch launcher for global channel thermal dataset generation.
+"""Batch launcher for global channel thermal raw-case generation.
+
+Scope
+-----
+This script handles **global channel** batch generation. It reads
+``Configs/config_channelthermal.json``, materializes many per-case configs, and
+launches ``simulate_channelthermal.py`` in CPU/GPU slots.
+
+Inputs and outputs
+------------------
+Generated configs and logs are written under ``Configs/Config_bk``. Raw cases
+are written by the simulator under ``Data_Saved/case_*``. The resulting raw
+cases should later be packed with ``preprocess_channelthermal_dataset.py`` for
+future Stage-B global hypergraph-organizer training.
 
 Edit the constants below to choose module counts, Reynolds numbers, repeats,
 and CPU/GPU slots. Each job writes a materialized config into
@@ -135,6 +148,7 @@ def build_job_config(
     re_value: float,
     layout_seed: int,
 ) -> SimulationConfig:
+    """Clone the template config and materialize one randomized layout."""
     cfg = config_from_dict(dataclass_to_dict(template))
     cfg.layout.num_modules = int(num_modules)
     cfg.layout.seed = int(layout_seed)
@@ -150,6 +164,7 @@ def build_job_config(
 
 
 def create_jobs() -> List[BatchJob]:
+    """Build all batch jobs and write their resolved JSON configs."""
     template = load_template_config()
     config_dir = generated_config_dir()
     log_dir = generated_log_dir()
@@ -195,6 +210,7 @@ def create_jobs() -> List[BatchJob]:
 
 
 def build_device_slots() -> List[DeviceSlot]:
+    """Expand editable CPU/GPU settings into concrete scheduler slots."""
     slots: List[DeviceSlot] = []
     if ENABLE_CPU:
         for idx in range(CPU_CONCURRENT_SLOTS):
@@ -223,6 +239,7 @@ def build_command(job: BatchJob, slot: DeviceSlot) -> List[str]:
 
 
 def launch_job(job: BatchJob, slot: DeviceSlot) -> RunningJob:
+    """Start one simulator subprocess and stream stdout/stderr to a log file."""
     command = build_command(job, slot)
     log_handle = job.log_path.open("w", encoding="utf-8", buffering=1)
     process = subprocess.Popen(
@@ -239,6 +256,7 @@ def launch_job(job: BatchJob, slot: DeviceSlot) -> RunningJob:
 
 
 def main() -> int:
+    """Schedule jobs until every generated global case is complete."""
     jobs = create_jobs()
     slots = build_device_slots()
     pending: Deque[BatchJob] = deque(jobs)

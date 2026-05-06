@@ -1,5 +1,23 @@
 """Shared utilities for the channel thermal modular-design demo.
 
+Scope
+-----
+This module is imported by every Demo 1 data-generation script. It defines the
+shared dataclass config schema, default paths, layout sampling, case-directory
+creation, grid helpers, masks, interpolation, and small physics estimates.
+
+Inputs and outputs
+------------------
+The helpers read JSON dictionaries from ``Configs/*.json`` and produce resolved
+``SimulationConfig`` objects. They also create the timestamped raw case layout
+used by both global channel cases and local module cases.
+
+Training role
+-------------
+Keeping these helpers centralized prevents Stage-A local surrogate data and
+Stage-B global channel data from drifting into incompatible naming, geometry, or
+path conventions.
+
 The demo intentionally keeps configuration, layout sampling, path handling, and
 small numerical helpers in this module so the raw simulators, preprocessors,
 visualizers, and future training scripts use one consistent data contract.
@@ -410,6 +428,8 @@ def sample_heat_powers(config: SimulationConfig) -> List[float]:
 
 def materialize_layout(config: SimulationConfig) -> SimulationConfig:
     """Fill in module centers and heat powers when the JSON leaves them null."""
+    # Layout materialization is intentionally deterministic from layout.seed.
+    # Batch launchers therefore need only record the seed to reproduce a case.
     if config.layout.centers is None:
         config.layout.centers = sample_module_centers(config)
     else:

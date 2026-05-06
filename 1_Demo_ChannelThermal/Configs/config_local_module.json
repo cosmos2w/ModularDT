@@ -1,4 +1,19 @@
 {
+  "description": "Tiny local module smoke-test config. Generates one raw Robin-conduction case for preprocessing into Processed_LocalModule_Dataset/packed_dataset.h5.",
+  "data_contract": {
+    "port_inputs": [
+      "theta",
+      "cos_theta",
+      "sin_theta",
+      "T_env",
+      "h"
+    ],
+    "interface_targets": [
+      "T_surface",
+      "q_normal"
+    ],
+    "module_params": "known-before-solve quantities only"
+  },
   "thermal": {
     "enabled": true,
     "t_in": 0.0,

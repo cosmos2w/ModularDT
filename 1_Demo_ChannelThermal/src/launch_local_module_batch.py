@@ -1,4 +1,18 @@
-"""Batch launcher for cheap local module thermal surrogate cases."""
+"""Batch launcher for local module thermal surrogate raw cases.
+
+Scope
+-----
+This script handles **local module** batch generation for Demo 1. It reads
+``Configs/config_local_module.json``, creates many seed-varied configs, and
+launches ``simulate_local_module_thermal.py`` through a small CPU scheduler.
+
+Inputs and outputs
+------------------
+Generated configs and logs live under ``Configs/Config_bk``. Raw local cases
+are written under ``Data_Saved/LocalModule_Raw/case_*`` and are later packed by
+``preprocess_local_module_dataset.py`` for future Stage-A local surrogate
+training.
+"""
 from __future__ import annotations
 
 import json
@@ -93,6 +107,7 @@ def build_case_id(case_number: int) -> str:
 
 
 def build_job_config(template: SimulationConfig, case_id: str, seed: int) -> SimulationConfig:
+    """Clone the template config and set the per-case seed/case ID."""
     cfg = config_from_dict(dataclass_to_dict(template))
     cfg.save.case_id = case_id
     cfg.layout.seed = int(seed)
@@ -100,6 +115,7 @@ def build_job_config(template: SimulationConfig, case_id: str, seed: int) -> Sim
 
 
 def create_jobs() -> List[BatchJob]:
+    """Build all local jobs and write resolved per-case configs."""
     template = load_template_config()
     raw_root = resolve_data_path(template.save.root_dir)
     config_dir = generated_config_dir()
@@ -134,6 +150,7 @@ def build_command(job: BatchJob) -> List[str]:
 
 
 def launch_job(job: BatchJob, slot_name: str) -> RunningJob:
+    """Start one local simulator subprocess and attach a log file."""
     log_handle = job.log_path.open("w", encoding="utf-8", buffering=1)
     process = subprocess.Popen(
         build_command(job),
@@ -146,6 +163,7 @@ def launch_job(job: BatchJob, slot_name: str) -> RunningJob:
 
 
 def main() -> int:
+    """Run local jobs across the configured CPU slots."""
     jobs = create_jobs()
     slots = [f"cpu:{idx}" for idx in range(CPU_CONCURRENT_SLOTS)]
     if not slots:

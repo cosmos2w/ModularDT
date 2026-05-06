@@ -31,12 +31,21 @@ Data_Saved/
 0_Demo_MultiCylinder/Saved_Model_Gen/
 0_Demo_MultiCylinder/Saved_Model_Inverse/
 0_Demo_MultiCylinder/Domain_shape/
+1_Demo_ChannelThermal/Data_Saved/
+1_Demo_ChannelThermal/Saved_Model/
+1_Demo_ChannelThermal/Saved_Model_Gen/
+1_Demo_ChannelThermal/Saved_Model_Inverse/
+1_Demo_ChannelThermal/Domain_shape/
 
 # Per-run generated config backups; keep active configs and templates tracked.
 0_Demo_MultiCylinder/Configs/Config_bk/
 0_Demo_MultiCylinder/Config_Train/Configs_bk/
 0_Demo_MultiCylinder/Config_Train/Configs_gen_bk/
 0_Demo_MultiCylinder/Config_Train/Configs_inverse_bk/
+1_Demo_ChannelThermal/Configs/Config_bk/
+1_Demo_ChannelThermal/Config_Train/Configs_bk/
+1_Demo_ChannelThermal/Config_Train/Configs_gen_bk/
+1_Demo_ChannelThermal/Config_Train/Configs_inverse_bk/
 
 # Heavy/intermediate artifacts
 *.pt

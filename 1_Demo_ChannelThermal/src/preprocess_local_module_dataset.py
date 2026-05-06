@@ -1,4 +1,29 @@
-"""Pack local module conduction cases for Stage-A surrogate training."""
+"""Pack raw local module conduction cases into a leakage-free HDF5 dataset.
+
+Scope
+-----
+This script handles the **local module** data layer for Demo 1. It reads raw
+cases produced by ``simulate_local_module_thermal.py`` from
+``Data_Saved/LocalModule_Raw`` and writes the canonical Stage-A dataset:
+
+``Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5``.
+
+Data contract
+-------------
+The packed file separates known inputs from solved targets:
+
+* ``module_params`` contains only known-before-solve scalar inputs.
+* ``port_tokens`` contains only boundary/interface condition inputs.
+* ``interface_targets`` contains solved ``T_surface`` and ``q_normal``.
+* ``local_target_stats`` stores solved-temperature summaries for analysis, not
+  model inputs.
+
+Backward safety
+---------------
+Older raw files may contain ``T_surface`` and ``q_normal`` inside
+``port_tokens``. The preprocessor detects that legacy schema, prints a warning,
+and strips the target columns before writing the HDF5 file.
+"""
 from __future__ import annotations
 
 import argparse
@@ -6,7 +31,7 @@ import csv
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, Tuple
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -27,13 +52,16 @@ MODULE_PARAM_NAMES = (
     "h_std",
     "T_env_mean",
     "T_env_std",
-    "T_mean",
-    "T_max",
 )
+PORT_INPUT_FEATURE_NAMES = ("theta", "cos_theta", "sin_theta", "T_env", "h")
+INTERFACE_TARGET_NAMES = ("T_surface", "q_normal")
+LOCAL_TARGET_STAT_NAMES = ("T_mean", "T_max", "T_min", "T_std")
 
 
 @dataclass
 class LocalRawCase:
+    """A raw local case discovered under the input root."""
+
     split_hint: str
     case_dir: Path
     cfg_payload: Dict[str, Any]
@@ -42,11 +70,14 @@ class LocalRawCase:
 
 @dataclass
 class LocalProcessedCase:
+    """Processed arrays for one leakage-free local surrogate case."""
+
     case_key: str
     split: str
     case_dir: Path
     cfg_payload: Dict[str, Any]
     module_params: np.ndarray
+    local_target_stats: np.ndarray
     port_tokens: np.ndarray
     internal_query_points: np.ndarray
     internal_temperature_targets: np.ndarray
@@ -69,7 +100,13 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def decode_names(values: np.ndarray) -> List[str]:
+    """Decode HDF5/NPZ byte-string feature-name arrays."""
+    return [value.decode("utf-8") if isinstance(value, bytes) else str(value) for value in values]
+
+
 def discover_local_cases(input_root: Path) -> List[LocalRawCase]:
+    """Discover raw local cases and load their single-frame payloads."""
     cases: List[LocalRawCase] = []
     for split_hint, case_dir in find_case_dirs(input_root):
         solution_path = case_dir / "local_solution.npz"
@@ -86,6 +123,12 @@ def discover_local_cases(input_root: Path) -> List[LocalRawCase]:
 
 
 def assign_splits(raw_cases: Sequence[LocalRawCase], train_fraction: float, seed: int) -> Dict[Path, str]:
+    """Assign train/test splits for unsplit raw folders.
+
+    If the input root already contains explicit ``train/`` or ``test/``
+    subfolders, those labels are preserved. Otherwise, a deterministic random
+    split is made from case directories.
+    """
     unsplit = [raw.case_dir for raw in raw_cases if raw.split_hint not in {"train", "test"}]
     assignments: Dict[Path, str] = {}
     for raw in raw_cases:
@@ -105,11 +148,8 @@ def assign_splits(raw_cases: Sequence[LocalRawCase], train_fraction: float, seed
     return assignments
 
 
-def decode_names(values: np.ndarray) -> List[str]:
-    return [value.decode("utf-8") if isinstance(value, bytes) else str(value) for value in values]
-
-
 def unique_case_key(base_key: str, existing: set[str]) -> str:
+    """Keep HDF5 case group names unique even when configs reuse case IDs."""
     key = base_key
     suffix = 1
     while key in existing:
@@ -119,7 +159,51 @@ def unique_case_key(base_key: str, existing: set[str]) -> str:
     return key
 
 
+def read_port_tokens(payload: Dict[str, np.ndarray]) -> Tuple[np.ndarray, Tuple[str, ...]]:
+    """Return leakage-free port input tokens and names.
+
+    New raw files write ``port_input_feature_names``. Legacy raw files only have
+    ``port_feature_names`` and may include solved target columns; those target
+    columns are stripped here.
+    """
+    port_tokens = payload["port_tokens"].astype(np.float32)
+    if "port_input_feature_names" in payload:
+        feature_names = tuple(decode_names(payload["port_input_feature_names"]))
+    else:
+        feature_names = tuple(decode_names(payload.get("port_feature_names", np.asarray(PORT_INPUT_FEATURE_NAMES, dtype="S"))))
+
+    target_columns = {"T_surface", "q_normal"}
+    if any(name in target_columns for name in feature_names):
+        print("Detected legacy port_tokens with target columns; stripping T_surface/q_normal from inputs.")
+        keep_indices = [idx for idx, name in enumerate(feature_names) if name not in target_columns]
+        port_tokens = port_tokens[:, keep_indices]
+        feature_names = tuple(feature_names[idx] for idx in keep_indices)
+
+    if feature_names != PORT_INPUT_FEATURE_NAMES:
+        missing = [name for name in PORT_INPUT_FEATURE_NAMES if name not in feature_names]
+        if missing:
+            raise ValueError(f"port_tokens are missing required input features: {missing}")
+        reorder = [feature_names.index(name) for name in PORT_INPUT_FEATURE_NAMES]
+        port_tokens = port_tokens[:, reorder]
+    return port_tokens.astype(np.float32), PORT_INPUT_FEATURE_NAMES
+
+
+def read_interface_targets(payload: Dict[str, np.ndarray]) -> np.ndarray:
+    """Return solved interface targets in canonical order."""
+    if "interface_targets" in payload:
+        targets = payload["interface_targets"].astype(np.float32)
+        if "interface_target_names" in payload:
+            names = tuple(decode_names(payload["interface_target_names"]))
+            if names != INTERFACE_TARGET_NAMES:
+                reorder = [names.index(name) for name in INTERFACE_TARGET_NAMES]
+                targets = targets[:, reorder]
+        return targets.astype(np.float32)
+
+    return np.stack([payload["T_surface"], payload["q_normal"]], axis=-1).astype(np.float32)
+
+
 def process_local_case(raw: LocalRawCase, case_key: str, split: str) -> LocalProcessedCase:
+    """Convert one raw case into leakage-free arrays for HDF5 writing."""
     cfg = config_from_dict(raw.cfg_payload)
     payload = raw.payload
     local_x = payload["local_x"].astype(np.float32)
@@ -133,6 +217,8 @@ def process_local_case(raw: LocalRawCase, case_key: str, split: str) -> LocalPro
     h = payload["h"].astype(np.float32)
     t_env = payload["T_env"].astype(np.float32)
     q_internal = float(payload["q_internal"][0])
+
+    # Model input parameters: every value below is known before solving.
     module_params = np.asarray(
         [
             q_internal,
@@ -142,30 +228,46 @@ def process_local_case(raw: LocalRawCase, case_key: str, split: str) -> LocalPro
             float(np.std(h)),
             float(np.mean(t_env)),
             float(np.std(t_env)),
-            float(np.mean(internal_temperature_targets)),
-            float(np.max(internal_temperature_targets)),
         ],
         dtype=np.float32,
     )
+
+    # Target-derived summaries are useful diagnostics but must not be mixed with
+    # the model input vector.
+    local_target_stats = np.asarray(
+        [
+            float(np.mean(internal_temperature_targets)),
+            float(np.max(internal_temperature_targets)),
+            float(np.min(internal_temperature_targets)),
+            float(np.std(internal_temperature_targets)),
+        ],
+        dtype=np.float32,
+    )
+    port_tokens, _ = read_port_tokens(payload)
+    interface_targets = read_interface_targets(payload)
+
     return LocalProcessedCase(
         case_key=case_key,
         split=split,
         case_dir=raw.case_dir,
         cfg_payload=raw.cfg_payload,
         module_params=module_params,
-        port_tokens=payload["port_tokens"].astype(np.float32),
+        local_target_stats=local_target_stats,
+        port_tokens=port_tokens,
         internal_query_points=internal_query_points,
         internal_temperature_targets=internal_temperature_targets,
-        interface_targets=payload["interface_targets"].astype(np.float32),
+        interface_targets=interface_targets,
         local_grid=local_grid.astype(np.float32),
         local_mask=local_mask,
     )
 
 
 def validate_uniform_shapes(processed: Sequence[LocalProcessedCase]) -> None:
+    """Ensure root-level stacked arrays can be written without ragged storage."""
     first = processed[0]
     expected = {
         "module_params": first.module_params.shape,
+        "local_target_stats": first.local_target_stats.shape,
         "port_tokens": first.port_tokens.shape,
         "internal_query_points": first.internal_query_points.shape,
         "internal_temperature_targets": first.internal_temperature_targets.shape,
@@ -183,6 +285,7 @@ def validate_uniform_shapes(processed: Sequence[LocalProcessedCase]) -> None:
 
 
 def write_index_csv(output_root: Path, processed: Sequence[LocalProcessedCase]) -> None:
+    """Write a human-readable local case index next to the HDF5 file."""
     with (output_root / "local_case_index.csv").open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["case_key", "split", "case_dir", "q_internal"])
         writer.writeheader()
@@ -197,21 +300,55 @@ def write_index_csv(output_root: Path, processed: Sequence[LocalProcessedCase]) 
             )
 
 
-def write_h5(output_root: Path, processed: Sequence[LocalProcessedCase], raw_cases: Sequence[LocalRawCase]) -> Path:
+def write_normalization_group(h5, processed: Sequence[LocalProcessedCase]) -> None:
+    """Save dataset-level statistics used by later training scripts."""
+    norm = h5.create_group("normalization")
+    module_params = np.stack([item.module_params for item in processed])
+    port_tokens = np.stack([item.port_tokens for item in processed])
+    internal_targets = np.concatenate([item.internal_temperature_targets.reshape(-1) for item in processed])
+    interface_targets = np.stack([item.interface_targets for item in processed])
+
+    norm.create_dataset("module_params_mean", data=np.mean(module_params, axis=0).astype(np.float32))
+    norm.create_dataset("module_params_std", data=np.std(module_params, axis=0).astype(np.float32))
+    norm.create_dataset("port_tokens_mean", data=np.mean(port_tokens.reshape(-1, port_tokens.shape[-1]), axis=0).astype(np.float32))
+    norm.create_dataset("port_tokens_std", data=np.std(port_tokens.reshape(-1, port_tokens.shape[-1]), axis=0).astype(np.float32))
+    norm.create_dataset("internal_temperature_mean", data=np.asarray([np.mean(internal_targets)], dtype=np.float32))
+    norm.create_dataset("internal_temperature_std", data=np.asarray([np.std(internal_targets)], dtype=np.float32))
+    norm.create_dataset(
+        "interface_targets_mean",
+        data=np.mean(interface_targets.reshape(-1, interface_targets.shape[-1]), axis=0).astype(np.float32),
+    )
+    norm.create_dataset(
+        "interface_targets_std",
+        data=np.std(interface_targets.reshape(-1, interface_targets.shape[-1]), axis=0).astype(np.float32),
+    )
+
+
+def write_h5(output_root: Path, processed: Sequence[LocalProcessedCase]) -> Path:
+    """Write the packed local module HDF5 dataset."""
     output_root.mkdir(parents=True, exist_ok=True)
     validate_uniform_shapes(processed)
     h5_path = output_root / "packed_dataset.h5"
     string_dtype = h5py.string_dtype(encoding="utf-8")
-    port_feature_names = decode_names(raw_cases[0].payload["port_feature_names"])
+    local_grid_size = int(processed[0].local_mask.shape[0])
+    n_interface_points = int(processed[0].port_tokens.shape[0])
+
     with h5py.File(h5_path, "w") as h5:
         h5.attrs["dataset_type"] = "local_module_steady_conduction"
+        h5.attrs["dataset_role"] = "local_module_surrogate"
+        h5.attrs["target_kind"] = "steady_robin_conduction"
         h5.attrs["num_cases"] = len(processed)
+        h5.attrs["local_grid_size"] = local_grid_size
+        h5.attrs["n_interface_points"] = n_interface_points
         h5.create_dataset("case_ids", data=np.asarray([item.case_key for item in processed], dtype=string_dtype))
         h5.create_dataset("splits", data=np.asarray([item.split for item in processed], dtype=string_dtype))
         h5.create_dataset("module_param_names", data=np.asarray(MODULE_PARAM_NAMES, dtype=string_dtype))
-        h5.create_dataset("port_feature_names", data=np.asarray(port_feature_names, dtype=string_dtype))
-        h5.create_dataset("interface_target_names", data=np.asarray(("T_surface", "q_normal"), dtype=string_dtype))
+        h5.create_dataset("port_input_feature_names", data=np.asarray(PORT_INPUT_FEATURE_NAMES, dtype=string_dtype))
+        h5.create_dataset("port_feature_names", data=np.asarray(PORT_INPUT_FEATURE_NAMES, dtype=string_dtype))
+        h5.create_dataset("interface_target_names", data=np.asarray(INTERFACE_TARGET_NAMES, dtype=string_dtype))
+        h5.create_dataset("local_target_stat_names", data=np.asarray(LOCAL_TARGET_STAT_NAMES, dtype=string_dtype))
         h5.create_dataset("module_params", data=np.stack([item.module_params for item in processed]), compression="gzip")
+        h5.create_dataset("local_target_stats", data=np.stack([item.local_target_stats for item in processed]), compression="gzip")
         h5.create_dataset("port_tokens", data=np.stack([item.port_tokens for item in processed]), compression="gzip")
         h5.create_dataset(
             "internal_query_points",
@@ -226,6 +363,7 @@ def write_h5(output_root: Path, processed: Sequence[LocalProcessedCase], raw_cas
         h5.create_dataset("interface_targets", data=np.stack([item.interface_targets for item in processed]), compression="gzip")
         h5.create_dataset("local_grid", data=np.stack([item.local_grid for item in processed]), compression="gzip")
         h5.create_dataset("local_mask", data=np.stack([item.local_mask for item in processed]), compression="gzip")
+        write_normalization_group(h5, processed)
 
         cases_group = h5.create_group("cases")
         for item in processed:
@@ -233,6 +371,7 @@ def write_h5(output_root: Path, processed: Sequence[LocalProcessedCase], raw_cas
             group.attrs["split"] = item.split
             group.attrs["source_case_dir"] = str(item.case_dir)
             group.create_dataset("module_params", data=item.module_params)
+            group.create_dataset("local_target_stats", data=item.local_target_stats)
             group.create_dataset("port_tokens", data=item.port_tokens, compression="gzip")
             group.create_dataset("internal_query_points", data=item.internal_query_points, compression="gzip")
             group.create_dataset("internal_temperature_targets", data=item.internal_temperature_targets, compression="gzip")
@@ -240,6 +379,7 @@ def write_h5(output_root: Path, processed: Sequence[LocalProcessedCase], raw_cas
             group.create_dataset("local_grid", data=item.local_grid, compression="gzip")
             group.create_dataset("local_mask", data=item.local_mask, compression="gzip")
             group.create_dataset("case_config_json", data=json.dumps(item.cfg_payload, indent=2), dtype=string_dtype)
+
     write_index_csv(output_root, processed)
     return h5_path
 
@@ -261,7 +401,7 @@ def main() -> int:
         case_key = unique_case_key(base_key, existing)
         processed.append(process_local_case(raw, case_key, assignments.get(raw.case_dir, "train")))
 
-    h5_path = write_h5(output_root, processed, raw_cases)
+    h5_path = write_h5(output_root, processed)
     tqdm.write(f"Packed {len(processed)} local module cases into: {h5_path}")
     return 0
 

@@ -1,4 +1,25 @@
-"""Pack raw channel thermal cases into a steady/quasi-steady HDF5 dataset.
+"""Pack raw global channel thermal cases into a steady/quasi-steady HDF5 dataset.
+
+Scope
+-----
+This script handles the **global channel** data layer for Demo 1. It reads raw
+case folders produced by ``simulate_channelthermal.py`` under ``Data_Saved`` and
+writes the canonical Stage-B dataset:
+
+``Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5``.
+
+Data flow
+---------
+For each case, frames after heat activation are filtered, the final window is
+averaged into ``steady_field``, and an ``rms_field`` is computed over that same
+window. Global point samples, module-internal temperature targets, and
+interface arrays are then packed for future neural-field training.
+
+Leakage guard
+-------------
+The raw ``interface_response`` is preserved for compatibility, but the packed
+HDF5 also writes ``interface_condition`` and ``interface_target`` so future
+training scripts can use clean inputs and targets by default.
 
 This first Demo 1 preprocessing pass is deliberately not phase-cycle based.
 For each raw case it selects saved frames after heat activation, averages the
@@ -35,6 +56,8 @@ from channelthermal_common import (
 
 CHANNEL_ORDER = ("u", "v", "p", "omega", "temperature")
 SAMPLED_POINT_FEATURES = ("x", "y", "u", "v", "p", "omega", "temperature")
+INTERFACE_CONDITION_FEATURE_NAMES = ("theta", "normal_x", "normal_y", "T_outside", "u_normal", "u_tangent", "h_proxy")
+INTERFACE_TARGET_NAMES = ("T_surface", "q_normal")
 
 
 @dataclass
@@ -62,6 +85,8 @@ class ProcessedCase:
     module_internal_temperature: np.ndarray
     module_internal_mask: np.ndarray
     interface_response: np.ndarray
+    interface_condition: np.ndarray
+    interface_target: np.ndarray
     interface_feature_names: Tuple[str, ...]
     module_centers: np.ndarray
     heat_powers: np.ndarray
@@ -94,6 +119,7 @@ def read_frame_index(case_dir: Path) -> List[Dict[str, str]]:
 
 
 def discover_raw_cases(input_root: Path) -> List[RawCase]:
+    """Find raw global cases with frames and config metadata."""
     records: List[RawCase] = []
     for split_hint, case_dir in find_case_dirs(input_root):
         scene_dir = case_dir / "scene"
@@ -109,7 +135,12 @@ def discover_raw_cases(input_root: Path) -> List[RawCase]:
 
 
 def select_final_window(raw: RawCase, final_window_override: int | None) -> List[Dict[str, str]]:
-    """Select final frames after heat activation, with robust fallbacks."""
+    """Select final frames after heat activation, with robust fallbacks.
+
+    The packed dataset is steady/quasi-steady. We therefore use only the final
+    heat-active frames, or warmup-complete frames if old raw data lacks explicit
+    heat flags.
+    """
     heat_start = float(raw.cfg.thermal.heat_start_time)
     eligible: List[Dict[str, str]] = []
     for row in raw.frame_rows:
@@ -133,6 +164,7 @@ def load_frame(case_dir: Path, row: Dict[str, str]) -> Dict[str, np.ndarray]:
 
 
 def stack_field_window(case_dir: Path, selected_rows: Sequence[Dict[str, str]]) -> Tuple[np.ndarray, Dict[str, np.ndarray], np.ndarray]:
+    """Load all field channels for the selected final window."""
     frames: List[np.ndarray] = []
     last_payload: Dict[str, np.ndarray] = {}
     times: List[float] = []
@@ -152,6 +184,7 @@ def choose_split(case_index: int, raw: RawCase, split_assignments: Dict[Path, st
 
 
 def assign_unsplit_cases(raw_cases: Sequence[RawCase], train_fraction: float, seed: int) -> Dict[Path, str]:
+    """Assign deterministic train/test labels when raw data is not pre-split."""
     unsplit = [raw.case_dir for raw in raw_cases if raw.split_hint not in {"train", "test"}]
     if not unsplit:
         return {}
@@ -175,7 +208,11 @@ def sample_global_points(
     points_per_case: int,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Sample uniform, near-module, and temperature-gradient-focused points."""
+    """Sample uniform, near-module, and temperature-gradient-focused points.
+
+    These samples become point-supervision tuples for the global environment
+    neural field. Module-interior and interface targets are stored separately.
+    """
     h, w, _ = steady_field.shape
     yy, xx = np.indices((h, w))
     flat_indices = np.arange(h * w)
@@ -231,6 +268,16 @@ def unique_case_key(base_key: str, existing: set[str]) -> str:
     return key
 
 
+def split_interface_response(
+    interface_response: np.ndarray,
+    feature_names: Tuple[str, ...],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Split full raw interface arrays into clean condition and target arrays."""
+    condition_indices = [feature_names.index(name) for name in INTERFACE_CONDITION_FEATURE_NAMES]
+    target_indices = [feature_names.index(name) for name in INTERFACE_TARGET_NAMES]
+    return interface_response[..., condition_indices].astype(np.float32), interface_response[..., target_indices].astype(np.float32)
+
+
 def process_case(
     raw: RawCase,
     case_key: str,
@@ -239,7 +286,12 @@ def process_case(
     points_per_case: int,
     seed: int,
 ) -> ProcessedCase:
+    """Convert one raw case folder into packed steady-window arrays."""
     selected_rows = select_final_window(raw, final_window_override)
+
+    # Final-window averaging is the core steady/quasi-steady reduction. The raw
+    # transient is not discarded on disk; only the packed dataset chooses this
+    # first training target.
     tensor, last_payload, selected_times = stack_field_window(raw.case_dir, selected_rows)
     steady_field = np.mean(tensor, axis=0).astype(np.float32)
     rms_field = np.sqrt(np.mean((tensor - steady_field[None, ...]) ** 2, axis=0)).astype(np.float32)
@@ -259,6 +311,7 @@ def process_case(
     interface_response = np.mean(np.stack(interface_frames, axis=0), axis=0).astype(np.float32)
     internal_mask = last_payload["module_internal_mask"].astype(np.uint8)
     feature_names = tuple(name.decode("utf-8") for name in last_payload["interface_feature_names"])
+    interface_condition, interface_target = split_interface_response(interface_response, feature_names)
     centers = np.asarray(raw.cfg.layout.centers or [], dtype=np.float32)
     heat_powers = np.asarray(raw.cfg.layout.heat_powers or [], dtype=np.float32)
     return ProcessedCase(
@@ -276,6 +329,8 @@ def process_case(
         module_internal_temperature=internal_temperature,
         module_internal_mask=internal_mask,
         interface_response=interface_response,
+        interface_condition=interface_condition,
+        interface_target=interface_target,
         interface_feature_names=feature_names,
         module_centers=centers,
         heat_powers=heat_powers,
@@ -291,6 +346,7 @@ def pad_first_axis(array: np.ndarray, target: int, fill_value: float = 0.0) -> n
 
 
 def write_global_case_index(output_root: Path, processed: Sequence[ProcessedCase]) -> None:
+    """Write a small CSV summary next to the packed HDF5 file."""
     index_path = output_root / "global_case_index.csv"
     with index_path.open("w", newline="", encoding="utf-8") as f:
         fieldnames = ["case_key", "split", "case_dir", "num_modules", "re", "heat_power_min", "heat_power_max"]
@@ -310,23 +366,84 @@ def write_global_case_index(output_root: Path, processed: Sequence[ProcessedCase
             )
 
 
+def _safe_mean_std(values: np.ndarray, axis: int | None = 0) -> Tuple[np.ndarray, np.ndarray]:
+    if values.size == 0:
+        return np.asarray([0.0], dtype=np.float32), np.asarray([0.0], dtype=np.float32)
+    return np.asarray(np.mean(values, axis=axis), dtype=np.float32), np.asarray(np.std(values, axis=axis), dtype=np.float32)
+
+
+def write_normalization_group(h5, processed: Sequence[ProcessedCase]) -> None:
+    """Save dataset-level normalization statistics for future training."""
+    norm = h5.create_group("normalization")
+    fields = np.concatenate([item.steady_field.reshape(-1, len(CHANNEL_ORDER)) for item in processed], axis=0)
+    samples = np.concatenate([item.sampled_points[:, 2:] for item in processed], axis=0)
+    heat_arrays = [item.heat_powers.reshape(-1) for item in processed if item.heat_powers.size > 0]
+    condition_arrays = [
+        item.interface_condition.reshape(-1, item.interface_condition.shape[-1]) for item in processed if item.interface_condition.size > 0
+    ]
+    target_arrays = [item.interface_target.reshape(-1, item.interface_target.shape[-1]) for item in processed if item.interface_target.size > 0]
+    heat_powers = np.concatenate(heat_arrays) if heat_arrays else np.asarray([], dtype=np.float32)
+    interface_condition = (
+        np.concatenate(condition_arrays, axis=0)
+        if condition_arrays
+        else np.zeros((0, len(INTERFACE_CONDITION_FEATURE_NAMES)), dtype=np.float32)
+    )
+    interface_target = np.concatenate(target_arrays, axis=0) if target_arrays else np.zeros((0, len(INTERFACE_TARGET_NAMES)), dtype=np.float32)
+    internal_values = []
+    for item in processed:
+        if item.module_internal_temperature.size == 0:
+            continue
+        disk = item.module_internal_mask.astype(bool)
+        internal_values.append(item.module_internal_temperature[:, disk].reshape(-1))
+    internal_temperature = np.concatenate(internal_values) if internal_values else np.asarray([], dtype=np.float32)
+
+    field_mean, field_std = _safe_mean_std(fields, axis=0)
+    sample_mean, sample_std = _safe_mean_std(samples, axis=0)
+    condition_mean, condition_std = _safe_mean_std(interface_condition, axis=0)
+    target_mean, target_std = _safe_mean_std(interface_target, axis=0)
+    internal_mean, internal_std = _safe_mean_std(internal_temperature, axis=None)
+
+    norm.create_dataset("field_mean_by_channel", data=field_mean)
+    norm.create_dataset("field_std_by_channel", data=field_std)
+    norm.create_dataset("sampled_point_mean_by_channel", data=sample_mean)
+    norm.create_dataset("sampled_point_std_by_channel", data=sample_std)
+    norm.create_dataset("heat_power_mean", data=np.asarray([np.mean(heat_powers) if heat_powers.size else 0.0], dtype=np.float32))
+    norm.create_dataset("heat_power_std", data=np.asarray([np.std(heat_powers) if heat_powers.size else 0.0], dtype=np.float32))
+    norm.create_dataset("interface_condition_mean", data=condition_mean)
+    norm.create_dataset("interface_condition_std", data=condition_std)
+    norm.create_dataset("interface_target_mean", data=target_mean)
+    norm.create_dataset("interface_target_std", data=target_std)
+    norm.create_dataset("internal_temperature_mean", data=np.asarray([float(internal_mean)], dtype=np.float32))
+    norm.create_dataset("internal_temperature_std", data=np.asarray([float(internal_std)], dtype=np.float32))
+
+
 def write_h5(output_root: Path, processed: Sequence[ProcessedCase], max_modules_arg: int) -> Path:
+    """Write the packed global channel HDF5 file."""
     output_root.mkdir(parents=True, exist_ok=True)
     h5_path = output_root / "packed_dataset.h5"
     max_modules = max(max_modules_arg, max((item.module_centers.shape[0] for item in processed), default=0))
     string_dtype = h5py.string_dtype(encoding="utf-8")
+    local_grid_size = int(processed[0].module_internal_mask.shape[0]) if processed else 0
+    n_interface_points = int(processed[0].interface_response.shape[1]) if processed and processed[0].interface_response.ndim >= 2 else 0
     with h5py.File(h5_path, "w") as h5:
         h5.attrs["dataset_type"] = "channelthermal_steady"
+        h5.attrs["dataset_role"] = "global_channelthermal"
+        h5.attrs["target_kind"] = "steady_final_window"
         h5.attrs["field_dim"] = len(CHANNEL_ORDER)
         h5.attrs["max_modules"] = max_modules
+        h5.attrs["local_grid_size"] = local_grid_size
+        h5.attrs["n_interface_points"] = n_interface_points
         h5.attrs["state_id"] = "steady_final_window"
         h5.create_dataset("field_dim", data=np.asarray([len(CHANNEL_ORDER)], dtype=np.int32))
         h5.create_dataset("channel_order", data=np.asarray(CHANNEL_ORDER, dtype=string_dtype))
         h5.create_dataset("sampled_point_feature_names", data=np.asarray(SAMPLED_POINT_FEATURES, dtype=string_dtype))
+        h5.create_dataset("interface_condition_feature_names", data=np.asarray(INTERFACE_CONDITION_FEATURE_NAMES, dtype=string_dtype))
+        h5.create_dataset("interface_target_names", data=np.asarray(INTERFACE_TARGET_NAMES, dtype=string_dtype))
         if processed:
             h5.create_dataset("interface_feature_names", data=np.asarray(processed[0].interface_feature_names, dtype=string_dtype))
         h5.create_dataset("case_ids", data=np.asarray([item.case_key for item in processed], dtype=string_dtype))
         h5.create_dataset("splits", data=np.asarray([item.split for item in processed], dtype=string_dtype))
+        write_normalization_group(h5, processed)
 
         cases_group = h5.create_group("cases")
         for item in processed:
@@ -354,6 +471,16 @@ def write_h5(output_root: Path, processed: Sequence[ProcessedCase], max_modules_
                 data=pad_first_axis(item.interface_response, max_modules),
                 compression="gzip",
             )
+            group.create_dataset(
+                "interface_condition",
+                data=pad_first_axis(item.interface_condition, max_modules),
+                compression="gzip",
+            )
+            group.create_dataset(
+                "interface_target",
+                data=pad_first_axis(item.interface_target, max_modules),
+                compression="gzip",
+            )
             centers = pad_first_axis(item.module_centers.reshape((-1, 2)), max_modules)
             powers = pad_first_axis(item.heat_powers.reshape((-1, 1)), max_modules).reshape((max_modules,))
             present = np.zeros((max_modules,), dtype=np.uint8)
@@ -377,6 +504,7 @@ def write_h5(output_root: Path, processed: Sequence[ProcessedCase], max_modules_
 
 
 def main() -> int:
+    """CLI entry point for packing raw global cases."""
     args = parse_args()
     input_root = resolve_data_path(args.input_root)
     output_root = resolve_data_path(args.output_root)
