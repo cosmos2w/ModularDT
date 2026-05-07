@@ -3,6 +3,7 @@ from __future__ import annotations
 """Evaluate a Stage B global Channel Thermal checkpoint on one processed case."""
 
 import argparse
+import csv
 import json
 import os
 from pathlib import Path
@@ -394,44 +395,129 @@ def plot_interface(output_path: Path, sample: Dict[str, Any], pred_interface: np
 def plot_organizer(output_path: Path, sample: Dict[str, Any], aux: Dict[str, Any], model: GlobalChannelThermalModel) -> None:
     centers = sample["structure"]["module_centers"]
     present = sample["structure"]["module_present"] > 0.5
-    fig, axes = plt.subplots(1, 3, figsize=(13.0, 4.2), constrained_layout=True)
+    heat = np.asarray(sample["structure"].get("heat_powers", np.zeros((centers.shape[0],))), dtype=np.float32)
+    env_coords = np.asarray(aux.get("env_coords", model.env_coords.detach().cpu().numpy()), dtype=np.float32)
+    A_eh = np.asarray(aux.get("A_eh", np.zeros((env_coords.shape[0], 1))), dtype=np.float32)
+    A_mh = np.asarray(aux.get("A_mh", np.zeros((centers.shape[0], A_eh.shape[-1]))), dtype=np.float32)
+    strength = np.asarray(aux.get("hyper_strength", np.ones((A_eh.shape[-1],), dtype=np.float32)), dtype=np.float32)
+    module_mass = np.asarray(aux.get("hyper_module_mass", np.zeros_like(strength)), dtype=np.float32)
+    env_mass = np.asarray(aux.get("hyper_env_mass", np.zeros_like(strength)), dtype=np.float32)
+    src = np.asarray(aux.get("hyper_source_coords", np.zeros((strength.shape[0], 2))), dtype=np.float32)
+    dst = np.asarray(aux.get("hyper_thermal_region_coords", np.zeros((strength.shape[0], 2))), dtype=np.float32)
 
-    axes[0].imshow(
-        sample["steady_field"][..., CHANNEL_ORDER.index("temperature")],
+    fig, axes = plt.subplots(2, 2, figsize=(12.5, 8.8), constrained_layout=True)
+    ax_overlay, ax_mh, ax_eh, ax_schema = axes.reshape(-1)
+    temp_idx = CHANNEL_ORDER.index("temperature") if "temperature" in CHANNEL_ORDER else min(sample["steady_field"].shape[-1] - 1, 0)
+
+    ax_overlay.imshow(
+        sample["steady_field"][..., temp_idx],
         origin="lower",
         extent=(float(np.min(sample["x_grid"])), float(np.max(sample["x_grid"])), float(np.min(sample["y_grid"])), float(np.max(sample["y_grid"]))),
         cmap="inferno",
         alpha=0.78,
         aspect="auto",
     )
-    for idx, (cx, cy) in enumerate(centers[present]):
-        axes[0].add_patch(plt.Circle((float(cx), float(cy)), float(model.config.module_radius), fill=False, color="white", lw=1.4))
-        axes[0].text(float(cx), float(cy), f"M{idx}", ha="center", va="center", color="white", fontsize=8)
-    if "hyper_source_coords" in aux and "hyper_thermal_region_coords" in aux:
-        src = aux["hyper_source_coords"]
-        dst = aux["hyper_thermal_region_coords"]
-        strength = aux.get("hyper_strength", np.ones((src.shape[0],), dtype=np.float32))
-        for hidx in range(src.shape[0]):
-            alpha = float(np.clip(strength[hidx], 0.15, 1.0))
-            axes[0].plot([src[hidx, 0], dst[hidx, 0]], [src[hidx, 1], dst[hidx, 1]], color="#66c2a5", lw=1.0 + 2.0 * alpha, alpha=alpha)
-            axes[0].scatter(dst[hidx, 0], dst[hidx, 1], s=30 + 70 * alpha, color="#66c2a5", edgecolor="black", linewidth=0.4)
-    axes[0].set_title("Physical organizer overlay")
-    axes[0].set_xlabel("x")
-    axes[0].set_ylabel("y")
+    num_h = max(A_eh.shape[-1], 1)
+    cmap = plt.get_cmap("tab10", num_h)
+    dominant_env = A_eh.argmax(axis=-1) if A_eh.size else np.zeros((env_coords.shape[0],), dtype=np.int64)
+    ax_overlay.scatter(env_coords[:, 0], env_coords[:, 1], c=dominant_env, cmap=cmap, s=24, edgecolor="white", linewidth=0.25, alpha=0.9)
+    heat_abs = np.abs(heat)
+    heat_scale = heat_abs / max(float(np.nanmax(heat_abs)) if heat_abs.size else 0.0, 1.0e-6)
+    for module_idx in np.flatnonzero(present):
+        cx, cy = centers[module_idx]
+        color = "#fdae61" if heat[module_idx] >= 0 else "#74add1"
+        radius = float(model.config.module_radius)
+        ax_overlay.add_patch(plt.Circle((float(cx), float(cy)), radius, fill=False, color=color, lw=1.2 + 1.4 * float(heat_scale[module_idx])))
+        ax_overlay.text(float(cx), float(cy), f"M{module_idx}", ha="center", va="center", color="white", fontsize=8, weight="bold")
+    for hidx in range(strength.shape[0]):
+        alpha = float(np.clip(strength[hidx], 0.12, 1.0))
+        color = cmap(hidx)
+        ax_overlay.plot([src[hidx, 0], dst[hidx, 0]], [src[hidx, 1], dst[hidx, 1]], color=color, lw=1.0 + 2.0 * alpha, alpha=alpha)
+        ax_overlay.scatter(src[hidx, 0], src[hidx, 1], marker="x", s=35 + 70 * alpha, color=color, linewidth=1.5)
+        ax_overlay.scatter(dst[hidx, 0], dst[hidx, 1], marker="o", s=34 + 95 * alpha, color=color, edgecolor="black", linewidth=0.45)
+        ax_overlay.text(dst[hidx, 0], dst[hidx, 1], f"H{hidx}\n{strength[hidx]:.2f}", color="white", fontsize=7, ha="center", va="center")
+    ax_overlay.set_title("Physical organizer overlay")
+    ax_overlay.set_xlabel("x")
+    ax_overlay.set_ylabel("y")
 
-    im1 = axes[1].imshow(aux.get("A_mh", np.zeros((1, 1))).T, aspect="auto", cmap="viridis")
-    axes[1].set_title("A_mh module-to-hyper")
-    axes[1].set_xlabel("module")
-    axes[1].set_ylabel("hyperedge")
-    fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+    im1 = ax_mh.imshow(A_mh.T, aspect="auto", cmap="viridis", vmin=0.0, vmax=max(float(np.nanmax(A_mh)) if A_mh.size else 1.0, 1.0e-6))
+    ax_mh.set_title("A_mh modules x hyperedges")
+    ax_mh.set_xlabel("module")
+    ax_mh.set_ylabel("hyperedge")
+    ax_mh.set_xticks(np.arange(centers.shape[0]))
+    ax_mh.set_xticklabels([f"M{i}" for i in range(centers.shape[0])], rotation=45, ha="right")
+    fig.colorbar(im1, ax=ax_mh, fraction=0.046, pad=0.04)
 
-    im2 = axes[2].imshow(aux.get("A_eh", np.zeros((1, 1))).T, aspect="auto", cmap="viridis")
-    axes[2].set_title("A_eh env-to-hyper")
-    axes[2].set_xlabel("env token")
-    axes[2].set_ylabel("hyperedge")
-    fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+    sort_idx = np.lexsort((np.arange(A_eh.shape[0]), dominant_env)) if A_eh.size else np.arange(0)
+    im2 = ax_eh.imshow(A_eh[sort_idx].T if A_eh.size else A_eh.T, aspect="auto", cmap="viridis", vmin=0.0)
+    ax_eh.set_title("A_eh env tokens sorted by dominant hyperedge")
+    ax_eh.set_xlabel("sorted env token")
+    ax_eh.set_ylabel("hyperedge")
+    fig.colorbar(im2, ax=ax_eh, fraction=0.046, pad=0.04)
+
+    ax_schema.set_title("Module/environment mass")
+    y = np.arange(strength.shape[0])
+    ax_schema.barh(y - 0.18, module_mass, height=0.34, color="#4c78a8", label="module mass")
+    ax_schema.barh(y + 0.18, env_mass, height=0.34, color="#f58518", label="env mass")
+    ax_schema.set_yticks(y)
+    ax_schema.set_yticklabels([f"H{i}" for i in range(strength.shape[0])])
+    ax_schema.set_xlabel("normalized mass")
+    ax_schema.grid(True, axis="x", alpha=0.25)
+    ax_schema.legend(fontsize=8)
     fig.savefig(output_path, dpi=170)
     plt.close(fig)
+
+
+def save_organizer_summary(output_dir: Path, aux: Dict[str, Any], sample: Dict[str, Any]) -> tuple[Path, Path]:
+    centers = np.asarray(sample["structure"]["module_centers"], dtype=np.float32)
+    present = np.asarray(sample["structure"]["module_present"] > 0.5)
+    A_mh = np.asarray(aux.get("A_mh", np.zeros((centers.shape[0], 0))), dtype=np.float32)
+    A_eh = np.asarray(aux.get("A_eh", np.zeros((0, A_mh.shape[-1] if A_mh.ndim == 2 else 0))), dtype=np.float32)
+    module_mass = np.asarray(aux.get("hyper_module_mass", np.zeros((A_mh.shape[-1],))), dtype=np.float32)
+    env_mass = np.asarray(aux.get("hyper_env_mass", np.zeros_like(module_mass)), dtype=np.float32)
+    strength = np.asarray(aux.get("hyper_strength", np.zeros_like(module_mass)), dtype=np.float32)
+    src = np.asarray(aux.get("hyper_source_coords", np.zeros((module_mass.shape[0], 2))), dtype=np.float32)
+    dst = np.asarray(aux.get("hyper_thermal_region_coords", np.zeros((module_mass.shape[0], 2))), dtype=np.float32)
+    dominant_env = A_eh.argmax(axis=-1) if A_eh.size else np.zeros((0,), dtype=np.int64)
+    rows = []
+    for hidx in range(module_mass.shape[0]):
+        module_scores = A_mh[:, hidx] if A_mh.size else np.zeros((centers.shape[0],), dtype=np.float32)
+        valid_scores = [(idx, float(module_scores[idx])) for idx in np.flatnonzero(present)]
+        valid_scores.sort(key=lambda item: item[1], reverse=True)
+        top_modules = [f"M{idx}:{score:.3f}" for idx, score in valid_scores[:4] if score > 1.0e-6]
+        row = {
+            "hyperedge_id": int(hidx),
+            "module_mass": float(module_mass[hidx]),
+            "env_mass": float(env_mass[hidx]),
+            "hyper_strength": float(strength[hidx]),
+            "source_x": float(src[hidx, 0]),
+            "source_y": float(src[hidx, 1]),
+            "thermal_region_x": float(dst[hidx, 0]),
+            "thermal_region_y": float(dst[hidx, 1]),
+            "top_modules": ";".join(top_modules),
+            "top_env_token_count": int(np.sum(dominant_env == hidx)),
+        }
+        rows.append(row)
+    csv_path = output_dir / "organization_summary.csv"
+    json_path = output_dir / "organization_summary.json"
+    fieldnames = [
+        "hyperedge_id",
+        "module_mass",
+        "env_mass",
+        "hyper_strength",
+        "source_x",
+        "source_y",
+        "thermal_region_x",
+        "thermal_region_y",
+        "top_modules",
+        "top_env_token_count",
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    write_json(json_path, {"hyperedges": rows})
+    return csv_path, json_path
 
 
 def mode_suffix(mode: str) -> str:
@@ -639,13 +725,21 @@ def main() -> int:
 
     if first_aux is not None:
         plot_organizer(output_dir / "organizer_visualization.png", raw_sample, first_aux, model)
+        org_csv, org_json = save_organizer_summary(output_dir, first_aux, raw_sample)
+    else:
+        org_csv = output_dir / "organization_summary.csv"
+        org_json = output_dir / "organization_summary.json"
 
     summary = {
         "checkpoint": str(checkpoint_path),
         "case_id": str(raw_sample["case_id"]),
         "local_port_condition_mode": args.local_port_condition_mode,
         "mixed_teacher_ratio": float(args.mixed_teacher_ratio),
-        "outputs": {"organizer_visualization": str(output_dir / "organizer_visualization.png")},
+        "outputs": {
+            "organizer_visualization": str(output_dir / "organizer_visualization.png"),
+            "organization_summary_csv": str(org_csv),
+            "organization_summary_json": str(org_json),
+        },
         "modes": mode_summaries,
     }
     if args.local_port_condition_mode == "both":

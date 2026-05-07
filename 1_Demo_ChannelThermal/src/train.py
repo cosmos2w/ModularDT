@@ -8,7 +8,7 @@ import math
 import os
 import warnings
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -30,7 +30,12 @@ from channelthermal_model_utils import (
     set_seed,
     write_json,
 )
-from model import GlobalChannelThermalModel, GlobalChannelThermalModelConfig, load_local_surrogate_from_checkpoint
+from model import (
+    GlobalChannelThermalModel,
+    GlobalChannelThermalModelConfig,
+    build_thermal_module_env_prior,
+    load_local_surrogate_from_checkpoint,
+)
 
 
 DEFAULT_CONFIG_PATH = "./Configs/train_global_config_template.json"
@@ -197,6 +202,202 @@ def interface_loss(
     return loss, t_surface_mse, q_normal_mse
 
 
+def _normalize_rows(values: torch.Tensor, eps: float = 1.0e-6) -> torch.Tensor:
+    return values / values.sum(dim=-1, keepdim=True).clamp_min(eps)
+
+
+def _thermal_prior_params(loss_cfg: Dict[str, Any]) -> Dict[str, float]:
+    return {
+        "sigma_distance": float(loss_cfg.get("organizer_me_sigma_distance", 1.50)),
+        "sigma_downstream": float(loss_cfg.get("organizer_me_sigma_downstream", 2.00)),
+        "sigma_lateral": float(loss_cfg.get("organizer_me_sigma_lateral", 0.90)),
+        "wall_weight": float(loss_cfg.get("organizer_me_wall_weight", 0.15)),
+        "heat_power_weight": float(loss_cfg.get("organizer_me_heat_power_weight", 0.15)),
+    }
+
+
+def build_thermal_prior_from_batch(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dict[str, Any]) -> torch.Tensor:
+    """Build the weak channel module->environment prior used for organizer losses."""
+    structure = batch["structure"]
+    material = structure.get("material_params")
+    module_radius = 0.45
+    if torch.is_tensor(material) and material.numel() > 5:
+        module_radius = float(material.reshape(material.shape[0], -1)[0, 5].detach().cpu())
+        if module_radius <= 0.0:
+            module_radius = 0.45
+    domain_length_x = float(structure.get("domain_length_x", outputs["module_centers"].new_tensor([[12.0]])).reshape(-1)[0].detach().cpu())
+    domain_length_y = float(structure.get("domain_length_y", outputs["module_centers"].new_tensor([[4.0]])).reshape(-1)[0].detach().cpu())
+    return build_thermal_module_env_prior(
+        outputs["module_centers"],
+        outputs["env_coords"],
+        outputs["module_present"],
+        outputs["heat_powers"],
+        domain_length_x,
+        domain_length_y,
+        module_radius,
+        **_thermal_prior_params(loss_cfg),
+        eps=float(loss_cfg.get("organizer_eps", 1.0e-6)),
+    )
+
+
+def compute_hyperedge_masses_channelthermal(
+    outputs: Dict[str, torch.Tensor],
+    batch: Dict[str, Any],
+    eps: float = 1.0e-6,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return raw and normalized module/environment mass per hyperedge."""
+    A_mh = outputs["A_mh"]
+    A_eh = outputs["A_eh"]
+    module_present = batch["structure"]["module_present"].to(device=A_mh.device, dtype=A_mh.dtype)
+    module_mass_raw = (A_mh * module_present[:, :, None]).sum(dim=1)
+    module_mass_raw = module_mass_raw / module_present.sum(dim=1, keepdim=True).clamp_min(eps)
+    env_mass_raw = A_eh.mean(dim=1)
+    module_mass = module_mass_raw / module_mass_raw.sum(dim=-1, keepdim=True).clamp_min(eps)
+    env_mass = env_mass_raw / env_mass_raw.sum(dim=-1, keepdim=True).clamp_min(eps)
+    return module_mass_raw, env_mass_raw, module_mass, env_mass
+
+
+def build_eh_factor_target_channelthermal(
+    outputs: Dict[str, torch.Tensor],
+    batch: Dict[str, Any],
+    target_source: str = "prior_me",
+    *,
+    loss_cfg: Optional[Dict[str, Any]] = None,
+    detach_mh: bool = True,
+    eps: float = 1.0e-6,
+) -> torch.Tensor:
+    """Target A_eh[e,k] from module->env influence factored through A_mh."""
+    loss_cfg = loss_cfg or {}
+    source = str(target_source).strip().lower()
+    if source == "prior_me":
+        A_me_for_target = build_thermal_prior_from_batch(outputs, batch, loss_cfg)
+    elif source == "learned_me":
+        A_me_for_target = outputs["A_me"].detach()
+    else:
+        raise ValueError("organizer_eh_factor_target_source must be 'prior_me' or 'learned_me'.")
+    A_mh = outputs["A_mh"].detach() if detach_mh else outputs["A_mh"]
+    raw = torch.einsum("bnm,bnk->bmk", A_me_for_target, A_mh)
+    denom = raw.sum(dim=-1, keepdim=True)
+    _, _, module_mass, _ = compute_hyperedge_masses_channelthermal(outputs, batch, eps=eps)
+    fallback = module_mass[:, None, :].expand_as(raw)
+    target = torch.where(denom > eps, raw / denom.clamp_min(eps), fallback)
+    return _normalize_rows(target.clamp_min(eps), eps=eps)
+
+
+def _module_module_affinity_prior_channelthermal(outputs: Dict[str, torch.Tensor], batch: Dict[str, Any], eps: float = 1.0e-6) -> torch.Tensor:
+    centers = outputs["module_centers"]
+    present = batch["structure"]["module_present"].to(device=centers.device, dtype=centers.dtype)
+    dx = centers[:, None, :, 0] - centers[:, :, None, 0]
+    dy = centers[:, None, :, 1] - centers[:, :, None, 1]
+    dist = torch.sqrt(dx.square() + dy.square() + eps)
+    same_lateral = torch.exp(-(dy.abs() / 0.9).square())
+    close = torch.exp(-dist / 1.5)
+    downstream_pair = torch.exp(-torch.relu(dx) / 2.0) * same_lateral
+    affinity = 0.55 * close + 0.45 * downstream_pair
+    n = centers.shape[1]
+    eye = torch.eye(n, device=centers.device, dtype=centers.dtype)[None, :, :]
+    return affinity * present[:, :, None] * present[:, None, :] * (1.0 - eye)
+
+
+def organizer_mass_diagnostics_channelthermal(
+    outputs: Dict[str, torch.Tensor],
+    batch: Dict[str, Any],
+    eps: float = 1.0e-6,
+) -> Dict[str, torch.Tensor]:
+    """Collapse-oriented diagnostics for the channel organizer."""
+    _, _, module_mass, env_mass = compute_hyperedge_masses_channelthermal(outputs, batch, eps=eps)
+    env_entropy = -(env_mass.clamp_min(eps) * env_mass.clamp_min(eps).log()).sum(dim=-1)
+    module_entropy = -(module_mass.clamp_min(eps) * module_mass.clamp_min(eps).log()).sum(dim=-1)
+    A_mh = outputs["A_mh"]
+    A_eh = outputs["A_eh"]
+    present = batch["structure"]["module_present"].to(device=A_mh.device, dtype=A_mh.dtype)
+    valid_module_max = A_mh.max(dim=-1).values * present
+    return {
+        "org_env_mass_max": env_mass.max(dim=-1).values.mean(),
+        "org_module_mass_max": module_mass.max(dim=-1).values.mean(),
+        "org_mass_l1": (env_mass - module_mass).abs().mean(),
+        "org_env_effective_hyperedges": torch.exp(env_entropy).mean(),
+        "org_module_effective_hyperedges": torch.exp(module_entropy).mean(),
+        "org_max_A_eh_mass": A_eh.max(dim=-1).values.mean(),
+        "org_max_A_mh_mass": valid_module_max.sum() / present.sum().clamp_min(1.0),
+    }
+
+
+def compute_organizer_losses(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+    """Weak direct supervision for physically meaningful channel hyperedges."""
+    aux = outputs.get("organizer_aux", {})
+    if not isinstance(aux, dict) or not {"A_me", "A_mh", "A_eh"}.issubset(aux):
+        zero = outputs["pred_field"].new_tensor(0.0)
+        return {
+            "loss_org_me": zero,
+            "loss_org_eh_factor": zero,
+            "loss_org_mass_align": zero,
+            "loss_org_mm": zero,
+            "loss_org_direct": zero,
+            "org_env_mass_max": zero,
+            "org_module_mass_max": zero,
+            "org_mass_l1": zero,
+            "org_env_effective_hyperedges": zero,
+            "org_module_effective_hyperedges": zero,
+            "org_max_A_eh_mass": zero,
+            "org_max_A_mh_mass": zero,
+        }
+
+    eps = float(loss_cfg.get("organizer_eps", 1.0e-6))
+    present = batch["structure"]["module_present"].to(device=aux["A_me"].device, dtype=aux["A_me"].dtype)
+
+    # A_me remains learned, but it is weakly guided toward a nonperiodic
+    # channel-thermal prior: near/downstream/wall/heat-power environment mass.
+    prior_me = build_thermal_prior_from_batch(aux, batch, loss_cfg).detach()
+    kl_me = F.kl_div(aux["A_me"].clamp_min(eps).log(), prior_me, reduction="none").sum(dim=-1)
+    loss_org_me = (kl_me * present).sum() / present.sum().clamp_min(1.0)
+
+    # Direct A_eh factor target: env token e should prefer hyperedge k when
+    # modules influencing e are assigned to k by A_mh.
+    target_eh = build_eh_factor_target_channelthermal(
+        aux,
+        batch,
+        target_source=str(loss_cfg.get("organizer_eh_factor_target_source", "prior_me")),
+        loss_cfg=loss_cfg,
+        detach_mh=bool(loss_cfg.get("organizer_eh_factor_detach_mh", True)),
+        eps=eps,
+    ).detach()
+    loss_org_eh_factor = F.kl_div(aux["A_eh"].clamp_min(eps).log(), target_eh, reduction="none").sum(dim=-1).mean()
+
+    _, _, module_mass, env_mass = compute_hyperedge_masses_channelthermal(aux, batch, eps=eps)
+    module_target = module_mass.detach() if bool(loss_cfg.get("organizer_mass_align_detach_module", True)) else module_mass
+    if bool(loss_cfg.get("organizer_mass_align_log_space", True)):
+        loss_org_mass_align = F.smooth_l1_loss(torch.log(env_mass + eps), torch.log(module_target + eps))
+    else:
+        loss_org_mass_align = F.smooth_l1_loss(env_mass, module_target)
+
+    if float(loss_cfg.get("organizer_mm_weight", 0.0)) > 0.0:
+        pred_mm = torch.matmul(aux["A_mh"], aux["A_mh"].transpose(1, 2))
+        prior_mm = _module_module_affinity_prior_channelthermal(aux, batch, eps=eps)
+        n = pred_mm.shape[1]
+        eye = torch.eye(n, device=pred_mm.device, dtype=pred_mm.dtype)[None, :, :]
+        valid = present[:, :, None] * present[:, None, :] * (1.0 - eye)
+        loss_org_mm = (((pred_mm - prior_mm) ** 2) * valid).sum() / valid.sum().clamp_min(1.0)
+    else:
+        loss_org_mm = aux["A_mh"].new_tensor(0.0)
+
+    loss_org_direct = (
+        float(loss_cfg.get("organizer_me_weight", 0.01)) * loss_org_me
+        + float(loss_cfg.get("organizer_eh_factor_weight", 0.05)) * loss_org_eh_factor
+        + float(loss_cfg.get("organizer_mass_align_weight", 0.02)) * loss_org_mass_align
+        + float(loss_cfg.get("organizer_mm_weight", 0.0)) * loss_org_mm
+    )
+    out = {
+        "loss_org_me": loss_org_me,
+        "loss_org_eh_factor": loss_org_eh_factor,
+        "loss_org_mass_align": loss_org_mass_align,
+        "loss_org_mm": loss_org_mm,
+        "loss_org_direct": loss_org_direct,
+    }
+    out.update(organizer_mass_diagnostics_channelthermal(aux, batch, eps=eps))
+    return out
+
+
 def effective_port_condition_settings(epoch: int, training_cfg: Dict[str, Any]) -> tuple[str, float]:
     """Resolve the Stage-B local-port curriculum for this epoch.
 
@@ -292,12 +493,14 @@ def compute_losses(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dic
         losses["diag_organizer_strength_mean"] = aux["hyper_strength"].mean()
     else:
         losses["diag_organizer_strength_mean"] = pred_port.new_tensor(0.0)
+    losses.update(compute_organizer_losses(outputs, batch, loss_cfg))
 
     total = (
         float(loss_cfg.get("field_mse_weight", 1.0)) * losses["loss_field"]
         + float(loss_cfg.get("internal_temperature_weight", 1.0)) * losses["loss_internal_temperature"]
         + float(loss_cfg.get("interface_weight", 0.2)) * losses["loss_interface"]
         + float(loss_cfg.get("port_condition_weight", 0.1)) * losses["loss_port_condition"]
+        + losses["loss_org_direct"]
     )
     losses["loss_total"] = total
     return losses
@@ -361,10 +564,13 @@ def save_global_loss_plots(history_path: Path, run_dir: Path) -> None:
         ("Global Field", ("loss_field", "val_loss_field")),
         ("Module/Internal Coupling", ("loss_internal_temperature", "val_loss_internal_temperature", "loss_interface", "val_loss_interface")),
         ("Port Condition", ("loss_port_condition", "val_loss_port_condition")),
+        ("Organizer", ("loss_org_me", "val_loss_org_me", "loss_org_eh_factor", "val_loss_org_eh_factor", "loss_org_mass_align", "val_loss_org_mass_align")),
     ]
-    fig, axes = plt.subplots(2, 2, figsize=(11.5, 7.2), constrained_layout=True)
+    fig, axes = plt.subplots(2, 3, figsize=(15.0, 7.2), constrained_layout=True)
     for ax, (title, keys) in zip(axes.reshape(-1), panels):
         _plot_loss_group(ax, history, keys, title=title)
+    for ax in axes.reshape(-1)[len(panels) :]:
+        ax.axis("off")
     fig.suptitle("Global Channel Thermal Losses", fontsize=13)
     fig.savefig(run_dir / "loss_curve.png", dpi=160)
     plt.close(fig)
@@ -440,7 +646,10 @@ def run_epoch(
         count += batch_size
         for key, value in losses.items():
             sums[key] = sums.get(key, 0.0) + float(value.detach().cpu()) * batch_size
-        iterator.set_postfix(loss=f"{float(losses['loss_total'].detach().cpu()):.3e}")
+        iterator.set_postfix(
+            loss=f"{float(losses['loss_total'].detach().cpu()):.3e}",
+            org_l1=f"{float(losses.get('org_mass_l1', losses['loss_total']).detach().cpu()):.2e}",
+        )
     if count == 0:
         return {
             key: float("nan")
@@ -454,6 +663,18 @@ def run_epoch(
                 "loss_port_condition",
                 "diag_port_condition_physical_mse",
                 "diag_organizer_strength_mean",
+                "loss_org_me",
+                "loss_org_eh_factor",
+                "loss_org_mass_align",
+                "loss_org_mm",
+                "loss_org_direct",
+                "org_env_mass_max",
+                "org_module_mass_max",
+                "org_mass_l1",
+                "org_env_effective_hyperedges",
+                "org_module_effective_hyperedges",
+                "org_max_A_eh_mass",
+                "org_max_A_mh_mass",
             ]
         }
     return {key: value / count for key, value in sums.items()}
@@ -705,6 +926,18 @@ def main() -> int:
         "loss_port_condition",
         "diag_port_condition_physical_mse",
         "diag_organizer_strength_mean",
+        "loss_org_me",
+        "loss_org_eh_factor",
+        "loss_org_mass_align",
+        "loss_org_mm",
+        "loss_org_direct",
+        "org_env_mass_max",
+        "org_module_mass_max",
+        "org_mass_l1",
+        "org_env_effective_hyperedges",
+        "org_module_effective_hyperedges",
+        "org_max_A_eh_mass",
+        "org_max_A_mh_mass",
         "effective_local_port_condition_mode",
         "effective_mixed_teacher_ratio",
         "val_loss_total",
@@ -716,6 +949,18 @@ def main() -> int:
         "val_loss_port_condition",
         "val_diag_port_condition_physical_mse",
         "val_diag_organizer_strength_mean",
+        "val_loss_org_me",
+        "val_loss_org_eh_factor",
+        "val_loss_org_mass_align",
+        "val_loss_org_mm",
+        "val_loss_org_direct",
+        "val_org_env_mass_max",
+        "val_org_module_mass_max",
+        "val_org_mass_l1",
+        "val_org_env_effective_hyperedges",
+        "val_org_module_effective_hyperedges",
+        "val_org_max_A_eh_mass",
+        "val_org_max_A_mh_mass",
     ]
     with history_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -768,6 +1013,18 @@ def main() -> int:
             "loss_port_condition": train_metrics.get("loss_port_condition", math.nan),
             "diag_port_condition_physical_mse": train_metrics.get("diag_port_condition_physical_mse", math.nan),
             "diag_organizer_strength_mean": train_metrics.get("diag_organizer_strength_mean", math.nan),
+            "loss_org_me": train_metrics.get("loss_org_me", math.nan),
+            "loss_org_eh_factor": train_metrics.get("loss_org_eh_factor", math.nan),
+            "loss_org_mass_align": train_metrics.get("loss_org_mass_align", math.nan),
+            "loss_org_mm": train_metrics.get("loss_org_mm", math.nan),
+            "loss_org_direct": train_metrics.get("loss_org_direct", math.nan),
+            "org_env_mass_max": train_metrics.get("org_env_mass_max", math.nan),
+            "org_module_mass_max": train_metrics.get("org_module_mass_max", math.nan),
+            "org_mass_l1": train_metrics.get("org_mass_l1", math.nan),
+            "org_env_effective_hyperedges": train_metrics.get("org_env_effective_hyperedges", math.nan),
+            "org_module_effective_hyperedges": train_metrics.get("org_module_effective_hyperedges", math.nan),
+            "org_max_A_eh_mass": train_metrics.get("org_max_A_eh_mass", math.nan),
+            "org_max_A_mh_mass": train_metrics.get("org_max_A_mh_mass", math.nan),
             "effective_local_port_condition_mode": effective_mode,
             "effective_mixed_teacher_ratio": effective_ratio,
             "val_loss_total": val_metrics.get("loss_total", math.nan),
@@ -779,6 +1036,18 @@ def main() -> int:
             "val_loss_port_condition": val_metrics.get("loss_port_condition", math.nan),
             "val_diag_port_condition_physical_mse": val_metrics.get("diag_port_condition_physical_mse", math.nan),
             "val_diag_organizer_strength_mean": val_metrics.get("diag_organizer_strength_mean", math.nan),
+            "val_loss_org_me": val_metrics.get("loss_org_me", math.nan),
+            "val_loss_org_eh_factor": val_metrics.get("loss_org_eh_factor", math.nan),
+            "val_loss_org_mass_align": val_metrics.get("loss_org_mass_align", math.nan),
+            "val_loss_org_mm": val_metrics.get("loss_org_mm", math.nan),
+            "val_loss_org_direct": val_metrics.get("loss_org_direct", math.nan),
+            "val_org_env_mass_max": val_metrics.get("org_env_mass_max", math.nan),
+            "val_org_module_mass_max": val_metrics.get("org_module_mass_max", math.nan),
+            "val_org_mass_l1": val_metrics.get("org_mass_l1", math.nan),
+            "val_org_env_effective_hyperedges": val_metrics.get("org_env_effective_hyperedges", math.nan),
+            "val_org_module_effective_hyperedges": val_metrics.get("org_module_effective_hyperedges", math.nan),
+            "val_org_max_A_eh_mass": val_metrics.get("org_max_A_eh_mass", math.nan),
+            "val_org_max_A_mh_mass": val_metrics.get("org_max_A_mh_mass", math.nan),
         }
         with history_path.open("a", newline="", encoding="utf-8") as f:
             csv.DictWriter(f, fieldnames=fieldnames).writerow(row)
@@ -810,6 +1079,8 @@ def main() -> int:
             f"internal={row['loss_internal_temperature']:.4e} interface={row['loss_interface']:.4e} "
             f"iface_T={row['diag_interface_T_surface_mse']:.4e} iface_q={row['diag_interface_q_normal_mse']:.4e} "
             f"port={row['loss_port_condition']:.4e} port_phys={row['diag_port_condition_physical_mse']:.4e} "
+            f"org_me={row['loss_org_me']:.3e} org_eh={row['loss_org_eh_factor']:.3e} "
+            f"org_mass_l1={row['org_mass_l1']:.3e} "
             f"mode={effective_mode} ratio={effective_ratio:.3f} "
             f"val={row['val_loss_total']:.4e}"
         )

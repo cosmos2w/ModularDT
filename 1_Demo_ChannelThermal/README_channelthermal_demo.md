@@ -444,6 +444,49 @@ Organizer strength is logged as `diag_organizer_strength_mean`. It is not part
 of the total loss; a positive `organizer_strength_weight` historically
 penalized strong hyperedges and should usually stay `0.0`.
 
+## Channel-Thermal Organizer Semantics
+
+In Stage B, a hyperedge is meant to represent a module group plus the matching
+channel/environment thermal interaction region. Typical organizations are
+modules sharing a downstream plume, near-wall heated modules with the adjacent
+wall/channel region, upstream groups that warm downstream coolant, or modules
+with a common local interface response.
+
+The organizer remains learned, but it now receives three lightweight direct
+signals:
+
+- `A_me` is weakly supervised by a nonperiodic channel prior using distance,
+  downstream alignment, lateral distance, wall proximity, and heat-power
+  magnitude.
+- `A_eh` receives a factor target:
+  `A_eh_target[e,k] proportional to sum_i A_me_for_target[i,e] * A_mh[i,k]`.
+  This ties an environment token to the hyperedge whose modules physically
+  influence that token.
+- normalized module mass from `A_mh` is aligned with normalized environment
+  mass from `A_eh`, preventing hyperedges that own only modules or only channel
+  tokens.
+
+`hyper_strength` is now semantic joint support:
+
+```text
+sqrt(hyper_module_mass * hyper_env_mass)
+```
+
+The old learned sigmoid strength is kept only as `hyper_strength_learned` for
+diagnostics. `DISABLE_EDGE` remains available, but the template leaves it off:
+hard early pruning is not recommended until the steady organizer has learned a
+meaningful module/environment split.
+
+This is deliberately lighter than `0_Demo_MultiCylinder`. The channel thermal
+model does not add phase losses, a dynamic residual branch, periodic wake
+priors, frequency losses, or duplicate-edge pruning by default.
+
+Evaluation now writes `organizer_visualization.png` plus
+`organization_summary.csv` and `organization_summary.json`. The figure overlays
+temperature, module heat power, dominant environment-token hyperedges,
+source-to-region links, `A_mh`, `A_eh`, and module/environment mass per
+hyperedge.
+
 ## Forward Model Files
 
 Stage A:

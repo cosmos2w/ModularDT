@@ -104,8 +104,60 @@ interaction group. It may represent a heat plume, a wall-influenced zone, or a
 broader module/environment coupling region. It is not limited to vortex or wake
 semantics.
 
-The organizer also exposes hyperedge state, source coordinates, thermal-region
-coordinates, and strength diagnostics for visualization.
+Physically, one hyperedge should combine:
+
+  source-side module support
+  channel/environment region support
+
+Examples include modules sharing a downstream thermal plume, near-wall modules
+and their adjacent wall/channel region, an upstream module group affecting
+downstream coolant temperature, or a thermal cluster with a common local
+interface response.
+
+The module-to-environment map A_me is still learned by attention plus geometry
+bias, but Stage B now weakly supervises it with a nonperiodic channel prior:
+near tokens, laterally aligned downstream tokens, wall-adjacent tokens for
+near-wall modules, and heat-power magnitude all receive interpretable mass.
+This prior is not a hard rule; it only keeps the organizer from becoming an
+unlabeled latent attention block.
+
+The most important direct organizer loss supervises A_eh with a factor target:
+
+  A_eh_target[e,k] proportional to sum_i A_me_for_target[i,e] * A_mh[i,k]
+
+By default A_me_for_target is the thermal prior. This says an environment token
+should choose hyperedge k when the modules influencing that token also belong
+to k. It directly couples environment-region ownership to module grouping.
+
+The model also aligns normalized hyperedge masses:
+
+  module mass from A_mh over valid modules
+  environment mass from A_eh over environment tokens
+
+The alignment uses smooth L1 in log space by default. It prevents one-sided
+hyperedges that own modules but no channel region, or a channel region but no
+source modules.
+
+Hyperedge strength is no longer a standalone sigmoid head. The semantic
+diagnostic is:
+
+  hyper_strength = sqrt(hyper_module_mass * hyper_env_mass)
+
+so strength is high only when both source modules and environment support are
+present. The old learned sigmoid is retained only as hyper_strength_learned.
+
+A_eh scoring can also include hyperedge-specific nonperiodic relative geometry
+from each provisional A_mh-weighted source coordinate to each environment
+token. This helps different hyperedges claim different physical channel
+regions.
+
+DISABLE_EDGE remains available for optional visualization experiments, but it
+is not recommended as a default for this first steady model. Early hard pruning
+can hide whether the weak organizer losses are fixing the learned organization.
+
+The organizer exposes hyperedge state, source coordinates, thermal-region
+coordinates, module/environment masses, semantic strength, and the assignment
+matrices for diagnostics and visualization.
 
 
 Port condition head
@@ -173,11 +225,20 @@ Stage B losses:
   internal module temperature MSE over valid module disk points
   interface MSE over [T_surface, q_normal]
   port condition MSE over [T_env, h]
+  weak A_me KL to the channel thermal module-environment prior
+  A_eh factor KL from A_me_for_target and A_mh
+  module/environment hyperedge mass alignment
   diag_organizer_strength_mean for organizer monitoring
 
 diag_organizer_strength_mean is logged only. It is not added to the total loss;
 a positive organizer_strength_weight historically penalized strong hyperedges
 and should usually remain 0.0.
+
+This ChannelThermal model intentionally does not copy the dynamic/periodic
+machinery from 0_Demo_MultiCylinder: no phase input, no dynamic residual branch,
+no periodic wake prior, no frequency loss, and no duplicate-edge pruning loss by
+default. The problem here is a steady nonperiodic channel thermal field, so the
+organizer supervision stays direct and lightweight.
 
 
 Global samples and local targets

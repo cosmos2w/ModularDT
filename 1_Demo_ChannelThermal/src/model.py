@@ -54,6 +54,12 @@ class GlobalChannelThermalModelConfig:
     decoder_hidden_dim: int = 128
     DISABLE_EDGE: bool = False
     disable_edge_strength_threshold: float = 0.05
+    use_hyper_specific_eh_geometry: bool = True
+    thermal_prior_sigma_distance: float = 1.50
+    thermal_prior_sigma_downstream: float = 2.00
+    thermal_prior_sigma_lateral: float = 0.90
+    thermal_prior_wall_weight: float = 0.15
+    thermal_prior_heat_power_weight: float = 0.15
     default_num_interface_points: int = 64
 
     @classmethod
@@ -118,6 +124,65 @@ def weighted_mean_coords(coords: torch.Tensor, weights: torch.Tensor) -> torch.T
     return torch.einsum("bnk,bnd->bkd", weights, coords) / denom
 
 
+def build_thermal_module_env_prior(
+    module_centers: torch.Tensor,
+    env_coords: torch.Tensor,
+    module_present: torch.Tensor,
+    heat_powers: torch.Tensor,
+    domain_length_x: float,
+    domain_length_y: float,
+    module_radius: float,
+    *,
+    sigma_distance: float,
+    sigma_downstream: float,
+    sigma_lateral: float,
+    wall_weight: float,
+    heat_power_weight: float,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Weak nonperiodic channel prior from heated modules to environment tokens.
+
+    The prior is intentionally simple and interpretable: nearby environment
+    tokens, downstream/laterally aligned plume tokens, wall-adjacent tokens for
+    near-wall modules, and stronger heat-power modules receive more mass. It is
+    used for weak organizer supervision only, not as a hard assignment rule.
+    """
+    if env_coords.ndim == 2:
+        env_coords = env_coords[None, :, :].expand(module_centers.shape[0], -1, -1)
+    env_coords = env_coords.to(device=module_centers.device, dtype=module_centers.dtype)
+    module_present = module_present.to(device=module_centers.device, dtype=module_centers.dtype)
+    heat_powers = heat_powers.to(device=module_centers.device, dtype=module_centers.dtype)
+
+    dx = env_coords[:, None, :, 0] - module_centers[:, :, None, 0]
+    dy = env_coords[:, None, :, 1] - module_centers[:, :, None, 1]
+    distance = torch.sqrt(dx.square() + dy.square() + eps)
+    downstream = torch.relu(dx)
+    lateral = dy.abs()
+
+    near = torch.exp(-distance / max(float(sigma_distance), eps))
+    plume = 0.5 * torch.exp(-(lateral / max(float(sigma_lateral), eps)).square()) * torch.sigmoid(
+        downstream / max(float(sigma_downstream), eps)
+    )
+
+    heat_abs = heat_powers.abs() * module_present
+    heat_norm = heat_abs / heat_abs.amax(dim=1, keepdim=True).clamp_min(eps)
+    heat_term = float(heat_power_weight) * heat_norm[:, :, None]
+
+    score = near + plume + heat_term
+    if float(wall_weight) != 0.0:
+        ly = max(float(domain_length_y), eps)
+        radius = max(float(module_radius), eps)
+        module_wall = torch.minimum(module_centers[..., 1], ly - module_centers[..., 1]).clamp_min(0.0)
+        env_wall = torch.minimum(env_coords[..., 1], ly - env_coords[..., 1]).clamp_min(0.0)
+        near_wall_module = torch.exp(-module_wall[:, :, None] / radius)
+        near_wall_env = torch.exp(-env_wall[:, None, :] / radius)
+        score = score + float(wall_weight) * near_wall_module * near_wall_env
+
+    score = score * module_present[:, :, None]
+    prior = score / score.sum(dim=-1, keepdim=True).clamp_min(eps)
+    return prior
+
+
 def teacher_port_tokens_from_interface_condition(interface_condition: torch.Tensor) -> torch.Tensor:
     """Map global interface_condition columns to local surrogate port tokens.
 
@@ -176,6 +241,7 @@ class HypergraphOrganizer(nn.Module):
         self.module_q = nn.Linear(hidden, hidden)
         self.env_k = nn.Linear(hidden, hidden)
         self.me_geom_bias = MLP(5, hidden, 1, num_layers=2, dropout=config.dropout)
+        self.eh_geometry_bias = MLP(9, hidden, 1, num_layers=2, dropout=config.dropout)
         self.hyper_fuse = MLP(2 * hidden + 4, hidden, hidden, num_layers=3, dropout=config.dropout, layer_norm=config.use_layer_norm)
         self.hyper_strength = MLP(hidden, hidden, 1, num_layers=2, dropout=config.dropout)
 
@@ -186,10 +252,12 @@ class HypergraphOrganizer(nn.Module):
         module_centers: torch.Tensor,
         env_coords: torch.Tensor,
         module_present: torch.Tensor,
+        heat_powers: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         batch, num_modules, hidden = module_state.shape
         num_env = env_state.shape[1]
         module_mask = module_present > 0.5
+        env_coords_batch = env_coords[None, :, :].expand(batch, -1, -1) if env_coords.ndim == 2 else env_coords
 
         q = self.module_q(module_state)
         k = self.env_k(env_state)
@@ -208,14 +276,26 @@ class HypergraphOrganizer(nn.Module):
         a_mh = masked_softmax(logits_mh, module_mask[:, :, None].expand_as(logits_mh), dim=-1)
         a_mh = a_mh * module_present[..., None]
         logits_eh = self.env_to_hyper(env_state)
+        hyper_source_coords_tmp = weighted_mean_coords(module_centers, a_mh)
+        if bool(self.config.use_hyper_specific_eh_geometry):
+            # A_eh is scored relative to each provisional module-group source,
+            # so an environment token can choose the hyperedge whose source is
+            # physically upstream/nearby instead of one generic latent slot.
+            rel_eh = nonperiodic_relative_geometry(
+                env_coords_batch[:, :, None, :].expand(-1, num_env, a_mh.shape[-1], -1),
+                hyper_source_coords_tmp[:, None, :, :].expand(-1, num_env, -1, -1),
+                domain_length_x=self.config.domain_length_x,
+                domain_length_y=self.config.domain_length_y,
+            )
+            logits_eh = logits_eh + self.eh_geometry_bias(rel_eh).squeeze(-1)
         a_eh = torch.softmax(logits_eh, dim=-1)
 
         mh_norm = a_mh / a_mh.sum(dim=1, keepdim=True).clamp_min(EPS)
         eh_norm = a_eh / a_eh.sum(dim=1, keepdim=True).clamp_min(EPS)
         module_agg = torch.einsum("bnk,bnd->bkd", mh_norm, module_state)
         env_agg = torch.einsum("bek,bed->bkd", eh_norm, env_state)
-        hyper_source_coords = weighted_mean_coords(module_centers, a_mh)
-        hyper_thermal_region_coords = torch.einsum("bek,ed->bkd", eh_norm, env_coords)
+        hyper_source_coords = hyper_source_coords_tmp
+        hyper_thermal_region_coords = torch.einsum("bek,bed->bkd", eh_norm, env_coords_batch)
         geom = torch.cat(
             [
                 hyper_source_coords[..., 0:1] / max(float(self.config.domain_length_x), EPS),
@@ -226,7 +306,15 @@ class HypergraphOrganizer(nn.Module):
             dim=-1,
         )
         hyper_state = self.hyper_fuse(torch.cat([module_agg, env_agg, geom], dim=-1))
-        hyper_strength = torch.sigmoid(self.hyper_strength(hyper_state)).squeeze(-1)
+        hyper_strength_learned = torch.sigmoid(self.hyper_strength(hyper_state)).squeeze(-1)
+        hyper_module_mass_raw = (a_mh * module_present[..., None]).sum(dim=1)
+        hyper_module_mass_raw = hyper_module_mass_raw / module_present.sum(dim=1, keepdim=True).clamp_min(EPS)
+        hyper_env_mass_raw = a_eh.mean(dim=1)
+        hyper_module_mass = hyper_module_mass_raw / hyper_module_mass_raw.sum(dim=-1, keepdim=True).clamp_min(EPS)
+        hyper_env_mass = hyper_env_mass_raw / hyper_env_mass_raw.sum(dim=-1, keepdim=True).clamp_min(EPS)
+        # Semantic strength means joint support from source modules and a
+        # matching channel/environment region. A one-sided hyperedge is weak.
+        hyper_strength = torch.sqrt(hyper_module_mass * hyper_env_mass + EPS)
         if self.config.DISABLE_EDGE:
             active_hyperedge_mask = hyper_strength >= float(self.config.disable_edge_strength_threshold)
             hyper_state = hyper_state * active_hyperedge_mask[..., None].to(hyper_state.dtype)
@@ -241,9 +329,16 @@ class HypergraphOrganizer(nn.Module):
             "hyper_source_coords": hyper_source_coords,
             "hyper_thermal_region_coords": hyper_thermal_region_coords,
             "hyper_wake_coords": hyper_thermal_region_coords,
+            "hyper_module_mass": hyper_module_mass,
+            "hyper_env_mass": hyper_env_mass,
             "hyper_strength": hyper_strength,
+            "hyper_strength_learned": hyper_strength_learned,
             "active_hyperedge_mask": active_hyperedge_mask,
             "module_env_context": module_env_context,
+            "module_centers": module_centers,
+            "env_coords": env_coords_batch,
+            "heat_powers": heat_powers if heat_powers is not None else module_state.new_zeros(batch, num_modules),
+            "module_present": module_present,
         }
 
 
@@ -720,7 +815,7 @@ class GlobalChannelThermalModel(nn.Module):
         base_module_state = self.encode_modules(module_centers, heat_powers, module_present, global_token, material_params)
         env_state = self.encode_environment(global_token)
         env_coords = self.env_coords.to(device=query_xy.device, dtype=query_xy.dtype)
-        base_org = self.organizer(base_module_state, env_state, module_centers, env_coords, module_present)
+        base_org = self.organizer(base_module_state, env_state, module_centers, env_coords, module_present, heat_powers)
 
         if teacher_port_tokens is None and interface_condition is not None:
             teacher_port_tokens = teacher_port_tokens_from_interface_condition(interface_condition.float())
@@ -762,7 +857,7 @@ class GlobalChannelThermalModel(nn.Module):
             fused = self.local_latent_fusion(torch.cat([base_module_state, local_outputs["module_response_latent"]], dim=-1))
             module_state = (base_module_state + fused) * module_present[..., None]
 
-        org = self.organizer(module_state, env_state, module_centers, env_coords, module_present)
+        org = self.organizer(module_state, env_state, module_centers, env_coords, module_present, heat_powers)
         pred_field = self.field_decoder(
             query_xy,
             module_state,

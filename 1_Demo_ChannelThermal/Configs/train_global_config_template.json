@@ -1,5 +1,5 @@
 {
-  "Run_ID": "0002",
+  "Run_ID": "0003",
   "_note": "Default is a global-only baseline. Set model.use_local_surrogate=true and provide a local checkpoint after Stage A is trained.",
   "dataset": {
     "packed_h5_path": "./Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
@@ -36,7 +36,13 @@
     "dropout": 0.0,
     "use_layer_norm": true,
     "DISABLE_EDGE": false,
-    "disable_edge_strength_threshold": 0.05
+    "disable_edge_strength_threshold": 0.05,
+    "use_hyper_specific_eh_geometry": true,
+    "thermal_prior_sigma_distance": 1.5,
+    "thermal_prior_sigma_downstream": 2.0,
+    "thermal_prior_sigma_lateral": 0.9,
+    "thermal_prior_wall_weight": 0.15,
+    "thermal_prior_heat_power_weight": 0.15
   },
   "loss": {
     "field_mse_weight": 1.0,
@@ -51,6 +57,21 @@
     "port_h_scale": 10.0,
     "_note_organizer_strength_weight": "Organizer strength is logged as diag_organizer_strength_mean only. Positive organizer_strength_weight used to penalize strong hyperedges and should usually stay 0.0.",
     "organizer_strength_weight": 0.0,
+    "_note_organizer_direct": "Weak channel organizer losses: prior-guided A_me, direct A_eh factor target, and module/environment mass alignment. Entropy/sparsity losses are intentionally off by default.",
+    "organizer_me_weight": 0.01,
+    "organizer_eh_factor_weight": 0.05,
+    "organizer_mass_align_weight": 0.02,
+    "organizer_mm_weight": 0.0,
+    "organizer_eh_factor_target_source": "prior_me",
+    "organizer_eh_factor_detach_mh": true,
+    "organizer_mass_align_log_space": true,
+    "organizer_mass_align_detach_module": true,
+    "organizer_eps": 0.000001,
+    "organizer_me_sigma_distance": 1.5,
+    "organizer_me_sigma_downstream": 2.0,
+    "organizer_me_sigma_lateral": 0.9,
+    "organizer_me_wall_weight": 0.15,
+    "organizer_me_heat_power_weight": 0.15,
     "field_channel_weights": null
   },
   "training": {
