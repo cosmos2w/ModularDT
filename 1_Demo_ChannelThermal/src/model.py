@@ -778,15 +778,18 @@ class GlobalChannelThermalModel(nn.Module):
             pred_internal = local_outputs["internal_temperature"]
             pred_interface = local_outputs["interface_pred"]
             module_response_latent = local_outputs["module_response_latent"]
+            interface_source = "local_surrogate"
         else:
             pred_internal = self._predict_global_internal(module_state, local_query_points, module_present)
             pred_interface = self._predict_global_interface(module_state, ntheta=ntheta, module_present=module_present)
             module_response_latent = module_state
+            interface_source = "global_head"
 
         return {
             "pred_field": pred_field,
             "pred_internal_temperature": pred_internal,
             "pred_interface": pred_interface,
+            "interface_source": interface_source,
             "pred_port_condition": pred_port_tokens,
             "module_response_latent": module_response_latent,
             "organizer_aux": org,

@@ -280,7 +280,16 @@ def plot_field_quicklook(output_path: Path, sample: Dict[str, Any], pred_field: 
     preferred = [name for name in ["temperature", "u", "omega"] if name in channel_order]
     if not preferred:
         preferred = channel_order[: min(3, len(channel_order))]
-    fig, axes = plt.subplots(len(preferred), 3, figsize=(10.5, 3.0 * len(preferred)), constrained_layout=True)
+    x_min = float(np.min(sample["x_grid"]))
+    x_max = float(np.max(sample["x_grid"]))
+    y_min = float(np.min(sample["y_grid"]))
+    y_max = float(np.max(sample["y_grid"]))
+    extent = (x_min, x_max, y_min, y_max)
+    domain_aspect = max((x_max - x_min) / max(y_max - y_min, 1.0e-12), 1.0e-6)
+    box_aspect = 1.0 / domain_aspect
+    panel_width = 3.5
+    panel_height = max(1.9, panel_width / domain_aspect)
+    fig, axes = plt.subplots(len(preferred), 3, figsize=(3.0 * panel_width, panel_height * len(preferred)), constrained_layout=True)
     if len(preferred) == 1:
         axes = axes[None, :]
     for row, name in enumerate(preferred):
@@ -295,18 +304,21 @@ def plot_field_quicklook(output_path: Path, sample: Dict[str, Any], pred_field: 
             [
                 (gt_img, f"GT {name}", channel_cmap(name)),
                 (pred_img, f"Pred {name}", channel_cmap(name)),
-                (err_img, f"Abs error {name}\nRMSE={channel_metrics['rmse']:.4e}", "magma"),
+                (err_img, f"Abs error {name}\nrelL2={channel_metrics['relative_l2']:.4e}", "magma"),
             ]
         ):
             im = axes[row, col].imshow(
                 image,
                 origin="lower",
-                extent=(float(np.min(sample["x_grid"])), float(np.max(sample["x_grid"])), float(np.min(sample["y_grid"])), float(np.max(sample["y_grid"]))),
+                extent=extent,
                 cmap=cmap,
                 vmin=vmin if col < 2 else None,
                 vmax=vmax if col < 2 else None,
-                aspect="auto",
+                aspect="equal",
             )
+            axes[row, col].set_aspect("equal", adjustable="box")
+            if hasattr(axes[row, col], "set_box_aspect"):
+                axes[row, col].set_box_aspect(box_aspect)
             axes[row, col].set_title(title)
             axes[row, col].set_xlabel("x")
             axes[row, col].set_ylabel("y")
@@ -342,7 +354,7 @@ def plot_internal(output_path: Path, sample: Dict[str, Any], pred_internal: np.n
             [
                 (gt_img, f"M{module_idx} GT", "inferno"),
                 (pred_img, f"M{module_idx} Pred", "inferno"),
-                (err_img, f"M{module_idx} Error\nRMSE={module_metrics['rmse']:.4e}", "magma"),
+                (err_img, f"M{module_idx} Error\nRMSE={module_metrics['rmse']:.4e}, relL2={module_metrics['relative_l2']:.4e}", "magma"),
             ]
         ):
             im = axes[row, col].imshow(image, origin="lower", extent=(-1, 1, -1, 1), cmap=cmap, vmin=vmin if col < 2 else None, vmax=vmax if col < 2 else None)
@@ -370,7 +382,7 @@ def plot_interface(output_path: Path, sample: Dict[str, Any], pred_interface: np
             curve_metrics = error_metrics(pred_interface[module_idx, :, col], gt[module_idx, :, col])
             ax.plot(theta, gt[module_idx, :, col], color="black", lw=1.7, label="GT")
             ax.plot(theta, pred_interface[module_idx, :, col], color="#d95f02", lw=1.4, label="Pred")
-            ax.set_title(f"M{module_idx} {label} RMSE={curve_metrics['rmse']:.4e}")
+            ax.set_title(f"M{module_idx} {label} RMSE={curve_metrics['rmse']:.4e}, relL2={curve_metrics['relative_l2']:.4e}")
             ax.set_xlabel("theta")
             ax.grid(True, alpha=0.25)
             if row == 0 and col == 0:
@@ -479,6 +491,10 @@ def summarize_prediction(
         str(name): error_metrics(pred_field[..., idx], gt_field[..., idx])["rmse"]
         for idx, name in enumerate(channel_order[: pred_field.shape[-1]])
     }
+    field_channel_relative_l2 = {
+        str(name): error_metrics(pred_field[..., idx], gt_field[..., idx])["relative_l2"]
+        for idx, name in enumerate(channel_order[: pred_field.shape[-1]])
+    }
     interface_l2_by_target = {
         "T_surface": l2_error(pred_interface[..., 0], gt_interface[..., 0]),
         "q_normal": l2_error(pred_interface[..., 1], gt_interface[..., 1]),
@@ -487,6 +503,10 @@ def summarize_prediction(
         "T_surface": error_metrics(pred_interface[..., 0], gt_interface[..., 0])["rmse"],
         "q_normal": error_metrics(pred_interface[..., 1], gt_interface[..., 1])["rmse"],
     }
+    interface_relative_l2_by_target = {
+        "T_surface": error_metrics(pred_interface[..., 0], gt_interface[..., 0])["relative_l2"],
+        "q_normal": error_metrics(pred_interface[..., 1], gt_interface[..., 1])["relative_l2"],
+    }
     field_metrics = error_metrics(pred_field, gt_field)
     temperature_metrics = error_metrics(pred_field[..., 4], gt_field[..., 4]) if pred_field.shape[-1] >= 5 else None
     internal_metrics = error_metrics(pred_internal.reshape(-1), gt_internal.reshape(-1))
@@ -494,7 +514,7 @@ def summarize_prediction(
     return {
         "checkpoint": str(checkpoint_path),
         "case_id": str(raw_sample["case_id"]),
-        "metric_note": "l2_error is the aggregate Euclidean norm over all values; rmse is usually better for visual comparison.",
+        "metric_note": "l2_error is the aggregate Euclidean norm over all values; relative_l2 is l2_error divided by target L2 norm.",
         "field_l2_error": field_metrics["l2_norm"],
         "temperature_l2_error": temperature_metrics["l2_norm"] if temperature_metrics is not None else None,
         "internal_l2_error": internal_metrics["l2_norm"],
@@ -509,8 +529,10 @@ def summarize_prediction(
         "interface_relative_l2": interface_metrics["relative_l2"],
         "field_channel_l2_error": field_channel_l2,
         "field_channel_rmse": field_channel_rmse,
+        "field_channel_relative_l2": field_channel_relative_l2,
         "interface_l2_error_by_target": interface_l2_by_target,
         "interface_rmse_by_target": interface_rmse_by_target,
+        "interface_relative_l2_by_target": interface_relative_l2_by_target,
         "field_metrics": field_metrics,
         "temperature_metrics": temperature_metrics,
         "internal_metrics": internal_metrics,
@@ -631,14 +653,22 @@ def main() -> int:
         predicted = mode_summaries["predicted"]
         summary.update(
             {
-                "teacher_field_l2_error": teacher["field_l2_error"],
-                "predicted_field_l2_error": predicted["field_l2_error"],
-                "teacher_temperature_l2_error": teacher["temperature_l2_error"],
-                "predicted_temperature_l2_error": predicted["temperature_l2_error"],
-                "teacher_internal_l2_error": teacher["internal_l2_error"],
-                "predicted_internal_l2_error": predicted["internal_l2_error"],
-                "teacher_interface_l2_error": teacher["interface_l2_error"],
-                "predicted_interface_l2_error": predicted["interface_l2_error"],
+                # "teacher_field_l2_error": teacher["field_l2_error"],
+                # "predicted_field_l2_error": predicted["field_l2_error"],
+                "teacher_field_relative_l2": teacher["field_relative_l2"],
+                "predicted_field_relative_l2": predicted["field_relative_l2"],
+                # "teacher_temperature_l2_error": teacher["temperature_l2_error"],
+                # "predicted_temperature_l2_error": predicted["temperature_l2_error"],
+                "teacher_temperature_relative_l2": teacher["temperature_relative_l2"],
+                "predicted_temperature_relative_l2": predicted["temperature_relative_l2"],
+                # "teacher_internal_l2_error": teacher["internal_l2_error"],
+                # "predicted_internal_l2_error": predicted["internal_l2_error"],
+                "teacher_internal_relative_l2": teacher["internal_relative_l2"],
+                "predicted_internal_relative_l2": predicted["internal_relative_l2"],
+                # "teacher_interface_l2_error": teacher["interface_l2_error"],
+                # "predicted_interface_l2_error": predicted["interface_l2_error"],
+                "teacher_interface_relative_l2": teacher["interface_relative_l2"],
+                "predicted_interface_relative_l2": predicted["interface_relative_l2"],
             }
         )
     else:
@@ -647,13 +677,21 @@ def main() -> int:
         summary.update(
             {
                 "field_l2_error": only["field_l2_error"],
+                "field_relative_l2": only["field_relative_l2"],
                 "temperature_l2_error": only["temperature_l2_error"],
+                "temperature_relative_l2": only["temperature_relative_l2"],
                 "internal_l2_error": only["internal_l2_error"],
+                "internal_relative_l2": only["internal_relative_l2"],
                 "interface_l2_error": only["interface_l2_error"],
+                "interface_relative_l2": only["interface_relative_l2"],
                 f"{suffix}_field_l2_error": only["field_l2_error"],
+                f"{suffix}_field_relative_l2": only["field_relative_l2"],
                 f"{suffix}_temperature_l2_error": only["temperature_l2_error"],
+                f"{suffix}_temperature_relative_l2": only["temperature_relative_l2"],
                 f"{suffix}_internal_l2_error": only["internal_l2_error"],
+                f"{suffix}_internal_relative_l2": only["internal_relative_l2"],
                 f"{suffix}_interface_l2_error": only["interface_l2_error"],
+                f"{suffix}_interface_relative_l2": only["interface_relative_l2"],
             }
         )
     write_json(output_dir / "evaluation_summary.json", summary)

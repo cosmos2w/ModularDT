@@ -156,6 +156,47 @@ def port_condition_loss(
     return scaled_mse, raw_mse
 
 
+def interface_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    module_present: torch.Tensor,
+    outputs: Dict[str, Any],
+    loss_cfg: Dict[str, Any],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return interface loss plus per-target diagnostics.
+
+    A frozen Stage-A local surrogate may have been trained on a synthetic
+    q_normal distribution that does not match the global dataset. In that case
+    local_surrogate_interface_target_weights can disable q_normal supervision
+    while keeping T_surface supervision.
+    """
+    source = str(outputs.get("interface_source", "global_head"))
+    weights_cfg = loss_cfg.get("interface_target_weights", None)
+    if source == "local_surrogate" and loss_cfg.get("local_surrogate_interface_target_weights", None) is not None:
+        weights_cfg = loss_cfg.get("local_surrogate_interface_target_weights")
+
+    mse_by_target = []
+    for idx in range(pred.shape[-1]):
+        mse_by_target.append(masked_mse(pred[..., idx : idx + 1], target[..., idx : idx + 1], module_present[:, :, None]))
+    if not mse_by_target:
+        zero = pred.new_tensor(0.0)
+        return zero, zero, zero
+
+    if weights_cfg is None:
+        loss = masked_mse(pred, target, module_present[:, :, None])
+    else:
+        weights = torch.as_tensor(weights_cfg, device=pred.device, dtype=pred.dtype)
+        if weights.numel() < pred.shape[-1]:
+            weights = F.pad(weights, (0, pred.shape[-1] - weights.numel()), value=1.0)
+        weights = weights[: pred.shape[-1]].clamp_min(0.0)
+        weighted = torch.stack(mse_by_target) * weights
+        loss = weighted.sum() / weights.sum().clamp_min(1.0e-6)
+
+    t_surface_mse = mse_by_target[0]
+    q_normal_mse = mse_by_target[1] if len(mse_by_target) > 1 else pred.new_tensor(0.0)
+    return loss, t_surface_mse, q_normal_mse
+
+
 def effective_port_condition_settings(epoch: int, training_cfg: Dict[str, Any]) -> tuple[str, float]:
     """Resolve the Stage-B local-port curriculum for this epoch.
 
@@ -173,7 +214,8 @@ def effective_port_condition_settings(epoch: int, training_cfg: Dict[str, Any]) 
 
     teacher_epochs = int(training_cfg.get("teacher_epochs", 100))
     mixed_epochs = int(training_cfg.get("mixed_epochs", 200))
-    predicted_after_epoch = int(training_cfg.get("predicted_after_epoch", teacher_epochs + mixed_epochs))
+    predicted_after_epoch_cfg = training_cfg.get("predicted_after_epoch", None)
+    predicted_after_epoch = int(predicted_after_epoch_cfg) if predicted_after_epoch_cfg is not None else teacher_epochs + mixed_epochs
     ratio_start = float(training_cfg.get("mixed_teacher_ratio_start", 1.0))
     ratio_end = float(training_cfg.get("mixed_teacher_ratio_end", 0.0))
     if int(epoch) <= teacher_epochs:
@@ -184,6 +226,29 @@ def effective_port_condition_settings(epoch: int, training_cfg: Dict[str, Any]) 
         ratio = ratio_start + (ratio_end - ratio_start) * progress
         return "mixed", float(min(max(ratio, 0.0), 1.0))
     return "predicted", 0.0
+
+
+def validate_local_surrogate_training_path(
+    model_config: GlobalChannelThermalModelConfig,
+    training_cfg: Dict[str, Any],
+    loss_cfg: Dict[str, Any],
+) -> None:
+    """Catch frozen teacher-forced local losses that cannot improve."""
+    if not model_config.use_local_surrogate or not model_config.freeze_local_surrogate:
+        return
+    schedule = str(training_cfg.get("port_condition_schedule", "none")).lower()
+    mode = str(training_cfg.get("local_port_condition_mode", "teacher")).lower()
+    local_loss_weight = float(loss_cfg.get("internal_temperature_weight", 1.0)) + float(loss_cfg.get("interface_weight", 0.2))
+    if schedule == "none" and mode == "teacher" and local_loss_weight > 0.0:
+        raise ValueError(
+            "The local surrogate is frozen and local_port_condition_mode='teacher' with "
+            "port_condition_schedule='none'. In this configuration pred_internal_temperature "
+            "and pred_interface are fixed outputs of the local checkpoint, so the internal "
+            "temperature and interface losses cannot decrease. Set "
+            "training.port_condition_schedule='teacher_to_predicted' so those losses can train "
+            "the global port head after the teacher phase, or set local_port_condition_mode='predicted', "
+            "or set internal_temperature_weight/interface_weight to 0 if you only want diagnostic local losses."
+        )
 
 
 def compute_losses(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dict[str, Any]) -> Dict[str, torch.Tensor]:
@@ -203,9 +268,15 @@ def compute_losses(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dic
         losses["loss_internal_temperature"] = outputs["pred_field"].new_tensor(0.0)
 
     if outputs.get("pred_interface") is not None and outputs["pred_interface"].numel() > 0:
-        losses["loss_interface"] = masked_mse(outputs["pred_interface"], batch["interface_target"], module_present[:, :, None])
+        (
+            losses["loss_interface"],
+            losses["diag_interface_T_surface_mse"],
+            losses["diag_interface_q_normal_mse"],
+        ) = interface_loss(outputs["pred_interface"], batch["interface_target"], module_present, outputs, loss_cfg)
     else:
         losses["loss_interface"] = outputs["pred_field"].new_tensor(0.0)
+        losses["diag_interface_T_surface_mse"] = outputs["pred_field"].new_tensor(0.0)
+        losses["diag_interface_q_normal_mse"] = outputs["pred_field"].new_tensor(0.0)
 
     pred_port = outputs["pred_port_condition"]
     target_port = batch["teacher_port_tokens"]
@@ -378,6 +449,8 @@ def run_epoch(
                 "loss_field",
                 "loss_internal_temperature",
                 "loss_interface",
+                "diag_interface_T_surface_mse",
+                "diag_interface_q_normal_mse",
                 "loss_port_condition",
                 "diag_port_condition_physical_mse",
                 "diag_organizer_strength_mean",
@@ -552,6 +625,7 @@ def main() -> int:
     enforce_dataset_convergence("train", train_dataset, require_converged)
 
     model_config = build_model_config(cfg, train_dataset)
+    validate_local_surrogate_training_path(model_config, training_cfg, loss_cfg)
     model = GlobalChannelThermalModel(model_config).to(device)
     model.set_global_target_normalization(
         train_dataset.normalizer.stats,
@@ -559,6 +633,14 @@ def main() -> int:
     )
     attach_local_surrogate_if_needed(model, model_config, cfg, device)
     print(f"[setup] device={device}, train_cases={len(train_dataset)}, val_cases={len(val_dataset)}")
+    print(
+        "[setup] port schedule: "
+        f"schedule={training_cfg.get('port_condition_schedule', 'none')}, "
+        f"base_mode={training_cfg.get('local_port_condition_mode', 'teacher')}, "
+        f"teacher_epochs={int(training_cfg.get('teacher_epochs', 100))}, "
+        f"mixed_epochs={int(training_cfg.get('mixed_epochs', 200))}, "
+        f"predicted_after_epoch={training_cfg.get('predicted_after_epoch', None)}"
+    )
     print(
         "[setup] normalization: "
         f"inputs={bool(dataset_cfg.get('normalize_inputs', False))}, "
@@ -618,6 +700,8 @@ def main() -> int:
         "loss_field",
         "loss_internal_temperature",
         "loss_interface",
+        "diag_interface_T_surface_mse",
+        "diag_interface_q_normal_mse",
         "loss_port_condition",
         "diag_port_condition_physical_mse",
         "diag_organizer_strength_mean",
@@ -627,6 +711,8 @@ def main() -> int:
         "val_loss_field",
         "val_loss_internal_temperature",
         "val_loss_interface",
+        "val_diag_interface_T_surface_mse",
+        "val_diag_interface_q_normal_mse",
         "val_loss_port_condition",
         "val_diag_port_condition_physical_mse",
         "val_diag_organizer_strength_mean",
@@ -677,6 +763,8 @@ def main() -> int:
             "loss_field": train_metrics.get("loss_field", math.nan),
             "loss_internal_temperature": train_metrics.get("loss_internal_temperature", math.nan),
             "loss_interface": train_metrics.get("loss_interface", math.nan),
+            "diag_interface_T_surface_mse": train_metrics.get("diag_interface_T_surface_mse", math.nan),
+            "diag_interface_q_normal_mse": train_metrics.get("diag_interface_q_normal_mse", math.nan),
             "loss_port_condition": train_metrics.get("loss_port_condition", math.nan),
             "diag_port_condition_physical_mse": train_metrics.get("diag_port_condition_physical_mse", math.nan),
             "diag_organizer_strength_mean": train_metrics.get("diag_organizer_strength_mean", math.nan),
@@ -686,6 +774,8 @@ def main() -> int:
             "val_loss_field": val_metrics.get("loss_field", math.nan),
             "val_loss_internal_temperature": val_metrics.get("loss_internal_temperature", math.nan),
             "val_loss_interface": val_metrics.get("loss_interface", math.nan),
+            "val_diag_interface_T_surface_mse": val_metrics.get("diag_interface_T_surface_mse", math.nan),
+            "val_diag_interface_q_normal_mse": val_metrics.get("diag_interface_q_normal_mse", math.nan),
             "val_loss_port_condition": val_metrics.get("loss_port_condition", math.nan),
             "val_diag_port_condition_physical_mse": val_metrics.get("diag_port_condition_physical_mse", math.nan),
             "val_diag_organizer_strength_mean": val_metrics.get("diag_organizer_strength_mean", math.nan),
@@ -704,6 +794,7 @@ def main() -> int:
                 epoch=epoch,
                 best_metric=best_metric,
             )
+            print(f'\nModel improving! Saving new best model...')
         save_checkpoint(
             run_dir / "latest_model.pt",
             model=model,
@@ -717,6 +808,7 @@ def main() -> int:
         print(
             f"[epoch {epoch:04d}] loss={row['loss_total']:.4e} field={row['loss_field']:.4e} "
             f"internal={row['loss_internal_temperature']:.4e} interface={row['loss_interface']:.4e} "
+            f"iface_T={row['diag_interface_T_surface_mse']:.4e} iface_q={row['diag_interface_q_normal_mse']:.4e} "
             f"port={row['loss_port_condition']:.4e} port_phys={row['diag_port_condition_physical_mse']:.4e} "
             f"mode={effective_mode} ratio={effective_ratio:.3f} "
             f"val={row['val_loss_total']:.4e}"
