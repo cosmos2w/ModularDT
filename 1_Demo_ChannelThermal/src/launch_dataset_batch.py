@@ -46,14 +46,14 @@ from channelthermal_common import (
 
 # ------------------------------ Editable settings -------------------------------
 
-# NUM_MODULE_OPTIONS = [1, 2, 4, 6, 12, 18]
+# NUM_MODULE_OPTIONS = [1, 2, 4, 6, 9, 12]
 # RE_OPTIONS = [20.0, 40.0, 60.0, 80.0, 100.0, 120.0, 140.0, 160.0, 200.0]
 
-NUM_MODULE_OPTIONS = [3]
-RE_OPTIONS = [50.0, 100.0]
+NUM_MODULE_OPTIONS = [3, 5, 7]
+RE_OPTIONS = [50.0, 150.0]
 
 HEAT_POWER_RANGE = (0.5, 2.0)
-REPEATS_PER_COMBINATION = 1
+REPEATS_PER_COMBINATION = 5
 
 ENABLE_CPU = False
 CPU_CONCURRENT_SLOTS = 2

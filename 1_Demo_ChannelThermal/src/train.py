@@ -34,11 +34,6 @@ from model import GlobalChannelThermalModel, GlobalChannelThermalModelConfig, lo
 
 
 DEFAULT_CONFIG_PATH = "./Configs/train_global_config_template.json"
-LOCAL_SURROGATE_NORMALIZATION_ERROR = (
-    "Local surrogate normalization is not yet supported inside Stage-B. "
-    "Re-train local surrogate with normalize_inputs=false and normalize_targets=false, "
-    "or implement local normalizer application."
-)
 
 
 def parse_args() -> argparse.Namespace:
@@ -300,15 +295,52 @@ def save_checkpoint(
             "field_dim": int(dataset.field_dim),
             "interface_condition_feature_names": list(dataset.interface_condition_feature_names),
             "interface_target_names": list(dataset.interface_target_names),
+            "global_normalization_config": {
+                "normalize_inputs": bool(train_config.get("dataset", {}).get("normalize_inputs", False)),
+                "normalize_targets": bool(train_config.get("dataset", {}).get("normalize_targets", False)),
+            },
+            "global_normalization_stats": {name: value.copy() for name, value in dataset.normalizer.stats.items()},
         },
         path,
     )
 
 
-def check_local_surrogate_normalization(checkpoint: Dict[str, Any]) -> None:
+def local_surrogate_normalization_config(checkpoint: Dict[str, Any]) -> Dict[str, bool]:
+    config = checkpoint.get("local_normalization_config")
+    if isinstance(config, dict):
+        return {
+            "normalize_inputs": bool(config.get("normalize_inputs", False)),
+            "normalize_targets": bool(config.get("normalize_targets", False)),
+        }
     dataset_cfg = checkpoint.get("train_config", {}).get("dataset", {})
-    if bool(dataset_cfg.get("normalize_inputs", False)) or bool(dataset_cfg.get("normalize_targets", False)):
-        raise ValueError(LOCAL_SURROGATE_NORMALIZATION_ERROR)
+    return {
+        "normalize_inputs": bool(dataset_cfg.get("normalize_inputs", False)),
+        "normalize_targets": bool(dataset_cfg.get("normalize_targets", False)),
+    }
+
+
+def require_local_normalization_stats(checkpoint: Dict[str, Any], normalization_config: Dict[str, bool]) -> Dict[str, Any]:
+    stats = checkpoint.get("local_normalization_stats", {})
+    if not isinstance(stats, dict):
+        stats = {}
+    if bool(normalization_config.get("normalize_inputs", False)):
+        missing = [key for key in ("module_params_mean", "module_params_std", "port_tokens_mean", "port_tokens_std") if key not in stats]
+        if missing:
+            raise ValueError(f"Local surrogate checkpoint was trained with normalized inputs but is missing stats: {missing}")
+    if bool(normalization_config.get("normalize_targets", False)):
+        missing = [
+            key
+            for key in (
+                "internal_temperature_mean",
+                "internal_temperature_std",
+                "interface_targets_mean",
+                "interface_targets_std",
+            )
+            if key not in stats
+        ]
+        if missing:
+            raise ValueError(f"Local surrogate checkpoint was trained with normalized targets but is missing stats: {missing}")
+    return stats
 
 
 def attach_local_surrogate_if_needed(
@@ -326,9 +358,15 @@ def attach_local_surrogate_if_needed(
             "Set use_local_surrogate=false for the global-only baseline."
         )
     local_model, local_checkpoint = load_local_surrogate_from_checkpoint(resolve_demo_path(checkpoint_path), map_location=device)
-    check_local_surrogate_normalization(local_checkpoint)
+    normalization_config = local_surrogate_normalization_config(local_checkpoint)
+    normalization_stats = require_local_normalization_stats(local_checkpoint, normalization_config)
     local_model.to(device)
-    model.set_local_surrogate(local_model, freeze=bool(model_config.freeze_local_surrogate))
+    model.set_local_surrogate(
+        local_model,
+        freeze=bool(model_config.freeze_local_surrogate),
+        normalization_config=normalization_config,
+        normalization_stats=normalization_stats,
+    )
 
 
 def print_dataset_quality(name: str, dataset: GlobalChannelThermalDataset) -> None:
@@ -402,6 +440,10 @@ def main() -> int:
 
     model_config = build_model_config(cfg, train_dataset)
     model = GlobalChannelThermalModel(model_config).to(device)
+    model.set_global_target_normalization(
+        train_dataset.normalizer.stats,
+        normalize_targets=bool(dataset_cfg.get("normalize_targets", False)),
+    )
     attach_local_surrogate_if_needed(model, model_config, cfg, device)
     print(f"[setup] device={device}, train_cases={len(train_dataset)}, val_cases={len(val_dataset)}")
     print(f"[setup] model parameters={count_parameters(model):,}")

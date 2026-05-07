@@ -1,23 +1,23 @@
 {
-  "Run_ID": "0002",
+  "Run_ID": "0001",
   "_note": "keys beginning with _note document intended usage.",
   "dataset": {
-    "_note_normalization": "For the first Stage-B workflow, keep normalize_inputs=false and normalize_targets=false. Stage-B does not yet apply local-surrogate normalizers when loading a Stage-A checkpoint.",
+    "_note_normalization": "Use mean/std normalization for Stage A. Checkpoints save the local normalizer stats, and Stage B applies them when a local surrogate is attached.",
     "packed_h5_path": "./Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5",
     "train_split": "train",
     "val_split": "test",
-    "batch_size": 64,
+    "batch_size": 128,
     "val_batch_size": 64,
     "num_workers": 4,
-    "normalize_inputs": false,
-    "normalize_targets": false
+    "normalize_inputs": true,
+    "normalize_targets": true
   },
   "model": {
     "module_param_dim": "auto",
     "port_token_dim": "auto",
     "interface_target_dim": 2,
     "hidden_dim": 128,
-    "latent_dim": 64,
+    "latent_dim": 128,
     "num_port_latents": 8,
     "num_heads": 4,
     "num_layers": 4,

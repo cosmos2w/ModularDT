@@ -22,10 +22,10 @@ solid_alpha / module_radius^2. The default local T_env and h sampling ranges
 cover the global interface_condition T_outside and h_proxy ranges.
 
 For the current Stage-B workflow, train this local surrogate with
-normalize_inputs=false and normalize_targets=false. Stage B calls the local
-surrogate with raw-scale module_params and port_tokens and now raises an
-explicit error if a normalized Stage-A checkpoint is attached before local
-normalizer transfer is implemented.
+normalize_inputs=true and normalize_targets=true. The checkpoint stores local
+normalizer stats. Stage B applies those stats when calling the frozen local
+surrogate and rescales the local outputs to the global target convention used
+by the Stage-B loss.
 
 The model encodes module parameters, encodes all port tokens, aggregates the
 boundary tokens with a small Perceiver-style cross-attention stack, and produces
@@ -213,8 +213,9 @@ The global model includes a simple baseline internal/interface head for
 use_local_surrogate=false. The intended Stage B path is to train Stage A first,
 then train Stage B with the local surrogate frozen.
 
-The local/global normalization helpers are implemented but the default configs
-leave normalization off to keep the first checkpoint interfaces transparent.
+The local/global training templates enable mean/std normalization by default.
+Evaluation scripts denormalize predictions before writing plots and summary
+errors so visual diagnostics stay in raw physical units.
 
 Stage C joint fine-tuning is only scaffolded by configuration: later runs can
 unfreeze the local surrogate and reduce the learning rate after Stage B is

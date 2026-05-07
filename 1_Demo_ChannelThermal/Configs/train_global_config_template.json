@@ -11,8 +11,8 @@
     "val_batch_size": 4,
     "num_workers": 0,
     "random_point_sampling": true,
-    "normalize_inputs": false,
-    "normalize_targets": false,
+    "normalize_inputs": true,
+    "normalize_targets": true,
     "require_converged": true
   },
   "model": {

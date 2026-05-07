@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Dict
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-channelthermal")
 
 import matplotlib
 
@@ -15,7 +18,15 @@ import numpy as np
 import torch
 
 from channelthermal_datasets import LocalModuleDataset
-from channelthermal_model_utils import current_timestamp, recursive_to_device, resolve_demo_path, select_device, strip_module_prefix, write_json
+from channelthermal_model_utils import (
+    current_timestamp,
+    load_trusted_checkpoint,
+    recursive_to_device,
+    resolve_demo_path,
+    select_device,
+    strip_module_prefix,
+    write_json,
+)
 from model_local import LocalModuleConfig, LocalModuleSurrogate
 
 
@@ -98,6 +109,29 @@ def l2_error(prediction: np.ndarray, target: np.ndarray) -> float:
     return float(np.linalg.norm(diff.reshape(-1), ord=2))
 
 
+def error_metrics(prediction: np.ndarray, target: np.ndarray) -> Dict[str, float]:
+    """Return aggregate and scale-normalized error metrics."""
+    pred = np.asarray(prediction, dtype=np.float64)
+    gt = np.asarray(target, dtype=np.float64)
+    diff = pred - gt
+    flat_diff = diff.reshape(-1)
+    flat_gt = gt.reshape(-1)
+    l2_norm = float(np.linalg.norm(flat_diff, ord=2))
+    mse = float(np.mean(flat_diff * flat_diff)) if flat_diff.size else float("nan")
+    rmse = float(np.sqrt(mse)) if np.isfinite(mse) else float("nan")
+    mae = float(np.mean(np.abs(flat_diff))) if flat_diff.size else float("nan")
+    gt_norm = float(np.linalg.norm(flat_gt, ord=2))
+    relative_l2 = float(l2_norm / max(gt_norm, 1e-12))
+    return {
+        "l2_norm": l2_norm,
+        "mse": mse,
+        "rmse": rmse,
+        "mae": mae,
+        "relative_l2": relative_l2,
+        "num_values": float(flat_diff.size),
+    }
+
+
 def safe_path_name(value: object) -> str:
     raw = str(value).strip()
     safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw)
@@ -109,7 +143,7 @@ def evaluation_output_dir(base_dir_arg: str | None, checkpoint_path: Path, case_
     return resolve_demo_path(base_dir) / f"{safe_path_name(case_id)}_{current_timestamp()}"
 
 
-def plot_internal(output_path: Path, sample: Dict, pred_internal: np.ndarray, l2_norm_error: float) -> None:
+def plot_internal(output_path: Path, sample: Dict, pred_internal: np.ndarray, metrics: Dict[str, float]) -> None:
     target = sample["internal_temperature_targets"].reshape(-1)
     pred = pred_internal.reshape(-1)
     mask = sample.get("local_mask")
@@ -124,7 +158,7 @@ def plot_internal(output_path: Path, sample: Dict, pred_internal: np.ndarray, l2
     for col, (ax, image, title, cmap) in enumerate([
         (axes[0], gt_img, "GT internal T", "inferno"),
         (axes[1], pred_img, "Pred internal T", "inferno"),
-        (axes[2], err_img, f"Abs error\nL2={l2_norm_error:.4e}", "magma"),
+        (axes[2], err_img, f"Abs error\nRMSE={metrics['rmse']:.4e}", "magma"),
     ]):
         im = ax.imshow(image, origin="lower", extent=(-1, 1, -1, 1), cmap=cmap, vmin=vmin if col < 2 else None, vmax=vmax if col < 2 else None)
         ax.set_title(title)
@@ -141,11 +175,11 @@ def plot_interface(output_path: Path, sample: Dict, pred_interface: np.ndarray) 
     fig, axes = plt.subplots(2, 1, figsize=(7.0, 5.0), sharex=True, constrained_layout=True)
     labels = ["T_surface", "q_normal"]
     for idx, ax in enumerate(axes):
-        channel_l2 = l2_error(pred_interface[:, idx], target[:, idx])
+        channel_metrics = error_metrics(pred_interface[:, idx], target[:, idx])
         ax.plot(theta, target[:, idx], color="black", lw=1.8, label="GT")
         ax.plot(theta, pred_interface[:, idx], color="#d95f02", lw=1.5, label="Pred")
         ax.set_ylabel(labels[idx])
-        ax.set_title(f"{labels[idx]} L2={channel_l2:.4e}")
+        ax.set_title(f"{labels[idx]} RMSE={channel_metrics['rmse']:.4e}, relL2={channel_metrics['relative_l2']:.4e}")
         ax.grid(True, alpha=0.25)
     axes[-1].set_xlabel("theta")
     axes[0].legend()
@@ -158,7 +192,7 @@ def main() -> int:
     checkpoint_path = resolve_checkpoint_arg(args)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = load_trusted_checkpoint(checkpoint_path, map_location="cpu")
     train_cfg = checkpoint.get("train_config", {})
     dataset_cfg = train_cfg.get("dataset", {})
     dataset_path = args.dataset or dataset_cfg.get("packed_h5_path", "./Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5")
@@ -194,8 +228,8 @@ def main() -> int:
         pred_interface = dataset.normalizer.denormalize_interface_targets(pred_interface)
         target_internal = raw_sample["internal_temperature_targets"]
         target_interface = raw_sample["interface_targets"]
-    internal_l2 = l2_error(pred_internal.reshape(-1), target_internal.reshape(-1))
-    interface_l2 = l2_error(pred_interface, target_interface)
+    internal_metrics = error_metrics(pred_internal.reshape(-1), target_internal.reshape(-1))
+    interface_metrics = error_metrics(pred_interface, target_interface)
 
     output_dir = evaluation_output_dir(args.output_dir, checkpoint_path, raw_sample["case_id"])
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -203,7 +237,7 @@ def main() -> int:
         output_dir / "internal_temperature_comparison.png",
         {**raw_sample, "internal_temperature_targets": target_internal},
         pred_internal,
-        internal_l2,
+        internal_metrics,
     )
     plot_interface(
         output_dir / "interface_curve_comparison.png",
@@ -213,8 +247,19 @@ def main() -> int:
     summary = {
         "checkpoint": str(checkpoint_path),
         "case_id": str(raw_sample["case_id"]),
-        "internal_l2_error": internal_l2,
-        "interface_l2_error": interface_l2,
+        "metric_note": "l2_error is the aggregate Euclidean norm over all values; rmse is usually better for visual comparison.",
+        "internal_l2_error": internal_metrics["l2_norm"],
+        "interface_l2_error": interface_metrics["l2_norm"],
+        "internal_rmse": internal_metrics["rmse"],
+        "interface_rmse": interface_metrics["rmse"],
+        "internal_mae": internal_metrics["mae"],
+        "interface_mae": interface_metrics["mae"],
+        "internal_relative_l2": internal_metrics["relative_l2"],
+        "interface_relative_l2": interface_metrics["relative_l2"],
+        "internal_num_values": int(internal_metrics["num_values"]),
+        "interface_num_values": int(interface_metrics["num_values"]),
+        "internal_metrics": internal_metrics,
+        "interface_metrics": interface_metrics,
         "outputs": {
             "internal_temperature_comparison": str(output_dir / "internal_temperature_comparison.png"),
             "interface_curve_comparison": str(output_dir / "interface_curve_comparison.png"),

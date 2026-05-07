@@ -18,7 +18,9 @@ from channelthermal_model_utils import (
     dataclass_from_dict,
     dataclass_to_dict,
     masked_softmax,
+    safe_std_torch,
     strip_module_prefix,
+    load_trusted_checkpoint,
 )
 from model_local import LocalModuleConfig, LocalModuleSurrogate
 
@@ -398,6 +400,21 @@ class GlobalChannelThermalModel(nn.Module):
         self.config = config
         hidden = int(config.hidden_dim)
         self.local_surrogate: Optional[LocalModuleSurrogate] = None
+        self.local_surrogate_normalize_inputs = False
+        self.local_surrogate_normalize_targets = False
+        self.global_normalize_targets = False
+        self.register_buffer("local_module_params_mean", torch.empty(0), persistent=False)
+        self.register_buffer("local_module_params_std", torch.empty(0), persistent=False)
+        self.register_buffer("local_port_tokens_mean", torch.empty(0), persistent=False)
+        self.register_buffer("local_port_tokens_std", torch.empty(0), persistent=False)
+        self.register_buffer("local_internal_temperature_mean", torch.empty(0), persistent=False)
+        self.register_buffer("local_internal_temperature_std", torch.empty(0), persistent=False)
+        self.register_buffer("local_interface_targets_mean", torch.empty(0), persistent=False)
+        self.register_buffer("local_interface_targets_std", torch.empty(0), persistent=False)
+        self.register_buffer("global_internal_temperature_mean", torch.empty(0), persistent=False)
+        self.register_buffer("global_internal_temperature_std", torch.empty(0), persistent=False)
+        self.register_buffer("global_interface_target_mean", torch.empty(0), persistent=False)
+        self.register_buffer("global_interface_target_std", torch.empty(0), persistent=False)
 
         self.global_encoder = MLP(
             2 + config.material_param_dim,
@@ -467,12 +484,60 @@ class GlobalChannelThermalModel(nn.Module):
         features = torch.cat([x_norm, y_norm, wall, inlet, outlet, centerline], dim=-1).float()
         return coords.float(), features
 
-    def set_local_surrogate(self, model: LocalModuleSurrogate, *, freeze: bool = True) -> None:
+    def _set_buffer_from_stat(self, name: str, stats: Optional[Dict], key: str) -> None:
+        value = None if stats is None else stats.get(key)
+        if value is None:
+            setattr(self, name, torch.empty(0))
+            return
+        tensor = torch.as_tensor(value, dtype=torch.float32).clone().detach()
+        setattr(self, name, tensor)
+
+    def set_global_target_normalization(self, stats: Optional[Dict], *, normalize_targets: bool) -> None:
+        """Configure global target stats used to rescale local-surrogate outputs."""
+        self.global_normalize_targets = bool(normalize_targets)
+        self._set_buffer_from_stat("global_internal_temperature_mean", stats, "internal_temperature_mean")
+        self._set_buffer_from_stat("global_internal_temperature_std", stats, "internal_temperature_std")
+        self._set_buffer_from_stat("global_interface_target_mean", stats, "interface_target_mean")
+        self._set_buffer_from_stat("global_interface_target_std", stats, "interface_target_std")
+
+    def set_local_surrogate(
+        self,
+        model: LocalModuleSurrogate,
+        *,
+        freeze: bool = True,
+        normalization_config: Optional[Dict] = None,
+        normalization_stats: Optional[Dict] = None,
+    ) -> None:
         self.local_surrogate = model
+        normalization_config = normalization_config or {}
+        self.local_surrogate_normalize_inputs = bool(normalization_config.get("normalize_inputs", False))
+        self.local_surrogate_normalize_targets = bool(normalization_config.get("normalize_targets", False))
+        self._set_buffer_from_stat("local_module_params_mean", normalization_stats, "module_params_mean")
+        self._set_buffer_from_stat("local_module_params_std", normalization_stats, "module_params_std")
+        self._set_buffer_from_stat("local_port_tokens_mean", normalization_stats, "port_tokens_mean")
+        self._set_buffer_from_stat("local_port_tokens_std", normalization_stats, "port_tokens_std")
+        self._set_buffer_from_stat("local_internal_temperature_mean", normalization_stats, "internal_temperature_mean")
+        self._set_buffer_from_stat("local_internal_temperature_std", normalization_stats, "internal_temperature_std")
+        self._set_buffer_from_stat("local_interface_targets_mean", normalization_stats, "interface_targets_mean")
+        self._set_buffer_from_stat("local_interface_targets_std", normalization_stats, "interface_targets_std")
         if freeze:
             self.local_surrogate.eval()
             for param in self.local_surrogate.parameters():
                 param.requires_grad_(False)
+
+    def _normalize_with_stats(self, values: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+        if mean.numel() == 0 or std.numel() == 0:
+            return values
+        mean = mean.to(device=values.device, dtype=values.dtype)
+        std = safe_std_torch(std.to(device=values.device, dtype=values.dtype))
+        return (values - mean) / std
+
+    def _denormalize_with_stats(self, values: torch.Tensor, mean: torch.Tensor, std: torch.Tensor) -> torch.Tensor:
+        if mean.numel() == 0 or std.numel() == 0:
+            return values
+        mean = mean.to(device=values.device, dtype=values.dtype)
+        std = safe_std_torch(std.to(device=values.device, dtype=values.dtype))
+        return values * std + mean
 
     def encode_global(
         self,
@@ -573,10 +638,37 @@ class GlobalChannelThermalModel(nn.Module):
             flat_query = expanded_query.reshape(batch * num_modules, expanded_query.shape[-2], 2)
         else:
             flat_query = None
+        if self.local_surrogate_normalize_inputs:
+            flat_params = self._normalize_with_stats(flat_params, self.local_module_params_mean, self.local_module_params_std)
+            flat_ports = self._normalize_with_stats(flat_ports, self.local_port_tokens_mean, self.local_port_tokens_std)
         out = self.local_surrogate(flat_params, flat_ports, flat_query)
         present = module_present[:, :, None, None]
-        internal = out["internal_temperature"].reshape(batch, num_modules, -1, 1) * present
-        interface = out["interface_pred"].reshape(batch, num_modules, ntheta, -1) * present
+        internal = out["internal_temperature"].reshape(batch, num_modules, -1, 1)
+        interface = out["interface_pred"].reshape(batch, num_modules, ntheta, -1)
+        if self.local_surrogate_normalize_targets:
+            internal = self._denormalize_with_stats(
+                internal,
+                self.local_internal_temperature_mean,
+                self.local_internal_temperature_std,
+            )
+            interface = self._denormalize_with_stats(
+                interface,
+                self.local_interface_targets_mean,
+                self.local_interface_targets_std,
+            )
+        if self.global_normalize_targets:
+            internal = self._normalize_with_stats(
+                internal,
+                self.global_internal_temperature_mean,
+                self.global_internal_temperature_std,
+            )
+            interface = self._normalize_with_stats(
+                interface,
+                self.global_interface_target_mean,
+                self.global_interface_target_std,
+            )
+        internal = internal * present
+        interface = interface * present
         latent = out["module_response_latent"].reshape(batch, num_modules, -1) * module_present[..., None]
         return {
             "internal_temperature": internal,
@@ -707,7 +799,7 @@ def load_local_surrogate_from_checkpoint(
     *,
     map_location: str | torch.device = "cpu",
 ) -> Tuple[LocalModuleSurrogate, Dict]:
-    checkpoint = torch.load(checkpoint_path, map_location=map_location)
+    checkpoint = load_trusted_checkpoint(checkpoint_path, map_location=map_location)
     config_payload = checkpoint.get("model_config") or checkpoint.get("local_model_config") or {}
     config = LocalModuleConfig.from_dict(config_payload)
     model = LocalModuleSurrogate(config)

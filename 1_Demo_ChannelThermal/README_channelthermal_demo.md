@@ -185,14 +185,11 @@ Canonical packed local module dataset:
 Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5
 ```
 
-Both packed datasets contain a root `normalization` group with means/stds for
-later training scripts.
-
-For the first Stage-B workflow, train the Stage-A local surrogate with
-`normalize_inputs=false` and `normalize_targets=false`. Stage B currently
-passes raw-scale `module_params` and `port_tokens` into the frozen local
-surrogate; it will raise a clear error if the local checkpoint was trained with
-local input or target normalization enabled.
+Both packed datasets contain a root `normalization` group with means/stds.
+The default training templates use these stats for mean/std normalization.
+Stage-A checkpoints save their local normalizer stats, and Stage B applies
+those stats when calling a frozen local surrogate, then maps local outputs onto
+the global target scale used by the Stage-B loss.
 
 ## Local Dataset Leakage Prevention
 

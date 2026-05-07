@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-channelthermal")
 
 import matplotlib
 
@@ -15,14 +18,16 @@ import numpy as np
 import torch
 
 from channelthermal_datasets import CHANNEL_ORDER, GlobalChannelThermalDataset
-from channelthermal_model_utils import current_timestamp, recursive_to_device, resolve_demo_path, select_device, strip_module_prefix, write_json
-from model import GlobalChannelThermalModel, GlobalChannelThermalModelConfig, load_local_surrogate_from_checkpoint
-
-LOCAL_SURROGATE_NORMALIZATION_ERROR = (
-    "Local surrogate normalization is not yet supported inside Stage-B. "
-    "Re-train local surrogate with normalize_inputs=false and normalize_targets=false, "
-    "or implement local normalizer application."
+from channelthermal_model_utils import (
+    current_timestamp,
+    load_trusted_checkpoint,
+    recursive_to_device,
+    resolve_demo_path,
+    select_device,
+    strip_module_prefix,
+    write_json,
 )
+from model import GlobalChannelThermalModel, GlobalChannelThermalModelConfig, load_local_surrogate_from_checkpoint
 
 
 def parse_args() -> argparse.Namespace:
@@ -114,17 +119,53 @@ def attach_local_surrogate(model: GlobalChannelThermalModel, checkpoint: Dict[st
     if not local_path:
         raise ValueError("Checkpoint config uses the local surrogate but does not include local_surrogate_checkpoint_path.")
     local_model, local_checkpoint = load_local_surrogate_from_checkpoint(resolve_demo_path(local_path), map_location=device)
-    dataset_cfg = local_checkpoint.get("train_config", {}).get("dataset", {})
-    if bool(dataset_cfg.get("normalize_inputs", False)) or bool(dataset_cfg.get("normalize_targets", False)):
-        raise ValueError(LOCAL_SURROGATE_NORMALIZATION_ERROR)
+    normalization_config = local_checkpoint.get("local_normalization_config")
+    if not isinstance(normalization_config, dict):
+        dataset_cfg = local_checkpoint.get("train_config", {}).get("dataset", {})
+        normalization_config = {
+            "normalize_inputs": bool(dataset_cfg.get("normalize_inputs", False)),
+            "normalize_targets": bool(dataset_cfg.get("normalize_targets", False)),
+        }
+    normalization_stats = local_checkpoint.get("local_normalization_stats", {})
+    if not isinstance(normalization_stats, dict):
+        normalization_stats = {}
+    if bool(normalization_config.get("normalize_inputs", False)):
+        missing = [key for key in ("module_params_mean", "module_params_std", "port_tokens_mean", "port_tokens_std") if key not in normalization_stats]
+        if missing:
+            raise ValueError(f"Local surrogate checkpoint was trained with normalized inputs but is missing stats: {missing}")
+    if bool(normalization_config.get("normalize_targets", False)):
+        missing = [
+            key
+            for key in (
+                "internal_temperature_mean",
+                "internal_temperature_std",
+                "interface_targets_mean",
+                "interface_targets_std",
+            )
+            if key not in normalization_stats
+        ]
+        if missing:
+            raise ValueError(f"Local surrogate checkpoint was trained with normalized targets but is missing stats: {missing}")
     local_model.to(device)
-    model.set_local_surrogate(local_model, freeze=bool(model.config.freeze_local_surrogate))
+    model.set_local_surrogate(
+        local_model,
+        freeze=bool(model.config.freeze_local_surrogate),
+        normalization_config=normalization_config,
+        normalization_stats=normalization_stats,
+    )
 
 
 def load_model(checkpoint_path: Path, device: torch.device) -> tuple[GlobalChannelThermalModel, Dict[str, Any]]:
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = load_trusted_checkpoint(checkpoint_path, map_location=device)
     model_config = GlobalChannelThermalModelConfig.from_dict(checkpoint.get("model_config", {}))
     model = GlobalChannelThermalModel(model_config).to(device)
+    global_norm_cfg = checkpoint.get("global_normalization_config", {})
+    if not isinstance(global_norm_cfg, dict):
+        global_norm_cfg = checkpoint.get("train_config", {}).get("dataset", {})
+    model.set_global_target_normalization(
+        checkpoint.get("global_normalization_stats", {}),
+        normalize_targets=bool(global_norm_cfg.get("normalize_targets", False)),
+    )
     attach_local_surrogate(model, checkpoint, device)
     model.load_state_dict(strip_module_prefix(checkpoint["model_state_dict"]), strict=False)
     model.eval()
@@ -200,6 +241,29 @@ def l2_error(prediction: np.ndarray, target: np.ndarray) -> float:
     return float(np.linalg.norm(diff.reshape(-1), ord=2))
 
 
+def error_metrics(prediction: np.ndarray, target: np.ndarray) -> Dict[str, float]:
+    """Return aggregate and per-value error metrics for arrays."""
+    pred = np.asarray(prediction, dtype=np.float64)
+    gt = np.asarray(target, dtype=np.float64)
+    diff = pred - gt
+    flat_diff = diff.reshape(-1)
+    flat_gt = gt.reshape(-1)
+    l2_norm = float(np.linalg.norm(flat_diff, ord=2))
+    mse = float(np.mean(flat_diff * flat_diff)) if flat_diff.size else float("nan")
+    rmse = float(np.sqrt(mse)) if np.isfinite(mse) else float("nan")
+    mae = float(np.mean(np.abs(flat_diff))) if flat_diff.size else float("nan")
+    gt_norm = float(np.linalg.norm(flat_gt, ord=2))
+    relative_l2 = float(l2_norm / max(gt_norm, 1e-12))
+    return {
+        "l2_norm": l2_norm,
+        "mse": mse,
+        "rmse": rmse,
+        "mae": mae,
+        "relative_l2": relative_l2,
+        "num_values": float(flat_diff.size),
+    }
+
+
 def safe_path_name(value: object) -> str:
     raw = str(value).strip()
     safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw)
@@ -224,14 +288,14 @@ def plot_field_quicklook(output_path: Path, sample: Dict[str, Any], pred_field: 
         gt_img = gt[..., idx]
         pred_img = pred_field[..., idx]
         err_img = np.abs(pred_img - gt_img)
-        channel_l2 = l2_error(pred_img, gt_img)
+        channel_metrics = error_metrics(pred_img, gt_img)
         vmin = float(np.nanmin(gt_img))
         vmax = float(np.nanmax(gt_img))
         for col, (image, title, cmap) in enumerate(
             [
                 (gt_img, f"GT {name}", channel_cmap(name)),
                 (pred_img, f"Pred {name}", channel_cmap(name)),
-                (err_img, f"Abs error {name}\nL2={channel_l2:.4e}", "magma"),
+                (err_img, f"Abs error {name}\nRMSE={channel_metrics['rmse']:.4e}", "magma"),
             ]
         ):
             im = axes[row, col].imshow(
@@ -271,14 +335,14 @@ def plot_internal(output_path: Path, sample: Dict[str, Any], pred_internal: np.n
         gt_img = raster_from_points(gt_points[module_idx], mask)
         pred_img = raster_from_points(pred_internal[module_idx, :, 0], mask)
         err_img = np.abs(pred_img - gt_img)
-        module_l2 = l2_error(pred_internal[module_idx, :, 0], gt_points[module_idx])
+        module_metrics = error_metrics(pred_internal[module_idx, :, 0], gt_points[module_idx])
         vmin = float(np.nanmin(gt_img))
         vmax = float(np.nanmax(gt_img))
         for col, (image, title, cmap) in enumerate(
             [
                 (gt_img, f"M{module_idx} GT", "inferno"),
                 (pred_img, f"M{module_idx} Pred", "inferno"),
-                (err_img, f"M{module_idx} Error\nL2={module_l2:.4e}", "magma"),
+                (err_img, f"M{module_idx} Error\nRMSE={module_metrics['rmse']:.4e}", "magma"),
             ]
         ):
             im = axes[row, col].imshow(image, origin="lower", extent=(-1, 1, -1, 1), cmap=cmap, vmin=vmin if col < 2 else None, vmax=vmax if col < 2 else None)
@@ -303,10 +367,10 @@ def plot_interface(output_path: Path, sample: Dict[str, Any], pred_interface: np
     for row, module_idx in enumerate(indices):
         for col, label in enumerate(["T_surface", "q_normal"]):
             ax = axes[row, col]
-            curve_l2 = l2_error(pred_interface[module_idx, :, col], gt[module_idx, :, col])
+            curve_metrics = error_metrics(pred_interface[module_idx, :, col], gt[module_idx, :, col])
             ax.plot(theta, gt[module_idx, :, col], color="black", lw=1.7, label="GT")
             ax.plot(theta, pred_interface[module_idx, :, col], color="#d95f02", lw=1.4, label="Pred")
-            ax.set_title(f"M{module_idx} {label} L2={curve_l2:.4e}")
+            ax.set_title(f"M{module_idx} {label} RMSE={curve_metrics['rmse']:.4e}")
             ax.set_xlabel("theta")
             ax.grid(True, alpha=0.25)
             if row == 0 and col == 0:
@@ -411,19 +475,46 @@ def summarize_prediction(
         str(name): l2_error(pred_field[..., idx], gt_field[..., idx])
         for idx, name in enumerate(channel_order[: pred_field.shape[-1]])
     }
+    field_channel_rmse = {
+        str(name): error_metrics(pred_field[..., idx], gt_field[..., idx])["rmse"]
+        for idx, name in enumerate(channel_order[: pred_field.shape[-1]])
+    }
     interface_l2_by_target = {
         "T_surface": l2_error(pred_interface[..., 0], gt_interface[..., 0]),
         "q_normal": l2_error(pred_interface[..., 1], gt_interface[..., 1]),
     }
+    interface_rmse_by_target = {
+        "T_surface": error_metrics(pred_interface[..., 0], gt_interface[..., 0])["rmse"],
+        "q_normal": error_metrics(pred_interface[..., 1], gt_interface[..., 1])["rmse"],
+    }
+    field_metrics = error_metrics(pred_field, gt_field)
+    temperature_metrics = error_metrics(pred_field[..., 4], gt_field[..., 4]) if pred_field.shape[-1] >= 5 else None
+    internal_metrics = error_metrics(pred_internal.reshape(-1), gt_internal.reshape(-1))
+    interface_metrics = error_metrics(pred_interface, gt_interface)
     return {
         "checkpoint": str(checkpoint_path),
         "case_id": str(raw_sample["case_id"]),
-        "field_l2_error": l2_error(pred_field, gt_field),
-        "temperature_l2_error": l2_error(pred_field[..., 4], gt_field[..., 4]) if pred_field.shape[-1] >= 5 else None,
-        "internal_l2_error": l2_error(pred_internal.reshape(-1), gt_internal.reshape(-1)),
-        "interface_l2_error": l2_error(pred_interface, gt_interface),
+        "metric_note": "l2_error is the aggregate Euclidean norm over all values; rmse is usually better for visual comparison.",
+        "field_l2_error": field_metrics["l2_norm"],
+        "temperature_l2_error": temperature_metrics["l2_norm"] if temperature_metrics is not None else None,
+        "internal_l2_error": internal_metrics["l2_norm"],
+        "interface_l2_error": interface_metrics["l2_norm"],
+        "field_rmse": field_metrics["rmse"],
+        "temperature_rmse": temperature_metrics["rmse"] if temperature_metrics is not None else None,
+        "internal_rmse": internal_metrics["rmse"],
+        "interface_rmse": interface_metrics["rmse"],
+        "field_relative_l2": field_metrics["relative_l2"],
+        "temperature_relative_l2": temperature_metrics["relative_l2"] if temperature_metrics is not None else None,
+        "internal_relative_l2": internal_metrics["relative_l2"],
+        "interface_relative_l2": interface_metrics["relative_l2"],
         "field_channel_l2_error": field_channel_l2,
+        "field_channel_rmse": field_channel_rmse,
         "interface_l2_error_by_target": interface_l2_by_target,
+        "interface_rmse_by_target": interface_rmse_by_target,
+        "field_metrics": field_metrics,
+        "temperature_metrics": temperature_metrics,
+        "internal_metrics": internal_metrics,
+        "interface_metrics": interface_metrics,
         "channel_order": channel_order,
         "outputs": outputs,
     }

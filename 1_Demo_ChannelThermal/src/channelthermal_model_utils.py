@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
 from contextlib import nullcontext
 from dataclasses import fields, is_dataclass
@@ -47,6 +48,20 @@ def write_json(path: str | Path, payload: Mapping[str, Any]) -> None:
     ensure_dir(path.parent)
     with path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+
+
+def load_trusted_checkpoint(path: str | Path, *, map_location: Any = "cpu") -> Dict[str, Any]:
+    """Load a local training checkpoint that may contain config/stat metadata.
+
+    PyTorch 2.6 changed ``torch.load`` to default to ``weights_only=True``.
+    Demo checkpoints are written by the local training scripts and intentionally
+    include dictionaries plus NumPy normalization stats, so trusted local loads
+    must opt back into full checkpoint unpickling.
+    """
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
 
 
 def current_timestamp() -> str:
@@ -231,6 +246,7 @@ class MLP(nn.Module):
 
 def save_loss_curve(csv_path: str | Path, png_path: str | Path, *, title: str = "Loss") -> None:
     """Render a simple loss curve from a CSV written by the training scripts."""
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-channelthermal")
     import matplotlib
 
     matplotlib.use("Agg")

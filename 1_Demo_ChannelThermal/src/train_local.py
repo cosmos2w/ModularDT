@@ -123,6 +123,7 @@ def run_epoch(
     scaler=None,
     amp: bool = False,
     max_batches: Optional[int] = None,
+    clip_norm: float = 1.0,
 ) -> Dict[str, float]:
     training = optimizer is not None
     model.train(training)
@@ -142,12 +143,12 @@ def run_epoch(
             if scaler is not None and scaler.is_enabled():
                 scaler.scale(losses["loss_total"]).backward()
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), float(loss_cfg.get("gradient_clip_norm", 1.0)))
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(clip_norm))
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 losses["loss_total"].backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), float(loss_cfg.get("gradient_clip_norm", 1.0)))
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(clip_norm))
                 optimizer.step()
         batch_size = int(batch["module_params"].shape[0])
         count += batch_size
@@ -186,6 +187,7 @@ def save_checkpoint(
                 "normalize_inputs": bool(dataset_cfg.get("normalize_inputs", False)),
                 "normalize_targets": bool(dataset_cfg.get("normalize_targets", False)),
             },
+            "local_normalization_stats": {name: value.copy() for name, value in dataset.normalizer.stats.items()},
         },
         path,
     )
@@ -220,6 +222,22 @@ def main() -> int:
     model_config = build_model_config(cfg, train_dataset)
     model = LocalModuleSurrogate(model_config).to(device)
     print(f"[setup] device={device}, train_cases={len(train_dataset)}, val_cases={len(val_dataset)}")
+    print(
+        "[setup] normalization: "
+        f"inputs={bool(dataset_cfg.get('normalize_inputs', False))}, "
+        f"targets={bool(dataset_cfg.get('normalize_targets', False))}"
+    )
+    if train_dataset.normalizer.has("internal_temperature_mean", "internal_temperature_std"):
+        internal_mean = train_dataset.normalizer.stats["internal_temperature_mean"].reshape(-1)[0]
+        internal_std = train_dataset.normalizer.stats["internal_temperature_std"].reshape(-1)[0]
+        interface_mean = train_dataset.normalizer.stats.get("interface_targets_mean")
+        interface_std = train_dataset.normalizer.stats.get("interface_targets_std")
+        print(f"[setup] internal T mean/std={float(internal_mean):.6g}/{float(internal_std):.6g}")
+        if interface_mean is not None and interface_std is not None:
+            print(
+                "[setup] interface target mean/std="
+                f"{interface_mean.astype(float).tolist()}/{interface_std.astype(float).tolist()}"
+            )
     print(f"[setup] model parameters={count_parameters(model):,}")
 
     batch_size = int(dataset_cfg.get("batch_size", training_cfg.get("batch_size", 16)))
@@ -287,6 +305,7 @@ def main() -> int:
             scaler=scaler,
             amp=bool(training_cfg.get("amp", False)),
             max_batches=max_train_batches,
+            clip_norm=float(training_cfg.get("gradient_clip_norm", 1.0)),
         )
         val_metrics = run_epoch(
             model,
@@ -297,6 +316,7 @@ def main() -> int:
             scaler=None,
             amp=bool(training_cfg.get("amp", False)),
             max_batches=max_val_batches,
+            clip_norm=float(training_cfg.get("gradient_clip_norm", 1.0)),
         )
         row = {
             "epoch": epoch,
