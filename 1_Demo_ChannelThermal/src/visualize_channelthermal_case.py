@@ -95,11 +95,25 @@ def parse_args() -> argparse.Namespace:
 def raw_case_candidates() -> List[Path]:
     """Return all raw global channel case directories in deterministic order."""
     root = resolve_data_path("./Data_Saved")
-    return sorted(
-        path
-        for _split, path in find_case_dirs(root)
-        if (path / "scene").exists() and (path / "frame_index.csv").exists()
-    )
+    candidates = [path for _split, path in find_case_dirs(root)]
+
+    # ``find_case_dirs`` intentionally switches to split-only discovery when
+    # train/test folders exist. Visualization should still be able to inspect
+    # fresh top-level raw runs that have not been packed into a split yet.
+    for path in sorted(root.iterdir()) if root.exists() else []:
+        if path.is_dir() and (path / "case_config.json").exists():
+            candidates.append(path)
+
+    seen: set[Path] = set()
+    raw_cases: List[Path] = []
+    for path in sorted(candidates):
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if (path / "scene").exists() and (path / "frame_index.csv").exists():
+            raw_cases.append(path)
+    return raw_cases
 
 
 def latest_raw_case() -> Path:

@@ -144,6 +144,7 @@ def masked_mean(value: torch.Tensor, mask: torch.Tensor, eps: float = EPS) -> to
     mask = mask.to(device=value.device, dtype=value.dtype)
     while mask.ndim < value.ndim:
         mask = mask.unsqueeze(-1)
+    mask = torch.broadcast_to(mask, value.shape)
     return (value * mask).sum() / mask.sum().clamp_min(eps)
 
 

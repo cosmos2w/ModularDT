@@ -484,8 +484,13 @@ class GlobalChannelThermalModel(nn.Module):
         features = torch.cat([x_norm, y_norm, wall, inlet, outlet, centerline], dim=-1).float()
         return coords.float(), features
 
-    def _set_buffer_from_stat(self, name: str, stats: Optional[Dict], key: str) -> None:
-        value = None if stats is None else stats.get(key)
+    def _set_buffer_from_stat(self, name: str, stats: Optional[Dict], key: str, *alternate_keys: str) -> None:
+        value = None
+        if stats is not None:
+            for candidate in (key, *alternate_keys):
+                value = stats.get(candidate)
+                if value is not None:
+                    break
         if value is None:
             setattr(self, name, torch.empty(0))
             return
@@ -497,8 +502,8 @@ class GlobalChannelThermalModel(nn.Module):
         self.global_normalize_targets = bool(normalize_targets)
         self._set_buffer_from_stat("global_internal_temperature_mean", stats, "internal_temperature_mean")
         self._set_buffer_from_stat("global_internal_temperature_std", stats, "internal_temperature_std")
-        self._set_buffer_from_stat("global_interface_target_mean", stats, "interface_target_mean")
-        self._set_buffer_from_stat("global_interface_target_std", stats, "interface_target_std")
+        self._set_buffer_from_stat("global_interface_target_mean", stats, "interface_target_mean", "interface_targets_mean")
+        self._set_buffer_from_stat("global_interface_target_std", stats, "interface_target_std", "interface_targets_std")
 
     def set_local_surrogate(
         self,

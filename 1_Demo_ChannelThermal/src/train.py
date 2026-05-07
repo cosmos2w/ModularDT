@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -25,7 +26,6 @@ from channelthermal_model_utils import (
     read_json,
     recursive_to_device,
     resolve_demo_path,
-    save_loss_curve,
     select_device,
     set_seed,
     write_json,
@@ -39,7 +39,7 @@ DEFAULT_CONFIG_PATH = "./Configs/train_global_config_template.json"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the Demo 1 global Channel Thermal model.")
     parser.add_argument("--config", type=str, default=DEFAULT_CONFIG_PATH, help="JSON config file path.")
-    parser.add_argument("--device", type=str, default=None, help="Torch device override.")
+    parser.add_argument("--device", type=str, default=None, help="Torch device override, like cpu or cuda:0")
     parser.add_argument("--epochs", type=int, default=None, help="Override training epochs.")
     parser.add_argument("--max-train-batches", type=int, default=None, help="Stop each epoch after this many train batches.")
     parser.add_argument("--max-val-batches", type=int, default=None, help="Stop validation after this many batches.")
@@ -131,6 +131,31 @@ def field_loss(pred: torch.Tensor, target: torch.Tensor, loss_cfg: Dict[str, Any
     return ((pred - target).square() * weights).mean()
 
 
+def port_condition_loss(
+    pred_port: torch.Tensor,
+    target_port: torch.Tensor,
+    module_present: torch.Tensor,
+    loss_cfg: Dict[str, Any],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return scaled optimization loss and raw physical MSE for port tokens.
+
+    The port head predicts physical ``T_env`` and ``h`` values. Their raw MSE can
+    be hundreds at initialization, so the optimization loss uses stable physical
+    scales while the raw MSE is kept as a diagnostic.
+    """
+    pred_values = pred_port[..., 3:5]
+    target_values = target_port[..., 3:5]
+    raw_mse = masked_mse(pred_values, target_values, module_present[:, :, None])
+    scales = pred_values.new_tensor(
+        [
+            max(float(loss_cfg.get("port_temperature_scale", 10.0)), 1.0e-6),
+            max(float(loss_cfg.get("port_h_scale", 10.0)), 1.0e-6),
+        ]
+    )
+    scaled_mse = masked_mse(pred_values / scales, target_values / scales, module_present[:, :, None])
+    return scaled_mse, raw_mse
+
+
 def effective_port_condition_settings(epoch: int, training_cfg: Dict[str, Any]) -> tuple[str, float]:
     """Resolve the Stage-B local-port curriculum for this epoch.
 
@@ -184,7 +209,12 @@ def compute_losses(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dic
 
     pred_port = outputs["pred_port_condition"]
     target_port = batch["teacher_port_tokens"]
-    losses["loss_port_condition"] = masked_mse(pred_port[..., 3:5], target_port[..., 3:5], module_present[:, :, None])
+    losses["loss_port_condition"], losses["diag_port_condition_physical_mse"] = port_condition_loss(
+        pred_port,
+        target_port,
+        module_present,
+        loss_cfg,
+    )
 
     aux = outputs.get("organizer_aux", {})
     if isinstance(aux, dict) and "hyper_strength" in aux:
@@ -200,6 +230,88 @@ def compute_losses(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dic
     )
     losses["loss_total"] = total
     return losses
+
+
+def _read_loss_history(history_path: Path) -> Dict[str, list[float]]:
+    """Read numeric columns from the global loss CSV."""
+    if not history_path.exists():
+        return {}
+    columns: Dict[str, list[float]] = {}
+    with history_path.open("r", newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            for key, value in row.items():
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError):
+                    continue
+                columns.setdefault(key, []).append(parsed)
+    return columns
+
+
+def _plot_loss_group(
+    ax: Any,
+    history: Dict[str, list[float]],
+    keys: tuple[str, ...],
+    *,
+    title: str,
+    ylabel: str = "loss",
+) -> None:
+    epochs = history.get("epoch", [])
+    for key in keys:
+        values = history.get(key)
+        if not values:
+            continue
+        label = key.removeprefix("val_").removeprefix("loss_")
+        if key.startswith("val_"):
+            label = f"val {label}"
+        ax.plot(epochs[: len(values)], values, label=label)
+    ax.set_title(title)
+    ax.set_xlabel("epoch")
+    ax.set_ylabel(ylabel)
+    ax.set_yscale("log")
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=8)
+
+
+def save_global_loss_plots(history_path: Path, run_dir: Path) -> None:
+    """Save readable global loss plots instead of one overcrowded figure."""
+    history = _read_loss_history(history_path)
+    if not history or not history.get("epoch"):
+        return
+
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-channelthermal")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    panels = [
+        ("Total", ("loss_total", "val_loss_total")),
+        ("Global Field", ("loss_field", "val_loss_field")),
+        ("Module/Internal Coupling", ("loss_internal_temperature", "val_loss_internal_temperature", "loss_interface", "val_loss_interface")),
+        ("Port Condition", ("loss_port_condition", "val_loss_port_condition")),
+    ]
+    fig, axes = plt.subplots(2, 2, figsize=(11.5, 7.2), constrained_layout=True)
+    for ax, (title, keys) in zip(axes.reshape(-1), panels):
+        _plot_loss_group(ax, history, keys, title=title)
+    fig.suptitle("Global Channel Thermal Losses", fontsize=13)
+    fig.savefig(run_dir / "loss_curve.png", dpi=160)
+    plt.close(fig)
+
+    focused = {
+        "loss_total_curve.png": ("Total Loss", ("loss_total", "val_loss_total")),
+        "loss_field_curve.png": ("Field Loss", ("loss_field", "val_loss_field")),
+        "loss_internal_interface_curve.png": (
+            "Internal Temperature and Interface Loss",
+            ("loss_internal_temperature", "val_loss_internal_temperature", "loss_interface", "val_loss_interface"),
+        ),
+        "loss_port_condition_curve.png": ("Port Condition Loss", ("loss_port_condition", "val_loss_port_condition")),
+    }
+    for filename, (title, keys) in focused.items():
+        fig, ax = plt.subplots(figsize=(7.0, 4.2), constrained_layout=True)
+        _plot_loss_group(ax, history, keys, title=title)
+        fig.savefig(run_dir / filename, dpi=160)
+        plt.close(fig)
 
 
 def run_epoch(
@@ -267,6 +379,7 @@ def run_epoch(
                 "loss_internal_temperature",
                 "loss_interface",
                 "loss_port_condition",
+                "diag_port_condition_physical_mse",
                 "diag_organizer_strength_mean",
             ]
         }
@@ -446,6 +559,26 @@ def main() -> int:
     )
     attach_local_surrogate_if_needed(model, model_config, cfg, device)
     print(f"[setup] device={device}, train_cases={len(train_dataset)}, val_cases={len(val_dataset)}")
+    print(
+        "[setup] normalization: "
+        f"inputs={bool(dataset_cfg.get('normalize_inputs', False))}, "
+        f"targets={bool(dataset_cfg.get('normalize_targets', False))}"
+    )
+    if train_dataset.normalizer.has("internal_temperature_mean", "internal_temperature_std"):
+        internal_mean = train_dataset.normalizer.stats["internal_temperature_mean"].reshape(-1)[0]
+        internal_std = train_dataset.normalizer.stats["internal_temperature_std"].reshape(-1)[0]
+        interface_mean = train_dataset.normalizer.stats.get("interface_target_mean")
+        interface_std = train_dataset.normalizer.stats.get("interface_target_std")
+        if interface_mean is None:
+            interface_mean = train_dataset.normalizer.stats.get("interface_targets_mean")
+        if interface_std is None:
+            interface_std = train_dataset.normalizer.stats.get("interface_targets_std")
+        print(f"[setup] internal T mean/std={float(internal_mean):.6g}/{float(internal_std):.6g}")
+        if interface_mean is not None and interface_std is not None:
+            print(
+                "[setup] interface target mean/std="
+                f"{interface_mean.astype(float).tolist()}/{interface_std.astype(float).tolist()}"
+            )
     print(f"[setup] model parameters={count_parameters(model):,}")
 
     batch_size = int(dataset_cfg.get("batch_size", training_cfg.get("batch_size", 4)))
@@ -486,6 +619,7 @@ def main() -> int:
         "loss_internal_temperature",
         "loss_interface",
         "loss_port_condition",
+        "diag_port_condition_physical_mse",
         "diag_organizer_strength_mean",
         "effective_local_port_condition_mode",
         "effective_mixed_teacher_ratio",
@@ -494,6 +628,7 @@ def main() -> int:
         "val_loss_internal_temperature",
         "val_loss_interface",
         "val_loss_port_condition",
+        "val_diag_port_condition_physical_mse",
         "val_diag_organizer_strength_mean",
     ]
     with history_path.open("w", newline="", encoding="utf-8") as f:
@@ -543,6 +678,7 @@ def main() -> int:
             "loss_internal_temperature": train_metrics.get("loss_internal_temperature", math.nan),
             "loss_interface": train_metrics.get("loss_interface", math.nan),
             "loss_port_condition": train_metrics.get("loss_port_condition", math.nan),
+            "diag_port_condition_physical_mse": train_metrics.get("diag_port_condition_physical_mse", math.nan),
             "diag_organizer_strength_mean": train_metrics.get("diag_organizer_strength_mean", math.nan),
             "effective_local_port_condition_mode": effective_mode,
             "effective_mixed_teacher_ratio": effective_ratio,
@@ -551,6 +687,7 @@ def main() -> int:
             "val_loss_internal_temperature": val_metrics.get("loss_internal_temperature", math.nan),
             "val_loss_interface": val_metrics.get("loss_interface", math.nan),
             "val_loss_port_condition": val_metrics.get("loss_port_condition", math.nan),
+            "val_diag_port_condition_physical_mse": val_metrics.get("diag_port_condition_physical_mse", math.nan),
             "val_diag_organizer_strength_mean": val_metrics.get("diag_organizer_strength_mean", math.nan),
         }
         with history_path.open("a", newline="", encoding="utf-8") as f:
@@ -576,11 +713,12 @@ def main() -> int:
             epoch=epoch,
             best_metric=best_metric,
         )
-        save_loss_curve(history_path, run_dir / "loss_curve.png", title="Global Channel Thermal Loss")
+        save_global_loss_plots(history_path, run_dir)
         print(
             f"[epoch {epoch:04d}] loss={row['loss_total']:.4e} field={row['loss_field']:.4e} "
             f"internal={row['loss_internal_temperature']:.4e} interface={row['loss_interface']:.4e} "
-            f"port={row['loss_port_condition']:.4e} mode={effective_mode} ratio={effective_ratio:.3f} "
+            f"port={row['loss_port_condition']:.4e} port_phys={row['diag_port_condition_physical_mse']:.4e} "
+            f"mode={effective_mode} ratio={effective_ratio:.3f} "
             f"val={row['val_loss_total']:.4e}"
         )
 
