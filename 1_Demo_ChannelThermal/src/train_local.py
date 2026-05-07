@@ -5,27 +5,30 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+import numpy as np
+from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
-from channelthermal_datasets import LocalModuleDataset
+from channelthermal_datasets import GlobalModuleAlignmentDataset, LocalModuleDataset
 from channelthermal_model_utils import (
     autocast_context,
     count_parameters,
     current_timestamp,
     ensure_dir,
+    load_trusted_checkpoint,
     make_grad_scaler,
     read_json,
     recursive_to_device,
     resolve_demo_path,
-    save_loss_curve,
     select_device,
     set_seed,
+    strip_module_prefix,
     write_json,
 )
 from model_local import LocalModuleConfig, LocalModuleSurrogate
@@ -43,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-val-batches", type=int, default=None, help="Stop validation after this many batches.")
     parser.add_argument("--run-name", type=str, default=None, help="Optional descriptive suffix after the numeric Run_ID.")
     parser.add_argument("--Run_ID", dest="run_id", type=str, default=None, help="Numeric run serial, e.g. 0001.")
+    parser.add_argument("--init-checkpoint", type=str, default=None, help="Optional Stage-A checkpoint to initialize from before fine-tuning.")
     return parser.parse_args()
 
 
@@ -59,12 +63,80 @@ def _auto_int(value: Any, fallback: int) -> int:
     return int(value)
 
 
-def build_model_config(payload: Dict[str, Any], dataset: LocalModuleDataset) -> LocalModuleConfig:
+def build_model_config(payload: Dict[str, Any], dataset: Dataset) -> LocalModuleConfig:
     model_cfg = dict(payload.get("model", {}))
     model_cfg["module_param_dim"] = _auto_int(model_cfg.get("module_param_dim"), dataset.module_param_dim)
     model_cfg["port_token_dim"] = _auto_int(model_cfg.get("port_token_dim"), dataset.port_token_dim)
     model_cfg["interface_target_dim"] = _auto_int(model_cfg.get("interface_target_dim"), dataset.interface_target_dim)
     return LocalModuleConfig.from_dict(model_cfg)
+
+
+class MixedLocalDataset(Dataset):
+    """Simple concatenation with local-surrogate metadata exposed for training."""
+
+    def __init__(self, datasets: Sequence[Dataset]):
+        self.datasets = [dataset for dataset in datasets if len(dataset) > 0]
+        if not self.datasets:
+            raise ValueError("MixedLocalDataset requires at least one non-empty dataset.")
+        self.lengths = [len(dataset) for dataset in self.datasets]
+        self.cumulative = np.cumsum(self.lengths).tolist()
+        first = self.datasets[0]
+        self.module_param_names = getattr(first, "module_param_names", [])
+        self.port_input_feature_names = getattr(first, "port_input_feature_names", [])
+        self.interface_target_names = getattr(first, "interface_target_names", [])
+        self.module_param_dim = int(getattr(first, "module_param_dim"))
+        self.port_token_dim = int(getattr(first, "port_token_dim"))
+        self.interface_target_dim = int(getattr(first, "interface_target_dim"))
+        self.n_interface_points = int(getattr(first, "n_interface_points"))
+        self.num_internal_points = int(getattr(first, "num_internal_points"))
+        self.normalizer = getattr(first, "normalizer", None)
+
+    def __len__(self) -> int:
+        return int(sum(self.lengths))
+
+    def __getitem__(self, item: int) -> Dict[str, Any]:
+        idx = int(item)
+        for dataset_idx, end in enumerate(self.cumulative):
+            start = 0 if dataset_idx == 0 else self.cumulative[dataset_idx - 1]
+            if idx < end:
+                return self.datasets[dataset_idx][idx - start]
+        return self.datasets[-1][self.lengths[-1] - 1]
+
+
+def build_stage_a_dataset(dataset_cfg: Dict[str, Any], *, split: str, source: str) -> Dataset:
+    normalize_inputs = bool(dataset_cfg.get("normalize_inputs", False))
+    normalize_targets = bool(dataset_cfg.get("normalize_targets", False))
+    source = str(source).lower()
+    if source == "local":
+        return LocalModuleDataset(
+            dataset_cfg.get("packed_h5_path", "./Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5"),
+            split=split,
+            normalize_inputs=normalize_inputs,
+            normalize_targets=normalize_targets,
+        )
+    if source == "global_alignment":
+        return GlobalModuleAlignmentDataset(
+            dataset_cfg.get("global_alignment_packed_h5_path", "./Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5"),
+            split=split,
+            normalize_inputs=normalize_inputs,
+            normalize_targets=normalize_targets,
+        )
+    if source == "mixed":
+        local = LocalModuleDataset(
+            dataset_cfg.get("packed_h5_path", "./Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5"),
+            split=split,
+            normalize_inputs=normalize_inputs,
+            normalize_targets=normalize_targets,
+        )
+        global_split = dataset_cfg.get("global_alignment_split", split) if split == dataset_cfg.get("train_split", "train") else dataset_cfg.get("global_alignment_val_split", split)
+        global_align = GlobalModuleAlignmentDataset(
+            dataset_cfg.get("global_alignment_packed_h5_path", "./Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5"),
+            split=global_split,
+            normalize_inputs=normalize_inputs,
+            normalize_targets=normalize_targets,
+        )
+        return MixedLocalDataset([local, global_align])
+    raise ValueError("dataset.source must be 'local', 'global_alignment', or 'mixed'.")
 
 
 def normalize_run_id(value: Any, fallback: str = "0001") -> str:
@@ -94,8 +166,16 @@ def resolve_run_id(args: argparse.Namespace, cfg: Dict[str, Any], fallback: str)
 
 def compute_losses(outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor], loss_cfg: Dict[str, Any]) -> Dict[str, torch.Tensor]:
     internal_loss = F.mse_loss(outputs["internal_temperature"], batch["internal_temperature_targets"])
-    interface_loss = F.mse_loss(outputs["interface_pred"], batch["interface_targets"])
-    smoothness_weight = float(loss_cfg.get("smoothness_weight", 0.0))
+    if loss_cfg.get("interface_target_weights", None) is not None:
+        weights = torch.as_tensor(loss_cfg["interface_target_weights"], device=outputs["interface_pred"].device, dtype=outputs["interface_pred"].dtype)
+        if weights.numel() < outputs["interface_pred"].shape[-1]:
+            weights = F.pad(weights, (0, outputs["interface_pred"].shape[-1] - weights.numel()), value=1.0)
+        weights = weights[: outputs["interface_pred"].shape[-1]].clamp_min(0.0)
+        mse_by_target = (outputs["interface_pred"] - batch["interface_targets"]).square().mean(dim=(0, 1))
+        interface_loss = (mse_by_target * weights).sum() / weights.sum().clamp_min(1.0e-6)
+    else:
+        interface_loss = F.mse_loss(outputs["interface_pred"], batch["interface_targets"])
+    smoothness_weight = float(loss_cfg.get("interface_smoothness_weight", loss_cfg.get("smoothness_weight", 0.0)))
     smoothness_loss = outputs["interface_pred"].new_tensor(0.0)
     if smoothness_weight > 0.0 and outputs["interface_pred"].shape[-2] > 1:
         diff = outputs["interface_pred"] - torch.roll(outputs["interface_pred"], shifts=1, dims=-2)
@@ -166,7 +246,7 @@ def save_checkpoint(
     model: LocalModuleSurrogate,
     model_config: LocalModuleConfig,
     train_config: Dict[str, Any],
-    dataset: LocalModuleDataset,
+    dataset: Dataset,
     epoch: int,
     best_metric: float,
 ) -> None:
@@ -187,10 +267,83 @@ def save_checkpoint(
                 "normalize_inputs": bool(dataset_cfg.get("normalize_inputs", False)),
                 "normalize_targets": bool(dataset_cfg.get("normalize_targets", False)),
             },
-            "local_normalization_stats": {name: value.copy() for name, value in dataset.normalizer.stats.items()},
+            "local_normalization_stats": {
+                name: value.copy()
+                for name, value in getattr(getattr(dataset, "normalizer", None), "stats", {}).items()
+            },
         },
         path,
     )
+
+
+def load_init_checkpoint_if_requested(model: LocalModuleSurrogate, init_path: Optional[str], device: torch.device) -> None:
+    if not init_path:
+        return
+    checkpoint = load_trusted_checkpoint(resolve_demo_path(init_path), map_location=device)
+    state = checkpoint.get("model_state_dict") or checkpoint.get("state_dict") or checkpoint
+    missing, unexpected = model.load_state_dict(strip_module_prefix(state), strict=False)
+    print(
+        f"[setup] initialized from {resolve_demo_path(init_path)} "
+        f"(missing={len(missing)}, unexpected={len(unexpected)})"
+    )
+
+
+def save_local_loss_curve(
+    history_path: Path,
+    output_path: Path,
+    *,
+    include_smoothness: bool = False,
+) -> None:
+    """Plot the primary Stage-A losses without crowding the figure.
+
+    Smoothness is a small auxiliary regularizer and remains in loss_history.csv
+    for diagnostics, but it is omitted from the figure unless explicitly
+    requested with loss.plot_smoothness_loss=true.
+    """
+    if not history_path.exists():
+        return
+    rows = np.genfromtxt(history_path, delimiter=",", names=True, dtype=None, encoding="utf-8")
+    if rows.size == 0:
+        return
+    if rows.ndim == 0:
+        rows = np.asarray([rows])
+    names = rows.dtype.names or ()
+    if "epoch" not in names:
+        return
+
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-channelthermal")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    keys = [
+        "loss_total",
+        "val_loss_total",
+        "loss_internal",
+        "val_loss_internal",
+        "loss_interface",
+        "val_loss_interface",
+    ]
+    if include_smoothness:
+        keys.extend(["loss_smoothness", "val_loss_smoothness"])
+
+    fig, ax = plt.subplots(figsize=(7.0, 4.0), constrained_layout=True)
+    for key in keys:
+        if key not in names:
+            continue
+        values = np.asarray(rows[key], dtype=float)
+        if np.any(np.isfinite(values)):
+            ax.plot(rows["epoch"], values, label=key)
+    ax.set_yscale("log")
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("loss")
+    ax.set_title("Local Module Surrogate Loss")
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=8)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=160)
+    plt.close(fig)
 
 
 def main() -> int:
@@ -203,25 +356,25 @@ def main() -> int:
     set_seed(int(training_cfg.get("seed", 42)))
     device = select_device(args.device or training_cfg.get("device"))
 
-    train_dataset = LocalModuleDataset(
-        dataset_cfg.get("packed_h5_path", "./Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5"),
-        split=dataset_cfg.get("train_split", "train"),
-        normalize_inputs=bool(dataset_cfg.get("normalize_inputs", False)),
-        normalize_targets=bool(dataset_cfg.get("normalize_targets", False)),
+    dataset_source = str(dataset_cfg.get("source", "local")).lower()
+    train_split = (
+        dataset_cfg.get("global_alignment_split", "train")
+        if dataset_source == "global_alignment"
+        else dataset_cfg.get("train_split", "train")
     )
+    train_dataset = build_stage_a_dataset(dataset_cfg, split=train_split, source=dataset_source)
     val_split = dataset_cfg.get("val_split", "test")
-    val_dataset = LocalModuleDataset(
-        dataset_cfg.get("packed_h5_path", "./Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5"),
-        split=val_split,
-        normalize_inputs=bool(dataset_cfg.get("normalize_inputs", False)),
-        normalize_targets=bool(dataset_cfg.get("normalize_targets", False)),
-    )
+    if dataset_source == "global_alignment":
+        val_split = dataset_cfg.get("global_alignment_val_split", dataset_cfg.get("global_alignment_split", "train"))
+    val_dataset = build_stage_a_dataset(dataset_cfg, split=val_split, source=dataset_source)
     if len(val_dataset) == 0:
         val_dataset = train_dataset
 
     model_config = build_model_config(cfg, train_dataset)
     model = LocalModuleSurrogate(model_config).to(device)
-    print(f"[setup] device={device}, train_cases={len(train_dataset)}, val_cases={len(val_dataset)}")
+    init_checkpoint = args.init_checkpoint or training_cfg.get("init_checkpoint_path")
+    load_init_checkpoint_if_requested(model, init_checkpoint, device)
+    print(f"[setup] device={device}, source={dataset_source}, train_cases={len(train_dataset)}, val_cases={len(val_dataset)}")
     print(
         "[setup] normalization: "
         f"inputs={bool(dataset_cfg.get('normalize_inputs', False))}, "
@@ -280,9 +433,11 @@ def main() -> int:
                 "loss_total",
                 "loss_internal",
                 "loss_interface",
+                "loss_smoothness",
                 "val_loss_total",
                 "val_loss_internal",
                 "val_loss_interface",
+                "val_loss_smoothness",
             ],
         )
         writer.writeheader()
@@ -323,9 +478,11 @@ def main() -> int:
             "loss_total": train_metrics.get("loss_total", math.nan),
             "loss_internal": train_metrics.get("loss_internal", math.nan),
             "loss_interface": train_metrics.get("loss_interface", math.nan),
+            "loss_smoothness": train_metrics.get("loss_smoothness", math.nan),
             "val_loss_total": val_metrics.get("loss_total", math.nan),
             "val_loss_internal": val_metrics.get("loss_internal", math.nan),
             "val_loss_interface": val_metrics.get("loss_interface", math.nan),
+            "val_loss_smoothness": val_metrics.get("loss_smoothness", math.nan),
         }
         with history_path.open("a", newline="", encoding="utf-8") as f:
             csv.DictWriter(f, fieldnames=list(row.keys())).writerow(row)
@@ -351,7 +508,11 @@ def main() -> int:
             epoch=epoch,
             best_metric=best_metric,
         )
-        save_loss_curve(history_path, run_dir / "loss_curve.png", title="Local Module Surrogate Loss")
+        save_local_loss_curve(
+            history_path,
+            run_dir / "loss_curve.png",
+            include_smoothness=bool(loss_cfg.get("plot_smoothness_loss", False)),
+        )
         print(
             f"[epoch {epoch:04d}] loss={row['loss_total']:.4e} "
             f"internal={row['loss_internal']:.4e} interface={row['loss_interface']:.4e} "

@@ -146,7 +146,16 @@ class LocalModuleConfig:
     h_max: float = 3.0
     t_env_min: float = -0.5
     t_env_max: float = 0.5
-    n_boundary_modes: int = 4
+    n_boundary_modes: int = 6
+    boundary_modes_min: int = 2
+    boundary_modes_max: Optional[int] = None
+    h_log_perturb_scale: float = 0.10
+    t_env_perturb_scale: float = 0.20
+    solver_type: str = "polar_fd"
+    polar_radial_points: int = 64
+    polar_theta_points: Optional[int] = None
+    polar_regularize_center: bool = True
+    interface_sample_radius: float = 0.95
     solver_iterations: int = 4000
     solver_tolerance: float = 1e-6
     relaxation: float = 1.4
@@ -220,6 +229,27 @@ class SimulationConfig:
             raise ValueError("local_module.local_grid_size must be at least 8.")
         if self.local_module.n_interface_points < 8:
             raise ValueError("local_module.n_interface_points must be at least 8.")
+        if self.local_module.n_boundary_modes < 1:
+            raise ValueError("local_module.n_boundary_modes must be positive.")
+        if self.local_module.boundary_modes_min < 0:
+            raise ValueError("local_module.boundary_modes_min must be non-negative.")
+        max_modes = (
+            int(self.local_module.n_boundary_modes)
+            if self.local_module.boundary_modes_max is None
+            else int(self.local_module.boundary_modes_max)
+        )
+        if max_modes < self.local_module.boundary_modes_min:
+            raise ValueError("local_module.boundary_modes_max must be >= boundary_modes_min.")
+        if max_modes > self.local_module.n_boundary_modes:
+            raise ValueError("local_module.boundary_modes_max must be <= n_boundary_modes.")
+        if self.local_module.solver_type not in {"polar_fd", "cartesian_mask"}:
+            raise ValueError("local_module.solver_type must be 'polar_fd' or 'cartesian_mask'.")
+        if self.local_module.polar_radial_points < 8:
+            raise ValueError("local_module.polar_radial_points must be at least 8.")
+        if self.local_module.polar_theta_points is not None and self.local_module.polar_theta_points < 8:
+            raise ValueError("local_module.polar_theta_points must be at least 8 when set.")
+        if not (0.0 < self.local_module.interface_sample_radius <= 1.0):
+            raise ValueError("local_module.interface_sample_radius must be in (0, 1].")
         if self.execution.device.lower().strip() not in {"cpu", "gpu"}:
             raise ValueError("execution.device must be 'cpu' or 'gpu'.")
         self.execution.device = self.execution.device.lower().strip()

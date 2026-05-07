@@ -198,9 +198,30 @@ def plot_boundary_conditions(payload: Dict[str, np.ndarray], title: str, output_
     """Plot condition inputs separately from solved interface targets."""
     theta = payload["theta"]
     fig, axes = plt.subplots(3, 1, figsize=(8.5, 7.0), sharex=True, constrained_layout=True)
-    axes[0].plot(theta, payload["T_env"], label="input: T_env", color="tab:blue")
-    axes[0].plot(theta, payload["T_surface"], label="target: T_surface", color="tab:red")
+    # Draw the target first and the known input second. In the polar solver the
+    # two temperature curves can be close, and drawing T_surface last can hide
+    # the T_env curve while still showing it in the legend.
+    axes[0].plot(theta, payload["T_surface"], label="target: T_surface", color="tab:red", linewidth=1.8, alpha=0.78, zorder=2)
+    axes[0].plot(
+        theta,
+        payload["T_env"],
+        label="input: T_env",
+        color="tab:blue",
+        linestyle="--",
+        linewidth=2.2,
+        marker=".",
+        markersize=3.0,
+        markevery=max(1, len(theta) // 24),
+        zorder=3,
+    )
     axes[0].set_ylabel("temperature")
+    t_values = np.concatenate([np.asarray(payload["T_env"]).reshape(-1), np.asarray(payload["T_surface"]).reshape(-1)])
+    finite = t_values[np.isfinite(t_values)]
+    if finite.size:
+        lo = float(np.min(finite))
+        hi = float(np.max(finite))
+        pad = max(0.05 * (hi - lo), 1.0e-6)
+        axes[0].set_ylim(lo - pad, hi + pad)
     axes[0].legend(loc="best")
 
     axes[1].plot(theta, payload["h"], color="tab:green")

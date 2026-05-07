@@ -1,5 +1,5 @@
 {
-  "description": "Local module smoke-test config. Generates one raw Robin-conduction case for preprocessing into Processed_LocalModule_Dataset/packed_dataset.h5.",
+  "description": "Local module config. Generates one raw Robin-conduction case for preprocessing into Processed_LocalModule_Dataset/packed_dataset.h5.",
   "data_contract": {
     "port_inputs": [
       "theta",
@@ -37,7 +37,7 @@
   "save": {
     "root_dir": "./Data_Saved/LocalModule_Raw",
     "case_id": "local_0001",
-    "tag": "local_module_tiny",
+    "tag": "local_module",
     "save_pressure": false,
     "save_vorticity": false,
     "save_temperature": true,
@@ -55,6 +55,18 @@
     "t_env_min": 0.0,
     "t_env_max": 22.0,
     "n_boundary_modes": 6,
+    "boundary_modes_min": 2,
+    "boundary_modes_max": 6,
+    "h_log_perturb_scale": 0.10,
+    "t_env_perturb_scale": 0.20,
+
+    "solver_type": "polar_fd",
+    "_note_solver_type": "local_module.solver_type = polar_fd | cartesian_mask | ...",
+    
+    "polar_radial_points": 64,
+    "polar_theta_points": null,
+    "polar_regularize_center": true,
+    "interface_sample_radius": 0.95,
     "solver_iterations": 5000,
     "solver_tolerance": 1e-6,
     "relaxation": 1.25

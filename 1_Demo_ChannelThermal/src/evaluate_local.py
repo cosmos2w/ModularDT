@@ -172,17 +172,33 @@ def plot_internal(output_path: Path, sample: Dict, pred_internal: np.ndarray, me
 def plot_interface(output_path: Path, sample: Dict, pred_interface: np.ndarray) -> None:
     theta = sample["port_tokens"][:, 0]
     target = sample["interface_targets"]
-    fig, axes = plt.subplots(2, 1, figsize=(7.0, 5.0), sharex=True, constrained_layout=True)
+    rough = sample.get("local_target_roughness", np.zeros((4,), dtype=np.float32))
+    fig, axes = plt.subplots(3, 1, figsize=(7.4, 7.2), sharex=True, constrained_layout=True)
+    axes[0].plot(theta, sample["port_tokens"][:, 3], color="#4c78a8", lw=1.5, label="T_env")
+    axes[0].set_ylabel("T_env")
+    ax_h = axes[0].twinx()
+    ax_h.plot(theta, sample["port_tokens"][:, 4], color="#f58518", lw=1.3, label="h")
+    ax_h.set_ylabel("h")
+    axes[0].set_title(
+        f"Boundary inputs | solver={sample.get('solver_type', 'unknown')} "
+        f"modes={int(np.asarray(sample.get('n_active_modes', [-1])).reshape(-1)[0])}"
+    )
+    axes[0].grid(True, alpha=0.25)
     labels = ["T_surface", "q_normal"]
-    for idx, ax in enumerate(axes):
+    for idx, ax in enumerate(axes[1:]):
         channel_metrics = error_metrics(pred_interface[:, idx], target[:, idx])
         ax.plot(theta, target[:, idx], color="black", lw=1.8, label="GT")
         ax.plot(theta, pred_interface[:, idx], color="#d95f02", lw=1.5, label="Pred")
+        if "interface_targets_raw" in sample:
+            ax.plot(theta, sample["interface_targets_raw"][:, idx], color="#7f7f7f", lw=1.0, alpha=0.65, label="raw target")
         ax.set_ylabel(labels[idx])
-        ax.set_title(f"{labels[idx]} RMSE={channel_metrics['rmse']:.4e}, relL2={channel_metrics['relative_l2']:.4e}")
+        ax.set_title(
+            f"{labels[idx]} RMSE={channel_metrics['rmse']:.4e}, relL2={channel_metrics['relative_l2']:.4e}, "
+            f"rough={float(rough[idx]):.3f}"
+        )
         ax.grid(True, alpha=0.25)
     axes[-1].set_xlabel("theta")
-    axes[0].legend()
+    axes[1].legend()
     fig.savefig(output_path, dpi=170)
     plt.close(fig)
 
@@ -230,6 +246,10 @@ def main() -> int:
         target_interface = raw_sample["interface_targets"]
     internal_metrics = error_metrics(pred_internal.reshape(-1), target_internal.reshape(-1))
     interface_metrics = error_metrics(pred_interface, target_interface)
+    t_surface_metrics = error_metrics(pred_interface[:, 0], target_interface[:, 0])
+    q_normal_metrics = error_metrics(pred_interface[:, 1], target_interface[:, 1])
+    roughness = raw_sample.get("local_target_roughness", np.zeros((4,), dtype=np.float32))
+    n_active_modes = int(np.asarray(raw_sample.get("n_active_modes", [-1])).reshape(-1)[0])
 
     output_dir = evaluation_output_dir(args.output_dir, checkpoint_path, raw_sample["case_id"])
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -250,6 +270,10 @@ def main() -> int:
         "metric_note": "l2_error is the aggregate Euclidean norm over all values; rmse is usually better for visual comparison.",
         "internal_l2_error": internal_metrics["l2_norm"],
         "interface_l2_error": interface_metrics["l2_norm"],
+        "T_surface_rmse": t_surface_metrics["rmse"],
+        "T_surface_relative_l2": t_surface_metrics["relative_l2"],
+        "q_normal_rmse": q_normal_metrics["rmse"],
+        "q_normal_relative_l2": q_normal_metrics["relative_l2"],
         "internal_rmse": internal_metrics["rmse"],
         "interface_rmse": interface_metrics["rmse"],
         "internal_mae": internal_metrics["mae"],
@@ -260,6 +284,17 @@ def main() -> int:
         "interface_num_values": int(interface_metrics["num_values"]),
         "internal_metrics": internal_metrics,
         "interface_metrics": interface_metrics,
+        "T_surface_metrics": t_surface_metrics,
+        "q_normal_metrics": q_normal_metrics,
+        "solver_type": str(raw_sample.get("solver_type", "unknown")),
+        "n_active_modes": n_active_modes,
+        "roughness_metrics": {
+            "roughness_T_surface": float(roughness[0]) if roughness.size > 0 else None,
+            "roughness_q_normal": float(roughness[1]) if roughness.size > 1 else None,
+            "highfreq_ratio_T_surface": float(roughness[2]) if roughness.size > 2 else None,
+            "highfreq_ratio_q_normal": float(roughness[3]) if roughness.size > 3 else None,
+        },
+        "interface_targets_smoothed": bool(getattr(raw_dataset, "interface_targets_smoothed", False)),
         "outputs": {
             "internal_temperature_comparison": str(output_dir / "internal_temperature_comparison.png"),
             "interface_curve_comparison": str(output_dir / "interface_curve_comparison.png"),

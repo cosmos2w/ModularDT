@@ -188,6 +188,16 @@ class LocalModuleDataset(Dataset):
             self.interface_target_names = decode_string_array(
                 h5.get("interface_target_names", np.asarray([], dtype="S"))[...]
             )
+            self.local_target_roughness_names = decode_string_array(
+                h5.get("local_target_roughness_names", np.asarray([], dtype="S"))[...]
+            )
+            self.solver_types = decode_string_array(h5.get("solver_type", np.asarray(["unknown"] * len(self.case_ids), dtype="S"))[...])
+            self.n_active_modes_all = (
+                np.asarray(h5["n_active_modes"][...], dtype=np.int32)
+                if "n_active_modes" in h5
+                else np.full((len(self.case_ids),), -1, dtype=np.int32)
+            )
+            self.interface_targets_smoothed = bool(h5.attrs.get("interface_targets_smoothed", False))
             self.module_param_dim = int(h5["module_params"].shape[-1])
             self.port_token_dim = int(h5["port_tokens"].shape[-1])
             self.interface_target_dim = int(h5["interface_targets"].shape[-1])
@@ -221,6 +231,12 @@ class LocalModuleDataset(Dataset):
         internal_query_points = h5["internal_query_points"][idx].astype(np.float32)
         internal_temperature_targets = h5["internal_temperature_targets"][idx].astype(np.float32)[..., None]
         interface_targets = h5["interface_targets"][idx].astype(np.float32)
+        interface_targets_raw = h5["interface_targets_raw"][idx].astype(np.float32) if "interface_targets_raw" in h5 else None
+        local_target_roughness = (
+            h5["local_target_roughness"][idx].astype(np.float32)
+            if "local_target_roughness" in h5
+            else np.zeros((4,), dtype=np.float32)
+        )
 
         if self.normalize_inputs:
             module_params = self.normalizer.normalize_module_params(module_params)
@@ -235,11 +251,219 @@ class LocalModuleDataset(Dataset):
             "internal_query_points": internal_query_points,
             "internal_temperature_targets": internal_temperature_targets,
             "interface_targets": interface_targets,
+            **({"interface_targets_raw": interface_targets_raw} if interface_targets_raw is not None else {}),
+            "local_target_roughness": local_target_roughness,
+            "solver_type": self.solver_types[idx] if idx < len(self.solver_types) else "unknown",
+            "n_active_modes": np.asarray([self.n_active_modes_all[idx]], dtype=np.int32),
             "case_id": self.case_ids[idx],
         }
         if self.include_grid and "local_grid" in h5 and "local_mask" in h5:
             sample["local_grid"] = h5["local_grid"][idx].astype(np.float32)
             sample["local_mask"] = h5["local_mask"][idx].astype(np.float32)
+        return sample
+
+
+class GlobalModuleAlignmentDataset(Dataset):
+    """View processed global channel data as local-surrogate alignment samples.
+
+    Each valid module in each selected global case becomes one Stage-A sample
+    with local module parameters, local-format port tokens, internal
+    temperature targets, and interface targets. This uses existing processed
+    global data only; it does not require a new global preprocessing step.
+    """
+
+    def __init__(
+        self,
+        packed_h5_path: str | Path = GLOBAL_DATASET_PATH,
+        *,
+        split: str = "train",
+        normalize_inputs: bool = False,
+        normalize_targets: bool = False,
+        include_grid: bool = True,
+    ):
+        self.path = resolve_demo_path(packed_h5_path)
+        self.split = str(split)
+        self.normalize_inputs = bool(normalize_inputs)
+        self.normalize_targets = bool(normalize_targets)
+        self.include_grid = bool(include_grid)
+        self._h5: Optional[h5py.File] = None
+        if not self.path.exists():
+            raise FileNotFoundError(f"Global channel thermal packed dataset not found: {self.path}")
+        self.module_param_names = ["q_internal", "solid_k", "solid_alpha", "h_mean", "h_std", "T_env_mean", "T_env_std"]
+        self.port_input_feature_names = list(LOCAL_PORT_INPUT_FEATURE_NAMES)
+        self.interface_target_names = list(LOCAL_INTERFACE_TARGET_NAMES)
+        self.local_target_roughness_names = []
+        with h5py.File(self.path, "r") as h5:
+            if "case_ids" in h5 and "splits" in h5:
+                case_ids = decode_string_array(h5["case_ids"][...])
+                splits = decode_string_array(h5["splits"][...])
+            else:
+                case_ids = sorted(h5["cases"].keys())
+                splits = [_decode_scalar_string(h5["cases"][key].attrs.get("split", "all")) for key in case_ids]
+            root_indices = _select_indices(splits, self.split)
+            self.case_ids = case_ids
+            self.records: List[tuple[str, int]] = []
+            for root_idx in root_indices:
+                case_id = case_ids[root_idx]
+                group = h5["cases"][case_id]
+                present = group["module_present"][...].astype(np.float32)
+                for module_idx in np.flatnonzero(present > 0.5):
+                    self.records.append((case_id, int(module_idx)))
+            if self.records:
+                sample_group = h5["cases"][self.records[0][0]]
+                self.n_interface_points = int(sample_group["interface_condition"].shape[1])
+                mask = sample_group["module_internal_mask"][...].astype(np.float32)
+                self.num_internal_points = int(np.sum(mask.astype(bool)))
+            else:
+                self.n_interface_points = int(h5.attrs.get("n_interface_points", 0))
+                self.num_internal_points = 0
+            self.module_param_dim = 7
+            self.port_token_dim = 5
+            self.interface_target_dim = 2
+            self.normalizer = self._compute_normalizer(h5)
+
+    def _material_params(self, group: h5py.Group) -> np.ndarray:
+        materials = group.get("material_parameters", None)
+        if materials is None:
+            return np.zeros((6,), dtype=np.float32)
+        return np.asarray(
+            [
+                float(materials.attrs.get("nu", 0.0)),
+                float(materials.attrs.get("solid_alpha", 0.0)),
+                float(materials.attrs.get("fluid_alpha", 0.0)),
+                float(materials.attrs.get("solid_k", 0.0)),
+                float(materials.attrs.get("fluid_k", 0.0)),
+                float(materials.attrs.get("module_radius", 0.0)),
+            ],
+            dtype=np.float32,
+        )
+
+    def _module_params_for(
+        self,
+        heat_power: float,
+        interface_condition: np.ndarray,
+        material_params: np.ndarray,
+        interface_names: Sequence[str],
+    ) -> np.ndarray:
+        t_idx = _feature_indices(interface_names, ("T_outside",), (3,))[0]
+        h_idx = _feature_indices(interface_names, ("h_proxy",), (6,))[0]
+        t_env = interface_condition[:, t_idx]
+        h = interface_condition[:, h_idx]
+        return np.asarray(
+            [
+                float(heat_power),
+                float(material_params[3]) if material_params.shape[0] > 3 else 0.0,
+                float(material_params[1]) if material_params.shape[0] > 1 else 0.0,
+                float(np.mean(h)),
+                float(np.std(h)),
+                float(np.mean(t_env)),
+                float(np.std(t_env)),
+            ],
+            dtype=np.float32,
+        )
+
+    def _port_tokens_for(self, interface_condition: np.ndarray, interface_names: Sequence[str]) -> np.ndarray:
+        requested = ("theta", "normal_x", "normal_y", "T_outside", "h_proxy")
+        indices = _feature_indices(interface_names, requested, (0, 1, 2, 3, 6))
+        return interface_condition[:, indices].astype(np.float32)
+
+    def _compute_normalizer(self, h5: h5py.File) -> H5Normalizer:
+        if not self.records:
+            return H5Normalizer({})
+        interface_names = decode_string_array(
+            h5.get("interface_condition_feature_names", np.asarray(GLOBAL_INTERFACE_CONDITION_FEATURE_NAMES, dtype="S"))[...]
+        )
+        module_params = []
+        port_tokens = []
+        internal_targets = []
+        interface_targets = []
+        for case_id, module_idx in self.records:
+            group = h5["cases"][case_id]
+            material = self._material_params(group)
+            cond = group["interface_condition"][module_idx].astype(np.float32)
+            heat = float(group["heat_powers"][module_idx])
+            module_params.append(self._module_params_for(heat, cond, material, interface_names))
+            port_tokens.append(self._port_tokens_for(cond, interface_names))
+            mask = group["module_internal_mask"][...].astype(bool)
+            internal_targets.append(group["module_internal_temperature"][module_idx][mask].astype(np.float32).reshape(-1))
+            interface_targets.append(group["interface_target"][module_idx].astype(np.float32))
+        module_params_arr = np.stack(module_params)
+        port_arr = np.stack(port_tokens)
+        internal_arr = np.concatenate(internal_targets)
+        interface_arr = np.stack(interface_targets)
+        return H5Normalizer(
+            {
+                "module_params_mean": np.mean(module_params_arr, axis=0).astype(np.float32),
+                "module_params_std": np.std(module_params_arr, axis=0).astype(np.float32),
+                "port_tokens_mean": np.mean(port_arr.reshape(-1, port_arr.shape[-1]), axis=0).astype(np.float32),
+                "port_tokens_std": np.std(port_arr.reshape(-1, port_arr.shape[-1]), axis=0).astype(np.float32),
+                "internal_temperature_mean": np.asarray([np.mean(internal_arr)], dtype=np.float32),
+                "internal_temperature_std": np.asarray([np.std(internal_arr)], dtype=np.float32),
+                "interface_targets_mean": np.mean(interface_arr.reshape(-1, interface_arr.shape[-1]), axis=0).astype(np.float32),
+                "interface_targets_std": np.std(interface_arr.reshape(-1, interface_arr.shape[-1]), axis=0).astype(np.float32),
+            }
+        )
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getstate__(self) -> Dict[str, Any]:
+        state = dict(self.__dict__)
+        state["_h5"] = None
+        return state
+
+    @property
+    def h5(self) -> h5py.File:
+        if self._h5 is None:
+            self._h5 = h5py.File(self.path, "r")
+        return self._h5
+
+    def close(self) -> None:
+        if self._h5 is not None:
+            self._h5.close()
+            self._h5 = None
+
+    def __getitem__(self, item: int) -> Dict[str, Any]:
+        case_id, module_idx = self.records[int(item)]
+        group = self.h5["cases"][case_id]
+        interface_names = decode_string_array(
+            self.h5.get("interface_condition_feature_names", np.asarray(GLOBAL_INTERFACE_CONDITION_FEATURE_NAMES, dtype="S"))[...]
+        )
+        material = self._material_params(group)
+        cond = group["interface_condition"][module_idx].astype(np.float32)
+        heat = float(group["heat_powers"][module_idx])
+        module_params = self._module_params_for(heat, cond, material, interface_names)
+        port_tokens = self._port_tokens_for(cond, interface_names)
+        mask = group["module_internal_mask"][...].astype(np.float32)
+        internal_query_points = _local_disk_query_points(mask)
+        internal_targets = group["module_internal_temperature"][module_idx][mask.astype(bool)].astype(np.float32)[..., None]
+        interface_targets = group["interface_target"][module_idx].astype(np.float32)
+        if self.normalize_inputs:
+            module_params = self.normalizer.normalize_module_params(module_params)
+            port_tokens = self.normalizer.normalize_port_tokens(port_tokens)
+        if self.normalize_targets:
+            internal_targets = self.normalizer.normalize_internal_temperature(internal_targets)
+            interface_targets = self.normalizer.normalize_interface_targets(interface_targets)
+        sample: Dict[str, Any] = {
+            "module_params": module_params.astype(np.float32),
+            "port_tokens": port_tokens.astype(np.float32),
+            "internal_query_points": internal_query_points.astype(np.float32),
+            "internal_temperature_targets": internal_targets.astype(np.float32),
+            "interface_targets": interface_targets.astype(np.float32),
+            "local_target_roughness": np.zeros((4,), dtype=np.float32),
+            "solver_type": "global_alignment",
+            "n_active_modes": np.asarray([-1], dtype=np.int32),
+            "case_id": f"{case_id}_M{module_idx}",
+        }
+        if self.include_grid:
+            sample["local_grid"] = np.stack(
+                np.meshgrid(
+                    np.linspace(-1.0, 1.0, mask.shape[1], dtype=np.float32),
+                    np.linspace(-1.0, 1.0, mask.shape[0], dtype=np.float32),
+                ),
+                axis=-1,
+            )
+            sample["local_mask"] = mask.astype(np.float32)
         return sample
 
 

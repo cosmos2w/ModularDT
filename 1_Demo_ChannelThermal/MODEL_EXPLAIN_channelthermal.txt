@@ -1,7 +1,7 @@
 Demo 1 Channel Thermal Forward Model
 ====================================
 
-Updated: 2026-04-28
+Updated: 2026-04-29
 
 Stage A: local module surrogate
 -------------------------------
@@ -20,6 +20,43 @@ The local target generator uses the same raw thermal scale as the global
 module interiors by solving with an effective normalized-disk coefficient
 solid_alpha / module_radius^2. The default local T_env and h sampling ranges
 cover the global interface_condition T_outside and h_proxy ranges.
+
+The local generator now defaults to a polar finite-difference solver
+(`solver_type="polar_fd"`). The physical boundary row is r=1, so interface
+targets are read directly as:
+
+  T_surface(theta) = T(r=1, theta)
+  q_normal(theta) = h(theta) * (T_surface(theta) - T_env(theta))
+
+This avoids the old Cartesian disk-mask artifact where a circular boundary was
+sampled from a stair-stepped square-grid mask. The old Cartesian solver remains
+available with `solver_type="cartesian_mask"` and uses
+`interface_sample_radius` for its fallback target sampling.
+
+Boundary condition complexity is randomized per case. `n_boundary_modes` is the
+maximum saved Fourier coefficient capacity, while `boundary_modes_min` and
+`boundary_modes_max` select the active low-frequency mode count for each raw
+case. The heat-transfer curve is generated in log space and clipped only as a
+safety bound:
+
+  log_h(theta) = log(h_base) + low-frequency perturbation
+  h(theta) = exp(log_h(theta))
+
+Preprocessing keeps raw interface targets by default. Optional smoothing is an
+ablation only; when enabled, raw targets are stored separately as
+interface_targets_raw. Roughness diagnostics are always stored as
+local_target_roughness, and solver metadata includes solver_type,
+n_active_modes, effective_conductivity, and module_radius.
+
+Stage A can now be trained in two passes:
+
+  Stage A1: synthetic local data
+  Stage A2: global_alignment or mixed fine-tuning from existing processed
+            global module/interface targets
+  Stage B: use the aligned local surrogate inside the global model
+
+Global alignment uses existing processed global data; it does not require new
+global preprocessing or changes to the Stage-B architecture.
 
 For the current Stage-B workflow, train this local surrogate with
 normalize_inputs=true and normalize_targets=true. The checkpoint stores local

@@ -1,6 +1,7 @@
 {
-  "Run_ID": "0003",
-  "_note": "Default is a global-only baseline. Set model.use_local_surrogate=true and provide a local checkpoint after Stage A is trained.",
+  "Run_ID": "0004",
+  "_note_1": "Default is a global-only baseline. Set model.use_local_surrogate=true and provide a local checkpoint after Stage A is trained.",
+  "_note_2": "0004 tests using new local module surrogate & updated hypergraph learning",
   "dataset": {
     "packed_h5_path": "./Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
     "train_split": "train",

@@ -33,8 +33,10 @@ global channel simulator:
     -(alpha_s / R^2) Laplacian_xi(T) = q
     -(alpha_s / R^2) dT/dn_xi = h(theta) * (T_surface - T_env(theta))
 
-Boundary functions are sampled from low-frequency Fourier modes. The solver is
-a robust finite-difference SOR iteration on a square grid with a circular mask.
+Boundary functions are sampled from low-frequency Fourier modes. The default
+solver is a polar finite-difference SOR iteration so interface targets are read
+directly on the true circular boundary instead of from a Cartesian stair-step
+mask. A Cartesian mask solver remains available as a compatibility fallback.
 """
 from __future__ import annotations
 
@@ -128,6 +130,9 @@ def sample_boundary_conditions(cfg: SimulationConfig) -> Dict[str, np.ndarray | 
     rng = np.random.default_rng(int(cfg.layout.seed))
     n_theta = int(local.n_interface_points)
     n_modes = int(local.n_boundary_modes)
+    modes_min = int(local.boundary_modes_min)
+    modes_max = int(local.n_boundary_modes if local.boundary_modes_max is None else local.boundary_modes_max)
+    n_active_modes = int(rng.integers(modes_min, modes_max + 1))
     theta = np.linspace(0.0, 2.0 * np.pi, n_theta, endpoint=False, dtype=np.float64)
     q_internal = float(rng.uniform(float(local.q_min), float(local.q_max)))
     t_base = float(rng.uniform(float(local.t_env_min), float(local.t_env_max)))
@@ -135,31 +140,48 @@ def sample_boundary_conditions(cfg: SimulationConfig) -> Dict[str, np.ndarray | 
 
     coeffs = np.zeros((n_modes, len(CONDITION_COEFFICIENT_NAMES)), dtype=np.float64)
     t_env = np.full_like(theta, t_base)
-    h_factor = np.ones_like(theta)
+    log_h = np.full_like(theta, math.log(max(h_base, 1.0e-12)))
     t_span = float(local.t_env_max) - float(local.t_env_min)
-    for mode_idx in range(n_modes):
+    for mode_idx in range(n_active_modes):
         mode = mode_idx + 1
-        t_scale = 0.20 * t_span / max(mode, 1)
-        h_scale = 0.25 / max(mode, 1)
+        t_scale = float(local.t_env_perturb_scale) * t_span / max(mode, 1)
+        h_scale = float(local.h_log_perturb_scale) / max(mode, 1)
         t_cos = float(rng.normal(0.0, t_scale))
         t_sin = float(rng.normal(0.0, t_scale))
         h_cos = float(rng.normal(0.0, h_scale))
         h_sin = float(rng.normal(0.0, h_scale))
         t_env += t_cos * np.cos(mode * theta) + t_sin * np.sin(mode * theta)
-        h_factor += h_cos * np.cos(mode * theta) + h_sin * np.sin(mode * theta)
+        log_h += h_cos * np.cos(mode * theta) + h_sin * np.sin(mode * theta)
         coeffs[mode_idx] = [mode, t_cos, t_sin, h_cos, h_sin]
 
     t_env = np.clip(t_env, float(local.t_env_min), float(local.t_env_max))
-    h = np.clip(h_base * h_factor, float(local.h_min), float(local.h_max))
+    h = np.clip(np.exp(log_h), float(local.h_min), float(local.h_max))
     return {
         "theta": theta,
         "T_env": t_env,
         "h": h,
         "q_internal": q_internal,
         "condition_coefficients": coeffs,
+        "n_active_modes": float(n_active_modes),
         "T_base": t_base,
         "h_base": h_base,
+        "h_min_actual": float(np.min(h)),
+        "h_max_actual": float(np.max(h)),
+        "T_env_min_actual": float(np.min(t_env)),
+        "T_env_max_actual": float(np.max(t_env)),
+        "boundary_roughness_T_env": curve_roughness(t_env),
+        "boundary_roughness_h": curve_roughness(h),
     }
+
+
+def curve_roughness(values: np.ndarray) -> float:
+    """Periodic RMS first-difference roughness normalized by signal scale."""
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    if arr.size < 2:
+        return 0.0
+    diff = arr - np.roll(arr, 1)
+    scale = max(float(np.std(arr)), 1.0e-8)
+    return float(np.sqrt(np.mean(diff * diff)) / scale)
 
 
 def interpolate_periodic(theta_grid: np.ndarray, values: np.ndarray, theta: np.ndarray) -> np.ndarray:
@@ -244,6 +266,120 @@ def solve_disk_conduction(
     return temperature, xi, eta, iteration, float(residual)
 
 
+def solve_disk_conduction_polar(
+    cfg: SimulationConfig,
+    theta: np.ndarray,
+    t_env: np.ndarray,
+    h_theta: np.ndarray,
+    q_internal: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, float]:
+    """Solve steady disk conduction on a periodic polar grid.
+
+    The boundary row is not sampled from a Cartesian mask. It is updated from
+    the Robin condition at r=1, making ``T_surface`` and ``q_normal`` clean
+    physical boundary targets.
+    """
+    local = cfg.local_module
+    nr = int(local.polar_radial_points)
+    ntheta = int(local.polar_theta_points or local.n_interface_points)
+    r = np.linspace(0.0, 1.0, nr, dtype=np.float64)
+    theta_grid = np.linspace(0.0, 2.0 * np.pi, ntheta, endpoint=False, dtype=np.float64)
+    t_env_p = interpolate_periodic(theta, t_env, theta_grid)
+    h_p = interpolate_periodic(theta, h_theta, theta_grid)
+    dr = 1.0 / max(nr - 1, 1)
+    dtheta = 2.0 * np.pi / max(ntheta, 1)
+    effective_k = local_effective_conductivity(cfg)
+    # The Cartesian mask solver tolerated over-relaxation. The polar stencil is
+    # cleaner at the boundary but more sensitive near r=0, so use conservative
+    # under-relaxation for robustness across random boundary functions.
+    relaxation = min(max(float(local.relaxation), 0.05), 1.00)
+    max_iterations = int(local.solver_iterations)
+    tolerance = float(local.solver_tolerance)
+
+    mean_env = float(np.mean(t_env_p))
+    mean_h = max(float(np.mean(h_p)), 1.0e-8)
+    temperature = np.full((nr, ntheta), mean_env + q_internal / max(2.0 * mean_h, 1.0e-8), dtype=np.float64)
+    source_over_k = q_internal / max(effective_k, 1.0e-12)
+
+    residual = math.inf
+    for iteration in range(1, max_iterations + 1):
+        old_temperature = temperature.copy()
+
+        if bool(local.polar_regularize_center):
+            temperature[0, :] = float(np.mean(temperature[1, :]))
+
+        inner = temperature[-2, :]
+        temperature[-1, :] = ((effective_k / dr) * inner + h_p * t_env_p) / np.maximum((effective_k / dr) + h_p, 1.0e-12)
+
+        max_update = 0.0
+        residual = 0.0
+        for j in range(1, nr - 1):
+            radius = max(float(r[j]), dr)
+            cp = 1.0 / (dr * dr) + 1.0 / (2.0 * radius * dr)
+            cm = 1.0 / (dr * dr) - 1.0 / (2.0 * radius * dr)
+            ct = 1.0 / (radius * radius * dtheta * dtheta)
+            denom = 2.0 / (dr * dr) + 2.0 * ct
+            theta_plus = np.roll(temperature[j, :], -1)
+            theta_minus = np.roll(temperature[j, :], 1)
+            target = (cp * temperature[j + 1, :] + cm * temperature[j - 1, :] + ct * (theta_plus + theta_minus) + source_over_k) / denom
+            new_row = (1.0 - relaxation) * temperature[j, :] + relaxation * target
+            if not np.all(np.isfinite(new_row)):
+                residual = math.inf
+                break
+            max_update = max(max_update, float(np.max(np.abs(new_row - temperature[j, :]))))
+            temperature[j, :] = new_row
+        if not math.isfinite(residual):
+            break
+
+        if bool(local.polar_regularize_center):
+            temperature[0, :] = float(np.mean(temperature[1, :]))
+        inner = temperature[-2, :]
+        temperature[-1, :] = ((effective_k / dr) * inner + h_p * t_env_p) / np.maximum((effective_k / dr) + h_p, 1.0e-12)
+
+        equation_residual = float(np.max(np.abs(temperature - old_temperature)))
+        residual = max(max_update, equation_residual)
+        if not math.isfinite(residual):
+            break
+        if residual < tolerance:
+            break
+
+    t_surface = temperature[-1, :].copy()
+    q_normal = h_p * (t_surface - t_env_p)
+    return temperature, r, theta_grid, t_surface, q_normal, iteration, float(residual)
+
+
+def sample_polar_to_square(
+    temperature_polar: np.ndarray,
+    r_grid: np.ndarray,
+    theta_grid: np.ndarray,
+    size: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Interpolate a polar disk solution onto the legacy square local grid."""
+    xi, eta, mask = local_disk_grid(size)
+    rr = np.sqrt(xi * xi + eta * eta)
+    th = np.mod(np.arctan2(eta, xi), 2.0 * np.pi)
+    nr, ntheta = temperature_polar.shape
+    radial_scaled = np.clip(rr / max(float(r_grid[-1]), 1.0e-12), 0.0, 1.0) * (nr - 1)
+    j0 = np.floor(radial_scaled).astype(np.int64)
+    j1 = np.clip(j0 + 1, 0, nr - 1)
+    wr = radial_scaled - j0
+    theta_scaled = (th / (2.0 * np.pi)) * ntheta
+    i0 = np.floor(theta_scaled).astype(np.int64) % ntheta
+    i1 = (i0 + 1) % ntheta
+    wt = theta_scaled - np.floor(theta_scaled)
+
+    v00 = temperature_polar[j0, i0]
+    v01 = temperature_polar[j0, i1]
+    v10 = temperature_polar[j1, i0]
+    v11 = temperature_polar[j1, i1]
+    row0 = (1.0 - wt) * v00 + wt * v01
+    row1 = (1.0 - wt) * v10 + wt * v11
+    square = (1.0 - wr) * row0 + wr * row1
+    square = square.astype(np.float64)
+    square[~mask] = 0.0
+    return square, xi, eta
+
+
 def extract_boundary_targets(
     temperature: np.ndarray,
     theta: np.ndarray,
@@ -264,6 +400,40 @@ def extract_boundary_targets(
     return t_surface.astype(np.float32), q_normal.astype(np.float32), port_tokens.astype(np.float32), interface_targets.astype(np.float32)
 
 
+def extract_boundary_targets_cartesian(
+    cfg: SimulationConfig,
+    temperature: np.ndarray,
+    theta: np.ndarray,
+    t_env: np.ndarray,
+    h_theta: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build Cartesian fallback targets at a configurable inside-disk radius."""
+    sample_radius = float(cfg.local_module.interface_sample_radius)
+    xi = sample_radius * np.cos(theta)
+    eta = sample_radius * np.sin(theta)
+    t_surface = local_bilinear_sample(temperature, xi, eta, fill_value=0.0)
+    q_normal = h_theta * (t_surface - t_env)
+    port_tokens = np.stack([theta, np.cos(theta), np.sin(theta), t_env, h_theta], axis=-1)
+    interface_targets = np.stack([t_surface, q_normal], axis=-1)
+    return t_surface.astype(np.float32), q_normal.astype(np.float32), port_tokens.astype(np.float32), interface_targets.astype(np.float32)
+
+
+def build_port_and_targets_from_polar(
+    theta_target: np.ndarray,
+    theta_polar: np.ndarray,
+    t_env_input: np.ndarray,
+    h_input: np.ndarray,
+    t_surface_polar: np.ndarray,
+    q_normal_polar: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Interpolate polar boundary outputs onto configured interface ports."""
+    t_surface = interpolate_periodic(theta_polar, t_surface_polar, theta_target)
+    q_normal = interpolate_periodic(theta_polar, q_normal_polar, theta_target)
+    port_tokens = np.stack([theta_target, np.cos(theta_target), np.sin(theta_target), t_env_input, h_input], axis=-1)
+    interface_targets = np.stack([t_surface, q_normal], axis=-1)
+    return t_surface.astype(np.float32), q_normal.astype(np.float32), port_tokens.astype(np.float32), interface_targets.astype(np.float32)
+
+
 def run_case(cfg: SimulationConfig) -> Path:
     """Run one local case and save raw arrays for preprocessing."""
     # 1. Sample boundary-condition functions and a scalar heat generation rate.
@@ -273,7 +443,29 @@ def run_case(cfg: SimulationConfig) -> Path:
     h_theta = conditions["h"].astype(np.float64)
     q_internal = float(conditions["q_internal"])
     # 2. Solve the steady disk conduction problem.
-    temperature, xi, eta, iterations, residual = solve_disk_conduction(cfg, theta, t_env, h_theta, q_internal)
+    solver_type = str(cfg.local_module.solver_type)
+    if solver_type == "polar_fd":
+        polar_temperature, r_grid, theta_polar, t_surface_p, q_normal_p, iterations, residual = solve_disk_conduction_polar(
+            cfg,
+            theta,
+            t_env,
+            h_theta,
+            q_internal,
+        )
+        temperature, xi, eta = sample_polar_to_square(polar_temperature, r_grid, theta_polar, int(cfg.local_module.local_grid_size))
+        t_surface, q_normal, port_tokens, interface_targets = build_port_and_targets_from_polar(
+            theta,
+            theta_polar,
+            t_env,
+            h_theta,
+            t_surface_p,
+            q_normal_p,
+        )
+    elif solver_type == "cartesian_mask":
+        temperature, xi, eta, iterations, residual = solve_disk_conduction(cfg, theta, t_env, h_theta, q_internal)
+        t_surface, q_normal, port_tokens, interface_targets = extract_boundary_targets_cartesian(cfg, temperature, theta, t_env, h_theta)
+    else:
+        raise ValueError(f"Unsupported local_module.solver_type={solver_type!r}.")
     solver_limit = int(cfg.local_module.solver_iterations)
     solver_tolerance = float(cfg.local_module.solver_tolerance)
     converged = bool(residual < solver_tolerance)
@@ -284,9 +476,6 @@ def run_case(cfg: SimulationConfig) -> Path:
         f"residual={residual:.3e}, tolerance={solver_tolerance:.3e}"
     )
     disk_mask = (xi * xi + eta * eta <= 1.0).astype(np.uint8)
-
-    # 3. Sample boundary inputs and solved targets on the same theta ports.
-    t_surface, q_normal, port_tokens, interface_targets = extract_boundary_targets(temperature, theta, t_env, h_theta)
 
     # 4. Save one raw frame. These names are consumed directly by the local
     # preprocessor; keep additions backward-compatible.
@@ -312,6 +501,14 @@ def run_case(cfg: SimulationConfig) -> Path:
         "interface_target_names": string_array(INTERFACE_TARGET_NAMES),
         "effective_conductivity": np.asarray([local_effective_conductivity(cfg)], dtype=np.float32),
         "module_radius": np.asarray([float(cfg.domain.module_radius)], dtype=np.float32),
+        "solver_type": np.asarray(solver_type),
+        "n_active_modes": np.asarray([int(conditions["n_active_modes"])], dtype=np.int32),
+        "h_min_actual": np.asarray([float(conditions["h_min_actual"])], dtype=np.float32),
+        "h_max_actual": np.asarray([float(conditions["h_max_actual"])], dtype=np.float32),
+        "T_env_min_actual": np.asarray([float(conditions["T_env_min_actual"])], dtype=np.float32),
+        "T_env_max_actual": np.asarray([float(conditions["T_env_max_actual"])], dtype=np.float32),
+        "boundary_roughness_T_env": np.asarray([float(conditions["boundary_roughness_T_env"])], dtype=np.float32),
+        "boundary_roughness_h": np.asarray([float(conditions["boundary_roughness_h"])], dtype=np.float32),
     }
     np.savez_compressed(scene_dir / "frame_000000.npz", **payload)
     np.savez_compressed(case_dir / "local_solution.npz", **payload)
@@ -321,6 +518,14 @@ def run_case(cfg: SimulationConfig) -> Path:
         "q_internal": q_internal,
         "T_base": float(conditions["T_base"]),
         "h_base": float(conditions["h_base"]),
+        "n_active_modes": int(conditions["n_active_modes"]),
+        "h_min_actual": float(conditions["h_min_actual"]),
+        "h_max_actual": float(conditions["h_max_actual"]),
+        "T_env_min_actual": float(conditions["T_env_min_actual"]),
+        "T_env_max_actual": float(conditions["T_env_max_actual"]),
+        "boundary_roughness_T_env": float(conditions["boundary_roughness_T_env"]),
+        "boundary_roughness_h": float(conditions["boundary_roughness_h"]),
+        "solver_type": solver_type,
         "iterations": int(iterations),
         "solver_iterations_used": int(iterations),
         "solver_iterations_limit": solver_limit,

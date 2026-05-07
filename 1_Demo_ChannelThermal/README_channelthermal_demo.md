@@ -1,6 +1,6 @@
 # Demo 1: Channel Thermal Modular Design
 
-Updated: 2026-04-28
+Updated: 2026-04-29
 
 ## Purpose
 
@@ -127,8 +127,19 @@ with Robin boundary functions:
 
 `T_env(theta)` and `h(theta)` are sampled from low-frequency Fourier/random
 modes over ranges chosen to cover the global simulator's interface
-`T_outside` and `h_proxy` values. The solver uses a simple finite-difference
-SOR iteration on a square grid with a disk mask.
+`T_outside` and `h_proxy` values. The number of active boundary modes is
+randomized per case between `boundary_modes_min` and `boundary_modes_max`,
+while `n_boundary_modes` remains the saved coefficient capacity.
+
+The local solver defaults to `solver_type="polar_fd"`. It solves on a polar
+finite-difference grid and reads `T_surface` and `q_normal` directly at the
+true circular boundary. This avoids the Cartesian disk-mask stair-step artifact
+that made local interface curves bumpy when boundary targets were sampled near
+the edge of a square grid.
+
+`solver_type="cartesian_mask"` remains available for compatibility. In that
+fallback path, `interface_sample_radius` controls the inside-disk sampling
+radius used for interface targets.
 
 ## Steady Target Selection
 
@@ -227,6 +238,25 @@ Target-derived local summaries are stored separately:
 local_target_stats["T_mean", "T_max", "T_min", "T_std"]
 ```
 
+The preprocessor keeps interface targets raw by default. Optional
+`--smooth-interface-targets --interface-smooth-modes N` is only an ablation and
+diagnostic path; if enabled, the raw curves are preserved in
+`interface_targets_raw`.
+
+Roughness diagnostics are always stored:
+
+```text
+local_target_roughness[
+  "roughness_T_surface",
+  "roughness_q_normal",
+  "highfreq_ratio_T_surface",
+  "highfreq_ratio_q_normal"
+]
+```
+
+Solver metadata is also packed when available: `solver_type`,
+`n_active_modes`, `effective_conductivity`, and `module_radius`.
+
 The local preprocessor also detects old raw files where `port_tokens` included
 `T_surface` or `q_normal`, prints a warning, and strips those target columns
 from model inputs.
@@ -296,6 +326,19 @@ There is no periodic wrapping or minimum-image distance.
 ## Training Stages
 
 Stage A trains a local module thermal surrogate from the local dataset.
+Recommended workflow:
+
+```text
+Stage A1: train on synthetic local data.
+Stage A2: fine-tune with dataset.source="global_alignment" or "mixed".
+Stage B: use the aligned local surrogate in the global model.
+```
+
+`GlobalModuleAlignmentDataset` reads the existing processed global HDF5 file
+and treats each valid module as one local-surrogate sample. It converts
+`interface_condition` into local port tokens and uses global
+`module_internal_temperature` and `interface_target` as targets, so no new
+global preprocessing is required.
 
 Stage B trains a global hypergraph-organized neural-field model from the global
 dataset. When configured, it loads the frozen Stage A local surrogate and uses

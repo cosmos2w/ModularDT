@@ -91,6 +91,12 @@ MODULE_PARAM_NAMES = (
 PORT_INPUT_FEATURE_NAMES = ("theta", "cos_theta", "sin_theta", "T_env", "h")
 INTERFACE_TARGET_NAMES = ("T_surface", "q_normal")
 LOCAL_TARGET_STAT_NAMES = ("T_mean", "T_max", "T_min", "T_std")
+LOCAL_TARGET_ROUGHNESS_NAMES = (
+    "roughness_T_surface",
+    "roughness_q_normal",
+    "highfreq_ratio_T_surface",
+    "highfreq_ratio_q_normal",
+)
 
 
 @dataclass
@@ -117,8 +123,14 @@ class LocalProcessedCase:
     internal_query_points: np.ndarray
     internal_temperature_targets: np.ndarray
     interface_targets: np.ndarray
+    interface_targets_raw: np.ndarray | None
+    local_target_roughness: np.ndarray
     local_grid: np.ndarray
     local_mask: np.ndarray
+    solver_type: str
+    n_active_modes: int
+    effective_conductivity: float
+    module_radius: float
 
 
 def parse_args() -> argparse.Namespace:
@@ -132,6 +144,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--train-fraction", type=float, default=0.90, help="Train split fraction for unsplit raw folders.")
     parser.add_argument("--seed", type=int, default=321, help="Split RNG seed.")
+    parser.add_argument("--smooth-interface-targets", action="store_true", help="Optional ablation: smooth interface targets before writing interface_targets.")
+    parser.add_argument("--interface-smooth-modes", type=int, default=6, help="Number of low Fourier modes to keep when smoothing is enabled.")
     return parser.parse_args()
 
 
@@ -237,7 +251,78 @@ def read_interface_targets(payload: Dict[str, np.ndarray]) -> np.ndarray:
     return np.stack([payload["T_surface"], payload["q_normal"]], axis=-1).astype(np.float32)
 
 
-def process_local_case(raw: LocalRawCase, case_key: str, split: str) -> LocalProcessedCase:
+def periodic_curve_roughness(values: np.ndarray) -> float:
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    if arr.size < 2:
+        return 0.0
+    diff = arr - np.roll(arr, 1)
+    scale = max(float(np.std(arr)), 1.0e-8)
+    return float(np.sqrt(np.mean(diff * diff)) / scale)
+
+
+def highfreq_ratio(values: np.ndarray, keep_modes: int = 6) -> float:
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    if arr.size < 4:
+        return 0.0
+    coeff = np.fft.rfft(arr - np.mean(arr))
+    power = np.abs(coeff) ** 2
+    total = float(np.sum(power[1:]))
+    if total <= 1.0e-20:
+        return 0.0
+    cutoff = min(max(int(keep_modes), 0), power.shape[0] - 1)
+    high = float(np.sum(power[cutoff + 1 :]))
+    return high / total
+
+
+def interface_roughness_metrics(interface_targets: np.ndarray, smooth_modes: int = 6) -> np.ndarray:
+    return np.asarray(
+        [
+            periodic_curve_roughness(interface_targets[:, 0]),
+            periodic_curve_roughness(interface_targets[:, 1]),
+            highfreq_ratio(interface_targets[:, 0], keep_modes=smooth_modes),
+            highfreq_ratio(interface_targets[:, 1], keep_modes=smooth_modes),
+        ],
+        dtype=np.float32,
+    )
+
+
+def smooth_periodic_curve(values: np.ndarray, keep_modes: int) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    coeff = np.fft.rfft(arr)
+    cutoff = min(max(int(keep_modes), 0), coeff.shape[0] - 1)
+    coeff[cutoff + 1 :] = 0.0
+    return np.fft.irfft(coeff, n=arr.shape[0]).astype(np.float32)
+
+
+def smooth_interface_targets(interface_targets: np.ndarray, keep_modes: int) -> np.ndarray:
+    smoothed = np.empty_like(interface_targets, dtype=np.float32)
+    for idx in range(interface_targets.shape[-1]):
+        smoothed[:, idx] = smooth_periodic_curve(interface_targets[:, idx], keep_modes)
+    return smoothed
+
+
+def payload_scalar(payload: Dict[str, np.ndarray], key: str, fallback: Any) -> Any:
+    if key not in payload:
+        return fallback
+    value = payload[key]
+    arr = np.asarray(value)
+    if arr.shape == ():
+        item = arr.item()
+    else:
+        item = arr.reshape(-1)[0]
+    if isinstance(item, bytes):
+        return item.decode("utf-8")
+    return item
+
+
+def process_local_case(
+    raw: LocalRawCase,
+    case_key: str,
+    split: str,
+    *,
+    smooth_interface: bool = False,
+    smooth_modes: int = 6,
+) -> LocalProcessedCase:
     """Convert one raw case into leakage-free arrays for HDF5 writing."""
     cfg = config_from_dict(raw.cfg_payload)
     payload = raw.payload
@@ -279,7 +364,20 @@ def process_local_case(raw: LocalRawCase, case_key: str, split: str) -> LocalPro
         dtype=np.float32,
     )
     port_tokens, _ = read_port_tokens(payload)
-    interface_targets = read_interface_targets(payload)
+    raw_interface_targets = read_interface_targets(payload)
+    roughness = interface_roughness_metrics(raw_interface_targets, smooth_modes=smooth_modes)
+    if smooth_interface:
+        interface_targets = smooth_interface_targets(raw_interface_targets, keep_modes=smooth_modes)
+        interface_targets_raw = raw_interface_targets
+    else:
+        interface_targets = raw_interface_targets
+        interface_targets_raw = None
+
+    local_solution = raw.cfg_payload.get("local_solution", {}) if isinstance(raw.cfg_payload, dict) else {}
+    solver_type = str(payload_scalar(payload, "solver_type", local_solution.get("solver_type", cfg.local_module.solver_type)))
+    n_active_modes = int(payload_scalar(payload, "n_active_modes", local_solution.get("n_active_modes", cfg.local_module.n_boundary_modes)))
+    effective_conductivity = float(payload_scalar(payload, "effective_conductivity", local_solution.get("effective_conductivity", 0.0)))
+    module_radius = float(payload_scalar(payload, "module_radius", local_solution.get("module_radius", cfg.domain.module_radius)))
 
     return LocalProcessedCase(
         case_key=case_key,
@@ -292,8 +390,14 @@ def process_local_case(raw: LocalRawCase, case_key: str, split: str) -> LocalPro
         internal_query_points=internal_query_points,
         internal_temperature_targets=internal_temperature_targets,
         interface_targets=interface_targets,
+        interface_targets_raw=interface_targets_raw,
+        local_target_roughness=roughness,
         local_grid=local_grid.astype(np.float32),
         local_mask=local_mask,
+        solver_type=solver_type,
+        n_active_modes=n_active_modes,
+        effective_conductivity=effective_conductivity,
+        module_radius=module_radius,
     )
 
 
@@ -307,6 +411,7 @@ def validate_uniform_shapes(processed: Sequence[LocalProcessedCase]) -> None:
         "internal_query_points": first.internal_query_points.shape,
         "internal_temperature_targets": first.internal_temperature_targets.shape,
         "interface_targets": first.interface_targets.shape,
+        "local_target_roughness": first.local_target_roughness.shape,
         "local_grid": first.local_grid.shape,
         "local_mask": first.local_mask.shape,
     }
@@ -322,7 +427,19 @@ def validate_uniform_shapes(processed: Sequence[LocalProcessedCase]) -> None:
 def write_index_csv(output_root: Path, processed: Sequence[LocalProcessedCase]) -> None:
     """Write a human-readable local case index next to the HDF5 file."""
     with (output_root / "local_case_index.csv").open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["case_key", "split", "case_dir", "q_internal"])
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "case_key",
+                "split",
+                "case_dir",
+                "q_internal",
+                "solver_type",
+                "n_active_modes",
+                "roughness_T_surface",
+                "roughness_q_normal",
+            ],
+        )
         writer.writeheader()
         for item in processed:
             writer.writerow(
@@ -331,6 +448,10 @@ def write_index_csv(output_root: Path, processed: Sequence[LocalProcessedCase]) 
                     "split": item.split,
                     "case_dir": str(item.case_dir),
                     "q_internal": float(item.module_params[0]),
+                    "solver_type": item.solver_type,
+                    "n_active_modes": int(item.n_active_modes),
+                    "roughness_T_surface": float(item.local_target_roughness[0]),
+                    "roughness_q_normal": float(item.local_target_roughness[1]),
                 }
             )
 
@@ -342,6 +463,7 @@ def write_normalization_group(h5, processed: Sequence[LocalProcessedCase]) -> No
     port_tokens = np.stack([item.port_tokens for item in processed])
     internal_targets = np.concatenate([item.internal_temperature_targets.reshape(-1) for item in processed])
     interface_targets = np.stack([item.interface_targets for item in processed])
+    roughness = np.stack([item.local_target_roughness for item in processed])
 
     norm.create_dataset("module_params_mean", data=np.mean(module_params, axis=0).astype(np.float32))
     norm.create_dataset("module_params_std", data=np.std(module_params, axis=0).astype(np.float32))
@@ -357,6 +479,8 @@ def write_normalization_group(h5, processed: Sequence[LocalProcessedCase]) -> No
         "interface_targets_std",
         data=np.std(interface_targets.reshape(-1, interface_targets.shape[-1]), axis=0).astype(np.float32),
     )
+    norm.create_dataset("local_target_roughness_mean", data=np.mean(roughness, axis=0).astype(np.float32))
+    norm.create_dataset("local_target_roughness_std", data=np.std(roughness, axis=0).astype(np.float32))
 
 
 def write_h5(output_root: Path, processed: Sequence[LocalProcessedCase]) -> Path:
@@ -382,8 +506,10 @@ def write_h5(output_root: Path, processed: Sequence[LocalProcessedCase]) -> Path
         h5.create_dataset("port_feature_names", data=np.asarray(PORT_INPUT_FEATURE_NAMES, dtype=string_dtype))
         h5.create_dataset("interface_target_names", data=np.asarray(INTERFACE_TARGET_NAMES, dtype=string_dtype))
         h5.create_dataset("local_target_stat_names", data=np.asarray(LOCAL_TARGET_STAT_NAMES, dtype=string_dtype))
+        h5.create_dataset("local_target_roughness_names", data=np.asarray(LOCAL_TARGET_ROUGHNESS_NAMES, dtype=string_dtype))
         h5.create_dataset("module_params", data=np.stack([item.module_params for item in processed]), compression="gzip")
         h5.create_dataset("local_target_stats", data=np.stack([item.local_target_stats for item in processed]), compression="gzip")
+        h5.create_dataset("local_target_roughness", data=np.stack([item.local_target_roughness for item in processed]), compression="gzip")
         h5.create_dataset("port_tokens", data=np.stack([item.port_tokens for item in processed]), compression="gzip")
         h5.create_dataset(
             "internal_query_points",
@@ -396,6 +522,22 @@ def write_h5(output_root: Path, processed: Sequence[LocalProcessedCase]) -> Path
             compression="gzip",
         )
         h5.create_dataset("interface_targets", data=np.stack([item.interface_targets for item in processed]), compression="gzip")
+        if any(item.interface_targets_raw is not None for item in processed):
+            h5.attrs["interface_targets_smoothed"] = True
+            h5.create_dataset(
+                "interface_targets_raw",
+                data=np.stack(
+                    [
+                        item.interface_targets_raw if item.interface_targets_raw is not None else item.interface_targets
+                        for item in processed
+                    ]
+                ),
+                compression="gzip",
+            )
+        h5.create_dataset("solver_type", data=np.asarray([item.solver_type for item in processed], dtype=string_dtype))
+        h5.create_dataset("n_active_modes", data=np.asarray([item.n_active_modes for item in processed], dtype=np.int32))
+        h5.create_dataset("effective_conductivity", data=np.asarray([item.effective_conductivity for item in processed], dtype=np.float32))
+        h5.create_dataset("module_radius", data=np.asarray([item.module_radius for item in processed], dtype=np.float32))
         h5.create_dataset("local_grid", data=np.stack([item.local_grid for item in processed]), compression="gzip")
         h5.create_dataset("local_mask", data=np.stack([item.local_mask for item in processed]), compression="gzip")
         write_normalization_group(h5, processed)
@@ -407,13 +549,20 @@ def write_h5(output_root: Path, processed: Sequence[LocalProcessedCase]) -> Path
             group.attrs["source_case_dir"] = str(item.case_dir)
             group.create_dataset("module_params", data=item.module_params)
             group.create_dataset("local_target_stats", data=item.local_target_stats)
+            group.create_dataset("local_target_roughness", data=item.local_target_roughness)
             group.create_dataset("port_tokens", data=item.port_tokens, compression="gzip")
             group.create_dataset("internal_query_points", data=item.internal_query_points, compression="gzip")
             group.create_dataset("internal_temperature_targets", data=item.internal_temperature_targets, compression="gzip")
             group.create_dataset("interface_targets", data=item.interface_targets, compression="gzip")
+            if item.interface_targets_raw is not None:
+                group.create_dataset("interface_targets_raw", data=item.interface_targets_raw, compression="gzip")
             group.create_dataset("local_grid", data=item.local_grid, compression="gzip")
             group.create_dataset("local_mask", data=item.local_mask, compression="gzip")
             group.create_dataset("case_config_json", data=json.dumps(item.cfg_payload, indent=2), dtype=string_dtype)
+            group.attrs["solver_type"] = item.solver_type
+            group.attrs["n_active_modes"] = int(item.n_active_modes)
+            group.attrs["effective_conductivity"] = float(item.effective_conductivity)
+            group.attrs["module_radius"] = float(item.module_radius)
 
     write_index_csv(output_root, processed)
     return h5_path
@@ -434,7 +583,15 @@ def main() -> int:
     for raw in tqdm(raw_cases, desc="Preprocessing local cases", unit="case", dynamic_ncols=True):
         base_key = str(config_from_dict(raw.cfg_payload).save.case_id) or raw.case_dir.name
         case_key = unique_case_key(base_key, existing)
-        processed.append(process_local_case(raw, case_key, assignments.get(raw.case_dir, "train")))
+        processed.append(
+            process_local_case(
+                raw,
+                case_key,
+                assignments.get(raw.case_dir, "train"),
+                smooth_interface=bool(args.smooth_interface_targets),
+                smooth_modes=int(args.interface_smooth_modes),
+            )
+        )
 
     h5_path = write_h5(output_root, processed)
     tqdm.write(f"Packed {len(processed)} local module cases into: {h5_path}")
