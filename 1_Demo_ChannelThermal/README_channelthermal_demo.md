@@ -111,21 +111,24 @@ python src/simulate_local_module_thermal.py --config-json config_local_module.js
 ```
 
 The local problem solves steady conduction in one circular solid module in
-normalized coordinates:
+normalized coordinates. To keep Stage-A local targets on the same raw
+temperature scale as Stage-B global module interiors, the local operator uses
+the global solid diffusivity and module radius:
 
 ```text
--k_s Laplacian(T) = q
+-(solid_alpha / module_radius^2) Laplacian_xi(T) = q
 ```
 
 with Robin boundary functions:
 
 ```text
--k_s dT/dn = h(theta) * (T_surface - T_env(theta))
+-(solid_alpha / module_radius^2) dT/dn_xi = h(theta) * (T_surface - T_env(theta))
 ```
 
 `T_env(theta)` and `h(theta)` are sampled from low-frequency Fourier/random
-modes. The solver uses a simple finite-difference SOR iteration on a square grid
-with a disk mask.
+modes over ranges chosen to cover the global simulator's interface
+`T_outside` and `h_proxy` values. The solver uses a simple finite-difference
+SOR iteration on a square grid with a disk mask.
 
 ## Steady Target Selection
 

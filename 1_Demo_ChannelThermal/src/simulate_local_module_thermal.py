@@ -24,10 +24,14 @@ These raw cases are packed by ``preprocess_local_module_dataset.py`` for the
 future Stage-A local module surrogate. Stage-A should learn internal
 temperature and interface response from module parameters plus port inputs.
 
-The local problem solves steady conduction inside a unit disk with uniform
-internal heat generation and a Robin boundary condition:
+The local problem solves steady conduction inside a normalized disk with
+uniform internal heat generation and a Robin boundary condition. The diffusion
+coefficient is scaled from the global module radius and solid thermal
+diffusivity so local targets live on the same raw temperature scale as the
+global channel simulator:
 
-    -k_s dT/dn = h(theta) * (T_surface - T_env(theta))
+    -(alpha_s / R^2) Laplacian_xi(T) = q
+    -(alpha_s / R^2) dT/dn_xi = h(theta) * (T_surface - T_env(theta))
 
 Boundary functions are sampled from low-frequency Fourier modes. The solver is
 a robust finite-difference SOR iteration on a square grid with a circular mask.
@@ -168,6 +172,17 @@ def interpolate_periodic(theta_grid: np.ndarray, values: np.ndarray, theta: np.n
     return (1.0 - w) * values[i0] + w * values[i1]
 
 
+def local_effective_conductivity(cfg: SimulationConfig) -> float:
+    """Return the normalized-disk coefficient matching the global heat solve.
+
+    The global simulator advances ``div(alpha grad T) + q`` in physical
+    coordinates. For local coordinates ``x = center + R * xi``, the steady
+    module equation becomes ``-(alpha / R^2) Laplacian_xi(T) = q``.
+    """
+    radius = max(float(cfg.domain.module_radius), 1e-12)
+    return float(cfg.thermal.solid_alpha) / (radius * radius)
+
+
 def solve_disk_conduction(
     cfg: SimulationConfig,
     theta: np.ndarray,
@@ -185,7 +200,7 @@ def solve_disk_conduction(
     size = int(cfg.local_module.local_grid_size)
     xi, eta, mask = local_disk_grid(size)
     dx = 2.0 / max(size - 1, 1)
-    ks = float(cfg.thermal.solid_k)
+    effective_k = local_effective_conductivity(cfg)
     relaxation = float(cfg.local_module.relaxation)
     max_iterations = int(cfg.local_module.solver_iterations)
     tolerance = float(cfg.local_module.solver_tolerance)
@@ -213,9 +228,12 @@ def solve_disk_conduction(
                 else:
                     h_value = float(h_cell[j, i])
                     env_value = float(env_cell[j, i])
-                    boundary_value = ((ks / dx) * old + h_value * env_value) / max((ks / dx) + h_value, 1e-12)
+                    boundary_value = ((effective_k / dx) * old + h_value * env_value) / max(
+                        (effective_k / dx) + h_value,
+                        1e-12,
+                    )
                     neighbor_sum += boundary_value
-            target = 0.25 * (neighbor_sum + q_internal * dx * dx / max(ks, 1e-12))
+            target = 0.25 * (neighbor_sum + q_internal * dx * dx / max(effective_k, 1e-12))
             new_value = (1.0 - relaxation) * old + relaxation * target
             temperature[j, i] = new_value
             residual = max(residual, abs(new_value - old))
@@ -292,6 +310,8 @@ def run_case(cfg: SimulationConfig) -> Path:
         "port_feature_names": string_array(PORT_INPUT_FEATURE_NAMES),
         "interface_targets": interface_targets,
         "interface_target_names": string_array(INTERFACE_TARGET_NAMES),
+        "effective_conductivity": np.asarray([local_effective_conductivity(cfg)], dtype=np.float32),
+        "module_radius": np.asarray([float(cfg.domain.module_radius)], dtype=np.float32),
     }
     np.savez_compressed(scene_dir / "frame_000000.npz", **payload)
     np.savez_compressed(case_dir / "local_solution.npz", **payload)
@@ -307,7 +327,9 @@ def run_case(cfg: SimulationConfig) -> Path:
         "solver_tolerance": solver_tolerance,
         "converged": converged,
         "residual": residual,
-        "physics": "steady disk conduction with Robin interface boundary functions",
+        "effective_conductivity": float(local_effective_conductivity(cfg)),
+        "module_radius": float(cfg.domain.module_radius),
+        "physics": "steady normalized-disk conduction using alpha_s/R^2 with Robin interface boundary functions",
     }
     write_json(case_dir / "case_config.json", config_payload)
 

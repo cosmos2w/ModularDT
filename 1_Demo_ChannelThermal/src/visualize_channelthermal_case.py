@@ -52,6 +52,14 @@ from channelthermal_common import config_from_dict, find_case_dirs, read_json, r
 FIELD_NAMES = ("u", "v", "p", "omega", "temperature")
 
 
+def finite_range(values: np.ndarray) -> Tuple[float, float]:
+    finite = np.asarray(values, dtype=np.float32)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return float("nan"), float("nan")
+    return float(np.min(finite)), float(np.max(finite))
+
+
 def domain_extent(cfg_payload: Dict[str, object]) -> Tuple[List[float], float, float]:
     """Return imshow extent plus physical domain dimensions."""
     cfg = config_from_dict(cfg_payload)
@@ -275,7 +283,11 @@ def plot_fields(
         image = ax.imshow(fields[name], origin="lower", extent=extent, aspect="equal", cmap="viridis")
         overlay_modules(ax, cfg.layout.centers or [], float(cfg.domain.module_radius))
         set_domain_aspect(ax, lx, ly)
-        ax.set_title(name)
+        if name == "temperature":
+            t_min, t_max = finite_range(fields[name])
+            ax.set_title(f"{name}\nT range [{t_min:.3g}, {t_max:.3g}]")
+        else:
+            ax.set_title(name)
         ax.set_xlabel("x")
         ax.set_ylabel("y")
         fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
@@ -298,18 +310,41 @@ def plot_internal_temperatures(payload: Dict[str, np.ndarray], output_path: Path
         count = min(int(internal.shape[0]), 8)
     if count == 0:
         return
+    displayed = internal[:count].astype(np.float32)
+    valid_values = displayed[np.isfinite(displayed)]
+    valid_values = valid_values[valid_values != 0.0]
+    if valid_values.size == 0:
+        valid_values = displayed[np.isfinite(displayed)]
+    vmin, vmax = finite_range(valid_values)
+    if not np.isfinite(vmin) or not np.isfinite(vmax):
+        return
+    if abs(vmax - vmin) < 1e-12:
+        pad = max(abs(vmin) * 0.05, 1e-6)
+        vmin -= pad
+        vmax += pad
     cols = min(count, 4)
     rows = int(np.ceil(count / cols))
     fig, axes = plt.subplots(rows, cols, figsize=(3.0 * cols, 3.0 * rows), squeeze=False, constrained_layout=True)
+    image = None
     for idx in range(rows * cols):
         ax = axes.ravel()[idx]
         if idx >= count:
             ax.axis("off")
             continue
-        image = ax.imshow(internal[idx], origin="lower", extent=[-1, 1, -1, 1], aspect="equal", cmap="inferno")
+        image = ax.imshow(
+            internal[idx],
+            origin="lower",
+            extent=[-1, 1, -1, 1],
+            aspect="equal",
+            cmap="inferno",
+            vmin=vmin,
+            vmax=vmax,
+        )
+        t_min, t_max = finite_range(internal[idx])
         ax.set_aspect("equal", adjustable="box")
-        ax.set_title(f"module {idx}")
-        fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+        ax.set_title(f"module {idx}\nT [{t_min:.3g}, {t_max:.3g}]")
+    if image is not None:
+        fig.colorbar(image, ax=axes.ravel()[:count].tolist(), fraction=0.046, pad=0.04, label="T")
     fig.suptitle("Module Internal Temperature")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=160)
@@ -395,6 +430,17 @@ def visualize_raw(
     plot_convergence_history(read_frame_index(case_dir), cfg_payload, out_dir / "convergence_temperature.png")
     if save_gif:
         save_temperature_gif(case_dir, cfg_payload, out_dir / "temperature_transient.gif")
+    field_min, field_max = finite_range(payload["temperature"])
+    internal = payload.get("module_internal_temperature")
+    if internal is not None and internal.size:
+        internal_min, internal_max = finite_range(internal[internal != 0.0])
+        print(
+            "Raw global temperature range: "
+            f"field=[{field_min:.6g}, {field_max:.6g}], "
+            f"internal=[{internal_min:.6g}, {internal_max:.6g}]"
+        )
+    else:
+        print(f"Raw global temperature range: field=[{field_min:.6g}, {field_max:.6g}]")
     print(f"Saved raw visualizations to: {out_dir}")
 
 
@@ -457,6 +503,13 @@ def visualize_processed(processed_h5_arg: Path, case_id: str | None, output_dir:
         f"case_id={key}, converged={converged}, target_mode={target_mode}, "
         f"selected_times={np.asarray(selected_times).tolist()}, "
         f"final_delta_inf={final_delta_inf:.6e}, final_delta_l2_rel={final_delta_l2_rel:.6e}"
+    )
+    steady_temp_min, steady_temp_max = finite_range(fields["temperature"])
+    internal_min, internal_max = finite_range(payload["module_internal_temperature"][payload["module_internal_temperature"] != 0.0])
+    print(
+        "Processed global temperature range: "
+        f"steady_field=[{steady_temp_min:.6g}, {steady_temp_max:.6g}], "
+        f"internal=[{internal_min:.6g}, {internal_max:.6g}]"
     )
     print(f"Saved processed visualizations to: {out_dir}")
 

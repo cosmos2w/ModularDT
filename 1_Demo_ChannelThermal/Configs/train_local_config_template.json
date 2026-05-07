@@ -6,7 +6,7 @@
     "packed_h5_path": "./Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5",
     "train_split": "train",
     "val_split": "test",
-    "batch_size": 32,
+    "batch_size": 64,
     "val_batch_size": 64,
     "num_workers": 4,
     "normalize_inputs": false,
@@ -21,13 +21,13 @@
     "num_port_latents": 8,
     "num_heads": 4,
     "num_layers": 4,
-    "coord_fourier_frequencies": 4,
+    "coord_fourier_frequencies": 6,
     "dropout": 0.0
   },
   "loss": {
     "internal_mse_weight": 1.0,
     "interface_mse_weight": 1.0,
-    "smoothness_weight": 0.0
+    "smoothness_weight": 0.01
   },
   "training": {
     "epochs": 10000,

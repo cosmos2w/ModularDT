@@ -140,11 +140,20 @@ def mask_temperature(temperature: np.ndarray, mask: np.ndarray) -> np.ndarray:
     return masked
 
 
+def finite_range(values: np.ndarray) -> Tuple[float, float]:
+    finite = np.asarray(values, dtype=np.float32)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return float("nan"), float("nan")
+    return float(np.min(finite)), float(np.max(finite))
+
+
 def plot_temperature_map(payload: Dict[str, np.ndarray], title: str, output_path: Path) -> None:
     """Plot the solved local temperature field on the disk."""
     local_x = payload["local_x"]
     local_y = payload["local_y"]
     temperature = mask_temperature(payload["temperature"], payload["disk_mask"])
+    t_min, t_max = finite_range(temperature)
     fig, ax = plt.subplots(figsize=(5.5, 4.8), constrained_layout=True)
     image = ax.imshow(
         temperature,
@@ -157,7 +166,7 @@ def plot_temperature_map(payload: Dict[str, np.ndarray], title: str, output_path
     ax.set_aspect("equal")
     ax.set_xlabel("xi")
     ax.set_ylabel("eta")
-    ax.set_title(title)
+    ax.set_title(f"{title}\nT range [{t_min:.3g}, {t_max:.3g}]")
     fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label="T")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=160)
@@ -274,6 +283,8 @@ def visualize_raw(case_dir_arg: Path | None, output_dir: Path | None, case_id_ar
     case_id = str(cfg_payload.get("save", {}).get("case_id", case_dir.name))
     out_dir = output_dir.expanduser().resolve() if output_dir is not None else case_dir / "plots"
     plot_all(payload, f"Raw local case {case_id}", out_dir, f"raw_{case_id}")
+    t_min, t_max = finite_range(mask_temperature(payload["temperature"], payload["disk_mask"]))
+    print(f"Raw local temperature range: [{t_min:.6g}, {t_max:.6g}]")
     print(f"Saved raw local module visualizations to: {out_dir}")
 
 
@@ -325,6 +336,8 @@ def visualize_processed(processed_h5_arg: Path, case_id: str | None, output_dir:
         payload = reconstruct_processed_payload(cases_group[key], h5)
     out_dir = output_dir.expanduser().resolve() if output_dir is not None else h5_path.parent / "plots"
     plot_all(payload, f"Processed local case {key}", out_dir, f"processed_{key}")
+    t_min, t_max = finite_range(mask_temperature(payload["temperature"], payload["disk_mask"]))
+    print(f"Processed local temperature range: [{t_min:.6g}, {t_max:.6g}]")
     print(f"Saved processed local module visualizations to: {out_dir}")
 
 

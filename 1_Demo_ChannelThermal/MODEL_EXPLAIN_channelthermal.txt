@@ -16,6 +16,11 @@ tokens:
 The port tokens are boundary and condition inputs only. They do not include
 solved surface temperature or solved heat flux.
 
+The local target generator uses the same raw thermal scale as the global
+module interiors by solving with an effective normalized-disk coefficient
+solid_alpha / module_radius^2. The default local T_env and h sampling ranges
+cover the global interface_condition T_outside and h_proxy ranges.
+
 For the current Stage-B workflow, train this local surrogate with
 normalize_inputs=false and normalize_targets=false. Stage B calls the local
 surrogate with raw-scale module_params and port_tokens and now raises an
