@@ -141,7 +141,7 @@ def port_condition_loss(
     target_port: torch.Tensor,
     module_present: torch.Tensor,
     loss_cfg: Dict[str, Any],
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return scaled optimization loss and raw physical MSE for port tokens.
 
     The port head predicts physical ``T_env`` and ``h`` values. Their raw MSE can
@@ -150,7 +150,10 @@ def port_condition_loss(
     """
     pred_values = pred_port[..., 3:5]
     target_values = target_port[..., 3:5]
-    raw_mse = masked_mse(pred_values, target_values, module_present[:, :, None])
+    mask = module_present[:, :, None]
+    raw_mse = masked_mse(pred_values, target_values, mask)
+    t_env_mse = masked_mse(pred_values[..., 0:1], target_values[..., 0:1], mask)
+    h_mse = masked_mse(pred_values[..., 1:2], target_values[..., 1:2], mask)
     scales = pred_values.new_tensor(
         [
             max(float(loss_cfg.get("port_temperature_scale", 10.0)), 1.0e-6),
@@ -158,7 +161,7 @@ def port_condition_loss(
         ]
     )
     scaled_mse = masked_mse(pred_values / scales, target_values / scales, module_present[:, :, None])
-    return scaled_mse, raw_mse
+    return scaled_mse, raw_mse, t_env_mse, h_mse
 
 
 def interface_loss(
@@ -170,10 +173,10 @@ def interface_loss(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return interface loss plus per-target diagnostics.
 
-    A frozen Stage-A local surrogate may have been trained on a synthetic
-    q_normal distribution that does not match the global dataset. In that case
-    local_surrogate_interface_target_weights can disable q_normal supervision
-    while keeping T_surface supervision.
+    With a frozen Stage-A local surrogate, q_normal can be weakly supervised
+    through local_surrogate_interface_target_weights. In the default
+    physics_from_port mode, this trains the port-predicted h_effective path
+    without letting flux dominate T_surface.
     """
     source = str(outputs.get("interface_source", "global_head"))
     weights_cfg = loss_cfg.get("interface_target_weights", None)
@@ -481,7 +484,12 @@ def compute_losses(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dic
 
     pred_port = outputs["pred_port_condition"]
     target_port = batch["teacher_port_tokens"]
-    losses["loss_port_condition"], losses["diag_port_condition_physical_mse"] = port_condition_loss(
+    (
+        losses["loss_port_condition"],
+        losses["diag_port_condition_physical_mse"],
+        losses["diag_port_T_env_mse"],
+        losses["diag_port_h_mse"],
+    ) = port_condition_loss(
         pred_port,
         target_port,
         module_present,
@@ -662,6 +670,8 @@ def run_epoch(
                 "diag_interface_q_normal_mse",
                 "loss_port_condition",
                 "diag_port_condition_physical_mse",
+                "diag_port_T_env_mse",
+                "diag_port_h_mse",
                 "diag_organizer_strength_mean",
                 "loss_org_me",
                 "loss_org_eh_factor",
@@ -925,6 +935,8 @@ def main() -> int:
         "diag_interface_q_normal_mse",
         "loss_port_condition",
         "diag_port_condition_physical_mse",
+        "diag_port_T_env_mse",
+        "diag_port_h_mse",
         "diag_organizer_strength_mean",
         "loss_org_me",
         "loss_org_eh_factor",
@@ -948,6 +960,8 @@ def main() -> int:
         "val_diag_interface_q_normal_mse",
         "val_loss_port_condition",
         "val_diag_port_condition_physical_mse",
+        "val_diag_port_T_env_mse",
+        "val_diag_port_h_mse",
         "val_diag_organizer_strength_mean",
         "val_loss_org_me",
         "val_loss_org_eh_factor",
@@ -1012,6 +1026,8 @@ def main() -> int:
             "diag_interface_q_normal_mse": train_metrics.get("diag_interface_q_normal_mse", math.nan),
             "loss_port_condition": train_metrics.get("loss_port_condition", math.nan),
             "diag_port_condition_physical_mse": train_metrics.get("diag_port_condition_physical_mse", math.nan),
+            "diag_port_T_env_mse": train_metrics.get("diag_port_T_env_mse", math.nan),
+            "diag_port_h_mse": train_metrics.get("diag_port_h_mse", math.nan),
             "diag_organizer_strength_mean": train_metrics.get("diag_organizer_strength_mean", math.nan),
             "loss_org_me": train_metrics.get("loss_org_me", math.nan),
             "loss_org_eh_factor": train_metrics.get("loss_org_eh_factor", math.nan),
@@ -1035,6 +1051,8 @@ def main() -> int:
             "val_diag_interface_q_normal_mse": val_metrics.get("diag_interface_q_normal_mse", math.nan),
             "val_loss_port_condition": val_metrics.get("loss_port_condition", math.nan),
             "val_diag_port_condition_physical_mse": val_metrics.get("diag_port_condition_physical_mse", math.nan),
+            "val_diag_port_T_env_mse": val_metrics.get("diag_port_T_env_mse", math.nan),
+            "val_diag_port_h_mse": val_metrics.get("diag_port_h_mse", math.nan),
             "val_diag_organizer_strength_mean": val_metrics.get("diag_organizer_strength_mean", math.nan),
             "val_loss_org_me": val_metrics.get("loss_org_me", math.nan),
             "val_loss_org_eh_factor": val_metrics.get("loss_org_eh_factor", math.nan),
@@ -1079,6 +1097,7 @@ def main() -> int:
             f"internal={row['loss_internal_temperature']:.4e} interface={row['loss_interface']:.4e} "
             f"iface_T={row['diag_interface_T_surface_mse']:.4e} iface_q={row['diag_interface_q_normal_mse']:.4e} "
             f"port={row['loss_port_condition']:.4e} port_phys={row['diag_port_condition_physical_mse']:.4e} "
+            f"port_T={row['diag_port_T_env_mse']:.3e} port_h={row['diag_port_h_mse']:.3e} "
             f"org_me={row['loss_org_me']:.3e} org_eh={row['loss_org_eh_factor']:.3e} "
             f"org_mass_l1={row['org_mass_l1']:.3e} "
             f"mode={effective_mode} ratio={effective_ratio:.3f} "

@@ -96,7 +96,16 @@ from channelthermal_common import (
 
 CHANNEL_ORDER = ("u", "v", "p", "omega", "temperature")
 SAMPLED_POINT_FEATURES = ("x", "y", "u", "v", "p", "omega", "temperature")
-INTERFACE_CONDITION_FEATURE_NAMES = ("theta", "normal_x", "normal_y", "T_outside", "u_normal", "u_tangent", "h_proxy")
+INTERFACE_CONDITION_FEATURE_NAMES = (
+    "theta",
+    "normal_x",
+    "normal_y",
+    "T_outside",
+    "u_normal",
+    "u_tangent",
+    "h_proxy",
+    "h_effective",
+)
 INTERFACE_TARGET_NAMES = ("T_surface", "q_normal")
 
 
@@ -139,6 +148,9 @@ class ProcessedCase:
     final_delta_l2_rel: float
     selected_frame_ids: np.ndarray
     packed_unconverged: bool
+    h_effective_valid_fraction: float
+    h_effective_clipped_fraction: float
+    h_effective_mean: float
 
 
 @dataclass
@@ -194,6 +206,8 @@ def parse_args() -> argparse.Namespace:
         help="How to select steady training target frames.",
     )
     parser.add_argument("--min-final-window-frames", type=int, default=1, help="Minimum selected frames for window targets.")
+    parser.add_argument("--h-effective-eps", type=float, default=1.0e-3, help="Minimum |T_surface - T_outside| used for h_effective.")
+    parser.add_argument("--h-effective-max", type=float, default=1.0e4, help="Upper clip for derived h_effective.")
     return parser.parse_args()
 
 
@@ -505,9 +519,46 @@ def split_interface_response(
     feature_names: Tuple[str, ...],
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Split full raw interface arrays into clean condition and target arrays."""
-    condition_indices = [feature_names.index(name) for name in INTERFACE_CONDITION_FEATURE_NAMES]
+    raw_condition_names = tuple(name for name in INTERFACE_CONDITION_FEATURE_NAMES if name != "h_effective")
+    condition_indices = [feature_names.index(name) for name in raw_condition_names]
     target_indices = [feature_names.index(name) for name in INTERFACE_TARGET_NAMES]
     return interface_response[..., condition_indices].astype(np.float32), interface_response[..., target_indices].astype(np.float32)
+
+
+def append_h_effective(
+    interface_condition: np.ndarray,
+    interface_target: np.ndarray,
+    *,
+    eps: float,
+    h_effective_max: float,
+) -> Tuple[np.ndarray, Dict[str, float]]:
+    """Append flux-consistent Robin coefficient h = q / (T_surface - T_outside)."""
+    if interface_condition.shape[-1] >= len(INTERFACE_CONDITION_FEATURE_NAMES):
+        return interface_condition.astype(np.float32), {
+            "valid_fraction": 1.0,
+            "clipped_fraction": 0.0,
+            "mean": float(np.mean(interface_condition[..., -1])) if interface_condition.size else 0.0,
+        }
+    t_outside = interface_condition[..., 3]
+    t_surface = interface_target[..., 0]
+    q_normal = interface_target[..., 1]
+    delta_t = t_surface - t_outside
+    eps_value = max(float(eps), 1.0e-12)
+    sign = np.where(delta_t < 0.0, -1.0, 1.0).astype(np.float32)
+    denom = np.where(np.abs(delta_t) < eps_value, sign * eps_value, delta_t).astype(np.float32)
+    raw_h = q_normal / denom
+    finite = np.isfinite(raw_h)
+    positive = raw_h > 0.0
+    clipped_h = np.nan_to_num(raw_h, nan=0.0, posinf=float(h_effective_max), neginf=0.0)
+    clipped_h = np.clip(clipped_h, 0.0, float(h_effective_max)).astype(np.float32)
+    condition = np.concatenate([interface_condition.astype(np.float32), clipped_h[..., None]], axis=-1)
+    total = max(int(raw_h.size), 1)
+    diagnostics = {
+        "valid_fraction": float(np.sum(finite & positive) / total),
+        "clipped_fraction": float(np.sum(finite & ((raw_h < 0.0) | (raw_h > float(h_effective_max)))) / total),
+        "mean": float(np.mean(clipped_h)) if clipped_h.size else 0.0,
+    }
+    return condition, diagnostics
 
 
 def process_case(
@@ -518,6 +569,8 @@ def process_case(
     points_per_case: int,
     seed: int,
     exclude_module_interior_from_global_points: bool,
+    h_effective_eps: float,
+    h_effective_max: float,
 ) -> ProcessedCase:
     """Convert one raw case folder into packed steady-window arrays."""
     selected_rows = selection.selected_rows
@@ -555,6 +608,12 @@ def process_case(
     internal_mask = last_payload["module_internal_mask"].astype(np.uint8)
     feature_names = tuple(name.decode("utf-8") if isinstance(name, bytes) else str(name) for name in last_payload["interface_feature_names"])
     interface_condition, interface_target = split_interface_response(interface_response, feature_names)
+    interface_condition, h_diag = append_h_effective(
+        interface_condition,
+        interface_target,
+        eps=float(h_effective_eps),
+        h_effective_max=float(h_effective_max),
+    )
     centers = np.asarray(raw.cfg.layout.centers or [], dtype=np.float32)
     heat_powers = np.asarray(raw.cfg.layout.heat_powers or [], dtype=np.float32)
     return ProcessedCase(
@@ -586,6 +645,9 @@ def process_case(
         final_delta_l2_rel=float(selection.final_delta_l2_rel),
         selected_frame_ids=selected_frame_ids,
         packed_unconverged=bool(selection.packed_unconverged),
+        h_effective_valid_fraction=float(h_diag["valid_fraction"]),
+        h_effective_clipped_fraction=float(h_diag["clipped_fraction"]),
+        h_effective_mean=float(h_diag["mean"]),
     )
 
 
@@ -763,6 +825,9 @@ def write_h5(
             group.attrs["final_delta_l2_rel"] = float(item.final_delta_l2_rel)
             group.attrs["packed_unconverged"] = bool(item.packed_unconverged)
             group.attrs["target_mode"] = str(target_mode)
+            group.attrs["h_effective_valid_fraction"] = float(item.h_effective_valid_fraction)
+            group.attrs["h_effective_clipped_fraction"] = float(item.h_effective_clipped_fraction)
+            group.attrs["h_effective_mean"] = float(item.h_effective_mean)
             group.create_dataset("x_grid", data=item.x_grid, compression="gzip")
             group.create_dataset("y_grid", data=item.y_grid, compression="gzip")
             group.create_dataset("steady_field", data=item.steady_field, compression="gzip")
@@ -878,6 +943,8 @@ def main() -> int:
             args.points_per_case,
             args.seed + idx,
             bool(args.exclude_module_interior_from_global_points),
+            float(args.h_effective_eps),
+            float(args.h_effective_max),
         )
         processed.append(item)
         quality_rows.append(

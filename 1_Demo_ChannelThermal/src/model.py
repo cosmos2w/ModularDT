@@ -44,6 +44,8 @@ class GlobalChannelThermalModelConfig:
     local_module_param_dim: int = 7
     local_port_token_dim: int = 5
     local_interface_target_dim: int = 2
+    local_surrogate_flux_mode: str = "physics_from_port"
+    local_surrogate_flux_blend_alpha: float = 0.5
     material_param_dim: int = 6
     future_global_feature_dim: int = 0
     dropout: float = 0.05
@@ -187,15 +189,20 @@ def teacher_port_tokens_from_interface_condition(interface_condition: torch.Tens
     """Map global interface_condition columns to local surrogate port tokens.
 
     Global condition columns are theta, normal_x, normal_y, T_outside,
-    u_normal, u_tangent, h_proxy. The local surrogate expects theta, cos_theta,
-    sin_theta, T_env, h.
+    u_normal, u_tangent, h_proxy, and optionally h_effective. The local
+    surrogate expects theta, cos_theta, sin_theta, T_env, h.
+
+    h_proxy is a heuristic environmental feature from the global simulation.
+    h_effective is the flux-consistent Robin coefficient q_normal /
+    (T_surface - T_outside), so it is the preferred conditioning value.
     """
+    h_index = 7 if interface_condition.shape[-1] >= 8 else 6
     return torch.cat(
         [
             interface_condition[..., 0:1],
             interface_condition[..., 1:3],
             interface_condition[..., 3:4],
-            interface_condition[..., 6:7],
+            interface_condition[..., h_index : h_index + 1],
         ],
         dim=-1,
     )
@@ -215,9 +222,10 @@ def build_local_module_params_from_global(
         params[..., 2] = material_params[:, None, 1]
     if interface_condition is not None and interface_condition.shape[-1] >= 7:
         t_out = interface_condition[..., 3]
-        h_proxy = interface_condition[..., 6]
-        params[..., 3] = h_proxy.mean(dim=-1)
-        params[..., 4] = h_proxy.std(dim=-1, unbiased=False)
+        h_index = 7 if interface_condition.shape[-1] >= 8 else 6
+        h_local = interface_condition[..., h_index]
+        params[..., 3] = h_local.mean(dim=-1)
+        params[..., 4] = h_local.std(dim=-1, unbiased=False)
         params[..., 5] = t_out.mean(dim=-1)
         params[..., 6] = t_out.std(dim=-1, unbiased=False)
     return params * module_present[..., None]
@@ -387,9 +395,9 @@ class PortConditionHead(nn.Module):
         global_features = global_token[:, None, None, :].expand(-1, num_modules, ntheta, -1)
         values = self.net(torch.cat([module_features, global_features, theta_features, heat, present], dim=-1))
         t_env = values[..., 0:1]
-        h_proxy = F.softplus(values[..., 1:2]) + 1.0e-4
+        h_effective = F.softplus(values[..., 1:2]) + 1.0e-4
         fixed = theta_tokens.view(1, 1, ntheta, 3).expand(batch, num_modules, -1, -1)
-        return torch.cat([fixed, t_env, h_proxy], dim=-1) * module_present[:, :, None, None]
+        return torch.cat([fixed, t_env, h_effective], dim=-1) * module_present[:, :, None, None]
 
 
 class QueryFieldDecoder(nn.Module):
@@ -776,6 +784,73 @@ class GlobalChannelThermalModel(nn.Module):
             "module_response_latent": latent,
         }
 
+    def _assemble_local_surrogate_interface(
+        self,
+        local_outputs: Dict[str, torch.Tensor],
+        local_ports: torch.Tensor,
+        module_present: torch.Tensor,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Choose the q_normal channel from surrogate, Robin physics, or a blend."""
+        surrogate_interface = local_outputs["interface_pred"]
+        if self.global_normalize_targets:
+            physical_surrogate = self._denormalize_with_stats(
+                surrogate_interface,
+                self.global_interface_target_mean,
+                self.global_interface_target_std,
+            )
+        else:
+            physical_surrogate = surrogate_interface
+
+        t_surface = physical_surrogate[..., 0:1]
+        q_surrogate = physical_surrogate[..., 1:2]
+        t_env = local_ports[..., 3:4]
+        h_effective = local_ports[..., 4:5]
+        q_physics = h_effective * (t_surface - t_env)
+        mode = str(self.config.local_surrogate_flux_mode).lower()
+        if mode == "surrogate":
+            q_use = q_surrogate
+        elif mode == "physics_from_port":
+            q_use = q_physics
+        elif mode == "blend":
+            alpha = float(self.config.local_surrogate_flux_blend_alpha)
+            q_use = alpha * q_surrogate + (1.0 - alpha) * q_physics
+        else:
+            raise ValueError(
+                "local_surrogate_flux_mode must be one of "
+                "'surrogate', 'physics_from_port', or 'blend'; "
+                f"got {self.config.local_surrogate_flux_mode!r}."
+            )
+
+        present = module_present[:, :, None, None]
+        physical_selected = torch.cat([t_surface, q_use], dim=-1) * present
+        physical_physics = torch.cat([t_surface, q_physics], dim=-1) * present
+        physical_surrogate = physical_surrogate * present
+        if self.global_normalize_targets:
+            selected = self._normalize_with_stats(
+                physical_selected,
+                self.global_interface_target_mean,
+                self.global_interface_target_std,
+            )
+            physics = self._normalize_with_stats(
+                physical_physics,
+                self.global_interface_target_mean,
+                self.global_interface_target_std,
+            )
+            surrogate = self._normalize_with_stats(
+                physical_surrogate,
+                self.global_interface_target_mean,
+                self.global_interface_target_std,
+            )
+        else:
+            selected = physical_selected
+            physics = physical_physics
+            surrogate = physical_surrogate
+        diagnostics = {
+            "pred_interface_surrogate_raw": surrogate * present,
+            "pred_interface_flux_physics": physics * present,
+        }
+        return selected * present, diagnostics
+
     def forward(
         self,
         structure: Optional[Dict[str, torch.Tensor]] = None,
@@ -871,7 +946,11 @@ class GlobalChannelThermalModel(nn.Module):
 
         if local_outputs is not None:
             pred_internal = local_outputs["internal_temperature"]
-            pred_interface = local_outputs["interface_pred"]
+            pred_interface, interface_diagnostics = self._assemble_local_surrogate_interface(
+                local_outputs,
+                local_ports,
+                module_present,
+            )
             module_response_latent = local_outputs["module_response_latent"]
             interface_source = "local_surrogate"
         else:
@@ -879,8 +958,9 @@ class GlobalChannelThermalModel(nn.Module):
             pred_interface = self._predict_global_interface(module_state, ntheta=ntheta, module_present=module_present)
             module_response_latent = module_state
             interface_source = "global_head"
+            interface_diagnostics = {}
 
-        return {
+        result = {
             "pred_field": pred_field,
             "pred_internal_temperature": pred_internal,
             "pred_interface": pred_interface,
@@ -890,6 +970,8 @@ class GlobalChannelThermalModel(nn.Module):
             "organizer_aux": org,
             "base_organizer_aux": base_org,
         }
+        result.update(interface_diagnostics)
+        return result
 
 
 def build_model_from_config(config_payload: Dict | GlobalChannelThermalModelConfig) -> GlobalChannelThermalModel:

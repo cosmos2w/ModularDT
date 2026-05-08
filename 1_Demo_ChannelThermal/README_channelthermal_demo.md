@@ -1,6 +1,6 @@
 # Demo 1: Channel Thermal Modular Design
 
-Updated: 2026-04-29
+Updated: 2026-04-30
 
 ## Purpose
 
@@ -95,6 +95,12 @@ and additionally writes leakage-aware interface datasets:
 Future training scripts should prefer `interface_condition` and
 `interface_target`.
 
+The packed global interface condition now keeps both the simulator's heuristic
+`h_proxy` and a target-derived `h_effective`. `h_effective` is computed as
+`q_normal / clamp(T_surface - T_outside)` with a sign-preserving temperature
+clamp and an upper safety clip. It is the flux-consistent Robin coefficient
+used when Stage B conditions the local surrogate.
+
 Global `sampled_points` are field-supervision points for the channel model.
 By default the preprocessor excludes module-interior cells from these samples,
 because solid module temperatures are already supervised separately through
@@ -127,7 +133,7 @@ with Robin boundary functions:
 
 `T_env(theta)` and `h(theta)` are sampled from low-frequency Fourier/random
 modes over ranges chosen to cover the global simulator's interface
-`T_outside` and `h_proxy` values. The number of active boundary modes is
+`T_outside` and flux-consistent `h` values. The number of active boundary modes is
 randomized per case between `boundary_modes_min` and `boundary_modes_max`,
 while `n_boundary_modes` remains the saved coefficient capacity.
 
@@ -296,7 +302,8 @@ Global clean condition inputs:
 
 ```text
 interface_condition[..., ["theta", "normal_x", "normal_y",
-                          "T_outside", "u_normal", "u_tangent", "h_proxy"]]
+                          "T_outside", "u_normal", "u_tangent",
+                          "h_proxy", "h_effective"]]
 ```
 
 Global supervised interface outputs:
@@ -343,6 +350,22 @@ global preprocessing is required.
 Stage B trains a global hypergraph-organized neural-field model from the global
 dataset. When configured, it loads the frozen Stage A local surrogate and uses
 its module response latent and local/interface predictions.
+
+For `use_local_surrogate=true`, the local surrogate expects a true Robin
+coefficient `h`, not the global simulator's heuristic `h_proxy`. Stage B now
+trains the port head to predict `[T_env, h_effective]`, maps teacher tokens to
+`[theta, cos_theta, sin_theta, T_outside, h_effective]`, and computes the final
+`q_normal` channel from local physics by default:
+
+```text
+q_normal = h_pred * (T_surface_pred - T_env_pred)
+```
+
+`T_surface`, internal temperature, and `module_response_latent` still come from
+the local surrogate. The global model's job is to predict the global channel
+field and the port conditions that make the local surrogate physically
+consistent. Older packed global datasets without `h_effective` fall back to
+`h_proxy` with a warning.
 
 The recommended local-port training curriculum is:
 

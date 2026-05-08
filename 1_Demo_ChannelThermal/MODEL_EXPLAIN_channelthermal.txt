@@ -1,7 +1,7 @@
 Demo 1 Channel Thermal Forward Model
 ====================================
 
-Updated: 2026-04-29
+Updated: 2026-04-30
 
 Stage A: local module surrogate
 -------------------------------
@@ -19,7 +19,7 @@ solved surface temperature or solved heat flux.
 The local target generator uses the same raw thermal scale as the global
 module interiors by solving with an effective normalized-disk coefficient
 solid_alpha / module_radius^2. The default local T_env and h sampling ranges
-cover the global interface_condition T_outside and h_proxy ranges.
+cover the global interface_condition T_outside and flux-consistent h ranges.
 
 The local generator now defaults to a polar finite-difference solver
 (`solver_type="polar_fd"`). The physical boundary row is r=1, so interface
@@ -209,7 +209,10 @@ The head predicts only physical condition values:
   T_env, h
 
 Training supervises these values against the global dataset's clean
-interface_condition columns T_outside and h_proxy.
+interface_condition columns T_outside and h_effective. h_proxy remains in the
+packed dataset as an environmental diagnostic, but it is not the preferred
+local-surrogate Robin coefficient. For legacy packed datasets without
+h_effective, the loaders fall back to h_proxy and warn.
 
 
 Local surrogate integration
@@ -228,6 +231,23 @@ The returned internal temperature, interface prediction, and
 module_response_latent are inserted into the global model. The first training
 default is teacher-forced port conditions so Stage B can learn a stable global
 organizer before relying on its own port predictions.
+
+The previous Stage-B local-surrogate path could produce nearly flat or badly
+scaled q_normal because q_normal was unsupervised when the frozen local
+surrogate was used, and because Stage B fed h_proxy into a local surrogate that
+expects Robin h. The fix is:
+
+  h_effective = q_normal / sign_preserving_clamp(T_surface - T_outside)
+  teacher/predicted port h targets use h_effective
+  q_normal defaults to h_pred * (T_surface_pred - T_env_pred)
+
+T_surface, internal temperature, and module_response_latent still come from the
+local surrogate. Only the interface flux channel is replaced by the selected
+flux mode. local_surrogate_flux_mode supports:
+
+  surrogate
+  physics_from_port
+  blend
 
 The recommended curriculum is teacher -> mixed -> predicted:
 

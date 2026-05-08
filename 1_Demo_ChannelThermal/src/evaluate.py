@@ -221,16 +221,21 @@ def predict_case(
                 first_outputs = outputs
     pred_field = np.concatenate(pred_chunks, axis=0).reshape(*x_grid.shape, model.config.field_dim)
     assert first_outputs is not None
-    return {
+    result = {
         "pred_field_grid": pred_field,
         "pred_internal_temperature": first_outputs["pred_internal_temperature"].detach().cpu().numpy()[0],
         "pred_interface": first_outputs["pred_interface"].detach().cpu().numpy()[0],
         "pred_port_condition": first_outputs["pred_port_condition"].detach().cpu().numpy()[0],
+        "interface_flux_mode": str(model.config.local_surrogate_flux_mode) if model.config.use_local_surrogate else "global_head",
         "organizer_aux": {
             key: value.detach().cpu().numpy()[0] if torch.is_tensor(value) and value.ndim > 0 else value
             for key, value in first_outputs["organizer_aux"].items()
         },
     }
+    for key in ("pred_interface_surrogate_raw", "pred_interface_flux_physics"):
+        if key in first_outputs:
+            result[key] = first_outputs[key].detach().cpu().numpy()[0]
+    return result
 
 
 def channel_cmap(name: str) -> str:
@@ -367,7 +372,13 @@ def plot_internal(output_path: Path, sample: Dict[str, Any], pred_internal: np.n
     plt.close(fig)
 
 
-def plot_interface(output_path: Path, sample: Dict[str, Any], pred_interface: np.ndarray) -> None:
+def plot_interface(
+    output_path: Path,
+    sample: Dict[str, Any],
+    pred_interface: np.ndarray,
+    pred_interface_surrogate_raw: Optional[np.ndarray] = None,
+    pred_interface_flux_physics: Optional[np.ndarray] = None,
+) -> None:
     present = sample["structure"]["module_present"] > 0.5
     indices = np.flatnonzero(present)[: min(3, int(np.sum(present)))]
     if len(indices) == 0:
@@ -383,6 +394,10 @@ def plot_interface(output_path: Path, sample: Dict[str, Any], pred_interface: np
             curve_metrics = error_metrics(pred_interface[module_idx, :, col], gt[module_idx, :, col])
             ax.plot(theta, gt[module_idx, :, col], color="black", lw=1.7, label="GT")
             ax.plot(theta, pred_interface[module_idx, :, col], color="#d95f02", lw=1.4, label="Pred")
+            if col == 1 and pred_interface_surrogate_raw is not None:
+                ax.plot(theta, pred_interface_surrogate_raw[module_idx, :, col], color="#7570b3", lw=1.0, alpha=0.85, label="surrogate raw")
+            if col == 1 and pred_interface_flux_physics is not None:
+                ax.plot(theta, pred_interface_flux_physics[module_idx, :, col], color="#1b9e77", lw=1.0, alpha=0.85, label="physics")
             ax.set_title(f"M{module_idx} {label} RMSE={curve_metrics['rmse']:.4e}, relL2={curve_metrics['relative_l2']:.4e}")
             ax.set_xlabel("theta")
             ax.grid(True, alpha=0.25)
@@ -535,6 +550,9 @@ def denormalize_predictions(
     out["pred_field_grid"] = dataset.normalizer.denormalize_fields(out["pred_field_grid"])
     out["pred_internal_temperature"] = dataset.normalizer.denormalize_internal_temperature(out["pred_internal_temperature"])
     out["pred_interface"] = dataset.normalizer.denormalize_interface_targets(out["pred_interface"])
+    for key in ("pred_interface_surrogate_raw", "pred_interface_flux_physics"):
+        if key in out:
+            out[key] = dataset.normalizer.denormalize_interface_targets(out[key])
     return out
 
 
@@ -552,17 +570,21 @@ def summarize_prediction(
     gt_internal = raw_sample["module_internal_temperature_points"]
     pred_interface = predictions["pred_interface"]
     gt_interface = raw_sample["interface_target"]
+    save_payload = {
+        "pred_field_grid": pred_field.astype(np.float32),
+        "gt_field_grid": gt_field.astype(np.float32),
+        "pred_internal_temperature": pred_internal.astype(np.float32),
+        "gt_internal_temperature": gt_internal.astype(np.float32),
+        "pred_interface": pred_interface.astype(np.float32),
+        "gt_interface": gt_interface.astype(np.float32),
+        "pred_port_condition": predictions["pred_port_condition"].astype(np.float32),
+    }
+    if "pred_interface_surrogate_raw" in predictions:
+        save_payload["pred_interface_surrogate_raw"] = predictions["pred_interface_surrogate_raw"].astype(np.float32)
+    if "pred_interface_flux_physics" in predictions:
+        save_payload["pred_interface_flux_physics"] = predictions["pred_interface_flux_physics"].astype(np.float32)
     npz_path = output_dir / f"evaluation_outputs_{suffix}.npz"
-    np.savez_compressed(
-        npz_path,
-        pred_field_grid=pred_field.astype(np.float32),
-        gt_field_grid=gt_field.astype(np.float32),
-        pred_internal_temperature=pred_internal.astype(np.float32),
-        gt_internal_temperature=gt_internal.astype(np.float32),
-        pred_interface=pred_interface.astype(np.float32),
-        gt_interface=gt_interface.astype(np.float32),
-        pred_port_condition=predictions["pred_port_condition"].astype(np.float32),
-    )
+    np.savez_compressed(npz_path, **save_payload)
     outputs = {
         "global_field_quicklook": str(output_dir / f"global_field_quicklook_{suffix}.png"),
         "module_internal_temperature": str(output_dir / f"module_internal_temperature_{suffix}.png"),
@@ -589,6 +611,10 @@ def summarize_prediction(
         "T_surface": error_metrics(pred_interface[..., 0], gt_interface[..., 0])["rmse"],
         "q_normal": error_metrics(pred_interface[..., 1], gt_interface[..., 1])["rmse"],
     }
+    target_port = raw_sample["teacher_port_tokens"][..., 3:5]
+    pred_port = predictions["pred_port_condition"][..., 3:5]
+    port_t_env_rmse = error_metrics(pred_port[..., 0], target_port[..., 0])["rmse"]
+    port_h_rmse = error_metrics(pred_port[..., 1], target_port[..., 1])["rmse"]
     interface_relative_l2_by_target = {
         "T_surface": error_metrics(pred_interface[..., 0], gt_interface[..., 0])["relative_l2"],
         "q_normal": error_metrics(pred_interface[..., 1], gt_interface[..., 1])["relative_l2"],
@@ -609,6 +635,11 @@ def summarize_prediction(
         "temperature_rmse": temperature_metrics["rmse"] if temperature_metrics is not None else None,
         "internal_rmse": internal_metrics["rmse"],
         "interface_rmse": interface_metrics["rmse"],
+        "interface_flux_mode": str(predictions.get("interface_flux_mode", "unknown")),
+        "T_surface_rmse": interface_rmse_by_target["T_surface"],
+        "q_normal_rmse": interface_rmse_by_target["q_normal"],
+        "port_T_env_rmse": port_t_env_rmse,
+        "port_h_rmse": port_h_rmse,
         "field_relative_l2": field_metrics["relative_l2"],
         "temperature_relative_l2": temperature_metrics["relative_l2"] if temperature_metrics is not None else None,
         "internal_relative_l2": internal_metrics["relative_l2"],
@@ -655,7 +686,13 @@ def evaluate_mode(
     predictions = denormalize_predictions(predictions, dataset, normalize_targets)
     plot_field_quicklook(output_dir / f"global_field_quicklook_{suffix}.png", raw_sample, predictions["pred_field_grid"], channel_order)
     plot_internal(output_dir / f"module_internal_temperature_{suffix}.png", raw_sample, predictions["pred_internal_temperature"])
-    plot_interface(output_dir / f"interface_curves_{suffix}.png", raw_sample, predictions["pred_interface"])
+    plot_interface(
+        output_dir / f"interface_curves_{suffix}.png",
+        raw_sample,
+        predictions["pred_interface"],
+        predictions.get("pred_interface_surrogate_raw"),
+        predictions.get("pred_interface_flux_physics"),
+    )
     summary = summarize_prediction(checkpoint_path, raw_sample, predictions, output_dir, suffix, channel_order)
     summary["_organizer_aux"] = predictions["organizer_aux"]
     return summary

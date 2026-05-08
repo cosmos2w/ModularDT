@@ -9,6 +9,7 @@ inputs.
 """
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -32,6 +33,7 @@ GLOBAL_INTERFACE_CONDITION_FEATURE_NAMES = (
     "u_normal",
     "u_tangent",
     "h_proxy",
+    "h_effective",
 )
 GLOBAL_INTERFACE_TARGET_NAMES = ("T_surface", "q_normal")
 
@@ -76,6 +78,35 @@ def _feature_indices(names: Sequence[str], requested: Sequence[str], fallback: S
         if not missing:
             return [name_to_idx[name] for name in requested]
     return [int(idx) for idx in fallback]
+
+
+def _append_h_effective_stat_fallback(normalizer: "H5Normalizer", h_proxy_idx: int) -> None:
+    """Mirror h_proxy stats for legacy packed files that lack h_effective."""
+    mean = normalizer.stats.get("interface_condition_mean")
+    std = normalizer.stats.get("interface_condition_std")
+    if mean is not None and mean.shape[0] > h_proxy_idx and mean.shape[0] < len(GLOBAL_INTERFACE_CONDITION_FEATURE_NAMES):
+        normalizer.stats["interface_condition_mean"] = np.concatenate([mean, mean[h_proxy_idx : h_proxy_idx + 1]]).astype(np.float32)
+    if std is not None and std.shape[0] > h_proxy_idx and std.shape[0] < len(GLOBAL_INTERFACE_CONDITION_FEATURE_NAMES):
+        normalizer.stats["interface_condition_std"] = np.concatenate([std, std[h_proxy_idx : h_proxy_idx + 1]]).astype(np.float32)
+
+
+def _condition_with_h_effective_fallback(
+    interface_condition: np.ndarray,
+    interface_names: Sequence[str],
+) -> np.ndarray:
+    """Append h_proxy as h_effective for legacy arrays whose metadata was upgraded on load."""
+    if "h_effective" not in interface_names:
+        return interface_condition.astype(np.float32)
+    h_effective_idx = list(interface_names).index("h_effective")
+    if interface_condition.shape[-1] > h_effective_idx:
+        return interface_condition.astype(np.float32)
+    h_proxy_idx = _feature_indices(interface_names, ("h_proxy",), (6,))[0]
+    h_proxy = interface_condition[..., h_proxy_idx : h_proxy_idx + 1]
+    return np.concatenate([interface_condition.astype(np.float32), h_proxy.astype(np.float32)], axis=-1)
+
+
+def _local_h_name(interface_names: Sequence[str]) -> str:
+    return "h_effective" if "h_effective" in interface_names else "h_proxy"
 
 
 class H5Normalizer:
@@ -346,7 +377,7 @@ class GlobalModuleAlignmentDataset(Dataset):
         interface_names: Sequence[str],
     ) -> np.ndarray:
         t_idx = _feature_indices(interface_names, ("T_outside",), (3,))[0]
-        h_idx = _feature_indices(interface_names, ("h_proxy",), (6,))[0]
+        h_idx = _feature_indices(interface_names, (_local_h_name(interface_names),), (6,))[0]
         t_env = interface_condition[:, t_idx]
         h = interface_condition[:, h_idx]
         return np.asarray(
@@ -363,7 +394,7 @@ class GlobalModuleAlignmentDataset(Dataset):
         )
 
     def _port_tokens_for(self, interface_condition: np.ndarray, interface_names: Sequence[str]) -> np.ndarray:
-        requested = ("theta", "normal_x", "normal_y", "T_outside", "h_proxy")
+        requested = ("theta", "normal_x", "normal_y", "T_outside", _local_h_name(interface_names))
         indices = _feature_indices(interface_names, requested, (0, 1, 2, 3, 6))
         return interface_condition[:, indices].astype(np.float32)
 
@@ -373,6 +404,8 @@ class GlobalModuleAlignmentDataset(Dataset):
         interface_names = decode_string_array(
             h5.get("interface_condition_feature_names", np.asarray(GLOBAL_INTERFACE_CONDITION_FEATURE_NAMES, dtype="S"))[...]
         )
+        if "h_effective" not in interface_names:
+            interface_names = list(interface_names) + ["h_effective"]
         module_params = []
         port_tokens = []
         internal_targets = []
@@ -380,7 +413,7 @@ class GlobalModuleAlignmentDataset(Dataset):
         for case_id, module_idx in self.records:
             group = h5["cases"][case_id]
             material = self._material_params(group)
-            cond = group["interface_condition"][module_idx].astype(np.float32)
+            cond = _condition_with_h_effective_fallback(group["interface_condition"][module_idx].astype(np.float32), interface_names)
             heat = float(group["heat_powers"][module_idx])
             module_params.append(self._module_params_for(heat, cond, material, interface_names))
             port_tokens.append(self._port_tokens_for(cond, interface_names))
@@ -429,8 +462,10 @@ class GlobalModuleAlignmentDataset(Dataset):
         interface_names = decode_string_array(
             self.h5.get("interface_condition_feature_names", np.asarray(GLOBAL_INTERFACE_CONDITION_FEATURE_NAMES, dtype="S"))[...]
         )
+        if "h_effective" not in interface_names:
+            interface_names = list(interface_names) + ["h_effective"]
         material = self._material_params(group)
-        cond = group["interface_condition"][module_idx].astype(np.float32)
+        cond = _condition_with_h_effective_fallback(group["interface_condition"][module_idx].astype(np.float32), interface_names)
         heat = float(group["heat_powers"][module_idx])
         module_params = self._module_params_for(heat, cond, material, interface_names)
         port_tokens = self._port_tokens_for(cond, interface_names)
@@ -499,6 +534,17 @@ class GlobalChannelThermalDataset(Dataset):
             self.interface_condition_feature_names = decode_string_array(
                 h5.get("interface_condition_feature_names", np.asarray(GLOBAL_INTERFACE_CONDITION_FEATURE_NAMES, dtype="S"))[...]
             )
+            self._h_effective_fallback_from_h_proxy = "h_effective" not in self.interface_condition_feature_names
+            if self._h_effective_fallback_from_h_proxy:
+                warnings.warn(
+                    "Packed global dataset does not contain h_effective; falling back to h_proxy for local-surrogate h targets. "
+                    "Re-run preprocess_channelthermal_dataset.py to store flux-consistent h_effective.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                h_proxy_idx = _feature_indices(self.interface_condition_feature_names, ("h_proxy",), (6,))[0]
+                self.interface_condition_feature_names = list(self.interface_condition_feature_names) + ["h_effective"]
+                _append_h_effective_stat_fallback(self.normalizer, h_proxy_idx)
             self.interface_target_names = decode_string_array(
                 h5.get("interface_target_names", np.asarray(GLOBAL_INTERFACE_TARGET_NAMES, dtype="S"))[...]
             )
@@ -588,7 +634,7 @@ class GlobalChannelThermalDataset(Dataset):
         return lx, ly
 
     def _teacher_port_tokens(self, interface_condition: np.ndarray) -> np.ndarray:
-        requested = ("theta", "normal_x", "normal_y", "T_outside", "h_proxy")
+        requested = ("theta", "normal_x", "normal_y", "T_outside", _local_h_name(self.interface_condition_feature_names))
         indices = _feature_indices(self.interface_condition_feature_names, requested, (0, 1, 2, 3, 6))
         return interface_condition[..., indices].astype(np.float32)
 
@@ -600,15 +646,15 @@ class GlobalChannelThermalDataset(Dataset):
         module_present: np.ndarray,
     ) -> np.ndarray:
         t_idx = _feature_indices(self.interface_condition_feature_names, ("T_outside",), (3,))[0]
-        h_idx = _feature_indices(self.interface_condition_feature_names, ("h_proxy",), (6,))[0]
+        h_idx = _feature_indices(self.interface_condition_feature_names, (_local_h_name(self.interface_condition_feature_names),), (6,))[0]
         t_out = interface_condition[..., t_idx]
-        h_proxy = interface_condition[..., h_idx]
+        h_local = interface_condition[..., h_idx]
         local_params = np.zeros((heat_powers.shape[0], 7), dtype=np.float32)
         local_params[:, 0] = heat_powers.astype(np.float32)
         local_params[:, 1] = float(material_params[3]) if material_params.shape[0] > 3 else 0.0
         local_params[:, 2] = float(material_params[1]) if material_params.shape[0] > 1 else 0.0
-        local_params[:, 3] = np.mean(h_proxy, axis=-1)
-        local_params[:, 4] = np.std(h_proxy, axis=-1)
+        local_params[:, 3] = np.mean(h_local, axis=-1)
+        local_params[:, 4] = np.std(h_local, axis=-1)
         local_params[:, 5] = np.mean(t_out, axis=-1)
         local_params[:, 6] = np.std(t_out, axis=-1)
         local_params *= module_present[:, None].astype(np.float32)
@@ -623,7 +669,10 @@ class GlobalChannelThermalDataset(Dataset):
         module_centers = group["module_centers"][...].astype(np.float32)
         heat_powers = group["heat_powers"][...].astype(np.float32)
         module_present = group["module_present"][...].astype(np.float32)
-        interface_condition = group["interface_condition"][...].astype(np.float32)
+        interface_condition = _condition_with_h_effective_fallback(
+            group["interface_condition"][...].astype(np.float32),
+            self.interface_condition_feature_names,
+        )
         interface_target = group["interface_target"][...].astype(np.float32)
         internal_grid = group["module_internal_temperature"][...].astype(np.float32)
         internal_mask = group["module_internal_mask"][...].astype(np.float32)
