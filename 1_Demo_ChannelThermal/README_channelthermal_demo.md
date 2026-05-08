@@ -1,6 +1,6 @@
 # Demo 1: Channel Thermal Modular Design
 
-Updated: 2026-04-30
+Updated: 2026-05-01
 
 ## Purpose
 
@@ -355,17 +355,30 @@ For `use_local_surrogate=true`, the local surrogate expects a true Robin
 coefficient `h`, not the global simulator's heuristic `h_proxy`. Stage B now
 trains the port head to predict `[T_env, h_effective]`, maps teacher tokens to
 `[theta, cos_theta, sin_theta, T_outside, h_effective]`, and computes the final
-`q_normal` channel from local physics by default:
+`q_normal` channel with the `corrected_physics` flux mode by default:
 
 ```text
-q_normal = h_pred * (T_surface_pred - T_env_pred)
+q_physics = h_pred * (T_surface_pred - T_env_pred)
+q_normal = q_physics + delta_q
 ```
+
+The previous `physics_from_port` mode made Pred overlap the plotted physics
+curve by design, because the final flux was exactly `q_physics`. That was too
+rigid when `h_effective` supervision was noisy or ill-conditioned. The new
+correction head is lightweight and zero-initialized, so training starts from
+Robin physics but can learn a physically anchored residual flux.
 
 `T_surface`, internal temperature, and `module_response_latent` still come from
 the local surrogate. The global model's job is to predict the global channel
 field and the port conditions that make the local surrogate physically
 consistent. Older packed global datasets without `h_effective` fall back to
-`h_proxy` with a warning.
+`h_proxy` with a warning. Older packed datasets without
+`interface_condition_valid_mask` use an all-ones fallback mask with a warning.
+
+`h_effective` is trained in log-space with a per-interface-point validity mask:
+points are used only when `|T_surface - T_outside|` is large enough and the
+derived `h_effective` is finite and within bounds. This keeps near-zero
+temperature differences from dominating the port-head loss.
 
 The recommended local-port training curriculum is:
 
@@ -380,6 +393,20 @@ lets Stage B first learn stable global organization, then gradually practice
 the autonomous conditions it must use during design inference. Configure it
 with `training.port_condition_schedule="teacher_to_predicted"` plus
 `teacher_epochs`, `predicted_after_epoch`, and the mixed-ratio start/end keys.
+Internal-temperature and interface losses are weighted by this same curriculum:
+zero in teacher mode, base weight times `(1 - teacher_ratio)` in mixed mode,
+and full base weight in predicted mode. This avoids optimizing frozen
+teacher-forced surrogate outputs that cannot respond to the port head.
+
+The organizer losses remain direct and lightweight, but the default schedule is
+`warmup_decay`: full organizer weight early, then a linear decay to a smaller
+late-training factor. This keeps organization useful during formation without
+letting organizer terms dominate once field, port, and interface refinement
+become the main work.
+
+If a loaded Stage-A checkpoint appears synthetic-only, Stage B prints a strong
+warning. A synthetic-only local surrogate can still be useful, but Stage-B gains
+may be limited until Stage A2 global-alignment or mixed training is used.
 
 Stage C is a future joint fine-tuning path. The template only scaffolds it
 lightly: after Stage B is stable, set `freeze_local_surrogate=false` and use a
@@ -531,6 +558,12 @@ signals:
 - normalized module mass from `A_mh` is aligned with normalized environment
   mass from `A_eh`, preventing hyperedges that own only modules or only channel
   tokens.
+
+When `use_local_surrogate=true`, each module token also receives an explicit
+local-response summary: mean/max `T_surface`, mean/max selected `q_normal`, and
+mean/max internal temperature. This is fused alongside
+`module_response_latent`, giving the organizer direct thermal-response context
+without adding a generative model or a complicated organizer.
 
 `hyper_strength` is now semantic joint support:
 

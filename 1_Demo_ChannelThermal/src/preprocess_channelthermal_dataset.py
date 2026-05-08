@@ -135,6 +135,7 @@ class ProcessedCase:
     module_internal_mask: np.ndarray
     interface_response: np.ndarray
     interface_condition: np.ndarray
+    h_effective_valid_mask: np.ndarray
     interface_target: np.ndarray
     interface_feature_names: Tuple[str, ...]
     module_centers: np.ndarray
@@ -531,34 +532,50 @@ def append_h_effective(
     *,
     eps: float,
     h_effective_max: float,
-) -> Tuple[np.ndarray, Dict[str, float]]:
-    """Append flux-consistent Robin coefficient h = q / (T_surface - T_outside)."""
-    if interface_condition.shape[-1] >= len(INTERFACE_CONDITION_FEATURE_NAMES):
-        return interface_condition.astype(np.float32), {
-            "valid_fraction": 1.0,
-            "clipped_fraction": 0.0,
-            "mean": float(np.mean(interface_condition[..., -1])) if interface_condition.size else 0.0,
-        }
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
+    """Append flux-consistent Robin coefficient h and its per-point validity."""
     t_outside = interface_condition[..., 3]
     t_surface = interface_target[..., 0]
     q_normal = interface_target[..., 1]
     delta_t = t_surface - t_outside
     eps_value = max(float(eps), 1.0e-12)
+
+    if interface_condition.shape[-1] >= len(INTERFACE_CONDITION_FEATURE_NAMES):
+        condition = interface_condition.astype(np.float32)
+        h_values = condition[..., -1]
+        valid_mask = (
+            (np.abs(delta_t) >= eps_value)
+            & np.isfinite(q_normal)
+            & np.isfinite(h_values)
+            & (h_values >= 0.0)
+            & (h_values <= float(h_effective_max))
+        ).astype(np.float32)
+        return condition, valid_mask, {
+            "valid_fraction": float(np.mean(valid_mask)) if valid_mask.size else 0.0,
+            "clipped_fraction": 0.0,
+            "mean": float(np.mean(h_values)) if h_values.size else 0.0,
+        }
     sign = np.where(delta_t < 0.0, -1.0, 1.0).astype(np.float32)
     denom = np.where(np.abs(delta_t) < eps_value, sign * eps_value, delta_t).astype(np.float32)
     raw_h = q_normal / denom
     finite = np.isfinite(raw_h)
-    positive = raw_h > 0.0
     clipped_h = np.nan_to_num(raw_h, nan=0.0, posinf=float(h_effective_max), neginf=0.0)
     clipped_h = np.clip(clipped_h, 0.0, float(h_effective_max)).astype(np.float32)
     condition = np.concatenate([interface_condition.astype(np.float32), clipped_h[..., None]], axis=-1)
+    valid_mask = (
+        (np.abs(delta_t) >= eps_value)
+        & np.isfinite(q_normal)
+        & np.isfinite(raw_h)
+        & (raw_h >= 0.0)
+        & (raw_h <= float(h_effective_max))
+    ).astype(np.float32)
     total = max(int(raw_h.size), 1)
     diagnostics = {
-        "valid_fraction": float(np.sum(finite & positive) / total),
+        "valid_fraction": float(np.sum(valid_mask) / total),
         "clipped_fraction": float(np.sum(finite & ((raw_h < 0.0) | (raw_h > float(h_effective_max)))) / total),
         "mean": float(np.mean(clipped_h)) if clipped_h.size else 0.0,
     }
-    return condition, diagnostics
+    return condition, valid_mask, diagnostics
 
 
 def process_case(
@@ -608,7 +625,7 @@ def process_case(
     internal_mask = last_payload["module_internal_mask"].astype(np.uint8)
     feature_names = tuple(name.decode("utf-8") if isinstance(name, bytes) else str(name) for name in last_payload["interface_feature_names"])
     interface_condition, interface_target = split_interface_response(interface_response, feature_names)
-    interface_condition, h_diag = append_h_effective(
+    interface_condition, h_effective_valid_mask, h_diag = append_h_effective(
         interface_condition,
         interface_target,
         eps=float(h_effective_eps),
@@ -632,6 +649,7 @@ def process_case(
         module_internal_mask=internal_mask,
         interface_response=interface_response,
         interface_condition=interface_condition,
+        h_effective_valid_mask=h_effective_valid_mask,
         interface_target=interface_target,
         interface_feature_names=feature_names,
         module_centers=centers,
@@ -800,10 +818,16 @@ def write_h5(
         h5.attrs["n_interface_points"] = n_interface_points
         h5.attrs["state_id"] = "steady_final_window"
         h5.attrs["exclude_module_interior_from_global_points"] = bool(exclude_module_interior_from_global_points)
+        h5.attrs["interface_condition_valid_mask"] = "h_effective_valid_mask"
+        h5.attrs["interface_condition_valid_mask_note"] = (
+            "1 marks interface points whose h_effective target is finite, within configured bounds, "
+            "and has |T_surface - T_outside| above h_effective_eps."
+        )
         h5.create_dataset("field_dim", data=np.asarray([len(CHANNEL_ORDER)], dtype=np.int32))
         h5.create_dataset("channel_order", data=np.asarray(CHANNEL_ORDER, dtype=string_dtype))
         h5.create_dataset("sampled_point_feature_names", data=np.asarray(SAMPLED_POINT_FEATURES, dtype=string_dtype))
         h5.create_dataset("interface_condition_feature_names", data=np.asarray(INTERFACE_CONDITION_FEATURE_NAMES, dtype=string_dtype))
+        h5.create_dataset("interface_condition_valid_mask_feature_names", data=np.asarray(["h_effective_valid_mask"], dtype=string_dtype))
         h5.create_dataset("interface_target_names", data=np.asarray(INTERFACE_TARGET_NAMES, dtype=string_dtype))
         if processed:
             h5.create_dataset("interface_feature_names", data=np.asarray(processed[0].interface_feature_names, dtype=string_dtype))
@@ -851,6 +875,11 @@ def write_h5(
             group.create_dataset(
                 "interface_condition",
                 data=pad_first_axis(item.interface_condition, max_modules),
+                compression="gzip",
+            )
+            group.create_dataset(
+                "interface_condition_valid_mask",
+                data=pad_first_axis(item.h_effective_valid_mask, max_modules),
                 compression="gzip",
             )
             group.create_dataset(

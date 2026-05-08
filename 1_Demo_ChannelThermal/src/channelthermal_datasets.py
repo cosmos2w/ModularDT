@@ -545,6 +545,17 @@ class GlobalChannelThermalDataset(Dataset):
                 h_proxy_idx = _feature_indices(self.interface_condition_feature_names, ("h_proxy",), (6,))[0]
                 self.interface_condition_feature_names = list(self.interface_condition_feature_names) + ["h_effective"]
                 _append_h_effective_stat_fallback(self.normalizer, h_proxy_idx)
+            sample_case_id = next(iter(h5["cases"].keys()), None)
+            self._has_interface_condition_valid_mask = (
+                sample_case_id is not None and "interface_condition_valid_mask" in h5["cases"][sample_case_id]
+            )
+            if not self._has_interface_condition_valid_mask:
+                warnings.warn(
+                    "Packed global dataset does not contain interface_condition_valid_mask; using all-ones h_effective "
+                    "validity masks. Re-run preprocess_channelthermal_dataset.py to store per-point h supervision masks.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             self.interface_target_names = decode_string_array(
                 h5.get("interface_target_names", np.asarray(GLOBAL_INTERFACE_TARGET_NAMES, dtype="S"))[...]
             )
@@ -673,6 +684,10 @@ class GlobalChannelThermalDataset(Dataset):
             group["interface_condition"][...].astype(np.float32),
             self.interface_condition_feature_names,
         )
+        if "interface_condition_valid_mask" in group:
+            interface_condition_valid_mask = group["interface_condition_valid_mask"][...].astype(np.float32)
+        else:
+            interface_condition_valid_mask = np.ones(interface_condition.shape[:-1], dtype=np.float32)
         interface_target = group["interface_target"][...].astype(np.float32)
         internal_grid = group["module_internal_temperature"][...].astype(np.float32)
         internal_mask = group["module_internal_mask"][...].astype(np.float32)
@@ -715,6 +730,7 @@ class GlobalChannelThermalDataset(Dataset):
             "module_internal_mask": internal_mask,
             "module_internal_query_points": local_query_points,
             "interface_condition": interface_condition,
+            "interface_condition_valid_mask": interface_condition_valid_mask,
             "interface_target": interface_target,
             "teacher_port_tokens": teacher_port_tokens,
             "local_module_params": local_module_params,

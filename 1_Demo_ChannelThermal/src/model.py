@@ -44,7 +44,7 @@ class GlobalChannelThermalModelConfig:
     local_module_param_dim: int = 7
     local_port_token_dim: int = 5
     local_interface_target_dim: int = 2
-    local_surrogate_flux_mode: str = "physics_from_port"
+    local_surrogate_flux_mode: str = "corrected_physics"
     local_surrogate_flux_blend_alpha: float = 0.5
     material_param_dim: int = 6
     future_global_feature_dim: int = 0
@@ -400,6 +400,42 @@ class PortConditionHead(nn.Module):
         return torch.cat([fixed, t_env, h_effective], dim=-1) * module_present[:, :, None, None]
 
 
+class FluxCorrectionHead(nn.Module):
+    """Residual q_normal correction anchored at Robin physics."""
+
+    def __init__(self, config: GlobalChannelThermalModelConfig):
+        super().__init__()
+        hidden = int(config.hidden_dim)
+        in_dim = hidden + int(config.local_surrogate_latent_dim) + 4
+        self.net = MLP(
+            in_dim,
+            hidden,
+            1,
+            num_layers=2,
+            dropout=config.dropout,
+            layer_norm=config.use_layer_norm,
+        )
+        last = self.net.net[-1]
+        if isinstance(last, nn.Linear):
+            nn.init.zeros_(last.weight)
+            nn.init.zeros_(last.bias)
+
+    def forward(
+        self,
+        module_state: torch.Tensor,
+        response_latent: torch.Tensor,
+        t_surface: torch.Tensor,
+        t_env: torch.Tensor,
+        h_effective: torch.Tensor,
+        q_surrogate_raw: torch.Tensor,
+    ) -> torch.Tensor:
+        _, _, ntheta, _ = t_surface.shape
+        module_features = module_state[:, :, None, :].expand(-1, -1, ntheta, -1)
+        latent_features = response_latent[:, :, None, :].expand(-1, -1, ntheta, -1)
+        physical_features = torch.cat([t_surface, t_env, torch.log1p(h_effective.clamp_min(0.0)), q_surrogate_raw], dim=-1)
+        return self.net(torch.cat([module_features, latent_features, physical_features], dim=-1))
+
+
 class QueryFieldDecoder(nn.Module):
     """Steady neural-field decoder over channel query points."""
 
@@ -543,6 +579,15 @@ class GlobalChannelThermalModel(nn.Module):
             dropout=config.dropout,
             layer_norm=config.use_layer_norm,
         )
+        self.local_response_summary_proj = MLP(
+            6,
+            hidden,
+            hidden,
+            num_layers=2,
+            dropout=config.dropout,
+            layer_norm=config.use_layer_norm,
+        )
+        self.flux_correction_head = FluxCorrectionHead(config)
         env_coords, env_features = self._make_environment_tokens()
         self.register_buffer("env_coords", env_coords, persistent=False)
         self.register_buffer("env_features", env_features, persistent=False)
@@ -788,9 +833,10 @@ class GlobalChannelThermalModel(nn.Module):
         self,
         local_outputs: Dict[str, torch.Tensor],
         local_ports: torch.Tensor,
+        module_state: torch.Tensor,
         module_present: torch.Tensor,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        """Choose the q_normal channel from surrogate, Robin physics, or a blend."""
+        """Choose the q_normal channel from surrogate, Robin physics, or a corrected blend."""
         surrogate_interface = local_outputs["interface_pred"]
         if self.global_normalize_targets:
             physical_surrogate = self._denormalize_with_stats(
@@ -811,13 +857,23 @@ class GlobalChannelThermalModel(nn.Module):
             q_use = q_surrogate
         elif mode == "physics_from_port":
             q_use = q_physics
+        elif mode == "corrected_physics":
+            delta_q = self.flux_correction_head(
+                module_state,
+                local_outputs["module_response_latent"],
+                t_surface,
+                t_env,
+                h_effective,
+                q_surrogate,
+            )
+            q_use = q_physics + delta_q
         elif mode == "blend":
             alpha = float(self.config.local_surrogate_flux_blend_alpha)
             q_use = alpha * q_surrogate + (1.0 - alpha) * q_physics
         else:
             raise ValueError(
                 "local_surrogate_flux_mode must be one of "
-                "'surrogate', 'physics_from_port', or 'blend'; "
+                "'surrogate', 'physics_from_port', 'corrected_physics', or 'blend'; "
                 f"got {self.config.local_surrogate_flux_mode!r}."
             )
 
@@ -825,6 +881,32 @@ class GlobalChannelThermalModel(nn.Module):
         physical_selected = torch.cat([t_surface, q_use], dim=-1) * present
         physical_physics = torch.cat([t_surface, q_physics], dim=-1) * present
         physical_surrogate = physical_surrogate * present
+        internal = local_outputs["internal_temperature"]
+        if self.global_normalize_targets:
+            physical_internal = self._denormalize_with_stats(
+                internal,
+                self.global_internal_temperature_mean,
+                self.global_internal_temperature_std,
+            )
+        else:
+            physical_internal = internal
+        if physical_internal.shape[-2] > 0:
+            internal_mean = physical_internal[..., 0].mean(dim=-1)
+            internal_max = physical_internal[..., 0].amax(dim=-1)
+        else:
+            internal_mean = module_state.new_zeros(module_state.shape[:2])
+            internal_max = module_state.new_zeros(module_state.shape[:2])
+        local_response_summary = torch.stack(
+            [
+                t_surface[..., 0].mean(dim=-1),
+                t_surface[..., 0].amax(dim=-1),
+                q_use[..., 0].mean(dim=-1),
+                q_use[..., 0].amax(dim=-1),
+                internal_mean,
+                internal_max,
+            ],
+            dim=-1,
+        ) * module_present[..., None]
         if self.global_normalize_targets:
             selected = self._normalize_with_stats(
                 physical_selected,
@@ -848,7 +930,11 @@ class GlobalChannelThermalModel(nn.Module):
         diagnostics = {
             "pred_interface_surrogate_raw": surrogate * present,
             "pred_interface_flux_physics": physics * present,
+            "pred_interface_physics": physics * present,
+            "local_response_summary": local_response_summary,
         }
+        if mode == "corrected_physics":
+            diagnostics["pred_interface_delta_q"] = (q_use - q_physics) * present
         return selected * present, diagnostics
 
     def forward(
@@ -911,6 +997,8 @@ class GlobalChannelThermalModel(nn.Module):
         )
 
         local_outputs: Optional[Dict[str, torch.Tensor]] = None
+        interface_diagnostics: Dict[str, torch.Tensor] = {}
+        pred_interface: Optional[torch.Tensor] = None
         module_state = base_module_state
         if self.config.use_local_surrogate:
             if local_module_params is None:
@@ -929,8 +1017,15 @@ class GlobalChannelThermalModel(nn.Module):
             else:
                 local_ports = pred_port_tokens
             local_outputs = self._call_local_surrogate(local_module_params.float(), local_ports, local_query_points, module_present)
-            fused = self.local_latent_fusion(torch.cat([base_module_state, local_outputs["module_response_latent"]], dim=-1))
-            module_state = (base_module_state + fused) * module_present[..., None]
+            pred_interface, interface_diagnostics = self._assemble_local_surrogate_interface(
+                local_outputs,
+                local_ports,
+                base_module_state,
+                module_present,
+            )
+            latent_fusion = self.local_latent_fusion(torch.cat([base_module_state, local_outputs["module_response_latent"]], dim=-1))
+            summary_fusion = self.local_response_summary_proj(interface_diagnostics["local_response_summary"])
+            module_state = (base_module_state + latent_fusion + summary_fusion) * module_present[..., None]
 
         org = self.organizer(module_state, env_state, module_centers, env_coords, module_present, heat_powers)
         pred_field = self.field_decoder(
@@ -946,11 +1041,8 @@ class GlobalChannelThermalModel(nn.Module):
 
         if local_outputs is not None:
             pred_internal = local_outputs["internal_temperature"]
-            pred_interface, interface_diagnostics = self._assemble_local_surrogate_interface(
-                local_outputs,
-                local_ports,
-                module_present,
-            )
+            if pred_interface is None:
+                raise RuntimeError("Local surrogate branch did not assemble pred_interface.")
             module_response_latent = local_outputs["module_response_latent"]
             interface_source = "local_surrogate"
         else:
@@ -965,6 +1057,7 @@ class GlobalChannelThermalModel(nn.Module):
             "pred_internal_temperature": pred_internal,
             "pred_interface": pred_interface,
             "interface_source": interface_source,
+            "pred_interface_source": interface_source,
             "pred_port_condition": pred_port_tokens,
             "module_response_latent": module_response_latent,
             "organizer_aux": org,

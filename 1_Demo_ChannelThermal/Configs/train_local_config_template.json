@@ -1,10 +1,10 @@
 {
-  "Run_ID": "0002",
+  "Run_ID": "0003",
   "_note": "keys beginning with _note document intended usage.",
   "dataset": {
     "_note_normalization": "Use mean/std normalization for Stage A. Checkpoints save the local normalizer stats, and Stage B applies them when a local surrogate is attached.",
     
-    "source": "local",
+    "source": "mixed",
     "_note_source": "dataset.source = local | global_alignment | mixed",
 
     "packed_h5_path": "./Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5",

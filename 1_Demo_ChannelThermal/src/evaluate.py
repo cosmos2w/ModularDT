@@ -232,7 +232,7 @@ def predict_case(
             for key, value in first_outputs["organizer_aux"].items()
         },
     }
-    for key in ("pred_interface_surrogate_raw", "pred_interface_flux_physics"):
+    for key in ("pred_interface_surrogate_raw", "pred_interface_flux_physics", "pred_interface_delta_q"):
         if key in first_outputs:
             result[key] = first_outputs[key].detach().cpu().numpy()[0]
     return result
@@ -378,6 +378,7 @@ def plot_interface(
     pred_interface: np.ndarray,
     pred_interface_surrogate_raw: Optional[np.ndarray] = None,
     pred_interface_flux_physics: Optional[np.ndarray] = None,
+    interface_flux_mode: str = "unknown",
 ) -> None:
     present = sample["structure"]["module_present"] > 0.5
     indices = np.flatnonzero(present)[: min(3, int(np.sum(present)))]
@@ -386,6 +387,14 @@ def plot_interface(
     theta = sample["teacher_port_tokens"][0, :, 0]
     gt = sample["interface_target"]
     fig, axes = plt.subplots(len(indices), 2, figsize=(10.0, 3.0 * len(indices)), constrained_layout=True)
+    mode = str(interface_flux_mode)
+    if mode == "physics_from_port":
+        note = "Pred q_normal = physics_from_port"
+    elif mode == "corrected_physics":
+        note = "Pred q_normal = physics + learned delta_q"
+    else:
+        note = f"Pred q_normal mode = {mode}"
+    fig.suptitle(note, fontsize=10)
     if len(indices) == 1:
         axes = axes[None, :]
     for row, module_idx in enumerate(indices):
@@ -401,8 +410,8 @@ def plot_interface(
             ax.set_title(f"M{module_idx} {label} RMSE={curve_metrics['rmse']:.4e}, relL2={curve_metrics['relative_l2']:.4e}")
             ax.set_xlabel("theta")
             ax.grid(True, alpha=0.25)
-            if row == 0 and col == 0:
-                ax.legend()
+            if row == 0:
+                ax.legend(fontsize=8)
     fig.savefig(output_path, dpi=170)
     plt.close(fig)
 
@@ -583,6 +592,8 @@ def summarize_prediction(
         save_payload["pred_interface_surrogate_raw"] = predictions["pred_interface_surrogate_raw"].astype(np.float32)
     if "pred_interface_flux_physics" in predictions:
         save_payload["pred_interface_flux_physics"] = predictions["pred_interface_flux_physics"].astype(np.float32)
+    if "pred_interface_delta_q" in predictions:
+        save_payload["pred_interface_delta_q"] = predictions["pred_interface_delta_q"].astype(np.float32)
     npz_path = output_dir / f"evaluation_outputs_{suffix}.npz"
     np.savez_compressed(npz_path, **save_payload)
     outputs = {
@@ -615,6 +626,12 @@ def summarize_prediction(
     pred_port = predictions["pred_port_condition"][..., 3:5]
     port_t_env_rmse = error_metrics(pred_port[..., 0], target_port[..., 0])["rmse"]
     port_h_rmse = error_metrics(pred_port[..., 1], target_port[..., 1])["rmse"]
+    q_surrogate_raw_rmse = None
+    if "pred_interface_surrogate_raw" in predictions:
+        q_surrogate_raw_rmse = error_metrics(predictions["pred_interface_surrogate_raw"][..., 1], gt_interface[..., 1])["rmse"]
+    q_physics_rmse = None
+    if "pred_interface_flux_physics" in predictions:
+        q_physics_rmse = error_metrics(predictions["pred_interface_flux_physics"][..., 1], gt_interface[..., 1])["rmse"]
     interface_relative_l2_by_target = {
         "T_surface": error_metrics(pred_interface[..., 0], gt_interface[..., 0])["relative_l2"],
         "q_normal": error_metrics(pred_interface[..., 1], gt_interface[..., 1])["relative_l2"],
@@ -640,6 +657,8 @@ def summarize_prediction(
         "q_normal_rmse": interface_rmse_by_target["q_normal"],
         "port_T_env_rmse": port_t_env_rmse,
         "port_h_rmse": port_h_rmse,
+        "q_surrogate_raw_rmse": q_surrogate_raw_rmse,
+        "q_physics_rmse": q_physics_rmse,
         "field_relative_l2": field_metrics["relative_l2"],
         "temperature_relative_l2": temperature_metrics["relative_l2"] if temperature_metrics is not None else None,
         "internal_relative_l2": internal_metrics["relative_l2"],
@@ -692,6 +711,7 @@ def evaluate_mode(
         predictions["pred_interface"],
         predictions.get("pred_interface_surrogate_raw"),
         predictions.get("pred_interface_flux_physics"),
+        str(predictions.get("interface_flux_mode", "unknown")),
     )
     summary = summarize_prediction(checkpoint_path, raw_sample, predictions, output_dir, suffix, channel_order)
     summary["_organizer_aux"] = predictions["organizer_aux"]
@@ -782,6 +802,15 @@ def main() -> int:
     if args.local_port_condition_mode == "both":
         teacher = mode_summaries["teacher"]
         predicted = mode_summaries["predicted"]
+        extra_metric_keys = [
+            "interface_flux_mode",
+            "T_surface_rmse",
+            "q_normal_rmse",
+            "port_T_env_rmse",
+            "port_h_rmse",
+            "q_surrogate_raw_rmse",
+            "q_physics_rmse",
+        ]
         summary.update(
             {
                 # "teacher_field_l2_error": teacher["field_l2_error"],
@@ -802,9 +831,21 @@ def main() -> int:
                 "predicted_interface_relative_l2": predicted["interface_relative_l2"],
             }
         )
+        for key in extra_metric_keys:
+            summary[f"teacher_{key}"] = teacher.get(key)
+            summary[f"predicted_{key}"] = predicted.get(key)
     else:
         suffix = mode_suffix(args.local_port_condition_mode)
         only = mode_summaries[suffix]
+        extra_metric_keys = [
+            "interface_flux_mode",
+            "T_surface_rmse",
+            "q_normal_rmse",
+            "port_T_env_rmse",
+            "port_h_rmse",
+            "q_surrogate_raw_rmse",
+            "q_physics_rmse",
+        ]
         summary.update(
             {
                 "field_l2_error": only["field_l2_error"],
@@ -825,6 +866,9 @@ def main() -> int:
                 f"{suffix}_interface_relative_l2": only["interface_relative_l2"],
             }
         )
+        for key in extra_metric_keys:
+            summary[key] = only.get(key)
+            summary[f"{suffix}_{key}"] = only.get(key)
     write_json(output_dir / "evaluation_summary.json", summary)
     print(json.dumps(summary, indent=2))
     return 0

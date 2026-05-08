@@ -1,7 +1,7 @@
 Demo 1 Channel Thermal Forward Model
 ====================================
 
-Updated: 2026-04-30
+Updated: 2026-05-01
 
 Stage A: local module surrogate
 -------------------------------
@@ -233,13 +233,16 @@ default is teacher-forced port conditions so Stage B can learn a stable global
 organizer before relying on its own port predictions.
 
 The previous Stage-B local-surrogate path could produce nearly flat or badly
-scaled q_normal because q_normal was unsupervised when the frozen local
-surrogate was used, and because Stage B fed h_proxy into a local surrogate that
-expects Robin h. The fix is:
+scaled q_normal because pure physics_from_port made the plotted Pred flux equal
+the plotted physics curve by design, because h_effective supervision can be
+noisy or ill-conditioned, and because older paths could feed h_proxy into a
+local surrogate that expects Robin h. The fix is:
 
   h_effective = q_normal / sign_preserving_clamp(T_surface - T_outside)
   teacher/predicted port h targets use h_effective
-  q_normal defaults to h_pred * (T_surface_pred - T_env_pred)
+  h loss uses log1p(h) and interface_condition_valid_mask
+  q_physics = h_pred * (T_surface_pred - T_env_pred)
+  q_normal defaults to q_physics + delta_q
 
 T_surface, internal temperature, and module_response_latent still come from the
 local surrogate. Only the interface flux channel is replaced by the selected
@@ -247,7 +250,23 @@ flux mode. local_surrogate_flux_mode supports:
 
   surrogate
   physics_from_port
+  corrected_physics
   blend
+
+corrected_physics is the default. The correction head is zero-initialized, so
+the first prediction is q_physics, then Stage B can learn a physically anchored
+delta_q residual instead of being forced to keep q_normal equal to pure Robin
+physics.
+
+For each module, the local branch also summarizes the selected response as:
+
+  mean/max T_surface
+  mean/max q_normal
+  mean/max internal temperature
+
+Those six numbers are projected and fused into the module token alongside
+module_response_latent. The organizer therefore sees explicit thermal-response
+information without becoming a complex generator.
 
 The recommended curriculum is teacher -> mixed -> predicted:
 
@@ -259,6 +278,12 @@ This matches the evaluation distinction. Teacher mode is a debugging aid
 because it supplies exact dataset port conditions to the local surrogate.
 Predicted mode is the realistic forward-design mode because, during autonomous
 inference, no solved teacher port tokens are available.
+
+The same curriculum gates internal-temperature and interface losses. They have
+zero effective weight in teacher mode, base_weight * (1 - teacher_ratio) in
+mixed mode, and full base weight in predicted mode. This matches what can
+actually be optimized: frozen teacher-forced local-surrogate outputs cannot be
+improved by the global port head.
 
 
 Global neural-field decoder
@@ -279,9 +304,9 @@ Stage A losses:
 Stage B losses:
 
   global field MSE over [u, v, p, omega, temperature]
-  internal module temperature MSE over valid module disk points
-  interface MSE over [T_surface, q_normal]
-  port condition MSE over [T_env, h]
+  schedule-weighted internal module temperature MSE over valid module disk points
+  schedule-weighted interface loss over [T_surface, q_normal]
+  port T_env loss plus log-space h_effective SmoothL1 with validity mask
   weak A_me KL to the channel thermal module-environment prior
   A_eh factor KL from A_me_for_target and A_mh
   module/environment hyperedge mass alignment
@@ -290,6 +315,15 @@ Stage B losses:
 diag_organizer_strength_mean is logged only. It is not added to the total loss;
 a positive organizer_strength_weight historically penalized strong hyperedges
 and should usually remain 0.0.
+
+Organizer direct-loss weights use the default warmup_decay schedule: full
+strength early, linearly decayed to a smaller late-training factor. This keeps
+the organizer from dominating after the module/environment structure has formed.
+
+If the loaded local surrogate checkpoint metadata indicates dataset_source
+local, or does not indicate A2/global_alignment/mixed alignment, Stage B prints
+a warning. A synthetic-only Stage-A surrogate can limit Stage-B improvement
+until global-alignment data is used.
 
 This ChannelThermal model intentionally does not copy the dynamic/periodic
 machinery from 0_Demo_MultiCylinder: no phase input, no dynamic residual branch,

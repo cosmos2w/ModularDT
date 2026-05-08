@@ -22,6 +22,7 @@ from channelthermal_model_utils import (
     current_timestamp,
     ensure_dir,
     make_grad_scaler,
+    masked_mean,
     masked_mse,
     read_json,
     recursive_to_device,
@@ -136,32 +137,39 @@ def field_loss(pred: torch.Tensor, target: torch.Tensor, loss_cfg: Dict[str, Any
     return ((pred - target).square() * weights).mean()
 
 
+def masked_smooth_l1(pred: torch.Tensor, target: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+    loss = F.smooth_l1_loss(pred, target, reduction="none")
+    if mask is None:
+        return loss.mean()
+    return masked_mean(loss, mask)
+
+
 def port_condition_loss(
     pred_port: torch.Tensor,
     target_port: torch.Tensor,
     module_present: torch.Tensor,
+    valid_mask: Optional[torch.Tensor],
     loss_cfg: Dict[str, Any],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Return scaled optimization loss and raw physical MSE for port tokens.
-
-    The port head predicts physical ``T_env`` and ``h`` values. Their raw MSE can
-    be hundreds at initialization, so the optimization loss uses stable physical
-    scales while the raw MSE is kept as a diagnostic.
-    """
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return port optimization loss plus raw physical diagnostics."""
     pred_values = pred_port[..., 3:5]
     target_values = target_port[..., 3:5]
     mask = module_present[:, :, None]
     raw_mse = masked_mse(pred_values, target_values, mask)
-    t_env_mse = masked_mse(pred_values[..., 0:1], target_values[..., 0:1], mask)
-    h_mse = masked_mse(pred_values[..., 1:2], target_values[..., 1:2], mask)
-    scales = pred_values.new_tensor(
-        [
-            max(float(loss_cfg.get("port_temperature_scale", 10.0)), 1.0e-6),
-            max(float(loss_cfg.get("port_h_scale", 10.0)), 1.0e-6),
-        ]
+    t_mask = mask
+    h_mask = mask if valid_mask is None else mask * valid_mask.to(device=pred_port.device, dtype=pred_port.dtype)
+    t_env_mse = masked_mse(pred_values[..., 0:1], target_values[..., 0:1], t_mask)
+    h_mse = masked_mse(pred_values[..., 1:2], target_values[..., 1:2], h_mask)
+    t_scale = max(float(loss_cfg.get("port_temperature_scale", 10.0)), 1.0e-6)
+    loss_port_t_env = masked_mse(pred_values[..., 0:1] / t_scale, target_values[..., 0:1] / t_scale, t_mask)
+    pred_h_log = torch.log1p(pred_values[..., 1:2].clamp_min(0.0))
+    target_h_log = torch.log1p(target_values[..., 1:2].clamp_min(0.0))
+    loss_port_h = masked_smooth_l1(pred_h_log, target_h_log, h_mask)
+    loss_port_condition = (
+        float(loss_cfg.get("port_temperature_weight", 1.0)) * loss_port_t_env
+        + float(loss_cfg.get("port_h_weight", 1.0)) * loss_port_h
     )
-    scaled_mse = masked_mse(pred_values / scales, target_values / scales, module_present[:, :, None])
-    return scaled_mse, raw_mse, t_env_mse, h_mse
+    return loss_port_condition, raw_mse, t_env_mse, h_mse, loss_port_t_env, loss_port_h
 
 
 def interface_loss(
@@ -174,9 +182,9 @@ def interface_loss(
     """Return interface loss plus per-target diagnostics.
 
     With a frozen Stage-A local surrogate, q_normal can be weakly supervised
-    through local_surrogate_interface_target_weights. In the default
-    physics_from_port mode, this trains the port-predicted h_effective path
-    without letting flux dominate T_surface.
+    through local_surrogate_interface_target_weights. In corrected_physics mode,
+    this trains the final physically anchored flux path without letting flux
+    dominate T_surface.
     """
     source = str(outputs.get("interface_source", "global_head"))
     weights_cfg = loss_cfg.get("interface_target_weights", None)
@@ -190,14 +198,29 @@ def interface_loss(
         zero = pred.new_tensor(0.0)
         return zero, zero, zero
 
+    loss_type = str(loss_cfg.get("interface_loss_type", "smooth_l1")).lower()
+    mask = module_present[:, :, None]
     if weights_cfg is None:
-        loss = masked_mse(pred, target, module_present[:, :, None])
+        if loss_type == "mse":
+            loss = masked_mse(pred, target, mask)
+        elif loss_type == "smooth_l1":
+            loss = masked_smooth_l1(pred, target, mask)
+        else:
+            raise ValueError(f"Unsupported interface_loss_type={loss_type!r}.")
     else:
         weights = torch.as_tensor(weights_cfg, device=pred.device, dtype=pred.dtype)
         if weights.numel() < pred.shape[-1]:
             weights = F.pad(weights, (0, pred.shape[-1] - weights.numel()), value=1.0)
         weights = weights[: pred.shape[-1]].clamp_min(0.0)
-        weighted = torch.stack(mse_by_target) * weights
+        per_target_loss = []
+        for idx in range(pred.shape[-1]):
+            if loss_type == "mse":
+                per_target_loss.append(masked_mse(pred[..., idx : idx + 1], target[..., idx : idx + 1], mask))
+            elif loss_type == "smooth_l1":
+                per_target_loss.append(masked_smooth_l1(pred[..., idx : idx + 1], target[..., idx : idx + 1], mask))
+            else:
+                raise ValueError(f"Unsupported interface_loss_type={loss_type!r}.")
+        weighted = torch.stack(per_target_loss) * weights
         loss = weighted.sum() / weights.sum().clamp_min(1.0e-6)
 
     t_surface_mse = mse_by_target[0]
@@ -326,7 +349,13 @@ def organizer_mass_diagnostics_channelthermal(
     }
 
 
-def compute_organizer_losses(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+def compute_organizer_losses(
+    outputs: Dict[str, Any],
+    batch: Dict[str, Any],
+    loss_cfg: Dict[str, Any],
+    *,
+    organizer_weight_scale: float = 1.0,
+) -> Dict[str, torch.Tensor]:
     """Weak direct supervision for physically meaningful channel hyperedges."""
     aux = outputs.get("organizer_aux", {})
     if not isinstance(aux, dict) or not {"A_me", "A_mh", "A_eh"}.issubset(aux):
@@ -344,6 +373,7 @@ def compute_organizer_losses(outputs: Dict[str, Any], batch: Dict[str, Any], los
             "org_module_effective_hyperedges": zero,
             "org_max_A_eh_mass": zero,
             "org_max_A_mh_mass": zero,
+            "organizer_weight_scale": zero,
         }
 
     eps = float(loss_cfg.get("organizer_eps", 1.0e-6))
@@ -384,7 +414,8 @@ def compute_organizer_losses(outputs: Dict[str, Any], batch: Dict[str, Any], los
     else:
         loss_org_mm = aux["A_mh"].new_tensor(0.0)
 
-    loss_org_direct = (
+    scale = float(organizer_weight_scale)
+    loss_org_direct = scale * (
         float(loss_cfg.get("organizer_me_weight", 0.01)) * loss_org_me
         + float(loss_cfg.get("organizer_eh_factor_weight", 0.05)) * loss_org_eh_factor
         + float(loss_cfg.get("organizer_mass_align_weight", 0.02)) * loss_org_mass_align
@@ -396,6 +427,7 @@ def compute_organizer_losses(outputs: Dict[str, Any], batch: Dict[str, Any], los
         "loss_org_mass_align": loss_org_mass_align,
         "loss_org_mm": loss_org_mm,
         "loss_org_direct": loss_org_direct,
+        "organizer_weight_scale": aux["A_mh"].new_tensor(scale),
     }
     out.update(organizer_mass_diagnostics_channelthermal(aux, batch, eps=eps))
     return out
@@ -432,6 +464,43 @@ def effective_port_condition_settings(epoch: int, training_cfg: Dict[str, Any]) 
     return "predicted", 0.0
 
 
+def effective_local_loss_weights(
+    loss_cfg: Dict[str, Any],
+    *,
+    local_port_condition_mode: str,
+    mixed_teacher_ratio: float,
+) -> tuple[float, float]:
+    base_internal = float(loss_cfg.get("internal_temperature_weight", 1.0))
+    base_interface = float(loss_cfg.get("interface_weight", 0.2))
+    mode = str(local_port_condition_mode).lower()
+    if mode == "teacher":
+        scale = 0.0
+    elif mode == "mixed":
+        scale = 1.0 - float(mixed_teacher_ratio)
+    else:
+        scale = 1.0
+    scale = min(max(scale, 0.0), 1.0)
+    return base_internal * scale, base_interface * scale
+
+
+def organizer_schedule_scale(epoch: int, training_cfg: Dict[str, Any]) -> float:
+    schedule = str(training_cfg.get("organizer_schedule", "warmup_decay")).lower()
+    if schedule == "constant":
+        return 1.0
+    if schedule != "warmup_decay":
+        raise ValueError(f"Unsupported organizer_schedule={schedule!r}.")
+    full_until = int(training_cfg.get("organizer_full_until_epoch", 100))
+    decay_end = int(training_cfg.get("organizer_decay_end_epoch", 300))
+    final = float(training_cfg.get("organizer_decay_factor_final", 0.2))
+    if int(epoch) <= full_until:
+        return 1.0
+    if int(epoch) >= decay_end:
+        return final
+    span = max(decay_end - full_until, 1)
+    progress = (int(epoch) - full_until) / span
+    return 1.0 + (final - 1.0) * min(max(progress, 0.0), 1.0)
+
+
 def validate_local_surrogate_training_path(
     model_config: GlobalChannelThermalModelConfig,
     training_cfg: Dict[str, Any],
@@ -455,7 +524,15 @@ def validate_local_surrogate_training_path(
         )
 
 
-def compute_losses(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+def compute_losses(
+    outputs: Dict[str, Any],
+    batch: Dict[str, Any],
+    loss_cfg: Dict[str, Any],
+    *,
+    effective_internal_temperature_weight: float,
+    effective_interface_weight: float,
+    organizer_weight_scale: float,
+) -> Dict[str, torch.Tensor]:
     structure = batch["structure"]
     module_present = structure["module_present"]
     losses: Dict[str, torch.Tensor] = {}
@@ -470,6 +547,7 @@ def compute_losses(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dic
         )
     else:
         losses["loss_internal_temperature"] = outputs["pred_field"].new_tensor(0.0)
+    losses["effective_internal_temperature_weight"] = outputs["pred_field"].new_tensor(float(effective_internal_temperature_weight))
 
     if outputs.get("pred_interface") is not None and outputs["pred_interface"].numel() > 0:
         (
@@ -481,6 +559,7 @@ def compute_losses(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dic
         losses["loss_interface"] = outputs["pred_field"].new_tensor(0.0)
         losses["diag_interface_T_surface_mse"] = outputs["pred_field"].new_tensor(0.0)
         losses["diag_interface_q_normal_mse"] = outputs["pred_field"].new_tensor(0.0)
+    losses["effective_interface_weight"] = outputs["pred_field"].new_tensor(float(effective_interface_weight))
 
     pred_port = outputs["pred_port_condition"]
     target_port = batch["teacher_port_tokens"]
@@ -489,10 +568,13 @@ def compute_losses(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dic
         losses["diag_port_condition_physical_mse"],
         losses["diag_port_T_env_mse"],
         losses["diag_port_h_mse"],
+        losses["loss_port_T_env"],
+        losses["loss_port_h"],
     ) = port_condition_loss(
         pred_port,
         target_port,
         module_present,
+        batch.get("interface_condition_valid_mask"),
         loss_cfg,
     )
 
@@ -501,12 +583,12 @@ def compute_losses(outputs: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dic
         losses["diag_organizer_strength_mean"] = aux["hyper_strength"].mean()
     else:
         losses["diag_organizer_strength_mean"] = pred_port.new_tensor(0.0)
-    losses.update(compute_organizer_losses(outputs, batch, loss_cfg))
+    losses.update(compute_organizer_losses(outputs, batch, loss_cfg, organizer_weight_scale=organizer_weight_scale))
 
     total = (
         float(loss_cfg.get("field_mse_weight", 1.0)) * losses["loss_field"]
-        + float(loss_cfg.get("internal_temperature_weight", 1.0)) * losses["loss_internal_temperature"]
-        + float(loss_cfg.get("interface_weight", 0.2)) * losses["loss_interface"]
+        + float(effective_internal_temperature_weight) * losses["loss_internal_temperature"]
+        + float(effective_interface_weight) * losses["loss_interface"]
         + float(loss_cfg.get("port_condition_weight", 0.1)) * losses["loss_port_condition"]
         + losses["loss_org_direct"]
     )
@@ -612,6 +694,9 @@ def run_epoch(
     max_batches: Optional[int] = None,
     local_port_condition_mode: str = "teacher",
     mixed_teacher_ratio: float = 0.5,
+    effective_internal_temperature_weight: float = 0.0,
+    effective_interface_weight: float = 0.0,
+    organizer_weight_scale: float = 1.0,
 ) -> Dict[str, float]:
     training = optimizer is not None
     model.train(training)
@@ -637,7 +722,14 @@ def run_epoch(
                 local_port_condition_mode=local_port_condition_mode,
                 mixed_teacher_ratio=float(mixed_teacher_ratio),
             )
-            losses = compute_losses(outputs, batch, loss_cfg)
+            losses = compute_losses(
+                outputs,
+                batch,
+                loss_cfg,
+                effective_internal_temperature_weight=float(effective_internal_temperature_weight),
+                effective_interface_weight=float(effective_interface_weight),
+                organizer_weight_scale=float(organizer_weight_scale),
+            )
         if training:
             clip_norm = float(training_cfg.get("gradient_clip_norm", 1.0))
             if scaler is not None and scaler.is_enabled():
@@ -672,6 +764,8 @@ def run_epoch(
                 "diag_port_condition_physical_mse",
                 "diag_port_T_env_mse",
                 "diag_port_h_mse",
+                "loss_port_T_env",
+                "loss_port_h",
                 "diag_organizer_strength_mean",
                 "loss_org_me",
                 "loss_org_eh_factor",
@@ -685,6 +779,9 @@ def run_epoch(
                 "org_module_effective_hyperedges",
                 "org_max_A_eh_mass",
                 "org_max_A_mh_mass",
+                "effective_internal_temperature_weight",
+                "effective_interface_weight",
+                "organizer_weight_scale",
             ]
         }
     return {key: value / count for key, value in sums.items()}
@@ -760,6 +857,25 @@ def require_local_normalization_stats(checkpoint: Dict[str, Any], normalization_
     return stats
 
 
+def warn_if_synthetic_only_local_surrogate(checkpoint: Dict[str, Any]) -> None:
+    metadata = checkpoint.get("metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    train_cfg = checkpoint.get("train_config", {})
+    dataset_cfg = train_cfg.get("dataset", {}) if isinstance(train_cfg, dict) else {}
+    training_cfg = train_cfg.get("training", {}) if isinstance(train_cfg, dict) else {}
+    dataset_source = str(metadata.get("dataset_source", dataset_cfg.get("source", ""))).lower()
+    alignment_stage = str(
+        metadata.get("alignment_stage", dataset_cfg.get("alignment_stage", training_cfg.get("alignment_stage", "")))
+    ).lower()
+    allowed_alignment = {"a2", "global_alignment", "mixed"}
+    if dataset_source == "local" or alignment_stage not in allowed_alignment:
+        print(
+            "[warning] Local surrogate appears synthetic-only; Stage-B may not outperform a global-only baseline "
+            "until Stage A2 alignment is used."
+        )
+
+
 def attach_local_surrogate_if_needed(
     model: GlobalChannelThermalModel,
     model_config: GlobalChannelThermalModelConfig,
@@ -775,6 +891,7 @@ def attach_local_surrogate_if_needed(
             "Set use_local_surrogate=false for the global-only baseline."
         )
     local_model, local_checkpoint = load_local_surrogate_from_checkpoint(resolve_demo_path(checkpoint_path), map_location=device)
+    warn_if_synthetic_only_local_surrogate(local_checkpoint)
     normalization_config = local_surrogate_normalization_config(local_checkpoint)
     normalization_stats = require_local_normalization_stats(local_checkpoint, normalization_config)
     local_model.to(device)
@@ -934,6 +1051,8 @@ def main() -> int:
         "diag_interface_T_surface_mse",
         "diag_interface_q_normal_mse",
         "loss_port_condition",
+        "loss_port_T_env",
+        "loss_port_h",
         "diag_port_condition_physical_mse",
         "diag_port_T_env_mse",
         "diag_port_h_mse",
@@ -952,6 +1071,9 @@ def main() -> int:
         "org_max_A_mh_mass",
         "effective_local_port_condition_mode",
         "effective_mixed_teacher_ratio",
+        "effective_internal_temperature_weight",
+        "effective_interface_weight",
+        "organizer_weight_scale",
         "val_loss_total",
         "val_loss_field",
         "val_loss_internal_temperature",
@@ -959,6 +1081,8 @@ def main() -> int:
         "val_diag_interface_T_surface_mse",
         "val_diag_interface_q_normal_mse",
         "val_loss_port_condition",
+        "val_loss_port_T_env",
+        "val_loss_port_h",
         "val_diag_port_condition_physical_mse",
         "val_diag_port_T_env_mse",
         "val_diag_port_h_mse",
@@ -975,6 +1099,9 @@ def main() -> int:
         "val_org_module_effective_hyperedges",
         "val_org_max_A_eh_mass",
         "val_org_max_A_mh_mass",
+        "val_effective_internal_temperature_weight",
+        "val_effective_interface_weight",
+        "val_organizer_weight_scale",
     ]
     with history_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -990,6 +1117,12 @@ def main() -> int:
     best_metric = math.inf
     for epoch in range(1, epochs + 1):
         effective_mode, effective_ratio = effective_port_condition_settings(epoch, training_cfg)
+        effective_internal_weight, effective_interface_weight = effective_local_loss_weights(
+            loss_cfg,
+            local_port_condition_mode=effective_mode,
+            mixed_teacher_ratio=effective_ratio,
+        )
+        org_scale = organizer_schedule_scale(epoch, training_cfg)
         train_metrics = run_epoch(
             model,
             train_loader,
@@ -1002,6 +1135,9 @@ def main() -> int:
             max_batches=max_train_batches,
             local_port_condition_mode=effective_mode,
             mixed_teacher_ratio=effective_ratio,
+            effective_internal_temperature_weight=effective_internal_weight,
+            effective_interface_weight=effective_interface_weight,
+            organizer_weight_scale=org_scale,
         )
         val_metrics = run_epoch(
             model,
@@ -1015,6 +1151,9 @@ def main() -> int:
             max_batches=max_val_batches,
             local_port_condition_mode=effective_mode,
             mixed_teacher_ratio=effective_ratio,
+            effective_internal_temperature_weight=effective_internal_weight,
+            effective_interface_weight=effective_interface_weight,
+            organizer_weight_scale=org_scale,
         )
         row = {
             "epoch": epoch,
@@ -1025,6 +1164,8 @@ def main() -> int:
             "diag_interface_T_surface_mse": train_metrics.get("diag_interface_T_surface_mse", math.nan),
             "diag_interface_q_normal_mse": train_metrics.get("diag_interface_q_normal_mse", math.nan),
             "loss_port_condition": train_metrics.get("loss_port_condition", math.nan),
+            "loss_port_T_env": train_metrics.get("loss_port_T_env", math.nan),
+            "loss_port_h": train_metrics.get("loss_port_h", math.nan),
             "diag_port_condition_physical_mse": train_metrics.get("diag_port_condition_physical_mse", math.nan),
             "diag_port_T_env_mse": train_metrics.get("diag_port_T_env_mse", math.nan),
             "diag_port_h_mse": train_metrics.get("diag_port_h_mse", math.nan),
@@ -1043,6 +1184,9 @@ def main() -> int:
             "org_max_A_mh_mass": train_metrics.get("org_max_A_mh_mass", math.nan),
             "effective_local_port_condition_mode": effective_mode,
             "effective_mixed_teacher_ratio": effective_ratio,
+            "effective_internal_temperature_weight": effective_internal_weight,
+            "effective_interface_weight": effective_interface_weight,
+            "organizer_weight_scale": org_scale,
             "val_loss_total": val_metrics.get("loss_total", math.nan),
             "val_loss_field": val_metrics.get("loss_field", math.nan),
             "val_loss_internal_temperature": val_metrics.get("loss_internal_temperature", math.nan),
@@ -1050,6 +1194,8 @@ def main() -> int:
             "val_diag_interface_T_surface_mse": val_metrics.get("diag_interface_T_surface_mse", math.nan),
             "val_diag_interface_q_normal_mse": val_metrics.get("diag_interface_q_normal_mse", math.nan),
             "val_loss_port_condition": val_metrics.get("loss_port_condition", math.nan),
+            "val_loss_port_T_env": val_metrics.get("loss_port_T_env", math.nan),
+            "val_loss_port_h": val_metrics.get("loss_port_h", math.nan),
             "val_diag_port_condition_physical_mse": val_metrics.get("diag_port_condition_physical_mse", math.nan),
             "val_diag_port_T_env_mse": val_metrics.get("diag_port_T_env_mse", math.nan),
             "val_diag_port_h_mse": val_metrics.get("diag_port_h_mse", math.nan),
@@ -1066,6 +1212,9 @@ def main() -> int:
             "val_org_module_effective_hyperedges": val_metrics.get("org_module_effective_hyperedges", math.nan),
             "val_org_max_A_eh_mass": val_metrics.get("org_max_A_eh_mass", math.nan),
             "val_org_max_A_mh_mass": val_metrics.get("org_max_A_mh_mass", math.nan),
+            "val_effective_internal_temperature_weight": val_metrics.get("effective_internal_temperature_weight", math.nan),
+            "val_effective_interface_weight": val_metrics.get("effective_interface_weight", math.nan),
+            "val_organizer_weight_scale": val_metrics.get("organizer_weight_scale", math.nan),
         }
         with history_path.open("a", newline="", encoding="utf-8") as f:
             csv.DictWriter(f, fieldnames=fieldnames).writerow(row)
@@ -1097,10 +1246,11 @@ def main() -> int:
             f"internal={row['loss_internal_temperature']:.4e} interface={row['loss_interface']:.4e} "
             f"iface_T={row['diag_interface_T_surface_mse']:.4e} iface_q={row['diag_interface_q_normal_mse']:.4e} "
             f"port={row['loss_port_condition']:.4e} port_phys={row['diag_port_condition_physical_mse']:.4e} "
-            f"port_T={row['diag_port_T_env_mse']:.3e} port_h={row['diag_port_h_mse']:.3e} "
+            f"port_T={row['loss_port_T_env']:.3e} port_h={row['loss_port_h']:.3e} "
             f"org_me={row['loss_org_me']:.3e} org_eh={row['loss_org_eh_factor']:.3e} "
             f"org_mass_l1={row['org_mass_l1']:.3e} "
             f"mode={effective_mode} ratio={effective_ratio:.3f} "
+            f"eff_int={effective_internal_weight:.3g} eff_iface={effective_interface_weight:.3g} org_scale={org_scale:.3g} "
             f"val={row['val_loss_total']:.4e}"
         )
 
