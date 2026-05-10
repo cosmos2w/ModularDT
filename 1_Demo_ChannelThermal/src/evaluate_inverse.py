@@ -40,7 +40,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reference-split", type=str, default="test", help="Dataset split used for fixed conditions.")
     parser.add_argument("--reference-case-index", type=int, default=0, help="Reference case index in split.")
     parser.add_argument("--n-samples", type=int, default=64, help="Number of inverse candidates to sample.")
-    parser.add_argument("--n-steps", type=int, default=32, help="Rectified-flow ODE steps.")
+    parser.add_argument("--n-steps", type=int, default=4, help="Rectified-flow ODE steps.")
+    parser.add_argument(
+        "--count-mode",
+        type=str,
+        default="uniform",
+        choices=("uniform", "sample", "argmax"),
+        help="How to choose generated module counts. 'uniform' samples within target count constraints.",
+    )
     parser.add_argument("--seed", type=int, default=123, help="Sampling seed.")
     parser.add_argument("--device", type=str, default=None, help="Torch device override.")
     parser.add_argument("--output-dir", type=str, default=None, help="Evaluation output directory.")
@@ -566,6 +573,7 @@ def main() -> int:
         n_samples=int(args.n_samples),
         n_steps=int(args.n_steps),
         seed=int(args.seed),
+        count_mode=str(args.count_mode),
         x_bounds=x_bounds,
         y_bounds=y_bounds,
         device=device,
@@ -627,6 +635,7 @@ def main() -> int:
         "target_path": target_payload.get("_path"),
         "reference_case_id": record.case_id,
         "n_samples": int(args.n_samples),
+        "count_mode": str(args.count_mode),
         "best_score": best["total_score"] if best else None,
         "best_valid": bool(best["valid"]) if best else None,
         "validity_rate": float(np.mean([float(c["valid"]) for c in candidates])) if candidates else 0.0,

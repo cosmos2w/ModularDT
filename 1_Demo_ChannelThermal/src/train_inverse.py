@@ -87,6 +87,12 @@ def decode_string_array(values: Any) -> List[str]:
 def _read_case_config(group: h5py.Group) -> Dict[str, Any]:
     if "case_config_json" not in group:
         return {}
+    raw = group["case_config_json"][()]
+    text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {}
 
 
 def stable_json_hash(payload: Any) -> str:
@@ -110,12 +116,6 @@ def file_fingerprint(path_like: str | Path) -> Dict[str, Any]:
         "size": int(stat.st_size),
         "sha256": digest.hexdigest(),
     }
-    raw = group["case_config_json"][()]
-    text = raw.decode("utf-8") if isinstance(raw, bytes) else str(raw)
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return {}
 
 
 def _domain_from_group(group: h5py.Group) -> Dict[str, float]:
@@ -553,9 +553,43 @@ def _resolve_local_surrogate_path(
     return None
 
 
+def load_first_readable_checkpoint(
+    candidates: Sequence[Path],
+    *,
+    map_location: Any,
+    label: str,
+) -> Tuple[Path, Dict[str, Any]]:
+    errors: List[str] = []
+    for path in candidates:
+        try:
+            checkpoint = load_trusted_checkpoint(path, map_location=map_location)
+            if errors:
+                print(f"[warning] using {path.name} for {label} after skipping unreadable checkpoint(s).")
+            return path, checkpoint
+        except Exception as exc:
+            errors.append(f"{path}: {type(exc).__name__}: {exc}")
+            print(f"[warning] skipping unreadable {label} checkpoint {path}: {exc}")
+    joined = "\n  ".join(errors)
+    raise RuntimeError(f"No readable {label} checkpoint found. Tried:\n  {joined}")
+
+
+def readable_forward_checkpoint_candidates(forward_cfg: Mapping[str, Any]) -> Tuple[List[Path], Path]:
+    saved_root = resolve_demo_path(forward_cfg.get("saved_root", "./Saved_Model"))
+    run_dir_raw = str(forward_cfg.get("run_dir", "auto"))
+    run_dir = latest_run_dir(saved_root) if run_dir_raw.lower() == "auto" else resolve_demo_path(run_dir_raw)
+    checkpoint_name = str(forward_cfg.get("checkpoint_name", "auto"))
+    names = list(forward_cfg.get("checkpoint_preference", CHECKPOINT_PREFERENCE))
+    if checkpoint_name.lower() != "auto":
+        names = [checkpoint_name, *[name for name in names if name != checkpoint_name]]
+    candidates = [(run_dir / str(name)).resolve() for name in names if (run_dir / str(name)).exists()]
+    if not candidates:
+        raise FileNotFoundError(f"No forward checkpoint found in {run_dir}; tried {names}.")
+    return candidates, run_dir.resolve()
+
+
 def load_forward_model(forward_cfg: Mapping[str, Any], device: torch.device) -> Tuple[GlobalChannelThermalModel, Dict[str, Any], Path]:
-    checkpoint_path, run_dir = resolve_forward_checkpoint(forward_cfg)
-    checkpoint = load_trusted_checkpoint(checkpoint_path, map_location=device)
+    checkpoint_candidates, run_dir = readable_forward_checkpoint_candidates(forward_cfg)
+    checkpoint_path, checkpoint = load_first_readable_checkpoint(checkpoint_candidates, map_location=device, label="forward")
     resolved_cfg = _resolved_forward_config(run_dir, checkpoint, forward_cfg)
     model_payload = checkpoint.get("model_config") or resolved_cfg.get("model", {})
     model_config = GlobalChannelThermalModelConfig.from_dict(dict(model_payload))
@@ -1077,6 +1111,7 @@ def run_forward_verification(
     n_steps: int,
     query_batch_size: int,
     seed: int,
+    count_mode: str = "uniform",
     heat_load_policy: str = "preserve_total_heat",
     fixed_heat_per_module: Optional[float] = None,
     target_heat_power_total: Optional[float] = None,
@@ -1096,7 +1131,14 @@ def run_forward_verification(
         physical_idx = int(np.asarray(item.get("physical_case_index", [int(idx) // dataset.samples_per_case])).reshape(-1)[0])
         record = dataset.records[physical_idx]
         target_spec_vec = item["target_spec_vector"]
-        candidates = inverse_model.sample_designs(target_spec_vec, n_samples=int(num_samples), n_steps=int(n_steps), seed=int(seed + idx), device=device)
+        candidates = inverse_model.sample_designs(
+            target_spec_vec,
+            n_samples=int(num_samples),
+            n_steps=int(n_steps),
+            seed=int(seed + idx),
+            count_mode=str(count_mode),
+            device=device,
+        )
         diversity.append(sample_diversity(candidates, inverse_model.max_num_modules))
         best_score = float("inf")
         best_valid = 0.0
@@ -1241,6 +1283,7 @@ def run_fixed_target_verification(
     n_steps: int,
     query_batch_size: int,
     seed: int,
+    count_mode: str,
     heat_load_policy: str,
     fixed_heat_per_module: Optional[float],
     temperature_limits: Optional[Mapping[str, Any]],
@@ -1252,6 +1295,7 @@ def run_fixed_target_verification(
         n_samples=num_samples,
         n_steps=n_steps,
         seed=seed,
+        count_mode=str(count_mode),
         x_bounds=_span_bounds(prefs.get("x_span")),
         y_bounds=_span_bounds(prefs.get("y_span")),
         device=device,
@@ -1330,7 +1374,7 @@ def save_loss_curve(history_path: Path, out_path: Path) -> None:
         return
     epochs = [float(row["epoch"]) for row in rows if row.get("epoch")]
     fig, ax = plt.subplots(figsize=(7.0, 4.2), constrained_layout=True)
-    for key in ("train_loss_total", "val_loss_total", "val_forward_score"):
+    for key in ("train_loss_total", "val_loss_total"):
         values = []
         for row in rows:
             try:
@@ -1344,6 +1388,49 @@ def save_loss_curve(history_path: Path, out_path: Path) -> None:
     ax.set_yscale("log")
     ax.grid(True, alpha=0.25)
     ax.legend()
+    fig.savefig(out_path, dpi=160)
+    plt.close(fig)
+
+
+def save_forward_score_curve(history_path: Path, out_path: Path) -> None:
+    if not history_path.exists():
+        return
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    with history_path.open("r", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        return
+    epochs = [float(row["epoch"]) for row in rows if row.get("epoch")]
+    keys = sorted(
+        key
+        for key in rows[0].keys()
+        if key == "val_forward_score" or key.startswith("val_forward_score_")
+    )
+    if not keys:
+        return
+    fig, ax = plt.subplots(figsize=(7.0, 4.2), constrained_layout=True)
+    plotted = False
+    for key in keys:
+        values = []
+        for row in rows:
+            try:
+                values.append(float(row.get(key, "nan")))
+            except ValueError:
+                values.append(float("nan"))
+        if values and any(math.isfinite(v) for v in values):
+            ax.plot(epochs[: len(values)], values, marker="o", markersize=3, label=key)
+            plotted = True
+    if not plotted:
+        plt.close(fig)
+        return
+    ax.set_xlabel("epoch")
+    ax.set_ylabel("forward score")
+    ax.grid(True, alpha=0.25)
+    ax.legend(fontsize=8)
     fig.savefig(out_path, dpi=160)
     plt.close(fig)
 
@@ -1502,7 +1589,10 @@ def main() -> int:
         f"train_cases={len(train_dataset.records)} train_items={len(train_dataset)}, "
         f"val_cases={len(val_dataset.records)} val_items={len(val_dataset)}, device={device}"
     )
-    print(f"[setup] design variables: centers+mask{' + heat_power' if model_config.generate_heat_power else ''}, max_num_modules={model_config.max_num_modules}")
+    print(
+        f"[setup] design variables: centers+mask{' + heat_power' if model_config.generate_heat_power else ''}, "
+        f"max_num_modules={model_config.max_num_modules}, center_decode_mode={model_config.center_decode_mode}"
+    )
     print(
         f"[setup] samples_per_case train={train_dataset.samples_per_case}, val={val_dataset.samples_per_case}; "
         f"validation augmentation enabled={bool(val_aug_cfg.get('enabled', False))}; heat_load_policy={heat_load_policy}"
@@ -1597,6 +1687,7 @@ def main() -> int:
                 n_steps=int(validation_cfg.get("forward_verify_n_steps", 16)),
                 query_batch_size=int(validation_cfg.get("forward_verify_query_batch_size", cfg.get("forward_model", {}).get("query_batch_size", 32768))),
                 seed=int(training_cfg.get("seed", 42)) + epoch,
+                count_mode=str(validation_cfg.get("forward_verify_count_mode", "uniform")),
                 heat_load_policy=heat_load_policy,
                 fixed_heat_per_module=float(fixed_heat_per_module) if fixed_heat_per_module is not None else None,
                 temperature_limits=temperature_limits,
@@ -1625,6 +1716,7 @@ def main() -> int:
                         n_steps=int(validation_cfg.get("demo_forward_verify_n_steps", validation_cfg.get("forward_verify_n_steps", 16))),
                         query_batch_size=int(validation_cfg.get("forward_verify_query_batch_size", cfg.get("forward_model", {}).get("query_batch_size", 32768))),
                         seed=int(training_cfg.get("seed", 42)) + epoch + 1009,
+                        count_mode=str(validation_cfg.get("demo_forward_verify_count_mode", validation_cfg.get("forward_verify_count_mode", "uniform"))),
                         heat_load_policy=heat_load_policy,
                         fixed_heat_per_module=float(fixed_heat_per_module) if fixed_heat_per_module is not None else None,
                         temperature_limits=temperature_limits,
@@ -1674,11 +1766,13 @@ def main() -> int:
         save_history_csv(history, metrics_history_path)
         if epoch % max(int(training_cfg.get("save_every_epochs", 25)), 1) == 0 or epoch == epochs:
             save_loss_curve(history_path, run_dir / "loss_curve.png")
+            save_forward_score_curve(history_path, run_dir / "forward_score_curve.png")
         print(
             f"[epoch {epoch:04d}] train={train_metrics.get('loss_total', float('nan')):.4e} "
             f"val={val_loss:.4e} forward={row.get('val_forward_score', float('nan')):.4e}"
         )
     save_loss_curve(history_path, run_dir / "loss_curve.png")
+    save_forward_score_curve(history_path, run_dir / "forward_score_curve.png")
     print(f"[done] inverse run saved to {run_dir}")
     return 0
 

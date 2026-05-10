@@ -151,7 +151,7 @@ class InverseModelConfig:
     wall_clearance: float = 0.05
     inlet_clearance: float = 0.25
     outlet_clearance: float = 0.25
-    center_decode_mode: str = "sigmoid"
+    center_decode_mode: str = "clamp"
     latent_align_completeness_power: float = 0.5
 
     def __post_init__(self) -> None:
@@ -163,8 +163,13 @@ class InverseModelConfig:
         if self.design_dim != expected:
             raise ValueError(f"design_dim must be {expected} for max_num_modules={self.max_num_modules}, generate_heat_power={self.generate_heat_power}.")
         mode = str(self.center_decode_mode).lower().strip()
-        if mode not in {"clamp", "sigmoid"}:
-            raise ValueError("center_decode_mode must be 'clamp' or 'sigmoid' for the nonperiodic channel.")
+        # Coordinates are trained directly as normalized [0, 1] values.  Older
+        # configs used "sigmoid", which double-compressed generated coordinates
+        # toward the channel center during evaluation.
+        if mode == "sigmoid":
+            mode = "clamp"
+        if mode not in {"clamp", "logit_sigmoid"}:
+            raise ValueError("center_decode_mode must be 'clamp' for direct normalized coordinates or 'logit_sigmoid' for logit-space coordinates.")
         self.center_decode_mode = mode
         policy = str(self.heat_load_policy).lower().strip()
         allowed_policies = {
@@ -462,7 +467,7 @@ class ThermalInverseDesignFlow(nn.Module):
 
     def decode_centers_norm_from_design_vec(self, x: torch.Tensor) -> torch.Tensor:
         raw = x[:, : self.max_num_modules * 2].reshape(x.shape[0], self.max_num_modules, 2)
-        if self.cfg.center_decode_mode == "sigmoid":
+        if self.cfg.center_decode_mode == "logit_sigmoid":
             return torch.sigmoid(raw)
         return raw.clamp(0.0, 1.0)
 
@@ -635,14 +640,27 @@ class ThermalInverseDesignFlow(nn.Module):
         count_probs = F.softmax(condition["count_logits"], dim=-1) if self.count_head is not None else torch.zeros(
             int(n_samples), self.max_num_modules + 1, device=device
         )
-        if self.count_head is None:
+        constraints = self._constraint_values(target)
+        normalized_count_mode = str(count_mode).lower().strip()
+        if normalized_count_mode in {"uniform", "constraint_uniform"}:
+            sampled_counts = []
+            for i in range(int(n_samples)):
+                lo = int(constraints["n_min"][i].item())
+                hi = int(constraints["n_max"][i].item())
+                if hi <= lo:
+                    sampled_counts.append(torch.tensor(lo, dtype=torch.long, device=device))
+                else:
+                    sampled_counts.append(torch.randint(lo, hi + 1, (1,), generator=generator, device=device, dtype=torch.long)[0])
+            raw_counts = torch.stack(sampled_counts, dim=0)
+        elif self.count_head is None:
             raw_counts = torch.full((int(n_samples),), self.max_num_modules, dtype=torch.long, device=device)
-        elif count_mode == "sample":
+            raw_counts = raw_counts.clamp(constraints["n_min"], constraints["n_max"])
+        elif normalized_count_mode == "sample":
             raw_counts = torch.multinomial(count_probs, num_samples=1, generator=generator).reshape(-1)
+            raw_counts = raw_counts.clamp(constraints["n_min"], constraints["n_max"])
         else:
             raw_counts = torch.argmax(count_probs, dim=-1)
-        constraints = self._constraint_values(target)
-        raw_counts = raw_counts.clamp(constraints["n_min"], constraints["n_max"])
+            raw_counts = raw_counts.clamp(constraints["n_min"], constraints["n_max"])
 
         centers_norm = self.decode_centers_norm_from_design_vec(x)
         mask_scores = torch.sigmoid(x[:, self.max_num_modules * 2 : self.max_num_modules * 3])

@@ -9,7 +9,7 @@
     "max_num_modules": "auto",
     "sort_centers": true,
     "samples_per_case": 4,
-    "validation_samples_per_case": 1,
+    "validation_samples_per_case": 2,
     "max_train_cases": 0,
     "max_val_cases": 0,
     "use_all_if_split_missing": true
@@ -105,10 +105,10 @@
     "max_num_modules": "auto",
     "hidden_dim": 256,
     "target_embed_dim": 128,
-    "behavior_latent_dim": 96,
-    "organization_latent_dim": 256,
+    "behavior_latent_dim": 128,
+    "organization_latent_dim": 128,
     "num_layers": 4,
-    "dropout": 0.05,
+    "dropout": 0.0,
     "use_count_head": true,
     "generate_heat_power": false,
     "heat_load_policy": "preserve_total_heat",
@@ -123,14 +123,14 @@
     "wall_clearance": 0.05,
     "inlet_clearance": 0.25,
     "outlet_clearance": 0.25,
-    "center_decode_mode": "sigmoid",
+    "center_decode_mode": "clamp",
     "latent_align_completeness_power": 0.5
   },
   "loss": {
     "flow_weight": 1.0,
-    "count_weight": 0.1,
-    "behavior_align_weight": 0.1,
-    "organization_align_weight": 0.1,
+    "count_weight": 0.25,
+    "behavior_align_weight": 0.25,
+    "organization_align_weight": 0.25,
     "validity_prior_weight": 0.02
   },
   "training": {
@@ -140,7 +140,7 @@
     "weight_decay": 0.00001,
     "gradient_clip_norm": 1.0,
     "scheduler_min_lr": 0.000001,
-    "num_workers": 0,
+    "num_workers": 2,
     "amp": false,
     "seed": 42,
     "device": null,
@@ -154,12 +154,14 @@
     "forward_verify_num_targets": 4,
     "forward_verify_num_samples": 4,
     "forward_verify_n_steps": 4,
+    "forward_verify_count_mode": "uniform",
     "forward_verify_query_batch_size": 32768,
     "demo_target_jsons": [
       "./inverse_targets/low_peak_uniform_pack_demo.json"
     ],
     "demo_forward_verify_num_samples": 4,
     "demo_forward_verify_n_steps": 4,
+    "demo_forward_verify_count_mode": "uniform",
     "best_metric_name": "val_loss_total"
   },
   "paths": {

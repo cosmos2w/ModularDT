@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+numpy
+matplotlib
+pillow
+torch
+h5py
+tqdm

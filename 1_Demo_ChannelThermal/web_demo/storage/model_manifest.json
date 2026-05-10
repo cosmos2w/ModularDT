@@ -1,0 +1,20 @@
+{
+  "models": [
+    {
+      "id": "channelthermal_run0004",
+      "label": "ChannelThermal Run0004",
+      "run_dir": "./Saved_Model/Run_0004_20260509_224057",
+      "checkpoint_name": "latest_model.pt",
+      "config_name": "resolved_train_config.json",
+      "enabled": true,
+      "preload": false,
+      "default_reference_split": "test",
+      "default_reference_case_index": 0,
+      "default_heat_power": 1.2,
+      "heat_power_min": 0.0,
+      "heat_power_max": 3.0,
+      "min_center_distance": 1.0,
+      "query_batch_size": 32768
+    }
+  ]
+}
