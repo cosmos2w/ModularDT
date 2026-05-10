@@ -549,6 +549,16 @@ python src/evaluate.py \
   --temperature-display-mode composite_internal
 ```
 
+Presentation organizer diagnostics by run id:
+
+```bash
+python src/evaluate.py \
+  --checkpoint best \
+  --Run_ID 0001 \
+  --organization-view all \
+  --organization-style presentation
+```
+
 `--local-port-condition-mode teacher` is a useful diagnostic because it gives
 the local surrogate exact dataset port conditions. `predicted` is the realistic
 forward-design mode: at inference time the model must generate its own local
@@ -617,14 +627,56 @@ priors, frequency losses, or duplicate-edge pruning by default.
 
 Evaluation now writes channel-thermal organizer diagnostics adapted from the
 useful spirit of `0_Demo_MultiCylinder` but without periodic, dynamic, phase, or
-wake-specific machinery. With `--organization-view all`, outputs include
-`organizer_visualization.png` for the nonperiodic physical overlay,
-`organization_matrices.png` for sorted `A_mh` and `A_eh` heatmaps,
-`organization_schematic.png` for a compact conceptual graph, and
-`organization_summary.csv/json` with hyperedge mass, strength, source/thermal
-region coordinates, top modules, and token counts. Organizer constraints remain
-intentionally light: an `A_me` prior, an `A_eh` factor target, and
-module/environment mass alignment, not heavy uniform-edge constraints.
+wake-specific machinery. This is nonperiodic channel geometry: source and
+thermal-region coordinates use direct x/y positions in the inlet-to-outlet
+domain, not periodic wake wrapping or minimum-image distances.
+
+`--organization-style presentation` is the default and writes clearer,
+presentation-ready diagnostics:
+
+- `organization_overview.png`: physical overlay plus a compact hyperedge table.
+  The muted temperature background is only context. Module circles sit at module
+  centers, radius equals the physical module radius, and heat power changes
+  circle emphasis. Environment-token color is the dominant hyperedge
+  `argmax(A_eh)`, while opacity/size is confidence `max(A_eh)`. Hyperedge source
+  centers use X markers, thermal-region centers use star markers, and arrows
+  show source-to-region direction. Module links are drawn only when `A_mh` is at
+  least `--organization-link-threshold` (default `0.25`).
+- `organization_schematic.png`: a clean tripartite graph. Modules `M_i` are on
+  the left, learned hyperedges `H_k` are in the middle, and thermal regions
+  `R_k` are on the right. Line width is soft assignment weight; hyperedge node
+  size follows `hyper_strength`; region nodes summarize environment mass/count.
+- `organization_summary_matrices.png`: a readable 2x2 summary with `A_mh`,
+  sorted `A_eh`, mass/strength bars, and a physical mini-map.
+
+`--organization-style debug` writes the dense legacy-style diagnostics as
+`organization_physical_debug.png`, `organization_matrices_debug.png`, and
+`organization_schematic_debug.png`. `--organization-style both` writes both
+sets. Legacy filenames such as `organizer_visualization.png`,
+`organization_matrices.png`, and `organization_schematic.png` are kept as
+aliases so older scripts still find expected outputs.
+
+Organizer quantities in these figures:
+
+- `A_mh`: soft module-to-hyperedge assignment. Row `M_i`, column `H_k` answers
+  how strongly module `i` belongs to hyperedge `k`.
+- `A_eh`: soft environment-token-to-hyperedge assignment. The presentation
+  views color each environment token by its dominant hyperedge.
+- `hyper_source_coords`: learned source-side center for each hyperedge, usually
+  near its module support.
+- `hyper_thermal_region_coords`: learned environment/thermal-region center for
+  each hyperedge.
+- `module_mass`: total normalized module support owned by a hyperedge.
+- `env_mass`: total normalized environment-token support owned by a hyperedge.
+- `hyper_strength`: semantic joint support,
+  `sqrt(module_mass * env_mass)`, high only when both module and environment
+  support are present.
+
+`organization_summary.csv/json` keep top modules, top module weights, source
+and thermal-region coordinates, dominant environment-token counts, and a
+`visual_encoding` metadata block. Organizer constraints remain intentionally
+light: an `A_me` prior, an `A_eh` factor target, and module/environment mass
+alignment, not heavy uniform-edge constraints.
 
 ## Forward Model Files
 

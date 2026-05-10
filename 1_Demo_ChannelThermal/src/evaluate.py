@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -29,6 +30,11 @@ from channelthermal_model_utils import (
     write_json,
 )
 from model import GlobalChannelThermalModel, GlobalChannelThermalModelConfig, load_local_surrogate_from_checkpoint
+from organizer_viz_channelthermal import (
+    render_channelthermal_organization_overview,
+    render_channelthermal_organization_schematic_presentation,
+    render_channelthermal_organization_summary_matrices,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,6 +72,18 @@ def parse_args() -> argparse.Namespace:
         choices=["all", "physical", "matrices", "schematic", "none"],
         default="all",
         help="Organizer diagnostics to render.",
+    )
+    parser.add_argument(
+        "--organization-style",
+        choices=["presentation", "debug", "both"],
+        default="presentation",
+        help="Organizer visualization style: clear presentation plots, dense raw debug plots, or both.",
+    )
+    parser.add_argument(
+        "--organization-link-threshold",
+        type=float,
+        default=0.25,
+        help="Minimum module-to-hyperedge assignment A_mh drawn as a visual link.",
     )
     return parser.parse_args()
 
@@ -631,6 +649,7 @@ def compute_channelthermal_hyperedge_summary(arrays: Dict[str, np.ndarray]) -> L
                 "top_modules": ";".join(f"M{idx}" for idx, _ in top),
                 "top_module_weights": ";".join(f"{score:.4f}" for _, score in top),
                 "env_token_count": int(np.sum(dominant_env == hidx)),
+                "dominant_env_count": int(np.sum(dominant_env == hidx)),
                 "source_x": float(src[hidx, 0]),
                 "source_y": float(src[hidx, 1]),
                 "thermal_region_x": float(dst[hidx, 0]),
@@ -830,6 +849,7 @@ def save_organizer_summary(output_dir: Path, aux: Dict[str, Any], sample: Dict[s
         "top_modules",
         "top_module_weights",
         "env_token_count",
+        "dominant_env_count",
         "source_x",
         "source_y",
         "thermal_region_x",
@@ -841,8 +861,25 @@ def save_organizer_summary(output_dir: Path, aux: Dict[str, Any], sample: Dict[s
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-    write_json(json_path, {"hyperedges": rows})
+    write_json(
+        json_path,
+        {
+            "hyperedges": rows,
+            "visual_encoding": {
+                "env_token_color": "dominant hyperedge argmax(A_eh)",
+                "env_token_alpha": "max assignment confidence max(A_eh)",
+                "module_link_width": "A_mh",
+                "hyperedge_strength": "sqrt(module_mass * env_mass)",
+            },
+        },
+    )
     return csv_path, json_path
+
+
+def copy_figure_alias(source: Path, alias: Path) -> None:
+    if source.resolve() == alias.resolve():
+        return
+    shutil.copyfile(source, alias)
 
 
 def mode_suffix(mode: str) -> str:
@@ -1142,19 +1179,77 @@ def main() -> int:
     if first_aux is not None:
         org_outputs: Dict[str, str] = {}
         view = str(args.organization_view)
+        style = str(args.organization_style)
+        link_threshold = float(args.organization_link_threshold)
+        org_arrays = extract_channelthermal_organization_arrays(raw_sample, first_aux, model)
+        org_module_radius = module_radius_from_sample(raw_sample, fallback=float(getattr(model.config, "module_radius", 0.45)))
+        render_presentation = style in {"presentation", "both"}
+        render_debug = style in {"debug", "both"}
         if view in {"all", "physical"}:
-            physical_path = output_dir / "organizer_visualization.png"
-            render_channelthermal_physical_organization(physical_path, raw_sample, first_aux, model)
-            org_outputs["organizer_visualization"] = str(physical_path)
-            org_outputs["organization_physical"] = str(physical_path)
+            if render_presentation:
+                overview_path = output_dir / "organization_overview.png"
+                render_channelthermal_organization_overview(
+                    overview_path,
+                    raw_sample,
+                    org_arrays,
+                    module_radius=org_module_radius,
+                    channel_order=channel_order,
+                    link_threshold=link_threshold,
+                )
+                org_outputs["organization_overview"] = str(overview_path)
+                legacy_path = output_dir / "organizer_visualization.png"
+                copy_figure_alias(overview_path, legacy_path)
+                org_outputs["organizer_visualization"] = str(legacy_path)
+                org_outputs["organization_physical"] = str(legacy_path)
+            if render_debug:
+                debug_physical_path = output_dir / "organization_physical_debug.png"
+                render_channelthermal_physical_organization(debug_physical_path, raw_sample, first_aux, model)
+                org_outputs["organization_physical_debug"] = str(debug_physical_path)
+                if not render_presentation:
+                    legacy_path = output_dir / "organizer_visualization.png"
+                    copy_figure_alias(debug_physical_path, legacy_path)
+                    org_outputs["organizer_visualization"] = str(legacy_path)
+                    org_outputs["organization_physical"] = str(legacy_path)
         if view in {"all", "matrices"}:
-            matrix_path = output_dir / "organization_matrices.png"
-            render_channelthermal_organization_matrices(matrix_path, raw_sample, first_aux, model)
-            org_outputs["organization_matrices"] = str(matrix_path)
+            if render_presentation:
+                summary_matrix_path = output_dir / "organization_summary_matrices.png"
+                render_channelthermal_organization_summary_matrices(
+                    summary_matrix_path,
+                    raw_sample,
+                    org_arrays,
+                    module_radius=org_module_radius,
+                    channel_order=channel_order,
+                )
+                org_outputs["organization_summary_matrices"] = str(summary_matrix_path)
+                legacy_matrix_path = output_dir / "organization_matrices.png"
+                copy_figure_alias(summary_matrix_path, legacy_matrix_path)
+                org_outputs["organization_matrices"] = str(legacy_matrix_path)
+            if render_debug:
+                debug_matrix_path = output_dir / "organization_matrices_debug.png"
+                render_channelthermal_organization_matrices(debug_matrix_path, raw_sample, first_aux, model)
+                org_outputs["organization_matrices_debug"] = str(debug_matrix_path)
+                if not render_presentation:
+                    legacy_matrix_path = output_dir / "organization_matrices.png"
+                    copy_figure_alias(debug_matrix_path, legacy_matrix_path)
+                    org_outputs["organization_matrices"] = str(legacy_matrix_path)
         if view in {"all", "schematic"}:
-            schematic_path = output_dir / "organization_schematic.png"
-            render_channelthermal_hypergraph_schematic(schematic_path, raw_sample, first_aux, model)
-            org_outputs["organization_schematic"] = str(schematic_path)
+            if render_presentation:
+                schematic_path = output_dir / "organization_schematic.png"
+                render_channelthermal_organization_schematic_presentation(
+                    schematic_path,
+                    raw_sample,
+                    org_arrays,
+                    link_threshold=link_threshold,
+                )
+                org_outputs["organization_schematic"] = str(schematic_path)
+            if render_debug:
+                debug_schematic_path = output_dir / "organization_schematic_debug.png"
+                render_channelthermal_hypergraph_schematic(debug_schematic_path, raw_sample, first_aux, model)
+                org_outputs["organization_schematic_debug"] = str(debug_schematic_path)
+                if not render_presentation:
+                    legacy_schematic_path = output_dir / "organization_schematic.png"
+                    copy_figure_alias(debug_schematic_path, legacy_schematic_path)
+                    org_outputs["organization_schematic"] = str(legacy_schematic_path)
         org_csv, org_json = save_organizer_summary(output_dir, first_aux, raw_sample, model)
     else:
         org_outputs = {}

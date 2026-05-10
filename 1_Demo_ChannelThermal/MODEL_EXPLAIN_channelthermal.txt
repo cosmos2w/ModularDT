@@ -377,13 +377,97 @@ evaluated separately.
 
 Organizer visualization now mirrors the useful diagnostic spirit of
 0_Demo_MultiCylinder but is adapted to nonperiodic channel thermal physics.
-evaluate.py can write a physical overlay, sorted A_mh/A_eh matrix diagnostics,
-a conceptual schematic, and organization_summary.csv/json. The overlay uses
-straight nonperiodic source-to-thermal-region lines, module heat-power circles,
-dominant environment-token hyperedges, hyperedge source X markers, thermal
-region star markers, and module-to-hyperedge links. The organizer constraints
-remain deliberately light: A_me prior, A_eh factor target, and module/env mass
-alignment, not heavy uniform-edge or entropy constraints by default.
+This demo is channel geometry, not periodic wake geometry: coordinates are
+direct x/y positions in the inlet-to-outlet domain, and no periodic wrapping is
+used when interpreting source or thermal-region positions.
+
+evaluate.py supports:
+
+  --organization-view all|physical|matrices|schematic|none
+  --organization-style presentation|debug|both
+
+The default presentation style writes readable, presentation-ready organizer
+diagnostics:
+
+  organization_overview.png
+    Left: muted physical temperature context with module circles, environment
+    tokens, source X markers, thermal-region stars, source-to-region arrows,
+    and only sufficiently strong module-to-hyperedge links. Environment-token
+    color is dominant hyperedge argmax(A_eh). Token opacity/size is confidence
+    max(A_eh). Module link width is A_mh.
+    Right: a compact hyperedge table with H id, hyper_strength, module_mass,
+    env_mass, top modules, and dominant environment-token count.
+
+  organization_schematic.png
+    A conceptual tripartite graph, not a physical-coordinate plot. Modules M_i
+    are in the left column, hyperedges H_k are in the middle, and thermal
+    regions R_k are on the right. Hyperedge node size follows hyper_strength;
+    module-to-hyperedge edge width follows A_mh; hyperedge-to-region edge width
+    follows env_mass or token support. Weak hyperedges may be hidden with a note
+    directing the reader to debug matrices.
+
+  organization_summary_matrices.png
+    A 2x2 summary: A_mh heatmap with rows M_i and columns H_k, A_eh heatmap
+    with environment tokens sorted by dominant hyperedge and a side color strip,
+    grouped bars for module_mass/env_mass/hyper_strength, and a physical
+    mini-map of environment tokens, modules, source markers, and thermal-region
+    markers.
+
+Debug style keeps the dense raw diagnostic plots:
+
+  organization_physical_debug.png
+  organization_matrices_debug.png
+  organization_schematic_debug.png
+
+Legacy filenames are still written as aliases where appropriate:
+organizer_visualization.png, organization_matrices.png, and
+organization_schematic.png.
+
+Organizer quantities:
+
+  A_mh
+    soft module-to-hyperedge assignment.
+
+  A_eh
+    soft environment-token-to-hyperedge assignment.
+
+  hyper_source_coords
+    learned source-side center of each hyperedge, usually near supporting
+    modules.
+
+  hyper_thermal_region_coords
+    learned environment/thermal-region center of each hyperedge.
+
+  module_mass
+    normalized module support owned by each hyperedge.
+
+  env_mass
+    normalized environment-token support owned by each hyperedge.
+
+  hyper_strength
+    sqrt(module_mass * env_mass), high only when both source modules and
+    environment support are present.
+
+Example:
+
+  python src/evaluate.py \
+    --checkpoint best \
+    --Run_ID 0001 \
+    --organization-view all \
+    --organization-style presentation
+
+organization_summary.csv/json include top modules, top module weights, source
+and thermal-region coordinates, dominant environment-token counts, and a
+visual_encoding metadata block:
+
+  env_token_color = dominant hyperedge argmax(A_eh)
+  env_token_alpha = max assignment confidence max(A_eh)
+  module_link_width = A_mh
+  hyperedge_strength = sqrt(module_mass * env_mass)
+
+The organizer constraints remain deliberately light: A_me prior, A_eh factor
+target, and module/env mass alignment, not heavy uniform-edge or entropy
+constraints by default.
 
 
 Known simplifications
