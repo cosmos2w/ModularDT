@@ -12,7 +12,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from thermal_inverse_kpi import CONSTRAINT_NAMES
-from thermal_design_intent import DESIGN_INTENT_DIM, FIELD_INTENT_CHANNELS, OBJECTIVE_DIM
+from thermal_design_intent import DESIGN_INTENT_DIM, FIELD_INTENT_CHANNELS, OBJECTIVE_DIM, STRUCTURE_INTENT_DIM
 
 
 def _activation(name: str = "silu") -> nn.Module:
@@ -132,18 +132,43 @@ class DesignIntentEncoder(nn.Module):
         num_layers: int,
         dropout: float,
         use_legacy_kpi_vector: bool,
+        structure_dim: int = 0,
+        structure_map_channels: int = 0,
+        heat_condition_dim: int = 0,
     ) -> None:
         super().__init__()
         part_dim = max(int(out_dim) // 2, 32)
         self.intent_dim = int(intent_dim)
         self.objective_dim = int(objective_dim)
         self.field_channels = int(field_channels)
+        self.structure_dim = int(structure_dim)
+        self.structure_map_channels = int(structure_map_channels)
+        self.heat_condition_dim = int(heat_condition_dim)
         self.use_legacy_kpi_vector = bool(use_legacy_kpi_vector)
         self.intent_encoder = MLP(self.intent_dim, hidden_dim, part_dim, num_layers=max(num_layers, 2), dropout=dropout, final_norm=True)
         self.objective_encoder = MLP(self.objective_dim, hidden_dim, part_dim, num_layers=2, dropout=dropout, final_norm=True)
         self.field_encoder = FieldIntentEncoder(self.field_channels, hidden_dim, part_dim, dropout)
+        self.structure_encoder = (
+            MLP(self.structure_dim, hidden_dim, part_dim, num_layers=2, dropout=dropout, final_norm=True)
+            if self.structure_dim > 0
+            else None
+        )
+        self.structure_map_encoder = (
+            FieldIntentEncoder(self.structure_map_channels, hidden_dim, part_dim, dropout)
+            if self.structure_map_channels > 0
+            else None
+        )
+        self.heat_encoder = (
+            MLP(self.heat_condition_dim, hidden_dim, part_dim, num_layers=2, dropout=dropout, final_norm=True)
+            if self.heat_condition_dim > 0
+            else None
+        )
         self.legacy_encoder = MLP(legacy_dim, hidden_dim, part_dim, num_layers=max(num_layers, 2), dropout=dropout, final_norm=True) if self.use_legacy_kpi_vector else None
-        self.fuse = MLP(part_dim * (4 if self.use_legacy_kpi_vector else 3), hidden_dim, out_dim, num_layers=2, dropout=dropout, final_norm=True)
+        num_parts = 3 + (1 if self.use_legacy_kpi_vector else 0)
+        num_parts += 1 if self.structure_encoder is not None else 0
+        num_parts += 1 if self.structure_map_encoder is not None else 0
+        num_parts += 1 if self.heat_encoder is not None else 0
+        self.fuse = MLP(part_dim * num_parts, hidden_dim, out_dim, num_layers=2, dropout=dropout, final_norm=True)
 
     def forward(
         self,
@@ -151,6 +176,9 @@ class DesignIntentEncoder(nn.Module):
         design_intent_vector: Optional[torch.Tensor],
         objective_weight_vector: Optional[torch.Tensor],
         field_intent_maps: Optional[torch.Tensor],
+        structure_intent_vector: Optional[torch.Tensor] = None,
+        structure_intent_maps: Optional[torch.Tensor] = None,
+        heat_condition_vector: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         bsz = target_spec_vector.shape[0]
         device = target_spec_vector.device
@@ -166,6 +194,18 @@ class DesignIntentEncoder(nn.Module):
             self.objective_encoder(objective_weight_vector),
             self.field_encoder(field_intent_maps),
         ]
+        if self.structure_encoder is not None:
+            if structure_intent_vector is None:
+                structure_intent_vector = torch.zeros(bsz, self.structure_dim, device=device, dtype=dtype)
+            parts.append(self.structure_encoder(structure_intent_vector))
+        if self.structure_map_encoder is not None:
+            if structure_intent_maps is None:
+                structure_intent_maps = torch.zeros(bsz, self.structure_map_channels, 12, 24, device=device, dtype=dtype)
+            parts.append(self.structure_map_encoder(structure_intent_maps))
+        if self.heat_encoder is not None:
+            if heat_condition_vector is None:
+                heat_condition_vector = torch.zeros(bsz, self.heat_condition_dim, device=device, dtype=dtype)
+            parts.append(self.heat_encoder(heat_condition_vector))
         if self.legacy_encoder is not None:
             parts.append(self.legacy_encoder(target_spec_vector))
         return self.fuse(torch.cat(parts, dim=-1))
@@ -234,6 +274,14 @@ class InverseModelConfig:
     field_intent_channels: int = len(FIELD_INTENT_CHANNELS)
     conditioning_dropout_enabled: bool = False
     conditioning_drop_probability: float = 0.0
+    structure_conditioning_enabled: bool = False
+    structure_intent_dim: int = STRUCTURE_INTENT_DIM
+    structure_intent_map_channels: int = 0
+    structure_drop_probability: float = 0.0
+    heat_conditioning_enabled: bool = False
+    heat_condition_dim: Optional[int] = None
+    heat_drop_probability: float = 0.0
+    slot_identity_mode: str = "anonymous"
 
     def __post_init__(self) -> None:
         self.max_num_modules = int(self.max_num_modules)
@@ -271,6 +319,17 @@ class InverseModelConfig:
         self.objective_dim = int(self.objective_dim)
         self.field_intent_channels = int(self.field_intent_channels)
         self.conditioning_drop_probability = min(max(float(self.conditioning_drop_probability), 0.0), 1.0)
+        self.structure_intent_dim = int(self.structure_intent_dim)
+        self.structure_intent_map_channels = int(self.structure_intent_map_channels) if self.structure_conditioning_enabled else 0
+        if self.heat_condition_dim is None:
+            self.heat_condition_dim = int(self.max_num_modules) * 2 + 7
+        self.heat_condition_dim = int(self.heat_condition_dim) if self.heat_conditioning_enabled else 0
+        self.structure_drop_probability = min(max(float(self.structure_drop_probability), 0.0), 1.0)
+        self.heat_drop_probability = min(max(float(self.heat_drop_probability), 0.0), 1.0)
+        slot_mode = str(self.slot_identity_mode).lower().strip()
+        if slot_mode not in {"anonymous", "heat_conditioned"}:
+            raise ValueError("slot_identity_mode must be 'anonymous' or 'heat_conditioned'.")
+        self.slot_identity_mode = slot_mode
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "InverseModelConfig":
@@ -383,6 +442,7 @@ def repair_channel_design(
     y_bounds: Optional[Tuple[float, float]] = None,
     rng: Optional[np.random.Generator] = None,
     iterations: int = 48,
+    preserve_order: bool = False,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     """Clip and lightly repair a nonperiodic channel module layout."""
 
@@ -476,7 +536,10 @@ def repair_channel_design(
             diagnostics["added_count"] += 1
             diagnostics["repaired"] = True
 
-    arr = sort_centers_xy(arr[:max_num_modules].astype(np.float32)).astype(np.float64)
+    arr = arr[:max_num_modules].astype(np.float32)
+    if not bool(preserve_order):
+        arr = sort_centers_xy(arr)
+    arr = arr.astype(np.float64)
     final_pairs = overlap_pairs(arr)
     diagnostics["overlap_pairs_final"] = len(final_pairs)
     diagnostics.update(channel_clearance_diagnostics(arr, domain_length_x=lx, domain_length_y=ly, module_radius=radius))
@@ -509,6 +572,9 @@ class ThermalInverseDesignFlow(nn.Module):
             num_layers=self.cfg.num_layers,
             dropout=self.cfg.dropout,
             use_legacy_kpi_vector=self.cfg.use_legacy_kpi_vector,
+            structure_dim=self.cfg.structure_intent_dim if self.cfg.structure_conditioning_enabled else 0,
+            structure_map_channels=self.cfg.structure_intent_map_channels,
+            heat_condition_dim=int(self.cfg.heat_condition_dim or 0),
         )
         self.behavior_org_head = BehaviorOrgHead(
             self.cfg.target_embed_dim,
@@ -549,9 +615,12 @@ class ThermalInverseDesignFlow(nn.Module):
         design_intent_vector: Optional[torch.Tensor],
         objective_weight_vector: Optional[torch.Tensor],
         field_intent_maps: Optional[torch.Tensor],
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        structure_intent_vector: Optional[torch.Tensor] = None,
+        structure_intent_maps: Optional[torch.Tensor] = None,
+        heat_condition_vector: Optional[torch.Tensor] = None,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         if not self.training or not self.cfg.conditioning_dropout_enabled or self.cfg.conditioning_drop_probability <= 0.0:
-            return design_intent_vector, objective_weight_vector, field_intent_maps
+            return design_intent_vector, objective_weight_vector, field_intent_maps, structure_intent_vector, structure_intent_maps, heat_condition_vector
         drop = float(self.cfg.conditioning_drop_probability)
         if design_intent_vector is not None:
             keep = (torch.rand(design_intent_vector.shape[0], 1, device=design_intent_vector.device) >= drop).to(design_intent_vector.dtype)
@@ -562,7 +631,16 @@ class ThermalInverseDesignFlow(nn.Module):
         if field_intent_maps is not None:
             keep = (torch.rand(field_intent_maps.shape[0], 1, 1, 1, device=field_intent_maps.device) >= drop).to(field_intent_maps.dtype)
             field_intent_maps = field_intent_maps * keep
-        return design_intent_vector, objective_weight_vector, field_intent_maps
+        if structure_intent_vector is not None and self.cfg.structure_drop_probability > 0.0:
+            keep = (torch.rand(structure_intent_vector.shape[0], 1, device=structure_intent_vector.device) >= self.cfg.structure_drop_probability).to(structure_intent_vector.dtype)
+            structure_intent_vector = structure_intent_vector * keep
+        if structure_intent_maps is not None and self.cfg.structure_drop_probability > 0.0:
+            keep = (torch.rand(structure_intent_maps.shape[0], 1, 1, 1, device=structure_intent_maps.device) >= self.cfg.structure_drop_probability).to(structure_intent_maps.dtype)
+            structure_intent_maps = structure_intent_maps * keep
+        if heat_condition_vector is not None and self.cfg.heat_drop_probability > 0.0:
+            keep = (torch.rand(heat_condition_vector.shape[0], 1, device=heat_condition_vector.device) >= self.cfg.heat_drop_probability).to(heat_condition_vector.dtype)
+            heat_condition_vector = heat_condition_vector * keep
+        return design_intent_vector, objective_weight_vector, field_intent_maps, structure_intent_vector, structure_intent_maps, heat_condition_vector
 
     def encode_condition(
         self,
@@ -571,14 +649,34 @@ class ThermalInverseDesignFlow(nn.Module):
         design_intent_vector: Optional[torch.Tensor] = None,
         objective_weight_vector: Optional[torch.Tensor] = None,
         field_intent_maps: Optional[torch.Tensor] = None,
+        structure_intent_vector: Optional[torch.Tensor] = None,
+        structure_intent_maps: Optional[torch.Tensor] = None,
+        heat_condition_vector: Optional[torch.Tensor] = None,
+        heat_condition_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         if self.cfg.conditioning_mode == "design_intent":
-            design_intent_vector, objective_weight_vector, field_intent_maps = self._apply_condition_dropout(
+            design_intent_vector, objective_weight_vector, field_intent_maps, structure_intent_vector, structure_intent_maps, heat_condition_vector = self._apply_condition_dropout(
                 design_intent_vector,
                 objective_weight_vector,
                 field_intent_maps,
+                structure_intent_vector,
+                structure_intent_maps,
+                heat_condition_vector,
             )
-            embedding = self.design_intent_encoder(target_spec_vector, design_intent_vector, objective_weight_vector, field_intent_maps)
+            if heat_condition_vector is not None and heat_condition_mask is not None and heat_condition_vector.shape[-1] >= self.max_num_modules * 2:
+                heat_condition_vector = heat_condition_vector.clone()
+                mask = heat_condition_mask.to(device=heat_condition_vector.device, dtype=heat_condition_vector.dtype)
+                heat_condition_vector[:, : self.max_num_modules] *= mask
+                heat_condition_vector[:, self.max_num_modules : self.max_num_modules * 2] *= mask
+            embedding = self.design_intent_encoder(
+                target_spec_vector,
+                design_intent_vector,
+                objective_weight_vector,
+                field_intent_maps,
+                structure_intent_vector=structure_intent_vector,
+                structure_intent_maps=structure_intent_maps,
+                heat_condition_vector=heat_condition_vector,
+            )
         else:
             embedding = self.target_encoder(target_spec_vector)
         behavior_hat, organization_hat = self.behavior_org_head(embedding)
@@ -611,6 +709,113 @@ class ThermalInverseDesignFlow(nn.Module):
             return None
         raw = x[:, self.heat_offset : self.heat_offset + self.max_num_modules]
         return F.softplus(raw) * float(self.cfg.heat_power_scale)
+
+    def _structure_features_from_design(self, x: torch.Tensor, true_count: torch.Tensor, heat_condition_vector: Optional[torch.Tensor] = None) -> torch.Tensor:
+        centers = self.decode_centers_norm_from_design_vec(x)
+        bsz = centers.shape[0]
+        device = centers.device
+        dtype = centers.dtype
+        idx = torch.arange(self.max_num_modules, device=device)[None, :]
+        mask = (idx < true_count.reshape(-1, 1).clamp(0, self.max_num_modules)).to(dtype)
+        heat = mask
+        if heat_condition_vector is not None and heat_condition_vector.shape[-1] >= self.max_num_modules:
+            heat = heat_condition_vector[:, : self.max_num_modules].to(device=device, dtype=dtype).clamp_min(0.0) * mask
+        count = mask.sum(dim=1).clamp_min(1.0)
+        heat_sum = heat.sum(dim=1).clamp_min(1.0e-8)
+        xnorm = centers[..., 0] * mask
+        ynorm = centers[..., 1] * mask
+        cx = xnorm.sum(dim=1) / count
+        cy = ynorm.sum(dim=1) / count
+        hcx = (centers[..., 0] * heat).sum(dim=1) / heat_sum
+        hcy = (centers[..., 1] * heat).sum(dim=1) / heat_sum
+        inactive_x = centers[..., 0].new_full(centers[..., 0].shape, 1.0e6)
+        inactive_y = centers[..., 1].new_full(centers[..., 1].shape, 1.0e6)
+        x_min = torch.where(mask > 0.5, centers[..., 0], inactive_x).min(dim=1).values
+        y_min = torch.where(mask > 0.5, centers[..., 1], inactive_y).min(dim=1).values
+        x_max = torch.where(mask > 0.5, centers[..., 0], -inactive_x).max(dim=1).values
+        y_max = torch.where(mask > 0.5, centers[..., 1], -inactive_y).max(dim=1).values
+        active_any = (mask.sum(dim=1) > 0.5).to(dtype)
+        x_cov = (x_max - x_min).clamp_min(0.0) * active_any
+        y_cov = (y_max - y_min).clamp_min(0.0) * active_any
+        x_std = torch.sqrt((((centers[..., 0] - cx[:, None]) * mask).square().sum(dim=1) / count).clamp_min(0.0) + 1.0e-8)
+        y_std = torch.sqrt((((centers[..., 1] - cy[:, None]) * mask).square().sum(dim=1) / count).clamp_min(0.0) + 1.0e-8)
+        dx = centers[:, :, None, 0] - centers[:, None, :, 0]
+        dy = centers[:, :, None, 1] - centers[:, None, :, 1]
+        dist_scaled = torch.sqrt((dx * float(self.cfg.domain_length_x)).square() + (dy * float(self.cfg.domain_length_y)).square() + 1.0e-8) / float(max(self.cfg.domain_length_x, self.cfg.domain_length_y, 1.0e-8))
+        pair_mask = (mask[:, :, None] * mask[:, None, :]) > 0.5
+        eye = torch.eye(self.max_num_modules, device=device, dtype=torch.bool)[None]
+        pair_mask = pair_mask & ~eye
+        has_pair = pair_mask.any(dim=(1, 2))
+        pair_count = pair_mask.sum(dim=(1, 2)).clamp_min(1)
+        pair_vals = torch.where(pair_mask, dist_scaled, torch.zeros_like(dist_scaled))
+        mean_pair = pair_vals.sum(dim=(1, 2)) / pair_count.to(dtype)
+        min_pair = torch.where(pair_mask, dist_scaled, torch.full_like(dist_scaled, 1.0e6)).amin(dim=(1, 2))
+        min_pair = torch.where(has_pair, min_pair, torch.zeros_like(min_pair))
+        pair_std = torch.sqrt((torch.where(pair_mask, (dist_scaled - mean_pair[:, None, None]).square(), torch.zeros_like(dist_scaled)).sum(dim=(1, 2)) / pair_count.to(dtype)).clamp_min(0.0) + 1.0e-8)
+        nn_valid = pair_mask.any(dim=2)
+        nn = torch.where(pair_mask, dist_scaled, torch.full_like(dist_scaled, 1.0e6)).amin(dim=2)
+        nn = torch.where(nn_valid, nn, torch.zeros_like(nn))
+        nn_count = nn_valid.to(dtype).sum(dim=1).clamp_min(1.0)
+        nn_mean = nn.sum(dim=1) / nn_count
+        nn_std = torch.sqrt((torch.where(nn_valid, (nn - nn_mean[:, None]).square(), torch.zeros_like(nn)).sum(dim=1) / nn_count).clamp_min(0.0) + 1.0e-8)
+        wall = torch.minimum(centers[..., 1], 1.0 - centers[..., 1]) * 2.0
+        wall_mean = (wall * mask).sum(dim=1) / count
+        wall_min = torch.where(mask > 0.5, wall, torch.ones_like(wall)).min(dim=1).values * active_any
+        upstream = ((centers[..., 0] < (1.0 / 3.0)).to(dtype) * mask).sum(dim=1) / count
+        midstream = (((centers[..., 0] >= (1.0 / 3.0)) & (centers[..., 0] < (2.0 / 3.0))).to(dtype) * mask).sum(dim=1) / count
+        downstream = ((centers[..., 0] >= (2.0 / 3.0)).to(dtype) * mask).sum(dim=1) / count
+        upstream_h = ((centers[..., 0] < (1.0 / 3.0)).to(dtype) * heat).sum(dim=1) / heat_sum
+        midstream_h = (((centers[..., 0] >= (1.0 / 3.0)) & (centers[..., 0] < (2.0 / 3.0))).to(dtype) * heat).sum(dim=1) / heat_sum
+        downstream_h = ((centers[..., 0] >= (2.0 / 3.0)).to(dtype) * heat).sum(dim=1) / heat_sum
+
+        def hist(values: torch.Tensor, bins: int) -> torch.Tensor:
+            centers_b = torch.linspace(0.5 / bins, 1.0 - 0.5 / bins, bins, device=device, dtype=dtype)
+            weights = F.relu(1.0 - torch.abs(values[:, :, None] - centers_b[None, None, :]) * bins) * mask[:, :, None]
+            return weights.sum(dim=1) / count[:, None]
+
+        x_hist = hist(centers[..., 0], 6)
+        y_hist = hist(centers[..., 1], 4)
+        pair_bins = torch.linspace(0.5 / 6.0, 1.0 - 0.5 / 6.0, 6, device=device, dtype=dtype)
+        pair_weights = F.relu(1.0 - torch.abs(dist_scaled[:, :, :, None].clamp(0.0, 1.0) - pair_bins[None, None, None, :]) * 6.0) * pair_mask[:, :, :, None].to(dtype)
+        pair_hist = pair_weights.sum(dim=(1, 2)) / pair_count[:, None].to(dtype)
+        occ_entropy = -((x_hist.clamp_min(1.0e-8) * x_hist.clamp_min(1.0e-8).log()).sum(dim=1) / math.log(6.0) + (y_hist.clamp_min(1.0e-8) * y_hist.clamp_min(1.0e-8).log()).sum(dim=1) / math.log(4.0)) * 0.5
+        heat_entropy = occ_entropy
+        anisotropy = (x_std - y_std).abs() / (x_std + y_std).clamp_min(1.0e-8)
+        features = torch.cat(
+            [
+                (mask.sum(dim=1) / float(self.max_num_modules))[:, None],
+                cx[:, None],
+                cy[:, None],
+                hcx[:, None],
+                hcy[:, None],
+                x_cov[:, None],
+                y_cov[:, None],
+                (x_cov * y_cov)[:, None],
+                x_std[:, None],
+                y_std[:, None],
+                min_pair[:, None],
+                mean_pair[:, None],
+                pair_std[:, None],
+                nn_mean[:, None],
+                nn_std[:, None],
+                wall_mean[:, None],
+                wall_min[:, None],
+                upstream[:, None],
+                midstream[:, None],
+                downstream[:, None],
+                upstream_h[:, None],
+                midstream_h[:, None],
+                downstream_h[:, None],
+                x_hist,
+                y_hist,
+                pair_hist,
+                occ_entropy[:, None],
+                heat_entropy[:, None],
+                anisotropy[:, None],
+            ],
+            dim=1,
+        )
+        return torch.nan_to_num(features, nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
 
     def _constraint_values(self, target_spec_vector: torch.Tensor) -> Dict[str, torch.Tensor]:
         constraints = target_spec_vector[:, -len(CONSTRAINT_NAMES) :]
@@ -679,6 +884,10 @@ class ThermalInverseDesignFlow(nn.Module):
             design_intent_vector=batch.get("design_intent_vector"),
             objective_weight_vector=batch.get("objective_weight_vector"),
             field_intent_maps=batch.get("field_intent_maps"),
+            structure_intent_vector=batch.get("structure_intent_vector"),
+            structure_intent_maps=batch.get("structure_intent_maps"),
+            heat_condition_vector=batch.get("heat_condition_vector"),
+            heat_condition_mask=batch.get("heat_condition_mask"),
         )
         v_pred = self.velocity(x_t, t, condition)
         loss_flow = F.mse_loss(v_pred, v_target)
@@ -705,19 +914,39 @@ class ThermalInverseDesignFlow(nn.Module):
         x1_hat = x_t + (1.0 - t) * v_pred
         loss_validity = self._validity_prior(x1_hat)
         loss_set_center = self._set_center_loss(x1_hat, x1, true_count)
+        if self.cfg.structure_conditioning_enabled and batch.get("structure_intent_vector") is not None:
+            pred_structure = self._structure_features_from_design(x1_hat, true_count, batch.get("heat_condition_vector"))
+            target_structure = batch["structure_intent_vector"].to(device=x1.device, dtype=x1.dtype)
+            dim = min(pred_structure.shape[-1], target_structure.shape[-1])
+            pred_structure = torch.nan_to_num(pred_structure[:, :dim], nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+            target_structure = torch.nan_to_num(target_structure[:, :dim], nan=0.0, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+            per_case = torch.mean((pred_structure - target_structure).square(), dim=-1)
+            strength = batch.get("structure_strength", batch.get("structure_intent_mask"))
+            if strength is None:
+                strength = torch.ones_like(per_case)
+            strength = strength.to(device=x1.device, dtype=x1.dtype).reshape(-1).clamp(0.0, 1.0)
+            loss_structure = torch.mean(per_case * strength)
+            structure_strength_mean = strength.mean()
+        else:
+            loss_structure = x1.new_tensor(0.0)
+            structure_strength_mean = x1.new_tensor(0.0)
         weights = {
             "flow_weight": 1.0,
-            "set_center_weight": 0.0,
+            "set_center_weight": 0.15,
+            "structure_match_weight": 0.20,
+            "heat_condition_weight": 0.0,
+            "structure_map_match_weight": 0.0,
             "count_weight": 0.1,
-            "behavior_align_weight": 0.1,
-            "organization_align_weight": 0.1,
-            "validity_prior_weight": 0.0,
+            "behavior_align_weight": 0.03,
+            "organization_align_weight": 0.03,
+            "validity_prior_weight": 0.05,
         }
         if loss_weights:
             weights.update({str(k): float(v) for k, v in loss_weights.items()})
         total = (
             weights["flow_weight"] * loss_flow
             + weights["set_center_weight"] * loss_set_center
+            + weights["structure_match_weight"] * loss_structure
             + weights["count_weight"] * loss_count
             + weights["behavior_align_weight"] * loss_behavior
             + weights["organization_align_weight"] * loss_organization
@@ -727,12 +956,14 @@ class ThermalInverseDesignFlow(nn.Module):
             "loss_total": total.detach(),
             "loss_flow": loss_flow.detach(),
             "loss_set_center": loss_set_center.detach(),
+            "loss_structure_match": loss_structure.detach(),
             "loss_count": loss_count.detach(),
             "loss_behavior": loss_behavior.detach(),
             "loss_organization": loss_organization.detach(),
             "loss_validity_prior": loss_validity.detach(),
             "count_accuracy": count_accuracy.detach(),
             "latent_align_weight_mean": align_weight_mean.detach(),
+            "structure_strength_mean": structure_strength_mean.detach(),
         }
         return total, metrics
 
@@ -769,6 +1000,10 @@ class ThermalInverseDesignFlow(nn.Module):
         design_intent_vector: Optional[torch.Tensor | np.ndarray] = None,
         objective_weight_vector: Optional[torch.Tensor | np.ndarray] = None,
         field_intent_maps: Optional[torch.Tensor | np.ndarray] = None,
+        structure_intent_vector: Optional[torch.Tensor | np.ndarray] = None,
+        structure_intent_maps: Optional[torch.Tensor | np.ndarray] = None,
+        heat_condition_vector: Optional[torch.Tensor | np.ndarray] = None,
+        heat_condition_mask: Optional[torch.Tensor | np.ndarray] = None,
         guidance_scale: float = 1.0,
         device: Optional[torch.device] = None,
     ) -> List[Dict[str, Any]]:
@@ -791,13 +1026,34 @@ class ThermalInverseDesignFlow(nn.Module):
         intent = torch.as_tensor(design_intent_vector, dtype=torch.float32, device=device) if design_intent_vector is not None else None
         objective = torch.as_tensor(objective_weight_vector, dtype=torch.float32, device=device) if objective_weight_vector is not None else None
         maps = torch.as_tensor(field_intent_maps, dtype=torch.float32, device=device) if field_intent_maps is not None else None
+        structure_vec = torch.as_tensor(structure_intent_vector, dtype=torch.float32, device=device) if structure_intent_vector is not None else None
+        structure_maps = torch.as_tensor(structure_intent_maps, dtype=torch.float32, device=device) if structure_intent_maps is not None else None
+        heat_vec = torch.as_tensor(heat_condition_vector, dtype=torch.float32, device=device) if heat_condition_vector is not None else None
+        heat_mask = torch.as_tensor(heat_condition_mask, dtype=torch.float32, device=device) if heat_condition_mask is not None else None
         if intent is not None and intent.ndim == 1:
             intent = intent[None, :].expand(int(n_samples), -1).contiguous()
         if objective is not None and objective.ndim == 1:
             objective = objective[None, :].expand(int(n_samples), -1).contiguous()
         if maps is not None and maps.ndim == 3:
             maps = maps[None].expand(int(n_samples), -1, -1, -1).contiguous()
-        condition = self.encode_condition(target, design_intent_vector=intent, objective_weight_vector=objective, field_intent_maps=maps)
+        if structure_vec is not None and structure_vec.ndim == 1:
+            structure_vec = structure_vec[None, :].expand(int(n_samples), -1).contiguous()
+        if structure_maps is not None and structure_maps.ndim == 3:
+            structure_maps = structure_maps[None].expand(int(n_samples), -1, -1, -1).contiguous()
+        if heat_vec is not None and heat_vec.ndim == 1:
+            heat_vec = heat_vec[None, :].expand(int(n_samples), -1).contiguous()
+        if heat_mask is not None and heat_mask.ndim == 1:
+            heat_mask = heat_mask[None, :].expand(int(n_samples), -1).contiguous()
+        condition = self.encode_condition(
+            target,
+            design_intent_vector=intent,
+            objective_weight_vector=objective,
+            field_intent_maps=maps,
+            structure_intent_vector=structure_vec,
+            structure_intent_maps=structure_maps,
+            heat_condition_vector=heat_vec,
+            heat_condition_mask=heat_mask,
+        )
         uncond_condition = None
         if float(guidance_scale) > 1.0:
             uncond_condition = self.encode_condition(
@@ -805,6 +1061,10 @@ class ThermalInverseDesignFlow(nn.Module):
                 design_intent_vector=torch.zeros_like(intent) if intent is not None else None,
                 objective_weight_vector=torch.zeros_like(objective) if objective is not None else None,
                 field_intent_maps=torch.zeros_like(maps) if maps is not None else None,
+                structure_intent_vector=torch.zeros_like(structure_vec) if structure_vec is not None else None,
+                structure_intent_maps=torch.zeros_like(structure_maps) if structure_maps is not None else None,
+                heat_condition_vector=torch.zeros_like(heat_vec) if heat_vec is not None else None,
+                heat_condition_mask=torch.zeros_like(heat_mask) if heat_mask is not None else None,
             )
         steps = max(int(n_steps), 1)
         dt = 1.0 / float(steps)
@@ -860,7 +1120,19 @@ class ThermalInverseDesignFlow(nn.Module):
             count = int(raw_counts[i].item())
             if count <= 0 and int(constraints["n_min"][i].item()) > 0:
                 count = int(constraints["n_min"][i].item())
-            order = torch.argsort(mask_scores[i], descending=True)
+            heat_conditioned = self.cfg.slot_identity_mode == "heat_conditioned" and heat_vec is not None
+            if heat_conditioned:
+                if heat_mask is not None:
+                    active_slots = torch.nonzero(heat_mask[i] > 0.5, as_tuple=False).reshape(-1)
+                    if active_slots.numel() >= count:
+                        order = active_slots
+                    else:
+                        fallback = torch.arange(self.max_num_modules, device=device)
+                        order = torch.cat([active_slots, fallback[~torch.isin(fallback, active_slots)]], dim=0)
+                else:
+                    order = torch.arange(self.max_num_modules, device=device)
+            else:
+                order = torch.argsort(mask_scores[i], descending=True)
             chosen = order[:count].detach().cpu().numpy()
             centers_i = centers_norm[i, chosen].detach().cpu().numpy()
             centers_phys = centers_i.copy()
@@ -890,12 +1162,18 @@ class ThermalInverseDesignFlow(nn.Module):
                 x_bounds=x_bounds,
                 y_bounds=y_bounds,
                 rng=np_rng,
+                preserve_order=heat_conditioned,
             )
-            sorted_repaired = sort_centers_xy(repaired)
+            sorted_repaired = repaired if heat_conditioned else sort_centers_xy(repaired)
             mask = np.zeros((self.max_num_modules,), dtype=np.float32)
             mask[: sorted_repaired.shape[0]] = 1.0
             heat_out = None
-            if heat is not None:
+            slot_ids = np.asarray(chosen[: sorted_repaired.shape[0]], dtype=np.int64)
+            if heat_conditioned and heat_vec is not None:
+                heat_selected = heat_vec[i, : self.max_num_modules].detach().cpu().numpy().astype(np.float32)[chosen]
+                heat_selected = heat_selected[: sorted_repaired.shape[0]] * float(self.cfg.heat_power_scale)
+                heat_out = heat_selected
+            elif heat is not None:
                 heat_selected = heat[i, chosen].detach().cpu().numpy().astype(np.float32)
                 if sorted_repaired.shape[0] != heat_selected.shape[0]:
                     heat_selected = np.resize(heat_selected, sorted_repaired.shape[0]).astype(np.float32)
@@ -918,6 +1196,9 @@ class ThermalInverseDesignFlow(nn.Module):
                     "mask": mask,
                     "count": int(sorted_repaired.shape[0]),
                     "heat_powers": heat_out,
+                    "slot_ids": slot_ids,
+                    "module_ids": slot_ids,
+                    "slot_identity_mode": self.cfg.slot_identity_mode,
                     "raw_design_vec": x[i].detach().cpu().numpy().astype(np.float32),
                     "raw_count": int(raw_counts[i].item()),
                     "mask_scores": mask_scores[i].detach().cpu().numpy().astype(np.float32),

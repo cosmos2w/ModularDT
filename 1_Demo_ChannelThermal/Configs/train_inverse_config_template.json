@@ -1,5 +1,5 @@
 {
-  "Run_ID": "0003",
+  "Run_ID": "0004",
   "description": "Steady ChannelThermal inverse-design training config. Trains an amortized rectified-flow generator over module layouts conditioned on thermal KPI targets and verified by a frozen ChannelThermal forward checkpoint.",
   "seed": 42,
   "dataset": {
@@ -124,6 +124,28 @@
     "enabled": true,
     "drop_probability": 0.15
   },
+  "structure_conditioning": {
+    "enabled": true,
+    "strength_train_range": [
+      0.0,
+      1.0
+    ],
+    "strength_val": 1.0,
+    "drop_probability": 0.15,
+    "noise_std": 0.03,
+    "use_structure_maps": true,
+    "x_bins": 6,
+    "y_bins": 4,
+    "pair_distance_bins": 6
+  },
+  "heat_conditioning": {
+    "enabled": true,
+    "mode": "given_per_module",
+    "sort_mode": "heat_desc_then_xy",
+    "include_heat_stats": true,
+    "include_heat_density_map": true,
+    "drop_probability": 0.05
+  },
   "forward_guidance": {
     "enabled": false,
     "start_epoch": 200,
@@ -144,6 +166,7 @@
     "dropout": 0.05,
     "use_count_head": true,
     "generate_heat_power": false,
+    "slot_identity_mode": "heat_conditioned",
     "heat_load_policy": "preserve_total_heat",
     "fixed_heat_per_module": null,
     "heat_power_scale": 1.0,
@@ -161,10 +184,13 @@
   },
   "loss": {
     "flow_weight": 1.0,
-    "set_center_weight": 0.25,
+    "set_center_weight": 0.15,
+    "structure_match_weight": 0.20,
+    "heat_condition_weight": 0.0,
+    "structure_map_match_weight": 0.0,
     "count_weight": 0.10,
-    "behavior_align_weight": 0.05,
-    "organization_align_weight": 0.05,
+    "behavior_align_weight": 0.03,
+    "organization_align_weight": 0.03,
     "validity_prior_weight": 0.05
   },
   "training": {

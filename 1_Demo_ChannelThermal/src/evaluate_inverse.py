@@ -32,8 +32,13 @@ from thermal_inverse_kpi import (
     score_candidate_kpis,
 )
 from thermal_design_intent import (
+    DEFAULT_FIELD_MAP_SHAPE,
+    STRUCTURE_FEATURE_NAMES,
+    STRUCTURE_INTENT_DIM,
     build_design_intent_arrays,
+    build_layout_structure_maps,
     compute_design_intent_score,
+    compute_layout_structure_features,
     is_design_intent_payload,
     normalize_intent_payload,
 )
@@ -76,6 +81,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--diversity-rerank-top-k", type=int, default=8, help="Number of top candidates to diversity-rerank for plots/NPZ.")
     parser.add_argument("--candidate-pool-multiplier", type=float, default=1.0, help="Sample a larger pool before selecting n-samples candidates.")
     parser.add_argument("--guidance-scale", type=float, default=1.0, help="Conditional/unconditional velocity guidance scale for v2 design-intent sampling.")
+    parser.add_argument("--reference-structure-strength", type=float, default=0.7, help="Strength for structure-family conditioning when deriving a target from a reference case.")
+    parser.add_argument("--reference-heat-mode", type=str, default="exact", choices=("exact", "total", "uniform", "none"), help="Heat conditioning mode for reference-case evaluation.")
+    parser.add_argument("--reference-anchor-mode", type=str, default="none", choices=("none", "soft", "exact"), help="Whether reference layouts are used as no anchors, soft map anchors, or exact center anchors.")
+    parser.add_argument("--disable-reference-structure", action="store_true", help="Do not derive structure constraints/conditioning from the reference case.")
+    parser.add_argument("--disable-reference-heat", action="store_true", help="Do not derive per-module heat conditions from the reference case.")
     return parser.parse_args()
 
 
@@ -260,6 +270,104 @@ def target_feasibility_report(payload: Mapping[str, Any], kpi_distribution_summa
     return {"entries": entries, "warnings": warnings, "summary_available": bool(entries)}
 
 
+def heat_condition_arrays_from_values(values: Any, *, max_num_modules: int, heat_power_scale: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    heat = np.asarray(values if values is not None else [], dtype=np.float32).reshape(-1)
+    max_n = int(max_num_modules)
+    vec_heat = np.zeros((max_n,), dtype=np.float32)
+    mask = np.zeros((max_n,), dtype=np.float32)
+    n = min(max_n, heat.size)
+    if n > 0:
+        vec_heat[:n] = heat[:n] / max(float(heat_power_scale), 1.0e-8)
+        mask[:n] = 1.0
+    active = heat[:n]
+    total = float(np.sum(active)) if active.size else 0.0
+    mean = float(np.mean(active)) if active.size else 0.0
+    std = float(np.std(active)) if active.size else 0.0
+    max_heat = float(np.max(active)) if active.size else 0.0
+    high_frac = float(np.mean(active >= mean + std)) if active.size and std > 1.0e-8 else 0.0
+    stats = np.asarray(
+        [
+            total / max(float(heat_power_scale) * max(float(max_n), 1.0), 1.0e-8),
+            mean / max(float(heat_power_scale), 1.0e-8),
+            std / max(float(heat_power_scale), 1.0e-8),
+            max_heat / max(float(heat_power_scale), 1.0e-8),
+            high_frac,
+            0.0,
+            0.0,
+        ],
+        dtype=np.float32,
+    )
+    return np.concatenate([vec_heat, mask, stats], axis=0).astype(np.float32), mask, stats
+
+
+def apply_structure_and_heat_payload(
+    spec: Dict[str, Any],
+    payload: Mapping[str, Any],
+    model: ThermalInverseDesignFlow,
+) -> Dict[str, Any]:
+    structure = payload.get("structure_constraints", {}) if isinstance(payload.get("structure_constraints"), Mapping) else {}
+    reference_centers = payload.get("reference_centers")
+    reference_heat = payload.get("reference_heat_powers")
+    if bool(structure.get("enabled", False)) and reference_centers is not None:
+        centers = np.asarray(reference_centers, dtype=np.float32).reshape(-1, 2)
+        present = np.ones((centers.shape[0],), dtype=np.float32)
+        struct_vec, struct_meta = compute_layout_structure_features(
+            centers,
+            present,
+            reference_heat,
+            domain_length_x=float(model.cfg.domain_length_x),
+            domain_length_y=float(model.cfg.domain_length_y),
+            module_radius=float(model.cfg.module_radius),
+            max_num_modules=model.max_num_modules,
+        )
+        ref_map = None
+        if str(structure.get("anchor_mode", "none")).lower().strip() in {"soft", "exact"}:
+            ref_map = build_layout_structure_maps(
+                centers,
+                present,
+                reference_heat,
+                domain_length_x=float(model.cfg.domain_length_x),
+                domain_length_y=float(model.cfg.domain_length_y),
+                module_radius=float(model.cfg.module_radius),
+                max_num_modules=model.max_num_modules,
+            )[0][0]
+        struct_maps, _ = build_layout_structure_maps(
+            centers,
+            present,
+            reference_heat,
+            domain_length_x=float(model.cfg.domain_length_x),
+            domain_length_y=float(model.cfg.domain_length_y),
+            module_radius=float(model.cfg.module_radius),
+            max_num_modules=model.max_num_modules,
+            reference_layout_soft_map=ref_map,
+        )
+        spec["structure_intent_vector"] = struct_vec
+        spec["structure_intent_maps"] = struct_maps
+        spec["structure_strength"] = float(structure.get("strength", 1.0))
+        spec["structure_constraints"] = dict(structure)
+        spec["structure_feature_metadata"] = struct_meta
+    else:
+        spec.setdefault("structure_intent_vector", np.zeros((STRUCTURE_INTENT_DIM,), dtype=np.float32))
+        spec.setdefault("structure_intent_maps", np.zeros((5, DEFAULT_FIELD_MAP_SHAPE[1], DEFAULT_FIELD_MAP_SHAPE[0]), dtype=np.float32))
+        spec.setdefault("structure_strength", 0.0)
+        spec["structure_constraints"] = dict(structure)
+
+    heat_loads = payload.get("heat_loads", {}) if isinstance(payload.get("heat_loads"), Mapping) else {}
+    values = heat_loads.get("values")
+    if values is not None and str(heat_loads.get("mode", "per_module")).lower().strip() != "none":
+        vec, mask, stats = heat_condition_arrays_from_values(values, max_num_modules=model.max_num_modules, heat_power_scale=float(model.cfg.heat_power_scale))
+        spec["heat_condition_vector"] = vec
+        spec["heat_condition_mask"] = mask
+        spec["heat_condition_stats"] = stats
+        spec["heat_loads"] = dict(heat_loads)
+    else:
+        spec.setdefault("heat_condition_vector", np.zeros((model.max_num_modules * 2 + 7,), dtype=np.float32))
+        spec.setdefault("heat_condition_mask", np.zeros((model.max_num_modules,), dtype=np.float32))
+        spec.setdefault("heat_condition_stats", np.zeros((7,), dtype=np.float32))
+        spec["heat_loads"] = dict(heat_loads)
+    return spec
+
+
 def target_spec_from_payload(
     payload: Mapping[str, Any],
     checkpoint: Mapping[str, Any],
@@ -316,7 +424,7 @@ def target_spec_from_payload(
             "wall_hot_delta_T": normalized_intent["thermal_limits"].get("wall_hot_delta_T"),
             "outlet_hot_delta_T": normalized_intent["thermal_limits"].get("outlet_hot_delta_T"),
         }
-    return {
+    spec = {
         "name": payload.get("name", "inverse_target"),
         "vector": vector,
         "kpi_names": list(kpi_names),
@@ -335,9 +443,39 @@ def target_spec_from_payload(
         "x_bounds": intent_arrays["x_bounds"],
         "y_bounds": intent_arrays["y_bounds"],
     }
+    return apply_structure_and_heat_payload(spec, payload, model)
 
 
-def target_payload_from_reference_record(record: Any, model: ThermalInverseDesignFlow) -> Dict[str, Any]:
+def target_payload_from_reference_record(
+    record: Any,
+    model: ThermalInverseDesignFlow,
+    *,
+    structure_strength: float = 0.7,
+    heat_mode: str = "exact",
+    anchor_mode: str = "none",
+    enable_structure: bool = True,
+    enable_heat: bool = True,
+) -> Dict[str, Any]:
+    centers = np.asarray(record.module_centers[record.module_present > 0.5], dtype=np.float32).reshape(-1, 2)
+    heat = np.asarray(record.heat_powers[record.module_present > 0.5], dtype=np.float32).reshape(-1)
+    struct_vec, _ = compute_layout_structure_features(
+        centers,
+        np.ones((centers.shape[0],), dtype=np.float32),
+        heat,
+        domain_length_x=float(record.domain_length_x),
+        domain_length_y=float(record.domain_length_y),
+        module_radius=float(record.module_radius),
+        max_num_modules=model.max_num_modules,
+    )
+    heat_mode_norm = "none" if not enable_heat else str(heat_mode).lower().strip()
+    if heat_mode_norm == "exact":
+        heat_loads = {"mode": "per_module", "values": heat.tolist(), "sort_mode": "heat_desc_then_xy"}
+    elif heat_mode_norm == "uniform":
+        heat_loads = {"mode": "uniform", "total": float(np.sum(heat)), "values": np.full((centers.shape[0],), float(np.mean(heat)) if heat.size else 0.0, dtype=np.float32).tolist()}
+    elif heat_mode_norm == "total":
+        heat_loads = {"mode": "total_only", "total": float(np.sum(heat)), "values": None}
+    else:
+        heat_loads = {"mode": "none", "values": None}
     return {
         "name": f"reference_{record.split}_{record.case_id}",
         "scenario": {
@@ -376,6 +514,24 @@ def target_payload_from_reference_record(record: Any, model: ThermalInverseDesig
             "protect_wall_band": True,
             "protect_outlet_uniformity": True,
         },
+        "structure_constraints": {
+            "enabled": bool(enable_structure),
+            "strength": float(structure_strength) if enable_structure else 0.0,
+            "x_coverage_min": float(struct_vec[5] * record.domain_length_x),
+            "y_coverage_min": float(struct_vec[6] * record.domain_length_y),
+            "mean_pair_distance_min": float(struct_vec[11] * max(record.domain_length_x, record.domain_length_y)),
+            "centroid": [float(np.mean(centers[:, 0])) if centers.size else 0.0, float(np.mean(centers[:, 1])) if centers.size else 0.0],
+            "centroid_tolerance": [2.0, 1.0],
+            "x_bin_occupancy": None,
+            "y_bin_occupancy": None,
+            "pair_distance_hist": None,
+            "avoid_vertical_stack": False,
+            "match_reference_layout_features": True,
+            "anchor_mode": str(anchor_mode),
+        },
+        "heat_loads": heat_loads,
+        "reference_centers": centers.tolist(),
+        "reference_heat_powers": heat.tolist(),
         "kpis": {
             name: {"mode": "exact", "value": float(record.kpi_dict[name]), "weight": 1.0}
             for name in DEFAULT_KPI_NAMES
@@ -392,8 +548,22 @@ def target_spec_from_reference_item(
     item: Mapping[str, Any],
     checkpoint: Mapping[str, Any],
     model: ThermalInverseDesignFlow,
+    *,
+    structure_strength: float = 0.7,
+    heat_mode: str = "exact",
+    anchor_mode: str = "none",
+    enable_structure: bool = True,
+    enable_heat: bool = True,
 ) -> Dict[str, Any]:
-    payload = target_payload_from_reference_record(record, model)
+    payload = target_payload_from_reference_record(
+        record,
+        model,
+        structure_strength=structure_strength,
+        heat_mode=heat_mode,
+        anchor_mode=anchor_mode,
+        enable_structure=enable_structure,
+        enable_heat=enable_heat,
+    )
     spec = target_spec_from_payload(payload, checkpoint, model)
     spec["name"] = payload["name"]
     spec["vector"] = np.asarray(item["target_spec_vector"], dtype=np.float32)
@@ -401,6 +571,12 @@ def target_spec_from_reference_item(
     spec["design_intent_vector"] = np.asarray(item.get("design_intent_vector", spec["design_intent_vector"]), dtype=np.float32)
     spec["objective_weight_vector"] = np.asarray(item.get("objective_weight_vector", spec["objective_weight_vector"]), dtype=np.float32)
     spec["field_intent_maps"] = np.asarray(item.get("field_intent_maps", spec["field_intent_maps"]), dtype=np.float32)
+    if enable_structure:
+        spec["structure_strength"] = float(structure_strength)
+    if enable_heat and str(heat_mode).lower().strip() == "exact":
+        spec["heat_condition_vector"] = np.asarray(spec.get("heat_condition_vector", item.get("heat_condition_vector")), dtype=np.float32)
+        spec["heat_condition_mask"] = np.asarray(spec.get("heat_condition_mask", item.get("heat_condition_mask")), dtype=np.float32)
+        spec["heat_condition_stats"] = np.asarray(spec.get("heat_condition_stats", item.get("heat_condition_stats")), dtype=np.float32)
     spec["reference_case_id"] = record.case_id
     spec["reference_ground_truth"] = {
         "centers": np.asarray(record.module_centers[record.module_present > 0.5], dtype=np.float32),
@@ -521,6 +697,69 @@ def _candidate_kpi_payload(
     kpis["heat_power_total"] = float(np.sum(heat_used[: kpis["num_modules"]])) if heat_used.size else 0.0
     kpis["valid"] = bool(candidate.get("validity", {}).get("valid", False))
     return kpis
+
+
+def compute_structure_match_score(candidate: Mapping[str, Any], target_spec: Mapping[str, Any], record: Any) -> Dict[str, Any]:
+    centers = np.asarray(candidate.get("centers", []), dtype=np.float32).reshape(-1, 2)
+    heat = np.asarray(candidate.get("heat_powers", []), dtype=np.float32).reshape(-1) if candidate.get("heat_powers") is not None else None
+    present = np.ones((centers.shape[0],), dtype=np.float32)
+    vec, meta = compute_layout_structure_features(
+        centers,
+        present,
+        heat,
+        domain_length_x=float(record.domain_length_x),
+        domain_length_y=float(record.domain_length_y),
+        module_radius=float(record.module_radius),
+        max_num_modules=int(getattr(record, "max_num_modules", centers.shape[0] or 12)),
+    )
+    target_vec = np.asarray(target_spec.get("structure_intent_vector", []), dtype=np.float32).reshape(-1)
+    constraints = target_spec.get("structure_constraints", {}) if isinstance(target_spec.get("structure_constraints"), Mapping) else {}
+    descriptor_error = float(np.mean(np.abs(vec[: min(vec.size, target_vec.size)] - target_vec[: min(vec.size, target_vec.size)]))) if target_vec.size else 0.0
+    centroid_error = 0.0
+    if constraints.get("centroid") is not None and centers.size:
+        centroid = np.mean(centers, axis=0)
+        target_centroid = np.asarray(constraints.get("centroid"), dtype=np.float32).reshape(-1)[:2]
+        tol = np.asarray(constraints.get("centroid_tolerance", [record.domain_length_x, record.domain_length_y]), dtype=np.float32).reshape(-1)[:2]
+        centroid_error = float(np.mean(np.abs(centroid - target_centroid) / np.maximum(tol, 1.0e-8)))
+    coverage_error = 0.0
+    if constraints.get("x_coverage_min") is not None:
+        coverage_error += max(0.0, float(constraints["x_coverage_min"]) - float(vec[5] * record.domain_length_x)) / max(float(constraints["x_coverage_min"]), 1.0)
+    if constraints.get("y_coverage_min") is not None:
+        coverage_error += max(0.0, float(constraints["y_coverage_min"]) - float(vec[6] * record.domain_length_y)) / max(float(constraints["y_coverage_min"]), 1.0)
+    if constraints.get("mean_pair_distance_min") is not None:
+        coverage_error += max(0.0, float(constraints["mean_pair_distance_min"]) - float(vec[11] * max(record.domain_length_x, record.domain_length_y))) / max(float(constraints["mean_pair_distance_min"]), 1.0)
+    hist_error = 0.0
+    if target_vec.size >= STRUCTURE_INTENT_DIM:
+        hist_error = float(np.mean(np.abs(vec[23:39] - target_vec[23:39])))
+    heat_weighted_centroid_error = float(np.mean(np.abs(vec[3:5] - target_vec[3:5]))) if target_vec.size >= 5 else 0.0
+    high_power_placement_error = 0.0
+    ref_centers = np.asarray(target_spec.get("reference_ground_truth", {}).get("centers", target_spec.get("target_payload", {}).get("reference_centers", [])), dtype=np.float32).reshape(-1, 2)
+    ref_heat = np.asarray(target_spec.get("target_payload", {}).get("reference_heat_powers", []), dtype=np.float32).reshape(-1)
+    if heat is not None and heat.size and centers.size and ref_centers.size and ref_heat.size:
+        n = min(centers.shape[0], heat.size)
+        m = min(ref_centers.shape[0], ref_heat.size)
+        cand_cut = float(np.percentile(heat[:n], 75.0))
+        ref_cut = float(np.percentile(ref_heat[:m], 75.0))
+        cand_high = centers[:n][heat[:n] >= cand_cut]
+        ref_high = ref_centers[:m][ref_heat[:m] >= ref_cut]
+        if cand_high.size and ref_high.size:
+            cand_hc = np.asarray([np.mean(cand_high[:, 0]) / record.domain_length_x, np.mean(cand_high[:, 1]) / record.domain_length_y])
+            ref_hc = np.asarray([np.mean(ref_high[:, 0]) / record.domain_length_x, np.mean(ref_high[:, 1]) / record.domain_length_y])
+            high_power_placement_error = float(np.mean(np.abs(cand_hc - ref_hc)))
+    vertical_stack_penalty = float(vec[-1]) if bool(constraints.get("avoid_vertical_stack", False)) else 0.0
+    total = descriptor_error + coverage_error + centroid_error + hist_error + heat_weighted_centroid_error + high_power_placement_error + vertical_stack_penalty
+    return {
+        "structure_match_score": float(total),
+        "descriptor_error": descriptor_error,
+        "coverage_error": coverage_error,
+        "centroid_error": centroid_error,
+        "histogram_l1_error": hist_error,
+        "heat_weighted_centroid_error": heat_weighted_centroid_error,
+        "high_power_placement_error": high_power_placement_error,
+        "vertical_stack_penalty": vertical_stack_penalty,
+        "features": vec,
+        "feature_metadata": meta,
+    }
 
 
 def write_candidates_csv(candidates: Sequence[Mapping[str, Any]], path: Path) -> None:
@@ -1028,6 +1267,101 @@ def write_reference_comparison_csv(candidate: Mapping[str, Any], record: Any, kp
             writer.writerow({"kpi": name, "reference_value": ref, "generated_value": gen, "absolute_error": abs(gen - ref) if math.isfinite(gen) and math.isfinite(ref) else ""})
 
 
+def write_structure_outputs(candidates: Sequence[Mapping[str, Any]], target_spec: Mapping[str, Any], record: Any, out_dirs: Mapping[str, Path]) -> None:
+    rows = []
+    feature_rows = []
+    target_vec = np.asarray(target_spec.get("structure_intent_vector", []), dtype=np.float32).reshape(-1)
+    for row in candidates:
+        detail = row.get("structure_score_detail", {})
+        rows.append(
+            {
+                "rank": row.get("rank", ""),
+                "sample_index": row.get("sample_index", ""),
+                "structure_match_score": detail.get("structure_match_score", ""),
+                "descriptor_error": detail.get("descriptor_error", ""),
+                "coverage_error": detail.get("coverage_error", ""),
+                "centroid_error": detail.get("centroid_error", ""),
+                "histogram_l1_error": detail.get("histogram_l1_error", ""),
+                "heat_weighted_centroid_error": detail.get("heat_weighted_centroid_error", ""),
+                "high_power_placement_error": detail.get("high_power_placement_error", ""),
+            }
+        )
+        features = np.asarray(detail.get("features", []), dtype=np.float32).reshape(-1)
+        feature_row = {"rank": row.get("rank", ""), "sample_index": row.get("sample_index", "")}
+        for idx, name in enumerate(STRUCTURE_FEATURE_NAMES):
+            feature_row[name] = float(features[idx]) if idx < features.size else ""
+            feature_row[f"target_{name}"] = float(target_vec[idx]) if idx < target_vec.size else ""
+        feature_rows.append(feature_row)
+    if rows:
+        with (out_dirs["data"] / "layout_structure_comparison.csv").open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(rows)
+        with (out_dirs["data"] / "candidate_structure_features.csv").open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(feature_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(feature_rows)
+    heat_rows = []
+    for row in candidates:
+        heat = np.asarray(row.get("heat_powers", row.get("prediction", {}).get("heat_powers", [])), dtype=np.float32).reshape(-1)
+        for idx, value in enumerate(heat[: int(row.get("count", heat.size))]):
+            heat_rows.append({"rank": row.get("rank", ""), "sample_index": row.get("sample_index", ""), "slot_id": idx, "heat_power": float(value), "heat_source": row.get("prediction", {}).get("heat_source", "")})
+    with (out_dirs["data"] / "heat_assignment_summary.csv").open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["rank", "sample_index", "slot_id", "heat_power", "heat_source"])
+        writer.writeheader()
+        writer.writerows(heat_rows)
+    best = candidates[0] if candidates else None
+    write_json(out_dirs["data"] / "layout_structure_summary.json", json_safe({"target_feature_names": list(STRUCTURE_FEATURE_NAMES), "target_features": target_vec, "best": best.get("structure_score_detail", {}) if best else {}}))
+
+
+def plot_structure_diagnostics(best: Mapping[str, Any], target_spec: Mapping[str, Any], record: Any, out_dirs: Mapping[str, Path]) -> None:
+    if not best:
+        return
+    target_vec = np.asarray(target_spec.get("structure_intent_vector", []), dtype=np.float32).reshape(-1)
+    cand_vec = np.asarray(best.get("structure_score_detail", {}).get("features", []), dtype=np.float32).reshape(-1)
+    if target_vec.size and cand_vec.size:
+        names = list(STRUCTURE_FEATURE_NAMES[:23]) + ["occupancy_entropy", "heat_density_entropy", "anisotropy_score"]
+        idxs = list(range(23)) + [39, 40, 41]
+        idxs = [idx for idx in idxs if idx < target_vec.size and idx < cand_vec.size]
+        fig, ax = plt.subplots(figsize=(max(8.0, 0.28 * len(idxs)), 4.0), constrained_layout=True)
+        x = np.arange(len(idxs))
+        ax.bar(x - 0.18, target_vec[idxs], width=0.36, label="target/reference", color="#666666")
+        ax.bar(x + 0.18, cand_vec[idxs], width=0.36, label="generated", color="#4c78a8")
+        ax.set_xticks(x)
+        ax.set_xticklabels([names[i] if i < len(names) else STRUCTURE_FEATURE_NAMES[idxs[i]] for i in range(len(idxs))], rotation=60, ha="right", fontsize=7)
+        ax.set_ylabel("normalized descriptor")
+        ax.legend(fontsize=8)
+        ax.grid(True, axis="y", alpha=0.25)
+        fig.savefig(out_dirs["diagnostics"] / "generated_vs_reference_layout_descriptor_bars.png", dpi=170)
+        fig.savefig(out_dirs["diagnostics"] / "layout_structure_comparison.png", dpi=170)
+        plt.close(fig)
+    ref_centers = np.asarray(target_spec.get("reference_ground_truth", {}).get("centers", []), dtype=np.float32).reshape(-1, 2)
+    gen_centers = np.asarray(best.get("centers", []), dtype=np.float32).reshape(-1, 2)
+    if ref_centers.size and gen_centers.size:
+        ref_maps = build_layout_structure_maps(ref_centers, np.ones((ref_centers.shape[0],), dtype=np.float32), None, domain_length_x=record.domain_length_x, domain_length_y=record.domain_length_y, module_radius=record.module_radius)[0]
+        gen_maps = build_layout_structure_maps(gen_centers, np.ones((gen_centers.shape[0],), dtype=np.float32), best.get("heat_powers"), domain_length_x=record.domain_length_x, domain_length_y=record.domain_length_y, module_radius=record.module_radius)[0]
+        fig, axes = plt.subplots(1, 2, figsize=(9.0, 3.2), constrained_layout=True)
+        axes[0].imshow(ref_maps[0], origin="lower", extent=_extent(record), cmap="Blues", aspect="equal")
+        _draw_layout(axes[0], record, ref_centers, title="reference occupancy")
+        axes[1].imshow(gen_maps[0], origin="lower", extent=_extent(record), cmap="Blues", aspect="equal")
+        _draw_layout(axes[1], record, gen_centers, title="generated occupancy")
+        fig.savefig(out_dirs["diagnostics"] / "reference_vs_generated_occupancy_maps.png", dpi=170)
+        plt.close(fig)
+    heat = np.asarray(best.get("heat_powers", best.get("prediction", {}).get("heat_powers", [])), dtype=np.float32).reshape(-1)
+    if gen_centers.size and heat.size:
+        fig, ax = plt.subplots(figsize=(8.2, 3.2), constrained_layout=True)
+        ax.set_xlim(0.0, float(record.domain_length_x))
+        ax.set_ylim(0.0, float(record.domain_length_y))
+        ax.set_aspect("equal", adjustable="box")
+        sizes = 80.0 + 180.0 * (heat[: gen_centers.shape[0]] / max(float(np.max(heat)), 1.0e-8))
+        sc = ax.scatter(gen_centers[:, 0], gen_centers[:, 1], c=heat[: gen_centers.shape[0]], s=sizes, cmap="magma", edgecolor="black")
+        fig.colorbar(sc, ax=ax, label="heat power")
+        ax.set_title("Generated heat-power layout overlay")
+        ax.grid(True, alpha=0.18)
+        fig.savefig(out_dirs["diagnostics"] / "heat_power_layout_overlay.png", dpi=170)
+        plt.close(fig)
+
+
 def try_plot_organization(candidate: Mapping[str, Any], record: Any, out_path: Path) -> None:
     aux = candidate.get("prediction", {}).get("organizer_aux", {})
     if not isinstance(aux, Mapping) or "A_mh" not in aux or "A_eh" not in aux:
@@ -1154,6 +1488,8 @@ def main() -> int:
     target_cfg = train_cfg.get("target_kpis", {}) if isinstance(train_cfg, Mapping) else {}
     conditioning_cfg = train_cfg.get("conditioning", {}) if isinstance(train_cfg, Mapping) and isinstance(train_cfg.get("conditioning", {}), Mapping) else {}
     intent_aug_cfg = train_cfg.get("intent_augmentation", {}) if isinstance(train_cfg, Mapping) and isinstance(train_cfg.get("intent_augmentation", {}), Mapping) else {}
+    structure_conditioning_cfg = train_cfg.get("structure_conditioning", {}) if isinstance(train_cfg, Mapping) and isinstance(train_cfg.get("structure_conditioning", {}), Mapping) else {}
+    heat_conditioning_cfg = train_cfg.get("heat_conditioning", {}) if isinstance(train_cfg, Mapping) and isinstance(train_cfg.get("heat_conditioning", {}), Mapping) else {}
     packed_path = args.dataset or dataset_cfg.get("packed_h5_path", "./Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5")
     if args.target:
         target_payload = load_target_payload(args.target)
@@ -1194,12 +1530,24 @@ def main() -> int:
         organization_latent_dim=int(inverse_model.cfg.organization_latent_dim),
         conditioning_mode=str(conditioning_cfg.get("mode", getattr(inverse_model.cfg, "conditioning_mode", "legacy_kpi"))),
         intent_augmentation={**intent_aug_cfg, "field_preference_dropout": 1.0},
+        structure_conditioning=structure_conditioning_cfg,
+        heat_conditioning=heat_conditioning_cfg,
     )
     dataset.set_kpi_distribution_summary(kpi_distribution_summary)
     record = dataset.records[min(max(int(args.reference_case_index), 0), len(dataset.records) - 1)]
     if not args.target:
         item = dataset[min(max(int(args.reference_case_index), 0), len(dataset) - 1)]
-        target_spec = target_spec_from_reference_item(record, item, checkpoint, inverse_model)
+        target_spec = target_spec_from_reference_item(
+            record,
+            item,
+            checkpoint,
+            inverse_model,
+            structure_strength=float(args.reference_structure_strength),
+            heat_mode=str(args.reference_heat_mode),
+            anchor_mode=str(args.reference_anchor_mode),
+            enable_structure=not bool(args.disable_reference_structure),
+            enable_heat=not bool(args.disable_reference_heat),
+        )
         target_payload = dict(target_spec.get("target_payload", {}))
         print(f"[target] derived target from {record.split} case {record.case_id} (index {args.reference_case_index}).")
     forward_cfg = apply_forward_overrides(train_cfg.get("forward_model", {}) if isinstance(train_cfg, Mapping) else {}, args)
@@ -1235,6 +1583,10 @@ def main() -> int:
         design_intent_vector=target_spec.get("design_intent_vector"),
         objective_weight_vector=target_spec.get("objective_weight_vector"),
         field_intent_maps=target_spec.get("field_intent_maps"),
+        structure_intent_vector=target_spec.get("structure_intent_vector"),
+        structure_intent_maps=target_spec.get("structure_intent_maps"),
+        heat_condition_vector=target_spec.get("heat_condition_vector"),
+        heat_condition_mask=target_spec.get("heat_condition_mask"),
         guidance_scale=float(args.guidance_scale),
         device=device,
     )
@@ -1257,19 +1609,27 @@ def main() -> int:
         verified_kpis = _candidate_kpi_payload(record, prediction, cand, inverse_model, target_spec)
         score = score_candidate_kpis(verified_kpis, target_spec)
         intent_score = compute_design_intent_score(verified_kpis, {"centers": cand.get("centers", [])}, target_spec)
+        structure_score = compute_structure_match_score({**cand, "heat_powers": prediction.get("heat_powers")}, target_spec, record)
         use_intent_score = bool(target_spec.get("is_design_intent", False) or getattr(inverse_model.cfg, "conditioning_mode", "legacy_kpi") == "design_intent")
-        primary_score = float(intent_score["design_intent_score"] if use_intent_score else score["total_score"])
+        structure_weight = float(target_spec.get("structure_strength", target_spec.get("structure_constraints", {}).get("strength", 0.0) if isinstance(target_spec.get("structure_constraints"), Mapping) else 0.0))
+        primary_base = float(intent_score["design_intent_score"] if use_intent_score else score["total_score"])
+        primary_score = primary_base + structure_weight * float(structure_score["structure_match_score"])
         row = {
             "sample_index": int(sample_idx),
             "count": int(cand.get("count", 0)),
             "centers": np.asarray(cand["centers"], dtype=np.float32),
+            "heat_powers": np.asarray(prediction.get("heat_powers", cand.get("heat_powers", [])), dtype=np.float32),
+            "slot_ids": np.asarray(cand.get("slot_ids", []), dtype=np.int64),
             "valid": bool(cand.get("validity", {}).get("valid", False)),
             "validity": cand.get("validity", {}),
             "verified_kpis": verified_kpis,
             "score_detail": score,
             "design_intent_score_detail": intent_score,
             "design_intent_score": float(intent_score["design_intent_score"]),
+            "structure_match_score": float(structure_score["structure_match_score"]),
+            "structure_score_detail": structure_score,
             "total_score": primary_score,
+            "primary_score_without_structure": primary_base,
             "legacy_total_score": float(score["total_score"]),
             "kpi_score": float(score.get("kpi_score", score["total_score"])),
             "constraint_penalty": float(score.get("constraint_penalty", 0.0)),
@@ -1304,6 +1664,7 @@ def main() -> int:
     write_json(out_dirs["data"] / "candidates.json", {"target": json_safe(target_spec), "candidates": serializable, "displayed_candidate_indices": [int(row["sample_index"]) for row in candidates_for_outputs]})
     write_candidates_csv(candidates_for_outputs, out_dirs["data"] / "candidates.csv")
     write_kpi_scores_csv(candidates_for_outputs, target_spec["kpi_names"], out_dirs["data"] / "kpi_scores.csv")
+    write_structure_outputs(candidates_for_outputs, target_spec, record, out_dirs)
     write_json(out_dirs["data"] / "target_spec_resolved.json", json_safe(target_spec))
     save_top_npz(candidates_for_outputs, out_dirs["data"] / "top_candidates.npz", max_num_modules=inverse_model.max_num_modules)
 
@@ -1328,6 +1689,8 @@ def main() -> int:
         "local_surrogate_used": bool(forward_metadata.get("local_surrogate_used", False)),
         "predicted_port_condition_kpis_available": bool(best and "mean_interface_T_env" in best.get("verified_kpis", {}).get("available_kpis", [])),
         "heat_load_policy": heat_load_policy,
+        "heat_source": best.get("prediction", {}).get("heat_source") if best else None,
+        "structure_weight": float(target_spec.get("structure_strength", 0.0)),
         "diversity_rerank_weight": float(args.diversity_rerank_weight),
         "diversity_rerank_top_k": int(args.diversity_rerank_top_k),
         "best_preference_penalties": best.get("score_detail", {}).get("per_preference_penalties", {}) if best else {},
@@ -1355,6 +1718,7 @@ def main() -> int:
         plot_interface_curves(best, out_dirs["fields"] / "best_layout_interface_curves.png")
         try_plot_organization(best, record, out_dirs["diagnostics"] / "best_layout_organization_overview.png")
         plot_diversity(candidates, out_dirs["diagnostics"] / "candidate_diversity.png")
+        plot_structure_diagnostics(best, target_spec, record, out_dirs)
         if target_spec.get("reference_ground_truth"):
             plot_reference_layout_comparison(best, record, out_dirs["reference"] / "generated_vs_reference_layout.png")
             plot_reference_field_comparison(best, record, out_dirs["reference"] / "generated_vs_reference_fields.png")

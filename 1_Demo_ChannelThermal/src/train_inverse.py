@@ -51,8 +51,11 @@ from thermal_inverse_kpi import (
 )
 from thermal_design_intent import (
     DEFAULT_FIELD_MAP_SHAPE,
+    STRUCTURE_INTENT_DIM,
     build_design_intent_arrays,
+    build_layout_structure_maps,
     compute_design_intent_score,
+    compute_layout_structure_features,
     is_design_intent_payload,
     normalize_intent_payload,
     training_intent_from_record,
@@ -74,7 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-val-batches", type=int, default=None, help="Limit val batches per epoch.")
     parser.add_argument("--dry-run", action="store_true", help="Load datasets/model, build one batch, then exit.")
     parser.add_argument("--Run_ID", dest="run_id", type=str, default=None, help="Numeric run serial, e.g. 0001.")
-    parser.add_argument("--run-name", type=str, default=None, help="Optional descriptive run suffix.")
+    parser.add_argument("--run-name", type=str, default=None, help="Deprecated; run directories are now only Run_ID plus timestamp.")
     return parser.parse_args()
 
 
@@ -206,6 +209,11 @@ class ThermalInverseCaseRecord:
     interface_target: Optional[np.ndarray]
     kpi_dict: Dict[str, Any]
     kpi_vector: np.ndarray
+    structure_intent_vector: np.ndarray
+    structure_intent_maps: np.ndarray
+    heat_condition_vector: np.ndarray
+    heat_condition_mask: np.ndarray
+    heat_condition_stats: np.ndarray
 
 
 class ThermalInverseDesignDataset(Dataset):
@@ -231,6 +239,8 @@ class ThermalInverseDesignDataset(Dataset):
         organization_latent_dim: int = 256,
         conditioning_mode: str = "legacy_kpi",
         intent_augmentation: Optional[Mapping[str, Any]] = None,
+        structure_conditioning: Optional[Mapping[str, Any]] = None,
+        heat_conditioning: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.path = resolve_demo_path(packed_h5_path)
         if not self.path.exists():
@@ -251,12 +261,76 @@ class ThermalInverseDesignDataset(Dataset):
         self.organization_latent_dim = int(organization_latent_dim)
         self.conditioning_mode = str(conditioning_mode).lower().strip()
         self.intent_augmentation = dict(intent_augmentation or {})
+        self.structure_conditioning = dict(structure_conditioning or {})
+        self.heat_conditioning = dict(heat_conditioning or {})
+        self.structure_enabled = bool(self.structure_conditioning.get("enabled", False))
+        self.heat_conditioning_enabled = bool(self.heat_conditioning.get("enabled", False))
+        self.heat_sort_mode = str(self.heat_conditioning.get("sort_mode", "heat_desc_then_xy")).lower().strip()
         self.kpi_distribution_summary: Optional[Mapping[str, Any]] = None
         self.latent_targets: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
         self.normalizer: Optional[H5Normalizer] = None
         self.records = self._load_records(max_cases=max_cases, use_all_if_split_missing=use_all_if_split_missing)
         if not self.records:
             raise RuntimeError(f"No inverse records found in split {self.split!r} from {self.path}.")
+
+    def _slot_order(self, centers: np.ndarray, present: np.ndarray, heat: np.ndarray) -> np.ndarray:
+        active = np.flatnonzero(np.asarray(present).reshape(-1) > 0.5)
+        if active.size <= 1:
+            return active
+        active_centers = centers[active]
+        active_heat = heat[active] if heat.size >= int(np.max(active)) + 1 else np.zeros((active.size,), dtype=np.float32)
+        mode = self.heat_sort_mode
+        if mode == "heat_desc_then_xy":
+            local = np.lexsort((active_centers[:, 1], active_centers[:, 0], -active_heat))
+        elif mode == "xy":
+            local = np.lexsort((active_centers[:, 1], active_centers[:, 0]))
+        elif mode in {"as_is", "preserve", "dataset"}:
+            local = np.arange(active.size)
+        else:
+            local = np.lexsort((active_centers[:, 1], active_centers[:, 0], -active_heat))
+        return active[local]
+
+    def _ordered_layout(self, centers: np.ndarray, present: np.ndarray, heat: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        order = self._slot_order(centers, present, heat) if self.heat_conditioning_enabled else np.flatnonzero(present.reshape(-1) > 0.5)
+        out_centers = np.zeros_like(centers, dtype=np.float32)
+        out_present = np.zeros_like(present, dtype=np.float32)
+        out_heat = np.zeros_like(heat, dtype=np.float32)
+        n = min(order.size, out_present.size)
+        if n > 0:
+            out_centers[:n] = centers[order[:n]]
+            out_present[:n] = 1.0
+            out_heat[:n] = heat[order[:n]] if heat.size else 0.0
+        return out_centers, out_present, out_heat
+
+    def _heat_condition_arrays(self, heat: np.ndarray, present: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        max_n = int(self.max_num_modules)
+        heat = np.asarray(heat, dtype=np.float32).reshape(-1)
+        present = np.asarray(present, dtype=np.float32).reshape(-1)
+        mask = np.zeros((max_n,), dtype=np.float32)
+        heat_norm = np.zeros((max_n,), dtype=np.float32)
+        n = min(max_n, heat.size, present.size)
+        if n > 0:
+            mask[:n] = (present[:n] > 0.5).astype(np.float32)
+            heat_norm[:n] = heat[:n] / max(float(self.heat_power_scale), 1.0e-8)
+        active_heat = heat[:n][mask[:n] > 0.5] if n else np.asarray([], dtype=np.float32)
+        total = float(np.sum(active_heat)) if active_heat.size else 0.0
+        mean = float(np.mean(active_heat)) if active_heat.size else 0.0
+        std = float(np.std(active_heat)) if active_heat.size else 0.0
+        max_heat = float(np.max(active_heat)) if active_heat.size else 0.0
+        high_power_fraction = float(np.mean(active_heat >= mean + std)) if active_heat.size and std > 1.0e-8 else 0.0
+        stats = np.asarray(
+            [
+                total / max(float(self.heat_power_scale) * max(float(max_n), 1.0), 1.0e-8),
+                mean / max(float(self.heat_power_scale), 1.0e-8),
+                std / max(float(self.heat_power_scale), 1.0e-8),
+                max_heat / max(float(self.heat_power_scale), 1.0e-8),
+                high_power_fraction,
+                0.0,
+                0.0,
+            ],
+            dtype=np.float32,
+        )
+        return np.concatenate([heat_norm, mask, stats], axis=0).astype(np.float32), mask.astype(np.float32), stats
 
     def _load_records(self, *, max_cases: int, use_all_if_split_missing: bool) -> List[ThermalInverseCaseRecord]:
         records: List[ThermalInverseCaseRecord] = []
@@ -288,6 +362,7 @@ class ThermalInverseDesignDataset(Dataset):
                 centers = group["module_centers"][...].astype(np.float32)
                 present = group["module_present"][...].astype(np.float32)
                 heat = group["heat_powers"][...].astype(np.float32) if "heat_powers" in group else np.zeros((centers.shape[0],), dtype=np.float32)
+                ordered_centers, ordered_present, ordered_heat = self._ordered_layout(centers, present, heat)
                 steady = group["steady_field"][...].astype(np.float32)
                 x_grid = group["x_grid"][...].astype(np.float32)
                 y_grid = group["y_grid"][...].astype(np.float32)
@@ -298,25 +373,48 @@ class ThermalInverseDesignDataset(Dataset):
                 interface_target = group["interface_target"][...].astype(np.float32) if "interface_target" in group else None
                 module_mask = group["module_mask"][...].astype(np.uint8) if "module_mask" in group else None
                 design_vec, _ = encode_design_vector(
-                    centers,
-                    present,
-                    heat,
+                    ordered_centers,
+                    ordered_present,
+                    ordered_heat,
                     max_num_modules=self.max_num_modules,
                     domain_length_x=float(domain["domain_length_x"]),
                     domain_length_y=float(domain["domain_length_y"]),
                     generate_heat_power=self.generate_heat_power,
                     heat_power_scale=self.heat_power_scale,
-                    sort_centers=self.sort_centers,
+                    sort_centers=bool(self.sort_centers and not self.heat_conditioning_enabled),
                 )
+                structure_vector, _ = compute_layout_structure_features(
+                    ordered_centers,
+                    ordered_present,
+                    ordered_heat,
+                    domain_length_x=float(domain["domain_length_x"]),
+                    domain_length_y=float(domain["domain_length_y"]),
+                    module_radius=radius,
+                    max_num_modules=self.max_num_modules,
+                    x_bins=int(self.structure_conditioning.get("x_bins", 6)),
+                    y_bins=int(self.structure_conditioning.get("y_bins", 4)),
+                    pair_distance_bins=int(self.structure_conditioning.get("pair_distance_bins", 6)),
+                )
+                structure_maps, _ = build_layout_structure_maps(
+                    ordered_centers,
+                    ordered_present,
+                    ordered_heat,
+                    domain_length_x=float(domain["domain_length_x"]),
+                    domain_length_y=float(domain["domain_length_y"]),
+                    module_radius=radius,
+                    max_num_modules=self.max_num_modules,
+                    shape=DEFAULT_FIELD_MAP_SHAPE,
+                )
+                heat_condition_vector, heat_condition_mask, heat_condition_stats = self._heat_condition_arrays(ordered_heat, ordered_present)
                 kpis = compute_steady_thermal_kpis(
                     steady,
                     x_grid=x_grid,
                     y_grid=y_grid,
                     channel_order=channel_order,
                     module_mask=module_mask,
-                    module_centers=centers,
-                    module_present=present,
-                    heat_powers=heat,
+                    module_centers=ordered_centers,
+                    module_present=ordered_present,
+                    heat_powers=ordered_heat,
                     module_internal_temperature=internal,
                     module_internal_mask=internal_mask,
                     interface_target=interface_target,
@@ -325,18 +423,18 @@ class ThermalInverseDesignDataset(Dataset):
                     material_params=material,
                     temperature_limits=self.temperature_limits,
                 )
-                active_count = int(np.sum(present > 0.5))
+                active_count = int(np.sum(ordered_present > 0.5))
                 kpis["num_modules"] = active_count
-                kpis["heat_power_total"] = float(np.sum(heat[present > 0.5])) if heat.size else 0.0
+                kpis["heat_power_total"] = float(np.sum(ordered_heat[ordered_present > 0.5])) if ordered_heat.size else 0.0
                 records.append(
                     ThermalInverseCaseRecord(
                         case_id=case_id,
                         split=str(splits[idx]),
                         design_vec=design_vec,
                         true_count=active_count,
-                        module_centers=centers,
-                        module_present=present,
-                        heat_powers=heat,
+                        module_centers=ordered_centers,
+                        module_present=ordered_present,
+                        heat_powers=ordered_heat,
                         material_params=material,
                         re=re,
                         u_in=u_in,
@@ -354,6 +452,11 @@ class ThermalInverseDesignDataset(Dataset):
                         interface_target=interface_target,
                         kpi_dict=kpis,
                         kpi_vector=kpi_vector_from_dict(kpis, self.kpi_names),
+                        structure_intent_vector=structure_vector,
+                        structure_intent_maps=structure_maps,
+                        heat_condition_vector=heat_condition_vector,
+                        heat_condition_mask=heat_condition_mask,
+                        heat_condition_stats=heat_condition_stats,
                     )
                 )
         return records
@@ -450,6 +553,41 @@ class ThermalInverseDesignDataset(Dataset):
                 np.zeros((self.organization_latent_dim,), dtype=np.float32),
             ),
         )
+        structure_vector = np.asarray(record.structure_intent_vector, dtype=np.float32).copy()
+        structure_maps = np.asarray(record.structure_intent_maps, dtype=np.float32).copy()
+        if self.structure_enabled:
+            if self.split.lower() in {"train", "training"}:
+                lo, hi = self.structure_conditioning.get("strength_train_range", [0.0, 1.0])
+                structure_strength = float(rng.uniform(float(lo), float(hi)))
+                noise_std = float(self.structure_conditioning.get("noise_std", 0.0) or 0.0)
+                if noise_std > 0.0:
+                    structure_vector += rng.normal(0.0, noise_std, size=structure_vector.shape).astype(np.float32)
+                drop_p = float(self.structure_conditioning.get("drop_probability", 0.0) or 0.0)
+                if drop_p > 0.0 and float(rng.random()) < drop_p:
+                    structure_strength = 0.0
+            else:
+                structure_strength = float(self.structure_conditioning.get("strength_val", 1.0))
+        else:
+            structure_strength = 0.0
+            structure_vector[:] = 0.0
+            structure_maps[:] = 0.0
+        structure_vector = np.clip(structure_vector, 0.0, 1.0).astype(np.float32)
+        if not bool(self.structure_conditioning.get("use_structure_maps", True)):
+            structure_maps[:] = 0.0
+
+        heat_condition_vector = np.asarray(record.heat_condition_vector, dtype=np.float32).copy()
+        heat_condition_mask = np.asarray(record.heat_condition_mask, dtype=np.float32).copy()
+        heat_condition_stats = np.asarray(record.heat_condition_stats, dtype=np.float32).copy()
+        if self.heat_conditioning_enabled:
+            drop_p = float(self.heat_conditioning.get("drop_probability", 0.0) or 0.0)
+            if self.split.lower() in {"train", "training"} and drop_p > 0.0 and float(rng.random()) < drop_p:
+                heat_condition_vector[:] = 0.0
+                heat_condition_mask[:] = 0.0
+                heat_condition_stats[:] = 0.0
+        else:
+            heat_condition_vector[:] = 0.0
+            heat_condition_mask[:] = 0.0
+            heat_condition_stats[:] = 0.0
         return {
             "case_id": record.case_id,
             "design_vec": record.design_vec.astype(np.float32),
@@ -457,6 +595,13 @@ class ThermalInverseDesignDataset(Dataset):
             "design_intent_vector": np.asarray(intent_arrays["design_intent_vector"], dtype=np.float32),
             "objective_weight_vector": np.asarray(intent_arrays["objective_weight_vector"], dtype=np.float32),
             "field_intent_maps": np.asarray(intent_arrays["field_intent_maps"], dtype=np.float32),
+            "structure_intent_vector": structure_vector,
+            "structure_intent_mask": np.asarray([structure_strength], dtype=np.float32),
+            "structure_strength": np.asarray([structure_strength], dtype=np.float32),
+            "structure_intent_maps": structure_maps.astype(np.float32),
+            "heat_condition_vector": heat_condition_vector.astype(np.float32),
+            "heat_condition_mask": heat_condition_mask.astype(np.float32),
+            "heat_condition_stats": heat_condition_stats.astype(np.float32),
             "target_kpi_targets": kpi_targets,
             "kpi_vector": record.kpi_vector.astype(np.float32),
             "true_count": np.asarray([record.true_count], dtype=np.int64),
@@ -482,6 +627,13 @@ def collate_inverse(batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "design_intent_vector",
         "objective_weight_vector",
         "field_intent_maps",
+        "structure_intent_vector",
+        "structure_intent_mask",
+        "structure_strength",
+        "structure_intent_maps",
+        "heat_condition_vector",
+        "heat_condition_mask",
+        "heat_condition_stats",
         "kpi_vector",
         "true_count",
         "active_kpi_count",
@@ -499,6 +651,8 @@ def collate_inverse(batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     out["true_count"] = out["true_count"].reshape(-1)
     out["active_kpi_count"] = out["active_kpi_count"].reshape(-1)
     out["target_active_fraction"] = out["target_active_fraction"].reshape(-1)
+    out["structure_intent_mask"] = out["structure_intent_mask"].reshape(-1)
+    out["structure_strength"] = out["structure_strength"].reshape(-1)
     out["record_index"] = out["record_index"].reshape(-1)
     out["physical_case_index"] = out["physical_case_index"].reshape(-1)
     out["augmentation_sample_index"] = out["augmentation_sample_index"].reshape(-1)
@@ -794,18 +948,20 @@ def _padded_design_arrays(
     heat_load_policy: str = "preserve_total_heat",
     fixed_heat_per_module: Optional[float] = None,
     target_heat_power_total: Optional[float] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, str]:
     centers = np.asarray(candidate["centers"], dtype=np.float32).reshape(-1, 2)
     count = min(int(centers.shape[0]), int(max_num_modules))
     padded_centers = np.zeros((max_num_modules, 2), dtype=np.float32)
     present = np.zeros((max_num_modules,), dtype=np.float32)
     heat = np.zeros((max_num_modules,), dtype=np.float32)
+    heat_source = "uniform"
     if count > 0:
         padded_centers[:count] = centers[:count]
         present[:count] = 1.0
-        if generate_heat_power and candidate.get("heat_powers") is not None:
-            generated_heat = np.asarray(candidate["heat_powers"], dtype=np.float32).reshape(-1)
-            heat[:count] = np.resize(generated_heat, count)[:count]
+        if candidate.get("heat_powers") is not None:
+            candidate_heat = np.asarray(candidate["heat_powers"], dtype=np.float32).reshape(-1)
+            heat[:count] = np.resize(candidate_heat, count)[:count]
+            heat_source = "generated_heat_power" if generate_heat_power else "candidate_heat_condition"
         else:
             active_heat = record.heat_powers[record.module_present > 0.5]
             if active_heat.size == 0:
@@ -814,6 +970,7 @@ def _padded_design_arrays(
             reference_total = float(np.sum(active_heat)) if active_heat.size else 0.0
             if policy == "preserve_total_heat":
                 heat[:count] = reference_total / max(float(count), 1.0)
+                heat_source = "preserve_total_heat"
             elif policy == "preserve_per_module_heat":
                 n = min(count, int(active_heat.size))
                 if n > 0:
@@ -821,21 +978,25 @@ def _padded_design_arrays(
                 if count > n:
                     remaining = max(reference_total - float(np.sum(heat[:n])), 0.0)
                     heat[n:count] = remaining / max(float(count - n), 1.0)
+                heat_source = "preserve_per_module_heat"
             elif policy == "reference_active_heat_resize":
                 heat[:count] = np.resize(active_heat.astype(np.float32), count)[:count]
+                heat_source = "preserve_per_module_heat"
             elif policy == "fixed_heat_per_module":
                 if fixed_heat_per_module is None:
                     raise ValueError("heat_load_policy='fixed_heat_per_module' requires inverse_model.fixed_heat_per_module or target fixed_heat_per_module.")
                 heat[:count] = float(fixed_heat_per_module)
+                heat_source = "uniform"
             elif policy == "target_heat_power_total":
                 total = reference_total if target_heat_power_total is None else float(target_heat_power_total)
                 heat[:count] = total / max(float(count), 1.0)
+                heat_source = "uniform"
             else:
                 raise ValueError(
                     "heat_load_policy must be one of preserve_total_heat, preserve_per_module_heat, "
                     "reference_active_heat_resize, fixed_heat_per_module, target_heat_power_total."
                 )
-    return padded_centers, present, heat.astype(np.float32), _apply_heat_normalization(heat, metadata)
+    return padded_centers, present, heat.astype(np.float32), _apply_heat_normalization(heat, metadata), heat_source
 
 
 def _local_module_params_from_raw_heat(record: ThermalInverseCaseRecord, heat_raw: np.ndarray, present: np.ndarray) -> np.ndarray:
@@ -862,7 +1023,7 @@ def predict_candidate_with_forward(
     target_heat_power_total: Optional[float] = None,
     query_batch_size: int = 32768,
 ) -> Dict[str, Any]:
-    centers, present, heat_raw, heat = _padded_design_arrays(
+    centers, present, heat_raw, heat, heat_source = _padded_design_arrays(
         record,
         candidate,
         max_num_modules,
@@ -925,6 +1086,7 @@ def predict_candidate_with_forward(
         "module_present": present,
         "heat_powers": heat_raw,
         "heat_load_policy": str(heat_load_policy),
+        "heat_source": heat_source,
         "verification_mode": "predicted",
     }
 
@@ -996,8 +1158,9 @@ def build_forward_latent_cache(
     disable_auto_rebuild: bool = False,
     query_batch_size: int = 32768,
 ) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
+    record_case_ids = [str(record.case_id) for record in records]
     expected_meta = {
-        "cache_version": 3,
+        "cache_version": 4,
         "packed_h5": file_fingerprint(packed_h5_path),
         "forward_checkpoint": file_fingerprint(str(metadata.get("checkpoint_path", ""))),
         "resolved_forward_config_hash": metadata.get("resolved_config_hash"),
@@ -1006,6 +1169,8 @@ def build_forward_latent_cache(
         "kpi_names": list(kpi_names),
         "behavior_latent_dim": int(behavior_dim),
         "organization_latent_dim": int(organization_dim),
+        "record_count": int(len(record_case_ids)),
+        "record_case_ids_hash": stable_json_hash(record_case_ids),
     }
 
     def _cache_matches(payload: Mapping[str, Any]) -> bool:
@@ -1056,7 +1221,7 @@ def build_forward_latent_cache(
             },
             "behavior_dim": behavior_dim,
             "organization_dim": organization_dim,
-            "cache_version": 3,
+            "cache_version": 4,
             "cache_metadata": expected_meta,
             "forward_checkpoint": metadata.get("checkpoint_path"),
         },
@@ -1080,7 +1245,12 @@ def mean_rows(rows: Sequence[Mapping[str, float]]) -> Dict[str, float]:
     if not rows:
         return {}
     keys = sorted({key for row in rows for key in row.keys()})
-    return {key: float(np.nanmean([row.get(key, float("nan")) for row in rows])) for key in keys}
+    out: Dict[str, float] = {}
+    for key in keys:
+        values = np.asarray([row.get(key, float("nan")) for row in rows], dtype=np.float64)
+        finite = values[np.isfinite(values)]
+        out[key] = float(np.mean(finite)) if finite.size else float("nan")
+    return out
 
 
 def run_supervised_epoch(
@@ -1228,6 +1398,10 @@ def run_forward_verification(
             design_intent_vector=item.get("design_intent_vector"),
             objective_weight_vector=item.get("objective_weight_vector"),
             field_intent_maps=item.get("field_intent_maps"),
+            structure_intent_vector=item.get("structure_intent_vector"),
+            structure_intent_maps=item.get("structure_intent_maps"),
+            heat_condition_vector=item.get("heat_condition_vector"),
+            heat_condition_mask=item.get("heat_condition_mask"),
             device=device,
         )
         diversity_raw.append(sample_diversity(candidates, inverse_model.max_num_modules))
@@ -1431,6 +1605,10 @@ def run_fixed_target_verification(
         design_intent_vector=target_spec.get("design_intent_vector"),
         objective_weight_vector=target_spec.get("objective_weight_vector"),
         field_intent_maps=target_spec.get("field_intent_maps"),
+        structure_intent_vector=target_spec.get("structure_intent_vector"),
+        structure_intent_maps=target_spec.get("structure_intent_maps"),
+        heat_condition_vector=target_spec.get("heat_condition_vector"),
+        heat_condition_mask=target_spec.get("heat_condition_mask"),
         device=device,
     )
     scores = []
@@ -1528,6 +1706,10 @@ def run_forward_guidance_replay(
             design_intent_vector=item.get("design_intent_vector"),
             objective_weight_vector=item.get("objective_weight_vector"),
             field_intent_maps=item.get("field_intent_maps"),
+            structure_intent_vector=item.get("structure_intent_vector"),
+            structure_intent_maps=item.get("structure_intent_maps"),
+            heat_condition_vector=item.get("heat_condition_vector"),
+            heat_condition_mask=item.get("heat_condition_mask"),
             device=device,
         )
         scored_rows = []
@@ -1724,6 +1906,8 @@ def main() -> int:
     conditioning_cfg = cfg.get("conditioning", {}) if isinstance(cfg.get("conditioning", {}), Mapping) else {}
     intent_aug_cfg = cfg.get("intent_augmentation", {}) if isinstance(cfg.get("intent_augmentation", {}), Mapping) else {}
     conditioning_dropout_cfg = cfg.get("conditioning_dropout", {}) if isinstance(cfg.get("conditioning_dropout", {}), Mapping) else {}
+    structure_conditioning_cfg = cfg.get("structure_conditioning", {}) if isinstance(cfg.get("structure_conditioning", {}), Mapping) else {}
+    heat_conditioning_cfg = cfg.get("heat_conditioning", {}) if isinstance(cfg.get("heat_conditioning", {}), Mapping) else {}
     forward_guidance_cfg = cfg.get("forward_guidance", {}) if isinstance(cfg.get("forward_guidance", {}), Mapping) else {}
     set_seed(int(training_cfg.get("seed", cfg.get("seed", 42))))
     device = select_device(args.device or training_cfg.get("device"))
@@ -1737,6 +1921,8 @@ def main() -> int:
         root_max_modules = int(h5.attrs.get("max_modules", 1))
     if str(inverse_cfg.get("max_num_modules", "auto")).lower() == "auto":
         inverse_cfg["max_num_modules"] = root_max_modules
+    if bool(heat_conditioning_cfg.get("enabled", False)):
+        inverse_cfg.setdefault("generate_heat_power", False)
     generate_heat_power = bool(inverse_cfg.get("generate_heat_power", False))
     heat_load_policy = str(inverse_cfg.get("heat_load_policy", "preserve_total_heat")).lower().strip()
     conditioning_mode = str(conditioning_cfg.get("mode", inverse_cfg.get("conditioning_mode", "legacy_kpi"))).lower().strip()
@@ -1744,6 +1930,13 @@ def main() -> int:
     inverse_cfg["use_legacy_kpi_vector"] = bool(conditioning_cfg.get("use_legacy_kpi_vector", inverse_cfg.get("use_legacy_kpi_vector", True)))
     inverse_cfg["conditioning_dropout_enabled"] = bool(conditioning_dropout_cfg.get("enabled", False))
     inverse_cfg["conditioning_drop_probability"] = float(conditioning_dropout_cfg.get("drop_probability", 0.0))
+    inverse_cfg["structure_conditioning_enabled"] = bool(structure_conditioning_cfg.get("enabled", False))
+    inverse_cfg["structure_intent_dim"] = STRUCTURE_INTENT_DIM
+    inverse_cfg["structure_intent_map_channels"] = 5 if bool(structure_conditioning_cfg.get("enabled", False)) and bool(structure_conditioning_cfg.get("use_structure_maps", True)) else 0
+    inverse_cfg["structure_drop_probability"] = float(structure_conditioning_cfg.get("drop_probability", 0.0))
+    inverse_cfg["heat_conditioning_enabled"] = bool(heat_conditioning_cfg.get("enabled", False))
+    inverse_cfg["heat_condition_dim"] = int(inverse_cfg["max_num_modules"]) * 2 + 7
+    inverse_cfg["heat_drop_probability"] = float(heat_conditioning_cfg.get("drop_probability", 0.0))
     fixed_heat_per_module = inverse_cfg.get("fixed_heat_per_module")
     heat_scale = float(inverse_cfg.get("heat_power_scale", target_cfg.get("heat_power_scale", 1.0)))
     temperature_limits = dict(target_cfg.get("temperature_limits", {}) or {})
@@ -1771,6 +1964,8 @@ def main() -> int:
         organization_latent_dim=int(inverse_cfg.get("organization_latent_dim", 256)),
         conditioning_mode=conditioning_mode,
         intent_augmentation=intent_aug_cfg,
+        structure_conditioning=structure_conditioning_cfg,
+        heat_conditioning=heat_conditioning_cfg,
     )
     val_dataset = ThermalInverseDesignDataset(
         packed_path,
@@ -1791,6 +1986,8 @@ def main() -> int:
         organization_latent_dim=int(inverse_cfg.get("organization_latent_dim", 256)),
         conditioning_mode=conditioning_mode,
         intent_augmentation={**intent_aug_cfg, "field_preference_dropout": 1.0} if conditioning_mode == "design_intent" else {},
+        structure_conditioning=structure_conditioning_cfg,
+        heat_conditioning=heat_conditioning_cfg,
     )
     kpi_stats = compute_kpi_stats(np.stack([record.kpi_vector for record in train_dataset.records]), kpi_names)
     kpi_distribution_summary = compute_kpi_distribution_summary(np.stack([record.kpi_vector for record in train_dataset.records]), kpi_names)
@@ -1867,8 +2064,9 @@ def main() -> int:
         return 0
 
     run_id = resolve_run_id(args, cfg)
-    suffix = sanitize_run_suffix(args.run_name or cfg.get("case_id") or cfg.get("description", "inverse"))
-    run_name = f"Run_{run_id}_{current_timestamp()}" + (f"_{suffix}" if suffix else "")
+    # Keep model run directories short and stable. Descriptive metadata is
+    # already stored in resolved_train_inverse_config.json inside the run.
+    run_name = f"Run_{run_id}_{current_timestamp()}"
     saved_root = ensure_dir(resolve_demo_path(cfg.get("paths", {}).get("saved_inverse_root", cfg.get("paths", {}).get("saved_model_dir", "./Saved_Model_Inverse"))))
     run_dir = ensure_dir(saved_root / run_name)
     write_json(run_dir / "resolved_train_inverse_config.json", cfg)

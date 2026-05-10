@@ -776,8 +776,9 @@ Default design variables:
 - Variable active module count up to `max_num_modules`.
 - Module center coordinates in physical channel coordinates.
 - Active mask for padded module slots.
-- Optional per-module heat power only when
-  `inverse_model.generate_heat_power=true`; the default is `false`.
+- Per-module heat power is normally an input condition, not a generated output.
+  The default is `heat_conditioning.enabled=true` and
+  `inverse_model.generate_heat_power=false`.
 
 Default fixed or conditioned quantities come from the processed dataset and
 forward config: inlet/ambient/wall conditions, module radius, material
@@ -810,9 +811,21 @@ active frequencies, and exact/range/max/min target-mode frequencies in both
 `loss_history.csv` and `training_metrics.csv`.
 
 Inverse layout generation is one-to-many: several different module layouts can
-meet the same thermal target. A high `val_loss_total` can therefore reflect
-held-out design-vector ambiguity rather than poor inverse-design behavior. Use
-the forward-verified KPI scores as the main inverse-design metric:
+meet the same thermal target. Exact KPI-to-layout reconstruction is
+underdetermined, especially when the target only says "make these thermal KPIs
+good" and says little about the module family that should achieve them. The v2
+pipeline therefore conditions on generalized layout-structure descriptors:
+count, centroid, heat-weighted centroid, coverage, pair spacing, wall
+proximity, upstream/mid/downstream occupancy and heat fractions, bin
+histograms, entropy, and anisotropy. A companion 24x12 map stack carries
+occupancy density, heat density, preferred regions, keepout regions, and an
+optional soft reference-layout map.
+
+These structure signals make the inverse problem less open without requiring
+exact coordinate anchoring. A high `val_loss_total` can still reflect held-out
+design-vector ambiguity rather than poor inverse-design behavior. Use the
+forward-verified KPI and design-intent scores as the main inverse-design
+metrics:
 `best_model.pt` remains the lowest supervised validation-loss checkpoint for
 debugging, while `best_verified_model.pt` tracks the lowest configured
 forward-verification score. In `conditioning.mode="design_intent"`,
@@ -857,6 +870,25 @@ Design-intent JSONs live under `inverse_targets_v2/` and use this shape:
     "avoid_downstream_hot_plumes": true,
     "protect_wall_band": true,
     "protect_outlet_uniformity": true
+  },
+  "structure_constraints": {
+    "enabled": true,
+    "strength": 0.5,
+    "x_coverage_min": 3.0,
+    "y_coverage_min": 1.2,
+    "mean_pair_distance_min": 1.4,
+    "centroid": [6.0, 2.0],
+    "centroid_tolerance": [2.0, 1.0],
+    "x_bin_occupancy": null,
+    "y_bin_occupancy": null,
+    "pair_distance_hist": null,
+    "avoid_vertical_stack": false,
+    "match_reference_layout_features": false
+  },
+  "heat_loads": {
+    "mode": "per_module",
+    "values": [1.0, 1.2, 0.8, 1.5],
+    "sort_mode": "heat_desc_then_xy"
   }
 }
 ```
@@ -867,11 +899,28 @@ channels. These maps feed a small `FieldIntentEncoder` and are also used in
 evaluation overlays. Predicted/autonomous frozen-forward verification remains
 the real design mode; teacher forcing is not used for ranking inverse layouts.
 
-Heat loads are controlled by `inverse_model.heat_load_policy` when
-`generate_heat_power=false`:
+Heat-conditioned typed modules differ from anonymous modules. In anonymous
+mode the generator may sort repaired centers by x/y because modules are
+interchangeable. In heat-conditioned mode
+`inverse_model.slot_identity_mode="heat_conditioned"` preserves generated slot
+order after repair and returns `slot_ids`, `module_ids`, and `heat_powers` in
+the same order. This keeps high-power and low-power modules attached to their
+generated centers.
 
+Heat loads are controlled by `heat_conditioning` first and by
+`inverse_model.heat_load_policy` only as a fallback when no candidate heat is
+available:
+
+- `heat_loads.mode="per_module"` or reference heat mode `exact` passes typed
+  per-module heat values into the inverse model and the frozen-forward
+  verifier.
+- `heat_loads.mode="uniform"` and `"total_only"` are supported target-schema
+  alternatives for less specific studies.
+- `heat_loads.mode="from_reference"` is used by reference-case evaluation.
+- `heat_loads.mode="heat_classes"` is a convenient JSON shorthand for
+  low/medium/high module groups; examples include explicit resolved `values`.
 - `preserve_total_heat` keeps the reference active total heat and distributes
-  it over generated active modules. This is the default.
+  it over generated active modules when no candidate heat is present.
 - `preserve_per_module_heat` copies reference active heat values by slot and
   spreads any remaining total over extra generated modules.
 - `reference_active_heat_resize` preserves the old resize behavior and is only
@@ -880,6 +929,27 @@ Heat loads are controlled by `inverse_model.heat_load_policy` when
   target JSON override.
 - `target_heat_power_total` distributes the target JSON or config total heat
   over generated active modules.
+
+Reference-case evaluation now defaults to structure family plus exact heat,
+not exact coordinate recovery:
+
+```bash
+python src/evaluate_inverse.py \
+  --inverse-run auto \
+  --reference-case-index 0 \
+  --reference-structure-strength 0.7 \
+  --reference-heat-mode exact \
+  --reference-anchor-mode none \
+  --n-samples 128 \
+  --n-steps 16 \
+  --count-mode sample
+```
+
+Use `--reference-anchor-mode soft` to include a soft reference occupancy map, or
+`exact` only for debugging coordinate reconstruction. For realistic battery or
+chip cooling layout design, keep exact heat loads when power identity matters,
+set structure constraints for the family you want, and let field-aware
+objectives and frozen-forward verification choose thermally plausible layouts.
 
 Inverse files:
 

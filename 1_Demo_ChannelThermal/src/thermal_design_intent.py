@@ -59,6 +59,39 @@ DESIGN_INTENT_DIM = len(DESIGN_INTENT_SCALAR_NAMES)
 OBJECTIVE_DIM = len(OBJECTIVE_NAMES)
 DEFAULT_FIELD_MAP_SHAPE = (24, 12)
 
+STRUCTURE_FEATURE_NAMES: Tuple[str, ...] = (
+    "count_scaled",
+    "centroid_x_scaled",
+    "centroid_y_scaled",
+    "heat_weighted_centroid_x_scaled",
+    "heat_weighted_centroid_y_scaled",
+    "x_coverage_scaled",
+    "y_coverage_scaled",
+    "bbox_area_scaled",
+    "x_std_scaled",
+    "y_std_scaled",
+    "min_pair_distance_scaled",
+    "mean_pair_distance_scaled",
+    "pair_distance_std_scaled",
+    "nearest_neighbor_mean_scaled",
+    "nearest_neighbor_std_scaled",
+    "wall_proximity_mean",
+    "wall_proximity_min",
+    "upstream_count_fraction",
+    "midstream_count_fraction",
+    "downstream_count_fraction",
+    "upstream_heat_fraction",
+    "midstream_heat_fraction",
+    "downstream_heat_fraction",
+    *tuple(f"x_bin_occupancy_{idx}" for idx in range(6)),
+    *tuple(f"y_bin_occupancy_{idx}" for idx in range(4)),
+    *tuple(f"pair_distance_hist_{idx}" for idx in range(6)),
+    "occupancy_entropy",
+    "heat_density_entropy",
+    "anisotropy_score",
+)
+STRUCTURE_INTENT_DIM = len(STRUCTURE_FEATURE_NAMES)
+
 
 def _finite_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -66,6 +99,220 @@ def _finite_float(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return float(default)
     return scalar if math.isfinite(scalar) else float(default)
+
+
+def _active_layout_arrays(
+    centers: Any,
+    present: Optional[Any],
+    heat_powers: Optional[Any],
+    *,
+    max_num_modules: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    centers_arr = np.asarray(centers, dtype=np.float32).reshape(-1, 2)
+    if present is None:
+        present_arr = np.ones((centers_arr.shape[0],), dtype=bool)
+    else:
+        present_arr = np.asarray(present, dtype=np.float32).reshape(-1) > 0.5
+    n = min(centers_arr.shape[0], present_arr.shape[0], int(max_num_modules))
+    centers_arr = centers_arr[:n]
+    present_arr = present_arr[:n]
+    active = centers_arr[present_arr] if n else np.zeros((0, 2), dtype=np.float32)
+    if heat_powers is None:
+        heat = np.ones((n,), dtype=np.float32)
+    else:
+        heat = np.asarray(heat_powers, dtype=np.float32).reshape(-1)
+        if heat.shape[0] < n:
+            heat = np.pad(heat, (0, n - heat.shape[0]))
+        heat = heat[:n]
+    return active.astype(np.float32), np.maximum(heat[present_arr], 0.0).astype(np.float32) if n else np.zeros((0,), dtype=np.float32)
+
+
+def _entropy(prob: np.ndarray) -> float:
+    arr = np.asarray(prob, dtype=np.float64).reshape(-1)
+    arr = arr[np.isfinite(arr) & (arr > 0.0)]
+    if arr.size <= 1:
+        return 0.0
+    return float(-np.sum(arr * np.log(arr)) / max(math.log(float(arr.size)), 1.0e-8))
+
+
+def compute_layout_structure_features(
+    centers: Any,
+    present: Optional[Any],
+    heat_powers: Optional[Any] = None,
+    *,
+    domain_length_x: float = 12.0,
+    domain_length_y: float = 4.0,
+    module_radius: float = 0.45,
+    max_num_modules: int = 12,
+    x_bins: int = 6,
+    y_bins: int = 4,
+    pair_distance_bins: int = 6,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Return normalized layout-structure descriptors and human-readable metadata."""
+
+    lx = max(float(domain_length_x), 1.0e-8)
+    ly = max(float(domain_length_y), 1.0e-8)
+    scale = max(lx, ly, 1.0e-8)
+    active, heat = _active_layout_arrays(centers, present, heat_powers, max_num_modules=max_num_modules)
+    count = int(active.shape[0])
+    x_bins = max(int(x_bins), 1)
+    y_bins = max(int(y_bins), 1)
+    pair_distance_bins = max(int(pair_distance_bins), 1)
+    names = list(STRUCTURE_FEATURE_NAMES)
+    values: Dict[str, float] = {name: 0.0 for name in names}
+
+    values["count_scaled"] = float(count) / max(float(max_num_modules), 1.0)
+    if count > 0:
+        x = np.clip(active[:, 0].astype(np.float64), 0.0, lx)
+        y = np.clip(active[:, 1].astype(np.float64), 0.0, ly)
+        heat64 = np.maximum(heat.astype(np.float64), 0.0)
+        heat_sum = float(np.sum(heat64))
+        weights = heat64 / heat_sum if heat_sum > 1.0e-12 else np.full((count,), 1.0 / float(count), dtype=np.float64)
+        centroid = np.asarray([np.mean(x), np.mean(y)], dtype=np.float64)
+        heat_centroid = np.asarray([np.sum(weights * x), np.sum(weights * y)], dtype=np.float64)
+        x_cov = float(np.max(x) - np.min(x)) if count >= 2 else 0.0
+        y_cov = float(np.max(y) - np.min(y)) if count >= 2 else 0.0
+        values.update(
+            {
+                "centroid_x_scaled": float(centroid[0] / lx),
+                "centroid_y_scaled": float(centroid[1] / ly),
+                "heat_weighted_centroid_x_scaled": float(heat_centroid[0] / lx),
+                "heat_weighted_centroid_y_scaled": float(heat_centroid[1] / ly),
+                "x_coverage_scaled": float(x_cov / lx),
+                "y_coverage_scaled": float(y_cov / ly),
+                "bbox_area_scaled": float((x_cov * y_cov) / max(lx * ly, 1.0e-8)),
+                "x_std_scaled": float(np.std(x) / lx),
+                "y_std_scaled": float(np.std(y) / ly),
+                "wall_proximity_mean": float(np.mean(np.minimum(y, ly - y)) / max(0.5 * ly, 1.0e-8)),
+                "wall_proximity_min": float(np.min(np.minimum(y, ly - y)) / max(0.5 * ly, 1.0e-8)),
+            }
+        )
+        region_masks = {
+            "upstream": x < (lx / 3.0),
+            "midstream": (x >= (lx / 3.0)) & (x < (2.0 * lx / 3.0)),
+            "downstream": x >= (2.0 * lx / 3.0),
+        }
+        for region, mask in region_masks.items():
+            values[f"{region}_count_fraction"] = float(np.mean(mask)) if count else 0.0
+            values[f"{region}_heat_fraction"] = float(np.sum(heat64[mask]) / heat_sum) if heat_sum > 1.0e-12 else values[f"{region}_count_fraction"]
+        x_hist, _ = np.histogram(x, bins=x_bins, range=(0.0, lx))
+        y_hist, _ = np.histogram(y, bins=y_bins, range=(0.0, ly))
+        x_occ = x_hist.astype(np.float64) / max(float(count), 1.0)
+        y_occ = y_hist.astype(np.float64) / max(float(count), 1.0)
+        for idx in range(6):
+            values[f"x_bin_occupancy_{idx}"] = float(x_occ[idx]) if idx < x_occ.size else 0.0
+        for idx in range(4):
+            values[f"y_bin_occupancy_{idx}"] = float(y_occ[idx]) if idx < y_occ.size else 0.0
+        values["occupancy_entropy"] = 0.5 * (_entropy(x_occ) + _entropy(y_occ))
+        heat_x_hist, _ = np.histogram(x, bins=x_bins, range=(0.0, lx), weights=heat64)
+        heat_y_hist, _ = np.histogram(y, bins=y_bins, range=(0.0, ly), weights=heat64)
+        heat_x_prob = heat_x_hist / max(float(np.sum(heat_x_hist)), 1.0e-12)
+        heat_y_prob = heat_y_hist / max(float(np.sum(heat_y_hist)), 1.0e-12)
+        values["heat_density_entropy"] = 0.5 * (_entropy(heat_x_prob) + _entropy(heat_y_prob))
+        values["anisotropy_score"] = float(abs(values["x_std_scaled"] - values["y_std_scaled"]) / max(values["x_std_scaled"] + values["y_std_scaled"], 1.0e-8))
+
+        pair = []
+        nearest = []
+        for i in range(count):
+            dists = []
+            for j in range(count):
+                if i == j:
+                    continue
+                d = float(np.linalg.norm(active[i].astype(np.float64) - active[j].astype(np.float64)))
+                dists.append(d)
+                if j > i:
+                    pair.append(d)
+            if dists:
+                nearest.append(min(dists))
+        pair_arr = np.asarray(pair, dtype=np.float64)
+        nn_arr = np.asarray(nearest, dtype=np.float64)
+        if pair_arr.size:
+            values["min_pair_distance_scaled"] = float(np.min(pair_arr) / scale)
+            values["mean_pair_distance_scaled"] = float(np.mean(pair_arr) / scale)
+            values["pair_distance_std_scaled"] = float(np.std(pair_arr) / scale)
+            pair_hist, _ = np.histogram(pair_arr, bins=pair_distance_bins, range=(0.0, scale))
+            pair_prob = pair_hist.astype(np.float64) / max(float(np.sum(pair_hist)), 1.0)
+            for idx in range(6):
+                values[f"pair_distance_hist_{idx}"] = float(pair_prob[idx]) if idx < pair_prob.size else 0.0
+        if nn_arr.size:
+            values["nearest_neighbor_mean_scaled"] = float(np.mean(nn_arr) / scale)
+            values["nearest_neighbor_std_scaled"] = float(np.std(nn_arr) / scale)
+
+    vector = np.asarray([values[name] for name in names], dtype=np.float32)
+    metadata = {
+        "feature_names": names,
+        "feature_values": {name: float(vector[idx]) for idx, name in enumerate(names)},
+        "count": count,
+        "domain_length_x": lx,
+        "domain_length_y": ly,
+        "module_radius": float(module_radius),
+        "x_bins": x_bins,
+        "y_bins": y_bins,
+        "pair_distance_bins": pair_distance_bins,
+    }
+    return vector, metadata
+
+
+def _soft_layout_density(
+    centers: np.ndarray,
+    weights: np.ndarray,
+    xx: np.ndarray,
+    yy: np.ndarray,
+    sigma: float,
+) -> np.ndarray:
+    density = np.zeros_like(xx, dtype=np.float32)
+    sigma2 = max(float(sigma) ** 2, 1.0e-8)
+    for idx, center in enumerate(np.asarray(centers, dtype=np.float32).reshape(-1, 2)):
+        w = float(weights[idx]) if idx < weights.size else 1.0
+        density += float(w) * np.exp(-0.5 * ((xx - float(center[0])) ** 2 + (yy - float(center[1])) ** 2) / sigma2).astype(np.float32)
+    max_value = float(np.max(density)) if density.size else 0.0
+    return density / max(max_value, 1.0e-8) if max_value > 0.0 else density
+
+
+def build_layout_structure_maps(
+    centers: Any,
+    present: Optional[Any],
+    heat_powers: Optional[Any] = None,
+    *,
+    domain_length_x: float = 12.0,
+    domain_length_y: float = 4.0,
+    module_radius: float = 0.45,
+    max_num_modules: int = 12,
+    shape: Tuple[int, int] = DEFAULT_FIELD_MAP_SHAPE,
+    preferred_region_map: Optional[Any] = None,
+    keepout_map: Optional[Any] = None,
+    reference_layout_soft_map: Optional[Any] = None,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """Build occupancy, heat, preference, keepout, and reference soft maps."""
+
+    width, height = int(shape[0]), int(shape[1])
+    xs = np.linspace(0.0, float(domain_length_x), width, dtype=np.float32)
+    ys = np.linspace(0.0, float(domain_length_y), height, dtype=np.float32)
+    xx, yy = np.meshgrid(xs, ys)
+    active, heat = _active_layout_arrays(centers, present, heat_powers, max_num_modules=max_num_modules)
+    occupancy = _soft_layout_density(active, np.ones((active.shape[0],), dtype=np.float32), xx, yy, sigma=max(float(module_radius), 0.1))
+    heat_map = _soft_layout_density(active, np.maximum(heat, 0.0), xx, yy, sigma=max(float(module_radius), 0.1))
+
+    def _map(value: Optional[Any]) -> np.ndarray:
+        if value is None:
+            return np.zeros((height, width), dtype=np.float32)
+        arr = np.asarray(value, dtype=np.float32)
+        if arr.shape != (height, width):
+            arr = np.resize(arr, (height, width)).astype(np.float32)
+        finite = np.where(np.isfinite(arr), arr, 0.0)
+        return np.clip(finite, 0.0, 1.0).astype(np.float32)
+
+    maps = np.stack(
+        [
+            occupancy,
+            heat_map,
+            _map(preferred_region_map),
+            _map(keepout_map),
+            _map(reference_layout_soft_map),
+        ],
+        axis=0,
+    ).astype(np.float32)
+    return maps, {"channel_names": ["occupancy_density_map", "heat_density_map", "preferred_region_map", "keepout_map", "reference_layout_soft_map"], "shape": [width, height]}
 
 
 def is_design_intent_payload(payload: Mapping[str, Any]) -> bool:
