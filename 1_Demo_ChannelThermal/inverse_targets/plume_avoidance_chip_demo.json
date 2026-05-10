@@ -1,0 +1,50 @@
+{
+  "name": "plume_avoidance_chip_demo",
+  "num_modules_min": 3,
+  "num_modules_max": 7,
+  "min_center_distance": 1.25,
+  "wall_clearance": 0.12,
+  "inlet_clearance": 0.4,
+  "outlet_clearance": 0.45,
+  "fixed_heat_load_note": "Heat load is conditioned from the reference case by default; optional heat_power_total is only active when heat generation is enabled.",
+  "kpis": {
+    "thermal_plume_length": {
+      "mode": "max",
+      "high": 3.0,
+      "weight": 1.2
+    },
+    "thermal_plume_area": {
+      "mode": "max",
+      "high": 0.14,
+      "weight": 1.0
+    },
+    "downstream_reheat_index": {
+      "mode": "max",
+      "high": 0.05,
+      "weight": 0.9
+    },
+    "hot_fluid_area_fraction": {
+      "mode": "max",
+      "high": 0.12,
+      "weight": 0.8
+    },
+    "wall_hot_area_fraction": {
+      "mode": "max",
+      "high": 0.08,
+      "weight": 0.7
+    },
+    "max_solid_temperature": {
+      "mode": "max",
+      "high": 2.0,
+      "weight": 0.5
+    }
+  },
+  "preferences": {
+    "avoid_wall_hotspots": true,
+    "x_span": [
+      1.5,
+      9.5
+    ],
+    "description": "Avoid long downstream thermal plumes and wall-adjacent hot regions for a compact heated chip layout."
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "name": "low_peak_uniform_pack_demo",
+  "num_modules_min": 4,
+  "num_modules_max": 8,
+  "min_center_distance": 1.15,
+  "wall_clearance": 0.08,
+  "inlet_clearance": 0.35,
+  "outlet_clearance": 0.35,
+  "fixed_heat_load_note": "Default inverse mode keeps heat powers fixed from the reference dataset/config case; set inverse_model.generate_heat_power=true to optimize heat allocation.",
+  "kpis": {
+    "max_solid_temperature": {
+      "mode": "max",
+      "high": 1.8,
+      "weight": 1.2
+    },
+    "module_peak_temperature_spread": {
+      "mode": "max",
+      "high": 0.22,
+      "weight": 1.0
+    },
+    "module_mean_temperature_std": {
+      "mode": "max",
+      "high": 0.08,
+      "weight": 0.8
+    },
+    "hot_solid_area_fraction": {
+      "mode": "max",
+      "high": 0.18,
+      "weight": 0.7
+    },
+    "pressure_drop": {
+      "mode": "max",
+      "high": 0.12,
+      "weight": 0.4
+    }
+  },
+  "preferences": {
+    "x_span": [
+      2.0,
+      10.0
+    ],
+    "y_span": [
+      0.7,
+      3.3
+    ],
+    "avoid_wall_hotspots": true,
+    "description": "Balanced packing target: keep solid peaks and inter-module temperature spread low without creating excessive pressure drop."
+  }
+}

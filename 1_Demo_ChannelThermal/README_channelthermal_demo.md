@@ -762,3 +762,117 @@ Stage B raw channel cases
 
 Stage C: jointly fine-tune the local surrogate and global organizer so module
 interior predictions and global interface responses improve together.
+
+## Inverse Design
+
+The inverse-design stack is a steady-state generator over heated module
+layouts in the nonperiodic channel. It does not rewrite or retrain the forward
+model. Instead, `src/train_inverse.py` trains a compact conditional
+rectified-flow inverse model and uses trained ChannelThermal global checkpoints
+as frozen verifiers.
+
+Default design variables:
+
+- Variable active module count up to `max_num_modules`.
+- Module center coordinates in physical channel coordinates.
+- Active mask for padded module slots.
+- Optional per-module heat power only when
+  `inverse_model.generate_heat_power=true`; the default is `false`.
+
+Default fixed or conditioned quantities come from the processed dataset and
+forward config: inlet/ambient/wall conditions, module radius, material
+constants, and heat loads. The layout repair step is nonperiodic: it clips
+centers inside the channel and enforces wall, inlet, outlet, and module-module
+clearances. There is no periodic wrapping or minimum-image distance.
+
+Inverse files:
+
+```text
+src/thermal_inverse_kpi.py
+src/model_inverse.py
+src/train_inverse.py
+src/evaluate_inverse.py
+Configs/train_inverse_config_template.json
+inverse_targets/*.json
+```
+
+Thermal KPI groups:
+
+- Core scalar KPIs:
+  `max_solid_temperature`, `p95_solid_temperature`,
+  `mean_solid_temperature`, `max_surface_temperature`,
+  `module_peak_temperature_spread`, `module_mean_temperature_std`,
+  `thermal_resistance_max`, `pressure_drop`,
+  `outlet_temperature_rise_mean`, and
+  `outlet_temperature_nonuniformity`.
+- Field-aware KPIs:
+  `max_fluid_temperature`, `p95_fluid_temperature`,
+  `hot_fluid_area_fraction`, `hot_solid_area_fraction`,
+  `thermal_plume_area`, `thermal_plume_length`,
+  `downstream_reheat_index`, `low_velocity_hotspot_fraction`,
+  `wall_hot_area_fraction`, `temperature_gradient_energy`, and
+  `outlet_hot_fraction`.
+- Interface/local KPIs, when predictions are available:
+  `max_interface_heat_flux`, `mean_abs_interface_heat_flux`,
+  `interface_flux_std`, `mean_interface_T_env`, and `max_h_effective`.
+
+When a global-only forward checkpoint has no local surrogate, internal and
+interface predictions come from the global heads where available; missing KPI
+entries are marked unavailable and skipped during scoring unless a target marks
+that KPI as `"required": true`.
+
+Train an inverse model:
+
+```bash
+cd 1_Demo_ChannelThermal
+python src/train_inverse.py --config Configs/train_inverse_config_template.json
+```
+
+Useful smoke-test command:
+
+```bash
+python src/train_inverse.py --config Configs/train_inverse_config_template.json --dry-run --max-train-cases 2 --max-val-cases 2 --device cpu
+```
+
+Evaluate a target:
+
+```bash
+python src/evaluate_inverse.py \
+  --inverse-run auto \
+  --target inverse_targets/low_peak_uniform_pack_demo.json \
+  --n-samples 64 \
+  --n-steps 32
+```
+
+Target JSONs use top-level layout constraints plus KPI entries:
+
+```json
+{
+  "name": "outlet_uniform_cooling_demo",
+  "num_modules_min": 4,
+  "num_modules_max": 9,
+  "min_center_distance": 1.1,
+  "wall_clearance": 0.08,
+  "kpis": {
+    "outlet_temperature_nonuniformity": {"mode": "max", "high": 0.05, "weight": 1.2},
+    "pressure_drop": {"mode": "max", "high": 0.10, "weight": 0.7}
+  }
+}
+```
+
+Supported KPI modes are `exact`, `range`, `min`, and `max`; `minimize` and
+`maximize` are also accepted for ranking-style objectives.
+
+Forward verification always uses predicted/autonomous local-port mode for
+inverse candidates. Teacher mode is diagnostic only because inverse-generated
+layouts do not have solved interface tokens. Checkpoint loading handles both
+global-only and global+local-surrogate runs:
+
+- If `model.use_local_surrogate=false`, the global checkpoint is loaded and
+  verification continues without a local checkpoint.
+- If `model.use_local_surrogate=true`, the loader first uses
+  `forward_model.local_surrogate_checkpoint_path`, then the path stored in the
+  forward checkpoint or resolved config, then the latest checkpoint under
+  `Saved_Model_LocalModule` when `local_surrogate_auto=true`.
+- A clear error is raised only when the forward model requires a local
+  surrogate and none can be resolved.

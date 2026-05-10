@@ -1,0 +1,54 @@
+{
+  "name": "outlet_uniform_cooling_demo",
+  "num_modules_min": 4,
+  "num_modules_max": 9,
+  "min_center_distance": 1.1,
+  "wall_clearance": 0.08,
+  "inlet_clearance": 0.3,
+  "outlet_clearance": 0.55,
+  "fixed_heat_load_note": "Uses fixed per-module heat loads from the selected reference case unless inverse_model.generate_heat_power=true.",
+  "kpis": {
+    "outlet_temperature_nonuniformity": {
+      "mode": "max",
+      "high": 0.05,
+      "weight": 1.2
+    },
+    "outlet_hot_fraction": {
+      "mode": "max",
+      "high": 0.15,
+      "weight": 1.0
+    },
+    "outlet_temperature_rise_mean": {
+      "mode": "max",
+      "high": 0.18,
+      "weight": 0.8
+    },
+    "pressure_drop": {
+      "mode": "max",
+      "high": 0.10,
+      "weight": 0.7
+    },
+    "low_velocity_hotspot_fraction": {
+      "mode": "max",
+      "high": 0.06,
+      "weight": 0.6
+    },
+    "module_peak_temperature_spread": {
+      "mode": "max",
+      "high": 0.25,
+      "weight": 0.5
+    }
+  },
+  "preferences": {
+    "avoid_wall_hotspots": true,
+    "x_span": [
+      1.0,
+      10.0
+    ],
+    "y_span": [
+      0.7,
+      3.3
+    ],
+    "description": "Prioritizes a uniform outlet thermal profile while keeping pressure drop and stagnant hot spots bounded."
+  }
+}
