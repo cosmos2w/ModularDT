@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from inverse_registry import inverse_registry
 from inverse_service import InverseService
 from model_registry import registry
-from schemas import DesignRequest, InferenceResponse, InverseRunRequest, InverseRunResponse
+from schemas import DesignRequest, ForwardSimulationRequest, ForwardSimulationResponse, InferenceResponse, InverseRunRequest, InverseRunResponse
 from settings import settings
 from thermal_service import ThermalInferenceService
 
@@ -131,6 +131,60 @@ def job_export(job_id: str):
     return FileResponse(path, media_type="application/octet-stream", filename=f"{job_id}.npz")
 
 
+@app.post("/api/simulate-forward", response_model=ForwardSimulationResponse)
+def simulate_forward(request: ForwardSimulationRequest = Body(...)):
+    try:
+        return thermal_service.run_forward_simulation(request)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/simulate-forward/jobs/{job_id}")
+def simulation_job_status(job_id: str):
+    path = thermal_service.simulation_status_path(job_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Unknown simulation job_id: {job_id}")
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+@app.get("/api/simulate-forward/jobs/{job_id}/result")
+def simulation_job_result(job_id: str):
+    path = thermal_service.simulation_result_path(job_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Simulation result is not ready: {job_id}")
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+@app.get("/api/simulate-forward/jobs/{job_id}/frames/{field}/{frame_id}")
+def simulation_job_frame(job_id: str, field: str, frame_id: str):
+    del frame_id
+    path = settings.cache_dir / "forward_sim_jobs" / job_id / "frames" / f"{Path(field).stem}.png"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Frame not found.")
+    return FileResponse(path, media_type="image/png")
+
+
+@app.get("/api/simulate-forward/jobs/{job_id}/files/{rel_path:path}")
+def simulation_job_file(job_id: str, rel_path: str):
+    path = _safe_job_file(settings.cache_dir / "forward_sim_jobs" / job_id, rel_path)
+    media = "image/png" if path.suffix.lower() == ".png" else "application/octet-stream"
+    return FileResponse(path, media_type=media, filename=path.name)
+
+
+@app.get("/api/simulate-forward/jobs/{job_id}/export.npz")
+def simulation_job_export(job_id: str):
+    path = settings.cache_dir / "forward_sim_jobs" / job_id / "simulation_fields.npz"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Simulation export not found.")
+    return FileResponse(path, media_type="application/octet-stream", filename=f"{job_id}_simulation.npz")
+
+
 @app.get("/api/inverse/models")
 def inverse_models():
     try:
@@ -195,6 +249,14 @@ def inverse_job_result(job_id: str):
 def inverse_candidates(job_id: str):
     try:
         return inverse_service.get_candidates(job_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/inverse/jobs/{job_id}/debug-files")
+def inverse_debug_files(job_id: str):
+    try:
+        return {"files": inverse_service.debug_files(job_id)}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

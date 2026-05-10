@@ -1,7 +1,7 @@
 {
-  "Run_ID": "0004",
+  "Run_ID": "0000",
   "_note_1": "Default is a global-only baseline. Set model.use_local_surrogate=true and provide a local checkpoint after Stage A is trained.",
-  "_note_2": "0004 tests using local module surrogate - mixed trained & updated hypergraph learning",
+  "_note_2": "0000 is default",
   "dataset": {
     "packed_h5_path": "./Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
     "train_split": "train",
@@ -37,8 +37,8 @@
     "latent_dim": 128,
 
     "_note_local_surrogate": "Stage B uses the frozen Stage-A surrogate for module internal/interface response. Use corrected_physics so q_normal remains anchored to predicted T_env and h_effective.",
-    "use_local_surrogate": true,
-    "local_surrogate_checkpoint_path": "./Saved_Model_LocalModule/Run_0003_20260507_224352/latest_model.pt",
+    "use_local_surrogate": false,
+    "local_surrogate_checkpoint_path": null,
     "freeze_local_surrogate": true,
     "local_surrogate_latent_dim": 128,
     "local_surrogate_flux_mode": "corrected_physics",
@@ -133,8 +133,8 @@
     "device": null,
 
     "_note_port_curriculum": "Start teacher-forced for stability, transition through mixed ports, then train/evaluate predicted ports. predicted_after_epoch marks when the autonomous path is fully active.",
-    "local_port_condition_mode": "teacher",
-    "port_condition_schedule": "teacher_to_predicted",
+    "local_port_condition_mode": "predicted",
+    "port_condition_schedule": "none",
     "teacher_epochs": 50,
     "mixed_epochs": 150,
     "predicted_after_epoch": 200,

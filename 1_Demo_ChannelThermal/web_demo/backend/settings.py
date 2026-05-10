@@ -16,6 +16,7 @@ class Settings:
     manifest_path: Path
     inverse_manifest_path: Path
     inverse_target_presets_dir: Path
+    inverse_target_v2_presets_dir: Path
     cache_dir: Path
     inverse_jobs_dir: Path
     device: str
@@ -48,6 +49,7 @@ def build_settings() -> Settings:
         manifest_path=storage_dir / "model_manifest.json",
         inverse_manifest_path=storage_dir / "inverse_model_manifest.json",
         inverse_target_presets_dir=demo_root / "inverse_targets",
+        inverse_target_v2_presets_dir=demo_root / "inverse_targets_v2",
         cache_dir=cache_dir,
         inverse_jobs_dir=inverse_jobs_dir,
         device=os.environ.get("CHANNELTHERMAL_WEB_DEMO_DEVICE", os.environ.get("MODULARDT_WEB_DEMO_DEVICE", "auto")),

@@ -1,9 +1,9 @@
 {
   "inverse_models": [
     {
-      "id": "channelthermal_inverse_run0003",
-      "label": "ChannelThermal inverse Run0003",
-      "run_dir": "./Saved_Model_Inverse/Run_0003_20260510_130920_Steady_ChannelThermal_inverse-design_training_config__Trains_an_amortized_rectified-flow_generator_over_module_layouts_conditioned_on_thermal_KPI_targets_and_verified_by_a_frozen_ChannelThermal_forward_checkpoint",
+      "id": "channelthermal_inverse_run0004",
+      "label": "ChannelThermal inverse Run0004",
+      "run_dir": "./Saved_Model_Inverse/Run_0004_20260510_162644",
       "checkpoint_name": "latest_model.pt",
       "config_name": "resolved_train_inverse_config.json",
       "enabled": true,

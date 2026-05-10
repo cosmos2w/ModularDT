@@ -1,7 +1,11 @@
 import type {
   DesignRequest,
+  ForwardSimulationRequest,
+  ForwardSimulationResponse,
+  ForwardSimulationResult,
   InferenceResponse,
   InverseModelEntry,
+  InverseCandidate,
   InverseResult,
   InverseRunRequest,
   InverseRunResponse,
@@ -71,6 +75,21 @@ export async function getJobResult(jobId: string): Promise<JobResult> {
   return requestJson<JobResult>(`/api/jobs/${encodeURIComponent(jobId)}/result`);
 }
 
+export async function runForwardSimulation(request: ForwardSimulationRequest): Promise<ForwardSimulationResponse> {
+  return requestJson<ForwardSimulationResponse>("/api/simulate-forward", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+}
+
+export async function getForwardSimulationStatus(jobId: string): Promise<Record<string, unknown>> {
+  return requestJson<Record<string, unknown>>(`/api/simulate-forward/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function getForwardSimulationResult(jobId: string): Promise<ForwardSimulationResult> {
+  return requestJson<ForwardSimulationResult>(`/api/simulate-forward/jobs/${encodeURIComponent(jobId)}/result`);
+}
+
 export async function getInverseModels(): Promise<InverseModelEntry[]> {
   const payload = await requestJson<{ models: InverseModelEntry[] }>("/api/inverse/models");
   return payload.models;
@@ -99,4 +118,12 @@ export async function getInverseStatus(jobId: string): Promise<Record<string, un
 
 export async function getInverseResult(jobId: string): Promise<InverseResult> {
   return requestJson<InverseResult>(`/api/inverse/jobs/${encodeURIComponent(jobId)}/result`);
+}
+
+export async function getInverseCandidates(jobId: string): Promise<{ target: Record<string, unknown>; candidates: InverseCandidate[] }> {
+  return requestJson<{ target: Record<string, unknown>; candidates: InverseCandidate[] }>(`/api/inverse/jobs/${encodeURIComponent(jobId)}/candidates`);
+}
+
+export async function getInverseDebugFiles(jobId: string): Promise<{ files: Array<{ path: string; size: number; url: string | null }> }> {
+  return requestJson<{ files: Array<{ path: string; size: number; url: string | null }> }>(`/api/inverse/jobs/${encodeURIComponent(jobId)}/debug-files`);
 }
