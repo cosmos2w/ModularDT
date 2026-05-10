@@ -562,8 +562,12 @@ python src/evaluate.py \
 `--local-port-condition-mode teacher` is a useful diagnostic because it gives
 the local surrogate exact dataset port conditions. `predicted` is the realistic
 forward-design mode: at inference time the model must generate its own local
-port conditions before calling the local surrogate. The default `both` writes
-teacher and predicted quicklooks/metrics side by side.
+port conditions before calling the local surrogate. The default checkpoint
+selector is now `best_predicted`, which resolves to `best_predicted_model.pt`
+when present and is the recommended autonomous/design-inference checkpoint.
+The default mode `both` writes teacher and predicted quicklooks/metrics side by
+side; use `--local-port-condition-mode predicted` for the real autonomous
+combined model.
 
 The global neural field represents the environment/channel field, not arbitrary
 values inside solid modules. Evaluation therefore masks module interiors for
@@ -590,19 +594,30 @@ modules sharing a downstream plume, near-wall heated modules with the adjacent
 wall/channel region, upstream groups that warm downstream coolant, or modules
 with a common local interface response.
 
-The organizer remains learned, but it now receives three lightweight direct
-signals:
+The global preprocessor now writes training-only structure targets:
 
-- `A_me` is weakly supervised by a nonperiodic channel prior using distance,
-  downstream alignment, lateral distance, wall proximity, and heat-power
-  magnitude.
-- `A_eh` receives a factor target:
-  `A_eh_target[e,k] proportional to sum_i A_me_for_target[i,e] * A_mh[i,k]`.
-  This ties an environment token to the hyperedge whose modules physically
-  influence that token.
-- normalized module mass from `A_mh` is aligned with normalized environment
-  mass from `A_eh`, preventing hyperedges that own only modules or only channel
-  tokens.
+- `env_module_influence_target`: a soft module-to-environment influence map on
+  a coarse channel token grid, derived from geometry, heat power, downstream
+  and lateral distance, wall proximity, solved temperature excess/gradient, and
+  interface response summaries.
+- `module_affinity_target`: a module-module thermal/geometry coupling target.
+- `active_edge_count_target` and `env_region_label`: diagnostics for how many
+  physical thermal regions appear active.
+
+These arrays are supervision targets only. They may use solved fields such as
+temperature excess, gradient magnitude, `T_surface`, `q_normal`, `T_outside`,
+and `h_effective`, so they are not fed as inference inputs. Old HDF5 files still
+load; Stage B warns and falls back to geometry-only approximations for these
+structure losses.
+
+The organizer remains learned, but the default direct signals now match learned
+assignments to those physical targets:
+
+- normalized `A_eh @ A_mh.T` reconstructs `env_module_influence_target`.
+- normalized `A_mh @ A_mh.T` reconstructs `module_affinity_target`.
+- duplicate-edge loss penalizes highly similar hyperedge assignment columns.
+- active-edge regularization matches the estimated active count instead of
+  forcing every hyperedge to be used.
 
 When `use_local_surrogate=true`, each module token also receives an explicit
 local-response summary: mean/max `T_surface`, mean/max selected `q_normal`, and
@@ -621,9 +636,14 @@ diagnostics. `DISABLE_EDGE` remains available, but the template leaves it off:
 hard early pruning is not recommended until the steady organizer has learned a
 meaningful module/environment split.
 
+The field decoder uses a gated hypergraph bottleneck: query points attend to
+hyperedge state and a smaller direct module/environment residual, while direct
+geometry features remain available. This gives the organizer predictive
+responsibility without removing useful local geometric context.
+
 This is deliberately lighter than `0_Demo_MultiCylinder`. The channel thermal
 model does not add phase losses, a dynamic residual branch, periodic wake
-priors, frequency losses, or duplicate-edge pruning by default.
+priors, or frequency losses.
 
 Evaluation now writes channel-thermal organizer diagnostics adapted from the
 useful spirit of `0_Demo_MultiCylinder` but without periodic, dynamic, phase, or
@@ -674,9 +694,20 @@ Organizer quantities in these figures:
 
 `organization_summary.csv/json` keep top modules, top module weights, source
 and thermal-region coordinates, dominant environment-token counts, and a
-`visual_encoding` metadata block. Organizer constraints remain intentionally
-light: an `A_me` prior, an `A_eh` factor target, and module/environment mass
-alignment, not heavy uniform-edge constraints.
+`visual_encoding` metadata block. They also report collapse diagnostics:
+`dominant_env_fraction_max`, `dominant_env_effective_edges`,
+`soft_env_effective_edges`, `A_eh_spatial_variation`,
+`hyperedge_column_cosine_mean`, and `active_edge_count`. A warning is printed
+when more than 90% of environment tokens choose the same dominant hyperedge,
+even if the soft mass entropy still looks broad.
+
+The port path keeps supervised `T_env` and `log(h_effective)` active from epoch
+0 and adds cyclic smoothness over interface angle. A small scheduled
+predicted-port consistency loss runs predicted ports through the frozen local
+surrogate before fully predicted mode, comparing predicted internal
+temperature and interface response against targets. Evaluation reports
+`port_T_env_mae`, `port_log_h_mae`, and teacher-vs-predicted interface/internal
+MSE gaps so the teacher-forced and autonomous paths are easy to interpret.
 
 ## Forward Model Files
 

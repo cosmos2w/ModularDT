@@ -154,6 +154,11 @@ class ProcessedCase:
     h_effective_valid_fraction: float
     h_effective_clipped_fraction: float
     h_effective_mean: float
+    structure_env_token_coords: np.ndarray
+    env_module_influence_target: np.ndarray
+    module_affinity_target: np.ndarray
+    active_edge_count_target: float
+    env_region_label: np.ndarray
 
 
 @dataclass
@@ -219,6 +224,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-final-window-frames", type=int, default=1, help="Minimum selected frames for window targets.")
     parser.add_argument("--h-effective-eps", type=float, default=1.0e-3, help="Minimum |T_surface - T_outside| used for h_effective.")
     parser.add_argument("--h-effective-max", type=float, default=1.0e4, help="Upper clip for derived h_effective.")
+    parser.add_argument(
+        "--structure-target-env-tokens-x",
+        type=int,
+        default=24,
+        help="Coarse x-token count for training-only organizer structure targets.",
+    )
+    parser.add_argument(
+        "--structure-target-env-tokens-y",
+        type=int,
+        default=12,
+        help="Coarse y-token count for training-only organizer structure targets.",
+    )
     return parser.parse_args()
 
 
@@ -638,6 +655,132 @@ def append_h_effective(
     return condition, valid_mask, diagnostics
 
 
+def _normalize01(values: np.ndarray, eps: float = 1.0e-8) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float32)
+    finite = np.isfinite(arr)
+    if not np.any(finite):
+        return np.zeros_like(arr, dtype=np.float32)
+    lo = float(np.nanmin(arr[finite]))
+    hi = float(np.nanpercentile(arr[finite], 95.0))
+    if hi <= lo + eps:
+        hi = float(np.nanmax(arr[finite]))
+    if hi <= lo + eps:
+        return np.zeros_like(arr, dtype=np.float32)
+    return np.clip((arr - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
+
+
+def build_structure_targets(
+    steady_field: np.ndarray,
+    x_grid: np.ndarray,
+    y_grid: np.ndarray,
+    module_mask: np.ndarray,
+    module_centers: np.ndarray,
+    heat_powers: np.ndarray,
+    interface_condition: np.ndarray,
+    interface_target: np.ndarray,
+    cfg: SimulationConfig,
+    *,
+    env_tokens_x: int,
+    env_tokens_y: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, np.ndarray]:
+    """Build training-only physical organizer targets.
+
+    These targets can use solved fields because they are stored only as
+    supervision. They are never appended to model inputs.
+    """
+    nx = max(int(env_tokens_x), 1)
+    ny = max(int(env_tokens_y), 1)
+    xs = np.linspace(0.0, float(cfg.domain.lx), nx, dtype=np.float32)
+    ys = np.linspace(0.0, float(cfg.domain.ly), ny, dtype=np.float32)
+    yy, xx = np.meshgrid(ys, xs, indexing="ij")
+    env_coords = np.stack([xx.reshape(-1), yy.reshape(-1)], axis=-1).astype(np.float32)
+    num_env = env_coords.shape[0]
+    num_modules = int(module_centers.shape[0])
+    if num_modules == 0:
+        return (
+            env_coords,
+            np.zeros((num_env, 0), dtype=np.float32),
+            np.zeros((0, 0), dtype=np.float32),
+            0.0,
+            np.full((num_env,), -1, dtype=np.int16),
+        )
+
+    x_axis = np.asarray(x_grid[0, :], dtype=np.float32)
+    y_axis = np.asarray(y_grid[:, 0], dtype=np.float32)
+    ix = np.clip(np.searchsorted(x_axis, env_coords[:, 0]), 0, len(x_axis) - 1)
+    iy = np.clip(np.searchsorted(y_axis, env_coords[:, 1]), 0, len(y_axis) - 1)
+    temperature = np.asarray(steady_field[..., CHANNEL_ORDER.index("temperature")], dtype=np.float32)
+    grad_y, grad_x = np.gradient(temperature)
+    grad_mag = np.hypot(grad_x, grad_y).astype(np.float32)
+    temp_excess = np.maximum(temperature - float(cfg.thermal.t_in), 0.0).astype(np.float32)
+    temp_token = _normalize01(temp_excess)[iy, ix]
+    grad_token = _normalize01(grad_mag)[iy, ix]
+    fluid_token = (~np.asarray(module_mask, dtype=bool))[iy, ix].astype(np.float32)
+
+    centers = np.asarray(module_centers, dtype=np.float32)
+    heat = np.asarray(heat_powers, dtype=np.float32).reshape(-1)
+    heat_abs = np.abs(heat)
+    heat_norm = heat_abs / max(float(np.max(heat_abs)) if heat_abs.size else 0.0, 1.0e-6)
+    radius = max(float(cfg.domain.module_radius), 1.0e-6)
+    lx = max(float(cfg.domain.lx), 1.0e-6)
+    ly = max(float(cfg.domain.ly), 1.0e-6)
+
+    t_out = interface_condition[..., 3] if interface_condition.shape[-1] > 3 else np.zeros(interface_target.shape[:-1], dtype=np.float32)
+    t_surf = interface_target[..., 0] if interface_target.shape[-1] > 0 else np.zeros_like(t_out)
+    q_norm = interface_target[..., 1] if interface_target.shape[-1] > 1 else np.zeros_like(t_out)
+    h_idx = 7 if interface_condition.shape[-1] >= 8 else 6
+    h_eff = interface_condition[..., h_idx] if interface_condition.shape[-1] > h_idx else np.zeros_like(t_out)
+    response_raw = (
+        0.35 * _normalize01(np.maximum(np.nanmean(t_surf - t_out, axis=-1), 0.0))
+        + 0.35 * _normalize01(np.nanmean(np.abs(q_norm), axis=-1))
+        + 0.30 * _normalize01(np.nanmean(np.maximum(h_eff, 0.0), axis=-1))
+    ).astype(np.float32)
+    if response_raw.shape[0] < num_modules:
+        response_raw = np.pad(response_raw, (0, num_modules - response_raw.shape[0]))
+    response_raw = response_raw[:num_modules]
+
+    dx = env_coords[:, None, 0] - centers[None, :, 0]
+    dy = env_coords[:, None, 1] - centers[None, :, 1]
+    dist = np.sqrt(dx * dx + dy * dy + 1.0e-8)
+    downstream = np.maximum(dx, 0.0)
+    upstream = np.maximum(-dx, 0.0)
+    lateral = np.abs(dy)
+    near = np.exp(-((np.maximum(dist - radius, 0.0)) / max(1.25 * radius, 1.0e-6)) ** 2)
+    plume = np.exp(-(lateral / max(0.9, 2.0 * radius)) ** 2) * (1.0 / (1.0 + np.exp(-(downstream - 0.2 * radius) / max(0.75, radius))))
+    upstream_decay = 0.25 * np.exp(-upstream / max(0.75, radius)) * np.exp(-(lateral / max(0.75, radius)) ** 2)
+    module_wall = np.minimum(centers[:, 1], ly - centers[:, 1])
+    env_wall = np.minimum(env_coords[:, 1], ly - env_coords[:, 1])
+    wall = np.exp(-module_wall[None, :] / radius) * np.exp(-env_wall[:, None] / radius)
+    source_scale = 0.35 + 0.45 * heat_norm[None, :] + 0.20 * response_raw[None, :]
+    solved_scale = 0.35 + 0.45 * temp_token[:, None] + 0.20 * grad_token[:, None]
+    score = (0.40 * near + 0.40 * plume + 0.10 * upstream_decay + 0.10 * wall) * source_scale * solved_scale
+    score = score * (0.05 + 0.95 * fluid_token[:, None])
+    score = np.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+    row_sum = score.sum(axis=-1, keepdims=True)
+    fallback = heat_abs / max(float(np.sum(heat_abs)), 1.0e-6)
+    if float(np.sum(fallback)) <= 0.0:
+        fallback = np.full((num_modules,), 1.0 / max(num_modules, 1), dtype=np.float32)
+    influence = np.where(row_sum > 1.0e-8, score / np.maximum(row_sum, 1.0e-8), fallback[None, :]).astype(np.float32)
+
+    mdx = centers[None, :, 0] - centers[:, None, 0]
+    mdy = centers[None, :, 1] - centers[:, None, 1]
+    mdist = np.sqrt(mdx * mdx + mdy * mdy + 1.0e-8)
+    close = np.exp(-mdist / max(1.5, 2.5 * radius))
+    downstream_pair = np.exp(-np.maximum(mdx, 0.0) / max(2.0, 4.0 * radius)) * np.exp(-(np.abs(mdy) / max(0.9, 2.0 * radius)) ** 2)
+    heat_sim = 1.0 - np.abs(heat_norm[:, None] - heat_norm[None, :])
+    wall_sim = np.exp(-np.abs(module_wall[:, None] - module_wall[None, :]) / radius)
+    affinity = 0.45 * close + 0.30 * downstream_pair + 0.15 * heat_sim + 0.10 * wall_sim
+    np.fill_diagonal(affinity, 1.0)
+    affinity = np.clip(np.nan_to_num(affinity, nan=0.0), 0.0, None).astype(np.float32)
+    affinity = affinity / np.maximum(affinity.sum(axis=-1, keepdims=True), 1.0e-8)
+
+    env_region_label = influence.argmax(axis=-1).astype(np.int16)
+    counts = np.bincount(env_region_label, minlength=num_modules).astype(np.float32)
+    active_edge_count = float(np.sum(counts >= max(2.0, 0.04 * float(num_env))))
+    active_edge_count = float(np.clip(active_edge_count, 1.0, max(float(num_modules), 1.0)))
+    return env_coords, influence, affinity, active_edge_count, env_region_label
+
+
 def process_case(
     raw: RawCase,
     case_key: str,
@@ -702,6 +845,25 @@ def process_case(
     )
     centers = np.asarray(raw.cfg.layout.centers or [], dtype=np.float32)
     heat_powers = np.asarray(raw.cfg.layout.heat_powers or [], dtype=np.float32)
+    (
+        structure_env_token_coords,
+        env_module_influence_target,
+        module_affinity_target,
+        active_edge_count_target,
+        env_region_label,
+    ) = build_structure_targets(
+        steady_field,
+        x_grid,
+        y_grid,
+        module_mask,
+        centers,
+        heat_powers,
+        interface_condition,
+        interface_target,
+        raw.cfg,
+        env_tokens_x=int(sampling_cfg.structure_target_env_tokens_x),
+        env_tokens_y=int(sampling_cfg.structure_target_env_tokens_y),
+    )
     return ProcessedCase(
         case_key=case_key,
         split=split,
@@ -737,6 +899,11 @@ def process_case(
         h_effective_valid_fraction=float(h_diag["valid_fraction"]),
         h_effective_clipped_fraction=float(h_diag["clipped_fraction"]),
         h_effective_mean=float(h_diag["mean"]),
+        structure_env_token_coords=structure_env_token_coords,
+        env_module_influence_target=env_module_influence_target,
+        module_affinity_target=module_affinity_target,
+        active_edge_count_target=float(active_edge_count_target),
+        env_region_label=env_region_label,
     )
 
 
@@ -744,6 +911,23 @@ def pad_first_axis(array: np.ndarray, target: int, fill_value: float = 0.0) -> n
     shape = (target,) + tuple(array.shape[1:])
     output = np.full(shape, fill_value, dtype=array.dtype)
     output[: min(target, array.shape[0])] = array[:target]
+    return output
+
+
+def pad_square(array: np.ndarray, target: int, fill_value: float = 0.0) -> np.ndarray:
+    output = np.full((target, target), fill_value, dtype=array.dtype)
+    rows = min(target, array.shape[0])
+    cols = min(target, array.shape[1] if array.ndim > 1 else 0)
+    if rows > 0 and cols > 0:
+        output[:rows, :cols] = array[:rows, :cols]
+    return output
+
+
+def pad_env_module(array: np.ndarray, target_modules: int, fill_value: float = 0.0) -> np.ndarray:
+    output = np.full((array.shape[0], target_modules), fill_value, dtype=array.dtype)
+    cols = min(target_modules, array.shape[1] if array.ndim > 1 else 0)
+    if cols > 0:
+        output[:, :cols] = array[:, :cols]
     return output
 
 
@@ -896,6 +1080,12 @@ def write_h5(
             "1 marks interface points whose h_effective target is finite, within configured bounds, "
             "and has |T_surface - T_outside| above h_effective_eps."
         )
+        h5.attrs["structure_targets_note"] = (
+            "Training-only organizer supervision targets derived from solved fields and geometry. "
+            "They are not model inference inputs."
+        )
+        if processed:
+            h5.attrs["structure_target_num_env_tokens"] = int(processed[0].structure_env_token_coords.shape[0])
         h5.create_dataset("field_dim", data=np.asarray([len(CHANNEL_ORDER)], dtype=np.int32))
         h5.create_dataset("channel_order", data=np.asarray(CHANNEL_ORDER, dtype=string_dtype))
         h5.create_dataset("sampled_point_feature_names", data=np.asarray(SAMPLED_POINT_FEATURES, dtype=string_dtype))
@@ -969,6 +1159,22 @@ def write_h5(
             group.create_dataset("module_centers", data=centers)
             group.create_dataset("heat_powers", data=powers)
             group.create_dataset("module_present", data=present)
+            group.create_dataset("structure_env_token_coords", data=item.structure_env_token_coords, compression="gzip")
+            group.create_dataset(
+                "env_module_influence_target",
+                data=pad_env_module(item.env_module_influence_target, max_modules),
+                compression="gzip",
+            )
+            group.create_dataset(
+                "module_affinity_target",
+                data=pad_square(item.module_affinity_target, max_modules),
+                compression="gzip",
+            )
+            group.create_dataset(
+                "active_edge_count_target",
+                data=np.asarray([float(item.active_edge_count_target)], dtype=np.float32),
+            )
+            group.create_dataset("env_region_label", data=item.env_region_label.astype(np.int16), compression="gzip")
             group.create_dataset("case_config_json", data=json.dumps(item.cfg_payload, indent=2), dtype=string_dtype)
 
             materials = group.create_group("material_parameters")

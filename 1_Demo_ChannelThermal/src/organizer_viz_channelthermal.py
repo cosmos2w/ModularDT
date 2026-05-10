@@ -76,6 +76,20 @@ def _dominant_env(A_eh: np.ndarray, env_count: int) -> Tuple[np.ndarray, np.ndar
     return np.zeros((env_count,), dtype=np.int64), np.ones((env_count,), dtype=np.float32)
 
 
+def _collapse_title_suffix(arrays: Dict[str, np.ndarray]) -> str:
+    A_eh = np.asarray(arrays.get("A_eh", np.zeros((0, 0))), dtype=np.float64)
+    if A_eh.size == 0:
+        return ""
+    eps = 1.0e-12
+    dominant = A_eh.argmax(axis=-1)
+    counts = np.bincount(dominant, minlength=A_eh.shape[-1]).astype(np.float64)
+    frac = counts / max(float(counts.sum()), eps)
+    env_mass = A_eh.mean(axis=0)
+    env_mass = env_mass / max(float(env_mass.sum()), eps)
+    entropy = -float(np.sum(env_mass * np.log(np.maximum(env_mass, eps))))
+    return f" | dom={float(np.max(frac)):.2f}, softEff={float(np.exp(entropy)):.2f}"
+
+
 def _heat_scale(heat: np.ndarray) -> np.ndarray:
     heat_abs = np.abs(np.asarray(heat, dtype=np.float32))
     denom = max(float(np.nanmax(heat_abs)) if heat_abs.size else 0.0, 1.0e-6)
@@ -263,7 +277,7 @@ def render_channelthermal_organization_overview(
     _draw_env_tokens(ax, arrays, colors)
     _draw_module_circles(ax, arrays, module_radius, label=True)
 
-    ax.set_title("Organizer physical overview")
+    ax.set_title(f"Organizer physical overview{_collapse_title_suffix(arrays)}")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_xlim(extent[0], extent[1])
@@ -455,7 +469,7 @@ def render_channelthermal_organization_summary_matrices(
 
     A_eh_sorted = A_eh[sort_idx] if A_eh.size else A_eh
     im_eh = ax_eh.imshow(A_eh_sorted, aspect="auto", cmap="viridis", vmin=0.0, vmax=max(float(np.nanmax(A_eh)) if A_eh.size else 1.0, 1.0e-6))
-    ax_eh.set_title("Environment -> Hyperedge assignment A_eh")
+    ax_eh.set_title(f"Environment -> Hyperedge assignment A_eh{_collapse_title_suffix(arrays)}")
     ax_eh.set_xlabel("hyperedge")
     ax_eh.set_ylabel("env tokens sorted by dominant H")
     ax_eh.set_xticks(np.arange(strength.shape[0]))

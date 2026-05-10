@@ -1,7 +1,7 @@
 {
-  "Run_ID": "0003",
+  "Run_ID": "0004",
   "_note_1": "Default is a global-only baseline. Set model.use_local_surrogate=true and provide a local checkpoint after Stage A is trained.",
-  "_note_2": "0003 tests using local module surrogate - mixed trained & updated hypergraph learning",
+  "_note_2": "0004 tests using local module surrogate - mixed trained & updated hypergraph learning",
   "dataset": {
     "packed_h5_path": "./Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
     "train_split": "train",
@@ -17,8 +17,15 @@
     "require_converged": true
   },
   "model": {
+    "_note_geometry_and_capacity": "Geometry auto-values are read from the processed dataset. Keep num_hyperedges near the expected number of module/plume groups, not necessarily equal to env token count.",
     "field_dim": 5,
-    "field_names": ["u", "v", "p", "omega", "temperature"],
+    "field_names": [
+      "u",
+      "v",
+      "p",
+      "omega",
+      "temperature"
+    ],
     "max_num_modules": "auto",
     "domain_length_x": "auto",
     "domain_length_y": "auto",
@@ -29,18 +36,24 @@
     "hidden_dim": 128,
     "latent_dim": 128,
 
+    "_note_local_surrogate": "Stage B uses the frozen Stage-A surrogate for module internal/interface response. Use corrected_physics so q_normal remains anchored to predicted T_env and h_effective.",
     "use_local_surrogate": true,
     "local_surrogate_checkpoint_path": "./Saved_Model_LocalModule/Run_0003_20260507_224352/latest_model.pt",
     "freeze_local_surrogate": true,
     "local_surrogate_latent_dim": 128,
     "local_surrogate_flux_mode": "corrected_physics",
     "local_surrogate_flux_blend_alpha": 0.5,
+
+    "_note_regularization_and_bottleneck": "dropout is low because datasets are small and physics targets already regularize. organizer_bottleneck_gate_init controls how much the field decoder initially relies on hyperedge state; 0.7 gives the organizer responsibility without removing direct geometry context.",
     "future_global_feature_dim": 0,
     "dropout": 0.0,
     "use_layer_norm": true,
     "DISABLE_EDGE": false,
     "disable_edge_strength_threshold": 0.05,
     "use_hyper_specific_eh_geometry": true,
+    "organizer_bottleneck_gate_init": 0.7,
+
+    "_note_thermal_prior_scales": "These only affect fallback/legacy organizer priors and diagnostics. Distance/downstream/lateral scales are in physical channel units; keep them comparable to module spacing and plume width.",
     "thermal_prior_sigma_distance": 1.5,
     "thermal_prior_sigma_downstream": 2.0,
     "thermal_prior_sigma_lateral": 0.9,
@@ -48,31 +61,60 @@
     "thermal_prior_heat_power_weight": 0.15
   },
   "loss": {
+    "_note_main_prediction_losses": "Field remains the primary objective. Internal/interface losses train the local-surrogate coupling path once predicted ports are used; interface q_normal is intentionally weaker than T_surface.",
     "field_mse_weight": 1.0,
     "temperature_weight": 1.0,
     "internal_temperature_weight": 1.0,
     "interface_weight": 0.2,
     "interface_target_weights": null,
+
     "_note_local_surrogate_interface_target_weights": "T_surface remains primary. q_normal is weakly supervised because flux is computed from predicted T_env, h_effective, and T_surface.",
-    "local_surrogate_interface_target_weights": [1.0, 0.25],
+    "local_surrogate_interface_target_weights": [
+      1.0,
+      0.25
+    ],
     "interface_loss_type": "smooth_l1",
+
+    "_note_port_supervision": "Keep port supervision active from epoch 0 because predicted-mode quality depends on T_env and h_effective. port_supervised_weight replaces port_condition_weight; the old key is retained for backward compatibility.",
     "port_condition_weight": 0.3,
+    "port_supervised_weight": 0.3,
     "port_temperature_weight": 1.0,
     "port_h_weight": 1.0,
     "port_temperature_scale": 10.0,
+    "port_smoothness_weight": 0.01,
+
+    "_note_predicted_consistency": "This gently practices the autonomous path before fully predicted mode by feeding predicted ports through the frozen local surrogate. Keep it smaller than field/interface weights and ramp with warmup.",
+    "predicted_consistency_weight": 0.05,
+    "predicted_consistency_warmup_epochs": 100,
+
     "_note_port_h_scale": "Deprecated: h_effective is trained in log1p space with interface_condition_valid_mask, so port_h_scale is ignored.",
     "_note_organizer_strength_weight": "Organizer strength is logged as diag_organizer_strength_mean only. Positive organizer_strength_weight used to penalize strong hyperedges and should usually stay 0.0.",
     "organizer_strength_weight": 0.0,
-    "_note_organizer_direct": "Weak channel organizer losses: prior-guided A_me, direct A_eh factor target, and module/environment mass alignment. Entropy/sparsity losses are intentionally off by default.",
-    "organizer_me_weight": 0.01,
-    "organizer_eh_factor_weight": 0.05,
-    "organizer_mass_align_weight": 0.02,
+
+    "_note_organizer_direct": "Structure losses use training-only preprocessing targets. Legacy prior/factor/mass terms are kept available but off by default.",
+    "_note_organizer_core_weights": "These weights are conservative so organizer supervision shapes the bottleneck without dominating field/interface prediction. Increase env_module first if env tokens still collapse; increase duplicate only if hyperedge columns become nearly identical.",
+    "organizer_env_module_weight": 0.05,
+    "organizer_module_affinity_weight": 0.02,
+    "organizer_duplicate_weight": 0.01,
+    "organizer_duplicate_margin": 0.15,
+
+    "_note_active_edge_logic": "Active-edge regularization matches the estimated number of physical thermal regions. It is not a uniform-all-edges rule, so one-module or one-plume cases can legitimately use few hyperedges.",
+    "organizer_active_edge_weight": 0.005,
+    "organizer_active_edge_threshold": 0.04,
+    "organizer_active_edge_temperature": 0.02,
+
+    "_note_legacy_organizer_terms": "These older prior/factor/mass losses remain available for ablations or old datasets, but default to 0 because direct structure targets are preferred.",
+    "organizer_me_weight": 0.0,
+    "organizer_eh_factor_weight": 0.0,
+    "organizer_mass_align_weight": 0.0,
     "organizer_mm_weight": 0.0,
     "organizer_eh_factor_target_source": "prior_me",
     "organizer_eh_factor_detach_mh": true,
     "organizer_mass_align_log_space": true,
     "organizer_mass_align_detach_module": true,
     "organizer_eps": 0.000001,
+
+    "_note_legacy_prior_scales": "Used only by organizer_me / eh_factor fallback terms and by old-HDF5 geometry fallbacks. Keep aligned with model thermal_prior_* unless deliberately testing a different prior.",
     "organizer_me_sigma_distance": 1.5,
     "organizer_me_sigma_downstream": 2.0,
     "organizer_me_sigma_lateral": 0.9,
@@ -81,6 +123,7 @@
     "field_channel_weights": null
   },
   "training": {
+    "_note_optimizer": "Long epoch count assumes manual early stopping/checkpoint selection from validation curves. Use max_train_batches_per_epoch for smoke tests.",
     "epochs": 100000,
     "learning_rate": 0.0001,
     "weight_decay": 0.00001,
@@ -89,6 +132,7 @@
     "seed": 42,
     "device": null,
 
+    "_note_port_curriculum": "Start teacher-forced for stability, transition through mixed ports, then train/evaluate predicted ports. predicted_after_epoch marks when the autonomous path is fully active.",
     "local_port_condition_mode": "teacher",
     "port_condition_schedule": "teacher_to_predicted",
     "teacher_epochs": 50,
@@ -98,10 +142,12 @@
     "mixed_teacher_ratio_start": 1.0,
     "mixed_teacher_ratio_end": 0.0,
     
+    "_note_organizer_schedule": "Organizer losses are strongest while hyperedges form, then decay so final field/interface accuracy can refine without overfitting the heuristic structure targets.",
     "organizer_schedule": "warmup_decay",
     "organizer_full_until_epoch": 100,
     "organizer_decay_end_epoch": 300,
     "organizer_decay_factor_final": 0.2,
+    "_note_debug_limits": "Set these to small integers for dry runs. Leave null for full training.",
     "max_train_batches_per_epoch": null,
     "max_val_batches": null
   },

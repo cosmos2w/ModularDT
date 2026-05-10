@@ -187,6 +187,33 @@ def port_condition_loss(
     return loss_port_condition, raw_mse, t_env_mse, h_mse, loss_port_t_env, loss_port_h
 
 
+def port_cyclic_smoothness_loss(
+    pred_port: torch.Tensor,
+    module_present: torch.Tensor,
+) -> torch.Tensor:
+    values = pred_port[..., 3:5]
+    t_env = values[..., 0:1]
+    log_h = torch.log1p(values[..., 1:2].clamp_min(0.0))
+    signal = torch.cat([t_env, log_h], dim=-1)
+    diff = signal - torch.roll(signal, shifts=-1, dims=-2)
+    return masked_mean(diff.abs(), module_present[:, :, None])
+
+
+def port_condition_mae_diagnostics(
+    pred_port: torch.Tensor,
+    target_port: torch.Tensor,
+    module_present: torch.Tensor,
+    valid_mask: Optional[torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    mask = module_present[:, :, None]
+    t_mae = masked_mean((pred_port[..., 3:4] - target_port[..., 3:4]).abs(), mask)
+    h_mask = mask if valid_mask is None else mask * valid_mask.to(device=pred_port.device, dtype=pred_port.dtype)
+    pred_log_h = torch.log1p(pred_port[..., 4:5].clamp_min(0.0))
+    target_log_h = torch.log1p(target_port[..., 4:5].clamp_min(0.0))
+    log_h_mae = masked_mean((pred_log_h - target_log_h).abs(), h_mask)
+    return t_mae, log_h_mae
+
+
 def interface_loss(
     pred: torch.Tensor,
     target: torch.Tensor,
@@ -340,6 +367,86 @@ def _module_module_affinity_prior_channelthermal(outputs: Dict[str, torch.Tensor
     return affinity * present[:, :, None] * present[:, None, :] * (1.0 - eye)
 
 
+def _row_normalize_masked(values: torch.Tensor, mask: Optional[torch.Tensor] = None, eps: float = 1.0e-6) -> torch.Tensor:
+    out = values.clamp_min(0.0)
+    if mask is not None:
+        out = out * mask.to(device=out.device, dtype=out.dtype)
+    return out / out.sum(dim=-1, keepdim=True).clamp_min(eps)
+
+
+def _resample_env_module_target(
+    aux: Dict[str, torch.Tensor],
+    batch: Dict[str, Any],
+    loss_cfg: Dict[str, Any],
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    structure_targets = batch.get("structure_targets", {})
+    A_mh = aux["A_mh"]
+    target = None
+    mask = None
+    has_solved = A_mh.new_zeros(A_mh.shape[0])
+    if isinstance(structure_targets, dict) and "env_module_influence_target" in structure_targets:
+        target_raw = structure_targets["env_module_influence_target"].to(device=A_mh.device, dtype=A_mh.dtype)
+        coords_raw = structure_targets.get("env_token_coords")
+        if coords_raw is not None and target_raw.shape[1] > 0:
+            coords_raw = coords_raw.to(device=A_mh.device, dtype=A_mh.dtype)
+            env_coords = aux["env_coords"].to(device=A_mh.device, dtype=A_mh.dtype)
+            distances = torch.cdist(env_coords, coords_raw)
+            nearest = distances.argmin(dim=-1)
+            gather_idx = nearest[..., None].expand(-1, -1, target_raw.shape[-1])
+            target = torch.gather(target_raw, dim=1, index=gather_idx)
+            if "env_module_target_mask" in structure_targets:
+                mask_raw = structure_targets["env_module_target_mask"].to(device=A_mh.device, dtype=A_mh.dtype)
+                mask = torch.gather(mask_raw, dim=1, index=gather_idx)
+            if "has_solved_structure_targets" in structure_targets:
+                has_solved = structure_targets["has_solved_structure_targets"].to(device=A_mh.device, dtype=A_mh.dtype).reshape(-1)
+    if target is None or target.shape[1] != aux["A_eh"].shape[1]:
+        prior = build_thermal_prior_from_batch(aux, batch, loss_cfg).transpose(1, 2).detach()
+        target = prior
+        mask = batch["structure"]["module_present"].to(device=A_mh.device, dtype=A_mh.dtype)[:, None, :].expand_as(target)
+        has_solved = A_mh.new_zeros(A_mh.shape[0])
+    if mask is None:
+        mask = batch["structure"]["module_present"].to(device=A_mh.device, dtype=A_mh.dtype)[:, None, :].expand_as(target)
+    target = _row_normalize_masked(target, mask, eps=eps)
+    return target, mask, has_solved
+
+
+def _module_affinity_target(
+    aux: Dict[str, torch.Tensor],
+    batch: Dict[str, Any],
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    structure_targets = batch.get("structure_targets", {})
+    A_mh = aux["A_mh"]
+    present = batch["structure"]["module_present"].to(device=A_mh.device, dtype=A_mh.dtype)
+    has_solved = A_mh.new_zeros(A_mh.shape[0])
+    if isinstance(structure_targets, dict) and "module_affinity_target" in structure_targets:
+        target = structure_targets["module_affinity_target"].to(device=A_mh.device, dtype=A_mh.dtype)
+        if "module_affinity_target_mask" in structure_targets:
+            mask = structure_targets["module_affinity_target_mask"].to(device=A_mh.device, dtype=A_mh.dtype)
+        else:
+            mask = present[:, :, None] * present[:, None, :]
+        if "has_solved_structure_targets" in structure_targets:
+            has_solved = structure_targets["has_solved_structure_targets"].to(device=A_mh.device, dtype=A_mh.dtype).reshape(-1)
+    else:
+        target = _module_module_affinity_prior_channelthermal(aux, batch, eps=eps)
+        eye = torch.eye(target.shape[1], device=target.device, dtype=target.dtype)[None, :, :]
+        target = target + eye * present[:, :, None]
+        mask = present[:, :, None] * present[:, None, :]
+    target = _row_normalize_masked(target, mask, eps=eps)
+    return target, mask, has_solved
+
+
+def _assignment_column_cosine(assignments: torch.Tensor, eps: float = 1.0e-6) -> torch.Tensor:
+    columns = assignments / assignments.norm(dim=1, keepdim=True).clamp_min(eps)
+    cosine = torch.matmul(columns.transpose(1, 2), columns).clamp(-1.0, 1.0)
+    k = cosine.shape[-1]
+    if k <= 1:
+        return assignments.new_tensor(0.0)
+    eye = torch.eye(k, device=assignments.device, dtype=assignments.dtype)[None, :, :]
+    return (cosine * (1.0 - eye)).sum() / (assignments.shape[0] * k * max(k - 1, 1))
+
+
 def organizer_mass_diagnostics_channelthermal(
     outputs: Dict[str, torch.Tensor],
     batch: Dict[str, Any],
@@ -353,6 +460,14 @@ def organizer_mass_diagnostics_channelthermal(
     A_eh = outputs["A_eh"]
     present = batch["structure"]["module_present"].to(device=A_mh.device, dtype=A_mh.dtype)
     valid_module_max = A_mh.max(dim=-1).values * present
+    dominant = A_eh.argmax(dim=-1)
+    num_h = A_eh.shape[-1]
+    counts = F.one_hot(dominant, num_classes=num_h).to(dtype=A_eh.dtype).sum(dim=1)
+    count_frac = counts / counts.sum(dim=-1, keepdim=True).clamp_min(eps)
+    count_entropy = -(count_frac.clamp_min(eps) * count_frac.clamp_min(eps).log()).sum(dim=-1)
+    strength = outputs.get("hyper_strength", torch.sqrt(module_mass * env_mass + eps))
+    active_count = (strength > 0.05).to(dtype=A_eh.dtype).sum(dim=-1)
+    combined = torch.cat([A_mh * present[:, :, None], A_eh], dim=1)
     return {
         "org_env_mass_max": env_mass.max(dim=-1).values.mean(),
         "org_module_mass_max": module_mass.max(dim=-1).values.mean(),
@@ -361,6 +476,12 @@ def organizer_mass_diagnostics_channelthermal(
         "org_module_effective_hyperedges": torch.exp(module_entropy).mean(),
         "org_max_A_eh_mass": A_eh.max(dim=-1).values.mean(),
         "org_max_A_mh_mass": valid_module_max.sum() / present.sum().clamp_min(1.0),
+        "dominant_env_fraction_max": count_frac.max(dim=-1).values.mean(),
+        "dominant_env_effective_edges": torch.exp(count_entropy).mean(),
+        "soft_env_effective_edges": torch.exp(env_entropy).mean(),
+        "A_eh_spatial_variation": A_eh.std(dim=1, unbiased=False).mean(),
+        "hyperedge_column_cosine_mean": _assignment_column_cosine(combined, eps=eps),
+        "active_edge_count": active_count.mean(),
     }
 
 
@@ -380,6 +501,10 @@ def compute_organizer_losses(
             "loss_org_eh_factor": zero,
             "loss_org_mass_align": zero,
             "loss_org_mm": zero,
+            "loss_org_env_module": zero,
+            "loss_org_module_affinity": zero,
+            "loss_org_duplicate": zero,
+            "loss_org_active_edge": zero,
             "loss_org_direct": zero,
             "org_env_mass_max": zero,
             "org_module_mass_max": zero,
@@ -388,20 +513,62 @@ def compute_organizer_losses(
             "org_module_effective_hyperedges": zero,
             "org_max_A_eh_mass": zero,
             "org_max_A_mh_mass": zero,
+            "dominant_env_fraction_max": zero,
+            "dominant_env_effective_edges": zero,
+            "soft_env_effective_edges": zero,
+            "A_eh_spatial_variation": zero,
+            "hyperedge_column_cosine_mean": zero,
+            "active_edge_count": zero,
             "organizer_weight_scale": zero,
         }
 
     eps = float(loss_cfg.get("organizer_eps", 1.0e-6))
     present = batch["structure"]["module_present"].to(device=aux["A_me"].device, dtype=aux["A_me"].dtype)
 
-    # A_me remains learned, but it is weakly guided toward a nonperiodic
-    # channel-thermal prior: near/downstream/wall/heat-power environment mass.
     prior_me = build_thermal_prior_from_batch(aux, batch, loss_cfg).detach()
     kl_me = F.kl_div(aux["A_me"].clamp_min(eps).log(), prior_me, reduction="none").sum(dim=-1)
     loss_org_me = (kl_me * present).sum() / present.sum().clamp_min(1.0)
 
-    # Direct A_eh factor target: env token e should prefer hyperedge k when
-    # modules influencing e are assigned to k by A_mh.
+    target_env_module, env_module_mask, _ = _resample_env_module_target(aux, batch, loss_cfg, eps)
+    pred_env_module = torch.matmul(aux["A_eh"], aux["A_mh"].transpose(1, 2))
+    pred_env_module = _row_normalize_masked(pred_env_module, env_module_mask, eps=eps)
+    loss_org_env_module = masked_smooth_l1(pred_env_module, target_env_module, env_module_mask)
+
+    target_mm, mm_mask, _ = _module_affinity_target(aux, batch, eps)
+    pred_mm = torch.matmul(aux["A_mh"], aux["A_mh"].transpose(1, 2))
+    pred_mm = _row_normalize_masked(pred_mm, mm_mask, eps=eps)
+    loss_org_module_affinity = masked_smooth_l1(pred_mm, target_mm, mm_mask)
+
+    combined_assignments = torch.cat([aux["A_mh"] * present[:, :, None], aux["A_eh"]], dim=1)
+    cosine_mean = _assignment_column_cosine(combined_assignments, eps=eps)
+    duplicate_margin = float(loss_cfg.get("organizer_duplicate_margin", 0.15))
+    # Penalize only clearly redundant positive correlation; different thermal
+    # regions can still be softly related without being forced uniform.
+    columns = combined_assignments / combined_assignments.norm(dim=1, keepdim=True).clamp_min(eps)
+    cosine = torch.matmul(columns.transpose(1, 2), columns).clamp(-1.0, 1.0)
+    k = cosine.shape[-1]
+    eye = torch.eye(k, device=cosine.device, dtype=cosine.dtype)[None, :, :]
+    loss_org_duplicate = (F.relu(cosine - duplicate_margin).square() * (1.0 - eye)).sum() / (
+        cosine.shape[0] * k * max(k - 1, 1)
+    )
+
+    _, _, module_mass, env_mass = compute_hyperedge_masses_channelthermal(aux, batch, eps=eps)
+    module_target = module_mass.detach() if bool(loss_cfg.get("organizer_mass_align_detach_module", True)) else module_mass
+    if bool(loss_cfg.get("organizer_mass_align_log_space", True)):
+        loss_org_mass_align = F.smooth_l1_loss(torch.log(env_mass + eps), torch.log(module_target + eps))
+    else:
+        loss_org_mass_align = F.smooth_l1_loss(env_mass, module_target)
+
+    structure_targets = batch.get("structure_targets", {})
+    if isinstance(structure_targets, dict) and "active_edge_count_target" in structure_targets:
+        active_target = structure_targets["active_edge_count_target"].to(device=env_mass.device, dtype=env_mass.dtype).reshape(-1)
+    else:
+        active_target = present.sum(dim=-1).clamp_min(1.0)
+    active_threshold = float(loss_cfg.get("organizer_active_edge_threshold", 0.04))
+    active_temperature = max(float(loss_cfg.get("organizer_active_edge_temperature", 0.02)), eps)
+    soft_active = torch.sigmoid((env_mass - active_threshold) / active_temperature).sum(dim=-1)
+    loss_org_active_edge = F.smooth_l1_loss(soft_active / max(float(env_mass.shape[-1]), 1.0), active_target / max(float(env_mass.shape[-1]), 1.0))
+
     target_eh = build_eh_factor_target_channelthermal(
         aux,
         batch,
@@ -411,36 +578,29 @@ def compute_organizer_losses(
         eps=eps,
     ).detach()
     loss_org_eh_factor = F.kl_div(aux["A_eh"].clamp_min(eps).log(), target_eh, reduction="none").sum(dim=-1).mean()
-
-    _, _, module_mass, env_mass = compute_hyperedge_masses_channelthermal(aux, batch, eps=eps)
-    module_target = module_mass.detach() if bool(loss_cfg.get("organizer_mass_align_detach_module", True)) else module_mass
-    if bool(loss_cfg.get("organizer_mass_align_log_space", True)):
-        loss_org_mass_align = F.smooth_l1_loss(torch.log(env_mass + eps), torch.log(module_target + eps))
-    else:
-        loss_org_mass_align = F.smooth_l1_loss(env_mass, module_target)
-
-    if float(loss_cfg.get("organizer_mm_weight", 0.0)) > 0.0:
-        pred_mm = torch.matmul(aux["A_mh"], aux["A_mh"].transpose(1, 2))
-        prior_mm = _module_module_affinity_prior_channelthermal(aux, batch, eps=eps)
-        n = pred_mm.shape[1]
-        eye = torch.eye(n, device=pred_mm.device, dtype=pred_mm.dtype)[None, :, :]
-        valid = present[:, :, None] * present[:, None, :] * (1.0 - eye)
-        loss_org_mm = (((pred_mm - prior_mm) ** 2) * valid).sum() / valid.sum().clamp_min(1.0)
-    else:
-        loss_org_mm = aux["A_mh"].new_tensor(0.0)
+    loss_org_mm = aux["A_mh"].new_tensor(0.0)
 
     scale = float(organizer_weight_scale)
     loss_org_direct = scale * (
-        float(loss_cfg.get("organizer_me_weight", 0.01)) * loss_org_me
-        + float(loss_cfg.get("organizer_eh_factor_weight", 0.05)) * loss_org_eh_factor
-        + float(loss_cfg.get("organizer_mass_align_weight", 0.02)) * loss_org_mass_align
+        float(loss_cfg.get("organizer_me_weight", 0.0)) * loss_org_me
+        + float(loss_cfg.get("organizer_eh_factor_weight", 0.0)) * loss_org_eh_factor
+        + float(loss_cfg.get("organizer_mass_align_weight", 0.0)) * loss_org_mass_align
         + float(loss_cfg.get("organizer_mm_weight", 0.0)) * loss_org_mm
+        + float(loss_cfg.get("organizer_env_module_weight", 0.05)) * loss_org_env_module
+        + float(loss_cfg.get("organizer_module_affinity_weight", 0.02)) * loss_org_module_affinity
+        + float(loss_cfg.get("organizer_duplicate_weight", 0.01)) * loss_org_duplicate
+        + float(loss_cfg.get("organizer_active_edge_weight", 0.005)) * loss_org_active_edge
     )
     out = {
         "loss_org_me": loss_org_me,
         "loss_org_eh_factor": loss_org_eh_factor,
         "loss_org_mass_align": loss_org_mass_align,
         "loss_org_mm": loss_org_mm,
+        "loss_org_env_module": loss_org_env_module,
+        "loss_org_module_affinity": loss_org_module_affinity,
+        "loss_org_duplicate": loss_org_duplicate,
+        "loss_org_active_edge": loss_org_active_edge,
+        "diag_org_column_cosine_for_duplicate": cosine_mean,
         "loss_org_direct": loss_org_direct,
         "organizer_weight_scale": aux["A_mh"].new_tensor(scale),
     }
@@ -516,6 +676,12 @@ def organizer_schedule_scale(epoch: int, training_cfg: Dict[str, Any]) -> float:
     return 1.0 + (final - 1.0) * min(max(progress, 0.0), 1.0)
 
 
+def predicted_consistency_weight_for_epoch(epoch: int, loss_cfg: Dict[str, Any]) -> float:
+    base = float(loss_cfg.get("predicted_consistency_weight", 0.0))
+    warmup = max(int(loss_cfg.get("predicted_consistency_warmup_epochs", 1)), 1)
+    return base * min(max(float(epoch) / float(warmup), 0.0), 1.0)
+
+
 def validate_local_surrogate_training_path(
     model_config: GlobalChannelThermalModelConfig,
     training_cfg: Dict[str, Any],
@@ -547,6 +713,7 @@ def compute_losses(
     effective_internal_temperature_weight: float,
     effective_interface_weight: float,
     organizer_weight_scale: float,
+    predicted_consistency_weight: float = 0.0,
 ) -> Dict[str, torch.Tensor]:
     structure = batch["structure"]
     module_present = structure["module_present"]
@@ -592,6 +759,43 @@ def compute_losses(
         batch.get("interface_condition_valid_mask"),
         loss_cfg,
     )
+    losses["loss_port_smoothness"] = port_cyclic_smoothness_loss(pred_port, module_present)
+    losses["diag_port_T_env_mae"], losses["diag_port_log_h_mae"] = port_condition_mae_diagnostics(
+        pred_port,
+        target_port,
+        module_present,
+        batch.get("interface_condition_valid_mask"),
+    )
+
+    if "predicted_port_internal_temperature" in outputs and "predicted_port_interface" in outputs:
+        target_internal = batch["module_internal_temperature_points"].unsqueeze(-1)
+        losses["loss_predicted_consistency_internal"] = masked_mse(
+            outputs["predicted_port_internal_temperature"],
+            target_internal,
+            module_present[:, :, None],
+        )
+        (
+            losses["loss_predicted_consistency_interface"],
+            _pred_t_mse,
+            _pred_q_mse,
+        ) = interface_loss(outputs["predicted_port_interface"], batch["interface_target"], module_present, outputs, loss_cfg)
+        losses["loss_predicted_consistency"] = (
+            losses["loss_predicted_consistency_internal"] + losses["loss_predicted_consistency_interface"]
+        )
+        losses["diag_predicted_vs_teacher_interface_mse_gap"] = (
+            losses["loss_predicted_consistency_interface"] - losses["loss_interface"]
+        )
+        losses["diag_predicted_vs_teacher_internal_mse_gap"] = (
+            losses["loss_predicted_consistency_internal"] - losses["loss_internal_temperature"]
+        )
+    else:
+        zero = outputs["pred_field"].new_tensor(0.0)
+        losses["loss_predicted_consistency_internal"] = zero
+        losses["loss_predicted_consistency_interface"] = zero
+        losses["loss_predicted_consistency"] = zero
+        losses["diag_predicted_vs_teacher_interface_mse_gap"] = zero
+        losses["diag_predicted_vs_teacher_internal_mse_gap"] = zero
+    losses["effective_predicted_consistency_weight"] = outputs["pred_field"].new_tensor(float(predicted_consistency_weight))
 
     aux = outputs.get("organizer_aux", {})
     if isinstance(aux, dict) and "hyper_strength" in aux:
@@ -604,7 +808,9 @@ def compute_losses(
         float(loss_cfg.get("field_mse_weight", 1.0)) * losses["loss_field"]
         + float(effective_internal_temperature_weight) * losses["loss_internal_temperature"]
         + float(effective_interface_weight) * losses["loss_interface"]
-        + float(loss_cfg.get("port_condition_weight", 0.1)) * losses["loss_port_condition"]
+        + float(loss_cfg.get("port_supervised_weight", loss_cfg.get("port_condition_weight", 0.1))) * losses["loss_port_condition"]
+        + float(loss_cfg.get("port_smoothness_weight", 0.0)) * losses["loss_port_smoothness"]
+        + float(predicted_consistency_weight) * losses["loss_predicted_consistency"]
         + losses["loss_org_direct"]
     )
     losses["loss_total"] = total
@@ -712,6 +918,7 @@ def run_epoch(
     effective_internal_temperature_weight: float = 0.0,
     effective_interface_weight: float = 0.0,
     organizer_weight_scale: float = 1.0,
+    predicted_consistency_weight: float = 0.0,
 ) -> Dict[str, float]:
     training = optimizer is not None
     model.train(training)
@@ -736,6 +943,7 @@ def run_epoch(
                 local_query_points=batch["module_internal_query_points"],
                 local_port_condition_mode=local_port_condition_mode,
                 mixed_teacher_ratio=float(mixed_teacher_ratio),
+                return_predicted_port_outputs=bool(float(predicted_consistency_weight) > 0.0 or not training),
             )
             losses = compute_losses(
                 outputs,
@@ -744,6 +952,7 @@ def run_epoch(
                 effective_internal_temperature_weight=float(effective_internal_temperature_weight),
                 effective_interface_weight=float(effective_interface_weight),
                 organizer_weight_scale=float(organizer_weight_scale),
+                predicted_consistency_weight=float(predicted_consistency_weight),
             )
         if training:
             clip_norm = float(training_cfg.get("gradient_clip_norm", 1.0))
@@ -781,11 +990,23 @@ def run_epoch(
                 "diag_port_h_mse",
                 "loss_port_T_env",
                 "loss_port_h",
+                "loss_port_smoothness",
+                "diag_port_T_env_mae",
+                "diag_port_log_h_mae",
+                "loss_predicted_consistency",
+                "loss_predicted_consistency_internal",
+                "loss_predicted_consistency_interface",
+                "diag_predicted_vs_teacher_interface_mse_gap",
+                "diag_predicted_vs_teacher_internal_mse_gap",
                 "diag_organizer_strength_mean",
                 "loss_org_me",
                 "loss_org_eh_factor",
                 "loss_org_mass_align",
                 "loss_org_mm",
+                "loss_org_env_module",
+                "loss_org_module_affinity",
+                "loss_org_duplicate",
+                "loss_org_active_edge",
                 "loss_org_direct",
                 "org_env_mass_max",
                 "org_module_mass_max",
@@ -794,8 +1015,15 @@ def run_epoch(
                 "org_module_effective_hyperedges",
                 "org_max_A_eh_mass",
                 "org_max_A_mh_mass",
+                "dominant_env_fraction_max",
+                "dominant_env_effective_edges",
+                "soft_env_effective_edges",
+                "A_eh_spatial_variation",
+                "hyperedge_column_cosine_mean",
+                "active_edge_count",
                 "effective_internal_temperature_weight",
                 "effective_interface_weight",
+                "effective_predicted_consistency_weight",
                 "organizer_weight_scale",
             ]
         }
@@ -1068,6 +1296,14 @@ def main() -> int:
         "loss_port_condition",
         "loss_port_T_env",
         "loss_port_h",
+        "loss_port_smoothness",
+        "diag_port_T_env_mae",
+        "diag_port_log_h_mae",
+        "loss_predicted_consistency",
+        "loss_predicted_consistency_internal",
+        "loss_predicted_consistency_interface",
+        "diag_predicted_vs_teacher_interface_mse_gap",
+        "diag_predicted_vs_teacher_internal_mse_gap",
         "diag_port_condition_physical_mse",
         "diag_port_T_env_mse",
         "diag_port_h_mse",
@@ -1076,6 +1312,10 @@ def main() -> int:
         "loss_org_eh_factor",
         "loss_org_mass_align",
         "loss_org_mm",
+        "loss_org_env_module",
+        "loss_org_module_affinity",
+        "loss_org_duplicate",
+        "loss_org_active_edge",
         "loss_org_direct",
         "org_env_mass_max",
         "org_module_mass_max",
@@ -1084,10 +1324,17 @@ def main() -> int:
         "org_module_effective_hyperedges",
         "org_max_A_eh_mass",
         "org_max_A_mh_mass",
+        "dominant_env_fraction_max",
+        "dominant_env_effective_edges",
+        "soft_env_effective_edges",
+        "A_eh_spatial_variation",
+        "hyperedge_column_cosine_mean",
+        "active_edge_count",
         "effective_local_port_condition_mode",
         "effective_mixed_teacher_ratio",
         "effective_internal_temperature_weight",
         "effective_interface_weight",
+        "effective_predicted_consistency_weight",
         "organizer_weight_scale",
         "val_loss_total",
         "val_loss_field",
@@ -1098,6 +1345,14 @@ def main() -> int:
         "val_loss_port_condition",
         "val_loss_port_T_env",
         "val_loss_port_h",
+        "val_loss_port_smoothness",
+        "val_diag_port_T_env_mae",
+        "val_diag_port_log_h_mae",
+        "val_loss_predicted_consistency",
+        "val_loss_predicted_consistency_internal",
+        "val_loss_predicted_consistency_interface",
+        "val_diag_predicted_vs_teacher_interface_mse_gap",
+        "val_diag_predicted_vs_teacher_internal_mse_gap",
         "val_diag_port_condition_physical_mse",
         "val_diag_port_T_env_mse",
         "val_diag_port_h_mse",
@@ -1106,6 +1361,10 @@ def main() -> int:
         "val_loss_org_eh_factor",
         "val_loss_org_mass_align",
         "val_loss_org_mm",
+        "val_loss_org_env_module",
+        "val_loss_org_module_affinity",
+        "val_loss_org_duplicate",
+        "val_loss_org_active_edge",
         "val_loss_org_direct",
         "val_org_env_mass_max",
         "val_org_module_mass_max",
@@ -1114,9 +1373,23 @@ def main() -> int:
         "val_org_module_effective_hyperedges",
         "val_org_max_A_eh_mass",
         "val_org_max_A_mh_mass",
+        "val_dominant_env_fraction_max",
+        "val_dominant_env_effective_edges",
+        "val_soft_env_effective_edges",
+        "val_A_eh_spatial_variation",
+        "val_hyperedge_column_cosine_mean",
+        "val_active_edge_count",
         "val_effective_internal_temperature_weight",
         "val_effective_interface_weight",
+        "val_effective_predicted_consistency_weight",
         "val_organizer_weight_scale",
+        "val_predicted_loss_total",
+        "val_predicted_loss_interface",
+        "val_predicted_loss_internal_temperature",
+        "val_predicted_diag_port_T_env_mae",
+        "val_predicted_diag_port_log_h_mae",
+        "val_predicted_diag_predicted_vs_teacher_interface_mse_gap",
+        "val_predicted_diag_predicted_vs_teacher_internal_mse_gap",
     ]
     with history_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1130,6 +1403,7 @@ def main() -> int:
         max_val_batches = int(training_cfg["max_val_batches"])
 
     best_metric = math.inf
+    best_predicted_metric = math.inf
     for epoch in range(1, epochs + 1):
         effective_mode, effective_ratio = effective_port_condition_settings(epoch, training_cfg)
         effective_internal_weight, effective_interface_weight = effective_local_loss_weights(
@@ -1138,6 +1412,7 @@ def main() -> int:
             mixed_teacher_ratio=effective_ratio,
         )
         org_scale = organizer_schedule_scale(epoch, training_cfg)
+        pred_consistency_weight = predicted_consistency_weight_for_epoch(epoch, loss_cfg)
         train_metrics = run_epoch(
             model,
             train_loader,
@@ -1153,6 +1428,7 @@ def main() -> int:
             effective_internal_temperature_weight=effective_internal_weight,
             effective_interface_weight=effective_interface_weight,
             organizer_weight_scale=org_scale,
+            predicted_consistency_weight=pred_consistency_weight,
         )
         val_metrics = run_epoch(
             model,
@@ -1169,17 +1445,34 @@ def main() -> int:
             effective_internal_temperature_weight=effective_internal_weight,
             effective_interface_weight=effective_interface_weight,
             organizer_weight_scale=org_scale,
+            predicted_consistency_weight=pred_consistency_weight,
+        )
+        predicted_val_metrics = run_epoch(
+            model,
+            val_loader,
+            device,
+            loss_cfg,
+            training_cfg,
+            optimizer=None,
+            scaler=None,
+            amp=bool(training_cfg.get("amp", False)),
+            max_batches=max_val_batches,
+            local_port_condition_mode="predicted",
+            mixed_teacher_ratio=0.0,
+            effective_internal_temperature_weight=float(loss_cfg.get("internal_temperature_weight", 1.0)),
+            effective_interface_weight=float(loss_cfg.get("interface_weight", 0.2)),
+            organizer_weight_scale=org_scale,
+            predicted_consistency_weight=0.0,
         )
         if (
             int(getattr(val_dataset, "max_num_modules", model_config.max_num_modules)) > 1
-            and float(val_metrics.get("org_env_effective_hyperedges", math.inf)) < 1.25
-            and float(val_metrics.get("org_env_mass_max", 0.0)) > 0.85
+            and float(val_metrics.get("dominant_env_fraction_max", 0.0)) > 0.90
         ):
             print(
                 "[warning] Channel organizer may be collapsing during validation: "
-                f"org_env_effective_hyperedges={val_metrics.get('org_env_effective_hyperedges', math.nan):.3f}, "
-                f"org_env_mass_max={val_metrics.get('org_env_mass_max', math.nan):.3f}. "
-                "This is diagnostic only; no extra collapse penalty was applied."
+                f"dominant_env_fraction_max={val_metrics.get('dominant_env_fraction_max', math.nan):.3f}, "
+                f"dominant_env_effective_edges={val_metrics.get('dominant_env_effective_edges', math.nan):.3f}, "
+                f"soft_env_effective_edges={val_metrics.get('soft_env_effective_edges', math.nan):.3f}."
             )
         row = {
             "epoch": epoch,
@@ -1192,6 +1485,14 @@ def main() -> int:
             "loss_port_condition": train_metrics.get("loss_port_condition", math.nan),
             "loss_port_T_env": train_metrics.get("loss_port_T_env", math.nan),
             "loss_port_h": train_metrics.get("loss_port_h", math.nan),
+            "loss_port_smoothness": train_metrics.get("loss_port_smoothness", math.nan),
+            "diag_port_T_env_mae": train_metrics.get("diag_port_T_env_mae", math.nan),
+            "diag_port_log_h_mae": train_metrics.get("diag_port_log_h_mae", math.nan),
+            "loss_predicted_consistency": train_metrics.get("loss_predicted_consistency", math.nan),
+            "loss_predicted_consistency_internal": train_metrics.get("loss_predicted_consistency_internal", math.nan),
+            "loss_predicted_consistency_interface": train_metrics.get("loss_predicted_consistency_interface", math.nan),
+            "diag_predicted_vs_teacher_interface_mse_gap": train_metrics.get("diag_predicted_vs_teacher_interface_mse_gap", math.nan),
+            "diag_predicted_vs_teacher_internal_mse_gap": train_metrics.get("diag_predicted_vs_teacher_internal_mse_gap", math.nan),
             "diag_port_condition_physical_mse": train_metrics.get("diag_port_condition_physical_mse", math.nan),
             "diag_port_T_env_mse": train_metrics.get("diag_port_T_env_mse", math.nan),
             "diag_port_h_mse": train_metrics.get("diag_port_h_mse", math.nan),
@@ -1200,6 +1501,10 @@ def main() -> int:
             "loss_org_eh_factor": train_metrics.get("loss_org_eh_factor", math.nan),
             "loss_org_mass_align": train_metrics.get("loss_org_mass_align", math.nan),
             "loss_org_mm": train_metrics.get("loss_org_mm", math.nan),
+            "loss_org_env_module": train_metrics.get("loss_org_env_module", math.nan),
+            "loss_org_module_affinity": train_metrics.get("loss_org_module_affinity", math.nan),
+            "loss_org_duplicate": train_metrics.get("loss_org_duplicate", math.nan),
+            "loss_org_active_edge": train_metrics.get("loss_org_active_edge", math.nan),
             "loss_org_direct": train_metrics.get("loss_org_direct", math.nan),
             "org_env_mass_max": train_metrics.get("org_env_mass_max", math.nan),
             "org_module_mass_max": train_metrics.get("org_module_mass_max", math.nan),
@@ -1208,10 +1513,17 @@ def main() -> int:
             "org_module_effective_hyperedges": train_metrics.get("org_module_effective_hyperedges", math.nan),
             "org_max_A_eh_mass": train_metrics.get("org_max_A_eh_mass", math.nan),
             "org_max_A_mh_mass": train_metrics.get("org_max_A_mh_mass", math.nan),
+            "dominant_env_fraction_max": train_metrics.get("dominant_env_fraction_max", math.nan),
+            "dominant_env_effective_edges": train_metrics.get("dominant_env_effective_edges", math.nan),
+            "soft_env_effective_edges": train_metrics.get("soft_env_effective_edges", math.nan),
+            "A_eh_spatial_variation": train_metrics.get("A_eh_spatial_variation", math.nan),
+            "hyperedge_column_cosine_mean": train_metrics.get("hyperedge_column_cosine_mean", math.nan),
+            "active_edge_count": train_metrics.get("active_edge_count", math.nan),
             "effective_local_port_condition_mode": effective_mode,
             "effective_mixed_teacher_ratio": effective_ratio,
             "effective_internal_temperature_weight": effective_internal_weight,
             "effective_interface_weight": effective_interface_weight,
+            "effective_predicted_consistency_weight": pred_consistency_weight,
             "organizer_weight_scale": org_scale,
             "val_loss_total": val_metrics.get("loss_total", math.nan),
             "val_loss_field": val_metrics.get("loss_field", math.nan),
@@ -1222,6 +1534,14 @@ def main() -> int:
             "val_loss_port_condition": val_metrics.get("loss_port_condition", math.nan),
             "val_loss_port_T_env": val_metrics.get("loss_port_T_env", math.nan),
             "val_loss_port_h": val_metrics.get("loss_port_h", math.nan),
+            "val_loss_port_smoothness": val_metrics.get("loss_port_smoothness", math.nan),
+            "val_diag_port_T_env_mae": val_metrics.get("diag_port_T_env_mae", math.nan),
+            "val_diag_port_log_h_mae": val_metrics.get("diag_port_log_h_mae", math.nan),
+            "val_loss_predicted_consistency": val_metrics.get("loss_predicted_consistency", math.nan),
+            "val_loss_predicted_consistency_internal": val_metrics.get("loss_predicted_consistency_internal", math.nan),
+            "val_loss_predicted_consistency_interface": val_metrics.get("loss_predicted_consistency_interface", math.nan),
+            "val_diag_predicted_vs_teacher_interface_mse_gap": val_metrics.get("diag_predicted_vs_teacher_interface_mse_gap", math.nan),
+            "val_diag_predicted_vs_teacher_internal_mse_gap": val_metrics.get("diag_predicted_vs_teacher_internal_mse_gap", math.nan),
             "val_diag_port_condition_physical_mse": val_metrics.get("diag_port_condition_physical_mse", math.nan),
             "val_diag_port_T_env_mse": val_metrics.get("diag_port_T_env_mse", math.nan),
             "val_diag_port_h_mse": val_metrics.get("diag_port_h_mse", math.nan),
@@ -1230,6 +1550,10 @@ def main() -> int:
             "val_loss_org_eh_factor": val_metrics.get("loss_org_eh_factor", math.nan),
             "val_loss_org_mass_align": val_metrics.get("loss_org_mass_align", math.nan),
             "val_loss_org_mm": val_metrics.get("loss_org_mm", math.nan),
+            "val_loss_org_env_module": val_metrics.get("loss_org_env_module", math.nan),
+            "val_loss_org_module_affinity": val_metrics.get("loss_org_module_affinity", math.nan),
+            "val_loss_org_duplicate": val_metrics.get("loss_org_duplicate", math.nan),
+            "val_loss_org_active_edge": val_metrics.get("loss_org_active_edge", math.nan),
             "val_loss_org_direct": val_metrics.get("loss_org_direct", math.nan),
             "val_org_env_mass_max": val_metrics.get("org_env_mass_max", math.nan),
             "val_org_module_mass_max": val_metrics.get("org_module_mass_max", math.nan),
@@ -1238,9 +1562,23 @@ def main() -> int:
             "val_org_module_effective_hyperedges": val_metrics.get("org_module_effective_hyperedges", math.nan),
             "val_org_max_A_eh_mass": val_metrics.get("org_max_A_eh_mass", math.nan),
             "val_org_max_A_mh_mass": val_metrics.get("org_max_A_mh_mass", math.nan),
+            "val_dominant_env_fraction_max": val_metrics.get("dominant_env_fraction_max", math.nan),
+            "val_dominant_env_effective_edges": val_metrics.get("dominant_env_effective_edges", math.nan),
+            "val_soft_env_effective_edges": val_metrics.get("soft_env_effective_edges", math.nan),
+            "val_A_eh_spatial_variation": val_metrics.get("A_eh_spatial_variation", math.nan),
+            "val_hyperedge_column_cosine_mean": val_metrics.get("hyperedge_column_cosine_mean", math.nan),
+            "val_active_edge_count": val_metrics.get("active_edge_count", math.nan),
             "val_effective_internal_temperature_weight": val_metrics.get("effective_internal_temperature_weight", math.nan),
             "val_effective_interface_weight": val_metrics.get("effective_interface_weight", math.nan),
+            "val_effective_predicted_consistency_weight": val_metrics.get("effective_predicted_consistency_weight", math.nan),
             "val_organizer_weight_scale": val_metrics.get("organizer_weight_scale", math.nan),
+            "val_predicted_loss_total": predicted_val_metrics.get("loss_total", math.nan),
+            "val_predicted_loss_interface": predicted_val_metrics.get("loss_interface", math.nan),
+            "val_predicted_loss_internal_temperature": predicted_val_metrics.get("loss_internal_temperature", math.nan),
+            "val_predicted_diag_port_T_env_mae": predicted_val_metrics.get("diag_port_T_env_mae", math.nan),
+            "val_predicted_diag_port_log_h_mae": predicted_val_metrics.get("diag_port_log_h_mae", math.nan),
+            "val_predicted_diag_predicted_vs_teacher_interface_mse_gap": predicted_val_metrics.get("diag_predicted_vs_teacher_interface_mse_gap", math.nan),
+            "val_predicted_diag_predicted_vs_teacher_internal_mse_gap": predicted_val_metrics.get("diag_predicted_vs_teacher_internal_mse_gap", math.nan),
         }
         with history_path.open("a", newline="", encoding="utf-8") as f:
             csv.DictWriter(f, fieldnames=fieldnames).writerow(row)
@@ -1257,6 +1595,19 @@ def main() -> int:
                 best_metric=best_metric,
             )
             print(f'\nModel improving! Saving new best model...')
+        predicted_metric = float(row["val_predicted_loss_total"])
+        if math.isfinite(predicted_metric) and predicted_metric < best_predicted_metric:
+            best_predicted_metric = predicted_metric
+            save_checkpoint(
+                run_dir / "best_predicted_model.pt",
+                model=model,
+                model_config=model_config,
+                train_config=cfg,
+                dataset=train_dataset,
+                epoch=epoch,
+                best_metric=best_predicted_metric,
+            )
+            print("\nPredicted-mode validation improving! Saving best_predicted_model.pt...")
         save_checkpoint(
             run_dir / "latest_model.pt",
             model=model,
@@ -1274,13 +1625,15 @@ def main() -> int:
             f"port={row['loss_port_condition']:.4e} port_phys={row['diag_port_condition_physical_mse']:.4e} "
             f"port_T={row['loss_port_T_env']:.3e} port_h={row['loss_port_h']:.3e} "
             f"org_me={row['loss_org_me']:.3e} org_eh={row['loss_org_eh_factor']:.3e} "
-            f"org_mass_l1={row['org_mass_l1']:.3e} "
+            f"org_envmod={row['loss_org_env_module']:.3e} dom_env={row['dominant_env_fraction_max']:.2f} "
             f"mode={effective_mode} ratio={effective_ratio:.3f} "
-            f"eff_int={effective_internal_weight:.3g} eff_iface={effective_interface_weight:.3g} org_scale={org_scale:.3g} "
-            f"val={row['val_loss_total']:.4e}"
+            f"eff_int={effective_internal_weight:.3g} eff_iface={effective_interface_weight:.3g} "
+            f"pred_cons={pred_consistency_weight:.3g} org_scale={org_scale:.3g} "
+            f"val={row['val_loss_total']:.4e} val_pred={row['val_predicted_loss_total']:.4e}"
         )
 
     print(f"[done] saved global model run: {run_dir}")
+    print("[done] autonomous/design inference should evaluate best_predicted_model.pt in predicted mode when available.")
     return 0
 
 

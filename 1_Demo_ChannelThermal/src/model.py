@@ -62,6 +62,7 @@ class GlobalChannelThermalModelConfig:
     thermal_prior_sigma_lateral: float = 0.90
     thermal_prior_wall_weight: float = 0.15
     thermal_prior_heat_power_weight: float = 0.15
+    organizer_bottleneck_gate_init: float = 0.70
     default_num_interface_points: int = 64
 
     @classmethod
@@ -452,7 +453,10 @@ class QueryFieldDecoder(nn.Module):
             dropout=config.dropout,
             layer_norm=config.use_layer_norm,
         )
-        self.memory_attn = nn.MultiheadAttention(hidden, config.num_attention_heads, dropout=config.dropout, batch_first=True)
+        self.direct_memory_attn = nn.MultiheadAttention(hidden, config.num_attention_heads, dropout=config.dropout, batch_first=True)
+        self.hyper_memory_attn = nn.MultiheadAttention(hidden, config.num_attention_heads, dropout=config.dropout, batch_first=True)
+        gate_init = min(max(float(config.organizer_bottleneck_gate_init), 1.0e-4), 1.0 - 1.0e-4)
+        self.hyper_bottleneck_logit = nn.Parameter(torch.tensor(math.log(gate_init / (1.0 - gate_init)), dtype=torch.float32))
         self.near_module_geom = MLP(9, hidden, hidden, num_layers=2, dropout=config.dropout)
         self.output = MLP(
             4 * hidden,
@@ -517,15 +521,27 @@ class QueryFieldDecoder(nn.Module):
             dim=-1,
         )
         query_state = self.query_encoder(query_features)
-        memory = torch.cat([module_state, env_state, hyper_state], dim=1)
+        direct_memory = torch.cat([module_state, env_state], dim=1)
         batch = query_xy.shape[0]
         env_mask = torch.zeros(batch, env_state.shape[1], device=query_xy.device, dtype=torch.bool)
+        direct_key_padding_mask = torch.cat([module_present <= 0.5, env_mask], dim=1)
         if hyper_mask is None:
             hyper_pad = torch.zeros(batch, hyper_state.shape[1], device=query_xy.device, dtype=torch.bool)
         else:
             hyper_pad = ~hyper_mask
-        key_padding_mask = torch.cat([module_present <= 0.5, env_mask, hyper_pad], dim=1)
-        attended, _ = self.memory_attn(query_state, memory, memory, key_padding_mask=key_padding_mask, need_weights=False)
+        if hyper_pad.ndim == 2 and bool(hyper_pad.all(dim=1).any()):
+            hyper_pad = hyper_pad.clone()
+            hyper_pad[hyper_pad.all(dim=1)] = False
+        direct_context, _ = self.direct_memory_attn(
+            query_state,
+            direct_memory,
+            direct_memory,
+            key_padding_mask=direct_key_padding_mask,
+            need_weights=False,
+        )
+        hyper_context, _ = self.hyper_memory_attn(query_state, hyper_state, hyper_state, key_padding_mask=hyper_pad, need_weights=False)
+        hyper_gate = torch.sigmoid(self.hyper_bottleneck_logit).to(device=query_xy.device, dtype=query_xy.dtype)
+        attended = hyper_gate * hyper_context + (1.0 - hyper_gate) * direct_context
         near_context = self.nearby_module_context(query_xy, module_centers, module_state, module_present)
         global_context = global_token[:, None, :].expand(-1, query_xy.shape[1], -1)
         return self.output(torch.cat([query_state, attended, near_context, global_context], dim=-1))
@@ -954,6 +970,7 @@ class GlobalChannelThermalModel(nn.Module):
         local_query_points: Optional[torch.Tensor] = None,
         local_port_condition_mode: str = "teacher",
         mixed_teacher_ratio: float = 0.5,
+        return_predicted_port_outputs: bool = False,
     ) -> Dict[str, torch.Tensor | Dict[str, torch.Tensor]]:
         if structure is not None:
             re = structure.get("re", re)
@@ -998,6 +1015,7 @@ class GlobalChannelThermalModel(nn.Module):
 
         local_outputs: Optional[Dict[str, torch.Tensor]] = None
         interface_diagnostics: Dict[str, torch.Tensor] = {}
+        predicted_port_diagnostics: Dict[str, torch.Tensor] = {}
         pred_interface: Optional[torch.Tensor] = None
         module_state = base_module_state
         if self.config.use_local_surrogate:
@@ -1023,6 +1041,27 @@ class GlobalChannelThermalModel(nn.Module):
                 base_module_state,
                 module_present,
             )
+            if bool(return_predicted_port_outputs):
+                if mode == "predicted" or teacher_port_tokens is None:
+                    predicted_local_outputs = local_outputs
+                    predicted_interface = pred_interface
+                else:
+                    predicted_local_outputs = self._call_local_surrogate(
+                        local_module_params.float(),
+                        pred_port_tokens,
+                        local_query_points,
+                        module_present,
+                    )
+                    predicted_interface, _ = self._assemble_local_surrogate_interface(
+                        predicted_local_outputs,
+                        pred_port_tokens,
+                        base_module_state,
+                        module_present,
+                    )
+                predicted_port_diagnostics = {
+                    "predicted_port_internal_temperature": predicted_local_outputs["internal_temperature"],
+                    "predicted_port_interface": predicted_interface,
+                }
             latent_fusion = self.local_latent_fusion(torch.cat([base_module_state, local_outputs["module_response_latent"]], dim=-1))
             summary_fusion = self.local_response_summary_proj(interface_diagnostics["local_response_summary"])
             module_state = (base_module_state + latent_fusion + summary_fusion) * module_present[..., None]
@@ -1064,6 +1103,7 @@ class GlobalChannelThermalModel(nn.Module):
             "base_organizer_aux": base_org,
         }
         result.update(interface_diagnostics)
+        result.update(predicted_port_diagnostics)
         return result
 
 

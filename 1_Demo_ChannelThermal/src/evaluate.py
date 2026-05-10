@@ -42,8 +42,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint",
         type=str,
-        default="best",
-        help="Checkpoint selector: best, latest/lastest, or a direct .pt path.",
+        default="best_predicted",
+        help="Checkpoint selector: best_predicted/predicted, best, latest/lastest, or a direct .pt path.",
     )
     parser.add_argument("--Run_ID", dest="run_id", type=str, default=None, help="Numeric run serial used to find the latest matching saved model, e.g. 0001.")
     parser.add_argument("--saved-root", type=str, default="./Saved_Model", help="Root directory containing global saved-model runs.")
@@ -90,11 +90,13 @@ def parse_args() -> argparse.Namespace:
 
 def checkpoint_file_name(selector: str) -> str:
     cleaned = str(selector).strip().lower()
+    if cleaned in {"best_predicted", "predicted", "autonomous"}:
+        return "best_predicted_model.pt"
     if cleaned == "best":
         return "best_model.pt"
     if cleaned in {"latest", "lastest"}:
         return "latest_model.pt"
-    raise ValueError("--checkpoint must be 'best', 'latest'/'lastest', or a direct checkpoint path.")
+    raise ValueError("--checkpoint must be 'best_predicted', 'best', 'latest'/'lastest', or a direct checkpoint path.")
 
 
 def normalize_run_id(value: str) -> str:
@@ -118,12 +120,17 @@ def resolve_checkpoint_arg(args: argparse.Namespace) -> Path:
     if args.run_id:
         saved_root = resolve_demo_path(args.saved_root)
         run_dir = latest_run_dir(saved_root, args.run_id)
-        return (run_dir / checkpoint_file_name(selector)).resolve()
+        candidate = (run_dir / checkpoint_file_name(selector)).resolve()
+        if not candidate.exists() and str(selector).strip().lower() in {"best_predicted", "predicted", "autonomous"}:
+            fallback = (run_dir / "best_model.pt").resolve()
+            print(f"[warning] {candidate.name} not found; falling back to {fallback.name}.")
+            return fallback
+        return candidate
     candidate = resolve_demo_path(selector)
     if candidate.suffix == ".pt" or candidate.exists():
         return candidate
-    if selector.strip().lower() in {"best", "latest", "lastest"}:
-        raise ValueError("--Run_ID is required when --checkpoint is 'best' or 'latest'.")
+    if selector.strip().lower() in {"best_predicted", "predicted", "autonomous", "best", "latest", "lastest"}:
+        raise ValueError("--Run_ID is required when --checkpoint is a named selector.")
     saved_root = resolve_demo_path(args.saved_root)
     return (latest_run_dir(saved_root, selector) / "best_model.pt").resolve()
 
@@ -661,6 +668,51 @@ def compute_channelthermal_hyperedge_summary(arrays: Dict[str, np.ndarray]) -> L
     return rows
 
 
+def compute_channelthermal_organization_diagnostics(arrays: Dict[str, np.ndarray]) -> Dict[str, Any]:
+    A_eh = np.asarray(arrays["A_eh"], dtype=np.float64)
+    A_mh = np.asarray(arrays["A_mh"], dtype=np.float64)
+    present = np.asarray(arrays["present"], dtype=bool)
+    strength = np.asarray(arrays["strength"], dtype=np.float64)
+    if A_eh.size == 0:
+        return {
+            "dominant_env_fraction_max": 0.0,
+            "dominant_env_effective_edges": 0.0,
+            "soft_env_effective_edges": 0.0,
+            "A_eh_spatial_variation": 0.0,
+            "hyperedge_column_cosine_mean": 0.0,
+            "active_edge_count": 0.0,
+            "collapse_warning": False,
+        }
+    eps = 1.0e-12
+    num_h = A_eh.shape[-1]
+    dominant = A_eh.argmax(axis=-1)
+    counts = np.bincount(dominant, minlength=num_h).astype(np.float64)
+    count_frac = counts / max(float(counts.sum()), eps)
+    env_mass = A_eh.mean(axis=0)
+    env_mass = env_mass / max(float(env_mass.sum()), eps)
+    count_entropy = -float(np.sum(count_frac * np.log(np.maximum(count_frac, eps))))
+    soft_entropy = -float(np.sum(env_mass * np.log(np.maximum(env_mass, eps))))
+    if A_mh.size:
+        module_part = A_mh * present[:, None].astype(np.float64)
+        combined = np.concatenate([module_part, A_eh], axis=0)
+    else:
+        combined = A_eh
+    norms = np.linalg.norm(combined, axis=0, keepdims=True)
+    cols = combined / np.maximum(norms, eps)
+    cosine = np.clip(cols.T @ cols, -1.0, 1.0)
+    offdiag = cosine[~np.eye(num_h, dtype=bool)] if num_h > 1 else np.asarray([], dtype=np.float64)
+    dominant_max = float(np.max(count_frac)) if count_frac.size else 0.0
+    return {
+        "dominant_env_fraction_max": dominant_max,
+        "dominant_env_effective_edges": float(np.exp(count_entropy)),
+        "soft_env_effective_edges": float(np.exp(soft_entropy)),
+        "A_eh_spatial_variation": float(np.std(A_eh, axis=0).mean()),
+        "hyperedge_column_cosine_mean": float(np.mean(offdiag)) if offdiag.size else 0.0,
+        "active_edge_count": float(np.sum(strength >= 0.05)),
+        "collapse_warning": bool(dominant_max > 0.90),
+    }
+
+
 def render_channelthermal_physical_organization(
     output_path: Path,
     sample: Dict[str, Any],
@@ -729,7 +781,11 @@ def render_channelthermal_physical_organization(
                 weight = float(A_mh[module_idx, hidx])
                 if weight >= 0.35:
                     ax.plot([centers[module_idx, 0], src[hidx, 0]], [centers[module_idx, 1], src[hidx, 1]], color=color, lw=0.5 + 1.8 * weight, alpha=0.18 + 0.55 * weight)
-    ax.set_title("Physical organizer overlay")
+    diag = compute_channelthermal_organization_diagnostics(arrays)
+    ax.set_title(
+        "Physical organizer overlay "
+        f"(dom={diag['dominant_env_fraction_max']:.2f}, softEff={diag['soft_env_effective_edges']:.2f})"
+    )
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     fig.savefig(output_path, dpi=170)
@@ -839,6 +895,7 @@ def plot_organizer(output_path: Path, sample: Dict[str, Any], aux: Dict[str, Any
 def save_organizer_summary(output_dir: Path, aux: Dict[str, Any], sample: Dict[str, Any], model: GlobalChannelThermalModel) -> tuple[Path, Path]:
     arrays = extract_channelthermal_organization_arrays(sample, aux, model)
     rows = compute_channelthermal_hyperedge_summary(arrays)
+    diagnostics = compute_channelthermal_organization_diagnostics(arrays)
     csv_path = output_dir / "organization_summary.csv"
     json_path = output_dir / "organization_summary.json"
     fieldnames = [
@@ -856,15 +913,24 @@ def save_organizer_summary(output_dir: Path, aux: Dict[str, Any], sample: Dict[s
         "thermal_region_y",
         "active",
         "low_strength",
+        "dominant_env_fraction_max",
+        "dominant_env_effective_edges",
+        "soft_env_effective_edges",
+        "A_eh_spatial_variation",
+        "hyperedge_column_cosine_mean",
+        "active_edge_count",
+        "collapse_warning",
     ]
+    rows_for_csv = [{**row, **diagnostics} for row in rows]
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows(rows_for_csv)
     write_json(
         json_path,
         {
             "hyperedges": rows,
+            "diagnostics": diagnostics,
             "visual_encoding": {
                 "env_token_color": "dominant hyperedge argmax(A_eh)",
                 "env_token_alpha": "max assignment confidence max(A_eh)",
@@ -873,6 +939,11 @@ def save_organizer_summary(output_dir: Path, aux: Dict[str, Any], sample: Dict[s
             },
         },
     )
+    if diagnostics.get("collapse_warning"):
+        print(
+            "[warning] Organizer dominant environment assignment exceeds 0.90: "
+            f"dominant_env_fraction_max={diagnostics['dominant_env_fraction_max']:.3f}."
+        )
     return csv_path, json_path
 
 
@@ -991,6 +1062,8 @@ def summarize_prediction(
     pred_port = predictions["pred_port_condition"][..., 3:5]
     port_t_env_rmse = error_metrics(pred_port[..., 0], target_port[..., 0])["rmse"]
     port_h_rmse = error_metrics(pred_port[..., 1], target_port[..., 1])["rmse"]
+    port_t_env_mae = error_metrics(pred_port[..., 0], target_port[..., 0])["mae"]
+    port_log_h_mae = error_metrics(np.log1p(np.maximum(pred_port[..., 1], 0.0)), np.log1p(np.maximum(target_port[..., 1], 0.0)))["mae"]
     q_surrogate_raw_rmse = None
     if "pred_interface_surrogate_raw" in predictions:
         q_surrogate_raw_rmse = error_metrics(predictions["pred_interface_surrogate_raw"][..., 1], gt_interface[..., 1])["rmse"]
@@ -1037,6 +1110,8 @@ def summarize_prediction(
         "q_normal_rmse": interface_rmse_by_target["q_normal"],
         "port_T_env_rmse": port_t_env_rmse,
         "port_h_rmse": port_h_rmse,
+        "port_T_env_mae": port_t_env_mae,
+        "port_log_h_mae": port_log_h_mae,
         "q_surrogate_raw_rmse": q_surrogate_raw_rmse,
         "q_physics_rmse": q_physics_rmse,
         "field_relative_l2": field_metrics["relative_l2"],
@@ -1277,6 +1352,8 @@ def main() -> int:
             "q_normal_rmse",
             "port_T_env_rmse",
             "port_h_rmse",
+            "port_T_env_mae",
+            "port_log_h_mae",
             "q_surrogate_raw_rmse",
             "q_physics_rmse",
         ]
@@ -1306,6 +1383,8 @@ def main() -> int:
                 # "predicted_interface_l2_error": predicted["interface_l2_error"],
                 "teacher_interface_relative_l2": teacher["interface_relative_l2"],
                 "predicted_interface_relative_l2": predicted["interface_relative_l2"],
+                "predicted_vs_teacher_interface_mse_gap": predicted["interface_metrics"]["mse"] - teacher["interface_metrics"]["mse"],
+                "predicted_vs_teacher_internal_mse_gap": predicted["internal_metrics"]["mse"] - teacher["internal_metrics"]["mse"],
             }
         )
         for key in extra_metric_keys:
@@ -1320,6 +1399,8 @@ def main() -> int:
             "q_normal_rmse",
             "port_T_env_rmse",
             "port_h_rmse",
+            "port_T_env_mae",
+            "port_log_h_mae",
             "q_surrogate_raw_rmse",
             "q_physics_rmse",
         ]

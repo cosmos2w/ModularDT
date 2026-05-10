@@ -556,6 +556,20 @@ class GlobalChannelThermalDataset(Dataset):
                     RuntimeWarning,
                     stacklevel=2,
                 )
+            self._has_structure_targets = (
+                sample_case_id is not None
+                and "env_module_influence_target" in h5["cases"][sample_case_id]
+                and "module_affinity_target" in h5["cases"][sample_case_id]
+            )
+            self.structure_target_num_env_tokens = int(h5.attrs.get("structure_target_num_env_tokens", 0))
+            if not self._has_structure_targets:
+                warnings.warn(
+                    "Packed global dataset does not contain organizer structure targets; using geometry-only "
+                    "fallback targets for structure losses. Re-run preprocess_channelthermal_dataset.py to store "
+                    "training-only solved-field structure supervision.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             self.interface_target_names = decode_string_array(
                 h5.get("interface_target_names", np.asarray(GLOBAL_INTERFACE_TARGET_NAMES, dtype="S"))[...]
             )
@@ -650,6 +664,51 @@ class GlobalChannelThermalDataset(Dataset):
         indices = _feature_indices(self.interface_condition_feature_names, requested, (0, 1, 2, 3, 6))
         return interface_condition[..., indices].astype(np.float32)
 
+    def _fallback_structure_targets(
+        self,
+        module_centers: np.ndarray,
+        heat_powers: np.ndarray,
+        module_present: np.ndarray,
+        lx: float,
+        ly: float,
+    ) -> Dict[str, np.ndarray]:
+        nx = 24
+        ny = 12
+        xs = np.linspace(0.0, float(lx), nx, dtype=np.float32)
+        ys = np.linspace(0.0, float(ly), ny, dtype=np.float32)
+        yy, xx = np.meshgrid(ys, xs, indexing="ij")
+        env_coords = np.stack([xx.reshape(-1), yy.reshape(-1)], axis=-1).astype(np.float32)
+        centers = np.asarray(module_centers, dtype=np.float32)
+        present = np.asarray(module_present, dtype=np.float32)
+        heat = np.abs(np.asarray(heat_powers, dtype=np.float32))
+        heat_norm = heat / max(float(np.max(heat)) if heat.size else 0.0, 1.0e-6)
+        dx = env_coords[:, None, 0] - centers[None, :, 0]
+        dy = env_coords[:, None, 1] - centers[None, :, 1]
+        dist = np.sqrt(dx * dx + dy * dy + 1.0e-8)
+        near = np.exp(-dist / 1.5)
+        plume = 0.5 * np.exp(-(np.abs(dy) / 0.9) ** 2) / (1.0 + np.exp(-np.maximum(dx, 0.0) / 2.0))
+        score = (near + plume + 0.15 * heat_norm[None, :]) * present[None, :]
+        row_sum = score.sum(axis=-1, keepdims=True)
+        fallback = present / max(float(np.sum(present)), 1.0)
+        env_module = np.where(row_sum > 1.0e-8, score / np.maximum(row_sum, 1.0e-8), fallback[None, :]).astype(np.float32)
+        mdx = centers[None, :, 0] - centers[:, None, 0]
+        mdy = centers[None, :, 1] - centers[:, None, 1]
+        mdist = np.sqrt(mdx * mdx + mdy * mdy + 1.0e-8)
+        affinity = (0.6 * np.exp(-mdist / 1.5) + 0.4 * np.exp(-(np.abs(mdy) / 0.9) ** 2)) * present[:, None] * present[None, :]
+        np.fill_diagonal(affinity, present)
+        affinity = affinity / np.maximum(affinity.sum(axis=-1, keepdims=True), 1.0e-8)
+        counts = np.bincount(env_module.argmax(axis=-1), minlength=module_present.shape[0]).astype(np.float32)
+        active = np.asarray([float(np.clip(np.sum(counts >= max(2.0, 0.04 * env_coords.shape[0])), 1.0, max(float(np.sum(present)), 1.0)))], dtype=np.float32)
+        return {
+            "env_token_coords": env_coords,
+            "env_module_influence_target": env_module.astype(np.float32),
+            "module_affinity_target": affinity.astype(np.float32),
+            "env_module_target_mask": np.ones(env_module.shape, dtype=np.float32),
+            "module_affinity_target_mask": (present[:, None] * present[None, :]).astype(np.float32),
+            "active_edge_count_target": active,
+            "has_solved_structure_targets": np.asarray([0.0], dtype=np.float32),
+        }
+
     def _local_module_params(
         self,
         heat_powers: np.ndarray,
@@ -711,6 +770,28 @@ class GlobalChannelThermalDataset(Dataset):
 
         teacher_port_tokens = self._teacher_port_tokens(interface_condition)
         local_module_params = self._local_module_params(heat_powers, interface_condition, material_params, module_present)
+        if self._has_structure_targets:
+            env_token_coords = group["structure_env_token_coords"][...].astype(np.float32)
+            env_module_target = group["env_module_influence_target"][...].astype(np.float32)
+            module_affinity_target = group["module_affinity_target"][...].astype(np.float32)
+            active_edge_count_target = (
+                group["active_edge_count_target"][...].astype(np.float32)
+                if "active_edge_count_target" in group
+                else np.asarray([0.0], dtype=np.float32)
+            )
+            structure_targets = {
+                "env_token_coords": env_token_coords,
+                "env_module_influence_target": env_module_target,
+                "module_affinity_target": module_affinity_target,
+                "env_module_target_mask": (module_present[None, :] > 0.5).astype(np.float32) * np.ones_like(env_module_target),
+                "module_affinity_target_mask": ((module_present[:, None] > 0.5) & (module_present[None, :] > 0.5)).astype(np.float32),
+                "active_edge_count_target": active_edge_count_target.reshape(1),
+                "has_solved_structure_targets": np.asarray([1.0], dtype=np.float32),
+            }
+            if "env_region_label" in group:
+                structure_targets["env_region_label"] = group["env_region_label"][...].astype(np.int64)
+        else:
+            structure_targets = self._fallback_structure_targets(module_centers, heat_powers, module_present, lx, ly)
 
         if self.normalize_inputs:
             heat_powers = self.normalizer.normalize_heat_power(heat_powers)
@@ -749,6 +830,7 @@ class GlobalChannelThermalDataset(Dataset):
             "interface_target": interface_target,
             "teacher_port_tokens": teacher_port_tokens,
             "local_module_params": local_module_params,
+            "structure_targets": structure_targets,
             "case_id": case_id,
         }
         if self.include_grid:
