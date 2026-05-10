@@ -12,6 +12,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from thermal_inverse_kpi import CONSTRAINT_NAMES
+from thermal_design_intent import DESIGN_INTENT_DIM, FIELD_INTENT_CHANNELS, OBJECTIVE_DIM
 
 
 def _activation(name: str = "silu") -> nn.Module:
@@ -97,6 +98,79 @@ class BehaviorOrgHead(nn.Module):
         return self.behavior(target_embedding), self.organization(target_embedding)
 
 
+class FieldIntentEncoder(nn.Module):
+    def __init__(self, in_channels: int, hidden_dim: int, out_dim: int, dropout: float) -> None:
+        super().__init__()
+        width = max(min(int(hidden_dim) // 2, 128), 32)
+        self.in_channels = int(in_channels)
+        self.net = nn.Sequential(
+            nn.Conv2d(self.in_channels, width, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.Dropout2d(float(dropout)) if dropout > 0.0 else nn.Identity(),
+            nn.Conv2d(width, width, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(width, int(out_dim)),
+            nn.LayerNorm(int(out_dim)),
+        )
+
+    def forward(self, maps: torch.Tensor) -> torch.Tensor:
+        return self.net(maps)
+
+
+class DesignIntentEncoder(nn.Module):
+    def __init__(
+        self,
+        *,
+        legacy_dim: int,
+        intent_dim: int,
+        objective_dim: int,
+        field_channels: int,
+        hidden_dim: int,
+        out_dim: int,
+        num_layers: int,
+        dropout: float,
+        use_legacy_kpi_vector: bool,
+    ) -> None:
+        super().__init__()
+        part_dim = max(int(out_dim) // 2, 32)
+        self.intent_dim = int(intent_dim)
+        self.objective_dim = int(objective_dim)
+        self.field_channels = int(field_channels)
+        self.use_legacy_kpi_vector = bool(use_legacy_kpi_vector)
+        self.intent_encoder = MLP(self.intent_dim, hidden_dim, part_dim, num_layers=max(num_layers, 2), dropout=dropout, final_norm=True)
+        self.objective_encoder = MLP(self.objective_dim, hidden_dim, part_dim, num_layers=2, dropout=dropout, final_norm=True)
+        self.field_encoder = FieldIntentEncoder(self.field_channels, hidden_dim, part_dim, dropout)
+        self.legacy_encoder = MLP(legacy_dim, hidden_dim, part_dim, num_layers=max(num_layers, 2), dropout=dropout, final_norm=True) if self.use_legacy_kpi_vector else None
+        self.fuse = MLP(part_dim * (4 if self.use_legacy_kpi_vector else 3), hidden_dim, out_dim, num_layers=2, dropout=dropout, final_norm=True)
+
+    def forward(
+        self,
+        target_spec_vector: torch.Tensor,
+        design_intent_vector: Optional[torch.Tensor],
+        objective_weight_vector: Optional[torch.Tensor],
+        field_intent_maps: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        bsz = target_spec_vector.shape[0]
+        device = target_spec_vector.device
+        dtype = target_spec_vector.dtype
+        if design_intent_vector is None:
+            design_intent_vector = torch.zeros(bsz, self.intent_dim, device=device, dtype=dtype)
+        if objective_weight_vector is None:
+            objective_weight_vector = torch.zeros(bsz, self.objective_dim, device=device, dtype=dtype)
+        if field_intent_maps is None:
+            field_intent_maps = torch.zeros(bsz, self.field_channels, 12, 24, device=device, dtype=dtype)
+        parts = [
+            self.intent_encoder(design_intent_vector),
+            self.objective_encoder(objective_weight_vector),
+            self.field_encoder(field_intent_maps),
+        ]
+        if self.legacy_encoder is not None:
+            parts.append(self.legacy_encoder(target_spec_vector))
+        return self.fuse(torch.cat(parts, dim=-1))
+
+
 class DesignVelocityNet(nn.Module):
     def __init__(
         self,
@@ -153,6 +227,13 @@ class InverseModelConfig:
     outlet_clearance: float = 0.25
     center_decode_mode: str = "clamp"
     latent_align_completeness_power: float = 0.5
+    conditioning_mode: str = "legacy_kpi"
+    use_legacy_kpi_vector: bool = True
+    design_intent_dim: int = DESIGN_INTENT_DIM
+    objective_dim: int = OBJECTIVE_DIM
+    field_intent_channels: int = len(FIELD_INTENT_CHANNELS)
+    conditioning_dropout_enabled: bool = False
+    conditioning_drop_probability: float = 0.0
 
     def __post_init__(self) -> None:
         self.max_num_modules = int(self.max_num_modules)
@@ -182,6 +263,14 @@ class InverseModelConfig:
         if policy not in allowed_policies:
             raise ValueError(f"heat_load_policy must be one of {sorted(allowed_policies)}, got {self.heat_load_policy!r}.")
         self.heat_load_policy = policy
+        conditioning_mode = str(self.conditioning_mode).lower().strip()
+        if conditioning_mode not in {"legacy_kpi", "design_intent"}:
+            raise ValueError("conditioning_mode must be 'legacy_kpi' or 'design_intent'.")
+        self.conditioning_mode = conditioning_mode
+        self.design_intent_dim = int(self.design_intent_dim)
+        self.objective_dim = int(self.objective_dim)
+        self.field_intent_channels = int(self.field_intent_channels)
+        self.conditioning_drop_probability = min(max(float(self.conditioning_drop_probability), 0.0), 1.0)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "InverseModelConfig":
@@ -410,6 +499,17 @@ class ThermalInverseDesignFlow(nn.Module):
         super().__init__()
         self.cfg = cfg if isinstance(cfg, InverseModelConfig) else InverseModelConfig.from_dict(cfg)
         self.target_encoder = TargetEncoder(self.cfg.target_dim, self.cfg.hidden_dim, self.cfg.target_embed_dim, self.cfg.num_layers, self.cfg.dropout)
+        self.design_intent_encoder = DesignIntentEncoder(
+            legacy_dim=self.cfg.target_dim,
+            intent_dim=self.cfg.design_intent_dim,
+            objective_dim=self.cfg.objective_dim,
+            field_channels=self.cfg.field_intent_channels,
+            hidden_dim=self.cfg.hidden_dim,
+            out_dim=self.cfg.target_embed_dim,
+            num_layers=self.cfg.num_layers,
+            dropout=self.cfg.dropout,
+            use_legacy_kpi_vector=self.cfg.use_legacy_kpi_vector,
+        )
         self.behavior_org_head = BehaviorOrgHead(
             self.cfg.target_embed_dim,
             self.cfg.hidden_dim,
@@ -444,8 +544,43 @@ class ThermalInverseDesignFlow(nn.Module):
     def heat_offset(self) -> int:
         return self.max_num_modules * 3
 
-    def encode_condition(self, target_spec_vector: torch.Tensor) -> Dict[str, torch.Tensor]:
-        embedding = self.target_encoder(target_spec_vector)
+    def _apply_condition_dropout(
+        self,
+        design_intent_vector: Optional[torch.Tensor],
+        objective_weight_vector: Optional[torch.Tensor],
+        field_intent_maps: Optional[torch.Tensor],
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        if not self.training or not self.cfg.conditioning_dropout_enabled or self.cfg.conditioning_drop_probability <= 0.0:
+            return design_intent_vector, objective_weight_vector, field_intent_maps
+        drop = float(self.cfg.conditioning_drop_probability)
+        if design_intent_vector is not None:
+            keep = (torch.rand(design_intent_vector.shape[0], 1, device=design_intent_vector.device) >= drop).to(design_intent_vector.dtype)
+            design_intent_vector = design_intent_vector * keep
+        if objective_weight_vector is not None:
+            keep = (torch.rand(objective_weight_vector.shape[0], 1, device=objective_weight_vector.device) >= drop).to(objective_weight_vector.dtype)
+            objective_weight_vector = objective_weight_vector * keep
+        if field_intent_maps is not None:
+            keep = (torch.rand(field_intent_maps.shape[0], 1, 1, 1, device=field_intent_maps.device) >= drop).to(field_intent_maps.dtype)
+            field_intent_maps = field_intent_maps * keep
+        return design_intent_vector, objective_weight_vector, field_intent_maps
+
+    def encode_condition(
+        self,
+        target_spec_vector: torch.Tensor,
+        *,
+        design_intent_vector: Optional[torch.Tensor] = None,
+        objective_weight_vector: Optional[torch.Tensor] = None,
+        field_intent_maps: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        if self.cfg.conditioning_mode == "design_intent":
+            design_intent_vector, objective_weight_vector, field_intent_maps = self._apply_condition_dropout(
+                design_intent_vector,
+                objective_weight_vector,
+                field_intent_maps,
+            )
+            embedding = self.design_intent_encoder(target_spec_vector, design_intent_vector, objective_weight_vector, field_intent_maps)
+        else:
+            embedding = self.target_encoder(target_spec_vector)
         behavior_hat, organization_hat = self.behavior_org_head(embedding)
         count_logits = self.count_head(embedding) if self.count_head is not None else torch.empty(
             embedding.shape[0], self.max_num_modules + 1, device=embedding.device, dtype=embedding.dtype
@@ -460,8 +595,8 @@ class ThermalInverseDesignFlow(nn.Module):
     def velocity(self, x_t: torch.Tensor, t: torch.Tensor, condition: Mapping[str, torch.Tensor]) -> torch.Tensor:
         return self.velocity_net(x_t, t, condition["target_embedding"], condition["behavior_latent_hat"], condition["organization_latent_hat"])
 
-    def forward(self, x_t: torch.Tensor, t: torch.Tensor, target_spec_vector: torch.Tensor) -> Dict[str, torch.Tensor]:
-        condition = self.encode_condition(target_spec_vector)
+    def forward(self, x_t: torch.Tensor, t: torch.Tensor, target_spec_vector: torch.Tensor, **condition_kwargs: torch.Tensor) -> Dict[str, torch.Tensor]:
+        condition = self.encode_condition(target_spec_vector, **condition_kwargs)
         condition["velocity"] = self.velocity(x_t, t, condition)
         return condition
 
@@ -539,7 +674,12 @@ class ThermalInverseDesignFlow(nn.Module):
         t = torch.rand(bsz, 1, device=x1.device, dtype=x1.dtype)
         x_t = (1.0 - t) * x0 + t * x1
         v_target = x1 - x0
-        condition = self.encode_condition(target_spec)
+        condition = self.encode_condition(
+            target_spec,
+            design_intent_vector=batch.get("design_intent_vector"),
+            objective_weight_vector=batch.get("objective_weight_vector"),
+            field_intent_maps=batch.get("field_intent_maps"),
+        )
         v_pred = self.velocity(x_t, t, condition)
         loss_flow = F.mse_loss(v_pred, v_target)
 
@@ -564,8 +704,10 @@ class ThermalInverseDesignFlow(nn.Module):
             align_weight_mean = align_weight.mean()
         x1_hat = x_t + (1.0 - t) * v_pred
         loss_validity = self._validity_prior(x1_hat)
+        loss_set_center = self._set_center_loss(x1_hat, x1, true_count)
         weights = {
             "flow_weight": 1.0,
+            "set_center_weight": 0.0,
             "count_weight": 0.1,
             "behavior_align_weight": 0.1,
             "organization_align_weight": 0.1,
@@ -575,6 +717,7 @@ class ThermalInverseDesignFlow(nn.Module):
             weights.update({str(k): float(v) for k, v in loss_weights.items()})
         total = (
             weights["flow_weight"] * loss_flow
+            + weights["set_center_weight"] * loss_set_center
             + weights["count_weight"] * loss_count
             + weights["behavior_align_weight"] * loss_behavior
             + weights["organization_align_weight"] * loss_organization
@@ -583,6 +726,7 @@ class ThermalInverseDesignFlow(nn.Module):
         metrics = {
             "loss_total": total.detach(),
             "loss_flow": loss_flow.detach(),
+            "loss_set_center": loss_set_center.detach(),
             "loss_count": loss_count.detach(),
             "loss_behavior": loss_behavior.detach(),
             "loss_organization": loss_organization.detach(),
@@ -591,6 +735,24 @@ class ThermalInverseDesignFlow(nn.Module):
             "latent_align_weight_mean": align_weight_mean.detach(),
         }
         return total, metrics
+
+    def _set_center_loss(self, pred_design: torch.Tensor, true_design: torch.Tensor, true_count: torch.Tensor) -> torch.Tensor:
+        pred_centers = self.decode_centers_norm_from_design_vec(pred_design).clone()
+        true_centers = true_design[:, : self.max_num_modules * 2].reshape(true_design.shape[0], self.max_num_modules, 2).clone()
+        pred_centers[..., 0] *= float(self.cfg.domain_length_x)
+        pred_centers[..., 1] *= float(self.cfg.domain_length_y)
+        true_centers[..., 0] *= float(self.cfg.domain_length_x)
+        true_centers[..., 1] *= float(self.cfg.domain_length_y)
+        losses = []
+        for i in range(pred_design.shape[0]):
+            n = int(true_count[i].item())
+            if n <= 0:
+                continue
+            pred_i = pred_centers[i, :n]
+            true_i = true_centers[i, :n]
+            dist = torch.cdist(pred_i[None], true_i[None], p=2).squeeze(0)
+            losses.append(0.5 * (dist.min(dim=1).values.square().mean() + dist.min(dim=0).values.square().mean()))
+        return torch.stack(losses).mean() if losses else pred_design.new_tensor(0.0)
 
     @torch.no_grad()
     def sample_designs(
@@ -604,6 +766,10 @@ class ThermalInverseDesignFlow(nn.Module):
         min_center_distance: Optional[float] = None,
         x_bounds: Optional[Tuple[float, float]] = None,
         y_bounds: Optional[Tuple[float, float]] = None,
+        design_intent_vector: Optional[torch.Tensor | np.ndarray] = None,
+        objective_weight_vector: Optional[torch.Tensor | np.ndarray] = None,
+        field_intent_maps: Optional[torch.Tensor | np.ndarray] = None,
+        guidance_scale: float = 1.0,
         device: Optional[torch.device] = None,
     ) -> List[Dict[str, Any]]:
         was_training = self.training
@@ -622,17 +788,40 @@ class ThermalInverseDesignFlow(nn.Module):
         if seed is not None:
             generator.manual_seed(int(seed))
         x = torch.randn((int(n_samples), self.design_dim), generator=generator, device=device, dtype=torch.float32)
-        condition = self.encode_condition(target)
+        intent = torch.as_tensor(design_intent_vector, dtype=torch.float32, device=device) if design_intent_vector is not None else None
+        objective = torch.as_tensor(objective_weight_vector, dtype=torch.float32, device=device) if objective_weight_vector is not None else None
+        maps = torch.as_tensor(field_intent_maps, dtype=torch.float32, device=device) if field_intent_maps is not None else None
+        if intent is not None and intent.ndim == 1:
+            intent = intent[None, :].expand(int(n_samples), -1).contiguous()
+        if objective is not None and objective.ndim == 1:
+            objective = objective[None, :].expand(int(n_samples), -1).contiguous()
+        if maps is not None and maps.ndim == 3:
+            maps = maps[None].expand(int(n_samples), -1, -1, -1).contiguous()
+        condition = self.encode_condition(target, design_intent_vector=intent, objective_weight_vector=objective, field_intent_maps=maps)
+        uncond_condition = None
+        if float(guidance_scale) > 1.0:
+            uncond_condition = self.encode_condition(
+                target,
+                design_intent_vector=torch.zeros_like(intent) if intent is not None else None,
+                objective_weight_vector=torch.zeros_like(objective) if objective is not None else None,
+                field_intent_maps=torch.zeros_like(maps) if maps is not None else None,
+            )
         steps = max(int(n_steps), 1)
         dt = 1.0 / float(steps)
         solver = str(self.cfg.ode_solver).lower()
         for step in range(steps):
             t0 = torch.full((int(n_samples), 1), step / float(steps), device=device, dtype=x.dtype)
             v0 = self.velocity(x, t0, condition)
+            if uncond_condition is not None:
+                v0_uncond = self.velocity(x, t0, uncond_condition)
+                v0 = v0_uncond + float(guidance_scale) * (v0 - v0_uncond)
             if solver == "heun":
                 x_euler = x + dt * v0
                 t1 = torch.full((int(n_samples), 1), (step + 1) / float(steps), device=device, dtype=x.dtype)
                 v1 = self.velocity(x_euler, t1, condition)
+                if uncond_condition is not None:
+                    v1_uncond = self.velocity(x_euler, t1, uncond_condition)
+                    v1 = v1_uncond + float(guidance_scale) * (v1 - v1_uncond)
                 x = x + 0.5 * dt * (v0 + v1)
             else:
                 x = x + dt * v0

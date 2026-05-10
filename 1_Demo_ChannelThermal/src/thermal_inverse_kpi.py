@@ -71,6 +71,15 @@ CONSTRAINT_NAMES: Tuple[str, ...] = (
 )
 
 NONNEGATIVE_KPI_NAMES = frozenset(DEFAULT_KPI_NAMES)
+LAYOUT_SPREAD_PREFERENCE_NAMES = frozenset(
+    (
+        "min_x_coverage",
+        "min_y_coverage",
+        "min_bbox_area",
+        "min_mean_pair_distance",
+        "prefer_count",
+    )
+)
 
 
 def _as_numpy(array: Any) -> np.ndarray:
@@ -90,6 +99,33 @@ def _finite_float(value: Any, default: float = 0.0) -> float:
 def _finite_array(value: Any) -> np.ndarray:
     arr = _as_numpy(value).astype(np.float64, copy=False)
     return arr[np.isfinite(arr)]
+
+
+def layout_spread_metrics(module_centers: Any, *, num_modules: Optional[int] = None) -> Dict[str, float]:
+    centers = _as_numpy(module_centers).astype(np.float64, copy=False).reshape(-1, 2)
+    if num_modules is not None:
+        centers = centers[: max(int(num_modules), 0)]
+    centers = centers[np.all(np.isfinite(centers), axis=1)] if centers.size else centers.reshape(0, 2)
+    count = int(centers.shape[0])
+    if count <= 0:
+        return {
+            "x_coverage": 0.0,
+            "y_coverage": 0.0,
+            "bbox_area": 0.0,
+            "mean_pair_distance": 0.0,
+        }
+    x_cov = float(np.max(centers[:, 0]) - np.min(centers[:, 0])) if count >= 2 else 0.0
+    y_cov = float(np.max(centers[:, 1]) - np.min(centers[:, 1])) if count >= 2 else 0.0
+    pair = []
+    for i in range(count):
+        for j in range(i + 1, count):
+            pair.append(float(np.linalg.norm(centers[i] - centers[j])))
+    return {
+        "x_coverage": x_cov,
+        "y_coverage": y_cov,
+        "bbox_area": float(x_cov * y_cov),
+        "mean_pair_distance": float(np.mean(pair)) if pair else 0.0,
+    }
 
 
 def _channel_index(channel_order: Optional[Sequence[str]], name: str, fallback: int, field_dim: int) -> int:
@@ -848,6 +884,42 @@ def _scale_for_error(*values: float) -> float:
     return max(finite + [1.0])
 
 
+def _add_spread_preference_penalties(
+    kpi_dict: Mapping[str, Any],
+    target_spec: Mapping[str, Any],
+) -> Tuple[float, Dict[str, Dict[str, float]]]:
+    prefs = target_spec.get("preferences", {})
+    if not isinstance(prefs, Mapping):
+        return 0.0, {}
+    total = 0.0
+    details: Dict[str, Dict[str, float]] = {}
+
+    def _penalty_min(pref_key: str, actual_key: str) -> None:
+        nonlocal total
+        if prefs.get(pref_key) is None:
+            return
+        target = _finite_float(prefs.get(pref_key), float("nan"))
+        actual = _finite_float(kpi_dict.get(actual_key), float("nan"))
+        if not math.isfinite(target) or target <= 0.0 or not math.isfinite(actual):
+            return
+        penalty = max(0.0, target - actual) / max(abs(target), 1.0)
+        details[pref_key] = {"target": float(target), "actual": float(actual), "penalty": float(penalty)}
+        total += penalty
+
+    _penalty_min("min_x_coverage", "x_coverage")
+    _penalty_min("min_y_coverage", "y_coverage")
+    _penalty_min("min_bbox_area", "bbox_area")
+    _penalty_min("min_mean_pair_distance", "mean_pair_distance")
+    if prefs.get("prefer_count") is not None:
+        target = _finite_float(prefs.get("prefer_count"), float("nan"))
+        actual = _finite_float(kpi_dict.get("num_modules", kpi_dict.get("count")), float("nan"))
+        if math.isfinite(target) and target > 0.0 and math.isfinite(actual):
+            penalty = abs(actual - target) / max(abs(target), 1.0)
+            details["prefer_count"] = {"target": float(target), "actual": float(actual), "penalty": float(penalty)}
+            total += penalty
+    return float(total), details
+
+
 def _scale_for_target(
     name: str,
     names: Sequence[str],
@@ -1005,17 +1077,20 @@ def score_candidate_kpis(kpi_dict: Mapping[str, Any], target_spec: Mapping[str, 
     if bool(kpi_dict.get("valid", True)) is False:
         feasibility_penalty += 10.0
 
+    spread_preference_penalty, per_preference_penalties = _add_spread_preference_penalties(kpi_dict, target_spec)
     kpi_violation = weighted_violation / max(hard_weight_total, 1.0e-8)
     preference_reward = weighted_reward / max(preference_weight_total, 1.0e-8) if preference_weight_total > 0.0 else 0.0
     preference_reward_weight = _finite_float(target_spec.get("preference_reward_weight", 0.1), 0.1)
-    total_score = float(feasibility_penalty + kpi_violation - preference_reward_weight * preference_reward)
+    total_score = float(feasibility_penalty + kpi_violation + spread_preference_penalty - preference_reward_weight * preference_reward)
     return {
         "total_score": total_score,
         "feasibility_penalty": float(feasibility_penalty),
         "kpi_violation": float(kpi_violation),
+        "spread_preference_penalty": float(spread_preference_penalty),
         "preference_reward": float(preference_reward),
         "kpi_score": float(kpi_violation),
         "per_kpi_errors": per_errors,
+        "per_preference_penalties": per_preference_penalties,
         "per_preference_rewards": per_preference_rewards,
         "constraint_penalty": float(feasibility_penalty),
         "missing_required_kpis": missing_required,
@@ -1023,3 +1098,84 @@ def score_candidate_kpis(kpi_dict: Mapping[str, Any], target_spec: Mapping[str, 
         "scored_weight": float(hard_weight_total),
         "preference_weight": float(preference_weight_total),
     }
+
+
+def _quantile_value(stats: Mapping[str, Any], name: str, quantile_key: str) -> Optional[float]:
+    entry = stats.get(name)
+    if not isinstance(entry, Mapping):
+        return None
+    value = entry.get(quantile_key)
+    if value is None:
+        return None
+    scalar = _finite_float(value, float("nan"))
+    return scalar if math.isfinite(scalar) else None
+
+
+def calibrate_target_spec_to_kpi_quantiles(
+    payload: Mapping[str, Any],
+    kpi_distribution_summary: Mapping[str, Any],
+    *,
+    max_replacement_quantile: str = "p10",
+    min_replacement_quantile: str = "p90",
+    aggressive_max_threshold_quantile: str = "p05",
+    aggressive_min_threshold_quantile: str = "p95",
+) -> Dict[str, Any]:
+    """Return a copy of a target JSON with impossible-looking bounds relaxed.
+
+    Only KPI entries already present in ``payload["kpis"]`` are changed. The
+    original user payload is not mutated.
+    """
+
+    resolved: Dict[str, Any] = dict(payload)
+    raw_kpis = payload.get("kpis", {})
+    resolved_kpis: Dict[str, Any] = {}
+    changes = []
+    kpi_stats = kpi_distribution_summary.get("kpis", kpi_distribution_summary)
+    for name, raw_entry in dict(raw_kpis or {}).items():
+        entry = dict(raw_entry) if isinstance(raw_entry, Mapping) else {"mode": "exact", "value": raw_entry}
+        mode = str(entry.get("mode", "exact")).lower().strip()
+        if mode in {"max", "upper", "at_most"}:
+            high = _finite_float(entry.get("high", entry.get("upper")), float("nan"))
+            threshold = _quantile_value(kpi_stats, str(name), aggressive_max_threshold_quantile)
+            replacement = _quantile_value(kpi_stats, str(name), max_replacement_quantile)
+            if math.isfinite(high) and threshold is not None and replacement is not None and high < threshold:
+                old = high
+                entry["high"] = float(replacement)
+                entry.pop("upper", None)
+                changes.append(
+                    {
+                        "kpi": str(name),
+                        "mode": mode,
+                        "old_high": float(old),
+                        "new_high": float(replacement),
+                        "trigger_quantile": aggressive_max_threshold_quantile,
+                        "replacement_quantile": max_replacement_quantile,
+                    }
+                )
+        elif mode in {"min", "lower", "at_least"}:
+            low = _finite_float(entry.get("low", entry.get("lower")), float("nan"))
+            threshold = _quantile_value(kpi_stats, str(name), aggressive_min_threshold_quantile)
+            replacement = _quantile_value(kpi_stats, str(name), min_replacement_quantile)
+            if math.isfinite(low) and threshold is not None and replacement is not None and low > threshold:
+                old = low
+                entry["low"] = float(replacement)
+                entry.pop("lower", None)
+                changes.append(
+                    {
+                        "kpi": str(name),
+                        "mode": mode,
+                        "old_low": float(old),
+                        "new_low": float(replacement),
+                        "trigger_quantile": aggressive_min_threshold_quantile,
+                        "replacement_quantile": min_replacement_quantile,
+                    }
+                )
+        resolved_kpis[str(name)] = entry
+    resolved["kpis"] = resolved_kpis
+    resolved["_calibration"] = {
+        "enabled": True,
+        "changes": changes,
+        "max_replacement_quantile": max_replacement_quantile,
+        "min_replacement_quantile": min_replacement_quantile,
+    }
+    return resolved

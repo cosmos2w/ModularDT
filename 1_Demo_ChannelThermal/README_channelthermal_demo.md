@@ -809,6 +809,64 @@ Epoch logs include mean active KPI fraction, mean active KPI count, per-KPI
 active frequencies, and exact/range/max/min target-mode frequencies in both
 `loss_history.csv` and `training_metrics.csv`.
 
+Inverse layout generation is one-to-many: several different module layouts can
+meet the same thermal target. A high `val_loss_total` can therefore reflect
+held-out design-vector ambiguity rather than poor inverse-design behavior. Use
+the forward-verified KPI scores as the main inverse-design metric:
+`best_model.pt` remains the lowest supervised validation-loss checkpoint for
+debugging, while `best_verified_model.pt` tracks the lowest configured
+forward-verification score. In `conditioning.mode="design_intent"`,
+`best_verified_model.pt` tracks the lowest design-intent score, such as
+`val_design_intent_score_battery_balanced_pack_intent`; otherwise it falls
+back to the legacy forward KPI score.
+
+The full KPI list is now primarily diagnostic/reporting surface. The v2 inverse
+problem is intent-conditioned thermal layout generation: compact scenario and
+constraint descriptors, objective weights, low-resolution spatial maps, and
+optional legacy KPI targets condition generation. Old KPI-target JSONs still
+work and are converted to a compatible intent internally when possible.
+
+Design-intent JSONs live under `inverse_targets_v2/` and use this shape:
+
+```json
+{
+  "name": "battery_balanced_pack_intent",
+  "scenario": {"num_modules_min": 4, "num_modules_max": 8},
+  "geometry_constraints": {
+    "min_center_distance": 1.15,
+    "x_span": [2.0, 10.0],
+    "y_span": [0.7, 3.3],
+    "keepout_boxes": [],
+    "protected_boxes": []
+  },
+  "thermal_limits": {
+    "solid_temperature_max": 1.8,
+    "module_temperature_spread_max": 0.25,
+    "pressure_drop_max": 0.12
+  },
+  "objective_weights": {
+    "safety": 1.0,
+    "uniformity": 0.8,
+    "pressure": 0.4,
+    "outlet_mixing": 0.5,
+    "wall_protection": 0.5,
+    "plume_avoidance": 0.8,
+    "coverage": 0.3
+  },
+  "field_preferences": {
+    "avoid_downstream_hot_plumes": true,
+    "protect_wall_band": true,
+    "protect_outlet_uniformity": true
+  }
+}
+```
+
+Field-aware preferences are encoded as compact 24x12 maps:
+protected-region, wall-risk, outlet-profile, plume-avoidance, and keepout
+channels. These maps feed a small `FieldIntentEncoder` and are also used in
+evaluation overlays. Predicted/autonomous frozen-forward verification remains
+the real design mode; teacher forcing is not used for ranking inverse layouts.
+
 Heat loads are controlled by `inverse_model.heat_load_policy` when
 `generate_heat_power=false`:
 
@@ -884,9 +942,54 @@ Evaluate a target:
 ```bash
 python src/evaluate_inverse.py \
   --inverse-run auto \
-  --target inverse_targets/low_peak_uniform_pack_demo.json \
-  --n-samples 64 \
-  --n-steps 32
+  --target inverse_targets_v2/battery_balanced_pack_intent.json \
+  --n-samples 128 \
+  --n-steps 16 \
+  --count-mode uniform \
+  --guidance-scale 1.0
+```
+
+`evaluate_inverse.py` uses `best_verified_model.pt` by default. The small
+smoke-test settings are available with explicit overrides or `--quick`:
+
+```bash
+python src/evaluate_inverse.py --inverse-run auto \
+  --target inverse_targets_v2/battery_balanced_pack_intent.json \
+  --quick
+```
+
+Before treating a demo target as a training objective, check its feasibility
+against the training distribution. Evaluation writes
+`target_feasibility_report.json`, warning when requested KPI bounds fall
+outside the train p01-p99 range or outside min-max. It also writes
+`target_vs_verified_kpis_normalized.png` plus CSV/JSON tables where zero means
+the limit is satisfied and positive values show normalized violations. Targets
+are not changed by default. For demo exploration only, use
+`--calibrate-target-to-data` to relax aggressive max/min bounds to achievable
+training quantiles and save `calibrated_target_spec_resolved.json`.
+
+For v2 intent targets, evaluation ranks by `design_intent_score`, not by the
+legacy KPI score. The score combines hard feasibility penalties for geometry,
+pressure, solid peak temperature, and module spread with weighted objectives
+for safety, uniformity, pressure, outlet mixing, wall protection, plume
+avoidance, and coverage. It also writes `design_intent_score_breakdown.png`,
+`best_layout_field_risk_overlay.png`, `candidate_pareto_scatter.png`,
+`design_intent_score_breakdown.csv`, `all_kpis_verified.csv`, and
+`field_penalty_summary.json`.
+
+To avoid eight visually identical top panels when the sample pool contains
+alternatives, enable diversity-aware display ranking:
+
+```bash
+python src/evaluate_inverse.py \
+  --inverse-run auto \
+  --target inverse_targets_v2/battery_balanced_pack_intent.json \
+  --n-samples 128 \
+  --n-steps 16 \
+  --count-mode uniform \
+  --candidate-pool-multiplier 2 \
+  --diversity-rerank-weight 0.15 \
+  --diversity-rerank-top-k 8
 ```
 
 Target JSONs use top-level layout constraints plus KPI entries:
@@ -938,6 +1041,23 @@ For fixed target-JSON validation during training, set:
 At each verification interval the trainer reports
 `val_forward_score_reconstruct`, `val_forward_score_<target_name>`,
 `validity_rate_<target_name>`, and `best_kpi_violation_<target_name>`.
-Target preferences currently supported are `x_span`, `y_span`, and
-`avoid_wall_hotspots`; unsupported preferences are warned and written to the
-evaluation summary.
+It also logs collapse diagnostics including `val_candidate_diversity_raw`,
+`val_candidate_diversity_top`, `val_count_histogram`, `val_mean_bbox_area`,
+and `val_mean_pair_distance`.
+
+Design-intent training uses Pareto-style augmentation: objective weights are
+sampled from a Dirichlet distribution, thermal limits can be sampled from
+training KPI quantiles, and field preferences are randomly toggled. Condition
+dropout is available through `conditioning_dropout`; `--guidance-scale` uses a
+conditional/unconditional velocity interpolation at sampling time when the
+model was trained with the v2 condition path. The `forward_guidance` block is
+present for opt-in replay/self-improvement experiments and remains disabled by
+default because frozen-forward verification is comparatively expensive.
+
+Target preferences currently supported are `x_span`, `y_span`,
+`avoid_wall_hotspots`, and optional spread/count preferences:
+`min_x_coverage`, `min_y_coverage`, `min_bbox_area`,
+`min_mean_pair_distance`, and `prefer_count`. Spread/count preferences add
+nonnegative ranking penalties only when present in the target JSON; `x_span`
+and `y_span` remain hard clipping bounds, not spread objectives. Unsupported
+preferences are warned and written to the evaluation summary.

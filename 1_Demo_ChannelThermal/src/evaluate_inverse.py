@@ -23,7 +23,20 @@ from tqdm.auto import tqdm
 from channelthermal_datasets import CHANNEL_ORDER
 from channelthermal_model_utils import current_timestamp, load_trusted_checkpoint, resolve_demo_path, select_device, strip_module_prefix, write_json
 from model_inverse import ThermalInverseDesignFlow, channel_clearance_diagnostics, repair_channel_design
-from thermal_inverse_kpi import DEFAULT_KPI_NAMES, build_target_spec_vector, score_candidate_kpis, compute_steady_thermal_kpis
+from thermal_inverse_kpi import (
+    DEFAULT_KPI_NAMES,
+    build_target_spec_vector,
+    calibrate_target_spec_to_kpi_quantiles,
+    compute_steady_thermal_kpis,
+    layout_spread_metrics,
+    score_candidate_kpis,
+)
+from thermal_design_intent import (
+    build_design_intent_arrays,
+    compute_design_intent_score,
+    is_design_intent_payload,
+    normalize_intent_payload,
+)
 from train_inverse import (
     ThermalInverseDesignDataset,
     load_forward_model,
@@ -35,12 +48,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a ChannelThermal inverse-design checkpoint.")
     parser.add_argument("--inverse-run", type=str, default="auto", help="Inverse run directory, checkpoint path, or auto.")
     parser.add_argument("--checkpoint-name", type=str, default="best_verified_model.pt", help="Inverse checkpoint filename or fallback selector.")
-    parser.add_argument("--target", type=str, required=True, help="Target JSON path.")
+    parser.add_argument("--target", type=str, default=None, help="Target JSON path. If omitted, derive the target from --reference-split/--reference-case-index.")
     parser.add_argument("--dataset", type=str, default=None, help="Packed HDF5 override for fixed conditions/reference grid.")
     parser.add_argument("--reference-split", type=str, default="test", help="Dataset split used for fixed conditions.")
     parser.add_argument("--reference-case-index", type=int, default=0, help="Reference case index in split.")
-    parser.add_argument("--n-samples", type=int, default=64, help="Number of inverse candidates to sample.")
-    parser.add_argument("--n-steps", type=int, default=4, help="Rectified-flow ODE steps.")
+    parser.add_argument("--n-samples", type=int, default=128, help="Number of inverse candidates to sample. Default: 128, or 8 with --quick/--smoke.")
+    parser.add_argument("--n-steps", type=int, default=4, help="Rectified-flow ODE steps. Default: 16, or 4 with --quick/--smoke.")
     parser.add_argument(
         "--count-mode",
         type=str,
@@ -56,6 +69,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--forward-checkpoint-name", type=str, default=None, help="Override forward_model.checkpoint_name.")
     parser.add_argument("--local-surrogate-checkpoint-path", type=str, default=None, help="Override local surrogate checkpoint path.")
     parser.add_argument("--diagnostic-teacher-mode", action="store_true", help="Reserved diagnostic flag; ranking still uses predicted/autonomous mode.")
+    parser.add_argument("--quick", action="store_true", help="Use small smoke-test defaults when n-samples/n-steps are omitted.")
+    parser.add_argument("--smoke", action="store_true", help="Alias for --quick.")
+    parser.add_argument("--calibrate-target-to-data", action="store_true", help="Relax aggressive target bounds to training-distribution quantiles and save the resolved calibrated target.")
+    parser.add_argument("--diversity-rerank-weight", type=float, default=0.15, help="MMR-style diversity reranking strength for displayed/saved top candidates.")
+    parser.add_argument("--diversity-rerank-top-k", type=int, default=8, help="Number of top candidates to diversity-rerank for plots/NPZ.")
+    parser.add_argument("--candidate-pool-multiplier", type=float, default=1.0, help="Sample a larger pool before selecting n-samples candidates.")
+    parser.add_argument("--guidance-scale", type=float, default=1.0, help="Conditional/unconditional velocity guidance scale for v2 design-intent sampling.")
     return parser.parse_args()
 
 
@@ -105,7 +125,13 @@ def resolve_inverse_checkpoint(inverse_run: str, checkpoint_name: str) -> Path:
 def load_inverse_checkpoint(path: Path, device: torch.device) -> Tuple[ThermalInverseDesignFlow, Dict[str, Any]]:
     checkpoint = load_trusted_checkpoint(path, map_location=device)
     model = ThermalInverseDesignFlow(checkpoint["model_config"]).to(device)
-    model.load_state_dict(strip_module_prefix(checkpoint["model_state_dict"]), strict=True)
+    incompatible = model.load_state_dict(strip_module_prefix(checkpoint["model_state_dict"]), strict=False)
+    missing = list(getattr(incompatible, "missing_keys", []))
+    unexpected = list(getattr(incompatible, "unexpected_keys", []))
+    if missing:
+        print(f"[inverse] missing checkpoint keys ({len(missing)}): {missing[:12]}{' ...' if len(missing) > 12 else ''}")
+    if unexpected:
+        print(f"[inverse] unexpected checkpoint keys ({len(unexpected)}): {unexpected[:12]}{' ...' if len(unexpected) > 12 else ''}")
     model.eval()
     return model, checkpoint
 
@@ -114,10 +140,124 @@ def load_target_payload(path: str | Path) -> Dict[str, Any]:
     target_path = resolve_demo_path(path)
     with target_path.open("r", encoding="utf-8") as f:
         payload = json.load(f)
-    if "kpis" not in payload:
-        raise ValueError(f"Target JSON must contain a 'kpis' block: {target_path}")
+    if "kpis" not in payload and not is_design_intent_payload(payload):
+        raise ValueError(f"Target JSON must contain a 'kpis' block or v2 design-intent blocks: {target_path}")
     payload["_path"] = str(target_path)
     return payload
+
+
+def load_kpi_distribution_summary(checkpoint: Mapping[str, Any], inverse_path: Path) -> Dict[str, Any]:
+    summary = checkpoint.get("kpi_distribution_summary")
+    if isinstance(summary, Mapping) and summary:
+        return dict(summary)
+    path = inverse_path.parent / "kpi_distribution_summary.json"
+    if path.exists():
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _target_entry_values(entry: Any) -> List[Tuple[str, float]]:
+    if not isinstance(entry, Mapping):
+        try:
+            return [("value", float(entry))]
+        except (TypeError, ValueError):
+            return []
+    mode = str(entry.get("mode", "exact")).lower().strip()
+    out: List[Tuple[str, float]] = []
+    if mode in {"range", "between"}:
+        for label, keys in (("low", ("low", "lower")), ("high", ("high", "upper"))):
+            for key in keys:
+                if entry.get(key) is not None:
+                    out.append((label, float(entry[key])))
+                    break
+    elif mode in {"max", "upper", "at_most"}:
+        value = entry.get("high", entry.get("upper"))
+        if value is not None:
+            out.append(("high", float(value)))
+    elif mode in {"min", "lower", "at_least"}:
+        value = entry.get("low", entry.get("lower"))
+        if value is not None:
+            out.append(("low", float(value)))
+    else:
+        value = entry.get("value", entry.get("target"))
+        if value is not None:
+            out.append(("value", float(value)))
+    return [(label, value) for label, value in out if math.isfinite(value)]
+
+
+def _percentile_estimate(value: float, stats: Mapping[str, Any]) -> Optional[float]:
+    points = [
+        ("min", 0.0),
+        ("p01", 1.0),
+        ("p05", 5.0),
+        ("p10", 10.0),
+        ("p25", 25.0),
+        ("p50", 50.0),
+        ("p75", 75.0),
+        ("p90", 90.0),
+        ("p95", 95.0),
+        ("p99", 99.0),
+        ("max", 100.0),
+    ]
+    pairs = [(float(stats[key]), pct) for key, pct in points if key in stats and math.isfinite(float(stats[key]))]
+    if not pairs:
+        return None
+    pairs.sort(key=lambda pair: pair[0])
+    if value <= pairs[0][0]:
+        return pairs[0][1]
+    if value >= pairs[-1][0]:
+        return pairs[-1][1]
+    for (v0, p0), (v1, p1) in zip(pairs[:-1], pairs[1:]):
+        if v0 <= value <= v1:
+            if abs(v1 - v0) < 1.0e-12:
+                return 0.5 * (p0 + p1)
+            return p0 + (value - v0) * (p1 - p0) / (v1 - v0)
+    return None
+
+
+def target_feasibility_report(payload: Mapping[str, Any], kpi_distribution_summary: Mapping[str, Any]) -> Dict[str, Any]:
+    kpi_stats = kpi_distribution_summary.get("kpis", kpi_distribution_summary)
+    entries = []
+    warnings = []
+    for name, raw_entry in dict(payload.get("kpis", {}) or {}).items():
+        stats = kpi_stats.get(str(name), {}) if isinstance(kpi_stats, Mapping) else {}
+        if not isinstance(stats, Mapping) or int(stats.get("count", 0) or 0) <= 0:
+            continue
+        mean = float(stats.get("mean", float("nan")))
+        std = float(stats.get("std", float("nan")))
+        p01 = float(stats.get("p01", float("nan")))
+        p99 = float(stats.get("p99", float("nan")))
+        vmin = float(stats.get("min", float("nan")))
+        vmax = float(stats.get("max", float("nan")))
+        for bound_name, value in _target_entry_values(raw_entry):
+            z = (value - mean) / std if math.isfinite(mean) and math.isfinite(std) and abs(std) > 1.0e-12 else float("nan")
+            pct = _percentile_estimate(value, stats)
+            outside_min_max = (math.isfinite(vmin) and value < vmin) or (math.isfinite(vmax) and value > vmax)
+            outside_p01_p99 = (math.isfinite(p01) and value < p01) or (math.isfinite(p99) and value > p99)
+            entry = {
+                "kpi": str(name),
+                "bound": bound_name,
+                "target_value": float(value),
+                "train_min": vmin,
+                "train_p01": p01,
+                "train_p05": float(stats.get("p05", float("nan"))),
+                "train_p50": float(stats.get("p50", float("nan"))),
+                "train_p95": float(stats.get("p95", float("nan"))),
+                "train_p99": p99,
+                "train_max": vmax,
+                "z_score": z,
+                "percentile_estimate": pct,
+                "outside_p01_p99": bool(outside_p01_p99),
+                "outside_min_max": bool(outside_min_max),
+            }
+            entries.append(entry)
+            if outside_min_max or outside_p01_p99:
+                scope = "min-max" if outside_min_max else "p01-p99"
+                msg = f"{name}.{bound_name}={value:.6g} is outside training {scope} (p01={p01:.6g}, p99={p99:.6g}, min={vmin:.6g}, max={vmax:.6g})."
+                warnings.append(msg)
+                print(f"[target-feasibility] warning: {msg}")
+    return {"entries": entries, "warnings": warnings, "summary_available": bool(entries)}
 
 
 def target_spec_from_payload(
@@ -130,18 +270,28 @@ def target_spec_from_payload(
     train_cfg = checkpoint.get("train_config", {})
     target_cfg = train_cfg.get("target_kpis", {}) if isinstance(train_cfg, Mapping) else {}
     prefs = payload.get("preferences", {}) if isinstance(payload.get("preferences", {}), Mapping) else {}
+    intent_arrays = build_design_intent_arrays(
+        payload,
+        max_num_modules=model.max_num_modules,
+        domain_length_x=float(model.cfg.domain_length_x),
+        domain_length_y=float(model.cfg.domain_length_y),
+        heat_power_scale=float(model.cfg.heat_power_scale),
+    )
+    normalized_intent = intent_arrays["intent"]
     kpis = dict(payload.get("kpis", {}))
     preference_warnings: List[str] = []
     if bool(prefs.get("avoid_wall_hotspots", False)) and "wall_hot_area_fraction" not in kpis:
         kpis["wall_hot_area_fraction"] = {"mode": "max", "high": 0.08, "weight": 0.5}
+    scenario = normalized_intent.get("scenario", {}) if isinstance(normalized_intent.get("scenario"), Mapping) else {}
+    geometry = normalized_intent.get("geometry_constraints", {}) if isinstance(normalized_intent.get("geometry_constraints"), Mapping) else {}
     constraints = {
-        "num_modules_min": payload.get("num_modules_min", payload.get("num_cylinders_min")),
-        "num_modules_max": payload.get("num_modules_max", payload.get("num_cylinders_max")),
-        "min_center_distance": payload.get("min_center_distance", prefs.get("min_center_distance")),
-        "wall_clearance": payload.get("wall_clearance", prefs.get("wall_clearance")),
-        "inlet_clearance": payload.get("inlet_clearance", prefs.get("inlet_clearance")),
-        "outlet_clearance": payload.get("outlet_clearance", prefs.get("outlet_clearance")),
-        "heat_power_total": payload.get("heat_power_total"),
+        "num_modules_min": scenario.get("num_modules_min", payload.get("num_modules_min", payload.get("num_cylinders_min"))),
+        "num_modules_max": scenario.get("num_modules_max", payload.get("num_modules_max", payload.get("num_cylinders_max"))),
+        "min_center_distance": geometry.get("min_center_distance", payload.get("min_center_distance", prefs.get("min_center_distance"))),
+        "wall_clearance": geometry.get("wall_clearance", payload.get("wall_clearance", prefs.get("wall_clearance"))),
+        "inlet_clearance": geometry.get("inlet_clearance", payload.get("inlet_clearance", prefs.get("inlet_clearance"))),
+        "outlet_clearance": geometry.get("outlet_clearance", payload.get("outlet_clearance", prefs.get("outlet_clearance"))),
+        "heat_power_total": scenario.get("heat_power_total", payload.get("heat_power_total")),
     }
     vector = build_target_spec_vector(
         kpi_targets=kpis,
@@ -160,6 +310,12 @@ def target_spec_from_payload(
         heat_power_scale=float(model.cfg.heat_power_scale),
         return_spec=False,
     )
+    thermal_limits_payload = payload.get("temperature_limits", target_cfg.get("temperature_limits"))
+    if thermal_limits_payload is None and isinstance(normalized_intent.get("thermal_limits"), Mapping):
+        thermal_limits_payload = {
+            "wall_hot_delta_T": normalized_intent["thermal_limits"].get("wall_hot_delta_T"),
+            "outlet_hot_delta_T": normalized_intent["thermal_limits"].get("outlet_hot_delta_T"),
+        }
     return {
         "name": payload.get("name", "inverse_target"),
         "vector": vector,
@@ -169,9 +325,89 @@ def target_spec_from_payload(
         "constraints": constraints,
         "preferences": dict(prefs),
         "preference_warnings": preference_warnings,
-        "temperature_limits": payload.get("temperature_limits", target_cfg.get("temperature_limits")),
+        "temperature_limits": thermal_limits_payload,
         "target_payload": dict(payload),
+        "design_intent": normalized_intent,
+        "is_design_intent": bool(is_design_intent_payload(payload)),
+        "design_intent_vector": intent_arrays["design_intent_vector"],
+        "objective_weight_vector": intent_arrays["objective_weight_vector"],
+        "field_intent_maps": intent_arrays["field_intent_maps"],
+        "x_bounds": intent_arrays["x_bounds"],
+        "y_bounds": intent_arrays["y_bounds"],
     }
+
+
+def target_payload_from_reference_record(record: Any, model: ThermalInverseDesignFlow) -> Dict[str, Any]:
+    return {
+        "name": f"reference_{record.split}_{record.case_id}",
+        "scenario": {
+            "num_modules_min": int(record.true_count),
+            "num_modules_max": int(record.true_count),
+            "heat_load_policy": getattr(model.cfg, "heat_load_policy", "preserve_total_heat"),
+        },
+        "geometry_constraints": {
+            "min_center_distance": float(model.cfg.min_center_distance),
+            "wall_clearance": float(model.cfg.wall_clearance),
+            "inlet_clearance": float(model.cfg.inlet_clearance),
+            "outlet_clearance": float(model.cfg.outlet_clearance),
+            "x_span": [0.0, float(record.domain_length_x)],
+            "y_span": [0.0, float(record.domain_length_y)],
+            "keepout_boxes": [],
+            "protected_boxes": [],
+        },
+        "thermal_limits": {
+            "solid_temperature_max": float(record.kpi_dict.get("max_solid_temperature", 0.0)),
+            "module_temperature_spread_max": float(record.kpi_dict.get("module_peak_temperature_spread", 0.0)),
+            "pressure_drop_max": float(record.kpi_dict.get("pressure_drop", 0.0)),
+            "wall_hot_delta_T": None,
+            "outlet_hot_delta_T": None,
+        },
+        "objective_weights": {
+            "safety": 1.0,
+            "uniformity": 1.0,
+            "pressure": 0.6,
+            "outlet_mixing": 0.6,
+            "wall_protection": 0.4,
+            "plume_avoidance": 0.6,
+            "coverage": 0.2,
+        },
+        "field_preferences": {
+            "avoid_downstream_hot_plumes": True,
+            "protect_wall_band": True,
+            "protect_outlet_uniformity": True,
+        },
+        "kpis": {
+            name: {"mode": "exact", "value": float(record.kpi_dict[name]), "weight": 1.0}
+            for name in DEFAULT_KPI_NAMES
+            if name in record.kpi_dict and name not in set(record.kpi_dict.get("unavailable_kpis", []))
+        },
+        "_source": "reference_case",
+        "_reference_case_id": record.case_id,
+        "_reference_split": record.split,
+    }
+
+
+def target_spec_from_reference_item(
+    record: Any,
+    item: Mapping[str, Any],
+    checkpoint: Mapping[str, Any],
+    model: ThermalInverseDesignFlow,
+) -> Dict[str, Any]:
+    payload = target_payload_from_reference_record(record, model)
+    spec = target_spec_from_payload(payload, checkpoint, model)
+    spec["name"] = payload["name"]
+    spec["vector"] = np.asarray(item["target_spec_vector"], dtype=np.float32)
+    spec["kpi_targets"] = dict(item.get("target_kpi_targets", spec.get("kpi_targets", {})))
+    spec["design_intent_vector"] = np.asarray(item.get("design_intent_vector", spec["design_intent_vector"]), dtype=np.float32)
+    spec["objective_weight_vector"] = np.asarray(item.get("objective_weight_vector", spec["objective_weight_vector"]), dtype=np.float32)
+    spec["field_intent_maps"] = np.asarray(item.get("field_intent_maps", spec["field_intent_maps"]), dtype=np.float32)
+    spec["reference_case_id"] = record.case_id
+    spec["reference_ground_truth"] = {
+        "centers": np.asarray(record.module_centers[record.module_present > 0.5], dtype=np.float32),
+        "count": int(record.true_count),
+        "verified_kpis": dict(record.kpi_dict),
+    }
+    return spec
 
 
 def _span_bounds(value: Any) -> Optional[Tuple[float, float]]:
@@ -191,7 +427,21 @@ def preference_bounds(target_spec: Mapping[str, Any]) -> Tuple[Optional[Tuple[fl
         return None, None, warnings
     x_bounds = _span_bounds(prefs.get("x_span"))
     y_bounds = _span_bounds(prefs.get("y_span"))
-    supported = {"x_span", "y_span", "avoid_wall_hotspots", "min_center_distance", "wall_clearance", "inlet_clearance", "outlet_clearance", "description"}
+    supported = {
+        "x_span",
+        "y_span",
+        "avoid_wall_hotspots",
+        "min_center_distance",
+        "wall_clearance",
+        "inlet_clearance",
+        "outlet_clearance",
+        "min_x_coverage",
+        "min_y_coverage",
+        "min_bbox_area",
+        "min_mean_pair_distance",
+        "prefer_count",
+        "description",
+    }
     for key in prefs:
         if key not in supported:
             warning = f"Unsupported preference {key!r} was parsed but not applied."
@@ -265,6 +515,7 @@ def _candidate_kpi_payload(
     )
     centers = np.asarray(candidate.get("centers", []), dtype=np.float32).reshape(-1, 2)
     kpis.update(channel_clearance_diagnostics(centers, domain_length_x=record.domain_length_x, domain_length_y=record.domain_length_y, module_radius=record.module_radius))
+    kpis.update(layout_spread_metrics(centers, num_modules=int(candidate.get("count", centers.shape[0]))))
     kpis["num_modules"] = int(candidate.get("count", centers.shape[0]))
     heat_used = np.asarray(prediction.get("heat_powers", record.heat_powers), dtype=np.float32).reshape(-1)
     kpis["heat_power_total"] = float(np.sum(heat_used[: kpis["num_modules"]])) if heat_used.size else 0.0
@@ -275,16 +526,23 @@ def _candidate_kpi_payload(
 def write_candidates_csv(candidates: Sequence[Mapping[str, Any]], path: Path) -> None:
     keys = [
         "rank",
+        "raw_score_rank",
+        "diversity_rank",
         "sample_index",
         "count",
         "valid",
         "total_score",
         "kpi_score",
         "constraint_penalty",
+        "spread_preference_penalty",
         "min_center_distance",
         "wall_clearance",
         "inlet_clearance",
         "outlet_clearance",
+        "x_coverage",
+        "y_coverage",
+        "bbox_area",
+        "mean_pair_distance",
     ]
     with path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=keys)
@@ -318,6 +576,41 @@ def _draw_layout(ax: Any, record: Any, centers: np.ndarray, *, title: str = "") 
         ax.add_patch(plt.Circle((float(cx), float(cy)), float(record.module_radius), fill=False, lw=1.3, color="#1f77b4"))
 
 
+def _draw_layout_with_style(ax: Any, record: Any, centers: np.ndarray, *, color: str, label: str, linestyle: str = "-", linewidth: float = 1.4) -> None:
+    first = True
+    for cx, cy in np.asarray(centers, dtype=np.float32).reshape(-1, 2):
+        ax.add_patch(
+            plt.Circle(
+                (float(cx), float(cy)),
+                float(record.module_radius),
+                fill=False,
+                lw=linewidth,
+                color=color,
+                linestyle=linestyle,
+                label=label if first else None,
+            )
+        )
+        first = False
+
+
+def plot_reference_layout_comparison(candidate: Mapping[str, Any], record: Any, out_path: Path) -> None:
+    gt_centers = np.asarray(record.module_centers[record.module_present > 0.5], dtype=np.float32).reshape(-1, 2)
+    pred_centers = np.asarray(candidate.get("centers", []), dtype=np.float32).reshape(-1, 2)
+    fig, ax = plt.subplots(figsize=(8.2, 3.2), constrained_layout=True)
+    ax.set_xlim(0.0, float(record.domain_length_x))
+    ax.set_ylim(0.0, float(record.domain_length_y))
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    _draw_layout_with_style(ax, record, gt_centers, color="#222222", label="reference layout", linestyle="--", linewidth=1.7)
+    _draw_layout_with_style(ax, record, pred_centers, color="#1f77b4", label="generated best", linestyle="-", linewidth=1.5)
+    ax.set_title(f"Generated vs reference layout, case {record.case_id}")
+    ax.legend(loc="upper right", fontsize=8)
+    ax.grid(True, alpha=0.18)
+    fig.savefig(out_path, dpi=170)
+    plt.close(fig)
+
+
 def plot_candidate_layouts(candidates: Sequence[Mapping[str, Any]], record: Any, out_path: Path, *, max_panels: int = 8) -> None:
     n = min(len(candidates), int(max_panels))
     if n <= 0:
@@ -328,6 +621,7 @@ def plot_candidate_layouts(candidates: Sequence[Mapping[str, Any]], record: Any,
     axes_arr = np.asarray(axes).reshape(-1)
     for ax, cand in zip(axes_arr, candidates[:n]):
         _draw_layout(ax, record, cand["centers"], title=f"#{cand['rank']} score={cand['total_score']:.3f}")
+        ax.text(0.01, 0.98, "circle = generated module footprint", transform=ax.transAxes, va="top", ha="left", fontsize=7, bbox={"facecolor": "white", "alpha": 0.65, "pad": 2})
     for ax in axes_arr[n:]:
         ax.axis("off")
     fig.savefig(out_path, dpi=170)
@@ -337,11 +631,24 @@ def plot_candidate_layouts(candidates: Sequence[Mapping[str, Any]], record: Any,
 def plot_temperature_field(candidate: Mapping[str, Any], record: Any, out_path: Path) -> None:
     pred = candidate["prediction"]["pred_field_grid"]
     names = list(CHANNEL_ORDER)
-    t_idx = names.index("temperature") if "temperature" in names else pred.shape[-1] - 1
-    fig, ax = plt.subplots(figsize=(9.5, 3.4), constrained_layout=True)
-    im = ax.imshow(pred[..., t_idx], origin="lower", extent=_extent(record), cmap="inferno", aspect="equal")
-    _draw_layout(ax, record, candidate["centers"], title=f"Best verified temperature, score={candidate['total_score']:.4f}")
-    fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+    wanted = [name for name in ("u", "v", "p", "temperature") if name in names]
+    if not wanted:
+        wanted = [names[min(pred.shape[-1] - 1, 0)] if names else "field"]
+    cols = min(2, len(wanted))
+    rows = int(math.ceil(len(wanted) / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(5.2 * cols, 3.0 * rows), constrained_layout=True)
+    axes_arr = np.asarray(axes).reshape(-1)
+    centers = np.asarray(candidate["centers"], dtype=np.float32).reshape(-1, 2)
+    for ax, name in zip(axes_arr, wanted):
+        idx = names.index(name) if name in names else pred.shape[-1] - 1
+        cmap = "inferno" if name == "temperature" else "viridis"
+        im = ax.imshow(pred[..., idx], origin="lower", extent=_extent(record), cmap=cmap, aspect="equal")
+        _draw_layout(ax, record, centers, title=f"{name} field")
+        ax.text(0.01, 0.98, "blue circles: generated modules", transform=ax.transAxes, va="top", ha="left", fontsize=8, color="white", bbox={"facecolor": "black", "alpha": 0.35, "pad": 2})
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+    for ax in axes_arr[len(wanted):]:
+        ax.axis("off")
+    fig.suptitle(f"Best generated global fields, score={candidate['total_score']:.4f}", fontsize=11)
     fig.savefig(out_path, dpi=170)
     plt.close(fig)
 
@@ -357,28 +664,24 @@ def plot_composite_internal(candidate: Mapping[str, Any], record: Any, out_path:
     internal = np.asarray(candidate["prediction"].get("pred_internal_temperature"), dtype=np.float32)
     if internal.size == 0 or record.module_internal_mask is None:
         return
-    pred = candidate["prediction"]["pred_field_grid"]
-    t_idx = list(CHANNEL_ORDER).index("temperature") if "temperature" in CHANNEL_ORDER else pred.shape[-1] - 1
-    composite = pred[..., t_idx].copy()
     centers = np.asarray(candidate["centers"], dtype=np.float32).reshape(-1, 2)
-    for m, (cx, cy) in enumerate(centers):
-        if m >= internal.shape[0]:
-            continue
+    count = min(int(candidate.get("count", centers.shape[0])), internal.shape[0], 8)
+    if count <= 0:
+        return
+    cols = min(4, count)
+    rows = int(math.ceil(count / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(2.7 * cols, 2.5 * rows), constrained_layout=True)
+    axes_arr = np.asarray(axes).reshape(-1)
+    for m, ax in enumerate(axes_arr[:count]):
         local = _local_disk_image(internal[m, :, 0] if internal.ndim == 4 else internal[m], record.module_internal_mask)
-        inside = np.hypot(record.x_grid - float(cx), record.y_grid - float(cy)) <= float(record.module_radius)
-        n = local.shape[0]
-        xi = np.clip((record.x_grid[inside] - float(cx)) / max(float(record.module_radius), 1.0e-12), -1.0, 1.0)
-        eta = np.clip((record.y_grid[inside] - float(cy)) / max(float(record.module_radius), 1.0e-12), -1.0, 1.0)
-        ii = np.rint((xi + 1.0) * 0.5 * (n - 1)).astype(int)
-        jj = np.rint((eta + 1.0) * 0.5 * (n - 1)).astype(int)
-        values = local[jj, ii]
-        valid = np.isfinite(values)
-        indices = np.flatnonzero(inside.reshape(-1))
-        composite.reshape(-1)[indices[valid]] = values[valid]
-    fig, ax = plt.subplots(figsize=(9.5, 3.4), constrained_layout=True)
-    im = ax.imshow(composite, origin="lower", extent=_extent(record), cmap="inferno", aspect="equal")
-    _draw_layout(ax, record, centers, title="Best layout composite internal temperature")
-    fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+        im = ax.imshow(local, origin="lower", cmap="inferno")
+        ax.set_title(f"M{m} internal T")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+    for ax in axes_arr[count:]:
+        ax.axis("off")
+    fig.suptitle("Generated module-internal temperature disks", fontsize=11)
     fig.savefig(out_path, dpi=170)
     plt.close(fig)
 
@@ -415,12 +718,13 @@ def plot_interface_curves(candidate: Mapping[str, Any], out_path: Path) -> None:
     if count == 1:
         axes = axes[None, :]
     for row in range(count):
-        axes[row, 0].plot(theta, interface[row, :, 0])
-        axes[row, 0].set_title(f"M{row} T_surface")
-        axes[row, 1].plot(theta, interface[row, :, 1])
-        axes[row, 1].set_title(f"M{row} q_normal")
+        axes[row, 0].plot(theta, interface[row, :, 0], label="predicted surface T")
+        axes[row, 0].set_title(f"M{row} surface temperature")
+        axes[row, 1].plot(theta, interface[row, :, 1], label="predicted normal heat flux")
+        axes[row, 1].set_title(f"M{row} interface heat flux")
         for col in range(2):
             axes[row, col].set_xlabel("theta")
+            axes[row, col].legend(fontsize=8)
             axes[row, col].grid(True, alpha=0.25)
     fig.savefig(out_path, dpi=170)
     plt.close(fig)
@@ -462,9 +766,106 @@ def plot_target_vs_verified(candidate: Mapping[str, Any], target_spec: Mapping[s
     ax.set_xticklabels(names, rotation=45, ha="right")
     ax.set_ylabel("KPI value")
     ax.set_title("Target vs best verified KPIs")
+    ax.legend(["target bound/value", "verified"], fontsize=8)
     ax.grid(True, axis="y", alpha=0.25)
     fig.savefig(out_path, dpi=170)
     plt.close(fig)
+
+
+def normalized_target_violation_rows(candidate: Mapping[str, Any], target_spec: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    targets = dict(target_spec.get("kpi_targets", {}) or {})
+    if not targets and isinstance(target_spec.get("design_intent"), Mapping):
+        thermal = target_spec["design_intent"].get("thermal_limits", {})
+        if isinstance(thermal, Mapping):
+            mapped = {
+                "max_solid_temperature": ("solid_temperature_max", "max"),
+                "module_peak_temperature_spread": ("module_temperature_spread_max", "max"),
+                "pressure_drop": ("pressure_drop_max", "max"),
+            }
+            for kpi_name, (limit_name, mode) in mapped.items():
+                if thermal.get(limit_name) is not None:
+                    targets[kpi_name] = {"mode": mode, "high": thermal.get(limit_name)}
+    names = [name for name in target_spec.get("kpi_names", []) if name in targets]
+    stats = target_spec.get("kpi_stats", {})
+    rows: List[Dict[str, Any]] = []
+    for name in names:
+        raw_entry = targets[name]
+        entry = raw_entry if isinstance(raw_entry, Mapping) else {"mode": "exact", "value": raw_entry}
+        mode = str(entry.get("mode", "exact")).lower().strip()
+        verified = float(candidate["verified_kpis"].get(name, float("nan")))
+        stat_entry = stats.get(name, {}) if isinstance(stats, Mapping) else {}
+        stat_std = float(stat_entry.get("std", 1.0)) if isinstance(stat_entry, Mapping) else 1.0
+        bound_value = float("nan")
+        bound_label = "value"
+        violation = 0.0
+        if not math.isfinite(verified):
+            violation = float("nan")
+        elif mode in {"range", "between"}:
+            lo = entry.get("low", entry.get("lower"))
+            hi = entry.get("high", entry.get("upper"))
+            lo_f = float(lo) if lo is not None else float("-inf")
+            hi_f = float(hi) if hi is not None else float("inf")
+            if verified < lo_f:
+                bound_value, bound_label = lo_f, "low"
+                violation = lo_f - verified
+            elif verified > hi_f:
+                bound_value, bound_label = hi_f, "high"
+                violation = verified - hi_f
+            else:
+                bound_value, bound_label, violation = 0.5 * (lo_f + hi_f), "range", 0.0
+        elif mode in {"max", "upper", "at_most"}:
+            bound_value = float(entry.get("high", entry.get("upper", float("nan"))))
+            bound_label = "high"
+            violation = max(0.0, verified - bound_value)
+        elif mode in {"min", "lower", "at_least"}:
+            bound_value = float(entry.get("low", entry.get("lower", float("nan"))))
+            bound_label = "low"
+            violation = max(0.0, bound_value - verified)
+        else:
+            bound_value = float(entry.get("value", entry.get("target", float("nan"))))
+            bound_label = "value"
+            violation = abs(verified - bound_value)
+        scale = max(abs(bound_value) if math.isfinite(bound_value) else 0.0, abs(stat_std) if math.isfinite(stat_std) else 0.0, 1.0)
+        rows.append(
+            {
+                "kpi": str(name),
+                "mode": mode,
+                "verified": verified,
+                "target_bound_label": bound_label,
+                "target_bound": bound_value,
+                "normalized_violation": float(max(violation, 0.0) / scale) if math.isfinite(violation) else float("nan"),
+            }
+        )
+    return rows
+
+
+def write_normalized_violation_table(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
+    keys = ["kpi", "mode", "verified", "target_bound_label", "target_bound", "normalized_violation"]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in keys})
+
+
+def plot_target_vs_verified_normalized(candidate: Mapping[str, Any], target_spec: Mapping[str, Any], out_path: Path) -> List[Dict[str, Any]]:
+    rows = normalized_target_violation_rows(candidate, target_spec)
+    if not rows:
+        return rows
+    names = [str(row["kpi"]) for row in rows]
+    values = [float(row["normalized_violation"]) for row in rows]
+    fig, ax = plt.subplots(figsize=(max(7.0, 0.45 * len(names)), 4.2), constrained_layout=True)
+    x = np.arange(len(names))
+    ax.bar(x, values, color="#d55e00", alpha=0.82)
+    ax.axhline(0.0, color="black", lw=0.8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, rotation=45, ha="right")
+    ax.set_ylabel("normalized violation")
+    ax.set_title("Target KPI violations, normalized")
+    ax.grid(True, axis="y", alpha=0.25)
+    fig.savefig(out_path, dpi=170)
+    plt.close(fig)
+    return rows
 
 
 def plot_diversity(candidates: Sequence[Mapping[str, Any]], out_path: Path) -> None:
@@ -480,6 +881,151 @@ def plot_diversity(candidates: Sequence[Mapping[str, Any]], out_path: Path) -> N
     ax.grid(True, alpha=0.25)
     fig.savefig(out_path, dpi=170)
     plt.close(fig)
+
+
+def write_all_kpis_verified(candidate: Mapping[str, Any], kpi_names: Sequence[str], path: Path) -> None:
+    kpis = candidate.get("verified_kpis", {})
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["kpi", "verified_value"])
+        writer.writeheader()
+        for name in kpi_names:
+            writer.writerow({"kpi": name, "verified_value": kpis.get(name, "")})
+
+
+def write_design_intent_breakdown(candidate: Mapping[str, Any], out_csv: Path, out_png: Path) -> None:
+    detail = candidate.get("design_intent_score_detail", {})
+    rows = []
+    for group, payload in (("objective", detail.get("components", {})), ("field", detail.get("field_penalties", {}))):
+        if isinstance(payload, Mapping):
+            for name, value in payload.items():
+                rows.append({"group": group, "component": name, "value": float(value)})
+    rows.extend(
+        [
+            {"group": "total", "component": "hard_feasibility_penalty", "value": float(detail.get("hard_feasibility_penalty", 0.0))},
+            {"group": "total", "component": "objective_score", "value": float(detail.get("objective_score", 0.0))},
+            {"group": "total", "component": "field_penalty", "value": float(detail.get("field_penalty", 0.0))},
+        ]
+    )
+    with out_csv.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["group", "component", "value"])
+        writer.writeheader()
+        writer.writerows(rows)
+    if not rows:
+        return
+    fig, ax = plt.subplots(figsize=(8.0, 4.2), constrained_layout=True)
+    labels = [row["component"] for row in rows]
+    values = [float(row["value"]) for row in rows]
+    ax.bar(np.arange(len(rows)), values, color="#4c78a8")
+    ax.set_xticks(np.arange(len(rows)))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_ylabel("penalty / score")
+    ax.set_title("Design intent score breakdown")
+    ax.grid(True, axis="y", alpha=0.25)
+    fig.savefig(out_png, dpi=170)
+    plt.close(fig)
+
+
+def plot_candidate_pareto_scatter(candidates: Sequence[Mapping[str, Any]], out_path: Path) -> None:
+    if not candidates:
+        return
+    pressure = [float(c.get("verified_kpis", {}).get("pressure_drop", np.nan)) for c in candidates]
+    tmax = [float(c.get("verified_kpis", {}).get("max_solid_temperature", np.nan)) for c in candidates]
+    color = [float(c.get("verified_kpis", {}).get("module_peak_temperature_spread", np.nan)) for c in candidates]
+    fig, ax = plt.subplots(figsize=(6.4, 4.4), constrained_layout=True)
+    sc = ax.scatter(pressure, tmax, c=color, cmap="magma", s=35)
+    ax.set_xlabel("pressure_drop")
+    ax.set_ylabel("max_solid_temperature")
+    ax.set_title("Candidate Pareto view")
+    fig.colorbar(sc, ax=ax, label="module temperature spread")
+    ax.grid(True, alpha=0.25)
+    fig.savefig(out_path, dpi=170)
+    plt.close(fig)
+
+
+def plot_field_risk_overlay(candidate: Mapping[str, Any], target_spec: Mapping[str, Any], record: Any, out_path: Path) -> None:
+    pred = candidate["prediction"]["pred_field_grid"]
+    names = list(CHANNEL_ORDER)
+    t_idx = names.index("temperature") if "temperature" in names else pred.shape[-1] - 1
+    maps = np.asarray(target_spec.get("field_intent_maps", []), dtype=np.float32)
+    risk = None
+    if maps.ndim == 3 and maps.shape[0] >= 4:
+        risk = np.maximum.reduce([maps[0], maps[1], maps[2], maps[3]])
+    fig, ax = plt.subplots(figsize=(9.5, 3.4), constrained_layout=True)
+    im = ax.imshow(pred[..., t_idx], origin="lower", extent=_extent(record), cmap="inferno", aspect="equal")
+    if risk is not None and np.any(risk > 0):
+        ax.imshow(risk, origin="lower", extent=_extent(record), cmap="Blues", alpha=0.35, aspect="equal")
+    _draw_layout(ax, record, candidate["centers"], title="Best layout thermal field + intent risk")
+    fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
+    fig.savefig(out_path, dpi=170)
+    plt.close(fig)
+
+
+def plot_reference_field_comparison(candidate: Mapping[str, Any], record: Any, out_path: Path) -> None:
+    pred = np.asarray(candidate["prediction"]["pred_field_grid"], dtype=np.float32)
+    ref = np.asarray(record.steady_field, dtype=np.float32)
+    names = list(CHANNEL_ORDER)
+    t_idx = names.index("temperature") if "temperature" in names else pred.shape[-1] - 1
+    p_idx = names.index("p") if "p" in names else min(2, pred.shape[-1] - 1)
+    panels = [
+        ("reference temperature", ref[..., t_idx], "inferno"),
+        ("generated temperature", pred[..., t_idx], "inferno"),
+        ("temperature error", pred[..., t_idx] - ref[..., t_idx], "coolwarm"),
+        ("pressure error", pred[..., p_idx] - ref[..., p_idx], "coolwarm"),
+    ]
+    fig, axes = plt.subplots(2, 2, figsize=(10.2, 6.0), constrained_layout=True)
+    for ax, (title, values, cmap) in zip(np.asarray(axes).reshape(-1), panels):
+        im = ax.imshow(values, origin="lower", extent=_extent(record), cmap=cmap, aspect="equal")
+        _draw_layout(ax, record, candidate["centers"], title=title)
+        if title.startswith("reference"):
+            _draw_layout_with_style(ax, record, record.module_centers[record.module_present > 0.5], color="#ffffff", label="reference modules", linestyle="--")
+            ax.legend(loc="upper right", fontsize=7)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
+    fig.suptitle(f"Generated-vs-reference fields for case {record.case_id}", fontsize=11)
+    fig.savefig(out_path, dpi=170)
+    plt.close(fig)
+
+
+def plot_reference_kpi_comparison(candidate: Mapping[str, Any], record: Any, kpi_names: Sequence[str], out_path: Path) -> None:
+    selected = [
+        "max_solid_temperature",
+        "module_peak_temperature_spread",
+        "pressure_drop",
+        "outlet_temperature_nonuniformity",
+        "wall_hot_area_fraction",
+        "thermal_plume_length",
+        "downstream_reheat_index",
+    ]
+    names = [name for name in selected if name in kpi_names and name in candidate.get("verified_kpis", {}) and name in record.kpi_dict]
+    if not names:
+        names = [name for name in kpi_names if name in candidate.get("verified_kpis", {}) and name in record.kpi_dict][:10]
+    if not names:
+        return
+    ref_vals = [float(record.kpi_dict.get(name, np.nan)) for name in names]
+    gen_vals = [float(candidate["verified_kpis"].get(name, np.nan)) for name in names]
+    x = np.arange(len(names))
+    fig, ax = plt.subplots(figsize=(max(8.0, 0.55 * len(names)), 4.2), constrained_layout=True)
+    ax.bar(x - 0.18, ref_vals, width=0.36, label="reference case", color="#666666")
+    ax.bar(x + 0.18, gen_vals, width=0.36, label="generated best", color="#4c78a8")
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, rotation=45, ha="right")
+    ax.set_ylabel("KPI value")
+    ax.set_title("Reference vs generated verified KPIs")
+    ax.legend(fontsize=8)
+    ax.grid(True, axis="y", alpha=0.25)
+    fig.savefig(out_path, dpi=170)
+    plt.close(fig)
+
+
+def write_reference_comparison_csv(candidate: Mapping[str, Any], record: Any, kpi_names: Sequence[str], path: Path) -> None:
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["kpi", "reference_value", "generated_value", "absolute_error"])
+        writer.writeheader()
+        for name in kpi_names:
+            if name not in record.kpi_dict or name not in candidate.get("verified_kpis", {}):
+                continue
+            ref = float(record.kpi_dict.get(name, np.nan))
+            gen = float(candidate["verified_kpis"].get(name, np.nan))
+            writer.writerow({"kpi": name, "reference_value": ref, "generated_value": gen, "absolute_error": abs(gen - ref) if math.isfinite(gen) and math.isfinite(ref) else ""})
 
 
 def try_plot_organization(candidate: Mapping[str, Any], record: Any, out_path: Path) -> None:
@@ -515,6 +1061,57 @@ def save_top_npz(candidates: Sequence[Mapping[str, Any]], path: Path, *, top_k: 
     np.savez_compressed(path, centers=centers, masks=masks, scores=scores)
 
 
+def _layout_vector(candidate: Mapping[str, Any], max_num_modules: int, record: Any) -> np.ndarray:
+    centers = np.asarray(candidate.get("centers", []), dtype=np.float32).reshape(-1, 2)
+    padded = np.zeros((max_num_modules, 2), dtype=np.float32)
+    n = min(centers.shape[0], max_num_modules)
+    if n > 0:
+        padded[:n, 0] = centers[:n, 0] / max(float(record.domain_length_x), 1.0e-8)
+        padded[:n, 1] = centers[:n, 1] / max(float(record.domain_length_y), 1.0e-8)
+    count = np.asarray([float(candidate.get("count", n)) / max(float(max_num_modules), 1.0)], dtype=np.float32)
+    return np.concatenate([padded.reshape(-1), count], axis=0)
+
+
+def diversity_rerank_candidates(
+    candidates: Sequence[Dict[str, Any]],
+    *,
+    weight: float,
+    top_k: int,
+    max_num_modules: int,
+    record: Any,
+) -> List[Dict[str, Any]]:
+    raw_sorted = list(candidates)
+    if not raw_sorted:
+        return []
+    if weight <= 0.0 or top_k <= 1:
+        for rank, row in enumerate(raw_sorted):
+            row["diversity_rank"] = int(rank)
+        return raw_sorted
+    pool = raw_sorted[: max(int(top_k), 1)]
+    remainder = raw_sorted[len(pool) :]
+    vectors = [_layout_vector(row, max_num_modules, record) for row in pool]
+    selected = [0]
+    remaining = set(range(1, len(pool)))
+    while remaining:
+        best_idx = None
+        best_adjusted = float("inf")
+        for idx in sorted(remaining):
+            min_dist = min(float(np.linalg.norm(vectors[idx] - vectors[j])) for j in selected)
+            adjusted = float(pool[idx]["total_score"]) - float(weight) * min_dist
+            if adjusted < best_adjusted:
+                best_adjusted = adjusted
+                best_idx = idx
+        assert best_idx is not None
+        pool[best_idx]["diversity_adjusted_score"] = float(best_adjusted)
+        selected.append(best_idx)
+        remaining.remove(best_idx)
+    reranked = [pool[idx] for idx in selected] + remainder
+    for rank, row in enumerate(reranked):
+        row["diversity_rank"] = int(rank)
+    reranked[0]["diversity_adjusted_score"] = float(reranked[0]["total_score"])
+    return reranked
+
+
 def apply_forward_overrides(forward_cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     cfg = dict(forward_cfg)
     if args.forward_run_dir is not None:
@@ -527,16 +1124,58 @@ def apply_forward_overrides(forward_cfg: Dict[str, Any], args: argparse.Namespac
     return cfg
 
 
+def make_output_dirs(out_dir: Path) -> Dict[str, Path]:
+    dirs = {
+        "root": out_dir,
+        "data": out_dir / "data",
+        "plots": out_dir / "plots",
+        "layouts": out_dir / "plots" / "layouts",
+        "fields": out_dir / "plots" / "fields",
+        "kpis": out_dir / "plots" / "kpis",
+        "diagnostics": out_dir / "plots" / "diagnostics",
+        "reference": out_dir / "reference",
+    }
+    for path in dirs.values():
+        path.mkdir(parents=True, exist_ok=True)
+    return dirs
+
+
 def main() -> int:
     args = parse_args()
+    quick = bool(args.quick or args.smoke)
+    n_samples = int(args.n_samples if args.n_samples is not None else (8 if quick else 128))
+    n_steps = int(args.n_steps if args.n_steps is not None else (4 if quick else 16))
     device = select_device(args.device)
     inverse_path = resolve_inverse_checkpoint(args.inverse_run, args.checkpoint_name)
     inverse_model, checkpoint = load_inverse_checkpoint(inverse_path, device)
-    target_payload = load_target_payload(args.target)
-    target_spec = target_spec_from_payload(target_payload, checkpoint, inverse_model)
+    kpi_distribution_summary = load_kpi_distribution_summary(checkpoint, inverse_path)
     train_cfg = checkpoint.get("train_config", {})
     dataset_cfg = train_cfg.get("dataset", {}) if isinstance(train_cfg, Mapping) else {}
+    target_cfg = train_cfg.get("target_kpis", {}) if isinstance(train_cfg, Mapping) else {}
+    conditioning_cfg = train_cfg.get("conditioning", {}) if isinstance(train_cfg, Mapping) and isinstance(train_cfg.get("conditioning", {}), Mapping) else {}
+    intent_aug_cfg = train_cfg.get("intent_augmentation", {}) if isinstance(train_cfg, Mapping) and isinstance(train_cfg.get("intent_augmentation", {}), Mapping) else {}
     packed_path = args.dataset or dataset_cfg.get("packed_h5_path", "./Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5")
+    if args.target:
+        target_payload = load_target_payload(args.target)
+        original_target_payload = dict(target_payload)
+        if args.calibrate_target_to_data:
+            calibration_cfg = target_payload.get("calibration", {}) if isinstance(target_payload.get("calibration"), Mapping) else {}
+            target_payload = calibrate_target_spec_to_kpi_quantiles(
+                target_payload,
+                kpi_distribution_summary,
+                max_replacement_quantile=str(calibration_cfg.get("max_replacement_quantile", "p10")),
+                min_replacement_quantile=str(calibration_cfg.get("min_replacement_quantile", "p90")),
+            )
+            target_payload["_path"] = original_target_payload.get("_path")
+        target_spec = target_spec_from_payload(target_payload, checkpoint, inverse_model)
+        dataset_temperature_limits = target_spec.get("temperature_limits") if isinstance(target_spec.get("temperature_limits"), Mapping) else None
+    else:
+        target_payload = {}
+        target_spec = {
+            "kpi_names": list(checkpoint.get("kpi_names", DEFAULT_KPI_NAMES)),
+            "temperature_limits": target_cfg.get("temperature_limits"),
+        }
+        dataset_temperature_limits = target_cfg.get("temperature_limits") if isinstance(target_cfg.get("temperature_limits"), Mapping) else None
     dataset = ThermalInverseDesignDataset(
         packed_path,
         split=args.reference_split,
@@ -544,7 +1183,7 @@ def main() -> int:
         kpi_stats=checkpoint.get("kpi_stats"),
         normalize_targets=False,
         target_augmentation={},
-        temperature_limits=target_spec.get("temperature_limits") if isinstance(target_spec.get("temperature_limits"), Mapping) else None,
+        temperature_limits=dataset_temperature_limits,
         max_num_modules=inverse_model.max_num_modules,
         generate_heat_power=bool(inverse_model.cfg.generate_heat_power),
         heat_power_scale=float(inverse_model.cfg.heat_power_scale),
@@ -553,8 +1192,16 @@ def main() -> int:
         seed=int(args.seed),
         behavior_latent_dim=int(inverse_model.cfg.behavior_latent_dim),
         organization_latent_dim=int(inverse_model.cfg.organization_latent_dim),
+        conditioning_mode=str(conditioning_cfg.get("mode", getattr(inverse_model.cfg, "conditioning_mode", "legacy_kpi"))),
+        intent_augmentation={**intent_aug_cfg, "field_preference_dropout": 1.0},
     )
+    dataset.set_kpi_distribution_summary(kpi_distribution_summary)
     record = dataset.records[min(max(int(args.reference_case_index), 0), len(dataset.records) - 1)]
+    if not args.target:
+        item = dataset[min(max(int(args.reference_case_index), 0), len(dataset) - 1)]
+        target_spec = target_spec_from_reference_item(record, item, checkpoint, inverse_model)
+        target_payload = dict(target_spec.get("target_payload", {}))
+        print(f"[target] derived target from {record.split} case {record.case_id} (index {args.reference_case_index}).")
     forward_cfg = apply_forward_overrides(train_cfg.get("forward_model", {}) if isinstance(train_cfg, Mapping) else {}, args)
     forward_model, forward_metadata, _ = load_forward_model(forward_cfg, device)
     inverse_cfg = train_cfg.get("inverse_model", {}) if isinstance(train_cfg, Mapping) else {}
@@ -563,19 +1210,32 @@ def main() -> int:
     if target_spec.get("constraints", {}).get("heat_power_total") is not None:
         heat_load_policy = "target_heat_power_total" if heat_load_policy == "preserve_total_heat" else heat_load_policy
     x_bounds, y_bounds, preference_warnings = preference_bounds(target_spec)
+    x_bounds = target_spec.get("x_bounds", x_bounds)
+    y_bounds = target_spec.get("y_bounds", y_bounds)
     base_out = Path(args.output_dir) if args.output_dir else inverse_path.parent / "evaluation" / f"inverse_eval_{current_timestamp()}"
     out_dir = resolve_demo_path(base_out)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dirs = make_output_dirs(out_dir)
+    feasibility_report = target_feasibility_report(target_payload, kpi_distribution_summary) if kpi_distribution_summary else {"entries": [], "warnings": ["kpi_distribution_summary.json not found; target feasibility was not checked."], "summary_available": False}
+    if not kpi_distribution_summary:
+        print("[target-feasibility] warning: kpi_distribution_summary.json not found; target feasibility was not checked.")
+    write_json(out_dirs["data"] / "target_feasibility_report.json", json_safe(feasibility_report))
+    if args.calibrate_target_to_data:
+        write_json(out_dirs["data"] / "calibrated_target_spec_resolved.json", json_safe(target_payload))
 
     target_vec = np.asarray(target_spec["vector"], dtype=np.float32)
+    candidate_pool_size = max(int(math.ceil(n_samples * max(float(args.candidate_pool_multiplier), 1.0))), n_samples)
     sampled = inverse_model.sample_designs(
         target_vec,
-        n_samples=int(args.n_samples),
-        n_steps=int(args.n_steps),
+        n_samples=int(candidate_pool_size),
+        n_steps=int(n_steps),
         seed=int(args.seed),
         count_mode=str(args.count_mode),
         x_bounds=x_bounds,
         y_bounds=y_bounds,
+        design_intent_vector=target_spec.get("design_intent_vector"),
+        objective_weight_vector=target_spec.get("objective_weight_vector"),
+        field_intent_maps=target_spec.get("field_intent_maps"),
+        guidance_scale=float(args.guidance_scale),
         device=device,
     )
     candidates: List[Dict[str, Any]] = []
@@ -596,6 +1256,9 @@ def main() -> int:
         )
         verified_kpis = _candidate_kpi_payload(record, prediction, cand, inverse_model, target_spec)
         score = score_candidate_kpis(verified_kpis, target_spec)
+        intent_score = compute_design_intent_score(verified_kpis, {"centers": cand.get("centers", [])}, target_spec)
+        use_intent_score = bool(target_spec.get("is_design_intent", False) or getattr(inverse_model.cfg, "conditioning_mode", "legacy_kpi") == "design_intent")
+        primary_score = float(intent_score["design_intent_score"] if use_intent_score else score["total_score"])
         row = {
             "sample_index": int(sample_idx),
             "count": int(cand.get("count", 0)),
@@ -604,40 +1267,60 @@ def main() -> int:
             "validity": cand.get("validity", {}),
             "verified_kpis": verified_kpis,
             "score_detail": score,
-            "total_score": float(score["total_score"]),
+            "design_intent_score_detail": intent_score,
+            "design_intent_score": float(intent_score["design_intent_score"]),
+            "total_score": primary_score,
+            "legacy_total_score": float(score["total_score"]),
             "kpi_score": float(score.get("kpi_score", score["total_score"])),
             "constraint_penalty": float(score.get("constraint_penalty", 0.0)),
+            "spread_preference_penalty": float(score.get("spread_preference_penalty", 0.0)),
             "feasibility_penalty": float(score.get("feasibility_penalty", score.get("constraint_penalty", 0.0))),
             "kpi_violation": float(score.get("kpi_violation", score.get("kpi_score", 0.0))),
             "preference_reward": float(score.get("preference_reward", 0.0)),
             "prediction": prediction,
         }
-        for key in ("min_center_distance", "wall_clearance", "inlet_clearance", "outlet_clearance"):
+        for key in ("min_center_distance", "wall_clearance", "inlet_clearance", "outlet_clearance", "x_coverage", "y_coverage", "bbox_area", "mean_pair_distance"):
             row[key] = float(verified_kpis.get(key, float("nan")))
         candidates.append(row)
     candidates.sort(key=lambda row: (0 if row["valid"] else 1, float(row["total_score"]), -int(row["count"])))
     for rank, row in enumerate(candidates):
+        row["raw_score_rank"] = int(rank)
         row["rank"] = int(rank)
+    ranked_candidates = diversity_rerank_candidates(
+        candidates,
+        weight=float(args.diversity_rerank_weight),
+        top_k=min(int(args.diversity_rerank_top_k), len(candidates)),
+        max_num_modules=inverse_model.max_num_modules,
+        record=record,
+    )
+    for row in ranked_candidates:
+        row["rank"] = int(row.get("diversity_rank", row.get("raw_score_rank", 0)))
+    candidates_for_outputs = ranked_candidates[: min(n_samples, len(ranked_candidates))]
 
     serializable = []
     for row in candidates:
         lite = {key: value for key, value in row.items() if key != "prediction"}
         serializable.append(json_safe(lite))
-    write_json(out_dir / "candidates.json", {"target": json_safe(target_spec), "candidates": serializable})
-    write_candidates_csv(candidates, out_dir / "candidates.csv")
-    write_kpi_scores_csv(candidates, target_spec["kpi_names"], out_dir / "kpi_scores.csv")
-    write_json(out_dir / "target_spec_resolved.json", json_safe(target_spec))
-    save_top_npz(candidates, out_dir / "top_candidates.npz", max_num_modules=inverse_model.max_num_modules)
+    write_json(out_dirs["data"] / "candidates.json", {"target": json_safe(target_spec), "candidates": serializable, "displayed_candidate_indices": [int(row["sample_index"]) for row in candidates_for_outputs]})
+    write_candidates_csv(candidates_for_outputs, out_dirs["data"] / "candidates.csv")
+    write_kpi_scores_csv(candidates_for_outputs, target_spec["kpi_names"], out_dirs["data"] / "kpi_scores.csv")
+    write_json(out_dirs["data"] / "target_spec_resolved.json", json_safe(target_spec))
+    save_top_npz(candidates_for_outputs, out_dirs["data"] / "top_candidates.npz", max_num_modules=inverse_model.max_num_modules)
 
     best = candidates[0] if candidates else None
     summary = {
         "inverse_checkpoint": str(inverse_path),
         "target_path": target_payload.get("_path"),
         "reference_case_id": record.case_id,
-        "n_samples": int(args.n_samples),
+        "n_samples": int(n_samples),
+        "candidate_pool_size": int(candidate_pool_size),
+        "n_steps": int(n_steps),
+        "guidance_scale": float(args.guidance_scale),
         "count_mode": str(args.count_mode),
         "best_score": best["total_score"] if best else None,
         "best_valid": bool(best["valid"]) if best else None,
+        "best_raw_score_rank": int(best.get("raw_score_rank", 0)) if best else None,
+        "best_diversity_rank": int(best.get("diversity_rank", 0)) if best else None,
         "validity_rate": float(np.mean([float(c["valid"]) for c in candidates])) if candidates else 0.0,
         "forward_checkpoint": forward_metadata.get("checkpoint_path"),
         "local_surrogate_checkpoint": forward_metadata.get("local_surrogate_checkpoint_path"),
@@ -645,19 +1328,38 @@ def main() -> int:
         "local_surrogate_used": bool(forward_metadata.get("local_surrogate_used", False)),
         "predicted_port_condition_kpis_available": bool(best and "mean_interface_T_env" in best.get("verified_kpis", {}).get("available_kpis", [])),
         "heat_load_policy": heat_load_policy,
+        "diversity_rerank_weight": float(args.diversity_rerank_weight),
+        "diversity_rerank_top_k": int(args.diversity_rerank_top_k),
+        "best_preference_penalties": best.get("score_detail", {}).get("per_preference_penalties", {}) if best else {},
+        "best_design_intent_score_breakdown": best.get("design_intent_score_detail", {}) if best else {},
+        "target_feasibility_warnings": feasibility_report.get("warnings", []),
+        "target_calibration": target_payload.get("_calibration", {"enabled": False}),
         "preference_warnings": sorted(set(preference_warnings + sum((list(c.get("preference_warnings", [])) for c in candidates), []))),
     }
-    write_json(out_dir / "verification_summary.json", json_safe(summary))
+    write_json(out_dirs["data"] / "verification_summary.json", json_safe(summary))
 
     if best is not None:
-        plot_target_vs_verified(best, target_spec, out_dir / "target_vs_verified_kpis.png")
-        plot_candidate_layouts(candidates, record, out_dir / "candidate_layouts_ranked.png")
-        plot_temperature_field(best, record, out_dir / "best_layout_temperature_field.png")
-        plot_composite_internal(best, record, out_dir / "best_layout_composite_internal_temperature.png")
-        plot_internal_bars(best, out_dir / "best_layout_module_temperature_bars.png")
-        plot_interface_curves(best, out_dir / "best_layout_interface_curves.png")
-        try_plot_organization(best, record, out_dir / "best_layout_organization_overview.png")
-        plot_diversity(candidates, out_dir / "candidate_diversity.png")
+        plot_target_vs_verified(best, target_spec, out_dirs["kpis"] / "target_vs_verified_kpis.png")
+        normalized_rows = plot_target_vs_verified_normalized(best, target_spec, out_dirs["kpis"] / "target_vs_verified_kpis_normalized.png")
+        write_normalized_violation_table(normalized_rows, out_dirs["data"] / "target_vs_verified_kpis_normalized.csv")
+        write_json(out_dirs["data"] / "target_vs_verified_kpis_normalized.json", json_safe({"rows": normalized_rows}))
+        plot_candidate_layouts(candidates_for_outputs, record, out_dirs["layouts"] / "candidate_layouts_ranked.png")
+        write_design_intent_breakdown(best, out_dirs["data"] / "design_intent_score_breakdown.csv", out_dirs["diagnostics"] / "design_intent_score_breakdown.png")
+        write_all_kpis_verified(best, target_spec["kpi_names"], out_dirs["data"] / "all_kpis_verified.csv")
+        write_json(out_dirs["data"] / "field_penalty_summary.json", json_safe(best.get("design_intent_score_detail", {}).get("field_penalties", {})))
+        plot_field_risk_overlay(best, target_spec, record, out_dirs["fields"] / "best_layout_field_risk_overlay.png")
+        plot_candidate_pareto_scatter(candidates, out_dirs["diagnostics"] / "candidate_pareto_scatter.png")
+        plot_temperature_field(best, record, out_dirs["fields"] / "best_layout_global_fields.png")
+        plot_composite_internal(best, record, out_dirs["fields"] / "best_layout_module_internal_disks.png")
+        plot_internal_bars(best, out_dirs["kpis"] / "best_layout_module_temperature_bars.png")
+        plot_interface_curves(best, out_dirs["fields"] / "best_layout_interface_curves.png")
+        try_plot_organization(best, record, out_dirs["diagnostics"] / "best_layout_organization_overview.png")
+        plot_diversity(candidates, out_dirs["diagnostics"] / "candidate_diversity.png")
+        if target_spec.get("reference_ground_truth"):
+            plot_reference_layout_comparison(best, record, out_dirs["reference"] / "generated_vs_reference_layout.png")
+            plot_reference_field_comparison(best, record, out_dirs["reference"] / "generated_vs_reference_fields.png")
+            plot_reference_kpi_comparison(best, record, target_spec["kpi_names"], out_dirs["reference"] / "generated_vs_reference_kpis.png")
+            write_reference_comparison_csv(best, record, target_spec["kpi_names"], out_dirs["reference"] / "generated_vs_reference_kpis.csv")
     print(f"[done] inverse evaluation saved to {out_dir}")
     if best is not None:
         print(f"[best] score={best['total_score']:.6f}, valid={best['valid']}, count={best['count']}")

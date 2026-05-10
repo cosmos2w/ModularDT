@@ -8,4 +8,8 @@ echo "Starting ChannelThermal web demo backend at http://127.0.0.1:8001"
 echo "Use your preferred Python environment. If needed: pip install -r requirements.txt"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/matplotlib-channelthermal-web}"
 mkdir -p "$MPLCONFIGDIR"
-python -m uvicorn app:app --reload --host 127.0.0.1 --port 8001
+if [[ "${CONDA_DEFAULT_ENV:-}" != "ModularDT" ]] && command -v conda >/dev/null 2>&1; then
+  conda run --no-capture-output -n ModularDT python -m uvicorn app:app --reload --host 127.0.0.1 --port 8001
+else
+  python -m uvicorn app:app --reload --host 127.0.0.1 --port 8001
+fi

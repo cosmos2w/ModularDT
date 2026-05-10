@@ -1,0 +1,238 @@
+{
+  "job_id": "4eb31d42631a4b42",
+  "status": "complete",
+  "request_hash": "44916d2cf4baa5903191a8ddbfb06a09aaada1b3484cbfc0daabc83b91e5f014",
+  "model": {
+    "id": "channelthermal_run0004",
+    "label": "ChannelThermal Run0004",
+    "enabled": true,
+    "available": true,
+    "run_dir": "/home/wanglz/Desktop/src/ModularDT/1_Demo_ChannelThermal/Saved_Model/Run_0004_20260509_224057",
+    "checkpoint_path": "/home/wanglz/Desktop/src/ModularDT/1_Demo_ChannelThermal/Saved_Model/Run_0004_20260509_224057/latest_model.pt",
+    "config_path": "/home/wanglz/Desktop/src/ModularDT/1_Demo_ChannelThermal/Saved_Model/Run_0004_20260509_224057/resolved_train_config.json",
+    "checkpoint_exists": true,
+    "config_exists": true,
+    "missing_files": [],
+    "reason_unavailable": null,
+    "status": "available",
+    "metadata": {
+      "max_num_modules": "auto",
+      "domain_length_x": "auto",
+      "domain_length_y": "auto",
+      "module_radius": "auto",
+      "field_names": [
+        "u",
+        "v",
+        "p",
+        "omega",
+        "temperature"
+      ],
+      "dataset": "./Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
+      "default_reference_split": "test",
+      "default_reference_case_index": 0,
+      "default_heat_power": 1.2,
+      "heat_power_min": 0.0,
+      "heat_power_max": 3.0,
+      "local_surrogate": "./Saved_Model_LocalModule/Run_0003_20260507_224352/latest_model.pt"
+    }
+  },
+  "validation": {
+    "valid": true,
+    "warnings": [],
+    "max_num_modules": 12,
+    "domain_length_x": 12.0,
+    "domain_length_y": 6.0,
+    "module_radius": 0.44999998807907104,
+    "min_center_distance": 1.0,
+    "heat_power_min": 0.0,
+    "heat_power_max": 3.0,
+    "total_heat_power": 4.198838710784912
+  },
+  "reference_case": {
+    "case_id": "0273",
+    "split": "test",
+    "re": 50.0,
+    "u_in": 1.0
+  },
+  "domain": {
+    "length_x": 12.0,
+    "length_y": 6.0,
+    "module_radius": 0.44999998807907104,
+    "resolution_nx": 128,
+    "resolution_ny": 64
+  },
+  "fields": [
+    "temperature",
+    "u",
+    "v",
+    "p",
+    "omega"
+  ],
+  "frame_urls": {
+    "temperature": [
+      "/api/jobs/4eb31d42631a4b42/frames/temperature/000"
+    ],
+    "u": [
+      "/api/jobs/4eb31d42631a4b42/frames/u/000"
+    ],
+    "v": [
+      "/api/jobs/4eb31d42631a4b42/frames/v/000"
+    ],
+    "p": [
+      "/api/jobs/4eb31d42631a4b42/frames/p/000"
+    ],
+    "omega": [
+      "/api/jobs/4eb31d42631a4b42/frames/omega/000"
+    ]
+  },
+  "render": {
+    "frame_count": 1,
+    "fields": {
+      "temperature": {
+        "vmin": -0.2927946150302887,
+        "vmax": 12.196049690246582,
+        "frames": [
+          "temperature.png"
+        ]
+      },
+      "u": {
+        "vmin": -1.4895431995391846,
+        "vmax": 1.4895431995391846,
+        "frames": [
+          "u.png"
+        ]
+      },
+      "v": {
+        "vmin": -0.08460498601198196,
+        "vmax": 0.08460498601198196,
+        "frames": [
+          "v.png"
+        ]
+      },
+      "p": {
+        "vmin": -0.12361131608486176,
+        "vmax": 0.39215222001075745,
+        "frames": [
+          "p.png"
+        ]
+      },
+      "omega": {
+        "vmin": -1.904885172843933,
+        "vmax": 1.904885172843933,
+        "frames": [
+          "omega.png"
+        ]
+      }
+    },
+    "raw_resolution": {
+      "nx": 128,
+      "ny": 64
+    },
+    "display_resolution": {
+      "width": 384,
+      "height": 192
+    },
+    "display_smoothing": true,
+    "display_scale": 3,
+    "render_interpolation": "bicubic",
+    "note": "Static steady-state field render; raw arrays are stored in the NPZ export."
+  },
+  "kpis": {
+    "available_kpis": [
+      "downstream_reheat_index",
+      "hot_fluid_area_fraction",
+      "hot_solid_area_fraction",
+      "interface_flux_std",
+      "low_velocity_hotspot_fraction",
+      "max_fluid_temperature",
+      "max_interface_heat_flux",
+      "max_solid_temperature",
+      "max_surface_temperature",
+      "mean_abs_interface_heat_flux",
+      "mean_interface_T_env",
+      "mean_solid_temperature",
+      "module_mean_temperature_std",
+      "module_peak_temperature_spread",
+      "outlet_hot_fraction",
+      "outlet_temperature_nonuniformity",
+      "outlet_temperature_rise_mean",
+      "p95_fluid_temperature",
+      "p95_solid_temperature",
+      "pressure_drop",
+      "temperature_gradient_energy",
+      "thermal_plume_area",
+      "thermal_plume_length",
+      "thermal_resistance_max",
+      "wall_hot_area_fraction"
+    ],
+    "unavailable_kpis": [
+      "max_h_effective"
+    ],
+    "num_modules": 3,
+    "temperature_thresholds": {
+      "reference_temperature": 0.05638000145554543,
+      "fluid_hot_temperature": 9.48282241821289,
+      "fluid_hot_source": "percentile_fallback",
+      "solid_hot_temperature": 14.357811450958254,
+      "solid_hot_source": "percentile_fallback",
+      "outlet_hot_temperature": 10.78120346069336,
+      "outlet_hot_source": "percentile_fallback",
+      "wall_hot_temperature": 9.48282241821289,
+      "wall_hot_source": "percentile_fallback"
+    },
+    "max_solid_temperature": 17.86656951904297,
+    "p95_solid_temperature": 15.657985115051268,
+    "mean_solid_temperature": 9.346850043016708,
+    "module_peak_temperature_spread": 5.227465629577637,
+    "module_mean_temperature_std": 1.336786101946938,
+    "thermal_resistance_max": 18.170836099127722,
+    "max_surface_temperature": 19.25696563720703,
+    "max_interface_heat_flux": 21.116315841674805,
+    "mean_abs_interface_heat_flux": 8.09034339338541,
+    "interface_flux_std": 5.858021719669004,
+    "mean_interface_T_env": 7.515335372028251,
+    "max_h_effective": null,
+    "pressure_drop": 0.05863588759093545,
+    "outlet_temperature_rise_mean": 5.986581415310502,
+    "outlet_temperature_nonuniformity": 3.2174526636485212,
+    "max_fluid_temperature": 13.386079788208008,
+    "p95_fluid_temperature": 10.849475955963134,
+    "hot_fluid_area_fraction": 0.1000752445447705,
+    "hot_solid_area_fraction": 0.10002153316106804,
+    "thermal_plume_area": 0.0653373463757211,
+    "thermal_plume_length": 7.9410600662231445,
+    "downstream_reheat_index": 2.47890051255242,
+    "low_velocity_hotspot_fraction": 0.002382743917732631,
+    "wall_hot_area_fraction": 0.0,
+    "temperature_gradient_energy": 0.2538808199146001,
+    "outlet_hot_fraction": 0.1,
+    "min_center_distance": 1.6668308504065141,
+    "wall_clearance": 1.362991750240326,
+    "inlet_clearance": 3.5620649456977844,
+    "outlet_clearance": 5.355389893054962,
+    "heat_power_total": 4.198838710784912
+  },
+  "modules": [
+    {
+      "x": 6.194610118865967,
+      "y": 3.415367364883423,
+      "heat_power": 0.8179366588592529
+    },
+    {
+      "x": 5.735570430755615,
+      "y": 1.812991738319397,
+      "heat_power": 1.4021844863891602
+    },
+    {
+      "x": 4.0120649337768555,
+      "y": 4.014726161956787,
+      "heat_power": 1.978717565536499
+    }
+  ],
+  "artifacts": {
+    "internal_summary": "/api/jobs/4eb31d42631a4b42/files/artifacts/module_internal_temperature_summary.png",
+    "interface_curves": "/api/jobs/4eb31d42631a4b42/files/artifacts/interface_curves.png",
+    "organization_matrices": "/api/jobs/4eb31d42631a4b42/files/artifacts/organization_matrices.png"
+  },
+  "export_npz_url": "/api/jobs/4eb31d42631a4b42/export.npz"
+}

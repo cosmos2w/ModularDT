@@ -1,0 +1,52 @@
+{
+  "frame_count": 1,
+  "fields": {
+    "temperature": {
+      "vmin": -0.45587173104286194,
+      "vmax": 14.268487930297852,
+      "frames": [
+        "temperature.png"
+      ]
+    },
+    "u": {
+      "vmin": -1.509717583656311,
+      "vmax": 1.509717583656311,
+      "frames": [
+        "u.png"
+      ]
+    },
+    "v": {
+      "vmin": -0.0881844162940979,
+      "vmax": 0.0881844162940979,
+      "frames": [
+        "v.png"
+      ]
+    },
+    "p": {
+      "vmin": -0.13781100511550903,
+      "vmax": 0.4210456609725952,
+      "frames": [
+        "p.png"
+      ]
+    },
+    "omega": {
+      "vmin": -2.4853830337524414,
+      "vmax": 2.4853830337524414,
+      "frames": [
+        "omega.png"
+      ]
+    }
+  },
+  "raw_resolution": {
+    "nx": 128,
+    "ny": 64
+  },
+  "display_resolution": {
+    "width": 384,
+    "height": 192
+  },
+  "display_smoothing": true,
+  "display_scale": 3,
+  "render_interpolation": "bicubic",
+  "note": "Static steady-state field render; raw arrays are stored in the NPZ export."
+}

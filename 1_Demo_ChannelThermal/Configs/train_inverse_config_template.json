@@ -1,5 +1,5 @@
 {
-  "Run_ID": "0001",
+  "Run_ID": "0003",
   "description": "Steady ChannelThermal inverse-design training config. Trains an amortized rectified-flow generator over module layouts conditioned on thermal KPI targets and verified by a frozen ChannelThermal forward checkpoint.",
   "seed": 42,
   "dataset": {
@@ -9,7 +9,7 @@
     "max_num_modules": "auto",
     "sort_centers": true,
     "samples_per_case": 4,
-    "validation_samples_per_case": 2,
+    "validation_samples_per_case": 1,
     "max_train_cases": 0,
     "max_val_cases": 0,
     "use_all_if_split_missing": true
@@ -99,6 +99,39 @@
   "target_augmentation_val": {
     "enabled": false
   },
+  "conditioning": {
+    "mode": "design_intent",
+    "use_legacy_kpi_vector": false,
+    "core_kpis": [
+      "max_solid_temperature",
+      "module_peak_temperature_spread",
+      "pressure_drop",
+      "outlet_temperature_nonuniformity",
+      "wall_hot_area_fraction",
+      "thermal_plume_length",
+      "downstream_reheat_index"
+    ],
+    "report_all_kpis": true
+  },
+  "intent_augmentation": {
+    "enabled": true,
+    "samples_per_case": 4,
+    "objective_weight_sampling": "dirichlet",
+    "limit_sampling": "train_quantiles",
+    "field_preference_dropout": 0.3
+  },
+  "conditioning_dropout": {
+    "enabled": true,
+    "drop_probability": 0.15
+  },
+  "forward_guidance": {
+    "enabled": false,
+    "start_epoch": 200,
+    "interval_epochs": 50,
+    "num_candidates_per_intent": 16,
+    "replay_top_k": 2,
+    "replay_weight": 0.2
+  },
   "inverse_model": {
     "target_dim": "auto",
     "design_dim": "auto",
@@ -108,7 +141,7 @@
     "behavior_latent_dim": 128,
     "organization_latent_dim": 128,
     "num_layers": 4,
-    "dropout": 0.0,
+    "dropout": 0.05,
     "use_count_head": true,
     "generate_heat_power": false,
     "heat_load_policy": "preserve_total_heat",
@@ -128,23 +161,24 @@
   },
   "loss": {
     "flow_weight": 1.0,
-    "count_weight": 0.25,
-    "behavior_align_weight": 0.25,
-    "organization_align_weight": 0.25,
-    "validity_prior_weight": 0.02
+    "set_center_weight": 0.25,
+    "count_weight": 0.10,
+    "behavior_align_weight": 0.05,
+    "organization_align_weight": 0.05,
+    "validity_prior_weight": 0.05
   },
   "training": {
     "epochs": 10000,
     "batch_size": 128,
     "learning_rate": 0.0001,
-    "weight_decay": 0.00001,
+    "weight_decay": 0.0001,
     "gradient_clip_norm": 1.0,
     "scheduler_min_lr": 0.000001,
     "num_workers": 2,
     "amp": false,
     "seed": 42,
     "device": null,
-    "save_every_epochs": 25,
+    "save_every_epochs": 5,
     "max_train_batches_per_epoch": null,
     "max_val_batches": null
   },
@@ -157,12 +191,12 @@
     "forward_verify_count_mode": "uniform",
     "forward_verify_query_batch_size": 32768,
     "demo_target_jsons": [
-      "./inverse_targets/low_peak_uniform_pack_demo.json"
+      "./inverse_targets_v2/battery_balanced_pack_intent.json"
     ],
     "demo_forward_verify_num_samples": 4,
     "demo_forward_verify_n_steps": 4,
     "demo_forward_verify_count_mode": "uniform",
-    "best_metric_name": "val_loss_total"
+    "best_metric_name": "val_design_intent_score_battery_balanced_pack_intent"
   },
   "paths": {
     "saved_inverse_root": "./Saved_Model_Inverse",

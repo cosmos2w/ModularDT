@@ -46,7 +46,16 @@ from thermal_inverse_kpi import (
     augment_kpi_targets_for_training,
     compute_steady_thermal_kpis,
     kpi_vector_from_dict,
+    layout_spread_metrics,
     score_candidate_kpis,
+)
+from thermal_design_intent import (
+    DEFAULT_FIELD_MAP_SHAPE,
+    build_design_intent_arrays,
+    compute_design_intent_score,
+    is_design_intent_payload,
+    normalize_intent_payload,
+    training_intent_from_record,
 )
 
 
@@ -220,6 +229,8 @@ class ThermalInverseDesignDataset(Dataset):
         seed: int = 42,
         behavior_latent_dim: int = 96,
         organization_latent_dim: int = 256,
+        conditioning_mode: str = "legacy_kpi",
+        intent_augmentation: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.path = resolve_demo_path(packed_h5_path)
         if not self.path.exists():
@@ -238,6 +249,9 @@ class ThermalInverseDesignDataset(Dataset):
         self.seed = int(seed)
         self.behavior_latent_dim = int(behavior_latent_dim)
         self.organization_latent_dim = int(organization_latent_dim)
+        self.conditioning_mode = str(conditioning_mode).lower().strip()
+        self.intent_augmentation = dict(intent_augmentation or {})
+        self.kpi_distribution_summary: Optional[Mapping[str, Any]] = None
         self.latent_targets: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
         self.normalizer: Optional[H5Normalizer] = None
         self.records = self._load_records(max_cases=max_cases, use_all_if_split_missing=use_all_if_split_missing)
@@ -350,6 +364,9 @@ class ThermalInverseDesignDataset(Dataset):
     def set_kpi_stats(self, stats: Optional[Mapping[str, Any]]) -> None:
         self.kpi_stats = stats
 
+    def set_kpi_distribution_summary(self, summary: Optional[Mapping[str, Any]]) -> None:
+        self.kpi_distribution_summary = summary
+
     def set_latent_targets(self, latents: Mapping[str, Tuple[np.ndarray, np.ndarray]]) -> None:
         self.latent_targets = {str(k): (np.asarray(v[0], dtype=np.float32), np.asarray(v[1], dtype=np.float32)) for k, v in latents.items()}
 
@@ -409,6 +426,23 @@ class ThermalInverseDesignDataset(Dataset):
             heat_power_total=float(np.sum(record.heat_powers[record.module_present > 0.5])) if self.generate_heat_power else None,
             heat_power_scale=self.heat_power_scale,
         )
+        if self.conditioning_mode == "design_intent":
+            intent_arrays = training_intent_from_record(
+                record.kpi_dict,
+                true_count=record.true_count,
+                domain_length_x=record.domain_length_x,
+                domain_length_y=record.domain_length_y,
+                max_num_modules=self.max_num_modules,
+                rng=rng,
+                distribution_summary=self.kpi_distribution_summary,
+                augmentation_cfg=self.intent_augmentation,
+            )
+        else:
+            intent_arrays = {
+                "design_intent_vector": np.zeros((24,), dtype=np.float32),
+                "objective_weight_vector": np.zeros((7,), dtype=np.float32),
+                "field_intent_maps": np.zeros((5, DEFAULT_FIELD_MAP_SHAPE[1], DEFAULT_FIELD_MAP_SHAPE[0]), dtype=np.float32),
+            }
         behavior, organization = self.latent_targets.get(
             record.case_id,
             (
@@ -420,6 +454,9 @@ class ThermalInverseDesignDataset(Dataset):
             "case_id": record.case_id,
             "design_vec": record.design_vec.astype(np.float32),
             "target_spec_vector": np.asarray(target_spec, dtype=np.float32),
+            "design_intent_vector": np.asarray(intent_arrays["design_intent_vector"], dtype=np.float32),
+            "objective_weight_vector": np.asarray(intent_arrays["objective_weight_vector"], dtype=np.float32),
+            "field_intent_maps": np.asarray(intent_arrays["field_intent_maps"], dtype=np.float32),
             "target_kpi_targets": kpi_targets,
             "kpi_vector": record.kpi_vector.astype(np.float32),
             "true_count": np.asarray([record.true_count], dtype=np.int64),
@@ -442,6 +479,9 @@ def collate_inverse(batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     tensor_keys = (
         "design_vec",
         "target_spec_vector",
+        "design_intent_vector",
+        "objective_weight_vector",
+        "field_intent_maps",
         "kpi_vector",
         "true_count",
         "active_kpi_count",
@@ -484,6 +524,39 @@ def compute_kpi_stats(vectors: np.ndarray, kpi_names: Sequence[str]) -> Dict[str
             for i, name in enumerate(kpi_names)
         },
     }
+
+
+def compute_kpi_distribution_summary(vectors: np.ndarray, kpi_names: Sequence[str]) -> Dict[str, Any]:
+    arr = np.asarray(vectors, dtype=np.float64)
+    quantiles = {
+        "p01": 1.0,
+        "p05": 5.0,
+        "p10": 10.0,
+        "p25": 25.0,
+        "p50": 50.0,
+        "p75": 75.0,
+        "p90": 90.0,
+        "p95": 95.0,
+        "p99": 99.0,
+    }
+    out: Dict[str, Any] = {"names": list(kpi_names), "kpis": {}}
+    for idx, name in enumerate(kpi_names):
+        values = arr[:, idx] if arr.ndim == 2 and idx < arr.shape[1] else np.asarray([], dtype=np.float64)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            out["kpis"][str(name)] = {"count": 0}
+            continue
+        entry = {
+            "count": int(values.size),
+            "min": float(np.min(values)),
+            "max": float(np.max(values)),
+            "mean": float(np.mean(values)),
+            "std": float(np.std(values)),
+        }
+        for key, q in quantiles.items():
+            entry[key] = float(np.percentile(values, q))
+        out["kpis"][str(name)] = entry
+    return out
 
 
 def latest_run_dir(saved_root: Path) -> Path:
@@ -1099,6 +1172,10 @@ def sample_diversity(candidates: Sequence[Mapping[str, Any]], max_num_modules: i
     return float(np.mean(dists)) if dists else 0.0
 
 
+def _candidate_layout_metrics(candidate: Mapping[str, Any]) -> Dict[str, float]:
+    return layout_spread_metrics(candidate.get("centers", []), num_modules=int(candidate.get("count", 0)))
+
+
 def run_forward_verification(
     inverse_model: ThermalInverseDesignFlow,
     forward_model: GlobalChannelThermalModel,
@@ -1123,13 +1200,24 @@ def run_forward_verification(
     indices = rng.choice(len(dataset), size=min(int(num_targets), len(dataset)), replace=False)
     scores = []
     valid = []
-    diversity = []
+    diversity_raw = []
+    diversity_top = []
+    bbox_areas = []
+    pair_distances = []
+    count_hist: Dict[int, int] = {}
     port_kpis_available = []
+    port_condition_predicted = []
     kpi_errors: Dict[str, List[float]] = {}
     for idx in indices:
         item = dataset[int(idx)]
         physical_idx = int(np.asarray(item.get("physical_case_index", [int(idx) // dataset.samples_per_case])).reshape(-1)[0])
         record = dataset.records[physical_idx]
+        item_case_id = str(item.get("case_id", ""))
+        if item_case_id != record.case_id:
+            raise AssertionError(
+                f"Forward verification index mismatch: dataset[{int(idx)}] case_id={item_case_id!r}, "
+                f"records[{physical_idx}] case_id={record.case_id!r}."
+            )
         target_spec_vec = item["target_spec_vector"]
         candidates = inverse_model.sample_designs(
             target_spec_vec,
@@ -1137,12 +1225,20 @@ def run_forward_verification(
             n_steps=int(n_steps),
             seed=int(seed + idx),
             count_mode=str(count_mode),
+            design_intent_vector=item.get("design_intent_vector"),
+            objective_weight_vector=item.get("objective_weight_vector"),
+            field_intent_maps=item.get("field_intent_maps"),
             device=device,
         )
-        diversity.append(sample_diversity(candidates, inverse_model.max_num_modules))
+        diversity_raw.append(sample_diversity(candidates, inverse_model.max_num_modules))
         best_score = float("inf")
         best_valid = 0.0
+        scored_candidates: List[Tuple[float, Mapping[str, Any]]] = []
         for cand in candidates:
+            count_hist[int(cand.get("count", 0))] = count_hist.get(int(cand.get("count", 0)), 0) + 1
+            spread = _candidate_layout_metrics(cand)
+            bbox_areas.append(float(spread["bbox_area"]))
+            pair_distances.append(float(spread["mean_pair_distance"]))
             prediction = predict_candidate_with_forward(
                 forward_model,
                 forward_metadata,
@@ -1173,7 +1269,9 @@ def run_forward_verification(
                 temperature_limits=temperature_limits,
             )
             kpis.update(cand.get("validity", {}))
+            kpis.update(spread)
             port_kpis_available.append(1.0 if "mean_interface_T_env" in kpis.get("available_kpis", []) else 0.0)
+            port_condition_predicted.append(1.0 if prediction.get("pred_port_condition") is not None else 0.0)
             kpis["num_modules"] = int(cand.get("count", 0))
             target_spec = {
                 "kpi_names": list(dataset.kpi_names),
@@ -1185,19 +1283,29 @@ def run_forward_verification(
                 },
             }
             scored = score_candidate_kpis(kpis, target_spec)
+            scored_candidates.append((float(scored["total_score"]), cand))
             if scored["total_score"] < best_score:
                 best_score = float(scored["total_score"])
                 best_valid = 1.0 if bool(cand.get("validity", {}).get("valid", False)) else 0.0
                 for name, err in scored.get("per_kpi_errors", {}).items():
                     kpi_errors.setdefault(name, []).append(float(err))
+        scored_candidates.sort(key=lambda item_score: item_score[0])
+        diversity_top.append(sample_diversity([cand for _, cand in scored_candidates[: min(4, len(scored_candidates))]], inverse_model.max_num_modules))
         scores.append(best_score)
         valid.append(best_valid)
     metrics = {
         "val_forward_score": float(np.mean(scores)) if scores else float("nan"),
         "val_forward_score_reconstruct": float(np.mean(scores)) if scores else float("nan"),
+        "val_design_intent_score_reconstruct": float(np.mean(scores)) if scores else float("nan"),
         "val_forward_validity_rate": float(np.mean(valid)) if valid else float("nan"),
-        "val_candidate_diversity": float(np.mean(diversity)) if diversity else float("nan"),
+        "val_candidate_diversity": float(np.mean(diversity_raw)) if diversity_raw else float("nan"),
+        "val_candidate_diversity_raw": float(np.mean(diversity_raw)) if diversity_raw else float("nan"),
+        "val_candidate_diversity_top": float(np.mean(diversity_top)) if diversity_top else float("nan"),
+        "val_count_histogram": json.dumps({str(k): int(v) for k, v in sorted(count_hist.items())}, sort_keys=True),
+        "val_mean_bbox_area": float(np.mean(bbox_areas)) if bbox_areas else float("nan"),
+        "val_mean_pair_distance": float(np.mean(pair_distances)) if pair_distances else float("nan"),
         "verification_mode": "predicted",
+        "predicted_port_condition_available": float(np.mean(port_condition_predicted)) if port_condition_predicted else 0.0,
         "predicted_port_condition_kpis_available": float(np.mean(port_kpis_available)) if port_kpis_available else 0.0,
     }
     for name, values in kpi_errors.items():
@@ -1230,18 +1338,28 @@ def _target_spec_from_json_for_validation(
 ) -> Dict[str, Any]:
     path = resolve_demo_path(path_like)
     payload = read_json(path)
+    intent_arrays = build_design_intent_arrays(
+        payload,
+        max_num_modules=model.max_num_modules,
+        domain_length_x=float(model.cfg.domain_length_x),
+        domain_length_y=float(model.cfg.domain_length_y),
+        heat_power_scale=float(model.cfg.heat_power_scale),
+    )
+    normalized_intent = intent_arrays["intent"]
     prefs = payload.get("preferences", {}) if isinstance(payload.get("preferences", {}), Mapping) else {}
     kpis = dict(payload.get("kpis", {}))
     if bool(prefs.get("avoid_wall_hotspots", False)) and "wall_hot_area_fraction" not in kpis:
         kpis["wall_hot_area_fraction"] = {"mode": "max", "high": 0.08, "weight": 0.5}
+    scenario = normalized_intent.get("scenario", {}) if isinstance(normalized_intent.get("scenario"), Mapping) else {}
+    geometry = normalized_intent.get("geometry_constraints", {}) if isinstance(normalized_intent.get("geometry_constraints"), Mapping) else {}
     constraints = {
-        "num_modules_min": payload.get("num_modules_min", payload.get("num_cylinders_min")),
-        "num_modules_max": payload.get("num_modules_max", payload.get("num_cylinders_max")),
-        "min_center_distance": payload.get("min_center_distance", prefs.get("min_center_distance")),
-        "wall_clearance": payload.get("wall_clearance", prefs.get("wall_clearance")),
-        "inlet_clearance": payload.get("inlet_clearance", prefs.get("inlet_clearance")),
-        "outlet_clearance": payload.get("outlet_clearance", prefs.get("outlet_clearance")),
-        "heat_power_total": payload.get("heat_power_total"),
+        "num_modules_min": scenario.get("num_modules_min", payload.get("num_modules_min", payload.get("num_cylinders_min"))),
+        "num_modules_max": scenario.get("num_modules_max", payload.get("num_modules_max", payload.get("num_cylinders_max"))),
+        "min_center_distance": geometry.get("min_center_distance", payload.get("min_center_distance", prefs.get("min_center_distance"))),
+        "wall_clearance": geometry.get("wall_clearance", payload.get("wall_clearance", prefs.get("wall_clearance"))),
+        "inlet_clearance": geometry.get("inlet_clearance", payload.get("inlet_clearance", prefs.get("inlet_clearance"))),
+        "outlet_clearance": geometry.get("outlet_clearance", payload.get("outlet_clearance", prefs.get("outlet_clearance"))),
+        "heat_power_total": scenario.get("heat_power_total", payload.get("heat_power_total")),
     }
     vector = build_target_spec_vector(
         kpi_targets=kpis,
@@ -1259,6 +1377,12 @@ def _target_spec_from_json_for_validation(
         domain_length_scale=max(float(model.cfg.domain_length_x), float(model.cfg.domain_length_y)),
         heat_power_scale=float(model.cfg.heat_power_scale),
     )
+    thermal_limits_payload = payload.get("temperature_limits")
+    if thermal_limits_payload is None and isinstance(normalized_intent.get("thermal_limits"), Mapping):
+        thermal_limits_payload = {
+            "wall_hot_delta_T": normalized_intent["thermal_limits"].get("wall_hot_delta_T"),
+            "outlet_hot_delta_T": normalized_intent["thermal_limits"].get("outlet_hot_delta_T"),
+        }
     return {
         "name": payload.get("name", path.stem),
         "vector": vector,
@@ -1267,7 +1391,13 @@ def _target_spec_from_json_for_validation(
         "kpi_stats": kpi_stats,
         "constraints": constraints,
         "preferences": prefs,
-        "temperature_limits": payload.get("temperature_limits"),
+        "temperature_limits": thermal_limits_payload,
+        "target_payload": payload,
+        "design_intent": normalized_intent,
+        "is_design_intent": bool(is_design_intent_payload(payload)),
+        "design_intent_vector": intent_arrays["design_intent_vector"],
+        "objective_weight_vector": intent_arrays["objective_weight_vector"],
+        "field_intent_maps": intent_arrays["field_intent_maps"],
     }
 
 
@@ -1298,12 +1428,19 @@ def run_fixed_target_verification(
         count_mode=str(count_mode),
         x_bounds=_span_bounds(prefs.get("x_span")),
         y_bounds=_span_bounds(prefs.get("y_span")),
+        design_intent_vector=target_spec.get("design_intent_vector"),
+        objective_weight_vector=target_spec.get("objective_weight_vector"),
+        field_intent_maps=target_spec.get("field_intent_maps"),
         device=device,
     )
     scores = []
+    intent_scores = []
     violations = []
     valid = []
+    spread_penalties = []
+    port_available = []
     for cand in candidates:
+        spread = _candidate_layout_metrics(cand)
         prediction = predict_candidate_with_forward(
             forward_model,
             forward_metadata,
@@ -1335,17 +1472,121 @@ def run_fixed_target_verification(
             temperature_limits=limits,
         )
         kpis.update(cand.get("validity", {}))
+        kpis.update(spread)
+        port_available.append(1.0 if "mean_interface_T_env" in kpis.get("available_kpis", []) else 0.0)
         kpis["num_modules"] = int(cand.get("count", 0))
         scored = score_candidate_kpis(kpis, target_spec)
+        intent_scored = compute_design_intent_score(kpis, {"centers": cand.get("centers", [])}, target_spec)
         scores.append(float(scored["total_score"]))
+        intent_scores.append(float(intent_scored["design_intent_score"]))
         violations.append(float(scored["kpi_violation"]))
+        spread_penalties.append(float(scored.get("spread_preference_penalty", 0.0)))
         valid.append(1.0 if bool(cand.get("validity", {}).get("valid", False)) else 0.0)
     name = _safe_metric_name(target_spec.get("name"))
     return {
         f"val_forward_score_{name}": float(np.min(scores)) if scores else float("nan"),
+        f"val_design_intent_score_{name}": float(np.min(intent_scores)) if intent_scores else float("nan"),
         f"validity_rate_{name}": float(np.mean(valid)) if valid else float("nan"),
         f"best_kpi_violation_{name}": float(np.min(violations)) if violations else float("nan"),
+        f"best_spread_preference_penalty_{name}": float(np.min(spread_penalties)) if spread_penalties else float("nan"),
+        f"predicted_port_condition_kpis_available_{name}": float(np.mean(port_available)) if port_available else 0.0,
     }
+
+
+def run_forward_guidance_replay(
+    inverse_model: ThermalInverseDesignFlow,
+    forward_model: GlobalChannelThermalModel,
+    forward_metadata: Mapping[str, Any],
+    dataset: ThermalInverseDesignDataset,
+    device: torch.device,
+    *,
+    num_intents: int,
+    num_candidates_per_intent: int,
+    replay_top_k: int,
+    n_steps: int,
+    seed: int,
+    count_mode: str,
+    heat_load_policy: str,
+    fixed_heat_per_module: Optional[float],
+    query_batch_size: int,
+) -> List[Dict[str, Any]]:
+    if num_intents <= 0 or num_candidates_per_intent <= 0:
+        return []
+    rng = np.random.default_rng(seed)
+    indices = rng.choice(len(dataset), size=min(int(num_intents), len(dataset)), replace=False)
+    replay: List[Dict[str, Any]] = []
+    for idx in indices:
+        item = dataset[int(idx)]
+        physical_idx = int(np.asarray(item.get("physical_case_index", [int(idx) // dataset.samples_per_case])).reshape(-1)[0])
+        record = dataset.records[physical_idx]
+        candidates = inverse_model.sample_designs(
+            item["target_spec_vector"],
+            n_samples=int(num_candidates_per_intent),
+            n_steps=int(n_steps),
+            seed=int(seed + idx),
+            count_mode=count_mode,
+            design_intent_vector=item.get("design_intent_vector"),
+            objective_weight_vector=item.get("objective_weight_vector"),
+            field_intent_maps=item.get("field_intent_maps"),
+            device=device,
+        )
+        scored_rows = []
+        for cand in candidates:
+            prediction = predict_candidate_with_forward(
+                forward_model,
+                forward_metadata,
+                record,
+                cand,
+                device,
+                max_num_modules=inverse_model.max_num_modules,
+                generate_heat_power=inverse_model.cfg.generate_heat_power,
+                heat_load_policy=heat_load_policy,
+                fixed_heat_per_module=fixed_heat_per_module,
+                query_batch_size=query_batch_size,
+            )
+            kpis = compute_steady_thermal_kpis(
+                prediction["pred_field_grid"],
+                x_grid=record.x_grid,
+                y_grid=record.y_grid,
+                channel_order=CHANNEL_ORDER,
+                module_centers=prediction["centers_padded"],
+                module_present=prediction["module_present"],
+                heat_powers=prediction.get("heat_powers", record.heat_powers),
+                module_internal_temperature=prediction["pred_internal_temperature"],
+                module_internal_mask=record.module_internal_mask,
+                interface_target=prediction["pred_interface"],
+                interface_condition=prediction.get("pred_port_condition"),
+                domain={"domain_length_x": record.domain_length_x, "domain_length_y": record.domain_length_y, "module_radius": record.module_radius},
+                material_params=record.material_params,
+                temperature_limits=dataset.temperature_limits,
+            )
+            kpis.update(cand.get("validity", {}))
+            kpis.update(_candidate_layout_metrics(cand))
+            kpis["num_modules"] = int(cand.get("count", 0))
+            target_spec = {"kpi_names": list(dataset.kpi_names), "kpi_targets": item.get("target_kpi_targets", {}), "kpi_stats": dataset.kpi_stats}
+            score = score_candidate_kpis(kpis, target_spec)
+            scored_rows.append((float(score["total_score"]), cand))
+        scored_rows.sort(key=lambda row: row[0])
+        for _, cand in scored_rows[: max(int(replay_top_k), 0)]:
+            replay_item = dict(item)
+            centers = np.asarray(cand.get("centers", []), dtype=np.float32).reshape(-1, 2)
+            present = np.zeros((inverse_model.max_num_modules,), dtype=np.float32)
+            present[: min(centers.shape[0], inverse_model.max_num_modules)] = 1.0
+            design_vec, _ = encode_design_vector(
+                centers,
+                present[: centers.shape[0]] if centers.shape[0] else present,
+                None,
+                max_num_modules=inverse_model.max_num_modules,
+                domain_length_x=record.domain_length_x,
+                domain_length_y=record.domain_length_y,
+                generate_heat_power=inverse_model.cfg.generate_heat_power,
+                heat_power_scale=float(inverse_model.cfg.heat_power_scale),
+                sort_centers=True,
+            )
+            replay_item["design_vec"] = design_vec.astype(np.float32)
+            replay_item["true_count"] = np.asarray([int(cand.get("count", centers.shape[0]))], dtype=np.int64)
+            replay.append(replay_item)
+    return replay
 
 
 def save_history_csv(history: Sequence[Mapping[str, Any]], path: Path) -> None:
@@ -1446,6 +1687,7 @@ def save_checkpoint(
     epoch: int,
     best_metric: float,
     forward_checkpoint: Optional[str],
+    kpi_distribution_summary: Optional[Mapping[str, Any]] = None,
 ) -> None:
     torch.save(
         {
@@ -1457,6 +1699,7 @@ def save_checkpoint(
             "train_config": cfg,
             "kpi_names": list(kpi_names),
             "kpi_stats": dict(kpi_stats),
+            "kpi_distribution_summary": dict(kpi_distribution_summary or {}),
             "forward_checkpoint": forward_checkpoint,
         },
         path,
@@ -1478,6 +1721,10 @@ def main() -> int:
     training_cfg = cfg.get("training", {})
     validation_cfg = cfg.get("validation", {})
     loss_cfg = cfg.get("loss", {})
+    conditioning_cfg = cfg.get("conditioning", {}) if isinstance(cfg.get("conditioning", {}), Mapping) else {}
+    intent_aug_cfg = cfg.get("intent_augmentation", {}) if isinstance(cfg.get("intent_augmentation", {}), Mapping) else {}
+    conditioning_dropout_cfg = cfg.get("conditioning_dropout", {}) if isinstance(cfg.get("conditioning_dropout", {}), Mapping) else {}
+    forward_guidance_cfg = cfg.get("forward_guidance", {}) if isinstance(cfg.get("forward_guidance", {}), Mapping) else {}
     set_seed(int(training_cfg.get("seed", cfg.get("seed", 42))))
     device = select_device(args.device or training_cfg.get("device"))
 
@@ -1492,6 +1739,11 @@ def main() -> int:
         inverse_cfg["max_num_modules"] = root_max_modules
     generate_heat_power = bool(inverse_cfg.get("generate_heat_power", False))
     heat_load_policy = str(inverse_cfg.get("heat_load_policy", "preserve_total_heat")).lower().strip()
+    conditioning_mode = str(conditioning_cfg.get("mode", inverse_cfg.get("conditioning_mode", "legacy_kpi"))).lower().strip()
+    inverse_cfg["conditioning_mode"] = conditioning_mode
+    inverse_cfg["use_legacy_kpi_vector"] = bool(conditioning_cfg.get("use_legacy_kpi_vector", inverse_cfg.get("use_legacy_kpi_vector", True)))
+    inverse_cfg["conditioning_dropout_enabled"] = bool(conditioning_dropout_cfg.get("enabled", False))
+    inverse_cfg["conditioning_drop_probability"] = float(conditioning_dropout_cfg.get("drop_probability", 0.0))
     fixed_heat_per_module = inverse_cfg.get("fixed_heat_per_module")
     heat_scale = float(inverse_cfg.get("heat_power_scale", target_cfg.get("heat_power_scale", 1.0)))
     temperature_limits = dict(target_cfg.get("temperature_limits", {}) or {})
@@ -1517,6 +1769,8 @@ def main() -> int:
         seed=int(training_cfg.get("seed", 42)),
         behavior_latent_dim=int(inverse_cfg.get("behavior_latent_dim", 96)),
         organization_latent_dim=int(inverse_cfg.get("organization_latent_dim", 256)),
+        conditioning_mode=conditioning_mode,
+        intent_augmentation=intent_aug_cfg,
     )
     val_dataset = ThermalInverseDesignDataset(
         packed_path,
@@ -1535,10 +1789,15 @@ def main() -> int:
         seed=int(training_cfg.get("seed", 42)) + 1000,
         behavior_latent_dim=int(inverse_cfg.get("behavior_latent_dim", 96)),
         organization_latent_dim=int(inverse_cfg.get("organization_latent_dim", 256)),
+        conditioning_mode=conditioning_mode,
+        intent_augmentation={**intent_aug_cfg, "field_preference_dropout": 1.0} if conditioning_mode == "design_intent" else {},
     )
     kpi_stats = compute_kpi_stats(np.stack([record.kpi_vector for record in train_dataset.records]), kpi_names)
+    kpi_distribution_summary = compute_kpi_distribution_summary(np.stack([record.kpi_vector for record in train_dataset.records]), kpi_names)
     train_dataset.set_kpi_stats(kpi_stats)
     val_dataset.set_kpi_stats(kpi_stats)
+    train_dataset.set_kpi_distribution_summary(kpi_distribution_summary)
+    val_dataset.set_kpi_distribution_summary(kpi_distribution_summary)
 
     sample_record = train_dataset.records[0]
     inverse_cfg["target_dim"] = len(kpi_names) * 7 + 8 if str(inverse_cfg.get("target_dim", "auto")).lower() == "auto" else inverse_cfg.get("target_dim")
@@ -1614,6 +1873,7 @@ def main() -> int:
     run_dir = ensure_dir(saved_root / run_name)
     write_json(run_dir / "resolved_train_inverse_config.json", cfg)
     write_json(run_dir / "kpi_stats.json", kpi_stats)
+    write_json(run_dir / "kpi_distribution_summary.json", kpi_distribution_summary)
 
     train_loader = DataLoader(
         train_dataset,
@@ -1643,8 +1903,10 @@ def main() -> int:
     max_train_batches = args.max_train_batches if args.max_train_batches is not None else training_cfg.get("max_train_batches_per_epoch")
     max_val_batches = args.max_val_batches if args.max_val_batches is not None else training_cfg.get("max_val_batches")
     history: List[Dict[str, Any]] = []
+    replay_buffer: List[Dict[str, Any]] = []
     best_val = float("inf")
     best_verified = float("inf")
+    best_verified_metric_name = str(validation_cfg.get("best_metric_name", "auto") or "auto")
     history_path = run_dir / "loss_history.csv"
     metrics_history_path = run_dir / "training_metrics.csv"
     for epoch in range(1, epochs + 1):
@@ -1722,9 +1984,21 @@ def main() -> int:
                         temperature_limits=temperature_limits,
                     )
                 )
-            verified = float(verify_metrics.get("val_forward_score", float("inf")))
+            design_metric_names = sorted(key for key in row if key.startswith("val_design_intent_score_"))
+            demo_metric_names = sorted(key for key in row if key.startswith("val_forward_score_") and key != "val_forward_score_reconstruct")
+            metric_name = best_verified_metric_name
+            if metric_name.lower() in {"auto", ""}:
+                metric_name = design_metric_names[0] if conditioning_mode == "design_intent" and design_metric_names else "val_design_intent_score_reconstruct" if conditioning_mode == "design_intent" and "val_design_intent_score_reconstruct" in row else demo_metric_names[0] if demo_metric_names else "val_forward_score_reconstruct"
+            if metric_name not in row:
+                fallback_metric = design_metric_names[0] if conditioning_mode == "design_intent" and design_metric_names else "val_design_intent_score_reconstruct" if conditioning_mode == "design_intent" and "val_design_intent_score_reconstruct" in row else demo_metric_names[0] if demo_metric_names else "val_forward_score_reconstruct"
+                print(f"[checkpoint] best metric {metric_name!r} unavailable; using {fallback_metric!r}.")
+                metric_name = fallback_metric
+            verified = float(row.get(metric_name, float("inf")))
             if math.isfinite(verified) and verified < best_verified:
                 best_verified = verified
+                row["best_verified_checkpoint_selected"] = 1
+                row["best_verified_metric_name"] = metric_name
+                row["best_verified_checkpoint_reason"] = f"lowest {metric_name}={verified:.6g}"
                 save_checkpoint(
                     run_dir / "best_verified_model.pt",
                     model=model,
@@ -1735,7 +2009,51 @@ def main() -> int:
                     epoch=epoch,
                     best_metric=best_verified,
                     forward_checkpoint=forward_metadata.get("checkpoint_path"),
+                    kpi_distribution_summary=kpi_distribution_summary,
                 )
+                print(f"[checkpoint] best_verified_model.pt updated: {row['best_verified_checkpoint_reason']}")
+            else:
+                row["best_verified_checkpoint_selected"] = 0
+                row["best_verified_metric_name"] = metric_name
+                row["best_verified_checkpoint_reason"] = f"kept previous lowest {metric_name}={best_verified:.6g}"
+        if (
+            forward_model is not None
+            and bool(forward_guidance_cfg.get("enabled", False))
+            and epoch >= int(forward_guidance_cfg.get("start_epoch", 200))
+            and epoch % max(int(forward_guidance_cfg.get("interval_epochs", 50)), 1) == 0
+        ):
+            new_replay = run_forward_guidance_replay(
+                model,
+                forward_model,
+                forward_metadata,
+                val_dataset,
+                device,
+                num_intents=int(forward_guidance_cfg.get("num_intents", validation_cfg.get("forward_verify_num_targets", 4))),
+                num_candidates_per_intent=int(forward_guidance_cfg.get("num_candidates_per_intent", 16)),
+                replay_top_k=int(forward_guidance_cfg.get("replay_top_k", 2)),
+                n_steps=int(forward_guidance_cfg.get("n_steps", validation_cfg.get("forward_verify_n_steps", 8))),
+                seed=int(training_cfg.get("seed", 42)) + epoch + 4049,
+                count_mode=str(forward_guidance_cfg.get("count_mode", validation_cfg.get("forward_verify_count_mode", "uniform"))),
+                heat_load_policy=heat_load_policy,
+                fixed_heat_per_module=float(fixed_heat_per_module) if fixed_heat_per_module is not None else None,
+                query_batch_size=int(forward_guidance_cfg.get("query_batch_size", cfg.get("forward_model", {}).get("query_batch_size", 32768))),
+            )
+            replay_buffer.extend(new_replay)
+            max_replay = int(forward_guidance_cfg.get("max_replay_items", 256))
+            if len(replay_buffer) > max_replay:
+                replay_buffer = replay_buffer[-max_replay:]
+            if replay_buffer:
+                model.train(True)
+                batch_size = min(int(training_cfg.get("batch_size", 64)), len(replay_buffer))
+                replay_batch = collate_inverse(replay_buffer[-batch_size:])
+                replay_batch = move_batch_to_device(replay_batch, device)
+                optimizer.zero_grad(set_to_none=True)
+                replay_loss, replay_metrics = model.training_loss(replay_batch, loss_weights=loss_cfg)
+                (float(forward_guidance_cfg.get("replay_weight", 0.2)) * replay_loss).backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(training_cfg.get("gradient_clip_norm", 1.0)))
+                optimizer.step()
+                row["forward_guidance_replay_items"] = len(replay_buffer)
+                row["forward_guidance_replay_loss_total"] = scalar(replay_metrics["loss_total"])
         val_loss = float(val_metrics.get("loss_total", float("inf")))
         if val_loss < best_val:
             best_val = val_loss
@@ -1749,6 +2067,7 @@ def main() -> int:
                 epoch=epoch,
                 best_metric=best_val,
                 forward_checkpoint=forward_metadata.get("checkpoint_path"),
+                kpi_distribution_summary=kpi_distribution_summary,
             )
         save_checkpoint(
             run_dir / "latest_model.pt",
@@ -1760,6 +2079,7 @@ def main() -> int:
             epoch=epoch,
             best_metric=best_val,
             forward_checkpoint=forward_metadata.get("checkpoint_path"),
+            kpi_distribution_summary=kpi_distribution_summary,
         )
         history.append(row)
         save_history_csv(history, history_path)
@@ -1767,9 +2087,15 @@ def main() -> int:
         if epoch % max(int(training_cfg.get("save_every_epochs", 25)), 1) == 0 or epoch == epochs:
             save_loss_curve(history_path, run_dir / "loss_curve.png")
             save_forward_score_curve(history_path, run_dir / "forward_score_curve.png")
+        demo_forward = " ".join(
+            f"{key}={float(row[key]):.4e}" for key in sorted(row) if key.startswith("val_forward_score_") and key != "val_forward_score_reconstruct" and isinstance(row.get(key), (int, float))
+        )
         print(
-            f"[epoch {epoch:04d}] train={train_metrics.get('loss_total', float('nan')):.4e} "
-            f"val={val_loss:.4e} forward={row.get('val_forward_score', float('nan')):.4e}"
+            f"[epoch {epoch:04d}] train_loss_total={train_metrics.get('loss_total', float('nan')):.4e} "
+            f"val_loss_total={val_loss:.4e} "
+            f"val_forward_score_reconstruct={row.get('val_forward_score_reconstruct', float('nan')):.4e} "
+            f"{demo_forward} val_candidate_diversity={row.get('val_candidate_diversity', float('nan'))} "
+            f"checkpoint={row.get('best_verified_checkpoint_reason', 'not verified this epoch')}"
         )
     save_loss_curve(history_path, run_dir / "loss_curve.png")
     save_forward_score_curve(history_path, run_dir / "forward_score_curve.png")
