@@ -6,7 +6,7 @@
   "wall_clearance": 0.12,
   "inlet_clearance": 0.4,
   "outlet_clearance": 0.45,
-  "fixed_heat_load_note": "Heat load is conditioned from the reference case by default; optional heat_power_total is only active when heat generation is enabled.",
+  "fixed_heat_load_note": "Default heat_load_policy=preserve_total_heat keeps the reference total heat and distributes it across active generated modules; optional heat_power_total can request a target total.",
   "kpis": {
     "thermal_plume_length": {
       "mode": "max",

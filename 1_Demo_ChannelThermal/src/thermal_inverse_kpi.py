@@ -212,6 +212,36 @@ def _hot_threshold(values: np.ndarray, reference: float, explicit: Optional[floa
     return max(p90, ref + 0.45 * max(p98 - ref, 0.0))
 
 
+def _limit_value(limits: Optional[Mapping[str, Any]], key: str) -> Optional[float]:
+    if not isinstance(limits, Mapping):
+        return None
+    value = limits.get(key)
+    if value is None:
+        return None
+    scalar = _finite_float(value, float("nan"))
+    return scalar if math.isfinite(scalar) else None
+
+
+def _configured_temperature_threshold(
+    values: np.ndarray,
+    reference: float,
+    limits: Optional[Mapping[str, Any]],
+    *,
+    absolute_key: str,
+    delta_key: str,
+    legacy_explicit: Optional[float] = None,
+) -> Tuple[float, str]:
+    absolute = _limit_value(limits, absolute_key)
+    if absolute is not None:
+        return float(absolute), f"{absolute_key}=absolute"
+    delta = _limit_value(limits, delta_key)
+    if delta is not None and math.isfinite(float(reference)):
+        return float(reference + delta), f"{delta_key}=reference_delta"
+    if legacy_explicit is not None and math.isfinite(float(legacy_explicit)):
+        return float(legacy_explicit), "hot_temperature_threshold=legacy_absolute"
+    return _hot_threshold(values, reference, None), "percentile_fallback"
+
+
 def _masked_values(values: np.ndarray, mask: np.ndarray) -> np.ndarray:
     if values.shape != mask.shape:
         mask = np.resize(mask.astype(bool), values.shape)
@@ -243,6 +273,7 @@ def compute_steady_thermal_kpis(
     material_params: Optional[Any] = None,
     reference_temperature: Optional[float] = None,
     hot_temperature_threshold: Optional[float] = None,
+    temperature_limits: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Compute steady field, internal, and interface KPIs.
 
@@ -288,13 +319,55 @@ def compute_steady_thermal_kpis(
         if inlet_t.size
         else float(np.nanmin(temperature))
     )
-    hot_t = _hot_threshold(fluid_t, ref_t, hot_temperature_threshold)
-    hot_fluid = (temperature >= hot_t) & fluid_mask if math.isfinite(hot_t) else np.zeros((h, w), dtype=bool)
+    fluid_hot_t, fluid_hot_source = _configured_temperature_threshold(
+        fluid_t,
+        ref_t,
+        temperature_limits,
+        absolute_key="fluid_hot_temperature",
+        delta_key="fluid_hot_delta_T",
+        legacy_explicit=hot_temperature_threshold,
+    )
+    solid_hot_t, solid_hot_source = _configured_temperature_threshold(
+        solid_values if "solid_values" in locals() and solid_values.size else fluid_t,
+        ref_t,
+        temperature_limits,
+        absolute_key="solid_hot_temperature",
+        delta_key="solid_hot_delta_T",
+        legacy_explicit=hot_temperature_threshold,
+    )
+    outlet_hot_t, outlet_hot_source = _configured_temperature_threshold(
+        outlet_t if outlet_t.size else fluid_t,
+        ref_t,
+        temperature_limits,
+        absolute_key="outlet_hot_temperature",
+        delta_key="outlet_hot_delta_T",
+        legacy_explicit=hot_temperature_threshold,
+    )
+    wall_hot_t, wall_hot_source = _configured_temperature_threshold(
+        fluid_t,
+        ref_t,
+        temperature_limits,
+        absolute_key="wall_hot_temperature",
+        delta_key="wall_hot_delta_T",
+        legacy_explicit=hot_temperature_threshold,
+    )
+    hot_fluid = (temperature >= fluid_hot_t) & fluid_mask if math.isfinite(fluid_hot_t) else np.zeros((h, w), dtype=bool)
 
     out: Dict[str, Any] = {
         "available_kpis": [],
         "unavailable_kpis": [],
         "num_modules": int(np.sum(_as_numpy(module_present).reshape(-1) > 0.5)) if module_present is not None else 0,
+        "temperature_thresholds": {
+            "reference_temperature": float(ref_t),
+            "fluid_hot_temperature": float(fluid_hot_t) if math.isfinite(fluid_hot_t) else float("nan"),
+            "fluid_hot_source": fluid_hot_source,
+            "solid_hot_temperature": float(solid_hot_t) if math.isfinite(solid_hot_t) else float("nan"),
+            "solid_hot_source": solid_hot_source,
+            "outlet_hot_temperature": float(outlet_hot_t) if math.isfinite(outlet_hot_t) else float("nan"),
+            "outlet_hot_source": outlet_hot_source,
+            "wall_hot_temperature": float(wall_hot_t) if math.isfinite(wall_hot_t) else float("nan"),
+            "wall_hot_source": wall_hot_source,
+        },
     }
 
     # Solid/internal KPIs.
@@ -325,6 +398,17 @@ def compute_steady_thermal_kpis(
                 solid_values = np.concatenate(active_values)
     elif module_mask_np is not None:
         solid_values = _masked_values(temperature, module_mask_np)
+
+    solid_hot_t, solid_hot_source = _configured_temperature_threshold(
+        solid_values if solid_values.size else fluid_t,
+        ref_t,
+        temperature_limits,
+        absolute_key="solid_hot_temperature",
+        delta_key="solid_hot_delta_T",
+        legacy_explicit=hot_temperature_threshold,
+    )
+    out["temperature_thresholds"]["solid_hot_temperature"] = float(solid_hot_t) if math.isfinite(solid_hot_t) else float("nan")
+    out["temperature_thresholds"]["solid_hot_source"] = solid_hot_source
 
     max_solid, p95_solid, mean_solid = _stats(solid_values)
     _add_available(out, "max_solid_temperature", max_solid)
@@ -383,9 +467,9 @@ def compute_steady_thermal_kpis(
     _add_available(out, "p95_fluid_temperature", p95_fluid)
     _add_available(out, "hot_fluid_area_fraction", float(np.mean(hot_fluid[fluid_mask])) if np.any(fluid_mask) else float("nan"))
     if solid_values.size:
-        _add_available(out, "hot_solid_area_fraction", float(np.mean(solid_values >= hot_t)) if math.isfinite(hot_t) else float("nan"))
+        _add_available(out, "hot_solid_area_fraction", float(np.mean(solid_values >= solid_hot_t)) if math.isfinite(solid_hot_t) else float("nan"))
     elif module_mask_np is not None and np.any(module_mask_np):
-        _add_available(out, "hot_solid_area_fraction", float(np.mean(temperature[module_mask_np] >= hot_t)) if math.isfinite(hot_t) else float("nan"))
+        _add_available(out, "hot_solid_area_fraction", float(np.mean(temperature[module_mask_np] >= solid_hot_t)) if math.isfinite(solid_hot_t) else float("nan"))
     else:
         _add_available(out, "hot_solid_area_fraction", float("nan"))
 
@@ -410,9 +494,9 @@ def compute_steady_thermal_kpis(
     speed = np.sqrt(u * u + v * v)
     speed_fluid = _masked_values(speed, fluid_mask)
     low_speed_cut = float(np.percentile(speed_fluid, 25.0)) if speed_fluid.size else float("nan")
-    low_hot = hot_fluid & (speed <= low_speed_cut) if math.isfinite(low_speed_cut) else np.zeros_like(hot_fluid)
+    low_hot = (temperature >= fluid_hot_t) & fluid_mask & (speed <= low_speed_cut) if math.isfinite(low_speed_cut) and math.isfinite(fluid_hot_t) else np.zeros_like(hot_fluid)
     _add_available(out, "low_velocity_hotspot_fraction", float(np.mean(low_hot[fluid_mask])) if np.any(fluid_mask) else float("nan"))
-    wall_hot = hot_fluid & axes["wall_band"]
+    wall_hot = (temperature >= wall_hot_t) & fluid_mask & axes["wall_band"] if math.isfinite(wall_hot_t) else np.zeros_like(hot_fluid)
     _add_available(out, "wall_hot_area_fraction", float(np.mean(wall_hot[fluid_mask & axes["wall_band"]])) if np.any(fluid_mask & axes["wall_band"]) else 0.0)
 
     try:
@@ -420,7 +504,7 @@ def compute_steady_thermal_kpis(
         _add_available(out, "temperature_gradient_energy", float(np.nanmean((grad_x[fluid_mask] ** 2 + grad_y[fluid_mask] ** 2))))
     except Exception:
         _add_available(out, "temperature_gradient_energy", float("nan"))
-    _add_available(out, "outlet_hot_fraction", float(np.mean((outlet_t >= hot_t))) if outlet_t.size and math.isfinite(hot_t) else float("nan"))
+    _add_available(out, "outlet_hot_fraction", float(np.mean((outlet_t >= outlet_hot_t))) if outlet_t.size and math.isfinite(outlet_hot_t) else float("nan"))
 
     out["available_kpis"] = sorted(set(out.get("available_kpis", [])))
     out["unavailable_kpis"] = sorted(set(name for name in DEFAULT_KPI_NAMES if name not in out["available_kpis"]))
@@ -485,30 +569,69 @@ def augment_kpi_targets_for_training(
     *,
     return_metadata: bool = False,
 ) -> Dict[str, Any]:
+    def _with_metadata(targets: Dict[str, Dict[str, float | str]]) -> Dict[str, Any]:
+        active_names = [str(name) for name in kpi_names if str(name) in targets]
+        active_set = set(active_names)
+        mode_by_kpi = {str(name): str(targets[name].get("mode", "exact")) for name in active_names}
+        if not return_metadata:
+            return targets
+        return {
+            "kpi_targets": targets,
+            "active_kpi_names": active_names,
+            "dropped_kpi_names": [str(name) for name in kpi_names if str(name) not in active_set],
+            "target_modes_by_kpi": mode_by_kpi,
+            "active_kpi_count": len(active_names),
+            "target_active_fraction": float(len(active_names)) / max(float(len(kpi_names)), 1.0),
+            "active_kpi_mask": [1.0 if str(name) in active_set else 0.0 for name in kpi_names],
+        }
+
     names = [str(name) for name in kpi_names if str(name) in kpi_dict and str(name) not in set(kpi_dict.get("unavailable_kpis", []))]
     if not names:
-        payload = {"kpi_targets": {}, "active_kpi_names": [], "active_kpi_count": 0, "target_active_fraction": 0.0}
-        return payload if return_metadata else {}
+        return _with_metadata({})
     if not bool(cfg.get("enabled", False)):
         targets = {name: {"mode": "exact", "value": _finite_float(kpi_dict.get(name, 0.0), 0.0), "weight": 1.0} for name in names}
     else:
+        mode_name = str(cfg.get("mode", "independent_dropout")).lower().strip()
         always = {str(name) for name in cfg.get("always_include", [])}
         drop_p = min(max(_finite_float(cfg.get("drop_probability", 0.0), 0.0), 0.0), 1.0)
-        min_active = min(max(int(cfg.get("min_active_kpis", 1)), 0), len(names))
+        min_active_cfg = min(max(int(cfg.get("min_active_kpis", 1)), 0), len(names))
         max_active_raw = cfg.get("max_active_kpis")
-        max_active = len(names) if max_active_raw is None else min(max(int(max_active_raw), min_active), len(names))
-        active = [name for name in names if name in always or float(rng.random()) >= drop_p]
+        max_active_cfg = len(names) if max_active_raw is None else min(max(int(max_active_raw), 0), len(names))
+        always_active = [name for name in names if name in always]
+        max_active_cfg = max(max_active_cfg, len(always_active))
+        if mode_name == "bounded_subset":
+            max_drop_fraction = min(max(_finite_float(cfg.get("max_drop_fraction", 1.0), 1.0), 0.0), 1.0)
+            bounded_min = int(math.ceil(len(names) * (1.0 - max_drop_fraction)))
+            min_active = max(min_active_cfg, bounded_min, len(always_active))
+            min_active = min(min_active, max_active_cfg)
+            max_active = max(max_active_cfg, min_active)
+            removable = [name for name in names if name not in always]
+            drop_candidates = [name for name in removable if float(rng.random()) < drop_p]
+            if drop_candidates:
+                drop_candidates = [str(name) for name in np.asarray(rng.permutation(drop_candidates)).reshape(-1)]
+            max_drops = max(len(names) - min_active, 0)
+            drop_set = set(drop_candidates[:max_drops])
+            active = [name for name in names if name not in drop_set]
+            if len(active) > max_active:
+                optional = [name for name in active if name not in always]
+                remove_count = min(len(active) - max_active, len(optional))
+                if remove_count > 0:
+                    remove = set(str(name) for name in np.asarray(rng.choice(optional, size=remove_count, replace=False)).reshape(-1))
+                    active = [name for name in active if name not in remove]
+        else:
+            min_active = min(max(min_active_cfg, len(always_active)), max_active_cfg)
+            active = [name for name in names if name in always or float(rng.random()) >= drop_p]
+            if len(active) > max_active_cfg:
+                optional = [name for name in active if name not in always]
+                remove_count = min(len(active) - max_active_cfg, len(optional))
+                if remove_count > 0:
+                    remove = set(str(name) for name in np.asarray(rng.choice(optional, size=remove_count, replace=False)).reshape(-1))
+                    active = [name for name in active if name not in remove]
         if len(active) < min_active:
             missing = [name for name in names if name not in active]
             if missing:
                 chosen = rng.choice(missing, size=min(min_active - len(active), len(missing)), replace=False)
                 active.extend([str(name) for name in np.asarray(chosen).reshape(-1)])
-        if len(active) > max_active:
-            optional = [name for name in active if name not in always]
-            remove_count = min(len(active) - max_active, len(optional))
-            if remove_count > 0:
-                remove = set(str(name) for name in np.asarray(rng.choice(optional, size=remove_count, replace=False)).reshape(-1))
-                active = [name for name in active if name not in remove]
         probs = np.asarray(
             [
                 max(_finite_float(cfg.get("exact_probability", 0.45), 0.45), 0.0),
@@ -518,7 +641,9 @@ def augment_kpi_targets_for_training(
             ],
             dtype=np.float64,
         )
-        probs = probs / max(float(np.sum(probs)), 1.0e-12)
+        if float(np.sum(probs)) <= 0.0:
+            probs = np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
+        probs = probs / float(np.sum(probs))
         modes = np.asarray(["exact", "range", "max", "min"], dtype=object)
         _, std_arr = _stats_arrays(kpi_stats, len(kpi_names))
         name_to_idx = {str(name): i for i, name in enumerate(kpi_names)}
@@ -545,16 +670,7 @@ def augment_kpi_targets_for_training(
                 targets[name] = {"mode": "min", "low": float(low), "weight": 1.0}
             else:
                 targets[name] = {"mode": "exact", "value": float(value), "weight": 1.0}
-    if not return_metadata:
-        return targets
-    active_names = list(targets.keys())
-    return {
-        "kpi_targets": targets,
-        "active_kpi_names": active_names,
-        "active_kpi_count": len(active_names),
-        "target_active_fraction": float(len(active_names)) / max(float(len(kpi_names)), 1.0),
-        "active_kpi_mask": [1.0 if str(name) in targets else 0.0 for name in kpi_names],
-    }
+    return _with_metadata(targets)
 
 
 def _normalize_scalar(name: str, value: float, kpi_names: Sequence[str], stats: Optional[Mapping[str, Any]], normalize: bool) -> float:
@@ -784,9 +900,13 @@ def score_candidate_kpis(kpi_dict: Mapping[str, Any], target_spec: Mapping[str, 
     unavailable = set(str(name) for name in kpi_dict.get("unavailable_kpis", []))
 
     per_errors: Dict[str, float] = {}
-    missing_required = []
-    weighted_total = 0.0
-    weight_total = 0.0
+    per_preference_rewards: Dict[str, float] = {}
+    missing_required: list[str] = []
+    unavailable_optional: list[str] = []
+    weighted_violation = 0.0
+    hard_weight_total = 0.0
+    weighted_reward = 0.0
+    preference_weight_total = 0.0
     for name, raw_entry in target_entries.items():
         entry = _parse_target_entry(str(name), raw_entry)
         weight = max(float(entry["weight"]), 0.0)
@@ -797,14 +917,18 @@ def score_candidate_kpis(kpi_dict: Mapping[str, Any], target_spec: Mapping[str, 
             if bool(entry.get("required", False)):
                 missing_required.append(str(name))
                 per_errors[str(name)] = float(target_spec.get("missing_kpi_penalty", 5.0))
-                weighted_total += weight * per_errors[str(name)]
-                weight_total += weight
+                weighted_violation += weight * per_errors[str(name)]
+                hard_weight_total += weight
+            else:
+                unavailable_optional.append(str(name))
             continue
         mode = str(entry["mode"])
         value = float(entry["value"])
         low = float(entry["low"])
         high = float(entry["high"])
         scale = float(entry["scale"])
+        is_preference = mode in {"minimize", "maximize"}
+        reward = 0.0
         if mode in {"range", "between"}:
             if math.isfinite(low) and candidate < low:
                 error = (low - candidate) / _scale_for_error(low, high)
@@ -817,10 +941,19 @@ def score_candidate_kpis(kpi_dict: Mapping[str, Any], target_spec: Mapping[str, 
         elif mode in {"min", "lower", "at_least"}:
             error = max(0.0, low - candidate) / _scale_for_error(low)
         elif mode == "minimize":
-            error = max(candidate, 0.0) / _scale_for_target(str(name), names, stats, scale, value, low, high)
+            denom = _scale_for_target(str(name), names, stats, scale, value, low, high)
+            if math.isfinite(high) and high > 0.0:
+                reward = 1.0 - min(max(candidate / max(high, 1.0e-8), 0.0), 1.0)
+            else:
+                reward = 1.0 / (1.0 + max(candidate, 0.0) / max(denom, 1.0e-8))
+            error = 0.0
         elif mode == "maximize":
             denom = _scale_for_target(str(name), names, stats, scale, value, low, high)
-            error = max(0.0, low - candidate) / denom if math.isfinite(low) else -candidate / denom
+            if math.isfinite(low) and low > 0.0:
+                reward = min(max(candidate / max(low, 1.0e-8), 0.0), 1.0)
+            else:
+                reward = 0.5 + math.atan(candidate / max(denom, 1.0e-8)) / math.pi
+            error = 0.0
         elif mode == "vector" and isinstance(raw_entry, Mapping):
             low_mask = _finite_float(raw_entry.get("low_mask", 0.0), 0.0)
             high_mask = _finite_float(raw_entry.get("high_mask", 0.0), 0.0)
@@ -835,11 +968,18 @@ def score_candidate_kpis(kpi_dict: Mapping[str, Any], target_spec: Mapping[str, 
                 error = 0.0
         else:
             error = abs(candidate - value) / _scale_for_error(value)
-        per_errors[str(name)] = float(error)
-        weighted_total += weight * float(error)
-        weight_total += weight
+        if is_preference:
+            reward = min(max(float(locals().get("reward", 0.0)), 0.0), 1.0)
+            per_preference_rewards[str(name)] = reward
+            weighted_reward += weight * reward
+            preference_weight_total += weight
+        else:
+            error = max(float(error), 0.0)
+            per_errors[str(name)] = error
+            weighted_violation += weight * error
+            hard_weight_total += weight
 
-    constraint_penalty = 0.0
+    feasibility_penalty = 0.0
     constraints = target_spec.get("constraints", target_spec)
     count = kpi_dict.get("num_modules", kpi_dict.get("count"))
     if count is not None and isinstance(constraints, Mapping):
@@ -847,9 +987,9 @@ def score_candidate_kpis(kpi_dict: Mapping[str, Any], target_spec: Mapping[str, 
         n_min = constraints.get("num_modules_min", constraints.get("num_cylinders_min"))
         n_max = constraints.get("num_modules_max", constraints.get("num_cylinders_max"))
         if n_min is not None and count_val < int(n_min):
-            constraint_penalty += float(int(n_min) - count_val)
+            feasibility_penalty += float(int(n_min) - count_val)
         if n_max is not None and count_val > int(n_max):
-            constraint_penalty += float(count_val - int(n_max))
+            feasibility_penalty += float(count_val - int(n_max))
     if isinstance(constraints, Mapping):
         for key in ("min_center_distance", "wall_clearance", "inlet_clearance", "outlet_clearance"):
             target_val = constraints.get(key)
@@ -857,20 +997,29 @@ def score_candidate_kpis(kpi_dict: Mapping[str, Any], target_spec: Mapping[str, 
             if target_val is not None and actual_val is not None:
                 deficit = float(target_val) - _finite_float(actual_val, 0.0)
                 if deficit > 0.0:
-                    constraint_penalty += deficit / max(float(target_val), 1.0e-8)
+                    feasibility_penalty += deficit / max(float(target_val), 1.0e-8)
         heat_target = constraints.get("heat_power_total")
         heat_actual = kpi_dict.get("heat_power_total")
         if heat_target is not None and heat_actual is not None:
-            constraint_penalty += abs(float(heat_actual) - float(heat_target)) / max(abs(float(heat_target)), 1.0)
+            feasibility_penalty += abs(float(heat_actual) - float(heat_target)) / max(abs(float(heat_target)), 1.0)
     if bool(kpi_dict.get("valid", True)) is False:
-        constraint_penalty += 10.0
+        feasibility_penalty += 10.0
 
-    normalized_total = weighted_total / max(weight_total, 1.0e-8)
+    kpi_violation = weighted_violation / max(hard_weight_total, 1.0e-8)
+    preference_reward = weighted_reward / max(preference_weight_total, 1.0e-8) if preference_weight_total > 0.0 else 0.0
+    preference_reward_weight = _finite_float(target_spec.get("preference_reward_weight", 0.1), 0.1)
+    total_score = float(feasibility_penalty + kpi_violation - preference_reward_weight * preference_reward)
     return {
-        "total_score": float(normalized_total + constraint_penalty),
-        "kpi_score": float(normalized_total),
+        "total_score": total_score,
+        "feasibility_penalty": float(feasibility_penalty),
+        "kpi_violation": float(kpi_violation),
+        "preference_reward": float(preference_reward),
+        "kpi_score": float(kpi_violation),
         "per_kpi_errors": per_errors,
-        "constraint_penalty": float(constraint_penalty),
+        "per_preference_rewards": per_preference_rewards,
+        "constraint_penalty": float(feasibility_penalty),
         "missing_required_kpis": missing_required,
-        "scored_weight": float(weight_total),
+        "unavailable_optional_kpis": sorted(set(unavailable_optional)),
+        "scored_weight": float(hard_weight_total),
+        "preference_weight": float(preference_weight_total),
     }

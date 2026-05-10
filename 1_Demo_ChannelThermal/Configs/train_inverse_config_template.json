@@ -8,6 +8,8 @@
     "val_split": "test",
     "max_num_modules": "auto",
     "sort_centers": true,
+    "samples_per_case": 4,
+    "validation_samples_per_case": 1,
     "max_train_cases": 0,
     "max_val_cases": 0,
     "use_all_if_split_missing": true
@@ -15,21 +17,23 @@
   "forward_model": {
     "enabled": true,
     "saved_root": "./Saved_Model",
-    "run_dir": "auto",
+    "run_dir": "./Saved_Model/Run_0004_20260509_224057",
     "checkpoint_name": "auto",
     "checkpoint_preference": [
+      "latest_model.pt",
       "best_predicted_model.pt",
-      "best_model.pt",
-      "latest_model.pt"
+      "best_model.pt"
     ],
     "config_name": "resolved_train_config.json",
     "freeze": true,
     "query_batch_size": 32768,
     "latent_cache_name": "inverse_forward_latent_cache.pt",
     "rebuild_latent_cache": false,
-    "local_surrogate_checkpoint_path": null,
+    "disable_auto_cache_rebuild": false,
+    "local_surrogate_checkpoint_path": "./Saved_Model_LocalModule/Run_0003_20260507_224352/latest_model.pt",
     "local_surrogate_auto": true,
-    "local_surrogate_saved_root": "./Saved_Model_LocalModule"
+    "local_surrogate_saved_root": "./Saved_Model_LocalModule",
+    "allow_state_mismatch": false
   },
   "target_kpis": {
     "names": [
@@ -63,11 +67,21 @@
     "normalize": true,
     "target_noise_std": 0.02,
     "domain_length_scale": "auto",
-    "heat_power_scale": 1.0
+    "heat_power_scale": 1.0,
+    "temperature_limits": {
+      "fluid_hot_temperature": null,
+      "fluid_hot_delta_T": null,
+      "solid_hot_temperature": null,
+      "solid_hot_delta_T": null,
+      "outlet_hot_delta_T": null,
+      "wall_hot_delta_T": null
+    }
   },
-  "target_augmentation": {
+  "target_augmentation_train": {
     "enabled": true,
-    "drop_probability": 0.25,
+    "mode": "bounded_subset",
+    "drop_probability": 0.30,
+    "max_drop_fraction": 0.30,
     "min_active_kpis": 3,
     "max_active_kpis": null,
     "always_include": [
@@ -82,6 +96,9 @@
     "target_noise_std": 0.02,
     "constraint_dropout_probability": 0.0
   },
+  "target_augmentation_val": {
+    "enabled": false
+  },
   "inverse_model": {
     "target_dim": "auto",
     "design_dim": "auto",
@@ -94,6 +111,8 @@
     "dropout": 0.05,
     "use_count_head": true,
     "generate_heat_power": false,
+    "heat_load_policy": "preserve_total_heat",
+    "fixed_heat_per_module": null,
     "heat_power_scale": 1.0,
     "ode_solver": "heun",
     "domain_length_x": "auto",
@@ -104,7 +123,7 @@
     "wall_clearance": 0.05,
     "inlet_clearance": 0.25,
     "outlet_clearance": 0.25,
-    "center_decode_mode": "clamp",
+    "center_decode_mode": "sigmoid",
     "latent_align_completeness_power": 0.5
   },
   "loss": {
@@ -116,7 +135,7 @@
   },
   "training": {
     "epochs": 10000,
-    "batch_size": 64,
+    "batch_size": 128,
     "learning_rate": 0.0001,
     "weight_decay": 0.00001,
     "gradient_clip_norm": 1.0,
@@ -130,13 +149,17 @@
     "max_val_batches": null
   },
   "validation": {
-    "batch_size": 64,
-    "forward_verify_every_epochs": 25,
+    "batch_size": 128,
+    "forward_verify_every_epochs": 50,
     "forward_verify_num_targets": 4,
     "forward_verify_num_samples": 4,
-    "forward_verify_n_steps": 16,
+    "forward_verify_n_steps": 4,
     "forward_verify_query_batch_size": 32768,
-    "demo_target_json": "./inverse_targets/low_peak_uniform_pack_demo.json",
+    "demo_target_jsons": [
+      "./inverse_targets/low_peak_uniform_pack_demo.json"
+    ],
+    "demo_forward_verify_num_samples": 4,
+    "demo_forward_verify_n_steps": 4,
     "best_metric_name": "val_loss_total"
   },
   "paths": {

@@ -6,7 +6,7 @@
   "wall_clearance": 0.08,
   "inlet_clearance": 0.35,
   "outlet_clearance": 0.35,
-  "fixed_heat_load_note": "Default inverse mode keeps heat powers fixed from the reference dataset/config case; set inverse_model.generate_heat_power=true to optimize heat allocation.",
+  "fixed_heat_load_note": "Default heat_load_policy=preserve_total_heat keeps the reference total heat and distributes it across active generated modules; set inverse_model.generate_heat_power=true to optimize heat allocation.",
   "kpis": {
     "max_solid_temperature": {
       "mode": "max",

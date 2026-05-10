@@ -785,6 +785,44 @@ constants, and heat loads. The layout repair step is nonperiodic: it clips
 centers inside the channel and enforces wall, inlet, outlet, and module-module
 clearances. There is no periodic wrapping or minimum-image distance.
 
+Validation is deterministic by default. Training target augmentation is read
+from `target_augmentation_train`, while validation reads
+`target_augmentation_val`; the template disables validation augmentation so
+held-out losses use exact held-out KPI targets for a fixed seed. Older configs
+that only define `target_augmentation` still use that block for training, but
+`target_augmentation_train` supersedes it when present.
+
+Training uses Demo-0-style KPI dropout/subset augmentation. The default
+`target_augmentation_train.mode="bounded_subset"` keeps the target vector
+dimension fixed, but marks dropped KPIs inactive/unconstrained in the target
+spec. `dataset.samples_per_case=4` expands each physical case into four
+deterministic target-conditioned samples per epoch; validation defaults to
+`dataset.validation_samples_per_case=1`.
+
+`always_include` names, by default `max_solid_temperature` and
+`pressure_drop`, are kept whenever those KPIs are available for a case. If a
+global-only or older forward path cannot provide a local/interface KPI, the KPI
+is marked unavailable and skipped gracefully; it is not forced into targets
+unless a fixed target JSON explicitly marks it `"required": true`.
+
+Epoch logs include mean active KPI fraction, mean active KPI count, per-KPI
+active frequencies, and exact/range/max/min target-mode frequencies in both
+`loss_history.csv` and `training_metrics.csv`.
+
+Heat loads are controlled by `inverse_model.heat_load_policy` when
+`generate_heat_power=false`:
+
+- `preserve_total_heat` keeps the reference active total heat and distributes
+  it over generated active modules. This is the default.
+- `preserve_per_module_heat` copies reference active heat values by slot and
+  spreads any remaining total over extra generated modules.
+- `reference_active_heat_resize` preserves the old resize behavior and is only
+  a legacy fallback.
+- `fixed_heat_per_module` uses `inverse_model.fixed_heat_per_module` or a
+  target JSON override.
+- `target_heat_power_total` distributes the target JSON or config total heat
+  over generated active modules.
+
 Inverse files:
 
 ```text
@@ -820,6 +858,13 @@ When a global-only forward checkpoint has no local surrogate, internal and
 interface predictions come from the global heads where available; missing KPI
 entries are marked unavailable and skipped during scoring unless a target marks
 that KPI as `"required": true`.
+
+Field-aware hot-area KPIs prefer physically configured thresholds from
+`target_kpis.temperature_limits` or a target JSON `temperature_limits` block:
+`fluid_hot_temperature`, `fluid_hot_delta_T`, `solid_hot_temperature`,
+`solid_hot_delta_T`, `outlet_hot_delta_T`, and `wall_hot_delta_T`. If no
+absolute or delta-T threshold is provided, the KPI code records and uses the
+percentile fallback for backward compatibility.
 
 Train an inverse model:
 
@@ -865,8 +910,10 @@ Supported KPI modes are `exact`, `range`, `min`, and `max`; `minimize` and
 
 Forward verification always uses predicted/autonomous local-port mode for
 inverse candidates. Teacher mode is diagnostic only because inverse-generated
-layouts do not have solved interface tokens. Checkpoint loading handles both
-global-only and global+local-surrogate runs:
+layouts do not have solved interface tokens. Predicted port conditions are
+passed into KPI computation, so `mean_interface_T_env` and `max_h_effective`
+are available when the forward model predicts ports. Checkpoint loading handles
+both global-only and global+local-surrogate runs:
 
 - If `model.use_local_surrogate=false`, the global checkpoint is loaded and
   verification continues without a local checkpoint.
@@ -876,3 +923,21 @@ global-only and global+local-surrogate runs:
   `Saved_Model_LocalModule` when `local_surrogate_auto=true`.
 - A clear error is raised only when the forward model requires a local
   surrogate and none can be resolved.
+
+For fixed target-JSON validation during training, set:
+
+```json
+"validation": {
+  "demo_target_jsons": [
+    "./inverse_targets/low_peak_uniform_pack_demo.json",
+    "./inverse_targets/outlet_uniform_cooling_demo.json"
+  ]
+}
+```
+
+At each verification interval the trainer reports
+`val_forward_score_reconstruct`, `val_forward_score_<target_name>`,
+`validity_rate_<target_name>`, and `best_kpi_violation_<target_name>`.
+Target preferences currently supported are `x_span`, `y_span`, and
+`avoid_wall_hotspots`; unsupported preferences are warned and written to the
+evaluation summary.

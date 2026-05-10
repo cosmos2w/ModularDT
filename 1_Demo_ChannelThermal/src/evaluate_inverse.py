@@ -22,7 +22,7 @@ from tqdm.auto import tqdm
 
 from channelthermal_datasets import CHANNEL_ORDER
 from channelthermal_model_utils import current_timestamp, load_trusted_checkpoint, resolve_demo_path, select_device, strip_module_prefix, write_json
-from model_inverse import ThermalInverseDesignFlow, channel_clearance_diagnostics
+from model_inverse import ThermalInverseDesignFlow, channel_clearance_diagnostics, repair_channel_design
 from thermal_inverse_kpi import DEFAULT_KPI_NAMES, build_target_spec_vector, score_candidate_kpis, compute_steady_thermal_kpis
 from train_inverse import (
     ThermalInverseDesignDataset,
@@ -48,6 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--forward-run-dir", type=str, default=None, help="Override forward_model.run_dir.")
     parser.add_argument("--forward-checkpoint-name", type=str, default=None, help="Override forward_model.checkpoint_name.")
     parser.add_argument("--local-surrogate-checkpoint-path", type=str, default=None, help="Override local surrogate checkpoint path.")
+    parser.add_argument("--diagnostic-teacher-mode", action="store_true", help="Reserved diagnostic flag; ranking still uses predicted/autonomous mode.")
     return parser.parse_args()
 
 
@@ -122,6 +123,10 @@ def target_spec_from_payload(
     train_cfg = checkpoint.get("train_config", {})
     target_cfg = train_cfg.get("target_kpis", {}) if isinstance(train_cfg, Mapping) else {}
     prefs = payload.get("preferences", {}) if isinstance(payload.get("preferences", {}), Mapping) else {}
+    kpis = dict(payload.get("kpis", {}))
+    preference_warnings: List[str] = []
+    if bool(prefs.get("avoid_wall_hotspots", False)) and "wall_hot_area_fraction" not in kpis:
+        kpis["wall_hot_area_fraction"] = {"mode": "max", "high": 0.08, "weight": 0.5}
     constraints = {
         "num_modules_min": payload.get("num_modules_min", payload.get("num_cylinders_min")),
         "num_modules_max": payload.get("num_modules_max", payload.get("num_cylinders_max")),
@@ -132,7 +137,7 @@ def target_spec_from_payload(
         "heat_power_total": payload.get("heat_power_total"),
     }
     vector = build_target_spec_vector(
-        kpi_targets=payload.get("kpis", {}),
+        kpi_targets=kpis,
         kpi_names=kpi_names,
         stats=kpi_stats,
         normalize=bool(target_cfg.get("normalize", True)),
@@ -152,12 +157,80 @@ def target_spec_from_payload(
         "name": payload.get("name", "inverse_target"),
         "vector": vector,
         "kpi_names": list(kpi_names),
-        "kpi_targets": dict(payload.get("kpis", {})),
+        "kpi_targets": kpis,
         "kpi_stats": kpi_stats,
         "constraints": constraints,
         "preferences": dict(prefs),
+        "preference_warnings": preference_warnings,
+        "temperature_limits": payload.get("temperature_limits", target_cfg.get("temperature_limits")),
         "target_payload": dict(payload),
     }
+
+
+def _span_bounds(value: Any) -> Optional[Tuple[float, float]]:
+    if value is None:
+        return None
+    arr = np.asarray(value, dtype=np.float64).reshape(-1)
+    if arr.size < 2 or not np.all(np.isfinite(arr[:2])):
+        return None
+    lo, hi = sorted((float(arr[0]), float(arr[1])))
+    return lo, hi
+
+
+def preference_bounds(target_spec: Mapping[str, Any]) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]], List[str]]:
+    prefs = target_spec.get("preferences", {})
+    warnings: List[str] = []
+    if not isinstance(prefs, Mapping):
+        return None, None, warnings
+    x_bounds = _span_bounds(prefs.get("x_span"))
+    y_bounds = _span_bounds(prefs.get("y_span"))
+    supported = {"x_span", "y_span", "avoid_wall_hotspots", "min_center_distance", "wall_clearance", "inlet_clearance", "outlet_clearance", "description"}
+    for key in prefs:
+        if key not in supported:
+            warning = f"Unsupported preference {key!r} was parsed but not applied."
+            print(f"[warning] {warning}")
+            warnings.append(warning)
+    return x_bounds, y_bounds, warnings
+
+
+def apply_preferences_to_candidate(
+    candidate: Mapping[str, Any],
+    record: Any,
+    target_spec: Mapping[str, Any],
+) -> Dict[str, Any]:
+    x_bounds, y_bounds, warnings = preference_bounds(target_spec)
+    if x_bounds is None and y_bounds is None:
+        out = dict(candidate)
+        out["preference_warnings"] = warnings
+        return out
+    centers = np.asarray(candidate.get("centers", []), dtype=np.float32).reshape(-1, 2).copy()
+    if centers.size:
+        if x_bounds is not None:
+            centers[:, 0] = np.clip(centers[:, 0], x_bounds[0], x_bounds[1])
+        if y_bounds is not None:
+            centers[:, 1] = np.clip(centers[:, 1], y_bounds[0], y_bounds[1])
+    constraints = target_spec.get("constraints", {}) if isinstance(target_spec.get("constraints"), Mapping) else {}
+    repaired, validity = repair_channel_design(
+        centers,
+        count=int(candidate.get("count", centers.shape[0])),
+        domain_length_x=float(record.domain_length_x),
+        domain_length_y=float(record.domain_length_y),
+        module_radius=float(record.module_radius),
+        min_center_distance=float(constraints.get("min_center_distance") or 1.1),
+        max_num_modules=int(len(candidate.get("mask", [])) or centers.shape[0] or 1),
+        min_count=int(constraints.get("num_modules_min") or 0),
+        wall_clearance=float(constraints.get("wall_clearance") or 0.0),
+        inlet_clearance=float(constraints.get("inlet_clearance") or 0.0),
+        outlet_clearance=float(constraints.get("outlet_clearance") or 0.0),
+        x_bounds=x_bounds,
+        y_bounds=y_bounds,
+    )
+    out = dict(candidate)
+    out["centers"] = repaired
+    out["count"] = int(repaired.shape[0])
+    out["validity"] = validity
+    out["preference_warnings"] = warnings
+    return out
 
 
 def _candidate_kpi_payload(
@@ -165,6 +238,7 @@ def _candidate_kpi_payload(
     prediction: Mapping[str, Any],
     candidate: Mapping[str, Any],
     model: ThermalInverseDesignFlow,
+    target_spec: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     kpis = compute_steady_thermal_kpis(
         prediction["pred_field_grid"],
@@ -177,9 +251,10 @@ def _candidate_kpi_payload(
         module_internal_temperature=prediction.get("pred_internal_temperature"),
         module_internal_mask=record.module_internal_mask,
         interface_target=prediction.get("pred_interface"),
-        interface_condition=None,
+        interface_condition=prediction.get("pred_port_condition"),
         domain={"domain_length_x": record.domain_length_x, "domain_length_y": record.domain_length_y, "module_radius": record.module_radius},
         material_params=record.material_params,
+        temperature_limits=target_spec.get("temperature_limits") if isinstance(target_spec, Mapping) and isinstance(target_spec.get("temperature_limits"), Mapping) else None,
     )
     centers = np.asarray(candidate.get("centers", []), dtype=np.float32).reshape(-1, 2)
     kpis.update(channel_clearance_diagnostics(centers, domain_length_x=record.domain_length_x, domain_length_y=record.domain_length_y, module_radius=record.module_radius))
@@ -462,6 +537,7 @@ def main() -> int:
         kpi_stats=checkpoint.get("kpi_stats"),
         normalize_targets=False,
         target_augmentation={},
+        temperature_limits=target_spec.get("temperature_limits") if isinstance(target_spec.get("temperature_limits"), Mapping) else None,
         max_num_modules=inverse_model.max_num_modules,
         generate_heat_power=bool(inverse_model.cfg.generate_heat_power),
         heat_power_scale=float(inverse_model.cfg.heat_power_scale),
@@ -474,14 +550,29 @@ def main() -> int:
     record = dataset.records[min(max(int(args.reference_case_index), 0), len(dataset.records) - 1)]
     forward_cfg = apply_forward_overrides(train_cfg.get("forward_model", {}) if isinstance(train_cfg, Mapping) else {}, args)
     forward_model, forward_metadata, _ = load_forward_model(forward_cfg, device)
+    inverse_cfg = train_cfg.get("inverse_model", {}) if isinstance(train_cfg, Mapping) else {}
+    heat_load_policy = str(inverse_cfg.get("heat_load_policy", getattr(inverse_model.cfg, "heat_load_policy", "preserve_total_heat"))).lower().strip()
+    fixed_heat_per_module = inverse_cfg.get("fixed_heat_per_module")
+    if target_spec.get("constraints", {}).get("heat_power_total") is not None:
+        heat_load_policy = "target_heat_power_total" if heat_load_policy == "preserve_total_heat" else heat_load_policy
+    x_bounds, y_bounds, preference_warnings = preference_bounds(target_spec)
     base_out = Path(args.output_dir) if args.output_dir else inverse_path.parent / "evaluation" / f"inverse_eval_{current_timestamp()}"
     out_dir = resolve_demo_path(base_out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     target_vec = np.asarray(target_spec["vector"], dtype=np.float32)
-    sampled = inverse_model.sample_designs(target_vec, n_samples=int(args.n_samples), n_steps=int(args.n_steps), seed=int(args.seed), device=device)
+    sampled = inverse_model.sample_designs(
+        target_vec,
+        n_samples=int(args.n_samples),
+        n_steps=int(args.n_steps),
+        seed=int(args.seed),
+        x_bounds=x_bounds,
+        y_bounds=y_bounds,
+        device=device,
+    )
     candidates: List[Dict[str, Any]] = []
-    for sample_idx, cand in enumerate(tqdm(sampled, desc="verify", unit="candidate", dynamic_ncols=True)):
+    for sample_idx, raw_cand in enumerate(tqdm(sampled, desc="verify", unit="candidate", dynamic_ncols=True)):
+        cand = apply_preferences_to_candidate(raw_cand, record, target_spec)
         prediction = predict_candidate_with_forward(
             forward_model,
             forward_metadata,
@@ -490,9 +581,12 @@ def main() -> int:
             device,
             max_num_modules=inverse_model.max_num_modules,
             generate_heat_power=bool(inverse_model.cfg.generate_heat_power),
+            heat_load_policy=heat_load_policy,
+            fixed_heat_per_module=float(fixed_heat_per_module) if fixed_heat_per_module is not None else target_payload.get("fixed_heat_per_module"),
+            target_heat_power_total=target_spec.get("constraints", {}).get("heat_power_total") if isinstance(target_spec.get("constraints"), Mapping) else None,
             query_batch_size=int(args.query_batch_size),
         )
-        verified_kpis = _candidate_kpi_payload(record, prediction, cand, inverse_model)
+        verified_kpis = _candidate_kpi_payload(record, prediction, cand, inverse_model, target_spec)
         score = score_candidate_kpis(verified_kpis, target_spec)
         row = {
             "sample_index": int(sample_idx),
@@ -505,6 +599,9 @@ def main() -> int:
             "total_score": float(score["total_score"]),
             "kpi_score": float(score.get("kpi_score", score["total_score"])),
             "constraint_penalty": float(score.get("constraint_penalty", 0.0)),
+            "feasibility_penalty": float(score.get("feasibility_penalty", score.get("constraint_penalty", 0.0))),
+            "kpi_violation": float(score.get("kpi_violation", score.get("kpi_score", 0.0))),
+            "preference_reward": float(score.get("preference_reward", 0.0)),
             "prediction": prediction,
         }
         for key in ("min_center_distance", "wall_clearance", "inlet_clearance", "outlet_clearance"):
@@ -535,6 +632,11 @@ def main() -> int:
         "validity_rate": float(np.mean([float(c["valid"]) for c in candidates])) if candidates else 0.0,
         "forward_checkpoint": forward_metadata.get("checkpoint_path"),
         "local_surrogate_checkpoint": forward_metadata.get("local_surrogate_checkpoint_path"),
+        "verification_mode": "predicted",
+        "local_surrogate_used": bool(forward_metadata.get("local_surrogate_used", False)),
+        "predicted_port_condition_kpis_available": bool(best and "mean_interface_T_env" in best.get("verified_kpis", {}).get("available_kpis", [])),
+        "heat_load_policy": heat_load_policy,
+        "preference_warnings": sorted(set(preference_warnings + sum((list(c.get("preference_warnings", [])) for c in candidates), []))),
     }
     write_json(out_dir / "verification_summary.json", json_safe(summary))
 

@@ -6,7 +6,7 @@
   "wall_clearance": 0.08,
   "inlet_clearance": 0.3,
   "outlet_clearance": 0.55,
-  "fixed_heat_load_note": "Uses fixed per-module heat loads from the selected reference case unless inverse_model.generate_heat_power=true.",
+  "fixed_heat_load_note": "Default heat_load_policy=preserve_total_heat keeps the reference total heat and distributes it across active generated modules unless inverse_model.generate_heat_power=true.",
   "kpis": {
     "outlet_temperature_nonuniformity": {
       "mode": "max",

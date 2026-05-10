@@ -140,6 +140,7 @@ class InverseModelConfig:
     dropout: float = 0.05
     use_count_head: bool = True
     generate_heat_power: bool = False
+    heat_load_policy: str = "preserve_total_heat"
     heat_power_scale: float = 1.0
     ode_solver: str = "heun"
     domain_length_x: float = 12.0
@@ -150,7 +151,7 @@ class InverseModelConfig:
     wall_clearance: float = 0.05
     inlet_clearance: float = 0.25
     outlet_clearance: float = 0.25
-    center_decode_mode: str = "clamp"
+    center_decode_mode: str = "sigmoid"
     latent_align_completeness_power: float = 0.5
 
     def __post_init__(self) -> None:
@@ -165,6 +166,17 @@ class InverseModelConfig:
         if mode not in {"clamp", "sigmoid"}:
             raise ValueError("center_decode_mode must be 'clamp' or 'sigmoid' for the nonperiodic channel.")
         self.center_decode_mode = mode
+        policy = str(self.heat_load_policy).lower().strip()
+        allowed_policies = {
+            "preserve_total_heat",
+            "preserve_per_module_heat",
+            "reference_active_heat_resize",
+            "fixed_heat_per_module",
+            "target_heat_power_total",
+        }
+        if policy not in allowed_policies:
+            raise ValueError(f"heat_load_policy must be one of {sorted(allowed_policies)}, got {self.heat_load_policy!r}.")
+        self.heat_load_policy = policy
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "InverseModelConfig":
@@ -273,6 +285,8 @@ def repair_channel_design(
     wall_clearance: float = 0.05,
     inlet_clearance: float = 0.25,
     outlet_clearance: float = 0.25,
+    x_bounds: Optional[Tuple[float, float]] = None,
+    y_bounds: Optional[Tuple[float, float]] = None,
     rng: Optional[np.random.Generator] = None,
     iterations: int = 48,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
@@ -286,6 +300,14 @@ def repair_channel_design(
     x_max = lx - radius - max(float(outlet_clearance), 0.0)
     y_min = radius + max(float(wall_clearance), 0.0)
     y_max = ly - radius - max(float(wall_clearance), 0.0)
+    if x_bounds is not None:
+        bx0, bx1 = sorted((float(x_bounds[0]), float(x_bounds[1])))
+        x_min = max(x_min, bx0 + radius)
+        x_max = min(x_max, bx1 - radius)
+    if y_bounds is not None:
+        by0, by1 = sorted((float(y_bounds[0]), float(y_bounds[1])))
+        y_min = max(y_min, by0 + radius)
+        y_max = min(y_max, by1 - radius)
     if x_max < x_min:
         x_min, x_max = radius, max(radius, lx - radius)
     if y_max < y_min:
@@ -304,6 +326,8 @@ def repair_channel_design(
         "overlap_pairs_initial": 0,
         "overlap_pairs_final": 0,
         "repaired": False,
+        "x_bounds": list(x_bounds) if x_bounds is not None else None,
+        "y_bounds": list(y_bounds) if y_bounds is not None else None,
     }
 
     def overlap_pairs(points: np.ndarray) -> List[Tuple[int, int, float]]:
@@ -573,6 +597,8 @@ class ThermalInverseDesignFlow(nn.Module):
         *,
         count_mode: str = "argmax",
         min_center_distance: Optional[float] = None,
+        x_bounds: Optional[Tuple[float, float]] = None,
+        y_bounds: Optional[Tuple[float, float]] = None,
         device: Optional[torch.device] = None,
     ) -> List[Dict[str, Any]]:
         was_training = self.training
@@ -633,6 +659,12 @@ class ThermalInverseDesignFlow(nn.Module):
             centers_phys = centers_i.copy()
             centers_phys[:, 0] *= float(self.cfg.domain_length_x)
             centers_phys[:, 1] *= float(self.cfg.domain_length_y)
+            if x_bounds is not None and centers_phys.size:
+                bx0, bx1 = sorted((float(x_bounds[0]), float(x_bounds[1])))
+                centers_phys[:, 0] = np.clip(centers_phys[:, 0], bx0, bx1)
+            if y_bounds is not None and centers_phys.size:
+                by0, by1 = sorted((float(y_bounds[0]), float(y_bounds[1])))
+                centers_phys[:, 1] = np.clip(centers_phys[:, 1], by0, by1)
             repair_min_dist = float(min_center_distance) if min_center_distance is not None else float(constraints["min_center_distance"][i].item())
             if repair_min_dist <= 0.0:
                 repair_min_dist = float(self.cfg.min_center_distance)
@@ -648,6 +680,8 @@ class ThermalInverseDesignFlow(nn.Module):
                 wall_clearance=max(float(constraints["wall_clearance"][i].item()), float(self.cfg.wall_clearance)),
                 inlet_clearance=max(float(constraints["inlet_clearance"][i].item()), float(self.cfg.inlet_clearance)),
                 outlet_clearance=max(float(constraints["outlet_clearance"][i].item()), float(self.cfg.outlet_clearance)),
+                x_bounds=x_bounds,
+                y_bounds=y_bounds,
                 rng=np_rng,
             )
             sorted_repaired = sort_centers_xy(repaired)
