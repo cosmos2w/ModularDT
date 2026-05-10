@@ -610,18 +610,19 @@ class GlobalChannelThermalDataset(Dataset):
             self._h5.close()
             self._h5 = None
 
-    def _choose_points(self, samples: np.ndarray, item: int) -> np.ndarray:
-        samples = np.asarray(samples, dtype=np.float32)
-        if self.points_per_case is None or int(self.points_per_case) <= 0 or samples.shape[0] <= int(self.points_per_case):
-            return samples
+    def _choose_point_indices(self, num_samples: int, item: int) -> np.ndarray:
+        if self.points_per_case is None or int(self.points_per_case) <= 0 or num_samples <= int(self.points_per_case):
+            return np.arange(num_samples, dtype=np.int64)
         count = int(self.points_per_case)
         if self.random_point_sampling:
             rng = np.random.default_rng()
-            indices = rng.choice(samples.shape[0], size=count, replace=False)
-        else:
-            rng = np.random.default_rng(self.seed + int(item) * 104729)
-            indices = rng.choice(samples.shape[0], size=count, replace=False)
-        return samples[indices]
+            return rng.choice(num_samples, size=count, replace=False)
+        rng = np.random.default_rng(self.seed + int(item) * 104729)
+        return rng.choice(num_samples, size=count, replace=False)
+
+    def _choose_points(self, samples: np.ndarray, item: int) -> np.ndarray:
+        samples = np.asarray(samples, dtype=np.float32)
+        return samples[self._choose_point_indices(samples.shape[0], item)]
 
     def _material_params(self, group: h5py.Group) -> np.ndarray:
         materials = group.get("material_parameters", None)
@@ -674,7 +675,19 @@ class GlobalChannelThermalDataset(Dataset):
     def __getitem__(self, item: int) -> Dict[str, Any]:
         case_id = self.selected_case_ids[int(item)]
         group = self.h5["cases"][case_id]
-        samples = self._choose_points(group["sampled_points"][...], item)
+        all_samples = group["sampled_points"][...]
+        point_indices = self._choose_point_indices(all_samples.shape[0], item)
+        samples = np.asarray(all_samples, dtype=np.float32)[point_indices]
+        if "sampled_point_weights" in group:
+            # Boundary-focused preprocessing stores weights separately from
+            # sampled_points so the old [x,y,u,v,p,omega,T] tuple is unchanged.
+            point_weights = group["sampled_point_weights"][...].astype(np.float32)[point_indices]
+        else:
+            point_weights = np.ones((samples.shape[0],), dtype=np.float32)
+        if "sampled_point_group" in group:
+            point_group = group["sampled_point_group"][...].astype(np.int64)[point_indices]
+        else:
+            point_group = np.zeros((samples.shape[0],), dtype=np.int64)
         query_xy = samples[:, 0:2].astype(np.float32)
         field_targets = samples[:, 2 : 2 + self.field_dim].astype(np.float32)
         module_centers = group["module_centers"][...].astype(np.float32)
@@ -725,6 +738,8 @@ class GlobalChannelThermalDataset(Dataset):
             },
             "query_xy": query_xy,
             "field_targets": field_targets,
+            "point_weights": point_weights.astype(np.float32),
+            "point_group": point_group,
             "module_internal_temperature": internal_grid,
             "module_internal_temperature_points": internal_points,
             "module_internal_mask": internal_mask,
@@ -741,4 +756,6 @@ class GlobalChannelThermalDataset(Dataset):
             sample["y_grid"] = group["y_grid"][...].astype(np.float32)
             sample["steady_field"] = group["steady_field"][...].astype(np.float32)
             sample["rms_field"] = group["rms_field"][...].astype(np.float32) if "rms_field" in group else np.zeros_like(sample["steady_field"])
+            if "module_mask" in group:
+                sample["module_mask"] = group["module_mask"][...].astype(np.uint8)
         return sample

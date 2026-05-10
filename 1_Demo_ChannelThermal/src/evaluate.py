@@ -7,7 +7,7 @@ import csv
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-channelthermal")
 
@@ -55,6 +55,18 @@ def parse_args() -> argparse.Namespace:
         help="Evaluate teacher-forced, model-predicted, mixed, or both teacher and predicted port conditions.",
     )
     parser.add_argument("--mixed-teacher-ratio", type=float, default=0.5, help="Teacher-token ratio for mixed port evaluation.")
+    parser.add_argument(
+        "--temperature-display-mode",
+        choices=["fluid_only", "composite_internal"],
+        default=None,
+        help="Quicklook temperature display: mask module interiors or composite fluid field with module-internal temperatures.",
+    )
+    parser.add_argument(
+        "--organization-view",
+        choices=["all", "physical", "matrices", "schematic", "none"],
+        default="all",
+        help="Organizer diagnostics to render.",
+    )
     return parser.parse_args()
 
 
@@ -270,6 +282,109 @@ def error_metrics(prediction: np.ndarray, target: np.ndarray) -> Dict[str, float
     }
 
 
+def masked_error_metrics(prediction: np.ndarray, target: np.ndarray, mask: np.ndarray) -> Dict[str, float]:
+    """Return metrics on cells selected by a boolean mask."""
+    pred = np.asarray(prediction)
+    gt = np.asarray(target)
+    valid = np.asarray(mask, dtype=bool)
+    if pred.ndim == valid.ndim + 1:
+        pred = pred[valid, :]
+        gt = gt[valid, :]
+    else:
+        pred = pred[valid]
+        gt = gt[valid]
+    return error_metrics(pred, gt)
+
+
+def module_radius_from_sample(sample: Dict[str, Any], fallback: float = 0.45) -> float:
+    material = np.asarray(sample["structure"].get("material_params", np.asarray([], dtype=np.float32)), dtype=np.float32).reshape(-1)
+    if material.size > 5 and float(material[5]) > 0.0:
+        return float(material[5])
+    return float(fallback)
+
+
+def module_and_fluid_masks(sample: Dict[str, Any], pred_field: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
+    """Build evaluation masks so global field metrics ignore solid interiors."""
+    if "module_mask" in sample:
+        module_mask = np.asarray(sample["module_mask"], dtype=bool)
+    else:
+        x_grid = np.asarray(sample["x_grid"], dtype=np.float32)
+        y_grid = np.asarray(sample["y_grid"], dtype=np.float32)
+        module_mask = np.zeros(x_grid.shape, dtype=bool)
+        centers = np.asarray(sample["structure"]["module_centers"], dtype=np.float32)
+        present = np.asarray(sample["structure"]["module_present"] > 0.5)
+        radius = module_radius_from_sample(sample)
+        for module_idx in np.flatnonzero(present):
+            cx, cy = centers[module_idx]
+            module_mask |= np.hypot(x_grid - float(cx), y_grid - float(cy)) <= radius
+    if pred_field is not None:
+        module_mask = module_mask[: pred_field.shape[0], : pred_field.shape[1]]
+    return module_mask, ~module_mask
+
+
+def draw_module_outlines(ax: Any, sample: Dict[str, Any], color: str = "#d9d9d9", linewidth: float = 1.0) -> None:
+    centers = np.asarray(sample["structure"]["module_centers"], dtype=np.float32)
+    present = np.asarray(sample["structure"]["module_present"] > 0.5)
+    radius = module_radius_from_sample(sample)
+    for module_idx in np.flatnonzero(present):
+        cx, cy = centers[module_idx]
+        ax.add_patch(plt.Circle((float(cx), float(cy)), radius, fill=False, color=color, lw=linewidth))
+
+
+def _local_disk_image(values: np.ndarray, local_mask: np.ndarray) -> np.ndarray:
+    image = np.full(local_mask.shape, np.nan, dtype=np.float32)
+    flat = np.asarray(values, dtype=np.float32).reshape(-1)
+    image[np.asarray(local_mask, dtype=bool)] = flat[: int(np.sum(local_mask))]
+    return image
+
+
+def composite_temperature_grid(
+    sample: Dict[str, Any],
+    global_temperature: np.ndarray,
+    internal_temperature_points: np.ndarray,
+) -> np.ndarray:
+    """Composite fluid global temperature with module-internal disk values.
+
+    The global neural field represents the fluid/channel environment. For this
+    display we project each module's local solid-temperature disk back into the
+    matching global module footprint and leave fluid cells from the global grid.
+    """
+    x_grid = np.asarray(sample["x_grid"], dtype=np.float32)
+    y_grid = np.asarray(sample["y_grid"], dtype=np.float32)
+    centers = np.asarray(sample["structure"]["module_centers"], dtype=np.float32)
+    present = np.asarray(sample["structure"]["module_present"] > 0.5)
+    local_mask = np.asarray(sample["module_internal_mask"], dtype=bool)
+    radius = module_radius_from_sample(sample)
+    out = np.asarray(global_temperature, dtype=np.float32).copy()
+    n = int(local_mask.shape[0])
+    if n <= 1:
+        return out
+    for module_idx in np.flatnonzero(present):
+        if module_idx >= internal_temperature_points.shape[0]:
+            continue
+        local_img = _local_disk_image(internal_temperature_points[module_idx], local_mask)
+        cx, cy = centers[module_idx]
+        inside = np.hypot(x_grid - float(cx), y_grid - float(cy)) <= radius
+        xi = np.clip((x_grid[inside] - float(cx)) / max(radius, 1.0e-12), -1.0, 1.0)
+        eta = np.clip((y_grid[inside] - float(cy)) / max(radius, 1.0e-12), -1.0, 1.0)
+        ii = np.rint((xi + 1.0) * 0.5 * (n - 1)).astype(int)
+        jj = np.rint((eta + 1.0) * 0.5 * (n - 1)).astype(int)
+        values = local_img[jj, ii]
+        valid = np.isfinite(values)
+        inside_indices = np.flatnonzero(inside.reshape(-1))
+        out.reshape(-1)[inside_indices[valid]] = values[valid]
+    return out
+
+
+def resolve_temperature_display_mode(requested: Optional[str], predictions: Dict[str, Any]) -> str:
+    if requested is not None:
+        return str(requested)
+    pred_internal = predictions.get("pred_internal_temperature")
+    if pred_internal is not None and np.asarray(pred_internal).size > 0:
+        return "composite_internal"
+    return "fluid_only"
+
+
 def safe_path_name(value: object) -> str:
     raw = str(value).strip()
     safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw)
@@ -281,9 +396,17 @@ def evaluation_output_dir(base_dir_arg: str | None, checkpoint_path: Path, case_
     return resolve_demo_path(base_dir) / f"{safe_path_name(case_id)}_{current_timestamp()}"
 
 
-def plot_field_quicklook(output_path: Path, sample: Dict[str, Any], pred_field: np.ndarray, channel_order: list[str]) -> None:
+def plot_field_quicklook(
+    output_path: Path,
+    sample: Dict[str, Any],
+    pred_field: np.ndarray,
+    channel_order: list[str],
+    *,
+    pred_internal_temperature: Optional[np.ndarray] = None,
+    temperature_display_mode: str = "fluid_only",
+) -> None:
     gt = sample["steady_field"][..., : pred_field.shape[-1]]
-    preferred = [name for name in ["temperature", "u", "omega"] if name in channel_order]
+    preferred = [name for name in ["u", "v", "p", "omega", "temperature"] if name in channel_order]
     if not preferred:
         preferred = channel_order[: min(3, len(channel_order))]
     x_min = float(np.min(sample["x_grid"]))
@@ -298,12 +421,23 @@ def plot_field_quicklook(output_path: Path, sample: Dict[str, Any], pred_field: 
     fig, axes = plt.subplots(len(preferred), 3, figsize=(3.0 * panel_width, panel_height * len(preferred)), constrained_layout=True)
     if len(preferred) == 1:
         axes = axes[None, :]
+    module_mask, fluid_mask = module_and_fluid_masks(sample, pred_field)
     for row, name in enumerate(preferred):
         idx = channel_order.index(name)
         gt_img = gt[..., idx]
         pred_img = pred_field[..., idx]
+        if name == "temperature" and str(temperature_display_mode) == "composite_internal" and pred_internal_temperature is not None:
+            gt_img = composite_temperature_grid(sample, gt_img, sample["module_internal_temperature_points"])
+            pred_img = composite_temperature_grid(sample, pred_img, pred_internal_temperature[..., 0])
+            metric_mask = np.ones_like(fluid_mask, dtype=bool)
+        else:
+            # The global neural field is not trained to predict arbitrary flow
+            # values inside solid modules, so quicklooks mask those interiors.
+            gt_img = np.where(fluid_mask, gt_img, np.nan)
+            pred_img = np.where(fluid_mask, pred_img, np.nan)
+            metric_mask = fluid_mask
         err_img = np.abs(pred_img - gt_img)
-        channel_metrics = error_metrics(pred_img, gt_img)
+        channel_metrics = masked_error_metrics(pred_img, gt_img, metric_mask)
         vmin = float(np.nanmin(gt_img))
         vmax = float(np.nanmax(gt_img))
         for col, (image, title, cmap) in enumerate(
@@ -313,15 +447,18 @@ def plot_field_quicklook(output_path: Path, sample: Dict[str, Any], pred_field: 
                 (err_img, f"Abs error {name}\nrelL2={channel_metrics['relative_l2']:.4e}", "magma"),
             ]
         ):
+            cm = plt.get_cmap(cmap).copy()
+            cm.set_bad("#303030")
             im = axes[row, col].imshow(
                 image,
                 origin="lower",
                 extent=extent,
-                cmap=cmap,
+                cmap=cm,
                 vmin=vmin if col < 2 else None,
                 vmax=vmax if col < 2 else None,
                 aspect="equal",
             )
+            draw_module_outlines(axes[row, col], sample, color="#e6e6e6", linewidth=0.9)
             axes[row, col].set_aspect("equal", adjustable="box")
             if hasattr(axes[row, col], "set_box_aspect"):
                 axes[row, col].set_box_aspect(box_aspect)
@@ -416,7 +553,12 @@ def plot_interface(
     plt.close(fig)
 
 
-def plot_organizer(output_path: Path, sample: Dict[str, Any], aux: Dict[str, Any], model: GlobalChannelThermalModel) -> None:
+def extract_channelthermal_organization_arrays(
+    sample: Dict[str, Any],
+    aux: Dict[str, Any],
+    model: GlobalChannelThermalModel,
+) -> Dict[str, np.ndarray]:
+    """Collect organizer arrays with defaults suitable for visualization."""
     centers = sample["structure"]["module_centers"]
     present = sample["structure"]["module_present"] > 0.5
     heat = np.asarray(sample["structure"].get("heat_powers", np.zeros((centers.shape[0],))), dtype=np.float32)
@@ -428,100 +570,256 @@ def plot_organizer(output_path: Path, sample: Dict[str, Any], aux: Dict[str, Any
     env_mass = np.asarray(aux.get("hyper_env_mass", np.zeros_like(strength)), dtype=np.float32)
     src = np.asarray(aux.get("hyper_source_coords", np.zeros((strength.shape[0], 2))), dtype=np.float32)
     dst = np.asarray(aux.get("hyper_thermal_region_coords", np.zeros((strength.shape[0], 2))), dtype=np.float32)
+    return {
+        "centers": np.asarray(centers, dtype=np.float32),
+        "present": np.asarray(present, dtype=bool),
+        "heat": heat,
+        "env_coords": env_coords,
+        "A_eh": A_eh,
+        "A_mh": A_mh,
+        "strength": strength,
+        "module_mass": module_mass,
+        "env_mass": env_mass,
+        "src": src,
+        "dst": dst,
+    }
 
-    fig, axes = plt.subplots(2, 2, figsize=(12.5, 8.8), constrained_layout=True)
-    ax_overlay, ax_mh, ax_eh, ax_schema = axes.reshape(-1)
+
+def _convex_hull(points: np.ndarray) -> np.ndarray:
+    pts = sorted({(float(x), float(y)) for x, y in np.asarray(points, dtype=np.float64)})
+    if len(pts) <= 2:
+        return np.asarray(pts, dtype=np.float32)
+
+    def cross(o: Tuple[float, float], a: Tuple[float, float], b: Tuple[float, float]) -> float:
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower: List[Tuple[float, float]] = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0.0:
+            lower.pop()
+        lower.append(p)
+    upper: List[Tuple[float, float]] = []
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0.0:
+            upper.pop()
+        upper.append(p)
+    return np.asarray(lower[:-1] + upper[:-1], dtype=np.float32)
+
+
+def compute_channelthermal_hyperedge_summary(arrays: Dict[str, np.ndarray]) -> List[Dict[str, Any]]:
+    A_mh = arrays["A_mh"]
+    A_eh = arrays["A_eh"]
+    present = arrays["present"]
+    module_mass = arrays["module_mass"]
+    env_mass = arrays["env_mass"]
+    strength = arrays["strength"]
+    src = arrays["src"]
+    dst = arrays["dst"]
+    dominant_env = A_eh.argmax(axis=-1) if A_eh.size else np.zeros((0,), dtype=np.int64)
+    rows: List[Dict[str, Any]] = []
+    for hidx in range(module_mass.shape[0]):
+        module_scores = A_mh[:, hidx] if A_mh.size else np.zeros((present.shape[0],), dtype=np.float32)
+        valid_scores = [(idx, float(module_scores[idx])) for idx in np.flatnonzero(present)]
+        valid_scores.sort(key=lambda item: item[1], reverse=True)
+        top = [(idx, score) for idx, score in valid_scores[:4] if score > 1.0e-6]
+        rows.append(
+            {
+                "hyperedge_id": int(hidx),
+                "module_mass": float(module_mass[hidx]),
+                "env_mass": float(env_mass[hidx]),
+                "hyper_strength": float(strength[hidx]),
+                "top_modules": ";".join(f"M{idx}" for idx, _ in top),
+                "top_module_weights": ";".join(f"{score:.4f}" for _, score in top),
+                "env_token_count": int(np.sum(dominant_env == hidx)),
+                "source_x": float(src[hidx, 0]),
+                "source_y": float(src[hidx, 1]),
+                "thermal_region_x": float(dst[hidx, 0]),
+                "thermal_region_y": float(dst[hidx, 1]),
+                "active": bool(strength[hidx] >= 0.05),
+                "low_strength": bool(strength[hidx] < 0.05),
+            }
+        )
+    return rows
+
+
+def render_channelthermal_physical_organization(
+    output_path: Path,
+    sample: Dict[str, Any],
+    aux: Dict[str, Any],
+    model: GlobalChannelThermalModel,
+) -> None:
+    arrays = extract_channelthermal_organization_arrays(sample, aux, model)
+    centers = arrays["centers"]
+    present = arrays["present"]
+    heat = arrays["heat"]
+    env_coords = arrays["env_coords"]
+    A_eh = arrays["A_eh"]
+    A_mh = arrays["A_mh"]
+    strength = arrays["strength"]
+    src = arrays["src"]
+    dst = arrays["dst"]
+
+    fig, ax = plt.subplots(figsize=(11.0, 4.8), constrained_layout=True)
     temp_idx = CHANNEL_ORDER.index("temperature") if "temperature" in CHANNEL_ORDER else min(sample["steady_field"].shape[-1] - 1, 0)
-
-    ax_overlay.imshow(
+    ax.imshow(
         sample["steady_field"][..., temp_idx],
         origin="lower",
         extent=(float(np.min(sample["x_grid"])), float(np.max(sample["x_grid"])), float(np.min(sample["y_grid"])), float(np.max(sample["y_grid"]))),
         cmap="inferno",
-        alpha=0.78,
+        alpha=0.42,
         aspect="auto",
     )
     num_h = max(A_eh.shape[-1], 1)
     cmap = plt.get_cmap("tab10", num_h)
     dominant_env = A_eh.argmax(axis=-1) if A_eh.size else np.zeros((env_coords.shape[0],), dtype=np.int64)
-    ax_overlay.scatter(env_coords[:, 0], env_coords[:, 1], c=dominant_env, cmap=cmap, s=24, edgecolor="white", linewidth=0.25, alpha=0.9)
+    confidence = A_eh.max(axis=-1) if A_eh.size else np.ones((env_coords.shape[0],), dtype=np.float32)
+    for hidx in range(num_h):
+        pts = env_coords[dominant_env == hidx]
+        if pts.shape[0] >= 3:
+            hull = _convex_hull(pts)
+            if hull.shape[0] >= 3:
+                ax.fill(hull[:, 0], hull[:, 1], color=cmap(hidx), alpha=0.10, lw=0.0)
+    ax.scatter(
+        env_coords[:, 0],
+        env_coords[:, 1],
+        c=dominant_env,
+        cmap=cmap,
+        s=18.0 + 38.0 * confidence,
+        edgecolor="white",
+        linewidth=0.25,
+        alpha=np.clip(0.25 + 0.75 * confidence, 0.25, 1.0),
+    )
     heat_abs = np.abs(heat)
     heat_scale = heat_abs / max(float(np.nanmax(heat_abs)) if heat_abs.size else 0.0, 1.0e-6)
     for module_idx in np.flatnonzero(present):
         cx, cy = centers[module_idx]
         color = "#fdae61" if heat[module_idx] >= 0 else "#74add1"
         radius = float(model.config.module_radius)
-        ax_overlay.add_patch(plt.Circle((float(cx), float(cy)), radius, fill=False, color=color, lw=1.2 + 1.4 * float(heat_scale[module_idx])))
-        ax_overlay.text(float(cx), float(cy), f"M{module_idx}", ha="center", va="center", color="white", fontsize=8, weight="bold")
+        ax.add_patch(plt.Circle((float(cx), float(cy)), radius, fill=True, color=color, alpha=0.20 + 0.35 * float(heat_scale[module_idx]), lw=0.0))
+        ax.add_patch(plt.Circle((float(cx), float(cy)), radius, fill=False, color=color, lw=1.2 + 1.4 * float(heat_scale[module_idx])))
+        ax.text(float(cx), float(cy), f"M{module_idx}", ha="center", va="center", color="white", fontsize=8, weight="bold")
     for hidx in range(strength.shape[0]):
         alpha = float(np.clip(strength[hidx], 0.12, 1.0))
         color = cmap(hidx)
-        ax_overlay.plot([src[hidx, 0], dst[hidx, 0]], [src[hidx, 1], dst[hidx, 1]], color=color, lw=1.0 + 2.0 * alpha, alpha=alpha)
-        ax_overlay.scatter(src[hidx, 0], src[hidx, 1], marker="x", s=35 + 70 * alpha, color=color, linewidth=1.5)
-        ax_overlay.scatter(dst[hidx, 0], dst[hidx, 1], marker="o", s=34 + 95 * alpha, color=color, edgecolor="black", linewidth=0.45)
-        ax_overlay.text(dst[hidx, 0], dst[hidx, 1], f"H{hidx}\n{strength[hidx]:.2f}", color="white", fontsize=7, ha="center", va="center")
-    ax_overlay.set_title("Physical organizer overlay")
-    ax_overlay.set_xlabel("x")
-    ax_overlay.set_ylabel("y")
+        ax.plot([src[hidx, 0], dst[hidx, 0]], [src[hidx, 1], dst[hidx, 1]], color=color, lw=1.0 + 2.0 * alpha, alpha=alpha)
+        ax.scatter(src[hidx, 0], src[hidx, 1], marker="x", s=35 + 70 * alpha, color=color, linewidth=1.5)
+        ax.scatter(dst[hidx, 0], dst[hidx, 1], marker="*", s=65 + 125 * alpha, color=color, edgecolor="black", linewidth=0.45)
+        ax.text(dst[hidx, 0], dst[hidx, 1], f"H{hidx}\n{strength[hidx]:.2f}", color="white", fontsize=7, ha="center", va="center")
+        if A_mh.size:
+            for module_idx in np.flatnonzero(present):
+                weight = float(A_mh[module_idx, hidx])
+                if weight >= 0.35:
+                    ax.plot([centers[module_idx, 0], src[hidx, 0]], [centers[module_idx, 1], src[hidx, 1]], color=color, lw=0.5 + 1.8 * weight, alpha=0.18 + 0.55 * weight)
+    ax.set_title("Physical organizer overlay")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    fig.savefig(output_path, dpi=170)
+    plt.close(fig)
 
+
+def render_channelthermal_organization_matrices(
+    output_path: Path,
+    sample: Dict[str, Any],
+    aux: Dict[str, Any],
+    model: GlobalChannelThermalModel,
+) -> None:
+    arrays = extract_channelthermal_organization_arrays(sample, aux, model)
+    centers = arrays["centers"]
+    A_mh = arrays["A_mh"]
+    A_eh = arrays["A_eh"]
+    strength = arrays["strength"]
+    module_mass = arrays["module_mass"]
+    env_mass = arrays["env_mass"]
+    dominant_env = A_eh.argmax(axis=-1) if A_eh.size else np.zeros((0,), dtype=np.int64)
+    sort_idx = np.lexsort((np.arange(A_eh.shape[0]), dominant_env)) if A_eh.size else np.arange(0)
+
+    fig = plt.figure(figsize=(12.2, 5.2), constrained_layout=True)
+    gs = fig.add_gridspec(1, 3, width_ratios=[1.0, 0.08, 1.45])
+    ax_mh = fig.add_subplot(gs[0, 0])
+    ax_strip = fig.add_subplot(gs[0, 1])
+    ax_eh = fig.add_subplot(gs[0, 2])
+    labels = [f"H{i}\nS={strength[i]:.2f}\nM={module_mass[i]:.2f} E={env_mass[i]:.2f}" for i in range(strength.shape[0])]
     im1 = ax_mh.imshow(A_mh.T, aspect="auto", cmap="viridis", vmin=0.0, vmax=max(float(np.nanmax(A_mh)) if A_mh.size else 1.0, 1.0e-6))
     ax_mh.set_title("A_mh modules x hyperedges")
     ax_mh.set_xlabel("module")
     ax_mh.set_ylabel("hyperedge")
     ax_mh.set_xticks(np.arange(centers.shape[0]))
     ax_mh.set_xticklabels([f"M{i}" for i in range(centers.shape[0])], rotation=45, ha="right")
+    ax_mh.set_yticks(np.arange(strength.shape[0]))
+    ax_mh.set_yticklabels(labels, fontsize=7)
     fig.colorbar(im1, ax=ax_mh, fraction=0.046, pad=0.04)
 
-    sort_idx = np.lexsort((np.arange(A_eh.shape[0]), dominant_env)) if A_eh.size else np.arange(0)
+    strip = dominant_env[sort_idx][:, None] if A_eh.size else np.zeros((0, 1), dtype=np.int64)
+    ax_strip.imshow(strip, aspect="auto", cmap=plt.get_cmap("tab10", max(strength.shape[0], 1)))
+    ax_strip.set_title("dom", fontsize=8)
+    ax_strip.set_xticks([])
+    ax_strip.set_yticks([])
     im2 = ax_eh.imshow(A_eh[sort_idx].T if A_eh.size else A_eh.T, aspect="auto", cmap="viridis", vmin=0.0)
     ax_eh.set_title("A_eh env tokens sorted by dominant hyperedge")
     ax_eh.set_xlabel("sorted env token")
     ax_eh.set_ylabel("hyperedge")
+    ax_eh.set_yticks(np.arange(strength.shape[0]))
+    ax_eh.set_yticklabels(labels, fontsize=7)
     fig.colorbar(im2, ax=ax_eh, fraction=0.046, pad=0.04)
-
-    ax_schema.set_title("Module/environment mass")
-    y = np.arange(strength.shape[0])
-    ax_schema.barh(y - 0.18, module_mass, height=0.34, color="#4c78a8", label="module mass")
-    ax_schema.barh(y + 0.18, env_mass, height=0.34, color="#f58518", label="env mass")
-    ax_schema.set_yticks(y)
-    ax_schema.set_yticklabels([f"H{i}" for i in range(strength.shape[0])])
-    ax_schema.set_xlabel("normalized mass")
-    ax_schema.grid(True, axis="x", alpha=0.25)
-    ax_schema.legend(fontsize=8)
     fig.savefig(output_path, dpi=170)
     plt.close(fig)
 
 
-def save_organizer_summary(output_dir: Path, aux: Dict[str, Any], sample: Dict[str, Any]) -> tuple[Path, Path]:
-    centers = np.asarray(sample["structure"]["module_centers"], dtype=np.float32)
-    present = np.asarray(sample["structure"]["module_present"] > 0.5)
-    A_mh = np.asarray(aux.get("A_mh", np.zeros((centers.shape[0], 0))), dtype=np.float32)
-    A_eh = np.asarray(aux.get("A_eh", np.zeros((0, A_mh.shape[-1] if A_mh.ndim == 2 else 0))), dtype=np.float32)
-    module_mass = np.asarray(aux.get("hyper_module_mass", np.zeros((A_mh.shape[-1],))), dtype=np.float32)
-    env_mass = np.asarray(aux.get("hyper_env_mass", np.zeros_like(module_mass)), dtype=np.float32)
-    strength = np.asarray(aux.get("hyper_strength", np.zeros_like(module_mass)), dtype=np.float32)
-    src = np.asarray(aux.get("hyper_source_coords", np.zeros((module_mass.shape[0], 2))), dtype=np.float32)
-    dst = np.asarray(aux.get("hyper_thermal_region_coords", np.zeros((module_mass.shape[0], 2))), dtype=np.float32)
-    dominant_env = A_eh.argmax(axis=-1) if A_eh.size else np.zeros((0,), dtype=np.int64)
-    rows = []
-    for hidx in range(module_mass.shape[0]):
-        module_scores = A_mh[:, hidx] if A_mh.size else np.zeros((centers.shape[0],), dtype=np.float32)
-        valid_scores = [(idx, float(module_scores[idx])) for idx in np.flatnonzero(present)]
-        valid_scores.sort(key=lambda item: item[1], reverse=True)
-        top_modules = [f"M{idx}:{score:.3f}" for idx, score in valid_scores[:4] if score > 1.0e-6]
-        row = {
-            "hyperedge_id": int(hidx),
-            "module_mass": float(module_mass[hidx]),
-            "env_mass": float(env_mass[hidx]),
-            "hyper_strength": float(strength[hidx]),
-            "source_x": float(src[hidx, 0]),
-            "source_y": float(src[hidx, 1]),
-            "thermal_region_x": float(dst[hidx, 0]),
-            "thermal_region_y": float(dst[hidx, 1]),
-            "top_modules": ";".join(top_modules),
-            "top_env_token_count": int(np.sum(dominant_env == hidx)),
-        }
-        rows.append(row)
+def render_channelthermal_hypergraph_schematic(
+    output_path: Path,
+    sample: Dict[str, Any],
+    aux: Dict[str, Any],
+    model: GlobalChannelThermalModel,
+) -> None:
+    arrays = extract_channelthermal_organization_arrays(sample, aux, model)
+    centers = arrays["centers"]
+    present = arrays["present"]
+    A_mh = arrays["A_mh"]
+    strength = arrays["strength"]
+    module_mass = arrays["module_mass"]
+    env_mass = arrays["env_mass"]
+    src = arrays["src"]
+    dst = arrays["dst"]
+    fig, ax = plt.subplots(figsize=(10.5, 4.6), constrained_layout=True)
+    num_h = max(strength.shape[0], 1)
+    cmap = plt.get_cmap("tab10", num_h)
+    for hidx in range(strength.shape[0]):
+        color = cmap(hidx) if strength[hidx] >= 0.05 else (0.55, 0.55, 0.55, 1.0)
+        alpha = float(np.clip(strength[hidx], 0.12, 0.85))
+        cx = 0.5 * (src[hidx, 0] + dst[hidx, 0])
+        cy = 0.5 * (src[hidx, 1] + dst[hidx, 1])
+        ax.add_patch(plt.Circle((float(cx), float(cy)), 0.34 + 0.8 * float(env_mass[hidx]), color=color, alpha=0.12 + 0.18 * alpha, lw=0.0))
+        ax.text(float(cx), float(cy), f"H{hidx}\nM={module_mass[hidx]:.2f} E={env_mass[hidx]:.2f}\nS={strength[hidx]:.2f}", ha="center", va="center", fontsize=8, color="black")
+    for module_idx in np.flatnonzero(present):
+        cx, cy = centers[module_idx]
+        ax.scatter(cx, cy, s=150, color="#fdae61", edgecolor="black", linewidth=0.7, zorder=3)
+        ax.text(cx, cy, f"M{module_idx}", ha="center", va="center", fontsize=8, color="white", weight="bold", zorder=4)
+        if A_mh.size:
+            for hidx in range(strength.shape[0]):
+                weight = float(A_mh[module_idx, hidx])
+                if weight < 0.20:
+                    continue
+                color = cmap(hidx) if strength[hidx] >= 0.05 else (0.55, 0.55, 0.55, 1.0)
+                ax.plot([cx, src[hidx, 0]], [cy, src[hidx, 1]], color=color, lw=0.4 + 2.2 * weight, alpha=0.20 + 0.55 * weight)
+    ax.scatter(src[:, 0], src[:, 1], marker="x", s=55, color="black", linewidth=1.3, label="source")
+    ax.scatter(dst[:, 0], dst[:, 1], marker="*", s=95, color="black", linewidth=0.7, label="thermal region")
+    ax.set_title("Conceptual organization schematic")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.legend(fontsize=8, loc="upper right")
+    ax.set_aspect("equal", adjustable="box")
+    fig.savefig(output_path, dpi=170)
+    plt.close(fig)
+
+
+def plot_organizer(output_path: Path, sample: Dict[str, Any], aux: Dict[str, Any], model: GlobalChannelThermalModel) -> None:
+    """Backward-compatible combined organizer diagnostic."""
+    render_channelthermal_physical_organization(output_path, sample, aux, model)
+
+
+def save_organizer_summary(output_dir: Path, aux: Dict[str, Any], sample: Dict[str, Any], model: GlobalChannelThermalModel) -> tuple[Path, Path]:
+    arrays = extract_channelthermal_organization_arrays(sample, aux, model)
+    rows = compute_channelthermal_hyperedge_summary(arrays)
     csv_path = output_dir / "organization_summary.csv"
     json_path = output_dir / "organization_summary.json"
     fieldnames = [
@@ -529,12 +827,15 @@ def save_organizer_summary(output_dir: Path, aux: Dict[str, Any], sample: Dict[s
         "module_mass",
         "env_mass",
         "hyper_strength",
+        "top_modules",
+        "top_module_weights",
+        "env_token_count",
         "source_x",
         "source_y",
         "thermal_region_x",
         "thermal_region_y",
-        "top_modules",
-        "top_env_token_count",
+        "active",
+        "low_strength",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -572,6 +873,7 @@ def summarize_prediction(
     output_dir: Path,
     suffix: str,
     channel_order: list[str],
+    temperature_display_mode: str,
 ) -> Dict[str, Any]:
     pred_field = predictions["pred_field_grid"]
     gt_field = raw_sample["steady_field"][..., : pred_field.shape[-1]]
@@ -579,15 +881,29 @@ def summarize_prediction(
     gt_internal = raw_sample["module_internal_temperature_points"]
     pred_interface = predictions["pred_interface"]
     gt_interface = raw_sample["interface_target"]
+    module_mask, fluid_mask = module_and_fluid_masks(raw_sample, pred_field)
+    pred_temp_display = None
+    gt_temp_display = None
+    composite_temperature_metrics = None
+    if pred_field.shape[-1] >= 5 and str(temperature_display_mode) == "composite_internal":
+        pred_temp_display = composite_temperature_grid(raw_sample, pred_field[..., 4], pred_internal[..., 0])
+        gt_temp_display = composite_temperature_grid(raw_sample, gt_field[..., 4], gt_internal)
+        composite_temperature_metrics = error_metrics(pred_temp_display, gt_temp_display)
     save_payload = {
         "pred_field_grid": pred_field.astype(np.float32),
         "gt_field_grid": gt_field.astype(np.float32),
+        "module_mask": module_mask.astype(np.uint8),
+        "fluid_mask": fluid_mask.astype(np.uint8),
+        "temperature_display_mode": np.asarray(str(temperature_display_mode)),
         "pred_internal_temperature": pred_internal.astype(np.float32),
         "gt_internal_temperature": gt_internal.astype(np.float32),
         "pred_interface": pred_interface.astype(np.float32),
         "gt_interface": gt_interface.astype(np.float32),
         "pred_port_condition": predictions["pred_port_condition"].astype(np.float32),
     }
+    if pred_temp_display is not None and gt_temp_display is not None:
+        save_payload["pred_temperature_display"] = pred_temp_display.astype(np.float32)
+        save_payload["gt_temperature_display"] = gt_temp_display.astype(np.float32)
     if "pred_interface_surrogate_raw" in predictions:
         save_payload["pred_interface_surrogate_raw"] = predictions["pred_interface_surrogate_raw"].astype(np.float32)
     if "pred_interface_flux_physics" in predictions:
@@ -614,6 +930,18 @@ def summarize_prediction(
         str(name): error_metrics(pred_field[..., idx], gt_field[..., idx])["relative_l2"]
         for idx, name in enumerate(channel_order[: pred_field.shape[-1]])
     }
+    field_channel_mse_fluid = {
+        str(name): masked_error_metrics(pred_field[..., idx], gt_field[..., idx], fluid_mask)["mse"]
+        for idx, name in enumerate(channel_order[: pred_field.shape[-1]])
+    }
+    field_channel_rmse_fluid = {
+        str(name): masked_error_metrics(pred_field[..., idx], gt_field[..., idx], fluid_mask)["rmse"]
+        for idx, name in enumerate(channel_order[: pred_field.shape[-1]])
+    }
+    field_channel_relative_l2_fluid = {
+        str(name): masked_error_metrics(pred_field[..., idx], gt_field[..., idx], fluid_mask)["relative_l2"]
+        for idx, name in enumerate(channel_order[: pred_field.shape[-1]])
+    }
     interface_l2_by_target = {
         "T_surface": l2_error(pred_interface[..., 0], gt_interface[..., 0]),
         "q_normal": l2_error(pred_interface[..., 1], gt_interface[..., 1]),
@@ -638,18 +966,33 @@ def summarize_prediction(
     }
     field_metrics = error_metrics(pred_field, gt_field)
     temperature_metrics = error_metrics(pred_field[..., 4], gt_field[..., 4]) if pred_field.shape[-1] >= 5 else None
+    field_metrics_fluid = masked_error_metrics(pred_field, gt_field, fluid_mask)
+    temperature_metrics_fluid = masked_error_metrics(pred_field[..., 4], gt_field[..., 4], fluid_mask) if pred_field.shape[-1] >= 5 else None
     internal_metrics = error_metrics(pred_internal.reshape(-1), gt_internal.reshape(-1))
     interface_metrics = error_metrics(pred_interface, gt_interface)
     return {
         "checkpoint": str(checkpoint_path),
         "case_id": str(raw_sample["case_id"]),
         "metric_note": "l2_error is the aggregate Euclidean norm over all values; relative_l2 is l2_error divided by target L2 norm.",
+        "metric_mask_note": "Fluid-only global metrics exclude solid module interiors; module internal temperature is evaluated separately.",
         "field_l2_error": field_metrics["l2_norm"],
         "temperature_l2_error": temperature_metrics["l2_norm"] if temperature_metrics is not None else None,
         "internal_l2_error": internal_metrics["l2_norm"],
         "interface_l2_error": interface_metrics["l2_norm"],
         "field_rmse": field_metrics["rmse"],
         "temperature_rmse": temperature_metrics["rmse"] if temperature_metrics is not None else None,
+        "field_mse_fluid": field_metrics_fluid["mse"],
+        "field_rmse_fluid": field_metrics_fluid["rmse"],
+        "field_relative_l2_fluid": field_metrics_fluid["relative_l2"],
+        "temperature_mse_fluid": temperature_metrics_fluid["mse"] if temperature_metrics_fluid is not None else None,
+        "temperature_rmse_fluid": temperature_metrics_fluid["rmse"] if temperature_metrics_fluid is not None else None,
+        "temperature_relative_l2_fluid": temperature_metrics_fluid["relative_l2"] if temperature_metrics_fluid is not None else None,
+        "u_mse_fluid": field_channel_mse_fluid.get("u"),
+        "omega_mse_fluid": field_channel_mse_fluid.get("omega"),
+        "temperature_display_mode": str(temperature_display_mode),
+        "temperature_composite_mse": composite_temperature_metrics["mse"] if composite_temperature_metrics is not None else None,
+        "temperature_composite_rmse": composite_temperature_metrics["rmse"] if composite_temperature_metrics is not None else None,
+        "temperature_composite_relative_l2": composite_temperature_metrics["relative_l2"] if composite_temperature_metrics is not None else None,
         "internal_rmse": internal_metrics["rmse"],
         "interface_rmse": interface_metrics["rmse"],
         "interface_flux_mode": str(predictions.get("interface_flux_mode", "unknown")),
@@ -666,11 +1009,17 @@ def summarize_prediction(
         "field_channel_l2_error": field_channel_l2,
         "field_channel_rmse": field_channel_rmse,
         "field_channel_relative_l2": field_channel_relative_l2,
+        "field_channel_mse_fluid": field_channel_mse_fluid,
+        "field_channel_rmse_fluid": field_channel_rmse_fluid,
+        "field_channel_relative_l2_fluid": field_channel_relative_l2_fluid,
         "interface_l2_error_by_target": interface_l2_by_target,
         "interface_rmse_by_target": interface_rmse_by_target,
         "interface_relative_l2_by_target": interface_relative_l2_by_target,
         "field_metrics": field_metrics,
         "temperature_metrics": temperature_metrics,
+        "field_metrics_fluid": field_metrics_fluid,
+        "temperature_metrics_fluid": temperature_metrics_fluid,
+        "composite_temperature_metrics": composite_temperature_metrics,
         "internal_metrics": internal_metrics,
         "interface_metrics": interface_metrics,
         "channel_order": channel_order,
@@ -692,6 +1041,7 @@ def evaluate_mode(
     mixed_teacher_ratio: float,
     normalize_targets: bool,
     channel_order: list[str],
+    temperature_display_mode_arg: Optional[str],
 ) -> Dict[str, Any]:
     suffix = mode_suffix(mode)
     predictions = predict_case(
@@ -703,7 +1053,15 @@ def evaluate_mode(
         mixed_teacher_ratio=mixed_teacher_ratio,
     )
     predictions = denormalize_predictions(predictions, dataset, normalize_targets)
-    plot_field_quicklook(output_dir / f"global_field_quicklook_{suffix}.png", raw_sample, predictions["pred_field_grid"], channel_order)
+    temperature_display_mode = resolve_temperature_display_mode(temperature_display_mode_arg, predictions)
+    plot_field_quicklook(
+        output_dir / f"global_field_quicklook_{suffix}.png",
+        raw_sample,
+        predictions["pred_field_grid"],
+        channel_order,
+        pred_internal_temperature=predictions.get("pred_internal_temperature"),
+        temperature_display_mode=temperature_display_mode,
+    )
     plot_internal(output_dir / f"module_internal_temperature_{suffix}.png", raw_sample, predictions["pred_internal_temperature"])
     plot_interface(
         output_dir / f"interface_curves_{suffix}.png",
@@ -713,7 +1071,7 @@ def evaluate_mode(
         predictions.get("pred_interface_flux_physics"),
         str(predictions.get("interface_flux_mode", "unknown")),
     )
-    summary = summarize_prediction(checkpoint_path, raw_sample, predictions, output_dir, suffix, channel_order)
+    summary = summarize_prediction(checkpoint_path, raw_sample, predictions, output_dir, suffix, channel_order, temperature_display_mode)
     summary["_organizer_aux"] = predictions["organizer_aux"]
     return summary
 
@@ -773,6 +1131,7 @@ def main() -> int:
             mixed_teacher_ratio=float(args.mixed_teacher_ratio),
             normalize_targets=normalize_targets,
             channel_order=channel_order,
+            temperature_display_mode_arg=args.temperature_display_mode,
         )
         if first_aux is None:
             first_aux = mode_summary.pop("_organizer_aux", None)
@@ -781,9 +1140,24 @@ def main() -> int:
         mode_summaries[mode_suffix(mode)] = mode_summary
 
     if first_aux is not None:
-        plot_organizer(output_dir / "organizer_visualization.png", raw_sample, first_aux, model)
-        org_csv, org_json = save_organizer_summary(output_dir, first_aux, raw_sample)
+        org_outputs: Dict[str, str] = {}
+        view = str(args.organization_view)
+        if view in {"all", "physical"}:
+            physical_path = output_dir / "organizer_visualization.png"
+            render_channelthermal_physical_organization(physical_path, raw_sample, first_aux, model)
+            org_outputs["organizer_visualization"] = str(physical_path)
+            org_outputs["organization_physical"] = str(physical_path)
+        if view in {"all", "matrices"}:
+            matrix_path = output_dir / "organization_matrices.png"
+            render_channelthermal_organization_matrices(matrix_path, raw_sample, first_aux, model)
+            org_outputs["organization_matrices"] = str(matrix_path)
+        if view in {"all", "schematic"}:
+            schematic_path = output_dir / "organization_schematic.png"
+            render_channelthermal_hypergraph_schematic(schematic_path, raw_sample, first_aux, model)
+            org_outputs["organization_schematic"] = str(schematic_path)
+        org_csv, org_json = save_organizer_summary(output_dir, first_aux, raw_sample, model)
     else:
+        org_outputs = {}
         org_csv = output_dir / "organization_summary.csv"
         org_json = output_dir / "organization_summary.json"
 
@@ -793,9 +1167,9 @@ def main() -> int:
         "local_port_condition_mode": args.local_port_condition_mode,
         "mixed_teacher_ratio": float(args.mixed_teacher_ratio),
         "outputs": {
-            "organizer_visualization": str(output_dir / "organizer_visualization.png"),
             "organization_summary_csv": str(org_csv),
             "organization_summary_json": str(org_json),
+            **org_outputs,
         },
         "modes": mode_summaries,
     }
@@ -817,6 +1191,14 @@ def main() -> int:
                 # "predicted_field_l2_error": predicted["field_l2_error"],
                 "teacher_field_relative_l2": teacher["field_relative_l2"],
                 "predicted_field_relative_l2": predicted["field_relative_l2"],
+                "teacher_field_mse_fluid": teacher["field_mse_fluid"],
+                "predicted_field_mse_fluid": predicted["field_mse_fluid"],
+                "teacher_temperature_mse_fluid": teacher["temperature_mse_fluid"],
+                "predicted_temperature_mse_fluid": predicted["temperature_mse_fluid"],
+                "teacher_u_mse_fluid": teacher["u_mse_fluid"],
+                "predicted_u_mse_fluid": predicted["u_mse_fluid"],
+                "teacher_omega_mse_fluid": teacher["omega_mse_fluid"],
+                "predicted_omega_mse_fluid": predicted["omega_mse_fluid"],
                 # "teacher_temperature_l2_error": teacher["temperature_l2_error"],
                 # "predicted_temperature_l2_error": predicted["temperature_l2_error"],
                 "teacher_temperature_relative_l2": teacher["temperature_relative_l2"],
@@ -850,14 +1232,24 @@ def main() -> int:
             {
                 "field_l2_error": only["field_l2_error"],
                 "field_relative_l2": only["field_relative_l2"],
+                "field_mse_fluid": only["field_mse_fluid"],
+                "field_relative_l2_fluid": only["field_relative_l2_fluid"],
                 "temperature_l2_error": only["temperature_l2_error"],
                 "temperature_relative_l2": only["temperature_relative_l2"],
+                "temperature_mse_fluid": only["temperature_mse_fluid"],
+                "temperature_relative_l2_fluid": only["temperature_relative_l2_fluid"],
+                "u_mse_fluid": only["u_mse_fluid"],
+                "omega_mse_fluid": only["omega_mse_fluid"],
                 "internal_l2_error": only["internal_l2_error"],
                 "internal_relative_l2": only["internal_relative_l2"],
                 "interface_l2_error": only["interface_l2_error"],
                 "interface_relative_l2": only["interface_relative_l2"],
                 f"{suffix}_field_l2_error": only["field_l2_error"],
                 f"{suffix}_field_relative_l2": only["field_relative_l2"],
+                f"{suffix}_field_mse_fluid": only["field_mse_fluid"],
+                f"{suffix}_temperature_mse_fluid": only["temperature_mse_fluid"],
+                f"{suffix}_u_mse_fluid": only["u_mse_fluid"],
+                f"{suffix}_omega_mse_fluid": only["omega_mse_fluid"],
                 f"{suffix}_temperature_l2_error": only["temperature_l2_error"],
                 f"{suffix}_temperature_relative_l2": only["temperature_relative_l2"],
                 f"{suffix}_internal_l2_error": only["internal_l2_error"],

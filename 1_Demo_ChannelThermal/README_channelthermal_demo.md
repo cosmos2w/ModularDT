@@ -1,6 +1,6 @@
 # Demo 1: Channel Thermal Modular Design
 
-Updated: 2026-05-01
+Updated: 2026-05-02
 
 ## Purpose
 
@@ -107,6 +107,26 @@ because solid module temperatures are already supervised separately through
 `module_internal_temperature`. Use
 `--no-exclude-module-interior-from-global-points` only when reproducing the old
 packed-dataset behavior.
+
+The preprocessor also supports boundary-focused point sampling for better
+module-interface behavior:
+
+```bash
+python src/preprocess_channelthermal_dataset.py \
+  --points-per-case 4096 \
+  --boundary-focus-fraction 0.25 \
+  --near-module-fraction 0.25 \
+  --gradient-focus-fraction 0.25 \
+  --uniform-fraction 0.25
+```
+
+Fractions are normalized if they do not sum to one. Boundary-ring points are
+fluid cells in the annulus from `module_radius + boundary_ring_inner` to
+`module_radius + boundary_ring_outer`; near-module points use a broader
+annulus; gradient points emphasize high temperature-gradient fluid cells. The
+packed dataset stores sidecar `sampled_point_weights` and diagnostic
+`sampled_point_group` arrays instead of changing the `sampled_points` feature
+layout. Training uses all-ones weights for older datasets.
 
 ## Local Module Surrogate Simulator
 
@@ -524,7 +544,9 @@ Evaluate a global checkpoint:
 ```bash
 python src/evaluate.py \
   --checkpoint Saved_Model/YOUR_RUN/best_model.pt \
-  --local-port-condition-mode both
+  --local-port-condition-mode both \
+  --organization-view all \
+  --temperature-display-mode composite_internal
 ```
 
 `--local-port-condition-mode teacher` is a useful diagnostic because it gives
@@ -532,6 +554,19 @@ the local surrogate exact dataset port conditions. `predicted` is the realistic
 forward-design mode: at inference time the model must generate its own local
 port conditions before calling the local surrogate. The default `both` writes
 teacher and predicted quicklooks/metrics side by side.
+
+The global neural field represents the environment/channel field, not arbitrary
+values inside solid modules. Evaluation therefore masks module interiors for
+`u`, `v`, `p`, `omega`, and fluid global-temperature metrics. Summary JSON and
+NPZ outputs include `module_mask`, `fluid_mask`, `field_mse_fluid`,
+`temperature_mse_fluid`, `u_mse_fluid`, and `omega_mse_fluid`.
+
+Temperature quicklooks support two display modes. `fluid_only` masks solid
+interiors in the global temperature panel. `composite_internal` displays the
+global predicted or GT temperature in fluid cells and projects the corresponding
+module-internal temperature disk back into each solid module. This composite is
+a visualization/diagnostic view; solid internal temperature is still supervised
+and evaluated separately through the local module targets.
 
 Organizer strength is logged as `diag_organizer_strength_mean`. It is not part
 of the total loss; a positive `organizer_strength_weight` historically
@@ -580,11 +615,16 @@ This is deliberately lighter than `0_Demo_MultiCylinder`. The channel thermal
 model does not add phase losses, a dynamic residual branch, periodic wake
 priors, frequency losses, or duplicate-edge pruning by default.
 
-Evaluation now writes `organizer_visualization.png` plus
-`organization_summary.csv` and `organization_summary.json`. The figure overlays
-temperature, module heat power, dominant environment-token hyperedges,
-source-to-region links, `A_mh`, `A_eh`, and module/environment mass per
-hyperedge.
+Evaluation now writes channel-thermal organizer diagnostics adapted from the
+useful spirit of `0_Demo_MultiCylinder` but without periodic, dynamic, phase, or
+wake-specific machinery. With `--organization-view all`, outputs include
+`organizer_visualization.png` for the nonperiodic physical overlay,
+`organization_matrices.png` for sorted `A_mh` and `A_eh` heatmaps,
+`organization_schematic.png` for a compact conceptual graph, and
+`organization_summary.csv/json` with hyperedge mass, strength, source/thermal
+region coordinates, top modules, and token counts. Organizer constraints remain
+intentionally light: an `A_me` prior, an `A_eh` factor target, and
+module/environment mass alignment, not heavy uniform-edge constraints.
 
 ## Forward Model Files
 

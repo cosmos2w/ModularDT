@@ -47,10 +47,10 @@ from channelthermal_common import (
 # ------------------------------ Editable settings -------------------------------
 
 # NUM_MODULE_OPTIONS = [1, 2, 4, 6, 9, 12]
-# RE_OPTIONS = [20.0, 40.0, 60.0, 80.0, 100.0, 120.0, 140.0, 160.0, 200.0]
+# RE_OPTIONS = [30.0, 50.0, 70.0, 90.0, 110.0, 130.0, 150.0, 180.0, 200.0]
 
 NUM_MODULE_OPTIONS = [3, 5, 7, 10]
-RE_OPTIONS = [70.0, 90.0, 130]
+RE_OPTIONS = [80.0, 100.0, 140]
 
 HEAT_POWER_RANGE = (0.5, 2.0)
 REPEATS_PER_COMBINATION = 5
@@ -58,7 +58,7 @@ REPEATS_PER_COMBINATION = 5
 ENABLE_CPU = False
 CPU_CONCURRENT_SLOTS = 2
 GPU_IDS: List[int] = [1]
-MAX_CONCURRENT_PER_GPU = 4
+MAX_CONCURRENT_PER_GPU = 8
 
 TEMPLATE_CONFIG_NAME = "config_channelthermal.json"
 GENERATED_CONFIG_PREFIX = "config_channelthermal"

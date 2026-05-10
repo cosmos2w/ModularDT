@@ -73,7 +73,7 @@ import csv
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -131,6 +131,8 @@ class ProcessedCase:
     steady_field: np.ndarray
     rms_field: np.ndarray
     sampled_points: np.ndarray
+    sampled_point_weights: np.ndarray
+    sampled_point_group: np.ndarray
     module_internal_temperature: np.ndarray
     module_internal_mask: np.ndarray
     interface_response: np.ndarray
@@ -186,6 +188,14 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Sample global point targets from fluid cells only; use --no-exclude-module-interior-from-global-points for old behavior.",
     )
+    parser.add_argument("--boundary-focus-fraction", type=float, default=0.25, help="Fraction of global samples drawn from the module boundary annulus.")
+    parser.add_argument("--near-module-fraction", type=float, default=0.25, help="Fraction of global samples drawn from a broader near-module annulus.")
+    parser.add_argument("--gradient-focus-fraction", type=float, default=0.25, help="Fraction of global samples drawn from high-temperature-gradient fluid cells.")
+    parser.add_argument("--uniform-fraction", type=float, default=0.25, help="Fraction of global samples drawn uniformly from fluid cells.")
+    parser.add_argument("--boundary-ring-inner", type=float, default=0.00, help="Inner offset from module radius for boundary-ring global samples.")
+    parser.add_argument("--boundary-ring-outer", type=float, default=0.30, help="Outer offset from module radius for boundary-ring global samples.")
+    parser.add_argument("--boundary-point-weight", type=float, default=3.0, help="Loss weight assigned to boundary-ring sampled points.")
+    parser.add_argument("--near-module-point-weight", type=float, default=1.5, help="Loss weight assigned to near-module sampled points.")
     convergence_group = parser.add_mutually_exclusive_group()
     convergence_group.add_argument(
         "--require-converged",
@@ -432,12 +442,24 @@ def sample_global_points(
     rng: np.random.Generator,
     *,
     exclude_module_interior_from_global_points: bool = True,
-) -> np.ndarray:
-    """Sample uniform, near-module, and temperature-gradient-focused points.
+    boundary_focus_fraction: float = 0.25,
+    near_module_fraction: float = 0.25,
+    gradient_focus_fraction: float = 0.25,
+    uniform_fraction: float = 0.25,
+    boundary_ring_inner: float = 0.00,
+    boundary_ring_outer: float = 0.30,
+    boundary_point_weight: float = 3.0,
+    near_module_point_weight: float = 1.5,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Sample weighted global environment points.
 
     These samples become point-supervision tuples for the global environment
     neural field. Module-interior and interface targets are stored separately,
     so the default candidate universe is fluid cells only.
+
+    ``sampled_point_weights`` is kept as a separate dataset, not appended to
+    sampled_points, so older Stage-B datasets and feature-name conventions
+    remain compatible.
     """
     h, w, _ = steady_field.shape
     yy, xx = np.indices((h, w))
@@ -450,59 +472,97 @@ def sample_global_points(
         print("Warning: no fluid cells available for global point sampling; falling back to all grid cells.")
         candidate_indices = flat_indices
 
+    def _samples_from_indices(chosen: np.ndarray, groups: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        jj = yy.reshape(-1)[chosen]
+        ii = xx.reshape(-1)[chosen]
+        samples = np.zeros((len(chosen), len(SAMPLED_POINT_FEATURES)), dtype=np.float32)
+        samples[:, 0] = x_grid[jj, ii]
+        samples[:, 1] = y_grid[jj, ii]
+        samples[:, 2:] = steady_field[jj, ii, :]
+        weights = np.ones((len(chosen),), dtype=np.float32)
+        weights[groups == 1] = float(near_module_point_weight)
+        weights[groups == 2] = float(boundary_point_weight)
+        return samples, weights, groups.astype(np.int16)
+
+    module_distance = np.full((h, w), np.inf, dtype=np.float32)
+    for cx, cy in cfg.layout.centers or []:
+        module_distance = np.minimum(module_distance, np.hypot(x_grid - float(cx), y_grid - float(cy)).astype(np.float32))
+    radius = float(cfg.domain.module_radius)
+    inner = radius + max(float(boundary_ring_inner), 0.0)
+    outer = radius + max(float(boundary_ring_outer), float(boundary_ring_inner))
+    near_outer = radius + max(2.0 * float(boundary_ring_outer), float(boundary_ring_outer) + 2.0 * float(cfg.domain.min_gap), 0.60)
+    boundary_mask = (module_distance >= inner) & (module_distance <= outer)
+    near_mask = (module_distance > outer) & (module_distance <= near_outer)
+    boundary_candidates = np.intersect1d(np.flatnonzero(boundary_mask.reshape(-1)), candidate_indices, assume_unique=False)
+    near_candidates = np.intersect1d(np.flatnonzero(near_mask.reshape(-1)), candidate_indices, assume_unique=False)
+
+    temp = steady_field[..., CHANNEL_ORDER.index("temperature")]
+    grad_y, grad_x = np.gradient(temp)
+    grad_mag = np.hypot(grad_x, grad_y)
+    candidate_grad = grad_mag.reshape(-1)[candidate_indices]
+    threshold = float(np.quantile(candidate_grad, 0.80)) if candidate_grad.size else float("inf")
+    grad_candidates = np.intersect1d(
+        np.flatnonzero((grad_mag >= threshold).reshape(-1)),
+        candidate_indices,
+        assume_unique=False,
+    )
+
     if points_per_case <= 0 or points_per_case >= len(candidate_indices):
         chosen = candidate_indices
+        groups = np.zeros((len(chosen),), dtype=np.int16)
+        chosen_set = chosen.reshape(-1)
+        boundary_lookup = np.isin(chosen_set, boundary_candidates)
+        near_lookup = np.isin(chosen_set, near_candidates)
+        grad_lookup = np.isin(chosen_set, grad_candidates)
+        groups[near_lookup] = 1
+        groups[boundary_lookup] = 2
+        groups[grad_lookup & ~boundary_lookup & ~near_lookup] = 3
     else:
-        n_uniform = points_per_case // 2
-        n_near = points_per_case // 4
-        n_grad = points_per_case - n_uniform - n_near
-
-        # Uniform, near-module, and gradient-focused samples all draw from the
-        # same candidate universe, so the global field loss does not silently
-        # include solid interior cells unless the compatibility flag is off.
-        chosen_parts: List[np.ndarray] = [
-            rng.choice(candidate_indices, size=n_uniform, replace=len(candidate_indices) < n_uniform)
-        ]
-
-        near_mask = np.zeros((h, w), dtype=bool)
-        radius = float(cfg.domain.module_radius) + 2.0 * float(cfg.domain.min_gap)
-        for cx, cy in cfg.layout.centers or []:
-            near_mask |= np.hypot(x_grid - float(cx), y_grid - float(cy)) <= radius
-        near_candidates = np.intersect1d(np.flatnonzero(near_mask.reshape(-1)), candidate_indices, assume_unique=False)
-        if len(near_candidates) > 0 and n_near > 0:
-            chosen_parts.append(rng.choice(near_candidates, size=n_near, replace=len(near_candidates) < n_near))
-
-        temp = steady_field[..., CHANNEL_ORDER.index("temperature")]
-        grad_y, grad_x = np.gradient(temp)
-        grad_mag = np.hypot(grad_x, grad_y)
-        grad_candidates = np.intersect1d(
-            np.flatnonzero((grad_mag >= np.quantile(grad_mag, 0.80)).reshape(-1)),
-            candidate_indices,
-            assume_unique=False,
+        raw_fracs = np.asarray(
+            [uniform_fraction, near_module_fraction, boundary_focus_fraction, gradient_focus_fraction],
+            dtype=np.float64,
         )
-        if len(grad_candidates) > 0 and n_grad > 0:
-            weights = grad_mag.reshape(-1)[grad_candidates].astype(np.float64)
-            weights = weights + 1e-8
-            weights = weights / np.sum(weights)
-            chosen_parts.append(rng.choice(grad_candidates, size=n_grad, replace=len(grad_candidates) < n_grad, p=weights))
+        raw_fracs = np.clip(raw_fracs, 0.0, None)
+        if float(raw_fracs.sum()) <= 0.0:
+            raw_fracs[:] = 0.25
+        fracs = raw_fracs / raw_fracs.sum()
+        counts = np.floor(fracs * int(points_per_case)).astype(int)
+        remainder = int(points_per_case) - int(counts.sum())
+        if remainder > 0:
+            order = np.argsort(-(fracs * int(points_per_case) - counts))
+            counts[order[:remainder]] += 1
 
-        chosen = np.unique(np.concatenate(chosen_parts))
-        if len(chosen) < points_per_case:
-            fill = rng.choice(
-                candidate_indices,
-                size=points_per_case - len(chosen),
-                replace=len(candidate_indices) < points_per_case,
-            )
-            chosen = np.concatenate([chosen, fill])
-        chosen = chosen[:points_per_case]
+        def _draw(candidates: np.ndarray, count: int, group: int, probs: Optional[np.ndarray] = None) -> Tuple[np.ndarray, np.ndarray]:
+            if count <= 0:
+                return np.zeros((0,), dtype=np.int64), np.zeros((0,), dtype=np.int16)
+            source = candidates if len(candidates) > 0 else candidate_indices
+            p = probs
+            if len(candidates) == 0:
+                p = None
+            replace = len(source) < count
+            return rng.choice(source, size=count, replace=replace, p=p), np.full((count,), group, dtype=np.int16)
 
-    jj = yy.reshape(-1)[chosen]
-    ii = xx.reshape(-1)[chosen]
-    samples = np.zeros((len(chosen), len(SAMPLED_POINT_FEATURES)), dtype=np.float32)
-    samples[:, 0] = x_grid[jj, ii]
-    samples[:, 1] = y_grid[jj, ii]
-    samples[:, 2:] = steady_field[jj, ii, :]
-    return samples
+        grad_probs = None
+        if len(grad_candidates) > 0:
+            grad_probs = grad_mag.reshape(-1)[grad_candidates].astype(np.float64) + 1.0e-8
+            grad_probs = grad_probs / np.sum(grad_probs)
+
+        # Boundary-ring samples are fluid cells in a narrow annulus around each
+        # module. They receive a higher loss weight so the global environment
+        # field pays more attention to no-slip/interface-adjacent behavior.
+        parts = [
+            _draw(candidate_indices, int(counts[0]), 0),
+            _draw(near_candidates, int(counts[1]), 1),
+            _draw(boundary_candidates, int(counts[2]), 2),
+            _draw(grad_candidates, int(counts[3]), 3, grad_probs),
+        ]
+        chosen = np.concatenate([part[0] for part in parts])
+        groups = np.concatenate([part[1] for part in parts])
+        order = rng.permutation(len(chosen))
+        chosen = chosen[order]
+        groups = groups[order]
+
+    return _samples_from_indices(chosen, groups)
 
 
 def unique_case_key(base_key: str, existing: set[str]) -> str:
@@ -588,6 +648,7 @@ def process_case(
     exclude_module_interior_from_global_points: bool,
     h_effective_eps: float,
     h_effective_max: float,
+    sampling_cfg: argparse.Namespace,
 ) -> ProcessedCase:
     """Convert one raw case folder into packed steady-window arrays."""
     selected_rows = selection.selected_rows
@@ -602,7 +663,7 @@ def process_case(
     x_grid, y_grid = build_uniform_grid(raw.cfg)
     module_mask = last_payload["module_mask"].astype(np.uint8)
     rng = np.random.default_rng(seed)
-    sampled_points = sample_global_points(
+    sampled_points, sampled_point_weights, sampled_point_group = sample_global_points(
         steady_field,
         x_grid,
         y_grid,
@@ -611,6 +672,14 @@ def process_case(
         points_per_case,
         rng,
         exclude_module_interior_from_global_points=exclude_module_interior_from_global_points,
+        boundary_focus_fraction=float(sampling_cfg.boundary_focus_fraction),
+        near_module_fraction=float(sampling_cfg.near_module_fraction),
+        gradient_focus_fraction=float(sampling_cfg.gradient_focus_fraction),
+        uniform_fraction=float(sampling_cfg.uniform_fraction),
+        boundary_ring_inner=float(sampling_cfg.boundary_ring_inner),
+        boundary_ring_outer=float(sampling_cfg.boundary_ring_outer),
+        boundary_point_weight=float(sampling_cfg.boundary_point_weight),
+        near_module_point_weight=float(sampling_cfg.near_module_point_weight),
     )
 
     internal_frames: List[np.ndarray] = []
@@ -645,6 +714,8 @@ def process_case(
         steady_field=steady_field,
         rms_field=rms_field,
         sampled_points=sampled_points,
+        sampled_point_weights=sampled_point_weights,
+        sampled_point_group=sampled_point_group,
         module_internal_temperature=internal_temperature,
         module_internal_mask=internal_mask,
         interface_response=interface_response,
@@ -818,6 +889,8 @@ def write_h5(
         h5.attrs["n_interface_points"] = n_interface_points
         h5.attrs["state_id"] = "steady_final_window"
         h5.attrs["exclude_module_interior_from_global_points"] = bool(exclude_module_interior_from_global_points)
+        h5.attrs["sampled_point_weights_note"] = "Per-point loss weights stored separately from sampled_points for backward compatibility."
+        h5.attrs["sampled_point_group_labels"] = "0=uniform, 1=near_module, 2=boundary_ring, 3=gradient"
         h5.attrs["interface_condition_valid_mask"] = "h_effective_valid_mask"
         h5.attrs["interface_condition_valid_mask_note"] = (
             "1 marks interface points whose h_effective target is finite, within configured bounds, "
@@ -857,6 +930,8 @@ def write_h5(
             group.create_dataset("steady_field", data=item.steady_field, compression="gzip")
             group.create_dataset("rms_field", data=item.rms_field, compression="gzip")
             group.create_dataset("sampled_points", data=item.sampled_points, compression="gzip")
+            group.create_dataset("sampled_point_weights", data=item.sampled_point_weights, compression="gzip")
+            group.create_dataset("sampled_point_group", data=item.sampled_point_group, compression="gzip")
             group.create_dataset("selected_times", data=item.selected_times)
             group.create_dataset("selected_frame_ids", data=item.selected_frame_ids)
             group.create_dataset("steady_time", data=np.asarray([float(np.mean(item.selected_times))], dtype=np.float32))
@@ -974,6 +1049,7 @@ def main() -> int:
             bool(args.exclude_module_interior_from_global_points),
             float(args.h_effective_eps),
             float(args.h_effective_max),
+            args,
         )
         processed.append(item)
         quality_rows.append(

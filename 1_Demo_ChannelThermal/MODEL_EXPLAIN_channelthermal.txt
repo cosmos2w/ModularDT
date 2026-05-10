@@ -1,7 +1,7 @@
 Demo 1 Channel Thermal Forward Model
 ====================================
 
-Updated: 2026-05-01
+Updated: 2026-05-02
 
 Stage A: local module surrogate
 -------------------------------
@@ -341,6 +341,13 @@ default, so the global field loss and local solid-temperature loss supervise
 different physical regions. The compatibility flag
 --no-exclude-module-interior-from-global-points restores the old behavior.
 
+Boundary-focused sampling is available without changing the sampled_points
+feature layout. The preprocessor writes sidecar sampled_point_weights [Q] and
+sampled_point_group [Q] arrays. Group labels are 0 uniform, 1 near_module,
+2 boundary_ring, and 3 gradient. Boundary-ring and near-module fluid samples
+receive larger field-loss weights, while old datasets without the sidecar array
+use all-ones weights.
+
 
 Evaluation modes
 ----------------
@@ -354,6 +361,29 @@ evaluate.py supports:
 The default both mode writes teacher and predicted quicklooks and metrics in
 one evaluation_summary.json. The predicted metrics are the fair autonomous
 forward-model numbers for design inference.
+
+The global neural field is an environment/channel field, not a solid-interior
+flow predictor. Evaluation therefore masks module interiors for u, v, p, omega,
+and fluid global-temperature metrics. It reports fluid-only metrics such as
+field_mse_fluid, temperature_mse_fluid, u_mse_fluid, and omega_mse_fluid while
+keeping legacy aggregate metrics for continuity.
+
+Temperature visualization can be fluid_only or composite_internal. fluid_only
+masks solid interiors in the global temperature field. composite_internal uses
+the global field in fluid cells and projects pred_internal_temperature, or the
+GT module_internal_temperature, back into each module disk. This is a
+diagnostic composite display; internal solid temperature remains supervised and
+evaluated separately.
+
+Organizer visualization now mirrors the useful diagnostic spirit of
+0_Demo_MultiCylinder but is adapted to nonperiodic channel thermal physics.
+evaluate.py can write a physical overlay, sorted A_mh/A_eh matrix diagnostics,
+a conceptual schematic, and organization_summary.csv/json. The overlay uses
+straight nonperiodic source-to-thermal-region lines, module heat-power circles,
+dominant environment-token hyperedges, hyperedge source X markers, thermal
+region star markers, and module-to-hyperedge links. The organizer constraints
+remain deliberately light: A_me prior, A_eh factor target, and module/env mass
+alignment, not heavy uniform-edge or entropy constraints by default.
 
 
 Known simplifications

@@ -125,7 +125,12 @@ def resolve_run_id(args: argparse.Namespace, cfg: Dict[str, Any], fallback: str)
     )
 
 
-def field_loss(pred: torch.Tensor, target: torch.Tensor, loss_cfg: Dict[str, Any]) -> torch.Tensor:
+def field_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    loss_cfg: Dict[str, Any],
+    point_weights: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     weights = torch.ones(pred.shape[-1], device=pred.device, dtype=pred.dtype)
     temperature_weight = float(loss_cfg.get("temperature_weight", 1.0))
     if pred.shape[-1] >= 5:
@@ -134,7 +139,17 @@ def field_loss(pred: torch.Tensor, target: torch.Tensor, loss_cfg: Dict[str, Any
     if channel_weights is not None:
         custom = torch.as_tensor(channel_weights, device=pred.device, dtype=pred.dtype)
         weights[: custom.numel()] = custom[: pred.shape[-1]]
-    return ((pred - target).square() * weights).mean()
+    per_value = (pred - target).square() * weights
+    if point_weights is None:
+        return per_value.mean()
+    point_weights = point_weights.to(device=pred.device, dtype=pred.dtype)
+    while point_weights.ndim < per_value.ndim:
+        point_weights = point_weights.unsqueeze(-1)
+    # Boundary-focused preprocessing supplies per-point weights. Normalize by
+    # their sum so boundary emphasis does not change the loss scale wildly.
+    weighted = per_value * point_weights
+    denom = point_weights.sum() * pred.new_tensor(float(pred.shape[-1]))
+    return weighted.sum() / denom.clamp_min(1.0e-6)
 
 
 def masked_smooth_l1(pred: torch.Tensor, target: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -536,7 +551,7 @@ def compute_losses(
     structure = batch["structure"]
     module_present = structure["module_present"]
     losses: Dict[str, torch.Tensor] = {}
-    losses["loss_field"] = field_loss(outputs["pred_field"], batch["field_targets"], loss_cfg)
+    losses["loss_field"] = field_loss(outputs["pred_field"], batch["field_targets"], loss_cfg, batch.get("point_weights"))
 
     if outputs.get("pred_internal_temperature") is not None and outputs["pred_internal_temperature"].numel() > 0:
         target_internal = batch["module_internal_temperature_points"].unsqueeze(-1)
@@ -1155,6 +1170,17 @@ def main() -> int:
             effective_interface_weight=effective_interface_weight,
             organizer_weight_scale=org_scale,
         )
+        if (
+            int(getattr(val_dataset, "max_num_modules", model_config.max_num_modules)) > 1
+            and float(val_metrics.get("org_env_effective_hyperedges", math.inf)) < 1.25
+            and float(val_metrics.get("org_env_mass_max", 0.0)) > 0.85
+        ):
+            print(
+                "[warning] Channel organizer may be collapsing during validation: "
+                f"org_env_effective_hyperedges={val_metrics.get('org_env_effective_hyperedges', math.nan):.3f}, "
+                f"org_env_mass_max={val_metrics.get('org_env_mass_max', math.nan):.3f}. "
+                "This is diagnostic only; no extra collapse penalty was applied."
+            )
         row = {
             "epoch": epoch,
             "loss_total": train_metrics.get("loss_total", math.nan),
