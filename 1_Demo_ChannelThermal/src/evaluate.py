@@ -285,7 +285,7 @@ def l2_error(prediction: np.ndarray, target: np.ndarray) -> float:
 
 
 def error_metrics(prediction: np.ndarray, target: np.ndarray) -> Dict[str, float]:
-    """Return aggregate and per-value error metrics for arrays."""
+    """Return aggregate, per-value, and scale-normalized error metrics."""
     pred = np.asarray(prediction, dtype=np.float64)
     gt = np.asarray(target, dtype=np.float64)
     diff = pred - gt
@@ -297,12 +297,23 @@ def error_metrics(prediction: np.ndarray, target: np.ndarray) -> Dict[str, float
     mae = float(np.mean(np.abs(flat_diff))) if flat_diff.size else float("nan")
     gt_norm = float(np.linalg.norm(flat_gt, ord=2))
     relative_l2 = float(l2_norm / max(gt_norm, 1e-12))
+    finite_gt = flat_gt[np.isfinite(flat_gt)]
+    if finite_gt.size:
+        span = float(np.max(finite_gt) - np.min(finite_gt))
+        rms_scale = float(np.sqrt(np.mean(finite_gt * finite_gt)))
+        normalizer = span if span > 1e-12 else rms_scale
+    else:
+        normalizer = float("nan")
+    normalizer = max(float(normalizer), 1e-12) if np.isfinite(normalizer) else float("nan")
+    nrmse = float(rmse / normalizer) if np.isfinite(rmse) and np.isfinite(normalizer) else float("nan")
     return {
         "l2_norm": l2_norm,
         "mse": mse,
         "rmse": rmse,
+        "nrmse": nrmse,
         "mae": mae,
         "relative_l2": relative_l2,
+        "normalizer": normalizer,
         "num_values": float(flat_diff.size),
     }
 
@@ -1034,6 +1045,10 @@ def summarize_prediction(
         str(name): error_metrics(pred_field[..., idx], gt_field[..., idx])["rmse"]
         for idx, name in enumerate(channel_order[: pred_field.shape[-1]])
     }
+    field_channel_nrmse = {
+        str(name): error_metrics(pred_field[..., idx], gt_field[..., idx])["nrmse"]
+        for idx, name in enumerate(channel_order[: pred_field.shape[-1]])
+    }
     field_channel_relative_l2 = {
         str(name): error_metrics(pred_field[..., idx], gt_field[..., idx])["relative_l2"]
         for idx, name in enumerate(channel_order[: pred_field.shape[-1]])
@@ -1044,6 +1059,10 @@ def summarize_prediction(
     }
     field_channel_rmse_fluid = {
         str(name): masked_error_metrics(pred_field[..., idx], gt_field[..., idx], fluid_mask)["rmse"]
+        for idx, name in enumerate(channel_order[: pred_field.shape[-1]])
+    }
+    field_channel_nrmse_fluid = {
+        str(name): masked_error_metrics(pred_field[..., idx], gt_field[..., idx], fluid_mask)["nrmse"]
         for idx, name in enumerate(channel_order[: pred_field.shape[-1]])
     }
     field_channel_relative_l2_fluid = {
@@ -1057,6 +1076,10 @@ def summarize_prediction(
     interface_rmse_by_target = {
         "T_surface": error_metrics(pred_interface[..., 0], gt_interface[..., 0])["rmse"],
         "q_normal": error_metrics(pred_interface[..., 1], gt_interface[..., 1])["rmse"],
+    }
+    interface_nrmse_by_target = {
+        "T_surface": error_metrics(pred_interface[..., 0], gt_interface[..., 0])["nrmse"],
+        "q_normal": error_metrics(pred_interface[..., 1], gt_interface[..., 1])["nrmse"],
     }
     target_port = raw_sample["teacher_port_tokens"][..., 3:5]
     pred_port = predictions["pred_port_condition"][..., 3:5]
@@ -1090,26 +1113,37 @@ def summarize_prediction(
         "internal_l2_error": internal_metrics["l2_norm"],
         "interface_l2_error": interface_metrics["l2_norm"],
         "field_rmse": field_metrics["rmse"],
+        "field_nrmse": field_metrics["nrmse"],
         "temperature_rmse": temperature_metrics["rmse"] if temperature_metrics is not None else None,
+        "temperature_nrmse": temperature_metrics["nrmse"] if temperature_metrics is not None else None,
         "field_mse_fluid": field_metrics_fluid["mse"],
         "field_rmse_fluid": field_metrics_fluid["rmse"],
+        "field_nrmse_fluid": field_metrics_fluid["nrmse"],
         "field_relative_l2_fluid": field_metrics_fluid["relative_l2"],
         "temperature_mse_fluid": temperature_metrics_fluid["mse"] if temperature_metrics_fluid is not None else None,
         "temperature_rmse_fluid": temperature_metrics_fluid["rmse"] if temperature_metrics_fluid is not None else None,
+        "temperature_nrmse_fluid": temperature_metrics_fluid["nrmse"] if temperature_metrics_fluid is not None else None,
         "temperature_relative_l2_fluid": temperature_metrics_fluid["relative_l2"] if temperature_metrics_fluid is not None else None,
         "u_mse_fluid": field_channel_mse_fluid.get("u"),
         "omega_mse_fluid": field_channel_mse_fluid.get("omega"),
         "temperature_display_mode": str(temperature_display_mode),
         "temperature_composite_mse": composite_temperature_metrics["mse"] if composite_temperature_metrics is not None else None,
         "temperature_composite_rmse": composite_temperature_metrics["rmse"] if composite_temperature_metrics is not None else None,
+        "temperature_composite_nrmse": composite_temperature_metrics["nrmse"] if composite_temperature_metrics is not None else None,
         "temperature_composite_relative_l2": composite_temperature_metrics["relative_l2"] if composite_temperature_metrics is not None else None,
         "internal_rmse": internal_metrics["rmse"],
+        "internal_nrmse": internal_metrics["nrmse"],
         "interface_rmse": interface_metrics["rmse"],
+        "interface_nrmse": interface_metrics["nrmse"],
         "interface_flux_mode": str(predictions.get("interface_flux_mode", "unknown")),
         "T_surface_rmse": interface_rmse_by_target["T_surface"],
+        "T_surface_nrmse": interface_nrmse_by_target["T_surface"],
         "q_normal_rmse": interface_rmse_by_target["q_normal"],
+        "q_normal_nrmse": interface_nrmse_by_target["q_normal"],
         "port_T_env_rmse": port_t_env_rmse,
+        "port_T_env_nrmse": error_metrics(pred_port[..., 0], target_port[..., 0])["nrmse"],
         "port_h_rmse": port_h_rmse,
+        "port_h_nrmse": error_metrics(pred_port[..., 1], target_port[..., 1])["nrmse"],
         "port_T_env_mae": port_t_env_mae,
         "port_log_h_mae": port_log_h_mae,
         "q_surrogate_raw_rmse": q_surrogate_raw_rmse,
@@ -1120,12 +1154,15 @@ def summarize_prediction(
         "interface_relative_l2": interface_metrics["relative_l2"],
         "field_channel_l2_error": field_channel_l2,
         "field_channel_rmse": field_channel_rmse,
+        "field_channel_nrmse": field_channel_nrmse,
         "field_channel_relative_l2": field_channel_relative_l2,
         "field_channel_mse_fluid": field_channel_mse_fluid,
         "field_channel_rmse_fluid": field_channel_rmse_fluid,
+        "field_channel_nrmse_fluid": field_channel_nrmse_fluid,
         "field_channel_relative_l2_fluid": field_channel_relative_l2_fluid,
         "interface_l2_error_by_target": interface_l2_by_target,
         "interface_rmse_by_target": interface_rmse_by_target,
+        "interface_nrmse_by_target": interface_nrmse_by_target,
         "interface_relative_l2_by_target": interface_relative_l2_by_target,
         "field_metrics": field_metrics,
         "temperature_metrics": temperature_metrics,
@@ -1186,6 +1223,140 @@ def evaluate_mode(
     summary = summarize_prediction(checkpoint_path, raw_sample, predictions, output_dir, suffix, channel_order, temperature_display_mode)
     summary["_organizer_aux"] = predictions["organizer_aux"]
     return summary
+
+
+def metric_subset(metrics: Optional[Dict[str, Any]], keys: Tuple[str, ...] = ("rmse", "nrmse", "relative_l2", "mae")) -> Dict[str, Any]:
+    if not isinstance(metrics, dict):
+        return {}
+    return {key: metrics.get(key) for key in keys if metrics.get(key) is not None}
+
+
+def target_metric_summary(
+    rmse_by_target: Dict[str, Any],
+    nrmse_by_target: Dict[str, Any],
+    relative_l2_by_target: Dict[str, Any],
+) -> Dict[str, Dict[str, Any]]:
+    names = sorted(set(rmse_by_target) | set(nrmse_by_target) | set(relative_l2_by_target))
+    return {
+        name: {
+            key: value
+            for key, value in {
+                "rmse": rmse_by_target.get(name),
+                "nrmse": nrmse_by_target.get(name),
+                "relative_l2": relative_l2_by_target.get(name),
+            }.items()
+            if value is not None
+        }
+        for name in names
+    }
+
+
+def channel_metric_summary(mode_summary: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    rmse = mode_summary.get("field_channel_rmse_fluid", {})
+    nrmse = mode_summary.get("field_channel_nrmse_fluid", {})
+    relative_l2 = mode_summary.get("field_channel_relative_l2_fluid", {})
+    available = set(rmse) | set(nrmse) | set(relative_l2)
+    names = [str(name) for name in mode_summary.get("channel_order", []) if str(name) in available]
+    return {
+        name: {
+            key: value
+            for key, value in {
+                "rmse": rmse.get(name),
+                "nrmse": nrmse.get(name),
+                "relative_l2": relative_l2.get(name),
+            }.items()
+            if value is not None
+        }
+        for name in names
+    }
+
+
+def compact_mode_summary(mode_summary: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "metrics": {
+            "field_fluid": metric_subset(mode_summary.get("field_metrics_fluid")),
+            "temperature_fluid": metric_subset(mode_summary.get("temperature_metrics_fluid")),
+            "temperature_composite": metric_subset(mode_summary.get("composite_temperature_metrics")),
+            "internal_temperature": metric_subset(mode_summary.get("internal_metrics")),
+            "interface": metric_subset(mode_summary.get("interface_metrics")),
+            "field_channels_fluid": channel_metric_summary(mode_summary),
+            "interface_targets": target_metric_summary(
+                mode_summary.get("interface_rmse_by_target", {}),
+                mode_summary.get("interface_nrmse_by_target", {}),
+                mode_summary.get("interface_relative_l2_by_target", {}),
+            ),
+            "port_conditions": {
+                "T_env": {
+                    key: value
+                    for key, value in {
+                        "rmse": mode_summary.get("port_T_env_rmse"),
+                        "nrmse": mode_summary.get("port_T_env_nrmse"),
+                        "mae": mode_summary.get("port_T_env_mae"),
+                    }.items()
+                    if value is not None
+                },
+                "h": {
+                    key: value
+                    for key, value in {
+                        "rmse": mode_summary.get("port_h_rmse"),
+                        "nrmse": mode_summary.get("port_h_nrmse"),
+                        "log_mae": mode_summary.get("port_log_h_mae"),
+                    }.items()
+                    if value is not None
+                },
+            },
+            "flux_diagnostics": {
+                key: value
+                for key, value in {
+                    "q_surrogate_raw_rmse": mode_summary.get("q_surrogate_raw_rmse"),
+                    "q_physics_rmse": mode_summary.get("q_physics_rmse"),
+                }.items()
+                if value is not None
+            },
+        },
+        "settings": {
+            "interface_flux_mode": mode_summary.get("interface_flux_mode"),
+            "temperature_display_mode": mode_summary.get("temperature_display_mode"),
+        },
+        "outputs": mode_summary.get("outputs", {}),
+    }
+
+
+def subtract_optional(left: Any, right: Any) -> Optional[float]:
+    if left is None or right is None:
+        return None
+    try:
+        return float(left) - float(right)
+    except (TypeError, ValueError):
+        return None
+
+
+def compact_mode_comparison(teacher: Dict[str, Any], predicted: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "predicted_minus_teacher": {
+            "field_fluid_nrmse": subtract_optional(predicted.get("field_nrmse_fluid"), teacher.get("field_nrmse_fluid")),
+            "temperature_fluid_nrmse": subtract_optional(predicted.get("temperature_nrmse_fluid"), teacher.get("temperature_nrmse_fluid")),
+            "temperature_composite_nrmse": subtract_optional(predicted.get("temperature_composite_nrmse"), teacher.get("temperature_composite_nrmse")),
+            "internal_temperature_nrmse": subtract_optional(predicted.get("internal_nrmse"), teacher.get("internal_nrmse")),
+            "interface_nrmse": subtract_optional(predicted.get("interface_nrmse"), teacher.get("interface_nrmse")),
+            "T_surface_nrmse": subtract_optional(predicted.get("T_surface_nrmse"), teacher.get("T_surface_nrmse")),
+            "q_normal_nrmse": subtract_optional(predicted.get("q_normal_nrmse"), teacher.get("q_normal_nrmse")),
+            "interface_mse": subtract_optional(predicted.get("interface_metrics", {}).get("mse"), teacher.get("interface_metrics", {}).get("mse")),
+            "internal_temperature_mse": subtract_optional(predicted.get("internal_metrics", {}).get("mse"), teacher.get("internal_metrics", {}).get("mse")),
+        }
+    }
+
+
+def headline_metrics(mode_summary: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "field_fluid_nrmse": mode_summary.get("field_nrmse_fluid"),
+        "temperature_fluid_nrmse": mode_summary.get("temperature_nrmse_fluid"),
+        "temperature_composite_nrmse": mode_summary.get("temperature_composite_nrmse"),
+        "internal_temperature_nrmse": mode_summary.get("internal_nrmse"),
+        "interface_nrmse": mode_summary.get("interface_nrmse"),
+        "T_surface_nrmse": mode_summary.get("T_surface_nrmse"),
+        "q_normal_nrmse": mode_summary.get("q_normal_nrmse"),
+    }
 
 
 def main() -> int:
@@ -1336,107 +1507,26 @@ def main() -> int:
         "case_id": str(raw_sample["case_id"]),
         "local_port_condition_mode": args.local_port_condition_mode,
         "mixed_teacher_ratio": float(args.mixed_teacher_ratio),
+        "metric_notes": {
+            "nrmse": "RMSE divided by the target range; if the target range is near zero, target RMS is used instead.",
+            "relative_l2": "Euclidean error norm divided by target Euclidean norm.",
+            "field_fluid": "Global field metrics evaluated only on fluid cells; solid module interiors are excluded.",
+            "temperature_composite": "Temperature display metric with fluid global temperature and module-internal solid temperature combined.",
+        },
         "outputs": {
             "organization_summary_csv": str(org_csv),
             "organization_summary_json": str(org_json),
             **org_outputs,
         },
-        "modes": mode_summaries,
+        "modes": {mode: compact_mode_summary(mode_summary) for mode, mode_summary in mode_summaries.items()},
     }
+    primary_mode = "predicted" if "predicted" in mode_summaries else next(iter(mode_summaries))
+    summary["primary_mode"] = primary_mode
+    summary["headline_metrics"] = headline_metrics(mode_summaries[primary_mode])
     if args.local_port_condition_mode == "both":
         teacher = mode_summaries["teacher"]
         predicted = mode_summaries["predicted"]
-        extra_metric_keys = [
-            "interface_flux_mode",
-            "T_surface_rmse",
-            "q_normal_rmse",
-            "port_T_env_rmse",
-            "port_h_rmse",
-            "port_T_env_mae",
-            "port_log_h_mae",
-            "q_surrogate_raw_rmse",
-            "q_physics_rmse",
-        ]
-        summary.update(
-            {
-                # "teacher_field_l2_error": teacher["field_l2_error"],
-                # "predicted_field_l2_error": predicted["field_l2_error"],
-                "teacher_field_relative_l2": teacher["field_relative_l2"],
-                "predicted_field_relative_l2": predicted["field_relative_l2"],
-                "teacher_field_mse_fluid": teacher["field_mse_fluid"],
-                "predicted_field_mse_fluid": predicted["field_mse_fluid"],
-                "teacher_temperature_mse_fluid": teacher["temperature_mse_fluid"],
-                "predicted_temperature_mse_fluid": predicted["temperature_mse_fluid"],
-                "teacher_u_mse_fluid": teacher["u_mse_fluid"],
-                "predicted_u_mse_fluid": predicted["u_mse_fluid"],
-                "teacher_omega_mse_fluid": teacher["omega_mse_fluid"],
-                "predicted_omega_mse_fluid": predicted["omega_mse_fluid"],
-                # "teacher_temperature_l2_error": teacher["temperature_l2_error"],
-                # "predicted_temperature_l2_error": predicted["temperature_l2_error"],
-                "teacher_temperature_relative_l2": teacher["temperature_relative_l2"],
-                "predicted_temperature_relative_l2": predicted["temperature_relative_l2"],
-                # "teacher_internal_l2_error": teacher["internal_l2_error"],
-                # "predicted_internal_l2_error": predicted["internal_l2_error"],
-                "teacher_internal_relative_l2": teacher["internal_relative_l2"],
-                "predicted_internal_relative_l2": predicted["internal_relative_l2"],
-                # "teacher_interface_l2_error": teacher["interface_l2_error"],
-                # "predicted_interface_l2_error": predicted["interface_l2_error"],
-                "teacher_interface_relative_l2": teacher["interface_relative_l2"],
-                "predicted_interface_relative_l2": predicted["interface_relative_l2"],
-                "predicted_vs_teacher_interface_mse_gap": predicted["interface_metrics"]["mse"] - teacher["interface_metrics"]["mse"],
-                "predicted_vs_teacher_internal_mse_gap": predicted["internal_metrics"]["mse"] - teacher["internal_metrics"]["mse"],
-            }
-        )
-        for key in extra_metric_keys:
-            summary[f"teacher_{key}"] = teacher.get(key)
-            summary[f"predicted_{key}"] = predicted.get(key)
-    else:
-        suffix = mode_suffix(args.local_port_condition_mode)
-        only = mode_summaries[suffix]
-        extra_metric_keys = [
-            "interface_flux_mode",
-            "T_surface_rmse",
-            "q_normal_rmse",
-            "port_T_env_rmse",
-            "port_h_rmse",
-            "port_T_env_mae",
-            "port_log_h_mae",
-            "q_surrogate_raw_rmse",
-            "q_physics_rmse",
-        ]
-        summary.update(
-            {
-                "field_l2_error": only["field_l2_error"],
-                "field_relative_l2": only["field_relative_l2"],
-                "field_mse_fluid": only["field_mse_fluid"],
-                "field_relative_l2_fluid": only["field_relative_l2_fluid"],
-                "temperature_l2_error": only["temperature_l2_error"],
-                "temperature_relative_l2": only["temperature_relative_l2"],
-                "temperature_mse_fluid": only["temperature_mse_fluid"],
-                "temperature_relative_l2_fluid": only["temperature_relative_l2_fluid"],
-                "u_mse_fluid": only["u_mse_fluid"],
-                "omega_mse_fluid": only["omega_mse_fluid"],
-                "internal_l2_error": only["internal_l2_error"],
-                "internal_relative_l2": only["internal_relative_l2"],
-                "interface_l2_error": only["interface_l2_error"],
-                "interface_relative_l2": only["interface_relative_l2"],
-                f"{suffix}_field_l2_error": only["field_l2_error"],
-                f"{suffix}_field_relative_l2": only["field_relative_l2"],
-                f"{suffix}_field_mse_fluid": only["field_mse_fluid"],
-                f"{suffix}_temperature_mse_fluid": only["temperature_mse_fluid"],
-                f"{suffix}_u_mse_fluid": only["u_mse_fluid"],
-                f"{suffix}_omega_mse_fluid": only["omega_mse_fluid"],
-                f"{suffix}_temperature_l2_error": only["temperature_l2_error"],
-                f"{suffix}_temperature_relative_l2": only["temperature_relative_l2"],
-                f"{suffix}_internal_l2_error": only["internal_l2_error"],
-                f"{suffix}_internal_relative_l2": only["internal_relative_l2"],
-                f"{suffix}_interface_l2_error": only["interface_l2_error"],
-                f"{suffix}_interface_relative_l2": only["interface_relative_l2"],
-            }
-        )
-        for key in extra_metric_keys:
-            summary[key] = only.get(key)
-            summary[f"{suffix}_{key}"] = only.get(key)
+        summary["comparison"] = compact_mode_comparison(teacher, predicted)
     write_json(output_dir / "evaluation_summary.json", summary)
     print(json.dumps(summary, indent=2))
     return 0

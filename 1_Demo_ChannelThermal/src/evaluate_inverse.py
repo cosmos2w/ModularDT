@@ -44,6 +44,9 @@ from thermal_design_intent import (
 )
 from train_inverse import (
     ThermalInverseDesignDataset,
+    build_hypergraph_plan_from_forward_prediction,
+    decode_hypergraph_plan_vector,
+    infer_hypergraph_plan_num_edges,
     load_forward_model,
     predict_candidate_with_forward,
 )
@@ -134,8 +137,22 @@ def resolve_inverse_checkpoint(inverse_run: str, checkpoint_name: str) -> Path:
 
 def load_inverse_checkpoint(path: Path, device: torch.device) -> Tuple[ThermalInverseDesignFlow, Dict[str, Any]]:
     checkpoint = load_trusted_checkpoint(path, map_location=device)
-    model = ThermalInverseDesignFlow(checkpoint["model_config"]).to(device)
-    incompatible = model.load_state_dict(strip_module_prefix(checkpoint["model_state_dict"]), strict=False)
+    state = strip_module_prefix(checkpoint["model_state_dict"])
+    model_config = dict(checkpoint["model_config"])
+    if "inverse_mode" not in model_config and bool(model_config.get("use_hypergraph_plan", False)):
+        model_config["inverse_mode"] = "layout_flow_with_hypergraph_plan"
+    mode = str(model_config.get("inverse_mode", "layout_flow") or "layout_flow").lower().strip()
+    model_config["inverse_mode"] = mode
+    model_config["use_hypergraph_plan"] = mode == "layout_flow_with_hypergraph_plan"
+    wants_plan = model_config["use_hypergraph_plan"]
+    has_plan_weights = any(str(key).startswith("hypergraph_planner.") or str(key).startswith("hypergraph_plan_encoder.") for key in state)
+    if wants_plan and not has_plan_weights:
+        print("[inverse] checkpoint has no hypergraph planner weights; loading as inverse_mode='layout_flow'.")
+        model_config["inverse_mode"] = "layout_flow"
+        model_config["use_hypergraph_plan"] = False
+        model_config.pop("hypergraph_plan_dim", None)
+    model = ThermalInverseDesignFlow(model_config).to(device)
+    incompatible = model.load_state_dict(state, strict=False)
     missing = list(getattr(incompatible, "missing_keys", []))
     unexpected = list(getattr(incompatible, "unexpected_keys", []))
     if missing:
@@ -1381,6 +1398,88 @@ def try_plot_organization(candidate: Mapping[str, Any], record: Any, out_path: P
     plt.close(fig)
 
 
+def hypergraph_plan_metrics(predicted: Mapping[str, Any], forward: Mapping[str, Any]) -> Dict[str, float]:
+    metrics: Dict[str, float] = {}
+
+    def mse(name: str, a: Any, b: Any) -> None:
+        arr_a = np.asarray(a, dtype=np.float32)
+        arr_b = np.asarray(b, dtype=np.float32)
+        if arr_a.size == 0 or arr_b.size == 0:
+            metrics[name] = float("nan")
+            return
+        n = min(arr_a.size, arr_b.size)
+        metrics[name] = float(np.mean((arr_a.reshape(-1)[:n] - arr_b.reshape(-1)[:n]) ** 2))
+
+    mse("hyper_strength_mse", predicted.get("hyper_strength"), forward.get("hyper_strength"))
+    mse("module_mass_mse", predicted.get("module_mass"), forward.get("module_mass"))
+    mse("env_mass_mse", predicted.get("env_mass"), forward.get("env_mass"))
+    mse("source_coord_mse", predicted.get("source_coords"), forward.get("source_coords"))
+    mse("thermal_region_coord_mse", predicted.get("thermal_region_coords"), forward.get("thermal_region_coords"))
+    mse("A_mh_mse", predicted.get("A_mh"), forward.get("A_mh"))
+    pred_vec = np.concatenate([np.asarray(predicted.get("edge", []), dtype=np.float32).reshape(-1), np.asarray(predicted.get("A_mh", []), dtype=np.float32).reshape(-1)])
+    fwd_vec = np.concatenate([np.asarray(forward.get("edge", []), dtype=np.float32).reshape(-1), np.asarray(forward.get("A_mh", []), dtype=np.float32).reshape(-1)])
+    mse("hypergraph_plan_mse", pred_vec, fwd_vec)
+    if predicted.get("active_edge_count") is not None and forward.get("active_edge_count") is not None:
+        metrics["active_edge_count_error"] = float(predicted["active_edge_count"] - forward["active_edge_count"])
+    return metrics
+
+
+def plot_hypergraph_plan_comparison(candidate: Mapping[str, Any], record: Any, out_path: Path) -> Optional[Dict[str, Any]]:
+    plan_hat = candidate.get("hypergraph_plan_hat")
+    if plan_hat is None:
+        return None
+    max_modules = int(len(candidate.get("mask", [])) or getattr(record, "module_present", np.zeros((0,))).shape[0])
+    num_edges = infer_hypergraph_plan_num_edges(np.asarray(plan_hat).size, max_modules)
+    predicted = decode_hypergraph_plan_vector(plan_hat, max_num_modules=max_modules, num_edges=num_edges)
+    forward_plan = build_hypergraph_plan_from_forward_prediction(
+        candidate.get("prediction", {}),
+        max_num_modules=max_modules,
+        domain_length_x=float(record.domain_length_x),
+        domain_length_y=float(record.domain_length_y),
+        num_edges=num_edges,
+    )
+    forward_summary = decode_hypergraph_plan_vector(forward_plan.get("vector"), max_num_modules=max_modules, num_edges=num_edges)
+    metrics = hypergraph_plan_metrics(predicted, forward_summary)
+    fig, axes = plt.subplots(2, 2, figsize=(11.0, 7.2), constrained_layout=True)
+    pred_edge = np.asarray(predicted["edge"], dtype=np.float32)
+    fwd_edge = np.asarray(forward_summary["edge"], dtype=np.float32)
+    vmax_edge = max(float(np.nanmax(np.abs(pred_edge))) if pred_edge.size else 1.0, float(np.nanmax(np.abs(fwd_edge))) if fwd_edge.size else 1.0, 1.0e-6)
+    im0 = axes[0, 0].imshow(pred_edge, aspect="auto", cmap="viridis", vmin=0.0, vmax=vmax_edge)
+    axes[0, 0].set_title("Predicted inverse hypergraph plan")
+    axes[0, 0].set_xlabel("edge field")
+    axes[0, 0].set_ylabel("canonical hyperedge")
+    fig.colorbar(im0, ax=axes[0, 0], fraction=0.046, pad=0.04)
+    im1 = axes[0, 1].imshow(fwd_edge, aspect="auto", cmap="viridis", vmin=0.0, vmax=vmax_edge)
+    axes[0, 1].set_title("Forward-inferred hypergraph from generated layout")
+    axes[0, 1].set_xlabel("edge field")
+    axes[0, 1].set_ylabel("canonical hyperedge")
+    fig.colorbar(im1, ax=axes[0, 1], fraction=0.046, pad=0.04)
+    a_pred = np.asarray(predicted["A_mh"], dtype=np.float32)
+    a_fwd = np.asarray(forward_summary["A_mh"], dtype=np.float32)
+    vmax_a = max(float(np.nanmax(np.abs(a_pred))) if a_pred.size else 1.0, float(np.nanmax(np.abs(a_fwd))) if a_fwd.size else 1.0, 1.0e-6)
+    im2 = axes[1, 0].imshow(a_pred, aspect="auto", cmap="magma", vmin=0.0, vmax=vmax_a)
+    axes[1, 0].set_title("Predicted module-to-hyperedge A_mh")
+    axes[1, 0].set_xlabel("canonical hyperedge")
+    axes[1, 0].set_ylabel("module slot")
+    fig.colorbar(im2, ax=axes[1, 0], fraction=0.046, pad=0.04)
+    axes[1, 1].set_xlim(0.0, float(record.domain_length_x))
+    axes[1, 1].set_ylim(0.0, float(record.domain_length_y))
+    axes[1, 1].set_aspect("equal", adjustable="box")
+    centers = np.asarray(candidate.get("centers", []), dtype=np.float32).reshape(-1, 2)
+    if centers.size:
+        axes[1, 1].scatter(centers[:, 0], centers[:, 1], s=90, c="#2f6fbb", edgecolor="black", label="generated modules")
+    axes[1, 1].set_title("Generated concrete design layout")
+    axes[1, 1].grid(True, alpha=0.2)
+    fig.savefig(out_path, dpi=170)
+    plt.close(fig)
+    return {
+        "predicted_hypergraph_plan_summary": json_safe(predicted),
+        "forward_inferred_hypergraph_plan_summary": json_safe(forward_summary),
+        "hypergraph_plan_metrics": metrics,
+        "hypergraph_plan_comparison_path": str(out_path),
+    }
+
+
 def save_top_npz(candidates: Sequence[Mapping[str, Any]], path: Path, *, top_k: int = 16, max_num_modules: int = 12) -> None:
     top = list(candidates[: min(top_k, len(candidates))])
     centers = np.zeros((len(top), max_num_modules, 2), dtype=np.float32)
@@ -1639,6 +1738,15 @@ def main() -> int:
             "preference_reward": float(score.get("preference_reward", 0.0)),
             "prediction": prediction,
         }
+        if "hypergraph_plan_hat" in cand:
+            row["hypergraph_plan_hat"] = np.asarray(cand["hypergraph_plan_hat"], dtype=np.float32)
+            row["decoded_hypergraph_plan_summary"] = json_safe(
+                decode_hypergraph_plan_vector(
+                    cand["hypergraph_plan_hat"],
+                    max_num_modules=inverse_model.max_num_modules,
+                    num_edges=infer_hypergraph_plan_num_edges(np.asarray(cand["hypergraph_plan_hat"]).size, inverse_model.max_num_modules),
+                )
+            )
         for key in ("min_center_distance", "wall_clearance", "inlet_clearance", "outlet_clearance", "x_coverage", "y_coverage", "bbox_area", "mean_pair_distance"):
             row[key] = float(verified_kpis.get(key, float("nan")))
         candidates.append(row)
@@ -1699,7 +1807,16 @@ def main() -> int:
         "target_calibration": target_payload.get("_calibration", {"enabled": False}),
         "preference_warnings": sorted(set(preference_warnings + sum((list(c.get("preference_warnings", [])) for c in candidates), []))),
     }
+    if best is not None and getattr(inverse_model.cfg, "use_hypergraph_plan", False) and best.get("hypergraph_plan_hat") is not None:
+        comparison = plot_hypergraph_plan_comparison(best, record, out_dirs["diagnostics"] / "inverse_hypergraph_plan_comparison.png")
+        if comparison:
+            write_json(out_dirs["data"] / "hypergraph_plan_comparison.json", json_safe(comparison))
+            summary.update(comparison.get("hypergraph_plan_metrics", {}))
+            summary["hypergraph_plan_comparison_path"] = comparison.get("hypergraph_plan_comparison_path")
+            summary["predicted_hypergraph_plan_summary"] = comparison.get("predicted_hypergraph_plan_summary")
+            summary["forward_inferred_hypergraph_plan_summary"] = comparison.get("forward_inferred_hypergraph_plan_summary")
     write_json(out_dirs["data"] / "verification_summary.json", json_safe(summary))
+    write_json(out_dirs["data"] / "evaluation_summary.json", json_safe(summary))
 
     if best is not None:
         plot_target_vs_verified(best, target_spec, out_dirs["kpis"] / "target_vs_verified_kpis.png")

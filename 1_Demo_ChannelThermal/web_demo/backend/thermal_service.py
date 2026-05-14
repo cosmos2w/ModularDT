@@ -88,6 +88,7 @@ def _organization_summary(aux: Optional[Mapping[str, Any]]) -> Optional[Dict[str
 FIELD_ORDER = ("temperature", "u", "v", "p", "omega")
 FIELD_CHANNELS = {"u": 0, "v": 1, "p": 2, "omega": 3, "temperature": 4}
 ERROR_FIELD_DEFINITION = "range_normalized_absolute_error_v2"
+FORWARD_RESULT_VERSION = "reference-local-conditioning-v3"
 
 
 def _robust_reference_scale(values: np.ndarray) -> float:
@@ -155,6 +156,89 @@ def _relative_error_grid(pred: np.ndarray, truth: np.ndarray) -> np.ndarray:
         scale = _robust_reference_scale(ref)
         rel[..., channel] = np.abs(pred_arr[..., channel] - ref) / max(scale, 1.0e-8)
     return rel
+
+
+def _local_disk_image(values: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    mask_bool = np.asarray(mask, dtype=bool)
+    image = np.full(mask_bool.shape, np.nan, dtype=np.float32)
+    arr = np.asarray(values, dtype=np.float32)
+    if arr.ndim >= 3 and arr.shape[-1] == 1:
+        arr = arr[..., 0]
+    if arr.shape == mask_bool.shape:
+        image[mask_bool] = arr[mask_bool]
+        return image
+    flat = arr.reshape(-1)
+    image[mask_bool] = flat[: int(np.sum(mask_bool))]
+    return image
+
+
+def _composite_temperature_channel(
+    *,
+    x_grid: np.ndarray,
+    y_grid: np.ndarray,
+    centers: np.ndarray,
+    present: np.ndarray,
+    radius: float,
+    global_temperature: np.ndarray,
+    internal_temperature: Optional[np.ndarray],
+    local_mask: Optional[np.ndarray],
+) -> np.ndarray:
+    out = np.asarray(global_temperature, dtype=np.float32).copy()
+    if internal_temperature is None or local_mask is None:
+        return out
+    local_mask_bool = np.asarray(local_mask, dtype=bool)
+    if local_mask_bool.ndim != 2 or local_mask_bool.size == 0:
+        return out
+    internal = np.asarray(internal_temperature, dtype=np.float32)
+    if internal.ndim < 2 or internal.shape[0] == 0:
+        return out
+    x_arr = np.asarray(x_grid, dtype=np.float32)
+    y_arr = np.asarray(y_grid, dtype=np.float32)
+    centers_arr = np.asarray(centers, dtype=np.float32).reshape(-1, 2)
+    present_arr = np.asarray(present, dtype=np.float32).reshape(-1)
+    n = int(local_mask_bool.shape[0])
+    if n <= 1:
+        return out
+    for module_idx in np.flatnonzero(present_arr > 0.5):
+        if module_idx >= centers_arr.shape[0] or module_idx >= internal.shape[0]:
+            continue
+        local_img = _local_disk_image(internal[module_idx], local_mask_bool)
+        cx, cy = centers_arr[module_idx]
+        inside = np.hypot(x_arr - float(cx), y_arr - float(cy)) <= float(radius)
+        if not np.any(inside):
+            continue
+        xi = np.clip((x_arr[inside] - float(cx)) / max(float(radius), 1.0e-12), -1.0, 1.0)
+        eta = np.clip((y_arr[inside] - float(cy)) / max(float(radius), 1.0e-12), -1.0, 1.0)
+        ii = np.rint((xi + 1.0) * 0.5 * (n - 1)).astype(int)
+        jj = np.rint((eta + 1.0) * 0.5 * (n - 1)).astype(int)
+        values = local_img[jj, ii]
+        valid = np.isfinite(values)
+        inside_indices = np.flatnonzero(inside.reshape(-1))
+        out.reshape(-1)[inside_indices[valid]] = values[valid]
+    return out
+
+
+def _field_with_composite_temperature(
+    field_grid: np.ndarray,
+    record: Any,
+    centers: np.ndarray,
+    present: np.ndarray,
+    internal_temperature: Optional[np.ndarray],
+) -> np.ndarray:
+    field = np.asarray(field_grid, dtype=np.float32).copy()
+    if field.ndim != 3 or field.shape[-1] <= FIELD_CHANNELS["temperature"]:
+        return field
+    field[..., FIELD_CHANNELS["temperature"]] = _composite_temperature_channel(
+        x_grid=record.x_grid,
+        y_grid=record.y_grid,
+        centers=centers,
+        present=present,
+        radius=float(record.module_radius),
+        global_temperature=field[..., FIELD_CHANNELS["temperature"]],
+        internal_temperature=internal_temperature,
+        local_mask=getattr(record, "module_internal_mask", None),
+    )
+    return field
 
 
 def _internal_points(values: np.ndarray, mask: np.ndarray, module_index: int) -> Optional[np.ndarray]:
@@ -606,6 +690,15 @@ class ThermalInferenceService:
             return False
         if "internal_temperature" not in result:
             return False
+        if result.get("result_version") != FORWARD_RESULT_VERSION:
+            return False
+        try:
+            entry = self.registry.get_entry(request.model_id)
+        except Exception:
+            return False
+        model_info = result.get("model")
+        if isinstance(model_info, Mapping) and model_info.get("checkpoint_path") != str(entry.checkpoint_path):
+            return False
         comparison = result.get("comparison")
         if request.return_error and isinstance(comparison, Mapping) and comparison.get("available"):
             return comparison.get("error_definition") == ERROR_FIELD_DEFINITION
@@ -639,6 +732,8 @@ class ThermalInferenceService:
         request: DesignRequest,
         record: Any,
         prediction: Mapping[str, Any],
+        prediction_field: Optional[np.ndarray] = None,
+        truth_field: Optional[np.ndarray] = None,
         job_id: str,
         job_dir: Path,
         modules_for_render: List[Mapping[str, Any]],
@@ -652,8 +747,8 @@ class ThermalInferenceService:
                 "mode": "inference_only",
                 "reason": "Ground truth is available only for unmodified dataset reference cases at reference flow conditions.",
             }
-        truth = np.asarray(record.steady_field, dtype=np.float32)
-        pred = np.asarray(prediction["pred_field_grid"], dtype=np.float32)
+        truth = np.asarray(truth_field if truth_field is not None else record.steady_field, dtype=np.float32)
+        pred = np.asarray(prediction_field if prediction_field is not None else prediction["pred_field_grid"], dtype=np.float32)
         truth_dir = job_dir / "truth_frames"
         error_dir = job_dir / "error_frames"
         truth_meta = render_field_images(
@@ -685,6 +780,7 @@ class ThermalInferenceService:
             "mode": "reference_ground_truth",
             "reason": None,
             "metrics": _comparison_metrics(pred, truth),
+            "temperature_mode": "composite_internal",
             "error_definition": ERROR_FIELD_DEFINITION,
             "error_label": "|prediction - reference| / robust_range(reference)",
             "ground_truth_frame_urls": {name: [f"/api/jobs/{job_id}/files/truth_frames/{name}.png"] for name in truth_meta["fields"].keys()},
@@ -831,6 +927,7 @@ class ThermalInferenceService:
             "count": len(modules),
             "heat_powers": np.asarray([item["heat_power"] for item in modules], dtype=np.float32),
         }
+        reference_match = self._matches_reference_record(request, record)
         prediction = predict_candidate_with_forward(
             model,
             metadata,
@@ -841,6 +938,7 @@ class ThermalInferenceService:
             generate_heat_power=False,
             heat_load_policy="preserve_per_module_heat",
             query_batch_size=int(entry.raw.get("query_batch_size", 32768)),
+            use_record_interface_condition=reference_match,
         )
 
         job_id = new_job_id()
@@ -861,14 +959,32 @@ class ThermalInferenceService:
             "module_present": prediction["module_present"],
             "heat_powers": prediction.get("heat_powers"),
         }
-        reference_match = self._matches_reference_record(request, record)
+        display_pred_field = _field_with_composite_temperature(
+            prediction["pred_field_grid"],
+            record,
+            prediction["centers_padded"],
+            prediction["module_present"],
+            prediction.get("pred_internal_temperature"),
+        )
+        display_truth_field = None
+        if reference_match and record.steady_field is not None and record.module_internal_temperature is not None:
+            display_truth_field = _field_with_composite_temperature(
+                record.steady_field,
+                record,
+                record.module_centers,
+                record.module_present,
+                record.module_internal_temperature,
+            )
+        export_arrays["pred_display_field"] = display_pred_field
+        if display_truth_field is not None:
+            export_arrays["ground_truth_display_field"] = display_truth_field
         field_scale_overrides = (
-            _field_scale_overrides(prediction["pred_field_grid"], record.steady_field)
+            _field_scale_overrides(display_pred_field, display_truth_field if display_truth_field is not None else record.steady_field)
             if reference_match and record.steady_field is not None and (request.return_ground_truth or request.return_error)
             else None
         )
         render_meta = render_field_images(
-            prediction["pred_field_grid"],
+            display_pred_field,
             frames_dir,
             modules_for_render,
             domain_length_x=float(record.domain_length_x),
@@ -883,6 +999,8 @@ class ThermalInferenceService:
             request=request,
             record=record,
             prediction=prediction,
+            prediction_field=display_pred_field,
+            truth_field=display_truth_field,
             job_id=job_id,
             job_dir=job_dir,
             modules_for_render=modules_for_render,
@@ -903,7 +1021,7 @@ class ThermalInferenceService:
         )
         if comparison.get("available") and record.steady_field is not None:
             export_arrays["ground_truth_field"] = record.steady_field
-            export_arrays["relative_error_field"] = _relative_error_grid(prediction["pred_field_grid"], record.steady_field)
+            export_arrays["relative_error_field"] = _relative_error_grid(display_pred_field, display_truth_field if display_truth_field is not None else record.steady_field)
         if truth_internal is not None:
             export_arrays["ground_truth_internal_temperature"] = truth_internal
         np.savez_compressed(job_dir / "fields.npz", **export_arrays)
@@ -947,6 +1065,7 @@ class ThermalInferenceService:
         result = {
             "job_id": job_id,
             "status": "complete",
+            "result_version": FORWARD_RESULT_VERSION,
             "request_hash": req_hash,
             "model": entry.to_public_dict(),
             "validation": _model_dump(validation),

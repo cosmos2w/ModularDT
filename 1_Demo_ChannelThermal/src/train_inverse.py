@@ -216,6 +216,208 @@ class ThermalInverseCaseRecord:
     heat_condition_stats: np.ndarray
 
 
+HYPERGRAPH_PLAN_FIELDS = [
+    "edge_active_or_strength",
+    "hyper_strength",
+    "module_mass",
+    "env_mass",
+    "source_x",
+    "source_y",
+    "thermal_region_x",
+    "thermal_region_y",
+]
+HYPERGRAPH_PLAN_EDGE_ORDERING = "hyper_strength_desc_then_thermal_region_xy"
+
+
+def hypergraph_plan_dim(max_num_modules: int, num_edges: int) -> int:
+    return int(num_edges) * (len(HYPERGRAPH_PLAN_FIELDS) + int(max_num_modules))
+
+
+def infer_hypergraph_plan_num_edges(plan_dim: int, max_num_modules: int) -> int:
+    denom = len(HYPERGRAPH_PLAN_FIELDS) + int(max_num_modules)
+    if denom <= 0 or int(plan_dim) <= 0:
+        return 0
+    return max(int(plan_dim) // denom, 0)
+
+
+def _aux_array(aux: Mapping[str, Any], key: str, shape: Tuple[int, ...]) -> Tuple[np.ndarray, np.ndarray]:
+    if key not in aux:
+        return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
+    arr = np.asarray(aux[key], dtype=np.float32)
+    out = np.zeros(shape, dtype=np.float32)
+    mask = np.zeros(shape, dtype=np.float32)
+    slices = tuple(slice(0, min(out.shape[i], arr.shape[i] if i < arr.ndim else 1)) for i in range(len(shape)))
+    if arr.ndim < len(shape):
+        arr = arr.reshape(arr.shape + (1,) * (len(shape) - arr.ndim))
+    if all(s.stop > 0 for s in slices):
+        out[slices] = arr[slices]
+        mask[slices] = 1.0
+    return out, mask
+
+
+def build_hypergraph_plan_from_forward_prediction(
+    prediction: Mapping[str, Any],
+    *,
+    max_num_modules: int,
+    domain_length_x: float,
+    domain_length_y: float,
+    num_edges: Optional[int] = None,
+) -> Dict[str, Any]:
+    aux = prediction.get("organizer_aux", {})
+    if not isinstance(aux, Mapping):
+        aux = {}
+    if num_edges is None:
+        if "hyper_strength" in aux:
+            num_edges = int(np.asarray(aux["hyper_strength"]).reshape(-1).shape[0])
+        elif "A_mh" in aux and np.asarray(aux["A_mh"]).ndim >= 2:
+            num_edges = int(np.asarray(aux["A_mh"]).shape[-1])
+        else:
+            num_edges = 0
+    k = max(int(num_edges or 0), 0)
+    m = int(max_num_modules)
+    dim = hypergraph_plan_dim(m, k)
+    if k <= 0:
+        empty = np.zeros((dim,), dtype=np.float32)
+        return {
+            "vector": empty,
+            "mask": empty.copy(),
+            "summary": {},
+            "metadata": {
+                "hypergraph_plan_num_edges": k,
+                "hypergraph_plan_fields": list(HYPERGRAPH_PLAN_FIELDS),
+                "hypergraph_plan_dim": dim,
+                "hypergraph_plan_edge_ordering": HYPERGRAPH_PLAN_EDGE_ORDERING,
+            },
+        }
+
+    strength, strength_mask = _aux_array(aux, "hyper_strength", (k,))
+    module_mass, module_mask = _aux_array(aux, "hyper_module_mass", (k,))
+    env_mass, env_mask = _aux_array(aux, "hyper_env_mass", (k,))
+    source, source_mask = _aux_array(aux, "hyper_source_coords", (k, 2))
+    thermal, thermal_mask = _aux_array(aux, "hyper_thermal_region_coords", (k, 2))
+    a_mh, a_mh_mask = _aux_array(aux, "A_mh", (m, k))
+    source_norm = source.copy()
+    thermal_norm = thermal.copy()
+    source_norm[:, 0] /= max(float(domain_length_x), 1.0e-8)
+    source_norm[:, 1] /= max(float(domain_length_y), 1.0e-8)
+    thermal_norm[:, 0] /= max(float(domain_length_x), 1.0e-8)
+    thermal_norm[:, 1] /= max(float(domain_length_y), 1.0e-8)
+    if "active_hyperedge_mask" in aux:
+        active_raw = np.asarray(aux["active_hyperedge_mask"], dtype=np.float32).reshape(-1)
+        active = np.zeros((k,), dtype=np.float32)
+        active[: min(k, active_raw.size)] = active_raw[: min(k, active_raw.size)]
+        active_mask = np.zeros((k,), dtype=np.float32)
+        active_mask[: min(k, active_raw.size)] = 1.0
+    else:
+        active = strength.copy()
+        active_mask = strength_mask.copy()
+    order = np.lexsort((thermal_norm[:, 1], thermal_norm[:, 0], -strength))
+    strength = strength[order]
+    strength_mask = strength_mask[order]
+    module_mass = module_mass[order]
+    module_mask = module_mask[order]
+    env_mass = env_mass[order]
+    env_mask = env_mask[order]
+    source_norm = source_norm[order]
+    source_mask = source_mask[order]
+    thermal_norm = thermal_norm[order]
+    thermal_mask = thermal_mask[order]
+    active = active[order]
+    active_mask = active_mask[order]
+    a_mh = a_mh[:, order]
+    a_mh_mask = a_mh_mask[:, order]
+    edge = np.stack(
+        [
+            active,
+            strength,
+            module_mass,
+            env_mass,
+            source_norm[:, 0],
+            source_norm[:, 1],
+            thermal_norm[:, 0],
+            thermal_norm[:, 1],
+        ],
+        axis=1,
+    ).astype(np.float32)
+    edge_mask = np.stack(
+        [
+            active_mask,
+            strength_mask,
+            module_mask,
+            env_mask,
+            source_mask[:, 0],
+            source_mask[:, 1],
+            thermal_mask[:, 0],
+            thermal_mask[:, 1],
+        ],
+        axis=1,
+    ).astype(np.float32)
+    vector = np.concatenate([edge.reshape(-1), a_mh.reshape(-1)], axis=0).astype(np.float32)
+    mask = np.concatenate([edge_mask.reshape(-1), a_mh_mask.reshape(-1)], axis=0).astype(np.float32)
+    active_count = None
+    if active_mask.sum() > 0:
+        active_count = float(np.sum(active > 0.5))
+    elif strength_mask.sum() > 0:
+        active_count = float(np.sum(strength > 0.05))
+    summary = {
+        "edge": edge,
+        "edge_mask": edge_mask,
+        "A_mh": a_mh,
+        "A_mh_mask": a_mh_mask,
+        "hyper_strength": strength,
+        "module_mass": module_mass,
+        "env_mass": env_mass,
+        "source_coords": source_norm,
+        "thermal_region_coords": thermal_norm,
+        "active_edge_count": active_count,
+    }
+    return {
+        "vector": vector,
+        "mask": mask,
+        "summary": summary,
+        "metadata": {
+            "hypergraph_plan_num_edges": k,
+            "hypergraph_plan_fields": list(HYPERGRAPH_PLAN_FIELDS),
+            "hypergraph_plan_dim": int(vector.size),
+            "hypergraph_plan_edge_ordering": HYPERGRAPH_PLAN_EDGE_ORDERING,
+            "coordinate_normalization": "x/domain_length_x, y/domain_length_y",
+        },
+    }
+
+
+def decode_hypergraph_plan_vector(vector: Any, *, max_num_modules: int, num_edges: Optional[int] = None) -> Dict[str, Any]:
+    arr = np.asarray(vector if vector is not None else [], dtype=np.float32).reshape(-1)
+    if num_edges is None:
+        num_edges = infer_hypergraph_plan_num_edges(arr.size, max_num_modules)
+    k = max(int(num_edges or 0), 0)
+    m = int(max_num_modules)
+    dim = hypergraph_plan_dim(m, k)
+    padded = np.zeros((dim,), dtype=np.float32)
+    if arr.size:
+        padded[: min(arr.size, dim)] = arr[: min(arr.size, dim)]
+    edge_size = k * len(HYPERGRAPH_PLAN_FIELDS)
+    edge = padded[:edge_size].reshape(k, len(HYPERGRAPH_PLAN_FIELDS)) if k else np.zeros((0, len(HYPERGRAPH_PLAN_FIELDS)), dtype=np.float32)
+    a_mh = padded[edge_size:].reshape(m, k) if k else np.zeros((m, 0), dtype=np.float32)
+    fields = {name: edge[:, idx] if k else np.zeros((0,), dtype=np.float32) for idx, name in enumerate(HYPERGRAPH_PLAN_FIELDS)}
+    return {
+        "fields": fields,
+        "edge": edge,
+        "A_mh": a_mh,
+        "hyper_strength": fields["hyper_strength"],
+        "module_mass": fields["module_mass"],
+        "env_mass": fields["env_mass"],
+        "source_coords": edge[:, 4:6],
+        "thermal_region_coords": edge[:, 6:8],
+        "active_edge_count": float(np.sum(fields["edge_active_or_strength"] > 0.5)) if k else 0.0,
+        "metadata": {
+            "hypergraph_plan_num_edges": k,
+            "hypergraph_plan_fields": list(HYPERGRAPH_PLAN_FIELDS),
+            "hypergraph_plan_dim": dim,
+            "hypergraph_plan_edge_ordering": HYPERGRAPH_PLAN_EDGE_ORDERING,
+        },
+    }
+
+
 class ThermalInverseDesignDataset(Dataset):
     def __init__(
         self,
@@ -241,6 +443,7 @@ class ThermalInverseDesignDataset(Dataset):
         intent_augmentation: Optional[Mapping[str, Any]] = None,
         structure_conditioning: Optional[Mapping[str, Any]] = None,
         heat_conditioning: Optional[Mapping[str, Any]] = None,
+        hypergraph_plan_dim: int = 0,
     ) -> None:
         self.path = resolve_demo_path(packed_h5_path)
         if not self.path.exists():
@@ -268,6 +471,8 @@ class ThermalInverseDesignDataset(Dataset):
         self.heat_sort_mode = str(self.heat_conditioning.get("sort_mode", "heat_desc_then_xy")).lower().strip()
         self.kpi_distribution_summary: Optional[Mapping[str, Any]] = None
         self.latent_targets: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+        self.hypergraph_plan_dim = max(int(hypergraph_plan_dim or 0), 0)
+        self.hypergraph_plan_targets: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
         self.normalizer: Optional[H5Normalizer] = None
         self.records = self._load_records(max_cases=max_cases, use_all_if_split_missing=use_all_if_split_missing)
         if not self.records:
@@ -473,6 +678,16 @@ class ThermalInverseDesignDataset(Dataset):
     def set_latent_targets(self, latents: Mapping[str, Tuple[np.ndarray, np.ndarray]]) -> None:
         self.latent_targets = {str(k): (np.asarray(v[0], dtype=np.float32), np.asarray(v[1], dtype=np.float32)) for k, v in latents.items()}
 
+    def set_hypergraph_plan_targets(self, plans: Mapping[str, Tuple[np.ndarray, np.ndarray]], *, plan_dim: Optional[int] = None) -> None:
+        if plan_dim is not None:
+            self.hypergraph_plan_dim = max(int(plan_dim), 0)
+        converted: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+        for key, value in plans.items():
+            vec = _pad_or_trim(np.asarray(value[0], dtype=np.float32), self.hypergraph_plan_dim)
+            mask = _pad_or_trim(np.asarray(value[1], dtype=np.float32), self.hypergraph_plan_dim)
+            converted[str(key)] = (vec, mask)
+        self.hypergraph_plan_targets = converted
+
     def __getitem__(self, item: int) -> Dict[str, Any]:
         item_idx = int(item)
         physical_idx = item_idx // self.samples_per_case
@@ -553,6 +768,13 @@ class ThermalInverseDesignDataset(Dataset):
                 np.zeros((self.organization_latent_dim,), dtype=np.float32),
             ),
         )
+        hypergraph_plan_target, hypergraph_plan_mask = self.hypergraph_plan_targets.get(
+            record.case_id,
+            (
+                np.zeros((self.hypergraph_plan_dim,), dtype=np.float32),
+                np.zeros((self.hypergraph_plan_dim,), dtype=np.float32),
+            ),
+        )
         structure_vector = np.asarray(record.structure_intent_vector, dtype=np.float32).copy()
         structure_maps = np.asarray(record.structure_intent_maps, dtype=np.float32).copy()
         if self.structure_enabled:
@@ -613,6 +835,8 @@ class ThermalInverseDesignDataset(Dataset):
             "target_modes_by_kpi": target_modes_by_kpi,
             "behavior_target": behavior.astype(np.float32),
             "organization_target": organization.astype(np.float32),
+            "hypergraph_plan_target": hypergraph_plan_target.astype(np.float32),
+            "hypergraph_plan_mask": hypergraph_plan_mask.astype(np.float32),
             "record_index": np.asarray([physical_idx], dtype=np.int64),
             "physical_case_index": np.asarray([physical_idx], dtype=np.int64),
             "augmentation_sample_index": np.asarray([sample_idx], dtype=np.int64),
@@ -641,6 +865,8 @@ def collate_inverse(batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         "active_kpi_mask",
         "behavior_target",
         "organization_target",
+        "hypergraph_plan_target",
+        "hypergraph_plan_mask",
         "record_index",
         "physical_case_index",
         "augmentation_sample_index",
@@ -999,13 +1225,28 @@ def _padded_design_arrays(
     return padded_centers, present, heat.astype(np.float32), _apply_heat_normalization(heat, metadata), heat_source
 
 
-def _local_module_params_from_raw_heat(record: ThermalInverseCaseRecord, heat_raw: np.ndarray, present: np.ndarray) -> np.ndarray:
+def _local_module_params_from_raw_heat(
+    record: ThermalInverseCaseRecord,
+    heat_raw: np.ndarray,
+    present: np.ndarray,
+    interface_condition: Optional[np.ndarray] = None,
+) -> np.ndarray:
     params = np.zeros((heat_raw.shape[0], 7), dtype=np.float32)
     params[:, 0] = heat_raw.astype(np.float32)
     if record.material_params.shape[0] > 3:
         params[:, 1] = float(record.material_params[3])
     if record.material_params.shape[0] > 1:
         params[:, 2] = float(record.material_params[1])
+    if interface_condition is not None:
+        cond = np.asarray(interface_condition, dtype=np.float32)
+        if cond.ndim >= 3 and cond.shape[0] == heat_raw.shape[0] and cond.shape[-1] >= 7:
+            h_index = 7 if cond.shape[-1] >= 8 else 6
+            t_out = cond[..., 3]
+            h_local = cond[..., h_index]
+            params[:, 3] = np.mean(h_local, axis=-1)
+            params[:, 4] = np.std(h_local, axis=-1)
+            params[:, 5] = np.mean(t_out, axis=-1)
+            params[:, 6] = np.std(t_out, axis=-1)
     return params * present[:, None].astype(np.float32)
 
 
@@ -1022,6 +1263,7 @@ def predict_candidate_with_forward(
     fixed_heat_per_module: Optional[float] = None,
     target_heat_power_total: Optional[float] = None,
     query_batch_size: int = 32768,
+    use_record_interface_condition: bool = False,
 ) -> Dict[str, Any]:
     centers, present, heat_raw, heat, heat_source = _padded_design_arrays(
         record,
@@ -1044,7 +1286,8 @@ def predict_candidate_with_forward(
         "domain_length_x": torch.tensor([[record.domain_length_x]], dtype=torch.float32, device=device),
         "domain_length_y": torch.tensor([[record.domain_length_y]], dtype=torch.float32, device=device),
     }
-    local_module_params = torch.from_numpy(_local_module_params_from_raw_heat(record, heat_raw, present)[None]).to(device)
+    record_interface_condition = getattr(record, "interface_condition", None) if bool(use_record_interface_condition) else None
+    local_module_params = torch.from_numpy(_local_module_params_from_raw_heat(record, heat_raw, present, record_interface_condition)[None]).to(device)
     local_query = torch.from_numpy(record.module_internal_query_points[None]).to(device) if record.module_internal_query_points.size else None
     pred_chunks: List[np.ndarray] = []
     first_outputs: Optional[Dict[str, Any]] = None
@@ -1151,16 +1394,18 @@ def build_forward_latent_cache(
     organization_dim: int,
     max_num_modules: int,
     generate_heat_power: bool,
+    hypergraph_plan_dim_value: int = 0,
+    hypergraph_plan_num_edges: int = 0,
     heat_load_policy: str = "preserve_total_heat",
     fixed_heat_per_module: Optional[float] = None,
     target_heat_power_total: Optional[float] = None,
     force_rebuild: bool = False,
     disable_auto_rebuild: bool = False,
     query_batch_size: int = 32768,
-) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
+) -> Dict[str, Any]:
     record_case_ids = [str(record.case_id) for record in records]
     expected_meta = {
-        "cache_version": 4,
+        "cache_version": 5,
         "packed_h5": file_fingerprint(packed_h5_path),
         "forward_checkpoint": file_fingerprint(str(metadata.get("checkpoint_path", ""))),
         "resolved_forward_config_hash": metadata.get("resolved_config_hash"),
@@ -1169,6 +1414,8 @@ def build_forward_latent_cache(
         "kpi_names": list(kpi_names),
         "behavior_latent_dim": int(behavior_dim),
         "organization_latent_dim": int(organization_dim),
+        "hypergraph_plan_dim": int(hypergraph_plan_dim_value),
+        "hypergraph_plan_num_edges": int(hypergraph_plan_num_edges),
         "record_count": int(len(record_case_ids)),
         "record_case_ids_hash": stable_json_hash(record_case_ids),
     }
@@ -1187,15 +1434,27 @@ def build_forward_latent_cache(
             and int(payload.get("organization_dim", -1)) == int(organization_dim)
         ):
             print(f"[latent-cache] loaded {cache_path}")
-            return {
+            latents = {
                 str(k): (np.asarray(v["behavior"], dtype=np.float32), np.asarray(v["organization"], dtype=np.float32))
                 for k, v in payload["latents"].items()
             }
+            plans = {
+                str(k): (np.asarray(v.get("hypergraph_plan_target", []), dtype=np.float32), np.asarray(v.get("hypergraph_plan_mask", []), dtype=np.float32))
+                for k, v in payload["latents"].items()
+            }
+            return {"latents": latents, "hypergraph_plans": plans, "hypergraph_plan_metadata": payload.get("hypergraph_plan_metadata", {})}
         message = f"[latent-cache] incompatible cache metadata for {cache_path}"
         if disable_auto_rebuild:
             raise RuntimeError(message + "; set forward_model.disable_auto_cache_rebuild=false or rebuild_latent_cache=true.")
         print(message + "; rebuilding")
     latents: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+    hypergraph_plans: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+    hypergraph_plan_metadata: Dict[str, Any] = {
+        "hypergraph_plan_num_edges": int(hypergraph_plan_num_edges),
+        "hypergraph_plan_fields": list(HYPERGRAPH_PLAN_FIELDS),
+        "hypergraph_plan_dim": int(hypergraph_plan_dim_value),
+        "hypergraph_plan_edge_ordering": HYPERGRAPH_PLAN_EDGE_ORDERING,
+    }
     for record in tqdm(records, desc="latent-cache", unit="case", dynamic_ncols=True, leave=False):
         candidate = {"centers": record.module_centers[record.module_present > 0.5], "count": record.true_count, "heat_powers": record.heat_powers[record.module_present > 0.5]}
         prediction = predict_candidate_with_forward(
@@ -1212,23 +1471,48 @@ def build_forward_latent_cache(
             query_batch_size=query_batch_size,
         )
         latents[record.case_id] = extract_forward_latent_targets(prediction, behavior_dim=behavior_dim, organization_dim=organization_dim)
+        plan = build_hypergraph_plan_from_forward_prediction(
+            prediction,
+            max_num_modules=max_num_modules,
+            domain_length_x=record.domain_length_x,
+            domain_length_y=record.domain_length_y,
+            num_edges=int(hypergraph_plan_num_edges) if int(hypergraph_plan_num_edges) > 0 else None,
+        )
+        vec = _pad_or_trim(np.asarray(plan["vector"], dtype=np.float32), int(hypergraph_plan_dim_value)) if int(hypergraph_plan_dim_value) > 0 else np.asarray(plan["vector"], dtype=np.float32)
+        mask = _pad_or_trim(np.asarray(plan["mask"], dtype=np.float32), int(hypergraph_plan_dim_value)) if int(hypergraph_plan_dim_value) > 0 else np.asarray(plan["mask"], dtype=np.float32)
+        hypergraph_plans[record.case_id] = (vec, mask)
+        if plan.get("metadata"):
+            case_summaries = hypergraph_plan_metadata.get("case_summaries", {})
+            hypergraph_plan_metadata.update(dict(plan["metadata"]))
+            hypergraph_plan_metadata["case_summaries"] = case_summaries
+        hypergraph_plan_metadata.setdefault("case_summaries", {})[record.case_id] = {
+            "active_edge_count": plan.get("summary", {}).get("active_edge_count") if isinstance(plan.get("summary"), Mapping) else None,
+        }
     ensure_dir(cache_path.parent)
     torch.save(
         {
             "latents": {
-                key: {"behavior": value[0], "organization": value[1]}
+                key: {
+                    "behavior": value[0],
+                    "organization": value[1],
+                    "hypergraph_plan_target": hypergraph_plans.get(key, (np.zeros((int(hypergraph_plan_dim_value),), dtype=np.float32), np.zeros((int(hypergraph_plan_dim_value),), dtype=np.float32)))[0],
+                    "hypergraph_plan_mask": hypergraph_plans.get(key, (np.zeros((int(hypergraph_plan_dim_value),), dtype=np.float32), np.zeros((int(hypergraph_plan_dim_value),), dtype=np.float32)))[1],
+                    "hypergraph_plan_summary": hypergraph_plan_metadata.get("case_summaries", {}).get(key, {}),
+                }
                 for key, value in latents.items()
             },
             "behavior_dim": behavior_dim,
             "organization_dim": organization_dim,
-            "cache_version": 4,
+            "hypergraph_plan_dim": int(hypergraph_plan_dim_value),
+            "hypergraph_plan_metadata": hypergraph_plan_metadata,
+            "cache_version": 5,
             "cache_metadata": expected_meta,
             "forward_checkpoint": metadata.get("checkpoint_path"),
         },
         cache_path,
     )
     print(f"[latent-cache] wrote {cache_path}")
-    return latents
+    return {"latents": latents, "hypergraph_plans": hypergraph_plans, "hypergraph_plan_metadata": hypergraph_plan_metadata}
 
 
 def move_batch_to_device(batch: Mapping[str, Any], device: torch.device) -> Dict[str, Any]:
@@ -1923,6 +2207,12 @@ def main() -> int:
         inverse_cfg["max_num_modules"] = root_max_modules
     if bool(heat_conditioning_cfg.get("enabled", False)):
         inverse_cfg.setdefault("generate_heat_power", False)
+    if "inverse_mode" not in inverse_cfg and bool(inverse_cfg.get("use_hypergraph_plan", False)):
+        inverse_cfg["inverse_mode"] = "layout_flow_with_hypergraph_plan"
+    inverse_cfg["inverse_mode"] = str(inverse_cfg.get("inverse_mode", "layout_flow") or "layout_flow").lower().strip()
+    inverse_cfg["use_hypergraph_plan"] = inverse_cfg["inverse_mode"] == "layout_flow_with_hypergraph_plan"
+    raw_plan_dim = inverse_cfg.get("hypergraph_plan_dim")
+    preliminary_plan_dim = int(raw_plan_dim) if raw_plan_dim is not None and str(raw_plan_dim).lower() != "auto" else 0
     generate_heat_power = bool(inverse_cfg.get("generate_heat_power", False))
     heat_load_policy = str(inverse_cfg.get("heat_load_policy", "preserve_total_heat")).lower().strip()
     conditioning_mode = str(conditioning_cfg.get("mode", inverse_cfg.get("conditioning_mode", "legacy_kpi"))).lower().strip()
@@ -1966,6 +2256,7 @@ def main() -> int:
         intent_augmentation=intent_aug_cfg,
         structure_conditioning=structure_conditioning_cfg,
         heat_conditioning=heat_conditioning_cfg,
+        hypergraph_plan_dim=preliminary_plan_dim,
     )
     val_dataset = ThermalInverseDesignDataset(
         packed_path,
@@ -1988,6 +2279,7 @@ def main() -> int:
         intent_augmentation={**intent_aug_cfg, "field_preference_dropout": 1.0} if conditioning_mode == "design_intent" else {},
         structure_conditioning=structure_conditioning_cfg,
         heat_conditioning=heat_conditioning_cfg,
+        hypergraph_plan_dim=preliminary_plan_dim,
     )
     kpi_stats = compute_kpi_stats(np.stack([record.kpi_vector for record in train_dataset.records]), kpi_names)
     kpi_distribution_summary = compute_kpi_distribution_summary(np.stack([record.kpi_vector for record in train_dataset.records]), kpi_names)
@@ -2002,15 +2294,27 @@ def main() -> int:
     inverse_cfg["domain_length_y"] = float(inverse_cfg.get("domain_length_y", "auto") if str(inverse_cfg.get("domain_length_y", "auto")).lower() != "auto" else sample_record.domain_length_y)
     inverse_cfg["module_radius"] = float(inverse_cfg.get("module_radius", "auto") if str(inverse_cfg.get("module_radius", "auto")).lower() != "auto" else sample_record.module_radius)
     inverse_cfg["heat_power_scale"] = heat_scale
-    model_config = InverseModelConfig.from_dict(inverse_cfg)
 
     forward_model = None
     forward_metadata: Dict[str, Any] = {}
     if bool(cfg.get("forward_model", {}).get("enabled", True)):
         forward_model, forward_metadata, _ = load_forward_model(cfg.get("forward_model", {}), device)
+    if bool(inverse_cfg.get("use_hypergraph_plan", False)):
+        raw_plan_dim = inverse_cfg.get("hypergraph_plan_dim")
+        if raw_plan_dim is None or str(raw_plan_dim).lower() == "auto":
+            num_edges = int(getattr(getattr(forward_model, "config", None), "num_hyperedges", inverse_cfg.get("hypergraph_plan_num_edges", 6)) or 6)
+            inverse_cfg["hypergraph_plan_num_edges"] = num_edges
+            inverse_cfg["hypergraph_plan_dim"] = hypergraph_plan_dim(int(inverse_cfg["max_num_modules"]), num_edges)
+        else:
+            inverse_cfg["hypergraph_plan_dim"] = int(raw_plan_dim)
+            inverse_cfg["hypergraph_plan_num_edges"] = infer_hypergraph_plan_num_edges(int(raw_plan_dim), int(inverse_cfg["max_num_modules"]))
+    model_config = InverseModelConfig.from_dict(inverse_cfg)
+    train_dataset.hypergraph_plan_dim = int(model_config.hypergraph_plan_dim or 0)
+    val_dataset.hypergraph_plan_dim = int(model_config.hypergraph_plan_dim or 0)
+    if forward_model is not None:
         cache_name = str(cfg.get("forward_model", {}).get("latent_cache_name", "inverse_forward_latent_cache.pt"))
         cache_path = (resolve_demo_path(cfg.get("paths", {}).get("saved_inverse_root", cfg.get("paths", {}).get("saved_model_dir", "./Saved_Model_Inverse"))) / "cache" / cache_name).resolve()
-        latents = build_forward_latent_cache(
+        cache_payload = build_forward_latent_cache(
             forward_model,
             forward_metadata,
             list(train_dataset.records) + list(val_dataset.records),
@@ -2025,19 +2329,27 @@ def main() -> int:
                 "generate_heat_power": model_config.generate_heat_power,
                 "heat_load_policy": heat_load_policy,
                 "center_decode_mode": model_config.center_decode_mode,
+                "inverse_mode": model_config.inverse_mode,
+                "use_hypergraph_plan": model_config.use_hypergraph_plan,
+                "hypergraph_plan_dim": model_config.hypergraph_plan_dim,
+                "hypergraph_plan_num_edges": model_config.hypergraph_plan_num_edges,
             },
             behavior_dim=model_config.behavior_latent_dim,
             organization_dim=model_config.organization_latent_dim,
             max_num_modules=model_config.max_num_modules,
             generate_heat_power=model_config.generate_heat_power,
+            hypergraph_plan_dim_value=int(model_config.hypergraph_plan_dim or 0),
+            hypergraph_plan_num_edges=int(model_config.hypergraph_plan_num_edges or infer_hypergraph_plan_num_edges(int(model_config.hypergraph_plan_dim or 0), model_config.max_num_modules)),
             heat_load_policy=heat_load_policy,
             fixed_heat_per_module=float(fixed_heat_per_module) if fixed_heat_per_module is not None else None,
             force_rebuild=bool(cfg.get("forward_model", {}).get("rebuild_latent_cache", False)),
             disable_auto_rebuild=bool(cfg.get("forward_model", {}).get("disable_auto_cache_rebuild", False)),
             query_batch_size=int(cfg.get("forward_model", {}).get("query_batch_size", 32768)),
         )
-        train_dataset.set_latent_targets(latents)
-        val_dataset.set_latent_targets(latents)
+        train_dataset.set_latent_targets(cache_payload.get("latents", {}))
+        val_dataset.set_latent_targets(cache_payload.get("latents", {}))
+        train_dataset.set_hypergraph_plan_targets(cache_payload.get("hypergraph_plans", {}), plan_dim=int(model_config.hypergraph_plan_dim or 0))
+        val_dataset.set_hypergraph_plan_targets(cache_payload.get("hypergraph_plans", {}), plan_dim=int(model_config.hypergraph_plan_dim or 0))
 
     model = ThermalInverseDesignFlow(model_config).to(device)
     print(
@@ -2048,6 +2360,10 @@ def main() -> int:
     print(
         f"[setup] design variables: centers+mask{' + heat_power' if model_config.generate_heat_power else ''}, "
         f"max_num_modules={model_config.max_num_modules}, center_decode_mode={model_config.center_decode_mode}"
+    )
+    print(
+        f"[setup] inverse_mode={model_config.inverse_mode}, use_hypergraph_plan={model_config.use_hypergraph_plan}, "
+        f"hypergraph_plan_dim={model_config.hypergraph_plan_dim or 0}"
     )
     print(
         f"[setup] samples_per_case train={train_dataset.samples_per_case}, val={val_dataset.samples_per_case}; "
@@ -2291,6 +2607,8 @@ def main() -> int:
         print(
             f"[epoch {epoch:04d}] train_loss_total={train_metrics.get('loss_total', float('nan')):.4e} "
             f"val_loss_total={val_loss:.4e} "
+            f"loss_hypergraph_plan={train_metrics.get('loss_hypergraph_plan', float('nan')):.4e} "
+            f"val_loss_hypergraph_plan={val_metrics.get('loss_hypergraph_plan', float('nan')):.4e} "
             f"val_forward_score_reconstruct={row.get('val_forward_score_reconstruct', float('nan')):.4e} "
             f"{demo_forward} val_candidate_diversity={row.get('val_candidate_diversity', float('nan'))} "
             f"checkpoint={row.get('best_verified_checkpoint_reason', 'not verified this epoch')}"

@@ -1,6 +1,6 @@
 # Demo 1: Channel Thermal Modular Design
 
-Updated: 2026-05-02
+Updated: 2026-05-03
 
 ## Purpose
 
@@ -770,6 +770,49 @@ layouts in the nonperiodic channel. It does not rewrite or retrain the forward
 model. Instead, `src/train_inverse.py` trains a compact conditional
 rectified-flow inverse model and uses trained ChannelThermal global checkpoints
 as frozen verifiers.
+
+Two inverse modes are available. The backward-compatible default,
+`inverse_model.inverse_mode="layout_flow"`, keeps the original path:
+
+```text
+target / design intent -> raw layout rectified flow -> concrete layout
+```
+
+The new `inverse_model.inverse_mode="layout_flow_with_hypergraph_plan"` adds
+an explicit intermediate organization plan learned from the frozen forward
+model's hypergraph diagnostics:
+
+```text
+target / design intent
+  -> structured hypergraph plan
+  -> raw layout rectified flow conditioned on that plan
+  -> concrete layout
+  -> frozen-forward verification
+  -> compare predicted plan with forward-inferred hypergraph
+```
+
+`inverse_mode` is the public switch. Plan-specific dimensions and embedding
+size are read from the `hypergraph_plan_*` fields; there is no separate config
+flag to enable the planner.
+
+The final inverse output is still a concrete design: module centers, active
+mask/module count, optional heat powers, slot identities, and layout-repair
+diagnostics. The hypergraph plan is an intermediate design intention, not a
+replacement for the layout. It captures desired module groups, desired
+thermal/environment regions, and desired module/environment mass
+distributions. During inverse training the plan target is built from cached
+forward outputs by canonicalizing hyperedges by descending `hyper_strength`
+and thermal-region x/y location, then storing edge fields plus flattened
+`A_mh`. If the forward cache is absent, the plan target and mask are zero and
+training falls back without crashing.
+
+For plan-enabled checkpoints, `evaluate_inverse.py` saves the generated layout,
+`hypergraph_plan_hat`, a decoded plan summary, the forward-inferred hypergraph
+from the generated layout, plan-comparison metrics in `evaluation_summary.json`,
+and `inverse_hypergraph_plan_comparison.png`. This preserves old checkpoint
+compatibility while opening a path to graph-first inverse design, two-stage
+graph-flow plus layout-flow generation, and forward-guided hypergraph
+consistency refinement.
 
 Default design variables:
 

@@ -30,6 +30,7 @@
     "latent_cache_name": "inverse_forward_latent_cache.pt",
     "rebuild_latent_cache": false,
     "disable_auto_cache_rebuild": false,
+    "cache_structured_hypergraph": true,
     "local_surrogate_checkpoint_path": "./Saved_Model_LocalModule/Run_0003_20260507_224352/latest_model.pt",
     "local_surrogate_auto": true,
     "local_surrogate_saved_root": "./Saved_Model_LocalModule",
@@ -155,6 +156,12 @@
     "replay_weight": 0.2
   },
   "inverse_model": {
+    "inverse_mode": "layout_flow",
+    "_notes":"Select in layout_flow or layout_flow_with_hypergraph_plan",
+    
+    "hypergraph_plan_dim": "auto",
+    "hypergraph_plan_embed_dim": 128,
+    "hypergraph_plan_conditioning": "concat",
     "target_dim": "auto",
     "design_dim": "auto",
     "max_num_modules": "auto",
@@ -191,6 +198,7 @@
     "count_weight": 0.10,
     "behavior_align_weight": 0.03,
     "organization_align_weight": 0.03,
+    "hypergraph_plan_weight": 0.05,
     "validity_prior_weight": 0.05
   },
   "training": {

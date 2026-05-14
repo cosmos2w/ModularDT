@@ -1,7 +1,7 @@
 Demo 1 Channel Thermal Forward Model
 ====================================
 
-Updated: 2026-05-02
+Updated: 2026-05-03
 
 Stage A: local module surrogate
 -------------------------------
@@ -195,6 +195,66 @@ can hide whether the weak organizer losses are fixing the learned organization.
 The organizer exposes hyperedge state, source coordinates, thermal-region
 coordinates, module/environment masses, semantic strength, and the assignment
 matrices for diagnostics and visualization.
+
+
+Inverse hypergraph-plan mode
+----------------------------
+The inverse model now has two selectable modes.
+
+  inverse_model.inverse_mode = "layout_flow"
+
+is the backward-compatible default. It preserves the old amortized conditional
+rectified-flow generator:
+
+  target / design intent -> raw layout flow -> concrete design layout
+
+The new mode:
+
+  inverse_model.inverse_mode = "layout_flow_with_hypergraph_plan"
+
+learns an explicit intermediate plan before generating the final layout:
+
+  target / design intent
+    -> structured hypergraph plan H_hat
+    -> raw layout flow conditioned on H_hat
+    -> concrete design layout x_hat
+    -> frozen-forward verification
+    -> compare H_hat with H_forward(x_hat)
+
+inverse_mode is the public switch. The hypergraph_plan_* fields provide the
+plan dimensions and embedding size when that mode is selected; there is no
+separate user-facing planner-enable flag.
+
+The final generated artifact remains a concrete design: module centers,
+active mask/module count, optional heat powers, slot identities, and repaired
+layout diagnostics. The hypergraph plan is an intermediate design intention
+that represents desired module groups, desired thermal/environment regions,
+and desired module/environment mass distribution.
+
+Plan targets are extracted from frozen forward-model organizer outputs when
+the inverse latent cache is built. The first version stores compact structured
+signals instead of the full environment assignment: hyper_strength,
+hyper_module_mass, hyper_env_mass, hyper_source_coords,
+hyper_thermal_region_coords, A_mh, and active edge count when available.
+Hyperedges are canonicalized by sorting by descending hyper_strength, then
+thermal-region x, then thermal-region y. The stored target vector contains
+eight per-edge fields followed by flattened A_mh with shape
+[max_num_modules, K]. A companion mask marks available components; absent
+forward cache produces zero target and zero mask for compatibility.
+
+In model_inverse.py, HypergraphPlanner predicts H_hat from the target/design
+intent embedding plus predicted behavior and organization latents.
+HypergraphPlanEncoder embeds H_hat, and DesignVelocityNet concatenates this
+plan embedding only in plan-enabled mode. Old configs and checkpoints that do
+not contain planner weights still load as "layout_flow".
+
+evaluate_inverse.py keeps the design layout as the primary output. For
+plan-enabled checkpoints it also saves hypergraph_plan_hat, a decoded plan
+summary, the forward-inferred hypergraph from the generated layout,
+hypergraph plan metrics in evaluation_summary.json, and
+inverse_hypergraph_plan_comparison.png. This preserves compatibility while
+creating a path toward graph-first inverse design, two-stage graph flow plus
+layout flow, and forward-guided hypergraph consistency refinement.
 
 
 Port condition head

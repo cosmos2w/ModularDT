@@ -71,3 +71,4 @@ Evaluation*/
 # Any smoke tests
 Saved_Model_LocalModule/
 cache/
+cache_index.json

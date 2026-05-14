@@ -98,6 +98,54 @@ class BehaviorOrgHead(nn.Module):
         return self.behavior(target_embedding), self.organization(target_embedding)
 
 
+class HypergraphPlanner(nn.Module):
+    """Predict the inverse model's structured hypergraph design intention."""
+
+    def __init__(
+        self,
+        target_embed_dim: int,
+        behavior_latent_dim: int,
+        organization_latent_dim: int,
+        hidden_dim: int,
+        hypergraph_plan_dim: int,
+        dropout: float,
+    ) -> None:
+        super().__init__()
+        self.behavior_latent_dim = int(behavior_latent_dim)
+        self.organization_latent_dim = int(organization_latent_dim)
+        in_dim = int(target_embed_dim) + self.behavior_latent_dim + self.organization_latent_dim
+        self.net = MLP(in_dim, hidden_dim, hypergraph_plan_dim, num_layers=3, dropout=dropout)
+
+    def forward(
+        self,
+        target_embedding: torch.Tensor,
+        behavior_latent_hat: Optional[torch.Tensor] = None,
+        organization_latent_hat: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        bsz = target_embedding.shape[0]
+        device = target_embedding.device
+        dtype = target_embedding.dtype
+        if behavior_latent_hat is None:
+            behavior_latent_hat = torch.zeros(bsz, self.behavior_latent_dim, device=device, dtype=dtype)
+        if organization_latent_hat is None:
+            organization_latent_hat = torch.zeros(bsz, self.organization_latent_dim, device=device, dtype=dtype)
+        return self.net(torch.cat([target_embedding, behavior_latent_hat, organization_latent_hat], dim=-1))
+
+
+class HypergraphPlanEncoder(nn.Module):
+    """Embed a structured hypergraph plan for layout-flow conditioning."""
+
+    def __init__(self, hypergraph_plan_dim: int, hidden_dim: int, embed_dim: int, dropout: float) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            MLP(hypergraph_plan_dim, hidden_dim, embed_dim, num_layers=3, dropout=dropout),
+            nn.LayerNorm(int(embed_dim)),
+        )
+
+    def forward(self, hypergraph_plan_hat: torch.Tensor) -> torch.Tensor:
+        return self.net(hypergraph_plan_hat)
+
+
 class FieldIntentEncoder(nn.Module):
     def __init__(self, in_channels: int, hidden_dim: int, out_dim: int, dropout: float) -> None:
         super().__init__()
@@ -222,10 +270,14 @@ class DesignVelocityNet(nn.Module):
         num_layers: int,
         dropout: float,
         time_embed_dim: int = 32,
+        hypergraph_plan_embed_dim: int = 0,
+        use_hypergraph_plan: bool = False,
     ) -> None:
         super().__init__()
+        self.use_hypergraph_plan = bool(use_hypergraph_plan)
+        self.hypergraph_plan_embed_dim = int(hypergraph_plan_embed_dim) if self.use_hypergraph_plan else 0
         self.time_embedding = SinusoidalTimeEmbedding(time_embed_dim)
-        in_dim = int(design_dim) + int(target_embed_dim) + int(behavior_latent_dim) + int(organization_latent_dim) + int(time_embed_dim)
+        in_dim = int(design_dim) + int(target_embed_dim) + int(behavior_latent_dim) + int(organization_latent_dim) + self.hypergraph_plan_embed_dim + int(time_embed_dim)
         self.net = MLP(in_dim, hidden_dim, design_dim, num_layers=max(num_layers, 2), dropout=dropout)
 
     def forward(
@@ -235,15 +287,35 @@ class DesignVelocityNet(nn.Module):
         target_embedding: torch.Tensor,
         behavior_latent_hat: torch.Tensor,
         organization_latent_hat: torch.Tensor,
+        hypergraph_plan_embedding: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         t_emb = self.time_embedding(t)
-        cond = torch.cat([target_embedding, behavior_latent_hat, organization_latent_hat, t_emb], dim=-1)
+        parts = [target_embedding, behavior_latent_hat, organization_latent_hat]
+        if self.use_hypergraph_plan:
+            if hypergraph_plan_embedding is None:
+                hypergraph_plan_embedding = torch.zeros(
+                    x_t.shape[0],
+                    self.hypergraph_plan_embed_dim,
+                    device=x_t.device,
+                    dtype=x_t.dtype,
+                )
+            parts.append(hypergraph_plan_embedding)
+        parts.append(t_emb)
+        cond = torch.cat(parts, dim=-1)
         return self.net(torch.cat([x_t, cond], dim=-1))
 
 
 @dataclass
 class InverseModelConfig:
     target_dim: int
+    inverse_mode: str = "layout_flow"
+    # Deprecated config/checkpoint field. inverse_mode is the public switch;
+    # this is retained so older payloads can still be read.
+    use_hypergraph_plan: bool = False
+    hypergraph_plan_dim: Optional[int] = None
+    hypergraph_plan_embed_dim: int = 128
+    hypergraph_plan_conditioning: str = "concat"
+    hypergraph_plan_num_edges: Optional[int] = None
     max_num_modules: int = 12
     design_dim: Optional[int] = None
     hidden_dim: int = 256
@@ -285,6 +357,24 @@ class InverseModelConfig:
 
     def __post_init__(self) -> None:
         self.max_num_modules = int(self.max_num_modules)
+        inverse_mode = str(self.inverse_mode or "layout_flow").lower().strip()
+        if inverse_mode not in {"layout_flow", "layout_flow_with_hypergraph_plan"}:
+            raise ValueError("inverse_mode must be 'layout_flow' or 'layout_flow_with_hypergraph_plan'.")
+        self.inverse_mode = inverse_mode
+        self.use_hypergraph_plan = self.inverse_mode == "layout_flow_with_hypergraph_plan"
+        conditioning = str(self.hypergraph_plan_conditioning or "concat").lower().strip()
+        if conditioning != "concat":
+            raise ValueError("hypergraph_plan_conditioning currently supports only 'concat'.")
+        self.hypergraph_plan_conditioning = conditioning
+        if self.hypergraph_plan_dim is not None:
+            self.hypergraph_plan_dim = int(self.hypergraph_plan_dim)
+        if self.hypergraph_plan_num_edges is not None:
+            self.hypergraph_plan_num_edges = int(self.hypergraph_plan_num_edges)
+        if self.use_hypergraph_plan and self.hypergraph_plan_dim is None:
+            edges = int(self.hypergraph_plan_num_edges or 6)
+            self.hypergraph_plan_num_edges = edges
+            self.hypergraph_plan_dim = edges * (8 + self.max_num_modules)
+        self.hypergraph_plan_embed_dim = int(self.hypergraph_plan_embed_dim)
         expected = self.max_num_modules * (4 if self.generate_heat_power else 3)
         if self.design_dim is None:
             self.design_dim = expected
@@ -334,7 +424,9 @@ class InverseModelConfig:
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "InverseModelConfig":
         data = dict(payload)
-        for key in ("target_dim", "design_dim", "behavior_latent_dim", "organization_latent_dim"):
+        if "inverse_mode" not in data and bool(data.get("use_hypergraph_plan", False)):
+            data["inverse_mode"] = "layout_flow_with_hypergraph_plan"
+        for key in ("target_dim", "design_dim", "behavior_latent_dim", "organization_latent_dim", "hypergraph_plan_dim", "hypergraph_plan_num_edges"):
             if str(data.get(key, "")).lower() == "auto":
                 data.pop(key, None)
         if "target_dim" not in data:
@@ -591,7 +683,29 @@ class ThermalInverseDesignFlow(nn.Module):
             self.cfg.hidden_dim,
             self.cfg.num_layers,
             self.cfg.dropout,
+            hypergraph_plan_embed_dim=self.cfg.hypergraph_plan_embed_dim,
+            use_hypergraph_plan=self.cfg.use_hypergraph_plan,
         )
+        if self.cfg.use_hypergraph_plan:
+            if self.cfg.hypergraph_plan_dim is None:
+                raise ValueError("hypergraph_plan_dim is required when use_hypergraph_plan=true.")
+            self.hypergraph_planner = HypergraphPlanner(
+                self.cfg.target_embed_dim,
+                self.cfg.behavior_latent_dim,
+                self.cfg.organization_latent_dim,
+                self.cfg.hidden_dim,
+                int(self.cfg.hypergraph_plan_dim),
+                self.cfg.dropout,
+            )
+            self.hypergraph_plan_encoder = HypergraphPlanEncoder(
+                int(self.cfg.hypergraph_plan_dim),
+                self.cfg.hidden_dim,
+                self.cfg.hypergraph_plan_embed_dim,
+                self.cfg.dropout,
+            )
+        else:
+            self.hypergraph_planner = None
+            self.hypergraph_plan_encoder = None
         self.count_head = (
             MLP(self.cfg.target_embed_dim, self.cfg.hidden_dim, self.cfg.max_num_modules + 1, num_layers=2, dropout=self.cfg.dropout)
             if self.cfg.use_count_head
@@ -680,18 +794,35 @@ class ThermalInverseDesignFlow(nn.Module):
         else:
             embedding = self.target_encoder(target_spec_vector)
         behavior_hat, organization_hat = self.behavior_org_head(embedding)
+        if self.hypergraph_planner is not None and self.hypergraph_plan_encoder is not None:
+            hypergraph_plan_hat = self.hypergraph_planner(embedding, behavior_hat, organization_hat)
+            hypergraph_plan_embedding = self.hypergraph_plan_encoder(hypergraph_plan_hat)
+        else:
+            hypergraph_plan_hat = None
+            hypergraph_plan_embedding = None
         count_logits = self.count_head(embedding) if self.count_head is not None else torch.empty(
             embedding.shape[0], self.max_num_modules + 1, device=embedding.device, dtype=embedding.dtype
         )
-        return {
+        condition = {
             "target_embedding": embedding,
             "behavior_latent_hat": behavior_hat,
             "organization_latent_hat": organization_hat,
             "count_logits": count_logits,
         }
+        if hypergraph_plan_hat is not None and hypergraph_plan_embedding is not None:
+            condition["hypergraph_plan_hat"] = hypergraph_plan_hat
+            condition["hypergraph_plan_embedding"] = hypergraph_plan_embedding
+        return condition
 
     def velocity(self, x_t: torch.Tensor, t: torch.Tensor, condition: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        return self.velocity_net(x_t, t, condition["target_embedding"], condition["behavior_latent_hat"], condition["organization_latent_hat"])
+        return self.velocity_net(
+            x_t,
+            t,
+            condition["target_embedding"],
+            condition["behavior_latent_hat"],
+            condition["organization_latent_hat"],
+            condition.get("hypergraph_plan_embedding"),
+        )
 
     def forward(self, x_t: torch.Tensor, t: torch.Tensor, target_spec_vector: torch.Tensor, **condition_kwargs: torch.Tensor) -> Dict[str, torch.Tensor]:
         condition = self.encode_condition(target_spec_vector, **condition_kwargs)
@@ -930,10 +1061,36 @@ class ThermalInverseDesignFlow(nn.Module):
         else:
             loss_structure = x1.new_tensor(0.0)
             structure_strength_mean = x1.new_tensor(0.0)
+        if self.cfg.use_hypergraph_plan and condition.get("hypergraph_plan_hat") is not None and batch.get("hypergraph_plan_target") is not None:
+            plan_hat = condition["hypergraph_plan_hat"]
+            plan_target = batch["hypergraph_plan_target"].to(device=x1.device, dtype=x1.dtype)
+            plan_mask = batch.get("hypergraph_plan_mask")
+            if plan_mask is None:
+                plan_mask = torch.ones_like(plan_target)
+            else:
+                plan_mask = plan_mask.to(device=x1.device, dtype=x1.dtype)
+            dim = min(plan_hat.shape[-1], plan_target.shape[-1], plan_mask.shape[-1])
+            if dim > 0:
+                plan_hat = plan_hat[:, :dim]
+                plan_target = plan_target[:, :dim]
+                plan_mask = plan_mask[:, :dim].clamp(0.0, 1.0)
+                denom = plan_mask.sum()
+                if float(denom.detach().cpu()) > 0.0:
+                    loss_hypergraph_plan = ((plan_hat - plan_target).square() * plan_mask).sum() / denom.clamp_min(1.0)
+                else:
+                    loss_hypergraph_plan = x1.new_tensor(0.0)
+                hypergraph_plan_mask_fraction = plan_mask.mean()
+            else:
+                loss_hypergraph_plan = x1.new_tensor(0.0)
+                hypergraph_plan_mask_fraction = x1.new_tensor(0.0)
+        else:
+            loss_hypergraph_plan = x1.new_tensor(0.0)
+            hypergraph_plan_mask_fraction = x1.new_tensor(0.0)
         weights = {
             "flow_weight": 1.0,
             "set_center_weight": 0.15,
             "structure_match_weight": 0.20,
+            "hypergraph_plan_weight": 0.0,
             "heat_condition_weight": 0.0,
             "structure_map_match_weight": 0.0,
             "count_weight": 0.1,
@@ -947,6 +1104,7 @@ class ThermalInverseDesignFlow(nn.Module):
             weights["flow_weight"] * loss_flow
             + weights["set_center_weight"] * loss_set_center
             + weights["structure_match_weight"] * loss_structure
+            + weights["hypergraph_plan_weight"] * loss_hypergraph_plan
             + weights["count_weight"] * loss_count
             + weights["behavior_align_weight"] * loss_behavior
             + weights["organization_align_weight"] * loss_organization
@@ -957,6 +1115,7 @@ class ThermalInverseDesignFlow(nn.Module):
             "loss_flow": loss_flow.detach(),
             "loss_set_center": loss_set_center.detach(),
             "loss_structure_match": loss_structure.detach(),
+            "loss_hypergraph_plan": loss_hypergraph_plan.detach(),
             "loss_count": loss_count.detach(),
             "loss_behavior": loss_behavior.detach(),
             "loss_organization": loss_organization.detach(),
@@ -964,6 +1123,7 @@ class ThermalInverseDesignFlow(nn.Module):
             "count_accuracy": count_accuracy.detach(),
             "latent_align_weight_mean": align_weight_mean.detach(),
             "structure_strength_mean": structure_strength_mean.detach(),
+            "hypergraph_plan_mask_fraction": hypergraph_plan_mask_fraction.detach(),
         }
         return total, metrics
 
@@ -1206,6 +1366,14 @@ class ThermalInverseDesignFlow(nn.Module):
                     "behavior_latent_hat": condition["behavior_latent_hat"][i].detach().cpu().numpy().astype(np.float32),
                     "organization_latent_hat": condition["organization_latent_hat"][i].detach().cpu().numpy().astype(np.float32),
                     "validity": validity,
+                    **(
+                        {
+                            "hypergraph_plan_hat": condition["hypergraph_plan_hat"][i].detach().cpu().numpy().astype(np.float32),
+                            "hypergraph_plan_embedding": condition["hypergraph_plan_embedding"][i].detach().cpu().numpy().astype(np.float32),
+                        }
+                        if "hypergraph_plan_hat" in condition and "hypergraph_plan_embedding" in condition
+                        else {}
+                    ),
                 }
             )
         if was_training:
