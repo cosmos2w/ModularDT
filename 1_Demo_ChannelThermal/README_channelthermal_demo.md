@@ -1195,3 +1195,13 @@ Target preferences currently supported are `x_span`, `y_span`,
 nonnegative ranking penalties only when present in the target JSON; `x_span`
 and `y_span` remain hard clipping bounds, not spread objectives. Unsupported
 preferences are warned and written to the evaluation summary.
+
+Hypergraph-aware inverse design supports deterministic hypergraph-plan
+conditioning, the opt-in `two_stage_hypergraph_layout_flow` stochastic
+hypergraph/layout generator, planned-vs-realized hypergraph diagnostics, and
+optional hypergraph-aware reranking. Planned `H` is produced by the inverse
+model before layout generation. Realized `H` is extracted from the frozen
+forward verifier after evaluating the generated layout. Their mismatch reports
+whether the generated concrete layout actually realizes the intended modular
+thermal organization; reranking uses this term only when
+`--hypergraph-rerank-weight` is greater than zero.

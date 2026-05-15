@@ -932,6 +932,48 @@ a {
   gap: 8px;
 }
 
+.hypergraph-diagnostics {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.hypergraph-diagnostics summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.hypergraph-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 8px;
+  margin-top: 7px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.hypergraph-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.hypergraph-links a {
+  color: var(--blue);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.hypergraph-thumb {
+  width: 100%;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f8faf7;
+}
+
 .debug-file-list {
   display: grid;
   gap: 6px;

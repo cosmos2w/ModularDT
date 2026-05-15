@@ -60,6 +60,7 @@ from thermal_design_intent import (
     normalize_intent_payload,
     training_intent_from_record,
 )
+from thermal_hypergraph_consistency import compare_hypergraph_plans
 
 
 DEFAULT_CONFIG_PATH = "./Configs/train_inverse_config_template.json"
@@ -2055,6 +2056,168 @@ def run_forward_guidance_replay(
     return replay
 
 
+class HypergraphRealizationReplayBuffer:
+    """Bounded replay store for forward-verified hypergraph realization targets."""
+
+    def __init__(self, max_size: int = 512, seed: int = 0) -> None:
+        self.max_size = max(int(max_size), 1)
+        self.items: List[Dict[str, Any]] = []
+        self.rng = np.random.default_rng(seed)
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def extend(self, rows: Sequence[Mapping[str, Any]]) -> None:
+        for row in rows:
+            self.items.append(dict(row))
+        if len(self.items) > self.max_size:
+            self.items = self.items[-self.max_size :]
+
+    def sample(self, batch_size: int) -> List[Dict[str, Any]]:
+        if not self.items:
+            return []
+        size = min(max(int(batch_size), 1), len(self.items))
+        indices = self.rng.choice(len(self.items), size=size, replace=len(self.items) < size)
+        return [self.items[int(i)] for i in indices]
+
+
+def collect_hypergraph_realization_replay(
+    inverse_model: ThermalInverseDesignFlow,
+    forward_model: GlobalChannelThermalModel,
+    forward_metadata: Mapping[str, Any],
+    dataset: ThermalInverseDesignDataset,
+    device: torch.device,
+    *,
+    num_reference_batches: int,
+    num_candidates_per_target: int,
+    top_k_per_round: int,
+    n_steps: int,
+    seed: int,
+    count_mode: str,
+    heat_load_policy: str,
+    fixed_heat_per_module: Optional[float],
+    query_batch_size: int,
+    hypergraph_consistency_weight: float,
+    kpi_score_weight: float,
+    edge_matching: str,
+) -> List[Dict[str, Any]]:
+    """
+    Collect pseudo-targets from the frozen forward verifier.
+
+    The frozen forward verifier is used as an expensive non-differentiable
+    teacher here. Replay avoids backpropagating through the verifier while
+    still aligning planned and realized hypergraph organization.
+    """
+
+    if not getattr(inverse_model.cfg, "use_hypergraph_plan", False) or not int(inverse_model.cfg.hypergraph_plan_dim or 0):
+        return []
+    rng = np.random.default_rng(seed)
+    count = min(max(int(num_reference_batches), 0), len(dataset))
+    if count <= 0 or int(num_candidates_per_target) <= 0:
+        return []
+    indices = rng.choice(len(dataset), size=count, replace=False)
+    scored: List[Tuple[float, Dict[str, Any]]] = []
+    plan_dim = int(inverse_model.cfg.hypergraph_plan_dim or 0)
+    num_edges = int(inverse_model.cfg.hypergraph_plan_num_edges or infer_hypergraph_plan_num_edges(plan_dim, inverse_model.max_num_modules))
+    for idx in indices:
+        item = dataset[int(idx)]
+        physical_idx = int(np.asarray(item.get("physical_case_index", [int(idx) // dataset.samples_per_case])).reshape(-1)[0])
+        record = dataset.records[physical_idx]
+        candidates = inverse_model.sample_designs(
+            item["target_spec_vector"],
+            n_samples=int(num_candidates_per_target),
+            n_steps=int(n_steps),
+            seed=int(seed + idx),
+            count_mode=count_mode,
+            design_intent_vector=item.get("design_intent_vector"),
+            objective_weight_vector=item.get("objective_weight_vector"),
+            field_intent_maps=item.get("field_intent_maps"),
+            structure_intent_vector=item.get("structure_intent_vector"),
+            structure_intent_maps=item.get("structure_intent_maps"),
+            heat_condition_vector=item.get("heat_condition_vector"),
+            heat_condition_mask=item.get("heat_condition_mask"),
+            device=device,
+        )
+        for cand in candidates:
+            planned_vec = cand.get("hypergraph_plan_hat")
+            if planned_vec is None:
+                continue
+            prediction = predict_candidate_with_forward(
+                forward_model,
+                forward_metadata,
+                record,
+                cand,
+                device,
+                max_num_modules=inverse_model.max_num_modules,
+                generate_heat_power=inverse_model.cfg.generate_heat_power,
+                heat_load_policy=heat_load_policy,
+                fixed_heat_per_module=fixed_heat_per_module,
+                query_batch_size=query_batch_size,
+            )
+            realized = build_hypergraph_plan_from_forward_prediction(
+                prediction,
+                max_num_modules=inverse_model.max_num_modules,
+                domain_length_x=record.domain_length_x,
+                domain_length_y=record.domain_length_y,
+                num_edges=num_edges,
+            )
+            if np.asarray(realized.get("mask", [])).sum() <= 0:
+                continue
+            planned_decoded = decode_hypergraph_plan_vector(planned_vec, max_num_modules=inverse_model.max_num_modules, num_edges=num_edges)
+            realized_decoded = decode_hypergraph_plan_vector(realized.get("vector"), max_num_modules=inverse_model.max_num_modules, num_edges=num_edges)
+            consistency = compare_hypergraph_plans(planned_decoded, realized_decoded, edge_matching=edge_matching)
+            kpis = compute_steady_thermal_kpis(
+                prediction["pred_field_grid"],
+                x_grid=record.x_grid,
+                y_grid=record.y_grid,
+                channel_order=CHANNEL_ORDER,
+                module_centers=prediction["centers_padded"],
+                module_present=prediction["module_present"],
+                heat_powers=prediction.get("heat_powers", record.heat_powers),
+                module_internal_temperature=prediction["pred_internal_temperature"],
+                module_internal_mask=record.module_internal_mask,
+                interface_target=prediction["pred_interface"],
+                interface_condition=prediction.get("pred_port_condition"),
+                domain={"domain_length_x": record.domain_length_x, "domain_length_y": record.domain_length_y, "module_radius": record.module_radius},
+                material_params=record.material_params,
+                temperature_limits=dataset.temperature_limits,
+            )
+            kpis.update(cand.get("validity", {}))
+            kpis.update(_candidate_layout_metrics(cand))
+            kpis["num_modules"] = int(cand.get("count", 0))
+            target_spec = {"kpi_names": list(dataset.kpi_names), "kpi_targets": item.get("target_kpi_targets", {}), "kpi_stats": dataset.kpi_stats}
+            kpi_score = float(score_candidate_kpis(kpis, target_spec)["total_score"])
+            combined = float(kpi_score_weight) * kpi_score + float(hypergraph_consistency_weight) * float(consistency.get("total", 0.0))
+            replay_item = dict(item)
+            centers = np.asarray(cand.get("centers", []), dtype=np.float32).reshape(-1, 2)
+            present = np.zeros((inverse_model.max_num_modules,), dtype=np.float32)
+            present[: min(centers.shape[0], inverse_model.max_num_modules)] = 1.0
+            heat_powers = np.asarray(prediction.get("heat_powers", cand.get("heat_powers", [])), dtype=np.float32).reshape(-1)
+            design_vec, _ = encode_design_vector(
+                centers,
+                present[: centers.shape[0]] if centers.shape[0] else present,
+                heat_powers[: centers.shape[0]] if inverse_model.cfg.generate_heat_power and heat_powers.size else None,
+                max_num_modules=inverse_model.max_num_modules,
+                domain_length_x=record.domain_length_x,
+                domain_length_y=record.domain_length_y,
+                generate_heat_power=inverse_model.cfg.generate_heat_power,
+                heat_power_scale=float(inverse_model.cfg.heat_power_scale),
+                sort_centers=True,
+            )
+            replay_item["design_vec"] = design_vec.astype(np.float32)
+            replay_item["true_count"] = np.asarray([int(cand.get("count", centers.shape[0]))], dtype=np.int64)
+            replay_item["hypergraph_plan_target"] = np.asarray(realized["vector"], dtype=np.float32)[:plan_dim]
+            replay_item["hypergraph_plan_mask"] = np.asarray(realized["mask"], dtype=np.float32)[:plan_dim]
+            replay_item["realized_hypergraph_plan_target"] = replay_item["hypergraph_plan_target"]
+            replay_item["realized_hypergraph_plan_mask"] = replay_item["hypergraph_plan_mask"]
+            replay_item["planned_hypergraph_plan_vector"] = np.asarray(planned_vec, dtype=np.float32)[:plan_dim]
+            replay_item["hypergraph_consistency_score"] = np.asarray([float(consistency.get("total", 0.0))], dtype=np.float32)
+            replay_item["verified_kpi_score"] = np.asarray([kpi_score], dtype=np.float32)
+            scored.append((combined, replay_item))
+    scored.sort(key=lambda row: row[0])
+    return [row for _, row in scored[: max(int(top_k_per_round), 0)]]
+
+
 def save_history_csv(history: Sequence[Mapping[str, Any]], path: Path) -> None:
     if not history:
         return
@@ -2193,6 +2356,7 @@ def main() -> int:
     structure_conditioning_cfg = cfg.get("structure_conditioning", {}) if isinstance(cfg.get("structure_conditioning", {}), Mapping) else {}
     heat_conditioning_cfg = cfg.get("heat_conditioning", {}) if isinstance(cfg.get("heat_conditioning", {}), Mapping) else {}
     forward_guidance_cfg = cfg.get("forward_guidance", {}) if isinstance(cfg.get("forward_guidance", {}), Mapping) else {}
+    hypergraph_replay_cfg = cfg.get("hypergraph_realization_consistency", {}) if isinstance(cfg.get("hypergraph_realization_consistency", {}), Mapping) else {}
     set_seed(int(training_cfg.get("seed", cfg.get("seed", 42))))
     device = select_device(args.device or training_cfg.get("device"))
 
@@ -2210,7 +2374,7 @@ def main() -> int:
     if "inverse_mode" not in inverse_cfg and bool(inverse_cfg.get("use_hypergraph_plan", False)):
         inverse_cfg["inverse_mode"] = "layout_flow_with_hypergraph_plan"
     inverse_cfg["inverse_mode"] = str(inverse_cfg.get("inverse_mode", "layout_flow") or "layout_flow").lower().strip()
-    inverse_cfg["use_hypergraph_plan"] = inverse_cfg["inverse_mode"] == "layout_flow_with_hypergraph_plan"
+    inverse_cfg["use_hypergraph_plan"] = inverse_cfg["inverse_mode"] in {"layout_flow_with_hypergraph_plan", "two_stage_hypergraph_layout_flow"}
     raw_plan_dim = inverse_cfg.get("hypergraph_plan_dim")
     preliminary_plan_dim = int(raw_plan_dim) if raw_plan_dim is not None and str(raw_plan_dim).lower() != "auto" else 0
     generate_heat_power = bool(inverse_cfg.get("generate_heat_power", False))
@@ -2418,6 +2582,17 @@ def main() -> int:
     max_val_batches = args.max_val_batches if args.max_val_batches is not None else training_cfg.get("max_val_batches")
     history: List[Dict[str, Any]] = []
     replay_buffer: List[Dict[str, Any]] = []
+    hypergraph_replay_enabled = bool(hypergraph_replay_cfg.get("enabled", False))
+    if hypergraph_replay_enabled and forward_model is None:
+        print("[hypergraph-replay] forward_model.enabled=false; planned-vs-realized replay is disabled.")
+        hypergraph_replay_enabled = False
+    if hypergraph_replay_enabled and not bool(model_config.use_hypergraph_plan):
+        print("[hypergraph-replay] inverse mode is not hypergraph-aware; planned-vs-realized replay is disabled.")
+        hypergraph_replay_enabled = False
+    hypergraph_replay_buffer = HypergraphRealizationReplayBuffer(
+        max_size=int(hypergraph_replay_cfg.get("replay_buffer_size", 512)),
+        seed=int(training_cfg.get("seed", 42)) + 9001,
+    )
     best_val = float("inf")
     best_verified = float("inf")
     best_verified_metric_name = str(validation_cfg.get("best_metric_name", "auto") or "auto")
@@ -2568,6 +2743,51 @@ def main() -> int:
                 optimizer.step()
                 row["forward_guidance_replay_items"] = len(replay_buffer)
                 row["forward_guidance_replay_loss_total"] = scalar(replay_metrics["loss_total"])
+        if (
+            hypergraph_replay_enabled
+            and forward_model is not None
+            and epoch >= int(hypergraph_replay_cfg.get("start_epoch", 5))
+            and epoch % max(int(hypergraph_replay_cfg.get("every_n_epochs", 5)), 1) == 0
+        ):
+            new_hg_replay = collect_hypergraph_realization_replay(
+                model,
+                forward_model,
+                forward_metadata,
+                val_dataset,
+                device,
+                num_reference_batches=int(hypergraph_replay_cfg.get("num_reference_batches", 2)),
+                num_candidates_per_target=int(hypergraph_replay_cfg.get("num_candidates_per_target", 4)),
+                top_k_per_round=int(hypergraph_replay_cfg.get("top_k_per_round", 16)),
+                n_steps=int(validation_cfg.get("forward_verify_n_steps", 4)),
+                seed=int(training_cfg.get("seed", 42)) + epoch + 7013,
+                count_mode=str(validation_cfg.get("forward_verify_count_mode", "uniform")),
+                heat_load_policy=heat_load_policy,
+                fixed_heat_per_module=float(fixed_heat_per_module) if fixed_heat_per_module is not None else None,
+                query_batch_size=int(hypergraph_replay_cfg.get("query_batch_size", cfg.get("forward_model", {}).get("query_batch_size", 32768))),
+                hypergraph_consistency_weight=float(hypergraph_replay_cfg.get("hypergraph_consistency_weight", 1.0)),
+                kpi_score_weight=float(hypergraph_replay_cfg.get("kpi_score_weight", 1.0)),
+                edge_matching=str(hypergraph_replay_cfg.get("edge_matching", "greedy")),
+            )
+            hypergraph_replay_buffer.extend(new_hg_replay)
+            row["hypergraph_replay_items"] = len(hypergraph_replay_buffer)
+        if hypergraph_replay_enabled and len(hypergraph_replay_buffer) > 0:
+            replay_steps = max(int(hypergraph_replay_cfg.get("replay_steps_per_epoch", 1)), 0)
+            replay_losses = []
+            for _ in range(replay_steps):
+                hg_batch_items = hypergraph_replay_buffer.sample(int(hypergraph_replay_cfg.get("replay_batch_size", 16)))
+                if not hg_batch_items:
+                    continue
+                model.train(True)
+                replay_batch = collate_inverse(hg_batch_items)
+                replay_batch = move_batch_to_device(replay_batch, device)
+                optimizer.zero_grad(set_to_none=True)
+                replay_loss, replay_metrics = model.training_loss(replay_batch, loss_weights=loss_cfg)
+                (float(hypergraph_replay_cfg.get("replay_loss_weight", 0.25)) * replay_loss).backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), float(training_cfg.get("gradient_clip_norm", 1.0)))
+                optimizer.step()
+                replay_losses.append(scalar(replay_metrics["loss_total"]))
+            if replay_losses:
+                row["hypergraph_replay_loss_total"] = float(np.mean(replay_losses))
         val_loss = float(val_metrics.get("loss_total", float("inf")))
         if val_loss < best_val:
             best_val = val_loss

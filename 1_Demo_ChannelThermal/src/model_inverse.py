@@ -305,9 +305,47 @@ class DesignVelocityNet(nn.Module):
         return self.net(torch.cat([x_t, cond], dim=-1))
 
 
+class HypergraphVelocityNet(nn.Module):
+    """
+    Rectified-flow velocity network for stochastic hypergraph-plan generation.
+
+    It models p(H | target, behavior, organization). H is a structured
+    module-environment hypergraph plan later used by the layout generator.
+    """
+
+    def __init__(
+        self,
+        hypergraph_plan_dim: int,
+        target_embed_dim: int,
+        behavior_latent_dim: int,
+        organization_latent_dim: int,
+        hidden_dim: int,
+        num_layers: int,
+        dropout: float,
+        time_embed_dim: int = 32,
+    ) -> None:
+        super().__init__()
+        self.time_embedding = SinusoidalTimeEmbedding(time_embed_dim)
+        in_dim = int(hypergraph_plan_dim) + int(target_embed_dim) + int(behavior_latent_dim) + int(organization_latent_dim) + int(time_embed_dim)
+        self.net = MLP(in_dim, hidden_dim, hypergraph_plan_dim, num_layers=max(num_layers, 2), dropout=dropout)
+
+    def forward(
+        self,
+        h_t: torch.Tensor,
+        t: torch.Tensor,
+        target_embedding: torch.Tensor,
+        behavior_latent_hat: torch.Tensor,
+        organization_latent_hat: torch.Tensor,
+    ) -> torch.Tensor:
+        cond = torch.cat([target_embedding, behavior_latent_hat, organization_latent_hat, self.time_embedding(t)], dim=-1)
+        return self.net(torch.cat([h_t, cond], dim=-1))
+
+
 @dataclass
 class InverseModelConfig:
     target_dim: int
+    # Inverse generation mode. Supported values are:
+    # layout_flow, layout_flow_with_hypergraph_plan, two_stage_hypergraph_layout_flow.
     inverse_mode: str = "layout_flow"
     # Deprecated config/checkpoint field. inverse_mode is the public switch;
     # this is retained so older payloads can still be read.
@@ -316,6 +354,16 @@ class InverseModelConfig:
     hypergraph_plan_embed_dim: int = 128
     hypergraph_plan_conditioning: str = "concat"
     hypergraph_plan_num_edges: Optional[int] = None
+    # Optional stochastic hypergraph-flow settings for two_stage_hypergraph_layout_flow.
+    hypergraph_flow_hidden_dim: Optional[int] = None
+    hypergraph_flow_num_layers: Optional[int] = None
+    hypergraph_flow_loss_weight: float = 1.0
+    hypergraph_plan_supervision_weight: float = 1.0
+    hypergraph_teacher_forcing_probability: float = 1.0
+    hypergraph_sample_steps: int = 4
+    hypergraph_sample_noise_scale: float = 1.0
+    hypergraph_clamp_output: bool = True
+    hypergraph_realization_replay_enabled: bool = False
     max_num_modules: int = 12
     design_dim: Optional[int] = None
     hidden_dim: int = 256
@@ -358,10 +406,10 @@ class InverseModelConfig:
     def __post_init__(self) -> None:
         self.max_num_modules = int(self.max_num_modules)
         inverse_mode = str(self.inverse_mode or "layout_flow").lower().strip()
-        if inverse_mode not in {"layout_flow", "layout_flow_with_hypergraph_plan"}:
-            raise ValueError("inverse_mode must be 'layout_flow' or 'layout_flow_with_hypergraph_plan'.")
+        if inverse_mode not in {"layout_flow", "layout_flow_with_hypergraph_plan", "two_stage_hypergraph_layout_flow"}:
+            raise ValueError("inverse_mode must be 'layout_flow', 'layout_flow_with_hypergraph_plan', or 'two_stage_hypergraph_layout_flow'.")
         self.inverse_mode = inverse_mode
-        self.use_hypergraph_plan = self.inverse_mode == "layout_flow_with_hypergraph_plan"
+        self.use_hypergraph_plan = self.inverse_mode in {"layout_flow_with_hypergraph_plan", "two_stage_hypergraph_layout_flow"}
         conditioning = str(self.hypergraph_plan_conditioning or "concat").lower().strip()
         if conditioning != "concat":
             raise ValueError("hypergraph_plan_conditioning currently supports only 'concat'.")
@@ -375,6 +423,15 @@ class InverseModelConfig:
             self.hypergraph_plan_num_edges = edges
             self.hypergraph_plan_dim = edges * (8 + self.max_num_modules)
         self.hypergraph_plan_embed_dim = int(self.hypergraph_plan_embed_dim)
+        self.hypergraph_flow_hidden_dim = int(self.hypergraph_flow_hidden_dim) if self.hypergraph_flow_hidden_dim is not None else None
+        self.hypergraph_flow_num_layers = int(self.hypergraph_flow_num_layers) if self.hypergraph_flow_num_layers is not None else None
+        self.hypergraph_flow_loss_weight = float(self.hypergraph_flow_loss_weight)
+        self.hypergraph_plan_supervision_weight = float(self.hypergraph_plan_supervision_weight)
+        self.hypergraph_teacher_forcing_probability = min(max(float(self.hypergraph_teacher_forcing_probability), 0.0), 1.0)
+        self.hypergraph_sample_steps = max(int(self.hypergraph_sample_steps), 1)
+        self.hypergraph_sample_noise_scale = max(float(self.hypergraph_sample_noise_scale), 0.0)
+        self.hypergraph_clamp_output = bool(self.hypergraph_clamp_output)
+        self.hypergraph_realization_replay_enabled = bool(self.hypergraph_realization_replay_enabled)
         expected = self.max_num_modules * (4 if self.generate_heat_power else 3)
         if self.design_dim is None:
             self.design_dim = expected
@@ -689,13 +746,30 @@ class ThermalInverseDesignFlow(nn.Module):
         if self.cfg.use_hypergraph_plan:
             if self.cfg.hypergraph_plan_dim is None:
                 raise ValueError("hypergraph_plan_dim is required when use_hypergraph_plan=true.")
-            self.hypergraph_planner = HypergraphPlanner(
-                self.cfg.target_embed_dim,
-                self.cfg.behavior_latent_dim,
-                self.cfg.organization_latent_dim,
-                self.cfg.hidden_dim,
-                int(self.cfg.hypergraph_plan_dim),
-                self.cfg.dropout,
+            self.hypergraph_planner = (
+                HypergraphPlanner(
+                    self.cfg.target_embed_dim,
+                    self.cfg.behavior_latent_dim,
+                    self.cfg.organization_latent_dim,
+                    self.cfg.hidden_dim,
+                    int(self.cfg.hypergraph_plan_dim),
+                    self.cfg.dropout,
+                )
+                if self.cfg.inverse_mode == "layout_flow_with_hypergraph_plan"
+                else None
+            )
+            self.hypergraph_velocity_net = (
+                HypergraphVelocityNet(
+                    int(self.cfg.hypergraph_plan_dim),
+                    self.cfg.target_embed_dim,
+                    self.cfg.behavior_latent_dim,
+                    self.cfg.organization_latent_dim,
+                    int(self.cfg.hypergraph_flow_hidden_dim or self.cfg.hidden_dim),
+                    int(self.cfg.hypergraph_flow_num_layers or self.cfg.num_layers),
+                    self.cfg.dropout,
+                )
+                if self.cfg.inverse_mode == "two_stage_hypergraph_layout_flow"
+                else None
             )
             self.hypergraph_plan_encoder = HypergraphPlanEncoder(
                 int(self.cfg.hypergraph_plan_dim),
@@ -705,6 +779,7 @@ class ThermalInverseDesignFlow(nn.Module):
             )
         else:
             self.hypergraph_planner = None
+            self.hypergraph_velocity_net = None
             self.hypergraph_plan_encoder = None
         self.count_head = (
             MLP(self.cfg.target_embed_dim, self.cfg.hidden_dim, self.cfg.max_num_modules + 1, num_layers=2, dropout=self.cfg.dropout)
@@ -823,6 +898,62 @@ class ThermalInverseDesignFlow(nn.Module):
             condition["organization_latent_hat"],
             condition.get("hypergraph_plan_embedding"),
         )
+
+    def hypergraph_velocity(self, h_t: torch.Tensor, t: torch.Tensor, condition: Mapping[str, torch.Tensor]) -> torch.Tensor:
+        """Velocity for the opt-in stochastic hypergraph-plan flow."""
+
+        if self.hypergraph_velocity_net is None:
+            raise RuntimeError("hypergraph_velocity is only available for two_stage_hypergraph_layout_flow.")
+        return self.hypergraph_velocity_net(
+            h_t,
+            t,
+            condition["target_embedding"],
+            condition["behavior_latent_hat"],
+            condition["organization_latent_hat"],
+        )
+
+    def _encode_hypergraph_condition(self, condition: Dict[str, torch.Tensor], hypergraph_plan: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Attach a hypergraph vector and its embedding to a layout-flow condition."""
+
+        if self.hypergraph_plan_encoder is None:
+            return condition
+        if self.cfg.hypergraph_clamp_output:
+            hypergraph_plan = hypergraph_plan.clamp(0.0, 1.0)
+        condition = dict(condition)
+        condition["hypergraph_plan_hat"] = hypergraph_plan
+        condition["hypergraph_plan_embedding"] = self.hypergraph_plan_encoder(hypergraph_plan)
+        return condition
+
+    @torch.no_grad()
+    def sample_hypergraph_plan(
+        self,
+        condition: Mapping[str, torch.Tensor],
+        *,
+        n_steps: Optional[int] = None,
+        generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        """Sample H_plan for the two-stage hypergraph/layout flow."""
+
+        if self.hypergraph_velocity_net is None or self.cfg.hypergraph_plan_dim is None:
+            raise RuntimeError("sample_hypergraph_plan requires two_stage_hypergraph_layout_flow.")
+        bsz = int(condition["target_embedding"].shape[0])
+        device = condition["target_embedding"].device
+        dtype = condition["target_embedding"].dtype
+        h = torch.randn((bsz, int(self.cfg.hypergraph_plan_dim)), generator=generator, device=device, dtype=dtype) * float(self.cfg.hypergraph_sample_noise_scale)
+        steps = max(int(n_steps or self.cfg.hypergraph_sample_steps), 1)
+        dt = 1.0 / float(steps)
+        solver = str(self.cfg.ode_solver).lower()
+        for step in range(steps):
+            t0 = torch.full((bsz, 1), step / float(steps), device=device, dtype=dtype)
+            v0 = self.hypergraph_velocity(h, t0, condition)
+            if solver == "heun":
+                h_euler = h + dt * v0
+                t1 = torch.full((bsz, 1), (step + 1) / float(steps), device=device, dtype=dtype)
+                v1 = self.hypergraph_velocity(h_euler, t1, condition)
+                h = h + 0.5 * dt * (v0 + v1)
+            else:
+                h = h + dt * v0
+        return h.clamp(0.0, 1.0) if self.cfg.hypergraph_clamp_output else h
 
     def forward(self, x_t: torch.Tensor, t: torch.Tensor, target_spec_vector: torch.Tensor, **condition_kwargs: torch.Tensor) -> Dict[str, torch.Tensor]:
         condition = self.encode_condition(target_spec_vector, **condition_kwargs)
@@ -1020,6 +1151,33 @@ class ThermalInverseDesignFlow(nn.Module):
             heat_condition_vector=batch.get("heat_condition_vector"),
             heat_condition_mask=batch.get("heat_condition_mask"),
         )
+        loss_hypergraph_flow = x1.new_tensor(0.0)
+        if self.cfg.inverse_mode == "two_stage_hypergraph_layout_flow" and batch.get("hypergraph_plan_target") is not None and self.cfg.hypergraph_plan_dim:
+            plan_target_full = batch["hypergraph_plan_target"].to(device=x1.device, dtype=x1.dtype)
+            plan_mask_full = batch.get("hypergraph_plan_mask")
+            if plan_mask_full is None:
+                plan_mask_full = torch.ones_like(plan_target_full)
+            else:
+                plan_mask_full = plan_mask_full.to(device=x1.device, dtype=x1.dtype)
+            dim_h = min(int(self.cfg.hypergraph_plan_dim), plan_target_full.shape[-1], plan_mask_full.shape[-1])
+            if dim_h > 0:
+                plan_target = plan_target_full[:, :dim_h]
+                plan_mask = plan_mask_full[:, :dim_h].clamp(0.0, 1.0)
+                z_h = torch.randn_like(plan_target) * float(self.cfg.hypergraph_sample_noise_scale)
+                t_h = torch.rand(bsz, 1, device=x1.device, dtype=x1.dtype)
+                h_t = (1.0 - t_h) * z_h + t_h * plan_target
+                v_target_h = plan_target - z_h
+                v_hat_h = self.hypergraph_velocity(h_t, t_h, condition)
+                if v_hat_h.shape[-1] != dim_h:
+                    v_hat_h = v_hat_h[:, :dim_h]
+                denom = plan_mask.sum().clamp_min(1.0)
+                loss_hypergraph_flow = ((v_hat_h - v_target_h).square() * plan_mask).sum() / denom
+                use_teacher = torch.rand((), device=x1.device) < float(self.cfg.hypergraph_teacher_forcing_probability)
+                if bool(use_teacher):
+                    h_condition = plan_target_full[:, : int(self.cfg.hypergraph_plan_dim)]
+                else:
+                    h_condition = self.sample_hypergraph_plan(condition).detach()
+                condition = self._encode_hypergraph_condition(condition, h_condition)
         v_pred = self.velocity(x_t, t, condition)
         loss_flow = F.mse_loss(v_pred, v_target)
 
@@ -1104,7 +1262,8 @@ class ThermalInverseDesignFlow(nn.Module):
             weights["flow_weight"] * loss_flow
             + weights["set_center_weight"] * loss_set_center
             + weights["structure_match_weight"] * loss_structure
-            + weights["hypergraph_plan_weight"] * loss_hypergraph_plan
+            + weights["hypergraph_plan_weight"] * float(self.cfg.hypergraph_plan_supervision_weight) * loss_hypergraph_plan
+            + float(self.cfg.hypergraph_flow_loss_weight) * loss_hypergraph_flow
             + weights["count_weight"] * loss_count
             + weights["behavior_align_weight"] * loss_behavior
             + weights["organization_align_weight"] * loss_organization
@@ -1113,6 +1272,7 @@ class ThermalInverseDesignFlow(nn.Module):
         metrics = {
             "loss_total": total.detach(),
             "loss_flow": loss_flow.detach(),
+            "hypergraph_flow_loss": loss_hypergraph_flow.detach(),
             "loss_set_center": loss_set_center.detach(),
             "loss_structure_match": loss_structure.detach(),
             "loss_hypergraph_plan": loss_hypergraph_plan.detach(),
@@ -1214,6 +1374,9 @@ class ThermalInverseDesignFlow(nn.Module):
             heat_condition_vector=heat_vec,
             heat_condition_mask=heat_mask,
         )
+        if self.cfg.inverse_mode == "two_stage_hypergraph_layout_flow":
+            h_sample = self.sample_hypergraph_plan(condition, generator=generator)
+            condition = self._encode_hypergraph_condition(condition, h_sample)
         uncond_condition = None
         if float(guidance_scale) > 1.0:
             uncond_condition = self.encode_condition(
@@ -1226,6 +1389,9 @@ class ThermalInverseDesignFlow(nn.Module):
                 heat_condition_vector=torch.zeros_like(heat_vec) if heat_vec is not None else None,
                 heat_condition_mask=torch.zeros_like(heat_mask) if heat_mask is not None else None,
             )
+            if self.cfg.inverse_mode == "two_stage_hypergraph_layout_flow":
+                uncond_h = self.sample_hypergraph_plan(uncond_condition, generator=generator)
+                uncond_condition = self._encode_hypergraph_condition(uncond_condition, uncond_h)
         steps = max(int(n_steps), 1)
         dt = 1.0 / float(steps)
         solver = str(self.cfg.ode_solver).lower()

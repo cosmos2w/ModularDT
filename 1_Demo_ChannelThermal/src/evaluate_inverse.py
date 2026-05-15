@@ -42,6 +42,13 @@ from thermal_design_intent import (
     is_design_intent_payload,
     normalize_intent_payload,
 )
+from thermal_hypergraph_consistency import (
+    compare_hypergraph_plans,
+    plot_hypergraph_mismatch_heatmap,
+    plot_hypergraph_overlay,
+    summarize_hypergraph_plan,
+    write_edge_table_csv,
+)
 from train_inverse import (
     ThermalInverseDesignDataset,
     build_hypergraph_plan_from_forward_prediction,
@@ -82,6 +89,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calibrate-target-to-data", action="store_true", help="Relax aggressive target bounds to training-distribution quantiles and save the resolved calibrated target.")
     parser.add_argument("--diversity-rerank-weight", type=float, default=0.15, help="MMR-style diversity reranking strength for displayed/saved top candidates.")
     parser.add_argument("--diversity-rerank-top-k", type=int, default=8, help="Number of top candidates to diversity-rerank for plots/NPZ.")
+    parser.add_argument("--hypergraph-diagnostics", dest="hypergraph_diagnostics", action="store_true", default=True, help="Write planned-vs-realized hypergraph diagnostics when a plan is available.")
+    parser.add_argument("--no-hypergraph-diagnostics", dest="hypergraph_diagnostics", action="store_false", help="Disable planned-vs-realized hypergraph diagnostics.")
+    parser.add_argument("--hypergraph-rerank-weight", type=float, default=0.0, help="Add this weight times hypergraph mismatch to candidate score. Default 0 preserves old ranking.")
+    parser.add_argument("--hypergraph-diagnostic-top-k", type=int, default=8, help="Number of ranked candidates with detailed hypergraph artifacts.")
+    parser.add_argument("--hypergraph-edge-matching", type=str, choices=("greedy", "hungarian"), default="greedy", help="Edge matching strategy for hypergraph diagnostics.")
     parser.add_argument("--candidate-pool-multiplier", type=float, default=1.0, help="Sample a larger pool before selecting n-samples candidates.")
     parser.add_argument("--guidance-scale", type=float, default=1.0, help="Conditional/unconditional velocity guidance scale for v2 design-intent sampling.")
     parser.add_argument("--reference-structure-strength", type=float, default=0.7, help="Strength for structure-family conditioning when deriving a target from a reference case.")
@@ -143,10 +155,10 @@ def load_inverse_checkpoint(path: Path, device: torch.device) -> Tuple[ThermalIn
         model_config["inverse_mode"] = "layout_flow_with_hypergraph_plan"
     mode = str(model_config.get("inverse_mode", "layout_flow") or "layout_flow").lower().strip()
     model_config["inverse_mode"] = mode
-    model_config["use_hypergraph_plan"] = mode == "layout_flow_with_hypergraph_plan"
+    model_config["use_hypergraph_plan"] = mode in {"layout_flow_with_hypergraph_plan", "two_stage_hypergraph_layout_flow"}
     wants_plan = model_config["use_hypergraph_plan"]
-    has_plan_weights = any(str(key).startswith("hypergraph_planner.") or str(key).startswith("hypergraph_plan_encoder.") for key in state)
-    if wants_plan and not has_plan_weights:
+    has_plan_weights = any(str(key).startswith("hypergraph_planner.") or str(key).startswith("hypergraph_plan_encoder.") or str(key).startswith("hypergraph_velocity_net.") for key in state)
+    if wants_plan and mode != "two_stage_hypergraph_layout_flow" and not has_plan_weights:
         print("[inverse] checkpoint has no hypergraph planner weights; loading as inverse_mode='layout_flow'.")
         model_config["inverse_mode"] = "layout_flow"
         model_config["use_hypergraph_plan"] = False
@@ -789,6 +801,12 @@ def write_candidates_csv(candidates: Sequence[Mapping[str, Any]], path: Path) ->
         "valid",
         "total_score",
         "kpi_score",
+        "hypergraph_consistency_score",
+        "hypergraph_active_count_error",
+        "hypergraph_source_rmse",
+        "hypergraph_thermal_region_rmse",
+        "hypergraph_A_mh_l1",
+        "hypergraph_strength_mae",
         "constraint_penalty",
         "spread_preference_penalty",
         "min_center_distance",
@@ -1480,6 +1498,109 @@ def plot_hypergraph_plan_comparison(candidate: Mapping[str, Any], record: Any, o
     }
 
 
+def attach_hypergraph_consistency(
+    row: Dict[str, Any],
+    *,
+    planned_vector: Any,
+    prediction: Mapping[str, Any],
+    record: Any,
+    max_num_modules: int,
+    edge_matching: str,
+    rerank_weight: float,
+) -> bool:
+    """Attach planned-vs-realized hypergraph diagnostics to a candidate row."""
+
+    if planned_vector is None:
+        row["hypergraph_diagnostics_available"] = False
+        row["hypergraph_consistency_score"] = 1.0 if float(rerank_weight) > 0.0 else 0.0
+        return False
+    plan_arr = np.asarray(planned_vector, dtype=np.float32).reshape(-1)
+    if plan_arr.size == 0:
+        row["hypergraph_diagnostics_available"] = False
+        row["hypergraph_consistency_score"] = 1.0 if float(rerank_weight) > 0.0 else 0.0
+        return False
+    num_edges = infer_hypergraph_plan_num_edges(plan_arr.size, max_num_modules)
+    if num_edges <= 0:
+        row["hypergraph_diagnostics_available"] = False
+        row["hypergraph_consistency_score"] = 1.0 if float(rerank_weight) > 0.0 else 0.0
+        return False
+    planned = decode_hypergraph_plan_vector(plan_arr, max_num_modules=max_num_modules, num_edges=num_edges)
+    realized_plan = build_hypergraph_plan_from_forward_prediction(
+        prediction,
+        max_num_modules=max_num_modules,
+        domain_length_x=float(record.domain_length_x),
+        domain_length_y=float(record.domain_length_y),
+        num_edges=num_edges,
+    )
+    realized_vec = realized_plan.get("vector")
+    if realized_vec is None or np.asarray(realized_vec).size == 0 or float(np.asarray(realized_plan.get("mask", []), dtype=np.float32).sum()) <= 0.0:
+        row["hypergraph_diagnostics_available"] = False
+        row["hypergraph_consistency_score"] = 1.0 if float(rerank_weight) > 0.0 else 0.0
+        return False
+    realized = decode_hypergraph_plan_vector(realized_vec, max_num_modules=max_num_modules, num_edges=num_edges)
+    comparison = compare_hypergraph_plans(planned, realized, edge_matching=edge_matching)
+    score = float(comparison.get("total", 0.0) or 0.0)
+    row["planned_hypergraph"] = json_safe({"decoded": planned, "summary": summarize_hypergraph_plan(planned)})
+    row["realized_hypergraph"] = json_safe({"decoded": realized, "summary": summarize_hypergraph_plan(realized)})
+    row["hypergraph_consistency"] = json_safe(comparison)
+    row["hypergraph_consistency_score"] = score
+    row["hypergraph_diagnostics_available"] = True
+    row["hypergraph_active_count_error"] = float(comparison.get("active_count_error", 0.0) or 0.0)
+    row["hypergraph_source_rmse"] = float(comparison.get("source_rmse", 0.0) or 0.0)
+    row["hypergraph_thermal_region_rmse"] = float(comparison.get("thermal_region_rmse", 0.0) or 0.0)
+    row["hypergraph_A_mh_l1"] = float(comparison.get("A_mh_l1", 0.0) or 0.0)
+    row["hypergraph_strength_mae"] = float(comparison.get("strength_mae", 0.0) or 0.0)
+    return True
+
+
+def write_hypergraph_candidate_artifacts(candidates: Sequence[Mapping[str, Any]], record: Any, out_dirs: Mapping[str, Path], *, top_k: int) -> None:
+    """Write per-candidate planned/realized/mismatch hypergraph artifacts."""
+
+    for row in list(candidates)[: max(int(top_k), 0)]:
+        if not row.get("hypergraph_diagnostics_available"):
+            continue
+        rank = int(row.get("rank", row.get("raw_score_rank", 0)))
+        prefix = f"candidate_{rank:03d}_hypergraph"
+        planned = row.get("planned_hypergraph", {})
+        realized = row.get("realized_hypergraph", {})
+        mismatch = row.get("hypergraph_consistency", {})
+        planned_decoded = planned.get("decoded", planned) if isinstance(planned, Mapping) else {}
+        realized_decoded = realized.get("decoded", realized) if isinstance(realized, Mapping) else {}
+        planned_path = out_dirs["data"] / f"{prefix}_planned.json"
+        realized_path = out_dirs["data"] / f"{prefix}_realized.json"
+        mismatch_path = out_dirs["data"] / f"{prefix}_mismatch.json"
+        edge_path = out_dirs["data"] / f"{prefix}_edge_table.csv"
+        overlay_path = out_dirs["diagnostics"] / f"{prefix}_overlay.png"
+        heatmap_path = out_dirs["diagnostics"] / f"{prefix}_mismatch_heatmap.png"
+        write_json(planned_path, json_safe(planned))
+        write_json(realized_path, json_safe(realized))
+        write_json(mismatch_path, json_safe(mismatch))
+        write_edge_table_csv(mismatch.get("edge_table", []) if isinstance(mismatch, Mapping) else [], edge_path)
+        plot_hypergraph_overlay(
+            planned_decoded,
+            realized_decoded,
+            mismatch if isinstance(mismatch, Mapping) else {},
+            centers=row.get("centers", []),
+            domain_length_x=float(record.domain_length_x),
+            domain_length_y=float(record.domain_length_y),
+            module_radius=float(record.module_radius),
+            out_path=overlay_path,
+        )
+        plot_hypergraph_mismatch_heatmap(mismatch if isinstance(mismatch, Mapping) else {}, heatmap_path)
+        if isinstance(row, dict):
+            artifacts = dict(row.get("artifacts", {}) or {})
+            for key, path in {
+                "hypergraph_planned": planned_path,
+                "hypergraph_realized": realized_path,
+                "hypergraph_mismatch": mismatch_path,
+                "hypergraph_edge_table": edge_path,
+                "hypergraph_overlay": overlay_path,
+                "hypergraph_mismatch_heatmap": heatmap_path,
+            }.items():
+                artifacts[key] = path.as_posix()
+            row["artifacts"] = artifacts
+
+
 def save_top_npz(candidates: Sequence[Mapping[str, Any]], path: Path, *, top_k: int = 16, max_num_modules: int = 12) -> None:
     top = list(candidates[: min(top_k, len(candidates))])
     centers = np.zeros((len(top), max_num_modules, 2), dtype=np.float32)
@@ -1690,6 +1811,7 @@ def main() -> int:
         device=device,
     )
     candidates: List[Dict[str, Any]] = []
+    hypergraph_missing_warned = False
     for sample_idx, raw_cand in enumerate(tqdm(sampled, desc="verify", unit="candidate", dynamic_ncols=True)):
         cand = apply_preferences_to_candidate(raw_cand, record, target_spec)
         prediction = predict_candidate_with_forward(
@@ -1738,6 +1860,22 @@ def main() -> int:
             "preference_reward": float(score.get("preference_reward", 0.0)),
             "prediction": prediction,
         }
+        diagnostics_available = False
+        if bool(args.hypergraph_diagnostics) or float(args.hypergraph_rerank_weight) > 0.0:
+            diagnostics_available = attach_hypergraph_consistency(
+                row,
+                planned_vector=cand.get("hypergraph_plan_hat"),
+                prediction=prediction,
+                record=record,
+                max_num_modules=inverse_model.max_num_modules,
+                edge_matching=str(args.hypergraph_edge_matching),
+                rerank_weight=float(args.hypergraph_rerank_weight),
+            )
+            if not diagnostics_available and not hypergraph_missing_warned:
+                print("[hypergraph] planned or realized hypergraph unavailable; diagnostics will be skipped for affected candidates.")
+                hypergraph_missing_warned = True
+            if float(args.hypergraph_rerank_weight) > 0.0:
+                row["total_score"] = float(row["total_score"]) + float(args.hypergraph_rerank_weight) * float(row.get("hypergraph_consistency_score", 1.0))
         if "hypergraph_plan_hat" in cand:
             row["hypergraph_plan_hat"] = np.asarray(cand["hypergraph_plan_hat"], dtype=np.float32)
             row["decoded_hypergraph_plan_summary"] = json_safe(
@@ -1764,6 +1902,8 @@ def main() -> int:
     for row in ranked_candidates:
         row["rank"] = int(row.get("diversity_rank", row.get("raw_score_rank", 0)))
     candidates_for_outputs = ranked_candidates[: min(n_samples, len(ranked_candidates))]
+    if bool(args.hypergraph_diagnostics):
+        write_hypergraph_candidate_artifacts(candidates_for_outputs, record, out_dirs, top_k=int(args.hypergraph_diagnostic_top_k))
 
     serializable = []
     for row in candidates:
@@ -1801,6 +1941,10 @@ def main() -> int:
         "structure_weight": float(target_spec.get("structure_strength", 0.0)),
         "diversity_rerank_weight": float(args.diversity_rerank_weight),
         "diversity_rerank_top_k": int(args.diversity_rerank_top_k),
+        "hypergraph_rerank_weight": float(args.hypergraph_rerank_weight),
+        "mean_hypergraph_consistency_score": float(np.mean([float(c.get("hypergraph_consistency_score", np.nan)) for c in candidates if c.get("hypergraph_diagnostics_available")])) if any(c.get("hypergraph_diagnostics_available") for c in candidates) else None,
+        "best_hypergraph_consistency_score": float(best.get("hypergraph_consistency_score")) if best and best.get("hypergraph_consistency_score") is not None else None,
+        "hypergraph_diagnostics_available_count": int(sum(1 for c in candidates if c.get("hypergraph_diagnostics_available"))),
         "best_preference_penalties": best.get("score_detail", {}).get("per_preference_penalties", {}) if best else {},
         "best_design_intent_score_breakdown": best.get("design_intent_score_detail", {}) if best else {},
         "target_feasibility_warnings": feasibility_report.get("warnings", []),

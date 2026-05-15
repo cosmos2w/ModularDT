@@ -1061,6 +1061,39 @@ function CandidateMiniLayout({ candidate, heatLoads, config }: { candidate: Inve
   );
 }
 
+function HypergraphDiagnostics({ candidate }: { candidate: InverseCandidate }) {
+  const artifacts = candidate.artifacts ?? {};
+  const links: Array<[string, string | undefined]> = [
+    ["Overlay", artifacts.hypergraph_overlay],
+    ["Mismatch heatmap", artifacts.hypergraph_mismatch_heatmap],
+    ["Edge table", artifacts.hypergraph_edge_table],
+    ["Planned JSON", artifacts.hypergraph_planned],
+    ["Realized JSON", artifacts.hypergraph_realized],
+  ];
+  const availableLinks = links.filter((item): item is [string, string] => Boolean(item[1]));
+  if (!candidate.hypergraph_diagnostics_available && !availableLinks.length) return null;
+  return (
+    <details className="hypergraph-diagnostics">
+      <summary>Hypergraph diagnostics</summary>
+      <div className="hypergraph-metrics">
+        <span>consistency {formatNumber(candidate.hypergraph_consistency_score, 3)}</span>
+        <span>active edge error {formatNumber(candidate.hypergraph_active_count_error, 3)}</span>
+        <span>source RMSE {formatNumber(candidate.hypergraph_source_rmse, 3)}</span>
+        <span>thermal RMSE {formatNumber(candidate.hypergraph_thermal_region_rmse, 3)}</span>
+        <span>A_mh L1 {formatNumber(candidate.hypergraph_A_mh_l1, 3)}</span>
+      </div>
+      {availableLinks.length > 0 && (
+        <div className="hypergraph-links">
+          {availableLinks.map(([label, url]) => (
+            <a key={label} href={apiUrl(url)} target="_blank" rel="noreferrer">{label}</a>
+          ))}
+        </div>
+      )}
+      {artifacts.hypergraph_overlay && <img className="hypergraph-thumb" src={apiUrl(artifacts.hypergraph_overlay)} alt="hypergraph overlay" />}
+    </details>
+  );
+}
+
 function CandidateGallery({
   inverseResult,
   heatLoads,
@@ -1096,6 +1129,7 @@ function CandidateGallery({
                 <button type="button" onClick={() => onUse(candidate)}><Flame size={15} /> Use in forward</button>
                 {candidate.artifacts?.preview && <a className="button-link" href={apiUrl(candidate.artifacts.preview)} target="_blank" rel="noreferrer">View details</a>}
               </div>
+              <HypergraphDiagnostics candidate={candidate} />
             </article>
           );
         })

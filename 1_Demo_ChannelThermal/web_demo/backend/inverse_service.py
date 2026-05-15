@@ -385,6 +385,11 @@ class InverseService:
             path.relative_to(out_dir).with_suffix("").as_posix().replace("/", "_"): _file_url(job_id, job_dir, path)
             for path in sorted(out_dir.rglob("*.png"))
         }
+        for path in sorted(out_dir.rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in {".json", ".csv", ".png"}:
+                continue
+            if any(token in path.name for token in ("hypergraph_planned", "hypergraph_realized", "hypergraph_mismatch", "hypergraph_overlay", "hypergraph_edge_table")):
+                artifacts[path.relative_to(out_dir).with_suffix("").as_posix().replace("/", "_")] = _file_url(job_id, job_dir, path)
         for rel in (
             "candidates.csv",
             "kpi_scores.csv",
@@ -472,11 +477,24 @@ class InverseService:
             if heat_values is not None and not any(abs(float(value)) > 1.0e-8 for value in heat_values):
                 heat_values = None
             artifacts = dict(raw.get("artifacts", {}) or {})
+            rank = int(raw.get("rank", fallback_rank))
+            prefix = f"candidate_{rank:03d}_hypergraph"
+            for key, rel in {
+                "hypergraph_planned": f"data/{prefix}_planned.json",
+                "hypergraph_realized": f"data/{prefix}_realized.json",
+                "hypergraph_mismatch": f"data/{prefix}_mismatch.json",
+                "hypergraph_edge_table": f"data/{prefix}_edge_table.csv",
+                "hypergraph_overlay": f"plots/diagnostics/{prefix}_overlay.png",
+                "hypergraph_mismatch_heatmap": f"plots/diagnostics/{prefix}_mismatch_heatmap.png",
+            }.items():
+                url = _file_url(job_id, job_dir, out_dir / rel)
+                if url:
+                    artifacts[key] = url
             if preview_url:
                 artifacts.setdefault("preview", preview_url)
             normalized.append(
                 {
-                    "rank": int(raw.get("rank", fallback_rank)),
+                    "rank": rank,
                     "sample_index": int(raw.get("sample_index", fallback_rank)),
                     "count": count,
                     "centers": centers[:count].tolist(),
@@ -486,6 +504,12 @@ class InverseService:
                     "total_score": _parse_number(raw.get("total_score")) or 0.0,
                     "design_intent_score": _parse_number(raw.get("design_intent_score")),
                     "kpi_score": _parse_number(raw.get("kpi_score", raw.get("legacy_total_score"))),
+                    "hypergraph_consistency_score": _parse_number(raw.get("hypergraph_consistency_score")),
+                    "hypergraph_diagnostics_available": bool(raw.get("hypergraph_diagnostics_available", False)),
+                    "hypergraph_active_count_error": _parse_number(raw.get("hypergraph_active_count_error")),
+                    "hypergraph_source_rmse": _parse_number(raw.get("hypergraph_source_rmse")),
+                    "hypergraph_thermal_region_rmse": _parse_number(raw.get("hypergraph_thermal_region_rmse")),
+                    "hypergraph_A_mh_l1": _parse_number(raw.get("hypergraph_A_mh_l1")),
                     "verified_kpis": dict(raw.get("verified_kpis", {}) or {}),
                     "score_detail": dict(raw.get("score_detail", {}) or {}),
                     "design_intent_score_detail": dict(raw.get("design_intent_score_detail", {}) or {}),
@@ -526,6 +550,12 @@ class InverseService:
                         "total_score": float(row.get("total_score", scores_arr[idx] if idx < scores_arr.shape[0] else 0.0) or 0.0),
                         "design_intent_score": row.get("design_intent_score"),
                         "kpi_score": row.get("kpi_score"),
+                        "hypergraph_consistency_score": _parse_number(row.get("hypergraph_consistency_score")),
+                        "hypergraph_diagnostics_available": row.get("hypergraph_consistency_score") not in (None, ""),
+                        "hypergraph_active_count_error": _parse_number(row.get("hypergraph_active_count_error")),
+                        "hypergraph_source_rmse": _parse_number(row.get("hypergraph_source_rmse")),
+                        "hypergraph_thermal_region_rmse": _parse_number(row.get("hypergraph_thermal_region_rmse")),
+                        "hypergraph_A_mh_l1": _parse_number(row.get("hypergraph_A_mh_l1")),
                         "verified_kpis": {key: value for key, value in score_row.items() if key not in {"rank", "sample_index", "total_score"}},
                         "score_detail": {},
                         "artifacts": {},
@@ -546,6 +576,12 @@ class InverseService:
                         "total_score": float(row.get("total_score", 0.0) or 0.0),
                         "design_intent_score": row.get("design_intent_score"),
                         "kpi_score": row.get("kpi_score"),
+                        "hypergraph_consistency_score": _parse_number(row.get("hypergraph_consistency_score")),
+                        "hypergraph_diagnostics_available": row.get("hypergraph_consistency_score") not in (None, ""),
+                        "hypergraph_active_count_error": _parse_number(row.get("hypergraph_active_count_error")),
+                        "hypergraph_source_rmse": _parse_number(row.get("hypergraph_source_rmse")),
+                        "hypergraph_thermal_region_rmse": _parse_number(row.get("hypergraph_thermal_region_rmse")),
+                        "hypergraph_A_mh_l1": _parse_number(row.get("hypergraph_A_mh_l1")),
                         "verified_kpis": {key: value for key, value in score_row.items() if key not in {"rank", "sample_index", "total_score"}},
                         "score_detail": {},
                         "artifacts": {},

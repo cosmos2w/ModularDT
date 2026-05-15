@@ -380,6 +380,12 @@ export interface InverseCandidate {
   design_intent_score?: number | null;
   kpi_score: number;
   constraint_penalty: number;
+  hypergraph_consistency_score?: number | null;
+  hypergraph_diagnostics_available?: boolean;
+  hypergraph_active_count_error?: number | null;
+  hypergraph_source_rmse?: number | null;
+  hypergraph_thermal_region_rmse?: number | null;
+  hypergraph_A_mh_l1?: number | null;
   verified_kpis: Record<string, unknown>;
   score_detail: Record<string, unknown>;
   design_intent_score_detail?: Record<string, unknown>;

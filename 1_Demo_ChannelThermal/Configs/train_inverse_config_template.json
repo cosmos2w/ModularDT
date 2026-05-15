@@ -155,13 +155,38 @@
     "replay_top_k": 2,
     "replay_weight": 0.2
   },
+  "hypergraph_realization_consistency": {
+    "enabled": false,
+    "mode": "periodic_replay",
+    "start_epoch": 5,
+    "every_n_epochs": 5,
+    "num_reference_batches": 2,
+    "num_candidates_per_target": 4,
+    "top_k_per_round": 16,
+    "replay_buffer_size": 512,
+    "replay_batch_size": 16,
+    "replay_steps_per_epoch": 1,
+    "replay_loss_weight": 0.25,
+    "hypergraph_consistency_weight": 1.0,
+    "kpi_score_weight": 1.0,
+    "edge_matching": "greedy"
+  },
   "inverse_model": {
     "inverse_mode": "layout_flow",
-    "_notes":"Select in layout_flow or layout_flow_with_hypergraph_plan",
+    "_notes":"Select one of: layout_flow, layout_flow_with_hypergraph_plan, two_stage_hypergraph_layout_flow. The new two-stage hypergraph/layout flow is opt-in.",
     
     "hypergraph_plan_dim": "auto",
     "hypergraph_plan_embed_dim": 128,
     "hypergraph_plan_conditioning": "concat",
+    "hypergraph_flow_hidden_dim": null,
+    "hypergraph_flow_num_layers": null,
+    "hypergraph_flow_loss_weight": 1.0,
+    "hypergraph_plan_supervision_weight": 1.0,
+    "hypergraph_teacher_forcing_probability": 1.0,
+    "hypergraph_sample_steps": 4,
+    "hypergraph_sample_noise_scale": 1.0,
+    "hypergraph_clamp_output": true,
+    "hypergraph_realization_replay_enabled": false,
     "target_dim": "auto",
     "design_dim": "auto",
     "max_num_modules": "auto",
@@ -230,7 +255,11 @@
     "demo_forward_verify_num_samples": 4,
     "demo_forward_verify_n_steps": 4,
     "demo_forward_verify_count_mode": "uniform",
-    "best_metric_name": "val_design_intent_score_battery_balanced_pack_intent"
+    "best_metric_name": "val_design_intent_score_battery_balanced_pack_intent",
+    "hypergraph_diagnostics": true,
+    "hypergraph_rerank_weight": 0.0,
+    "hypergraph_diagnostic_top_k": 8,
+    "hypergraph_edge_matching": "greedy"
   },
   "paths": {
     "saved_inverse_root": "./Saved_Model_Inverse",
