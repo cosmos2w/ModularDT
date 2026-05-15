@@ -1,7 +1,7 @@
 Demo 1 Channel Thermal Forward Model
 ====================================
 
-Updated: 2026-05-03
+Updated: 2026-05-14
 
 Stage A: local module surrogate
 -------------------------------
@@ -93,6 +93,18 @@ The global simulator that produces these targets is lightweight and
 approximate. The flow is analytic/diagnostic, not a full Navier-Stokes solve.
 It records flow diagnostics and can optionally run a simple projection cleanup,
 but projection is disabled by default.
+
+Layout sampling supports:
+
+  random
+  tandem
+  staggered
+  mixed
+
+The mixed mode samples tandem and staggered cases with configurable fractions.
+Tandem places modules downstream with small lateral offsets; staggered
+alternates lateral offsets. These layouts deliberately exercise
+module-behind-module thermal plume coupling.
 
 Temperature is advanced dynamically with explicit substeps until convergence or
 the configured maximum solve time. The preprocessor now packs steady targets
@@ -292,6 +304,17 @@ module_response_latent are inserted into the global model. The first training
 default is teacher-forced port conditions so Stage B can learn a stable global
 organizer before relying on its own port predictions.
 
+The local_module_params summary columns h_mean, h_std, T_env_mean, and
+T_env_std can be refreshed from the actual port tokens used in the current
+forward pass:
+
+  update_local_module_params_from_ports(base_module_params, local_ports,
+                                        module_present)
+
+This is enabled by default with local_module_params_from_used_ports=true. It
+prevents teacher-derived interface statistics from leaking into predicted or
+web-demo inference.
+
 The previous Stage-B local-surrogate path could produce nearly flat or badly
 scaled q_normal because pure physics_from_port made the plotted Pred flux equal
 the plotted physics curve by design, because h_effective supervision can be
@@ -327,6 +350,21 @@ For each module, the local branch also summarizes the selected response as:
 Those six numbers are projected and fused into the module token alongside
 module_response_latent. The organizer therefore sees explicit thermal-response
 information without becoming a complex generator.
+
+Port/global consistency samples points just outside the module surface:
+
+  x = cx + (R + offset) cos(theta)
+  y = cy + (R + offset) sin(theta)
+
+The decoder predicts physical global temperature at those points and compares
+it with predicted port T_env. The loss is weighted in predicted mode, scaled in
+mixed mode, and diagnostic-only by default in teacher mode.
+
+If interaction_refinement_steps=1, Stage B performs one extra coupling pass:
+initial ports -> local surrogate -> fused module state -> outside global
+temperature samples -> PortRefinementHead residual delta_T_env and delta_log_h
+-> second local surrogate call -> final global decode. The default is 0 for
+backward compatibility.
 
 The recommended curriculum is teacher -> mixed -> predicted:
 
@@ -367,6 +405,7 @@ Stage B losses:
   schedule-weighted internal module temperature MSE over valid module disk points
   schedule-weighted interface loss over [T_surface, q_normal]
   port T_env loss plus log-space h_effective SmoothL1 with validity mask
+  port/global outside-temperature consistency for predicted ports
   weak A_me KL to the channel thermal module-environment prior
   A_eh factor KL from A_me_for_target and A_mh
   module/environment hyperedge mass alignment
@@ -418,9 +457,9 @@ evaluate.py supports:
   --local-port-condition-mode mixed
   --local-port-condition-mode both
 
-The default both mode writes teacher and predicted quicklooks and metrics in
-one evaluation_summary.json. The predicted metrics are the fair autonomous
-forward-model numbers for design inference.
+The default evaluation mode is predicted. Use both mode to write teacher and
+predicted quicklooks and metrics in one evaluation_summary.json. The predicted
+metrics are the fair autonomous forward-model numbers for design inference.
 
 The global neural field is an environment/channel field, not a solid-interior
 flow predictor. Evaluation therefore masks module interiors for u, v, p, omega,

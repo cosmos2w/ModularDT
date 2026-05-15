@@ -60,6 +60,9 @@
   "layout": {
     "num_modules": 2,
     "seed": 1,
+    "layout_mode": "mixed",
+    "tandem_fraction": 0.25,
+    "staggered_fraction": 0.25,
     "centers": null,
     "heat_powers": null
   },

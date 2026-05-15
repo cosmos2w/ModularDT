@@ -1,6 +1,6 @@
 # Demo 1: Channel Thermal Modular Design
 
-Updated: 2026-05-03
+Updated: 2026-05-14
 
 ## Purpose
 
@@ -55,6 +55,13 @@ nonperiodic analytic/diagnostic channel flow approximation with:
 - wake deficits around circular modules
 - pressure drop and local pressure perturbations
 - vorticity computed from the velocity field
+
+`layout.layout_mode` can be `random`, `tandem`, `staggered`, or `mixed`.
+`mixed` is the default and samples tandem and staggered cases with
+`tandem_fraction` and `staggered_fraction`. Tandem layouts place modules
+downstream of one another with small lateral offsets; staggered layouts
+alternate the lateral offset. This makes module-behind-module plume failures
+visible in generated Stage-B data instead of relying on rare random layouts.
 
 The flow field is saved with diagnostics such as max/mean divergence,
 wall/module no-slip error, inlet profile error, and outlet pressure mean. An
@@ -565,9 +572,9 @@ forward-design mode: at inference time the model must generate its own local
 port conditions before calling the local surrogate. The default checkpoint
 selector is now `best_predicted`, which resolves to `best_predicted_model.pt`
 when present and is the recommended autonomous/design-inference checkpoint.
-The default mode `both` writes teacher and predicted quicklooks/metrics side by
-side; use `--local-port-condition-mode predicted` for the real autonomous
-combined model.
+The default evaluation mode is `predicted`, the real autonomous combined model.
+Use `--local-port-condition-mode both` when you want teacher and predicted
+quicklooks/metrics side by side for diagnosis.
 
 The global neural field represents the environment/channel field, not arbitrary
 values inside solid modules. Evaluation therefore masks module interiors for
@@ -708,6 +715,20 @@ surrogate before fully predicted mode, comparing predicted internal
 temperature and interface response against targets. Evaluation reports
 `port_T_env_mae`, `port_log_h_mae`, and teacher-vs-predicted interface/internal
 MSE gaps so the teacher-forced and autonomous paths are easy to interpret.
+
+With `local_module_params_from_used_ports=true`, Stage B refreshes the local
+module parameter summary columns from the actual teacher, mixed, or predicted
+port tokens used in that forward pass. This keeps mean/std `h` and `T_env`
+consistent during predicted and web-demo inference, where solved teacher
+interface statistics are unavailable.
+
+Stage B also decodes the global temperature just outside valid module surfaces
+and compares it with predicted port `T_env` through
+`loss_port_global_consistency`. The loss is active in predicted mode, scaled by
+the predicted fraction in mixed mode, and logged only by default in teacher
+mode. `interaction_refinement_steps=1` enables one extra residual port update
+from module state, current ports, outside global temperature, and local response
+summary before the final local-surrogate call and decode.
 
 ## Forward Model Files
 

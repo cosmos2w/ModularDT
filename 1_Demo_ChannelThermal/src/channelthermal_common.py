@@ -115,6 +115,9 @@ class LayoutConfig:
 
     num_modules: int = 4
     seed: int = 1
+    layout_mode: str = "mixed"
+    tandem_fraction: float = 0.25
+    staggered_fraction: float = 0.25
     centers: Optional[List[List[float]]] = None
     heat_powers: Optional[List[float]] = None
 
@@ -197,6 +200,13 @@ class SimulationConfig:
             self.layout.num_modules = len(self.layout.centers)
         if self.layout.num_modules < 0:
             raise ValueError("layout.num_modules must be non-negative.")
+        self.layout.layout_mode = str(self.layout.layout_mode).lower().strip()
+        if self.layout.layout_mode not in {"random", "tandem", "staggered", "mixed"}:
+            raise ValueError("layout.layout_mode must be one of 'random', 'tandem', 'staggered', or 'mixed'.")
+        if self.layout.tandem_fraction < 0.0 or self.layout.staggered_fraction < 0.0:
+            raise ValueError("layout tandem/staggered fractions must be non-negative.")
+        if self.layout.tandem_fraction + self.layout.staggered_fraction > 1.0:
+            raise ValueError("layout.tandem_fraction + layout.staggered_fraction must be <= 1.")
         if self.layout.heat_powers is not None and len(self.layout.heat_powers) != int(self.layout.num_modules):
             raise ValueError("layout.heat_powers length must match layout.num_modules.")
         if self.thermal.heat_power_min > self.thermal.heat_power_max:
@@ -454,17 +464,29 @@ def derive_runtime(config: SimulationConfig) -> Dict[str, Any]:
 # ----------------------------- Layout / design helpers ---------------------------
 
 
-def sample_module_centers(config: SimulationConfig) -> List[List[float]]:
-    """Sample non-overlapping circular modules in a nonperiodic channel."""
-    rng = np.random.default_rng(int(config.layout.seed))
+def _layout_bounds(config: SimulationConfig) -> Tuple[float, float, float, float, float]:
     r = float(config.domain.module_radius)
-    min_center_dist = 2.0 * r + float(config.domain.min_gap)
     xmin = float(config.domain.inlet_margin) + r
     xmax = float(config.domain.lx) - float(config.domain.outlet_margin) - r
     ymin = float(config.domain.wall_margin) + r
     ymax = float(config.domain.ly) - float(config.domain.wall_margin) - r
     if xmin >= xmax or ymin >= ymax:
         raise ValueError("Domain is too small for the requested module radius and margins.")
+    min_center_dist = 2.0 * r + float(config.domain.min_gap)
+    return xmin, xmax, ymin, ymax, min_center_dist
+
+
+def _valid_nonoverlap(centers: Sequence[Sequence[float]], min_center_dist: float) -> bool:
+    for idx, (cx, cy) in enumerate(centers):
+        for ox, oy in centers[:idx]:
+            if float(np.hypot(float(cx) - float(ox), float(cy) - float(oy))) < min_center_dist:
+                return False
+    return True
+
+
+def _sample_random_module_centers(config: SimulationConfig, rng: np.random.Generator) -> List[List[float]]:
+    """Sample non-overlapping circular modules in a nonperiodic channel."""
+    xmin, xmax, ymin, ymax, min_center_dist = _layout_bounds(config)
 
     centers: List[List[float]] = []
     attempts = 0
@@ -477,6 +499,63 @@ def sample_module_centers(config: SimulationConfig) -> List[List[float]]:
         if all(float(np.hypot(candidate[0] - cx, candidate[1] - cy)) >= min_center_dist for cx, cy in centers):
             centers.append(candidate.tolist())
     return centers
+
+
+def _sample_ordered_module_centers(config: SimulationConfig, rng: np.random.Generator, *, staggered: bool) -> List[List[float]]:
+    num_modules = int(config.layout.num_modules)
+    if num_modules <= 0:
+        return []
+    xmin, xmax, ymin, ymax, min_center_dist = _layout_bounds(config)
+    y_span = ymax - ymin
+    x_span = xmax - xmin
+    base_y = float(rng.uniform(ymin + 0.2 * y_span, ymax - 0.2 * y_span)) if y_span > 0.0 else ymin
+    max_jitter_x = 0.08 * x_span / max(num_modules - 1, 1)
+    max_jitter_y = min(0.35 * min_center_dist, 0.18 * y_span) if y_span > 0.0 else 0.0
+    stagger_offset = min(0.55 * min_center_dist, 0.35 * y_span) if y_span > 0.0 else 0.0
+    for _attempt in range(2000):
+        xs = np.linspace(xmin, xmax, num_modules, dtype=float)
+        if num_modules > 2 and max_jitter_x > 0.0:
+            xs[1:-1] += rng.uniform(-max_jitter_x, max_jitter_x, size=num_modules - 2)
+        ys = np.full(num_modules, base_y, dtype=float)
+        if staggered:
+            signs = np.where(np.arange(num_modules) % 2 == 0, -1.0, 1.0)
+            ys += signs * stagger_offset
+            ys += rng.uniform(-0.15 * max(stagger_offset, max_jitter_y), 0.15 * max(stagger_offset, max_jitter_y), size=num_modules)
+        elif max_jitter_y > 0.0:
+            ys += rng.uniform(-max_jitter_y, max_jitter_y, size=num_modules)
+        ys = np.clip(ys, ymin, ymax)
+        centers = [[float(x), float(y)] for x, y in zip(xs, ys)]
+        if _valid_nonoverlap(centers, min_center_dist):
+            return centers
+        base_y = float(rng.uniform(ymin, ymax))
+        max_jitter_y = min(0.75 * min_center_dist, 0.35 * y_span) if y_span > 0.0 else 0.0
+        stagger_offset = min(0.85 * min_center_dist, 0.45 * y_span) if y_span > 0.0 else 0.0
+    return _sample_random_module_centers(config, rng)
+
+
+def _resolve_layout_mode(config: SimulationConfig, rng: np.random.Generator) -> str:
+    mode = str(config.layout.layout_mode).lower().strip()
+    if mode != "mixed":
+        return mode
+    tandem = float(config.layout.tandem_fraction)
+    staggered = float(config.layout.staggered_fraction)
+    choice = float(rng.uniform())
+    if choice < tandem:
+        return "tandem"
+    if choice < tandem + staggered:
+        return "staggered"
+    return "random"
+
+
+def sample_module_centers(config: SimulationConfig) -> List[List[float]]:
+    """Sample non-overlapping modules with random, tandem, staggered, or mixed layout modes."""
+    rng = np.random.default_rng(int(config.layout.seed))
+    mode = _resolve_layout_mode(config, rng)
+    if mode == "tandem":
+        return _sample_ordered_module_centers(config, rng, staggered=False)
+    if mode == "staggered":
+        return _sample_ordered_module_centers(config, rng, staggered=True)
+    return _sample_random_module_centers(config, rng)
 
 
 def sample_heat_powers(config: SimulationConfig) -> List[float]:

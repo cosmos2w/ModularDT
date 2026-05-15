@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--local-port-condition-mode",
         choices=["teacher", "predicted", "mixed", "both"],
-        default="both",
+        default="predicted",
         help="Evaluate teacher-forced, model-predicted, mixed, or both teacher and predicted port conditions.",
     )
     parser.add_argument("--mixed-teacher-ratio", type=float, default=0.5, help="Teacher-token ratio for mixed port evaluation.")

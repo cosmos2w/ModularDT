@@ -54,6 +54,7 @@ RE_OPTIONS = [80.0, 100.0, 140]
 
 HEAT_POWER_RANGE = (0.5, 2.0)
 REPEATS_PER_COMBINATION = 5
+LAYOUT_MODE_SEQUENCE = ["mixed", "tandem", "staggered", "random"]
 
 ENABLE_CPU = False
 CPU_CONCURRENT_SLOTS = 2
@@ -76,6 +77,7 @@ class BatchJob:
     re_value: float
     replicate_idx: int
     layout_seed: int
+    layout_mode: str
     config_path: Path
     config_arg: str
     log_path: Path
@@ -151,11 +153,13 @@ def build_job_config(
     num_modules: int,
     re_value: float,
     layout_seed: int,
+    layout_mode: str,
 ) -> SimulationConfig:
     """Clone the template config and materialize one randomized layout."""
     cfg = config_from_dict(dataclass_to_dict(template))
     cfg.layout.num_modules = int(num_modules)
     cfg.layout.seed = int(layout_seed)
+    cfg.layout.layout_mode = str(layout_mode)
     cfg.layout.centers = None
     cfg.layout.heat_powers = None
     cfg.flow.re = float(re_value)
@@ -182,12 +186,14 @@ def create_jobs() -> List[BatchJob]:
         for re_value in RE_OPTIONS:
             for replicate_idx in range(REPEATS_PER_COMBINATION):
                 case_id = build_case_id(next_case_number)
+                layout_mode = LAYOUT_MODE_SEQUENCE[replicate_idx % len(LAYOUT_MODE_SEQUENCE)]
                 cfg = build_job_config(
                     template,
                     case_id=case_id,
                     num_modules=num_modules,
                     re_value=re_value,
                     layout_seed=layout_seed,
+                    layout_mode=layout_mode,
                 )
                 config_name = f"{GENERATED_CONFIG_PREFIX}_{case_id}.json"
                 config_path = config_dir / config_name
@@ -200,6 +206,7 @@ def create_jobs() -> List[BatchJob]:
                         re_value=re_value,
                         replicate_idx=replicate_idx,
                         layout_seed=layout_seed,
+                        layout_mode=layout_mode,
                         config_path=config_path,
                         config_arg=config_arg,
                         log_path=log_dir / f"case_{case_id}.log",
@@ -288,7 +295,7 @@ def main() -> int:
                     tqdm.write(
                         "Launched case: "
                         f"case_id={job.case_id}, N={job.num_modules}, Re={job.re_value}, "
-                        f"seed={job.layout_seed}, slot={slot.slot_name}"
+                        f"layout={job.layout_mode}, seed={job.layout_seed}, slot={slot.slot_name}"
                     )
 
                 finished_slots: List[str] = []

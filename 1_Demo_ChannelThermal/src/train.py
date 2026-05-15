@@ -710,6 +710,8 @@ def compute_losses(
     batch: Dict[str, Any],
     loss_cfg: Dict[str, Any],
     *,
+    local_port_condition_mode: str,
+    mixed_teacher_ratio: float,
     effective_internal_temperature_weight: float,
     effective_interface_weight: float,
     organizer_weight_scale: float,
@@ -766,6 +768,25 @@ def compute_losses(
         module_present,
         batch.get("interface_condition_valid_mask"),
     )
+    if "pred_port_global_temperature" in outputs and "pred_port_global_temperature_target" in outputs:
+        losses["loss_port_global_consistency"] = masked_mse(
+            outputs["pred_port_global_temperature"][..., None],
+            outputs["pred_port_global_temperature_target"][..., None],
+            outputs.get("pred_port_global_consistency_mask"),
+        )
+    else:
+        losses["loss_port_global_consistency"] = outputs["pred_field"].new_tensor(0.0)
+    mode = str(local_port_condition_mode).lower()
+    if mode == "teacher":
+        port_global_weight = float(loss_cfg.get("port_global_consistency_teacher_weight", 0.0))
+    elif mode == "mixed":
+        port_global_weight = float(loss_cfg.get("port_global_consistency_weight", 0.10)) * max(
+            0.0,
+            1.0 - float(mixed_teacher_ratio),
+        )
+    else:
+        port_global_weight = float(loss_cfg.get("port_global_consistency_weight", 0.10))
+    losses["effective_port_global_consistency_weight"] = outputs["pred_field"].new_tensor(float(port_global_weight))
 
     if "predicted_port_internal_temperature" in outputs and "predicted_port_interface" in outputs:
         target_internal = batch["module_internal_temperature_points"].unsqueeze(-1)
@@ -810,6 +831,7 @@ def compute_losses(
         + float(effective_interface_weight) * losses["loss_interface"]
         + float(loss_cfg.get("port_supervised_weight", loss_cfg.get("port_condition_weight", 0.1))) * losses["loss_port_condition"]
         + float(loss_cfg.get("port_smoothness_weight", 0.0)) * losses["loss_port_smoothness"]
+        + port_global_weight * losses["loss_port_global_consistency"]
         + float(predicted_consistency_weight) * losses["loss_predicted_consistency"]
         + losses["loss_org_direct"]
     )
@@ -874,7 +896,7 @@ def save_global_loss_plots(history_path: Path, run_dir: Path) -> None:
         ("Total", ("loss_total", "val_loss_total")),
         ("Global Field", ("loss_field", "val_loss_field")),
         ("Module/Internal Coupling", ("loss_internal_temperature", "val_loss_internal_temperature", "loss_interface", "val_loss_interface")),
-        ("Port Condition", ("loss_port_condition", "val_loss_port_condition")),
+        ("Port Condition", ("loss_port_condition", "val_loss_port_condition", "loss_port_global_consistency", "val_loss_port_global_consistency")),
         ("Organizer", ("loss_org_me", "val_loss_org_me", "loss_org_eh_factor", "val_loss_org_eh_factor", "loss_org_mass_align", "val_loss_org_mass_align")),
     ]
     fig, axes = plt.subplots(2, 3, figsize=(15.0, 7.2), constrained_layout=True)
@@ -893,7 +915,10 @@ def save_global_loss_plots(history_path: Path, run_dir: Path) -> None:
             "Internal Temperature and Interface Loss",
             ("loss_internal_temperature", "val_loss_internal_temperature", "loss_interface", "val_loss_interface"),
         ),
-        "loss_port_condition_curve.png": ("Port Condition Loss", ("loss_port_condition", "val_loss_port_condition")),
+        "loss_port_condition_curve.png": (
+            "Port Condition Loss",
+            ("loss_port_condition", "val_loss_port_condition", "loss_port_global_consistency", "val_loss_port_global_consistency"),
+        ),
     }
     for filename, (title, keys) in focused.items():
         fig, ax = plt.subplots(figsize=(7.0, 4.2), constrained_layout=True)
@@ -949,6 +974,8 @@ def run_epoch(
                 outputs,
                 batch,
                 loss_cfg,
+                local_port_condition_mode=local_port_condition_mode,
+                mixed_teacher_ratio=float(mixed_teacher_ratio),
                 effective_internal_temperature_weight=float(effective_internal_temperature_weight),
                 effective_interface_weight=float(effective_interface_weight),
                 organizer_weight_scale=float(organizer_weight_scale),
@@ -991,6 +1018,7 @@ def run_epoch(
                 "loss_port_T_env",
                 "loss_port_h",
                 "loss_port_smoothness",
+                "loss_port_global_consistency",
                 "diag_port_T_env_mae",
                 "diag_port_log_h_mae",
                 "loss_predicted_consistency",
@@ -1024,6 +1052,7 @@ def run_epoch(
                 "effective_internal_temperature_weight",
                 "effective_interface_weight",
                 "effective_predicted_consistency_weight",
+                "effective_port_global_consistency_weight",
                 "organizer_weight_scale",
             ]
         }
@@ -1297,6 +1326,7 @@ def main() -> int:
         "loss_port_T_env",
         "loss_port_h",
         "loss_port_smoothness",
+        "loss_port_global_consistency",
         "diag_port_T_env_mae",
         "diag_port_log_h_mae",
         "loss_predicted_consistency",
@@ -1335,6 +1365,7 @@ def main() -> int:
         "effective_internal_temperature_weight",
         "effective_interface_weight",
         "effective_predicted_consistency_weight",
+        "effective_port_global_consistency_weight",
         "organizer_weight_scale",
         "val_loss_total",
         "val_loss_field",
@@ -1346,6 +1377,7 @@ def main() -> int:
         "val_loss_port_T_env",
         "val_loss_port_h",
         "val_loss_port_smoothness",
+        "val_loss_port_global_consistency",
         "val_diag_port_T_env_mae",
         "val_diag_port_log_h_mae",
         "val_loss_predicted_consistency",
@@ -1382,6 +1414,7 @@ def main() -> int:
         "val_effective_internal_temperature_weight",
         "val_effective_interface_weight",
         "val_effective_predicted_consistency_weight",
+        "val_effective_port_global_consistency_weight",
         "val_organizer_weight_scale",
         "val_predicted_loss_total",
         "val_predicted_loss_interface",
@@ -1486,6 +1519,7 @@ def main() -> int:
             "loss_port_T_env": train_metrics.get("loss_port_T_env", math.nan),
             "loss_port_h": train_metrics.get("loss_port_h", math.nan),
             "loss_port_smoothness": train_metrics.get("loss_port_smoothness", math.nan),
+            "loss_port_global_consistency": train_metrics.get("loss_port_global_consistency", math.nan),
             "diag_port_T_env_mae": train_metrics.get("diag_port_T_env_mae", math.nan),
             "diag_port_log_h_mae": train_metrics.get("diag_port_log_h_mae", math.nan),
             "loss_predicted_consistency": train_metrics.get("loss_predicted_consistency", math.nan),
@@ -1524,6 +1558,7 @@ def main() -> int:
             "effective_internal_temperature_weight": effective_internal_weight,
             "effective_interface_weight": effective_interface_weight,
             "effective_predicted_consistency_weight": pred_consistency_weight,
+            "effective_port_global_consistency_weight": train_metrics.get("effective_port_global_consistency_weight", math.nan),
             "organizer_weight_scale": org_scale,
             "val_loss_total": val_metrics.get("loss_total", math.nan),
             "val_loss_field": val_metrics.get("loss_field", math.nan),
@@ -1535,6 +1570,7 @@ def main() -> int:
             "val_loss_port_T_env": val_metrics.get("loss_port_T_env", math.nan),
             "val_loss_port_h": val_metrics.get("loss_port_h", math.nan),
             "val_loss_port_smoothness": val_metrics.get("loss_port_smoothness", math.nan),
+            "val_loss_port_global_consistency": val_metrics.get("loss_port_global_consistency", math.nan),
             "val_diag_port_T_env_mae": val_metrics.get("diag_port_T_env_mae", math.nan),
             "val_diag_port_log_h_mae": val_metrics.get("diag_port_log_h_mae", math.nan),
             "val_loss_predicted_consistency": val_metrics.get("loss_predicted_consistency", math.nan),
@@ -1571,6 +1607,7 @@ def main() -> int:
             "val_effective_internal_temperature_weight": val_metrics.get("effective_internal_temperature_weight", math.nan),
             "val_effective_interface_weight": val_metrics.get("effective_interface_weight", math.nan),
             "val_effective_predicted_consistency_weight": val_metrics.get("effective_predicted_consistency_weight", math.nan),
+            "val_effective_port_global_consistency_weight": val_metrics.get("effective_port_global_consistency_weight", math.nan),
             "val_organizer_weight_scale": val_metrics.get("organizer_weight_scale", math.nan),
             "val_predicted_loss_total": predicted_val_metrics.get("loss_total", math.nan),
             "val_predicted_loss_interface": predicted_val_metrics.get("loss_interface", math.nan),
@@ -1624,6 +1661,7 @@ def main() -> int:
             f"iface_T={row['diag_interface_T_surface_mse']:.4e} iface_q={row['diag_interface_q_normal_mse']:.4e} "
             f"port={row['loss_port_condition']:.4e} port_phys={row['diag_port_condition_physical_mse']:.4e} "
             f"port_T={row['loss_port_T_env']:.3e} port_h={row['loss_port_h']:.3e} "
+            f"port_global={row['loss_port_global_consistency']:.3e} "
             f"org_me={row['loss_org_me']:.3e} org_eh={row['loss_org_eh_factor']:.3e} "
             f"org_envmod={row['loss_org_env_module']:.3e} dom_env={row['dominant_env_fraction_max']:.2f} "
             f"mode={effective_mode} ratio={effective_ratio:.3f} "

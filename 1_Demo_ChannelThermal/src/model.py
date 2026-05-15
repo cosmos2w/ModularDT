@@ -43,9 +43,13 @@ class GlobalChannelThermalModelConfig:
     local_surrogate_latent_dim: int = 128
     local_module_param_dim: int = 7
     local_port_token_dim: int = 5
+    local_module_params_from_used_ports: bool = True
     local_interface_target_dim: int = 2
     local_surrogate_flux_mode: str = "corrected_physics"
     local_surrogate_flux_blend_alpha: float = 0.5
+    port_global_consistency_radius_offset: float = 0.05
+    port_global_consistency_num_points: int = 32
+    interaction_refinement_steps: int = 0
     material_param_dim: int = 6
     future_global_feature_dim: int = 0
     dropout: float = 0.05
@@ -230,6 +234,33 @@ def build_local_module_params_from_global(
         params[..., 5] = t_out.mean(dim=-1)
         params[..., 6] = t_out.std(dim=-1, unbiased=False)
     return params * module_present[..., None]
+
+
+def update_local_module_params_from_ports(
+    base_module_params: torch.Tensor,
+    local_ports: torch.Tensor,
+    module_present: torch.Tensor,
+) -> torch.Tensor:
+    """Refresh h/T_env summary columns from the port tokens actually in use."""
+    if base_module_params.shape[-1] < 7 or local_ports.shape[-1] < 5:
+        return base_module_params * module_present[..., None]
+    params = base_module_params.clone()
+    t_env = local_ports[..., 3]
+    h_local = local_ports[..., 4]
+    params[..., 3] = h_local.mean(dim=-1)
+    params[..., 4] = h_local.std(dim=-1, unbiased=False)
+    params[..., 5] = t_env.mean(dim=-1)
+    params[..., 6] = t_env.std(dim=-1, unbiased=False)
+    return params * module_present[..., None]
+
+
+def build_local_module_params_from_port_tokens(
+    module_params: torch.Tensor,
+    port_tokens: torch.Tensor,
+    module_present: torch.Tensor,
+) -> torch.Tensor:
+    """Backward-compatible alias for the used-port parameter refresh."""
+    return update_local_module_params_from_ports(module_params, port_tokens, module_present)
 
 
 class HypergraphOrganizer(nn.Module):
@@ -437,6 +468,53 @@ class FluxCorrectionHead(nn.Module):
         return self.net(torch.cat([module_features, latent_features, physical_features], dim=-1))
 
 
+class PortRefinementHead(nn.Module):
+    """Small residual update for one local/global interaction pass."""
+
+    def __init__(self, config: GlobalChannelThermalModelConfig):
+        super().__init__()
+        hidden = int(config.hidden_dim)
+        self.theta_encoder = FourierEncoder(3, 2, include_input=True)
+        self.net = MLP(
+            hidden + self.theta_encoder.output_dim + 5 + 2 + 6,
+            hidden,
+            2,
+            num_layers=2,
+            dropout=config.dropout,
+            layer_norm=config.use_layer_norm,
+        )
+        last = self.net.net[-1]
+        if isinstance(last, nn.Linear):
+            nn.init.zeros_(last.weight)
+            nn.init.zeros_(last.bias)
+
+    def forward(
+        self,
+        module_state: torch.Tensor,
+        current_port_tokens: torch.Tensor,
+        outside_temperature: torch.Tensor,
+        local_response_summary: torch.Tensor,
+        module_present: torch.Tensor,
+    ) -> torch.Tensor:
+        batch, num_modules, ntheta, _ = current_port_tokens.shape
+        theta_features = self.theta_encoder(current_port_tokens[..., 0:3])
+        module_features = module_state[:, :, None, :].expand(-1, -1, ntheta, -1)
+        outside_features = torch.cat(
+            [
+                outside_temperature[..., None],
+                outside_temperature[..., None] - current_port_tokens[..., 3:4],
+            ],
+            dim=-1,
+        )
+        response_features = local_response_summary[:, :, None, :].expand(-1, -1, ntheta, -1)
+        delta = self.net(torch.cat([module_features, theta_features, current_port_tokens, outside_features, response_features], dim=-1))
+        refined_t_env = current_port_tokens[..., 3:4] + delta[..., 0:1]
+        log_h = torch.log1p(current_port_tokens[..., 4:5].clamp_min(0.0)) + delta[..., 1:2]
+        refined_h = torch.expm1(log_h).clamp_min(1.0e-6)
+        refined = torch.cat([current_port_tokens[..., 0:3], refined_t_env, refined_h], dim=-1)
+        return refined * module_present[:, :, None, None]
+
+
 class QueryFieldDecoder(nn.Module):
     """Steady neural-field decoder over channel query points."""
 
@@ -570,6 +648,8 @@ class GlobalChannelThermalModel(nn.Module):
         self.register_buffer("global_internal_temperature_std", torch.empty(0), persistent=False)
         self.register_buffer("global_interface_target_mean", torch.empty(0), persistent=False)
         self.register_buffer("global_interface_target_std", torch.empty(0), persistent=False)
+        self.register_buffer("global_field_mean_by_channel", torch.empty(0), persistent=False)
+        self.register_buffer("global_field_std_by_channel", torch.empty(0), persistent=False)
 
         self.global_encoder = MLP(
             2 + config.material_param_dim,
@@ -604,6 +684,7 @@ class GlobalChannelThermalModel(nn.Module):
             layer_norm=config.use_layer_norm,
         )
         self.flux_correction_head = FluxCorrectionHead(config)
+        self.port_refinement_head = PortRefinementHead(config)
         env_coords, env_features = self._make_environment_tokens()
         self.register_buffer("env_coords", env_coords, persistent=False)
         self.register_buffer("env_features", env_features, persistent=False)
@@ -668,6 +749,8 @@ class GlobalChannelThermalModel(nn.Module):
         self._set_buffer_from_stat("global_internal_temperature_std", stats, "internal_temperature_std")
         self._set_buffer_from_stat("global_interface_target_mean", stats, "interface_target_mean", "interface_targets_mean")
         self._set_buffer_from_stat("global_interface_target_std", stats, "interface_target_std", "interface_targets_std")
+        self._set_buffer_from_stat("global_field_mean_by_channel", stats, "field_mean_by_channel")
+        self._set_buffer_from_stat("global_field_std_by_channel", stats, "field_std_by_channel")
 
     def set_local_surrogate(
         self,
@@ -707,6 +790,16 @@ class GlobalChannelThermalModel(nn.Module):
         mean = mean.to(device=values.device, dtype=values.dtype)
         std = safe_std_torch(std.to(device=values.device, dtype=values.dtype))
         return values * std + mean
+
+    def _temperature_from_field_output(self, field_values: torch.Tensor) -> torch.Tensor:
+        if field_values.shape[-1] <= 4:
+            return field_values.new_zeros(field_values.shape[:-1])
+        temperature = field_values[..., 4]
+        if self.global_normalize_targets and self.global_field_mean_by_channel.numel() > 4 and self.global_field_std_by_channel.numel() > 4:
+            mean = self.global_field_mean_by_channel.to(device=field_values.device, dtype=field_values.dtype)[4]
+            std = safe_std_torch(self.global_field_std_by_channel.to(device=field_values.device, dtype=field_values.dtype))[4]
+            temperature = temperature * std + mean
+        return temperature
 
     def encode_global(
         self,
@@ -953,6 +1046,99 @@ class GlobalChannelThermalModel(nn.Module):
             diagnostics["pred_interface_delta_q"] = (q_use - q_physics) * present
         return selected * present, diagnostics
 
+    def _local_module_params_for_ports(
+        self,
+        base_module_params: torch.Tensor,
+        local_ports: torch.Tensor,
+        module_present: torch.Tensor,
+    ) -> torch.Tensor:
+        if bool(self.config.local_module_params_from_used_ports):
+            return update_local_module_params_from_ports(base_module_params, local_ports, module_present)
+        return base_module_params * module_present[..., None]
+
+    def _port_subset_indices(self, ntheta: int, device: torch.device) -> torch.Tensor:
+        count = int(self.config.port_global_consistency_num_points)
+        count = max(1, min(count, int(ntheta)))
+        if count >= int(ntheta):
+            return torch.arange(int(ntheta), device=device)
+        return torch.linspace(0, int(ntheta) - 1, count, device=device).round().long()
+
+    def _decode_global_temperature_at_ports(
+        self,
+        port_tokens: torch.Tensor,
+        module_state: torch.Tensor,
+        env_state: torch.Tensor,
+        org: Dict[str, torch.Tensor],
+        global_token: torch.Tensor,
+        module_centers: torch.Tensor,
+        module_present: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Decode physical global temperature just outside selected port angles."""
+        batch, num_modules, ntheta, _ = port_tokens.shape
+        indices = self._port_subset_indices(ntheta, port_tokens.device)
+        selected_ports = port_tokens.index_select(dim=-2, index=indices)
+        normals = selected_ports[..., 1:3]
+        radius = float(self.config.module_radius) + float(self.config.port_global_consistency_radius_offset)
+        outside_xy = module_centers[:, :, None, :] + radius * normals
+        outside_xy = torch.stack(
+            [
+                outside_xy[..., 0].clamp(0.0, float(self.config.domain_length_x)),
+                outside_xy[..., 1].clamp(0.0, float(self.config.domain_length_y)),
+            ],
+            dim=-1,
+        )
+        flat_xy = outside_xy.reshape(batch, num_modules * int(indices.numel()), 2)
+        flat_field = self.field_decoder(
+            flat_xy,
+            module_state,
+            env_state,
+            org["hyper_state"],
+            global_token,
+            module_centers,
+            module_present,
+            org.get("active_hyperedge_mask"),
+        )
+        temperature = self._temperature_from_field_output(flat_field).reshape(batch, num_modules, int(indices.numel()))
+        target_t_env = selected_ports[..., 3]
+        valid_mask = module_present[:, :, None].expand_as(temperature)
+        return temperature * valid_mask, target_t_env * valid_mask, valid_mask
+
+    def _global_temperature_for_all_ports(
+        self,
+        port_tokens: torch.Tensor,
+        module_state: torch.Tensor,
+        env_state: torch.Tensor,
+        org: Dict[str, torch.Tensor],
+        global_token: torch.Tensor,
+        module_centers: torch.Tensor,
+        module_present: torch.Tensor,
+    ) -> torch.Tensor:
+        """Decode physical outside temperature at every port angle for refinement."""
+        batch, num_modules, ntheta, _ = port_tokens.shape
+        normals = port_tokens[..., 1:3]
+        radius = float(self.config.module_radius) + float(self.config.port_global_consistency_radius_offset)
+        outside_xy = module_centers[:, :, None, :] + radius * normals
+        outside_xy = torch.stack(
+            [
+                outside_xy[..., 0].clamp(0.0, float(self.config.domain_length_x)),
+                outside_xy[..., 1].clamp(0.0, float(self.config.domain_length_y)),
+            ],
+            dim=-1,
+        )
+        flat_xy = outside_xy.reshape(batch, num_modules * ntheta, 2)
+        flat_field = self.field_decoder(
+            flat_xy,
+            module_state,
+            env_state,
+            org["hyper_state"],
+            global_token,
+            module_centers,
+            module_present,
+            org.get("active_hyperedge_mask"),
+        )
+        temperature = self._temperature_from_field_output(flat_field).reshape(batch, num_modules, ntheta)
+        return temperature * module_present[:, :, None]
+
     def forward(
         self,
         structure: Optional[Dict[str, torch.Tensor]] = None,
@@ -1018,6 +1204,8 @@ class GlobalChannelThermalModel(nn.Module):
         predicted_port_diagnostics: Dict[str, torch.Tensor] = {}
         pred_interface: Optional[torch.Tensor] = None
         module_state = base_module_state
+        final_pred_port_tokens = pred_port_tokens
+        local_ports_used = pred_port_tokens
         if self.config.use_local_surrogate:
             if local_module_params is None:
                 local_module_params = build_local_module_params_from_global(
@@ -1034,27 +1222,87 @@ class GlobalChannelThermalModel(nn.Module):
                 local_ports = ratio * teacher_port_tokens.float() + (1.0 - ratio) * pred_port_tokens
             else:
                 local_ports = pred_port_tokens
-            local_outputs = self._call_local_surrogate(local_module_params.float(), local_ports, local_query_points, module_present)
+            local_module_params_used = self._local_module_params_for_ports(
+                local_module_params.float(),
+                local_ports,
+                module_present,
+            )
+            local_outputs = self._call_local_surrogate(local_module_params_used, local_ports, local_query_points, module_present)
             pred_interface, interface_diagnostics = self._assemble_local_surrogate_interface(
                 local_outputs,
                 local_ports,
                 base_module_state,
                 module_present,
             )
+
+            refinement_steps = max(0, int(self.config.interaction_refinement_steps))
+            if refinement_steps > 1:
+                raise ValueError("interaction_refinement_steps currently supports only 0 or 1.")
+            if refinement_steps == 1 and (mode != "teacher" or teacher_port_tokens is None):
+                provisional_latent = self.local_latent_fusion(
+                    torch.cat([base_module_state, local_outputs["module_response_latent"]], dim=-1)
+                )
+                provisional_summary = self.local_response_summary_proj(interface_diagnostics["local_response_summary"])
+                provisional_module_state = (base_module_state + provisional_latent + provisional_summary) * module_present[..., None]
+                provisional_org = self.organizer(
+                    provisional_module_state,
+                    env_state,
+                    module_centers,
+                    env_coords,
+                    module_present,
+                    heat_powers,
+                )
+                outside_temperature = self._global_temperature_for_all_ports(
+                    local_ports,
+                    provisional_module_state,
+                    env_state,
+                    provisional_org,
+                    global_token,
+                    module_centers,
+                    module_present,
+                )
+                local_ports = self.port_refinement_head(
+                    provisional_module_state,
+                    local_ports,
+                    outside_temperature,
+                    interface_diagnostics["local_response_summary"],
+                    module_present,
+                )
+                if mode == "predicted" or teacher_port_tokens is None:
+                    final_pred_port_tokens = local_ports
+                local_module_params_used = self._local_module_params_for_ports(
+                    local_module_params.float(),
+                    local_ports,
+                    module_present,
+                )
+                local_outputs = self._call_local_surrogate(local_module_params_used, local_ports, local_query_points, module_present)
+                pred_interface, interface_diagnostics = self._assemble_local_surrogate_interface(
+                    local_outputs,
+                    local_ports,
+                    provisional_module_state,
+                    module_present,
+                )
+            local_ports_used = local_ports
+
             if bool(return_predicted_port_outputs):
                 if mode == "predicted" or teacher_port_tokens is None:
                     predicted_local_outputs = local_outputs
                     predicted_interface = pred_interface
                 else:
-                    predicted_local_outputs = self._call_local_surrogate(
+                    predicted_module_params = self._local_module_params_for_ports(
                         local_module_params.float(),
-                        pred_port_tokens,
+                        final_pred_port_tokens,
+                        module_present,
+                    )
+                    predicted_local_outputs = self._call_local_surrogate(
+                        predicted_module_params,
+                        final_pred_port_tokens,
                         local_query_points,
                         module_present,
                     )
                     predicted_interface, _ = self._assemble_local_surrogate_interface(
                         predicted_local_outputs,
-                        pred_port_tokens,
+                        final_pred_port_tokens,
                         base_module_state,
                         module_present,
                     )
@@ -1091,13 +1339,27 @@ class GlobalChannelThermalModel(nn.Module):
             interface_source = "global_head"
             interface_diagnostics = {}
 
+        port_global_temperature, port_global_t_env, port_global_mask = self._decode_global_temperature_at_ports(
+            final_pred_port_tokens,
+            module_state,
+            env_state,
+            org,
+            global_token,
+            module_centers,
+            module_present,
+        )
         result = {
             "pred_field": pred_field,
             "pred_internal_temperature": pred_internal,
             "pred_interface": pred_interface,
             "interface_source": interface_source,
             "pred_interface_source": interface_source,
-            "pred_port_condition": pred_port_tokens,
+            "pred_port_condition": final_pred_port_tokens,
+            "pred_port_condition_raw": pred_port_tokens,
+            "local_port_condition_used": local_ports_used,
+            "pred_port_global_temperature": port_global_temperature,
+            "pred_port_global_temperature_target": port_global_t_env,
+            "pred_port_global_consistency_mask": port_global_mask,
             "module_response_latent": module_response_latent,
             "organizer_aux": org,
             "base_organizer_aux": base_org,
