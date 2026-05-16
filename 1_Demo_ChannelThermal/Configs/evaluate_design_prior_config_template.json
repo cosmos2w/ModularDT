@@ -1,0 +1,88 @@
+{
+  "forward_model": {
+    "config_path": "Configs/train_inverse_config_template.json",
+    "checkpoint_path": "Saved_Model/Run_0005_20260514_160311/latest_model.pt",
+    "device": "auto",
+    "batch_size": 32768
+  },
+  "objective": {
+    "spec_path": "inverse_targets_v2/field_functional_chip_plume_demo.json",
+    "success_hard_violation_tolerance": 1e-6
+  },
+  "design_prior": {
+    "checkpoint_path": "Data_Saved/DesignPrior_Runs/default_atlas/best_model.pt",
+    "device": "auto"
+  },
+  "current_inverse_baseline": {
+    "enabled": false,
+    "checkpoint_path": "",
+    "config_path": ""
+  },
+  "methods": {
+    "random_valid": true,
+    "raw_layout_cem": true,
+    "current_inverse": false,
+    "atlas_prior": true,
+    "atlas_guided": true
+  },
+  "context": {
+    "dataset_path": "Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
+    "split": "test",
+    "case_index": 0,
+    "max_cases": 1
+  },
+  "layout": {
+    "max_num_modules": 12,
+    "min_num_modules": 1,
+    "max_active_modules": 12,
+    "domain_length_x": 12.0,
+    "domain_length_y": 4.0,
+    "module_radius": 0.45,
+    "min_center_distance": 1.1,
+    "wall_clearance": 0.05,
+    "inlet_clearance": 0.25,
+    "outlet_clearance": 0.25,
+    "generate_heat_power": false
+  },
+  "random_valid": {
+    "num_samples": 512,
+    "num_return": 16,
+    "seed": 0
+  },
+  "raw_layout_cem": {
+    "cem_iterations": 8,
+    "cem_population": 128,
+    "cem_elite_frac": 0.15,
+    "cem_init_std": 0.35,
+    "cem_min_std": 0.03,
+    "cem_smoothing": 0.5,
+    "num_return": 16,
+    "seed": 0
+  },
+  "atlas_prior": {
+    "num_samples": 512,
+    "num_return": 16,
+    "temperature": 1.0,
+    "seed": 0
+  },
+  "atlas_guided": {
+    "method": "latent_cem",
+    "latent_cem_iterations": 8,
+    "latent_cem_population": 128,
+    "latent_cem_elite_frac": 0.15,
+    "latent_cem_init_std": 1.0,
+    "latent_cem_min_std": 0.05,
+    "latent_cem_smoothing": 0.5,
+    "prior_energy_weight": 0.01,
+    "geometry_penalty_weight": 1.0,
+    "hypergraph_consistency_weight": 1.0,
+    "diversity_weight": 0.0,
+    "num_return": 16,
+    "seed": 0
+  },
+  "output": {
+    "run_dir": "Data_Saved/DesignPrior_Eval/default_field_functional",
+    "save_top_k_per_method": 5,
+    "save_dense_forward_outputs": false
+  }
+}

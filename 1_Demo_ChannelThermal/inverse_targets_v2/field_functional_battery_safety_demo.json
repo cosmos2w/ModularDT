@@ -1,0 +1,91 @@
+{
+  "name": "field_functional_battery_safety_demo",
+  "missing_term_penalty": 0.0,
+  "scalar_kpi_terms": [
+    {
+      "name": "max_solid_temperature_limit",
+      "kpi": "max_solid_temperature",
+      "mode": "upper_bound",
+      "value": 355.0,
+      "weight": 3.0,
+      "hard": true
+    },
+    {
+      "name": "module_peak_spread",
+      "kpi": "module_peak_temperature_spread",
+      "mode": "minimize",
+      "weight": 1.4
+    },
+    {
+      "name": "wall_hot_area",
+      "kpi": "wall_hot_area_fraction",
+      "mode": "minimize",
+      "weight": 1.0
+    },
+    {
+      "name": "downstream_reheat",
+      "kpi": "downstream_reheat_index",
+      "mode": "minimize",
+      "weight": 0.8
+    }
+  ],
+  "field_terms": [
+    {
+      "name": "wall_temperature_hot_fraction",
+      "field": "temperature",
+      "region": "wall_band",
+      "operator": "area_above_threshold",
+      "threshold": 335.0,
+      "mode": "minimize",
+      "weight": 1.0,
+      "fallback_kpi": "wall_hot_area_fraction"
+    },
+    {
+      "name": "outlet_uniformity",
+      "field": "temperature",
+      "region": "outlet_band",
+      "operator": "std",
+      "mode": "minimize",
+      "weight": 0.6,
+      "fallback_kpi": "outlet_temperature_nonuniformity"
+    }
+  ],
+  "layout_terms": [
+    {
+      "name": "x_spread",
+      "operator": "x_span",
+      "mode": "target_range",
+      "range": [4.0, 9.5],
+      "weight": 0.4
+    },
+    {
+      "name": "y_spread",
+      "operator": "y_span",
+      "mode": "target_range",
+      "range": [1.2, 3.0],
+      "weight": 0.4
+    },
+    {
+      "name": "mean_spacing",
+      "operator": "mean_pair_distance",
+      "mode": "lower_bound",
+      "value": 1.35,
+      "weight": 0.3
+    }
+  ],
+  "hypergraph_terms": [
+    {
+      "name": "planned_realized_consistency",
+      "operator": "plan_realization_distance",
+      "mode": "minimize",
+      "weight": 0.8
+    }
+  ],
+  "hard_constraints": {
+    "num_modules": [8, 10],
+    "min_center_distance": 1.1,
+    "wall_clearance": 0.05,
+    "inlet_clearance": 0.25,
+    "outlet_clearance": 0.25
+  }
+}

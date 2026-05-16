@@ -1,0 +1,69 @@
+{
+  "name": "field_functional_chip_plume_demo",
+  "missing_term_penalty": 0.0,
+  "scalar_kpi_terms": [
+    {
+      "name": "max_solid_temperature_limit",
+      "kpi": "max_solid_temperature",
+      "mode": "upper_bound",
+      "value": 360.0,
+      "weight": 3.0,
+      "hard": true
+    },
+    {
+      "name": "pressure_drop_soft",
+      "kpi": "pressure_drop",
+      "mode": "minimize",
+      "weight": 0.35
+    }
+  ],
+  "field_terms": [
+    {
+      "name": "downstream_plume_avoidance",
+      "field": "temperature",
+      "region": {
+        "type": "box",
+        "x_range": [7.0, 11.5],
+        "y_range": [1.0, 3.0]
+      },
+      "operator": "mean_above_threshold",
+      "threshold": 335.0,
+      "mode": "minimize",
+      "weight": 2.0,
+      "fallback_kpi": "thermal_plume_area"
+    },
+    {
+      "name": "outlet_uniformity",
+      "field": "temperature",
+      "region": "outlet_band",
+      "operator": "std",
+      "mode": "minimize",
+      "weight": 1.0,
+      "fallback_kpi": "outlet_temperature_nonuniformity"
+    }
+  ],
+  "layout_terms": [
+    {
+      "name": "coverage",
+      "operator": "bbox_area",
+      "mode": "target_range",
+      "range": [2.5, 14.0],
+      "weight": 0.2
+    }
+  ],
+  "hypergraph_terms": [
+    {
+      "name": "planned_realized_consistency",
+      "operator": "plan_realization_distance",
+      "mode": "minimize",
+      "weight": 1.0
+    }
+  ],
+  "hard_constraints": {
+    "num_modules": [6, 8],
+    "min_center_distance": 1.1,
+    "wall_clearance": 0.05,
+    "inlet_clearance": 0.25,
+    "outlet_clearance": 0.25
+  }
+}

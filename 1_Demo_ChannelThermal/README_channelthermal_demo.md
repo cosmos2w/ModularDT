@@ -1205,3 +1205,69 @@ forward verifier after evaluating the generated layout. Their mismatch reports
 whether the generated concrete layout actually realizes the intended modular
 thermal organization; reranking uses this term only when
 `--hypergraph-rerank-weight` is greater than zero.
+
+## Behavior-aware generative design prior + field-functional guided sampling
+
+The existing inverse generator remains the KPI/design-intent conditioned
+baseline:
+
+```text
+target KPI or design-intent vector -> layout / hypergraph plan -> frozen-forward verification
+```
+
+The behavior-aware design-prior track is target agnostic during training. It
+learns a compact atlas of feasible modular layouts and their predicted
+organization:
+
+```text
+z, context -> layout D + planned hypergraph H_plan + behavior descriptor b_hat
+```
+
+Specific design requirements are solved later by guided posterior sampling in
+latent space:
+
+```text
+field-functional objective + frozen forward HONF + latent search
+```
+
+This matters because arbitrary field-functional requirements, such as plume
+avoidance in a downstream box or outlet-band uniformity, are evaluated at
+inference time from the full-state forward prediction rather than baked into a
+fixed target KPI vector.
+
+The benchmark suite compares:
+
+- A. Raw layout CEM / CMA-ES + forward HONF.
+- B. Random valid layout sampling + forward HONF.
+- C. Current KPI-conditioned inverse generator.
+- D. Latent design atlas + unguided prior sampling.
+- E. Latent design atlas + guided posterior sampling.
+
+Method D is not the final inverse-design method; it is the prior-quality
+baseline. Method E is the actual generative inverse-design method. The key
+claim is that guided latent search should reach field-functional objectives
+more efficiently, and with better feasibility/diversity/organization
+consistency, than random sampling or raw layout optimization alone.
+
+Example workflow:
+
+```bash
+# 1. Build a compact behavior-aware library from existing/random layouts.
+python src/generate_design_library.py \
+  --source mixed \
+  --input-data Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5 \
+  --output Data_Saved/DesignPrior_Library/design_library.h5 \
+  --num-random-layouts 512
+
+# 2. Train the target-agnostic latent atlas.
+python src/train_design_prior.py \
+  --config Configs/train_design_prior_config_template.json
+
+# 3. Evaluate field-functional inverse-design methods A/B/D/E.
+python src/evaluate_design_prior.py \
+  --config Configs/evaluate_design_prior_config_template.json
+```
+
+The field-functional objective specs live under `inverse_targets_v2/`, for
+example `field_functional_chip_plume_demo.json` and
+`field_functional_battery_safety_demo.json`.

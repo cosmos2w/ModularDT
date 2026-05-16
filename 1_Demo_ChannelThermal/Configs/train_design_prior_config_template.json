@@ -1,0 +1,43 @@
+{
+  "data": {
+    "library_path": "Data_Saved/DesignPrior_Library/design_library.h5",
+    "val_fraction": 0.1,
+    "num_workers": 0
+  },
+  "model": {
+    "max_num_modules": 12,
+    "latent_dim": 32,
+    "hidden_dim": 256,
+    "num_layers": 4,
+    "dropout": 0.05,
+    "behavior_dim": 32,
+    "context_dim": 0,
+    "hypergraph_dim": null,
+    "generate_heat_power": false,
+    "kl_weight": 0.001,
+    "layout_recon_weight": 1.0,
+    "hypergraph_recon_weight": 0.5,
+    "behavior_recon_weight": 0.5,
+    "geometry_weight": 0.05,
+    "domain_length_x": 12.0,
+    "domain_length_y": 4.0,
+    "module_radius": 0.45,
+    "min_center_distance": 1.1,
+    "wall_clearance": 0.05,
+    "inlet_clearance": 0.25,
+    "outlet_clearance": 0.25
+  },
+  "training": {
+    "batch_size": 128,
+    "epochs": 200,
+    "learning_rate": 0.0005,
+    "weight_decay": 0.000001,
+    "seed": 0,
+    "device": "auto",
+    "save_every": 10,
+    "grad_clip_norm": 1.0
+  },
+  "output": {
+    "run_dir": "Data_Saved/DesignPrior_Runs/default_atlas"
+  }
+}

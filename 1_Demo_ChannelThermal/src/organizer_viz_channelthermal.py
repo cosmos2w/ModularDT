@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib.lines import Line2D
 from matplotlib.patches import Ellipse, Polygon
 
@@ -471,7 +472,7 @@ def render_channelthermal_organization_summary_matrices(
     im_eh = ax_eh.imshow(A_eh_sorted, aspect="auto", cmap="viridis", vmin=0.0, vmax=max(float(np.nanmax(A_eh)) if A_eh.size else 1.0, 1.0e-6))
     ax_eh.set_title(f"Environment -> Hyperedge assignment A_eh{_collapse_title_suffix(arrays)}")
     ax_eh.set_xlabel("hyperedge")
-    ax_eh.set_ylabel("env tokens sorted by dominant H")
+    ax_eh.set_ylabel("sorted env token index")
     ax_eh.set_xticks(np.arange(strength.shape[0]))
     ax_eh.set_xticklabels([f"H{i}" for i in range(strength.shape[0])])
     max_ticks = min(8, A_eh_sorted.shape[0])
@@ -480,14 +481,6 @@ def render_channelthermal_organization_summary_matrices(
         ax_eh.set_yticks(tick_pos)
         ax_eh.set_yticklabels([str(int(idx)) for idx in tick_pos])
     fig.colorbar(im_eh, ax=ax_eh, fraction=0.046, pad=0.04)
-    if A_eh.size:
-        strip_colors = np.asarray([colors[int(h) % len(colors)] for h in dominant[sort_idx]])[:, None, :]
-        inset = ax_eh.inset_axes([-0.055, 0.0, 0.025, 1.0], transform=ax_eh.transAxes)
-        inset.imshow(strip_colors, aspect="auto")
-        inset.set_xticks([])
-        inset.set_yticks([])
-        inset.set_title("dom", fontsize=7)
-
     x = np.arange(strength.shape[0])
     width = 0.25
     ax_bar.bar(x - width, module_mass, width, label="module_mass", color="#d95f02", alpha=0.78)
@@ -517,6 +510,15 @@ def render_channelthermal_organization_summary_matrices(
     ax_map.set_aspect("equal", adjustable="box")
     if confidence.size:
         ax_map.text(0.01, 0.01, "color = dominant H; size/opacity = confidence", transform=ax_map.transAxes, fontsize=8, va="bottom", bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75})
+    if strength.size:
+        dominant_cmap = ListedColormap(colors[: strength.shape[0]])
+        dominant_norm = BoundaryNorm(np.arange(strength.shape[0] + 1) - 0.5, strength.shape[0])
+        dominant_mappable = plt.cm.ScalarMappable(cmap=dominant_cmap, norm=dominant_norm)
+        dominant_mappable.set_array([])
+        cbar = fig.colorbar(dominant_mappable, ax=ax_map, fraction=0.046, pad=0.04)
+        cbar.set_ticks(np.arange(strength.shape[0]))
+        cbar.set_ticklabels([f"H{i}" for i in range(strength.shape[0])])
+        cbar.set_label("env token dominant H")
 
     fig.savefig(output_path, dpi=180)
     plt.close(fig)

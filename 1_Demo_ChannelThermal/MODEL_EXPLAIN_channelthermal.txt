@@ -569,6 +569,29 @@ target, and module/env mass alignment, not heavy uniform-edge or entropy
 constraints by default.
 
 
+Behavior-aware design prior and guided sampling
+-----------------------------------------------
+The forward HONF remains the core full-state evaluator. It predicts the
+channel field, module/internal/interface quantities, and realized organizer
+state for a concrete layout.
+
+The behavior-aware design prior does not replace HONF. It learns a compact
+target-agnostic latent atlas:
+
+  z, context -> layout + planned hypergraph + behavior descriptor
+
+The atlas is trained by reconstructing observed layouts, hypergraph plan
+vectors, and compact behavior descriptors. It does not consume a target KPI
+vector during training.
+
+At inference time, guided posterior sampling searches over z. Each decoded
+layout is repaired if needed, evaluated by the frozen forward HONF, and scored
+against a field-functional objective. This lets new downstream requirements,
+such as plume avoidance in a physical region or outlet-band uniformity, be
+compiled into deterministic scores without retraining a KPI-conditioned inverse
+model.
+
+
 Known simplifications
 ---------------------
 This first implementation is steady only at the training-target level. There

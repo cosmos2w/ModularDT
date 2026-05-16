@@ -14,6 +14,10 @@ from urllib.parse import quote
 
 import numpy as np
 
+BACKEND_DIR = Path(__file__).resolve().parent
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
 from inverse_registry import InverseModelRegistry
 from model_registry import ModelRegistry
 from schemas import InverseRunRequest
@@ -105,6 +109,52 @@ def _csv_index(rows: List[Dict[str, Any]], key: str = "sample_index") -> Dict[in
         if isinstance(parsed, int):
             out[parsed] = {_key: _parse_number(value) for _key, value in row.items()}
     return out
+
+
+def load_design_prior_eval_run(run_dir: str | Path) -> Dict[str, Any]:
+    """Load a completed design-prior evaluation folder for optional web display.
+
+    This helper is intentionally read-only and is not wired into existing
+    inverse endpoints. It summarizes outputs produced by
+    ``src/evaluate_design_prior.py`` so a later API route or UI panel can expose
+    them without changing the current inverse demo behavior.
+    """
+
+    root = Path(run_dir).expanduser()
+    summary = _read_json(root / "summary.json")
+    top_rows = [{key: _parse_number(value) for key, value in row.items()} for row in _read_csv_rows(root / "candidates_top.csv")]
+    all_rows = _read_csv_rows(root / "candidates_all.csv")
+    score_rows = [{key: _parse_number(value) for key, value in row.items()} for row in _read_csv_rows(root / "score_vs_forward_calls.csv")]
+    methods = summary.get("methods", {}) if isinstance(summary.get("methods"), Mapping) else {}
+    artifacts: Dict[str, Any] = {"comparison_plots": {}, "top_candidates": []}
+    for name in ("method_comparison.png", "score_vs_calls.png"):
+        path = root / name
+        if path.exists():
+            artifacts["comparison_plots"][path.stem] = str(path)
+    top_dir = root / "top_candidates"
+    if top_dir.exists():
+        grouped: Dict[str, Dict[str, str]] = {}
+        for path in sorted(top_dir.glob("*")):
+            if not path.is_file() or path.suffix.lower() not in {".png", ".json", ".csv"}:
+                continue
+            stem = path.stem
+            parts = stem.split("_")
+            prefix = "_".join(parts[:3]) if len(parts) >= 3 and parts[-2].isdigit() else stem
+            grouped.setdefault(prefix, {})[path.name] = str(path)
+        artifacts["top_candidates"] = [{"prefix": prefix, "files": files} for prefix, files in sorted(grouped.items())]
+    return _json_safe(
+        {
+            "run_dir": str(root),
+            "exists": root.exists(),
+            "summary": summary,
+            "methods": methods,
+            "top_candidates": top_rows,
+            "candidate_count_top": len(top_rows),
+            "candidate_count_all": len(all_rows),
+            "score_vs_forward_calls": score_rows,
+            "artifacts": artifacts,
+        }
+    )
 
 
 def _format_kpi_target(entry: Mapping[str, Any]) -> Dict[str, Any]:

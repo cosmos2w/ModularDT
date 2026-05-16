@@ -15,6 +15,22 @@
       "heat_power_max": 3.0,
       "min_center_distance": 1.0,
       "query_batch_size": 32768
+    },
+    {
+      "id": "channelthermal_run0005",
+      "label": "ChannelThermal Run0005",
+      "run_dir": "./Saved_Model/Run_0005_20260514_160311",
+      "checkpoint_name": "latest_model.pt",
+      "config_name": "resolved_train_config.json",
+      "enabled": true,
+      "preload": false,
+      "default_reference_split": "test",
+      "default_reference_case_index": 0,
+      "default_heat_power": 1.2,
+      "heat_power_min": 0.0,
+      "heat_power_max": 3.0,
+      "min_center_distance": 1.0,
+      "query_batch_size": 32768
     }
   ]
 }

@@ -1403,6 +1403,7 @@ def build_forward_latent_cache(
     force_rebuild: bool = False,
     disable_auto_rebuild: bool = False,
     query_batch_size: int = 32768,
+    fallback_cache_paths: Sequence[Path] = (),
 ) -> Dict[str, Any]:
     record_case_ids = [str(record.case_id) for record in records]
     expected_meta = {
@@ -1425,8 +1426,8 @@ def build_forward_latent_cache(
         meta = payload.get("cache_metadata", {})
         return isinstance(meta, Mapping) and meta == expected_meta
 
-    if cache_path.exists() and not force_rebuild:
-        payload = torch.load(cache_path, map_location="cpu", weights_only=False)
+    def _load_compatible_cache(path: Path) -> Optional[Dict[str, Any]]:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
         if (
             isinstance(payload, Mapping)
             and "latents" in payload
@@ -1434,7 +1435,7 @@ def build_forward_latent_cache(
             and int(payload.get("behavior_dim", -1)) == int(behavior_dim)
             and int(payload.get("organization_dim", -1)) == int(organization_dim)
         ):
-            print(f"[latent-cache] loaded {cache_path}")
+            print(f"[latent-cache] loaded {path}")
             latents = {
                 str(k): (np.asarray(v["behavior"], dtype=np.float32), np.asarray(v["organization"], dtype=np.float32))
                 for k, v in payload["latents"].items()
@@ -1444,10 +1445,26 @@ def build_forward_latent_cache(
                 for k, v in payload["latents"].items()
             }
             return {"latents": latents, "hypergraph_plans": plans, "hypergraph_plan_metadata": payload.get("hypergraph_plan_metadata", {})}
-        message = f"[latent-cache] incompatible cache metadata for {cache_path}"
+        return None
+
+    if not force_rebuild:
+        candidate_paths = [cache_path, *fallback_cache_paths]
+        seen_cache_paths = set()
+        for candidate_path in candidate_paths:
+            candidate_path = Path(candidate_path)
+            candidate_key = str(candidate_path.resolve())
+            if candidate_key in seen_cache_paths or not candidate_path.exists():
+                continue
+            seen_cache_paths.add(candidate_key)
+            loaded = _load_compatible_cache(candidate_path)
+            if loaded is not None:
+                return loaded
+            message = f"[latent-cache] incompatible cache metadata for {candidate_path}"
+            print(message + "; trying next cache" if candidate_path != cache_path else message + "; checking fallback caches")
         if disable_auto_rebuild:
-            raise RuntimeError(message + "; set forward_model.disable_auto_cache_rebuild=false or rebuild_latent_cache=true.")
-        print(message + "; rebuilding")
+            raise RuntimeError(f"[latent-cache] no compatible cache found for {cache_path}; set forward_model.disable_auto_cache_rebuild=false or rebuild_latent_cache=true.")
+        if seen_cache_paths:
+            print(f"[latent-cache] no compatible fallback cache found; rebuilding {cache_path}")
     latents: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
     hypergraph_plans: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
     hypergraph_plan_metadata: Dict[str, Any] = {
@@ -1514,6 +1531,39 @@ def build_forward_latent_cache(
     )
     print(f"[latent-cache] wrote {cache_path}")
     return {"latents": latents, "hypergraph_plans": hypergraph_plans, "hypergraph_plan_metadata": hypergraph_plan_metadata}
+
+
+def run_scoped_latent_cache_path(cache_root: Path, cache_name: str, run_id: str) -> Path:
+    cache_template = str(cache_name or "inverse_forward_latent_cache.pt")
+    if "{run_id}" in cache_template or "{Run_ID}" in cache_template:
+        cache_relative_path = Path(cache_template.format(run_id=run_id, Run_ID=run_id))
+    else:
+        configured = Path(cache_template)
+        suffix = configured.suffix or ".pt"
+        stem = configured.stem if configured.suffix else configured.name
+        if stem.endswith(f"_{run_id}"):
+            cache_filename = f"{stem}{suffix}"
+        else:
+            cache_filename = f"{stem}_{run_id}{suffix}"
+        cache_relative_path = configured.parent / cache_filename if str(configured.parent) != "." else Path(cache_filename)
+    return (cache_root / cache_relative_path).resolve()
+
+
+def latest_latent_cache_fallbacks(cache_root: Path, cache_name: str, primary_path: Path) -> List[Path]:
+    configured = Path(str(cache_name or "inverse_forward_latent_cache.pt"))
+    suffix = configured.suffix or ".pt"
+    stem = configured.stem if configured.suffix else configured.name
+    base_stem = stem[:-5] if len(stem) > 5 and stem[-5] == "_" and stem[-4:].isdigit() else stem
+    search_root = cache_root / configured.parent if str(configured.parent) != "." else cache_root
+    candidates = []
+    if search_root.exists():
+        candidates.extend(path for path in search_root.glob(f"{base_stem}_[0-9][0-9][0-9][0-9]{suffix}") if path.is_file())
+        legacy_path = search_root / f"{base_stem}{suffix}"
+        if legacy_path.exists():
+            candidates.append(legacy_path)
+    primary_key = str(primary_path.resolve())
+    unique_candidates = {str(path.resolve()): path.resolve() for path in candidates if str(path.resolve()) != primary_key}
+    return sorted(unique_candidates.values(), key=lambda path: (path.stat().st_mtime_ns, path.name), reverse=True)
 
 
 def move_batch_to_device(batch: Mapping[str, Any], device: torch.device) -> Dict[str, Any]:
@@ -2229,6 +2279,46 @@ def save_history_csv(history: Sequence[Mapping[str, Any]], path: Path) -> None:
             writer.writerow({key: row.get(key, "") for key in keys})
 
 
+LOSS_HISTORY_COLUMNS = (
+    "epoch",
+    "train_loss_total",
+    "val_loss_total",
+    "train_loss_flow",
+    "val_loss_flow",
+    "train_loss_count",
+    "val_loss_count",
+    "train_loss_set_center",
+    "val_loss_set_center",
+    "train_loss_behavior",
+    "val_loss_behavior",
+    "train_loss_organization",
+    "val_loss_organization",
+    "train_loss_hypergraph_plan",
+    "val_loss_hypergraph_plan",
+    "train_hypergraph_flow_loss",
+    "val_hypergraph_flow_loss",
+    "train_loss_structure_match",
+    "val_loss_structure_match",
+    "train_loss_validity_prior",
+    "val_loss_validity_prior",
+    "forward_guidance_replay_loss_total",
+    "hypergraph_replay_loss_total",
+    "lr",
+)
+
+
+def save_loss_history_csv(history: Sequence[Mapping[str, Any]], path: Path) -> None:
+    if not history:
+        return
+    available_keys = {key for row in history for key in row.keys()}
+    keys = [key for key in LOSS_HISTORY_COLUMNS if key in available_keys]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+        for row in history:
+            writer.writerow({key: row.get(key, "") for key in keys})
+
+
 def save_loss_curve(history_path: Path, out_path: Path) -> None:
     if not history_path.exists():
         return
@@ -2359,6 +2449,8 @@ def main() -> int:
     hypergraph_replay_cfg = cfg.get("hypergraph_realization_consistency", {}) if isinstance(cfg.get("hypergraph_realization_consistency", {}), Mapping) else {}
     set_seed(int(training_cfg.get("seed", cfg.get("seed", 42))))
     device = select_device(args.device or training_cfg.get("device"))
+    run_id = resolve_run_id(args, cfg)
+    cfg["Run_ID"] = run_id
 
     kpi_names = tuple(target_cfg.get("names", DEFAULT_KPI_NAMES))
     max_train_cases = args.max_train_cases if args.max_train_cases is not None else int(dataset_cfg.get("max_train_cases", 0) or 0)
@@ -2477,7 +2569,13 @@ def main() -> int:
     val_dataset.hypergraph_plan_dim = int(model_config.hypergraph_plan_dim or 0)
     if forward_model is not None:
         cache_name = str(cfg.get("forward_model", {}).get("latent_cache_name", "inverse_forward_latent_cache.pt"))
-        cache_path = (resolve_demo_path(cfg.get("paths", {}).get("saved_inverse_root", cfg.get("paths", {}).get("saved_model_dir", "./Saved_Model_Inverse"))) / "cache" / cache_name).resolve()
+        cache_root = (resolve_demo_path(cfg.get("paths", {}).get("saved_inverse_root", cfg.get("paths", {}).get("saved_model_dir", "./Saved_Model_Inverse"))) / "cache").resolve()
+        cache_path = run_scoped_latent_cache_path(cache_root, cache_name, run_id)
+        fallback_cache_paths = latest_latent_cache_fallbacks(cache_root, cache_name, cache_path)
+        if fallback_cache_paths:
+            print(f"[latent-cache] primary cache {cache_path}; latest fallback {fallback_cache_paths[0]}")
+        else:
+            print(f"[latent-cache] primary cache {cache_path}")
         cache_payload = build_forward_latent_cache(
             forward_model,
             forward_metadata,
@@ -2509,6 +2607,7 @@ def main() -> int:
             force_rebuild=bool(cfg.get("forward_model", {}).get("rebuild_latent_cache", False)),
             disable_auto_rebuild=bool(cfg.get("forward_model", {}).get("disable_auto_cache_rebuild", False)),
             query_batch_size=int(cfg.get("forward_model", {}).get("query_batch_size", 32768)),
+            fallback_cache_paths=fallback_cache_paths,
         )
         train_dataset.set_latent_targets(cache_payload.get("latents", {}))
         val_dataset.set_latent_targets(cache_payload.get("latents", {}))
@@ -2543,7 +2642,6 @@ def main() -> int:
         print("[dry-run] metrics:", {key: scalar(value) for key, value in metrics.items()})
         return 0
 
-    run_id = resolve_run_id(args, cfg)
     # Keep model run directories short and stable. Descriptive metadata is
     # already stored in resolved_train_inverse_config.json inside the run.
     run_name = f"Run_{run_id}_{current_timestamp()}"
@@ -2816,7 +2914,7 @@ def main() -> int:
             kpi_distribution_summary=kpi_distribution_summary,
         )
         history.append(row)
-        save_history_csv(history, history_path)
+        save_loss_history_csv(history, history_path)
         save_history_csv(history, metrics_history_path)
         if epoch % max(int(training_cfg.get("save_every_epochs", 25)), 1) == 0 or epoch == epochs:
             save_loss_curve(history_path, run_dir / "loss_curve.png")
