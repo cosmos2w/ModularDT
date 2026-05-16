@@ -422,15 +422,25 @@ class FieldFunctionalObjective:
         hard = bool(term.get("hard", False))
         penalty = _finite_float(term.get("missing_term_penalty", 1.0 if hard else self.missing_term_penalty), 1.0 if hard else 0.0)
         weight = _finite_float(term.get("weight", 1.0), 1.0)
+        scale = _finite_float(term.get("scale", 1.0), 1.0)
+        scale_safe = max(scale, 1.0e-8)
+        scaled_penalty = penalty / scale_safe
         return ObjectiveTermResult(
             name=str(term.get("name", term.get("kpi", term.get("operator", "term")))),
-            value=float(weight * penalty),
+            value=float(weight * scaled_penalty),
             raw_value=float("nan"),
             target=_jsonable(term.get("value", term.get("range"))),
             weight=weight,
             mode=str(term.get("mode", "minimize")),
             satisfied=False,
-            details={"available": False, "reason": reason, "hard": hard},
+            details={
+                "available": False,
+                "reason": reason,
+                "hard": hard,
+                "scale": float(scale_safe),
+                "unscaled_penalty": float(penalty),
+                "scaled_penalty": float(scaled_penalty),
+            },
         )
 
     def _evaluate_term(self, section: str, term: Mapping[str, Any], **payload: Any) -> ObjectiveTermResult:
@@ -471,7 +481,14 @@ class FieldFunctionalObjective:
             raw = _hypergraph_value(str(term.get("operator", "")), payload.get("planned_hypergraph"), payload.get("realized_hypergraph"), payload.get("hypergraph_consistency"))
         if raw is None or not math.isfinite(float(raw)):
             return self._unavailable(term, "operator value unavailable")
-        contribution, satisfied, target = self._score_raw_value(float(raw), term, mode, weight)
+        contribution, satisfied, target, unscaled_penalty, scaled_penalty = self._score_raw_value(float(raw), term, mode, weight)
+        details.update(
+            {
+                "scale": float(max(_finite_float(term.get("scale", 1.0), 1.0), 1.0e-8)),
+                "unscaled_penalty": float(unscaled_penalty),
+                "scaled_penalty": float(scaled_penalty),
+            }
+        )
         return ObjectiveTermResult(
             name=str(term.get("name", term.get("kpi", term.get("operator", "term")))),
             value=float(contribution),
@@ -483,32 +500,38 @@ class FieldFunctionalObjective:
             details=details,
         )
 
-    def _score_raw_value(self, raw: float, term: Mapping[str, Any], mode: str, weight: float) -> Tuple[float, bool, Any]:
+    def _score_raw_value(self, raw: float, term: Mapping[str, Any], mode: str, weight: float) -> Tuple[float, bool, Any, float, float]:
+        scale = max(_finite_float(term.get("scale", 1.0), 1.0), 1.0e-8)
+
+        def pack(unscaled_penalty: float, satisfied: bool, target: Any) -> Tuple[float, bool, Any, float, float]:
+            scaled_penalty = float(unscaled_penalty) / scale
+            return weight * scaled_penalty, bool(satisfied), target, float(unscaled_penalty), float(scaled_penalty)
+
         if mode == "minimize":
-            return weight * raw, True, None
+            return pack(raw, True, None)
         if mode == "maximize":
-            return -weight * raw, True, None
+            return pack(-raw, True, None)
         if mode == "exact":
             target = _finite_float(term.get("value", term.get("target")), 0.0)
             tol = max(_finite_float(term.get("tolerance", 0.0), 0.0), 0.0)
             violation = max(abs(raw - target) - tol, 0.0)
-            return weight * violation, violation <= 1.0e-12, target
+            return pack(violation, violation <= 1.0e-12, target)
         if mode == "target_range":
             rng = term.get("range", term.get("target", [0.0, 0.0]))
             low, high = sorted((_finite_float(rng[0], 0.0), _finite_float(rng[1], 0.0))) if isinstance(rng, Sequence) and len(rng) >= 2 else (0.0, 0.0)
             violation = max(low - raw, 0.0, raw - high)
-            return weight * violation, violation <= 1.0e-12, [low, high]
+            return pack(violation, violation <= 1.0e-12, [low, high])
         if mode == "upper_bound":
             target = _finite_float(term.get("value", term.get("upper", term.get("target"))), 0.0)
             violation = max(raw - target, 0.0)
-            return weight * violation, violation <= 1.0e-12, target
+            return pack(violation, violation <= 1.0e-12, target)
         if mode == "lower_bound":
             target = _finite_float(term.get("value", term.get("lower", term.get("target"))), 0.0)
             violation = max(target - raw, 0.0)
-            return weight * violation, violation <= 1.0e-12, target
+            return pack(violation, violation <= 1.0e-12, target)
         if mode in {"mean_above_threshold_minimize", "area_above_threshold_minimize"}:
-            return weight * raw, raw <= 1.0e-12, term.get("threshold")
-        return weight * raw, True, None
+            return pack(raw, raw <= 1.0e-12, term.get("threshold"))
+        return pack(raw, True, None)
 
     def _evaluate_hard_constraints(self, layout: Optional[Mapping[str, Any]], constraints: Any) -> Dict[str, Any]:
         if not isinstance(constraints, Mapping) or not constraints:

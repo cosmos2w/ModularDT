@@ -16,9 +16,12 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
+from matplotlib.markers import MarkerStyle
 import numpy as np
 import torch
 
+import _bootstrap_imports  # noqa: F401
 from channelthermal_datasets import CHANNEL_ORDER, GlobalChannelThermalDataset
 from channelthermal_model_utils import (
     current_timestamp,
@@ -364,7 +367,7 @@ def draw_module_outlines(ax: Any, sample: Dict[str, Any], color: str = "#d9d9d9"
     radius = module_radius_from_sample(sample)
     for module_idx in np.flatnonzero(present):
         cx, cy = centers[module_idx]
-        ax.add_patch(plt.Circle((float(cx), float(cy)), radius, fill=False, color=color, lw=linewidth))
+        ax.add_patch(Circle((float(cx), float(cy)), radius, fill=False, color=color, lw=linewidth))
 
 
 def _local_disk_image(values: np.ndarray, local_mask: np.ndarray) -> np.ndarray:
@@ -502,7 +505,7 @@ def plot_field_quicklook(
             axes[row, col].set_xlabel("x")
             axes[row, col].set_ylabel("y")
             fig.colorbar(im, ax=axes[row, col], fraction=0.046, pad=0.04)
-    fig.savefig(output_path, dpi=170)
+    fig.savefig(str(output_path), dpi=170)
     plt.close(fig)
 
 
@@ -541,7 +544,7 @@ def plot_internal(output_path: Path, sample: Dict[str, Any], pred_internal: np.n
             axes[row, col].set_xlabel("xi")
             axes[row, col].set_ylabel("eta")
             fig.colorbar(im, ax=axes[row, col], fraction=0.046, pad=0.04)
-    fig.savefig(output_path, dpi=170)
+    fig.savefig(str(output_path), dpi=170)
     plt.close(fig)
 
 
@@ -585,7 +588,7 @@ def plot_interface(
             ax.grid(True, alpha=0.25)
             if row == 0:
                 ax.legend(fontsize=8)
-    fig.savefig(output_path, dpi=170)
+    fig.savefig(str(output_path), dpi=170)
     plt.close(fig)
 
 
@@ -777,15 +780,15 @@ def render_channelthermal_physical_organization(
         cx, cy = centers[module_idx]
         color = "#fdae61" if heat[module_idx] >= 0 else "#74add1"
         radius = float(model.config.module_radius)
-        ax.add_patch(plt.Circle((float(cx), float(cy)), radius, fill=True, color=color, alpha=0.20 + 0.35 * float(heat_scale[module_idx]), lw=0.0))
-        ax.add_patch(plt.Circle((float(cx), float(cy)), radius, fill=False, color=color, lw=1.2 + 1.4 * float(heat_scale[module_idx])))
+        ax.add_patch(Circle((float(cx), float(cy)), radius, fill=True, color=color, alpha=0.20 + 0.35 * float(heat_scale[module_idx]), lw=0.0))
+        ax.add_patch(Circle((float(cx), float(cy)), radius, fill=False, color=color, lw=1.2 + 1.4 * float(heat_scale[module_idx])))
         ax.text(float(cx), float(cy), f"M{module_idx}", ha="center", va="center", color="white", fontsize=8, weight="bold")
     for hidx in range(strength.shape[0]):
         alpha = float(np.clip(strength[hidx], 0.12, 1.0))
         color = cmap(hidx)
         ax.plot([src[hidx, 0], dst[hidx, 0]], [src[hidx, 1], dst[hidx, 1]], color=color, lw=1.0 + 2.0 * alpha, alpha=alpha)
-        ax.scatter(src[hidx, 0], src[hidx, 1], marker="x", s=35 + 70 * alpha, color=color, linewidth=1.5)
-        ax.scatter(dst[hidx, 0], dst[hidx, 1], marker="*", s=65 + 125 * alpha, color=color, edgecolor="black", linewidth=0.45)
+        ax.scatter(src[hidx, 0], src[hidx, 1], marker=MarkerStyle("x"), s=35 + 70 * alpha, color=color, linewidth=1.5)
+        ax.scatter(dst[hidx, 0], dst[hidx, 1], marker=MarkerStyle("*"), s=65 + 125 * alpha, color=color, edgecolor="black", linewidth=0.45)
         ax.text(dst[hidx, 0], dst[hidx, 1], f"H{hidx}\n{strength[hidx]:.2f}", color="white", fontsize=7, ha="center", va="center")
         if A_mh.size:
             for module_idx in np.flatnonzero(present):
@@ -799,7 +802,7 @@ def render_channelthermal_physical_organization(
     )
     ax.set_xlabel("x")
     ax.set_ylabel("y")
-    fig.savefig(output_path, dpi=170)
+    fig.savefig(str(output_path), dpi=170)
     plt.close(fig)
 
 
@@ -847,7 +850,7 @@ def render_channelthermal_organization_matrices(
     ax_eh.set_yticks(np.arange(strength.shape[0]))
     ax_eh.set_yticklabels(labels, fontsize=7)
     fig.colorbar(im2, ax=ax_eh, fraction=0.046, pad=0.04)
-    fig.savefig(output_path, dpi=170)
+    fig.savefig(str(output_path), dpi=170)
     plt.close(fig)
 
 
@@ -874,7 +877,7 @@ def render_channelthermal_hypergraph_schematic(
         alpha = float(np.clip(strength[hidx], 0.12, 0.85))
         cx = 0.5 * (src[hidx, 0] + dst[hidx, 0])
         cy = 0.5 * (src[hidx, 1] + dst[hidx, 1])
-        ax.add_patch(plt.Circle((float(cx), float(cy)), 0.34 + 0.8 * float(env_mass[hidx]), color=color, alpha=0.12 + 0.18 * alpha, lw=0.0))
+        ax.add_patch(Circle((float(cx), float(cy)), 0.34 + 0.8 * float(env_mass[hidx]), color=color, alpha=0.12 + 0.18 * alpha, lw=0.0))
         ax.text(float(cx), float(cy), f"H{hidx}\nM={module_mass[hidx]:.2f} E={env_mass[hidx]:.2f}\nS={strength[hidx]:.2f}", ha="center", va="center", fontsize=8, color="black")
     for module_idx in np.flatnonzero(present):
         cx, cy = centers[module_idx]
@@ -894,7 +897,7 @@ def render_channelthermal_hypergraph_schematic(
     ax.set_ylabel("y")
     ax.legend(fontsize=8, loc="upper right")
     ax.set_aspect("equal", adjustable="box")
-    fig.savefig(output_path, dpi=170)
+    fig.savefig(str(output_path), dpi=170)
     plt.close(fig)
 
 

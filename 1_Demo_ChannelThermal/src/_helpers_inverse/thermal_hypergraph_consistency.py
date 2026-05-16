@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
+from matplotlib.markers import MarkerStyle
+from matplotlib.patches import Circle
 
 
 DEFAULT_WEIGHTS: Dict[str, float] = {
@@ -313,11 +315,11 @@ def plot_hypergraph_overlay(
     ax.set_ylabel("y")
     ax.set_title("Planned vs realized hypergraph landmarks")
     for cx, cy in centers_arr:
-        ax.add_patch(plt.Circle((float(cx), float(cy)), float(module_radius), fill=False, lw=1.1, color="#6b7280", alpha=0.9))
+        ax.add_patch(Circle((float(cx), float(cy)), float(module_radius), fill=False, lw=1.1, color="#6b7280", alpha=0.9))
     if p_src.size:
         ax.scatter(p_src[:, 0], p_src[:, 1], marker="o", s=55, c="#2563eb", label="planned source")
     if p_thr.size:
-        ax.scatter(p_thr[:, 0], p_thr[:, 1], marker="^", s=65, c="#2563eb", label="planned thermal")
+        ax.scatter(p_thr[:, 0], p_thr[:, 1], marker=MarkerStyle("^"), s=65, c="#2563eb", label="planned thermal")
     if r_src.size:
         ax.scatter(r_src[:, 0], r_src[:, 1], marker="x", s=60, c="#dc2626", label="realized source")
     if r_thr.size:
@@ -331,7 +333,7 @@ def plot_hypergraph_overlay(
             ax.text(r_src[ri, 0], r_src[ri, 1], f"R{ri}", fontsize=8, color="#b91c1c")
     ax.grid(True, alpha=0.18)
     ax.legend(loc="upper right", fontsize=8)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
 
 
@@ -354,5 +356,5 @@ def plot_hypergraph_mismatch_heatmap(comparison: Mapping[str, Any], out_path: Pa
     ax.set_ylabel("planned active edge")
     for match in comparison.get("matched_edges", []) or []:
         ax.text(int(match.get("realized_match_index", 0)), int(match.get("planned_match_index", 0)), "x", ha="center", va="center", color="white", fontweight="bold")
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)

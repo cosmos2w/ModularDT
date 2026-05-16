@@ -6,10 +6,12 @@ from dataclasses import dataclass
 import math
 from pathlib import Path
 import sys
+import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 
 SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
@@ -63,6 +65,7 @@ class GuidedSearchConfig:
     hypergraph_consistency_weight: float = 1.0
     diversity_weight: float = 0.0
     random_seed: int = 0
+    avoid_hypergraph_double_count: bool = True
 
 
 def _finite_float(value: Any, default: float = 0.0) -> float:
@@ -166,6 +169,22 @@ def compare_hypergraphs(planned: Optional[Mapping[str, Any]], realized: Optional
         return out
     except Exception:
         return _fallback_hypergraph_compare(planned, realized)
+
+
+def objective_has_plan_realization_term(objective: Any) -> bool:
+    """Return True when the objective already scores planned-vs-realized consistency."""
+
+    spec = getattr(objective, "spec", {})
+    if not isinstance(spec, Mapping):
+        return False
+    for term in spec.get("hypergraph_terms", []) or []:
+        if not isinstance(term, Mapping):
+            continue
+        operator = str(term.get("operator", "")).lower().strip()
+        name = str(term.get("name", "")).lower()
+        if operator == "plan_realization_distance" or "planned_realized" in name:
+            return True
+    return False
 
 
 class ForwardHONFEvaluator:
@@ -296,6 +315,7 @@ class LatentPosteriorDesignSearcher:
         self.search_config = search_config
         self.device = next(prior_model.parameters()).device
         self.forward_calls = 0
+        self._objective_counts_plan_realization = objective_has_plan_realization_term(objective)
 
     def _context_tensor(self, context: Optional[Mapping[str, Any]], n: int = 1) -> Optional[torch.Tensor]:
         dim = int(getattr(self.prior_model.cfg, "context_dim", 0))
@@ -342,10 +362,13 @@ class LatentPosteriorDesignSearcher:
         z_tensor = torch.from_numpy(np.asarray(z, dtype=np.float32)[None]).to(self.device)
         prior_energy = float(self.prior_model.latent_prior_energy(z_tensor).detach().cpu().numpy().reshape(-1)[0])
         hyper_score = float(comparison.get("total", 0.0) or 0.0) if bool(comparison.get("diagnostics_available", False)) else 0.0
+        hyper_extra_score = float(self.search_config.hypergraph_consistency_weight) * hyper_score
+        if bool(self.search_config.avoid_hypergraph_double_count) and self._objective_counts_plan_realization:
+            hyper_extra_score = 0.0
         total = (
             float(objective_result.get("total_score", 0.0))
             + float(self.search_config.geometry_penalty_weight) * geom
-            + float(self.search_config.hypergraph_consistency_weight) * hyper_score
+            + hyper_extra_score
             + float(self.search_config.prior_energy_weight) * prior_energy
         )
         return _jsonable(
@@ -362,11 +385,13 @@ class LatentPosteriorDesignSearcher:
                 "realized_hypergraph": realized,
                 "hypergraph_consistency": comparison,
                 "hypergraph_consistency_score": hyper_score,
+                "hypergraph_extra_score": hyper_extra_score,
                 "behavior_vec_hat": behavior.detach().cpu().numpy().reshape(-1).astype(np.float32) if behavior is not None else None,
                 "kpis": forward_payload.get("kpis", {}),
                 "forward_prediction": forward_payload.get("forward_prediction", {}),
                 "objective_result": objective_result,
                 "total_score": total,
+                "objective_score": float(objective_result.get("total_score", 0.0)),
                 "hard_violation_score": float(objective_result.get("hard_violation_score", 0.0)),
                 "satisfied": bool(objective_result.get("satisfied", False)),
                 "num_satisfied": int(objective_result.get("num_satisfied", 0)),
@@ -387,7 +412,7 @@ class LatentPosteriorDesignSearcher:
             torch.manual_seed(int(self.search_config.random_seed))
             z = torch.randn(int(num_samples), int(self.prior_model.cfg.latent_dim), device=self.device) * float(temperature)
             decoded_all = self.prior_model.decode_latent(z, context_vec)
-            for idx in range(int(num_samples)):
+            for idx in tqdm(range(int(num_samples)), desc="atlas_prior", unit="sample", dynamic_ncols=True):
                 decoded = {key: value[idx : idx + 1] for key, value in decoded_all.items()}
                 candidates.append(
                     self._evaluate_decoded(
@@ -411,14 +436,17 @@ class LatentPosteriorDesignSearcher:
         history = []
         pop = max(int(self.search_config.latent_cem_population), 2)
         elite_n = max(1, int(math.ceil(pop * float(self.search_config.latent_cem_elite_frac))))
-        for iteration in range(max(int(self.search_config.latent_cem_iterations), 1)):
+        total_iterations = max(int(self.search_config.latent_cem_iterations), 1)
+        progress = tqdm(range(total_iterations), desc="atlas_guided latent_cem", unit="iter", dynamic_ncols=True)
+        for iteration in progress:
+            iter_start = time.time()
             z_np = rng.normal(mean[None, :], std[None, :], size=(pop, latent_dim)).astype(np.float32)
             rows = []
             with torch.no_grad():
                 z = torch.from_numpy(z_np).to(self.device)
                 context_vec = self._context_tensor(context, pop)
                 decoded_all = self.prior_model.decode_latent(z, context_vec)
-                for idx in range(pop):
+                for idx in tqdm(range(pop), desc=f"atlas_guided iter {iteration + 1}/{total_iterations}", unit="cand", leave=False, dynamic_ncols=True):
                     decoded = {key: value[idx : idx + 1] for key, value in decoded_all.items()}
                     rows.append(
                         self._evaluate_decoded(
@@ -442,8 +470,10 @@ class LatentPosteriorDesignSearcher:
                     "best_score": float(rows[0]["total_score"]),
                     "mean_elite_score": float(np.mean([float(row["total_score"]) for row in elites])),
                     "num_forward_calls": int(self.forward_calls),
+                    "runtime_seconds": float(time.time() - iter_start),
                 }
             )
+            progress.set_postfix(best=f"{float(rows[0]['total_score']):.4g}", calls=self.forward_calls)
         all_candidates.sort(key=lambda row: float(row.get("total_score", float("inf"))))
         reranked = diversity_rerank(all_candidates, weight=float(self.search_config.diversity_weight), config=self.layout_config)
         top = reranked[: max(int(self.search_config.num_return), 0)]

@@ -49,6 +49,7 @@ from typing import Dict, Tuple
 import numpy as np
 from tqdm.auto import tqdm
 
+import _bootstrap_imports  # noqa: F401
 from channelthermal_common import (
     SimulationConfig,
     backup_config_file,

@@ -15,6 +15,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 import numpy as np
 
 try:
@@ -35,7 +36,12 @@ CANDIDATE_CSV_FIELDS = [
     "repair_distance",
     "geometry_penalty",
     "hypergraph_consistency_score",
+    "hypergraph_extra_score",
     "planned_realized_hypergraph_score",
+    "prior_energy",
+    "objective_score",
+    "best_score",
+    "runtime_seconds",
     "forward_calls",
     "diversity_cluster_id",
     "source",
@@ -78,13 +84,22 @@ def _value(candidate: Mapping[str, Any], field: str) -> Any:
     return ""
 
 
+def _csv_safe(value: Any) -> Any:
+    value = to_jsonable(value)
+    if value is None:
+        return ""
+    if isinstance(value, (Mapping, list, tuple)):
+        return json.dumps(value, sort_keys=True)
+    return value
+
+
 def write_candidates_csv(candidates: Sequence[Mapping[str, Any]], path: str | Path) -> None:
     out = _ensure_parent(path)
     with out.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CANDIDATE_CSV_FIELDS)
         writer.writeheader()
         for row in candidates:
-            writer.writerow({field: to_jsonable(_value(row, field)) for field in CANDIDATE_CSV_FIELDS})
+            writer.writerow({field: _csv_safe(_value(row, field)) for field in CANDIDATE_CSV_FIELDS})
 
 
 def write_summary_json(summary: Mapping[str, Any], path: str | Path) -> None:
@@ -111,7 +126,7 @@ def plot_score_vs_calls(histories: Mapping[str, Sequence[Mapping[str, Any]]] | S
     ax.grid(True, alpha=0.25)
     if isinstance(histories, Mapping) and len(histories) > 1:
         ax.legend()
-    fig.savefig(out, dpi=170)
+    fig.savefig(str(out), dpi=170)
     plt.close(fig)
 
 
@@ -135,7 +150,7 @@ def plot_method_comparison(summary_by_method: Mapping[str, Any], path: str | Pat
     ax.set_ylabel("Best total score")
     ax.set_title("Method comparison")
     ax.grid(True, axis="y", alpha=0.25)
-    fig.savefig(out, dpi=170)
+    fig.savefig(str(out), dpi=170)
     plt.close(fig)
 
 
@@ -171,7 +186,7 @@ def plot_layout_candidate(
             fig.colorbar(im, ax=ax, shrink=0.82, label="field")
     ax.add_patch(plt.Rectangle((0.0, 0.0), lx, ly, fill=False, linewidth=1.4, edgecolor="black"))
     for idx, (cx, cy) in enumerate(centers):
-        ax.add_patch(plt.Circle((float(cx), float(cy)), radius, fill=False, linewidth=1.4))
+        ax.add_patch(Circle((float(cx), float(cy)), radius, fill=False, linewidth=1.4))
         ax.text(float(cx), float(cy), str(idx + 1), ha="center", va="center", fontsize=8)
     ax.set_xlim(-0.05 * lx, 1.05 * lx)
     ax.set_ylim(-0.08 * ly, 1.08 * ly)
@@ -180,7 +195,7 @@ def plot_layout_candidate(
     ax.set_ylabel("y")
     ax.set_title(str(title or "Layout candidate"))
     ax.grid(True, alpha=0.2)
-    fig.savefig(out, dpi=170)
+    fig.savefig(str(out), dpi=170)
     plt.close(fig)
 
 

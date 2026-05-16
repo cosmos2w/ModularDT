@@ -1,0 +1,13 @@
+{
+  "typeCheckingMode": "basic",
+  "include": [
+    "src"
+  ],
+  "extraPaths": [
+    "src",
+    "src/_helpers_forward",
+    "src/_helpers_inverse",
+    "src/_models_forward",
+    "src/_models_inverse"
+  ]
+}

@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib.lines import Line2D
-from matplotlib.patches import Ellipse, Polygon
+from matplotlib.patches import Circle, Ellipse, Polygon
 
 
 def _hyperedge_colors(num_h: int) -> List[Tuple[float, float, float, float]]:
@@ -147,8 +147,8 @@ def _draw_module_circles(
         color = "#d95f02" if hot else "#1f78b4"
         lw = 1.2 + 2.5 * float(scale[module_idx]) if module_idx < scale.shape[0] else 1.2
         alpha = 0.16 + 0.28 * float(scale[module_idx]) if module_idx < scale.shape[0] else 0.16
-        ax.add_patch(plt.Circle((float(cx), float(cy)), module_radius, facecolor=color, edgecolor=color, alpha=alpha, lw=0.0, zorder=3))
-        ax.add_patch(plt.Circle((float(cx), float(cy)), module_radius, fill=False, edgecolor=color, lw=lw, alpha=0.95, zorder=5))
+        ax.add_patch(Circle((float(cx), float(cy)), module_radius, facecolor=color, edgecolor=color, alpha=alpha, lw=0.0, zorder=3))
+        ax.add_patch(Circle((float(cx), float(cy)), module_radius, fill=False, edgecolor=color, lw=lw, alpha=0.95, zorder=5))
         if label:
             ax.text(
                 float(cx),
@@ -310,7 +310,7 @@ def render_channelthermal_organization_overview(
             rgba[3] = 0.20
             cell.set_facecolor(tuple(rgba))
     ax_table.set_title("Hyperedge summary", pad=14)
-    fig.savefig(output_path, dpi=180)
+    fig.savefig(str(output_path), dpi=180)
     plt.close(fig)
 
 
@@ -419,7 +419,7 @@ def render_channelthermal_organization_schematic_presentation(
     ax.legend(handles=legend_items, loc="lower center", ncol=3, fontsize=8, framealpha=0.90)
     if hidden_count > 0:
         ax.text(0.5, 0.045, "weak hyperedges hidden; see debug matrices", ha="center", va="center", fontsize=8, color="#444444")
-    fig.savefig(output_path, dpi=180)
+    fig.savefig(str(output_path), dpi=180)
     plt.close(fig)
 
 
@@ -520,5 +520,5 @@ def render_channelthermal_organization_summary_matrices(
         cbar.set_ticklabels([f"H{i}" for i in range(strength.shape[0])])
         cbar.set_label("env token dominant H")
 
-    fig.savefig(output_path, dpi=180)
+    fig.savefig(str(output_path), dpi=180)
     plt.close(fig)

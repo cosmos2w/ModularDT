@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+import _bootstrap_imports
 from channelthermal_datasets import LocalModuleDataset
 from channelthermal_model_utils import (
     current_timestamp,
@@ -165,7 +166,7 @@ def plot_internal(output_path: Path, sample: Dict, pred_internal: np.ndarray, me
         ax.set_xlabel("xi")
         ax.set_ylabel("eta")
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    fig.savefig(output_path, dpi=170)
+    fig.savefig(str(output_path), dpi=170)
     plt.close(fig)
 
 
@@ -199,7 +200,7 @@ def plot_interface(output_path: Path, sample: Dict, pred_interface: np.ndarray) 
         ax.grid(True, alpha=0.25)
     axes[-1].set_xlabel("theta")
     axes[1].legend()
-    fig.savefig(output_path, dpi=170)
+    fig.savefig(str(output_path), dpi=170)
     plt.close(fig)
 
 

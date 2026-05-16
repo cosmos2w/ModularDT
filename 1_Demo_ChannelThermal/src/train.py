@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
+import _bootstrap_imports  # noqa: F401
 from channelthermal_datasets import GlobalChannelThermalDataset
 from channelthermal_model_utils import (
     autocast_context,
@@ -905,7 +906,7 @@ def save_global_loss_plots(history_path: Path, run_dir: Path) -> None:
     for ax in axes.reshape(-1)[len(panels) :]:
         ax.axis("off")
     fig.suptitle("Global Channel Thermal Losses", fontsize=13)
-    fig.savefig(run_dir / "loss_curve.png", dpi=160)
+    fig.savefig(str(run_dir / "loss_curve.png"), dpi=160)
     plt.close(fig)
 
     focused = {
@@ -923,7 +924,7 @@ def save_global_loss_plots(history_path: Path, run_dir: Path) -> None:
     for filename, (title, keys) in focused.items():
         fig, ax = plt.subplots(figsize=(7.0, 4.2), constrained_layout=True)
         _plot_loss_group(ax, history, keys, title=title)
-        fig.savefig(run_dir / filename, dpi=160)
+        fig.savefig(str(run_dir / filename), dpi=160)
         plt.close(fig)
 
 

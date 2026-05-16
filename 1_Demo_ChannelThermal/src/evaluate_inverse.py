@@ -16,10 +16,13 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.markers import MarkerStyle
+from matplotlib.patches import Circle
 import numpy as np
 import torch
 from tqdm.auto import tqdm
 
+import _bootstrap_imports
 from channelthermal_datasets import CHANNEL_ORDER
 from channelthermal_model_utils import current_timestamp, load_trusted_checkpoint, resolve_demo_path, select_device, strip_module_prefix, write_json
 from model_inverse import ThermalInverseDesignFlow, channel_clearance_diagnostics, repair_channel_design
@@ -839,6 +842,15 @@ def _extent(record: Any) -> Tuple[float, float, float, float]:
     return (float(np.min(record.x_grid)), float(np.max(record.x_grid)), float(np.min(record.y_grid)), float(np.max(record.y_grid)))
 
 
+def _float_or_none(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _draw_layout(ax: Any, record: Any, centers: np.ndarray, *, title: str = "") -> None:
     ax.set_xlim(0.0, float(record.domain_length_x))
     ax.set_ylim(0.0, float(record.domain_length_y))
@@ -847,14 +859,14 @@ def _draw_layout(ax: Any, record: Any, centers: np.ndarray, *, title: str = "") 
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     for cx, cy in np.asarray(centers, dtype=np.float32).reshape(-1, 2):
-        ax.add_patch(plt.Circle((float(cx), float(cy)), float(record.module_radius), fill=False, lw=1.3, color="#1f77b4"))
+        ax.add_patch(Circle((float(cx), float(cy)), float(record.module_radius), fill=False, lw=1.3, color="#1f77b4"))
 
 
 def _draw_layout_with_style(ax: Any, record: Any, centers: np.ndarray, *, color: str, label: str, linestyle: str = "-", linewidth: float = 1.4) -> None:
     first = True
     for cx, cy in np.asarray(centers, dtype=np.float32).reshape(-1, 2):
         ax.add_patch(
-            plt.Circle(
+            Circle(
                 (float(cx), float(cy)),
                 float(record.module_radius),
                 fill=False,
@@ -881,7 +893,7 @@ def plot_reference_layout_comparison(candidate: Mapping[str, Any], record: Any, 
     ax.set_title(f"Generated vs reference layout, case {record.case_id}")
     ax.legend(loc="upper right", fontsize=8)
     ax.grid(True, alpha=0.18)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
 
 
@@ -898,7 +910,7 @@ def plot_candidate_layouts(candidates: Sequence[Mapping[str, Any]], record: Any,
         ax.text(0.01, 0.98, "circle = generated module footprint", transform=ax.transAxes, va="top", ha="left", fontsize=7, bbox={"facecolor": "white", "alpha": 0.65, "pad": 2})
     for ax in axes_arr[n:]:
         ax.axis("off")
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
 
 
@@ -923,7 +935,7 @@ def plot_temperature_field(candidate: Mapping[str, Any], record: Any, out_path: 
     for ax in axes_arr[len(wanted):]:
         ax.axis("off")
     fig.suptitle(f"Best generated global fields, score={candidate['total_score']:.4f}", fontsize=11)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
 
 
@@ -956,7 +968,7 @@ def plot_composite_internal(candidate: Mapping[str, Any], record: Any, out_path:
     for ax in axes_arr[count:]:
         ax.axis("off")
     fig.suptitle("Generated module-internal temperature disks", fontsize=11)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
 
 
@@ -976,7 +988,7 @@ def plot_internal_bars(candidate: Mapping[str, Any], out_path: Path) -> None:
     ax.set_ylabel("temperature")
     ax.legend()
     ax.grid(True, axis="y", alpha=0.25)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
 
 
@@ -1000,7 +1012,7 @@ def plot_interface_curves(candidate: Mapping[str, Any], out_path: Path) -> None:
             axes[row, col].set_xlabel("theta")
             axes[row, col].legend(fontsize=8)
             axes[row, col].grid(True, alpha=0.25)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
 
 
@@ -1027,11 +1039,11 @@ def plot_target_vs_verified(candidate: Mapping[str, Any], target_spec: Mapping[s
         elif mode in {"max", "upper", "at_most"}:
             hi = entry.get("high", entry.get("upper"))
             if hi is not None:
-                ax.scatter([i], [float(hi)], marker="v", color="black", s=30)
+                ax.scatter([i], [float(hi)], marker=MarkerStyle("v"), color="black", s=30)
         elif mode in {"min", "lower", "at_least"}:
             lo = entry.get("low", entry.get("lower"))
             if lo is not None:
-                ax.scatter([i], [float(lo)], marker="^", color="black", s=30)
+                ax.scatter([i], [float(lo)], marker=MarkerStyle("^"), color="black", s=30)
         else:
             val = entry.get("value", entry.get("target"))
             if val is not None:
@@ -1042,7 +1054,7 @@ def plot_target_vs_verified(candidate: Mapping[str, Any], target_spec: Mapping[s
     ax.set_title("Target vs best verified KPIs")
     ax.legend(["target bound/value", "verified"], fontsize=8)
     ax.grid(True, axis="y", alpha=0.25)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
 
 
@@ -1137,7 +1149,7 @@ def plot_target_vs_verified_normalized(candidate: Mapping[str, Any], target_spec
     ax.set_ylabel("normalized violation")
     ax.set_title("Target KPI violations, normalized")
     ax.grid(True, axis="y", alpha=0.25)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
     return rows
 
@@ -1153,7 +1165,7 @@ def plot_diversity(candidates: Sequence[Mapping[str, Any]], out_path: Path) -> N
     ax.set_ylabel("verified score")
     ax.set_title("Candidate diversity")
     ax.grid(True, alpha=0.25)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
 
 
@@ -1195,7 +1207,7 @@ def write_design_intent_breakdown(candidate: Mapping[str, Any], out_csv: Path, o
     ax.set_ylabel("penalty / score")
     ax.set_title("Design intent score breakdown")
     ax.grid(True, axis="y", alpha=0.25)
-    fig.savefig(out_png, dpi=170)
+    fig.savefig(str(out_png), dpi=170)
     plt.close(fig)
 
 
@@ -1212,7 +1224,7 @@ def plot_candidate_pareto_scatter(candidates: Sequence[Mapping[str, Any]], out_p
     ax.set_title("Candidate Pareto view")
     fig.colorbar(sc, ax=ax, label="module temperature spread")
     ax.grid(True, alpha=0.25)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
 
 
@@ -1230,7 +1242,7 @@ def plot_field_risk_overlay(candidate: Mapping[str, Any], target_spec: Mapping[s
         ax.imshow(risk, origin="lower", extent=_extent(record), cmap="Blues", alpha=0.35, aspect="equal")
     _draw_layout(ax, record, candidate["centers"], title="Best layout thermal field + intent risk")
     fig.colorbar(im, ax=ax, fraction=0.03, pad=0.02)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
 
 
@@ -1255,7 +1267,7 @@ def plot_reference_field_comparison(candidate: Mapping[str, Any], record: Any, o
             ax.legend(loc="upper right", fontsize=7)
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
     fig.suptitle(f"Generated-vs-reference fields for case {record.case_id}", fontsize=11)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
 
 
@@ -1286,7 +1298,7 @@ def plot_reference_kpi_comparison(candidate: Mapping[str, Any], record: Any, kpi
     ax.set_title("Reference vs generated verified KPIs")
     ax.legend(fontsize=8)
     ax.grid(True, axis="y", alpha=0.25)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
 
 
@@ -1367,8 +1379,8 @@ def plot_structure_diagnostics(best: Mapping[str, Any], target_spec: Mapping[str
         ax.set_ylabel("normalized descriptor")
         ax.legend(fontsize=8)
         ax.grid(True, axis="y", alpha=0.25)
-        fig.savefig(out_dirs["diagnostics"] / "generated_vs_reference_layout_descriptor_bars.png", dpi=170)
-        fig.savefig(out_dirs["diagnostics"] / "layout_structure_comparison.png", dpi=170)
+        fig.savefig(str(out_dirs["diagnostics"] / "generated_vs_reference_layout_descriptor_bars.png"), dpi=170)
+        fig.savefig(str(out_dirs["diagnostics"] / "layout_structure_comparison.png"), dpi=170)
         plt.close(fig)
     ref_centers = np.asarray(target_spec.get("reference_ground_truth", {}).get("centers", []), dtype=np.float32).reshape(-1, 2)
     gen_centers = np.asarray(best.get("centers", []), dtype=np.float32).reshape(-1, 2)
@@ -1380,7 +1392,7 @@ def plot_structure_diagnostics(best: Mapping[str, Any], target_spec: Mapping[str
         _draw_layout(axes[0], record, ref_centers, title="reference occupancy")
         axes[1].imshow(gen_maps[0], origin="lower", extent=_extent(record), cmap="Blues", aspect="equal")
         _draw_layout(axes[1], record, gen_centers, title="generated occupancy")
-        fig.savefig(out_dirs["diagnostics"] / "reference_vs_generated_occupancy_maps.png", dpi=170)
+        fig.savefig(str(out_dirs["diagnostics"] / "reference_vs_generated_occupancy_maps.png"), dpi=170)
         plt.close(fig)
     heat = np.asarray(best.get("heat_powers", best.get("prediction", {}).get("heat_powers", [])), dtype=np.float32).reshape(-1)
     if gen_centers.size and heat.size:
@@ -1393,7 +1405,7 @@ def plot_structure_diagnostics(best: Mapping[str, Any], target_spec: Mapping[str
         fig.colorbar(sc, ax=ax, label="heat power")
         ax.set_title("Generated heat-power layout overlay")
         ax.grid(True, alpha=0.18)
-        fig.savefig(out_dirs["diagnostics"] / "heat_power_layout_overlay.png", dpi=170)
+        fig.savefig(str(out_dirs["diagnostics"] / "heat_power_layout_overlay.png"), dpi=170)
         plt.close(fig)
 
 
@@ -1412,7 +1424,7 @@ def try_plot_organization(candidate: Mapping[str, Any], record: Any, out_path: P
     axes[1].set_xlabel("hyperedge")
     axes[1].set_ylabel("env token")
     fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
 
 
@@ -1488,7 +1500,7 @@ def plot_hypergraph_plan_comparison(candidate: Mapping[str, Any], record: Any, o
         axes[1, 1].scatter(centers[:, 0], centers[:, 1], s=90, c="#2f6fbb", edgecolor="black", label="generated modules")
     axes[1, 1].set_title("Generated concrete design layout")
     axes[1, 1].grid(True, alpha=0.2)
-    fig.savefig(out_path, dpi=170)
+    fig.savefig(str(out_path), dpi=170)
     plt.close(fig)
     return {
         "predicted_hypergraph_plan_summary": json_safe(predicted),
@@ -1943,7 +1955,7 @@ def main() -> int:
         "diversity_rerank_top_k": int(args.diversity_rerank_top_k),
         "hypergraph_rerank_weight": float(args.hypergraph_rerank_weight),
         "mean_hypergraph_consistency_score": float(np.mean([float(c.get("hypergraph_consistency_score", np.nan)) for c in candidates if c.get("hypergraph_diagnostics_available")])) if any(c.get("hypergraph_diagnostics_available") for c in candidates) else None,
-        "best_hypergraph_consistency_score": float(best.get("hypergraph_consistency_score")) if best and best.get("hypergraph_consistency_score") is not None else None,
+        "best_hypergraph_consistency_score": _float_or_none(best.get("hypergraph_consistency_score")) if best else None,
         "hypergraph_diagnostics_available_count": int(sum(1 for c in candidates if c.get("hypergraph_diagnostics_available"))),
         "best_preference_penalties": best.get("score_detail", {}).get("per_preference_penalties", {}) if best else {},
         "best_design_intent_score_breakdown": best.get("design_intent_score_detail", {}) if best else {},

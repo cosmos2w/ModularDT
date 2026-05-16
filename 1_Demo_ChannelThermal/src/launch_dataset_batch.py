@@ -32,6 +32,7 @@ from typing import Deque, Dict, List, Optional, TextIO
 
 from tqdm.auto import tqdm
 
+import _bootstrap_imports  # noqa: F401
 from channelthermal_common import (
     SimulationConfig,
     config_from_dict,

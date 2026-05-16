@@ -10,9 +10,11 @@ variables with the same frozen forward HONF verifier.
 
 from dataclasses import dataclass
 import math
+import time
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
+from tqdm.auto import tqdm
 
 try:
     from field_functional_objective import FieldFunctionalObjective
@@ -363,10 +365,13 @@ class RawLayoutCEMOptimizer:
         calls = 0
         pop = max(int(self.config.cem_population), 2)
         elite_n = max(1, int(math.ceil(pop * float(self.config.cem_elite_frac))))
-        for iteration in range(max(int(self.config.cem_iterations), 1)):
+        total_iterations = max(int(self.config.cem_iterations), 1)
+        progress = tqdm(range(total_iterations), desc="raw_layout_cem", unit="iter", dynamic_ncols=True)
+        for iteration in progress:
+            iter_start = time.time()
             iteration_rows = []
             vectors = np.clip(rng.normal(mean[None, :], std[None, :], size=(pop, mean.size)), 0.0, 1.0)
-            for vec in vectors:
+            for vec in tqdm(vectors, desc=f"raw_layout_cem iter {iteration + 1}/{total_iterations}", unit="cand", leave=False, dynamic_ncols=True):
                 layout = decode_design_vec_to_layout(vec, self.config)
                 design_vec = encode_layout_to_design_vec(layout, self.config)
                 forward_payload = _forward_eval(self.forward_evaluator, layout, design_vec, ctx)
@@ -395,8 +400,10 @@ class RawLayoutCEMOptimizer:
                     "best_score": float(iteration_rows[0]["total_score"]),
                     "mean_elite_score": float(np.mean([row["total_score"] for row in elites])),
                     "num_forward_calls": int(calls),
+                    "runtime_seconds": float(time.time() - iter_start),
                 }
             )
+            progress.set_postfix(best=f"{float(iteration_rows[0]['total_score']):.4g}", calls=calls)
         all_candidates.sort(key=lambda item: float(item["total_score"]))
         for rank, row in enumerate(all_candidates[: max(int(num_return), 0)], start=1):
             row["rank"] = int(rank)
@@ -416,7 +423,7 @@ class RandomValidLayoutSampler:
         n = int(num_samples or self.num_samples or max(int(self.config.cem_population), int(num_return)))
         rows = []
         calls = 0
-        for idx in range(max(n, 0)):
+        for idx in tqdm(range(max(n, 0)), desc="random_valid", unit="layout", dynamic_ncols=True):
             layout = sample_random_valid_layout(self.config, rng, ctx)
             design_vec = encode_layout_to_design_vec(layout, self.config)
             forward_payload = _forward_eval(self.forward_evaluator, layout, design_vec, ctx)

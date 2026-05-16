@@ -21,6 +21,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
+import _bootstrap_imports  # noqa: F401
 from channelthermal_datasets import CHANNEL_ORDER, H5Normalizer
 from channelthermal_model_utils import (
     autocast_context,
@@ -2348,7 +2349,7 @@ def save_loss_curve(history_path: Path, out_path: Path) -> None:
     ax.set_yscale("log")
     ax.grid(True, alpha=0.25)
     ax.legend()
-    fig.savefig(out_path, dpi=160)
+    fig.savefig(str(out_path), dpi=160)
     plt.close(fig)
 
 
@@ -2391,7 +2392,7 @@ def save_forward_score_curve(history_path: Path, out_path: Path) -> None:
     ax.set_ylabel("forward score")
     ax.grid(True, alpha=0.25)
     ax.legend(fontsize=8)
-    fig.savefig(out_path, dpi=160)
+    fig.savefig(str(out_path), dpi=160)
     plt.close(fig)
 
 

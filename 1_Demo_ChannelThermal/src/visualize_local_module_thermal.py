@@ -25,6 +25,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 import numpy as np
 
 try:
@@ -32,6 +33,7 @@ try:
 except ImportError:  # pragma: no cover - only needed for processed views
     h5py = None
 
+import _bootstrap_imports  # noqa: F401
 from channelthermal_common import read_json, resolve_data_path
 
 
@@ -161,7 +163,7 @@ def plot_temperature_map(payload: Dict[str, np.ndarray], title: str, output_path
         extent=[float(np.min(local_x)), float(np.max(local_x)), float(np.min(local_y)), float(np.max(local_y))],
         cmap="inferno",
     )
-    circle = plt.Circle((0.0, 0.0), 1.0, fill=False, color="white", linewidth=1.2)
+    circle = Circle((0.0, 0.0), 1.0, fill=False, color="white", linewidth=1.2)
     ax.add_patch(circle)
     ax.set_aspect("equal")
     ax.set_xlabel("xi")
@@ -169,7 +171,7 @@ def plot_temperature_map(payload: Dict[str, np.ndarray], title: str, output_path
     ax.set_title(f"{title}\nT range [{t_min:.3g}, {t_max:.3g}]")
     fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label="T")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=160)
+    fig.savefig(str(output_path), dpi=160)
     plt.close(fig)
 
 
@@ -190,7 +192,7 @@ def plot_disk_mask(payload: Dict[str, np.ndarray], title: str, output_path: Path
     ax.set_title(title)
     fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04, label="inside disk")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=160)
+    fig.savefig(str(output_path), dpi=160)
     plt.close(fig)
 
 
@@ -233,7 +235,7 @@ def plot_boundary_conditions(payload: Dict[str, np.ndarray], title: str, output_
     axes[2].set_ylabel("target: q_normal")
     fig.suptitle(title)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=160)
+    fig.savefig(str(output_path), dpi=160)
     plt.close(fig)
 
 
@@ -250,7 +252,7 @@ def plot_port_phase(payload: Dict[str, np.ndarray], title: str, output_path: Pat
         edgecolors="black",
         linewidths=0.3,
     )
-    circle = plt.Circle((0.0, 0.0), 1.0, fill=False, color="0.2", linewidth=1.0)
+    circle = Circle((0.0, 0.0), 1.0, fill=False, color="0.2", linewidth=1.0)
     ax.add_patch(circle)
     ax.set_aspect("equal")
     ax.set_xlabel("cos(theta)")
@@ -258,7 +260,7 @@ def plot_port_phase(payload: Dict[str, np.ndarray], title: str, output_path: Pat
     ax.set_title(title)
     fig.colorbar(scatter, ax=ax, fraction=0.046, pad=0.04, label="q_normal")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=160)
+    fig.savefig(str(output_path), dpi=160)
     plt.close(fig)
 
 
@@ -284,7 +286,7 @@ def plot_condition_coefficients(payload: Dict[str, np.ndarray], title: str, outp
     axes[1].legend(loc="best")
     fig.suptitle(title)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=160)
+    fig.savefig(str(output_path), dpi=160)
     plt.close(fig)
 
 

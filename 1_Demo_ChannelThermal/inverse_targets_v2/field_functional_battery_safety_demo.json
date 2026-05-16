@@ -7,6 +7,7 @@
       "kpi": "max_solid_temperature",
       "mode": "upper_bound",
       "value": 355.0,
+      "scale": 10.0,
       "weight": 3.0,
       "hard": true
     },
@@ -14,18 +15,21 @@
       "name": "module_peak_spread",
       "kpi": "module_peak_temperature_spread",
       "mode": "minimize",
+      "scale": 5.0,
       "weight": 1.4
     },
     {
       "name": "wall_hot_area",
       "kpi": "wall_hot_area_fraction",
       "mode": "minimize",
+      "scale": 0.1,
       "weight": 1.0
     },
     {
       "name": "downstream_reheat",
       "kpi": "downstream_reheat_index",
       "mode": "minimize",
+      "scale": 1.0,
       "weight": 0.8
     }
   ],
@@ -37,6 +41,7 @@
       "operator": "area_above_threshold",
       "threshold": 335.0,
       "mode": "minimize",
+      "scale": 0.1,
       "weight": 1.0,
       "fallback_kpi": "wall_hot_area_fraction"
     },
@@ -46,6 +51,7 @@
       "region": "outlet_band",
       "operator": "std",
       "mode": "minimize",
+      "scale": 3.0,
       "weight": 0.6,
       "fallback_kpi": "outlet_temperature_nonuniformity"
     }
@@ -56,6 +62,7 @@
       "operator": "x_span",
       "mode": "target_range",
       "range": [4.0, 9.5],
+      "scale": 2.0,
       "weight": 0.4
     },
     {
@@ -63,6 +70,7 @@
       "operator": "y_span",
       "mode": "target_range",
       "range": [1.2, 3.0],
+      "scale": 1.0,
       "weight": 0.4
     },
     {
@@ -70,6 +78,7 @@
       "operator": "mean_pair_distance",
       "mode": "lower_bound",
       "value": 1.35,
+      "scale": 1.0,
       "weight": 0.3
     }
   ],
@@ -78,6 +87,7 @@
       "name": "planned_realized_consistency",
       "operator": "plan_realization_distance",
       "mode": "minimize",
+      "scale": 1.0,
       "weight": 0.8
     }
   ],

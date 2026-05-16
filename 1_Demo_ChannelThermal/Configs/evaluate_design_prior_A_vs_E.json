@@ -3,7 +3,7 @@
     "config_path": "Configs/train_inverse_config_template.json",
     "checkpoint_path": "Saved_Model/Run_0005_20260514_160311/latest_model.pt",
     "device": "auto",
-    "batch_size": 32768
+    "batch_size": 256
   },
   "objective": {
     "spec_path": "inverse_targets_v2/field_functional_chip_plume_demo_fair.json",
@@ -12,8 +12,8 @@
   "design_prior": {
     "checkpoint_path": "auto",
     "saved_root": "Saved_Model_Prior",
-    "Run_ID": "0001",
-    "checkpoint_name": "best_model.pt",
+    "Run_ID": "0002",
+    "checkpoint_name": "latest_model.pt",
     "device": "auto"
   },
   "current_inverse_baseline": {
@@ -22,10 +22,10 @@
     "config_path": ""
   },
   "methods": {
-    "random_valid": true,
+    "random_valid": false,
     "raw_layout_cem": true,
     "current_inverse": false,
-    "atlas_prior": true,
+    "atlas_prior": false,
     "atlas_guided": true
   },
   "context": {

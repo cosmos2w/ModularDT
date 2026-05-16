@@ -7,6 +7,7 @@ import csv
 import json
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -16,27 +17,47 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, random_split
 from tqdm.auto import tqdm
 
-try:
-    from channelthermal_model_utils import current_timestamp, ensure_dir, resolve_demo_path, select_device, set_seed, write_json
-    from design_prior_dataset import DesignPriorDataset, collate_fn
-    from model_design_prior import DesignPriorConfig, LatentModularDesignPrior
-except Exception:  # pragma: no cover
-    from .channelthermal_model_utils import current_timestamp, ensure_dir, resolve_demo_path, select_device, set_seed, write_json
-    from .design_prior_dataset import DesignPriorDataset, collate_fn
-    from .model_design_prior import DesignPriorConfig, LatentModularDesignPrior
+import _bootstrap_imports
+from channelthermal_model_utils import current_timestamp, ensure_dir, resolve_demo_path, select_device, set_seed, write_json
+from design_prior_dataset import DesignPriorDataset, collate_fn
+from model_design_prior import DesignPriorConfig, LatentModularDesignPrior
 
+DEFAULT_CONFIG_PATH = "./Configs/train_design_prior_config_template.json"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a ChannelThermal latent design prior.")
-    parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--config", type=str, default=DEFAULT_CONFIG_PATH, help="JSON config path.")
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--Run_ID", dest="run_id", type=str, default=None, help="Numeric run serial, e.g. 0001.")
     return parser.parse_args()
+
+
+def normalize_run_id(value: Any, fallback: str = "0001") -> str:
+    raw = str(value if value is not None and str(value).strip() else fallback).strip()
+    if not raw.isdigit():
+        raise ValueError(f"Run_ID must be a numeric serial such as '0001'; got {raw!r}.")
+    return raw.zfill(4)
+
+
+def resolve_run_id(args: argparse.Namespace, cfg: Mapping[str, Any]) -> str:
+    training_cfg = cfg.get("training", {}) if isinstance(cfg.get("training"), Mapping) else {}
+    return normalize_run_id(args.run_id or cfg.get("Run_ID") or cfg.get("run_id") or training_cfg.get("Run_ID") or training_cfg.get("run_id"), "0001")
+
+
+def make_run_dir(cfg: Mapping[str, Any], run_id: str) -> Path:
+    output_cfg = cfg.get("output", {}) if isinstance(cfg.get("output"), Mapping) else {}
+    saved_root = resolve_demo_path(output_cfg.get("saved_root", "Saved_Model_Prior"))
+    run_name = f"Run_{run_id}_{current_timestamp()}"
+    if not re.match(r"^Run_\d{4}_\d{8}_\d{6}$", run_name):
+        raise ValueError(f"Unexpected design-prior run directory name: {run_name}")
+    return ensure_dir(saved_root / run_name)
 
 
 def read_json(path: str | Path) -> Dict[str, Any]:
@@ -112,15 +133,19 @@ def plot_loss_curves(history: Sequence[Mapping[str, Any]], path: Path) -> None:
         return
     fig, ax = plt.subplots(figsize=(7.0, 4.0), constrained_layout=True)
     epochs = [int(row["epoch"]) for row in history]
+    positive_values = []
     for key in ("train_loss_total", "val_loss_total", "train_layout_recon_loss", "val_layout_recon_loss"):
         vals = [float(row.get(key, np.nan)) for row in history]
         if any(math.isfinite(v) for v in vals):
             ax.plot(epochs, vals, marker="o", markersize=3, label=key)
+            positive_values.extend(v for v in vals if math.isfinite(v) and v > 0.0)
+    if positive_values:
+        ax.set_yscale("log")
     ax.set_xlabel("epoch")
     ax.set_ylabel("loss")
     ax.grid(True, alpha=0.25)
     ax.legend(fontsize=8)
-    fig.savefig(path, dpi=160)
+    fig.savefig(str(path), dpi=160)
     plt.close(fig)
 
 
@@ -141,7 +166,7 @@ def plot_latent_norm_hist(model: LatentModularDesignPrior, loader: DataLoader, d
     ax.set_xlabel("latent ||mu||")
     ax.set_ylabel("count")
     ax.set_title("Latent norm distribution")
-    fig.savefig(path, dpi=160)
+    fig.savefig(str(path), dpi=160)
     plt.close(fig)
 
 
@@ -170,9 +195,9 @@ def plot_generated_layout_examples(model: LatentModularDesignPrior, device: torc
         centers[:, 1] *= float(model.cfg.domain_length_y)
         ax.add_patch(plt.Rectangle((0.0, 0.0), float(model.cfg.domain_length_x), float(model.cfg.domain_length_y), fill=False, lw=1.0))
         for cx, cy in centers[mask]:
-            ax.add_patch(plt.Circle((float(cx), float(cy)), float(model.cfg.module_radius), fill=False, lw=1.0))
+            ax.add_patch(Circle((float(cx), float(cy)), float(model.cfg.module_radius), fill=False, lw=1.0))
         ax.set_title(f"sample {idx + 1}", fontsize=9)
-    fig.savefig(path, dpi=160)
+    fig.savefig(str(path), dpi=160)
     plt.close(fig)
 
 
@@ -197,7 +222,8 @@ def main() -> int:
     data_cfg = cfg.get("data", {}) if isinstance(cfg.get("data"), Mapping) else {}
     model_cfg = dict(cfg.get("model", {}) if isinstance(cfg.get("model"), Mapping) else {})
     training_cfg = cfg.get("training", {}) if isinstance(cfg.get("training"), Mapping) else {}
-    output_cfg = cfg.get("output", {}) if isinstance(cfg.get("output"), Mapping) else {}
+    run_id = resolve_run_id(args, cfg)
+    cfg["Run_ID"] = run_id
     set_seed(int(training_cfg.get("seed", 0)))
     device_arg = training_cfg.get("device", "auto")
     device = select_device(None if str(device_arg).lower() == "auto" else str(device_arg))
@@ -225,7 +251,7 @@ def main() -> int:
     train_loader = DataLoader(train_dataset, batch_size=int(training_cfg.get("batch_size", 128)), shuffle=True, num_workers=int(data_cfg.get("num_workers", 0)), collate_fn=collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=int(training_cfg.get("batch_size", 128)), shuffle=False, num_workers=int(data_cfg.get("num_workers", 0)), collate_fn=collate_fn)
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(training_cfg.get("learning_rate", 5.0e-4)), weight_decay=float(training_cfg.get("weight_decay", 1.0e-6)))
-    run_dir = ensure_dir(resolve_demo_path(output_cfg.get("run_dir", f"Data_Saved/DesignPrior_Runs/Run_{current_timestamp()}")))
+    run_dir = make_run_dir(cfg, run_id)
     write_json(run_dir / "resolved_train_design_prior_config.json", cfg)
     write_json(run_dir / "dataset_stats.json", dataset.stats)
     epochs = int(args.epochs or training_cfg.get("epochs", 200))

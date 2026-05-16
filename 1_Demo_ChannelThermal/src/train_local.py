@@ -15,6 +15,7 @@ import numpy as np
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
+import _bootstrap_imports  # noqa: F401
 from channelthermal_datasets import GlobalModuleAlignmentDataset, LocalModuleDataset
 from channelthermal_model_utils import (
     autocast_context,
@@ -342,7 +343,7 @@ def save_local_loss_curve(
     ax.grid(True, alpha=0.25)
     ax.legend(fontsize=8)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=160)
+    fig.savefig(str(output_path), dpi=160)
     plt.close(fig)
 
 

@@ -64,6 +64,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
@@ -76,6 +77,7 @@ try:
 except ImportError as exc:  # pragma: no cover - environment dependent
     raise ImportError("preprocess_local_module_dataset.py requires h5py.") from exc
 
+import _bootstrap_imports 
 from channelthermal_common import config_from_dict, find_case_dirs, read_json, resolve_data_path
 
 
@@ -184,9 +186,8 @@ def assign_splits(raw_cases: Sequence[LocalRawCase], train_fraction: float, seed
         if raw.split_hint in {"train", "test"}:
             assignments[raw.case_dir] = raw.split_hint
     if unsplit:
-        rng = np.random.default_rng(seed)
         order = list(unsplit)
-        rng.shuffle(order)
+        random.Random(seed).shuffle(order)
         if len(order) == 1:
             train_count = 1
         else:

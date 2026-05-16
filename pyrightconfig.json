@@ -1,0 +1,13 @@
+{
+  "typeCheckingMode": "basic",
+  "include": [
+    "1_Demo_ChannelThermal/src"
+  ],
+  "extraPaths": [
+    "1_Demo_ChannelThermal/src",
+    "1_Demo_ChannelThermal/src/_helpers_forward",
+    "1_Demo_ChannelThermal/src/_helpers_inverse",
+    "1_Demo_ChannelThermal/src/_models_forward",
+    "1_Demo_ChannelThermal/src/_models_inverse"
+  ]
+}

@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--forward-config", type=str, default=None)
     parser.add_argument("--forward-checkpoint", type=str, default=None)
     parser.add_argument("--input-data", type=str, default=None)
-    parser.add_argument("--output", type=str, required=True)
+    parser.add_argument("--output", type=str, default="Data_Saved/DesignPrior_Library/design_library.h5")
     parser.add_argument("--num-random-layouts", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--seed", type=int, default=0)

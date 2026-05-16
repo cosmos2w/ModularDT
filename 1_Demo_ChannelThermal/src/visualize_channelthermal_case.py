@@ -39,6 +39,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 import numpy as np
 
 try:
@@ -46,6 +47,7 @@ try:
 except ImportError:  # pragma: no cover - only needed for processed views
     h5py = None
 
+import _bootstrap_imports  # noqa: F401
 from channelthermal_common import config_from_dict, find_case_dirs, read_json, resolve_data_path
 
 
@@ -252,7 +254,7 @@ def plot_convergence_history(
             ax.legend(loc="best", fontsize=8)
     fig.suptitle("Temperature Convergence")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=160)
+    fig.savefig(str(output_path), dpi=160)
     plt.close(fig)
 
 
@@ -270,14 +272,14 @@ def plot_processed_metadata(metadata: Dict[str, object], output_path: Path) -> N
     ]
     ax.text(0.02, 0.95, "\n".join(lines), va="top", ha="left", family="monospace", fontsize=11)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=160)
+    fig.savefig(str(output_path), dpi=160)
     plt.close(fig)
 
 
 def overlay_modules(ax: plt.Axes, centers: Sequence[Sequence[float]], radius: float) -> None:
     """Draw circular module outlines on global channel plots."""
     for idx, (cx, cy) in enumerate(centers):
-        circle = plt.Circle((float(cx), float(cy)), radius, fill=False, color="white", linewidth=1.2)
+        circle = Circle((float(cx), float(cy)), radius, fill=False, color="white", linewidth=1.2)
         ax.add_patch(circle)
         ax.text(float(cx), float(cy), str(idx), color="white", ha="center", va="center", fontsize=8)
 
@@ -308,7 +310,7 @@ def plot_fields(
     axes_flat[-1].axis("off")
     fig.suptitle(title)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=160)
+    fig.savefig(str(output_path), dpi=160)
     plt.close(fig)
 
 
@@ -361,7 +363,7 @@ def plot_internal_temperatures(payload: Dict[str, np.ndarray], output_path: Path
         fig.colorbar(image, ax=axes.ravel()[:count].tolist(), fraction=0.046, pad=0.04, label="T")
     fig.suptitle("Module Internal Temperature")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=160)
+    fig.savefig(str(output_path), dpi=160)
     plt.close(fig)
 
 
@@ -386,7 +388,7 @@ def plot_interface_targets(payload: Dict[str, np.ndarray], output_path: Path) ->
     axes[1].set_ylabel("target: q_normal")
     fig.suptitle("Interface Targets")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=160)
+    fig.savefig(str(output_path), dpi=160)
     plt.close(fig)
 
 

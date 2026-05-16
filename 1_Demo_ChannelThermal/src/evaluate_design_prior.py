@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -20,7 +21,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from tqdm.auto import tqdm
 
+import _bootstrap_imports
 SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
@@ -28,7 +31,7 @@ if str(SRC_DIR) not in sys.path:
 from channelthermal_model_utils import current_timestamp, ensure_dir, resolve_demo_path, select_device, write_json
 from design_candidate_io import plot_layout_candidate, plot_score_vs_calls, to_jsonable, write_candidates_csv, write_summary_json
 from field_functional_objective import FieldFunctionalObjective, extract_field_array
-from layout_search_baselines import LayoutSearchConfig, RandomValidLayoutSampler, RawLayoutCEMOptimizer
+from layout_search_baselines import LayoutSearchConfig, RandomValidLayoutSampler, RawLayoutCEMOptimizer, sample_random_valid_layout
 from model_design_prior import LatentModularDesignPrior
 from search_design_prior import ForwardHONFEvaluator, GuidedSearchConfig, LatentPosteriorDesignSearcher
 from train_inverse import ThermalInverseDesignDataset
@@ -38,6 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate ChannelThermal design-prior inverse search.")
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--calibrate-only", action="store_true")
+    parser.add_argument("--calibration-samples", type=int, default=256)
     return parser.parse_args()
 
 
@@ -79,6 +84,48 @@ def _load_prior(path: str | Path, device: torch.device) -> LatentModularDesignPr
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     model.eval()
     return model
+
+
+def _normalize_run_id(value: Any, fallback: str = "0001") -> str:
+    raw = str(value if value is not None and str(value).strip() else fallback).strip()
+    if not raw.isdigit():
+        raise ValueError(f"Run_ID must be a numeric serial such as '0001'; got {raw!r}.")
+    return raw.zfill(4)
+
+
+def _latest_design_prior_run(saved_root: Path, run_id: str) -> Path:
+    normalized = _normalize_run_id(run_id)
+    pattern = re.compile(rf"^Run_{re.escape(normalized)}_\d{{8}}_\d{{6}}$")
+    runs = sorted([path for path in saved_root.glob(f"Run_{normalized}_*") if path.is_dir() and pattern.match(path.name)])
+    if not runs:
+        raise FileNotFoundError(f"No design-prior runs found under {saved_root} with Run_ID={normalized!r}.")
+    return runs[-1]
+
+
+def _resolve_design_prior_checkpoint(prior_cfg: Mapping[str, Any], *, required: bool = False) -> Optional[Path]:
+    checkpoint_path = str(prior_cfg.get("checkpoint_path", "auto") or "auto")
+    if checkpoint_path.lower() not in {"", "auto", "latest"}:
+        path = resolve_demo_path(checkpoint_path)
+        if path.exists() or required:
+            return path
+        return None
+    saved_root = resolve_demo_path(prior_cfg.get("saved_root", "Saved_Model_Prior"))
+    run_id = _normalize_run_id(prior_cfg.get("Run_ID", prior_cfg.get("run_id", "0001")))
+    checkpoint_name = str(prior_cfg.get("checkpoint_name", "best_model.pt"))
+    try:
+        run_dir = _latest_design_prior_run(saved_root, run_id)
+    except FileNotFoundError:
+        if required:
+            raise
+        return None
+    path = run_dir / checkpoint_name
+    if not path.exists() and checkpoint_name != "latest_model.pt":
+        latest = run_dir / "latest_model.pt"
+        if latest.exists():
+            return latest
+    if path.exists() or required:
+        return path
+    return None
 
 
 def _context_dataset_path(cfg: Mapping[str, Any], prior_checkpoint: Optional[Mapping[str, Any]] = None) -> str:
@@ -133,6 +180,15 @@ def _success(candidate: Mapping[str, Any], tolerance: float) -> bool:
     result = candidate.get("objective_result", {})
     hard = float(candidate.get("hard_violation_score", result.get("hard_violation_score", 0.0)) or 0.0) if isinstance(result, Mapping) else 0.0
     return bool(candidate.get("satisfied", result.get("satisfied", False) if isinstance(result, Mapping) else False)) and hard <= float(tolerance)
+
+
+def _float_or_nan(value: Any) -> float:
+    if value is None:
+        return float("nan")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
 
 
 def _topk_diversity(candidates: Sequence[Mapping[str, Any]], top_k: int = 8) -> float:
@@ -234,7 +290,7 @@ def _write_top_artifacts(candidates: Sequence[Mapping[str, Any]], out_dir: Path,
             im = ax.imshow(np.asarray(field), origin="lower", aspect="auto")
             fig.colorbar(im, ax=ax, shrink=0.8)
             ax.set_title(f"{method} #{rank} temperature preview")
-            fig.savefig(out_dir / f"{prefix}_field_preview.png", dpi=160)
+            fig.savefig(str(out_dir / f"{prefix}_field_preview.png"), dpi=160)
             plt.close(fig)
         if save_dense:
             write_summary_json(to_jsonable(row), out_dir / f"{prefix}_candidate_full.json")
@@ -245,8 +301,8 @@ def _plot_method_comparison(summary: Mapping[str, Mapping[str, Any]], path: Path
     if not enabled:
         return
     names = [name for name, _ in enabled]
-    best = [float(payload.get("best_score") if payload.get("best_score") is not None else np.nan) for _, payload in enabled]
-    success = [float(payload.get("success_rate", 0.0) or 0.0) for _, payload in enabled]
+    best = [_float_or_nan(payload.get("best_score")) for _, payload in enabled]
+    success = [_float_or_nan(payload.get("success_rate", 0.0) or 0.0) for _, payload in enabled]
     x = np.arange(len(names))
     fig, axes = plt.subplots(1, 2, figsize=(max(8.0, 1.1 * len(names)), 3.8), constrained_layout=True)
     axes[0].bar(x, best)
@@ -260,7 +316,7 @@ def _plot_method_comparison(summary: Mapping[str, Mapping[str, Any]], path: Path
     axes[1].set_ylabel("Success rate")
     axes[1].set_ylim(0.0, 1.0)
     axes[1].grid(True, axis="y", alpha=0.25)
-    fig.savefig(path, dpi=170)
+    fig.savefig(str(path), dpi=170)
     plt.close(fig)
 
 
@@ -278,13 +334,167 @@ def _dry_run(cfg: Mapping[str, Any]) -> int:
     methods = cfg.get("methods", {}) if isinstance(cfg.get("methods"), Mapping) else {}
     layout_cfg = _layout_config(cfg)
     guided_cfg = _guided_config(cfg.get("atlas_guided", {}) if isinstance(cfg.get("atlas_guided"), Mapping) else {})
+    prior_cfg = cfg.get("design_prior", {}) if isinstance(cfg.get("design_prior"), Mapping) else {}
+    resolved_prior = _resolve_design_prior_checkpoint(prior_cfg, required=False)
     print("[dry-run] objective:", objective.name if objective else f"missing ({objective_path})")
     print("[dry-run] layout:", layout_cfg)
     print("[dry-run] guided:", guided_cfg)
     print("[dry-run] forward checkpoint:", _path_status(cfg.get("forward_model", {}).get("checkpoint_path") if isinstance(cfg.get("forward_model"), Mapping) else None))
-    print("[dry-run] design prior checkpoint:", _path_status(cfg.get("design_prior", {}).get("checkpoint_path") if isinstance(cfg.get("design_prior"), Mapping) else None))
+    print("[dry-run] design prior checkpoint:", _path_status(resolved_prior) if resolved_prior is not None else {"path": "auto", "exists": False, "saved_root": str(resolve_demo_path(prior_cfg.get("saved_root", "Saved_Model_Prior"))), "Run_ID": _normalize_run_id(prior_cfg.get("Run_ID", prior_cfg.get("run_id", "0001")))})
     print("[dry-run] methods:", {name: bool(enabled) for name, enabled in methods.items()})
     return 0
+
+
+CALIBRATION_KPIS = (
+    "max_solid_temperature",
+    "pressure_drop",
+    "outlet_temperature_nonuniformity",
+    "wall_hot_area_fraction",
+    "thermal_plume_length",
+    "downstream_reheat_index",
+)
+
+
+def _finite_series(values: Sequence[Any]) -> np.ndarray:
+    parsed = []
+    for value in values:
+        if value is None or str(value) == "":
+            continue
+        try:
+            parsed.append(float(value))
+        except (TypeError, ValueError):
+            continue
+    arr = np.asarray(parsed, dtype=np.float64)
+    return arr[np.isfinite(arr)]
+
+
+def _quantile_summary(values: Sequence[Any]) -> Dict[str, Any]:
+    arr = _finite_series(values)
+    if arr.size == 0:
+        return {"count": 0}
+    return {
+        "count": int(arr.size),
+        "min": float(np.min(arr)),
+        "p05": float(np.percentile(arr, 5.0)),
+        "p25": float(np.percentile(arr, 25.0)),
+        "p50": float(np.percentile(arr, 50.0)),
+        "p75": float(np.percentile(arr, 75.0)),
+        "p95": float(np.percentile(arr, 95.0)),
+        "max": float(np.max(arr)),
+    }
+
+
+def _write_calibration_histograms(series: Mapping[str, Sequence[Any]], path: Path) -> None:
+    finite_items = [(name, _finite_series(values)) for name, values in series.items()]
+    finite_items = [(name, arr) for name, arr in finite_items if arr.size]
+    if not finite_items:
+        return
+    n = len(finite_items)
+    cols = min(3, n)
+    rows = int(math.ceil(n / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(4.2 * cols, 3.0 * rows), constrained_layout=True)
+    axes_arr = np.asarray(axes).reshape(-1)
+    for ax, (name, arr) in zip(axes_arr, finite_items):
+        ax.hist(arr, bins=min(24, max(4, int(math.sqrt(arr.size)) + 1)), alpha=0.85)
+        ax.set_title(name)
+        ax.grid(True, alpha=0.25)
+    for ax in axes_arr[len(finite_items) :]:
+        ax.axis("off")
+    fig.savefig(str(path), dpi=170)
+    plt.close(fig)
+
+
+def _run_calibration(
+    *,
+    cfg: Mapping[str, Any],
+    objective: FieldFunctionalObjective,
+    layout_config: LayoutSearchConfig,
+    context: Mapping[str, Any],
+    evaluator: ForwardHONFEvaluator,
+    num_samples: int,
+    run_dir: Path,
+) -> Dict[str, Any]:
+    search_context = dict(context)
+    search_context["objective_spec"] = objective.spec
+    search_context["hard_constraints"] = objective.spec.get("hard_constraints", {})
+    seed = int((cfg.get("random_valid", {}) if isinstance(cfg.get("random_valid"), Mapping) else {}).get("seed", 0))
+    rng = np.random.default_rng(seed)
+    term_rows: List[Dict[str, Any]] = []
+    series: Dict[str, List[Any]] = {"total_score": [], "hard_violation_score": []}
+    for key in CALIBRATION_KPIS:
+        series[key] = []
+    term_series: Dict[str, List[Any]] = {}
+    for idx in tqdm(range(max(int(num_samples), 0)), desc="calibration", unit="layout", dynamic_ncols=True):
+        layout = sample_random_valid_layout(layout_config, rng, search_context)
+        forward_payload = evaluator.evaluate_layout(layout, search_context)
+        objective_result = objective.evaluate(
+            forward_prediction=forward_payload.get("forward_prediction"),
+            kpis=forward_payload.get("kpis"),
+            layout=forward_payload.get("layout", layout),
+            realized_hypergraph=forward_payload.get("realized_hypergraph"),
+        )
+        total = objective_result.get("total_score")
+        hard = objective_result.get("hard_violation_score")
+        series["total_score"].append(total)
+        series["hard_violation_score"].append(hard)
+        kpis = forward_payload.get("kpis", {}) if isinstance(forward_payload.get("kpis"), Mapping) else {}
+        for key in CALIBRATION_KPIS:
+            series[key].append(kpis.get(key))
+        for term in objective_result.get("term_results", []) or []:
+            if not isinstance(term, Mapping):
+                continue
+            name = str(term.get("name", "term"))
+            raw = term.get("raw_value")
+            term_series.setdefault(f"term_raw:{name}", []).append(raw)
+            details = term.get("details", {}) if isinstance(term.get("details"), Mapping) else {}
+            term_rows.append(
+                {
+                    "sample_index": idx,
+                    "term_name": name,
+                    "raw_value": raw,
+                    "value": term.get("value"),
+                    "satisfied": term.get("satisfied"),
+                    "mode": term.get("mode"),
+                    "scale": details.get("scale", ""),
+                    "unscaled_penalty": details.get("unscaled_penalty", ""),
+                    "scaled_penalty": details.get("scaled_penalty", ""),
+                }
+            )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    summary = {
+        "objective": objective.name,
+        "num_samples": int(num_samples),
+        "num_forward_calls": int(getattr(evaluator, "num_forward_calls", 0)),
+        "quantiles": {name: _quantile_summary(values) for name, values in {**series, **term_series}.items()},
+        "run_dir": str(run_dir),
+    }
+    write_summary_json(summary, run_dir / "calibration_summary.json")
+    with (run_dir / "calibration_terms.csv").open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "sample_index",
+                "term_name",
+                "raw_value",
+                "value",
+                "satisfied",
+                "mode",
+                "scale",
+                "unscaled_penalty",
+                "scaled_penalty",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(term_rows)
+    _write_calibration_histograms({**series, **term_series}, run_dir / "calibration_histograms.png")
+    best = _quantile_summary(series["total_score"])
+    print(
+        "[calibrate] wrote calibration to"
+        f" {run_dir} | samples={num_samples}"
+        f" total_score_p50={best.get('p50')}"
+        f" total_score_p95={best.get('p95')}"
+    )
+    return summary
 
 
 def main() -> int:
@@ -297,19 +507,43 @@ def main() -> int:
     tolerance = float(objective_cfg.get("success_hard_violation_tolerance", 1.0e-6))
     layout_config = _layout_config(cfg)
     context = _load_context(cfg, int(layout_config.max_num_modules), bool(layout_config.generate_heat_power))
+    search_context = dict(context)
+    search_context["objective_spec"] = objective.spec
+    search_context["hard_constraints"] = objective.spec.get("hard_constraints", {})
     forward_cfg = _forward_cfg(cfg.get("forward_model", {}) if isinstance(cfg.get("forward_model"), Mapping) else {})
+    if args.calibrate_only:
+        checkpoint_path = (cfg.get("forward_model", {}) if isinstance(cfg.get("forward_model"), Mapping) else {}).get("checkpoint_path")
+        if checkpoint_path and not resolve_demo_path(checkpoint_path).exists():
+            raise FileNotFoundError(f"Forward checkpoint is required for --calibrate-only and was not found: {resolve_demo_path(checkpoint_path)}")
     forward_device = select_device(None if str(cfg.get("forward_model", {}).get("device", "auto")).lower() == "auto" else str(cfg.get("forward_model", {}).get("device")))
     evaluator = ForwardHONFEvaluator.from_config(forward_cfg, forward_device, layout_config)
+    output_cfg = cfg.get("output", {}) if isinstance(cfg.get("output"), Mapping) else {}
+    run_dir_cfg = str(output_cfg.get("run_dir", "") or "").strip()
+    if run_dir_cfg:
+        run_dir = ensure_dir(resolve_demo_path(run_dir_cfg))
+    else:
+        run_dir = ensure_dir(resolve_demo_path(f"Saved_Model_Prior/DesignPrior_Eval/eval_{current_timestamp()}"))
+    if args.calibrate_only:
+        _run_calibration(
+            cfg=cfg,
+            objective=objective,
+            layout_config=layout_config,
+            context=search_context,
+            evaluator=evaluator,
+            num_samples=int(args.calibration_samples),
+            run_dir=run_dir,
+        )
+        return 0
+    methods_cfg = cfg.get("methods", {}) if isinstance(cfg.get("methods"), Mapping) else {}
     prior_model = None
     design_prior_cfg = cfg.get("design_prior", {}) if isinstance(cfg.get("design_prior"), Mapping) else {}
-    if design_prior_cfg.get("checkpoint_path"):
+    need_prior = bool(methods_cfg.get("atlas_prior", True) or methods_cfg.get("atlas_guided", True))
+    prior_checkpoint = _resolve_design_prior_checkpoint(design_prior_cfg, required=False) if need_prior else None
+    if need_prior and prior_checkpoint is not None and prior_checkpoint.exists():
         prior_device = select_device(None if str(design_prior_cfg.get("device", "auto")).lower() == "auto" else str(design_prior_cfg.get("device")))
-        prior_model = _load_prior(design_prior_cfg["checkpoint_path"], prior_device)
-    output_cfg = cfg.get("output", {}) if isinstance(cfg.get("output"), Mapping) else {}
-    run_dir = ensure_dir(resolve_demo_path(output_cfg.get("run_dir", f"Data_Saved/DesignPrior_Eval/eval_{current_timestamp()}")))
+        prior_model = _load_prior(prior_checkpoint, prior_device)
     histories_dir = ensure_dir(run_dir / "histories")
     top_dir = ensure_dir(run_dir / "top_candidates")
-    methods_cfg = cfg.get("methods", {}) if isinstance(cfg.get("methods"), Mapping) else {}
     results: Dict[str, Any] = {}
     summaries: Dict[str, Any] = {}
     all_candidates: List[Dict[str, Any]] = []
@@ -323,15 +557,24 @@ def main() -> int:
         if result.get("history"):
             histories[method] = list(result["history"])
             write_summary_json({"history": list(result["history"])}, histories_dir / f"{method}_history.json")
+        if skipped:
+            print(f"[method:{method}] skipped in {runtime:.2f}s: {reason}")
+        else:
+            best = summaries[method].get("best_score")
+            calls = summaries[method].get("num_forward_calls")
+            best_text = "nan" if best is None else f"{float(best):.6g}"
+            print(f"[method:{method}] done in {runtime:.2f}s | forward_calls={calls} | best_score={best_text}")
 
     if bool(methods_cfg.get("random_valid", True)):
+        print("[method:random_valid] starting")
         start = time.time()
         rv_cfg = cfg.get("random_valid", {}) if isinstance(cfg.get("random_valid"), Mapping) else {}
         lcfg = _layout_config(cfg, {"random_seed": int(rv_cfg.get("seed", 0))})
         sampler = RandomValidLayoutSampler(lcfg, evaluator, objective, num_samples=int(rv_cfg.get("num_samples", 512)))
-        result = sampler.search(context, num_return=int(rv_cfg.get("num_return", 16)), num_samples=int(rv_cfg.get("num_samples", 512)))
+        result = sampler.search(search_context, num_return=int(rv_cfg.get("num_return", 16)), num_samples=int(rv_cfg.get("num_samples", 512)))
         record_result("random_valid", result, time.time() - start)
     if bool(methods_cfg.get("raw_layout_cem", True)):
+        print("[method:raw_layout_cem] starting")
         start = time.time()
         raw_cfg = cfg.get("raw_layout_cem", {}) if isinstance(cfg.get("raw_layout_cem"), Mapping) else {}
         lcfg = _layout_config(
@@ -346,20 +589,22 @@ def main() -> int:
                 "random_seed": int(raw_cfg.get("seed", 0)),
             },
         )
-        result = RawLayoutCEMOptimizer(lcfg, evaluator, objective).search(context, num_return=int(raw_cfg.get("num_return", 16)))
+        result = RawLayoutCEMOptimizer(lcfg, evaluator, objective).search(search_context, num_return=int(raw_cfg.get("num_return", 16)))
         record_result("raw_layout_cem", result, time.time() - start)
     if bool(methods_cfg.get("current_inverse", False)):
         record_result("current_inverse", {"method": "current_inverse", "best_candidates": [], "history": [], "num_forward_calls": 0}, 0.0, skipped=True, reason="Current KPI-conditioned inverse baseline integration is deferred; A/B/D/E remain runnable.")
     if bool(methods_cfg.get("atlas_prior", True)):
         if prior_model is None:
-            record_result("atlas_prior", {"method": "atlas_prior", "best_candidates": [], "history": [], "num_forward_calls": 0}, 0.0, skipped=True, reason="design_prior.checkpoint_path missing.")
+            reason = "design_prior.checkpoint_path missing or not found."
+            record_result("atlas_prior", {"method": "atlas_prior", "best_candidates": [], "history": [], "num_forward_calls": 0}, 0.0, skipped=True, reason=reason)
         else:
+            print("[method:atlas_prior] starting")
             start = time.time()
             prior_cfg = cfg.get("atlas_prior", {}) if isinstance(cfg.get("atlas_prior"), Mapping) else {}
             search_cfg = GuidedSearchConfig(num_return=int(prior_cfg.get("num_return", 16)), random_seed=int(prior_cfg.get("seed", 0)))
             searcher = LatentPosteriorDesignSearcher(prior_model, evaluator, objective, layout_config, search_cfg)
             candidates = searcher.sample_prior_candidates(
-                context,
+                search_context,
                 int(prior_cfg.get("num_samples", 512)),
                 temperature=float(prior_cfg.get("temperature", 1.0)),
             )[: int(prior_cfg.get("num_return", 16))]
@@ -367,12 +612,14 @@ def main() -> int:
             record_result("atlas_prior", result, time.time() - start)
     if bool(methods_cfg.get("atlas_guided", True)):
         if prior_model is None:
-            record_result("atlas_guided", {"method": "atlas_guided", "best_candidates": [], "history": [], "num_forward_calls": 0}, 0.0, skipped=True, reason="design_prior.checkpoint_path missing.")
+            reason = "design_prior.checkpoint_path missing or not found."
+            record_result("atlas_guided", {"method": "atlas_guided", "best_candidates": [], "history": [], "num_forward_calls": 0}, 0.0, skipped=True, reason=reason)
         else:
+            print("[method:atlas_guided] starting")
             start = time.time()
             guided_cfg = _guided_config(cfg.get("atlas_guided", {}) if isinstance(cfg.get("atlas_guided"), Mapping) else {})
             searcher = LatentPosteriorDesignSearcher(prior_model, evaluator, objective, layout_config, guided_cfg)
-            result = searcher.latent_cem_search(context)
+            result = searcher.latent_cem_search(search_context)
             record_result("atlas_guided", result, time.time() - start)
 
     save_dense = bool(output_cfg.get("save_dense_forward_outputs", False))

@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 
 
-DEMO_ROOT = Path(__file__).resolve().parent.parent
+DEMO_ROOT = Path(__file__).resolve().parents[2]
 EPS = 1.0e-6
 
 
@@ -281,5 +281,5 @@ def save_loss_curve(csv_path: str | Path, png_path: str | Path, *, title: str = 
     plt.grid(True, alpha=0.25)
     plt.legend(fontsize=8)
     plt.tight_layout()
-    plt.savefig(png_path, dpi=160)
+    plt.savefig(str(png_path), dpi=160)
     plt.close()

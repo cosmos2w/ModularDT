@@ -36,7 +36,7 @@ import numpy as np
 
 
 SRC_DIR = Path(__file__).resolve().parent
-DEMO_DIR = SRC_DIR.parent
+DEMO_DIR = SRC_DIR.parents[1]
 DEFAULT_DATA_DIR = DEMO_DIR / "Data_Saved"
 DEFAULT_CONFIG_DIR = DEMO_DIR / "Configs"
 DEFAULT_CONFIG_BK_DIR = DEFAULT_CONFIG_DIR / "Config_bk"

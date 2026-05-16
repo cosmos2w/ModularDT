@@ -71,6 +71,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -83,6 +84,7 @@ try:
 except ImportError as exc:  # pragma: no cover - environment dependent
     raise ImportError("preprocess_channelthermal_dataset.py requires h5py.") from exc
 
+import _bootstrap_imports  # noqa: F401
 from channelthermal_common import (
     SimulationConfig,
     build_uniform_grid,
@@ -438,9 +440,8 @@ def assign_unsplit_cases(raw_cases: Sequence[RawCase], train_fraction: float, se
     unsplit = [raw.case_dir for raw in raw_cases if raw.split_hint not in {"train", "test"}]
     if not unsplit:
         return {}
-    rng = np.random.default_rng(seed)
     order = list(unsplit)
-    rng.shuffle(order)
+    random.Random(seed).shuffle(order)
     if len(order) == 1:
         train_count = 1
     else:
