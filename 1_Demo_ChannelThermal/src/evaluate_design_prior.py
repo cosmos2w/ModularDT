@@ -62,18 +62,42 @@ def _path_status(path: str | Path | None) -> Dict[str, Any]:
 
 def _forward_cfg(raw_cfg: Mapping[str, Any]) -> Dict[str, Any]:
     cfg = {}
-    config_path = raw_cfg.get("config_path")
-    if config_path:
-        path = resolve_demo_path(config_path)
-        if path.exists():
-            loaded = _read_json(path)
-            if isinstance(loaded.get("forward_model"), Mapping):
-                cfg.update(dict(loaded["forward_model"]))
     if raw_cfg.get("checkpoint_path"):
         checkpoint = resolve_demo_path(raw_cfg["checkpoint_path"])
         cfg["run_dir"] = str(checkpoint.parent)
         cfg["checkpoint_name"] = checkpoint.name
+    run_dir = resolve_demo_path(cfg["run_dir"]) if cfg.get("run_dir") else None
+    candidate_configs: List[Path] = []
+    if raw_cfg.get("config_path"):
+        provided = resolve_demo_path(raw_cfg["config_path"])
+        if provided.exists():
+            candidate_configs.append(provided)
+        else:
+            print(f"[warn] forward_model.config_path not found: {provided}")
+    if run_dir is not None:
+        candidate_configs.extend([run_dir / "config.json", run_dir / "resolved_train_config.json", run_dir / "train_config.json"])
+    fallback = resolve_demo_path("Configs/train_inverse_config_template.json")
+    selected_config = next((path for path in candidate_configs if path.exists()), None)
+    if selected_config is None and fallback.exists():
+        selected_config = fallback
+        print(f"[warn] falling back to {fallback} for forward config metadata.")
+    if selected_config is not None:
+        loaded = _read_json(selected_config)
+        if isinstance(loaded.get("forward_model"), Mapping):
+            cfg.update(dict(loaded["forward_model"]))
+        elif isinstance(loaded, Mapping):
+            if isinstance(loaded.get("model"), Mapping):
+                local_path = loaded["model"].get("local_surrogate_checkpoint_path")
+                if local_path:
+                    cfg["local_surrogate_checkpoint_path"] = local_path
+            if run_dir is not None and selected_config.parent == run_dir:
+                cfg["config_name"] = selected_config.name
+        cfg["resolved_forward_config_path"] = str(selected_config)
     cfg.update({k: v for k, v in raw_cfg.items() if k not in {"config_path", "checkpoint_path", "device", "batch_size"}})
+    if raw_cfg.get("checkpoint_path"):
+        checkpoint = resolve_demo_path(raw_cfg["checkpoint_path"])
+        cfg["run_dir"] = str(checkpoint.parent)
+        cfg["checkpoint_name"] = checkpoint.name
     if raw_cfg.get("batch_size") and "query_batch_size" not in cfg:
         cfg["query_batch_size"] = int(raw_cfg["batch_size"])
     cfg.setdefault("enabled", True)
@@ -242,6 +266,17 @@ def _topk_diversity(candidates: Sequence[Mapping[str, Any]], top_k: int = 8) -> 
     return float(np.mean(vals)) if vals else 0.0
 
 
+def _candidate_score(row: Mapping[str, Any], key: str, fallback: str = "total_score") -> float:
+    for candidate_key in (key, fallback):
+        try:
+            value = float(row.get(candidate_key, np.nan))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            return value
+    return float("inf")
+
+
 def _finite_candidate_mean(candidates: Sequence[Mapping[str, Any]], key: str, default: float = 0.0) -> float:
     vals = []
     for row in candidates:
@@ -269,6 +304,10 @@ def _finite_candidate_min(candidates: Sequence[Mapping[str, Any]], key: str, def
 def _method_summary(result: Mapping[str, Any], candidates: Sequence[Mapping[str, Any]], *, enabled: bool, skipped: bool = False, skip_reason: str = "", tolerance: float = 1.0e-6, runtime: float = 0.0) -> Dict[str, Any]:
     scores = np.asarray([float(row.get("total_score", np.nan)) for row in candidates], dtype=np.float64)
     finite = scores[np.isfinite(scores)]
+    objective_scores = np.asarray([_candidate_score(row, "fair_objective_score", "total_score") for row in candidates], dtype=np.float64)
+    objective_finite = objective_scores[np.isfinite(objective_scores)]
+    internal_scores = np.asarray([_candidate_score(row, "internal_total_score", "total_score") for row in candidates], dtype=np.float64)
+    internal_finite = internal_scores[np.isfinite(internal_scores)]
     successes = [_success(row, tolerance) for row in candidates]
     first_success = None
     for row, ok in zip(candidates, successes):
@@ -282,7 +321,10 @@ def _method_summary(result: Mapping[str, Any], candidates: Sequence[Mapping[str,
         "num_candidates": int(len(candidates)),
         "num_forward_calls": int(result.get("num_forward_calls", 0)),
         "best_score": float(np.min(finite)) if finite.size else None,
+        "best_internal_total_score": float(np.min(internal_finite)) if internal_finite.size else None,
+        "best_objective_score": float(np.min(objective_finite)) if objective_finite.size else None,
         "median_topk_score": float(np.median(finite[: min(8, finite.size)])) if finite.size else None,
+        "median_topk_objective_score": float(np.median(objective_finite[: min(8, objective_finite.size)])) if objective_finite.size else None,
         "success_rate": float(np.mean(successes)) if candidates else 0.0,
         "time_to_first_success_calls": first_success,
         "valid_fraction_before_repair": None,
@@ -292,7 +334,7 @@ def _method_summary(result: Mapping[str, Any], candidates: Sequence[Mapping[str,
         "mean_mechanism_prior_score": _finite_candidate_mean(candidates, "mechanism_prior_score"),
         "mean_hypergraph_realization_score": _finite_candidate_mean(candidates, "hypergraph_realization_score"),
         "best_hypergraph_realization_score": _finite_candidate_min(candidates, "hypergraph_realization_score"),
-        "mean_objective_score": _finite_candidate_mean(candidates, "objective_score"),
+        "mean_objective_score": float(np.mean(objective_finite)) if objective_finite.size else 0.0,
         "topk_mechanism_cluster_count": int(len([row for row in candidates[:8] if row.get("mechanism_cluster_id") is not None])),
         "topk_distinct_clusters": int(len({int(row.get("mechanism_cluster_id")) for row in candidates[:8] if row.get("mechanism_cluster_id") is not None})),
         "topk_diversity": _topk_diversity(candidates),
@@ -303,7 +345,7 @@ def _method_summary(result: Mapping[str, Any], candidates: Sequence[Mapping[str,
 def _write_score_vs_calls_csv(histories: Mapping[str, Sequence[Mapping[str, Any]]], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["method", "iteration", "num_forward_calls", "best_score", "mean_elite_score"])
+        writer = csv.DictWriter(f, fieldnames=["method", "iteration", "num_forward_calls", "best_score", "round_best_score", "mean_elite_score", "ranking_score_key"])
         writer.writeheader()
         for method, rows in histories.items():
             for row in rows:
@@ -313,7 +355,9 @@ def _write_score_vs_calls_csv(histories: Mapping[str, Sequence[Mapping[str, Any]
                         "iteration": row.get("iteration", ""),
                         "num_forward_calls": row.get("num_forward_calls", ""),
                         "best_score": row.get("best_score", ""),
+                        "round_best_score": row.get("round_best_score", ""),
                         "mean_elite_score": row.get("mean_elite_score", ""),
+                        "ranking_score_key": row.get("ranking_score_key", ""),
                     }
                 )
 
@@ -339,15 +383,59 @@ def _strip_dense(candidate: Mapping[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def _write_top_artifacts(candidates: Sequence[Mapping[str, Any]], out_dir: Path, *, top_k: int, save_dense: bool) -> None:
+def _target_box_regions(objective: FieldFunctionalObjective) -> List[Dict[str, Any]]:
+    spec = getattr(objective, "spec", {})
+    regions: List[Dict[str, Any]] = []
+    if not isinstance(spec, Mapping):
+        return regions
+    for term in spec.get("field_terms", []) or []:
+        if not isinstance(term, Mapping):
+            continue
+        region = term.get("region")
+        if not isinstance(region, Mapping) or str(region.get("type", "")).lower() != "box":
+            continue
+        x_range = region.get("x_range")
+        y_range = region.get("y_range")
+        if not isinstance(x_range, Sequence) or not isinstance(y_range, Sequence) or len(x_range) < 2 or len(y_range) < 2:
+            continue
+        regions.append({"name": str(term.get("name", "target_region")), "x_range": [float(x_range[0]), float(x_range[1])], "y_range": [float(y_range[0]), float(y_range[1])]})
+    return regions
+
+
+def _overlay_target_regions(ax: Any, regions: Sequence[Mapping[str, Any]], *, color: str = "tab:cyan") -> None:
+    for region in regions:
+        try:
+            x0, x1 = [float(v) for v in region.get("x_range", [])[:2]]
+            y0, y1 = [float(v) for v in region.get("y_range", [])[:2]]
+        except Exception:
+            continue
+        ax.add_patch(plt.Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, linewidth=1.5, linestyle="--", edgecolor=color))
+        ax.text(x0, y1, str(region.get("name", "target")), ha="left", va="bottom", fontsize=7, color=color, bbox={"facecolor": "black", "alpha": 0.35, "pad": 1.5, "edgecolor": "none"})
+
+
+def _write_top_artifacts(candidates: Sequence[Mapping[str, Any]], out_dir: Path, *, top_k: int, save_dense: bool, target_regions: Sequence[Mapping[str, Any]]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for row in list(candidates)[:top_k]:
         method = str(row.get("method", "method"))
         rank = int(row.get("rank", 0) or 0)
         prefix = f"{method}_{rank:03d}"
         field = _candidate_field(row)
-        plot_layout_candidate(row.get("layout", row), out_dir / f"{prefix}_layout.png", title=f"{method} #{rank}", field=field)
-        write_summary_json(row.get("objective_result", {}), out_dir / f"{prefix}_score_terms.json")
+        plot_layout_candidate(row.get("layout", row), out_dir / f"{prefix}_layout.png", title=f"{method} #{rank}", field=field, target_regions=target_regions)
+        write_summary_json(
+            {
+                "objective_result": row.get("objective_result", {}),
+                "total_score": row.get("total_score"),
+                "internal_total_score": row.get("internal_total_score", row.get("total_score")),
+                "fair_objective_score": row.get("fair_objective_score", row.get("objective_score", row.get("total_score"))),
+                "objective_score": row.get("objective_score", row.get("total_score")),
+                "geometry_penalty": row.get("geometry_penalty"),
+                "hypergraph_realization_score": row.get("hypergraph_realization_score"),
+                "mechanism_prior_score": row.get("mechanism_prior_score"),
+                "ranking_score": row.get("ranking_score"),
+                "ranking_score_key": row.get("ranking_score_key"),
+            },
+            out_dir / f"{prefix}_score_terms.json",
+        )
         write_summary_json(row.get("kpis", {}), out_dir / f"{prefix}_kpis.json")
         write_summary_json({"mechanism_feature": row.get("mechanism_feature"), "mechanism_cluster_id": row.get("mechanism_cluster_id"), "desired_behavior": row.get("desired_behavior"), "mechanism_prior_score": row.get("mechanism_prior_score")}, out_dir / f"{prefix}_desired_mechanism.json")
         write_summary_json(row.get("desired_hypergraph", row.get("planned_hypergraph", {})), out_dir / f"{prefix}_desired_hypergraph.json")
@@ -358,8 +446,12 @@ def _write_top_artifacts(candidates: Sequence[Mapping[str, Any]], out_dir: Path,
             out_dir / f"{prefix}_hypergraph.json",
         )
         if field is not None:
+            domain = row.get("layout", {}).get("domain", {}) if isinstance(row.get("layout"), Mapping) else {}
+            lx = float(domain.get("domain_length_x", domain.get("lx", 12.0))) if isinstance(domain, Mapping) else 12.0
+            ly = float(domain.get("domain_length_y", domain.get("ly", 4.0))) if isinstance(domain, Mapping) else 4.0
             fig, ax = plt.subplots(figsize=(6.4, 3.2), constrained_layout=True)
-            im = ax.imshow(np.asarray(field), origin="lower", aspect="auto")
+            im = ax.imshow(np.asarray(field), origin="lower", aspect="auto", extent=[0.0, lx, 0.0, ly])
+            _overlay_target_regions(ax, target_regions)
             fig.colorbar(im, ax=ax, shrink=0.8)
             ax.set_title(f"{method} #{rank} temperature preview")
             fig.savefig(str(out_dir / f"{prefix}_field_preview.png"), dpi=160)
@@ -368,19 +460,19 @@ def _write_top_artifacts(candidates: Sequence[Mapping[str, Any]], out_dir: Path,
             write_summary_json(to_jsonable(row), out_dir / f"{prefix}_candidate_full.json")
 
 
-def _plot_method_comparison(summary: Mapping[str, Mapping[str, Any]], path: Path) -> None:
+def _plot_method_comparison(summary: Mapping[str, Mapping[str, Any]], path: Path, *, score_key: str, ylabel: str) -> None:
     enabled = [(name, payload) for name, payload in summary.items() if payload.get("enabled") and not payload.get("skipped")]
     if not enabled:
         return
     names = [name for name, _ in enabled]
-    best = [_float_or_nan(payload.get("best_score")) for _, payload in enabled]
+    best = [_float_or_nan(payload.get(score_key)) for _, payload in enabled]
     success = [_float_or_nan(payload.get("success_rate", 0.0) or 0.0) for _, payload in enabled]
     x = np.arange(len(names))
     fig, axes = plt.subplots(1, 2, figsize=(max(8.0, 1.1 * len(names)), 3.8), constrained_layout=True)
     axes[0].bar(x, best)
     axes[0].set_xticks(x)
     axes[0].set_xticklabels(names, rotation=25, ha="right")
-    axes[0].set_ylabel("Best total score")
+    axes[0].set_ylabel(ylabel)
     axes[0].grid(True, axis="y", alpha=0.25)
     axes[1].bar(x, success)
     axes[1].set_xticks(x)
@@ -393,7 +485,7 @@ def _plot_method_comparison(summary: Mapping[str, Mapping[str, Any]], path: Path
 
 
 def _rank(method: str, candidates: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    rows = sorted([dict(row) for row in candidates], key=lambda row: float(row.get("total_score", float("inf"))))
+    rows = sorted([dict(row) for row in candidates], key=lambda row: _candidate_score(row, "ranking_score", "total_score"))
     for idx, row in enumerate(rows, start=1):
         row["rank"] = int(idx)
         row["method"] = method
@@ -634,10 +726,10 @@ def main() -> int:
         if skipped:
             print(f"[method:{method}] skipped in {runtime:.2f}s: {reason}")
         else:
-            best = summaries[method].get("best_score")
+            best = summaries[method].get("best_objective_score", summaries[method].get("best_score"))
             calls = summaries[method].get("num_forward_calls")
             best_text = "nan" if best is None else f"{float(best):.6g}"
-            print(f"[method:{method}] done in {runtime:.2f}s | forward_calls={calls} | best_score={best_text}")
+            print(f"[method:{method}] done in {runtime:.2f}s | forward_calls={calls} | best_objective_score={best_text}")
 
     if bool(methods_cfg.get("random_valid", True)):
         print("[method:random_valid] starting")
@@ -697,11 +789,12 @@ def main() -> int:
 
     save_dense = bool(output_cfg.get("save_dense_forward_outputs", False))
     top_k = int(output_cfg.get("save_top_k_per_method", 5))
+    target_regions = _target_box_regions(objective)
     top_candidates = []
     for method in results:
         candidates = _rank(method, list(results[method].get("best_candidates", [])))
         top_candidates.extend(candidates[:top_k])
-        _write_top_artifacts(candidates, top_dir, top_k=top_k, save_dense=save_dense)
+        _write_top_artifacts(candidates, top_dir, top_k=top_k, save_dense=save_dense, target_regions=target_regions)
     csv_candidates = [_strip_dense(row) for row in all_candidates] if not save_dense else all_candidates
     csv_top = [_strip_dense(row) for row in top_candidates] if not save_dense else top_candidates
     write_candidates_csv(csv_candidates, run_dir / "candidates_all.csv")
@@ -709,7 +802,10 @@ def main() -> int:
     _write_score_vs_calls_csv(histories, run_dir / "score_vs_forward_calls.csv")
     if histories:
         plot_score_vs_calls(histories, run_dir / "score_vs_calls.png")
-    _plot_method_comparison(summaries, run_dir / "method_comparison.png")
+    _plot_method_comparison(summaries, run_dir / "method_comparison_internal.png", score_key="best_internal_total_score", ylabel="Best internal total score")
+    _plot_method_comparison(summaries, run_dir / "method_comparison_objective.png", score_key="best_objective_score", ylabel="Best objective score")
+    if (run_dir / "method_comparison_objective.png").exists():
+        shutil.copy2(run_dir / "method_comparison_objective.png", run_dir / "method_comparison.png")
     write_summary_json(
         {
             "objective": objective.name,

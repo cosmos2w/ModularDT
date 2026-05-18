@@ -72,6 +72,13 @@ class MechanismGuidedSearchConfig:
     filter_mechanisms_by_count: bool = True
     mechanism_jitter_std: float = 0.05
     random_seed: int = 0
+    ranking_score_key: str = "internal_total_score"
+
+    def __post_init__(self) -> None:
+        key = str(self.ranking_score_key or "internal_total_score").strip()
+        if key not in {"internal_total_score", "fair_objective_score"}:
+            raise ValueError("ranking_score_key must be 'internal_total_score' or 'fair_objective_score'.")
+        self.ranking_score_key = key
 
 
 GuidedSearchConfig = MechanismGuidedSearchConfig
@@ -117,7 +124,7 @@ def _layout_vector(candidate: Mapping[str, Any], max_num_modules: int, config: L
     return encode_layout_to_design_vec(layout, config) if isinstance(layout, Mapping) else np.zeros((max_num_modules * 3,), dtype=np.float32)
 
 
-def diversity_rerank(candidates: Sequence[Dict[str, Any]], *, weight: float, config: LayoutSearchConfig) -> List[Dict[str, Any]]:
+def diversity_rerank(candidates: Sequence[Dict[str, Any]], *, weight: float, config: LayoutSearchConfig, score_key: str = "total_score") -> List[Dict[str, Any]]:
     rows = list(candidates)
     if float(weight) <= 0.0 or len(rows) <= 2:
         for rank, row in enumerate(rows, start=1):
@@ -131,7 +138,7 @@ def diversity_rerank(candidates: Sequence[Dict[str, Any]], *, weight: float, con
         best_adjusted = float("inf")
         for idx in sorted(remaining):
             min_dist = min(float(np.linalg.norm(vectors[idx] - vectors[j])) for j in selected)
-            adjusted = float(rows[idx].get("total_score", float("inf"))) - float(weight) * min_dist
+            adjusted = float(rows[idx].get(score_key, row_score(rows[idx]))) - float(weight) * min_dist
             if adjusted < best_adjusted:
                 best_adjusted = adjusted
                 best_idx = idx
@@ -144,6 +151,13 @@ def diversity_rerank(candidates: Sequence[Dict[str, Any]], *, weight: float, con
     for rank, row in enumerate(reranked, start=1):
         row["rank"] = int(rank)
     return reranked
+
+
+def row_score(row: Mapping[str, Any], key: str = "total_score") -> float:
+    try:
+        return float(row.get(key, row.get("total_score", float("inf"))))
+    except (TypeError, ValueError):
+        return float("inf")
 
 
 def _decode_hypergraph(vector: Optional[Any], max_num_modules: int) -> Optional[Dict[str, Any]]:
@@ -344,6 +358,7 @@ class HypergraphMechanismDesignSearcher:
         self.device = next(layout_realizer.parameters()).device
         self.forward_calls = 0
         self._objective_counts_plan_realization = objective_has_plan_realization_term(objective)
+        self.ranking_score_key = str(search_config.ranking_score_key)
 
     def _context_tensor(self, context: Optional[Mapping[str, Any]], n: int = 1) -> Optional[torch.Tensor]:
         dim = int(getattr(self.layout_realizer.cfg, "context_dim", 0))
@@ -458,6 +473,8 @@ class HypergraphMechanismDesignSearcher:
             + hyper_extra_score
             + float(self.search_config.mechanism_prior_weight) * prior_energy
         )
+        objective_score = float(objective_result.get("total_score", 0.0))
+        ranking_score = objective_score if self.ranking_score_key == "fair_objective_score" else total
         cluster_id = int(np.asarray(self.mechanism_atlas.nearest_cluster(mechanism)).reshape(-1)[0])
         return _jsonable(
             {
@@ -483,7 +500,11 @@ class HypergraphMechanismDesignSearcher:
                 "forward_prediction": forward_payload.get("forward_prediction", {}),
                 "objective_result": objective_result,
                 "total_score": total,
-                "objective_score": float(objective_result.get("total_score", 0.0)),
+                "internal_total_score": total,
+                "fair_objective_score": objective_score,
+                "objective_score": objective_score,
+                "ranking_score": ranking_score,
+                "ranking_score_key": self.ranking_score_key,
                 "mechanism_prior_score": prior_energy,
                 "hard_violation_score": float(objective_result.get("hard_violation_score", 0.0)),
                 "satisfied": bool(objective_result.get("satisfied", False)),
@@ -524,7 +545,7 @@ class HypergraphMechanismDesignSearcher:
                         layout_index=layout_idx,
                     )
                 )
-            rows.sort(key=lambda row: float(row.get("total_score", float("inf"))))
+            rows.sort(key=lambda row: row_score(row, "ranking_score"))
             candidates.extend(rows)
         return candidates
 
@@ -544,8 +565,8 @@ class HypergraphMechanismDesignSearcher:
             count_range=count_range,
         )
         candidates = self._evaluate_mechanisms(features, context, method="mechanism_prior", source="mechanism_prior")
-        candidates.sort(key=lambda row: float(row.get("total_score", float("inf"))))
-        return diversity_rerank(candidates, weight=float(self.search_config.diversity_weight), config=self.layout_config)
+        candidates.sort(key=lambda row: row_score(row, "ranking_score"))
+        return diversity_rerank(candidates, weight=float(self.search_config.diversity_weight), config=self.layout_config, score_key="ranking_score")
 
     def mechanism_cem_search(self, context: Mapping[str, Any]) -> Dict[str, Any]:
         rng = np.random.default_rng(int(self.search_config.random_seed))
@@ -572,34 +593,35 @@ class HypergraphMechanismDesignSearcher:
             else:
                 mechanism_np = rng.normal(mean[None, :], std[None, :], size=(pop, mechanism_dim)).astype(np.float32)
             rows = self._evaluate_mechanisms(mechanism_np, context, method="mechanism_guided", source=f"mechanism_cem_iteration_{iteration}")
-            rows.sort(key=lambda row: float(row.get("total_score", float("inf"))))
+            rows.sort(key=lambda row: row_score(row, "ranking_score"))
             best_by_mechanism: Dict[str, Dict[str, Any]] = {}
             for row in rows:
                 key = tuple(np.round(np.asarray(row["mechanism_feature"], dtype=np.float64), 8).tolist())
-                if key not in best_by_mechanism or float(row["total_score"]) < float(best_by_mechanism[key]["total_score"]):
+                if key not in best_by_mechanism or row_score(row, "ranking_score") < row_score(best_by_mechanism[key], "ranking_score"):
                     best_by_mechanism[key] = row
-            mechanism_rows = sorted(best_by_mechanism.values(), key=lambda row: float(row.get("total_score", float("inf"))))
+            mechanism_rows = sorted(best_by_mechanism.values(), key=lambda row: row_score(row, "ranking_score"))
             elites = mechanism_rows[:elite_n]
             elite_features = np.stack([np.asarray(row["mechanism_feature"], dtype=np.float64).reshape(-1) for row in elites], axis=0)
             smoothing = min(max(float(self.search_config.mechanism_cem_smoothing), 0.0), 1.0)
             mean = smoothing * mean + (1.0 - smoothing) * np.mean(elite_features, axis=0)
             std = smoothing * std + (1.0 - smoothing) * np.maximum(np.std(elite_features, axis=0), float(self.search_config.mechanism_cem_min_std))
             all_candidates.extend(rows)
-            round_best = float(rows[0]["total_score"]) if rows else float("inf")
+            round_best = row_score(rows[0], "ranking_score") if rows else float("inf")
             cumulative_best = min(cumulative_best, round_best)
             history.append(
                 {
                     "iteration": int(iteration),
                     "best_score": float(cumulative_best),
                     "round_best_score": float(round_best),
-                    "mean_elite_score": float(np.mean([float(row["total_score"]) for row in elites])),
+                    "mean_elite_score": float(np.mean([row_score(row, "ranking_score") for row in elites])),
+                    "ranking_score_key": self.ranking_score_key,
                     "num_forward_calls": int(self.forward_calls),
                     "runtime_seconds": float(time.time() - iter_start),
                 }
             )
             progress.set_postfix(best=f"{cumulative_best:.4g}", calls=self.forward_calls)
-        all_candidates.sort(key=lambda row: float(row.get("total_score", float("inf"))))
-        reranked = diversity_rerank(all_candidates, weight=float(self.search_config.diversity_weight), config=self.layout_config)
+        all_candidates.sort(key=lambda row: row_score(row, "ranking_score"))
+        reranked = diversity_rerank(all_candidates, weight=float(self.search_config.diversity_weight), config=self.layout_config, score_key="ranking_score")
         top = reranked[: max(int(self.search_config.num_return), 0)]
         for rank, row in enumerate(top, start=1):
             row["rank"] = int(rank)

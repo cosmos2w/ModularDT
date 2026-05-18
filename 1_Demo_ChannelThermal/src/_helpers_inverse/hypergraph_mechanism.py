@@ -46,6 +46,10 @@ class MechanismAtlasState:
     feature_dim: int
     hypergraph_dim: int
     behavior_dim: int
+    representative_features: list | None = None
+    representative_feature_cluster_ids: list | None = None
+    representative_counts: list | None = None
+    max_representatives_per_cluster: int = 128
 
 
 def _as_2d_float(arr: Optional[np.ndarray], *, n: int = 0) -> np.ndarray:
@@ -261,6 +265,40 @@ class HypergraphMechanismAtlas:
                 keep.append(int(cid))
         return np.asarray(keep if keep else eligible, dtype=np.int64)
 
+    def _representative_state(self, max_per_cluster: int = 128) -> Dict[str, Any]:
+        if self.training_features.size == 0 or self.assignments.size == 0 or self.cluster_centers.size == 0:
+            return {
+                "representative_features": [],
+                "representative_feature_cluster_ids": [],
+                "representative_counts": [],
+                "max_representatives_per_cluster": int(max_per_cluster),
+            }
+        features = np.asarray(self.training_features, dtype=np.float32)
+        assignments = np.asarray(self.assignments, dtype=np.int64).reshape(-1)
+        counts = np.asarray(self.training_counts, dtype=np.float32).reshape(-1, 1)
+        if counts.shape[0] != features.shape[0]:
+            counts = np.zeros((features.shape[0], 1), dtype=np.float32)
+        rep_features = []
+        rep_clusters = []
+        rep_counts = []
+        for cid in range(int(self.cluster_centers.shape[0])):
+            idx = np.where(assignments == cid)[0]
+            if idx.size == 0:
+                continue
+            dist = np.sum((features[idx] - self.cluster_centers[cid][None, :]) ** 2, axis=1)
+            chosen = idx[np.argsort(dist)[: max(int(max_per_cluster), 1)]]
+            rep_features.append(features[chosen])
+            rep_clusters.extend([int(cid)] * int(chosen.size))
+            rep_counts.append(counts[chosen])
+        feature_rows = np.concatenate(rep_features, axis=0) if rep_features else np.zeros((0, features.shape[1]), dtype=np.float32)
+        count_rows = np.concatenate(rep_counts, axis=0) if rep_counts else np.zeros((0, 1), dtype=np.float32)
+        return {
+            "representative_features": feature_rows.astype(float).tolist(),
+            "representative_feature_cluster_ids": [int(v) for v in rep_clusters],
+            "representative_counts": count_rows.astype(float).reshape(-1).tolist(),
+            "max_representatives_per_cluster": int(max_per_cluster),
+        }
+
     def sample_features(
         self,
         num_samples,
@@ -328,6 +366,7 @@ class HypergraphMechanismAtlas:
         return out
 
     def to_state(self) -> dict:
+        representatives = self._representative_state(max_per_cluster=128)
         state = MechanismAtlasState(
             feature_config=asdict(self.config),
             hypergraph_mean=list(self.stats.get("hypergraph_mean", [])),
@@ -342,6 +381,10 @@ class HypergraphMechanismAtlas:
             feature_dim=int(self.stats.get("feature_dim", self.cluster_centers.shape[1] if self.cluster_centers.ndim == 2 else 0)),
             hypergraph_dim=int(self.stats.get("hypergraph_dim", 0)),
             behavior_dim=int(self.stats.get("behavior_dim", 0)),
+            representative_features=representatives["representative_features"],
+            representative_feature_cluster_ids=representatives["representative_feature_cluster_ids"],
+            representative_counts=representatives["representative_counts"],
+            max_representatives_per_cluster=int(representatives["max_representatives_per_cluster"]),
         )
         return asdict(state)
 
@@ -367,6 +410,25 @@ class HypergraphMechanismAtlas:
             atlas.cluster_centers = atlas.cluster_centers.reshape(0, int(atlas.stats.get("feature_dim", 0)))
         atlas.cluster_counts = np.asarray(payload.get("cluster_counts", []), dtype=np.int64)
         atlas.assignments = np.asarray(payload.get("assignments", []), dtype=np.int64)
-        atlas.training_features = np.zeros((0, int(atlas.stats.get("feature_dim", 0))), dtype=np.float32)
-        atlas.training_counts = np.zeros((0, 1), dtype=np.float32)
+        rep_features = np.asarray(payload.get("representative_features", []), dtype=np.float32)
+        if rep_features.ndim == 1 and rep_features.size:
+            rep_features = rep_features.reshape(1, -1)
+        elif rep_features.ndim != 2:
+            rep_features = np.zeros((0, int(atlas.stats.get("feature_dim", 0))), dtype=np.float32)
+        rep_clusters = np.asarray(payload.get("representative_feature_cluster_ids", []), dtype=np.int64).reshape(-1)
+        rep_counts = np.asarray(payload.get("representative_counts", []), dtype=np.float32).reshape(-1, 1)
+        if rep_features.shape[0] > 0:
+            atlas.training_features = rep_features.astype(np.float32)
+            if rep_clusters.size == rep_features.shape[0]:
+                atlas.assignments = rep_clusters.astype(np.int64)
+            elif atlas.assignments.size != rep_features.shape[0]:
+                atlas.assignments = atlas.nearest_cluster(rep_features)
+            if rep_counts.shape[0] == rep_features.shape[0]:
+                atlas.training_counts = rep_counts.astype(np.float32)
+            else:
+                decoded = atlas.decode_feature_to_parts(rep_features)
+                atlas.training_counts = np.asarray(decoded.get("count_descriptor", np.zeros((rep_features.shape[0], 1))), dtype=np.float32).reshape(-1, 1)
+        else:
+            atlas.training_features = np.zeros((0, int(atlas.stats.get("feature_dim", 0))), dtype=np.float32)
+            atlas.training_counts = np.zeros((0, 1), dtype=np.float32)
         return atlas

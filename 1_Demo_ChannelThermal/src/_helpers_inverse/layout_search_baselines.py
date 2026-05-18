@@ -333,6 +333,11 @@ def _candidate(
         "forward_prediction": dict(forward_payload),
         "objective_result": dict(objective_result),
         "total_score": float(objective_result.get("total_score", float("inf"))),
+        "internal_total_score": float(objective_result.get("total_score", float("inf"))),
+        "fair_objective_score": float(objective_result.get("total_score", float("inf"))),
+        "objective_score": float(objective_result.get("total_score", float("inf"))),
+        "ranking_score": float(objective_result.get("total_score", float("inf"))),
+        "ranking_score_key": "fair_objective_score",
         "hard_violation_score": float(objective_result.get("hard_violation_score", 0.0)),
         "satisfied": bool(objective_result.get("satisfied", False)),
         "num_satisfied": int(objective_result.get("num_satisfied", 0)),
@@ -363,6 +368,7 @@ class RawLayoutCEMOptimizer:
         all_candidates = []
         history = []
         calls = 0
+        cumulative_best = float("inf")
         pop = max(int(self.config.cem_population), 2)
         elite_n = max(1, int(math.ceil(pop * float(self.config.cem_elite_frac))))
         total_iterations = max(int(self.config.cem_iterations), 1)
@@ -394,16 +400,19 @@ class RawLayoutCEMOptimizer:
             mean = smoothing * mean + (1.0 - smoothing) * np.mean(elite_vecs, axis=0)
             std = smoothing * std + (1.0 - smoothing) * np.maximum(np.std(elite_vecs, axis=0), float(self.config.cem_min_std))
             all_candidates.extend(iteration_rows)
+            round_best = float(iteration_rows[0]["total_score"])
+            cumulative_best = min(cumulative_best, round_best)
             history.append(
                 {
                     "iteration": int(iteration),
-                    "best_score": float(iteration_rows[0]["total_score"]),
+                    "round_best_score": float(round_best),
+                    "best_score": float(cumulative_best),
                     "mean_elite_score": float(np.mean([row["total_score"] for row in elites])),
                     "num_forward_calls": int(calls),
                     "runtime_seconds": float(time.time() - iter_start),
                 }
             )
-            progress.set_postfix(best=f"{float(iteration_rows[0]['total_score']):.4g}", calls=calls)
+            progress.set_postfix(best=f"{cumulative_best:.4g}", calls=calls)
         all_candidates.sort(key=lambda item: float(item["total_score"]))
         for rank, row in enumerate(all_candidates[: max(int(num_return), 0)], start=1):
             row["rank"] = int(rank)
@@ -443,5 +452,6 @@ class RandomValidLayoutSampler:
         rows.sort(key=lambda item: float(item["total_score"]))
         for rank, row in enumerate(rows[: max(int(num_return), 0)], start=1):
             row["rank"] = int(rank)
-        history = [{"iteration": 0, "best_score": float(rows[0]["total_score"]) if rows else float("inf"), "mean_elite_score": float(np.mean([r["total_score"] for r in rows[: max(1, min(len(rows), num_return))]])) if rows else float("inf"), "num_forward_calls": int(calls)}]
+        best = float(rows[0]["total_score"]) if rows else float("inf")
+        history = [{"iteration": 0, "round_best_score": best, "best_score": best, "mean_elite_score": float(np.mean([r["total_score"] for r in rows[: max(1, min(len(rows), num_return))]])) if rows else float("inf"), "num_forward_calls": int(calls)}]
         return {"method": "random_valid_layout", "best_candidates": rows[: max(int(num_return), 0)], "history": history, "num_forward_calls": int(calls)}

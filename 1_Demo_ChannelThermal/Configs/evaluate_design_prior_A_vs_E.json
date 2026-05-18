@@ -1,9 +1,9 @@
 {
   "forward_model": {
-    "config_path": "Configs/train_inverse_config_template.json",
+    "config_path": "Saved_Model/Run_0005_20260514_160311/resolved_train_config.json",
     "checkpoint_path": "Saved_Model/Run_0005_20260514_160311/latest_model.pt",
     "device": "auto",
-    "batch_size": 256
+    "batch_size": 1024
   },
   "objective": {
     "spec_path": "inverse_targets_v2/field_functional_chip_plume_demo_fair.json",
@@ -83,10 +83,11 @@
     "layouts_per_mechanism": 2,
     "layout_sample_steps": 16,
     "layout_temperature": 1.0,
-    "mechanism_prior_weight": 0.05,
+    "mechanism_prior_weight": 0.02,
     "geometry_penalty_weight": 1.0,
-    "hypergraph_realization_weight": 1.0,
+    "hypergraph_realization_weight": 0.5,
     "diversity_weight": 0.0,
+    "ranking_score_key": "internal_total_score",
     "filter_mechanisms_by_count": true,
     "mechanism_jitter_std": 0.05,
     "num_return": 16,

@@ -28,6 +28,10 @@ CANDIDATE_CSV_FIELDS = [
     "method",
     "rank",
     "total_score",
+    "internal_total_score",
+    "fair_objective_score",
+    "ranking_score",
+    "ranking_score_key",
     "hard_violation_score",
     "satisfied",
     "num_satisfied",
@@ -169,6 +173,7 @@ def plot_layout_candidate(
     title: str = "",
     field: Any = None,
     domain: Mapping[str, Any] | None = None,
+    target_regions: Sequence[Mapping[str, Any]] | None = None,
 ) -> None:
     out = _ensure_parent(path)
     payload = _layout_payload(layout)
@@ -188,6 +193,19 @@ def plot_layout_candidate(
             im = ax.imshow(arr, origin="lower", extent=[0.0, lx, 0.0, ly], aspect="auto", alpha=0.75)
             fig.colorbar(im, ax=ax, shrink=0.82, label="field")
     ax.add_patch(plt.Rectangle((0.0, 0.0), lx, ly, fill=False, linewidth=1.4, edgecolor="black"))
+    if target_regions:
+        for region in target_regions:
+            if not isinstance(region, Mapping):
+                continue
+            try:
+                x0, x1 = [float(v) for v in region.get("x_range", [])[:2]]
+                y0, y1 = [float(v) for v in region.get("y_range", [])[:2]]
+            except Exception:
+                continue
+            rect = plt.Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, linewidth=1.5, linestyle="--", edgecolor="tab:cyan")
+            ax.add_patch(rect)
+            label = str(region.get("name", "target"))
+            ax.text(x0, y1, label, ha="left", va="bottom", fontsize=7, color="tab:cyan", bbox={"facecolor": "black", "alpha": 0.35, "pad": 1.5, "edgecolor": "none"})
     for idx, (cx, cy) in enumerate(centers):
         ax.add_patch(Circle((float(cx), float(cy)), radius, fill=False, linewidth=1.4))
         ax.text(float(cx), float(cy), str(idx + 1), ha="center", va="center", fontsize=8)

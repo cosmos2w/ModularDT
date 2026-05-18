@@ -56,6 +56,17 @@ It is not used to learn a generic valid-layout prior.
   forward verification. Useful range: `1` to `8`.
 - `filter_mechanisms_by_count`: prefer mechanism clusters whose decoded count
   descriptor matches objective hard count constraints.
+- `ranking_score_key`: choose `"internal_total_score"` to use mechanism
+  regularizers during posterior search, or `"fair_objective_score"` to rank
+  only by the field-functional objective.
+
+For the first fair A-vs-E comparison, use
+`inverse_targets_v2/field_functional_chip_plume_demo_fair.json` as the
+objective and treat `best_objective_score` as the headline metric.
+`mechanism_prior_weight` and `hypergraph_realization_weight` are search
+regularizers/diagnostics; the template keeps them modest at `0.02` and `0.5`.
+Raw layout CEM has no desired mechanism and is compared only by the same
+objective score.
 
 ## Method Roles
 
