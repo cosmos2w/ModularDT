@@ -25,8 +25,8 @@
     "random_valid": true,
     "raw_layout_cem": true,
     "current_inverse": false,
-    "atlas_prior": true,
-    "atlas_guided": true
+    "mechanism_prior": true,
+    "mechanism_guided": true
   },
   "context": {
     "dataset_path": "Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
@@ -62,25 +62,33 @@
     "num_return": 16,
     "seed": 0
   },
-  "atlas_prior": {
+  "mechanism_prior": {
     "num_samples": 512,
     "num_return": 16,
-    "temperature": 1.0,
+    "layouts_per_mechanism": 1,
+    "layout_sample_steps": 16,
+    "layout_temperature": 1.0,
+    "filter_mechanisms_by_count": true,
+    "mechanism_jitter_std": 0.05,
     "seed": 0
   },
-  "atlas_guided": {
-    "method": "latent_cem",
-    "latent_cem_iterations": 8,
-    "latent_cem_population": 128,
-    "latent_cem_elite_frac": 0.15,
-    "latent_cem_init_std": 1.0,
-    "latent_cem_min_std": 0.05,
-    "latent_cem_smoothing": 0.5,
-    "prior_energy_weight": 0.01,
+  "mechanism_guided": {
+    "method": "mechanism_cem",
+    "mechanism_cem_iterations": 8,
+    "mechanism_cem_population": 128,
+    "mechanism_cem_elite_frac": 0.15,
+    "mechanism_cem_init_std": 0.5,
+    "mechanism_cem_min_std": 0.03,
+    "mechanism_cem_smoothing": 0.5,
+    "layouts_per_mechanism": 2,
+    "layout_sample_steps": 16,
+    "layout_temperature": 1.0,
+    "mechanism_prior_weight": 0.05,
     "geometry_penalty_weight": 1.0,
-    "hypergraph_consistency_weight": 0.0,
-    "avoid_hypergraph_double_count": true,
+    "hypergraph_realization_weight": 1.0,
     "diversity_weight": 0.0,
+    "filter_mechanisms_by_count": true,
+    "mechanism_jitter_std": 0.05,
     "num_return": 16,
     "seed": 0
   },

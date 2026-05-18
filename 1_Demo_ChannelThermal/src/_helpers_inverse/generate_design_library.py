@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-"""Generate a behavior-aware design library for the latent design prior.
+"""Generate a hypergraph mechanism-library source for design-prior training.
 
-Data enhancement here is not about inventing arbitrary valid structures. It is
-about populating a behavior-diverse atlas of layout -> full-state behavior ->
-realized hypergraph organization using the frozen forward HONF verifier.
+The design library is now a mechanism library source:
+    layout -> realized hypergraph -> field behavior.
+It is not used to learn a generic valid-layout prior.
 """
 
 import argparse
@@ -48,7 +48,7 @@ except Exception:  # pragma: no cover
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate a ChannelThermal design-prior library.")
+    parser = argparse.ArgumentParser(description="Generate a ChannelThermal hypergraph mechanism-library source.")
     parser.add_argument("--source", choices=("existing", "random", "mixed"), default="existing")
     parser.add_argument("--forward-config", type=str, default=None)
     parser.add_argument("--forward-checkpoint", type=str, default=None)
@@ -65,6 +65,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--existing-sample-weight", type=float, default=1.0)
     parser.add_argument("--random-sample-weight", type=float, default=0.3)
     parser.add_argument("--max-num-modules", type=int, default=12)
+    parser.add_argument("--count-range-min", type=int, default=None, help="Optional minimum active module count to keep/sample.")
+    parser.add_argument("--count-range-max", type=int, default=None, help="Optional maximum active module count to keep/sample.")
     return parser.parse_args()
 
 
@@ -98,6 +100,24 @@ def _behavior_from_kpis(kpis: Mapping[str, Any], layout_desc: np.ndarray, hyper_
     out = np.zeros((32,), dtype=np.float32)
     out[: min(out.size, raw.size)] = raw[: out.size]
     return out
+
+
+def _behavior_descriptor_names() -> List[str]:
+    names = list(FALLBACK_KPI_NAMES)
+    names.extend(["active_edge_count", "hyper_strength_mean", "hyper_strength_max"])
+    names.extend(["layout_count", "layout_x_coverage", "layout_y_coverage", "layout_bbox_area", "layout_mean_pair_distance"])
+    names.extend(["field_temperature_max", "field_temperature_mean", "field_temperature_std", "field_temperature_p95", "outlet_temperature_std", "hot_area_fraction_p90", "hot_excess_mean_p90"])
+    while len(names) < 32:
+        names.append(f"reserved_{len(names)}")
+    return names[:32]
+
+
+def _count_allowed(count: int, lo: Optional[int], hi: Optional[int]) -> bool:
+    if lo is not None and int(count) < int(lo):
+        return False
+    if hi is not None and int(count) > int(hi):
+        return False
+    return True
 
 
 def _field_descriptors(prediction: Mapping[str, Any]) -> np.ndarray:
@@ -202,6 +222,7 @@ def _append_sample(rows: List[Dict[str, Any]], *, layout: Mapping[str, Any], rec
     hyper_mask = np.asarray(plan.get("mask", np.ones_like(hyper_vec)), dtype=np.float32).reshape(-1)
     summary = plan.get("summary", {}) if isinstance(plan.get("summary"), Mapping) else {}
     layout_desc = _layout_descriptors(layout)
+    true_count = int(layout_desc[0])
     field_desc = _field_descriptors(prediction)
     kpis = _kpis_for_prediction(record, prediction, layout)
     behavior = _behavior_from_kpis(kpis, layout_desc, summary, field_desc)
@@ -213,6 +234,8 @@ def _append_sample(rows: List[Dict[str, Any]], *, layout: Mapping[str, Any], rec
         "context_vec": _context(record),
         "kpi_descriptor_vec": np.asarray([float(kpis.get(name, 0.0) or 0.0) for name in FALLBACK_KPI_NAMES], dtype=np.float32),
         "layout_descriptor_vec": layout_desc.astype(np.float32),
+        "true_count": np.asarray([true_count], dtype=np.float32),
+        "count_vec": np.asarray([true_count], dtype=np.float32),
         "sample_weight": float(weight),
         "source_tag": source,
         "case_id": str(getattr(record, "case_id", len(rows))),
@@ -232,17 +255,38 @@ def _pad_stack(rows: Sequence[Mapping[str, Any]], key: str) -> np.ndarray:
     return out
 
 
-def _write_h5(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
+def _source_distribution(rows: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for row in rows:
+        key = str(row.get("source_tag", ""))
+        out[key] = out.get(key, 0) + 1
+    return out
+
+
+def _write_h5(rows: Sequence[Mapping[str, Any]], path: Path, *, forward_checkpoint: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as h5:
-        for key in ("design_vec", "hypergraph_vec", "hypergraph_mask", "behavior_vec", "context_vec", "kpi_descriptor_vec", "layout_descriptor_vec"):
+        for key in ("design_vec", "hypergraph_vec", "hypergraph_mask", "behavior_vec", "context_vec", "kpi_descriptor_vec", "layout_descriptor_vec", "true_count", "count_vec"):
             h5.create_dataset(key, data=_pad_stack(rows, key), compression="gzip")
         h5.create_dataset("sample_weight", data=np.asarray([float(row.get("sample_weight", 1.0)) for row in rows], dtype=np.float32))
         for key in ("source_tag", "case_id", "forward_model_checkpoint_id"):
             values = np.asarray([str(row.get(key, "")) for row in rows], dtype=h5py.string_dtype("utf-8"))
             h5.create_dataset(key, data=values)
         h5.attrs["num_samples"] = int(len(rows))
-        h5.attrs["library_version"] = 1
+        h5.attrs["library_version"] = 2
+        h5.attrs["library_role"] = "hypergraph_mechanism_library_source"
+        h5.attrs["mechanism_source_metadata"] = json.dumps(
+            {
+                "forward_checkpoint_path": str(forward_checkpoint),
+                "hypergraph_vector_fields": [
+                    "per_edge: edge_active_or_strength, hyper_strength, module_mass, env_mass, source_x, source_y, thermal_region_x, thermal_region_y",
+                    "per_edge_module_assignment: A_mh[:, edge]",
+                ],
+                "behavior_descriptor_names": _behavior_descriptor_names(),
+                "library_generation_source_distribution": _source_distribution(rows),
+            },
+            sort_keys=True,
+        )
 
 
 def main() -> int:
@@ -265,6 +309,8 @@ def main() -> int:
     if include_existing:
         for record in tqdm(dataset.records, desc="existing", unit="layout"):
             layout = _record_layout(record)
+            if not _count_allowed(int(layout.get("count", 0)), args.count_range_min, args.count_range_max):
+                continue
             prediction = predict_candidate_with_forward(
                 forward_model,
                 forward_metadata,
@@ -282,6 +328,11 @@ def main() -> int:
             n_random = len(dataset.records)
         for idx in tqdm(range(max(n_random, 0)), desc="random", unit="layout"):
             record = dataset.records[idx % len(dataset.records)]
+            lo = int(args.count_range_min) if args.count_range_min is not None else 1
+            hi_default = min(int(args.max_num_modules), 8)
+            hi = int(args.count_range_max) if args.count_range_max is not None else hi_default
+            lo = max(0, min(lo, int(args.max_num_modules)))
+            hi = max(lo, min(hi, int(args.max_num_modules)))
             cfg = LayoutSearchConfig(
                 max_num_modules=int(args.max_num_modules),
                 domain_length_x=float(record.domain_length_x),
@@ -289,7 +340,9 @@ def main() -> int:
                 module_radius=float(record.module_radius),
                 random_seed=int(args.seed) + idx,
             )
-            layout = sample_random_valid_layout(cfg, rng, {"hard_constraints": {"num_modules": [1, min(int(args.max_num_modules), 8)]}})
+            layout = sample_random_valid_layout(cfg, rng, {"hard_constraints": {"num_modules": [lo, hi]}})
+            if not _count_allowed(int(layout.get("count", 0)), args.count_range_min, args.count_range_max):
+                continue
             prediction = predict_candidate_with_forward(
                 forward_model,
                 forward_metadata,
@@ -302,7 +355,7 @@ def main() -> int:
             _append_sample(rows, layout=layout, record=record, prediction=prediction, max_num_modules=int(args.max_num_modules), source="random_forward_synthetic", weight=float(args.random_sample_weight), forward_checkpoint=str(forward_path), save_fields=bool(args.save_fields))
     if not rows:
         raise RuntimeError("No design-library rows were generated.")
-    _write_h5(rows, resolve_demo_path(args.output))
+    _write_h5(rows, resolve_demo_path(args.output), forward_checkpoint=str(forward_path))
     print(f"[library] wrote {len(rows)} samples to {resolve_demo_path(args.output)}")
     return 0
 

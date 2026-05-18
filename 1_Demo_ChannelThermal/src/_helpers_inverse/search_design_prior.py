@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Guided posterior search over the target-agnostic latent design prior."""
+"""Mechanism-prior search over hypergraph-conditioned layout realization."""
 
 from dataclasses import dataclass
 import math
@@ -30,7 +30,6 @@ try:
         encode_layout_to_design_vec,
         geometry_penalty,
     )
-    from model_design_prior import LatentModularDesignPrior
     from thermal_hypergraph_consistency import compare_hypergraph_plans
     from thermal_inverse_kpi import compute_steady_thermal_kpis
     from train_inverse import (
@@ -49,23 +48,33 @@ except Exception as exc:  # pragma: no cover
 
 
 @dataclass
-class GuidedSearchConfig:
-    method: str = "latent_cem"
+class MechanismGuidedSearchConfig:
+    method: str = "mechanism_cem"
     num_initial_samples: int = 512
     num_return: int = 16
-    latent_cem_iterations: int = 8
-    latent_cem_population: int = 128
-    latent_cem_elite_frac: float = 0.15
-    latent_cem_init_std: float = 1.0
-    latent_cem_min_std: float = 0.05
-    latent_cem_smoothing: float = 0.5
-    posterior_beta: float = 1.0
-    prior_energy_weight: float = 0.01
+
+    mechanism_cem_iterations: int = 8
+    mechanism_cem_population: int = 128
+    mechanism_cem_elite_frac: float = 0.15
+    mechanism_cem_init_std: float = 0.5
+    mechanism_cem_min_std: float = 0.03
+    mechanism_cem_smoothing: float = 0.5
+
+    layouts_per_mechanism: int = 2
+    layout_sample_steps: int = 16
+    layout_temperature: float = 1.0
+
+    mechanism_prior_weight: float = 0.05
     geometry_penalty_weight: float = 1.0
-    hypergraph_consistency_weight: float = 1.0
+    hypergraph_realization_weight: float = 1.0
     diversity_weight: float = 0.0
+
+    filter_mechanisms_by_count: bool = True
+    mechanism_jitter_std: float = 0.05
     random_seed: int = 0
-    avoid_hypergraph_double_count: bool = True
+
+
+GuidedSearchConfig = MechanismGuidedSearchConfig
 
 
 def _finite_float(value: Any, default: float = 0.0) -> float:
@@ -299,26 +308,45 @@ class ForwardHONFEvaluator:
         }
 
 
-class LatentPosteriorDesignSearcher:
+def _count_range_from_context(config: LayoutSearchConfig, context: Optional[Mapping[str, Any]]) -> Tuple[int, int]:
+    hard: Dict[str, Any] = {}
+    if isinstance(context, Mapping):
+        if isinstance(context.get("hard_constraints"), Mapping):
+            hard.update(context["hard_constraints"])  # type: ignore[index]
+        if isinstance(context.get("objective_spec"), Mapping) and isinstance(context["objective_spec"].get("hard_constraints"), Mapping):  # type: ignore[index]
+            hard.update(context["objective_spec"]["hard_constraints"])  # type: ignore[index]
+    lo = int(hard.get("num_modules_min", config.min_num_modules))
+    hi = int(hard.get("num_modules_max", config.max_active_modules or config.max_num_modules))
+    if isinstance(hard.get("num_modules"), Sequence) and len(hard["num_modules"]) >= 2:
+        lo = int(hard["num_modules"][0])
+        hi = int(hard["num_modules"][1])
+    lo = max(0, min(lo, int(config.max_num_modules)))
+    hi = max(lo, min(hi, int(config.max_num_modules)))
+    return lo, hi
+
+
+class HypergraphMechanismDesignSearcher:
     def __init__(
         self,
-        prior_model: LatentModularDesignPrior,
+        mechanism_atlas: Any,
+        layout_realizer: Any,
         forward_evaluator: Any,
         objective: FieldFunctionalObjective,
         layout_config: LayoutSearchConfig,
-        search_config: GuidedSearchConfig,
+        search_config: MechanismGuidedSearchConfig,
     ) -> None:
-        self.prior_model = prior_model
+        self.mechanism_atlas = mechanism_atlas
+        self.layout_realizer = layout_realizer
         self.forward_evaluator = forward_evaluator
         self.objective = objective
         self.layout_config = layout_config
         self.search_config = search_config
-        self.device = next(prior_model.parameters()).device
+        self.device = next(layout_realizer.parameters()).device
         self.forward_calls = 0
         self._objective_counts_plan_realization = objective_has_plan_realization_term(objective)
 
     def _context_tensor(self, context: Optional[Mapping[str, Any]], n: int = 1) -> Optional[torch.Tensor]:
-        dim = int(getattr(self.prior_model.cfg, "context_dim", 0))
+        dim = int(getattr(self.layout_realizer.cfg, "context_dim", 0))
         if dim <= 0:
             return None
         raw = None if context is None else context.get("context_vec")
@@ -331,67 +359,132 @@ class LatentPosteriorDesignSearcher:
             arr = np.repeat(padded[None, :], n, axis=0)
         return torch.from_numpy(arr).to(self.device)
 
-    def _evaluate_decoded(
+    def _evaluate_forward(self, design_vec: np.ndarray, context: Mapping[str, Any]) -> Dict[str, Any]:
+        if hasattr(self.forward_evaluator, "evaluate_design_vec"):
+            return self.forward_evaluator.evaluate_design_vec(design_vec, context)
+        if callable(self.forward_evaluator):
+            return self.forward_evaluator(design_vec, context)
+        raise TypeError("forward_evaluator must be callable or expose evaluate_design_vec(design_vec, context).")
+
+    def _sample_layouts(self, mechanism_features: np.ndarray, context: Mapping[str, Any], *, num_layouts: int) -> np.ndarray:
+        mech = np.asarray(mechanism_features, dtype=np.float32).reshape(-1, int(self.layout_realizer.cfg.mechanism_dim))
+        if num_layouts > 1:
+            mech = np.repeat(mech, int(num_layouts), axis=0)
+        with torch.no_grad():
+            mech_t = torch.from_numpy(mech).to(self.device)
+            context_t = self._context_tensor(context, mech_t.shape[0])
+            out = self.layout_realizer.sample_layout(
+                mech_t,
+                context_t,
+                num_samples=int(mech_t.shape[0]),
+                steps=int(self.search_config.layout_sample_steps),
+                temperature=float(self.search_config.layout_temperature),
+            )
+        return out["design_vec"].detach().cpu().numpy().astype(np.float32)
+
+    def _eligible_cluster_ids(self, count_range: Optional[Tuple[float, float]]) -> Optional[np.ndarray]:
+        centers = np.asarray(getattr(self.mechanism_atlas, "cluster_centers", []), dtype=np.float32)
+        if count_range is None or centers.size == 0:
+            return None
+        decoded = self.mechanism_atlas.decode_feature_to_parts(centers)
+        count_descriptor = decoded.get("count_descriptor")
+        if count_descriptor is None:
+            return None
+        counts = np.asarray(count_descriptor, dtype=np.float32).reshape(-1)
+        lo, hi = float(count_range[0]), float(count_range[1])
+        eligible = np.where((counts >= lo) & (counts <= hi))[0].astype(np.int64)
+        return eligible if eligible.size else None
+
+    def _sample_atlas_features(
+        self,
+        num_samples: int,
+        *,
+        rng: np.random.Generator,
+        count_range: Optional[Tuple[float, float]],
+    ) -> np.ndarray:
+        cluster_ids = None
+        eligible = self._eligible_cluster_ids(count_range)
+        if eligible is not None:
+            cluster_counts = np.asarray(getattr(self.mechanism_atlas, "cluster_counts", []), dtype=np.float64)
+            weights = cluster_counts[eligible] if cluster_counts.size >= int(np.max(eligible)) + 1 else np.ones((eligible.size,), dtype=np.float64)
+            weights = weights / weights.sum() if weights.sum() > 0.0 else np.full((eligible.size,), 1.0 / max(eligible.size, 1))
+            cluster_ids = rng.choice(eligible, size=int(num_samples), replace=True, p=weights)
+        sampled = self.mechanism_atlas.sample_features(
+            int(num_samples),
+            rng=rng,
+            count_range=count_range if cluster_ids is None else None,
+            cluster_ids=cluster_ids,
+            jitter_std=float(self.search_config.mechanism_jitter_std),
+        )
+        return np.asarray(sampled["features"], dtype=np.float32)
+
+    def _evaluate_mechanism_layout(
         self,
         *,
-        z: np.ndarray,
-        decoded: Mapping[str, torch.Tensor],
+        mechanism_feature: np.ndarray,
+        design_vec: np.ndarray,
         context: Mapping[str, Any],
         source: str,
         method: str,
+        layout_index: int = 0,
     ) -> Dict[str, Any]:
-        design_vec = decoded["design_vec"].detach().cpu().numpy().reshape(-1).astype(np.float32)
-        planned_vec = decoded.get("hypergraph_vec")
-        behavior = decoded.get("behavior_vec")
-        planned_np = planned_vec.detach().cpu().numpy().reshape(-1).astype(np.float32) if planned_vec is not None else None
-        planned = _decode_hypergraph(planned_np, int(self.layout_config.max_num_modules))
-        forward_payload = self.forward_evaluator.evaluate_design_vec(design_vec, context)
+        mechanism = np.asarray(mechanism_feature, dtype=np.float32).reshape(1, -1)
+        decoded_parts = self.mechanism_atlas.decode_feature_to_parts(mechanism)
+        desired_vec = np.asarray(decoded_parts.get("hypergraph_vec", np.zeros((1, 0), dtype=np.float32))[0], dtype=np.float32)
+        desired = _decode_hypergraph(desired_vec, int(self.layout_config.max_num_modules))
+        desired_behavior = np.asarray(decoded_parts.get("behavior_vec", np.zeros((1, 0), dtype=np.float32))[0], dtype=np.float32)
+        forward_payload = self._evaluate_forward(np.asarray(design_vec, dtype=np.float32).reshape(-1), context)
         self.forward_calls += 1
-        layout = forward_payload["layout"]
+        layout = forward_payload.get("layout", decode_design_vec_to_layout(design_vec, self.layout_config))
         realized = forward_payload.get("realized_hypergraph")
-        comparison = compare_hypergraphs(planned, realized)
+        comparison = compare_hypergraphs(desired, realized)
         objective_result = self.objective.evaluate(
             forward_prediction=forward_payload.get("forward_prediction"),
             kpis=forward_payload.get("kpis"),
             layout=layout,
-            planned_hypergraph=planned,
+            planned_hypergraph=desired,
             realized_hypergraph=realized,
             hypergraph_consistency=comparison,
         )
         geom = _sum_geometry_penalty(layout, self.layout_config)
-        z_tensor = torch.from_numpy(np.asarray(z, dtype=np.float32)[None]).to(self.device)
-        prior_energy = float(self.prior_model.latent_prior_energy(z_tensor).detach().cpu().numpy().reshape(-1)[0])
+        prior_energy = float(np.asarray(self.mechanism_atlas.prior_energy(mechanism), dtype=np.float32).reshape(-1)[0])
         hyper_score = float(comparison.get("total", 0.0) or 0.0) if bool(comparison.get("diagnostics_available", False)) else 0.0
-        hyper_extra_score = float(self.search_config.hypergraph_consistency_weight) * hyper_score
-        if bool(self.search_config.avoid_hypergraph_double_count) and self._objective_counts_plan_realization:
+        hyper_extra_score = float(self.search_config.hypergraph_realization_weight) * hyper_score
+        if self._objective_counts_plan_realization:
             hyper_extra_score = 0.0
         total = (
             float(objective_result.get("total_score", 0.0))
             + float(self.search_config.geometry_penalty_weight) * geom
             + hyper_extra_score
-            + float(self.search_config.prior_energy_weight) * prior_energy
+            + float(self.search_config.mechanism_prior_weight) * prior_energy
         )
+        cluster_id = int(np.asarray(self.mechanism_atlas.nearest_cluster(mechanism)).reshape(-1)[0])
         return _jsonable(
             {
                 "method": method,
+                "mechanism_feature": mechanism.reshape(-1).astype(np.float32),
+                "mechanism_cluster_id": cluster_id,
+                "desired_hypergraph": desired,
+                "desired_hypergraph_vec": desired_vec,
+                "desired_behavior": desired_behavior,
+                "planned_hypergraph": desired,
+                "planned_hypergraph_vec": desired_vec,
                 "design_vec": np.asarray(forward_payload.get("design_vec", design_vec), dtype=np.float32),
                 "layout": layout,
                 "centers": layout.get("centers"),
                 "count": int(layout.get("count", 0)),
                 "num_modules": int(layout.get("count", 0)),
-                "latent_z": np.asarray(z, dtype=np.float32),
-                "planned_hypergraph": planned,
-                "planned_hypergraph_vec": planned_np,
                 "realized_hypergraph": realized,
                 "hypergraph_consistency": comparison,
+                "hypergraph_realization_score": hyper_score,
                 "hypergraph_consistency_score": hyper_score,
                 "hypergraph_extra_score": hyper_extra_score,
-                "behavior_vec_hat": behavior.detach().cpu().numpy().reshape(-1).astype(np.float32) if behavior is not None else None,
                 "kpis": forward_payload.get("kpis", {}),
                 "forward_prediction": forward_payload.get("forward_prediction", {}),
                 "objective_result": objective_result,
                 "total_score": total,
                 "objective_score": float(objective_result.get("total_score", 0.0)),
+                "mechanism_prior_score": prior_energy,
                 "hard_violation_score": float(objective_result.get("hard_violation_score", 0.0)),
                 "satisfied": bool(objective_result.get("satisfied", False)),
                 "num_satisfied": int(objective_result.get("num_satisfied", 0)),
@@ -400,86 +493,120 @@ class LatentPosteriorDesignSearcher:
                 "geometry_penalty": geom,
                 "repair_distance": float(layout.get("repair_distance", 0.0)),
                 "forward_calls": int(self.forward_calls),
+                "layout_index": int(layout_index),
                 "source": source,
             }
         )
 
-    def sample_prior_candidates(self, context: Mapping[str, Any], num_samples: int, *, temperature: float = 1.0) -> List[Dict[str, Any]]:
-        self.prior_model.eval()
+    def _evaluate_mechanisms(
+        self,
+        mechanism_features: np.ndarray,
+        context: Mapping[str, Any],
+        *,
+        method: str,
+        source: str,
+    ) -> List[Dict[str, Any]]:
         candidates: List[Dict[str, Any]] = []
-        with torch.no_grad():
-            context_vec = self._context_tensor(context, int(num_samples))
-            torch.manual_seed(int(self.search_config.random_seed))
-            z = torch.randn(int(num_samples), int(self.prior_model.cfg.latent_dim), device=self.device) * float(temperature)
-            decoded_all = self.prior_model.decode_latent(z, context_vec)
-            for idx in tqdm(range(int(num_samples)), desc="atlas_prior", unit="sample", dynamic_ncols=True):
-                decoded = {key: value[idx : idx + 1] for key, value in decoded_all.items()}
-                candidates.append(
-                    self._evaluate_decoded(
-                        z=z[idx].detach().cpu().numpy(),
-                        decoded=decoded,
+        features = np.asarray(mechanism_features, dtype=np.float32).reshape(-1, int(self.layout_realizer.cfg.mechanism_dim))
+        layouts_per = max(int(self.search_config.layouts_per_mechanism), 1)
+        design_vecs = self._sample_layouts(features, context, num_layouts=layouts_per)
+        for idx in tqdm(range(features.shape[0]), desc=method, unit="mechanism", leave=False, dynamic_ncols=True):
+            rows = []
+            for layout_idx in range(layouts_per):
+                design_idx = idx * layouts_per + layout_idx
+                rows.append(
+                    self._evaluate_mechanism_layout(
+                        mechanism_feature=features[idx],
+                        design_vec=design_vecs[design_idx],
                         context=context,
-                        source=f"prior_{idx}",
-                        method="atlas_prior",
+                        source=f"{source}_{idx}",
+                        method=method,
+                        layout_index=layout_idx,
                     )
                 )
+            rows.sort(key=lambda row: float(row.get("total_score", float("inf"))))
+            candidates.extend(rows)
+        return candidates
+
+    def sample_mechanism_prior_candidates(
+        self,
+        context: Mapping[str, Any],
+        num_samples: int,
+        *,
+        count_range: Optional[Tuple[float, float]] = None,
+    ) -> List[Dict[str, Any]]:
+        rng = np.random.default_rng(int(self.search_config.random_seed))
+        if count_range is None and bool(self.search_config.filter_mechanisms_by_count):
+            count_range = _count_range_from_context(self.layout_config, context)
+        features = self._sample_atlas_features(
+            int(num_samples),
+            rng=rng,
+            count_range=count_range,
+        )
+        candidates = self._evaluate_mechanisms(features, context, method="mechanism_prior", source="mechanism_prior")
         candidates.sort(key=lambda row: float(row.get("total_score", float("inf"))))
         return diversity_rerank(candidates, weight=float(self.search_config.diversity_weight), config=self.layout_config)
 
-    def latent_cem_search(self, context: Mapping[str, Any]) -> Dict[str, Any]:
-        self.prior_model.eval()
+    def mechanism_cem_search(self, context: Mapping[str, Any]) -> Dict[str, Any]:
         rng = np.random.default_rng(int(self.search_config.random_seed))
-        latent_dim = int(self.prior_model.cfg.latent_dim)
-        mean = np.zeros((latent_dim,), dtype=np.float64)
-        std = np.full((latent_dim,), max(float(self.search_config.latent_cem_init_std), float(self.search_config.latent_cem_min_std)), dtype=np.float64)
+        mechanism_dim = int(self.layout_realizer.cfg.mechanism_dim)
+        count_range = _count_range_from_context(self.layout_config, context) if bool(self.search_config.filter_mechanisms_by_count) else None
+        seed_features = self._sample_atlas_features(
+            int(max(self.search_config.num_initial_samples, self.search_config.mechanism_cem_population)),
+            rng=rng,
+            count_range=count_range,
+        ).astype(np.float64).reshape(-1, mechanism_dim)
+        mean = np.mean(seed_features, axis=0)
+        std = np.maximum(np.std(seed_features, axis=0), float(self.search_config.mechanism_cem_init_std))
         all_candidates: List[Dict[str, Any]] = []
         history = []
-        pop = max(int(self.search_config.latent_cem_population), 2)
-        elite_n = max(1, int(math.ceil(pop * float(self.search_config.latent_cem_elite_frac))))
-        total_iterations = max(int(self.search_config.latent_cem_iterations), 1)
-        progress = tqdm(range(total_iterations), desc="atlas_guided latent_cem", unit="iter", dynamic_ncols=True)
+        pop = max(int(self.search_config.mechanism_cem_population), 2)
+        elite_n = max(1, int(math.ceil(pop * float(self.search_config.mechanism_cem_elite_frac))))
+        total_iterations = max(int(self.search_config.mechanism_cem_iterations), 1)
+        cumulative_best = float("inf")
+        progress = tqdm(range(total_iterations), desc="mechanism_guided cem", unit="iter", dynamic_ncols=True)
         for iteration in progress:
             iter_start = time.time()
-            z_np = rng.normal(mean[None, :], std[None, :], size=(pop, latent_dim)).astype(np.float32)
-            rows = []
-            with torch.no_grad():
-                z = torch.from_numpy(z_np).to(self.device)
-                context_vec = self._context_tensor(context, pop)
-                decoded_all = self.prior_model.decode_latent(z, context_vec)
-                for idx in tqdm(range(pop), desc=f"atlas_guided iter {iteration + 1}/{total_iterations}", unit="cand", leave=False, dynamic_ncols=True):
-                    decoded = {key: value[idx : idx + 1] for key, value in decoded_all.items()}
-                    rows.append(
-                        self._evaluate_decoded(
-                            z=z_np[idx],
-                            decoded=decoded,
-                            context=context,
-                            source=f"latent_cem_iteration_{iteration}",
-                            method="atlas_guided",
-                        )
-                    )
+            if iteration == 0:
+                mechanism_np = seed_features[:pop].astype(np.float32)
+            else:
+                mechanism_np = rng.normal(mean[None, :], std[None, :], size=(pop, mechanism_dim)).astype(np.float32)
+            rows = self._evaluate_mechanisms(mechanism_np, context, method="mechanism_guided", source=f"mechanism_cem_iteration_{iteration}")
             rows.sort(key=lambda row: float(row.get("total_score", float("inf"))))
-            elites = rows[:elite_n]
-            elite_z = np.stack([np.asarray(row["latent_z"], dtype=np.float64).reshape(-1) for row in elites], axis=0)
-            smoothing = min(max(float(self.search_config.latent_cem_smoothing), 0.0), 1.0)
-            mean = smoothing * mean + (1.0 - smoothing) * np.mean(elite_z, axis=0)
-            std = smoothing * std + (1.0 - smoothing) * np.maximum(np.std(elite_z, axis=0), float(self.search_config.latent_cem_min_std))
+            best_by_mechanism: Dict[str, Dict[str, Any]] = {}
+            for row in rows:
+                key = tuple(np.round(np.asarray(row["mechanism_feature"], dtype=np.float64), 8).tolist())
+                if key not in best_by_mechanism or float(row["total_score"]) < float(best_by_mechanism[key]["total_score"]):
+                    best_by_mechanism[key] = row
+            mechanism_rows = sorted(best_by_mechanism.values(), key=lambda row: float(row.get("total_score", float("inf"))))
+            elites = mechanism_rows[:elite_n]
+            elite_features = np.stack([np.asarray(row["mechanism_feature"], dtype=np.float64).reshape(-1) for row in elites], axis=0)
+            smoothing = min(max(float(self.search_config.mechanism_cem_smoothing), 0.0), 1.0)
+            mean = smoothing * mean + (1.0 - smoothing) * np.mean(elite_features, axis=0)
+            std = smoothing * std + (1.0 - smoothing) * np.maximum(np.std(elite_features, axis=0), float(self.search_config.mechanism_cem_min_std))
             all_candidates.extend(rows)
+            round_best = float(rows[0]["total_score"]) if rows else float("inf")
+            cumulative_best = min(cumulative_best, round_best)
             history.append(
                 {
                     "iteration": int(iteration),
-                    "best_score": float(rows[0]["total_score"]),
+                    "best_score": float(cumulative_best),
+                    "round_best_score": float(round_best),
                     "mean_elite_score": float(np.mean([float(row["total_score"]) for row in elites])),
                     "num_forward_calls": int(self.forward_calls),
                     "runtime_seconds": float(time.time() - iter_start),
                 }
             )
-            progress.set_postfix(best=f"{float(rows[0]['total_score']):.4g}", calls=self.forward_calls)
+            progress.set_postfix(best=f"{cumulative_best:.4g}", calls=self.forward_calls)
         all_candidates.sort(key=lambda row: float(row.get("total_score", float("inf"))))
         reranked = diversity_rerank(all_candidates, weight=float(self.search_config.diversity_weight), config=self.layout_config)
         top = reranked[: max(int(self.search_config.num_return), 0)]
         for rank, row in enumerate(top, start=1):
             row["rank"] = int(rank)
-        return {"method": "atlas_guided", "best_candidates": top, "history": history, "num_forward_calls": int(self.forward_calls)}
+        return {"method": "mechanism_guided", "best_candidates": top, "history": history, "num_forward_calls": int(self.forward_calls)}
 
     def smc_search(self, context: Mapping[str, Any]) -> Dict[str, Any]:
-        raise NotImplementedError("SMC posterior search is reserved for a later prompt; latent_cem is implemented for Prompt 3.")
+        raise NotImplementedError("SMC posterior search is reserved for a later prompt; mechanism_cem is implemented.")
+
+
+LatentPosteriorDesignSearcher = HypergraphMechanismDesignSearcher

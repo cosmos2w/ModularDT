@@ -1,29 +1,36 @@
 {
-  "Run_ID": "0003",
+  "Run_ID": "0001",
+  "description": "hypergraph-centric mechanism prior and layout realizer",
   "data": {
     "library_path": "Data_Saved/DesignPrior_Library/design_library.h5",
     "val_fraction": 0.1,
     "num_workers": 0
   },
-  "model": {
+  "mechanism": {
+    "num_clusters": 24,
+    "kmeans_iterations": 100,
+    "kmeans_seed": 0,
+    "hypergraph_weight": 1.0,
+    "behavior_weight": 0.5,
+    "include_behavior": true,
+    "include_count_descriptor": true,
+    "count_weight": 0.25,
+    "sample_cluster_balance": false
+  },
+  "layout_realizer": {
     "max_num_modules": 12,
-
-    "latent_dim": 64,
     "hidden_dim": 256,
+    "condition_dim": 128,
     "num_layers": 4,
     "dropout": 0.05,
-
-    "behavior_dim": 64,
-    "context_dim": 0,
-    "hypergraph_dim": null,
-    "generate_heat_power": false,
-
-    "kl_weight": 0.001,
-    "layout_recon_weight": 1.0,
-    "hypergraph_recon_weight": 0.5,
-    "behavior_recon_weight": 0.5,
+    "flow_steps_default": 16,
+    "layout_flow_weight": 1.0,
+    "mask_component_weight": 2.0,
+    "active_center_weight": 2.0,
+    "inactive_center_weight": 0.05,
     "geometry_weight": 0.05,
-
+    "count_weight": 0.2,
+    "generate_heat_power": false,
     "domain_length_x": 12.0,
     "domain_length_y": 4.0,
     "module_radius": 0.45,
@@ -34,7 +41,7 @@
   },
   "training": {
     "batch_size": 128,
-    "epochs": 10000,
+    "epochs": 2000,
     "learning_rate": 0.0003,
     "weight_decay": 0.00001,
     "seed": 0,

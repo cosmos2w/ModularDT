@@ -1206,7 +1206,7 @@ whether the generated concrete layout actually realizes the intended modular
 thermal organization; reranking uses this term only when
 `--hypergraph-rerank-weight` is greater than zero.
 
-## Behavior-aware generative design prior + field-functional guided sampling
+## Hypergraph-centric mechanism prior + field-functional guided design
 
 The existing inverse generator remains the KPI/design-intent conditioned
 baseline:
@@ -1215,19 +1215,28 @@ baseline:
 target KPI or design-intent vector -> layout / hypergraph plan -> frozen-forward verification
 ```
 
-The behavior-aware design-prior track is target agnostic during training. It
-learns a compact atlas of feasible modular layouts and their predicted
-organization:
+The hypergraph-centric design-prior track is target agnostic during training,
+but it is no longer an opaque latent layout atlas. It separates mechanism
+discovery from layout realization:
 
 ```text
-z, context -> layout D + planned hypergraph H_plan + behavior descriptor b_hat
-```
+1. Forward HONF:
+   D, c -> H_realized, U
 
-Specific design requirements are solved later by guided posterior sampling in
-latent space:
+2. Mechanism library:
+   D, H_realized, behavior descriptors, layout descriptors
 
-```text
-field-functional objective + frozen forward HONF + latent search
+3. Mechanism prior:
+   clusters / modes in H + behavior space
+
+4. Layout realizer:
+   p(D | mechanism, context)
+
+5. Design-time guided sampling:
+   search/sample mechanisms
+     -> realize layouts
+     -> forward-verify
+     -> score arbitrary field-functional objective
 ```
 
 This matters because arbitrary field-functional requirements, such as plume
@@ -1239,27 +1248,29 @@ The benchmark suite compares:
 
 - A. Raw layout CEM / CMA-ES + forward HONF.
 - B. Random valid layout sampling + forward HONF.
-- C. Current KPI-conditioned inverse generator.
-- D. Latent design atlas + unguided prior sampling.
-- E. Latent design atlas + guided posterior sampling.
+- C. Current KPI/design-intent conditional inverse generator.
+- D. `mechanism_prior` sampling.
+- E. `mechanism_guided` posterior sampling.
 
-Method D is not the final inverse-design method; it is the prior-quality
-baseline. Method E is the actual generative inverse-design method. The key
-claim is that guided latent search should reach field-functional objectives
-more efficiently, and with better feasibility/diversity/organization
-consistency, than random sampling or raw layout optimization alone.
+`mechanism_prior` is diagnostic: it answers whether the discovered mechanisms
+and learned realizer generate plausible layouts before objective guidance.
+`mechanism_guided` is the actual hypergraph-centric generative inverse method.
+It runs posterior search in mechanism-feature space, realizes layouts with
+`p(D | mechanism, context)`, forward-verifies every candidate, and can include
+an internal desired-vs-realized hypergraph consistency term. Raw CEM has no
+desired hypergraph and is not penalized by that term.
 
 Example workflow:
 
 ```bash
-# 1. Build a compact behavior-aware library from existing/random layouts.
+# 1. Build a mechanism library source from existing/random layouts.
 python src/generate_design_library.py \
   --source mixed \
   --input-data Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5 \
   --output Data_Saved/DesignPrior_Library/design_library.h5 \
   --num-random-layouts 512
 
-# 2. Train the target-agnostic latent atlas.
+# 2. Train the mechanism prior and conditional layout realizer.
 python src/train_design_prior.py \
   --config Configs/train_design_prior_config_template.json
 

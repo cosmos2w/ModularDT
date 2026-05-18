@@ -569,27 +569,44 @@ target, and module/env mass alignment, not heavy uniform-edge or entropy
 constraints by default.
 
 
-Behavior-aware design prior and guided sampling
------------------------------------------------
+Hypergraph-centric mechanism prior and guided sampling
+------------------------------------------------------
 The forward HONF remains the core full-state evaluator. It predicts the
 channel field, module/internal/interface quantities, and realized organizer
-state for a concrete layout.
+state for a concrete layout:
 
-The behavior-aware design prior does not replace HONF. It learns a compact
-target-agnostic latent atlas:
+  D, c -> H_realized, U
 
-  z, context -> layout + planned hypergraph + behavior descriptor
+The design-prior path is now mechanism-centric. The generated design library
+stores layouts together with the realized forward hypergraph organization,
+compact field-behavior descriptors, layout descriptors, context, and module
+count. This is a mechanism library source, not a generic valid-layout prior:
 
-The atlas is trained by reconstructing observed layouts, hypergraph plan
-vectors, and compact behavior descriptors. It does not consume a target KPI
-vector during training.
+  D -> H_realized -> behavior descriptors
 
-At inference time, guided posterior sampling searches over z. Each decoded
-layout is repaired if needed, evaluated by the frozen forward HONF, and scored
-against a field-functional objective. This lets new downstream requirements,
-such as plume avoidance in a physical region or outlet-band uniformity, be
-compiled into deterministic scores without retraining a KPI-conditioned inverse
-model.
+The mechanism prior clusters modes in hypergraph-plus-behavior space. A
+mechanism sample means a plausible module/environment thermal interaction
+organization. The layout realizer then learns:
+
+  p(D | mechanism, context)
+
+At inference time, mechanism_guided search samples or optimizes mechanism
+features, realizes layouts, evaluates every layout with the frozen forward
+HONF, and scores arbitrary field-functional objectives. The search can include
+an internal desired-vs-realized hypergraph consistency term for mechanism
+realization. Raw layout CEM has no desired hypergraph and is not penalized by
+that term.
+
+The benchmark methods are:
+
+  A. raw_layout_cem + forward HONF
+  B. random_valid + forward HONF
+  C. current KPI/design-intent conditional inverse generator
+  D. mechanism_prior sampling
+  E. mechanism_guided posterior sampling
+
+mechanism_prior is a diagnostic prior-quality baseline. mechanism_guided is
+the hypergraph-centric generative inverse-design method.
 
 
 Known simplifications

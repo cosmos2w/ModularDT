@@ -9,6 +9,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import time
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -32,8 +33,9 @@ from channelthermal_model_utils import current_timestamp, ensure_dir, resolve_de
 from design_candidate_io import plot_layout_candidate, plot_score_vs_calls, to_jsonable, write_candidates_csv, write_summary_json
 from field_functional_objective import FieldFunctionalObjective, extract_field_array
 from layout_search_baselines import LayoutSearchConfig, RandomValidLayoutSampler, RawLayoutCEMOptimizer, sample_random_valid_layout
-from model_design_prior import LatentModularDesignPrior
-from search_design_prior import ForwardHONFEvaluator, GuidedSearchConfig, LatentPosteriorDesignSearcher
+from hypergraph_mechanism import HypergraphMechanismAtlas
+from model_design_prior import HypergraphConditionedLayoutRealizer
+from search_design_prior import ForwardHONFEvaluator, HypergraphMechanismDesignSearcher, MechanismGuidedSearchConfig
 from train_inverse import ThermalInverseDesignDataset
 
 
@@ -78,12 +80,15 @@ def _forward_cfg(raw_cfg: Mapping[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
-def _load_prior(path: str | Path, device: torch.device) -> LatentModularDesignPrior:
+def _load_mechanism_prior(path: str | Path, device: torch.device) -> tuple[HypergraphMechanismAtlas, HypergraphConditionedLayoutRealizer, Mapping[str, Any]]:
     checkpoint = torch.load(resolve_demo_path(path), map_location=device, weights_only=False)
-    model = LatentModularDesignPrior(checkpoint["model_config"]).to(device)
+    if "mechanism_atlas_state" not in checkpoint:
+        raise ValueError(f"Design-prior checkpoint is not a mechanism-prior checkpoint: {resolve_demo_path(path)}")
+    atlas = HypergraphMechanismAtlas.from_state(checkpoint["mechanism_atlas_state"])
+    model = HypergraphConditionedLayoutRealizer(checkpoint["model_config"]).to(device)
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     model.eval()
-    return model
+    return atlas, model, checkpoint
 
 
 def _normalize_run_id(value: Any, fallback: str = "0001") -> str:
@@ -126,6 +131,14 @@ def _resolve_design_prior_checkpoint(prior_cfg: Mapping[str, Any], *, required: 
     if path.exists() or required:
         return path
     return None
+
+
+def _copy_checkpoint_mechanism_diagnostics(prior_checkpoint: Optional[Path], run_dir: Path) -> None:
+    if prior_checkpoint is None:
+        return
+    source = Path(prior_checkpoint).parent / "mechanism_cluster_hist.png"
+    if source.exists():
+        shutil.copy2(source, run_dir / "mechanism_cluster_hist.png")
 
 
 def _context_dataset_path(cfg: Mapping[str, Any], prior_checkpoint: Optional[Mapping[str, Any]] = None) -> str:
@@ -172,8 +185,33 @@ def _layout_config(cfg: Mapping[str, Any], override: Optional[Mapping[str, Any]]
     return LayoutSearchConfig(**{k: v for k, v in layout.items() if k in LayoutSearchConfig.__dataclass_fields__})
 
 
-def _guided_config(payload: Mapping[str, Any]) -> GuidedSearchConfig:
-    return GuidedSearchConfig(**{k if k != "seed" else "random_seed": v for k, v in dict(payload).items() if k in GuidedSearchConfig.__dataclass_fields__ or k == "seed"})
+def _guided_config(payload: Mapping[str, Any]) -> MechanismGuidedSearchConfig:
+    return MechanismGuidedSearchConfig(**{k if k != "seed" else "random_seed": v for k, v in dict(payload).items() if k in MechanismGuidedSearchConfig.__dataclass_fields__ or k == "seed"})
+
+
+def _normalize_methods_config(cfg: Mapping[str, Any]) -> Dict[str, bool]:
+    methods = dict(cfg.get("methods", {}) if isinstance(cfg.get("methods"), Mapping) else {})
+    if "atlas_prior" in methods and "mechanism_prior" not in methods:
+        print("[warn] methods.atlas_prior is deprecated; using mechanism_prior.")
+        methods["mechanism_prior"] = bool(methods.get("atlas_prior"))
+    if "atlas_guided" in methods and "mechanism_guided" not in methods:
+        print("[warn] methods.atlas_guided is deprecated; using mechanism_guided.")
+        methods["mechanism_guided"] = bool(methods.get("atlas_guided"))
+    methods.setdefault("random_valid", True)
+    methods.setdefault("raw_layout_cem", True)
+    methods.setdefault("current_inverse", False)
+    methods.setdefault("mechanism_prior", True)
+    methods.setdefault("mechanism_guided", True)
+    return {str(k): bool(v) for k, v in methods.items() if str(k) not in {"atlas_prior", "atlas_guided"}}
+
+
+def _section_cfg(cfg: Mapping[str, Any], name: str, fallback: str = "") -> Mapping[str, Any]:
+    if isinstance(cfg.get(name), Mapping):
+        return cfg[name]  # type: ignore[return-value]
+    if fallback and isinstance(cfg.get(fallback), Mapping):
+        print(f"[warn] {fallback} config block is deprecated; using {name}.")
+        return cfg[fallback]  # type: ignore[return-value]
+    return {}
 
 
 def _success(candidate: Mapping[str, Any], tolerance: float) -> bool:
@@ -204,6 +242,30 @@ def _topk_diversity(candidates: Sequence[Mapping[str, Any]], top_k: int = 8) -> 
     return float(np.mean(vals)) if vals else 0.0
 
 
+def _finite_candidate_mean(candidates: Sequence[Mapping[str, Any]], key: str, default: float = 0.0) -> float:
+    vals = []
+    for row in candidates:
+        try:
+            value = float(row.get(key, default) or default)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            vals.append(value)
+    return float(np.mean(vals)) if vals else 0.0
+
+
+def _finite_candidate_min(candidates: Sequence[Mapping[str, Any]], key: str, default: float = 0.0) -> float:
+    vals = []
+    for row in candidates:
+        try:
+            value = float(row.get(key, default) or default)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            vals.append(value)
+    return float(np.min(vals)) if vals else 0.0
+
+
 def _method_summary(result: Mapping[str, Any], candidates: Sequence[Mapping[str, Any]], *, enabled: bool, skipped: bool = False, skip_reason: str = "", tolerance: float = 1.0e-6, runtime: float = 0.0) -> Dict[str, Any]:
     scores = np.asarray([float(row.get("total_score", np.nan)) for row in candidates], dtype=np.float64)
     finite = scores[np.isfinite(scores)]
@@ -227,6 +289,12 @@ def _method_summary(result: Mapping[str, Any], candidates: Sequence[Mapping[str,
         "mean_repair_distance": float(np.mean([float(row.get("repair_distance", 0.0) or 0.0) for row in candidates])) if candidates else 0.0,
         "mean_hypergraph_consistency_score": float(np.mean([float(row.get("hypergraph_consistency_score", 0.0) or 0.0) for row in candidates])) if candidates else 0.0,
         "best_hypergraph_consistency_score": float(np.min([float(row.get("hypergraph_consistency_score", 0.0) or 0.0) for row in candidates])) if candidates else 0.0,
+        "mean_mechanism_prior_score": _finite_candidate_mean(candidates, "mechanism_prior_score"),
+        "mean_hypergraph_realization_score": _finite_candidate_mean(candidates, "hypergraph_realization_score"),
+        "best_hypergraph_realization_score": _finite_candidate_min(candidates, "hypergraph_realization_score"),
+        "mean_objective_score": _finite_candidate_mean(candidates, "objective_score"),
+        "topk_mechanism_cluster_count": int(len([row for row in candidates[:8] if row.get("mechanism_cluster_id") is not None])),
+        "topk_distinct_clusters": int(len({int(row.get("mechanism_cluster_id")) for row in candidates[:8] if row.get("mechanism_cluster_id") is not None})),
         "topk_diversity": _topk_diversity(candidates),
         "runtime_seconds": float(runtime),
     }
@@ -281,6 +349,10 @@ def _write_top_artifacts(candidates: Sequence[Mapping[str, Any]], out_dir: Path,
         plot_layout_candidate(row.get("layout", row), out_dir / f"{prefix}_layout.png", title=f"{method} #{rank}", field=field)
         write_summary_json(row.get("objective_result", {}), out_dir / f"{prefix}_score_terms.json")
         write_summary_json(row.get("kpis", {}), out_dir / f"{prefix}_kpis.json")
+        write_summary_json({"mechanism_feature": row.get("mechanism_feature"), "mechanism_cluster_id": row.get("mechanism_cluster_id"), "desired_behavior": row.get("desired_behavior"), "mechanism_prior_score": row.get("mechanism_prior_score")}, out_dir / f"{prefix}_desired_mechanism.json")
+        write_summary_json(row.get("desired_hypergraph", row.get("planned_hypergraph", {})), out_dir / f"{prefix}_desired_hypergraph.json")
+        write_summary_json(row.get("realized_hypergraph", {}), out_dir / f"{prefix}_realized_hypergraph.json")
+        write_summary_json(row.get("hypergraph_consistency", {}), out_dir / f"{prefix}_hypergraph_comparison.json")
         write_summary_json(
             {"planned": row.get("planned_hypergraph"), "realized": row.get("realized_hypergraph"), "comparison": row.get("hypergraph_consistency")},
             out_dir / f"{prefix}_hypergraph.json",
@@ -331,14 +403,14 @@ def _rank(method: str, candidates: Sequence[Dict[str, Any]]) -> List[Dict[str, A
 def _dry_run(cfg: Mapping[str, Any]) -> int:
     objective_path = cfg.get("objective", {}).get("spec_path") if isinstance(cfg.get("objective"), Mapping) else None
     objective = FieldFunctionalObjective.from_json(resolve_demo_path(objective_path)) if objective_path and resolve_demo_path(objective_path).exists() else None
-    methods = cfg.get("methods", {}) if isinstance(cfg.get("methods"), Mapping) else {}
+    methods = _normalize_methods_config(cfg)
     layout_cfg = _layout_config(cfg)
-    guided_cfg = _guided_config(cfg.get("atlas_guided", {}) if isinstance(cfg.get("atlas_guided"), Mapping) else {})
+    guided_cfg = _guided_config(_section_cfg(cfg, "mechanism_guided", "atlas_guided"))
     prior_cfg = cfg.get("design_prior", {}) if isinstance(cfg.get("design_prior"), Mapping) else {}
     resolved_prior = _resolve_design_prior_checkpoint(prior_cfg, required=False)
     print("[dry-run] objective:", objective.name if objective else f"missing ({objective_path})")
     print("[dry-run] layout:", layout_cfg)
-    print("[dry-run] guided:", guided_cfg)
+    print("[dry-run] mechanism_guided:", guided_cfg)
     print("[dry-run] forward checkpoint:", _path_status(cfg.get("forward_model", {}).get("checkpoint_path") if isinstance(cfg.get("forward_model"), Mapping) else None))
     print("[dry-run] design prior checkpoint:", _path_status(resolved_prior) if resolved_prior is not None else {"path": "auto", "exists": False, "saved_root": str(resolve_demo_path(prior_cfg.get("saved_root", "Saved_Model_Prior"))), "Run_ID": _normalize_run_id(prior_cfg.get("Run_ID", prior_cfg.get("run_id", "0001")))})
     print("[dry-run] methods:", {name: bool(enabled) for name, enabled in methods.items()})
@@ -534,14 +606,16 @@ def main() -> int:
             run_dir=run_dir,
         )
         return 0
-    methods_cfg = cfg.get("methods", {}) if isinstance(cfg.get("methods"), Mapping) else {}
-    prior_model = None
+    methods_cfg = _normalize_methods_config(cfg)
+    mechanism_atlas = None
+    layout_realizer = None
     design_prior_cfg = cfg.get("design_prior", {}) if isinstance(cfg.get("design_prior"), Mapping) else {}
-    need_prior = bool(methods_cfg.get("atlas_prior", True) or methods_cfg.get("atlas_guided", True))
+    need_prior = bool(methods_cfg.get("mechanism_prior", True) or methods_cfg.get("mechanism_guided", True))
     prior_checkpoint = _resolve_design_prior_checkpoint(design_prior_cfg, required=False) if need_prior else None
     if need_prior and prior_checkpoint is not None and prior_checkpoint.exists():
         prior_device = select_device(None if str(design_prior_cfg.get("device", "auto")).lower() == "auto" else str(design_prior_cfg.get("device")))
-        prior_model = _load_prior(prior_checkpoint, prior_device)
+        mechanism_atlas, layout_realizer, _ = _load_mechanism_prior(prior_checkpoint, prior_device)
+        _copy_checkpoint_mechanism_diagnostics(prior_checkpoint, run_dir)
     histories_dir = ensure_dir(run_dir / "histories")
     top_dir = ensure_dir(run_dir / "top_candidates")
     results: Dict[str, Any] = {}
@@ -593,34 +667,33 @@ def main() -> int:
         record_result("raw_layout_cem", result, time.time() - start)
     if bool(methods_cfg.get("current_inverse", False)):
         record_result("current_inverse", {"method": "current_inverse", "best_candidates": [], "history": [], "num_forward_calls": 0}, 0.0, skipped=True, reason="Current KPI-conditioned inverse baseline integration is deferred; A/B/D/E remain runnable.")
-    if bool(methods_cfg.get("atlas_prior", True)):
-        if prior_model is None:
+    if bool(methods_cfg.get("mechanism_prior", True)):
+        if mechanism_atlas is None or layout_realizer is None:
             reason = "design_prior.checkpoint_path missing or not found."
-            record_result("atlas_prior", {"method": "atlas_prior", "best_candidates": [], "history": [], "num_forward_calls": 0}, 0.0, skipped=True, reason=reason)
+            record_result("mechanism_prior", {"method": "mechanism_prior", "best_candidates": [], "history": [], "num_forward_calls": 0}, 0.0, skipped=True, reason=reason)
         else:
-            print("[method:atlas_prior] starting")
+            print("[method:mechanism_prior] starting")
             start = time.time()
-            prior_cfg = cfg.get("atlas_prior", {}) if isinstance(cfg.get("atlas_prior"), Mapping) else {}
-            search_cfg = GuidedSearchConfig(num_return=int(prior_cfg.get("num_return", 16)), random_seed=int(prior_cfg.get("seed", 0)))
-            searcher = LatentPosteriorDesignSearcher(prior_model, evaluator, objective, layout_config, search_cfg)
-            candidates = searcher.sample_prior_candidates(
+            prior_cfg = _section_cfg(cfg, "mechanism_prior", "atlas_prior")
+            search_cfg = _guided_config({**dict(prior_cfg), "num_return": int(prior_cfg.get("num_return", 16)), "random_seed": int(prior_cfg.get("seed", prior_cfg.get("random_seed", 0))), "layouts_per_mechanism": int(prior_cfg.get("layouts_per_mechanism", 1))})
+            searcher = HypergraphMechanismDesignSearcher(mechanism_atlas, layout_realizer, evaluator, objective, layout_config, search_cfg)
+            candidates = searcher.sample_mechanism_prior_candidates(
                 search_context,
                 int(prior_cfg.get("num_samples", 512)),
-                temperature=float(prior_cfg.get("temperature", 1.0)),
             )[: int(prior_cfg.get("num_return", 16))]
-            result = {"method": "atlas_prior", "best_candidates": candidates, "history": [{"iteration": 0, "best_score": float(candidates[0]["total_score"]) if candidates else float("inf"), "num_forward_calls": int(searcher.forward_calls)}], "num_forward_calls": int(searcher.forward_calls)}
-            record_result("atlas_prior", result, time.time() - start)
-    if bool(methods_cfg.get("atlas_guided", True)):
-        if prior_model is None:
+            result = {"method": "mechanism_prior", "best_candidates": candidates, "history": [{"iteration": 0, "best_score": float(candidates[0]["total_score"]) if candidates else float("inf"), "num_forward_calls": int(searcher.forward_calls)}], "num_forward_calls": int(searcher.forward_calls)}
+            record_result("mechanism_prior", result, time.time() - start)
+    if bool(methods_cfg.get("mechanism_guided", True)):
+        if mechanism_atlas is None or layout_realizer is None:
             reason = "design_prior.checkpoint_path missing or not found."
-            record_result("atlas_guided", {"method": "atlas_guided", "best_candidates": [], "history": [], "num_forward_calls": 0}, 0.0, skipped=True, reason=reason)
+            record_result("mechanism_guided", {"method": "mechanism_guided", "best_candidates": [], "history": [], "num_forward_calls": 0}, 0.0, skipped=True, reason=reason)
         else:
-            print("[method:atlas_guided] starting")
+            print("[method:mechanism_guided] starting")
             start = time.time()
-            guided_cfg = _guided_config(cfg.get("atlas_guided", {}) if isinstance(cfg.get("atlas_guided"), Mapping) else {})
-            searcher = LatentPosteriorDesignSearcher(prior_model, evaluator, objective, layout_config, guided_cfg)
-            result = searcher.latent_cem_search(search_context)
-            record_result("atlas_guided", result, time.time() - start)
+            guided_cfg = _guided_config(_section_cfg(cfg, "mechanism_guided", "atlas_guided"))
+            searcher = HypergraphMechanismDesignSearcher(mechanism_atlas, layout_realizer, evaluator, objective, layout_config, guided_cfg)
+            result = searcher.mechanism_cem_search(search_context)
+            record_result("mechanism_guided", result, time.time() - start)
 
     save_dense = bool(output_cfg.get("save_dense_forward_outputs", False))
     top_k = int(output_cfg.get("save_top_k_per_method", 5))

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-"""Target-agnostic latent design prior for ChannelThermal layouts.
+"""Mechanism-conditioned layout realization for ChannelThermal design priors.
 
-This model is a behavior-aware design atlas, not a KPI-conditioned inverse
-generator. It learns a compact latent manifold of valid-ish layouts, realized
-or planned hypergraph descriptors, and compact behavior descriptors. Downstream
-inverse design should search over ``z`` with a frozen forward verifier and a
-field-functional objective.
+The old latent atlas learned ``z -> D,H,b``.  This module instead provides a
+conditional rectified-flow realizer:
+
+    noise + mechanism M + context c -> layout D
+
+where ``M`` is supplied by a hypergraph/behavior mechanism atlas discovered
+from the frozen forward HONF mechanism library.
 """
 
 from dataclasses import asdict, dataclass
@@ -18,23 +20,30 @@ import torch.nn.functional as F
 
 
 @dataclass
-class DesignPriorConfig:
+class MechanismLayoutRealizerConfig:
     max_num_modules: int = 12
     design_dim: Optional[int] = None
+    mechanism_dim: int = 0
     hypergraph_dim: int = 0
-    behavior_dim: int = 32
+    behavior_dim: int = 0
     context_dim: int = 0
-    latent_dim: int = 32
+
     hidden_dim: int = 256
+    condition_dim: int = 128
     num_layers: int = 4
     dropout: float = 0.05
+
+    flow_steps_default: int = 16
+    center_decode_mode: str = "clamp"
     generate_heat_power: bool = False
-    kl_weight: float = 1e-3
-    layout_recon_weight: float = 1.0
-    hypergraph_recon_weight: float = 0.5
-    behavior_recon_weight: float = 0.5
+
+    layout_flow_weight: float = 1.0
+    mask_component_weight: float = 2.0
+    active_center_weight: float = 2.0
+    inactive_center_weight: float = 0.05
     geometry_weight: float = 0.05
-    latent_l2_weight: float = 0.0
+    count_weight: float = 0.2
+
     domain_length_x: float = 12.0
     domain_length_y: float = 4.0
     module_radius: float = 0.45
@@ -42,30 +51,36 @@ class DesignPriorConfig:
     wall_clearance: float = 0.05
     inlet_clearance: float = 0.25
     outlet_clearance: float = 0.25
-    center_decode_mode: str = "sigmoid"
 
     def __post_init__(self) -> None:
         self.max_num_modules = int(self.max_num_modules)
         if self.design_dim is None:
             self.design_dim = self.max_num_modules * (4 if self.generate_heat_power else 3)
         self.design_dim = int(self.design_dim)
+        self.mechanism_dim = max(int(self.mechanism_dim or 0), 0)
         self.hypergraph_dim = max(int(self.hypergraph_dim or 0), 0)
         self.behavior_dim = max(int(self.behavior_dim or 0), 0)
         self.context_dim = max(int(self.context_dim or 0), 0)
-        self.latent_dim = int(self.latent_dim)
         self.hidden_dim = int(self.hidden_dim)
+        self.condition_dim = int(self.condition_dim)
         self.num_layers = max(int(self.num_layers), 2)
-        mode = str(self.center_decode_mode or "sigmoid").lower().strip()
-        if mode not in {"sigmoid", "clamp", "identity"}:
-            raise ValueError("center_decode_mode must be one of sigmoid, clamp, identity.")
+        self.flow_steps_default = max(int(self.flow_steps_default), 1)
+        mode = str(self.center_decode_mode or "clamp").lower().strip()
+        if mode not in {"clamp", "sigmoid", "identity"}:
+            raise ValueError("center_decode_mode must be one of clamp, sigmoid, identity.")
         self.center_decode_mode = mode
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "DesignPriorConfig":
-        return cls(**{key: value for key, value in dict(payload).items() if key in cls.__dataclass_fields__})
+    def from_dict(cls, payload: Mapping[str, Any]) -> "MechanismLayoutRealizerConfig":
+        fields = cls.__dataclass_fields__
+        return cls(**{key: value for key, value in dict(payload).items() if key in fields})
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+class DesignPriorConfig(MechanismLayoutRealizerConfig):
+    """Compatibility config name for older design-prior training imports."""
 
 
 def _activation() -> nn.Module:
@@ -91,112 +106,116 @@ class MLP(nn.Module):
         return self.net(x)
 
 
-class LatentModularDesignPrior(nn.Module):
-    """Target-agnostic behavior-aware design atlas.
+def _time_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
+    t_flat = t.float().reshape(-1, 1)
+    if dim <= 1:
+        return t_flat
+    half = dim // 2
+    freqs = torch.exp(
+        torch.linspace(0.0, 1.0, half, device=t_flat.device, dtype=t_flat.dtype)
+        * torch.log(t_flat.new_tensor(1000.0))
+    )
+    emb = torch.cat([torch.sin(t_flat * freqs), torch.cos(t_flat * freqs)], dim=-1)
+    if emb.shape[-1] < dim:
+        emb = F.pad(emb, (0, dim - emb.shape[-1]))
+    return emb[:, :dim]
 
-    Learns p(D, H, b | context) using a compact VAE latent ``z``. It does not
-    take KPI targets. Layout reconstruction is valid here because this is
-    prior/atlas learning over observed designs, not supervised inverse learning
-    for a unique downstream target.
-    """
 
-    def __init__(self, cfg: DesignPriorConfig | Mapping[str, Any]) -> None:
+class MechanismConditionEncoder(nn.Module):
+    """Encode mechanism feature plus optional context into a condition vector."""
+
+    def __init__(self, cfg: MechanismLayoutRealizerConfig | Mapping[str, Any]) -> None:
         super().__init__()
-        self.cfg = cfg if isinstance(cfg, DesignPriorConfig) else DesignPriorConfig.from_dict(cfg)
-        enc_in = int(self.cfg.design_dim) + int(self.cfg.hypergraph_dim) + int(self.cfg.behavior_dim) + int(self.cfg.context_dim)
-        dec_in = int(self.cfg.latent_dim) + int(self.cfg.context_dim)
-        self.encoder = MLP(enc_in, self.cfg.hidden_dim, 2 * self.cfg.latent_dim, num_layers=self.cfg.num_layers, dropout=self.cfg.dropout)
-        self.decoder_trunk = MLP(dec_in, self.cfg.hidden_dim, self.cfg.hidden_dim, num_layers=self.cfg.num_layers, dropout=self.cfg.dropout)
-        self.design_head = nn.Linear(self.cfg.hidden_dim, self.cfg.design_dim)
-        self.hypergraph_head = nn.Linear(self.cfg.hidden_dim, self.cfg.hypergraph_dim) if self.cfg.hypergraph_dim > 0 else None
-        self.behavior_head = nn.Linear(self.cfg.hidden_dim, self.cfg.behavior_dim) if self.cfg.behavior_dim > 0 else None
-
-    def _zeros(self, batch: int, dim: int, ref: torch.Tensor) -> torch.Tensor:
-        return ref.new_zeros((int(batch), int(dim)))
+        self.cfg = cfg if isinstance(cfg, MechanismLayoutRealizerConfig) else MechanismLayoutRealizerConfig.from_dict(cfg)
+        in_dim = int(self.cfg.mechanism_dim) + int(self.cfg.context_dim)
+        self.net = MLP(in_dim, self.cfg.hidden_dim, self.cfg.condition_dim, num_layers=self.cfg.num_layers, dropout=self.cfg.dropout)
 
     def _context(self, context_vec: Optional[torch.Tensor], batch: int, ref: torch.Tensor) -> torch.Tensor:
         if self.cfg.context_dim <= 0:
             return ref.new_zeros((batch, 0))
         if context_vec is None:
-            return self._zeros(batch, self.cfg.context_dim, ref)
+            return ref.new_zeros((batch, self.cfg.context_dim))
         return context_vec.float().reshape(batch, self.cfg.context_dim)
 
-    def encode(
+    def forward(self, mechanism_feature: torch.Tensor, context_vec: Optional[torch.Tensor] = None) -> torch.Tensor:
+        mech = mechanism_feature.float().reshape(mechanism_feature.shape[0], self.cfg.mechanism_dim)
+        context = self._context(context_vec, mech.shape[0], mech)
+        return self.net(torch.cat([mech, context], dim=-1))
+
+
+class ConditionalLayoutVelocityNet(nn.Module):
+    """Velocity field over design vectors conditioned on mechanism embeddings."""
+
+    def __init__(self, cfg: MechanismLayoutRealizerConfig | Mapping[str, Any]) -> None:
+        super().__init__()
+        self.cfg = cfg if isinstance(cfg, MechanismLayoutRealizerConfig) else MechanismLayoutRealizerConfig.from_dict(cfg)
+        time_dim = int(self.cfg.condition_dim)
+        in_dim = int(self.cfg.design_dim) + int(self.cfg.condition_dim) + time_dim
+        self.net = MLP(in_dim, self.cfg.hidden_dim, self.cfg.design_dim, num_layers=self.cfg.num_layers, dropout=self.cfg.dropout)
+
+    def forward(self, x_t: torch.Tensor, t: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
+        x = x_t.float().reshape(x_t.shape[0], self.cfg.design_dim)
+        time = _time_embedding(t, int(self.cfg.condition_dim))
+        return self.net(torch.cat([x, time, condition.float()], dim=-1))
+
+
+class HypergraphConditionedLayoutRealizer(nn.Module):
+    """Conditional rectified-flow layout realizer ``p(D | M, c)``.
+
+    ``M`` is a hypergraph/behavior mechanism feature discovered from the
+    forward HONF mechanism library. The model samples layouts that should
+    realize the desired mechanism after frozen-forward verification.
+    """
+
+    def __init__(self, cfg: MechanismLayoutRealizerConfig | Mapping[str, Any]) -> None:
+        super().__init__()
+        self.cfg = cfg if isinstance(cfg, MechanismLayoutRealizerConfig) else MechanismLayoutRealizerConfig.from_dict(cfg)
+        self.condition_encoder = MechanismConditionEncoder(self.cfg)
+        self.velocity_net = ConditionalLayoutVelocityNet(self.cfg)
+
+    def encode_condition(self, mechanism_feature: torch.Tensor, context_vec: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return self.condition_encoder(mechanism_feature, context_vec)
+
+    def velocity(
         self,
-        design_vec: torch.Tensor,
-        hypergraph_vec: Optional[torch.Tensor] = None,
-        behavior_vec: Optional[torch.Tensor] = None,
+        x_t: torch.Tensor,
+        t: torch.Tensor,
+        mechanism_feature: torch.Tensor,
         context_vec: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        design = design_vec.float().reshape(design_vec.shape[0], self.cfg.design_dim)
-        batch = design.shape[0]
-        parts = [design]
-        if self.cfg.hypergraph_dim > 0:
-            parts.append(hypergraph_vec.float().reshape(batch, self.cfg.hypergraph_dim) if hypergraph_vec is not None else self._zeros(batch, self.cfg.hypergraph_dim, design))
-        if self.cfg.behavior_dim > 0:
-            parts.append(behavior_vec.float().reshape(batch, self.cfg.behavior_dim) if behavior_vec is not None else self._zeros(batch, self.cfg.behavior_dim, design))
-        parts.append(self._context(context_vec, batch, design))
-        stats = self.encoder(torch.cat(parts, dim=-1))
-        mu, logvar = torch.chunk(stats, 2, dim=-1)
-        return mu, torch.clamp(logvar, min=-12.0, max=8.0)
-
-    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
-        if self.training:
-            return mu + torch.randn_like(mu) * torch.exp(0.5 * logvar)
-        return mu
-
-    def decode_latent(self, z: torch.Tensor, context_vec: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
-        batch = z.shape[0]
-        context = self._context(context_vec, batch, z)
-        hidden = self.decoder_trunk(torch.cat([z.float(), context], dim=-1))
-        raw_design = self.design_head(hidden)
-        if self.cfg.center_decode_mode == "sigmoid":
-            design_vec = torch.sigmoid(raw_design)
-        elif self.cfg.center_decode_mode == "clamp":
-            design_vec = torch.clamp(raw_design, 0.0, 1.0)
-        else:
-            design_vec = raw_design
-        out: Dict[str, torch.Tensor] = {"design_vec": design_vec}
-        if self.hypergraph_head is not None:
-            out["hypergraph_vec"] = self.hypergraph_head(hidden)
-        if self.behavior_head is not None:
-            out["behavior_vec"] = self.behavior_head(hidden)
-        return out
-
-    def sample(
-        self,
-        context_vec: Optional[torch.Tensor],
-        num_samples: int,
-        temperature: float = 1.0,
-        device: Optional[torch.device | str] = None,
-    ) -> Dict[str, torch.Tensor]:
-        if device is None:
-            if context_vec is not None:
-                device = context_vec.device
-            else:
-                device = next(self.parameters()).device
-        dev = torch.device(device)
-        n = int(num_samples)
-        if context_vec is not None and context_vec.shape[0] == 1 and n > 1:
-            context_vec = context_vec.to(dev).expand(n, -1)
-        elif context_vec is not None:
-            context_vec = context_vec.to(dev)
-            n = int(context_vec.shape[0]) if n <= 0 else n
-            if context_vec.shape[0] != n:
-                context_vec = context_vec[:1].expand(n, -1)
-        z = torch.randn(n, self.cfg.latent_dim, device=dev) * float(temperature)
-        return self.decode_latent(z, context_vec)
-
-    def latent_prior_energy(self, z: torch.Tensor) -> torch.Tensor:
-        return 0.5 * torch.sum(z.float() ** 2, dim=-1)
+    ) -> torch.Tensor:
+        condition = self.encode_condition(mechanism_feature, context_vec)
+        return self.velocity_net(x_t, t, condition)
 
     def _split_design(self, design_vec: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         m = int(self.cfg.max_num_modules)
-        design = design_vec.float()
+        design = design_vec.float().reshape(design_vec.shape[0], -1)
+        if design.shape[-1] < 3 * m:
+            design = F.pad(design, (0, 3 * m - design.shape[-1]))
         centers_norm = design[:, : 2 * m].reshape(-1, m, 2)
         mask = design[:, 2 * m : 3 * m].reshape(-1, m)
         heat = design[:, 3 * m : 4 * m].reshape(-1, m) if self.cfg.generate_heat_power and design.shape[-1] >= 4 * m else None
         return centers_norm, mask, heat
+
+    def _component_weights(self, target_design: torch.Tensor) -> torch.Tensor:
+        m = int(self.cfg.max_num_modules)
+        target = target_design.float().reshape(target_design.shape[0], -1)
+        weights = torch.ones_like(target)
+        if target.shape[-1] < 3 * m:
+            return weights
+        active = (target[:, 2 * m : 3 * m] > 0.5).float()
+        center_w = active * float(self.cfg.active_center_weight) + (1.0 - active) * float(self.cfg.inactive_center_weight)
+        weights[:, : 2 * m] = center_w.repeat_interleave(2, dim=-1)
+        weights[:, 2 * m : 3 * m] = float(self.cfg.mask_component_weight)
+        if self.cfg.generate_heat_power and target.shape[-1] >= 4 * m:
+            weights[:, 3 * m : 4 * m] = 1.0
+        return weights
+
+    def _weighted_mean(self, values: torch.Tensor, sample_weight: Optional[torch.Tensor]) -> torch.Tensor:
+        per_sample = values.reshape(values.shape[0], -1).mean(dim=-1)
+        if sample_weight is None:
+            return per_sample.mean()
+        w = sample_weight.float().reshape(-1)
+        return torch.sum(per_sample * w) / torch.clamp(torch.sum(w), min=1.0e-8)
 
     def _geometry_loss(self, design_vec: torch.Tensor) -> torch.Tensor:
         centers_norm, mask_raw, heat = self._split_design(design_vec)
@@ -227,57 +246,114 @@ class LatentModularDesignPrior(nn.Module):
             loss = loss + torch.mean((1.0 - mask) * heat**2)
         return loss
 
-    def _weighted_mean(self, values: torch.Tensor, sample_weight: Optional[torch.Tensor]) -> torch.Tensor:
-        per_sample = values.reshape(values.shape[0], -1).mean(dim=-1)
-        if sample_weight is None:
-            return per_sample.mean()
-        w = sample_weight.float().reshape(-1)
-        return torch.sum(per_sample * w) / torch.clamp(torch.sum(w), min=1.0e-8)
-
-    def training_loss(self, batch: Mapping[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        design = batch["design_vec"].float()
-        hyper = batch.get("hypergraph_vec")
-        behavior = batch.get("behavior_vec")
-        context = batch.get("context_vec")
-        sample_weight = batch.get("sample_weight")
-        mu, logvar = self.encode(design, hyper, behavior, context)
-        z = self.reparameterize(mu, logvar)
-        decoded = self.decode_latent(z, context)
-        layout_recon = self._weighted_mean((decoded["design_vec"] - design) ** 2, sample_weight)
-        hyper_recon = design.new_tensor(0.0)
-        if self.cfg.hypergraph_dim > 0 and hyper is not None and "hypergraph_vec" in decoded:
-            diff = (decoded["hypergraph_vec"] - hyper.float()) ** 2
-            mask = batch.get("hypergraph_mask")
-            if mask is not None:
-                diff = diff * mask.float()
-            hyper_recon = self._weighted_mean(diff, sample_weight)
-        behavior_recon = design.new_tensor(0.0)
-        if self.cfg.behavior_dim > 0 and behavior is not None and "behavior_vec" in decoded:
-            behavior_recon = self._weighted_mean((decoded["behavior_vec"] - behavior.float()) ** 2, sample_weight)
-        kl_per = -0.5 * torch.sum(1.0 + logvar - mu.pow(2) - logvar.exp(), dim=-1)
+    def _mask_and_count_losses(
+        self,
+        endpoint: torch.Tensor,
+        target: torch.Tensor,
+        true_count: Optional[torch.Tensor],
+        sample_weight: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        m = int(self.cfg.max_num_modules)
+        if endpoint.shape[-1] < 3 * m or target.shape[-1] < 3 * m:
+            zero = target.new_tensor(0.0)
+            return zero, zero
+        pred_mask = endpoint[:, 2 * m : 3 * m]
+        target_mask = target[:, 2 * m : 3 * m]
+        mask_loss = self._weighted_mean((pred_mask - target_mask) ** 2, sample_weight)
+        if true_count is None:
+            count_target = torch.sum((target_mask > 0.5).float(), dim=-1)
+        else:
+            count_target = true_count.float().reshape(-1)
+        count_pred = torch.sum(torch.clamp(pred_mask, 0.0, 1.0), dim=-1)
+        count_loss_per = ((count_pred - count_target) / max(float(m), 1.0)) ** 2
         if sample_weight is not None:
             w = sample_weight.float().reshape(-1)
-            kl_loss = torch.sum(kl_per * w) / torch.clamp(torch.sum(w), min=1.0e-8)
+            count_loss = torch.sum(count_loss_per * w) / torch.clamp(torch.sum(w), min=1.0e-8)
         else:
-            kl_loss = kl_per.mean()
-        geometry_loss = self._geometry_loss(decoded["design_vec"])
-        latent_l2 = torch.mean(self.latent_prior_energy(z))
+            count_loss = count_loss_per.mean()
+        return mask_loss, count_loss
+
+    def training_loss(self, batch: Mapping[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        design = batch["design_vec"].float().reshape(batch["design_vec"].shape[0], self.cfg.design_dim)
+        mechanism = batch["mechanism_feature"].float().reshape(design.shape[0], self.cfg.mechanism_dim)
+        context = batch.get("context_vec")
+        sample_weight = batch.get("sample_weight")
+        z = torch.randn_like(design)
+        t = torch.rand((design.shape[0], 1), device=design.device, dtype=design.dtype)
+        x_t = (1.0 - t) * z + t * design
+        v_target = design - z
+        v_hat = self.velocity(x_t, t, mechanism, context)
+        component_weights = self._component_weights(design)
+        flow_loss = self._weighted_mean(((v_hat - v_target) ** 2) * component_weights, sample_weight)
+        endpoint = x_t + (1.0 - t) * v_hat
+        mask_loss, count_loss = self._mask_and_count_losses(endpoint, design, batch.get("true_count", batch.get("count_vec")), sample_weight)
+        geometry_loss = self._geometry_loss(endpoint)
         total = (
-            float(self.cfg.layout_recon_weight) * layout_recon
-            + float(self.cfg.hypergraph_recon_weight) * hyper_recon
-            + float(self.cfg.behavior_recon_weight) * behavior_recon
-            + float(self.cfg.kl_weight) * kl_loss
+            float(self.cfg.layout_flow_weight) * flow_loss
+            + mask_loss
+            + float(self.cfg.count_weight) * count_loss
             + float(self.cfg.geometry_weight) * geometry_loss
-            + float(self.cfg.latent_l2_weight) * latent_l2
         )
         return {
             "loss_total": total,
-            "layout_recon_loss": layout_recon,
-            "hypergraph_recon_loss": hyper_recon,
-            "behavior_recon_loss": behavior_recon,
-            "kl_loss": kl_loss,
+            "layout_flow_loss": flow_loss,
+            "mask_loss": mask_loss,
+            "count_loss": count_loss,
             "geometry_loss": geometry_loss,
-            "latent_l2_loss": latent_l2,
-            "mu_mean": mu.mean(),
-            "mu_std": mu.std(unbiased=False),
+            "velocity_norm": torch.mean(torch.linalg.norm(v_hat, dim=-1)),
         }
+
+    @torch.no_grad()
+    def sample_layout(
+        self,
+        mechanism_feature: torch.Tensor,
+        context_vec: Optional[torch.Tensor] = None,
+        *,
+        num_samples: int = 1,
+        steps: Optional[int] = None,
+        temperature: float = 1.0,
+    ) -> Dict[str, torch.Tensor]:
+        self.eval()
+        mech = mechanism_feature.float()
+        if mech.ndim == 1:
+            mech = mech[None, :]
+        n = int(num_samples if num_samples is not None else mech.shape[0])
+        if mech.shape[0] == 1 and n > 1:
+            mech = mech.expand(n, -1)
+        elif mech.shape[0] != n:
+            n = int(mech.shape[0])
+        if context_vec is not None:
+            context_vec = context_vec.to(device=mech.device, dtype=mech.dtype)
+            if context_vec.ndim == 1:
+                context_vec = context_vec[None, :]
+            if context_vec.shape[0] == 1 and n > 1:
+                context_vec = context_vec.expand(n, -1)
+            elif context_vec.shape[0] != n:
+                context_vec = context_vec[:1].expand(n, -1)
+        step_count = max(int(steps or self.cfg.flow_steps_default), 1)
+        x = torch.randn((n, int(self.cfg.design_dim)), device=mech.device, dtype=mech.dtype) * float(temperature)
+        dt = 1.0 / float(step_count)
+        for idx in range(step_count):
+            t = torch.full((n, 1), float(idx) / float(step_count), device=x.device, dtype=x.dtype)
+            x = x + dt * self.velocity(x, t, mech, context_vec)
+        if self.cfg.center_decode_mode == "clamp":
+            x = torch.clamp(x, 0.0, 1.0)
+        elif self.cfg.center_decode_mode == "sigmoid":
+            x = torch.sigmoid(x)
+        return {
+            "design_vec": x,
+            "mechanism_feature": mech,
+            "steps": torch.tensor(step_count, device=x.device),
+            "temperature": torch.tensor(float(temperature), device=x.device, dtype=x.dtype),
+        }
+
+
+class LatentModularDesignPrior(nn.Module):
+    """Deprecated compatibility symbol for the removed VAE-style prior."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__()
+        raise RuntimeError(
+            "LatentModularDesignPrior has been replaced by "
+            "HypergraphMechanismAtlas + HypergraphConditionedLayoutRealizer."
+        )

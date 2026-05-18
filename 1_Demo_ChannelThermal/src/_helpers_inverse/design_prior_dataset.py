@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Dataset utilities for target-agnostic design-prior training."""
+"""Dataset utilities for mechanism-centric design-prior training."""
 
 import json
 import warnings
@@ -84,8 +84,20 @@ def _normalize(arr: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
     return ((np.nan_to_num(arr, nan=0.0) - mean) / std).astype(np.float32), {"mean": mean.tolist(), "std": std.tolist()}
 
 
+def _infer_true_count(design_vec: np.ndarray, *, generate_heat_power: bool = False) -> np.ndarray:
+    design = _as_2d(design_vec)
+    if design.shape[1] == 0:
+        return np.zeros((design.shape[0],), dtype=np.float32)
+    slots_per_module = 4 if generate_heat_power and design.shape[1] % 4 == 0 else 3
+    m = max(int(design.shape[1] // slots_per_module), 1)
+    if design.shape[1] < 3 * m:
+        return np.zeros((design.shape[0],), dtype=np.float32)
+    mask = design[:, 2 * m : 3 * m]
+    return np.sum(mask > 0.5, axis=1).astype(np.float32)
+
+
 class DesignPriorDataset(Dataset):
-    """Dataset for target-agnostic design atlas training.
+    """Dataset for mechanism-conditioned layout-realizer training.
 
     Expected arrays:
         design_vec: [N, design_dim]
@@ -93,6 +105,8 @@ class DesignPriorDataset(Dataset):
         hypergraph_mask: [N, hypergraph_dim] optional
         behavior_vec: [N, behavior_dim] optional
         context_vec: [N, context_dim] optional
+        mechanism_feature: [N, mechanism_dim] optional, supplied after atlas fit
+        true_count or count_vec: [N] optional
         sample_weight: [N] optional
     """
 
@@ -130,6 +144,22 @@ class DesignPriorDataset(Dataset):
         self.context_vec = _as_2d(arrays.get("context_vec"), n)
         if self.context_vec.shape[1] == 0:
             self._warn("context_vec missing; using context_dim=0.")
+        self.mechanism_feature = _as_2d(arrays.get("mechanism_feature"), n)
+        true_count = arrays.get("true_count")
+        count_vec = arrays.get("count_vec")
+        if true_count is None and count_vec is not None:
+            true_count = np.asarray(count_vec, dtype=np.float32).reshape(-1)
+        if true_count is None:
+            self.true_count = _infer_true_count(self.design_vec, generate_heat_power=self.generate_heat_power)
+            self.metadata["true_count_source"] = "inferred_from_design_mask"
+        else:
+            self.true_count = np.asarray(true_count, dtype=np.float32).reshape(-1)[:n]
+            if self.true_count.size < n:
+                inferred = _infer_true_count(self.design_vec, generate_heat_power=self.generate_heat_power)
+                self.true_count = np.pad(self.true_count, (0, n - self.true_count.size), constant_values=0.0)
+                self.true_count[self.true_count <= 0.0] = inferred[self.true_count <= 0.0]
+            self.metadata["true_count_source"] = "library"
+        self.count_vec = np.asarray(self.true_count, dtype=np.float32).reshape(-1, 1)
         sample_weight = arrays.get("sample_weight")
         self.sample_weight = np.asarray(sample_weight, dtype=np.float32).reshape(-1)[:n] if sample_weight is not None else np.ones((n,), dtype=np.float32)
         if self.sample_weight.size < n:
@@ -173,6 +203,9 @@ class DesignPriorDataset(Dataset):
             "hypergraph_mask": _first_dataset_h5(h5, ("hypergraph_mask", "hypergraph_plan_mask")),
             "behavior_vec": _first_dataset_h5(h5, ("behavior_vec", "behavior_vectors", "behavior_descriptor_vec")),
             "context_vec": _first_dataset_h5(h5, ("context_vec", "context_vectors")),
+            "mechanism_feature": _first_dataset_h5(h5, ("mechanism_feature", "mechanism_features", "mechanism_vec")),
+            "true_count": _first_dataset_h5(h5, ("true_count", "module_count", "num_modules")),
+            "count_vec": _first_dataset_h5(h5, ("count_vec", "count_descriptor", "count_descriptor_vec")),
             "sample_weight": _first_dataset_h5(h5, ("sample_weight", "sample_weights")),
             "kpi_descriptor_vec": _first_dataset_h5(h5, ("kpi_descriptor_vec", "kpi_vec", "kpi_vector")),
             "layout_descriptor_vec": _first_dataset_h5(h5, ("layout_descriptor_vec", "layout_vec")),
@@ -231,6 +264,8 @@ class DesignPriorDataset(Dataset):
             "behavior_vec": behavior,
             "context_vec": np.asarray(context_rows, dtype=np.float32),
             "layout_descriptor_vec": np.asarray(layout_rows, dtype=np.float32),
+            "true_count": np.asarray([row[0] for row in layout_rows], dtype=np.float32),
+            "count_vec": np.asarray([[row[0]] for row in layout_rows], dtype=np.float32),
             "sample_weight": np.ones((len(design_rows),), dtype=np.float32),
             "case_id": np.asarray(case_ids, dtype=object),
             "source_tag": np.asarray(["packed_cases"] * len(design_rows), dtype=object),
@@ -265,12 +300,39 @@ class DesignPriorDataset(Dataset):
             "hypergraph": stats(self.hypergraph_vec),
             "behavior": stats(self.behavior_vec),
             "context": stats(self.context_vec),
+            "mechanism": stats(self.mechanism_feature),
+            "true_count": {
+                "dim": 1,
+                "mean": float(np.mean(self.true_count)) if self.true_count.size else 0.0,
+                "std": float(np.std(self.true_count)) if self.true_count.size else 1.0,
+            },
             "sample_weight_mean": float(np.mean(self.sample_weight)) if self.sample_weight.size else 1.0,
             "metadata": self.metadata,
         }
 
     def get_normalization(self) -> Dict[str, Any]:
         return self.stats
+
+    def get_arrays_for_mechanism_fit(self) -> Dict[str, np.ndarray]:
+        """Return raw arrays for external mechanism feature fitting.
+
+        Clustering is intentionally not performed by the dataset.  Callers can
+        fit ``HypergraphMechanismAtlas`` with these arrays, then attach or feed
+        the resulting mechanism features to the layout realizer.
+        """
+
+        out = {
+            "design_vec": np.asarray(self.design_vec, dtype=np.float32),
+            "hypergraph_vec": np.asarray(self.hypergraph_vec, dtype=np.float32),
+            "behavior_vec": np.asarray(self.behavior_vec, dtype=np.float32),
+            "context_vec": np.asarray(self.context_vec, dtype=np.float32),
+            "sample_weight": np.asarray(self.sample_weight, dtype=np.float32),
+            "true_count": np.asarray(self.true_count, dtype=np.float32),
+            "count_vec": np.asarray(self.count_vec, dtype=np.float32),
+        }
+        if self.mechanism_feature.shape[1] > 0:
+            out["mechanism_feature"] = np.asarray(self.mechanism_feature, dtype=np.float32)
+        return out
 
     def __len__(self) -> int:
         return int(self.design_vec.shape[0])
@@ -280,6 +342,8 @@ class DesignPriorDataset(Dataset):
         item: Dict[str, Any] = {
             "design_vec": self.design_vec[i],
             "sample_weight": np.asarray([self.sample_weight[i]], dtype=np.float32),
+            "true_count": np.asarray(self.true_count[i], dtype=np.float32),
+            "count_vec": self.count_vec[i],
             "case_id": _decode(self.case_id[i]) if i < self.case_id.size else str(i),
             "source_tag": _decode(self.source_tag[i]) if i < self.source_tag.size else "",
         }
@@ -290,6 +354,8 @@ class DesignPriorDataset(Dataset):
             item["behavior_vec"] = self.behavior_vec[i]
         if self.context_vec.shape[1] > 0:
             item["context_vec"] = self.context_vec[i]
+        if self.mechanism_feature.shape[1] > 0:
+            item["mechanism_feature"] = self.mechanism_feature[i]
         return item
 
     @staticmethod
@@ -298,11 +364,13 @@ class DesignPriorDataset(Dataset):
             "case_id": [str(item.get("case_id", "")) for item in batch],
             "source_tag": [str(item.get("source_tag", "")) for item in batch],
         }
-        for key in ("design_vec", "hypergraph_vec", "hypergraph_mask", "behavior_vec", "context_vec", "sample_weight"):
+        for key in ("design_vec", "hypergraph_vec", "hypergraph_mask", "behavior_vec", "context_vec", "mechanism_feature", "sample_weight", "true_count", "count_vec"):
             if key in batch[0]:
                 out[key] = torch.as_tensor(np.stack([np.asarray(item[key], dtype=np.float32) for item in batch]), dtype=torch.float32)
         if "sample_weight" in out:
             out["sample_weight"] = out["sample_weight"].reshape(-1)
+        if "true_count" in out:
+            out["true_count"] = out["true_count"].reshape(-1)
         return out
 
 

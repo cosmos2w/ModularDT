@@ -1,72 +1,71 @@
-# Design Prior Configuration Notes
+# Mechanism Design Prior Configuration Notes
 
-The behavior-aware design prior is a target-agnostic latent atlas:
+The design-prior path is now a hypergraph-centric mechanism prior plus a
+conditional layout realizer:
 
 ```text
-z, context -> layout + planned hypergraph + behavior descriptor
+mechanism = realized hypergraph organization + field-behavior descriptor
+p(D | mechanism, context)
 ```
 
-It is trained separately from the KPI-conditioned inverse generator. Field
-functional design tasks are solved later by searching over `z` with the frozen
-forward HONF verifier.
+The design library is a mechanism source:
 
-## Main Training Hyperparameters
+```text
+layout -> frozen-forward HONF -> realized hypergraph -> field behavior
+```
 
-- `latent_dim`: compact atlas dimension. Default is `32`.
-- `hidden_dim`: MLP width for encoder/decoder networks.
-- `kl_weight`: VAE regularization weight. Default is `1e-3`; keep this small
-  early to avoid posterior collapse.
-- `behavior_recon_weight`: reconstruction weight for compact behavior
-  descriptors.
-- `hypergraph_recon_weight`: reconstruction weight for planned/realized
-  hypergraph vectors.
-- `geometry_weight`: differentiable validity pressure for overlaps, channel
-  boundaries, and inactive heat slots.
+It is not used to learn a generic valid-layout prior.
 
-Suggested sweeps:
+## Mechanism Parameters
 
-| Parameter | Useful range |
-| --- | --- |
-| `latent_dim` | `16`, `32`, `64` |
-| `hidden_dim` | `128`, `256`, `512` |
-| `kl_weight` | `1e-4` to `1e-2` |
-| `behavior_recon_weight` | `0.25` to `2.0` |
-| `hypergraph_recon_weight` | `0.1` to `1.5` |
-| `geometry_weight` | `0.01` to `0.2` |
+- `num_clusters`: number of mechanism clusters. Start with `24`; useful sweeps
+  are `12`, `24`, and `48`.
+- `hypergraph_weight`: weight for normalized realized-hypergraph features.
+  Useful range: `0.5` to `2.0`.
+- `behavior_weight`: weight for normalized behavior descriptors. Useful range:
+  `0.2` to `1.0`.
+- `include_count_descriptor`: include module count as part of the mechanism
+  feature. Keep enabled for count-constrained design tasks.
+- `count_weight`: normalized count-descriptor weight. Start with `0.25`.
+- `kmeans_iterations`: NumPy k-means iterations for unsupervised mechanism
+  discovery. `100` is usually enough for the starter library size.
 
-## Guided Search Hyperparameters
+## Layout Realizer Parameters
 
-- `latent_cem_iterations`: number of latent CEM updates.
-- `latent_cem_population`: candidates per CEM iteration.
-- `latent_cem_elite_frac`: fraction of candidates used to update the proposal.
-- `prior_energy_weight`: penalty for moving far from the learned prior.
-- `hypergraph_consistency_weight`: penalty for planned-vs-realized organization
-  mismatch.
-- `geometry_penalty_weight`: penalty for repaired or invalid decoded layouts.
+- `hidden_dim`: MLP width for the conditional rectified-flow realizer.
+- `condition_dim`: embedding size for mechanism plus context.
+- `layout_flow_weight`: main velocity matching loss weight.
+- `mask_component_weight`: extra weight on active-mask slots.
+- `active_center_weight`: center-coordinate weight for true active modules.
+- `inactive_center_weight`: center-coordinate weight for inactive padded slots.
+- `geometry_weight`: differentiable overlap/boundary validity pressure.
+- `count_weight`: penalty for matching generated active count to the mechanism
+  count/target count.
 
-Suggested sweeps:
+## Search Parameters
 
-| Parameter | Useful range |
-| --- | --- |
-| `latent_cem_population` | `64` to `512` |
-| `latent_cem_iterations` | `5` to `20` |
-| `latent_cem_elite_frac` | `0.10` to `0.25` |
-| `prior_energy_weight` | `0.001` to `0.1` |
-| `hypergraph_consistency_weight` | `0.0` to `5.0` |
-| `geometry_penalty_weight` | `0.5` to `5.0` |
+- `mechanism_cem_iterations`: number of posterior CEM updates in mechanism
+  feature space.
+- `mechanism_cem_population`: mechanisms evaluated per CEM iteration.
+- `mechanism_cem_elite_frac`: fraction used to update the Gaussian proposal.
+- `mechanism_prior_weight`: penalty for moving far from the learned mechanism
+  clusters. Useful range: `0.01` to `0.2`.
+- `hypergraph_realization_weight`: desired-vs-realized hypergraph consistency
+  weight. Useful range: `0.2` to `2.0`.
+- `layouts_per_mechanism`: number of layouts sampled for each mechanism before
+  forward verification. Useful range: `1` to `8`.
+- `filter_mechanisms_by_count`: prefer mechanism clusters whose decoded count
+  descriptor matches objective hard count constraints.
 
-## Raw Layout CEM vs Latent Guided Search
+## Method Roles
 
-Use raw layout CEM when you need a direct optimizer baseline. It searches
-normalized module positions and active masks without using the learned atlas.
-This is useful for measuring whether the latent prior genuinely improves
-sample efficiency or feasibility.
+Use `mechanism_prior` as a diagnostic: it samples mechanisms from the atlas and
+realizes layouts without posterior guidance.
 
-Use latent guided search when the design prior has learned a meaningful
-behavior-aware manifold. The guided search optimizes in compact latent space,
-then verifies every decoded candidate with the same frozen forward HONF. This
-is the intended generative inverse-design method.
+Use `mechanism_guided` as the actual hypergraph-centric generative inverse
+method. It searches mechanism-feature space, realizes layouts through
+`p(D | mechanism, context)`, forward-verifies every layout, and scores the
+field-functional objective plus optional mechanism-realization terms.
 
-Use unguided prior sampling only as a prior-quality baseline. It should produce
-plausible layouts, but it is not expected to satisfy arbitrary downstream
-field-functional objectives by itself.
+Raw layout CEM remains the direct optimizer baseline. It has no desired
+mechanism, so it should not receive a hypergraph-realization penalty.
