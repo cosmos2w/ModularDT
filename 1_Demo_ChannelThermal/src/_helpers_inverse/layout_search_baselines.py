@@ -359,12 +359,28 @@ class RawLayoutCEMOptimizer:
         self.forward_evaluator = forward_evaluator
         self.objective = objective
 
-    def search(self, context: Optional[Mapping[str, Any]], *, num_return: int = 16) -> Dict[str, Any]:
+    def search(
+        self,
+        context: Optional[Mapping[str, Any]],
+        *,
+        num_return: int = 16,
+        initial_mean_vec: Optional[Any] = None,
+        initial_std: Optional[float] = None,
+    ) -> Dict[str, Any]:
         ctx: Mapping[str, Any] = context or {}
         rng = np.random.default_rng(int(self.config.random_seed))
-        seed_layout = sample_random_valid_layout(self.config, rng, ctx)
-        mean = encode_layout_to_design_vec(seed_layout, self.config).astype(np.float64)
-        std = np.full_like(mean, max(float(self.config.cem_init_std), float(self.config.cem_min_std)), dtype=np.float64)
+        if initial_mean_vec is None:
+            seed_layout = sample_random_valid_layout(self.config, rng, ctx)
+            mean = encode_layout_to_design_vec(seed_layout, self.config).astype(np.float64)
+            std_value = float(self.config.cem_init_std)
+        else:
+            mean = np.asarray(initial_mean_vec, dtype=np.float64).reshape(-1)
+            expected_dim = 3 * int(self.config.max_num_modules) + (int(self.config.max_num_modules) if self.config.generate_heat_power else 0)
+            if mean.size < expected_dim:
+                mean = np.pad(mean, (0, expected_dim - mean.size))
+            mean = np.clip(mean[:expected_dim], 0.0, 1.0)
+            std_value = 0.10 if initial_std is None else float(initial_std)
+        std = np.full_like(mean, max(std_value, float(self.config.cem_min_std)), dtype=np.float64)
         all_candidates = []
         history = []
         calls = 0
@@ -407,9 +423,12 @@ class RawLayoutCEMOptimizer:
                     "iteration": int(iteration),
                     "round_best_score": float(round_best),
                     "best_score": float(cumulative_best),
+                    "best_objective_score": float(cumulative_best),
+                    "best_internal_total_score": float(cumulative_best),
                     "mean_elite_score": float(np.mean([row["total_score"] for row in elites])),
                     "num_forward_calls": int(calls),
                     "runtime_seconds": float(time.time() - iter_start),
+                    "ranking_score_key": "fair_objective_score",
                 }
             )
             progress.set_postfix(best=f"{cumulative_best:.4g}", calls=calls)
@@ -453,5 +472,5 @@ class RandomValidLayoutSampler:
         for rank, row in enumerate(rows[: max(int(num_return), 0)], start=1):
             row["rank"] = int(rank)
         best = float(rows[0]["total_score"]) if rows else float("inf")
-        history = [{"iteration": 0, "round_best_score": best, "best_score": best, "mean_elite_score": float(np.mean([r["total_score"] for r in rows[: max(1, min(len(rows), num_return))]])) if rows else float("inf"), "num_forward_calls": int(calls)}]
+        history = [{"iteration": 0, "round_best_score": best, "best_score": best, "best_objective_score": best, "best_internal_total_score": best, "mean_elite_score": float(np.mean([r["total_score"] for r in rows[: max(1, min(len(rows), num_return))]])) if rows else float("inf"), "num_forward_calls": int(calls), "ranking_score_key": "fair_objective_score"}]
         return {"method": "random_valid_layout", "best_candidates": rows[: max(int(num_return), 0)], "history": history, "num_forward_calls": int(calls)}

@@ -115,7 +115,13 @@ def write_summary_json(summary: Mapping[str, Any], path: str | Path) -> None:
         json.dump(to_jsonable(summary), f, indent=2)
 
 
-def plot_score_vs_calls(histories: Mapping[str, Sequence[Mapping[str, Any]]] | Sequence[Mapping[str, Any]], path: str | Path) -> None:
+def plot_score_vs_calls(
+    histories: Mapping[str, Sequence[Mapping[str, Any]]] | Sequence[Mapping[str, Any]],
+    path: str | Path,
+    *,
+    score_key: str = "best_score",
+    ylabel: str = "Best total score",
+) -> None:
     out = _ensure_parent(path)
     fig, ax = plt.subplots(figsize=(7.0, 4.0), constrained_layout=True)
     if isinstance(histories, Mapping):
@@ -124,11 +130,11 @@ def plot_score_vs_calls(histories: Mapping[str, Sequence[Mapping[str, Any]]] | S
         items = [("method", histories)]
     for name, history in items:
         calls = [float(row.get("num_forward_calls", idx + 1)) for idx, row in enumerate(history)]
-        scores = [float(row.get("best_score", row.get("total_score", np.nan))) for row in history]
+        scores = [float(row.get(score_key, row.get("best_score", row.get("total_score", np.nan)))) for row in history]
         if calls and scores:
             ax.plot(calls, scores, marker="o", linewidth=1.5, label=str(name))
     ax.set_xlabel("Forward calls")
-    ax.set_ylabel("Best total score")
+    ax.set_ylabel(ylabel)
     ax.set_title("Score vs forward calls")
     ax.grid(True, alpha=0.25)
     if isinstance(histories, Mapping) and len(histories) > 1:

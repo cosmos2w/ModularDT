@@ -2,7 +2,7 @@ from __future__ import annotations
 
 """Mechanism-prior search over hypergraph-conditioned layout realization."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 from pathlib import Path
 import sys
@@ -26,6 +26,7 @@ try:
     from field_functional_objective import FieldFunctionalObjective
     from layout_search_baselines import (
         LayoutSearchConfig,
+        RawLayoutCEMOptimizer,
         decode_design_vec_to_layout,
         encode_layout_to_design_vec,
         geometry_penalty,
@@ -49,7 +50,8 @@ except Exception as exc:  # pragma: no cover
 
 @dataclass
 class MechanismGuidedSearchConfig:
-    method: str = "mechanism_cem"
+    method: str = "retrieve_refine"
+    mode: str = "retrieve_refine"
     num_initial_samples: int = 512
     num_return: int = 16
 
@@ -74,11 +76,33 @@ class MechanismGuidedSearchConfig:
     random_seed: int = 0
     ranking_score_key: str = "internal_total_score"
 
+    use_representative_bank: bool = True
+    screen_representatives: bool = True
+    representative_screen_samples: int = 256
+    screen_top_k_representatives: int = 32
+    screen_top_k_clusters: int = 8
+    include_witness_layouts: bool = True
+
+    local_refine_enabled: bool = True
+    local_refine_top_k: int = 8
+    local_refine_iterations: int = 4
+    local_refine_population: int = 48
+    local_refine_init_std: float = 0.08
+    local_refine_num_return: int = 8
+
     def __post_init__(self) -> None:
         key = str(self.ranking_score_key or "internal_total_score").strip()
         if key not in {"internal_total_score", "fair_objective_score"}:
             raise ValueError("ranking_score_key must be 'internal_total_score' or 'fair_objective_score'.")
         self.ranking_score_key = key
+        mode = str(self.mode or self.method or "retrieve_refine").strip()
+        if mode == "mechanism_cem":
+            mode = "mechanism_feature_cem"
+        if mode not in {"retrieve_refine", "mechanism_feature_cem"}:
+            raise ValueError("mode must be 'retrieve_refine' or 'mechanism_feature_cem'.")
+        self.mode = mode
+        if str(self.method or "").strip() in {"", "mechanism_cem"}:
+            self.method = mode
 
 
 GuidedSearchConfig = MechanismGuidedSearchConfig
@@ -348,6 +372,7 @@ class HypergraphMechanismDesignSearcher:
         objective: FieldFunctionalObjective,
         layout_config: LayoutSearchConfig,
         search_config: MechanismGuidedSearchConfig,
+        representative_bank: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.mechanism_atlas = mechanism_atlas
         self.layout_realizer = layout_realizer
@@ -355,10 +380,22 @@ class HypergraphMechanismDesignSearcher:
         self.objective = objective
         self.layout_config = layout_config
         self.search_config = search_config
+        self.representative_bank = self._normalize_representative_bank(representative_bank)
         self.device = next(layout_realizer.parameters()).device
         self.forward_calls = 0
         self._objective_counts_plan_realization = objective_has_plan_realization_term(objective)
         self.ranking_score_key = str(search_config.ranking_score_key)
+
+    def _normalize_representative_bank(self, bank: Optional[Mapping[str, Any]]) -> Optional[Dict[str, np.ndarray]]:
+        if not isinstance(bank, Mapping) or "features" not in bank or "design_vecs" not in bank:
+            return None
+        out: Dict[str, np.ndarray] = {}
+        for key in ("features", "design_vecs", "hypergraph_vecs", "behavior_vecs", "true_counts", "cluster_ids", "sample_indices", "source_tags"):
+            if key in bank:
+                out[key] = np.asarray(bank[key])
+        if out.get("features", np.zeros((0,))).size == 0 or out.get("design_vecs", np.zeros((0,))).size == 0:
+            return None
+        return out
 
     def _context_tensor(self, context: Optional[Mapping[str, Any]], n: int = 1) -> Optional[torch.Tensor]:
         dim = int(getattr(self.layout_realizer.cfg, "context_dim", 0))
@@ -549,6 +586,149 @@ class HypergraphMechanismDesignSearcher:
             candidates.extend(rows)
         return candidates
 
+    def _annotate_layout_candidate_with_mechanism(
+        self,
+        row: Mapping[str, Any],
+        mechanism_feature: np.ndarray,
+        *,
+        source: str,
+        method: str = "mechanism_guided",
+    ) -> Dict[str, Any]:
+        mechanism = np.asarray(mechanism_feature, dtype=np.float32).reshape(1, -1)
+        decoded_parts = self.mechanism_atlas.decode_feature_to_parts(mechanism)
+        desired_vec = np.asarray(decoded_parts.get("hypergraph_vec", np.zeros((1, 0), dtype=np.float32))[0], dtype=np.float32)
+        desired = _decode_hypergraph(desired_vec, int(self.layout_config.max_num_modules))
+        desired_behavior = np.asarray(decoded_parts.get("behavior_vec", np.zeros((1, 0), dtype=np.float32))[0], dtype=np.float32)
+        realized = row.get("realized_hypergraph")
+        forward_payload = row.get("forward_prediction", {}) if isinstance(row.get("forward_prediction"), Mapping) else {}
+        if realized is None and isinstance(forward_payload, Mapping):
+            realized = forward_payload.get("realized_hypergraph")
+        comparison = compare_hypergraphs(desired, realized)
+        objective_score = float(row.get("fair_objective_score", row.get("objective_score", row.get("total_score", 0.0))) or 0.0)
+        layout = row.get("layout", {})
+        geom = _sum_geometry_penalty(layout, self.layout_config) if isinstance(layout, Mapping) else 0.0
+        prior_energy = float(np.asarray(self.mechanism_atlas.prior_energy(mechanism), dtype=np.float32).reshape(-1)[0])
+        hyper_score = float(comparison.get("total", 0.0) or 0.0) if bool(comparison.get("diagnostics_available", False)) else 0.0
+        hyper_extra_score = float(self.search_config.hypergraph_realization_weight) * hyper_score
+        if self._objective_counts_plan_realization:
+            hyper_extra_score = 0.0
+        total = objective_score + float(self.search_config.geometry_penalty_weight) * geom + hyper_extra_score + float(self.search_config.mechanism_prior_weight) * prior_energy
+        ranking_score = objective_score if self.ranking_score_key == "fair_objective_score" else total
+        cluster_id = int(np.asarray(self.mechanism_atlas.nearest_cluster(mechanism)).reshape(-1)[0])
+        out = dict(row)
+        out.update(
+            {
+                "method": method,
+                "mechanism_feature": mechanism.reshape(-1).astype(np.float32),
+                "mechanism_cluster_id": cluster_id,
+                "desired_hypergraph": desired,
+                "desired_hypergraph_vec": desired_vec,
+                "desired_behavior": desired_behavior,
+                "planned_hypergraph": desired,
+                "planned_hypergraph_vec": desired_vec,
+                "realized_hypergraph": realized,
+                "kpis": row.get("kpis", forward_payload.get("kpis", {})),
+                "hypergraph_consistency": comparison,
+                "hypergraph_realization_score": hyper_score,
+                "hypergraph_consistency_score": hyper_score,
+                "hypergraph_extra_score": hyper_extra_score,
+                "total_score": total,
+                "internal_total_score": total,
+                "fair_objective_score": objective_score,
+                "objective_score": objective_score,
+                "ranking_score": ranking_score,
+                "ranking_score_key": self.ranking_score_key,
+                "mechanism_prior_score": prior_energy,
+                "prior_energy": prior_energy,
+                "geometry_penalty": geom,
+                "source": source,
+            }
+        )
+        return _jsonable(out)
+
+    def retrieve_representatives(self, context: Mapping[str, Any]) -> List[Dict[str, Any]]:
+        bank = self.representative_bank
+        self._last_retrieval_history: List[Dict[str, Any]] = []
+        if bank is None or not bool(self.search_config.use_representative_bank):
+            return []
+        features = np.asarray(bank["features"], dtype=np.float32)
+        designs = np.asarray(bank["design_vecs"], dtype=np.float32)
+        counts = np.asarray(bank.get("true_counts", np.zeros((features.shape[0],), dtype=np.float32)), dtype=np.float32).reshape(-1)
+        cluster_ids = np.asarray(bank.get("cluster_ids", np.zeros((features.shape[0],), dtype=np.int64)), dtype=np.int64).reshape(-1)
+        sample_indices = np.asarray(bank.get("sample_indices", np.arange(features.shape[0])), dtype=np.int64).reshape(-1)
+        if features.size == 0 or designs.size == 0:
+            return []
+        idx = np.arange(features.shape[0])
+        if bool(self.search_config.filter_mechanisms_by_count) and counts.size:
+            lo, hi = _count_range_from_context(self.layout_config, context)
+            eligible = idx[(counts[: idx.size] >= float(lo)) & (counts[: idx.size] <= float(hi))]
+            if eligible.size:
+                idx = eligible
+        rng = np.random.default_rng(int(self.search_config.random_seed))
+        if idx.size > int(self.search_config.representative_screen_samples):
+            idx = rng.choice(idx, size=int(self.search_config.representative_screen_samples), replace=False)
+
+        rows: List[Dict[str, Any]] = []
+        if bool(self.search_config.screen_representatives) or bool(self.search_config.include_witness_layouts):
+            for local_i, rep_idx in enumerate(tqdm(idx, desc="mechanism retrieval", unit="rep", leave=False, dynamic_ncols=True)):
+                row = self._evaluate_mechanism_layout(
+                    mechanism_feature=features[int(rep_idx)],
+                    design_vec=designs[int(rep_idx)],
+                    context=context,
+                    source="representative_witness",
+                    method="mechanism_guided",
+                    layout_index=local_i,
+                )
+                row["representative_index"] = int(rep_idx)
+                row["sample_index"] = int(sample_indices[int(rep_idx)]) if sample_indices.size > int(rep_idx) else int(rep_idx)
+                row["source"] = "representative_witness"
+                rows.append(row)
+            rows.sort(key=lambda row: row_score(row, "fair_objective_score" if bool(self.search_config.screen_representatives) else "ranking_score"))
+        else:
+            order = sorted(idx.tolist(), key=lambda rep_idx: float(np.asarray(self.mechanism_atlas.prior_energy(features[int(rep_idx)][None, :])).reshape(-1)[0]))
+            for rep_idx in order:
+                rows.append(
+                    {
+                        "feature": features[int(rep_idx)].astype(np.float32),
+                        "mechanism_feature": features[int(rep_idx)].astype(np.float32),
+                        "design_vec": designs[int(rep_idx)].astype(np.float32),
+                        "mechanism_cluster_id": int(cluster_ids[int(rep_idx)]) if cluster_ids.size > int(rep_idx) else int(self.mechanism_atlas.nearest_cluster(features[int(rep_idx)][None, :])[0]),
+                        "representative_index": int(rep_idx),
+                        "sample_index": int(sample_indices[int(rep_idx)]) if sample_indices.size > int(rep_idx) else int(rep_idx),
+                        "source": "representative_witness",
+                    }
+                )
+        if rows and int(self.search_config.screen_top_k_clusters) > 0:
+            kept: List[Dict[str, Any]] = []
+            seen_clusters: set[int] = set()
+            allowed_clusters: set[int] = set()
+            for row in rows:
+                cid = int(row.get("mechanism_cluster_id", -1))
+                if cid not in allowed_clusters and len(allowed_clusters) >= int(self.search_config.screen_top_k_clusters):
+                    continue
+                allowed_clusters.add(cid)
+                kept.append(row)
+                seen_clusters.add(cid)
+                if len(kept) >= int(self.search_config.screen_top_k_representatives):
+                    break
+            rows = kept
+        else:
+            rows = rows[: int(self.search_config.screen_top_k_representatives)]
+        best_objective = row_score(rows[0], "fair_objective_score") if rows and "fair_objective_score" in rows[0] else float("inf")
+        self._last_retrieval_history = [
+            {
+                "iteration": 0,
+                "method": "mechanism_retrieval",
+                "round_best_score": float(best_objective),
+                "best_score": float(best_objective),
+                "best_objective_score": float(best_objective),
+                "best_internal_total_score": row_score(rows[0], "internal_total_score") if rows and "internal_total_score" in rows[0] else float("inf"),
+                "num_forward_calls": int(self.forward_calls),
+                "ranking_score_key": "fair_objective_score",
+            }
+        ]
+        return rows
+
     def sample_mechanism_prior_candidates(
         self,
         context: Mapping[str, Any],
@@ -567,6 +747,121 @@ class HypergraphMechanismDesignSearcher:
         candidates = self._evaluate_mechanisms(features, context, method="mechanism_prior", source="mechanism_prior")
         candidates.sort(key=lambda row: row_score(row, "ranking_score"))
         return diversity_rerank(candidates, weight=float(self.search_config.diversity_weight), config=self.layout_config, score_key="ranking_score")
+
+    def retrieve_refine_search(self, context: Mapping[str, Any]) -> Dict[str, Any]:
+        all_candidates: List[Dict[str, Any]] = []
+        history: List[Dict[str, Any]] = []
+        cumulative_objective = float("inf")
+        cumulative_internal = float("inf")
+
+        representatives = self.retrieve_representatives(context)
+        if getattr(self, "_last_retrieval_history", None):
+            history.extend(self._last_retrieval_history)
+            if representatives:
+                cumulative_objective = min(cumulative_objective, row_score(representatives[0], "fair_objective_score"))
+                cumulative_internal = min(cumulative_internal, row_score(representatives[0], "internal_total_score"))
+                history[-1]["best_objective_score"] = float(cumulative_objective)
+                history[-1]["best_internal_total_score"] = float(cumulative_internal)
+        if bool(self.search_config.include_witness_layouts):
+            all_candidates.extend([row for row in representatives if "total_score" in row])
+
+        if representatives:
+            selected_features = np.stack([np.asarray(row.get("mechanism_feature", row.get("feature")), dtype=np.float32).reshape(-1) for row in representatives], axis=0)
+        else:
+            rng = np.random.default_rng(int(self.search_config.random_seed))
+            count_range = _count_range_from_context(self.layout_config, context) if bool(self.search_config.filter_mechanisms_by_count) else None
+            selected_features = self._sample_atlas_features(
+                max(int(self.search_config.screen_top_k_representatives), 1),
+                rng=rng,
+                count_range=count_range,
+            )
+
+        iter_start = time.time()
+        generated = self._evaluate_mechanisms(selected_features, context, method="mechanism_guided", source="mechanism_realizer_sample")
+        for row in generated:
+            row["source"] = "mechanism_realizer_sample"
+        all_candidates.extend(generated)
+        if generated:
+            generated.sort(key=lambda row: row_score(row, "ranking_score"))
+            round_obj = min(row_score(row, "fair_objective_score") for row in generated)
+            round_internal = min(row_score(row, "internal_total_score") for row in generated)
+            cumulative_objective = min(cumulative_objective, round_obj)
+            cumulative_internal = min(cumulative_internal, round_internal)
+            history.append(
+                {
+                    "iteration": len(history),
+                    "method": "mechanism_realizer_sample",
+                    "round_best_score": float(round_internal if self.ranking_score_key == "internal_total_score" else round_obj),
+                    "best_score": float(cumulative_internal if self.ranking_score_key == "internal_total_score" else cumulative_objective),
+                    "best_objective_score": float(cumulative_objective),
+                    "best_internal_total_score": float(cumulative_internal),
+                    "num_forward_calls": int(self.forward_calls),
+                    "ranking_score_key": self.ranking_score_key,
+                    "runtime_seconds": float(time.time() - iter_start),
+                }
+            )
+
+        if bool(self.search_config.local_refine_enabled) and all_candidates:
+            seed_rows = sorted(all_candidates, key=lambda row: row_score(row, "ranking_score"))[: max(int(self.search_config.local_refine_top_k), 0)]
+            for seed_idx, seed in enumerate(seed_rows):
+                local_cfg = replace(
+                    self.layout_config,
+                    cem_iterations=max(int(self.search_config.local_refine_iterations), 1),
+                    cem_population=max(int(self.search_config.local_refine_population), 2),
+                    random_seed=int(self.search_config.random_seed) + 1009 + seed_idx,
+                )
+                optimizer = RawLayoutCEMOptimizer(local_cfg, self.forward_evaluator, self.objective)
+                before_calls = int(self.forward_calls)
+                local = optimizer.search(
+                    context,
+                    num_return=max(int(self.search_config.local_refine_num_return), 1),
+                    initial_mean_vec=np.asarray(seed.get("design_vec"), dtype=np.float32).reshape(-1),
+                    initial_std=float(self.search_config.local_refine_init_std),
+                )
+                local_calls = int(local.get("num_forward_calls", 0))
+                self.forward_calls += local_calls
+                feature = np.asarray(seed.get("mechanism_feature"), dtype=np.float32).reshape(-1)
+                local_rows = []
+                for row in local.get("best_candidates", []):
+                    annotated = self._annotate_layout_candidate_with_mechanism(
+                        row,
+                        feature,
+                        source="mechanism_local_refine",
+                        method="mechanism_guided",
+                    )
+                    annotated["forward_calls"] = int(before_calls + int(row.get("forward_calls", 0)))
+                    annotated["seed_source"] = seed.get("source", "")
+                    annotated["seed_rank"] = int(seed.get("rank", seed_idx + 1) or seed_idx + 1)
+                    local_rows.append(annotated)
+                all_candidates.extend(local_rows)
+                if local_rows:
+                    round_obj = min(row_score(row, "fair_objective_score") for row in local_rows)
+                    round_internal = min(row_score(row, "internal_total_score") for row in local_rows)
+                    cumulative_objective = min(cumulative_objective, round_obj)
+                    cumulative_internal = min(cumulative_internal, round_internal)
+                for local_hist in local.get("history", []):
+                    history.append(
+                        {
+                            "iteration": len(history),
+                            "method": "mechanism_local_refine",
+                            "seed_index": int(seed_idx),
+                            "round_best_score": float(local_hist.get("round_best_score", local_hist.get("best_score", float("inf")))),
+                            "best_score": float(cumulative_internal if self.ranking_score_key == "internal_total_score" else cumulative_objective),
+                            "best_objective_score": float(cumulative_objective),
+                            "best_internal_total_score": float(cumulative_internal),
+                            "mean_elite_score": local_hist.get("mean_elite_score", ""),
+                            "num_forward_calls": int(before_calls + int(local_hist.get("num_forward_calls", 0))),
+                            "ranking_score_key": self.ranking_score_key,
+                            "runtime_seconds": local_hist.get("runtime_seconds", ""),
+                        }
+                    )
+
+        all_candidates.sort(key=lambda row: row_score(row, "ranking_score"))
+        reranked = diversity_rerank(all_candidates, weight=float(self.search_config.diversity_weight), config=self.layout_config, score_key="ranking_score")
+        top = reranked[: max(int(self.search_config.num_return), 0)]
+        for rank, row in enumerate(top, start=1):
+            row["rank"] = int(rank)
+        return {"method": "mechanism_guided", "best_candidates": top, "history": history, "num_forward_calls": int(self.forward_calls)}
 
     def mechanism_cem_search(self, context: Mapping[str, Any]) -> Dict[str, Any]:
         rng = np.random.default_rng(int(self.search_config.random_seed))
@@ -608,11 +903,15 @@ class HypergraphMechanismDesignSearcher:
             all_candidates.extend(rows)
             round_best = row_score(rows[0], "ranking_score") if rows else float("inf")
             cumulative_best = min(cumulative_best, round_best)
+            best_objective = min([row_score(row, "fair_objective_score") for row in all_candidates], default=float("inf"))
+            best_internal = min([row_score(row, "internal_total_score") for row in all_candidates], default=float("inf"))
             history.append(
                 {
                     "iteration": int(iteration),
                     "best_score": float(cumulative_best),
                     "round_best_score": float(round_best),
+                    "best_objective_score": float(best_objective),
+                    "best_internal_total_score": float(best_internal),
                     "mean_elite_score": float(np.mean([row_score(row, "ranking_score") for row in elites])),
                     "ranking_score_key": self.ranking_score_key,
                     "num_forward_calls": int(self.forward_calls),
@@ -626,6 +925,9 @@ class HypergraphMechanismDesignSearcher:
         for rank, row in enumerate(top, start=1):
             row["rank"] = int(rank)
         return {"method": "mechanism_guided", "best_candidates": top, "history": history, "num_forward_calls": int(self.forward_calls)}
+
+    def mechanism_feature_cem(self, context: Mapping[str, Any]) -> Dict[str, Any]:
+        return self.mechanism_cem_search(context)
 
     def smc_search(self, context: Mapping[str, Any]) -> Dict[str, Any]:
         raise NotImplementedError("SMC posterior search is reserved for a later prompt; mechanism_cem is implemented.")

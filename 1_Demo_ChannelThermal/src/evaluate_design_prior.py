@@ -115,6 +115,13 @@ def _load_mechanism_prior(path: str | Path, device: torch.device) -> tuple[Hyper
     return atlas, model, checkpoint
 
 
+def _representative_bank_from_checkpoint(checkpoint: Mapping[str, Any]) -> Optional[Mapping[str, Any]]:
+    bank = checkpoint.get("mechanism_representative_bank")
+    if isinstance(bank, Mapping) and bank.get("features") is not None and bank.get("design_vecs") is not None:
+        return bank
+    return None
+
+
 def _normalize_run_id(value: Any, fallback: str = "0001") -> str:
     raw = str(value if value is not None and str(value).strip() else fallback).strip()
     if not raw.isdigit():
@@ -345,7 +352,20 @@ def _method_summary(result: Mapping[str, Any], candidates: Sequence[Mapping[str,
 def _write_score_vs_calls_csv(histories: Mapping[str, Sequence[Mapping[str, Any]]], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["method", "iteration", "num_forward_calls", "best_score", "round_best_score", "mean_elite_score", "ranking_score_key"])
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "method",
+                "iteration",
+                "num_forward_calls",
+                "best_score",
+                "round_best_score",
+                "best_objective_score",
+                "best_internal_total_score",
+                "mean_elite_score",
+                "ranking_score_key",
+            ],
+        )
         writer.writeheader()
         for method, rows in histories.items():
             for row in rows:
@@ -356,6 +376,8 @@ def _write_score_vs_calls_csv(histories: Mapping[str, Sequence[Mapping[str, Any]
                         "num_forward_calls": row.get("num_forward_calls", ""),
                         "best_score": row.get("best_score", ""),
                         "round_best_score": row.get("round_best_score", ""),
+                        "best_objective_score": row.get("best_objective_score", row.get("best_score", "")),
+                        "best_internal_total_score": row.get("best_internal_total_score", row.get("best_score", "")),
                         "mean_elite_score": row.get("mean_elite_score", ""),
                         "ranking_score_key": row.get("ranking_score_key", ""),
                     }
@@ -701,12 +723,16 @@ def main() -> int:
     methods_cfg = _normalize_methods_config(cfg)
     mechanism_atlas = None
     layout_realizer = None
+    representative_bank = None
     design_prior_cfg = cfg.get("design_prior", {}) if isinstance(cfg.get("design_prior"), Mapping) else {}
     need_prior = bool(methods_cfg.get("mechanism_prior", True) or methods_cfg.get("mechanism_guided", True))
     prior_checkpoint = _resolve_design_prior_checkpoint(design_prior_cfg, required=False) if need_prior else None
     if need_prior and prior_checkpoint is not None and prior_checkpoint.exists():
         prior_device = select_device(None if str(design_prior_cfg.get("device", "auto")).lower() == "auto" else str(design_prior_cfg.get("device")))
-        mechanism_atlas, layout_realizer, _ = _load_mechanism_prior(prior_checkpoint, prior_device)
+        mechanism_atlas, layout_realizer, prior_checkpoint_payload = _load_mechanism_prior(prior_checkpoint, prior_device)
+        representative_bank = _representative_bank_from_checkpoint(prior_checkpoint_payload)
+        if representative_bank is None:
+            print("No mechanism representative bank found; mechanism search will use cluster centers only.")
         _copy_checkpoint_mechanism_diagnostics(prior_checkpoint, run_dir)
     histories_dir = ensure_dir(run_dir / "histories")
     top_dir = ensure_dir(run_dir / "top_candidates")
@@ -768,12 +794,29 @@ def main() -> int:
             start = time.time()
             prior_cfg = _section_cfg(cfg, "mechanism_prior", "atlas_prior")
             search_cfg = _guided_config({**dict(prior_cfg), "num_return": int(prior_cfg.get("num_return", 16)), "random_seed": int(prior_cfg.get("seed", prior_cfg.get("random_seed", 0))), "layouts_per_mechanism": int(prior_cfg.get("layouts_per_mechanism", 1))})
-            searcher = HypergraphMechanismDesignSearcher(mechanism_atlas, layout_realizer, evaluator, objective, layout_config, search_cfg)
+            searcher = HypergraphMechanismDesignSearcher(mechanism_atlas, layout_realizer, evaluator, objective, layout_config, search_cfg, representative_bank=representative_bank)
             candidates = searcher.sample_mechanism_prior_candidates(
                 search_context,
                 int(prior_cfg.get("num_samples", 512)),
             )[: int(prior_cfg.get("num_return", 16))]
-            result = {"method": "mechanism_prior", "best_candidates": candidates, "history": [{"iteration": 0, "best_score": float(candidates[0]["total_score"]) if candidates else float("inf"), "num_forward_calls": int(searcher.forward_calls)}], "num_forward_calls": int(searcher.forward_calls)}
+            best_internal = min([_candidate_score(row, "internal_total_score") for row in candidates], default=float("inf"))
+            best_objective = min([_candidate_score(row, "fair_objective_score") for row in candidates], default=float("inf"))
+            result = {
+                "method": "mechanism_prior",
+                "best_candidates": candidates,
+                "history": [
+                    {
+                        "iteration": 0,
+                        "best_score": best_internal,
+                        "round_best_score": best_internal,
+                        "best_internal_total_score": best_internal,
+                        "best_objective_score": best_objective,
+                        "num_forward_calls": int(searcher.forward_calls),
+                        "ranking_score_key": search_cfg.ranking_score_key,
+                    }
+                ],
+                "num_forward_calls": int(searcher.forward_calls),
+            }
             record_result("mechanism_prior", result, time.time() - start)
     if bool(methods_cfg.get("mechanism_guided", True)):
         if mechanism_atlas is None or layout_realizer is None:
@@ -783,8 +826,11 @@ def main() -> int:
             print("[method:mechanism_guided] starting")
             start = time.time()
             guided_cfg = _guided_config(_section_cfg(cfg, "mechanism_guided", "atlas_guided"))
-            searcher = HypergraphMechanismDesignSearcher(mechanism_atlas, layout_realizer, evaluator, objective, layout_config, guided_cfg)
-            result = searcher.mechanism_cem_search(search_context)
+            searcher = HypergraphMechanismDesignSearcher(mechanism_atlas, layout_realizer, evaluator, objective, layout_config, guided_cfg, representative_bank=representative_bank)
+            if guided_cfg.mode == "mechanism_feature_cem":
+                result = searcher.mechanism_feature_cem(search_context)
+            else:
+                result = searcher.retrieve_refine_search(search_context)
             record_result("mechanism_guided", result, time.time() - start)
 
     save_dense = bool(output_cfg.get("save_dense_forward_outputs", False))
@@ -801,7 +847,10 @@ def main() -> int:
     write_candidates_csv(csv_top, run_dir / "candidates_top.csv")
     _write_score_vs_calls_csv(histories, run_dir / "score_vs_forward_calls.csv")
     if histories:
-        plot_score_vs_calls(histories, run_dir / "score_vs_calls.png")
+        plot_score_vs_calls(histories, run_dir / "score_vs_calls_objective.png", score_key="best_objective_score", ylabel="Best objective score")
+        plot_score_vs_calls(histories, run_dir / "score_vs_calls_internal.png", score_key="best_internal_total_score", ylabel="Best internal total score")
+        if (run_dir / "score_vs_calls_objective.png").exists():
+            shutil.copy2(run_dir / "score_vs_calls_objective.png", run_dir / "score_vs_calls.png")
     _plot_method_comparison(summaries, run_dir / "method_comparison_internal.png", score_key="best_internal_total_score", ylabel="Best internal total score")
     _plot_method_comparison(summaries, run_dir / "method_comparison_objective.png", score_key="best_objective_score", ylabel="Best objective score")
     if (run_dir / "method_comparison_objective.png").exists():

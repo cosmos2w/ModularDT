@@ -1,0 +1,27 @@
+{
+  "model": {
+    "field_dim": 5,
+    "max_num_modules": 12,
+    "num_env_tokens_x": 16,
+    "num_env_tokens_y": 6,
+    "num_hyperedges": 4,
+    "hidden_dim": 128,
+    "geometry_mode": "nonperiodic",
+    "decoder_mode": "hyper_only",
+    "use_A_me_auxiliary": true,
+    "use_direct_module_env_decoder": false,
+    "use_near_module_context": false,
+    "use_global_context": true,
+    "direct_residual_gate_init": 0.0
+  },
+  "data": {
+    "channelthermal_dataset_path": "../1_Demo_ChannelThermal/Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
+    "multicylinder_dataset_path": "../0_Demo_MultiCylinder/Data_Saved/Processed_MultiCylinder_Dataset/packed_dataset.h5"
+  },
+  "training": {
+    "batch_size": 4,
+    "learning_rate": 0.0003,
+    "seed": 0,
+    "device": "auto"
+  }
+}

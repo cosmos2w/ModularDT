@@ -1,0 +1,44 @@
+{
+  "ablations": [
+    {
+      "name": "A0_hyper_only",
+      "decoder_mode": "hyper_only",
+      "use_A_me_auxiliary": true,
+      "use_direct_module_env_decoder": false,
+      "use_near_module_context": false,
+      "use_global_context": false,
+      "num_hyperedges": 4,
+      "notes": "Strict hypergraph bottleneck baseline."
+    },
+    {
+      "name": "A1_hyper_plus_global",
+      "decoder_mode": "hyper_plus_global",
+      "use_A_me_auxiliary": true,
+      "use_direct_module_env_decoder": false,
+      "use_near_module_context": false,
+      "use_global_context": true,
+      "num_hyperedges": 4,
+      "notes": "Adds a global operating-condition token."
+    },
+    {
+      "name": "A2_hyper_plus_direct_residual",
+      "decoder_mode": "hyper_plus_direct_residual",
+      "use_A_me_auxiliary": true,
+      "use_direct_module_env_decoder": true,
+      "use_near_module_context": false,
+      "use_global_context": false,
+      "num_hyperedges": 4,
+      "notes": "Adds explicitly gated direct module/environment residual path."
+    },
+    {
+      "name": "A3_hyper_plus_near_module",
+      "decoder_mode": "hyper_plus_near_module",
+      "use_A_me_auxiliary": true,
+      "use_direct_module_env_decoder": false,
+      "use_near_module_context": true,
+      "use_global_context": false,
+      "num_hyperedges": 4,
+      "notes": "Adds local near-module context without a direct decoder shortcut."
+    }
+  ]
+}

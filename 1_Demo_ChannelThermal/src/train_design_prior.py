@@ -27,6 +27,7 @@ import _bootstrap_imports
 from channelthermal_model_utils import current_timestamp, ensure_dir, resolve_demo_path, select_device, set_seed, write_json
 from design_prior_dataset import DesignPriorDataset, collate_fn
 from hypergraph_mechanism import HypergraphMechanismAtlas, MechanismFeatureConfig
+from layout_search_baselines import LayoutSearchConfig, decode_design_vec_to_layout, encode_layout_to_design_vec, geometry_penalty
 from model_design_prior import HypergraphConditionedLayoutRealizer, MechanismLayoutRealizerConfig
 
 DEFAULT_CONFIG_PATH = "./Configs/train_design_prior_config_template.json"
@@ -37,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a ChannelThermal hypergraph mechanism design prior.")
     parser.add_argument("--config", type=str, default=DEFAULT_CONFIG_PATH, help="JSON config path.")
     parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--device", type=str, default=None, help="Override training device, e.g. 'cpu', 'cuda', or 'cuda:0'.")
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--Run_ID", dest="run_id", type=str, default=None, help="Numeric run serial, e.g. 0001.")
     parser.add_argument("--dry-run", action="store_true", help="Load data, fit a small atlas, run one batch loss, then exit.")
@@ -54,6 +56,11 @@ def normalize_run_id(value: Any, fallback: str = "0001") -> str:
 def resolve_run_id(args: argparse.Namespace, cfg: Mapping[str, Any]) -> str:
     training_cfg = cfg.get("training", {}) if isinstance(cfg.get("training"), Mapping) else {}
     return normalize_run_id(args.run_id or cfg.get("Run_ID") or cfg.get("run_id") or training_cfg.get("Run_ID") or training_cfg.get("run_id"), "0001")
+
+
+def resolve_device(args: argparse.Namespace, training_cfg: Mapping[str, Any]) -> torch.device:
+    device_arg = args.device if args.device is not None else training_cfg.get("device", "auto")
+    return select_device(None if str(device_arg).lower() == "auto" else str(device_arg))
 
 
 def make_run_dir(cfg: Mapping[str, Any], run_id: str) -> Path:
@@ -146,6 +153,58 @@ def build_model_config(dataset: DesignPriorDataset, mechanism_features: np.ndarr
     model_cfg["behavior_dim"] = int(dataset.behavior_vec.shape[1])
     model_cfg["context_dim"] = int(dataset.context_vec.shape[1])
     return MechanismLayoutRealizerConfig.from_dict(model_cfg)
+
+
+def build_representative_bank(
+    arrays: Mapping[str, np.ndarray],
+    features: np.ndarray,
+    atlas: HypergraphMechanismAtlas,
+    *,
+    max_per_cluster: int = 64,
+) -> Dict[str, Any]:
+    """Save observed mechanism-layout witnesses for retrieval-time search."""
+
+    assignments = np.asarray(atlas.assignments, dtype=np.int64).reshape(-1)
+    centers = np.asarray(atlas.cluster_centers, dtype=np.float32)
+    features_np = np.asarray(features, dtype=np.float32)
+    selected: list[int] = []
+    cluster_ids: list[int] = []
+    limit = max(int(max_per_cluster), 1)
+    for cid in range(centers.shape[0]):
+        idx = np.where(assignments == cid)[0]
+        if idx.size == 0:
+            continue
+        dist = np.sum((features_np[idx] - centers[cid][None, :]) ** 2, axis=1)
+        order = idx[np.argsort(dist)[: min(limit, idx.size)]]
+        selected.extend(int(i) for i in order)
+        cluster_ids.extend([int(cid)] * int(order.size))
+    if selected:
+        sample_indices = np.asarray(selected, dtype=np.int64)
+        cluster_arr = np.asarray(cluster_ids, dtype=np.int64)
+    else:
+        sample_indices = np.zeros((0,), dtype=np.int64)
+        cluster_arr = np.zeros((0,), dtype=np.int64)
+
+    n = int(sample_indices.size)
+    design = np.asarray(arrays.get("design_vec", np.zeros((0, 0), dtype=np.float32)), dtype=np.float32)
+    hyper = np.asarray(arrays.get("hypergraph_vec", np.zeros((design.shape[0], 0), dtype=np.float32)), dtype=np.float32)
+    behavior = np.asarray(arrays.get("behavior_vec", np.zeros((design.shape[0], 0), dtype=np.float32)), dtype=np.float32)
+    true_count = np.asarray(arrays.get("true_count", arrays.get("count_vec", np.zeros((design.shape[0],), dtype=np.float32))), dtype=np.float32).reshape(-1)
+    source_tags = np.asarray([f"train_sample_{int(i)}" for i in sample_indices], dtype=str)
+    return {
+        "features": features_np[sample_indices] if n else np.zeros((0, features_np.shape[1]), dtype=np.float32),
+        "design_vecs": design[sample_indices] if n else np.zeros((0, design.shape[1] if design.ndim == 2 else 0), dtype=np.float32),
+        "hypergraph_vecs": hyper[sample_indices] if n else np.zeros((0, hyper.shape[1] if hyper.ndim == 2 else 0), dtype=np.float32),
+        "behavior_vecs": behavior[sample_indices] if n else np.zeros((0, behavior.shape[1] if behavior.ndim == 2 else 0), dtype=np.float32),
+        "true_counts": true_count[sample_indices] if n and true_count.size else np.zeros((n,), dtype=np.float32),
+        "cluster_ids": cluster_arr,
+        "sample_indices": sample_indices,
+        "source_tags": source_tags,
+    }
+
+
+def write_representative_bank_npz(bank: Mapping[str, Any], path: Path) -> None:
+    np.savez_compressed(path, **{key: np.asarray(value) for key, value in bank.items()})
 
 
 def run_epoch(
@@ -282,6 +341,33 @@ def draw_layout_axis(ax: Any, design_vec: np.ndarray, cfg: MechanismLayoutRealiz
         ax.set_title(title, fontsize=8)
 
 
+def _layout_search_config_from_model(cfg: MechanismLayoutRealizerConfig) -> LayoutSearchConfig:
+    return LayoutSearchConfig(
+        max_num_modules=int(cfg.max_num_modules),
+        domain_length_x=float(cfg.domain_length_x),
+        domain_length_y=float(cfg.domain_length_y),
+        module_radius=float(cfg.module_radius),
+        min_center_distance=float(cfg.min_center_distance),
+        wall_clearance=float(cfg.wall_clearance),
+        inlet_clearance=float(cfg.inlet_clearance),
+        outlet_clearance=float(cfg.outlet_clearance),
+        generate_heat_power=bool(cfg.generate_heat_power),
+    )
+
+
+def _raw_layout_from_design_vec(design_vec: np.ndarray, cfg: MechanismLayoutRealizerConfig) -> Dict[str, Any]:
+    centers, mask = split_design_vec(design_vec, int(cfg.max_num_modules))
+    centers = centers.copy()
+    centers[:, 0] *= float(cfg.domain_length_x)
+    centers[:, 1] *= float(cfg.domain_length_y)
+    return {
+        "centers": centers[mask].astype(np.float32),
+        "count": int(np.sum(mask)),
+        "module_radius": float(cfg.module_radius),
+        "domain": {"domain_length_x": float(cfg.domain_length_x), "domain_length_y": float(cfg.domain_length_y), "module_radius": float(cfg.module_radius)},
+    }
+
+
 def write_mechanism_representatives(
     run_dir: Path,
     dataset: DesignPriorDataset,
@@ -361,6 +447,8 @@ def plot_generated_layout_examples_by_mechanism(
     *,
     max_clusters: int = 8,
     samples_per_cluster: int = 3,
+    raw_path: Optional[Path] = None,
+    validity_path: Optional[Path] = None,
 ) -> None:
     model.eval()
     centers = np.asarray(atlas.cluster_centers, dtype=np.float32)
@@ -371,14 +459,59 @@ def plot_generated_layout_examples_by_mechanism(
     rows = int(cluster_ids.size)
     cols = int(samples_per_cluster)
     fig, axes = plt.subplots(rows, cols, figsize=(3.1 * cols, 2.25 * rows), constrained_layout=True)
+    raw_fig = raw_axes = None
+    if raw_path is not None:
+        raw_fig, raw_axes = plt.subplots(rows, cols, figsize=(3.1 * cols, 2.25 * rows), constrained_layout=True)
     axes_arr = np.asarray(axes).reshape(rows, cols)
+    raw_axes_arr = np.asarray(raw_axes).reshape(rows, cols) if raw_axes is not None else None
+    layout_cfg = _layout_search_config_from_model(model.cfg)
+    validity_rows: list[Dict[str, Any]] = []
     for r, cid in enumerate(cluster_ids):
         mech = torch.as_tensor(centers[int(cid)][None, :], dtype=torch.float32, device=device)
         samples = model.sample_layout(mech, num_samples=cols, steps=max(2, min(int(model.cfg.flow_steps_default), 16)))["design_vec"].detach().cpu().numpy()
         for c in range(cols):
-            draw_layout_axis(axes_arr[r, c], samples[c], model.cfg, title=f"cluster {int(cid)}")
+            raw_layout = _raw_layout_from_design_vec(samples[c], model.cfg)
+            repaired_layout = decode_design_vec_to_layout(samples[c], layout_cfg)
+            repaired_vec = encode_layout_to_design_vec(repaired_layout, layout_cfg)
+            raw_penalty = geometry_penalty(raw_layout, layout_cfg)
+            validity = repaired_layout.get("validity", {}) if isinstance(repaired_layout.get("validity"), Mapping) else {}
+            repair_penalty = validity.get("geometry_penalty", {}) if isinstance(validity.get("geometry_penalty"), Mapping) else geometry_penalty(repaired_layout, layout_cfg)
+            validity_rows.append(
+                {
+                    "cluster_id": int(cid),
+                    "raw_count": int(raw_layout.get("count", 0)),
+                    "repaired_count": int(repaired_layout.get("count", 0)),
+                    "repair_distance": float(repaired_layout.get("repair_distance", 0.0)),
+                    "raw_overlap_violation": float(raw_penalty.get("min_center_distance", 0.0)) > 1.0e-8,
+                    "raw_wall_violation": float(raw_penalty.get("wall_clearance", 0.0)) > 1.0e-8,
+                    "raw_inlet_outlet_violation": float(raw_penalty.get("inlet_clearance", 0.0) + raw_penalty.get("outlet_clearance", 0.0)) > 1.0e-8,
+                    "repaired_valid": bool(validity.get("valid", sum(float(v) for v in repair_penalty.values()) <= 1.0e-8)),
+                }
+            )
+            draw_layout_axis(axes_arr[r, c], repaired_vec, model.cfg, title=f"cluster {int(cid)}")
+            if raw_axes_arr is not None:
+                draw_layout_axis(raw_axes_arr[r, c], samples[c], model.cfg, title=f"raw c{int(cid)}")
     fig.savefig(str(path), dpi=160)
     plt.close(fig)
+    if raw_fig is not None and raw_path is not None:
+        raw_fig.savefig(str(raw_path), dpi=160)
+        plt.close(raw_fig)
+    if validity_path is not None and validity_rows:
+        repaired_counts = np.asarray([row["repaired_count"] for row in validity_rows], dtype=np.float32)
+        repairs = np.asarray([row["repair_distance"] for row in validity_rows], dtype=np.float32)
+        write_json(
+            validity_path,
+            {
+                "num_samples": int(len(validity_rows)),
+                "mean_count": float(np.mean(repaired_counts)) if repaired_counts.size else 0.0,
+                "count_valid_rate": float(np.mean([bool(row["repaired_valid"]) for row in validity_rows])),
+                "mean_repair_distance": float(np.mean(repairs)) if repairs.size else 0.0,
+                "overlap_violation_rate": float(np.mean([bool(row["raw_overlap_violation"]) for row in validity_rows])),
+                "wall_violation_rate": float(np.mean([bool(row["raw_wall_violation"]) for row in validity_rows])),
+                "inlet_outlet_violation_rate": float(np.mean([bool(row["raw_inlet_outlet_violation"]) for row in validity_rows])),
+                "rows": validity_rows,
+            },
+        )
 
 
 def save_checkpoint(
@@ -390,6 +523,7 @@ def save_checkpoint(
     dataset_stats: Mapping[str, Any],
     epoch: int,
     best_metric: float,
+    representative_bank: Optional[Mapping[str, Any]] = None,
 ) -> None:
     torch.save(
         {
@@ -402,6 +536,7 @@ def save_checkpoint(
             "model_state_dict": model.state_dict(),
             "dataset_stats": dict(dataset_stats),
             "train_config": dict(cfg),
+            "mechanism_representative_bank": dict(representative_bank or {}),
         },
         path,
     )
@@ -433,7 +568,14 @@ def write_run_diagnostics(
     plot_mechanism_feature_pca(features, assignments, run_dir / "mechanism_feature_pca.png")
     plot_mechanism_feature_pca(features, assignments, run_dir / "mechanism_feature_umap_or_pca.png")
     write_mechanism_representatives(run_dir, dataset, features, assignments, atlas, model.cfg)
-    plot_generated_layout_examples_by_mechanism(model, atlas, device, run_dir / "generated_layout_examples_by_mechanism.png")
+    plot_generated_layout_examples_by_mechanism(
+        model,
+        atlas,
+        device,
+        run_dir / "generated_layout_examples_by_mechanism.png",
+        raw_path=run_dir / "generated_layout_examples_raw_by_mechanism.png",
+        validity_path=run_dir / "generated_layout_validity_summary.json",
+    )
     return summary
 
 
@@ -465,8 +607,7 @@ def dry_run(args: argparse.Namespace, cfg: Mapping[str, Any]) -> int:
     atlas, fit_features = build_mechanism_atlas(fit_arrays, mechanism_cfg)
     features = atlas.encode(arrays.get("hypergraph_vec"), arrays.get("behavior_vec"), arrays.get("count_vec", arrays.get("true_count")))
     model_config = build_model_config(dataset, features, cfg)
-    device_arg = training_cfg.get("device", "auto")
-    device = select_device(None if str(device_arg).lower() == "auto" else str(device_arg))
+    device = resolve_device(args, training_cfg)
     model = HypergraphConditionedLayoutRealizer(model_config).to(device)
     dry_dataset = MechanismFeatureDataset(dataset, features)
     loader = DataLoader(dry_dataset, batch_size=min(int(training_cfg.get("batch_size", 128)), len(dry_dataset)), shuffle=False, num_workers=0, collate_fn=collate_fn)
@@ -495,12 +636,21 @@ def main() -> int:
     run_id = resolve_run_id(args, cfg)
     cfg["Run_ID"] = run_id
     set_seed(int(training_cfg.get("seed", 0)))
-    device_arg = training_cfg.get("device", "auto")
-    device = select_device(None if str(device_arg).lower() == "auto" else str(device_arg))
+    device = resolve_device(args, training_cfg)
+    if args.device is not None:
+        cfg.setdefault("training", {})
+        if isinstance(cfg["training"], dict):
+            cfg["training"]["device"] = str(args.device)
 
     dataset = _load_dataset(data_cfg, realizer_cfg)
     arrays = dataset.get_arrays_for_mechanism_fit()
     atlas, mechanism_features = build_mechanism_atlas(arrays, mechanism_cfg)
+    representative_bank = build_representative_bank(
+        arrays,
+        mechanism_features,
+        atlas,
+        max_per_cluster=int(mechanism_cfg.get("max_representatives_per_cluster", 64)),
+    )
     model_config = build_model_config(dataset, mechanism_features, cfg)
     model = HypergraphConditionedLayoutRealizer(model_config).to(device)
     if args.resume:
@@ -544,6 +694,7 @@ def main() -> int:
     write_json(run_dir / "resolved_train_design_prior_config.json", cfg)
     write_json(run_dir / "dataset_stats.json", dataset.stats)
     write_json(run_dir / "mechanism_atlas_state.json", atlas.to_state())
+    write_representative_bank_npz(representative_bank, run_dir / "mechanism_representative_bank.npz")
     epochs = int(args.epochs or training_cfg.get("epochs", 2000))
     history = []
     best = float("inf")
@@ -558,9 +709,9 @@ def main() -> int:
         metric = float(row.get("val_loss_total", row.get("train_loss_total", float("inf"))))
         if metric < best:
             best = metric
-            save_checkpoint(run_dir / "best_model.pt", model=model, atlas=atlas, cfg=cfg, dataset_stats=dataset.stats, epoch=epoch, best_metric=best)
+            save_checkpoint(run_dir / "best_model.pt", model=model, atlas=atlas, cfg=cfg, dataset_stats=dataset.stats, epoch=epoch, best_metric=best, representative_bank=representative_bank)
         if epoch % save_every == 0 or epoch == epochs:
-            save_checkpoint(run_dir / "latest_model.pt", model=model, atlas=atlas, cfg=cfg, dataset_stats=dataset.stats, epoch=epoch, best_metric=best)
+            save_checkpoint(run_dir / "latest_model.pt", model=model, atlas=atlas, cfg=cfg, dataset_stats=dataset.stats, epoch=epoch, best_metric=best, representative_bank=representative_bank)
         write_history(history, run_dir / "loss_history.csv")
         plot_loss_curves(history, run_dir / "loss_curves.png")
         print(f"[epoch {epoch:04d}] train={row.get('train_loss_total', float('nan')):.6g} val={row.get('val_loss_total', float('nan')):.6g} best={best:.6g}")

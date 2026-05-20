@@ -37,6 +37,8 @@ Data_Saved/
 1_Demo_ChannelThermal/Saved_Model_Inverse/
 1_Demo_ChannelThermal/Domain_shape/
 1_Demo_ChannelThermal/Saved_Model_Prior/
+Unified_Forward_Model_0/results/*
+!Unified_Forward_Model_0/results/.gitkeep
 
 # Per-run generated config backups; keep active configs and templates tracked.
 0_Demo_MultiCylinder/Configs/Config_bk/
