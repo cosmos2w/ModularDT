@@ -87,6 +87,7 @@ class HypergraphOrganizerCore(nn.Module):
         )
         self.me_query = nn.Linear(hidden_dim, hidden_dim)
         self.me_key = nn.Linear(hidden_dim, hidden_dim)
+        self.me_context_proj = nn.Linear(hidden_dim, hidden_dim)
 
     def forward(
         self,
@@ -105,7 +106,26 @@ class HypergraphOrganizerCore(nn.Module):
         env_coords_b = _as_batched_coords(env_coords.to(module_tokens.device, module_tokens.dtype), batch_size)
         module_present = module_present.to(device=module_tokens.device, dtype=module_tokens.dtype)
 
-        module_logits = self.module_score(module_tokens)
+        if cfg.use_A_me_auxiliary:
+            q = self.me_query(module_tokens)
+            k = self.me_key(env_tokens)
+            logits = torch.einsum("bmh,beh->bme", q, k) / math.sqrt(float(hidden_dim))
+            A_me = torch.softmax(logits, dim=-1) * module_present.unsqueeze(-1)
+            module_env_context = torch.einsum("bme,beh->bmh", A_me, env_tokens)
+            module_tokens_for_hyper = module_tokens + 0.25 * self.me_context_proj(module_env_context)
+            module_tokens_for_hyper = module_tokens_for_hyper * module_present.unsqueeze(-1)
+        else:
+            A_me = torch.zeros(
+                module_tokens.shape[0],
+                module_tokens.shape[1],
+                env_tokens.shape[1],
+                device=module_tokens.device,
+                dtype=module_tokens.dtype,
+            )
+            module_env_context = torch.zeros_like(module_tokens)
+            module_tokens_for_hyper = module_tokens
+
+        module_logits = self.module_score(module_tokens_for_hyper)
         module_mask = module_present.unsqueeze(-1).expand_as(module_logits)
         A_mh = _masked_softmax(module_logits, module_mask, dim=-1)
         A_mh = A_mh * module_present.unsqueeze(-1)
@@ -128,7 +148,7 @@ class HypergraphOrganizerCore(nn.Module):
         hyper_region_coords = _weighted_coords(env_coords_b, region_weights, cfg)
         hyper_strength = torch.sqrt(hyper_module_mass * hyper_env_mass + EPS)
 
-        module_summary = torch.einsum("bmk,bmh->bkh", A_mh, self.module_to_hyper(module_tokens))
+        module_summary = torch.einsum("bmk,bmh->bkh", A_mh, self.module_to_hyper(module_tokens_for_hyper))
         module_summary = module_summary / module_mass_raw.unsqueeze(-1).clamp_min(EPS)
         env_summary = torch.einsum("bek,beh->bkh", A_eh, self.env_to_hyper(env_tokens))
         env_summary = env_summary / env_mass_raw.unsqueeze(-1).clamp_min(EPS)
@@ -146,27 +166,13 @@ class HypergraphOrganizerCore(nn.Module):
             "hyper_env_mass": hyper_env_mass,
             "hyper_strength": hyper_strength,
             "module_tokens": module_tokens,
+            "module_tokens_for_hyper": module_tokens_for_hyper,
             "env_tokens": env_tokens,
             "env_coords": env_coords_b,
             "module_centers": module_centers,
             "module_present": module_present,
+            "A_me": A_me,
+            "module_env_context": module_env_context,
         }
-
-        if cfg.use_A_me_auxiliary:
-            q = self.me_query(module_tokens)
-            k = self.me_key(env_tokens)
-            logits = torch.einsum("bmh,beh->bme", q, k) / math.sqrt(float(hidden_dim))
-            A_me = torch.softmax(logits, dim=-1) * module_present.unsqueeze(-1)
-            output["A_me"] = A_me
-            output["module_env_context"] = torch.einsum("bme,beh->bmh", A_me, env_tokens)
-        else:
-            output["A_me"] = torch.zeros(
-                module_tokens.shape[0],
-                module_tokens.shape[1],
-                env_tokens.shape[1],
-                device=module_tokens.device,
-                dtype=module_tokens.dtype,
-            )
-            output["module_env_context"] = torch.zeros_like(module_tokens)
 
         return output

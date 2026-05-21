@@ -1,35 +1,29 @@
 {
   "model": {
     "_note_case": "ChannelThermal: nonperiodic channel, steady query, 5 fields including temperature.",
-    
     "_note_field_dim": "5 means u,v,p,omega,temperature.",
     "field_dim": 5,
-    
     "_note_layout": "Physical channel units. Test module_radius only if local geometry scale is uncertain.",
     "max_num_modules": 12,
     "domain_length_x": 12.0,
     "domain_length_y": 4.0,
     "module_radius": 0.45,
-    
     "_note_env_tokens": "Centered environment grid. Test 12x4,16x6,24x8 for spatial resolution.",
     "num_env_tokens_x": 16,
     "num_env_tokens_y": 6,
-    
     "_note_num_hyperedges": "Thermal organization bottleneck. Test 2,4,6,8.",
     "num_hyperedges": 4,
     "_note_hidden_dim": "Shared token width. Test 64,96,128,192.",
     "hidden_dim": 128,
-    
     "_note_geometry_time": "nonperiodic uses direct wall/channel geometry; no query time by default.",
     "geometry_mode": "nonperiodic",
     "query_time_mode": "none",
-    
+
     "_note_decoder_mode": "Start hyper_only. Add global/direct/near paths only as ablations.",
-    "decoder_mode": "hyper_only",
+    "decoder_mode": "current_like",
     "_note_hyper_geometry_bias": "Query-to-hyperedge coordinate bias; useful for plume/wall placement.",
     "use_hyper_geometry_bias": true,
     "hyper_geometry_bias_scale": 1.0,
-    
     "_note_auxiliary_paths": "A_me shapes organizer; direct/near/global reveal redundant decoder shortcuts.",
     "use_A_me_auxiliary": true,
     "use_direct_module_env_decoder": false,
@@ -39,14 +33,31 @@
     "direct_residual_gate_init": 0.0
   },
   "data": {
-    "_note_paths": "Reads existing demo datasets in place; missing files fall back to synthetic smoke data.",
+    "_note_paths": "Reads existing demo datasets in place; missing files fail real training and synthetic remains separate.",
     "channelthermal_dataset_path": "../1_Demo_ChannelThermal/Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
     "multicylinder_dataset_path": "../0_Demo_MultiCylinder/Data_Saved/Processed_MultiCylinder_Dataset/packed_dataset.h5"
   },
   "training": {
     "_note_training": "Use --inspect-data and dry-run before real ablations.",
-    "batch_size": 4,
+    "epochs": 2000,
+    "batch_size": 64,
+    "val_batch_size": 64,
+    "points_per_case": 2048,
+    "val_points_per_case": 2048,
+    
+    "max_train_cases": null,
+    "max_val_cases": null,
+    "max_train_batches_per_epoch": null,
+    "max_val_batches": null,
+    "normalize_targets": true,
+    "field_channel_weights": null,
+    "temperature_weight": 1.0,
+
     "learning_rate": 0.0003,
+    "weight_decay": 0.00001,
+    "grad_clip_norm": 1.0,
+    "eval_every": 5,
+    "save_every": 20,
     "seed": 0,
     "device": "auto"
   }

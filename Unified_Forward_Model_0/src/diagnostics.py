@@ -14,7 +14,7 @@ EPS = 1e-8
 
 def compute_basic_field_metrics(pred: torch.Tensor, target: Optional[torch.Tensor]) -> Dict[str, Any]:
     """Compute basic prediction metrics when targets are available."""
-    metrics: Dict[str, Any] = {"pred_shape": list(pred.shape), "target_shape": None, "shape_mismatch": False}
+    metrics: Dict[str, Any] = {"pred_shape": list(pred.shape), "target_shape": None, "shape_mismatch": 0.0}
     if target is None:
         metrics["field_mse"] = float("nan")
         return metrics
@@ -23,9 +23,12 @@ def compute_basic_field_metrics(pred: torch.Tensor, target: Optional[torch.Tenso
     metrics["target_shape"] = list(target.shape)
     if pred.shape != target.shape:
         metrics["field_mse"] = float("nan")
-        metrics["shape_mismatch"] = True
+        metrics["shape_mismatch"] = 1.0
         return metrics
     metrics["field_mse"] = float(torch.mean((pred - target) ** 2).cpu())
+    channel_mse = torch.mean((pred - target) ** 2, dim=tuple(range(pred.ndim - 1)))
+    for idx, value in enumerate(channel_mse):
+        metrics[f"mse_channel_{idx}"] = float(value.cpu())
     if pred.shape[-1] >= 5 and target.shape[-1] >= 5:
         metrics["temperature_mse"] = float(torch.mean((pred[..., 4] - target[..., 4]) ** 2).cpu())
     return metrics
@@ -126,7 +129,10 @@ def plot_ablation_summary(rows: list[Dict[str, Any]], path: str | Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     names = [str(row.get("name", idx)) for idx, row in enumerate(rows)]
-    mses = [float(row.get("field_mse", float("nan"))) for row in rows]
+    mses = [
+        float(row.get("field_mse", row.get("best_val_field_mse", row.get("val_field_mse_physical", float("nan")))))
+        for row in rows
+    ]
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.bar(names, mses)
     ax.set_ylabel("field MSE")
