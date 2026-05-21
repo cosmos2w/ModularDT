@@ -73,16 +73,15 @@ def make_synthetic_batch(case_name: str = "channel", batch_size: int = 2, points
     weights = torch.exp(-dist2 / (0.08 if is_multi else 1.0)) * module_present[:, None, :]
     influence = weights.sum(dim=-1)
     phase = torch.zeros_like(influence) if query_time is None else torch.sin(2.0 * torch.pi * query_time[..., 0])
-    target = torch.stack(
-        [
-            torch.sin(query_xy[..., 0]) + 0.1 * influence,
-            torch.cos(query_xy[..., 1]) - 0.05 * influence,
-            0.2 * influence,
-            phase + 0.1 * influence,
-            0.5 + influence,
-        ],
-        dim=-1,
-    )
+    target_pieces = [
+        torch.sin(query_xy[..., 0]) + 0.1 * influence,
+        torch.cos(query_xy[..., 1]) - 0.05 * influence,
+        0.2 * influence,
+        phase + 0.1 * influence,
+    ]
+    if not is_multi:
+        target_pieces.append(0.5 + influence)
+    target = torch.stack(target_pieces, dim=-1)
 
     return BatchData(
         module_centers=module_centers,
@@ -225,6 +224,134 @@ class MultiCylinderAdapter(_BaseAdapter):
 
     def __init__(self, dataset_path: str = DEFAULT_MULTICYLINDER_PATH):
         super().__init__(dataset_path, "multicylinder")
+
+    def load_one_batch(self, batch_size: int = 1, points_per_case: int = 256) -> BatchData:
+        if not self.dataset_path.exists():
+            print(f"[adapter] Dataset not found: {self.dataset_path}. Using synthetic smoke batch.")
+            return make_synthetic_batch(self.case_name, batch_size=batch_size, points_per_case=points_per_case)
+        try:
+            import h5py  # type: ignore
+        except ImportError:
+            print("[adapter] h5py is not installed. Using synthetic smoke batch.")
+            return make_synthetic_batch(self.case_name, batch_size=batch_size, points_per_case=points_per_case)
+
+        try:
+            with h5py.File(self.dataset_path, "r") as handle:
+                batch = self._load_multicylinder_h5(handle, batch_size=batch_size, points_per_case=points_per_case)
+        except Exception as exc:
+            print(f"[adapter] Could not read MultiCylinder layout from {self.dataset_path}: {exc}. Using synthetic smoke batch.")
+            return make_synthetic_batch(self.case_name, batch_size=batch_size, points_per_case=points_per_case)
+        return batch
+
+    def _load_multicylinder_h5(self, handle: object, batch_size: int, points_per_case: int) -> BatchData:
+        cases = handle["cases"]  # type: ignore[index]
+        case_ids = sorted(cases.keys(), key=lambda item: (0, int(item)) if str(item).isdigit() else (1, str(item)))
+        selected_ids = case_ids[: max(int(batch_size), 1)]
+        if not selected_ids:
+            raise ValueError("No cases found in HDF5 file.")
+
+        centers_raw = []
+        queries = []
+        query_times = []
+        targets = []
+        global_rows = []
+        metadata_cases = []
+        max_modules = 0
+        for case_id in selected_ids:
+            grp = cases[case_id]
+            sampled = grp["sampled_points"]
+            centers = torch.as_tensor(grp["cylinder_centers"][()], dtype=torch.float32)
+            max_modules = max(max_modules, int(centers.shape[0]))
+            centers_raw.append(centers)
+
+            total_points = int(sampled["x"].shape[0])
+            count = min(int(points_per_case), total_points)
+            if count <= 0:
+                raise ValueError(f"Case {case_id} has no sampled points.")
+            point_idx = torch.linspace(0, total_points - 1, count).round().long()
+            x = torch.as_tensor(sampled["x"][point_idx.numpy()], dtype=torch.float32)
+            y = torch.as_tensor(sampled["y"][point_idx.numpy()], dtype=torch.float32)
+            tau = torch.as_tensor(sampled["tau"][point_idx.numpy()], dtype=torch.float32)
+            field = torch.stack(
+                [
+                    torch.as_tensor(sampled["u"][point_idx.numpy()], dtype=torch.float32),
+                    torch.as_tensor(sampled["v"][point_idx.numpy()], dtype=torch.float32),
+                    torch.as_tensor(sampled["p"][point_idx.numpy()], dtype=torch.float32),
+                    torch.as_tensor(sampled["omega"][point_idx.numpy()], dtype=torch.float32),
+                ],
+                dim=-1,
+            )
+
+            x_grid = torch.as_tensor(grp["x_grid"][()], dtype=torch.float32)
+            y_grid = torch.as_tensor(grp["y_grid"][()], dtype=torch.float32)
+            x_min = float(x_grid.min())
+            y_min = float(y_grid.min())
+            x_span = float(x_grid.max() - x_grid.min())
+            y_span = float(y_grid.max() - y_grid.min())
+            x_norm = (x - x_min) / max(x_span, 1e-6)
+            y_norm = (y - y_min) / max(y_span, 1e-6)
+            centers_norm = centers.clone()
+            centers_norm[:, 0] = (centers_norm[:, 0] - x_min) / max(x_span, 1e-6)
+            centers_norm[:, 1] = (centers_norm[:, 1] - y_min) / max(y_span, 1e-6)
+            centers_raw[-1] = centers_norm
+
+            queries.append(torch.stack([x_norm, y_norm], dim=-1))
+            query_times.append(tau[:, None])
+            targets.append(field)
+            global_rows.append(
+                torch.tensor(
+                    [
+                        1.0,
+                        float(grp.attrs.get("re", 0.0)),
+                        float(grp.attrs.get("dominant_frequency", 0.0)),
+                        float(grp.attrs.get("num_cylinders", centers.shape[0])),
+                        float(x_span),
+                        float(y_span),
+                        0.0,
+                        0.0,
+                    ],
+                    dtype=torch.float32,
+                )
+            )
+            metadata_cases.append(
+                {
+                    "case_id": str(case_id),
+                    "num_cylinders": int(centers.shape[0]),
+                    "source_field_dim": 4,
+                    "source_domain_x": float(x_span),
+                    "source_domain_y": float(y_span),
+                }
+            )
+
+        module_centers = torch.zeros(len(selected_ids), max_modules, 2)
+        module_present = torch.zeros(len(selected_ids), max_modules)
+        module_features = torch.zeros(len(selected_ids), max_modules, 8)
+        for row, centers in enumerate(centers_raw):
+            count = int(centers.shape[0])
+            module_centers[row, :count] = centers
+            module_present[row, :count] = 1.0
+            module_features[row, :count, 0:2] = centers
+            module_features[row, :count, 2] = 0.06
+            module_features[row, :count, 3] = global_rows[row][1] / 100.0
+            module_features[row, :count, 4] = 1.0
+
+        return BatchData(
+            module_centers=module_centers,
+            module_present=module_present,
+            module_features=module_features,
+            global_context=torch.stack(global_rows, dim=0),
+            query_xy=torch.stack(queries, dim=0),
+            query_time=torch.stack(query_times, dim=0),
+            target_field=torch.stack(targets, dim=0),
+            case_name="multicylinder",
+            metadata={
+                "synthetic": False,
+                "source": str(self.dataset_path),
+                "layout": "cases/<id>/sampled_points",
+                "normalized_to_unit_domain": True,
+                "cases": metadata_cases,
+            },
+        )
 
 
 def _shape(value: Any) -> Optional[list[int]]:

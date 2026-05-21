@@ -34,7 +34,7 @@
   "data": {
     "_note_paths": "Reads existing demo datasets in place; missing files fall back to synthetic smoke data.",
     "channelthermal_dataset_path": "../1_Demo_ChannelThermal/Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
-    "multicylinder_dataset_path": "../0_Demo_MultiCylinder/Data_Saved/Processed_MultiCylinder_Dataset/packed_dataset.h5"
+    "multicylinder_dataset_path": "../0_Demo_MultiCylinder/Data_Saved/Processed_Inert_Dataset/packed_dataset.h5"
   },
   "training": {
     "_note_training": "Use --inspect-data and dry-run before real ablations.",
