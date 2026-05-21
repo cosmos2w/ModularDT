@@ -2,7 +2,7 @@
 
 The decoder keeps the hypergraph path primary and introduces possible shortcut
 paths only through explicit ablation modes. The direct module/environment path
-is gated by a learnable scalar initialized from the configuration.
+is gated by a sigmoid/logit scalar initialized from the configuration.
 """
 
 from __future__ import annotations
@@ -49,12 +49,15 @@ class HypergraphFieldDecoder(nn.Module):
         self.query_to_hyper = nn.Linear(hidden_dim, hidden_dim)
         self.hyper_key = nn.Linear(hidden_dim, hidden_dim)
         self.hyper_value = nn.Linear(hidden_dim, hidden_dim)
+        self.hyper_geometry_bias = nn.Linear(10, 1)
         self.direct_key = nn.Linear(hidden_dim, hidden_dim)
         self.direct_value = nn.Linear(hidden_dim, hidden_dim)
         self.global_proj = nn.Linear(hidden_dim, hidden_dim)
         self.near_proj = nn.Linear(hidden_dim, hidden_dim)
         self.context_norm = nn.LayerNorm(hidden_dim) if config.use_layer_norm else nn.Identity()
-        self.direct_residual_gate = nn.Parameter(torch.tensor(float(config.direct_residual_gate_init)))
+        gate_init = min(max(float(config.direct_residual_gate_init), 1e-4), 1.0 - 1e-4)
+        gate_logit = math.log(gate_init / (1.0 - gate_init))
+        self.direct_residual_logit = nn.Parameter(torch.tensor(gate_logit, dtype=torch.float32))
 
         self.pred_head = MLP(hidden_dim, hidden_dim, field_dim, float(config.dropout))
         if config.output_mean_residual_split:
@@ -78,11 +81,18 @@ class HypergraphFieldDecoder(nn.Module):
             self.query_to_hyper(query_state),
             self.hyper_key(hyper_state),
         ) / math.sqrt(float(query_state.shape[-1]))
+        if cfg.use_hyper_geometry_bias:
+            geometry_bias = self.hyper_geometry_bias(self._hyper_geometry_features(query_xy, organizer_output)).squeeze(-1)
+            hyper_logits = hyper_logits + float(cfg.hyper_geometry_bias_scale) * geometry_bias
+        else:
+            geometry_bias = torch.zeros_like(hyper_logits)
         hyper_attention = torch.softmax(hyper_logits, dim=-1)
         context = torch.einsum("bqk,bkh->bqh", hyper_attention, self.hyper_value(hyper_state))
 
         diagnostics: Dict[str, torch.Tensor | str] = {
             "hyper_attention_mean": hyper_attention.mean(dim=1),
+            "hyper_geometry_bias_mean": geometry_bias.detach().mean(),
+            "hyper_geometry_bias_std": geometry_bias.detach().std(unbiased=False),
             "decoder_mode": cfg.decoder_mode,
         }
 
@@ -91,7 +101,7 @@ class HypergraphFieldDecoder(nn.Module):
 
         if self._uses_direct():
             direct_context, direct_attention = self._direct_context(query_state, organizer_output)
-            gate = torch.clamp(self.direct_residual_gate, 0.0, 1.0)
+            gate = torch.sigmoid(self.direct_residual_logit)
             context = context + gate * direct_context
             diagnostics["direct_attention_mean"] = direct_attention.mean(dim=1)
             diagnostics["direct_residual_gate"] = gate.detach()
@@ -132,6 +142,54 @@ class HypergraphFieldDecoder(nn.Module):
             t_sin = torch.zeros_like(t)
             t_cos = torch.ones_like(t)
         return torch.cat([xy, t, t_sin, t_cos], dim=-1)
+
+    def _hyper_geometry_features(
+        self,
+        query_xy: torch.Tensor,
+        organizer_output: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        source = organizer_output["hyper_source_coords"]
+        region = organizer_output["hyper_region_coords"]
+        source_delta, source_downstream, source_lateral = self._relative_geometry(query_xy, source)
+        region_delta, region_downstream, region_lateral = self._relative_geometry(query_xy, region)
+        diag = math.sqrt(max(float(self.config.domain_length_x), EPS) ** 2 + max(float(self.config.domain_length_y), EPS) ** 2)
+        source_dist = torch.sqrt(source_delta.square().sum(dim=-1, keepdim=True) + EPS) / max(diag, EPS)
+        region_dist = torch.sqrt(region_delta.square().sum(dim=-1, keepdim=True) + EPS) / max(diag, EPS)
+        lx = max(float(self.config.domain_length_x), EPS)
+        ly = max(float(self.config.domain_length_y), EPS)
+        return torch.cat(
+            [
+                source_delta[..., 0:1] / lx,
+                source_delta[..., 1:2] / ly,
+                region_delta[..., 0:1] / lx,
+                region_delta[..., 1:2] / ly,
+                source_dist,
+                region_dist,
+                source_downstream,
+                region_downstream,
+                source_lateral,
+                region_lateral,
+            ],
+            dim=-1,
+        )
+
+    def _relative_geometry(
+        self,
+        query_xy: torch.Tensor,
+        hyper_coords: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        lx = max(float(self.config.domain_length_x), EPS)
+        ly = max(float(self.config.domain_length_y), EPS)
+        delta = query_xy[:, :, None, :] - hyper_coords[:, None, :, :]
+        if self.config.geometry_mode == "periodic":
+            lengths = torch.tensor([lx, ly], device=query_xy.device, dtype=query_xy.dtype)
+            raw_dx = delta[..., 0]
+            delta = torch.remainder(delta + 0.5 * lengths, lengths) - 0.5 * lengths
+            downstream = torch.remainder(raw_dx, lx).unsqueeze(-1) / lx
+        else:
+            downstream = torch.relu(delta[..., 0:1]) / lx
+        lateral = delta[..., 1:2].abs() / ly
+        return delta, downstream, lateral
 
     def _direct_context(
         self,

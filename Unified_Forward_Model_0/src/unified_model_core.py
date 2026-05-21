@@ -101,7 +101,9 @@ class UnifiedHypergraphNeuralField(nn.Module):
 
     def _environment_coords(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         cfg = self.config
-        xs = torch.linspace(0.0, float(cfg.domain_length_x), int(cfg.num_env_tokens_x), device=device, dtype=dtype)
-        ys = torch.linspace(0.0, float(cfg.domain_length_y), int(cfg.num_env_tokens_y), device=device, dtype=dtype)
+        nx = int(cfg.num_env_tokens_x)
+        ny = int(cfg.num_env_tokens_y)
+        xs = (torch.arange(nx, device=device, dtype=dtype) + 0.5) / max(float(nx), 1.0) * float(cfg.domain_length_x)
+        ys = (torch.arange(ny, device=device, dtype=dtype) + 0.5) / max(float(ny), 1.0) * float(cfg.domain_length_y)
         grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
         return torch.stack([grid_x.reshape(-1), grid_y.reshape(-1)], dim=-1)

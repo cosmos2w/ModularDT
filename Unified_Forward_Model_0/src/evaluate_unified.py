@@ -9,7 +9,7 @@ from typing import Any, Dict
 
 import torch
 
-from case_adapters import ChannelThermalAdapter, MultiCylinderAdapter, make_synthetic_batch
+from case_adapters import ChannelThermalAdapter, MultiCylinderAdapter, describe_batch, make_synthetic_batch
 from diagnostics import (
     compute_basic_field_metrics,
     compute_hypergraph_diagnostics,
@@ -31,11 +31,22 @@ def main() -> None:
     device = resolve_device(training_cfg.get("device", "auto"))
     config = UnifiedForwardConfig.from_dict(payload.get("model", {}))
 
-    batch = load_batch(args.case, payload, batch_size=int(training_cfg.get("batch_size", 1))).to(device)
+    batch = load_batch(args.case, payload, batch_size=int(training_cfg.get("batch_size", 1)))
+    if args.inspect_data:
+        print(json.dumps({"batch": describe_batch(batch)}, indent=2, sort_keys=True))
+    batch = batch.to(device)
     model = UnifiedHypergraphNeuralField(config).to(device)
     model.eval()
     with torch.no_grad():
         output = model(batch)
+    if args.inspect_data:
+        pred_shape = list(output["pred_field"].shape)
+        print(json.dumps({"pred_field_shape": pred_shape}, indent=2, sort_keys=True))
+        if batch.target_field is not None and output["pred_field"].shape != batch.target_field.shape:
+            print(
+                "[warning] pred_field shape does not match target_field shape; "
+                f"skipping MSE. pred={pred_shape} target={list(batch.target_field.shape)}"
+            )
 
     metrics = compute_basic_field_metrics(output["pred_field"], batch.target_field)
     metrics.update(compute_hypergraph_diagnostics(output))
@@ -51,6 +62,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="configs/unified_forward_config_template.json")
     parser.add_argument("--case", choices=["channelthermal", "multicylinder", "synthetic"], default="synthetic")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--inspect-data", action="store_true")
     return parser.parse_args()
 
 

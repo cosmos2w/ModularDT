@@ -46,6 +46,8 @@ class UnifiedForwardConfig:
     query_time_mode: str = "none"
 
     decoder_mode: str = "hyper_only"
+    use_hyper_geometry_bias: bool = True
+    hyper_geometry_bias_scale: float = 1.0
     direct_residual_gate_init: float = 0.0
     use_A_me_auxiliary: bool = True
     use_direct_module_env_decoder: bool = False

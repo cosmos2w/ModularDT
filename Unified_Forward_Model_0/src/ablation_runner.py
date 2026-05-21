@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 import torch
 
-from case_adapters import make_synthetic_batch
+from case_adapters import ChannelThermalAdapter, MultiCylinderAdapter, make_synthetic_batch
 from diagnostics import (
     compute_basic_field_metrics,
     compute_hypergraph_diagnostics,
@@ -30,7 +30,7 @@ def main() -> None:
     training_cfg = base_payload.get("training", {})
     torch.manual_seed(int(training_cfg.get("seed", 0)))
     device = torch.device("cuda" if training_cfg.get("device", "auto") == "auto" and torch.cuda.is_available() else "cpu")
-    batch = make_synthetic_batch("channel", batch_size=2, points_per_case=192).to(device)
+    batch = load_batch(args.case, base_payload, batch_size=int(training_cfg.get("batch_size", 2))).to(device)
 
     rows: List[Dict[str, Any]] = []
     for item in plan_payload.get("ablations", []):
@@ -53,7 +53,14 @@ def main() -> None:
             output = model(batch)
         metrics = compute_basic_field_metrics(output["pred_field"], batch.target_field)
         metrics.update(compute_hypergraph_diagnostics(output))
-        row = {"name": ablation.name, "notes": ablation.notes, **metrics, "config": config.to_dict()}
+        row = {
+            "name": ablation.name,
+            "notes": ablation.notes,
+            "case_name": batch.case_name,
+            "synthetic": bool(batch.metadata.get("synthetic", False)),
+            **metrics,
+            "config": config.to_dict(),
+        }
         rows.append(row)
 
     out_path = SANDBOX_ROOT / "results" / "ablation_manifest_resolved.json"
@@ -66,7 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/unified_forward_config_template.json")
     parser.add_argument("--plan", default="configs/ablation_plan_template.json")
-    parser.add_argument("--case", choices=["synthetic"], default="synthetic")
+    parser.add_argument("--case", choices=["synthetic", "channelthermal", "multicylinder"], default="synthetic")
     return parser.parse_args()
 
 
@@ -75,6 +82,21 @@ def load_json(path: str) -> Dict[str, Any]:
     if not config_path.is_absolute():
         config_path = SANDBOX_ROOT / config_path
     return json.loads(config_path.read_text(encoding="utf-8"))
+
+
+def load_batch(case: str, payload: Dict[str, Any], batch_size: int = 2):
+    data_cfg = payload.get("data", {})
+    if case == "synthetic":
+        return make_synthetic_batch("channel", batch_size=batch_size, points_per_case=192)
+    if case == "channelthermal":
+        return ChannelThermalAdapter(data_cfg.get("channelthermal_dataset_path", ChannelThermalAdapter().dataset_path)).load_one_batch(
+            batch_size=batch_size,
+            points_per_case=192,
+        )
+    return MultiCylinderAdapter(data_cfg.get("multicylinder_dataset_path", MultiCylinderAdapter().dataset_path)).load_one_batch(
+        batch_size=batch_size,
+        points_per_case=192,
+    )
 
 
 if __name__ == "__main__":

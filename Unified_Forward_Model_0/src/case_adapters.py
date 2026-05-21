@@ -8,7 +8,7 @@ fall back to synthetic smoke batches without copying data into the sandbox.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -17,6 +17,22 @@ from unified_types import BatchData
 
 DEFAULT_CHANNEL_PATH = "../1_Demo_ChannelThermal/Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5"
 DEFAULT_MULTICYLINDER_PATH = "../0_Demo_MultiCylinder/Data_Saved/Processed_MultiCylinder_Dataset/packed_dataset.h5"
+
+
+def describe_batch(batch: BatchData) -> Dict[str, Any]:
+    """Return shape and provenance information for a loaded BatchData object."""
+    return {
+        "case_name": batch.case_name,
+        "synthetic": bool(batch.metadata.get("synthetic", False)),
+        "module_centers_shape": _shape(batch.module_centers),
+        "module_present_shape": _shape(batch.module_present),
+        "module_features_shape": _shape(batch.module_features),
+        "global_context_shape": _shape(batch.global_context),
+        "query_xy_shape": _shape(batch.query_xy),
+        "query_time_shape": _shape(batch.query_time),
+        "target_field_shape": _shape(batch.target_field),
+        "metadata": batch.metadata,
+    }
 
 
 def make_synthetic_batch(case_name: str = "channel", batch_size: int = 2, points_per_case: int = 192) -> BatchData:
@@ -209,3 +225,10 @@ class MultiCylinderAdapter(_BaseAdapter):
 
     def __init__(self, dataset_path: str = DEFAULT_MULTICYLINDER_PATH):
         super().__init__(dataset_path, "multicylinder")
+
+
+def _shape(value: Any) -> Optional[list[int]]:
+    if value is None:
+        return None
+    shape = getattr(value, "shape", None)
+    return list(shape) if shape is not None else None

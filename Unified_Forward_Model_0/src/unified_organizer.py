@@ -110,7 +110,8 @@ class HypergraphOrganizerCore(nn.Module):
         A_mh = _masked_softmax(module_logits, module_mask, dim=-1)
         A_mh = A_mh * module_present.unsqueeze(-1)
 
-        module_mass = A_mh.sum(dim=1)
+        module_mass_raw = A_mh.sum(dim=1)
+        hyper_module_mass = module_mass_raw / module_mass_raw.sum(dim=-1, keepdim=True).clamp_min(EPS)
         source_weights = A_mh / A_mh.sum(dim=1, keepdim=True).clamp_min(EPS)
         hyper_source_coords = _weighted_coords(module_centers, source_weights, cfg)
 
@@ -121,15 +122,16 @@ class HypergraphOrganizerCore(nn.Module):
         geometry_bias = -dist / max(scale, EPS)
         A_eh = torch.softmax(env_logits + geometry_bias, dim=-1)
 
-        env_mass = A_eh.sum(dim=1)
+        env_mass_raw = A_eh.sum(dim=1)
+        hyper_env_mass = env_mass_raw / env_mass_raw.sum(dim=-1, keepdim=True).clamp_min(EPS)
         region_weights = A_eh / A_eh.sum(dim=1, keepdim=True).clamp_min(EPS)
         hyper_region_coords = _weighted_coords(env_coords_b, region_weights, cfg)
-        hyper_strength = torch.sqrt(module_mass * env_mass + EPS)
+        hyper_strength = torch.sqrt(hyper_module_mass * hyper_env_mass + EPS)
 
         module_summary = torch.einsum("bmk,bmh->bkh", A_mh, self.module_to_hyper(module_tokens))
-        module_summary = module_summary / module_mass.unsqueeze(-1).clamp_min(EPS)
+        module_summary = module_summary / module_mass_raw.unsqueeze(-1).clamp_min(EPS)
         env_summary = torch.einsum("bek,beh->bkh", A_eh, self.env_to_hyper(env_tokens))
-        env_summary = env_summary / env_mass.unsqueeze(-1).clamp_min(EPS)
+        env_summary = env_summary / env_mass_raw.unsqueeze(-1).clamp_min(EPS)
         hyper_state = self.hyper_mix(module_summary + env_summary)
 
         output: Dict[str, torch.Tensor] = {
@@ -138,8 +140,10 @@ class HypergraphOrganizerCore(nn.Module):
             "hyper_state": hyper_state,
             "hyper_source_coords": hyper_source_coords,
             "hyper_region_coords": hyper_region_coords,
-            "hyper_module_mass": module_mass,
-            "hyper_env_mass": env_mass,
+            "hyper_module_mass_raw": module_mass_raw,
+            "hyper_env_mass_raw": env_mass_raw,
+            "hyper_module_mass": hyper_module_mass,
+            "hyper_env_mass": hyper_env_mass,
             "hyper_strength": hyper_strength,
             "module_tokens": module_tokens,
             "env_tokens": env_tokens,

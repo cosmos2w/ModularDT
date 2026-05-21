@@ -10,7 +10,7 @@ from typing import Any, Dict
 import torch
 import torch.nn.functional as F
 
-from case_adapters import ChannelThermalAdapter, MultiCylinderAdapter, make_synthetic_batch
+from case_adapters import ChannelThermalAdapter, MultiCylinderAdapter, describe_batch, make_synthetic_batch
 from diagnostics import (
     compute_basic_field_metrics,
     compute_hypergraph_diagnostics,
@@ -33,6 +33,8 @@ def main() -> None:
     config = UnifiedForwardConfig.from_dict(payload.get("model", {}))
 
     batch = load_batch(args.case, payload, batch_size=int(training_cfg.get("batch_size", 1)))
+    if args.inspect_data:
+        print(json.dumps({"batch": describe_batch(batch)}, indent=2, sort_keys=True))
     model = UnifiedHypergraphNeuralField(config).to(device)
     batch = batch.to(device)
 
@@ -40,15 +42,24 @@ def main() -> None:
     model.train()
     steps = max(int(args.max_steps), 1)
     last_output: Dict[str, Any] = {}
+    warned_shape = False
     for _ in range(steps):
         optimizer.zero_grad(set_to_none=True)
         output = model(batch)
         pred = output["pred_field"]
-        if batch.target_field is not None:
+        if args.inspect_data:
+            print(json.dumps({"pred_field_shape": list(pred.shape)}, indent=2, sort_keys=True))
+        if batch.target_field is not None and pred.shape == batch.target_field.shape:
             loss = F.mse_loss(pred, batch.target_field.float())
             loss.backward()
             if not args.dry_run:
                 optimizer.step()
+        elif batch.target_field is not None and not warned_shape:
+            print(
+                "[warning] pred_field shape does not match target_field shape; "
+                f"skipping MSE/backward. pred={list(pred.shape)} target={list(batch.target_field.shape)}"
+            )
+            warned_shape = True
         last_output = output
 
     metrics = compute_basic_field_metrics(last_output["pred_field"], batch.target_field)
@@ -66,6 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--case", choices=["channelthermal", "multicylinder", "synthetic"], default="synthetic")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--max-steps", type=int, default=1)
+    parser.add_argument("--inspect-data", action="store_true")
     return parser.parse_args()
 
 

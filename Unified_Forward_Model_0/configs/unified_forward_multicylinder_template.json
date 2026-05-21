@@ -1,0 +1,46 @@
+{
+  "model": {
+    "_note_case": "MultiCylinder: periodic domain, phase-conditioned query, 4 flow fields.",
+    "_note_field_dim": "4 means u,v,p,omega. If targets include extra channels, shape_mismatch will flag it.",
+    "field_dim": 4,
+    "_note_layout": "Normalized periodic units. module_radius sets near-module geometry scale.",
+    "max_num_modules": 12,
+    "domain_length_x": 1.0,
+    "domain_length_y": 1.0,
+    "module_radius": 0.06,
+    "_note_env_tokens": "Centered periodic grid. Test 12x6,16x6,24x8 for wake resolution.",
+    "num_env_tokens_x": 16,
+    "num_env_tokens_y": 6,
+    "_note_num_hyperedges": "Wake organization bottleneck. Test 2,4,6,8.",
+    "num_hyperedges": 4,
+    "_note_hidden_dim": "Shared token width. Test 64,96,128,192.",
+    "hidden_dim": 128,
+    "_note_geometry_time": "periodic wraps x/y; phase uses tau-style sin/cos query features.",
+    "geometry_mode": "periodic",
+    "query_time_mode": "phase",
+    "_note_decoder_mode": "Start hyper_only. current_like approximates old shortcut-heavy behavior.",
+    "decoder_mode": "hyper_only",
+    "_note_hyper_geometry_bias": "Query-to-hyperedge coordinate bias with periodic directed x.",
+    "use_hyper_geometry_bias": true,
+    "hyper_geometry_bias_scale": 1.0,
+    "_note_auxiliary_paths": "A_me shapes organizer; direct/near/global reveal redundant wake shortcuts.",
+    "use_A_me_auxiliary": true,
+    "use_direct_module_env_decoder": false,
+    "use_near_module_context": false,
+    "use_global_context": true,
+    "_note_direct_residual_gate_init": "0 keeps direct shortcut nearly off; raise only for direct-residual ablations.",
+    "direct_residual_gate_init": 0.0
+  },
+  "data": {
+    "_note_paths": "Reads existing demo datasets in place; missing files fall back to synthetic smoke data.",
+    "channelthermal_dataset_path": "../1_Demo_ChannelThermal/Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
+    "multicylinder_dataset_path": "../0_Demo_MultiCylinder/Data_Saved/Processed_MultiCylinder_Dataset/packed_dataset.h5"
+  },
+  "training": {
+    "_note_training": "Use --inspect-data and dry-run before real ablations.",
+    "batch_size": 4,
+    "learning_rate": 0.0003,
+    "seed": 0,
+    "device": "auto"
+  }
+}

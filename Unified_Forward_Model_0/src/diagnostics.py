@@ -12,13 +12,20 @@ import torch
 EPS = 1e-8
 
 
-def compute_basic_field_metrics(pred: torch.Tensor, target: Optional[torch.Tensor]) -> Dict[str, float]:
+def compute_basic_field_metrics(pred: torch.Tensor, target: Optional[torch.Tensor]) -> Dict[str, Any]:
     """Compute basic prediction metrics when targets are available."""
+    metrics: Dict[str, Any] = {"pred_shape": list(pred.shape), "target_shape": None, "shape_mismatch": False}
     if target is None:
-        return {"field_mse": float("nan")}
+        metrics["field_mse"] = float("nan")
+        return metrics
     pred = pred.detach()
     target = target.detach().to(device=pred.device, dtype=pred.dtype)
-    metrics = {"field_mse": float(torch.mean((pred - target) ** 2).cpu())}
+    metrics["target_shape"] = list(target.shape)
+    if pred.shape != target.shape:
+        metrics["field_mse"] = float("nan")
+        metrics["shape_mismatch"] = True
+        return metrics
+    metrics["field_mse"] = float(torch.mean((pred - target) ** 2).cpu())
     if pred.shape[-1] >= 5 and target.shape[-1] >= 5:
         metrics["temperature_mse"] = float(torch.mean((pred[..., 4] - target[..., 4]) ** 2).cpu())
     return metrics
@@ -36,18 +43,35 @@ def compute_hypergraph_diagnostics(org: Dict[str, Any]) -> Dict[str, float]:
     A_mh = org.get("A_mh")
     if torch.is_tensor(A_mh):
         out["A_mh_entropy"] = _entropy(A_mh.detach(), dim=-1)
-        out["module_mass_max"] = float(A_mh.detach().sum(dim=1).amax().cpu())
+    module_mass = org.get("hyper_module_mass")
+    if torch.is_tensor(module_mass):
+        out["module_mass_max"] = float(module_mass.detach().amax().cpu())
+    module_mass_raw = org.get("hyper_module_mass_raw")
+    if torch.is_tensor(module_mass_raw):
+        out["module_mass_raw_max"] = float(module_mass_raw.detach().amax().cpu())
 
     A_eh = org.get("A_eh")
     if torch.is_tensor(A_eh):
         out["A_eh_entropy"] = _entropy(A_eh.detach(), dim=-1)
-        out["env_mass_max"] = float(A_eh.detach().sum(dim=1).amax().cpu())
+    env_mass = org.get("hyper_env_mass")
+    if torch.is_tensor(env_mass):
+        out["env_mass_max"] = float(env_mass.detach().amax().cpu())
+    env_mass_raw = org.get("hyper_env_mass_raw")
+    if torch.is_tensor(env_mass_raw):
+        out["env_mass_raw_max"] = float(env_mass_raw.detach().amax().cpu())
 
     gate = org.get("direct_residual_gate")
     if torch.is_tensor(gate):
         out["direct_residual_gate"] = float(gate.detach().mean().cpu())
     elif gate is not None:
         out["direct_residual_gate"] = float(gate)
+
+    geom_mean = org.get("hyper_geometry_bias_mean")
+    if torch.is_tensor(geom_mean):
+        out["hyper_geometry_bias_mean"] = float(geom_mean.detach().mean().cpu())
+    geom_std = org.get("hyper_geometry_bias_std")
+    if torch.is_tensor(geom_std):
+        out["hyper_geometry_bias_std"] = float(geom_std.detach().mean().cpu())
 
     return out
 
