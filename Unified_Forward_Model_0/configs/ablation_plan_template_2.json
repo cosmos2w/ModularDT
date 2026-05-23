@@ -1,0 +1,60 @@
+{
+  "_note_plan": "Each row overrides key model switches for one-batch/dry-run ablation or real ChannelThermal training.",
+  "_note_decoder_mode": "hyper_only = bottleneck only; +global = operating context; +direct = gated shortcut; +near = local module context; combinations isolate shortcut interactions.",
+  "_note_direct_gate": "direct_residual_gate_init is a sigmoid gate probability. 0.05 makes direct residual measurable without fully opening the shortcut.",
+  "_note_num_hyperedges": "Main bottleneck size. Duplicate rows with 2,4,6,8 to test organization capacity.",
+  "ablations": [
+    {
+      "name": "A1_hyper_plus_global",
+      "decoder_mode": "hyper_plus_global",
+      "use_A_me_auxiliary": true,
+      "use_direct_module_env_decoder": false,
+      "use_near_module_context": false,
+      "use_global_context": true,
+      "num_hyperedges": 4,
+      "notes": "Adds global operating/layout context only."
+    },
+    {
+      "name": "A3_hyper_plus_near_module",
+      "decoder_mode": "hyper_plus_near_module",
+      "use_A_me_auxiliary": true,
+      "use_direct_module_env_decoder": false,
+      "use_near_module_context": true,
+      "use_global_context": false,
+      "num_hyperedges": 4,
+      "notes": "Adds local near-module context without direct attention."
+    },
+    {
+      "name": "A5_hyper_plus_global_near",
+      "decoder_mode": "hyper_plus_global_near",
+      "use_A_me_auxiliary": true,
+      "use_direct_module_env_decoder": false,
+      "use_near_module_context": true,
+      "use_global_context": true,
+      "num_hyperedges": 4,
+      "notes": "Tests whether global plus local context explains the A4 gain without direct residual."
+    },
+    {
+      "name": "A8_current_like_direct_gate005",
+      "decoder_mode": "current_like",
+      "direct_residual_gate_init": 0.05,
+      "use_A_me_auxiliary": true,
+      "use_direct_module_env_decoder": true,
+      "use_near_module_context": true,
+      "use_global_context": true,
+      "num_hyperedges": 4,
+      "notes": "All shortcut paths enabled with a measurable direct residual gate."
+    },
+    {
+      "name": "A9_current_like_no_Ame",
+      "decoder_mode": "current_like",
+      "direct_residual_gate_init": 0.05,
+      "use_A_me_auxiliary": false,
+      "use_direct_module_env_decoder": true,
+      "use_near_module_context": true,
+      "use_global_context": true,
+      "num_hyperedges": 4,
+      "notes": "A8 without module-environment auxiliary shaping to test whether A_me matters."
+    }
+  ]
+}

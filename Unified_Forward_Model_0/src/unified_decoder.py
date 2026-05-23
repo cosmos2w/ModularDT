@@ -96,10 +96,17 @@ class HypergraphFieldDecoder(nn.Module):
             "decoder_mode": cfg.decoder_mode,
         }
 
-        if self._uses_global() and global_context is not None:
+        uses_global = self._uses_global()
+        uses_direct = self._uses_direct()
+        uses_near = self._uses_near_module()
+        diagnostics["uses_global_context"] = torch.tensor(float(uses_global), device=query_xy.device, dtype=query_xy.dtype)
+        diagnostics["uses_direct_context"] = torch.tensor(float(uses_direct), device=query_xy.device, dtype=query_xy.dtype)
+        diagnostics["uses_near_module_context"] = torch.tensor(float(uses_near), device=query_xy.device, dtype=query_xy.dtype)
+
+        if uses_global and global_context is not None:
             context = context + self.global_proj(global_context).unsqueeze(1)
 
-        if self._uses_direct():
+        if uses_direct:
             direct_context, direct_attention = self._direct_context(query_state, organizer_output)
             gate = torch.sigmoid(self.direct_residual_logit)
             context = context + gate * direct_context
@@ -108,7 +115,7 @@ class HypergraphFieldDecoder(nn.Module):
         else:
             diagnostics["direct_residual_gate"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
 
-        if self._uses_near_module():
+        if uses_near:
             context = context + self.near_proj(self._near_module_context(query_xy, organizer_output))
 
         context = self.context_norm(context)
@@ -234,12 +241,32 @@ class HypergraphFieldDecoder(nn.Module):
         return torch.einsum("bqm,bmh->bqh", weights, module_tokens)
 
     def _uses_global(self) -> bool:
-        return self.config.use_global_context and self.config.decoder_mode in {"hyper_plus_global", "current_like"}
+        mode_uses = self.config.decoder_mode in {
+            "hyper_plus_global",
+            "hyper_plus_global_near",
+            "hyper_plus_global_direct",
+            "current_like",
+        }
+        return bool(self.config.use_global_context and mode_uses)
 
     def _uses_direct(self) -> bool:
-        mode_uses = self.config.decoder_mode in {"hyper_plus_direct_residual", "current_like"}
+        if self.config.decoder_mode == "hyper_only":
+            return False
+        mode_uses = self.config.decoder_mode in {
+            "hyper_plus_direct_residual",
+            "hyper_plus_global_direct",
+            "hyper_plus_near_direct",
+            "current_like",
+        }
         return bool(self.config.use_direct_module_env_decoder or mode_uses)
 
     def _uses_near_module(self) -> bool:
-        mode_uses = self.config.decoder_mode in {"hyper_plus_near_module", "current_like"}
+        if self.config.decoder_mode == "hyper_only":
+            return False
+        mode_uses = self.config.decoder_mode in {
+            "hyper_plus_near_module",
+            "hyper_plus_global_near",
+            "hyper_plus_near_direct",
+            "current_like",
+        }
         return bool(self.config.use_near_module_context or mode_uses)

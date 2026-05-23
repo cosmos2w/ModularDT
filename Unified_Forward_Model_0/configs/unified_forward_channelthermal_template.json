@@ -6,11 +6,13 @@
     "_note_layout": "Physical channel units. Test module_radius only if local geometry scale is uncertain.",
     "max_num_modules": 12,
     "domain_length_x": 12.0,
-    "domain_length_y": 4.0,
+    "domain_length_y": 6.0,
     "module_radius": 0.45,
+
     "_note_env_tokens": "Centered environment grid. Test 12x4,16x6,24x8 for spatial resolution.",
     "num_env_tokens_x": 16,
     "num_env_tokens_y": 6,
+    
     "_note_num_hyperedges": "Thermal organization bottleneck. Test 2,4,6,8.",
     "num_hyperedges": 4,
     "_note_hidden_dim": "Shared token width. Test 64,96,128,192.",
@@ -19,7 +21,7 @@
     "geometry_mode": "nonperiodic",
     "query_time_mode": "none",
 
-    "_note_decoder_mode": "Start hyper_only. Add global/direct/near paths only as ablations.",
+    "_note_decoder_mode": "Modes: hyper_only, +global, +direct, +near, +global_near, +global_direct, +near_direct, current_like.",
     "decoder_mode": "current_like",
     "_note_hyper_geometry_bias": "Query-to-hyperedge coordinate bias; useful for plume/wall placement.",
     "use_hyper_geometry_bias": true,
@@ -39,7 +41,7 @@
   },
   "training": {
     "_note_training": "Use --inspect-data and dry-run before real ablations.",
-    "epochs": 2000,
+    "epochs": 4000,
     "batch_size": 64,
     "val_batch_size": 64,
     "points_per_case": 2048,
@@ -50,6 +52,8 @@
     "max_train_batches_per_epoch": null,
     "max_val_batches": null,
     "normalize_targets": true,
+    "_note_module_heat_feature_mode": "case_relative, dataset_scaled, or both; tests whether heat magnitude needs case-local or dataset-scale encoding.",
+    "module_heat_feature_mode": "both",
     "field_channel_weights": null,
     "temperature_weight": 1.0,
 

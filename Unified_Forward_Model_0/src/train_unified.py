@@ -22,6 +22,7 @@ from case_adapters import ChannelThermalAdapter, MultiCylinderAdapter, describe_
 from channelthermal_dataset import ChannelThermalPointDataset, collate_batchdata
 from diagnostics import (
     compute_basic_field_metrics,
+    compute_channelthermal_region_metrics,
     compute_hypergraph_diagnostics,
     plot_organization_overview,
     save_diagnostics_json,
@@ -59,6 +60,7 @@ def train_one_run(
     dry_run: bool = False,
     max_steps: Optional[int] = None,
     output_dir: Optional[str | Path] = None,
+    use_output_dir_as_run_dir: bool = False,
 ) -> Dict[str, Any]:
     """Train one unified forward run and return its summary."""
     if dry_run:
@@ -72,7 +74,7 @@ def train_one_run(
     model_cfg = UnifiedForwardConfig.from_dict(config_payload.get("model", {}))
     if case == "channelthermal":
         model_cfg = adapt_model_config_to_channelthermal_dataset(config_payload, model_cfg)
-    run_dir = resolve_run_dir(run_name, output_dir)
+    run_dir = Path(output_dir) if use_output_dir_as_run_dir and output_dir is not None else resolve_run_dir(run_name, output_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     train_dataset, val_dataset, target_stats = build_channelthermal_datasets(config_payload, model_cfg)
@@ -100,7 +102,11 @@ def train_one_run(
     )
     start_epoch = 1
     best_val_loss = float("inf")
-    best_metrics: Dict[str, Any] = {}
+    best_val_field_mse_physical = float("inf")
+    best_val_temperature_mse = float("inf")
+    best_by_loss_metrics: Dict[str, Any] = {}
+    best_by_field_mse_metrics: Dict[str, Any] = {}
+    best_by_temperature_mse_metrics: Dict[str, Any] = {}
     history: List[Dict[str, Any]] = []
     if resume:
         checkpoint = torch.load(resume, map_location=device)
@@ -109,6 +115,8 @@ def train_one_run(
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_epoch = int(checkpoint.get("epoch", 0)) + 1
         best_val_loss = float(checkpoint.get("best_val_loss", float("inf")))
+        best_val_field_mse_physical = float(checkpoint.get("best_val_field_mse_physical", float("inf")))
+        best_val_temperature_mse = float(checkpoint.get("best_val_temperature_mse", float("inf")))
 
     config_resolved = dict(config_payload)
     config_resolved["model"] = model_cfg.to_dict()
@@ -123,6 +131,9 @@ def train_one_run(
     metrics_csv = run_dir / "metrics.csv"
     latest_path = run_dir / "latest_model.pt"
     best_path = run_dir / "best_model.pt"
+    best_by_loss_path = run_dir / "best_by_loss_model.pt"
+    best_by_field_mse_path = run_dir / "best_by_field_mse_model.pt"
+    best_by_temperature_mse_path = run_dir / "best_by_temperature_mse_model.pt"
     total_steps = 0
     epochs = int(training_cfg.get("epochs", 1))
     eval_every = max(1, int(training_cfg.get("eval_every", 1)))
@@ -151,10 +162,12 @@ def train_one_run(
                 device,
                 training_cfg,
                 target_stats,
+                model_cfg,
                 max_batches=training_cfg.get("max_val_batches"),
             )
             if last_val_output is not None:
                 plot_organization_overview(last_val_output, run_dir / "val_organization_latest.png")
+                save_temperature_visualizations(last_val_output, run_dir, target_stats)
 
         row = {"epoch": epoch, "train_steps": total_steps, **prefix_keys(train_metrics, "train_"), **val_metrics}
         history.append(row)
@@ -162,15 +175,41 @@ def train_one_run(
         save_loss_curves(history, run_dir / "loss_curves.png")
 
         val_loss = float(val_metrics.get("val_loss", float("nan")))
-        is_best = math.isfinite(val_loss) and val_loss < best_val_loss
-        if is_best:
+        val_field_mse = float(val_metrics.get("val_field_mse_physical", float("nan")))
+        val_temperature_mse = float(val_metrics.get("val_temperature_mse", float("nan")))
+        is_best_loss = math.isfinite(val_loss) and val_loss < best_val_loss
+        is_best_field_mse = math.isfinite(val_field_mse) and val_field_mse < best_val_field_mse_physical
+        is_best_temperature_mse = math.isfinite(val_temperature_mse) and val_temperature_mse < best_val_temperature_mse
+        if is_best_loss:
             best_val_loss = val_loss
-            best_metrics = dict(val_metrics)
-        if is_best or epoch % save_every == 0 or max_steps_int is not None:
-            checkpoint = make_checkpoint(epoch, model, optimizer, config_resolved, model_cfg, target_stats, best_val_loss, val_metrics)
+            best_by_loss_metrics = dict(val_metrics)
+        if is_best_field_mse:
+            best_val_field_mse_physical = val_field_mse
+            best_by_field_mse_metrics = dict(val_metrics)
+        if is_best_temperature_mse:
+            best_val_temperature_mse = val_temperature_mse
+            best_by_temperature_mse_metrics = dict(val_metrics)
+        if is_best_loss or is_best_field_mse or is_best_temperature_mse or epoch % save_every == 0 or max_steps_int is not None:
+            checkpoint = make_checkpoint(
+                epoch,
+                model,
+                optimizer,
+                config_resolved,
+                model_cfg,
+                target_stats,
+                best_val_loss,
+                val_metrics,
+                best_val_field_mse_physical=best_val_field_mse_physical,
+                best_val_temperature_mse=best_val_temperature_mse,
+            )
             torch.save(checkpoint, latest_path)
-            if is_best:
+            if is_best_loss:
+                torch.save(checkpoint, best_by_loss_path)
                 torch.save(checkpoint, best_path)
+            if is_best_field_mse:
+                torch.save(checkpoint, best_by_field_mse_path)
+            if is_best_temperature_mse:
+                torch.save(checkpoint, best_by_temperature_mse_path)
 
         print(
             f"[epoch] {epoch:03d}/{epochs:03d} train_loss={train_metrics.get('loss', float('nan')):.4e} "
@@ -181,14 +220,53 @@ def train_one_run(
 
     if not latest_path.exists():
         final_val = history[-1] if history else {}
-        torch.save(make_checkpoint(epoch, model, optimizer, config_resolved, model_cfg, target_stats, best_val_loss, final_val), latest_path)
+        torch.save(
+            make_checkpoint(
+                epoch,
+                model,
+                optimizer,
+                config_resolved,
+                model_cfg,
+                target_stats,
+                best_val_loss,
+                final_val,
+                best_val_field_mse_physical=best_val_field_mse_physical,
+                best_val_temperature_mse=best_val_temperature_mse,
+            ),
+            latest_path,
+        )
         if not best_path.exists():
-            torch.save(make_checkpoint(epoch, model, optimizer, config_resolved, model_cfg, target_stats, best_val_loss, final_val), best_path)
+            torch.save(
+                make_checkpoint(
+                    epoch,
+                    model,
+                    optimizer,
+                    config_resolved,
+                    model_cfg,
+                    target_stats,
+                    best_val_loss,
+                    final_val,
+                    best_val_field_mse_physical=best_val_field_mse_physical,
+                    best_val_temperature_mse=best_val_temperature_mse,
+                ),
+                best_path,
+            )
+        if not best_by_loss_path.exists():
+            torch.save(torch.load(best_path, map_location="cpu"), best_by_loss_path)
+        if not best_by_field_mse_path.exists():
+            torch.save(torch.load(latest_path, map_location="cpu"), best_by_field_mse_path)
+        if not best_by_temperature_mse_path.exists():
+            torch.save(torch.load(latest_path, map_location="cpu"), best_by_temperature_mse_path)
 
     summary = {
         "run_dir": str(run_dir),
         "best_val_loss": best_val_loss,
-        "best_metrics": best_metrics or (history[-1] if history else {}),
+        "best_val_field_mse_physical": best_val_field_mse_physical,
+        "best_val_temperature_mse": best_val_temperature_mse,
+        "best_metrics": best_by_loss_metrics or (history[-1] if history else {}),
+        "best_by_loss_metrics": best_by_loss_metrics or (history[-1] if history else {}),
+        "best_by_field_mse_metrics": best_by_field_mse_metrics or (history[-1] if history else {}),
+        "best_by_temperature_mse_metrics": best_by_temperature_mse_metrics or (history[-1] if history else {}),
         "latest_epoch": history[-1]["epoch"] if history else 0,
         "latest_metrics": history[-1] if history else {},
         "target_stats": stats_to_json(target_stats),
@@ -249,6 +327,7 @@ def build_channelthermal_datasets(
     training_cfg = config_payload.get("training", {})
     path = data_cfg.get("channelthermal_dataset_path", "../1_Demo_ChannelThermal/Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5")
     normalize_targets = bool(training_cfg.get("normalize_targets", True))
+    heat_feature_mode = str(training_cfg.get("module_heat_feature_mode", "both"))
     stats_probe = ChannelThermalPointDataset(
         path,
         split="train",
@@ -257,9 +336,11 @@ def build_channelthermal_datasets(
         max_num_modules=int(model_cfg.max_num_modules),
         field_dim=int(model_cfg.field_dim),
         normalize_targets=False,
+        module_heat_feature_mode=heat_feature_mode,
         seed=int(training_cfg.get("seed", 0)),
     )
     computed_stats = stats_probe.compute_target_stats(max_cases=training_cfg.get("max_train_cases"))
+    dataset_heat_scale = float(stats_probe.dataset_heat_scale or 1.0)
     stats_probe.close()
     target_mean = computed_stats["mean"]
     target_std = computed_stats["std"]
@@ -273,6 +354,8 @@ def build_channelthermal_datasets(
         normalize_targets=normalize_targets,
         target_mean=target_mean,
         target_std=target_std,
+        module_heat_feature_mode=heat_feature_mode,
+        dataset_heat_scale=dataset_heat_scale,
         seed=int(training_cfg.get("seed", 0)),
     )
     val_dataset = ChannelThermalPointDataset(
@@ -285,9 +368,17 @@ def build_channelthermal_datasets(
         normalize_targets=normalize_targets,
         target_mean=target_mean,
         target_std=target_std,
+        module_heat_feature_mode=heat_feature_mode,
+        dataset_heat_scale=dataset_heat_scale,
         seed=int(training_cfg.get("seed", 0)) + 999,
     )
-    return train_dataset, val_dataset, {"mean": target_mean, "std": target_std, "normalize_targets": normalize_targets}
+    return train_dataset, val_dataset, {
+        "mean": target_mean,
+        "std": target_std,
+        "normalize_targets": normalize_targets,
+        "dataset_heat_scale": dataset_heat_scale,
+        "module_heat_feature_mode": heat_feature_mode,
+    }
 
 
 def adapt_model_config_to_channelthermal_dataset(
@@ -371,6 +462,7 @@ def evaluate_loader(
     device: torch.device,
     training_cfg: Dict[str, Any],
     target_stats: Dict[str, Any],
+    model_cfg: UnifiedForwardConfig,
     *,
     max_batches: Optional[Any] = None,
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
@@ -385,11 +477,18 @@ def evaluate_loader(
                 break
             batch = batch.to(device)
             output = model(batch)
-            last_output = output
             loss = weighted_mse_loss(output["pred_field"], batch.target_field, training_cfg)
             physical_pred = denormalize_field(output["pred_field"], target_stats)
             physical_target = denormalize_field(batch.target_field, target_stats)
+            last_output = dict(output)
+            last_output["_query_xy"] = batch.query_xy.detach()
+            if physical_pred is not None:
+                last_output["_physical_pred_field"] = physical_pred.detach()
+            if physical_target is not None:
+                last_output["_physical_target_field"] = physical_target.detach()
             metrics = compute_basic_field_metrics(physical_pred, physical_target)
+            if batch.case_name == "channelthermal":
+                metrics.update(compute_channelthermal_region_metrics(physical_pred, physical_target, batch, model_cfg))
             metrics.update(compute_hypergraph_diagnostics(output))
             metrics["val_loss"] = float(loss.cpu())
             batch_size = int(batch.query_xy.shape[0])
@@ -449,6 +548,9 @@ def make_checkpoint(
     target_stats: Dict[str, Any],
     best_val_loss: float,
     val_metrics: Dict[str, Any],
+    *,
+    best_val_field_mse_physical: float = float("inf"),
+    best_val_temperature_mse: float = float("inf"),
 ) -> Dict[str, Any]:
     return {
         "epoch": int(epoch),
@@ -458,6 +560,8 @@ def make_checkpoint(
         "model_config": model_cfg.to_dict(),
         "target_stats": stats_to_json(target_stats),
         "best_val_loss": float(best_val_loss),
+        "best_val_field_mse_physical": float(best_val_field_mse_physical),
+        "best_val_temperature_mse": float(best_val_temperature_mse),
         "val_metrics": val_metrics,
     }
 
@@ -476,6 +580,7 @@ def load_batch(case: str, payload: Dict[str, Any], batch_size: int = 1) -> Batch
             max_num_modules=int(payload.get("model", {}).get("max_num_modules", 12)),
             field_dim=int(payload.get("model", {}).get("field_dim", 5)),
             normalize_targets=False,
+            module_heat_feature_mode=str(training_cfg.get("module_heat_feature_mode", "both")),
             seed=int(training_cfg.get("seed", 0)),
         )
         items = [dataset[idx] for idx in range(min(batch_size, len(dataset)))]
@@ -485,6 +590,38 @@ def load_batch(case: str, payload: Dict[str, Any], batch_size: int = 1) -> Batch
         batch_size=batch_size,
         points_per_case=192,
     )
+
+
+def save_temperature_visualizations(output: Dict[str, Any], run_dir: Path, target_stats: Dict[str, Any]) -> None:
+    """Save lightweight scatter plots for one validation batch's temperature field."""
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        return
+    query_xy = output.get("_query_xy")
+    pred = output.get("_physical_pred_field")
+    target = output.get("_physical_target_field")
+    if not (torch.is_tensor(query_xy) and torch.is_tensor(pred) and torch.is_tensor(target)):
+        return
+    if pred.ndim < 3 or target.ndim < 3 or pred.shape[-1] < 5 or target.shape[-1] < 5:
+        return
+    xy = query_xy[0].detach().cpu()
+    pred_temp = pred[0, :, 4].detach().cpu()
+    target_temp = target[0, :, 4].detach().cpu()
+    error_temp = (pred_temp - target_temp).abs()
+    for filename, values, title in [
+        ("val_temperature_target_latest.png", target_temp, "Temperature Target"),
+        ("val_temperature_pred_latest.png", pred_temp, "Temperature Prediction"),
+        ("val_temperature_error_latest.png", error_temp, "Temperature Absolute Error"),
+    ]:
+        fig, ax = plt.subplots(figsize=(7, 4), dpi=150)
+        sc = ax.scatter(xy[:, 0], xy[:, 1], c=values, s=8, cmap="inferno")
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_title(title)
+        fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+        fig.tight_layout()
+        fig.savefig(run_dir / filename)
+        plt.close(fig)
 
 
 def save_loss_curves(history: List[Dict[str, Any]], path: Path) -> None:
@@ -546,6 +683,8 @@ def stats_to_json(stats: Dict[str, Any]) -> Dict[str, Any]:
         "mean": stats["mean"].detach().cpu().tolist(),
         "std": stats["std"].detach().cpu().tolist(),
         "normalize_targets": bool(stats.get("normalize_targets", False)),
+        "dataset_heat_scale": float(stats.get("dataset_heat_scale", 1.0)),
+        "module_heat_feature_mode": str(stats.get("module_heat_feature_mode", "both")),
     }
 
 

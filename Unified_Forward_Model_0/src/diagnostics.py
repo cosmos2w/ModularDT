@@ -76,7 +76,58 @@ def compute_hypergraph_diagnostics(org: Dict[str, Any]) -> Dict[str, float]:
     if torch.is_tensor(geom_std):
         out["hyper_geometry_bias_std"] = float(geom_std.detach().mean().cpu())
 
+    for key in ("uses_global_context", "uses_direct_context", "uses_near_module_context"):
+        value = org.get(key)
+        if torch.is_tensor(value):
+            out[key] = float(value.detach().mean().cpu())
+        elif value is not None:
+            out[key] = float(value)
+
     return out
+
+
+def compute_channelthermal_region_metrics(
+    pred: torch.Tensor,
+    target: Optional[torch.Tensor],
+    batch: Any,
+    model_config: Any,
+) -> Dict[str, Any]:
+    """Compute ChannelThermal MSE diagnostics on simple geometric regions."""
+    metrics: Dict[str, Any] = {}
+    if target is None:
+        return metrics
+    pred = pred.detach()
+    target = target.detach().to(device=pred.device, dtype=pred.dtype)
+    if pred.shape != target.shape:
+        return metrics
+
+    query_xy = batch.query_xy.to(device=pred.device, dtype=pred.dtype)
+    module_centers = batch.module_centers.to(device=pred.device, dtype=pred.dtype)
+    module_present = batch.module_present.to(device=pred.device, dtype=pred.dtype)
+    radius = float(getattr(model_config, "module_radius", 0.45))
+    lx = float(getattr(model_config, "domain_length_x", 12.0))
+    ly = float(getattr(model_config, "domain_length_y", 4.0))
+
+    delta = query_xy[:, :, None, :] - module_centers[:, None, :, :]
+    dist = torch.sqrt(delta.square().sum(dim=-1).clamp_min(EPS))
+    large = torch.full_like(dist, 1.0e6)
+    nearest = torch.where(module_present[:, None, :] > 0, dist, large).amin(dim=-1)
+
+    x = query_xy[..., 0]
+    y = query_xy[..., 1]
+    masks = {
+        "near_module": nearest <= radius + 0.25,
+        "far_field": nearest > radius + 1.0,
+        "wall_band": (y < 0.4) | (y > ly - 0.4),
+        "outlet_band": x > lx - 0.75,
+        "downstream_mid_box": (x >= 0.55 * lx) & (x <= 0.95 * lx) & (y >= 0.25 * ly) & (y <= 0.75 * ly),
+    }
+    diff2 = (pred - target).square()
+    for name, mask in masks.items():
+        metrics[f"field_mse_{name}"] = _masked_mse(diff2, mask)
+        if pred.shape[-1] >= 5:
+            metrics[f"temperature_mse_{name}"] = _masked_mse(diff2[..., 4], mask)
+    return metrics
 
 
 def save_diagnostics_json(payload: Dict[str, Any], path: str | Path) -> None:
@@ -118,7 +169,7 @@ def plot_organization_overview(org: Dict[str, Any], path: str | Path) -> None:
     plt.close(fig)
 
 
-def plot_ablation_summary(rows: list[Dict[str, Any]], path: str | Path) -> None:
+def plot_ablation_summary(rows: list[Dict[str, Any]], path: str | Path, metric_key: str = "best_val_field_mse_physical") -> None:
     """Plot simple ablation MSE bars."""
     try:
         import matplotlib.pyplot as plt
@@ -129,13 +180,10 @@ def plot_ablation_summary(rows: list[Dict[str, Any]], path: str | Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     names = [str(row.get("name", idx)) for idx, row in enumerate(rows)]
-    mses = [
-        float(row.get("field_mse", row.get("best_val_field_mse", row.get("val_field_mse_physical", float("nan")))))
-        for row in rows
-    ]
+    mses = [float(row.get(metric_key, row.get("field_mse", row.get("best_val_field_mse", float("nan"))))) for row in rows]
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.bar(names, mses)
-    ax.set_ylabel("field MSE")
+    ax.set_ylabel(metric_key)
     ax.tick_params(axis="x", rotation=20)
     fig.tight_layout()
     fig.savefig(path, dpi=160)
@@ -146,6 +194,14 @@ def _entropy(weights: torch.Tensor, dim: int) -> float:
     probs = weights / weights.sum(dim=dim, keepdim=True).clamp_min(EPS)
     entropy = -(probs * torch.log(probs.clamp_min(EPS))).sum(dim=dim)
     return float(entropy.mean().cpu())
+
+
+def _masked_mse(diff2: torch.Tensor, mask: torch.Tensor) -> float:
+    while mask.ndim < diff2.ndim:
+        mask = mask.unsqueeze(-1)
+    mask = mask.to(device=diff2.device, dtype=diff2.dtype)
+    denom = mask.expand_as(diff2).sum().clamp_min(1.0)
+    return float((diff2 * mask).sum().div(denom).detach().cpu())
 
 
 def _jsonable(value: Any) -> Any:

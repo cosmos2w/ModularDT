@@ -59,6 +59,8 @@ class ChannelThermalPointDataset(Dataset):
         normalize_targets: bool = True,
         target_mean: Optional[Sequence[float]] = None,
         target_std: Optional[Sequence[float]] = None,
+        module_heat_feature_mode: str = "both",
+        dataset_heat_scale: Optional[float] = None,
         seed: int = 0,
     ):
         self.path = Path(packed_h5_path).expanduser()
@@ -69,9 +71,13 @@ class ChannelThermalPointDataset(Dataset):
         self.max_num_modules = int(max_num_modules)
         self.field_dim = int(field_dim)
         self.normalize_targets = bool(normalize_targets)
+        self.module_heat_feature_mode = str(module_heat_feature_mode)
+        if self.module_heat_feature_mode not in {"case_relative", "dataset_scaled", "both"}:
+            raise ValueError("module_heat_feature_mode must be one of: case_relative, dataset_scaled, both.")
         self.seed = int(seed)
         self._h5: Optional[h5py.File] = None
         self.layout_warnings: List[str] = []
+        self.dataset_heat_scale = float(dataset_heat_scale) if dataset_heat_scale is not None else None
 
         if not self.path.exists():
             raise FileNotFoundError(f"ChannelThermal packed HDF5 not found: {self.path}")
@@ -98,6 +104,8 @@ class ChannelThermalPointDataset(Dataset):
                 else ["u", "v", "p", "omega", "temperature"][: self.field_dim]
             )
             self.root_max_modules = int(h5.attrs.get("max_modules", self.max_num_modules))
+            if self.dataset_heat_scale is None:
+                self.dataset_heat_scale = self._compute_heat_scale(h5, selected)
 
             norm = h5.get("normalization")
             h5_mean = None
@@ -191,12 +199,20 @@ class ChannelThermalPointDataset(Dataset):
         module_present_padded[:count] = module_present[:count]
         heat = np.zeros((self.max_num_modules,), dtype=np.float32)
         heat[: min(heat_powers.shape[0], self.max_num_modules)] = heat_powers[: self.max_num_modules]
-        heat_scale = max(float(np.max(np.abs(heat))) if heat.size else 0.0, 1.0)
+        case_heat_scale = max(float(np.max(np.abs(heat))) if heat.size else 0.0, 1.0)
+        dataset_heat_scale = max(float(self.dataset_heat_scale or 1.0), 1.0)
+        heat_case_relative = heat / case_heat_scale
+        heat_dataset_scaled = heat / dataset_heat_scale
+        if self.module_heat_feature_mode == "case_relative":
+            heat_dataset_scaled = np.zeros_like(heat_dataset_scaled)
+        elif self.module_heat_feature_mode == "dataset_scaled":
+            heat_case_relative = np.zeros_like(heat_case_relative)
         module_features[:, 0] = module_centers_padded[:, 0] / max(lx, EPS)
         module_features[:, 1] = module_centers_padded[:, 1] / max(ly, EPS)
         module_features[:, 2] = 0.45 / max(min(lx, ly), EPS)
-        module_features[:, 3] = heat / heat_scale
-        module_features[:, 4] = module_present_padded
+        module_features[:, 3] = heat_case_relative
+        module_features[:, 4] = heat_dataset_scaled
+        module_features[:, 5] = module_present_padded
 
         if self.normalize_targets and self.target_mean is not None and self.target_std is not None:
             target_field = (target_field - self.target_mean.numpy()) / self.target_std.numpy()
@@ -223,6 +239,8 @@ class ChannelThermalPointDataset(Dataset):
                 "source": str(self.path),
                 "split": self.split,
                 "normalized_targets": bool(self.normalize_targets and self.target_mean is not None),
+                "module_heat_feature_mode": self.module_heat_feature_mode,
+                "dataset_heat_scale": float(dataset_heat_scale),
                 "domain_length_x": float(lx),
                 "domain_length_y": float(ly),
             },
@@ -289,6 +307,19 @@ class ChannelThermalPointDataset(Dataset):
             raise KeyError(f"None of the expected keys were found in case group: {list(aliases)}")
         print(f"[channelthermal_dataset] Optional keys missing: {list(aliases)}")
         return None
+
+    @staticmethod
+    def _compute_heat_scale(h5: h5py.File, case_ids: Sequence[str]) -> float:
+        max_abs = 0.0
+        for case_id in case_ids:
+            group = h5["cases"][case_id]
+            for key in ("heat_powers", "heat_power"):
+                if key in group:
+                    values = np.asarray(group[key], dtype=np.float32).reshape(-1)
+                    if values.size:
+                        max_abs = max(max_abs, float(np.max(np.abs(values))))
+                    break
+        return max(max_abs, 1.0)
 
 
 def collate_batchdata(items: Sequence[BatchData]) -> BatchData:

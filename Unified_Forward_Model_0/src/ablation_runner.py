@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 import csv
+from datetime import datetime
 import json
 from pathlib import Path
+import re
 from typing import Any, Dict, List
 
 import torch
@@ -17,7 +19,7 @@ from diagnostics import (
     plot_ablation_summary,
     save_diagnostics_json,
 )
-from train_unified import SANDBOX_ROOT, load_json, train_one_run
+from train_unified import SANDBOX_ROOT, load_json, resolve_device, train_one_run
 from unified_model_core import UnifiedHypergraphNeuralField
 from unified_types import AblationConfig, UnifiedForwardConfig
 
@@ -35,8 +37,8 @@ def main() -> None:
 
 
 def run_channelthermal_ablations(base_payload: Dict[str, Any], plan_payload: Dict[str, Any]) -> None:
-    root = SANDBOX_ROOT / "results" / "ablations" / "channelthermal"
-    root.mkdir(parents=True, exist_ok=True)
+    ablation_root = SANDBOX_ROOT / "results" / "ablations" / "channelthermal"
+    root = make_sweep_dir(ablation_root, label="ablation")
     rows: List[Dict[str, Any]] = []
     for item in plan_payload.get("ablations", []):
         ablation = AblationConfig.from_dict(item)
@@ -45,34 +47,73 @@ def run_channelthermal_ablations(base_payload: Dict[str, Any], plan_payload: Dic
         summary = train_one_run(
             payload,
             case="channelthermal",
-            run_name=ablation.name,
             output_dir=run_dir,
+            use_output_dir_as_run_dir=True,
         )
-        best = summary.get("best_metrics", {}) or summary.get("latest_metrics", {})
+        best_loss = summary.get("best_by_loss_metrics", summary.get("best_metrics", {}))
+        best_field = summary.get("best_by_field_mse_metrics", summary.get("best_metrics", {}))
+        best_temp = summary.get("best_by_temperature_mse_metrics", summary.get("best_metrics", {}))
+        best = best_field or best_loss or summary.get("latest_metrics", {})
+        actual_run_dir = Path(summary.get("run_dir", run_dir))
         row = {
             "name": ablation.name,
             "best_val_loss": summary.get("best_val_loss", float("nan")),
-            "best_val_field_mse": best.get("val_field_mse_physical", best.get("val_field_mse", float("nan"))),
-            "temperature_mse": best.get("val_temperature_mse", float("nan")),
+            "best_val_field_mse_physical": summary.get(
+                "best_val_field_mse_physical",
+                best_field.get("val_field_mse_physical", best_field.get("val_field_mse", float("nan"))),
+            ),
+            "best_val_temperature_mse": summary.get(
+                "best_val_temperature_mse",
+                best_temp.get("val_temperature_mse", float("nan")),
+            ),
             "active_edge_count": best.get("val_active_edge_count", float("nan")),
             "A_mh_entropy": best.get("val_A_mh_entropy", float("nan")),
             "A_eh_entropy": best.get("val_A_eh_entropy", float("nan")),
             "direct_residual_gate": best.get("val_direct_residual_gate", float("nan")),
-            "run_dir": str(run_dir),
+            "selected_checkpoint_for_summary": str(actual_run_dir / "best_by_field_mse_model.pt"),
+            "run_dir": str(actual_run_dir),
             "notes": ablation.notes,
         }
         rows.append(row)
 
     write_summary_csv(root / "ablation_summary.csv", rows)
     save_diagnostics_json({"ablations": rows}, root / "ablation_summary.json")
-    plot_ablation_summary(rows, root / "ablation_summary.png")
+    plot_ablation_summary(rows, root / "ablation_summary.png", metric_key="best_val_field_mse_physical")
     print(json.dumps({"wrote": str(root), "ablations": rows}, indent=2, sort_keys=True))
+
+
+def make_sweep_dir(parent: Path, label: str = "ablation") -> Path:
+    """Create one timestamped ablation sweep directory with collision retries."""
+    parent.mkdir(parents=True, exist_ok=True)
+    suffix = sanitize_label(label)
+    pattern = re.compile(r"^Run_(\d{4})_\d{8}_\d{6}")
+    for _ in range(1000):
+        max_id = 0
+        for child in parent.iterdir():
+            if child.is_dir():
+                match = pattern.match(child.name)
+                if match:
+                    max_id = max(max_id, int(match.group(1)))
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        name = f"Run_{max_id + 1:04d}_{timestamp}" + (f"_{suffix}" if suffix else "")
+        path = parent / name
+        try:
+            path.mkdir(parents=False, exist_ok=False)
+            return path
+        except FileExistsError:
+            continue
+    raise RuntimeError(f"Could not create a unique ablation sweep directory under {parent}")
+
+
+def sanitize_label(label: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(label).strip())
+    return text.strip("_")[:80]
 
 
 def run_synthetic_ablations(case: str, base_payload: Dict[str, Any], plan_payload: Dict[str, Any]) -> None:
     training_cfg = base_payload.get("training", {})
     torch.manual_seed(int(training_cfg.get("seed", 0)))
-    device = torch.device("cuda" if training_cfg.get("device", "auto") == "auto" and torch.cuda.is_available() else "cpu")
+    device = resolve_device(training_cfg.get("device", "auto"))
     batch = load_batch(case, base_payload, batch_size=int(training_cfg.get("batch_size", 2))).to(device)
 
     rows: List[Dict[str, Any]] = []
@@ -98,7 +139,7 @@ def run_synthetic_ablations(case: str, base_payload: Dict[str, Any], plan_payloa
 
     out_path = SANDBOX_ROOT / "results" / "ablation_manifest_resolved.json"
     save_diagnostics_json({"ablations": rows}, out_path)
-    plot_ablation_summary(rows, SANDBOX_ROOT / "results" / "ablation_summary.png")
+    plot_ablation_summary(rows, SANDBOX_ROOT / "results" / "ablation_summary.png", metric_key="field_mse")
     print(json.dumps({"wrote": str(out_path), "ablations": rows}, indent=2, sort_keys=True))
 
 
@@ -114,6 +155,20 @@ def resolved_payload_for_ablation(base_payload: Dict[str, Any], ablation: Ablati
             "num_hyperedges": ablation.num_hyperedges,
         }
     )
+    optional_model_fields = (
+        "direct_residual_gate_init",
+        "use_hyper_geometry_bias",
+        "hyper_geometry_bias_scale",
+        "num_env_tokens_x",
+        "num_env_tokens_y",
+        "hidden_dim",
+    )
+    for field in optional_model_fields:
+        value = getattr(ablation, field)
+        if value is not None:
+            payload["model"][field] = value
+    if ablation.module_heat_feature_mode is not None:
+        payload.setdefault("training", {})["module_heat_feature_mode"] = ablation.module_heat_feature_mode
     return payload
 
 

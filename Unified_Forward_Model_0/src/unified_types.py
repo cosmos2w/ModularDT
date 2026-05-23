@@ -21,6 +21,9 @@ DECODER_MODES = {
     "hyper_plus_global",
     "hyper_plus_direct_residual",
     "hyper_plus_near_module",
+    "hyper_plus_global_near",
+    "hyper_plus_global_direct",
+    "hyper_plus_near_direct",
     "current_like",
 }
 
@@ -104,6 +107,13 @@ class AblationConfig:
     use_near_module_context: bool = False
     use_global_context: bool = True
     num_hyperedges: int = 4
+    direct_residual_gate_init: Optional[float] = None
+    use_hyper_geometry_bias: Optional[bool] = None
+    hyper_geometry_bias_scale: Optional[float] = None
+    num_env_tokens_x: Optional[int] = None
+    num_env_tokens_y: Optional[int] = None
+    hidden_dim: Optional[int] = None
+    module_heat_feature_mode: Optional[str] = None
     notes: str = ""
 
     def __post_init__(self) -> None:
