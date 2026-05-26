@@ -24,6 +24,7 @@ from diagnostics import (
     compute_basic_field_metrics,
     compute_channelthermal_region_metrics,
     compute_hypergraph_diagnostics,
+    compute_organizer_regularization,
     plot_organization_overview,
     save_diagnostics_json,
 )
@@ -440,7 +441,9 @@ def run_epoch(
             optimizer.zero_grad(set_to_none=True)
         with torch.set_grad_enabled(optimizer is not None):
             output = model(batch)
-            loss = weighted_mse_loss(output["pred_field"], batch.target_field, training_cfg)
+            field_loss = weighted_mse_loss(output["pred_field"], batch.target_field, training_cfg)
+            org_reg = compute_organizer_regularization(output, model.config, training_cfg)
+            loss = field_loss + org_reg["org_reg_loss"]
         if optimizer is not None:
             loss.backward()
             clip = float(training_cfg.get("grad_clip_norm", training_cfg.get("gradient_clip_norm", 1.0)))
@@ -451,7 +454,10 @@ def run_epoch(
         count += batch_size
         steps += 1
         sums["loss"] = sums.get("loss", 0.0) + float(loss.detach().cpu()) * batch_size
+        sums["field_loss"] = sums.get("field_loss", 0.0) + float(field_loss.detach().cpu()) * batch_size
         for key, value in compute_hypergraph_diagnostics(output).items():
+            sums[key] = sums.get(key, 0.0) + float(value) * batch_size
+        for key, value in tensor_metrics_to_float(org_reg).items():
             sums[key] = sums.get(key, 0.0) + float(value) * batch_size
     return ({key: value / max(count, 1) for key, value in sums.items()}, steps)
 
@@ -478,6 +484,7 @@ def evaluate_loader(
             batch = batch.to(device)
             output = model(batch)
             loss = weighted_mse_loss(output["pred_field"], batch.target_field, training_cfg)
+            org_reg = compute_organizer_regularization(output, model_cfg, training_cfg)
             physical_pred = denormalize_field(output["pred_field"], target_stats)
             physical_target = denormalize_field(batch.target_field, target_stats)
             last_output = dict(output)
@@ -490,6 +497,7 @@ def evaluate_loader(
             if batch.case_name == "channelthermal":
                 metrics.update(compute_channelthermal_region_metrics(physical_pred, physical_target, batch, model_cfg))
             metrics.update(compute_hypergraph_diagnostics(output))
+            metrics.update(tensor_metrics_to_float(org_reg))
             metrics["val_loss"] = float(loss.cpu())
             batch_size = int(batch.query_xy.shape[0])
             count += batch_size
@@ -520,6 +528,16 @@ def weighted_mse_loss(pred: torch.Tensor, target: Optional[torch.Tensor], traini
         channel_weights = channel_weights.clone()
         channel_weights[4] = channel_weights[4] * float(training_cfg.get("temperature_weight", 1.0))
     return (diff * channel_weights.view(*([1] * (diff.ndim - 1)), -1)).mean()
+
+
+def tensor_metrics_to_float(metrics: Dict[str, Any]) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for key, value in metrics.items():
+        if torch.is_tensor(value):
+            out[key] = float(value.detach().cpu())
+        elif isinstance(value, (int, float)):
+            out[key] = float(value)
+    return out
 
 
 def denormalize_field(values: Optional[torch.Tensor], target_stats: Dict[str, Any]) -> Optional[torch.Tensor]:

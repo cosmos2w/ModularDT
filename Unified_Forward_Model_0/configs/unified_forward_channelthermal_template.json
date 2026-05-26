@@ -12,7 +12,7 @@
     "_note_env_tokens": "Centered environment grid. Test 12x4,16x6,24x8 for spatial resolution.",
     "num_env_tokens_x": 16,
     "num_env_tokens_y": 6,
-    
+
     "_note_num_hyperedges": "Thermal organization bottleneck. Test 2,4,6,8.",
     "num_hyperedges": 4,
     "_note_hidden_dim": "Shared token width. Test 64,96,128,192.",
@@ -23,13 +23,15 @@
 
     "_note_decoder_mode": "Modes: hyper_only, +global, +direct, +near, +global_near, +global_direct, +near_direct, current_like.",
     "decoder_mode": "current_like",
+    "_note_use_hyper_context": "true lets decoder attend to learned H; false keeps organizer diagnostics but removes H from decoding.",
+    "use_hyper_context": true,
     "_note_hyper_geometry_bias": "Query-to-hyperedge coordinate bias; useful for plume/wall placement.",
     "use_hyper_geometry_bias": true,
     "hyper_geometry_bias_scale": 1.0,
     "_note_auxiliary_paths": "A_me shapes organizer; direct/near/global reveal redundant decoder shortcuts.",
     "use_A_me_auxiliary": true,
     "use_direct_module_env_decoder": false,
-    "use_near_module_context": false,
+    "use_near_module_context": true,
     "use_global_context": true,
     "_note_direct_residual_gate_init": "0 keeps direct shortcut nearly off; try 0.01 or 0.1 only in shortcut ablations.",
     "direct_residual_gate_init": 0.0
@@ -56,6 +58,21 @@
     "module_heat_feature_mode": "both",
     "field_channel_weights": null,
     "temperature_weight": 1.0,
+    "organizer_regularization": {
+      "_note": "Weak generic anti-collapse regularization for H; no case-specific plume/wall/downstream priors.",
+      "enabled": false,
+      "active_edge_weight": 0.01,
+      "target_active_edges": 3.0,
+      "edge_strength_threshold": 0.05,
+      "edge_strength_temperature": 0.02,
+      "env_mass_entropy_weight": 0.002,
+      "module_mass_entropy_weight": 0.001,
+      "min_mass_entropy_fraction": 0.65,
+      "mass_max_weight": 0.001,
+      "max_mass_fraction": 0.75,
+      "duplicate_weight": 0.001,
+      "duplicate_similarity_threshold": 0.95
+    },
 
     "learning_rate": 0.0003,
     "weight_decay": 0.00001,

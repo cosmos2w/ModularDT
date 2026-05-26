@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
+import torch.nn.functional as F
 
 
 EPS = 1e-8
@@ -76,7 +78,14 @@ def compute_hypergraph_diagnostics(org: Dict[str, Any]) -> Dict[str, float]:
     if torch.is_tensor(geom_std):
         out["hyper_geometry_bias_std"] = float(geom_std.detach().mean().cpu())
 
-    for key in ("uses_global_context", "uses_direct_context", "uses_near_module_context"):
+    for key in (
+        "uses_hyper_context",
+        "uses_global_context",
+        "uses_direct_context",
+        "uses_near_module_context",
+        "hyper_context_norm",
+        "nonhyper_context_norm",
+    ):
         value = org.get(key)
         if torch.is_tensor(value):
             out[key] = float(value.detach().mean().cpu())
@@ -84,6 +93,78 @@ def compute_hypergraph_diagnostics(org: Dict[str, Any]) -> Dict[str, float]:
             out[key] = float(value)
 
     return out
+
+
+def compute_organizer_regularization(
+    output: Dict[str, Any],
+    model_config: Any,
+    training_cfg: Dict[str, Any],
+) -> Dict[str, torch.Tensor]:
+    """Weak generic anti-collapse regularization for learned hypergraph usage."""
+    cfg = _organizer_reg_cfg(training_cfg)
+    reference = output.get("hyper_strength")
+    if not torch.is_tensor(reference):
+        ref = output["pred_field"] if torch.is_tensor(output.get("pred_field")) else None
+        if ref is None:
+            raise KeyError("compute_organizer_regularization requires hyper_strength or pred_field for device inference.")
+        zero = ref.new_tensor(0.0)
+        return _zero_org_reg_payload(zero)
+
+    strength = reference
+    zero = strength.new_tensor(0.0)
+    num_edges = max(int(getattr(model_config, "num_hyperedges", strength.shape[-1])), 1)
+    threshold = float(cfg["edge_strength_threshold"])
+    temperature = max(float(cfg["edge_strength_temperature"]), EPS)
+    soft_active = torch.sigmoid((strength - threshold) / temperature)
+    soft_active_edge_count = soft_active.sum(dim=-1).mean()
+    active_loss = (soft_active_edge_count - float(cfg["target_active_edges"])).square()
+
+    env_mass = output.get("hyper_env_mass")
+    module_mass = output.get("hyper_module_mass")
+    env_entropy_norm = _mass_entropy_norm(env_mass, num_edges) if torch.is_tensor(env_mass) else zero
+    module_entropy_norm = _mass_entropy_norm(module_mass, num_edges) if torch.is_tensor(module_mass) else zero
+    min_entropy = float(cfg["min_mass_entropy_fraction"])
+    env_entropy_loss = F.relu(min_entropy - env_entropy_norm).square()
+    module_entropy_loss = F.relu(min_entropy - module_entropy_norm).square()
+
+    env_mass_max = env_mass.amax(dim=-1).mean() if torch.is_tensor(env_mass) else zero
+    module_mass_max = module_mass.amax(dim=-1).mean() if torch.is_tensor(module_mass) else zero
+    max_mass = float(cfg["max_mass_fraction"])
+    mass_max_loss = F.relu(env_mass_max - max_mass).square() + F.relu(module_mass_max - max_mass).square()
+
+    duplicate_loss = zero
+    A_eh = output.get("A_eh")
+    A_mh = output.get("A_mh")
+    duplicate_threshold = float(cfg["duplicate_similarity_threshold"])
+    if torch.is_tensor(A_eh):
+        duplicate_loss = duplicate_loss + _duplicate_column_loss(A_eh, duplicate_threshold)
+    if torch.is_tensor(A_mh):
+        duplicate_loss = duplicate_loss + _duplicate_column_loss(A_mh, duplicate_threshold)
+
+    enabled = bool(cfg["enabled"])
+    org_reg_loss = zero
+    if enabled:
+        org_reg_loss = (
+            float(cfg["active_edge_weight"]) * active_loss
+            + float(cfg["env_mass_entropy_weight"]) * env_entropy_loss
+            + float(cfg["module_mass_entropy_weight"]) * module_entropy_loss
+            + float(cfg["mass_max_weight"]) * mass_max_loss
+            + float(cfg["duplicate_weight"]) * duplicate_loss
+        )
+
+    return {
+        "org_reg_loss": org_reg_loss,
+        "org_active_loss": active_loss,
+        "org_env_entropy_loss": env_entropy_loss,
+        "org_module_entropy_loss": module_entropy_loss,
+        "org_mass_max_loss": mass_max_loss,
+        "org_duplicate_loss": duplicate_loss,
+        "soft_active_edge_count": soft_active_edge_count,
+        "env_mass_entropy_norm": env_entropy_norm,
+        "module_mass_entropy_norm": module_entropy_norm,
+        "env_mass_max": env_mass_max,
+        "module_mass_max": module_mass_max,
+    }
 
 
 def compute_channelthermal_region_metrics(
@@ -194,6 +275,59 @@ def _entropy(weights: torch.Tensor, dim: int) -> float:
     probs = weights / weights.sum(dim=dim, keepdim=True).clamp_min(EPS)
     entropy = -(probs * torch.log(probs.clamp_min(EPS))).sum(dim=dim)
     return float(entropy.mean().cpu())
+
+
+def _organizer_reg_cfg(training_cfg: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = {
+        "enabled": False,
+        "active_edge_weight": 0.005,
+        "target_active_edges": 3.0,
+        "edge_strength_threshold": 0.05,
+        "edge_strength_temperature": 0.02,
+        "env_mass_entropy_weight": 0.002,
+        "module_mass_entropy_weight": 0.001,
+        "min_mass_entropy_fraction": 0.65,
+        "mass_max_weight": 0.001,
+        "max_mass_fraction": 0.75,
+        "duplicate_weight": 0.001,
+        "duplicate_similarity_threshold": 0.95,
+    }
+    payload = dict(training_cfg.get("organizer_regularization", {}) or {})
+    defaults.update(payload)
+    return defaults
+
+
+def _zero_org_reg_payload(zero: torch.Tensor) -> Dict[str, torch.Tensor]:
+    return {
+        "org_reg_loss": zero,
+        "org_active_loss": zero,
+        "org_env_entropy_loss": zero,
+        "org_module_entropy_loss": zero,
+        "org_mass_max_loss": zero,
+        "org_duplicate_loss": zero,
+        "soft_active_edge_count": zero,
+        "env_mass_entropy_norm": zero,
+        "module_mass_entropy_norm": zero,
+        "env_mass_max": zero,
+        "module_mass_max": zero,
+    }
+
+
+def _mass_entropy_norm(mass: torch.Tensor, num_edges: int) -> torch.Tensor:
+    probs = mass / mass.sum(dim=-1, keepdim=True).clamp_min(EPS)
+    entropy = -(probs * torch.log(probs.clamp_min(EPS))).sum(dim=-1)
+    return (entropy / max(math.log(float(max(num_edges, 2))), EPS)).mean()
+
+
+def _duplicate_column_loss(weights: torch.Tensor, threshold: float) -> torch.Tensor:
+    if weights.shape[-1] <= 1:
+        return weights.new_tensor(0.0)
+    columns = F.normalize(weights.float(), p=2, dim=1, eps=EPS)
+    similarity = torch.einsum("bnk,bnl->bkl", columns, columns)
+    eye = torch.eye(similarity.shape[-1], device=similarity.device, dtype=torch.bool).unsqueeze(0)
+    off_diag = similarity.masked_fill(eye, 0.0)
+    denom = float(max(similarity.shape[-1] * (similarity.shape[-1] - 1), 1))
+    return F.relu(off_diag - threshold).square().sum(dim=(-1, -2)).mean() / denom
 
 
 def _masked_mse(diff2: torch.Tensor, mask: torch.Tensor) -> float:

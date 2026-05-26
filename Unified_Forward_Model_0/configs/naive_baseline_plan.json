@@ -1,0 +1,19 @@
+[
+  {
+    "name": "NB0_flat_layout_mlp",
+    "model_overrides": {
+      "model_type": "flat_layout_mlp",
+      "hidden_dim": 256,
+      "num_layers": 5
+    }
+  },
+  {
+    "name": "NB1_query_deepsets_mlp",
+    "model_overrides": {
+      "model_type": "query_deepsets_mlp",
+      "hidden_dim": 256,
+      "num_layers": 5,
+      "pool_mode": "sum_mean_max"
+    }
+  }
+]

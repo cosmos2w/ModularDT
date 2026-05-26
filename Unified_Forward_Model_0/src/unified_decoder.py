@@ -50,6 +50,7 @@ class HypergraphFieldDecoder(nn.Module):
         self.hyper_key = nn.Linear(hidden_dim, hidden_dim)
         self.hyper_value = nn.Linear(hidden_dim, hidden_dim)
         self.hyper_geometry_bias = nn.Linear(10, 1)
+        self.nonhyper_query_proj = nn.Linear(hidden_dim, hidden_dim)
         self.direct_key = nn.Linear(hidden_dim, hidden_dim)
         self.direct_value = nn.Linear(hidden_dim, hidden_dim)
         self.global_proj = nn.Linear(hidden_dim, hidden_dim)
@@ -75,48 +76,63 @@ class HypergraphFieldDecoder(nn.Module):
         query_features = self._query_features(query_xy, query_time)
         query_state = self.query_encoder(query_features)
 
-        hyper_state = organizer_output["hyper_state"]
-        hyper_logits = torch.einsum(
-            "bqh,bkh->bqk",
-            self.query_to_hyper(query_state),
-            self.hyper_key(hyper_state),
-        ) / math.sqrt(float(query_state.shape[-1]))
-        if cfg.use_hyper_geometry_bias:
-            geometry_bias = self.hyper_geometry_bias(self._hyper_geometry_features(query_xy, organizer_output)).squeeze(-1)
-            hyper_logits = hyper_logits + float(cfg.hyper_geometry_bias_scale) * geometry_bias
-        else:
-            geometry_bias = torch.zeros_like(hyper_logits)
-        hyper_attention = torch.softmax(hyper_logits, dim=-1)
-        context = torch.einsum("bqk,bkh->bqh", hyper_attention, self.hyper_value(hyper_state))
-
-        diagnostics: Dict[str, torch.Tensor | str] = {
-            "hyper_attention_mean": hyper_attention.mean(dim=1),
-            "hyper_geometry_bias_mean": geometry_bias.detach().mean(),
-            "hyper_geometry_bias_std": geometry_bias.detach().std(unbiased=False),
-            "decoder_mode": cfg.decoder_mode,
-        }
-
+        uses_hyper = bool(cfg.use_hyper_context)
         uses_global = self._uses_global()
         uses_direct = self._uses_direct()
         uses_near = self._uses_near_module()
+        hyper_context = torch.zeros_like(query_state)
+        nonhyper_context = torch.zeros_like(query_state)
+        diagnostics: Dict[str, torch.Tensor | str] = {"decoder_mode": cfg.decoder_mode}
+        if uses_hyper:
+            hyper_state = organizer_output["hyper_state"]
+            hyper_logits = torch.einsum(
+                "bqh,bkh->bqk",
+                self.query_to_hyper(query_state),
+                self.hyper_key(hyper_state),
+            ) / math.sqrt(float(query_state.shape[-1]))
+            if cfg.use_hyper_geometry_bias:
+                geometry_bias = self.hyper_geometry_bias(self._hyper_geometry_features(query_xy, organizer_output)).squeeze(-1)
+                hyper_logits = hyper_logits + float(cfg.hyper_geometry_bias_scale) * geometry_bias
+            else:
+                geometry_bias = torch.zeros_like(hyper_logits)
+            hyper_attention = torch.softmax(hyper_logits, dim=-1)
+            hyper_context = torch.einsum("bqk,bkh->bqh", hyper_attention, self.hyper_value(hyper_state))
+            diagnostics["hyper_attention_mean"] = hyper_attention.mean(dim=1)
+            diagnostics["hyper_geometry_bias_mean"] = geometry_bias.detach().mean()
+            diagnostics["hyper_geometry_bias_std"] = geometry_bias.detach().std(unbiased=False)
+        else:
+            nonhyper_context = self.nonhyper_query_proj(query_state)
+            diagnostics["hyper_geometry_bias_mean"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
+            diagnostics["hyper_geometry_bias_std"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
+        context = hyper_context + nonhyper_context
+
+        diagnostics["uses_hyper_context"] = torch.tensor(float(uses_hyper), device=query_xy.device, dtype=query_xy.dtype)
         diagnostics["uses_global_context"] = torch.tensor(float(uses_global), device=query_xy.device, dtype=query_xy.dtype)
         diagnostics["uses_direct_context"] = torch.tensor(float(uses_direct), device=query_xy.device, dtype=query_xy.dtype)
         diagnostics["uses_near_module_context"] = torch.tensor(float(uses_near), device=query_xy.device, dtype=query_xy.dtype)
 
         if uses_global and global_context is not None:
-            context = context + self.global_proj(global_context).unsqueeze(1)
+            addition = self.global_proj(global_context).unsqueeze(1)
+            context = context + addition
+            nonhyper_context = nonhyper_context + addition
 
         if uses_direct:
             direct_context, direct_attention = self._direct_context(query_state, organizer_output)
             gate = torch.sigmoid(self.direct_residual_logit)
             context = context + gate * direct_context
+            nonhyper_context = nonhyper_context + gate * direct_context
             diagnostics["direct_attention_mean"] = direct_attention.mean(dim=1)
             diagnostics["direct_residual_gate"] = gate.detach()
         else:
             diagnostics["direct_residual_gate"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
 
         if uses_near:
-            context = context + self.near_proj(self._near_module_context(query_xy, organizer_output))
+            addition = self.near_proj(self._near_module_context(query_xy, organizer_output))
+            context = context + addition
+            nonhyper_context = nonhyper_context + addition
+
+        diagnostics["hyper_context_norm"] = hyper_context.detach().norm(dim=-1).mean()
+        diagnostics["nonhyper_context_norm"] = nonhyper_context.detach().norm(dim=-1).mean()
 
         context = self.context_norm(context)
         output: Dict[str, torch.Tensor | str] = dict(diagnostics)
@@ -241,13 +257,17 @@ class HypergraphFieldDecoder(nn.Module):
         return torch.einsum("bqm,bmh->bqh", weights, module_tokens)
 
     def _uses_global(self) -> bool:
+        if self.config.decoder_mode == "hyper_only":
+            return False
         mode_uses = self.config.decoder_mode in {
             "hyper_plus_global",
             "hyper_plus_global_near",
             "hyper_plus_global_direct",
+            "no_hyper_global_near",
+            "no_hyper_current_like_direct",
             "current_like",
         }
-        return bool(self.config.use_global_context and mode_uses)
+        return bool(self.config.use_global_context and (mode_uses or self.config.use_global_context))
 
     def _uses_direct(self) -> bool:
         if self.config.decoder_mode == "hyper_only":
@@ -256,6 +276,7 @@ class HypergraphFieldDecoder(nn.Module):
             "hyper_plus_direct_residual",
             "hyper_plus_global_direct",
             "hyper_plus_near_direct",
+            "no_hyper_current_like_direct",
             "current_like",
         }
         return bool(self.config.use_direct_module_env_decoder or mode_uses)
@@ -267,6 +288,8 @@ class HypergraphFieldDecoder(nn.Module):
             "hyper_plus_near_module",
             "hyper_plus_global_near",
             "hyper_plus_near_direct",
+            "no_hyper_global_near",
+            "no_hyper_current_like_direct",
             "current_like",
         }
         return bool(self.config.use_near_module_context or mode_uses)

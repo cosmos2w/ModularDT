@@ -7,7 +7,7 @@ folder or copying any dataset artifacts.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields, is_dataclass
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from typing import Any, Dict, Optional
 
 try:
@@ -24,6 +24,8 @@ DECODER_MODES = {
     "hyper_plus_global_near",
     "hyper_plus_global_direct",
     "hyper_plus_near_direct",
+    "no_hyper_global_near",
+    "no_hyper_current_like_direct",
     "current_like",
 }
 
@@ -49,6 +51,7 @@ class UnifiedForwardConfig:
     query_time_mode: str = "none"
 
     decoder_mode: str = "hyper_only"
+    use_hyper_context: bool = True
     use_hyper_geometry_bias: bool = True
     hyper_geometry_bias_scale: float = 1.0
     direct_residual_gate_init: float = 0.0
@@ -108,12 +111,15 @@ class AblationConfig:
     use_global_context: bool = True
     num_hyperedges: int = 4
     direct_residual_gate_init: Optional[float] = None
+    use_hyper_context: Optional[bool] = None
     use_hyper_geometry_bias: Optional[bool] = None
     hyper_geometry_bias_scale: Optional[float] = None
     num_env_tokens_x: Optional[int] = None
     num_env_tokens_y: Optional[int] = None
     hidden_dim: Optional[int] = None
     module_heat_feature_mode: Optional[str] = None
+    model_overrides: Dict[str, Any] = field(default_factory=dict)
+    training_overrides: Dict[str, Any] = field(default_factory=dict)
     notes: str = ""
 
     def __post_init__(self) -> None:

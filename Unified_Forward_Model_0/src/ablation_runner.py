@@ -16,6 +16,7 @@ from case_adapters import ChannelThermalAdapter, MultiCylinderAdapter, make_synt
 from diagnostics import (
     compute_basic_field_metrics,
     compute_hypergraph_diagnostics,
+    compute_organizer_regularization,
     plot_ablation_summary,
     save_diagnostics_json,
 )
@@ -50,12 +51,31 @@ def run_channelthermal_ablations(base_payload: Dict[str, Any], plan_payload: Dic
             output_dir=run_dir,
             use_output_dir_as_run_dir=True,
         )
-        best_loss = summary.get("best_by_loss_metrics", summary.get("best_metrics", {}))
-        best_field = summary.get("best_by_field_mse_metrics", summary.get("best_metrics", {}))
-        best_temp = summary.get("best_by_temperature_mse_metrics", summary.get("best_metrics", {}))
-        best = best_field or best_loss or summary.get("latest_metrics", {})
         actual_run_dir = Path(summary.get("run_dir", run_dir))
-        row = {
+        row = ablation_summary_row(ablation, summary, actual_run_dir)
+        rows.append(row)
+
+    write_summary_csv(root / "ablation_summary.csv", rows)
+    save_diagnostics_json({"ablations": rows}, root / "ablation_summary.json")
+    plot_ablation_summary(rows, root / "ablation_summary.png", metric_key="best_val_field_mse_physical")
+    plot_ablation_summary(rows, root / "ablation_summary_field_mse.png", metric_key="best_val_field_mse_physical")
+    plot_ablation_summary(rows, root / "ablation_summary_temperature_mse.png", metric_key="best_val_temperature_mse")
+    plot_ablation_summary(rows, root / "ablation_summary_active_edges.png", metric_key="active_edge_count")
+    plot_multi_metric_summary(
+        rows,
+        root / "ablation_summary_mass_entropy.png",
+        ["env_mass_entropy_norm", "module_mass_entropy_norm"],
+        "mass entropy norm",
+    )
+    print(json.dumps({"wrote": str(root), "ablations": rows}, indent=2, sort_keys=True))
+
+
+def ablation_summary_row(ablation: AblationConfig, summary: Dict[str, Any], actual_run_dir: Path) -> Dict[str, Any]:
+    best_loss = summary.get("best_by_loss_metrics", summary.get("best_metrics", {}))
+    best_field = summary.get("best_by_field_mse_metrics", summary.get("best_metrics", {}))
+    best_temp = summary.get("best_by_temperature_mse_metrics", summary.get("best_metrics", {}))
+    best = best_field or best_loss or summary.get("latest_metrics", {})
+    return {
             "name": ablation.name,
             "best_val_loss": summary.get("best_val_loss", float("nan")),
             "best_val_field_mse_physical": summary.get(
@@ -66,20 +86,27 @@ def run_channelthermal_ablations(base_payload: Dict[str, Any], plan_payload: Dic
                 "best_val_temperature_mse",
                 best_temp.get("val_temperature_mse", float("nan")),
             ),
+            "val_temperature_mse_near_module": best.get("val_temperature_mse_near_module", float("nan")),
+            "val_temperature_mse_far_field": best.get("val_temperature_mse_far_field", float("nan")),
+            "val_temperature_mse_downstream_mid_box": best.get("val_temperature_mse_downstream_mid_box", float("nan")),
             "active_edge_count": best.get("val_active_edge_count", float("nan")),
+            "soft_active_edge_count": best.get("val_soft_active_edge_count", float("nan")),
+            "env_mass_entropy_norm": best.get("val_env_mass_entropy_norm", float("nan")),
+            "module_mass_entropy_norm": best.get("val_module_mass_entropy_norm", float("nan")),
+            "env_mass_max": best.get("val_env_mass_max", best.get("val_env_mass_raw_max", float("nan"))),
+            "module_mass_max": best.get("val_module_mass_max", best.get("val_module_mass_raw_max", float("nan"))),
             "A_mh_entropy": best.get("val_A_mh_entropy", float("nan")),
             "A_eh_entropy": best.get("val_A_eh_entropy", float("nan")),
             "direct_residual_gate": best.get("val_direct_residual_gate", float("nan")),
+            "uses_hyper_context": best.get("val_uses_hyper_context", float("nan")),
+            "uses_global_context": best.get("val_uses_global_context", float("nan")),
+            "uses_direct_context": best.get("val_uses_direct_context", float("nan")),
+            "uses_near_module_context": best.get("val_uses_near_module_context", float("nan")),
+            "org_reg_loss": best.get("val_org_reg_loss", float("nan")),
             "selected_checkpoint_for_summary": str(actual_run_dir / "best_by_field_mse_model.pt"),
             "run_dir": str(actual_run_dir),
             "notes": ablation.notes,
         }
-        rows.append(row)
-
-    write_summary_csv(root / "ablation_summary.csv", rows)
-    save_diagnostics_json({"ablations": rows}, root / "ablation_summary.json")
-    plot_ablation_summary(rows, root / "ablation_summary.png", metric_key="best_val_field_mse_physical")
-    print(json.dumps({"wrote": str(root), "ablations": rows}, indent=2, sort_keys=True))
 
 
 def make_sweep_dir(parent: Path, label: str = "ablation") -> Path:
@@ -127,6 +154,7 @@ def run_synthetic_ablations(case: str, base_payload: Dict[str, Any], plan_payloa
             output = model(batch)
         metrics = compute_basic_field_metrics(output["pred_field"], batch.target_field)
         metrics.update(compute_hypergraph_diagnostics(output))
+        metrics.update(tensor_metrics_to_float(compute_organizer_regularization(output, config, payload.get("training", {}))))
         row = {
             "name": ablation.name,
             "notes": ablation.notes,
@@ -169,7 +197,55 @@ def resolved_payload_for_ablation(base_payload: Dict[str, Any], ablation: Ablati
             payload["model"][field] = value
     if ablation.module_heat_feature_mode is not None:
         payload.setdefault("training", {})["module_heat_feature_mode"] = ablation.module_heat_feature_mode
+    if ablation.use_hyper_context is not None:
+        payload["model"]["use_hyper_context"] = ablation.use_hyper_context
+    if ablation.model_overrides:
+        payload.setdefault("model", {}).update(ablation.model_overrides)
+    if ablation.training_overrides:
+        recursive_update(payload.setdefault("training", {}), ablation.training_overrides)
     return payload
+
+
+def recursive_update(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            recursive_update(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def tensor_metrics_to_float(metrics: Dict[str, Any]) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for key, value in metrics.items():
+        if torch.is_tensor(value):
+            out[key] = float(value.detach().cpu())
+        elif isinstance(value, (int, float)):
+            out[key] = float(value)
+    return out
+
+
+def plot_multi_metric_summary(rows: List[Dict[str, Any]], path: Path, metric_keys: List[str], ylabel: str) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[ablation_runner] matplotlib is not installed; skipping multi-metric plot.")
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    names = [str(row.get("name", idx)) for idx, row in enumerate(rows)]
+    xs = torch.arange(len(names), dtype=torch.float32)
+    width = 0.8 / max(len(metric_keys), 1)
+    fig, ax = plt.subplots(figsize=(9, 4), dpi=160)
+    for idx, key in enumerate(metric_keys):
+        values = [float(row.get(key, float("nan"))) for row in rows]
+        offset = (idx - (len(metric_keys) - 1) / 2.0) * width
+        ax.bar((xs + offset).tolist(), values, width=width, label=key)
+    ax.set_xticks(xs.tolist(), names, rotation=20, ha="right")
+    ax.set_ylabel(ylabel)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
 
 
 def load_batch(case: str, payload: Dict[str, Any], batch_size: int = 2):

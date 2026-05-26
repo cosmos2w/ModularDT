@@ -1,0 +1,96 @@
+{
+  "_note_plan": "Final clean HONF test: NH removes decoder access to H; H keeps learned hypergraph decoder context; orgreg adds weak generic anti-collapse organizer regularization.",
+  "_note_notation": "D = layout/module structure, c = operating context, H = learned hypergraph organization, U = predicted physical field.",
+  "ablations": [
+    {
+      "name": "NH1_no_hyper_global_near",
+      "decoder_mode": "hyper_plus_global_near",
+      "use_hyper_context": false,
+      "use_global_context": true,
+      "use_near_module_context": true,
+      "use_direct_module_env_decoder": false,
+      "direct_residual_gate_init": 0.0,
+      "training_overrides": {
+        "organizer_regularization": {
+          "enabled": false
+        }
+      },
+      "notes": "NH: no hypergraph decoder context. Tests global c plus near-module correction without H."
+    },
+    {
+      "name": "H1_hyper_global_near",
+      "decoder_mode": "hyper_plus_global_near",
+      "use_hyper_context": true,
+      "use_global_context": true,
+      "use_near_module_context": true,
+      "use_direct_module_env_decoder": false,
+      "direct_residual_gate_init": 0.0,
+      "training_overrides": {
+        "organizer_regularization": {
+          "enabled": false
+        }
+      },
+      "notes": "H: adds learned hypergraph decoder context to the same global plus near-module paths."
+    },
+    {
+      "name": "H2_hyper_global_near_orgreg",
+      "decoder_mode": "hyper_plus_global_near",
+      "use_hyper_context": true,
+      "use_global_context": true,
+      "use_near_module_context": true,
+      "use_direct_module_env_decoder": false,
+      "direct_residual_gate_init": 0.0,
+      "training_overrides": {
+        "organizer_regularization": {
+          "enabled": true
+        }
+      },
+      "notes": "H + orgreg: same as H1 with weak generic anti-collapse organizer regularization."
+    },
+    {
+      "name": "NH2_no_hyper_current_like_direct005",
+      "decoder_mode": "current_like",
+      "use_hyper_context": false,
+      "use_global_context": true,
+      "use_near_module_context": true,
+      "use_direct_module_env_decoder": true,
+      "direct_residual_gate_init": 0.05,
+      "training_overrides": {
+        "organizer_regularization": {
+          "enabled": false
+        }
+      },
+      "notes": "NH: no hypergraph decoder context, with global, near-module, and direct residual shortcuts."
+    },
+    {
+      "name": "H3_current_like_direct005",
+      "decoder_mode": "current_like",
+      "use_hyper_context": true,
+      "use_global_context": true,
+      "use_near_module_context": true,
+      "use_direct_module_env_decoder": true,
+      "direct_residual_gate_init": 0.05,
+      "training_overrides": {
+        "organizer_regularization": {
+          "enabled": false
+        }
+      },
+      "notes": "H: learned hypergraph decoder context plus global, near-module, and direct residual shortcuts."
+    },
+    {
+      "name": "H4_current_like_direct005_orgreg",
+      "decoder_mode": "current_like",
+      "use_hyper_context": true,
+      "use_global_context": true,
+      "use_near_module_context": true,
+      "use_direct_module_env_decoder": true,
+      "direct_residual_gate_init": 0.05,
+      "training_overrides": {
+        "organizer_regularization": {
+          "enabled": true
+        }
+      },
+      "notes": "H + orgreg: same as H3 with weak generic anti-collapse organizer regularization."
+    }
+  ]
+}

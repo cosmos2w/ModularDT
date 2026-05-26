@@ -52,3 +52,17 @@ ChannelThermal:
 
 Existing demo folders are not modified. This sandbox is used to test
 simplifications before back-porting.
+
+## External Naive Baselines
+
+The naive ChannelThermal baselines test whether simple MLP-style neural fields
+can learn the layout-to-field map without learned organization `H`.
+
+- `NB0_flat_layout_mlp`: a slot-order-dependent lower baseline that flattens
+  module layout/features and concatenates them with each query point.
+- `NB1_query_deepsets_mlp`: a permutation-invariant query-conditioned DeepSets
+  baseline that pools simple module-relative embeddings per query.
+
+Neither baseline uses environment tokens, `A_mh`, `A_eh`, `A_me`, hyperedge
+source/region coordinates, local surrogates, port/interface heads, or HONF
+decoder internals.

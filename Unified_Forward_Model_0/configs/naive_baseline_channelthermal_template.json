@@ -1,0 +1,48 @@
+{
+  "model": {
+    "model_type": "query_deepsets_mlp",
+    "field_dim": 5,
+    "max_num_modules": 12,
+    "module_feature_dim": 8,
+    "global_context_dim": 8,
+    "hidden_dim": 256,
+    "num_layers": 5,
+    "dropout": 0.05,
+    "use_layer_norm": true,
+    "query_fourier_frequencies": 4,
+    "relative_fourier_frequencies": 2,
+    "pool_mode": "sum_mean_max",
+    "include_nearest_distance_features": true,
+    "include_global_context": true,
+    "domain_length_x": 12.0,
+    "domain_length_y": 4.0,
+    "module_radius": 0.45
+  },
+  "data": {
+    "channelthermal_dataset_path": "../1_Demo_ChannelThermal/Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5"
+  },
+  "training": {
+    "epochs": 2000,
+    "batch_size": 64,
+    "val_batch_size": 64,
+    "points_per_case": 2048,
+    "val_points_per_case": 2048,
+    "max_train_cases": null,
+    "max_val_cases": null,
+    "max_train_batches_per_epoch": null,
+    "max_val_batches": null,
+    "normalize_targets": true,
+    "field_channel_weights": null,
+    "temperature_weight": 1.0,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.00001,
+    "grad_clip_norm": 1.0,
+    "eval_every": 5,
+    "save_every": 20,
+    "seed": 0,
+    "device": "auto"
+  },
+  "output": {
+    "saved_root": "results/naive_baselines"
+  }
+}
