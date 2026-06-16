@@ -17,6 +17,10 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import torch
 from torch.utils.data import DataLoader
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - optional progress display.
+    tqdm = None  # type: ignore[assignment]
 
 from case_adapters import ChannelThermalAdapter, MultiCylinderAdapter, describe_batch, make_synthetic_batch
 from channelthermal_dataset import ChannelThermalPointDataset, collate_batchdata
@@ -151,6 +155,7 @@ def train_one_run(
             optimizer=optimizer,
             max_batches=training_cfg.get("max_train_batches_per_epoch"),
             max_steps=max_steps_int - total_steps if max_steps_int is not None else None,
+            progress_desc=f"epoch {epoch}/{epochs} train",
         )
         total_steps += train_steps
         should_eval = epoch == 1 or epoch % eval_every == 0 or (max_steps_int is not None and total_steps >= max_steps_int)
@@ -165,6 +170,7 @@ def train_one_run(
                 target_stats,
                 model_cfg,
                 max_batches=training_cfg.get("max_val_batches"),
+                progress_desc=f"epoch {epoch}/{epochs} val",
             )
             if last_val_output is not None:
                 plot_organization_overview(last_val_output, run_dir / "val_organization_latest.png")
@@ -425,13 +431,16 @@ def run_epoch(
     optimizer: Optional[torch.optim.Optimizer],
     max_batches: Optional[Any] = None,
     max_steps: Optional[int] = None,
+    progress_desc: Optional[str] = None,
 ) -> tuple[Dict[str, float], int]:
     model.train(optimizer is not None)
     sums: Dict[str, float] = {}
     count = 0
     steps = 0
     max_batches_int = int(max_batches) if max_batches is not None else None
-    for batch_idx, batch in enumerate(loader):
+    progress_total = _progress_total(loader, max_batches_int, max_steps)
+    iterator = _progress(enumerate(loader), desc=progress_desc, total=progress_total)
+    for batch_idx, batch in iterator:
         if max_batches_int is not None and batch_idx >= max_batches_int:
             break
         if max_steps is not None and steps >= max_steps:
@@ -459,6 +468,13 @@ def run_epoch(
             sums[key] = sums.get(key, 0.0) + float(value) * batch_size
         for key, value in tensor_metrics_to_float(org_reg).items():
             sums[key] = sums.get(key, 0.0) + float(value) * batch_size
+        _progress_set_postfix(
+            iterator,
+            {
+                "loss": float(loss.detach().cpu()),
+                "field": float(field_loss.detach().cpu()),
+            },
+        )
     return ({key: value / max(count, 1) for key, value in sums.items()}, steps)
 
 
@@ -471,14 +487,17 @@ def evaluate_loader(
     model_cfg: UnifiedForwardConfig,
     *,
     max_batches: Optional[Any] = None,
+    progress_desc: Optional[str] = None,
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     model.eval()
     sums: Dict[str, float] = {}
     count = 0
     last_output: Optional[Dict[str, Any]] = None
     max_batches_int = int(max_batches) if max_batches is not None else None
+    progress_total = _progress_total(loader, max_batches_int, None)
     with torch.no_grad():
-        for batch_idx, batch in enumerate(loader):
+        iterator = _progress(enumerate(loader), desc=progress_desc, total=progress_total)
+        for batch_idx, batch in iterator:
             if max_batches_int is not None and batch_idx >= max_batches_int:
                 break
             batch = batch.to(device)
@@ -504,10 +523,32 @@ def evaluate_loader(
             for key, value in metrics.items():
                 if isinstance(value, (int, float)):
                     sums[key] = sums.get(key, 0.0) + float(value) * batch_size
+            _progress_set_postfix(iterator, {"val_loss": float(loss.detach().cpu())})
     averaged = {f"val_{key}" if not str(key).startswith("val_") else str(key): value / max(count, 1) for key, value in sums.items()}
     if "val_field_mse" in averaged:
         averaged["val_field_mse_physical"] = averaged["val_field_mse"]
     return averaged, last_output
+
+
+def _progress_total(loader: DataLoader, max_batches: Optional[int], max_steps: Optional[int]) -> Optional[int]:
+    try:
+        total = len(loader)
+    except TypeError:
+        total = None
+    limits = [value for value in (total, max_batches, max_steps) if value is not None and int(value) >= 0]
+    return min(int(value) for value in limits) if limits else total
+
+
+def _progress(iterable: Iterable[Any], *, desc: Optional[str], total: Optional[int]) -> Iterable[Any]:
+    if tqdm is None or not desc:
+        return iterable
+    return tqdm(iterable, desc=desc, total=total, leave=False, dynamic_ncols=True)
+
+
+def _progress_set_postfix(iterator: Iterable[Any], values: Dict[str, float]) -> None:
+    set_postfix = getattr(iterator, "set_postfix", None)
+    if set_postfix is not None:
+        set_postfix({key: f"{value:.3e}" for key, value in values.items()})
 
 
 def weighted_mse_loss(pred: torch.Tensor, target: Optional[torch.Tensor], training_cfg: Dict[str, Any]) -> torch.Tensor:

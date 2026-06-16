@@ -18,6 +18,27 @@ from unified_organizer import HypergraphOrganizerCore
 from unified_types import BatchData, UnifiedForwardConfig
 
 
+class FourierFeatures(nn.Module):
+    """Append powers-of-two sin/cos Fourier features to the input."""
+
+    def __init__(self, num_frequencies: int):
+        super().__init__()
+        self.num_frequencies = max(0, int(num_frequencies))
+        if self.num_frequencies > 0:
+            frequencies = (2.0 ** torch.arange(self.num_frequencies, dtype=torch.float32)) * torch.pi
+        else:
+            frequencies = torch.empty(0, dtype=torch.float32)
+        self.register_buffer("frequencies", frequencies, persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.num_frequencies <= 0:
+            return x
+        frequencies = self.frequencies.to(device=x.device, dtype=x.dtype).view(*([1] * (x.ndim - 1)), -1, 1)
+        angles = x.unsqueeze(-2) * frequencies
+        encoded = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-2).flatten(start_dim=-2)
+        return torch.cat([x, encoded], dim=-1)
+
+
 class LazyMLP(nn.Module):
     """Lazy input MLP for adapter-provided feature dimensions."""
 
@@ -43,8 +64,9 @@ class UnifiedHypergraphNeuralField(nn.Module):
         hidden_dim = int(config.hidden_dim)
         self.global_encoder = LazyMLP(hidden_dim, float(config.dropout))
         self.module_feature_encoder = LazyMLP(hidden_dim, float(config.dropout))
-        self.module_position_encoder = nn.Sequential(nn.Linear(2, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, hidden_dim))
-        self.env_encoder = nn.Sequential(nn.Linear(2, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, hidden_dim))
+        self.position_fourier = FourierFeatures(int(config.position_fourier_frequencies))
+        self.module_position_encoder = LazyMLP(hidden_dim, float(config.dropout))
+        self.env_encoder = LazyMLP(hidden_dim, float(config.dropout))
         self.organizer = HypergraphOrganizerCore(config)
         self.decoder = HypergraphFieldDecoder(config)
 
@@ -65,7 +87,11 @@ class UnifiedHypergraphNeuralField(nn.Module):
             ],
             dim=-1,
         )
-        module_tokens = self.module_feature_encoder(module_features) + self.module_position_encoder(module_pos)
+        if cfg.use_position_fourier_for_modules:
+            module_pos_encoded = self.position_fourier(module_pos)
+        else:
+            module_pos_encoded = module_pos
+        module_tokens = self.module_feature_encoder(module_features) + self.module_position_encoder(module_pos_encoded)
         module_tokens = module_tokens * module_present.unsqueeze(-1)
 
         env_coords = self._environment_coords(query_xy.device, query_xy.dtype)
@@ -76,7 +102,11 @@ class UnifiedHypergraphNeuralField(nn.Module):
             ],
             dim=-1,
         )
-        env_tokens = self.env_encoder(env_norm).unsqueeze(0).expand(query_xy.shape[0], -1, -1)
+        if cfg.use_position_fourier_for_env:
+            env_pos_encoded = self.position_fourier(env_norm)
+        else:
+            env_pos_encoded = env_norm
+        env_tokens = self.env_encoder(env_pos_encoded).unsqueeze(0).expand(query_xy.shape[0], -1, -1)
         if cfg.use_global_context:
             env_tokens = env_tokens + global_token.unsqueeze(1)
 
@@ -88,6 +118,7 @@ class UnifiedHypergraphNeuralField(nn.Module):
             module_present=module_present,
             geometry_mode=cfg.geometry_mode,
         )
+        organizer_output["module_features_raw"] = module_features
         decoder_output = self.decoder(
             query_xy=query_xy,
             query_time=query_time,

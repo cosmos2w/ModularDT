@@ -36,6 +36,142 @@ class MLP(nn.Module):
         return self.net(x)
 
 
+class LazyMLP(nn.Module):
+    """Lazy input MLP for dynamically assembled feature vectors."""
+
+    def __init__(self, hidden_dim: int, out_dim: int, num_layers: int, dropout: float):
+        super().__init__()
+        layers: list[nn.Module] = [nn.LazyLinear(hidden_dim), nn.GELU()]
+        if dropout > 0:
+            layers.append(nn.Dropout(dropout))
+        for _ in range(max(0, int(num_layers) - 2)):
+            layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.GELU()])
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+        layers.append(nn.Linear(hidden_dim, out_dim))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
+
+
+class FourierFeatures(nn.Module):
+    """Append powers-of-two sin/cos Fourier features to the input."""
+
+    def __init__(self, num_frequencies: int):
+        super().__init__()
+        self.num_frequencies = max(0, int(num_frequencies))
+        if self.num_frequencies > 0:
+            frequencies = (2.0 ** torch.arange(self.num_frequencies, dtype=torch.float32)) * math.pi
+        else:
+            frequencies = torch.empty(0, dtype=torch.float32)
+        self.register_buffer("frequencies", frequencies, persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.num_frequencies <= 0:
+            return x
+        frequencies = self.frequencies.to(device=x.device, dtype=x.dtype).view(*([1] * (x.ndim - 1)), -1, 1)
+        angles = x.unsqueeze(-2) * frequencies
+        encoded = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-2).flatten(start_dim=-2)
+        return torch.cat([x, encoded], dim=-1)
+
+
+def channel_boundary_features(query_xy: torch.Tensor, Lx: float, Ly: float) -> torch.Tensor:
+    """Channel boundary features mirroring the original ChannelThermal decoder."""
+
+    lx = max(float(Lx), EPS)
+    ly = max(float(Ly), EPS)
+    x = query_xy[..., 0:1]
+    y = query_xy[..., 1:2]
+    return torch.cat([x / lx, y / ly, y / ly, (ly - y) / ly, x / lx, (lx - x) / lx], dim=-1)
+
+
+class HypergraphGatedPairwiseKernel(nn.Module):
+    """Query-module pairwise kernel routed through learned hypergraph incidences."""
+
+    def __init__(self, config: UnifiedForwardConfig):
+        super().__init__()
+        self.config = config
+        hidden_dim = int(config.hidden_dim)
+        kernel_hidden_dim = int(config.pairwise_kernel_hidden_dim or hidden_dim)
+        self.relative_fourier = FourierFeatures(int(config.pairwise_kernel_fourier_frequencies))
+        self.pair_mlp = LazyMLP(
+            hidden_dim=kernel_hidden_dim,
+            out_dim=hidden_dim,
+            num_layers=int(config.pairwise_kernel_num_layers),
+            dropout=float(config.dropout),
+        )
+        gate_init = min(max(float(config.pairwise_kernel_gate_init), 1e-4), 1.0 - 1e-4)
+        gate_logit = math.log(gate_init / (1.0 - gate_init))
+        self.pairwise_kernel_logit = nn.Parameter(torch.tensor(gate_logit, dtype=torch.float32))
+
+    def forward(
+        self,
+        query_xy: torch.Tensor,
+        organizer_output: Dict[str, torch.Tensor],
+        hyper_attention: torch.Tensor,
+    ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        cfg = self.config
+        module_centers = organizer_output["module_centers"]
+        module_tokens = organizer_output["module_tokens"]
+        module_present = organizer_output["module_present"].to(device=query_xy.device, dtype=query_xy.dtype)
+        A_mh = organizer_output["A_mh"].to(device=query_xy.device, dtype=query_xy.dtype)
+
+        rel = self._relative_features(query_xy, module_centers)
+        if cfg.pairwise_kernel_use_fourier:
+            rel_encoded = self.relative_fourier(rel)
+        else:
+            rel_encoded = rel
+        pieces = [rel_encoded, module_present[:, None, :, None].expand(-1, query_xy.shape[1], -1, -1)]
+        if cfg.pairwise_kernel_include_module_token:
+            pieces.append(module_tokens[:, None, :, :].expand(-1, query_xy.shape[1], -1, -1))
+        if cfg.pairwise_kernel_include_module_features:
+            raw_features = organizer_output.get("module_features_raw")
+            if torch.is_tensor(raw_features):
+                pieces.append(raw_features[:, None, :, :].to(device=query_xy.device, dtype=query_xy.dtype).expand(-1, query_xy.shape[1], -1, -1))
+
+        pair_input = torch.cat(pieces, dim=-1)
+        pair_embed = self.pair_mlp(pair_input) * module_present[:, None, :, None]
+        if cfg.pairwise_kernel_normalize_by_edge_mass:
+            edge_module_weight = A_mh / A_mh.sum(dim=1, keepdim=True).clamp_min(EPS)
+        else:
+            edge_module_weight = A_mh
+        edge_pair_context = torch.einsum("bmk,bqmh->bqkh", edge_module_weight, pair_embed)
+        pair_context = torch.einsum("bqk,bqkh->bqh", hyper_attention, edge_pair_context)
+        gate = torch.sigmoid(self.pairwise_kernel_logit)
+        diagnostics = {
+            "pairwise_kernel_gate": gate.detach(),
+            "pairwise_context_norm": pair_context.detach().norm(dim=-1).mean(),
+            "pairwise_edge_context_norm": edge_pair_context.detach().norm(dim=-1).mean(),
+            "pairwise_edge_usage_mean": hyper_attention.detach().mean(),
+        }
+        return gate * pair_context, diagnostics
+
+    def _relative_features(self, query_xy: torch.Tensor, module_centers: torch.Tensor) -> torch.Tensor:
+        cfg = self.config
+        lx = max(float(cfg.domain_length_x), EPS)
+        ly = max(float(cfg.domain_length_y), EPS)
+        diag = max(math.sqrt(lx * lx + ly * ly), EPS)
+        delta = query_xy[:, :, None, :] - module_centers[:, None, :, :]
+        if cfg.geometry_mode == "periodic":
+            lengths = torch.tensor([lx, ly], device=query_xy.device, dtype=query_xy.dtype)
+            delta = torch.remainder(delta + 0.5 * lengths, lengths) - 0.5 * lengths
+        dx = delta[..., 0:1]
+        dy = delta[..., 1:2]
+        distance = torch.sqrt(dx.square() + dy.square() + EPS)
+        return torch.cat(
+            [
+                dx / lx,
+                dy / ly,
+                distance / diag,
+                torch.relu(dx) / lx,
+                torch.relu(-dx) / lx,
+                dy.abs() / ly,
+            ],
+            dim=-1,
+        )
+
+
 class HypergraphFieldDecoder(nn.Module):
     """Decode query fields from organized hyperedge state and ablated context."""
 
@@ -45,7 +181,8 @@ class HypergraphFieldDecoder(nn.Module):
         hidden_dim = int(config.hidden_dim)
         field_dim = int(config.field_dim)
 
-        self.query_encoder = MLP(5, hidden_dim, hidden_dim, float(config.dropout))
+        self.query_fourier = FourierFeatures(int(config.query_fourier_frequencies))
+        self.query_encoder = LazyMLP(hidden_dim, hidden_dim, 2, float(config.dropout))
         self.query_to_hyper = nn.Linear(hidden_dim, hidden_dim)
         self.hyper_key = nn.Linear(hidden_dim, hidden_dim)
         self.hyper_value = nn.Linear(hidden_dim, hidden_dim)
@@ -59,6 +196,9 @@ class HypergraphFieldDecoder(nn.Module):
         gate_init = min(max(float(config.direct_residual_gate_init), 1e-4), 1.0 - 1e-4)
         gate_logit = math.log(gate_init / (1.0 - gate_init))
         self.direct_residual_logit = nn.Parameter(torch.tensor(gate_logit, dtype=torch.float32))
+        self.pairwise_kernel = (
+            HypergraphGatedPairwiseKernel(config) if config.use_hypergraph_gated_pairwise_kernel else None
+        )
 
         self.pred_head = MLP(hidden_dim, hidden_dim, field_dim, float(config.dropout))
         if config.output_mean_residual_split:
@@ -80,9 +220,17 @@ class HypergraphFieldDecoder(nn.Module):
         uses_global = self._uses_global()
         uses_direct = self._uses_direct()
         uses_near = self._uses_near_module()
+        uses_pairwise = bool(cfg.use_hyper_context and self.pairwise_kernel is not None)
         hyper_context = torch.zeros_like(query_state)
         nonhyper_context = torch.zeros_like(query_state)
         diagnostics: Dict[str, torch.Tensor | str] = {"decoder_mode": cfg.decoder_mode}
+        diagnostics["query_feature_dim"] = torch.tensor(float(query_features.shape[-1]), device=query_xy.device, dtype=query_xy.dtype)
+        diagnostics["uses_query_fourier"] = torch.tensor(float(int(cfg.query_fourier_frequencies) > 0), device=query_xy.device, dtype=query_xy.dtype)
+        diagnostics["uses_boundary_features"] = torch.tensor(
+            float(cfg.boundary_feature_mode == "channel"),
+            device=query_xy.device,
+            dtype=query_xy.dtype,
+        )
         if uses_hyper:
             hyper_state = organizer_output["hyper_state"]
             hyper_logits = torch.einsum(
@@ -100,16 +248,26 @@ class HypergraphFieldDecoder(nn.Module):
             diagnostics["hyper_attention_mean"] = hyper_attention.mean(dim=1)
             diagnostics["hyper_geometry_bias_mean"] = geometry_bias.detach().mean()
             diagnostics["hyper_geometry_bias_std"] = geometry_bias.detach().std(unbiased=False)
+            if uses_pairwise:
+                pair_context, pair_diagnostics = self.pairwise_kernel(query_xy, organizer_output, hyper_attention)
+                hyper_context = hyper_context + pair_context
+                diagnostics.update(pair_diagnostics)
         else:
             nonhyper_context = self.nonhyper_query_proj(query_state)
             diagnostics["hyper_geometry_bias_mean"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
             diagnostics["hyper_geometry_bias_std"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
+        if not uses_pairwise:
+            diagnostics["pairwise_kernel_gate"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
+            diagnostics["pairwise_context_norm"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
+            diagnostics["pairwise_edge_context_norm"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
+            diagnostics["pairwise_edge_usage_mean"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
         context = hyper_context + nonhyper_context
 
         diagnostics["uses_hyper_context"] = torch.tensor(float(uses_hyper), device=query_xy.device, dtype=query_xy.dtype)
         diagnostics["uses_global_context"] = torch.tensor(float(uses_global), device=query_xy.device, dtype=query_xy.dtype)
         diagnostics["uses_direct_context"] = torch.tensor(float(uses_direct), device=query_xy.device, dtype=query_xy.dtype)
         diagnostics["uses_near_module_context"] = torch.tensor(float(uses_near), device=query_xy.device, dtype=query_xy.dtype)
+        diagnostics["pairwise_kernel_enabled"] = torch.tensor(float(uses_pairwise), device=query_xy.device, dtype=query_xy.dtype)
 
         if uses_global and global_context is not None:
             addition = self.global_proj(global_context).unsqueeze(1)
@@ -133,6 +291,7 @@ class HypergraphFieldDecoder(nn.Module):
 
         diagnostics["hyper_context_norm"] = hyper_context.detach().norm(dim=-1).mean()
         diagnostics["nonhyper_context_norm"] = nonhyper_context.detach().norm(dim=-1).mean()
+        diagnostics["context_norm"] = context.detach().norm(dim=-1).mean()
 
         context = self.context_norm(context)
         output: Dict[str, torch.Tensor | str] = dict(diagnostics)
@@ -164,7 +323,12 @@ class HypergraphFieldDecoder(nn.Module):
             t = torch.zeros_like(t)
             t_sin = torch.zeros_like(t)
             t_cos = torch.ones_like(t)
-        return torch.cat([xy, t, t_sin, t_cos], dim=-1)
+        base = torch.cat([xy, t, t_sin, t_cos], dim=-1)
+        query_fourier = self.query_fourier(xy)
+        pieces = [base, query_fourier[..., xy.shape[-1] :]]
+        if self.config.boundary_feature_mode == "channel":
+            pieces.append(channel_boundary_features(query_xy, lx, ly))
+        return torch.cat(pieces, dim=-1)
 
     def _hyper_geometry_features(
         self,
@@ -266,6 +430,7 @@ class HypergraphFieldDecoder(nn.Module):
             "no_hyper_global_near",
             "no_hyper_current_like_direct",
             "current_like",
+            "enhanced_honf_pairwise",
         }
         return bool(self.config.use_global_context and (mode_uses or self.config.use_global_context))
 
@@ -291,5 +456,6 @@ class HypergraphFieldDecoder(nn.Module):
             "no_hyper_global_near",
             "no_hyper_current_like_direct",
             "current_like",
+            "enhanced_honf_pairwise",
         }
         return bool(self.config.use_near_module_context or mode_uses)

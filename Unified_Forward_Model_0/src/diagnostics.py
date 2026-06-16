@@ -85,6 +85,15 @@ def compute_hypergraph_diagnostics(org: Dict[str, Any]) -> Dict[str, float]:
         "uses_near_module_context",
         "hyper_context_norm",
         "nonhyper_context_norm",
+        "context_norm",
+        "pairwise_kernel_gate",
+        "pairwise_context_norm",
+        "pairwise_edge_context_norm",
+        "pairwise_edge_usage_mean",
+        "query_feature_dim",
+        "uses_query_fourier",
+        "uses_boundary_features",
+        "pairwise_kernel_enabled",
     ):
         value = org.get(key)
         if torch.is_tensor(value):

@@ -17,7 +17,7 @@ import torch.nn as nn
 from unified_types import BatchData
 
 
-MODEL_TYPES = {"flat_layout_mlp", "query_deepsets_mlp"}
+MODEL_TYPES = {"flat_layout_mlp", "query_deepsets_mlp", "query_pair_deepsets_mlp"}
 POOL_MODES = {"sum", "mean", "sum_mean", "sum_mean_max"}
 EPS = 1.0e-6
 
@@ -38,6 +38,7 @@ class NaiveFieldBaselineConfig:
 
     query_fourier_frequencies: int = 4
     relative_fourier_frequencies: int = 2
+    use_relative_fourier: bool = True
 
     pool_mode: str = "sum_mean_max"
 
@@ -186,12 +187,13 @@ class QueryDeepSetsMLPField(nn.Module):
 
         rel = _relative_features(query_xy, module_centers, cfg)
         rel_fourier = self.relative_fourier(rel)
+        rel_extras = rel_fourier[..., rel.shape[-1] :] if cfg.use_relative_fourier else rel[..., :0]
         features = torch.cat(
             [
                 module_features[:, None, :, :].expand(-1, query_xy.shape[1], -1, -1),
                 module_present[:, None, :, None].expand(-1, query_xy.shape[1], -1, -1),
                 rel,
-                rel_fourier[..., rel.shape[-1] :],
+                rel_extras,
             ],
             dim=-1,
         )
@@ -228,7 +230,7 @@ class NaiveFieldBaseline(nn.Module):
         self.config = config
         if config.model_type == "flat_layout_mlp":
             self.model = FlatLayoutMLPField(config)
-        elif config.model_type == "query_deepsets_mlp":
+        elif config.model_type in {"query_deepsets_mlp", "query_pair_deepsets_mlp"}:
             self.model = QueryDeepSetsMLPField(config)
         else:  # pragma: no cover - config validation catches this.
             raise ValueError(f"Unsupported model_type={config.model_type!r}.")

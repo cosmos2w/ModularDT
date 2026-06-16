@@ -27,6 +27,7 @@ DECODER_MODES = {
     "no_hyper_global_near",
     "no_hyper_current_like_direct",
     "current_like",
+    "enhanced_honf_pairwise",
 }
 
 
@@ -52,6 +53,20 @@ class UnifiedForwardConfig:
 
     decoder_mode: str = "hyper_only"
     use_hyper_context: bool = True
+    query_fourier_frequencies: int = 4
+    boundary_feature_mode: str = "channel"
+    position_fourier_frequencies: int = 2
+    use_position_fourier_for_modules: bool = True
+    use_position_fourier_for_env: bool = True
+    use_hypergraph_gated_pairwise_kernel: bool = False
+    pairwise_kernel_hidden_dim: Optional[int] = None
+    pairwise_kernel_num_layers: int = 3
+    pairwise_kernel_gate_init: float = 0.10
+    pairwise_kernel_use_fourier: bool = True
+    pairwise_kernel_fourier_frequencies: int = 2
+    pairwise_kernel_include_module_token: bool = True
+    pairwise_kernel_include_module_features: bool = True
+    pairwise_kernel_normalize_by_edge_mass: bool = True
     use_hyper_geometry_bias: bool = True
     hyper_geometry_bias_scale: float = 1.0
     direct_residual_gate_init: float = 0.0
@@ -69,9 +84,17 @@ class UnifiedForwardConfig:
             raise ValueError("geometry_mode must be 'nonperiodic' or 'periodic'.")
         if self.query_time_mode not in {"none", "phase", "physical_time"}:
             raise ValueError("query_time_mode must be 'none', 'phase', or 'physical_time'.")
+        if self.boundary_feature_mode not in {"none", "channel"}:
+            raise ValueError("boundary_feature_mode must be 'none' or 'channel'.")
         if self.decoder_mode not in DECODER_MODES:
             allowed = ", ".join(sorted(DECODER_MODES))
             raise ValueError(f"decoder_mode must be one of: {allowed}")
+        if self.decoder_mode == "enhanced_honf_pairwise":
+            self.use_hyper_context = True
+            self.use_global_context = True
+            self.use_near_module_context = True
+            self.use_direct_module_env_decoder = False
+            self.use_hypergraph_gated_pairwise_kernel = True
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "UnifiedForwardConfig":
@@ -117,6 +140,17 @@ class AblationConfig:
     num_env_tokens_x: Optional[int] = None
     num_env_tokens_y: Optional[int] = None
     hidden_dim: Optional[int] = None
+    query_fourier_frequencies: Optional[int] = None
+    boundary_feature_mode: Optional[str] = None
+    position_fourier_frequencies: Optional[int] = None
+    use_position_fourier_for_modules: Optional[bool] = None
+    use_position_fourier_for_env: Optional[bool] = None
+    use_hypergraph_gated_pairwise_kernel: Optional[bool] = None
+    pairwise_kernel_gate_init: Optional[float] = None
+    pairwise_kernel_fourier_frequencies: Optional[int] = None
+    pairwise_kernel_num_layers: Optional[int] = None
+    pairwise_kernel_include_module_token: Optional[bool] = None
+    pairwise_kernel_include_module_features: Optional[bool] = None
     module_heat_feature_mode: Optional[str] = None
     model_overrides: Dict[str, Any] = field(default_factory=dict)
     training_overrides: Dict[str, Any] = field(default_factory=dict)

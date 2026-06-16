@@ -187,10 +187,21 @@ def resolved_payload_for_ablation(base_payload: Dict[str, Any], ablation: Ablati
         "direct_residual_gate_init",
         "use_hyper_geometry_bias",
         "hyper_geometry_bias_scale",
-        "num_env_tokens_x",
-        "num_env_tokens_y",
-        "hidden_dim",
-    )
+            "num_env_tokens_x",
+            "num_env_tokens_y",
+            "hidden_dim",
+            "query_fourier_frequencies",
+            "boundary_feature_mode",
+            "position_fourier_frequencies",
+            "use_position_fourier_for_modules",
+            "use_position_fourier_for_env",
+            "use_hypergraph_gated_pairwise_kernel",
+            "pairwise_kernel_gate_init",
+            "pairwise_kernel_fourier_frequencies",
+            "pairwise_kernel_num_layers",
+            "pairwise_kernel_include_module_token",
+            "pairwise_kernel_include_module_features",
+        )
     for field in optional_model_fields:
         value = getattr(ablation, field)
         if value is not None:
@@ -200,7 +211,7 @@ def resolved_payload_for_ablation(base_payload: Dict[str, Any], ablation: Ablati
     if ablation.use_hyper_context is not None:
         payload["model"]["use_hyper_context"] = ablation.use_hyper_context
     if ablation.model_overrides:
-        payload.setdefault("model", {}).update(ablation.model_overrides)
+        recursive_update(payload.setdefault("model", {}), ablation.model_overrides)
     if ablation.training_overrides:
         recursive_update(payload.setdefault("training", {}), ablation.training_overrides)
     return payload

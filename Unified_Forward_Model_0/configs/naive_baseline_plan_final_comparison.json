@@ -1,0 +1,16 @@
+[
+  {
+    "name": "NB_query_pair_deepsets_full_capacity",
+    "model_overrides": {
+      "model_type": "query_pair_deepsets_mlp",
+      "hidden_dim": 256,
+      "num_layers": 5,
+      "pool_mode": "sum_mean_max",
+      "query_fourier_frequencies": 4,
+      "relative_fourier_frequencies": 2,
+      "use_relative_fourier": true,
+      "include_nearest_distance_features": true,
+      "include_global_context": true
+    }
+  }
+]
