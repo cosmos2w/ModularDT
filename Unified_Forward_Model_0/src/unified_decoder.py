@@ -86,6 +86,45 @@ def channel_boundary_features(query_xy: torch.Tensor, Lx: float, Ly: float) -> t
     return torch.cat([x / lx, y / ly, y / ly, (ly - y) / ly, x / lx, (lx - x) / lx], dim=-1)
 
 
+def sparse_topk_softmax(
+    logits: torch.Tensor,
+    topk: int,
+    temperature: float = 1.0,
+    detach_mask: bool = True,
+) -> torch.Tensor:
+    """Softmax over all hyperedges or query-local top-k hyperedges."""
+
+    k = int(topk)
+    temperature = max(float(temperature), EPS)
+    if k <= 0 or k >= logits.shape[-1]:
+        return torch.softmax(logits / temperature, dim=-1)
+    _, indices = torch.topk(logits, k=k, dim=-1)
+    mask = torch.zeros_like(logits, dtype=torch.bool).scatter_(-1, indices, True)
+    if detach_mask:
+        mask = mask.detach()
+    masked_logits = logits.masked_fill(~mask, torch.finfo(logits.dtype).min)
+    return torch.softmax(masked_logits / temperature, dim=-1)
+
+
+class HyperedgeMechanismEncoder(nn.Module):
+    """Enrich hyperedge state with generic source-region mechanism descriptors."""
+
+    def __init__(self, config: UnifiedForwardConfig):
+        super().__init__()
+        hidden_dim = int(config.hidden_dim)
+        mechanism_hidden_dim = int(config.mechanism_hidden_dim or hidden_dim)
+        self.net = LazyMLP(
+            hidden_dim=mechanism_hidden_dim,
+            out_dim=hidden_dim,
+            num_layers=2,
+            dropout=float(config.dropout),
+        )
+
+    def forward(self, hyper_state: torch.Tensor, mechanism_features: torch.Tensor) -> torch.Tensor:
+        mechanism_delta = self.net(torch.cat([hyper_state, mechanism_features], dim=-1))
+        return hyper_state + mechanism_delta
+
+
 class HypergraphGatedPairwiseKernel(nn.Module):
     """Query-module pairwise kernel routed through learned hypergraph incidences."""
 
@@ -144,6 +183,8 @@ class HypergraphGatedPairwiseKernel(nn.Module):
             "pairwise_context_norm": pair_context.detach().norm(dim=-1).mean(),
             "pairwise_edge_context_norm": edge_pair_context.detach().norm(dim=-1).mean(),
             "pairwise_edge_usage_mean": hyper_attention.detach().mean(),
+            "pairwise_active_hyperedge_count": (hyper_attention.detach() > 0).float().sum(dim=-1).mean(),
+            "pairwise_uses_sparse_hyper_attention": hyper_attention.new_tensor(float(int(cfg.hyper_attention_topk) > 0)),
         }
         return gate * pair_context, diagnostics
 
@@ -187,6 +228,7 @@ class HypergraphFieldDecoder(nn.Module):
         self.hyper_key = nn.Linear(hidden_dim, hidden_dim)
         self.hyper_value = nn.Linear(hidden_dim, hidden_dim)
         self.hyper_geometry_bias = nn.Linear(10, 1)
+        self.mechanism_encoder = HyperedgeMechanismEncoder(config) if config.use_hyper_mechanism_encoder else None
         self.nonhyper_query_proj = nn.Linear(hidden_dim, hidden_dim)
         self.direct_key = nn.Linear(hidden_dim, hidden_dim)
         self.direct_value = nn.Linear(hidden_dim, hidden_dim)
@@ -232,7 +274,27 @@ class HypergraphFieldDecoder(nn.Module):
             dtype=query_xy.dtype,
         )
         if uses_hyper:
-            hyper_state = organizer_output["hyper_state"]
+            hyper_state_raw = organizer_output["hyper_state"]
+            mechanism_features = self._mechanism_features(organizer_output)
+            if self.mechanism_encoder is not None and torch.is_tensor(mechanism_features):
+                hyper_state = self.mechanism_encoder(hyper_state_raw, mechanism_features)
+                diagnostics["use_hyper_mechanism_encoder"] = torch.tensor(1.0, device=query_xy.device, dtype=query_xy.dtype)
+                diagnostics["mechanism_state_norm"] = hyper_state.detach().norm(dim=-1).mean()
+                diagnostics["mechanism_raw_feature_dim"] = torch.tensor(
+                    float(mechanism_features.shape[-1]),
+                    device=query_xy.device,
+                    dtype=query_xy.dtype,
+                )
+            else:
+                hyper_state = hyper_state_raw
+                diagnostics["use_hyper_mechanism_encoder"] = torch.tensor(0.0, device=query_xy.device, dtype=query_xy.dtype)
+                diagnostics["mechanism_state_norm"] = hyper_state.detach().norm(dim=-1).mean()
+            geometry_features = organizer_output.get("mechanism_geometry_features")
+            mass_features = organizer_output.get("mechanism_mass_features")
+            if torch.is_tensor(geometry_features):
+                diagnostics["mechanism_geometry_feature_mean"] = geometry_features.detach().mean()
+            if torch.is_tensor(mass_features):
+                diagnostics["mechanism_mass_feature_mean"] = mass_features.detach().mean()
             hyper_logits = torch.einsum(
                 "bqh,bkh->bqk",
                 self.query_to_hyper(query_state),
@@ -243,9 +305,21 @@ class HypergraphFieldDecoder(nn.Module):
                 hyper_logits = hyper_logits + float(cfg.hyper_geometry_bias_scale) * geometry_bias
             else:
                 geometry_bias = torch.zeros_like(hyper_logits)
-            hyper_attention = torch.softmax(hyper_logits, dim=-1)
+            hyper_attention = sparse_topk_softmax(
+                hyper_logits,
+                topk=int(cfg.hyper_attention_topk),
+                temperature=float(cfg.hyper_attention_temperature),
+                detach_mask=bool(cfg.sparse_hyper_attention_detach_mask),
+            )
             hyper_context = torch.einsum("bqk,bkh->bqh", hyper_attention, self.hyper_value(hyper_state))
             diagnostics["hyper_attention_mean"] = hyper_attention.mean(dim=1)
+            hyper_entropy = -(hyper_attention * torch.log(hyper_attention.clamp_min(EPS))).sum(dim=-1)
+            diagnostics["hyper_attention_topk"] = torch.tensor(float(cfg.hyper_attention_topk), device=query_xy.device, dtype=query_xy.dtype)
+            diagnostics["hyper_attention_temperature"] = torch.tensor(float(cfg.hyper_attention_temperature), device=query_xy.device, dtype=query_xy.dtype)
+            diagnostics["hyper_attention_entropy"] = hyper_entropy.detach().mean()
+            diagnostics["hyper_attention_effective_edges"] = torch.exp(hyper_entropy.detach()).mean()
+            diagnostics["hyper_attention_max"] = hyper_attention.detach().amax(dim=-1).mean()
+            diagnostics["hyper_attention_nonzero_count"] = (hyper_attention.detach() > 0).float().sum(dim=-1).mean()
             diagnostics["hyper_geometry_bias_mean"] = geometry_bias.detach().mean()
             diagnostics["hyper_geometry_bias_std"] = geometry_bias.detach().std(unbiased=False)
             if uses_pairwise:
@@ -256,11 +330,14 @@ class HypergraphFieldDecoder(nn.Module):
             nonhyper_context = self.nonhyper_query_proj(query_state)
             diagnostics["hyper_geometry_bias_mean"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
             diagnostics["hyper_geometry_bias_std"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
+            diagnostics["use_hyper_mechanism_encoder"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
         if not uses_pairwise:
             diagnostics["pairwise_kernel_gate"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
             diagnostics["pairwise_context_norm"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
             diagnostics["pairwise_edge_context_norm"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
             diagnostics["pairwise_edge_usage_mean"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
+            diagnostics["pairwise_active_hyperedge_count"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
+            diagnostics["pairwise_uses_sparse_hyper_attention"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
         context = hyper_context + nonhyper_context
 
         diagnostics["uses_hyper_context"] = torch.tensor(float(uses_hyper), device=query_xy.device, dtype=query_xy.dtype)
@@ -329,6 +406,25 @@ class HypergraphFieldDecoder(nn.Module):
         if self.config.boundary_feature_mode == "channel":
             pieces.append(channel_boundary_features(query_xy, lx, ly))
         return torch.cat(pieces, dim=-1)
+
+    def _mechanism_features(self, organizer_output: Dict[str, torch.Tensor]) -> Optional[torch.Tensor]:
+        pieces: list[torch.Tensor] = []
+        has_split_features = False
+        geometry = organizer_output.get("mechanism_geometry_features")
+        mass = organizer_output.get("mechanism_mass_features")
+        has_split_features = torch.is_tensor(geometry) or torch.is_tensor(mass)
+        if self.config.mechanism_include_geometry:
+            if torch.is_tensor(geometry):
+                pieces.append(geometry)
+        if self.config.mechanism_include_masses:
+            if torch.is_tensor(mass):
+                pieces.append(mass)
+        if pieces:
+            return torch.cat(pieces, dim=-1)
+        if has_split_features:
+            return None
+        raw = organizer_output.get("mechanism_raw_features")
+        return raw if torch.is_tensor(raw) else None
 
     def _hyper_geometry_features(
         self,

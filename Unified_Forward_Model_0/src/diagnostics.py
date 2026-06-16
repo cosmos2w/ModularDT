@@ -94,6 +94,22 @@ def compute_hypergraph_diagnostics(org: Dict[str, Any]) -> Dict[str, float]:
         "uses_query_fourier",
         "uses_boundary_features",
         "pairwise_kernel_enabled",
+        "use_hyper_mechanism_encoder",
+        "mechanism_state_norm",
+        "mechanism_raw_feature_dim",
+        "mechanism_geometry_feature_mean",
+        "mechanism_mass_feature_mean",
+        "hyper_attention_topk",
+        "hyper_attention_temperature",
+        "hyper_attention_entropy",
+        "hyper_attention_effective_edges",
+        "hyper_attention_max",
+        "hyper_attention_nonzero_count",
+        "hyper_source_region_distance",
+        "hyper_source_region_downstream",
+        "hyper_source_region_lateral",
+        "pairwise_active_hyperedge_count",
+        "pairwise_uses_sparse_hyper_attention",
     ):
         value = org.get(key)
         if torch.is_tensor(value):

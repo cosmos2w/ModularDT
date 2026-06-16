@@ -58,6 +58,13 @@ class UnifiedForwardConfig:
     position_fourier_frequencies: int = 2
     use_position_fourier_for_modules: bool = True
     use_position_fourier_for_env: bool = True
+    use_hyper_mechanism_encoder: bool = True
+    mechanism_include_geometry: bool = True
+    mechanism_include_masses: bool = True
+    mechanism_hidden_dim: Optional[int] = None
+    hyper_attention_topk: int = 0
+    hyper_attention_temperature: float = 1.0
+    sparse_hyper_attention_detach_mask: bool = True
     use_hypergraph_gated_pairwise_kernel: bool = False
     pairwise_kernel_hidden_dim: Optional[int] = None
     pairwise_kernel_num_layers: int = 3
@@ -86,6 +93,10 @@ class UnifiedForwardConfig:
             raise ValueError("query_time_mode must be 'none', 'phase', or 'physical_time'.")
         if self.boundary_feature_mode not in {"none", "channel"}:
             raise ValueError("boundary_feature_mode must be 'none' or 'channel'.")
+        if int(self.hyper_attention_topk) < 0:
+            raise ValueError("hyper_attention_topk must be >= 0.")
+        if float(self.hyper_attention_temperature) <= 0:
+            raise ValueError("hyper_attention_temperature must be > 0.")
         if self.decoder_mode not in DECODER_MODES:
             allowed = ", ".join(sorted(DECODER_MODES))
             raise ValueError(f"decoder_mode must be one of: {allowed}")
@@ -145,6 +156,13 @@ class AblationConfig:
     position_fourier_frequencies: Optional[int] = None
     use_position_fourier_for_modules: Optional[bool] = None
     use_position_fourier_for_env: Optional[bool] = None
+    use_hyper_mechanism_encoder: Optional[bool] = None
+    mechanism_include_geometry: Optional[bool] = None
+    mechanism_include_masses: Optional[bool] = None
+    mechanism_hidden_dim: Optional[int] = None
+    hyper_attention_topk: Optional[int] = None
+    hyper_attention_temperature: Optional[float] = None
+    sparse_hyper_attention_detach_mask: Optional[bool] = None
     use_hypergraph_gated_pairwise_kernel: Optional[bool] = None
     pairwise_kernel_gate_init: Optional[float] = None
     pairwise_kernel_fourier_frequencies: Optional[int] = None

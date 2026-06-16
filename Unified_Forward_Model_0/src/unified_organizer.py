@@ -66,6 +66,77 @@ def _weighted_coords(coords: torch.Tensor, weights: torch.Tensor, cfg: UnifiedFo
     return torch.remainder(mean_angle / (2.0 * math.pi) * lengths, lengths)
 
 
+def _mechanism_descriptors(
+    hyper_source_coords: torch.Tensor,
+    hyper_region_coords: torch.Tensor,
+    hyper_module_mass: torch.Tensor,
+    hyper_env_mass: torch.Tensor,
+    hyper_strength: torch.Tensor,
+    module_mass_raw: torch.Tensor,
+    env_mass_raw: torch.Tensor,
+    module_present: torch.Tensor,
+    env_count: int,
+    cfg: UnifiedForwardConfig,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Generic source-region descriptors for hyperedge field mechanisms.
+
+    These features describe where a hyperedge draws from, where its field
+    context is concentrated, and how much module/environment mass it carries.
+    They deliberately avoid case-specific wall, plume, or thermal rules.
+    """
+
+    lx = max(float(cfg.domain_length_x), EPS)
+    ly = max(float(cfg.domain_length_y), EPS)
+    diag = max(math.sqrt(lx * lx + ly * ly), EPS)
+    displacement = _relative_delta(hyper_source_coords, hyper_region_coords, cfg)
+    dx = displacement[..., 0:1]
+    dy = displacement[..., 1:2]
+    if cfg.geometry_mode == "periodic":
+        downstream = torch.remainder(hyper_region_coords[..., 0:1] - hyper_source_coords[..., 0:1], lx) / lx
+        upstream = torch.remainder(hyper_source_coords[..., 0:1] - hyper_region_coords[..., 0:1], lx) / lx
+    else:
+        downstream = torch.relu(dx) / lx
+        upstream = torch.relu(-dx) / lx
+    lateral = dy.abs() / ly
+    distance = torch.sqrt(dx.square() + dy.square() + EPS) / diag
+    mechanism_geometry_features = torch.cat(
+        [
+            hyper_source_coords[..., 0:1] / lx,
+            hyper_source_coords[..., 1:2] / ly,
+            hyper_region_coords[..., 0:1] / lx,
+            hyper_region_coords[..., 1:2] / ly,
+            dx / lx,
+            dy / ly,
+            distance,
+            downstream,
+            upstream,
+            lateral,
+        ],
+        dim=-1,
+    )
+
+    module_count = module_present.sum(dim=-1, keepdim=True).clamp_min(1.0)
+    env_count_t = module_present.new_tensor(float(max(env_count, 1)))
+    module_raw_norm = module_mass_raw / module_count
+    env_raw_norm = env_mass_raw / env_count_t
+    module_raw_log = torch.log1p(module_mass_raw) / torch.log1p(module_count)
+    env_raw_log = torch.log1p(env_mass_raw) / torch.log1p(env_count_t)
+    mechanism_mass_features = torch.stack(
+        [
+            hyper_module_mass,
+            hyper_env_mass,
+            hyper_strength,
+            module_raw_norm,
+            env_raw_norm,
+            module_raw_log,
+            env_raw_log,
+        ],
+        dim=-1,
+    )
+    mechanism_raw_features = torch.cat([mechanism_geometry_features, mechanism_mass_features], dim=-1)
+    return mechanism_geometry_features, mechanism_mass_features, mechanism_raw_features, distance, downstream, lateral
+
+
 class HypergraphOrganizerCore(nn.Module):
     """Small learned organizer over module and environment tokens."""
 
@@ -147,6 +218,25 @@ class HypergraphOrganizerCore(nn.Module):
         region_weights = A_eh / A_eh.sum(dim=1, keepdim=True).clamp_min(EPS)
         hyper_region_coords = _weighted_coords(env_coords_b, region_weights, cfg)
         hyper_strength = torch.sqrt(hyper_module_mass * hyper_env_mass + EPS)
+        (
+            mechanism_geometry_features,
+            mechanism_mass_features,
+            mechanism_raw_features,
+            hyper_source_region_distance,
+            hyper_source_region_downstream,
+            hyper_source_region_lateral,
+        ) = _mechanism_descriptors(
+            hyper_source_coords,
+            hyper_region_coords,
+            hyper_module_mass,
+            hyper_env_mass,
+            hyper_strength,
+            module_mass_raw,
+            env_mass_raw,
+            module_present,
+            env_tokens.shape[1],
+            cfg,
+        )
 
         module_summary = torch.einsum("bmk,bmh->bkh", A_mh, self.module_to_hyper(module_tokens_for_hyper))
         module_summary = module_summary / module_mass_raw.unsqueeze(-1).clamp_min(EPS)
@@ -165,6 +255,12 @@ class HypergraphOrganizerCore(nn.Module):
             "hyper_module_mass": hyper_module_mass,
             "hyper_env_mass": hyper_env_mass,
             "hyper_strength": hyper_strength,
+            "mechanism_geometry_features": mechanism_geometry_features,
+            "mechanism_mass_features": mechanism_mass_features,
+            "mechanism_raw_features": mechanism_raw_features,
+            "hyper_source_region_distance": hyper_source_region_distance,
+            "hyper_source_region_downstream": hyper_source_region_downstream,
+            "hyper_source_region_lateral": hyper_source_region_lateral,
             "module_tokens": module_tokens,
             "module_tokens_for_hyper": module_tokens_for_hyper,
             "env_tokens": env_tokens,

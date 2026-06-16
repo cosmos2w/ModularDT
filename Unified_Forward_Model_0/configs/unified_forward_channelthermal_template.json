@@ -32,6 +32,18 @@
     "position_fourier_frequencies": 4,
     "use_position_fourier_for_modules": true,
     "use_position_fourier_for_env": true,
+
+    "_note_mechanism_hyperedge": "Mechanism encoder enriches each hyperedge with generic source-region geometry, masses, and strength.",
+    "use_hyper_mechanism_encoder": true,
+    "mechanism_include_geometry": true,
+    "mechanism_include_masses": true,
+    "mechanism_hidden_dim": null,
+
+    "_note_sparse_hyper_attention": "0=dense; 1/2 makes each query use only top-k hyperedges.",
+    "hyper_attention_topk": 0,
+    "hyper_attention_temperature": 1.0,
+    "sparse_hyper_attention_detach_mask": true,
+
     "_note_hyper_geometry_bias": "Query-to-hyperedge coordinate bias; useful for plume/wall placement.",
     "use_hyper_geometry_bias": true,
     "hyper_geometry_bias_scale": 1.0,
@@ -45,11 +57,11 @@
 
     "_note_pairwise_kernel": "Enhanced HONF routes query-module pairwise geometry through A_mh and query-to-hyperedge attention, not an unrestricted direct shortcut.",
     "use_hypergraph_gated_pairwise_kernel": true,
-    "pairwise_kernel_hidden_dim": null,
-    "pairwise_kernel_num_layers": 3,
+    "pairwise_kernel_hidden_dim": 64,
+    "pairwise_kernel_num_layers": 4,
     "pairwise_kernel_gate_init": 0.10,
     "pairwise_kernel_use_fourier": true,
-    "pairwise_kernel_fourier_frequencies": 3,
+    "pairwise_kernel_fourier_frequencies": 4,
     "pairwise_kernel_include_module_token": true,
     "pairwise_kernel_include_module_features": true,
     "pairwise_kernel_normalize_by_edge_mass": true
@@ -61,7 +73,7 @@
   },
   "training": {
     "_note_training": "Use --inspect-data and dry-run before real ablations.",
-    "epochs": 5000,
+    "epochs": 1000,
     "batch_size": 64,
     "val_batch_size": 64,
     "points_per_case": 2048,
