@@ -1,4 +1,12 @@
 {
+
+  "notes": {
+    "general": "Initial unified model with strong inductive biases for modular channel thermal; ablations will disable specific biases to test their importance.",
+    "model": "Enhanced HONF but use_hyper_value_context is false",
+    "Special ablation notes": "_note_routing_factorization_ablations: all uniform",
+    "training": "Long training with organizer regularization to encourage meaningful hypergraph structure; tests whether the model can learn a good modular decomposition and how it affects performance."
+  },
+
   "model": {
     "_note_case": "ChannelThermal: nonperiodic channel, steady query, 5 fields including temperature.",
     "_note_field_dim": "5 means u,v,p,omega,temperature.",
@@ -25,6 +33,8 @@
     "decoder_mode": "current_like",
     "_note_use_hyper_context": "true lets decoder attend to learned H; false keeps organizer diagnostics but removes H from decoding.",
     "use_hyper_context": true,
+    "use_hyper_value_context": false,
+
     "_note_query_features": "HONF query features use normalized xy/time plus optional Fourier xy and channel boundary features.",
     "query_fourier_frequencies": 4,
     "boundary_feature_mode": "channel",
@@ -34,10 +44,14 @@
     "use_position_fourier_for_env": true,
 
     "_note_mechanism_hyperedge": "Mechanism encoder enriches each hyperedge with generic source-region geometry, masses, and strength.",
-    "use_hyper_mechanism_encoder": true,
+    "use_hyper_mechanism_encoder": false,
     "mechanism_include_geometry": true,
     "mechanism_include_masses": true,
     "mechanism_hidden_dim": null,
+
+    "_note_routing_factorization_ablations": "learned keeps normal routing; uniform tests whether a routing factor matters.",
+    "hyper_module_assignment_mode": "uniform",
+    "hyper_query_attention_mode": "uniform",
 
     "_note_sparse_hyper_attention": "0=dense; 1/2 makes each query use only top-k hyperedges.",
     "hyper_attention_topk": 0,
@@ -57,7 +71,7 @@
 
     "_note_pairwise_kernel": "Enhanced HONF routes query-module pairwise geometry through A_mh and query-to-hyperedge attention, not an unrestricted direct shortcut.",
     "use_hypergraph_gated_pairwise_kernel": true,
-    "pairwise_kernel_hidden_dim": 64,
+    "pairwise_kernel_hidden_dim": 256,
     "pairwise_kernel_num_layers": 4,
     "pairwise_kernel_gate_init": 0.10,
     "pairwise_kernel_use_fourier": true,
@@ -73,7 +87,7 @@
   },
   "training": {
     "_note_training": "Use --inspect-data and dry-run before real ablations.",
-    "epochs": 1000,
+    "epochs": 2000,
     "batch_size": 64,
     "val_batch_size": 64,
     "points_per_case": 2048,

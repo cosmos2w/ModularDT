@@ -80,6 +80,7 @@ def compute_hypergraph_diagnostics(org: Dict[str, Any]) -> Dict[str, float]:
 
     for key in (
         "uses_hyper_context",
+        "uses_hyper_value_context",
         "uses_global_context",
         "uses_direct_context",
         "uses_near_module_context",
@@ -99,6 +100,8 @@ def compute_hypergraph_diagnostics(org: Dict[str, Any]) -> Dict[str, float]:
         "mechanism_raw_feature_dim",
         "mechanism_geometry_feature_mean",
         "mechanism_mass_feature_mean",
+        "hyper_module_assignment_uniform",
+        "hyper_query_attention_uniform",
         "hyper_attention_topk",
         "hyper_attention_temperature",
         "hyper_attention_entropy",

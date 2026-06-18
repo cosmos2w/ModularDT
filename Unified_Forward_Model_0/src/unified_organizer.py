@@ -197,9 +197,12 @@ class HypergraphOrganizerCore(nn.Module):
             module_tokens_for_hyper = module_tokens
 
         module_logits = self.module_score(module_tokens_for_hyper)
-        module_mask = module_present.unsqueeze(-1).expand_as(module_logits)
-        A_mh = _masked_softmax(module_logits, module_mask, dim=-1)
-        A_mh = A_mh * module_present.unsqueeze(-1)
+        if cfg.hyper_module_assignment_mode == "uniform":
+            A_mh = module_present.unsqueeze(-1).expand_as(module_logits) / float(max(module_logits.shape[-1], 1))
+        else:
+            module_mask = module_present.unsqueeze(-1).expand_as(module_logits)
+            A_mh = _masked_softmax(module_logits, module_mask, dim=-1)
+            A_mh = A_mh * module_present.unsqueeze(-1)
 
         module_mass_raw = A_mh.sum(dim=1)
         hyper_module_mass = module_mass_raw / module_mass_raw.sum(dim=-1, keepdim=True).clamp_min(EPS)
@@ -269,6 +272,7 @@ class HypergraphOrganizerCore(nn.Module):
             "module_present": module_present,
             "A_me": A_me,
             "module_env_context": module_env_context,
+            "hyper_module_assignment_uniform": A_mh.new_tensor(float(cfg.hyper_module_assignment_mode == "uniform")),
         }
 
         return output

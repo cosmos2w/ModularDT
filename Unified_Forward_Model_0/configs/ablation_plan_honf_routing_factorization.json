@@ -1,0 +1,54 @@
+{
+  "_note_plan": "Routing-factorization ablations for the current ChannelThermal enhanced HONF setup. Use with configs/unified_forward_channelthermal_template.json.",
+  "_note_baseline": "Compare against Run_0009-style settings where use_hyper_value_context=false, H-routed pairwise kernel is enabled, A_mh is learned, and query-to-H attention is learned.",
+  "ablations": [
+    {
+      "name": "routing_factorization_uniform_Amh",
+      "decoder_mode": "current_like",
+      "notes": "Replace module-to-hyperedge assignment with A_mh(m,k)=1/K for present modules. Tests whether learned hyperedge module grouping matters.",
+      "model_overrides": {
+        "num_hyperedges": 6,
+        "use_hyper_context": true,
+        "use_hyper_value_context": false,
+        "use_global_context": true,
+        "use_near_module_context": true,
+        "use_direct_module_env_decoder": false,
+        "use_hypergraph_gated_pairwise_kernel": true,
+        "hyper_module_assignment_mode": "uniform",
+        "hyper_query_attention_mode": "learned"
+      }
+    },
+    {
+      "name": "routing_factorization_uniform_alpha_qk",
+      "decoder_mode": "current_like",
+      "notes": "Replace query-to-H attention with alpha_qk=1/K. Tests whether query-specific hyperedge selection matters.",
+      "model_overrides": {
+        "num_hyperedges": 6,
+        "use_hyper_context": true,
+        "use_hyper_value_context": false,
+        "use_global_context": true,
+        "use_near_module_context": true,
+        "use_direct_module_env_decoder": false,
+        "use_hypergraph_gated_pairwise_kernel": true,
+        "hyper_module_assignment_mode": "learned",
+        "hyper_query_attention_mode": "uniform"
+      }
+    },
+    {
+      "name": "normal_routing",
+      "decoder_mode": "current_like",
+      "notes": "Replace query-to-H attention with alpha_qk=1/K. Tests whether query-specific hyperedge selection matters.",
+      "model_overrides": {
+        "num_hyperedges": 6,
+        "use_hyper_context": true,
+        "use_hyper_value_context": false,
+        "use_global_context": true,
+        "use_near_module_context": true,
+        "use_direct_module_env_decoder": false,
+        "use_hypergraph_gated_pairwise_kernel": true,
+        "hyper_module_assignment_mode": "learned",
+        "hyper_query_attention_mode": "learned"
+      }
+    }
+  ]
+}

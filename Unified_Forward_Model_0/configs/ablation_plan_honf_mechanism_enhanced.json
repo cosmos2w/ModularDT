@@ -55,13 +55,54 @@
         "use_hyper_mechanism_encoder": true,
         "mechanism_include_geometry": true,
         "mechanism_include_masses": true,
-
         "mechanism_hidden_dim": null,
+
         "hyper_attention_topk": 2,
         "hyper_attention_temperature": 1.0,
         "sparse_hyper_attention_detach_mask": true,
-        "use_hypergraph_gated_pairwise_kernel": true,
 
+        "use_hypergraph_gated_pairwise_kernel": true,
+        "pairwise_kernel_hidden_dim": 128,
+        "pairwise_kernel_num_layers": 4,
+        "pairwise_kernel_gate_init": 0.10,
+        "pairwise_kernel_use_fourier": true,
+        "pairwise_kernel_fourier_frequencies": 4,
+        "pairwise_kernel_include_module_token": true,
+        "pairwise_kernel_include_module_features": true,
+        "pairwise_kernel_normalize_by_edge_mass": true
+      }
+    },
+    {
+      "name": "H_pairwise_only_newH_sparseK2_pairwise_capacity",
+      "decoder_mode": "enhanced_honf_pairwise_only",
+      "notes": "Enhanced HONF routing with mechanism-aware hyperedges and top-2 query-to-H attention, but the decoder field uses only the H-routed query-module pairwise kernel from the hyper branch.",
+      "model_overrides": {
+        "hidden_dim": 256,
+        "num_env_tokens_x": 24,
+        "num_env_tokens_y": 8,
+        "num_hyperedges": 6,
+        "use_hyper_context": true,
+        "use_hyper_value_context": false,
+        "use_global_context": true,
+        "use_near_module_context": true,
+        "use_direct_module_env_decoder": false,
+        "direct_residual_gate_init": 0.0,
+        "query_fourier_frequencies": 4,
+        "boundary_feature_mode": "channel",
+        "position_fourier_frequencies": 4,
+        "use_position_fourier_for_modules": true,
+        "use_position_fourier_for_env": true,
+
+        "use_hyper_mechanism_encoder": true,
+        "mechanism_include_geometry": true,
+        "mechanism_include_masses": true,
+        "mechanism_hidden_dim": null,
+
+        "hyper_attention_topk": 2,
+        "hyper_attention_temperature": 1.0,
+        "sparse_hyper_attention_detach_mask": true,
+
+        "use_hypergraph_gated_pairwise_kernel": true,
         "pairwise_kernel_hidden_dim": 128,
         "pairwise_kernel_num_layers": 4,
         "pairwise_kernel_gate_init": 0.10,

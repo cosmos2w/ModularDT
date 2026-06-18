@@ -184,7 +184,9 @@ class HypergraphGatedPairwiseKernel(nn.Module):
             "pairwise_edge_context_norm": edge_pair_context.detach().norm(dim=-1).mean(),
             "pairwise_edge_usage_mean": hyper_attention.detach().mean(),
             "pairwise_active_hyperedge_count": (hyper_attention.detach() > 0).float().sum(dim=-1).mean(),
-            "pairwise_uses_sparse_hyper_attention": hyper_attention.new_tensor(float(int(cfg.hyper_attention_topk) > 0)),
+            "pairwise_uses_sparse_hyper_attention": hyper_attention.new_tensor(
+                float(int(cfg.hyper_attention_topk) > 0 and cfg.hyper_query_attention_mode != "uniform")
+            ),
         }
         return gate * pair_context, diagnostics
 
@@ -259,6 +261,7 @@ class HypergraphFieldDecoder(nn.Module):
         query_state = self.query_encoder(query_features)
 
         uses_hyper = bool(cfg.use_hyper_context)
+        uses_hyper_value = bool(cfg.use_hyper_value_context)
         uses_global = self._uses_global()
         uses_direct = self._uses_direct()
         uses_near = self._uses_near_module()
@@ -305,17 +308,29 @@ class HypergraphFieldDecoder(nn.Module):
                 hyper_logits = hyper_logits + float(cfg.hyper_geometry_bias_scale) * geometry_bias
             else:
                 geometry_bias = torch.zeros_like(hyper_logits)
-            hyper_attention = sparse_topk_softmax(
-                hyper_logits,
-                topk=int(cfg.hyper_attention_topk),
-                temperature=float(cfg.hyper_attention_temperature),
-                detach_mask=bool(cfg.sparse_hyper_attention_detach_mask),
-            )
-            hyper_context = torch.einsum("bqk,bkh->bqh", hyper_attention, self.hyper_value(hyper_state))
+            if cfg.hyper_query_attention_mode == "uniform":
+                hyper_attention = torch.full_like(hyper_logits, 1.0 / float(max(hyper_logits.shape[-1], 1)))
+            else:
+                hyper_attention = sparse_topk_softmax(
+                    hyper_logits,
+                    topk=int(cfg.hyper_attention_topk),
+                    temperature=float(cfg.hyper_attention_temperature),
+                    detach_mask=bool(cfg.sparse_hyper_attention_detach_mask),
+                )
+            hyper_value_context = torch.einsum("bqk,bkh->bqh", hyper_attention, self.hyper_value(hyper_state))
+            if uses_hyper_value:
+                hyper_context = hyper_value_context
+            else:
+                hyper_context = torch.zeros_like(hyper_value_context)
             diagnostics["hyper_attention_mean"] = hyper_attention.mean(dim=1)
             hyper_entropy = -(hyper_attention * torch.log(hyper_attention.clamp_min(EPS))).sum(dim=-1)
             diagnostics["hyper_attention_topk"] = torch.tensor(float(cfg.hyper_attention_topk), device=query_xy.device, dtype=query_xy.dtype)
             diagnostics["hyper_attention_temperature"] = torch.tensor(float(cfg.hyper_attention_temperature), device=query_xy.device, dtype=query_xy.dtype)
+            diagnostics["hyper_query_attention_uniform"] = torch.tensor(
+                float(cfg.hyper_query_attention_mode == "uniform"),
+                device=query_xy.device,
+                dtype=query_xy.dtype,
+            )
             diagnostics["hyper_attention_entropy"] = hyper_entropy.detach().mean()
             diagnostics["hyper_attention_effective_edges"] = torch.exp(hyper_entropy.detach()).mean()
             diagnostics["hyper_attention_max"] = hyper_attention.detach().amax(dim=-1).mean()
@@ -341,6 +356,7 @@ class HypergraphFieldDecoder(nn.Module):
         context = hyper_context + nonhyper_context
 
         diagnostics["uses_hyper_context"] = torch.tensor(float(uses_hyper), device=query_xy.device, dtype=query_xy.dtype)
+        diagnostics["uses_hyper_value_context"] = torch.tensor(float(uses_hyper and uses_hyper_value), device=query_xy.device, dtype=query_xy.dtype)
         diagnostics["uses_global_context"] = torch.tensor(float(uses_global), device=query_xy.device, dtype=query_xy.dtype)
         diagnostics["uses_direct_context"] = torch.tensor(float(uses_direct), device=query_xy.device, dtype=query_xy.dtype)
         diagnostics["uses_near_module_context"] = torch.tensor(float(uses_near), device=query_xy.device, dtype=query_xy.dtype)
@@ -527,6 +543,7 @@ class HypergraphFieldDecoder(nn.Module):
             "no_hyper_current_like_direct",
             "current_like",
             "enhanced_honf_pairwise",
+            "enhanced_honf_pairwise_only",
         }
         return bool(self.config.use_global_context and (mode_uses or self.config.use_global_context))
 
@@ -553,5 +570,6 @@ class HypergraphFieldDecoder(nn.Module):
             "no_hyper_current_like_direct",
             "current_like",
             "enhanced_honf_pairwise",
+            "enhanced_honf_pairwise_only",
         }
         return bool(self.config.use_near_module_context or mode_uses)

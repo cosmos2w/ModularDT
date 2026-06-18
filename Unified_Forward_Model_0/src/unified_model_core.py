@@ -60,15 +60,18 @@ class UnifiedHypergraphNeuralField(nn.Module):
 
     def __init__(self, config: UnifiedForwardConfig):
         super().__init__()
+
         self.config = config
         hidden_dim = int(config.hidden_dim)
-        self.global_encoder = LazyMLP(hidden_dim, float(config.dropout))
-        self.module_feature_encoder = LazyMLP(hidden_dim, float(config.dropout))
-        self.position_fourier = FourierFeatures(int(config.position_fourier_frequencies))
+
+        self.global_encoder          = LazyMLP(hidden_dim, float(config.dropout))
+        self.module_feature_encoder  = LazyMLP(hidden_dim, float(config.dropout))
+        self.position_fourier        = FourierFeatures(int(config.position_fourier_frequencies))
         self.module_position_encoder = LazyMLP(hidden_dim, float(config.dropout))
-        self.env_encoder = LazyMLP(hidden_dim, float(config.dropout))
-        self.organizer = HypergraphOrganizerCore(config)
-        self.decoder = HypergraphFieldDecoder(config)
+        self.env_encoder             = LazyMLP(hidden_dim, float(config.dropout))
+
+        self.organizer               = HypergraphOrganizerCore(config)
+        self.decoder                 = HypergraphFieldDecoder(config)
 
     def forward(self, batch: BatchData) -> Dict[str, torch.Tensor]:
         cfg = self.config

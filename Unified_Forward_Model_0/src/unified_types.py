@@ -28,6 +28,7 @@ DECODER_MODES = {
     "no_hyper_current_like_direct",
     "current_like",
     "enhanced_honf_pairwise",
+    "enhanced_honf_pairwise_only",
 }
 
 
@@ -53,6 +54,7 @@ class UnifiedForwardConfig:
 
     decoder_mode: str = "hyper_only"
     use_hyper_context: bool = True
+    use_hyper_value_context: bool = True
     query_fourier_frequencies: int = 4
     boundary_feature_mode: str = "channel"
     position_fourier_frequencies: int = 2
@@ -62,6 +64,8 @@ class UnifiedForwardConfig:
     mechanism_include_geometry: bool = True
     mechanism_include_masses: bool = True
     mechanism_hidden_dim: Optional[int] = None
+    hyper_module_assignment_mode: str = "learned"
+    hyper_query_attention_mode: str = "learned"
     hyper_attention_topk: int = 0
     hyper_attention_temperature: float = 1.0
     sparse_hyper_attention_detach_mask: bool = True
@@ -93,6 +97,10 @@ class UnifiedForwardConfig:
             raise ValueError("query_time_mode must be 'none', 'phase', or 'physical_time'.")
         if self.boundary_feature_mode not in {"none", "channel"}:
             raise ValueError("boundary_feature_mode must be 'none' or 'channel'.")
+        if self.hyper_module_assignment_mode not in {"learned", "uniform"}:
+            raise ValueError("hyper_module_assignment_mode must be 'learned' or 'uniform'.")
+        if self.hyper_query_attention_mode not in {"learned", "uniform"}:
+            raise ValueError("hyper_query_attention_mode must be 'learned' or 'uniform'.")
         if int(self.hyper_attention_topk) < 0:
             raise ValueError("hyper_attention_topk must be >= 0.")
         if float(self.hyper_attention_temperature) <= 0:
@@ -100,12 +108,14 @@ class UnifiedForwardConfig:
         if self.decoder_mode not in DECODER_MODES:
             allowed = ", ".join(sorted(DECODER_MODES))
             raise ValueError(f"decoder_mode must be one of: {allowed}")
-        if self.decoder_mode == "enhanced_honf_pairwise":
+        if self.decoder_mode in {"enhanced_honf_pairwise", "enhanced_honf_pairwise_only"}:
             self.use_hyper_context = True
             self.use_global_context = True
             self.use_near_module_context = True
             self.use_direct_module_env_decoder = False
             self.use_hypergraph_gated_pairwise_kernel = True
+        if self.decoder_mode == "enhanced_honf_pairwise_only":
+            self.use_hyper_value_context = False
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "UnifiedForwardConfig":
@@ -146,6 +156,7 @@ class AblationConfig:
     num_hyperedges: int = 4
     direct_residual_gate_init: Optional[float] = None
     use_hyper_context: Optional[bool] = None
+    use_hyper_value_context: Optional[bool] = None
     use_hyper_geometry_bias: Optional[bool] = None
     hyper_geometry_bias_scale: Optional[float] = None
     num_env_tokens_x: Optional[int] = None
@@ -160,6 +171,8 @@ class AblationConfig:
     mechanism_include_geometry: Optional[bool] = None
     mechanism_include_masses: Optional[bool] = None
     mechanism_hidden_dim: Optional[int] = None
+    hyper_module_assignment_mode: Optional[str] = None
+    hyper_query_attention_mode: Optional[str] = None
     hyper_attention_topk: Optional[int] = None
     hyper_attention_temperature: Optional[float] = None
     sparse_hyper_attention_detach_mask: Optional[bool] = None
