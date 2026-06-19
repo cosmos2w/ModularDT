@@ -10,9 +10,15 @@ signature and local surrogate coupling contract.
 from __future__ import annotations
 
 import argparse
+import sys
 from copy import deepcopy
+from pathlib import Path
 
 import torch
+
+SRC_NEW_ROOT = Path(__file__).resolve().parents[1]
+if str(SRC_NEW_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_NEW_ROOT))
 
 import _bootstrap_imports  # noqa: F401
 from _data.channelthermal_datasets import GlobalChannelThermalDataset

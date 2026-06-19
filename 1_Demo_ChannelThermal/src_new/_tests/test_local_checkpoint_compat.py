@@ -10,10 +10,15 @@ surrogate checkpoint schema.
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
 import torch
+
+SRC_NEW_ROOT = Path(__file__).resolve().parents[1]
+if str(SRC_NEW_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_NEW_ROOT))
 
 import _bootstrap_imports  # noqa: F401
 from _helpers.model_utils import load_trusted_checkpoint, resolve_demo_path, strip_module_prefix

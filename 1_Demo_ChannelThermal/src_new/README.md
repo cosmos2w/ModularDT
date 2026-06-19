@@ -41,6 +41,18 @@ Compile:
 conda run -n ModularDT python -m py_compile src_new/train.py src_new/evaluate.py
 ```
 
+Smoke and compatibility utilities live under `src_new/_tests/` so the top
+level only exposes the main train/evaluate entrypoints:
+
+```bash
+conda run -n ModularDT python src_new/_tests/test_local_checkpoint_compat.py --device cpu
+
+conda run -n ModularDT python src_new/_tests/smoke_global_modes.py \
+  --config Configs_new/train_global_honf_template.json \
+  --device cpu \
+  --points 32
+```
+
 CPU smoke train:
 
 ```bash
