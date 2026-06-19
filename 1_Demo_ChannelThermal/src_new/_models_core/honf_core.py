@@ -9,7 +9,7 @@ about ChannelThermal walls, inlet/outlet distances, or materials.
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -74,7 +74,13 @@ class HONFNeuralField(nn.Module):
         self.organizer               = HypergraphOrganizerCore(config)
         self.decoder                 = HypergraphFieldDecoder(config)
 
-    def forward(self, batch: BatchData) -> Dict[str, torch.Tensor]:
+    def encode_and_organize(self, batch: BatchData) -> Dict[str, torch.Tensor]:
+        """Encode generic inputs and build static HONF organizer state.
+
+        This CORE HONF method intentionally does not decode query fields. Domain
+        wrappers can fuse case-specific information into module tokens and then
+        call `decode_queries()` exactly once for the final field.
+        """
         cfg = self.config
         module_centers = batch.module_centers.float()
         module_present = batch.module_present.float()
@@ -139,16 +145,44 @@ class HONFNeuralField(nn.Module):
             geometry_mode=cfg.geometry_mode,
         )
         organizer_output["module_features_raw"] = module_features
-        decoder_output = self.decoder(
+        output: Dict[str, torch.Tensor] = {}
+        output.update(organizer_output)
+        output["global_token"] = global_token
+        output["module_tokens"] = module_tokens
+        output["env_tokens"] = env_tokens
+        output["module_features_raw"] = module_features
+        return output
+
+    def decode_queries(
+        self,
+        query_xy: torch.Tensor,
+        query_time: Optional[torch.Tensor],
+        organizer_output: Dict[str, torch.Tensor],
+        global_token: torch.Tensor,
+        *,
+        return_routing_maps: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        """Decode field values from already-organized HONF state."""
+
+        return self.decoder(
             query_xy=query_xy,
             query_time=query_time,
             organizer_output=organizer_output,
             global_context=global_token,
+            return_routing_maps=bool(return_routing_maps),
+        )
+
+    def forward(self, batch: BatchData) -> Dict[str, torch.Tensor]:
+        encoded = self.encode_and_organize(batch)
+        decoder_output = self.decode_queries(
+            query_xy=batch.query_xy.float(),
+            query_time=None if batch.query_time is None else batch.query_time.float(),
+            organizer_output=encoded,
+            global_token=encoded["global_token"],
         )
         output: Dict[str, torch.Tensor] = {}
-        output.update(organizer_output)
+        output.update(encoded)
         output.update(decoder_output)
-        output["global_token"] = global_token
         return output
 
     def _environment_coords(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:

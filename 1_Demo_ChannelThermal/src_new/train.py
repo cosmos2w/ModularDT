@@ -31,11 +31,11 @@ from _helpers.model_utils import (
     read_json,
     recursive_to_device,
     resolve_demo_path,
-    save_loss_curve,
     select_device,
     set_seed,
     write_json,
 )
+from _helpers.honf_diagnostics import HONF_DIAGNOSTIC_KEYS, compute_honf_diagnostics, organizer_regularization_loss
 from _models_channelthermal.channelthermal_config import ChannelThermalHONFConfig
 from _models_channelthermal.channelthermal_full_model import ChannelThermalHONFModel
 
@@ -98,37 +98,64 @@ def _first_domain_and_radius(dataset: GlobalChannelThermalDataset) -> tuple[floa
     return lx, ly, radius
 
 
+LOCAL_COUPLING_KEYS = {
+    "use_local_surrogate",
+    "local_surrogate_checkpoint_path",
+    "freeze_local_surrogate",
+    "local_surrogate_latent_dim",
+    "local_module_params_from_used_ports",
+    "default_num_interface_points",
+}
+
+PHYSICAL_CORRECTION_KEYS = {
+    "local_surrogate_flux_mode",
+    "local_surrogate_flux_blend_alpha",
+    "interaction_refinement_steps",
+    "port_global_consistency_radius_offset",
+    "port_global_consistency_num_points",
+}
+
+CHANNELTHERMAL_KEYS = {
+    "field_names",
+    "material_param_dim",
+    "heat_scale",
+    "internal_prediction_mode",
+    "fallback_internal_query_dim",
+    "fallback_interface_dim",
+    "fallback_hidden_dim",
+    "fallback_fourier_frequencies",
+}
+
+
+def _merge_authoritative(
+    channel_payload: Dict[str, Any],
+    section_payload: Dict[str, Any],
+    keys: set[str],
+    *,
+    section_name: str,
+) -> None:
+    for key in keys:
+        if key not in section_payload:
+            continue
+        if key in channel_payload and channel_payload[key] != section_payload[key]:
+            print(
+                f"[warning] Conflicting model.channelthermal.{key}={channel_payload[key]!r}; "
+                f"using authoritative model.{section_name}.{key}={section_payload[key]!r}."
+            )
+        channel_payload[key] = section_payload[key]
+
+
 def build_model_config(payload: Dict[str, Any], dataset: GlobalChannelThermalDataset) -> ChannelThermalHONFConfig:
     model_payload = dict(payload.get("model", {}))
     core_payload = dict(model_payload.get("core_honf", {}))
     channel_payload = dict(model_payload.get("channelthermal", {}))
     local_payload = dict(model_payload.get("local_coupling", {}))
     physical_payload = dict(model_payload.get("physical_correction", {}))
-    for key in (
-        "use_local_surrogate",
-        "local_surrogate_checkpoint_path",
-        "freeze_local_surrogate",
-        "local_surrogate_latent_dim",
-        "local_module_params_from_used_ports",
-        "local_surrogate_flux_mode",
-        "local_surrogate_flux_blend_alpha",
-        "interaction_refinement_steps",
-        "port_global_consistency_radius_offset",
-        "port_global_consistency_num_points",
-        "internal_prediction_mode",
-        "default_num_interface_points",
-    ):
-        if key in local_payload and key not in channel_payload:
-            channel_payload[key] = local_payload[key]
-    for key in (
-        "local_surrogate_flux_mode",
-        "local_surrogate_flux_blend_alpha",
-        "interaction_refinement_steps",
-        "port_global_consistency_radius_offset",
-        "port_global_consistency_num_points",
-    ):
-        if key in physical_payload and key not in channel_payload:
-            channel_payload[key] = physical_payload[key]
+    if "enable_fallback_heads" in channel_payload:
+        print("[warning] model.channelthermal.enable_fallback_heads is ignored; use internal_prediction_mode instead.")
+        channel_payload.pop("enable_fallback_heads", None)
+    _merge_authoritative(channel_payload, local_payload, LOCAL_COUPLING_KEYS, section_name="local_coupling")
+    _merge_authoritative(channel_payload, physical_payload, PHYSICAL_CORRECTION_KEYS, section_name="physical_correction")
     lx, ly, radius = _first_domain_and_radius(dataset)
     core_payload["field_dim"] = _auto_int(core_payload.get("field_dim"), dataset.field_dim)
     core_payload["max_num_modules"] = _auto_int(core_payload.get("max_num_modules"), dataset.max_num_modules)
@@ -141,6 +168,38 @@ def build_model_config(payload: Dict[str, Any], dataset: GlobalChannelThermalDat
         dataset.n_interface_points or 64,
     )
     return ChannelThermalHONFConfig.from_dict({"core_honf": core_payload, "channelthermal": channel_payload})
+
+
+def resolved_config_payload(
+    cfg: Dict[str, Any],
+    model_config: ChannelThermalHONFConfig,
+    dataset_cfg: Dict[str, Any],
+    local_checkpoint_provenance: Optional[str],
+) -> Dict[str, Any]:
+    """Write a concrete config with no auto-valued model fields."""
+
+    resolved = dict(cfg)
+    channel = model_config.channelthermal.to_dict()
+    resolved["model"] = {
+        "core_honf": model_config.core_honf.to_dict(),
+        "channelthermal": {key: channel[key] for key in CHANNELTHERMAL_KEYS if key in channel},
+        "local_coupling": {key: channel[key] for key in LOCAL_COUPLING_KEYS if key in channel},
+        "physical_correction": {key: channel[key] for key in PHYSICAL_CORRECTION_KEYS if key in channel},
+        "effective_model_config": model_config.to_dict(),
+    }
+    resolved["dataset"] = dict(dataset_cfg)
+    resolved["dataset"]["normalize_inputs"] = bool(dataset_cfg.get("normalize_inputs", False))
+    resolved["dataset"]["normalize_targets"] = bool(dataset_cfg.get("normalize_targets", False))
+    resolved["local_checkpoint_provenance"] = local_checkpoint_provenance
+    return resolved
+
+
+def resolve_auto_internal_mode(model_config: ChannelThermalHONFConfig, model: ChannelThermalHONFModel) -> None:
+    if str(model_config.channelthermal.internal_prediction_mode) != "auto":
+        return
+    model_config.channelthermal.internal_prediction_mode = (
+        "local_surrogate" if model.local_surrogate_attached else "global_head"
+    )
 
 
 def field_loss(
@@ -167,12 +226,7 @@ def field_loss(
 
 
 def organizer_regularization(output: Dict[str, Any], loss_cfg: Dict[str, Any]) -> torch.Tensor:
-    weight = float(loss_cfg.get("organizer_entropy_weight", 0.0))
-    if weight == 0.0 or "A_eh" not in output["organizer_aux"]:
-        return output["pred_field"].new_zeros(())
-    a_eh = output["organizer_aux"]["A_eh"].clamp_min(1.0e-8)
-    entropy = -(a_eh * torch.log(a_eh)).sum(dim=-1).mean()
-    return output["pred_field"].new_tensor(weight) * entropy
+    return organizer_regularization_loss(output, loss_cfg.get("organizer_regularization", {}))
 
 
 def internal_loss(output: Dict[str, Any], batch: Dict[str, Any]) -> torch.Tensor:
@@ -194,7 +248,13 @@ def interface_loss(output: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dict
         custom = torch.as_tensor(loss_cfg["interface_target_weights"], device=pred.device, dtype=pred.dtype)
         weights[: min(custom.numel(), pred.shape[-1])] = custom[: pred.shape[-1]]
     mask = batch["structure"]["module_present"].float()[:, :, None, None]
-    per_value = (pred - target).square() * weights
+    loss_type = str(loss_cfg.get("interface_loss_type", "mse")).lower()
+    if loss_type == "smooth_l1":
+        per_value = torch.nn.functional.smooth_l1_loss(pred, target, reduction="none") * weights
+    elif loss_type == "mse":
+        per_value = (pred - target).square() * weights
+    else:
+        raise ValueError(f"interface_loss_type must be 'mse' or 'smooth_l1', got {loss_type!r}.")
     return (per_value * mask).sum() / (mask.sum() * pred.new_tensor(float(pred.shape[-2] * pred.shape[-1]))).clamp_min(1.0e-6)
 
 
@@ -213,7 +273,14 @@ def port_condition_loss(output: Dict[str, Any], batch: Dict[str, Any], loss_cfg:
     h_mask = module_mask if valid_h is None else module_mask * valid_h.float().unsqueeze(-1)
     pred_h = torch.log1p(pred_values[..., 1:2].clamp_min(0.0))
     target_h = torch.log1p(target_values[..., 1:2].clamp_min(0.0))
-    loss_h = ((pred_h - target_h).square() * h_mask).sum() / h_mask.sum().clamp_min(1.0e-6)
+    h_loss_type = str(loss_cfg.get("port_h_loss_type", "mse")).lower()
+    if h_loss_type == "smooth_l1":
+        h_error = torch.nn.functional.smooth_l1_loss(pred_h, target_h, reduction="none")
+    elif h_loss_type == "mse":
+        h_error = (pred_h - target_h).square()
+    else:
+        raise ValueError(f"port_h_loss_type must be 'mse' or 'smooth_l1', got {h_loss_type!r}.")
+    loss_h = (h_error * h_mask).sum() / h_mask.sum().clamp_min(1.0e-6)
     return float(loss_cfg.get("port_temperature_weight", 1.0)) * loss_t + float(loss_cfg.get("port_h_weight", 1.0)) * loss_h
 
 
@@ -298,6 +365,7 @@ def make_model_inputs(
     local_port_condition_mode: str,
     mixed_teacher_ratio: float,
     return_predicted_port_outputs: bool = False,
+    return_port_global_consistency: bool = False,
 ) -> Dict[str, Any]:
     return {
         "structure": batch["structure"],
@@ -309,6 +377,7 @@ def make_model_inputs(
         "local_port_condition_mode": local_port_condition_mode,
         "mixed_teacher_ratio": mixed_teacher_ratio,
         "return_predicted_port_outputs": return_predicted_port_outputs,
+        "return_port_global_consistency": return_port_global_consistency,
     }
 
 
@@ -327,6 +396,7 @@ def run_epoch(
     effective_internal_temperature_weight: float,
     effective_interface_weight: float,
     predicted_consistency_weight: float,
+    gradient_clip_norm: float = 0.0,
 ) -> Dict[str, float]:
     training = optimizer is not None
     model.train(training)
@@ -341,12 +411,14 @@ def run_epoch(
         point_weights = batch.get("point_weights")
         with torch.set_grad_enabled(training):
             with autocast_context(device, amp):
+                port_global_weight = effective_port_global_weight(loss_cfg, local_port_condition_mode, mixed_teacher_ratio)
                 output = model(
                     **make_model_inputs(
                         batch,
                         local_port_condition_mode=local_port_condition_mode,
                         mixed_teacher_ratio=mixed_teacher_ratio,
                         return_predicted_port_outputs=bool(predicted_consistency_weight > 0.0),
+                        return_port_global_consistency=bool(port_global_weight != 0.0),
                     )
                 )
                 loss_field = field_loss(output["pred_field"], target, loss_cfg, point_weights)
@@ -371,7 +443,6 @@ def run_epoch(
                     pred_cons_interface = output["pred_field"].new_zeros(())
                     loss_predicted_consistency = output["pred_field"].new_zeros(())
                 loss_org = organizer_regularization(output, loss_cfg)
-                port_global_weight = effective_port_global_weight(loss_cfg, local_port_condition_mode, mixed_teacher_ratio)
                 loss = (
                     float(loss_cfg.get("field_mse_weight", 1.0)) * loss_field
                     + float(effective_internal_temperature_weight) * loss_internal
@@ -384,20 +455,31 @@ def run_epoch(
                 )
         if training:
             optimizer.zero_grad(set_to_none=True)
+            clip_norm = float(gradient_clip_norm or 0.0)
             if scaler is not None and scaler.is_enabled():
                 scaler.scale(loss).backward()
+                if clip_norm > 0.0:
+                    # AMP gradients must be unscaled before clipping; otherwise
+                    # the threshold applies to scaled values and is meaningless.
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
+                if clip_norm > 0.0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 optimizer.step()
         with torch.no_grad():
             pred = output["pred_field"].detach()
             mse = torch.mean((pred - target) ** 2)
             temp_mse = torch.mean((pred[..., 4] - target[..., 4]) ** 2) if pred.shape[-1] >= 5 else mse
-            org = output["organizer_aux"]
-            strength = org.get("hyper_strength")
-            active = (strength > 0.05).float().sum(dim=-1).mean() if torch.is_tensor(strength) else mse.new_zeros(())
+            reg_cfg = loss_cfg.get("organizer_regularization", {}) if isinstance(loss_cfg.get("organizer_regularization"), dict) else {}
+            honf_diag = compute_honf_diagnostics(
+                output,
+                edge_strength_threshold=float(reg_cfg.get("edge_strength_threshold", 0.05)),
+                edge_strength_temperature=float(reg_cfg.get("edge_strength_temperature", 0.05)),
+            )
             metrics = {
                 "loss_total": float(loss.detach().cpu()),
                 "loss_field": float(loss_field.detach().cpu()),
@@ -416,8 +498,8 @@ def run_epoch(
                 "effective_interface_weight": float(effective_interface_weight),
                 "field_mse": float(mse.detach().cpu()),
                 "temperature_mse": float(temp_mse.detach().cpu()),
-                "active_edge_count": float(active.detach().cpu()),
             }
+            metrics.update(honf_diag)
         for key, value in metrics.items():
             sums[key] = sums.get(key, 0.0) + float(value)
         count += 1
@@ -443,7 +525,7 @@ def run_epoch(
                 "effective_interface_weight",
                 "field_mse",
                 "temperature_mse",
-                "active_edge_count",
+                *HONF_DIAGNOSTIC_KEYS,
             )
         }
     return {key: value / count for key, value in sums.items()}
@@ -479,6 +561,14 @@ def save_checkpoint(
         }.items()
         if value is not None
     }
+    local_model_config = None
+    if local.local_surrogate is not None:
+        local_model_config = local.local_surrogate.config.to_dict()
+    config_payload = model_config.to_dict()
+    if config_payload.get("channelthermal", {}).get("internal_prediction_mode") == "auto":
+        config_payload["channelthermal"]["internal_prediction_mode"] = (
+            "local_surrogate" if model.local_surrogate_attached else "global_head"
+        )
     torch.save(
         {
             "stage": "channelthermal_prompt3_honf_physical_coupling",
@@ -486,7 +576,7 @@ def save_checkpoint(
             "current_epoch": int(epoch),
             "best_metric": float(best_metric),
             "best_metrics": dict(best_metrics or {}),
-            "model_config": model_config.to_dict(),
+            "model_config": config_payload,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": None if optimizer is None else optimizer.state_dict(),
             "train_config": train_config,
@@ -500,6 +590,9 @@ def save_checkpoint(
             },
             "global_normalization_stats": {name: value.copy() for name, value in dataset.normalizer.stats.items()},
             "local_surrogate_checkpoint_path": model_config.channelthermal.local_surrogate_checkpoint_path,
+            "local_checkpoint_provenance": local.local_surrogate_checkpoint_path or model_config.channelthermal.local_surrogate_checkpoint_path,
+            "local_model_config": local_model_config,
+            "local_surrogate_frozen": bool(local.local_surrogate_frozen),
             "local_normalization_config": {
                 "normalize_inputs": bool(local.local_surrogate_normalize_inputs),
                 "normalize_targets": bool(local.local_surrogate_normalize_targets),
@@ -519,6 +612,233 @@ def write_metrics_row(path: Path, fieldnames: Iterable[str], row: Dict[str, Any]
         writer.writerow(row)
 
 
+def best_metrics_payload(row: Dict[str, Any], best_total: float, best_field: float, best_temperature: float, best_predicted: float) -> Dict[str, float]:
+    payload = {
+        "best_val_loss_total": float(best_total),
+        "best_val_field_mse": float(best_field),
+        "best_val_temperature_mse": float(best_temperature),
+        "best_val_predicted_loss_total": float(best_predicted),
+    }
+    for key in HONF_DIAGNOSTIC_KEYS:
+        val_key = f"val_{key}"
+        if val_key in row:
+            payload[val_key] = float(row[val_key])
+    return payload
+
+
+def _read_metric_history(metrics_path: Path) -> Dict[str, list[float]]:
+    """Read numeric metric columns from `metrics.csv` for compact plotting."""
+
+    if not metrics_path.exists():
+        return {}
+    columns: Dict[str, list[float]] = {}
+    with metrics_path.open("r", newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            for key, value in row.items():
+                try:
+                    parsed = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(parsed):
+                    columns.setdefault(key, []).append(parsed)
+    return columns
+
+
+def _plot_metric_group(
+    ax: Any,
+    history: Dict[str, list[float]],
+    keys: tuple[str, ...],
+    *,
+    title: str,
+    ylabel: str = "value",
+    log_scale: bool = True,
+    y_min_zero: bool = False,
+    reference_y: Optional[float] = None,
+    reference_label: Optional[str] = None,
+) -> None:
+    epochs = history.get("epoch", [])
+    for key in keys:
+        values = history.get(key)
+        if not values:
+            continue
+        label = key
+        for prefix in ("val_", "loss_"):
+            label = label.removeprefix(prefix)
+        if key.startswith("val_"):
+            label = f"val {label}"
+        ax.plot(epochs[: len(values)], values, label=label)
+    if reference_y is not None and epochs:
+        # Active-edge count is thresholded and can be lower than total H. The
+        # reference line makes `num_hyperedges` visible without changing the
+        # scalar diagnostic definition.
+        ax.axhline(float(reference_y), color="black", linestyle="--", linewidth=1.0, alpha=0.55, label=reference_label or "reference")
+    ax.set_title(title)
+    ax.set_xlabel("epoch")
+    ax.set_ylabel(ylabel)
+    if log_scale:
+        ax.set_yscale("log")
+    if y_min_zero:
+        _, top = ax.get_ylim()
+        ax.set_ylim(bottom=0.0, top=max(float(top), float(reference_y or 0.0) * 1.10, 1.0))
+    ax.grid(True, alpha=0.25)
+    if ax.lines:
+        ax.legend(fontsize=8)
+
+
+def _resolved_num_hyperedges(run_dir: Path) -> Optional[int]:
+    config_path = run_dir / "config_resolved.json"
+    if not config_path.exists():
+        return None
+    try:
+        payload = read_json(config_path)
+        value = payload.get("model", {}).get("core_honf", {}).get("num_hyperedges")
+        return None if value is None else int(value)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
+    """Save readable grouped plots instead of one overcrowded metric figure."""
+
+    history = _read_metric_history(metrics_path)
+    if not history or not history.get("epoch"):
+        return
+    import os
+
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-channelthermal-newhonf")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    # Keep the main PNG concise: it is for human scanning during training.
+    # Detailed scalar diagnostics remain in metrics.csv and focused plots below.
+    diagnostics_dir = run_dir / "diagnostic_plots"
+    diagnostics_dir.mkdir(parents=True, exist_ok=True)
+    num_hyperedges = _resolved_num_hyperedges(run_dir)
+    stale_root_plots = [
+        "loss_curves.png",
+        "loss_total_curve.png",
+        "loss_field_curve.png",
+        "loss_local_coupling_curve.png",
+        "loss_port_condition_curve.png",
+        "honf_entropy_activity_curve.png",
+        "honf_context_curve.png",
+    ]
+    for filename in stale_root_plots:
+        stale_path = run_dir / filename
+        if stale_path.exists():
+            stale_path.unlink()
+
+    panels = [
+        ("Total", ("loss_total", "val_loss_total", "val_predicted_loss_total"), "loss", True, False),
+        ("Global Field", ("loss_field", "val_loss_field", "field_mse", "val_field_mse"), "loss / mse", True, False),
+        (
+            "Local/Internal Coupling",
+            ("loss_internal_temperature", "val_loss_internal_temperature", "loss_interface", "val_loss_interface"),
+            "loss",
+            True,
+            False,
+        ),
+        (
+            "Port and Consistency",
+            ("loss_port_condition", "val_loss_port_condition", "loss_port_global_consistency", "val_loss_port_global_consistency"),
+            "loss",
+            True,
+            False,
+        ),
+        ("Temperature", ("temperature_mse", "val_temperature_mse"), "mse", True, False),
+        ("Thresholded Active H Edges", ("active_edge_count", "val_active_edge_count", "soft_active_edge_count", "val_soft_active_edge_count"), "edges", False, True),
+    ]
+    fig, axes = plt.subplots(2, 3, figsize=(15.5, 7.4), constrained_layout=True)
+    for ax, (title, keys, ylabel, log_scale, y_min_zero) in zip(axes.reshape(-1), panels):
+        _plot_metric_group(
+            ax,
+            history,
+            keys,
+            title=title,
+            ylabel=ylabel,
+            log_scale=log_scale,
+            y_min_zero=y_min_zero,
+            reference_y=float(num_hyperedges) if y_min_zero and num_hyperedges is not None else None,
+            reference_label=f"num_hyperedges={num_hyperedges}" if y_min_zero and num_hyperedges is not None else None,
+        )
+    fig.suptitle("NewHONF Training Overview", fontsize=13)
+    fig.savefig(str(run_dir / "loss_curve.png"), dpi=160)
+    plt.close(fig)
+
+    focused = {
+        "loss_total_curve.png": ("Total Loss", ("loss_total", "val_loss_total", "val_predicted_loss_total"), "loss", True, False),
+        "loss_field_curve.png": ("Field Loss and MSE", ("loss_field", "val_loss_field", "field_mse", "val_field_mse"), "loss / mse", True, False),
+        "loss_local_coupling_curve.png": (
+            "Internal Temperature and Interface Loss",
+            ("loss_internal_temperature", "val_loss_internal_temperature", "loss_interface", "val_loss_interface"),
+            "loss",
+            True,
+            False,
+        ),
+        "loss_port_condition_curve.png": (
+            "Port and Consistency Loss",
+            (
+                "loss_port_condition",
+                "val_loss_port_condition",
+                "loss_port_global_consistency",
+                "val_loss_port_global_consistency",
+                "loss_predicted_consistency",
+                "val_loss_predicted_consistency",
+            ),
+            "loss",
+            True,
+            False,
+        ),
+        "honf_entropy_activity_curve.png": (
+            "HONF Entropy and Thresholded Active H Edges",
+            (
+                "A_mh_entropy",
+                "val_A_mh_entropy",
+                "A_eh_entropy",
+                "val_A_eh_entropy",
+                "active_edge_count",
+                "val_active_edge_count",
+            ),
+            "value",
+            False,
+            True,
+        ),
+        "honf_context_curve.png": (
+            "HONF Context Norms and Pairwise Gate",
+            (
+                "pairwise_kernel_gate",
+                "val_pairwise_kernel_gate",
+                "pairwise_context_norm",
+                "val_pairwise_context_norm",
+                "total_hyper_context_norm",
+                "val_total_hyper_context_norm",
+                "nonhyper_context_norm",
+                "val_nonhyper_context_norm",
+            ),
+            "value",
+            True,
+            False,
+        ),
+    }
+    for filename, (title, keys, ylabel, log_scale, y_min_zero) in focused.items():
+        fig, ax = plt.subplots(figsize=(7.4, 4.4), constrained_layout=True)
+        _plot_metric_group(
+            ax,
+            history,
+            keys,
+            title=title,
+            ylabel=ylabel,
+            log_scale=log_scale,
+            y_min_zero=y_min_zero,
+            reference_y=float(num_hyperedges) if y_min_zero and num_hyperedges is not None else None,
+            reference_label=f"num_hyperedges={num_hyperedges}" if y_min_zero and num_hyperedges is not None else None,
+        )
+        fig.savefig(str(diagnostics_dir / filename), dpi=160)
+        plt.close(fig)
+
+
 def main() -> int:
     args = parse_args()
     cfg = read_json(resolve_config_path(args.config))
@@ -528,11 +848,14 @@ def main() -> int:
     ignored_organizer_keys = [
         key
         for key in loss_cfg
-        if key.startswith("organizer_") and key not in {"organizer_entropy_weight", "organizer_anti_collapse_weight"}
+        if key.startswith("organizer_") and key not in {"organizer_regularization"}
         and float(loss_cfg.get(key, 0.0) or 0.0) != 0.0
     ]
     if ignored_organizer_keys:
-        print(f"[warning] Prompt 3 ignores old task-specific organizer losses by default: {ignored_organizer_keys}")
+        print(
+            "[warning] Deprecated/legacy organizer losses are ignored; use "
+            f"loss.organizer_regularization instead: {ignored_organizer_keys}"
+        )
     set_seed(int(training_cfg.get("seed", 42)))
     device = select_device(args.device or training_cfg.get("device"))
 
@@ -559,6 +882,13 @@ def main() -> int:
     model_config = build_model_config(cfg, train_dataset)
     model = ChannelThermalHONFModel(model_config).to(device)
     model.set_global_target_normalization(train_dataset.normalizer.stats, normalize_targets=bool(dataset_cfg.get("normalize_targets", False)))
+    resolve_auto_internal_mode(model_config, model)
+    cfg = resolved_config_payload(
+        cfg,
+        model_config,
+        dataset_cfg,
+        model.local_coupling.local_surrogate_checkpoint_path or model_config.channelthermal.local_surrogate_checkpoint_path,
+    )
 
     batch_size = int(dataset_cfg.get("batch_size", training_cfg.get("batch_size", 4)))
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=int(dataset_cfg.get("num_workers", 0)), pin_memory=device.type == "cuda")
@@ -603,7 +933,7 @@ def main() -> int:
         "effective_interface_weight",
         "field_mse",
         "temperature_mse",
-        "active_edge_count",
+        *HONF_DIAGNOSTIC_KEYS,
         "val_loss_total",
         "val_loss_field",
         "val_loss_internal_temperature",
@@ -621,7 +951,7 @@ def main() -> int:
         "val_effective_interface_weight",
         "val_field_mse",
         "val_temperature_mse",
-        "val_active_edge_count",
+        *[f"val_{key}" for key in HONF_DIAGNOSTIC_KEYS],
         "val_predicted_loss_total",
         "val_predicted_field_mse",
         "val_predicted_temperature_mse",
@@ -636,6 +966,7 @@ def main() -> int:
         effective_mode, effective_ratio = effective_port_condition_settings(epoch, training_cfg)
         eff_internal, eff_interface = effective_local_loss_weights(loss_cfg, effective_mode, effective_ratio)
         pred_consistency_weight = predicted_consistency_weight_for_epoch(epoch, loss_cfg)
+        gradient_clip_norm = float(training_cfg.get("gradient_clip_norm", 0.0) or 0.0)
         train_metrics = run_epoch(
             model,
             train_loader,
@@ -650,6 +981,7 @@ def main() -> int:
             effective_internal_temperature_weight=eff_internal,
             effective_interface_weight=eff_interface,
             predicted_consistency_weight=pred_consistency_weight,
+            gradient_clip_norm=gradient_clip_norm,
         )
         val_metrics = run_epoch(
             model,
@@ -665,6 +997,7 @@ def main() -> int:
             effective_internal_temperature_weight=eff_internal,
             effective_interface_weight=eff_interface,
             predicted_consistency_weight=pred_consistency_weight,
+            gradient_clip_norm=gradient_clip_norm,
         )
         predicted_val_metrics = run_epoch(
             model,
@@ -680,6 +1013,7 @@ def main() -> int:
             effective_internal_temperature_weight=float(loss_cfg.get("internal_temperature_weight", 1.0)),
             effective_interface_weight=float(loss_cfg.get("interface_weight", 0.2)),
             predicted_consistency_weight=0.0,
+            gradient_clip_norm=gradient_clip_norm,
         )
         row = {
             "epoch": epoch,
@@ -695,19 +1029,19 @@ def main() -> int:
         temp_metric = float(row["val_temperature_mse"])
         if math.isfinite(total_metric) and total_metric < best_total:
             best_total = total_metric
-            save_checkpoint(run_dir / "best_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, best_metrics={"best_val_loss_total": best_total, "best_val_field_mse": best_field, "best_val_temperature_mse": best_temperature, "best_val_predicted_loss_total": best_predicted})
+            save_checkpoint(run_dir / "best_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted))
         if math.isfinite(field_metric) and field_metric < best_field:
             best_field = field_metric
-            save_checkpoint(run_dir / "best_by_field_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_field, optimizer=optimizer, best_metrics={"best_val_loss_total": best_total, "best_val_field_mse": best_field, "best_val_temperature_mse": best_temperature, "best_val_predicted_loss_total": best_predicted})
+            save_checkpoint(run_dir / "best_by_field_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_field, optimizer=optimizer, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted))
         if math.isfinite(temp_metric) and temp_metric < best_temperature:
             best_temperature = temp_metric
-            save_checkpoint(run_dir / "best_by_temperature_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_temperature, optimizer=optimizer, best_metrics={"best_val_loss_total": best_total, "best_val_field_mse": best_field, "best_val_temperature_mse": best_temperature, "best_val_predicted_loss_total": best_predicted})
+            save_checkpoint(run_dir / "best_by_temperature_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_temperature, optimizer=optimizer, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted))
         predicted_metric = float(row["val_predicted_loss_total"])
         if math.isfinite(predicted_metric) and predicted_metric < best_predicted:
             best_predicted = predicted_metric
-            save_checkpoint(run_dir / "best_predicted_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_predicted, optimizer=optimizer, best_metrics={"best_val_loss_total": best_total, "best_val_field_mse": best_field, "best_val_temperature_mse": best_temperature, "best_val_predicted_loss_total": best_predicted})
-        save_checkpoint(run_dir / "latest_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, best_metrics={"best_val_loss_total": best_total, "best_val_field_mse": best_field, "best_val_temperature_mse": best_temperature, "best_val_predicted_loss_total": best_predicted})
-        save_loss_curve(metrics_path, run_dir / "loss_curves.png", title="Prompt-3 NewHONF Physical Coupling Loss")
+            save_checkpoint(run_dir / "best_predicted_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_predicted, optimizer=optimizer, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted))
+        save_checkpoint(run_dir / "latest_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted))
+        save_global_loss_plots(metrics_path, run_dir)
         print(
             f"[epoch {epoch:04d}] loss={row['loss_total']:.4e} field={row['field_mse']:.4e} "
             f"internal={row['loss_internal_temperature']:.4e} interface={row['loss_interface']:.4e} "

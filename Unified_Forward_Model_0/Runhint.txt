@@ -1,0 +1,15 @@
+python src/train_unified.py \
+  --config configs/unified_forward_channelthermal_template.json \
+  --case channelthermal \
+  --device cuda:2
+
+python src/ablation_runner.py \
+  --config configs/unified_forward_channelthermal_template.json \
+  --plan configs/ablation_plan_honf_routing_factorization.json \
+  --case channelthermal \
+  --device cuda:2
+
+python src/evaluate_unified.py \
+  --config configs/unified_forward_channelthermal_template.json \
+  --case channelthermal \
+  --checkpoint ./results/runs/Run_0004_20260616_152515/latest_model.pt

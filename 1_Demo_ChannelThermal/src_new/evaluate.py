@@ -34,7 +34,12 @@ from _helpers.evaluation_plots import (
     plot_interface,
     plot_internal,
 )
-from _helpers.hypergraph_plan import extract_hypergraph_plan
+from _helpers.hypergraph_plan import (
+    extract_hypergraph_plan,
+    save_hypergraph_plan,
+    summarize_hypergraph_plan,
+    validate_hypergraph_plan,
+)
 from _helpers.model_utils import current_timestamp, load_trusted_checkpoint, recursive_to_device, resolve_demo_path, select_device, strip_module_prefix, write_json
 from _helpers.organizer_viz_channelthermal import (
     render_channelthermal_organization_overview,
@@ -44,6 +49,7 @@ from _helpers.organizer_viz_channelthermal import (
 from _helpers.routing_viz_channelthermal import save_routing_diagnostics
 from _models_channelthermal.channelthermal_config import ChannelThermalHONFConfig
 from _models_channelthermal.channelthermal_full_model import ChannelThermalHONFModel
+from _models_local.model_local import LocalModuleConfig, LocalModuleSurrogate
 
 
 def parse_args() -> argparse.Namespace:
@@ -140,10 +146,42 @@ def make_batch(sample: Dict[str, Any], query_xy: np.ndarray, device: torch.devic
 def load_model(checkpoint_path: Path, device: torch.device) -> tuple[ChannelThermalHONFModel, Dict[str, Any]]:
     checkpoint = load_trusted_checkpoint(checkpoint_path, map_location="cpu")
     model_config = ChannelThermalHONFConfig.from_dict(checkpoint.get("model_config", {}))
-    model = ChannelThermalHONFModel(model_config).to(device)
+    model = ChannelThermalHONFModel(model_config, attach_local_from_checkpoint=False)
+    if bool(model_config.channelthermal.use_local_surrogate):
+        local_config_payload = checkpoint.get("local_model_config")
+        if isinstance(local_config_payload, dict):
+            local_model = LocalModuleSurrogate(LocalModuleConfig.from_dict(local_config_payload))
+            model.local_coupling.set_local_surrogate(
+                local_model,
+                freeze=bool(checkpoint.get("local_surrogate_frozen", model_config.channelthermal.freeze_local_surrogate)),
+                normalization_config=checkpoint.get("local_normalization_config", {}),
+                normalization_stats=checkpoint.get("local_normalization_stats", {}),
+            )
+            model.local_coupling.local_surrogate_checkpoint_path = checkpoint.get("local_checkpoint_provenance", checkpoint.get("local_surrogate_checkpoint_path"))
+        elif model_config.channelthermal.local_surrogate_checkpoint_path:
+            print("[warning] checkpoint lacks embedded local_model_config; falling back to external local checkpoint path.")
+            model.local_coupling.attach_from_checkpoint(
+                model_config.channelthermal.local_surrogate_checkpoint_path,
+                freeze=bool(model_config.channelthermal.freeze_local_surrogate),
+                map_location="cpu",
+            )
+    model = model.to(device)
     global_norm_cfg = checkpoint.get("global_normalization_config", checkpoint.get("train_config", {}).get("dataset", {}))
     model.set_global_target_normalization(checkpoint.get("global_normalization_stats", {}), normalize_targets=bool(global_norm_cfg.get("normalize_targets", False)))
-    model.load_state_dict(strip_module_prefix(checkpoint["model_state_dict"]), strict=False)
+    state = strip_module_prefix(checkpoint["model_state_dict"])
+    incompatible = model.load_state_dict(state, strict=False)
+    critical_prefixes = ("core.", "local_coupling.", "local_coupling.local_surrogate")
+    bad_missing = [key for key in incompatible.missing_keys if key.startswith(critical_prefixes)]
+    bad_unexpected = [key for key in incompatible.unexpected_keys if key.startswith(critical_prefixes)]
+    if bad_missing or bad_unexpected:
+        raise RuntimeError(
+            "Critical checkpoint state mismatch: "
+            f"missing={bad_missing}, unexpected={bad_unexpected}"
+        )
+    allowed_missing = [key for key in incompatible.missing_keys if not key.startswith(critical_prefixes)]
+    allowed_unexpected = [key for key in incompatible.unexpected_keys if not key.startswith(critical_prefixes)]
+    if allowed_missing or allowed_unexpected:
+        print(f"[warning] allowed non-critical checkpoint differences: missing={allowed_missing}, unexpected={allowed_unexpected}")
     model.eval()
     return model, checkpoint
 
@@ -220,6 +258,10 @@ def predict_case(
             key: value.detach().cpu().numpy()[0] if torch.is_tensor(value) and value.ndim > 0 else value
             for key, value in first_outputs["organizer_aux"].items()
         },
+        "base_organizer_aux": {
+            key: value.detach().cpu().numpy()[0] if torch.is_tensor(value) and value.ndim > 0 else value
+            for key, value in first_outputs.get("base_organizer_aux", {}).items()
+        },
     }
     if return_routing_maps:
         result["routing_maps"] = {
@@ -271,6 +313,74 @@ def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> 
         "env_mass": np.asarray(aux.get("hyper_env_mass", np.zeros_like(strength)), dtype=np.float32),
         "src": np.asarray(aux.get("hyper_source_coords", np.zeros((strength.shape[0], 2))), dtype=np.float32),
         "dst": np.asarray(aux.get("hyper_thermal_region_coords", aux.get("hyper_region_coords", np.zeros((strength.shape[0], 2)))), dtype=np.float32),
+    }
+
+
+def _entropy(values: np.ndarray, axis: int = -1) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    arr = np.clip(arr, 1.0e-12, None)
+    return -np.sum(arr * np.log(arr), axis=axis)
+
+
+def hypergraph_diagnostics(predictions: Dict[str, Any]) -> Dict[str, Any]:
+    aux = predictions["organizer_aux"]
+    base = predictions.get("base_organizer_aux", {})
+    A_mh = np.asarray(aux.get("A_mh", np.zeros((0, 0))), dtype=np.float64)
+    A_eh = np.asarray(aux.get("A_eh", np.zeros((0, 0))), dtype=np.float64)
+    strength = np.asarray(aux.get("hyper_strength", np.zeros((0,))), dtype=np.float64)
+    module_mass = np.asarray(aux.get("hyper_module_mass", np.zeros_like(strength)), dtype=np.float64)
+    env_mass = np.asarray(aux.get("hyper_env_mass", np.zeros_like(strength)), dtype=np.float64)
+    num_h = max(int(strength.shape[0]), 1)
+    static = {
+        "active_edge_count": float(np.sum(strength > 0.05)),
+        "A_mh_entropy": float(np.mean(_entropy(A_mh, axis=-1))) if A_mh.size else 0.0,
+        "A_eh_entropy": float(np.mean(_entropy(A_eh, axis=-1))) if A_eh.size else 0.0,
+        "module_mass_entropy_norm": float(_entropy(module_mass, axis=-1) / np.log(max(num_h, 2))) if module_mass.size else 0.0,
+        "env_mass_entropy_norm": float(_entropy(env_mass, axis=-1) / np.log(max(num_h, 2))) if env_mass.size else 0.0,
+        "module_mass_max": float(np.max(module_mass)) if module_mass.size else 0.0,
+        "env_mass_max": float(np.max(env_mass)) if env_mass.size else 0.0,
+        "hyper_strength_mean": float(np.mean(strength)) if strength.size else 0.0,
+        "hyper_strength_max": float(np.max(strength)) if strength.size else 0.0,
+    }
+    routing_maps = predictions.get("routing_maps", {})
+    routing = {}
+    if routing_maps:
+        alpha = np.asarray(routing_maps.get("query_hyper_attention", np.zeros((0, 0, 0))), dtype=np.float64)
+        pair = np.asarray(routing_maps.get("pairwise_edge_contribution", np.zeros_like(alpha)), dtype=np.float64)
+        c_h = np.asarray(routing_maps.get("c_H_norm", np.zeros((0, 0))), dtype=np.float64)
+        c_pair = np.asarray(routing_maps.get("c_pair_norm", np.zeros((0, 0))), dtype=np.float64)
+        if alpha.size:
+            entropy = _entropy(alpha, axis=-1)
+            routing.update(
+                {
+                    "query_attention_entropy": float(np.mean(entropy)),
+                    "query_attention_effective_edges": float(np.mean(np.exp(entropy))),
+                    "query_attention_max": float(np.mean(np.max(alpha, axis=-1))),
+                    "pairwise_edge_contribution_mean": float(np.mean(pair)) if pair.size else 0.0,
+                    "c_H_norm_mean": float(np.mean(c_h)) if c_h.size else 0.0,
+                    "c_pair_norm_mean": float(np.mean(c_pair)) if c_pair.size else 0.0,
+                }
+            )
+    changes = {}
+    for key, out_key in (
+        ("A_mh", "A_mh_change_norm"),
+        ("A_eh", "A_eh_change_norm"),
+        ("hyper_source_coords", "source_coordinate_shift"),
+        ("hyper_region_coords", "region_coordinate_shift"),
+        ("hyper_module_mass", "module_mass_shift"),
+        ("hyper_env_mass", "env_mass_shift"),
+        ("hyper_strength", "strength_shift"),
+    ):
+        if key in aux and key in base:
+            final_arr = np.asarray(aux[key], dtype=np.float64)
+            base_arr = np.asarray(base[key], dtype=np.float64)
+            if final_arr.shape == base_arr.shape:
+                changes[out_key] = float(np.linalg.norm(final_arr - base_arr))
+    return {
+        "static_organization": static,
+        "routing": routing,
+        "base_vs_final": changes,
+        "note": "Organization/routing/plan diagnostics are computed from predicted mode when both teacher and predicted modes are evaluated.",
     }
 
 
@@ -384,9 +494,10 @@ def main() -> int:
     output_dir = evaluation_output_dir(args.output_dir, checkpoint_path, raw_sample["case_id"])
     output_dir.mkdir(parents=True, exist_ok=True)
     channel_order = dataset.channel_order or list(CHANNEL_ORDER)
-    requested_modes = ["teacher", "predicted"] if args.local_port_condition_mode == "both" else [args.local_port_condition_mode]
+    requested_modes = ["predicted", "teacher"] if args.local_port_condition_mode == "both" else [args.local_port_condition_mode]
     mode_summaries: Dict[str, Any] = {}
     first_predictions: Optional[Dict[str, Any]] = None
+    primary_predictions: Optional[Dict[str, Any]] = None
     for mode in requested_modes:
         suffix = "predicted" if mode == "predicted" else str(mode)
         predictions = predict_case(
@@ -402,6 +513,8 @@ def main() -> int:
         predictions["suffix"] = suffix
         if first_predictions is None:
             first_predictions = predictions
+        if mode == "predicted" or primary_predictions is None:
+            primary_predictions = predictions
         temp_mode = args.temperature_display_mode or ("composite_internal" if np.asarray(predictions["pred_internal_temperature"]).size else "fluid_only")
         plot_field_quicklook(
             output_dir / f"global_field_quicklook_{suffix}.png",
@@ -421,32 +534,44 @@ def main() -> int:
 
     org_outputs: Dict[str, str] = {}
     arrays: Optional[Dict[str, np.ndarray]] = None
-    if args.organization_view != "none" and first_predictions is not None:
-        arrays = extract_organization_arrays(raw_sample, first_predictions["organizer_aux"])
+    if primary_predictions is None:
+        primary_predictions = first_predictions
+    if args.organization_view != "none" and primary_predictions is not None:
+        arrays = extract_organization_arrays(raw_sample, primary_predictions["organizer_aux"])
         radius = module_radius_from_sample(raw_sample, fallback=float(model.config.module_radius))
-        if args.organization_view in {"all", "physical"}:
+        style = str(args.organization_style)
+        if style not in {"presentation", "debug", "both"}:
+            print(f"[warning] unknown --organization-style={style!r}; using presentation.")
+            style = "presentation"
+        render_presentation = style in {"presentation", "both"}
+        render_debug = style in {"debug", "both"}
+        if args.organization_view in {"all", "physical"} and render_presentation:
             overview = output_dir / "organization_overview.png"
             render_channelthermal_organization_overview(overview, raw_sample, arrays, module_radius=radius, channel_order=channel_order, link_threshold=float(args.organization_link_threshold))
             alias = output_dir / "organizer_visualization.png"
             copy_figure_alias(overview, alias)
             org_outputs["organization_overview"] = str(overview)
             org_outputs["organizer_visualization"] = str(alias)
-        if args.organization_view in {"all", "matrices"}:
+            org_outputs["organization_physical"] = str(alias)
+        if args.organization_view in {"all", "matrices"} and (render_presentation or render_debug):
             matrices = output_dir / "organization_summary_matrices.png"
             render_channelthermal_organization_summary_matrices(matrices, raw_sample, arrays, module_radius=radius, channel_order=channel_order)
             org_outputs["organization_summary_matrices"] = str(matrices)
-        if args.organization_view in {"all", "schematic"}:
+            legacy_matrices = output_dir / "organization_matrices.png"
+            copy_figure_alias(matrices, legacy_matrices)
+            org_outputs["organization_matrices"] = str(legacy_matrices)
+        if args.organization_view in {"all", "schematic"} and render_presentation:
             schematic = output_dir / "organization_schematic.png"
             render_channelthermal_organization_schematic_presentation(schematic, raw_sample, arrays, link_threshold=float(args.organization_link_threshold))
             org_outputs["organization_schematic"] = str(schematic)
 
-    if arrays is None and first_predictions is not None:
-        arrays = extract_organization_arrays(raw_sample, first_predictions["organizer_aux"])
+    if arrays is None and primary_predictions is not None:
+        arrays = extract_organization_arrays(raw_sample, primary_predictions["organizer_aux"])
     radius = module_radius_from_sample(raw_sample, fallback=float(model.config.module_radius))
 
     routing_outputs: Dict[str, str] = {}
-    if args.return_routing_maps and first_predictions is not None and arrays is not None:
-        routing_maps = first_predictions.get("routing_maps", {})
+    if args.return_routing_maps and primary_predictions is not None and arrays is not None:
+        routing_maps = primary_predictions.get("routing_maps", {})
         required = {"query_hyper_attention", "pairwise_edge_contribution", "c_H_norm", "c_pair_norm"}
         if required.issubset(routing_maps):
             routing_outputs = save_routing_diagnostics(
@@ -459,20 +584,25 @@ def main() -> int:
             )
 
     plan_outputs: Dict[str, str] = {}
-    if args.export_hypergraph_plan and first_predictions is not None:
-        plan = extract_hypergraph_plan(first_predictions["organizer_aux"], raw_sample["structure"]["module_present"], detach=True)
+    diagnostics_outputs: Dict[str, str] = {}
+    if primary_predictions is not None:
+        diagnostics_path = output_dir / "hypergraph_diagnostics.json"
+        write_json(diagnostics_path, hypergraph_diagnostics(primary_predictions))
+        diagnostics_outputs["hypergraph_diagnostics"] = str(diagnostics_path)
+
+    if args.export_hypergraph_plan and primary_predictions is not None:
+        structure = raw_sample["structure"]
+        plan = extract_hypergraph_plan(
+            primary_predictions["organizer_aux"],
+            structure["module_present"],
+            detach=True,
+            domain_length_x=float(np.asarray(structure["domain_length_x"]).reshape(-1)[0]),
+            domain_length_y=float(np.asarray(structure["domain_length_y"]).reshape(-1)[0]),
+        )
+        validate_hypergraph_plan(plan)
         plan_path = output_dir / "hypergraph_plan.npz"
-        np.savez_compressed(plan_path, **plan)
-        plan_summary = {
-            "keys": sorted(plan.keys()),
-            "shapes": {key: list(value.shape) for key, value in plan.items()},
-            "active_hyperedge_count": int(np.asarray(plan.get("active_hyperedge_mask", np.zeros((0,)))).sum()),
-            "note": (
-                "This compact plan stores static organizer variables only. "
-                "Query-dependent alpha_qk is recomputed by the HONF decoder, "
-                "and raw module tokens are recomputed from generated physical designs."
-            ),
-        }
+        save_hypergraph_plan(plan_path, plan)
+        plan_summary = summarize_hypergraph_plan(plan)
         plan_summary_path = output_dir / "hypergraph_plan_summary.json"
         write_json(plan_summary_path, plan_summary)
         plan_outputs = {
@@ -482,15 +612,24 @@ def main() -> int:
 
     if len(mode_summaries) == 1:
         summary = next(iter(mode_summaries.values()))
+        summary["primary_export_mode"] = str(primary_predictions.get("suffix", "predicted")) if primary_predictions else "unknown"
         summary["outputs"].update(org_outputs)
         summary["outputs"].update(routing_outputs)
         summary["outputs"].update(plan_outputs)
+        summary["outputs"].update(diagnostics_outputs)
     else:
         outputs = {}
         outputs.update(org_outputs)
         outputs.update(routing_outputs)
         outputs.update(plan_outputs)
-        summary = {"checkpoint": str(checkpoint_path), "case_id": str(raw_sample["case_id"]), "modes": mode_summaries, "outputs": outputs}
+        outputs.update(diagnostics_outputs)
+        summary = {
+            "checkpoint": str(checkpoint_path),
+            "case_id": str(raw_sample["case_id"]),
+            "primary_export_mode": str(primary_predictions.get("suffix", "predicted")) if primary_predictions else "unknown",
+            "modes": mode_summaries,
+            "outputs": outputs,
+        }
     write_json(output_dir / "summary.json", summary)
     with (output_dir / "summary_compact.json").open("w", encoding="utf-8") as f:
         if "field_metrics_fluid" in summary:

@@ -32,7 +32,7 @@ from .local_coupling import (
 class ChannelThermalHONFModel(nn.Module):
     """Legacy-compatible ChannelThermal wrapper around the CORE HONF model."""
 
-    def __init__(self, config: ChannelThermalHONFConfig):
+    def __init__(self, config: ChannelThermalHONFConfig, *, attach_local_from_checkpoint: bool = True):
         super().__init__()
         self.config = config
         hidden = int(config.core_honf.hidden_dim)
@@ -61,7 +61,7 @@ class ChannelThermalHONFModel(nn.Module):
             ),
         )
         path = config.channelthermal.local_surrogate_checkpoint_path
-        if bool(config.channelthermal.use_local_surrogate) and path:
+        if bool(attach_local_from_checkpoint) and bool(config.channelthermal.use_local_surrogate) and path:
             self.local_coupling.attach_from_checkpoint(path, freeze=bool(config.channelthermal.freeze_local_surrogate), map_location="cpu")
 
     def set_global_target_normalization(self, stats: Optional[Dict[str, Any]], *, normalize_targets: bool) -> None:
@@ -72,6 +72,32 @@ class ChannelThermalHONFModel(nn.Module):
     @property
     def local_surrogate_attached(self) -> bool:
         return self.local_coupling.has_local_surrogate
+
+    def extract_hypergraph_plan(
+        self,
+        organizer_aux: Dict[str, Any],
+        module_present: torch.Tensor,
+        *,
+        detach: bool = True,
+    ) -> Dict[str, Any]:
+        """Return the canonical static organizer plan used by inverse tooling.
+
+        This ChannelThermal wrapper provides a model-side API so inverse code
+        can consume the same compact static plan as evaluation without depending
+        on evaluator control flow. Query-dependent routing maps and raw tokens
+        are intentionally excluded; those are recomputed by the decoder for a
+        generated physical design.
+        """
+
+        from _helpers.hypergraph_plan import extract_hypergraph_plan
+
+        return extract_hypergraph_plan(
+            organizer_aux,
+            module_present,
+            detach=detach,
+            domain_length_x=float(self.config.core_honf.domain_length_x),
+            domain_length_y=float(self.config.core_honf.domain_length_y),
+        )
 
     def forward(
         self,
@@ -92,6 +118,7 @@ class ChannelThermalHONFModel(nn.Module):
         mixed_teacher_ratio: float = 0.5,
         return_predicted_port_outputs: bool = False,
         return_routing_maps: bool = False,
+        return_port_global_consistency: bool = False,
     ) -> Dict[str, Any]:
         if structure is not None:
             re = structure.get("re", re)
@@ -151,7 +178,9 @@ class ChannelThermalHONFModel(nn.Module):
             env_coords=env.env_coords,
             env_features=env.env_features,
         )
-        base_output = self.core(honf_batch)
+        # Encode/organize only. The ChannelThermal local response changes
+        # module tokens, so decoding a field here would be discarded work.
+        base_output = self.core.encode_and_organize(honf_batch)
         base_org = self._legacy_organizer_aux(base_output, adapter, env.env_coords)
         base_module_state = base_output["module_tokens"]
         env_state = base_output["env_tokens"]
@@ -234,13 +263,17 @@ class ChannelThermalHONFModel(nn.Module):
                     geometry_mode=self.config.core_honf.geometry_mode,
                 )
                 provisional_org_raw["module_features_raw"] = adapter.module_features
-                outside_temperature = self._global_temperature_for_all_ports(
+                outside_temperature, refinement_diag = self._global_temperature_for_all_ports(
                     local_ports_used,
                     module_state,
                     provisional_org_raw,
                     global_token,
                     adapter.module_centers,
                     adapter.module_present,
+                )
+                interface_diagnostics["refinement_use_hyper_mechanism_encoder"] = refinement_diag.get(
+                    "use_hyper_mechanism_encoder",
+                    outside_temperature.new_zeros(()),
                 )
                 refined_ports = self.local_coupling.port_refinement_head(
                     module_state,
@@ -263,12 +296,13 @@ class ChannelThermalHONFModel(nn.Module):
                     local_query_points.to(device=device, dtype=dtype) if torch.is_tensor(local_query_points) else None,
                     adapter.module_present,
                 )
-                pred_interface, interface_diagnostics = self.local_coupling.assemble_interface(
+                pred_interface, refreshed_interface_diagnostics = self.local_coupling.assemble_interface(
                     local_outputs=local_outputs,
                     local_ports=local_ports_used,
                     module_state=module_state,
                     module_present=adapter.module_present,
                 )
+                interface_diagnostics.update(refreshed_interface_diagnostics)
                 local_response_summary = self.local_coupling.local_response_summary(
                     local_outputs=local_outputs,
                     module_present=adapter.module_present,
@@ -313,11 +347,11 @@ class ChannelThermalHONFModel(nn.Module):
             geometry_mode=self.config.core_honf.geometry_mode,
         )
         final_org_raw["module_features_raw"] = adapter.module_features
-        decoder_output = self.core.decoder(
+        decoder_output = self.core.decode_queries(
             query_xy=query_xy.float(),
             query_time=None,
             organizer_output=final_org_raw,
-            global_context=global_token,
+            global_token=global_token,
             return_routing_maps=bool(return_routing_maps),
         )
         final_output: Dict[str, Any] = {}
@@ -335,14 +369,22 @@ class ChannelThermalHONFModel(nn.Module):
             module_response_latent = module_state
             interface_source = "global_head"
 
-        port_global_temperature, port_global_t_env, port_global_mask = self._decode_global_temperature_at_ports(
-            final_pred_port_tokens,
-            module_state,
-            org,
-            global_token,
-            adapter.module_centers,
-            adapter.module_present,
-        )
+        if bool(return_port_global_consistency):
+            port_global_temperature, port_global_t_env, port_global_mask, port_global_diag = self._decode_global_temperature_at_ports(
+                final_pred_port_tokens,
+                module_state,
+                final_org_raw,
+                global_token,
+                adapter.module_centers,
+                adapter.module_present,
+            )
+        else:
+            # Dense port-global probes are loss/diagnostic-only. Keep the legacy
+            # keys but avoid the extra decoder pass for standard forwards.
+            port_global_temperature = query_xy.new_empty(batch, adapter.module_centers.shape[1], 0)
+            port_global_t_env = query_xy.new_empty(batch, adapter.module_centers.shape[1], 0)
+            port_global_mask = query_xy.new_empty(batch, adapter.module_centers.shape[1], 0)
+            port_global_diag = {"use_hyper_mechanism_encoder": decoder_output["pred_field"].new_zeros(())}
         result = {
             "pred_field": decoder_output["pred_field"],
             "pred_internal_temperature": pred_internal,
@@ -360,6 +402,10 @@ class ChannelThermalHONFModel(nn.Module):
             "base_organizer_aux": base_org,
             "routing_aux": {key: value for key, value in decoder_output.items() if key != "pred_field"},
         }
+        result["routing_aux"]["port_global_use_hyper_mechanism_encoder"] = port_global_diag.get(
+            "use_hyper_mechanism_encoder",
+            decoder_output["pred_field"].new_zeros(()),
+        )
         result.update(interface_diagnostics)
         result.update(predicted_port_diagnostics)
         return result
@@ -437,7 +483,8 @@ class ChannelThermalHONFModel(nn.Module):
         global_token: torch.Tensor,
         module_centers: torch.Tensor,
         module_present: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+        del module_state
         batch, num_modules, ntheta, _ = port_tokens.shape
         indices = self._port_subset_indices(ntheta, port_tokens.device)
         selected_ports = port_tokens.index_select(dim=-2, index=indices)
@@ -452,11 +499,13 @@ class ChannelThermalHONFModel(nn.Module):
             dim=-1,
         )
         flat_xy = outside_xy.reshape(batch, num_modules * int(indices.numel()), 2)
-        flat_field = self.core.decoder(flat_xy, None, org, global_token)["pred_field"]
-        temperature = self._temperature_from_field_output(flat_field).reshape(batch, num_modules, int(indices.numel()))
+        # Keep the full organizer output here. The reduced legacy organizer aux
+        # is only for plotting and lacks mechanism features used by the decoder.
+        port_output = self.core.decode_queries(flat_xy, None, org, global_token)
+        temperature = self._temperature_from_field_output(port_output["pred_field"]).reshape(batch, num_modules, int(indices.numel()))
         target_t_env = selected_ports[..., 3]
         valid_mask = module_present[:, :, None].expand_as(temperature)
-        return temperature * valid_mask, target_t_env * valid_mask, valid_mask
+        return temperature * valid_mask, target_t_env * valid_mask, valid_mask, port_output
 
     def _global_temperature_for_all_ports(
         self,
@@ -466,7 +515,8 @@ class ChannelThermalHONFModel(nn.Module):
         global_token: torch.Tensor,
         module_centers: torch.Tensor,
         module_present: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        del module_state
         batch, num_modules, ntheta, _ = port_tokens.shape
         normals = port_tokens[..., 1:3]
         radius = float(self.config.core_honf.module_radius) + float(self.config.channelthermal.port_global_consistency_radius_offset)
@@ -479,8 +529,9 @@ class ChannelThermalHONFModel(nn.Module):
             dim=-1,
         )
         flat_xy = outside_xy.reshape(batch, num_modules * ntheta, 2)
-        flat_field = self.core.decoder(flat_xy, None, org, global_token)["pred_field"]
-        return self._temperature_from_field_output(flat_field).reshape(batch, num_modules, ntheta) * module_present[:, :, None]
+        refinement_output = self.core.decode_queries(flat_xy, None, org, global_token)
+        temperature = self._temperature_from_field_output(refinement_output["pred_field"]).reshape(batch, num_modules, ntheta)
+        return temperature * module_present[:, :, None], refinement_output
 
     def _infer_ntheta(
         self,

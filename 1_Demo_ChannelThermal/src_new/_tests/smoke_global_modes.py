@@ -51,10 +51,11 @@ def tensorize(value):
 def run_mode(base_cfg: dict, dataset: GlobalChannelThermalDataset, batch: dict, device: torch.device, *, name: str, use_local: bool, mode: str) -> None:
     cfg = deepcopy(base_cfg)
     cfg.setdefault("model", {}).setdefault("channelthermal", {})
-    cfg["model"]["channelthermal"]["use_local_surrogate"] = bool(use_local)
+    cfg.setdefault("model", {}).setdefault("local_coupling", {})
+    cfg["model"]["local_coupling"]["use_local_surrogate"] = bool(use_local)
     cfg["model"]["channelthermal"]["internal_prediction_mode"] = "auto" if use_local else "global_head"
     if not use_local:
-        cfg["model"]["channelthermal"]["local_surrogate_checkpoint_path"] = None
+        cfg["model"]["local_coupling"]["local_surrogate_checkpoint_path"] = None
     model_config = build_model_config(cfg, dataset)
     model = ChannelThermalHONFModel(model_config).to(device)
     model.set_global_target_normalization(dataset.normalizer.stats, normalize_targets=bool(cfg.get("dataset", {}).get("normalize_targets", False)))

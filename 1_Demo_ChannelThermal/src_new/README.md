@@ -6,6 +6,12 @@ compatibility, and adds ChannelThermal-specific physical coupling around the
 new H-routed decoder. It does not import the old `src/` tree or
 `Unified_Forward_Model_0` at runtime.
 
+The core is split into `encode_and_organize()` and `decode_queries()`. The
+ChannelThermal wrapper uses the base encode/organize pass, fuses any local
+response into module tokens, recomputes the final organizer, and decodes the
+environmental field only once for standard forwards. Auxiliary port-global
+temperature probes are requested only when their loss or diagnostics need them.
+
 Main field equation:
 
 ```text
@@ -51,6 +57,13 @@ conda run -n ModularDT python src_new/_tests/smoke_global_modes.py \
   --config Configs_new/train_global_honf_template.json \
   --device cpu \
   --points 32
+
+conda run -n ModularDT python src_new/_tests/test_newhonf_hardening.py \
+  --config Configs_new/train_global_honf_template.json \
+  --device cpu \
+  --points 32
+
+conda run -n ModularDT python src_new/_tests/test_hypergraph_plan_stability.py
 ```
 
 CPU smoke train:
@@ -125,7 +138,70 @@ They are emitted only with `--return-routing-maps`.
 for inverse-design seeding: `A_mh`, `A_eh`, source/region coordinates, masses,
 strengths, and the active hyperedge mask.
 
+The export is canonicalized with active hyperedges first, then source/region
+coordinates and strength. `edge_permutation` records the original H-index
+provenance. Use `_helpers.hypergraph_plan.load_hypergraph_plan()` and
+`validate_hypergraph_plan()` to round-trip and validate saved plans. The
+model wrapper also exposes `ChannelThermalHONFModel.extract_hypergraph_plan()`
+for inverse code that already has `organizer_aux`.
+
 The export intentionally excludes dense learned `hyper_state`,
 query-dependent `alpha_qk`, and module tokens. `alpha_qk` is recomputed by the
 forward decoder for each query grid, and module tokens are recomputed from the
 generated physical design.
+
+Every evaluation writes `hypergraph_diagnostics.json`. It summarizes static
+organization health, optional routing summaries, and base-versus-final H
+changes after local-response fusion (`A_mh`, `A_eh`, source/region shifts, and
+mass/strength shifts). When `--local-port-condition-mode both` is used, teacher
+outputs are saved with a `_teacher` suffix, but organization plots, routing
+maps, and hypergraph-plan exports use predicted mode as the primary inverse
+source.
+
+## Training Diagnostics
+
+Training logs scalar HONF diagnostics in `metrics.csv` for both train and
+validation:
+
+- active and soft-active edge counts.
+- `A_mh`/`A_eh` entropy and mass concentration.
+- query-attention entropy, effective edge count, and max attention.
+- pairwise gate/context norm, `c_H` value-context norm, total hyper context,
+  and non-hyper context norm.
+- flags for whether hyper value context and pairwise kernel are active.
+
+Dense `[Q,K]` routing maps are not retained during training. The old ambiguous
+`organizer_entropy_weight` path is deprecated; use
+`loss.organizer_regularization` for optional generic anti-collapse experiments.
+All generic regularization effects are disabled by default.
+
+## Config And Checkpoints
+
+`Configs_new/train_global_honf_template.json` uses authoritative nested
+sections:
+
+- `model.core_honf`: reusable HONF settings.
+- `model.channelthermal`: adapter dimensions, internal prediction mode, and
+  fallback-head dimensions.
+- `model.local_coupling`: local surrogate enable/path/freeze/latent settings.
+- `model.physical_correction`: flux mode, refinement, and port-global probe
+  settings.
+
+Legacy duplicate keys are parsed with warnings, but the nested
+`local_coupling` and `physical_correction` sections win. Training writes a
+`config_resolved.json` with concrete dataset-derived dimensions and no
+`"auto"` model fields.
+
+Global checkpoints are self-contained for evaluation: they store the local
+surrogate config, local normalization stats, frozen flag, and original external
+checkpoint path as provenance. The local model state itself is included in the
+global `model_state_dict`.
+
+Additional profiles:
+
+- `Configs_new/train_global_honf_validated_core.json` pins the enhanced HONF
+  sandbox settings from `Run_0009_20260617_154601` and adds the full
+  ChannelThermal coupling stack.
+- `Configs_new/train_global_honf_old_parity.json` matches old comparison data
+  normalization, split, point count, seed, optimizer scale, local checkpoint,
+  and Smooth L1 interface/log-h losses where practical.

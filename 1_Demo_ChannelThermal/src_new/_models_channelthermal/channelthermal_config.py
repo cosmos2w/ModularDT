@@ -32,7 +32,6 @@ class ChannelThermalSpecificConfig:
     port_global_consistency_radius_offset: float = 0.05
     port_global_consistency_num_points: int = 32
     internal_prediction_mode: str = "auto"
-    enable_fallback_heads: bool = False
     default_num_interface_points: int = 64
     fallback_internal_query_dim: int = 2
     fallback_interface_dim: int = 2

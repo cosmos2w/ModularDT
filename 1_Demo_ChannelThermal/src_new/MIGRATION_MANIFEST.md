@@ -6,6 +6,42 @@ created a standalone global-field HONF path under `src_new/` and
 and ChannelThermal-specific physical coupling without importing old source at
 runtime.
 
+Pre-training hardening revisions:
+
+- `src_new/_models_core/honf_core.py` now exposes `encode_and_organize()` and
+  `decode_queries()` so ChannelThermal can avoid discarded pre-fusion field
+  decodes.
+- `src_new/_models_channelthermal/channelthermal_full_model.py` uses full
+  organizer dictionaries for final, port-global, and refinement decoder calls;
+  reduced legacy organizer aliases are created only for outputs/plots.
+- `src_new/_models_channelthermal/local_coupling.py` keeps a frozen attached
+  local surrogate in eval mode even when coupling heads are trained.
+- `src_new/train.py` resolves authoritative nested config sections, clips
+  gradients, saves concrete `config_resolved.json`, and embeds local surrogate
+  config/normalization/provenance in global checkpoints.
+- `src_new/evaluate.py` loads embedded local surrogate metadata before loading
+  the global state dict and validates critical state-dict mismatches.
+- Smoke and regression utilities are grouped under `src_new/_tests/`.
+
+Diagnostics and inverse-readiness revisions:
+
+- `src_new/_helpers/honf_diagnostics.py` logs scalar HONF health metrics during
+  training without retaining dense query-routing maps.
+- `src_new/train.py` deprecates ambiguous legacy organizer entropy weights in
+  favor of disabled-by-default generic `loss.organizer_regularization`
+  controls.
+- `src_new/evaluate.py` uses predicted mode as the primary organization,
+  routing, and hypergraph-plan export source when `--local-port-condition-mode
+  both` is requested; teacher outputs are retained with a suffix.
+- `src_new/_helpers/hypergraph_plan.py` exports a canonical schema-versioned
+  inverse-ready plan with loader and validator utilities.
+- `Configs_new/train_global_honf_validated_core.json` preserves the exact
+  validated enhanced-HONF sandbox core settings and adds the full local
+  coupling stack.
+- `Configs_new/train_global_honf_old_parity.json` mirrors old comparison data,
+  normalization, seed, optimizer, local-checkpoint, and Smooth L1 loss choices
+  where practical.
+
 | Source file copied | Destination file | Reason copied | Required revisions |
 | --- | --- | --- | --- |
 | `Unified_Forward_Model_0/src/unified_types.py` | `src_new/_models_core/honf_types.py` | Validated HONF configuration and batch container. | Rename to HONF terminology, add CORE HONF docstring, use relative imports, add optional generic environment coordinates/features to `BatchData`. |
@@ -23,3 +59,8 @@ runtime.
 | New full-model wrapper | `src_new/_models_channelthermal/channelthermal_full_model.py` | Provides legacy forward signature and output dictionary while using the standalone HONF core. | Return internal/interface/port tensors from either the copied local surrogate path or global fallback heads, plus organizer aliases expected by evaluation. |
 | New fallback heads | `src_new/_models_channelthermal/internal_fallback_heads.py` | Preserves old global fallback internal/interface head shapes for comparison runs when local surrogate is disabled. | Keep available through `internal_prediction_mode="global_head"`. |
 | New config template | `Configs_new/train_global_honf_template.json` | Production Prompt-3 training configuration for standalone enhanced HONF plus ChannelThermal coupling. | Add `_note_*` explanations and separate core HONF, local coupling, physical correction, loss, curriculum, checkpointing, and path blocks. |
+| New diagnostics helper | `src_new/_helpers/honf_diagnostics.py` | Scalar HONF collapse/routing/context diagnostics and generic anti-collapse regularization. | Keep outputs scalar during training; avoid dense routing tensors unless evaluation explicitly requests them. |
+| New plan helper | `src_new/_helpers/hypergraph_plan.py` | Canonical inverse-ready static organization export. | Add schema metadata, canonical H ordering, loader, validator, summary, and exclude query-dependent routing/module tokens. |
+| New routing helper | `src_new/_helpers/routing_viz_channelthermal.py` | Optional query-dependent routing maps for NewHONF evaluation. | Save routing NPZ/JSON and opt-in PNGs only when `--return-routing-maps` is enabled. |
+| New validated config | `Configs_new/train_global_honf_validated_core.json` | Reproduce the validated enhanced-HONF core settings inside the standalone NewHONF stack. | Add local coupling/physical correction sections without changing the copied core hyperparameters. |
+| New parity config | `Configs_new/train_global_honf_old_parity.json` | Compare against the old ChannelThermal global model under matching data/normalization/loss settings. | Keep NewHONF H-routed decoder; do not restore old direct-memory attention. |

@@ -226,6 +226,8 @@ class LocalSurrogateCoupling(nn.Module):
     ):
         super().__init__()
         self.local_surrogate: Optional[LocalModuleSurrogate] = None
+        self.local_surrogate_frozen = False
+        self.local_surrogate_checkpoint_path: str | None = None
         self.local_surrogate_normalize_inputs = False
         self.local_surrogate_normalize_targets = False
         self.local_module_params_from_used_ports = bool(local_module_params_from_used_ports)
@@ -280,6 +282,7 @@ class LocalSurrogateCoupling(nn.Module):
         if not isinstance(normalization_stats, dict):
             normalization_stats = {}
         self.set_local_surrogate(model, freeze=freeze, normalization_config=normalization_config, normalization_stats=normalization_stats)
+        self.local_surrogate_checkpoint_path = str(checkpoint_path)
         return checkpoint
 
     def set_global_target_normalization(self, stats: Optional[Dict[str, Any]], *, normalize_targets: bool) -> None:
@@ -298,6 +301,7 @@ class LocalSurrogateCoupling(nn.Module):
         normalization_stats: Optional[Dict[str, Any]],
     ) -> None:
         self.local_surrogate = model
+        self.local_surrogate_frozen = bool(freeze)
         self.local_surrogate_normalize_inputs = bool((normalization_config or {}).get("normalize_inputs", False))
         self.local_surrogate_normalize_targets = bool((normalization_config or {}).get("normalize_targets", False))
         self._set_buffer_from_stat("local_module_params_mean", normalization_stats, "module_params_mean")
@@ -312,6 +316,21 @@ class LocalSurrogateCoupling(nn.Module):
             self.local_surrogate.eval()
             for param in self.local_surrogate.parameters():
                 param.requires_grad_(False)
+        else:
+            for param in self.local_surrogate.parameters():
+                param.requires_grad_(True)
+            self.local_surrogate.train(self.training)
+
+    def train(self, mode: bool = True) -> "LocalSurrogateCoupling":
+        super().train(mode)
+        if self.local_surrogate is not None:
+            if self.local_surrogate_frozen:
+                # Case-specific coupling heads can train, but the copied
+                # pretrained local surrogate must remain deterministic.
+                self.local_surrogate.eval()
+            else:
+                self.local_surrogate.train(mode)
+        return self
 
     def _set_buffer_from_stat(self, name: str, stats: Optional[Dict[str, Any]], key: str, *alternate_keys: str) -> None:
         value = None

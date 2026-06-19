@@ -335,6 +335,7 @@ class HypergraphFieldDecoder(nn.Module):
             else:
                 hyper_context = torch.zeros_like(hyper_value_context)
             c_h_context = hyper_context
+            diagnostics["hyper_value_context_norm"] = c_h_context.detach().norm(dim=-1).mean()
             diagnostics["hyper_attention_mean"] = hyper_attention.mean(dim=1)
             hyper_entropy = -(hyper_attention * torch.log(hyper_attention.clamp_min(EPS))).sum(dim=-1)
             diagnostics["hyper_attention_topk"] = torch.tensor(float(cfg.hyper_attention_topk), device=query_xy.device, dtype=query_xy.dtype)
@@ -382,6 +383,7 @@ class HypergraphFieldDecoder(nn.Module):
             diagnostics["pairwise_edge_usage_mean"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
             diagnostics["pairwise_active_hyperedge_count"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
             diagnostics["pairwise_uses_sparse_hyper_attention"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
+            diagnostics.setdefault("hyper_value_context_norm", torch.zeros((), device=query_xy.device, dtype=query_xy.dtype))
             if return_routing_maps:
                 batch, num_query = query_xy.shape[:2]
                 num_hyper = int(organizer_output.get("hyper_state", query_xy.new_zeros(batch, 0, query_state.shape[-1])).shape[1])
@@ -421,6 +423,7 @@ class HypergraphFieldDecoder(nn.Module):
             nonhyper_context = nonhyper_context + addition
 
         diagnostics["hyper_context_norm"] = hyper_context.detach().norm(dim=-1).mean()
+        diagnostics["total_hyper_context_norm"] = diagnostics["hyper_context_norm"]
         diagnostics["nonhyper_context_norm"] = nonhyper_context.detach().norm(dim=-1).mean()
         diagnostics["context_norm"] = context.detach().norm(dim=-1).mean()
 
