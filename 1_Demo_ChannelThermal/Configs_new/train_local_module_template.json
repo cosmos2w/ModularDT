@@ -1,0 +1,58 @@
+{
+  "Run_ID": "0004",
+  "_note": "Global alignment on 0002",
+  "dataset": {
+    "_note_normalization": "Use mean/std normalization for Stage A. Checkpoints save the local normalizer stats, and Stage B applies them when a local surrogate is attached.",
+    
+    "source": "mixed",
+    "_note_source": "dataset.source = local | global_alignment | mixed",
+
+    "packed_h5_path": "./Data_Saved/Processed_LocalModule_Dataset/packed_dataset.h5",
+    "global_alignment_packed_h5_path": "./Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
+    "global_alignment_split": "train",
+    "global_alignment_val_split": "test",
+    "local_synthetic_weight": 1.0,
+    "global_alignment_weight": 1.0,
+    "train_split": "train",
+    "val_split": "test",
+    "batch_size": 32,
+    "val_batch_size": 32,
+    "num_workers": 4,
+    "normalize_inputs": true,
+    "normalize_targets": true
+  },
+  "model": {
+    "module_param_dim": "auto",
+    "port_token_dim": "auto",
+    "interface_target_dim": 2,
+    "hidden_dim": 128,
+    "latent_dim": 128,
+    "num_port_latents": 16,
+    "num_heads": 4,
+    "num_layers": 4,
+    "coord_fourier_frequencies": 6,
+    "dropout": 0.0
+  },
+  "loss": {
+    "internal_mse_weight": 1.0,
+    "interface_mse_weight": 1.0,
+    "interface_target_weights": [1.0, 0.2],
+    "interface_smoothness_weight": 0.0,
+    "plot_smoothness_loss": false
+  },
+  "training": {
+    "epochs": 10000,
+    "learning_rate": 0.00005,
+    "weight_decay": 0.00001,
+    "gradient_clip_norm": 1.0,
+    "amp": false,
+    "seed": 42,
+    "device": "cpu",
+    "init_checkpoint_path": "./Saved_Model_LocalModule/Run_0002_20260507_085853/latest_model.pt",
+    "max_train_batches_per_epoch": null,
+    "max_val_batches": null
+  },
+  "paths": {
+    "saved_model_dir": "./Saved_Model_LocalModule_NewHONF"
+  }
+}

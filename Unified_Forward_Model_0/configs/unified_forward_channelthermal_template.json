@@ -50,8 +50,8 @@
     "mechanism_hidden_dim": null,
 
     "_note_routing_factorization_ablations": "learned keeps normal routing; uniform tests whether a routing factor matters.",
-    "hyper_module_assignment_mode": "uniform",
-    "hyper_query_attention_mode": "uniform",
+    "hyper_module_assignment_mode": "learned",
+    "hyper_query_attention_mode": "learned",
 
     "_note_sparse_hyper_attention": "0=dense; 1/2 makes each query use only top-k hyperedges.",
     "hyper_attention_topk": 0,
