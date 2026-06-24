@@ -1,6 +1,6 @@
 {
-  "_note_template": "Fully-trained version of Case-3",
-  "Run_ID": "0006",
+  "_note_template": "clean 'not using learned hypergraph' config-only ablation while preserving the same enhanced pairwise decoder path",
+  "Run_ID": "0005",
   "model": {
     "_note_model": "Reusable CORE HONF settings are intentionally separated from ChannelThermal local physics.",
     "core_honf": {
@@ -20,12 +20,12 @@
 
       "geometry_mode": "nonperiodic",
       "query_time_mode": "none",
-      "decoder_mode": "enhanced_honf_pairwise",
+      "decoder_mode": "enhanced_honf_pairwise_only",
       "use_hyper_context": true,
-      "use_hyper_value_context": true,
+      "use_hyper_value_context": false,
 
-      "hyper_module_assignment_mode": "learned",
-      "hyper_query_attention_mode": "learned",
+      "hyper_module_assignment_mode": "uniform",
+      "hyper_query_attention_mode": "uniform",
       "hyper_attention_topk": 0,
       "hyper_attention_temperature": 1.0,
       "sparse_hyper_attention_detach_mask": true,
@@ -53,7 +53,6 @@
       "use_hyper_geometry_bias": true,
       "hyper_geometry_bias_scale": 1.0,
       "use_A_me_auxiliary": true,
-
       "use_direct_module_env_decoder": false,
       "_note_use_direct_module_env_decoder": "Must remain false; the old unrestricted direct-memory decoder is not restored.",
       "direct_residual_gate_init": 0.0,
@@ -98,10 +97,10 @@
     "packed_h5_path": "./Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
     "train_split": "train",
     "val_split": "test",
-    "points_per_case": 1024,
-    "val_points_per_case": 1024,
-    "batch_size": 32,
-    "val_batch_size": 32,
+    "points_per_case": 2048,
+    "val_points_per_case": 2048,
+    "batch_size": 64,
+    "val_batch_size": 64,
     "num_workers": 4,
     "normalize_inputs": true,
     "normalize_targets": true,
@@ -149,14 +148,15 @@
     }
   },
   "training": {
+    "_note_training": "Sandbox-compatible optimization scale. Use CUDA_VISIBLE_DEVICES=2 externally for physical GPU 2.",
     "seed": 0,
-    "device": "cuda:1",
+    "device": "cuda:2",
     "epochs": 20000,
     "learning_rate": 0.0003,
     "weight_decay": 0.00001,
     "amp": false,
     "gradient_clip_norm": 1.0,
-    "run_name": "global_honf_validated_core",
+    "run_name": "train_global_honf_UniformHAssignment",
     "port_curriculum": {
       "_note": "Default autonomous predicted-port operation; teacher/mixed remain available for debugging.",
       "schedule": "none",
@@ -175,7 +175,7 @@
     "save_best": true,
     "save_best_field_mse": false,
     "save_best_temperature_mse": false,
-    "save_best_predicted": true,
+    "save_best_predicted": false,
     "save_latest": true
   },
   "paths": {

@@ -28,11 +28,13 @@ from _helpers.model_utils import (
     current_timestamp,
     ensure_dir,
     make_grad_scaler,
+    load_trusted_checkpoint,
     read_json,
     recursive_to_device,
     resolve_demo_path,
     select_device,
     set_seed,
+    strip_module_prefix,
     write_json,
 )
 from _helpers.honf_diagnostics import HONF_DIAGNOSTIC_KEYS, compute_honf_diagnostics, organizer_regularization_loss
@@ -52,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-val-batches", type=int, default=None)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--Run_ID", dest="run_id", type=str, default=None)
+    parser.add_argument("--resume-checkpoint", type=str, default=None, help="Resume training from a saved NewHONF checkpoint.")
     return parser.parse_args()
 
 
@@ -60,6 +63,32 @@ def normalize_run_id(value: Any, fallback: str = "0001") -> str:
     if not raw.isdigit():
         raise ValueError(f"Run_ID must be a numeric serial such as '0001'; got {raw!r}.")
     return f"{int(raw):04d}"
+
+
+def resolve_run_id(args_value: Any, cfg: Dict[str, Any], training_cfg: Dict[str, Any]) -> str:
+    """Resolve Run_ID with CLI override first, then template settings.
+
+    Some templates carry both top-level `Run_ID` and `training.Run_ID`.
+    `training.Run_ID` is the operational training setting, so it wins when no
+    `--Run_ID` override is provided. The resolved value is mirrored back into
+    both places before saving `config_resolved.json`.
+    """
+
+    top_level = cfg.get("Run_ID")
+    training_value = training_cfg.get("Run_ID")
+    if args_value is not None:
+        return normalize_run_id(args_value, "0001")
+    if top_level is not None and training_value is not None:
+        normalized_top = normalize_run_id(top_level, "0001")
+        normalized_training = normalize_run_id(training_value, "0001")
+        if normalized_top != normalized_training:
+            print(
+                "[warning] Conflicting Run_ID values in config: "
+                f"top-level Run_ID={normalized_top}, training.Run_ID={normalized_training}; "
+                "using training.Run_ID. Pass --Run_ID to override both."
+            )
+        return normalized_training
+    return normalize_run_id(training_value if training_value is not None else top_level, "0001")
 
 
 def sanitize_run_suffix(value: Any) -> str:
@@ -612,6 +641,17 @@ def write_metrics_row(path: Path, fieldnames: Iterable[str], row: Dict[str, Any]
         writer.writerow(row)
 
 
+def repair_metrics_csv_for_append(path: Path) -> None:
+    if not path.exists():
+        return
+    raw = path.read_bytes()
+    repaired = raw.replace(b"\x00", b"")
+    if repaired and not repaired.endswith(b"\n"):
+        repaired += b"\n"
+    if repaired != raw:
+        path.write_bytes(repaired)
+
+
 def best_metrics_payload(row: Dict[str, Any], best_total: float, best_field: float, best_temperature: float, best_predicted: float) -> Dict[str, float]:
     payload = {
         "best_val_loss_total": float(best_total),
@@ -903,15 +943,20 @@ def main() -> int:
     epochs = int(args.epochs if args.epochs is not None else training_cfg.get("epochs", 200))
     max_train_batches = args.max_train_batches if args.max_train_batches is not None else training_cfg.get("max_train_batches_per_epoch")
     max_val_batches = args.max_val_batches if args.max_val_batches is not None else training_cfg.get("max_val_batches")
+    resume_checkpoint = resolve_demo_path(args.resume_checkpoint) if args.resume_checkpoint else None
 
     paths_cfg = cfg.get("paths", {})
     saved_root = ensure_dir(resolve_demo_path(paths_cfg.get("saved_model_dir", "./Saved_Model_NewHONF")))
-    run_id = normalize_run_id(args.run_id or cfg.get("Run_ID") or training_cfg.get("Run_ID"), "0001")
+    run_id = resolve_run_id(args.run_id, cfg, training_cfg)
     cfg["Run_ID"] = run_id
-    suffix = sanitize_run_suffix(args.run_name or training_cfg.get("run_name"))
-    stamp = current_timestamp()
-    run_name = f"Run_{run_id}_{stamp}_{suffix}" if suffix else f"Run_{run_id}_{stamp}"
-    run_dir = ensure_dir(saved_root / run_name)
+    cfg.setdefault("training", {})["Run_ID"] = run_id
+    if resume_checkpoint is None:
+        suffix = sanitize_run_suffix(args.run_name or training_cfg.get("run_name"))
+        stamp = current_timestamp()
+        run_name = f"Run_{run_id}_{stamp}_{suffix}" if suffix else f"Run_{run_id}_{stamp}"
+        run_dir = ensure_dir(saved_root / run_name)
+    else:
+        run_dir = ensure_dir(resume_checkpoint.parent)
     write_json(run_dir / "config_resolved.json", cfg)
     metrics_path = run_dir / "metrics.csv"
     fieldnames = [
@@ -962,7 +1007,24 @@ def main() -> int:
     best_field = math.inf
     best_temperature = math.inf
     best_predicted = math.inf
-    for epoch in range(1, epochs + 1):
+    start_epoch = 1
+    if resume_checkpoint is not None:
+        repair_metrics_csv_for_append(metrics_path)
+        checkpoint = load_trusted_checkpoint(resume_checkpoint, map_location=device)
+        model.load_state_dict(strip_module_prefix(checkpoint["model_state_dict"]), strict=True)
+        optimizer_state = checkpoint.get("optimizer_state_dict")
+        if optimizer_state:
+            optimizer.load_state_dict(optimizer_state)
+        checkpoint_epoch = int(checkpoint.get("epoch", checkpoint.get("current_epoch", 0)) or 0)
+        best_payload = dict(checkpoint.get("best_metrics") or {})
+        best_total = float(best_payload.get("best_val_loss_total", checkpoint.get("best_metric", math.inf)))
+        best_field = float(best_payload.get("best_val_field_mse", math.inf))
+        best_temperature = float(best_payload.get("best_val_temperature_mse", math.inf))
+        best_predicted = float(best_payload.get("best_val_predicted_loss_total", math.inf))
+        start_epoch = checkpoint_epoch + 1
+        print(f"[resume] loaded {resume_checkpoint}; continuing at epoch {start_epoch} / {epochs}")
+
+    for epoch in range(start_epoch, epochs + 1):
         effective_mode, effective_ratio = effective_port_condition_settings(epoch, training_cfg)
         eff_internal, eff_interface = effective_local_loss_weights(loss_cfg, effective_mode, effective_ratio)
         pred_consistency_weight = predicted_consistency_weight_for_epoch(epoch, loss_cfg)

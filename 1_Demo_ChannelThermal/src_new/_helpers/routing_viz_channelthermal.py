@@ -18,6 +18,7 @@ from typing import Any, Dict, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
 from matplotlib.patches import Circle
 
 
@@ -83,6 +84,19 @@ def _format_axis(ax: Any, sample: Dict[str, Any], arrays: Dict[str, np.ndarray],
     ax.set_aspect("equal", adjustable="box")
 
 
+def _add_geometry_legend(fig: Any, colors: Sequence[Any]) -> None:
+    """Explain ChannelThermal overlays without changing the panel data scale."""
+
+    sample_color = colors[0] if colors else "black"
+    handles = [
+        Line2D([0], [0], color="white", marker="o", markerfacecolor="none", markeredgecolor="black", lw=0, label="module outline / M id"),
+        Line2D([0], [0], color=sample_color, marker="x", lw=0, label="H source: module-side center"),
+        Line2D([0], [0], color=sample_color, marker="*", markeredgecolor="black", lw=0, label="H region: env-side center"),
+        Line2D([0], [0], color=sample_color, lw=1.2, label="source-to-region link"),
+    ]
+    fig.legend(handles=handles, loc="lower center", ncol=4, frameon=False, fontsize=11)
+
+
 def _panel_grid(count: int) -> tuple[int, int]:
     cols = min(3, max(1, int(np.ceil(np.sqrt(max(count, 1))))))
     rows = int(np.ceil(max(count, 1) / cols))
@@ -98,22 +112,29 @@ def _plot_edge_panels(
     title_prefix: str,
     cmap: str,
     module_radius: float,
+    figure_note: str | None = None,
+    colorbar_label: str | None = None,
 ) -> None:
     num_h = int(values.shape[-1])
     active = _active_edges(arrays, num_h)
     colors = _colors(num_h)
     extent = _domain_extent(sample)
     rows, cols = _panel_grid(len(active))
-    fig, axes = plt.subplots(rows, cols, figsize=(5.2 * cols, 4.2 * rows), squeeze=False, constrained_layout=True)
+    fig, axes = plt.subplots(rows, cols, figsize=(5.2 * cols, 4.35 * rows), squeeze=False, constrained_layout=True)
+    if figure_note:
+        fig.suptitle(figure_note, fontsize=13)
     vmax = float(np.nanmax(values[..., active])) if values.size and active else 1.0
     vmax = max(vmax, 1.0e-8)
     for panel_idx, hidx in enumerate(active):
         ax = axes[panel_idx // cols][panel_idx % cols]
         im = ax.imshow(values[..., hidx], origin="lower", extent=extent, cmap=cmap, vmin=0.0, vmax=vmax, aspect="auto")
         _format_axis(ax, sample, arrays, module_radius, colors, f"{title_prefix} H{hidx}")
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        if colorbar_label:
+            cbar.set_label(colorbar_label, fontsize=11)
     for panel_idx in range(len(active), rows * cols):
         axes[panel_idx // cols][panel_idx % cols].axis("off")
+    _add_geometry_legend(fig, colors)
     fig.savefig(str(output_path), dpi=180)
     plt.close(fig)
 
@@ -206,6 +227,11 @@ def save_routing_diagnostics(
         "c_pair_norm_mean": float(np.nanmean(c_pair)),
         "entropy_mean": float(np.nanmean(entropy)),
         "note": "alpha_qk is query-dependent and is recomputed by the HONF decoder for each query grid.",
+        "pairwise_edge_contribution_meaning": (
+            "Each H panel shows ||g_pair * alpha_qk * edge_pair_context_qk||. "
+            "Bright regions are query locations where that hyperedge contributes strong routed module-detail information "
+            "to c_pair(q); the value is a diagnostic magnitude, not temperature/flux and not signed."
+        ),
     }
     summary_path = output_dir / "routing_summary.json"
     with summary_path.open("w", encoding="utf-8") as f:
@@ -224,9 +250,31 @@ def save_routing_diagnostics(
     if routing_view == "all":
         attention_path = output_dir / "routing_attention_maps.png"
         pair_path = output_dir / "routing_pairwise_contribution_maps.png"
-        _plot_edge_panels(attention_path, sample, organizer_arrays, alpha, title_prefix="alpha_qk", cmap="viridis", module_radius=module_radius)
-        _plot_edge_panels(pair_path, sample, organizer_arrays, pair, title_prefix="||g_pair alpha edge_pair_context||", cmap="plasma", module_radius=module_radius)
+        _plot_edge_panels(
+            attention_path,
+            sample,
+            organizer_arrays,
+            alpha,
+            title_prefix="alpha_qk",
+            cmap="viridis",
+            module_radius=module_radius,
+            figure_note="Query-to-H routing: bright = this query selects the shown hyperedge more strongly.",
+            colorbar_label="attention weight alpha_qk",
+        )
+        _plot_edge_panels(
+            pair_path,
+            sample,
+            organizer_arrays,
+            pair,
+            title_prefix="pairwise routed detail",
+            cmap="plasma",
+            module_radius=module_radius,
+            figure_note=(
+                "Per-edge pairwise contribution: bright = strong H-routed module-detail contribution to c_pair(q). "
+                "Magnitude is ||g_pair * alpha_qk * edge_pair_context_qk||."
+            ),
+            colorbar_label="diagnostic norm, not physical units",
+        )
         outputs["routing_attention_maps"] = str(attention_path)
         outputs["routing_pairwise_contribution_maps"] = str(pair_path)
     return outputs
-
