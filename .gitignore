@@ -38,6 +38,7 @@ Data_Saved/
 1_Demo_ChannelThermal/Saved_Model_NewHONF/
 1_Demo_ChannelThermal/Domain_shape/
 1_Demo_ChannelThermal/Saved_Model_Prior/
+1_Demo_ChannelThermal/Saved_Model_HONF_CL/
 Unified_Forward_Model_0/results/*
 !Unified_Forward_Model_0/results/.gitkeep
 
