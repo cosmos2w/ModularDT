@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "_note": "Archived no-pretrained-module/global-fallback ablation.",
+  "core": {
+    "model": {
+      "core_honf": {
+        "use_hyper_value_context": false
+      }
+    }
+  },
+  "case": {
+    "model": {
+      "channelthermal": {
+        "internal_prediction_mode": "global_head"
+      },
+      "local_coupling": {
+        "use_local_surrogate": false
+      },
+      "physical_correction": {
+        "interaction_refinement_steps": 0
+      }
+    }
+  }
+}

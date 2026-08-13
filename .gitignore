@@ -15,6 +15,8 @@ __pycache__/
 Notes.txt
 MODEL_EXPLAIN.txt
 0_Demo_MultiCylinder/MODEL_EXPLAIN.txt
+INVERSE_CODING.md
+Creat_Proj.md
 
 # Frontend dependency/build output
 node_modules/
@@ -66,6 +68,27 @@ Unified_Forward_Model_0/results/*
 *.gif
 *.png
 *.csv
+*.txt
+!HONF_Proj/requirements.txt
+
+# Python packaging and local environments
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# HONF_Proj machine-local resource mappings and generated convenience links
+HONF_Proj/Case_ThermalChannel/Dataset/dataset_locations.local.json
+HONF_Proj/Case_ThermalChannel/Dataset/links/*
+!HONF_Proj/Case_ThermalChannel/Dataset/links/.gitkeep
+HONF_Proj/Case_ThermalChannel/artifacts/*
+!HONF_Proj/Case_ThermalChannel/artifacts/README.md
+
+# HONF_Proj generated runs and post-processing; retain only contracts/markers
+HONF_Proj/Trained_Results/**/Run_*/
+HONF_Proj/Trained_Results/**/Eval_*/
+HONF_Proj/Trained_Results/**/CompareModels/
 
 # Generated reports/plots/history files from runs
 loss_history.csv

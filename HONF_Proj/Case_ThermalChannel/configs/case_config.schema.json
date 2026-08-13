@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://honf.example/schemas/thermalchannel-case-config-v1.json",
+  "title": "ThermalChannel case profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "profile_name", "case_id", "plugin", "dataset", "model", "loss", "evaluation", "local_modules"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "profile_name": {"type": "string", "minLength": 1},
+    "case_id": {"const": "ThermalChannel"},
+    "plugin": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_.]*:[A-Za-z_][A-Za-z0-9_]*$"},
+    "dataset": {"$ref": "#/$defs/dataset"},
+    "model": {"$ref": "#/$defs/model"},
+    "loss": {"$ref": "#/$defs/loss"},
+    "evaluation": {"$ref": "#/$defs/evaluation"},
+    "local_modules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["thermal_disk"],
+      "properties": {"thermal_disk": {"$ref": "#/$defs/local_module"}}
+    },
+    "_note": {}
+  },
+  "$defs": {
+    "auto_integer": {"oneOf": [{"type": "integer", "minimum": 1}, {"const": "auto"}]},
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest", "locations", "train_split", "val_split"],
+      "properties": {
+        "manifest": {"type": "string", "minLength": 1},
+        "locations": {"type": "string", "minLength": 1},
+        "train_split": {"type": "string", "minLength": 1},
+        "val_split": {"type": "string", "minLength": 1},
+        "points_per_case": {"type": "integer", "minimum": 1},
+        "val_points_per_case": {"type": "integer", "minimum": 1},
+        "batch_size": {"type": "integer", "minimum": 1},
+        "val_batch_size": {"type": "integer", "minimum": 1},
+        "num_workers": {"type": "integer", "minimum": 0},
+        "normalize_inputs": {"type": "boolean"},
+        "normalize_targets": {"type": "boolean"},
+        "random_point_sampling": {"type": "boolean"},
+        "require_converged": {"type": "boolean"},
+        "allow_train_as_validation": {"type": "boolean"}
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["channelthermal", "local_coupling", "physical_correction"],
+      "properties": {
+        "channelthermal": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "field_names": {"type": "array", "items": {"type": "string"}},
+            "material_param_dim": {"type": "integer", "minimum": 1},
+            "heat_scale": {"type": "number"},
+            "internal_prediction_mode": {"enum": ["auto", "local_surrogate", "global_head"]},
+            "fallback_internal_query_dim": {"type": "integer", "minimum": 1},
+            "fallback_interface_dim": {"type": "integer", "minimum": 1},
+            "fallback_hidden_dim": {"type": "integer", "minimum": 1},
+            "fallback_fourier_frequencies": {"type": "integer", "minimum": 0}
+          }
+        },
+        "local_coupling": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "use_local_surrogate": {"type": "boolean"},
+            "freeze_local_surrogate": {"type": "boolean"},
+            "local_surrogate_checkpoint": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["source", "path"],
+              "properties": {
+                "source": {"type": "string", "minLength": 1},
+                "path": {"type": "string", "minLength": 1}
+              }
+            },
+            "local_surrogate_latent_dim": {"type": "integer", "minimum": 1},
+            "local_module_params_from_used_ports": {"type": "boolean"},
+            "default_num_interface_points": {"$ref": "#/$defs/auto_integer"}
+          }
+        },
+        "physical_correction": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "local_surrogate_flux_mode": {"enum": ["surrogate", "physics_from_port", "corrected_physics", "blend"]},
+            "local_surrogate_flux_blend_alpha": {"type": "number", "minimum": 0, "maximum": 1},
+            "interaction_refinement_steps": {"type": "integer", "minimum": 0},
+            "port_global_consistency_radius_offset": {"type": "number", "minimum": 0},
+            "port_global_consistency_num_points": {"type": "integer", "minimum": 1}
+          }
+        }
+      }
+    },
+    "loss": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "field_mse_weight": {"type": "number", "minimum": 0},
+        "temperature_weight": {"type": "number", "minimum": 0},
+        "field_channel_weights": {"type": ["array", "null"], "items": {"type": "number", "minimum": 0}},
+        "internal_temperature_weight": {"type": "number", "minimum": 0},
+        "interface_weight": {"type": "number", "minimum": 0},
+        "interface_loss_type": {"enum": ["mse", "smooth_l1"]},
+        "interface_target_weights": {"type": "array", "items": {"type": "number", "minimum": 0}},
+        "port_condition_weight": {"type": "number", "minimum": 0},
+        "port_supervised_weight": {"type": "number", "minimum": 0},
+        "port_temperature_weight": {"type": "number", "minimum": 0},
+        "port_h_weight": {"type": "number", "minimum": 0},
+        "port_h_loss_type": {"enum": ["mse", "smooth_l1"]},
+        "port_temperature_scale": {"type": "number", "exclusiveMinimum": 0},
+        "port_smoothness_weight": {"type": "number", "minimum": 0},
+        "port_global_consistency_weight": {"type": "number", "minimum": 0},
+        "port_global_consistency_teacher_weight": {"type": "number", "minimum": 0},
+        "predicted_consistency_weight": {"type": "number", "minimum": 0},
+        "predicted_consistency_warmup_epochs": {"type": "integer", "minimum": 0},
+        "organizer_regularization": {"$ref": "#/$defs/organizer_regularization"}
+      }
+    },
+    "organizer_regularization": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "active_edge_weight": {"type": "number", "minimum": 0},
+        "target_active_edges": {"type": "integer", "minimum": 1},
+        "edge_strength_threshold": {"type": "number", "minimum": 0},
+        "edge_strength_temperature": {"type": "number", "exclusiveMinimum": 0},
+        "env_mass_entropy_floor_weight": {"type": "number", "minimum": 0},
+        "module_mass_entropy_floor_weight": {"type": "number", "minimum": 0},
+        "min_mass_entropy_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "max_mass_weight": {"type": "number", "minimum": 0},
+        "max_mass_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "duplicate_weight": {"type": "number", "minimum": 0},
+        "duplicate_similarity_threshold": {"type": "number", "minimum": -1, "maximum": 1}
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "split": {"type": "string"},
+        "checkpoint": {"type": "string"},
+        "query_batch_size": {"type": "integer", "minimum": 1},
+        "local_port_condition_mode": {"enum": ["teacher", "predicted", "mixed", "both"]},
+        "mixed_teacher_ratio": {"type": "number", "minimum": 0, "maximum": 1},
+        "temperature_display_mode": {"enum": ["fluid_only", "composite_internal"]},
+        "organization_view": {"enum": ["all", "physical", "matrices", "schematic", "none"]},
+        "organization_style": {"enum": ["presentation", "debug", "both"]},
+        "organization_link_threshold": {"type": "number", "minimum": 0},
+        "return_routing_maps": {"type": "boolean"},
+        "routing_view": {"enum": ["none", "summary", "all"]},
+        "export_hypergraph_plan": {"type": "boolean"}
+      }
+    },
+    "local_module": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dataset_id", "global_alignment_dataset_id", "source", "model", "loss"],
+      "properties": {
+        "dataset_id": {"type": "string"},
+        "global_alignment_dataset_id": {"type": "string"},
+        "source": {"enum": ["local", "global_alignment", "mixed"]},
+        "global_alignment_split": {"type": "string"},
+        "global_alignment_val_split": {"type": "string"},
+        "local_synthetic_weight": {"type": "number", "minimum": 0},
+        "global_alignment_weight": {"type": "number", "minimum": 0},
+        "train_split": {"type": "string"},
+        "val_split": {"type": "string"},
+        "batch_size": {"type": "integer", "minimum": 1},
+        "val_batch_size": {"type": "integer", "minimum": 1},
+        "num_workers": {"type": "integer", "minimum": 0},
+        "normalize_inputs": {"type": "boolean"},
+        "normalize_targets": {"type": "boolean"},
+        "allow_train_as_validation": {"type": "boolean"},
+        "model": {"$ref": "#/$defs/local_model"},
+        "loss": {"$ref": "#/$defs/local_loss"}
+      }
+    },
+    "local_model": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "module_param_dim": {"$ref": "#/$defs/auto_integer"},
+        "port_token_dim": {"$ref": "#/$defs/auto_integer"},
+        "interface_target_dim": {"type": "integer", "minimum": 1},
+        "hidden_dim": {"type": "integer", "minimum": 1},
+        "latent_dim": {"type": "integer", "minimum": 1},
+        "num_port_latents": {"type": "integer", "minimum": 1},
+        "num_heads": {"type": "integer", "minimum": 1},
+        "num_layers": {"type": "integer", "minimum": 1},
+        "coord_fourier_frequencies": {"type": "integer", "minimum": 0},
+        "dropout": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "local_loss": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "internal_mse_weight": {"type": "number", "minimum": 0},
+        "interface_mse_weight": {"type": "number", "minimum": 0},
+        "interface_target_weights": {"type": "array", "items": {"type": "number", "minimum": 0}},
+        "interface_smoothness_weight": {"type": "number", "minimum": 0},
+        "plot_smoothness_loss": {"type": "boolean"}
+      }
+    }
+  }
+}

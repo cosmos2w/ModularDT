@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "profile_name": "hyper_plus_global_near",
+  "workflow": "forward",
+  "model_family": "honf_forward",
+  "case": {
+    "id": "ThermalChannel",
+    "config": "project://Case_ThermalChannel/configs/case_default.json",
+    "dataset_id": "thermal_channel_global_v1"
+  },
+  "model": {
+    "core_honf": {
+      "field_dim": "auto",
+      "max_num_modules": "auto",
+      "domain_length_x": "auto",
+      "domain_length_y": "auto",
+      "module_radius": "auto",
+      "coordinate_scale": [12.0, 6.0],
+      "periodic_axes": [],
+      "local_context_scale": 0.45,
+      "num_env_tokens_x": 24,
+      "num_env_tokens_y": 8,
+      "num_hyperedges": 6,
+      "hidden_dim": 256,
+      "dropout": 0.0,
+      "use_layer_norm": true,
+      "geometry_mode": "nonperiodic",
+      "query_time_mode": "none",
+      "decoder_mode": "hyper_plus_global_near",
+      "use_hyper_value_context": true,
+      "hyper_module_assignment_mode": "learned",
+      "hyper_query_attention_mode": "learned",
+      "hyper_attention_topk": 0,
+      "hyper_attention_temperature": 1.0,
+      "sparse_hyper_attention_detach_mask": true,
+      "pairwise_kernel_hidden_dim": 256,
+      "pairwise_kernel_num_layers": 4,
+      "pairwise_kernel_gate_init": 0.1,
+      "pairwise_kernel_use_fourier": true,
+      "pairwise_kernel_fourier_frequencies": 4,
+      "pairwise_kernel_include_module_token": true,
+      "pairwise_kernel_include_module_features": true,
+      "pairwise_kernel_normalize_by_edge_mass": true,
+      "query_fourier_frequencies": 4,
+      "boundary_feature_mode": "none",
+      "position_fourier_frequencies": 4,
+      "use_position_fourier_for_modules": true,
+      "use_position_fourier_for_env": true,
+      "use_hyper_mechanism_encoder": false,
+      "mechanism_include_geometry": true,
+      "mechanism_include_masses": true,
+      "mechanism_hidden_dim": null,
+      "use_hyper_geometry_bias": true,
+      "hyper_geometry_bias_scale": 1.0,
+      "use_A_me_auxiliary": true,
+      "direct_residual_gate_init": 0.0,
+      "output_mean_residual_split": false
+    }
+  },
+  "training": {
+    "seed": 0,
+    "device": null,
+    "epochs": 2000,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.00001,
+    "amp": false,
+    "gradient_clip_norm": 1.0,
+    "plot_every_epochs": 10,
+    "port_curriculum": {
+      "schedule": "none",
+      "mode": "predicted",
+      "mixed_teacher_ratio": 0.5,
+      "teacher_epochs": 50,
+      "predicted_after_epoch": 200,
+      "mixed_teacher_ratio_start": 1.0,
+      "mixed_teacher_ratio_end": 0.0
+    },
+    "max_train_batches_per_epoch": null,
+    "max_val_batches": null
+  },
+  "checkpointing": {
+    "save_best": true,
+    "save_best_field_mse": true,
+    "save_best_temperature_mse": true,
+    "save_best_predicted": true,
+    "save_latest": true
+  },
+  "run": {
+    "id": "0001",
+    "name": "hyper_plus_global_near",
+    "output_root": "project://Trained_Results"
+  }
+}

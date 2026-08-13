@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "honf-case-thermalchannel"
+version = "0.1.0"
+description = "ChannelThermal case plugin for HONF"
+requires-python = ">=3.10"
+dependencies = [
+  "honf-project>=0.1.0",
+  "h5py",
+  "matplotlib",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["channelthermal*"]

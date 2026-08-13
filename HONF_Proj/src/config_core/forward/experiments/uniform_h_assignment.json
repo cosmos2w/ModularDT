@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "_note": "Archived uniform assignment ablation using pairwise-only hyperedge routing.",
+  "core": {
+    "model": {
+      "core_honf": {
+        "decoder_mode": "enhanced_honf_pairwise_only",
+        "use_hyper_value_context": false,
+        "hyper_module_assignment_mode": "uniform",
+        "hyper_query_attention_mode": "uniform"
+      }
+    }
+  },
+  "case": {}
+}

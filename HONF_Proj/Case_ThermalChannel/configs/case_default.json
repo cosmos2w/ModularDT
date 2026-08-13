@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "profile_name": "thermalchannel_coupled_default",
+  "case_id": "ThermalChannel",
+  "plugin": "channelthermal.plugin:create_plugin",
+  "dataset": {
+    "manifest": "project://Case_ThermalChannel/Dataset/dataset_manifest.json",
+    "locations": "project://Case_ThermalChannel/Dataset/dataset_locations.local.json",
+    "train_split": "train",
+    "val_split": "test",
+    "points_per_case": 1024,
+    "val_points_per_case": 1024,
+    "batch_size": 48,
+    "val_batch_size": 48,
+    "num_workers": 4,
+    "normalize_inputs": true,
+    "normalize_targets": true,
+    "random_point_sampling": true,
+    "require_converged": false,
+    "allow_train_as_validation": false
+  },
+  "model": {
+    "channelthermal": {
+      "material_param_dim": 6,
+      "heat_scale": 1.0,
+      "internal_prediction_mode": "auto",
+      "fallback_internal_query_dim": 2,
+      "fallback_interface_dim": 2,
+      "fallback_hidden_dim": 128,
+      "fallback_fourier_frequencies": 4
+    },
+    "local_coupling": {
+      "use_local_surrogate": true,
+      "freeze_local_surrogate": true,
+      "local_surrogate_checkpoint": {
+        "source": "case_artifact",
+        "path": "project://Case_ThermalChannel/artifacts/thermal_disk.pt"
+      },
+      "local_surrogate_latent_dim": 128,
+      "local_module_params_from_used_ports": true,
+      "default_num_interface_points": "auto"
+    },
+    "physical_correction": {
+      "local_surrogate_flux_mode": "corrected_physics",
+      "local_surrogate_flux_blend_alpha": 0.5,
+      "interaction_refinement_steps": 1,
+      "port_global_consistency_radius_offset": 0.05,
+      "port_global_consistency_num_points": 32
+    }
+  },
+  "loss": {
+    "field_mse_weight": 1.0,
+    "temperature_weight": 1.0,
+    "field_channel_weights": null,
+    "internal_temperature_weight": 1.0,
+    "interface_weight": 0.2,
+    "interface_loss_type": "smooth_l1",
+    "interface_target_weights": [1.0, 0.25],
+    "port_condition_weight": 0.3,
+    "port_supervised_weight": 0.3,
+    "port_temperature_weight": 1.0,
+    "port_h_weight": 1.0,
+    "port_h_loss_type": "smooth_l1",
+    "port_temperature_scale": 10.0,
+    "port_smoothness_weight": 0.01,
+    "port_global_consistency_weight": 0.2,
+    "port_global_consistency_teacher_weight": 0.0,
+    "predicted_consistency_weight": 0.05,
+    "predicted_consistency_warmup_epochs": 100,
+    "organizer_regularization": {
+      "enabled": false,
+      "active_edge_weight": 0.01,
+      "target_active_edges": 3,
+      "edge_strength_threshold": 0.05,
+      "edge_strength_temperature": 0.02,
+      "env_mass_entropy_floor_weight": 0.002,
+      "module_mass_entropy_floor_weight": 0.001,
+      "min_mass_entropy_fraction": 0.65,
+      "max_mass_weight": 0.001,
+      "max_mass_fraction": 0.75,
+      "duplicate_weight": 0.001,
+      "duplicate_similarity_threshold": 0.95
+    }
+  },
+  "evaluation": {
+    "split": "test",
+    "checkpoint": "best_autonomous",
+    "query_batch_size": 32768,
+    "local_port_condition_mode": "predicted",
+    "temperature_display_mode": "composite_internal",
+    "organization_view": "all",
+    "organization_style": "presentation",
+    "routing_view": "summary",
+    "export_hypergraph_plan": true
+  },
+  "local_modules": {
+    "thermal_disk": {
+      "dataset_id": "thermal_disk_local_v1",
+      "global_alignment_dataset_id": "thermal_channel_global_v1",
+      "source": "mixed",
+      "global_alignment_split": "train",
+      "global_alignment_val_split": "test",
+      "local_synthetic_weight": 1.0,
+      "global_alignment_weight": 1.0,
+      "train_split": "train",
+      "val_split": "test",
+      "batch_size": 128,
+      "val_batch_size": 128,
+      "num_workers": 4,
+      "normalize_inputs": true,
+      "normalize_targets": true,
+      "allow_train_as_validation": false,
+      "model": {
+        "module_param_dim": "auto",
+        "port_token_dim": "auto",
+        "interface_target_dim": 2,
+        "hidden_dim": 128,
+        "latent_dim": 128,
+        "num_port_latents": 16,
+        "num_heads": 4,
+        "num_layers": 4,
+        "coord_fourier_frequencies": 6,
+        "dropout": 0.0
+      },
+      "loss": {
+        "internal_mse_weight": 1.0,
+        "interface_mse_weight": 1.0,
+        "interface_target_weights": [1.0, 0.2],
+        "interface_smoothness_weight": 0.01,
+        "plot_smoothness_loss": false
+      }
+    }
+  }
+}

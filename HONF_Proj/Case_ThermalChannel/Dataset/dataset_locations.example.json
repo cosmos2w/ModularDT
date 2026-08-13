@@ -1,0 +1,4 @@
+{
+  "thermal_disk_local_v1": "/path/to/Processed_LocalModule_Dataset/packed_dataset.h5",
+  "thermal_channel_global_v1": "/path/to/Processed_ChannelThermal_Dataset/packed_dataset.h5"
+}

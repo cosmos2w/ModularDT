@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, cite the associated HONF publication and this software release."
+title: "HONF Project: Extensible Hypergraph Operator Neural Fields"
+type: software
+version: 0.1.0
+date-released: 2026-08-12
+authors:
+  - family-names: "HONF Project Contributors"
+repository-code: "https://github.com/OWNER/REPOSITORY"
+abstract: "Case-neutral HONF core and a coupled ThermalChannel reference plugin."

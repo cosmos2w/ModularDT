@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "case_id": "ThermalChannel",
+  "datasets": {
+    "thermal_disk_local_v1": {
+      "description": "Packed steady single-module Robin-conduction samples for Stage-A training.",
+      "format": "hdf5",
+      "schema": "thermal_disk_local_hdf5_v1",
+      "filename": "packed_dataset.h5",
+      "relative_path": "Processed_LocalModule_Dataset/packed_dataset.h5",
+      "size_bytes": 60424808,
+      "sha256": "51a875857e3b163b9a2fcb1e4a04ea3f343f6ff4c71b3709232e395e36bac5cf",
+      "num_cases": 1034,
+      "splits": {"train": 919, "test": 115},
+      "required_keys": [
+        "case_ids",
+        "splits",
+        "module_params",
+        "port_tokens",
+        "internal_query_points",
+        "internal_temperature_targets",
+        "interface_targets",
+        "normalization"
+      ]
+    },
+    "thermal_channel_global_v1": {
+      "description": "Packed converged steady ChannelThermal fields and coupled module/interface targets.",
+      "format": "hdf5",
+      "schema": "thermal_channel_global_hdf5_v1",
+      "filename": "packed_dataset.h5",
+      "relative_path": "Processed_ChannelThermal_Dataset/packed_dataset.h5",
+      "size_bytes": 265224376,
+      "sha256": "4224093c22a67af4adfecc8b21d53548e4263ec2254c230dc83c89526b36da05",
+      "num_cases": 690,
+      "splits": {"train": 600, "test": 90},
+      "required_keys": [
+        "case_ids",
+        "splits",
+        "cases",
+        "channel_order",
+        "interface_condition_feature_names",
+        "interface_target_names",
+        "normalization"
+      ]
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "_note": "Archived old-parity switch: omit learned hyperedge value context while preserving pairwise routing and frozen Stage A.",
+  "core": {
+    "model": {
+      "core_honf": {
+        "use_hyper_value_context": false
+      }
+    }
+  },
+  "case": {}
+}

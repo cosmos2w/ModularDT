@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "profile_name": "thermal_disk_local_module",
+  "workflow": "local_module",
+  "model_family": "honf_forward",
+  "case": {
+    "id": "ThermalChannel",
+    "config": "project://Case_ThermalChannel/configs/case_default.json",
+    "dataset_id": "thermal_disk_local_v1",
+    "local_module_id": "thermal_disk"
+  },
+  "model": {},
+  "training": {
+    "seed": 42,
+    "device": null,
+    "epochs": 5000,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.00001,
+    "gradient_clip_norm": 1.0,
+    "amp": false,
+    "plot_every_epochs": 10,
+    "max_train_batches_per_epoch": null,
+    "max_val_batches": null,
+    "init_checkpoint_path": null
+  },
+  "checkpointing": {
+    "save_best": true,
+    "save_latest": true
+  },
+  "run": {
+    "id": "0001",
+    "name": "thermal_disk_local",
+    "output_root": "project://Trained_Results"
+  }
+}

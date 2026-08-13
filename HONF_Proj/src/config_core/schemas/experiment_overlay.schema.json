@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://honf.example/schemas/experiment-overlay-v1.json",
+  "title": "HONF strict experiment overlay",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "core": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {"type": "object"},
+        "training": {"type": "object"},
+        "checkpointing": {"type": "object"}
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dataset": {"type": "object"},
+        "model": {"type": "object"},
+        "loss": {"type": "object"},
+        "evaluation": {"type": "object"},
+        "local_modules": {"type": "object"}
+      }
+    },
+    "_note": {}
+  }
+}
