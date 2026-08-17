@@ -48,10 +48,11 @@ DECODER_COMPONENTS = {
     "enhanced_honf_pairwise_only": {"hyper", "pairwise", "global", "near"},
 }
 
-# Accepted only when loading historical configs/checkpoints. Decoder mode is
-# now the sole authority for these components, so they are never serialized by
-# the cleaned configuration.
+# Accepted only when loading historical configs/checkpoints and never
+# serialized by the cleaned configuration. Decoder mode supersedes the old
+# component flags; runtime batch tensors supersede the old module-count cap.
 LEGACY_IGNORED_CORE_KEYS = {
+    "max_num_modules",
     "use_hyper_context",
     "use_hypergraph_gated_pairwise_kernel",
     "use_direct_module_env_decoder",
@@ -67,7 +68,6 @@ class UnifiedForwardConfig:
     """Configuration for the minimal unified hypergraph neural field."""
 
     field_dim: int = 5
-    max_num_modules: int = 12
     domain_length_x: float = 12.0
     domain_length_y: float = 4.0
     module_radius: float = 0.45

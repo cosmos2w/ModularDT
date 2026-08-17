@@ -53,7 +53,10 @@ class ChannelThermalHONFModel(nn.Module):
         self.config = config
         hidden = int(config.core_honf.hidden_dim)
         self.core = HONFNeuralField(config.core_honf)
-        self.input_adapter = ChannelThermalInputAdapter()
+        self.input_adapter = ChannelThermalInputAdapter(
+            global_feature_schema=str(config.channelthermal.global_feature_schema),
+            legacy_active_fraction_reference_slots=config.channelthermal.legacy_active_fraction_reference_slots,
+        )
         self.environment_builder = ChannelThermalEnvironmentBuilder()
         self.global_normalize_targets = False
         self.global_normalization_stats: Dict[str, Any] = {}
@@ -174,11 +177,6 @@ class ChannelThermalHONFModel(nn.Module):
             raise ValueError("query_xy is required.")
         if module_centers is None or heat_powers is None or module_present is None:
             raise ValueError("module_centers, heat_powers, and module_present are required.")
-        if int(module_centers.shape[-2]) > int(self.config.core_honf.max_num_modules):
-            raise ValueError(
-                f"Received {module_centers.shape[-2]} module slots, above configured "
-                f"max_num_modules={self.config.core_honf.max_num_modules}."
-            )
         device = query_xy.device
         dtype = query_xy.dtype
         batch = int(query_xy.shape[0])

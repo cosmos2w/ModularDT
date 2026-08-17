@@ -27,7 +27,6 @@ def _model() -> HONFNeuralField:
     torch.manual_seed(11)
     config = UnifiedForwardConfig(
         field_dim=3,
-        max_num_modules=4,
         domain_length_x=12.0,
         domain_length_y=6.0,
         num_env_tokens_x=4,
@@ -76,6 +75,61 @@ def test_core_is_invariant_to_consistent_module_permutation() -> None:
     assert torch.allclose(reference, candidate, atol=1.0e-6, rtol=1.0e-6)
 
 
+def _pad_module_axis(batch: BatchData, width: int) -> BatchData:
+    padding = int(width) - int(batch.module_present.shape[1])
+    if padding < 0:
+        raise ValueError("Requested width is smaller than the source batch.")
+    return BatchData(
+        module_centers=torch.cat(
+            [batch.module_centers, batch.module_centers.new_zeros(batch.module_centers.shape[0], padding, 2)],
+            dim=1,
+        ),
+        module_present=torch.cat(
+            [batch.module_present, batch.module_present.new_zeros(batch.module_present.shape[0], padding)],
+            dim=1,
+        ),
+        module_features=torch.cat(
+            [
+                batch.module_features,
+                batch.module_features.new_zeros(
+                    batch.module_features.shape[0],
+                    padding,
+                    batch.module_features.shape[-1],
+                ),
+            ],
+            dim=1,
+        ),
+        global_context=batch.global_context,
+        query_xy=batch.query_xy,
+        query_time=batch.query_time,
+        target_field=batch.target_field,
+        case_name=batch.case_name,
+        metadata=batch.metadata,
+    )
+
+
+def test_core_is_padding_invariant_for_runtime_module_widths() -> None:
+    model = _model()
+    batch = _batch()
+    with torch.no_grad():
+        reference = model(batch)
+        padded_12 = model(_pad_module_axis(batch, 12))
+        padded_32 = model(_pad_module_axis(batch, 32))
+
+    for candidate in (padded_12, padded_32):
+        assert torch.allclose(reference["pred_field"], candidate["pred_field"], atol=1.0e-6, rtol=1.0e-6)
+        assert torch.allclose(reference["hyper_state"], candidate["hyper_state"], atol=1.0e-6, rtol=1.0e-6)
+        assert torch.allclose(reference["module_tokens"], candidate["module_tokens"][:, :4], atol=1.0e-6, rtol=1.0e-6)
+        assert torch.allclose(reference["A_mh"], candidate["A_mh"][:, :4], atol=1.0e-6, rtol=1.0e-6)
+
+
+def test_forward_config_ignores_legacy_max_modules_without_serializing_it() -> None:
+    config = UnifiedForwardConfig.from_dict({"field_dim": 2, "max_num_modules": 12})
+
+    assert "max_num_modules" not in config.to_dict()
+    assert not hasattr(config, "max_num_modules")
+
+
 def test_prepared_query_chunks_match_one_shot_decode() -> None:
     model = _model()
     batch = _batch()
@@ -95,7 +149,6 @@ def test_every_preserved_decoder_mode_is_finite(decoder_mode: str) -> None:
     torch.manual_seed(19)
     config = UnifiedForwardConfig(
         field_dim=3,
-        max_num_modules=4,
         domain_length_x=12.0,
         domain_length_y=6.0,
         num_env_tokens_x=4,
@@ -126,7 +179,6 @@ def test_case_supplied_query_features_are_supported_and_shape_checked() -> None:
 def test_vector_scale_and_axis_periodicity_are_case_neutral() -> None:
     config = UnifiedForwardConfig(
         field_dim=2,
-        max_num_modules=4,
         coordinate_scale=[12.0, 6.0],
         periodic_axes=[0],
         num_env_tokens_x=4,

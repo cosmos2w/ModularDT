@@ -13,6 +13,7 @@ def test_split_config_composes_deterministically() -> None:
     second = load_config_bundle("project://src/config_core/forward/enhanced_honf_pairwise.json")
     assert first.config_hash == second.config_hash
     assert first.effective["model"]["core_honf"]["decoder_mode"] == "enhanced_honf_pairwise"
+    assert "max_num_modules" not in first.effective["model"]["core_honf"]
     assert first.effective["case"]["selection"]["dataset_id"] == "thermal_channel_global_v1"
 
 

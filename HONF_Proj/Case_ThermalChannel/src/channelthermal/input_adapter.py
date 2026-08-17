@@ -53,7 +53,7 @@ class ChannelThermalInputAdapter:
         "module_radius",
     )
 
-    global_context_names = (
+    legacy_global_context_names = (
         "re",
         "u_in",
         "active_module_fraction",
@@ -70,6 +70,51 @@ class ChannelThermalInputAdapter:
         "module_radius",
     )
 
+    padding_invariant_global_context_names = (
+        "re",
+        "u_in",
+        "active_module_count",
+        "log1p_active_module_count",
+        "module_number_density",
+        "occupied_area_fraction",
+        "total_dataset_scaled_heat",
+        "total_dataset_scaled_heat_per_domain_area",
+        "mean_active_dataset_scaled_heat",
+        "max_abs_dataset_scaled_heat",
+        "domain_length_x",
+        "domain_length_y",
+        "nu",
+        "solid_alpha",
+        "fluid_alpha",
+        "solid_k",
+        "fluid_k",
+        "module_radius",
+    )
+
+    global_context_names = padding_invariant_global_context_names
+
+    def __init__(
+        self,
+        *,
+        global_feature_schema: str = "padding_invariant_v2",
+        legacy_active_fraction_reference_slots: int | None = None,
+    ) -> None:
+        """Select the padding-invariant schema or the legacy checkpoint transform."""
+
+        self.global_feature_schema = str(global_feature_schema)
+        self.legacy_active_fraction_reference_slots = legacy_active_fraction_reference_slots
+        if self.global_feature_schema == "legacy_v1":
+            if (
+                legacy_active_fraction_reference_slots is None
+                or int(legacy_active_fraction_reference_slots) <= 0
+            ):
+                raise ValueError("legacy_v1 requires a positive fixed active-fraction reference.")
+            self.global_context_names = self.legacy_global_context_names
+        elif self.global_feature_schema == "padding_invariant_v2":
+            self.global_context_names = self.padding_invariant_global_context_names
+        else:
+            raise ValueError(f"Unsupported ChannelThermal global feature schema: {self.global_feature_schema!r}.")
+
     def __call__(
         self,
         *,
@@ -82,7 +127,7 @@ class ChannelThermalInputAdapter:
         domain_length_x: torch.Tensor | None = None,
         domain_length_y: torch.Tensor | None = None,
     ) -> ChannelThermalAdapterOutput:
-        """Map ``[B,M,*]`` physical inputs to module ``[B,M,10]`` and global ``[B,14]`` features."""
+        """Map physical inputs to module features and padding-invariant global context."""
 
         module_centers = module_centers.float()
         heat_powers = heat_powers.float()
@@ -92,7 +137,8 @@ class ChannelThermalInputAdapter:
         material_params = self._as_material(material_params, module_centers)
         batch, num_modules = heat_powers.shape
         active = module_present.clamp(0.0, 1.0)
-        active_count = active.sum(dim=1, keepdim=True).clamp_min(1.0)
+        active_count_raw = active.sum(dim=1, keepdim=True)
+        active_count = active_count_raw.clamp_min(1.0)
         heat_active = heat_powers * active
         max_abs = heat_active.abs().amax(dim=1, keepdim=True).clamp_min(1.0e-6)
         heat_case_relative = heat_powers / max_abs
@@ -116,20 +162,36 @@ class ChannelThermalInputAdapter:
 
         lx = self._optional_batch_column(domain_length_x, module_centers, fallback=12.0)
         ly = self._optional_batch_column(domain_length_y, module_centers, fallback=4.0)
-        global_context = torch.cat(
-            [
-                re,
-                u_in,
-                active.mean(dim=1, keepdim=True),
-                heat_active.sum(dim=1, keepdim=True),
-                heat_active.sum(dim=1, keepdim=True) / active_count,
-                max_abs,
-                lx,
-                ly,
-                mat[:, 0:6],
-            ],
-            dim=-1,
-        )
+        total_heat = heat_active.sum(dim=1, keepdim=True)
+        mean_heat = total_heat / active_count
+        if self.global_feature_schema == "legacy_v1":
+            reference = active.new_tensor(float(self.legacy_active_fraction_reference_slots))
+            global_context = torch.cat(
+                [re, u_in, active_count_raw / reference, total_heat, mean_heat, max_abs, lx, ly, mat[:, 0:6]],
+                dim=-1,
+            )
+        else:
+            domain_area = (lx * ly).clamp_min(1.0e-6)
+            module_radius = mat[:, 5:6].clamp_min(0.0)
+            occupied_area_fraction = active_count_raw * torch.pi * module_radius.square() / domain_area
+            global_context = torch.cat(
+                [
+                    re,
+                    u_in,
+                    active_count_raw,
+                    torch.log1p(active_count_raw),
+                    active_count_raw / domain_area,
+                    occupied_area_fraction,
+                    total_heat,
+                    total_heat / domain_area,
+                    mean_heat,
+                    max_abs,
+                    lx,
+                    ly,
+                    mat[:, 0:6],
+                ],
+                dim=-1,
+            )
         return ChannelThermalAdapterOutput(
             global_context=global_context,
             module_features=module_features,

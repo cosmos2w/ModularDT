@@ -21,6 +21,8 @@ class ChannelThermalSpecificConfig:
     field_names: list[str] = field(default_factory=lambda: ["u", "v", "p", "omega", "temperature"])
     material_param_dim: int = 6
     heat_scale: float = 1.0
+    global_feature_schema: str = "padding_invariant_v2"
+    legacy_active_fraction_reference_slots: int | None = None
     use_local_surrogate: bool = False
     local_surrogate_checkpoint_path: str | None = None
     freeze_local_surrogate: bool = True
@@ -47,6 +49,14 @@ class ChannelThermalSpecificConfig:
             raise ValueError("The current ChannelThermal material schema has exactly 6 values.")
         if float(self.heat_scale) <= 0.0:
             raise ValueError("heat_scale must be positive.")
+        if self.global_feature_schema not in {"legacy_v1", "padding_invariant_v2"}:
+            raise ValueError("global_feature_schema must be 'legacy_v1' or 'padding_invariant_v2'.")
+        if self.global_feature_schema == "legacy_v1":
+            if (
+                self.legacy_active_fraction_reference_slots is None
+                or int(self.legacy_active_fraction_reference_slots) <= 0
+            ):
+                raise ValueError("legacy_v1 requires a positive legacy_active_fraction_reference_slots value.")
         if self.internal_prediction_mode not in {"auto", "local_surrogate", "global_head"}:
             raise ValueError("internal_prediction_mode must be 'auto', 'local_surrogate', or 'global_head'.")
         if self.local_surrogate_flux_mode not in {"surrogate", "physics_from_port", "corrected_physics", "blend"}:
@@ -103,6 +113,7 @@ class ChannelThermalHONFConfig:
         if not core_payload and not channel_payload:
             core_keys = set(UnifiedForwardConfig.__dataclass_fields__)  # type: ignore[attr-defined]
             legacy_keys = {
+                "max_num_modules",
                 "use_hyper_context",
                 "use_hypergraph_gated_pairwise_kernel",
                 "use_direct_module_env_decoder",
@@ -118,9 +129,15 @@ class ChannelThermalHONFConfig:
             if unknown:
                 raise ValueError(f"Unknown flat core settings: {unknown}")
             core_payload = {key: value for key, value in payload.items() if key in core_keys}
+        core_payload = dict(core_payload or {})
+        channel_payload = dict(channel_payload or {})
+        legacy_max_modules = core_payload.get("max_num_modules", payload.get("max_num_modules"))
+        if legacy_max_modules is not None and "global_feature_schema" not in channel_payload:
+            channel_payload["global_feature_schema"] = "legacy_v1"
+            channel_payload["legacy_active_fraction_reference_slots"] = int(legacy_max_modules)
         return cls(
-            core_honf=UnifiedForwardConfig.from_dict(dict(core_payload or {})),
-            channelthermal=ChannelThermalSpecificConfig.from_dict(dict(channel_payload or {})),
+            core_honf=UnifiedForwardConfig.from_dict(core_payload),
+            channelthermal=ChannelThermalSpecificConfig.from_dict(channel_payload),
         )
 
     def to_dict(self) -> Dict[str, Any]:

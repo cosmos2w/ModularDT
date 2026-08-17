@@ -23,7 +23,6 @@ class DummyCasePlugin:
     def __init__(self) -> None:
         config = UnifiedForwardConfig(
             field_dim=1,
-            max_num_modules=2,
             domain_length_x=1.0,
             domain_length_y=1.0,
             num_env_tokens_x=2,

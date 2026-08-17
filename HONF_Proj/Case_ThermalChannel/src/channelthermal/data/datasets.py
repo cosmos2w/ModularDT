@@ -791,6 +791,10 @@ class GlobalChannelThermalDataset(Dataset):
                     case_id for case_id in self.selected_case_ids if self.converged_by_case.get(case_id, False)
                 ]
                 self.indices = [self.case_ids.index(case_id) for case_id in self.selected_case_ids]
+            self.selected_module_counts = [
+                int(np.sum(h5["cases"][case_id]["module_present"][...] > 0.5))
+                for case_id in self.selected_case_ids
+            ]
             self.selected_converged_flags = [self.converged_by_case.get(case_id, False) for case_id in self.selected_case_ids]
             self.num_selected_converged = int(sum(1 for flag in self.selected_converged_flags if flag))
             self.num_selected_unconverged = int(len(self.selected_converged_flags) - self.num_selected_converged)

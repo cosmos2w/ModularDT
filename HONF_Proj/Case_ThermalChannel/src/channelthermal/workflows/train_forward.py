@@ -24,6 +24,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
+from channelthermal.data.collation import ChannelThermalBatchCollator, ModuleCountBucketBatchSampler
 from channelthermal.data.datasets import GlobalChannelThermalDataset
 from honf_runtime.compat import (
     autocast_context,
@@ -42,9 +43,9 @@ from honf_runtime.compat import (
 )
 from honf_runtime.checkpoints import validate_checkpoint_identity
 from honf_forward_core.training.diagnostics import HONF_DIAGNOSTIC_KEYS, compute_honf_diagnostics, organizer_regularization_loss
-from honf_forward_core.training.losses import weighted_field_mse
 from channelthermal.config import ChannelThermalHONFConfig
 from channelthermal.model import ChannelThermalHONFModel
+from channelthermal.training_tools.losses import channelthermal_field_mse
 
 
 def parse_args() -> argparse.Namespace:
@@ -164,6 +165,8 @@ CHANNELTHERMAL_KEYS = {
     "field_names",
     "material_param_dim",
     "heat_scale",
+    "global_feature_schema",
+    "legacy_active_fraction_reference_slots",
     "internal_prediction_mode",
     "fallback_internal_query_dim",
     "fallback_interface_dim",
@@ -207,7 +210,6 @@ def build_model_config(payload: Dict[str, Any], dataset: GlobalChannelThermalDat
     _merge_authoritative(channel_payload, physical_payload, PHYSICAL_CORRECTION_KEYS, section_name="physical_correction")
     lx, ly, radius = _first_domain_and_radius(dataset)
     core_payload["field_dim"] = _auto_int(core_payload.get("field_dim"), dataset.field_dim)
-    core_payload["max_num_modules"] = _auto_int(core_payload.get("max_num_modules"), dataset.max_num_modules)
     core_payload["domain_length_x"] = _auto_float(core_payload.get("domain_length_x"), lx)
     core_payload["domain_length_y"] = _auto_float(core_payload.get("domain_length_y"), ly)
     core_payload["module_radius"] = _auto_float(core_payload.get("module_radius"), radius)
@@ -251,17 +253,6 @@ def resolve_auto_internal_mode(model_config: ChannelThermalHONFConfig, model: Ch
     model_config.channelthermal.internal_prediction_mode = (
         "local_surrogate" if model.local_surrogate_attached else "global_head"
     )
-
-
-def field_loss(
-    pred: torch.Tensor,
-    target: torch.Tensor,
-    loss_cfg: Dict[str, Any],
-    point_weights: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
-    """Compute the configured channel- and point-weighted global field MSE."""
-
-    return weighted_field_mse(pred, target, loss_cfg, point_weights)
 
 
 def organizer_regularization(output: Dict[str, Any], loss_cfg: Dict[str, Any]) -> torch.Tensor:
@@ -484,7 +475,13 @@ def run_epoch(
                         return_port_global_consistency=bool(port_global_weight != 0.0),
                     )
                 )
-                loss_field = field_loss(output["pred_field"], target, loss_cfg, point_weights)
+                loss_field = channelthermal_field_mse(
+                    output["pred_field"],
+                    target,
+                    loss_cfg,
+                    field_names=model.config.channelthermal.field_names,
+                    point_weights=point_weights,
+                )
                 zero = output["pred_field"].new_zeros(())
                 loss_internal = internal_loss(output, batch) if effective_internal_temperature_weight != 0.0 else zero
                 loss_interface = interface_loss(output, batch, loss_cfg) if effective_interface_weight != 0.0 else zero
@@ -662,10 +659,17 @@ def save_checkpoint(
             "dataset_id": train_config.get("dataset", {}).get("dataset_id"),
             "dataset_schema": train_config.get("dataset", {}).get("dataset_schema"),
             "dataset_fingerprint": train_config.get("dataset", {}).get("dataset_fingerprint"),
+            "dataset_metadata": {
+                "max_num_modules": int(dataset.max_num_modules),
+                "selected_module_count_min": min(dataset.selected_module_counts, default=0),
+                "selected_module_count_max": max(dataset.selected_module_counts, default=0),
+            },
             "feature_schemas": {
                 "channel_order": list(dataset.channel_order),
                 "interface_condition_feature_names": list(dataset.interface_condition_feature_names),
                 "interface_target_names": list(dataset.interface_target_names),
+                "module_feature_names": list(model.input_adapter.feature_names),
+                "global_context_names": list(model.input_adapter.global_context_names),
             },
             "global_normalization_config": {
                 "normalize_inputs": bool(train_config.get("dataset", {}).get("normalize_inputs", False)),
@@ -729,7 +733,8 @@ def _validate_resume_checkpoint(
             "local_surrogate" if model.local_surrogate_attached else "global_head"
         )
     saved_config = dict(checkpoint.get("model_config") or {})
-    if saved_config and saved_config != current_config:
+    normalized_saved_config = ChannelThermalHONFConfig.from_dict(saved_config).to_dict() if saved_config else {}
+    if normalized_saved_config and normalized_saved_config != current_config:
         raise ValueError("Resume checkpoint forward architecture/configuration does not match this launch.")
     expected_schemas = {
         "channel_order": list(dataset.channel_order),
@@ -1085,8 +1090,44 @@ def run_from_config(
     )
 
     batch_size = int(dataset_cfg.get("batch_size", training_cfg.get("batch_size", 4)))
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=int(dataset_cfg.get("num_workers", 0)), pin_memory=device.type == "cuda")
-    val_loader = DataLoader(val_dataset, batch_size=int(dataset_cfg.get("val_batch_size", batch_size)), shuffle=False, num_workers=int(dataset_cfg.get("num_workers", 0)), pin_memory=device.type == "cuda")
+    val_batch_size = int(dataset_cfg.get("val_batch_size", batch_size))
+    num_workers = int(dataset_cfg.get("num_workers", 0))
+    max_modules_per_batch = dataset_cfg.get("max_modules_per_batch")
+    collator = ChannelThermalBatchCollator(
+        dynamic_module_padding=bool(dataset_cfg.get("dynamic_module_padding", True)),
+        max_modules_per_batch=None if max_modules_per_batch is None else int(max_modules_per_batch),
+    )
+    if bool(dataset_cfg.get("bucket_by_module_count", True)):
+        train_batch_sampler = ModuleCountBucketBatchSampler(
+            train_dataset.selected_module_counts,
+            batch_size=batch_size,
+            bucket_size_multiplier=int(dataset_cfg.get("module_count_bucket_size_multiplier", 8)),
+            seed=int(training_cfg.get("seed", 42)),
+        )
+        train_loader = DataLoader(
+            train_dataset,
+            batch_sampler=train_batch_sampler,
+            num_workers=num_workers,
+            pin_memory=device.type == "cuda",
+            collate_fn=collator,
+        )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=device.type == "cuda",
+            collate_fn=collator,
+        )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=val_batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=device.type == "cuda",
+        collate_fn=collator,
+    )
 
     optimizer = torch.optim.AdamW(
         [param for param in model.parameters() if param.requires_grad],
@@ -1193,6 +1234,8 @@ def run_from_config(
 
     for epoch in range(start_epoch, epochs + 1):
         train_dataset.set_epoch(epoch)
+        if hasattr(train_loader.batch_sampler, "set_epoch"):
+            train_loader.batch_sampler.set_epoch(epoch)
         effective_mode, effective_ratio = effective_port_condition_settings(epoch, training_cfg)
         eff_internal, eff_interface = effective_local_loss_weights(loss_cfg, effective_mode, effective_ratio)
         pred_consistency_weight = predicted_consistency_weight_for_epoch(epoch, loss_cfg)

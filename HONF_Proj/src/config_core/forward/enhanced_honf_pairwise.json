@@ -11,7 +11,6 @@
   "model": {
     "core_honf": {
       "field_dim": "auto",
-      "max_num_modules": "auto",
       "domain_length_x": "auto",
       "domain_length_y": "auto",
       "module_radius": "auto",

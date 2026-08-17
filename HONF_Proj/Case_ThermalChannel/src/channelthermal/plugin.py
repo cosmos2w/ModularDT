@@ -23,6 +23,8 @@ from .resources import DatasetRegistry, DatasetResource
 DATASET_KEYS = {
     "manifest", "locations", "train_split", "val_split", "points_per_case",
     "val_points_per_case", "batch_size", "val_batch_size", "num_workers",
+    "dynamic_module_padding", "max_modules_per_batch", "bucket_by_module_count",
+    "module_count_bucket_size_multiplier",
     "normalize_inputs", "normalize_targets", "random_point_sampling",
     "require_converged", "allow_train_as_validation",
 }

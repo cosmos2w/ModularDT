@@ -38,6 +38,10 @@
         "batch_size": {"type": "integer", "minimum": 1},
         "val_batch_size": {"type": "integer", "minimum": 1},
         "num_workers": {"type": "integer", "minimum": 0},
+        "dynamic_module_padding": {"type": "boolean"},
+        "max_modules_per_batch": {"type": ["integer", "null"], "minimum": 1},
+        "bucket_by_module_count": {"type": "boolean"},
+        "module_count_bucket_size_multiplier": {"type": "integer", "minimum": 1},
         "normalize_inputs": {"type": "boolean"},
         "normalize_targets": {"type": "boolean"},
         "random_point_sampling": {"type": "boolean"},
@@ -57,6 +61,8 @@
             "field_names": {"type": "array", "items": {"type": "string"}},
             "material_param_dim": {"type": "integer", "minimum": 1},
             "heat_scale": {"type": "number"},
+            "global_feature_schema": {"enum": ["legacy_v1", "padding_invariant_v2"]},
+            "legacy_active_fraction_reference_slots": {"type": ["integer", "null"], "minimum": 1},
             "internal_prediction_mode": {"enum": ["auto", "local_surrogate", "global_head"]},
             "fallback_internal_query_dim": {"type": "integer", "minimum": 1},
             "fallback_interface_dim": {"type": "integer", "minimum": 1},
@@ -102,8 +108,16 @@
       "additionalProperties": false,
       "properties": {
         "field_mse_weight": {"type": "number", "minimum": 0},
-        "temperature_weight": {"type": "number", "minimum": 0},
-        "field_channel_weights": {"type": ["array", "null"], "items": {"type": "number", "minimum": 0}},
+        "temperature_weight": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Default weight for the field channel named 'temperature'."
+        },
+        "field_channel_weights": {
+          "type": ["array", "null"],
+          "items": {"type": "number", "minimum": 0},
+          "description": "Optional complete override with one weight per model.channelthermal.field_names entry, in the same order."
+        },
         "internal_temperature_weight": {"type": "number", "minimum": 0},
         "interface_weight": {"type": "number", "minimum": 0},
         "interface_loss_type": {"enum": ["mse", "smooth_l1"]},

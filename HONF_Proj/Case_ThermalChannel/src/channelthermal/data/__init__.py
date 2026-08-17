@@ -12,12 +12,15 @@ from .datasets import (
     LocalModuleDataset,
     fit_local_normalizer,
 )
+from .collation import ChannelThermalBatchCollator, ModuleCountBucketBatchSampler
 
 __all__ = [
     "CHANNEL_ORDER",
+    "ChannelThermalBatchCollator",
     "GlobalChannelThermalDataset",
     "GlobalModuleAlignmentDataset",
     "H5Normalizer",
     "LocalModuleDataset",
+    "ModuleCountBucketBatchSampler",
     "fit_local_normalizer",
 ]

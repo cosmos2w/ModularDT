@@ -70,7 +70,6 @@
       "additionalProperties": false,
       "properties": {
         "field_dim": {"$ref": "#/$defs/integer_or_auto"},
-        "max_num_modules": {"$ref": "#/$defs/integer_or_auto"},
         "domain_length_x": {"$ref": "#/$defs/positive_or_auto"},
         "domain_length_y": {"$ref": "#/$defs/positive_or_auto"},
         "module_radius": {"$ref": "#/$defs/positive_or_auto"},
