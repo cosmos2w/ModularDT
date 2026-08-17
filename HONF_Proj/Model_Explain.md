@@ -2,8 +2,8 @@
 
 This document defines the Hypergraph Operator Neural Field (HONF) as a neural
 surrogate for modular physical designs, specifies the ThermalChannel prediction
-problem and its packed datasets, and explains how the case-neutral core is
-adapted to that problem in `HONF_Proj`.
+problem and its packed datasets, and explains how the case-neutral forward and
+initial hierarchical inverse cores are adapted to that problem in `HONF_Proj`.
 
 The project now has two explicit ownership levels. Code under
 `src/honf_forward_core` implements the reusable set-to-field operator and must
@@ -1191,3 +1191,550 @@ The reusable HONF therefore defines a continuous set-to-field operator for
 arbitrary modular designs, while the ChannelThermal layer supplies the exact
 physical features, local solid surrogate, interface variables, and coupling
 logic needed for this particular multi-field prediction problem.
+
+## 5. Initial hierarchical inverse-design problem
+
+### 5.1 Scope and status
+
+The inverse implementation is a first version built around the standalone
+forward HONF described above. Its purpose is to establish explicit data,
+conditioning, generation, and verification contracts before increasing model
+capacity or adding other module families. It is not an iterative optimizer and
+is not yet a mature engineering-design system.
+
+Four objects must remain distinct:
+
+| Symbol | Meaning | ThermalChannel representation |
+|---|---|---|
+| $D$ | physical modular design | padded module centers, presence, and heat powers |
+| $c$ | fixed operating/material context | ten physical scalars |
+| $R$ | desired behavior | unordered functional tokens plus separate geometry constraints |
+| $G$ | generated compact mechanism plan | fixed $K$ edge tokens with 12 interpretable features |
+| $\widehat G$ | realized compact plan | the same schema extracted from frozen HONF for $(D,c)$ |
+
+The requested conditional distribution is factorized as
+
+$$
+p_\theta(D,G\mid R,c)
+=
+p_{\theta_D}(D\mid G,R,c)\,
+p_{\theta_G}(G\mid R,c).
+$$
+
+This is a distribution rather than a deterministic inverse because many
+mechanisms may satisfy one request and many layouts may realize one mechanism.
+The forward model supplies a deterministic verification map
+
+$$
+(\widehat{\mathbf u},\widehat{\mathbf T}^{int},
+ \widehat{\mathbf b},\widehat G)
+=
+\mathcal V_{\Phi}(D,c),
+$$
+
+where $\Phi$ is frozen. The realized plan is specifically extracted from the
+final organizer after local-response fusion, under autonomous predicted-port
+mode. It is not taken from a pre-fusion organizer and is not inferred by the
+inverse generator itself.
+
+The implemented hierarchy is therefore
+
+$$
+(R,c)\xrightarrow{\text{plan RF}}G
+\xrightarrow[\ R,c\ ]{\text{layout RF}}D
+\xrightarrow{\text{frozen HONF}}(\widehat{\mathbf u},\widehat G)
+\xrightarrow{\text{optional one-pass proposal}}(G',D').
+$$
+
+### 5.2 Physical design $D$ and operating context $c$
+
+Schema v1 assumes one fixed circular module family and a maximum of $M=12$
+slots. A design is
+
+$$
+D=\{(a_m,\mathbf x_m,q_m)\}_{m=1}^{M},
+\qquad
+a_m\in\{0,1\},\quad
+\mathbf x_m=(x_m,y_m),
+$$
+
+where $a_m$ is presence and $q_m$ is module heat power. Active modules are
+sorted lexicographically by normalized $x$, normalized $y$, heat, and original
+index, then packed before zero-valued padding. The model layout state is
+
+$$
+\bar D_m=
+\left[
+\frac{x_m}{L_x},
+\frac{y_m}{L_y},
+\frac{q_m-\mu_q}{\sigma_q}
+\right].
+$$
+
+The physical decoder clips centers to the clearance-valid rectangle. If the
+sampled centers already obey the minimum distance, they pass through. An
+invalid endpoint receives one deterministic ordered-$x$ fallback, and total
+heat is scaled once into its requested interval when present. These operations
+are an endpoint parameterization, not repeated geometric repair.
+
+The context vector has fixed order
+
+$$
+c=[Re,u_{in},\nu,\alpha_s,\alpha_f,k_s,k_f,r,L_x,L_y]\in\mathbb R^{10}.
+$$
+
+| Component | Physical role |
+|---|---|
+| $Re,u_{in},\nu$ | flow operating condition and viscosity |
+| $\alpha_s,\alpha_f$ | solid/fluid thermal diffusivity |
+| $k_s,k_f$ | solid/fluid thermal conductivity |
+| $r$ | fixed module radius |
+| $L_x,L_y$ | channel length and height |
+
+Context values are standardized using inverse-training statistics before they
+enter the request encoder. The physical values remain available to geometry,
+functional evaluation, and the forward input adapter.
+
+## 6. Structured request $R$
+
+### 6.1 Token and geometry contracts
+
+A request is an unordered set of at most four active tokens. Each token carries
+
+$$
+r_\ell=(t_\ell,\rho_\ell,y_\ell,\tau_\ell,
+[l_\ell,h_\ell],p_\ell,w_\ell,\mathcal B_\ell,a_\ell),
+$$
+
+where $t$ is request type, $\rho$ is relation, $y$ is a target, $\tau$ is a
+tolerance, $[l,h]$ is an optional range, $p\in\{1,2,3\}$ is priority, $w>0$
+is weight, $\mathcal B$ is an optional normalized rectangle, and $a$ is the
+active mask. Relation-specific fields are masked rather than overloaded.
+
+The supported relation set is
+
+$$
+\{\texttt{upper_bound},\texttt{lower_bound},
+\texttt{target_range},\texttt{minimize}\}.
+$$
+
+Only regional-temperature types accept
+$\mathcal B=[\bar x_0,\bar y_0,\bar x_1,\bar y_1]\subset[0,1]^2$, and schema
+v1 allows no more than one regional token. Geometry is kept outside the token
+set:
+
+$$
+C_{geo}=[N_{min},N_{max},d_{min},c_w,c_{in},c_{out},Q_{min},Q_{max}],
+$$
+
+with a separate mask because the total-heat interval is optional. Counts are
+normalized by $M$; distances are normalized by the appropriate domain scale;
+heat bounds use inverse-train total-heat statistics.
+
+Priority and weight are both visible to the encoder. In exact evaluation,
+priority is reported as request metadata and the materialized `weight` is the
+sole multiplier, avoiding accidental double weighting. When JSON omits an
+explicit weight, the codec derives its default from priority.
+
+### 6.2 Exact ThermalChannel functionals
+
+Let $\Omega_f(D)$ be grid points outside the union of active module disks, let
+$T(\mathbf x)$ and $p(\mathbf x)$ be denormalized frozen-HONF temperature and
+pressure, and let $T^{int}_{mj}$ be module-$m$ internal temperature at local
+query $j$. Define inlet and outlet fluid bands
+
+$$
+\Omega_{in}=\{\mathbf x\in\Omega_f:x\le0.08L_x\},\qquad
+\Omega_{out}=\{\mathbf x\in\Omega_f:x\ge0.92L_x\}.
+$$
+
+The seven supported functionals are
+
+$$
+\begin{aligned}
+f_{T,max}^{env}&=\max_{\mathbf x\in\Omega_f}T(\mathbf x),\\
+f_{\Delta p}&=\operatorname{mean}_{\Omega_{in}}p-
+               \operatorname{mean}_{\Omega_{out}}p,\\
+f_{T,std}^{out}&=\operatorname{std}_{\Omega_{out}}T
+\quad(\mathrm{ddof}=0),\\
+f_{T,max}^{int}&=\max_{m:a_m=1}\max_j T^{int}_{mj},\\
+f_{T,spread}^{int}&=
+\max_{m:a_m=1}\max_jT^{int}_{mj}
+-\min_{m:a_m=1}\max_jT^{int}_{mj},\\
+f_{T,mean}^{\mathcal B}&=
+\operatorname{mean}_{\mathbf x\in\Omega_f\cap\mathcal B}T(\mathbf x),\\
+f_{T,max}^{\mathcal B}&=
+\max_{\mathbf x\in\Omega_f\cap\mathcal B}T(\mathbf x).
+\end{aligned}
+$$
+
+The internal spread is zero for one active module. Empty selections, absent
+active modules, and non-finite forward values are validation failures rather
+than silently assigned scores.
+
+For functional $j$, inverse-train statistics define
+
+$$
+z_j(f)=\frac{f-\mu_j}{\sigma_j},
+\qquad
+\bar\tau_j=\frac{\tau_j}{\sigma_j}.
+$$
+
+The signed exact request residual is
+
+$$
+e_j=
+\begin{cases}
+\max(z_j(f)-z_j(y)-\bar\tau_j,0),&\text{upper bound},\\
+-\max(z_j(y)-\bar\tau_j-z_j(f),0),&\text{lower bound},\\
+\max(z_j(f)-z_j(h)-\bar\tau_j,0)
+-\max(z_j(l)-\bar\tau_j-z_j(f),0),&\text{target range},\\
+\max(z_j(f),0),&\text{minimize}.
+\end{cases}
+$$
+
+Thus schema-v1 `minimize` uses the inverse-training mean as its zero-violation
+reference; it is not an unconstrained promise to find a global optimum. Exact
+aggregate violation and satisfaction are
+
+$$
+V_R=\frac{\sum_jw_j|e_j|}{\sum_jw_j},
+\qquad
+S_R=\mathbb 1[|e_j|\le10^{-8}\ \forall j].
+$$
+
+Stage-four training uses smooth counterparts of these hinges on a smaller
+differentiable probe grid. Final reported values always come from the exact
+denormalized verifier.
+
+## 7. Compact mechanism plan $G$ and realized plan $\widehat G$
+
+### 7.1 Fixed-edge schema
+
+For each of the forward model's $K$ canonical hyperedges, schema v1 stores
+
+$$
+G_k=[a_k,s_{kx},s_{ky},r_{kx},r_{ky},m_k^M,m_k^E,
+\eta_k,\sigma_{kx},\sigma_{ky},h_k,n_k].
+$$
+
+| Feature | Physical/organizational interpretation |
+|---|---|
+| $a_k$ | edge activity indicator |
+| $\mathbf s_k$ | module-side source centroid |
+| $\mathbf r_k$ | environment-side region centroid |
+| $m_k^M,m_k^E$ | normalized module and environment incidence masses |
+| $\eta_k$ | mass-derived edge strength |
+| $\boldsymbol\sigma_k$ | environment-region spatial scale |
+| $h_k$ | fraction of absolute module heat assigned through the edge |
+| $n_k$ | fraction of active modules whose strongest assignment is this edge |
+
+The mass and fraction columns are simplexes across $k$. Strength and activity
+are derived rather than independent generated variables:
+
+$$
+\eta_k=\sqrt{m_k^Mm_k^E+10^{-6}},
+\qquad
+a_k=\mathbb 1[\eta_k>0.05].
+$$
+
+If $A^{EH}_{ek}$ is the dense environment-to-edge incidence and
+$\widetilde A^{EH}_{ek}$ its column normalization, then
+
+$$
+\boldsymbol\sigma_k=
+\sqrt{\sum_e\widetilde A^{EH}_{ek}
+(\mathbf y_e-\mathbf r_k)^{\odot2}}.
+$$
+
+For absolute active heat $\widetilde q_m=|q_m|a_m$,
+
+$$
+h_k=
+\frac{\sum_mA^{MH}_{mk}\widetilde q_m}
+     {\sum_{k'}\sum_mA^{MH}_{mk'}\widetilde q_m},
+$$
+
+with incidence mass used as a defined fallback when total heat is zero. The
+hard module/source fraction is
+
+$$
+n_k=\frac{1}{N_M}\sum_{m:a_m=1}
+\mathbb 1\left[k=\arg\max_jA^{MH}_{mj}\right].
+$$
+
+Only ten independent continuous columns are generated:
+
+$$
+(s_x,s_y,r_x,r_y,m^M,m^E,\sigma_x,\sigma_y,h,n).
+$$
+
+The plan intentionally excludes dense `hyper_state`, query-dependent routing
+$\alpha_{qk}$, raw module tokens, full $A^{EH}$, and slot-specific $A^{MH}$.
+Those tensors are either too dense, query dependent, or tied to a particular
+padded layout and therefore are not suitable mechanism-level generation
+targets.
+
+### 7.2 Normalization, order, and planned/realized distance
+
+Source/region $x$ and scale $x$ are divided by $L_x$; their $y$ counterparts
+are divided by $L_y$. All other plan features are already dimensionless. Edges
+are sorted active first, then lexicographically by source, region, and negative
+strength. The dataset and generator preserve this order by default.
+
+Given normalized, aligned plans $G$ and $\widehat G$, evaluation reports
+
+$$
+d_G(G,\widehat G)=
+\sqrt{\operatorname{mean}_{k,j\in\mathcal I}
+(G_{kj}-\widehat G_{kj})^2}
++0.25\operatorname{mean}_k|a_k-\widehat a_k|,
+$$
+
+where $\mathcal I$ contains the ten independent continuous columns. Canonical
+alignment is the default. Hungarian or Sinkhorn matching can be enabled as an
+experiment/diagnostic when edge correspondence is empirically unstable; they
+do not change the compact-plan ABI.
+
+## 8. Inverse dataset contract
+
+Let $N$ be physical cases, $V$ request variants per case (default 16), $L=4$
+maximum request slots, $M=12$ module slots, and $K$ the frozen HONF hyperedge
+count. The HDF5 is case-major:
+
+| Group/array | Leading shape | Meaning |
+|---|---:|---|
+| `design/source/*` | $[N,M,\ldots]$ | physical source-slot $D$ |
+| `design/model/*` | $[N,M,\ldots]$ | canonical normalized $D$ and slot maps |
+| `context/vector` | $[N,10]$ | physical $c$ |
+| `context/normalized_vector` | $[N,10]$ | standardized model context |
+| `plan/compact_raw` | $[N,K,12]$ | physical compact target $G$ |
+| `plan/compact_normalized` | $[N,K,12]$ | model target $G$ |
+| `plan/full/*` | case-major, optional | canonical forward plan for audit only |
+| `functionals/global_raw` | $[N,5]$ | five nonregional exact values |
+| `requests/*` | $[N,V,L,\ldots]$ | token values, masks, and realized values |
+| `geometry/*` | $[N,V,\ldots]$ | constraints, actuals, margins, validity |
+| `normalization/*` | feature dependent | train-only functional/context/heat stats |
+| `splits/*` | case indices/hashes | leakage-checkable partitions |
+
+The source test set remains test. Source-training cases are deterministically
+split into inverse train and validation before any request augmentation, so all
+variants of one design remain in exactly one partition. For each case the
+builder:
+
+1. loads $D$ and $c$;
+2. runs frozen HONF once;
+3. exports the canonical full plan and derives $G$;
+4. computes exact nonregional functionals and geometry metadata; and
+5. creates request variants around realized values without another HONF call.
+
+Each default variant activates two to four distinct functionals, uses at most
+one regional term, chooses feasible bounds/ranges and slack, and omits unused
+metrics. Case IDs, source indices, variant seeds, forward checkpoint identity,
+schema versions, split hashes, and partial-debug status are stored as
+provenance. `InverseH5Dataset` exposes one training row per `(case, variant)`
+while reusing the case-level design and plan.
+
+## 9. Hierarchical conditional rectified flows
+
+### 9.1 Request-set encoder
+
+For each active request token, categorical type/relation embeddings are joined
+with 13 continuous/mask values: normalized target, target mask, normalized
+tolerance, two range endpoints, range mask, scaled priority, log weight, four
+region coordinates, and region mask. A shared residual MLP produces token
+embedding $\mathbf z_\ell$.
+
+Permutation invariance follows from masked mean and maximum pooling:
+
+$$
+\mathbf z_R=
+f_R\left[
+\frac{\sum_\ell a_\ell\mathbf z_\ell}{\sum_\ell a_\ell},
+\max_{\ell:a_\ell=1}\mathbf z_\ell,
+f_c(\bar c),
+f_g(\bar C_{geo},m_{geo})
+\right].
+$$
+
+The default global request dimension is 128. Per-token embeddings are retained
+for future extensions even though the first two flows condition primarily on
+the global embedding.
+
+### 9.2 Rectified-flow objective
+
+For a data endpoint $x_1$ and independent Gaussian $x_0\sim\mathcal N(0,I)$,
+the straight interpolation is
+
+$$
+x_t=(1-t)x_0+tx_1,
+\qquad
+v^\star=x_1-x_0,
+\qquad t\sim\mathcal U[0,1].
+$$
+
+Each conditional velocity field minimizes
+
+$$
+\mathcal L_{FM}=
+\mathbb E\left\|v_\theta(x_t,t;\text{condition})-v^\star\right\|_2^2.
+$$
+
+Sampling starts from new Gaussian noise and integrates $dx/dt=v_\theta$ from
+0 to 1 using fixed-step Heun integration (24 steps by default). This occurs
+once per requested sample and contains no gradient-based design search.
+
+### 9.3 Plan flow
+
+The plan velocity field acts on $[B,K,10]$. It combines the current state,
+time embedding, global request embedding, and learned fixed-edge embedding in a
+four-block residual MLP of default width 256. A separate head predicts edge
+activity logits. Endpoint projection clamps coordinates/scales, forms gated
+mass/fraction simplexes, derives strength/activity, retains at least one active
+edge, and returns canonical $[B,K,12]$ plans.
+
+The default plan loss is
+
+$$
+\mathcal L_{plan}=
+\mathcal L_{FM}
++0.10\,\mathcal L_{BCE}^{edge}
++0.05\,\mathcal L_{valid}^{G},
+$$
+
+where validity penalizes coordinate bounds, negative mass/scale/fraction
+values, and mass/fraction simplex errors.
+
+### 9.4 Layout flow
+
+The layout velocity field acts on $[B,M,3]$. Its condition contains both an
+active-weighted pool of plan tokens and a projection of the entire ordered
+$K\times12$ plan, plus $\mathbf z_R$. Learned slot and time embeddings let the
+network produce slotwise velocity and presence logits; a global head predicts
+module count.
+
+The projected count is clipped to requested count bounds, the top-count slots
+by presence logit are selected, normalized centers and heat are bounded, and
+active slots are sorted. The default objective is
+
+$$
+\begin{aligned}
+\mathcal L_{layout}={}&\mathcal L_{FM}^{slot}
++0.10\mathcal L_{BCE}^{presence}
++0.05\mathcal L_{CE}^{count}\\
+&+0.05\mathcal L_{geo}
++0.02\mathcal L_{heat}
++0.05\mathcal L_{plan\text{-}align}.
+\end{aligned}
+$$
+
+Inactive slots retain flow weight 0.25 rather than disappearing. The geometry
+term is a differentiable clearance/pair-distance surrogate. Plan alignment
+softly assigns module centers to active plan sources and matches edge module
+fractions; exact realized consistency still belongs to frozen HONF.
+
+## 10. Staged training and optional correction
+
+Training is intentionally explicit:
+
+| Stage | Trainable path | Main target |
+|---|---|---|
+| 1 `stage_plan` | request encoder + plan flow | true compact $G$ |
+| 2 `stage_layout_teacher_plan` | layout flow | true $G$ and true $D$ |
+| 3 `stage_layout_mixed_plan` | plan/layout hierarchy | linearly mixed true and sampled $G$ |
+| 4 `stage_joint_consistency` | selected hierarchy/corrector parameters | request, geometry, and $G$/$\widehat G$ consistency |
+
+The generated-plan probability in stage 3 increases to 0.5 by default. Stage
+4 invokes a differentiable frozen-HONF bridge only on the configured subset of
+batches and candidate samples. Its weighted consistency term is
+
+$$
+\mathcal L_{joint}^{raw}=
+0.10\mathcal L_R+0.10\mathcal L_{G\widehat G}
++0.05\mathcal L_{geo}+0.02\mathcal L_{\delta}
++0.10\mathcal L_{\delta,target}.
+$$
+
+To preserve the learned one-to-many flow rather than turn training into a
+deterministic optimizer, the applied consistency value is capped at one half
+of the detached layout-flow reference loss.
+
+When enabled, `JointConsistencyCorrector` receives
+
+$$
+(G,D,\widehat G,\mathbf e_R,\mathbf z_R)
+$$
+
+and predicts bounded residuals
+
+$$
+\Delta G=\epsilon_G\tanh h_G(\cdot),\qquad
+\Delta D=\epsilon_D\tanh h_D(\cdot),
+$$
+
+with default normalized bounds $\epsilon_G=\epsilon_D=0.05$. It preserves the
+sampled topology and proposes exactly one corrected pair. During evaluation,
+the proposal is run through HONF once and accepted only if exact geometry is
+valid and $V_R$ is lower than the raw candidate's value. Rejected proposals
+remain in the proposal-only report so their failures are not hidden.
+
+## 11. Frozen verification, sampling, and ranking
+
+`FrozenThermalChannelVerifier` requires a self-contained forward checkpoint,
+freezes every parameter, remains in evaluation mode, and forces predicted
+ports with zero teacher mixing. It uses the maintained forward loader and case
+adapter, evaluates the complete inherited global/local grids, exports the
+canonical full plan, derives $\widehat G$, and optionally returns environment,
+internal, interface, and port outputs. A generated $(D,c)$ is assembled
+directly; source-case design values are not borrowed.
+
+With $P$ sampled plans and $L$ layouts per plan, there are $PL$ raw lineages.
+The default $P=8,L=4$ creates 32 raw candidates. Verification costs are
+
+$$
+N_{HONF}=PL\quad\text{without correction},\qquad
+N_{HONF}=2PL\quad\text{with one proposal per lineage}.
+$$
+
+Four populations are recorded separately: raw unguided candidates, all
+one-pass proposals, accepted raw-or-corrected lineage representatives, and the
+final top-$k$. Ranking first minimizes exact normalized request violation, then
+prefers valid geometry and smaller plan mismatch; diversity is used only to
+break near ties. Population-level raw and corrected success fractions are
+reported independently from ranking, so top-$k$ selection is not evidence that
+the generator itself succeeds.
+
+Every candidate stores its generated $D$, planned $G$, realized full plan and
+$\widehat G$, exact functionals and request terms, geometry result, correction
+flag/magnitude, forward-call indices, and source plan/layout indices. Evaluation
+also records the forward SHA, inverse dataset hash, schema versions, resolved
+inputs, and an artifact manifest.
+
+## 12. Inverse implementation index and current limitations
+
+| Mathematical component | Main implementation |
+|---|---|
+| request JSON, relations, masks, normalization | `src/honf_inverse_core/request_schema.py` |
+| request/context/geometry encoder | `src/honf_inverse_core/models/request_encoder.py` |
+| rectified-flow path and integration | `src/honf_inverse_core/models/rectified_flow.py` |
+| $p(G\mid R,c)$ | `src/honf_inverse_core/models/plan_flow.py` |
+| $p(D\mid G,R,c)$ | `src/honf_inverse_core/models/layout_flow.py` |
+| one-pass residual proposal | `src/honf_inverse_core/models/joint_corrector.py` |
+| public hierarchy and checkpoint loader | `src/honf_inverse_core/models/hierarchical_inverse.py` |
+| staged losses and optimization | `src/honf_inverse_core/training/` |
+| ThermalChannel vocabulary/context | `Case_ThermalChannel/src/channelthermal/inverse/{vocabulary,context,request}.py` |
+| exact functionals and geometry | `Case_ThermalChannel/src/channelthermal/inverse/{functionals,geometry}.py` |
+| $G$ extraction and validation | `Case_ThermalChannel/src/channelthermal/inverse/compact_plan.py` |
+| frozen HONF verification | `Case_ThermalChannel/src/channelthermal/inverse/verifier.py` |
+| dataset assembly/HDF5 | `Case_ThermalChannel/src/channelthermal/inverse/{dataset_builder,dataset_io}.py` |
+| exact candidate evaluation/artifacts | `Case_ThermalChannel/src/channelthermal/inverse/evaluation/` |
+| build/train/evaluate/audit entry points | `Case_ThermalChannel/src/channelthermal/workflows/*inverse*.py` |
+
+Important first-version limits are fixed $K$, at most 12 modules, one module
+family, center/heat generation only, and an intentionally small request
+vocabulary. The differentiable joint-stage probes are coarser smooth training
+surrogates, whereas final metrics are exact frozen-HONF grid evaluations. The
+current evaluator expects forward calls to succeed rather than serializing
+failed lineages. It provides no iterative correction, no gradient-based layout
+optimization, no guarantee of feasibility for an arbitrary request, and no
+claim of physical accuracy beyond that of the frozen forward surrogate.

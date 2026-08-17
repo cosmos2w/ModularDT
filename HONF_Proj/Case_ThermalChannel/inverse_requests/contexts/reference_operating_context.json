@@ -1,0 +1,14 @@
+{
+  "schema_name": "thermalchannel_inverse_context",
+  "schema_version": 1,
+  "re": 50.0,
+  "u_in": 1.0,
+  "nu": 0.018,
+  "solid_alpha": 0.01,
+  "fluid_alpha": 0.02,
+  "solid_k": 1.0,
+  "fluid_k": 1.0,
+  "module_radius": 0.45,
+  "domain_length_x": 12.0,
+  "domain_length_y": 6.0
+}

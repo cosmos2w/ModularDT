@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HONF hierarchical inverse training config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["dataset_path", "forward_checkpoint", "device", "output_root", "run_name", "batch_size", "model", "stages"],
+  "properties": {
+    "dataset_path": {"type": "string", "minLength": 1},
+    "forward_checkpoint": {"type": "string", "minLength": 1},
+    "device": {"type": "string", "minLength": 1},
+    "output_root": {"type": "string", "minLength": 1},
+    "run_name": {"type": "string", "minLength": 1},
+    "batch_size": {"type": "integer", "minimum": 1},
+    "num_workers": {"type": "integer", "minimum": 0},
+    "learning_rate": {"type": "number", "exclusiveMinimum": 0.0},
+    "weight_decay": {"type": "number", "minimum": 0.0},
+    "allow_partial_debug": {"type": "boolean"},
+    "joint_query_grid": {"type": "array", "prefixItems": [{"type": "integer", "minimum": 2}, {"type": "integer", "minimum": 2}], "minItems": 2, "maxItems": 2},
+    "joint_local_grid_size": {"type": "integer", "minimum": 4},
+    "initialize_from": {"type": "string", "minLength": 1},
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "request_hidden_dim": {"type": "integer", "minimum": 1},
+        "plan_hidden_dim": {"type": "integer", "minimum": 1},
+        "plan_layers": {"type": "integer", "minimum": 1},
+        "plan_sampling_steps": {"type": "integer", "minimum": 1},
+        "layout_hidden_dim": {"type": "integer", "minimum": 1},
+        "layout_layers": {"type": "integer", "minimum": 1},
+        "layout_sampling_steps": {"type": "integer", "minimum": 1},
+        "corrector_enabled": {"type": "boolean"},
+        "corrector_hidden_dim": {"type": "integer", "minimum": 1},
+        "corrector_blocks": {"type": "integer", "minimum": 1},
+        "matching_mode": {"enum": ["canonical", "hungarian", "sinkhorn"]},
+        "max_plan_delta": {"type": "number", "minimum": 0.0},
+        "max_layout_delta": {"type": "number", "minimum": 0.0},
+        "dropout": {"type": "number", "minimum": 0.0, "maximum": 1.0}
+      }
+    },
+    "stages": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage_plan", "stage_layout_teacher_plan", "stage_layout_mixed_plan", "stage_joint_consistency"],
+      "properties": {
+        "stage_plan": {"$ref": "#/$defs/stage"},
+        "stage_layout_teacher_plan": {"$ref": "#/$defs/stage"},
+        "stage_layout_mixed_plan": {"$ref": "#/$defs/stage"},
+        "stage_joint_consistency": {"$ref": "#/$defs/stage"}
+      }
+    }
+  },
+  "$defs": {
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["epochs", "learning_rate"],
+      "properties": {
+        "epochs": {"type": "integer", "minimum": 0},
+        "learning_rate": {"type": "number", "exclusiveMinimum": 0.0},
+        "forward_batch_fraction": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "forward_sample_count": {"type": "integer", "minimum": 1},
+        "corrector_only": {"type": "boolean"}
+      }
+    }
+  }
+}

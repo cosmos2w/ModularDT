@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HONF hierarchical inverse evaluation config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["inverse_checkpoint", "forward_checkpoint", "request_json", "context_json", "device", "seed", "num_plans", "layouts_per_plan", "correct_once", "top_k", "output_dir"],
+  "properties": {
+    "inverse_checkpoint": {"type": "string", "minLength": 1},
+    "forward_checkpoint": {"type": "string", "minLength": 1},
+    "forward_dataset": {"type": "string", "minLength": 1},
+    "request_json": {"type": "string", "minLength": 1},
+    "context_json": {"type": "string", "minLength": 1},
+    "device": {"type": "string", "minLength": 1},
+    "seed": {"type": "integer"},
+    "num_plans": {"type": "integer", "minimum": 1},
+    "layouts_per_plan": {"type": "integer", "minimum": 1},
+    "correct_once": {"type": "boolean"},
+    "top_k": {"type": "integer", "minimum": 1},
+    "output_dir": {"type": "string", "minLength": 1},
+    "timestamp_output": {"type": "boolean"}
+  }
+}

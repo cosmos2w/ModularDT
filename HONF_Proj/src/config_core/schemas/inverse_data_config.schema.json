@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HONF inverse dataset build config",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["case", "checkpoint", "device", "output_dir", "variants_per_case", "seed", "split_seed", "validation_fraction", "query_batch_size", "save_full_plan"],
+  "properties": {
+    "case": {"const": "ThermalChannel"},
+    "checkpoint": {"type": "string", "minLength": 1},
+    "dataset": {"type": ["string", "null"], "minLength": 1},
+    "device": {"type": "string", "minLength": 1},
+    "output_dir": {"type": "string", "minLength": 1},
+    "variants_per_case": {"type": "integer", "minimum": 1},
+    "seed": {"type": "integer"},
+    "split_seed": {"type": "integer"},
+    "validation_fraction": {"type": "number", "minimum": 0.0, "exclusiveMaximum": 1.0},
+    "query_batch_size": {"type": "integer", "minimum": 1},
+    "save_full_plan": {"type": "boolean"},
+    "max_cases_per_split": {"type": "integer", "minimum": 1}
+  }
+}

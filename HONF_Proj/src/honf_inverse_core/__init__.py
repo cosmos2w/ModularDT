@@ -1,8 +1,32 @@
-"""Reserved package for the future HONF inverse core.
+"""Reusable contracts for the hierarchical HONF inverse-design stack."""
 
-No inverse model is implemented in the first repository migration.  Keeping a
-real package marker makes that boundary explicit without advertising a false
-runtime API.
-"""
+from .contracts import CompactPlan, FunctionalValue, NamedContext, PhysicalDesign, VerificationResult
+from .normalization import ScalarStats, VectorStats, fit_scalar, fit_vector
+from .request_schema import (
+    GeometryConstraints,
+    RELATION_NAMES,
+    RELATION_TO_ID,
+    RequestCodec,
+    RequestTensors,
+    RequestToken,
+    StructuredRequest,
+)
 
-__all__: list[str] = []
+__all__ = [
+    "CompactPlan",
+    "FunctionalValue",
+    "GeometryConstraints",
+    "NamedContext",
+    "PhysicalDesign",
+    "RELATION_NAMES",
+    "RELATION_TO_ID",
+    "RequestCodec",
+    "RequestTensors",
+    "RequestToken",
+    "ScalarStats",
+    "StructuredRequest",
+    "VectorStats",
+    "VerificationResult",
+    "fit_scalar",
+    "fit_vector",
+]

@@ -90,10 +90,25 @@ HONF_Proj/Trained_Results/**/Run_*/
 HONF_Proj/Trained_Results/**/Eval_*/
 HONF_Proj/Trained_Results/**/CompareModels/
 
+# HONF hierarchical-inverse runtime artifacts. These directories contain
+# generated HDF5/NPZ datasets, copied forward checkpoints, training checkpoints,
+# per-run configs/metrics, audit reports, plots, and manifests. Keep the inverse
+# source, schemas, request examples, and reusable templates tracked instead.
+HONF_Proj/Trained_Results/ThermalChannel/Inverse_Dataset_Builds/
+HONF_Proj/Trained_Results/ThermalChannel/Inverse_Resources/
+HONF_Proj/Trained_Results/ThermalChannel/HONF_Inverse_Runs/
+
+# One-off inverse smoke/diagnostic launch profiles reference local run IDs and
+# immutable snapshots. Reusable templates and non-diagnostic data configs remain
+# visible to Git.
+HONF_Proj/src/config_core/inverse/*diagnostic*.json
+HONF_Proj/src/config_core/inverse/thermalchannel_inverse_data_snapshot_v1.json
+
 # Generated reports/plots/history files from runs
 loss_history.csv
 loss_history.json
 loss_curve.png
+evaluations/
 Evaluation*/
 
 # Any smoke tests

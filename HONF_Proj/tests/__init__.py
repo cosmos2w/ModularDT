@@ -1,1 +1,1 @@
-"""Test support package for external-style plugin fixtures."""
+"""Repository-level test helpers and regression tests."""

@@ -1,0 +1,14 @@
+{
+  "inverse_checkpoint": "Trained_Results/ThermalChannel/HONF_Inverse_Runs/Run_####_<timestamp>_<name>/best_corrected_model.pt",
+  "forward_checkpoint": "Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_####_<timestamp>_<name>/best_predicted_model.pt",
+  "request_json": "Case_ThermalChannel/inverse_requests/balanced_cooling.json",
+  "context_json": "Case_ThermalChannel/inverse_requests/contexts/reference_operating_context.json",
+  "device": "cuda:0",
+  "seed": 20260813,
+  "num_plans": 8,
+  "layouts_per_plan": 4,
+  "correct_once": true,
+  "top_k": 8,
+  "output_dir": "Trained_Results/ThermalChannel/HONF_Inverse_Runs/evaluations",
+  "timestamp_output": true
+}

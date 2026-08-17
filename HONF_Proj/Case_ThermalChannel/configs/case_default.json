@@ -33,8 +33,8 @@
       "use_local_surrogate": true,
       "freeze_local_surrogate": true,
       "local_surrogate_checkpoint": {
-        "source": "case_artifact",
-        "path": "project://Case_ThermalChannel/artifacts/thermal_disk.pt"
+        "source": "legacy_run",
+        "path": "project://Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/Run_0000_base/best_model.pt"
       },
       "local_surrogate_latent_dim": 128,
       "local_module_params_from_used_ports": true,
@@ -67,6 +67,7 @@
     "port_global_consistency_teacher_weight": 0.0,
     "predicted_consistency_weight": 0.05,
     "predicted_consistency_warmup_epochs": 100,
+
     "organizer_regularization": {
       "enabled": false,
       "active_edge_weight": 0.01,

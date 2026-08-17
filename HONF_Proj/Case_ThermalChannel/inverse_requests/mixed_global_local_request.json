@@ -1,0 +1,10 @@
+{
+  "schema_name": "thermalchannel_inverse_request",
+  "schema_version": 1,
+  "tokens": [
+    {"request_type": "internal_temperature_max", "relation": "upper_bound", "target": 21.0, "tolerance": 0.5, "priority": 3, "region": null, "active": true},
+    {"request_type": "regional_temperature_mean", "relation": "upper_bound", "target": 17.0, "tolerance": 0.5, "priority": 2, "region": [0.45, 0.2, 0.75, 0.8], "active": true},
+    {"request_type": "pressure_drop", "relation": "target_range", "target": 0.0, "target_range": [-0.2, 0.2], "tolerance": 0.02, "priority": 1, "region": null, "active": true}
+  ],
+  "geometry_constraints": {"module_count_min": 2, "module_count_max": 8, "minimum_center_distance": 0.9, "wall_clearance": 0.15, "inlet_clearance": 0.4, "outlet_clearance": 0.4, "total_heat_range": [1.0, 20.0]}
+}

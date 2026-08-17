@@ -1,0 +1,13 @@
+{
+  "case": "ThermalChannel",
+  "checkpoint": "Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_####_<timestamp>_<name>/best_predicted_model.pt",
+  "dataset": "../1_Demo_ChannelThermal/Data_Saved/Processed_ChannelThermal_Dataset/packed_dataset.h5",
+  "device": "cuda:0",
+  "output_dir": "Trained_Results/ThermalChannel/Inverse_Dataset_Builds/Build_####_<name>",
+  "variants_per_case": 16,
+  "seed": 20260813,
+  "split_seed": 20260813,
+  "validation_fraction": 0.10,
+  "query_batch_size": 32768,
+  "save_full_plan": true
+}

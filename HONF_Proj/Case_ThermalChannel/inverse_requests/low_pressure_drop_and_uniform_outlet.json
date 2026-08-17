@@ -1,0 +1,9 @@
+{
+  "schema_name": "thermalchannel_inverse_request",
+  "schema_version": 1,
+  "tokens": [
+    {"request_type": "pressure_drop", "relation": "target_range", "target": 0.0, "target_range": [-0.15, 0.15], "tolerance": 0.02, "priority": 3, "region": null, "active": true},
+    {"request_type": "outlet_temperature_nonuniformity", "relation": "upper_bound", "target": 2.0, "tolerance": 0.2, "priority": 3, "region": null, "active": true}
+  ],
+  "geometry_constraints": {"module_count_min": 2, "module_count_max": 8, "minimum_center_distance": 0.9, "wall_clearance": 0.15, "inlet_clearance": 0.4, "outlet_clearance": 0.4, "total_heat_range": [1.0, 20.0]}
+}
