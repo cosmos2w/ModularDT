@@ -21,8 +21,31 @@ import torch
 EPS = 1.0e-8
 
 HONF_DIAGNOSTIC_KEYS = [
-    "active_edge_count",
-    "soft_active_edge_count",
+    "candidate_edge_count",
+    "selected_edge_count",
+    "viable_selected_edge_count",
+    "functional_edge_count",
+    "soft_functional_edge_count",
+    "empty_selected_edge_count",
+    "effective_query_edge_count",
+    "selection_module_coverage",
+    "selection_environment_coverage",
+    "candidate_module_nonzero_fraction",
+    "selected_module_nonzero_fraction",
+    "candidate_environment_nonzero_fraction",
+    "selected_environment_nonzero_fraction",
+    "selected_module_probability_mass_min",
+    "selected_module_probability_mass_p05",
+    "selected_module_probability_mass_mean",
+    "selected_environment_probability_mass_min",
+    "selected_environment_probability_mass_p05",
+    "selected_environment_probability_mass_mean",
+    "query_edge_retained_probability_mass_min",
+    "query_edge_retained_probability_mass_p05",
+    "query_edge_retained_probability_mass_mean",
+    "retained_module_incidence_mass_min",
+    "retained_module_incidence_mass_p05",
+    "retained_module_incidence_mass_mean",
     "A_mh_entropy",
     "A_eh_entropy",
     "module_mass_entropy_norm",
@@ -84,8 +107,28 @@ def compute_honf_diagnostics(
     strength = strength.to(device=device, dtype=dtype)
     threshold = float(edge_strength_threshold)
     temperature = max(float(edge_strength_temperature), EPS)
-    active = (strength > threshold).to(dtype=dtype).sum(dim=-1).mean() if strength.numel() else pred.new_zeros(())
-    soft_active = torch.sigmoid((strength - threshold) / temperature).sum(dim=-1).mean() if strength.numel() else pred.new_zeros(())
+    functional = (strength > threshold).to(dtype=dtype).sum(dim=-1).mean() if strength.numel() else pred.new_zeros(())
+    soft_functional = torch.sigmoid((strength - threshold) / temperature).sum(dim=-1).mean() if strength.numel() else pred.new_zeros(())
+    candidate_count = _scalar(org.get("candidate_edge_count"), device, dtype)
+    if org.get("candidate_edge_count") is None:
+        candidate_count = pred.new_tensor(float(strength.shape[-1]))
+    selected_mask = org.get("edge_active_mask")
+    if torch.is_tensor(selected_mask):
+        selected_mask = selected_mask.to(device=device, dtype=dtype)
+        selected_count = selected_mask.sum(dim=-1).mean()
+    else:
+        selected_mask = torch.ones_like(strength)
+        selected_count = _scalar(org.get("selected_edge_count"), device, dtype)
+        if org.get("selected_edge_count") is None:
+            selected_count = candidate_count
+    effective_mask = org.get("effective_edge_mask")
+    if torch.is_tensor(effective_mask):
+        effective_mask = effective_mask.to(device=device, dtype=dtype)
+        viable_selected = effective_mask.sum(dim=-1).mean()
+    else:
+        viable_selected = _scalar(org.get("viable_selected_edge_count"), device, dtype)
+        if org.get("viable_selected_edge_count") is None:
+            viable_selected = selected_count
 
     A_mh = org.get("A_mh")
     A_eh = org.get("A_eh")
@@ -105,9 +148,45 @@ def compute_honf_diagnostics(
     module_mass = module_mass.to(device=device, dtype=dtype) if torch.is_tensor(module_mass) else pred.new_zeros(*strength.shape)
     env_mass = env_mass.to(device=device, dtype=dtype) if torch.is_tensor(env_mass) else pred.new_zeros(*strength.shape)
 
+    empty_selected = org.get("empty_selected_edge_count")
+    if empty_selected is None and strength.numel():
+        empty_mask = selected_mask.to(dtype=torch.bool) & (
+            (module_mass <= EPS) | (env_mass <= EPS)
+        )
+        empty_selected_value = empty_mask.to(dtype=dtype).sum(dim=-1).mean()
+    else:
+        empty_selected_value = _scalar(empty_selected, device, dtype)
+
     values = {
-        "active_edge_count": active,
-        "soft_active_edge_count": soft_active,
+        "candidate_edge_count": candidate_count,
+        "selected_edge_count": selected_count,
+        "viable_selected_edge_count": viable_selected,
+        "functional_edge_count": functional,
+        "soft_functional_edge_count": soft_functional,
+        "empty_selected_edge_count": empty_selected_value,
+        "effective_query_edge_count": _scalar(
+            routing.get("effective_query_edge_count", routing.get("mean_query_nonzero_edges")),
+            device,
+            dtype,
+        ),
+        "selection_module_coverage": _scalar(org.get("selection_module_coverage"), device, dtype),
+        "selection_environment_coverage": _scalar(org.get("selection_environment_coverage"), device, dtype),
+        "candidate_module_nonzero_fraction": _scalar(org.get("candidate_module_nonzero_fraction"), device, dtype),
+        "selected_module_nonzero_fraction": _scalar(org.get("selected_module_nonzero_fraction"), device, dtype),
+        "candidate_environment_nonzero_fraction": _scalar(org.get("candidate_environment_nonzero_fraction"), device, dtype),
+        "selected_environment_nonzero_fraction": _scalar(org.get("selected_environment_nonzero_fraction"), device, dtype),
+        "selected_module_probability_mass_min": _scalar(org.get("selected_module_probability_mass_min"), device, dtype),
+        "selected_module_probability_mass_p05": _scalar(org.get("selected_module_probability_mass_p05"), device, dtype),
+        "selected_module_probability_mass_mean": _scalar(org.get("selected_module_probability_mass_mean"), device, dtype),
+        "selected_environment_probability_mass_min": _scalar(org.get("selected_environment_probability_mass_min"), device, dtype),
+        "selected_environment_probability_mass_p05": _scalar(org.get("selected_environment_probability_mass_p05"), device, dtype),
+        "selected_environment_probability_mass_mean": _scalar(org.get("selected_environment_probability_mass_mean"), device, dtype),
+        "query_edge_retained_probability_mass_min": _scalar(routing.get("query_edge_retained_probability_mass_min"), device, dtype),
+        "query_edge_retained_probability_mass_p05": _scalar(routing.get("query_edge_retained_probability_mass_p05"), device, dtype),
+        "query_edge_retained_probability_mass_mean": _scalar(routing.get("query_edge_retained_probability_mass_mean"), device, dtype),
+        "retained_module_incidence_mass_min": _scalar(routing.get("retained_module_incidence_mass_min"), device, dtype),
+        "retained_module_incidence_mass_p05": _scalar(routing.get("retained_module_incidence_mass_p05"), device, dtype),
+        "retained_module_incidence_mass_mean": _scalar(routing.get("retained_module_incidence_mass_mean"), device, dtype),
         "A_mh_entropy": A_mh_entropy,
         "A_eh_entropy": A_eh_entropy,
         "module_mass_entropy_norm": _entropy_norm(module_mass, dim=-1).mean() if module_mass.numel() else pred.new_zeros(()),

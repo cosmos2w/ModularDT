@@ -101,6 +101,8 @@ class UnifiedForwardConfig:
     selection_coverage_rate: float = 0.95
     selection_token_threshold: float = 0.50
     selection_maximum_redundancy: float = 0.85
+    candidate_module_mass_fraction_floor: float = 0.01
+    candidate_environment_mass_fraction_floor: float = 0.01
 
     module_assignment_normalizer: str = "softmax"
     environment_assignment_normalizer: str = "softmax"
@@ -109,6 +111,7 @@ class UnifiedForwardConfig:
 
     environment_locality_mode: str = "none"
     environment_locality_strength: float = 1.0
+    locality_radius_cap: float = 3.0
     minimum_region_scale: float = 0.05
 
     mechanism_state_mode: str = "residual_concat"
@@ -187,6 +190,10 @@ class UnifiedForwardConfig:
             raise ValueError("selection_token_threshold must be in (0, 1].")
         if not 0.0 <= float(self.selection_maximum_redundancy) <= 1.0:
             raise ValueError("selection_maximum_redundancy must be in [0, 1].")
+        if not 0.0 < float(self.candidate_module_mass_fraction_floor) <= 1.0:
+            raise ValueError("candidate_module_mass_fraction_floor must be in (0, 1].")
+        if not 0.0 < float(self.candidate_environment_mass_fraction_floor) <= 1.0:
+            raise ValueError("candidate_environment_mass_fraction_floor must be in (0, 1].")
         normalizers = {
             self.module_assignment_normalizer,
             self.environment_assignment_normalizer,
@@ -198,10 +205,14 @@ class UnifiedForwardConfig:
             raise ValueError("entmax_alpha must be in (1, 2].")
         if "entmax15" in normalizers and abs(float(self.entmax_alpha) - 1.5) > 1.0e-8:
             raise ValueError("entmax15 assignment modes require entmax_alpha=1.5.")
-        if self.environment_locality_mode not in {"none", "compact_kernel"}:
-            raise ValueError("environment_locality_mode must be 'none' or 'compact_kernel'.")
+        if self.environment_locality_mode not in {"none", "compact_kernel", "bounded_gaussian"}:
+            raise ValueError(
+                "environment_locality_mode must be 'none', 'compact_kernel', or 'bounded_gaussian'."
+            )
         if float(self.environment_locality_strength) < 0.0:
             raise ValueError("environment_locality_strength must be >= 0.")
+        if float(self.locality_radius_cap) <= 0.0:
+            raise ValueError("locality_radius_cap must be positive.")
         if float(self.minimum_region_scale) <= 0.0:
             raise ValueError("minimum_region_scale must be positive.")
         if self.mechanism_state_mode not in {"residual_concat", "descriptor_first"}:

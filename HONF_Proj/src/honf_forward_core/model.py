@@ -50,6 +50,11 @@ class HONFNeuralField(nn.Module):
 
         self.organizer.set_training_progress(epoch=epoch, total_epochs=total_epochs)
 
+    def selection_state(self) -> Dict[str, Optional[int]]:
+        """Return the serialized organizer selection progress."""
+
+        return self.organizer.selection_state()
+
     def encode_and_organize(self, batch: BatchData) -> Dict[str, torch.Tensor]:
         """Encode generic inputs and build static HONF organizer state.
 

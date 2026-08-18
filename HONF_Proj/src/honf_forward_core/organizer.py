@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 
 from .config import UnifiedForwardConfig
-from .routing import normalize_assignment
+from .routing import locality_bias, normalize_assignment
 
 
 EPS = 1e-6
@@ -118,6 +118,27 @@ def _assignment_purity(assignment: torch.Tensor) -> torch.Tensor:
     winner_mask = torch.nn.functional.one_hot(winners, num_classes=assignment.shape[-1]).to(assignment.dtype)
     numerator = (assignment * winner_mask).sum(dim=1)
     return numerator / assignment.sum(dim=1).clamp_min(EPS)
+
+
+def _masked_mass_statistics(
+    mass: torch.Tensor,
+    token_mask: Optional[torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return per-case minimum, p05, and mean retained token mass."""
+
+    minima = []
+    p05s = []
+    means = []
+    for batch_index in range(mass.shape[0]):
+        values = mass[batch_index]
+        if token_mask is not None:
+            values = values[token_mask[batch_index].to(device=mass.device, dtype=torch.bool)]
+        if values.numel() == 0:
+            values = mass.new_zeros(1)
+        minima.append(values.amin())
+        p05s.append(torch.quantile(values.float(), 0.05).to(dtype=mass.dtype))
+        means.append(values.mean())
+    return torch.stack(minima), torch.stack(p05s), torch.stack(means)
 
 
 def _descriptor_first_features(
@@ -286,8 +307,13 @@ class ExchangeableSlotOrganizer(nn.Module):
         self.me_key = nn.Linear(hidden_dim, hidden_dim)
         self.me_context_proj = nn.Linear(hidden_dim, hidden_dim)
         self._runtime_edge_capacity = int(config.edge_capacity)
-        self._selection_epoch = 0
-        self._selection_total_epochs: Optional[int] = None
+        # Persist explicit selection progress with the model. Standalone
+        # inference defaults to the final/post-warmup policy.
+        self.register_buffer(
+            "_selection_epoch_state",
+            torch.tensor(int(config.selection_warmup_epochs), dtype=torch.long),
+        )
+        self.register_buffer("_selection_total_epochs_state", torch.tensor(-1, dtype=torch.long))
 
     def set_edge_capacity(self, capacity: int) -> None:
         """Set the runtime candidate budget without changing parameters."""
@@ -299,14 +325,49 @@ class ExchangeableSlotOrganizer(nn.Module):
         self._runtime_edge_capacity = int(capacity)
 
     def set_training_progress(self, *, epoch: int, total_epochs: Optional[int] = None) -> None:
-        """Update detached selection warmup state once per training epoch."""
+        """Persist the explicit selection phase used by train and evaluation."""
 
         if int(epoch) < 0:
             raise ValueError("Training epoch must be nonnegative.")
         if total_epochs is not None and int(total_epochs) <= 0:
             raise ValueError("total_epochs must be positive when provided.")
-        self._selection_epoch = int(epoch)
-        self._selection_total_epochs = None if total_epochs is None else int(total_epochs)
+        self._selection_epoch_state.fill_(int(epoch))
+        self._selection_total_epochs_state.fill_(-1 if total_epochs is None else int(total_epochs))
+
+    def selection_state(self) -> Dict[str, Optional[int]]:
+        """Return the serialized selection progress as plain checkpoint data."""
+
+        total = int(self._selection_total_epochs_state.item())
+        return {
+            "epoch": int(self._selection_epoch_state.item()),
+            "total_epochs": None if total < 0 else total,
+        }
+
+    def _load_from_state_dict(
+        self,
+        state_dict: Dict[str, torch.Tensor],
+        prefix: str,
+        local_metadata: Dict[str, object],
+        strict: bool,
+        missing_keys: list[str],
+        unexpected_keys: list[str],
+        error_msgs: list[str],
+    ) -> None:
+        """Load pre-selection-state checkpoints without weakening strict loads."""
+
+        for name in ("_selection_epoch_state", "_selection_total_epochs_state"):
+            key = prefix + name
+            if key not in state_dict:
+                state_dict[key] = getattr(self, name).detach().clone()
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def forward(
         self,
@@ -381,19 +442,63 @@ class ExchangeableSlotOrganizer(nn.Module):
             previous_region_coords=previous_region_coords,
             previous_region_scale=previous_region_scale,
         )
+        candidate_module_mass_raw = candidate_A_mh.sum(dim=1)
+        candidate_env_mass_raw = candidate_A_eh.sum(dim=1)
+        candidate_module_mass_fraction = candidate_module_mass_raw / candidate_module_mass_raw.sum(
+            dim=-1, keepdim=True
+        ).clamp_min(EPS)
+        candidate_env_mass_fraction = candidate_env_mass_raw / candidate_env_mass_raw.sum(
+            dim=-1, keepdim=True
+        ).clamp_min(EPS)
+        raw_viable_mask = (
+            candidate_module_mass_fraction > float(cfg.candidate_module_mass_fraction_floor)
+        ) & (
+            candidate_env_mass_fraction > float(cfg.candidate_environment_mass_fraction_floor)
+        )
+        # A completely disjoint candidate partition can leave no joint support.
+        # Promote exactly one deterministic geometric-mass fallback so selected
+        # token rows can still conserve probability mass.
+        edge_viable_mask = raw_viable_mask.clone()
+        no_viable = ~edge_viable_mask.any(dim=-1)
+        if bool(no_viable.any()):
+            geometric_mass = torch.sqrt(
+                candidate_module_mass_fraction * candidate_env_mass_fraction
+            )
+            fallback = geometric_mass.argmax(dim=-1, keepdim=True)
+            promoted = torch.zeros_like(edge_viable_mask).scatter_(-1, fallback, True)
+            edge_viable_mask = edge_viable_mask | (promoted & no_viable.unsqueeze(-1))
+
         module_purity = _assignment_purity(candidate_A_mh)
         env_purity = _assignment_purity(candidate_A_eh)
-        edge_quality = torch.sqrt(module_purity * env_purity)
+        ordinary_purity = torch.sqrt(module_purity * env_purity)
+        module_attenuation = (
+            candidate_module_mass_fraction / float(cfg.candidate_module_mass_fraction_floor)
+        ).clamp(max=1.0)
+        env_attenuation = (
+            candidate_env_mass_fraction / float(cfg.candidate_environment_mass_fraction_floor)
+        ).clamp(max=1.0)
+        # Preserve ordinary purity unchanged above both viability floors.
+        edge_quality = ordinary_purity * torch.sqrt(module_attenuation * env_attenuation)
         edge_active_mask = self._select_active_edges(
             candidate_A_mh,
             candidate_A_eh,
             edge_quality,
             codes,
             module_present,
+            edge_viable_mask,
             cfg,
         )
-        A_mh = self._mask_and_renormalize(candidate_A_mh, edge_active_mask, module_present)
-        A_eh = self._mask_and_renormalize(candidate_A_eh, edge_active_mask, None)
+        effective_edge_mask = edge_active_mask * edge_viable_mask.to(dtype=edge_active_mask.dtype)
+        A_mh, selected_module_probability_mass = self._mask_and_renormalize(
+            candidate_A_mh,
+            effective_edge_mask,
+            module_present,
+        )
+        A_eh, selected_environment_probability_mass = self._mask_and_renormalize(
+            candidate_A_eh,
+            effective_edge_mask,
+            None,
+        )
         return self._assemble_output(
             module_tokens=module_tokens,
             module_tokens_for_hyper=module_tokens_for_hyper,
@@ -411,6 +516,13 @@ class ExchangeableSlotOrganizer(nn.Module):
             candidate_codes=codes,
             edge_quality=edge_quality,
             edge_active_mask=edge_active_mask,
+            raw_viable_mask=raw_viable_mask,
+            edge_viable_mask=edge_viable_mask,
+            effective_edge_mask=effective_edge_mask,
+            candidate_module_mass_fraction=candidate_module_mass_fraction,
+            candidate_env_mass_fraction=candidate_env_mass_fraction,
+            selected_module_probability_mass=selected_module_probability_mass,
+            selected_environment_probability_mass=selected_environment_probability_mass,
             cfg=cfg,
         )
 
@@ -507,7 +619,7 @@ class ExchangeableSlotOrganizer(nn.Module):
             self.env_query(env_tokens),
             self.env_key(slots),
         ) / scale
-        if cfg.environment_locality_mode == "compact_kernel":
+        if cfg.environment_locality_mode != "none":
             env_logits = env_logits + self._environment_locality_bias(
                 env_coords,
                 source_coords if previous_region_coords is None else previous_region_coords,
@@ -530,7 +642,7 @@ class ExchangeableSlotOrganizer(nn.Module):
         region_scale: Optional[torch.Tensor],
         cfg: UnifiedForwardConfig,
     ) -> torch.Tensor:
-        """Return a broad-first compact-support bias for environment tokens."""
+        """Return the configured normalized-distance bias for environment tokens."""
 
         scale_x, scale_y = cfg.spatial_scale()
         if region_scale is None:
@@ -546,8 +658,12 @@ class ExchangeableSlotOrganizer(nn.Module):
             anisotropic_scale = torch.maximum(region_scale, minimum).unsqueeze(1)
         delta = _relative_delta(region_coords[:, None, :, :], env_coords[:, :, None, :], cfg)
         radius_square = (delta / anisotropic_scale).square().sum(dim=-1)
-        compactness = torch.relu(1.0 - radius_square).square()
-        return float(cfg.environment_locality_strength) * torch.log(compactness + EPS)
+        return locality_bias(
+            radius_square,
+            mode=cfg.environment_locality_mode,
+            strength=cfg.environment_locality_strength,
+            radius_cap=cfg.locality_radius_cap,
+        )
 
     def _select_active_edges(
         self,
@@ -556,13 +672,17 @@ class ExchangeableSlotOrganizer(nn.Module):
         edge_quality: torch.Tensor,
         candidate_codes: torch.Tensor,
         module_present: torch.Tensor,
+        edge_viable_mask: torch.Tensor,
         cfg: UnifiedForwardConfig,
     ) -> torch.Tensor:
         """Select the smallest quality/novelty set that reaches coverage."""
 
         if cfg.edge_selection_mode == "all":
-            return torch.ones_like(edge_quality).detach()
-        warmup = self.training and self._selection_epoch < int(cfg.selection_warmup_epochs)
+            return edge_viable_mask.to(dtype=edge_quality.dtype).detach()
+        # Selection phase is an epoch property, not a module train/eval-mode
+        # property. This keeps validation topology identical to training during
+        # warmup while leaving fixed-projection organization untouched.
+        warmup = int(self._selection_epoch_state.item()) < int(cfg.selection_warmup_epochs)
         selected_masks = []
         tie_weights = torch.linspace(
             0.5,
@@ -574,8 +694,9 @@ class ExchangeableSlotOrganizer(nn.Module):
         tie_scores = torch.einsum("bkh,h->bk", candidate_codes, tie_weights)
         with torch.no_grad():
             for batch_index in range(edge_quality.shape[0]):
+                viable = torch.nonzero(edge_viable_mask[batch_index], as_tuple=False).squeeze(-1).tolist()
                 order = sorted(
-                    range(edge_quality.shape[1]),
+                    viable,
                     key=lambda index: (
                         float(edge_quality[batch_index, index]),
                         float(tie_scores[batch_index, index]),
@@ -583,8 +704,9 @@ class ExchangeableSlotOrganizer(nn.Module):
                     reverse=True,
                 )
                 if warmup:
-                    count = min(int(cfg.initial_active_edges), len(order))
-                    selected = order[:count]
+                    # Warmup trains every viable candidate rather than starving
+                    # slots behind a detached top-K rank.
+                    selected = order
                 else:
                     selected = self._coverage_selection(
                         candidate_A_mh[batch_index],
@@ -687,14 +809,32 @@ class ExchangeableSlotOrganizer(nn.Module):
         assignment: torch.Tensor,
         edge_active_mask: torch.Tensor,
         token_mask: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        """Zero inactive candidates and recover unit row assignment mass."""
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Mask candidates, record retained mass, and recover unit token rows."""
 
-        selected = assignment * edge_active_mask.unsqueeze(1)
+        selected_mask = edge_active_mask.to(device=assignment.device, dtype=torch.bool)
+        selected = assignment * selected_mask.unsqueeze(1).to(dtype=assignment.dtype)
+        retained_mass = selected.sum(dim=-1)
+        active_tokens = (
+            torch.ones_like(retained_mass, dtype=torch.bool)
+            if token_mask is None
+            else token_mask.to(device=assignment.device, dtype=torch.bool)
+        )
+        unsupported = active_tokens & (retained_mass <= EPS)
+        if bool(unsupported.any()):
+            candidate_scores = assignment.masked_fill(
+                ~selected_mask.unsqueeze(1),
+                torch.finfo(assignment.dtype).min,
+            )
+            fallback_index = candidate_scores.argmax(dim=-1)
+            fallback = torch.nn.functional.one_hot(
+                fallback_index,
+                num_classes=assignment.shape[-1],
+            ).to(dtype=assignment.dtype).detach()
+            selected = selected + fallback * unsupported.unsqueeze(-1).to(dtype=assignment.dtype)
         selected = selected / selected.sum(dim=-1, keepdim=True).clamp_min(EPS)
-        if token_mask is not None:
-            selected = selected * token_mask.unsqueeze(-1)
-        return selected
+        selected = selected * active_tokens.unsqueeze(-1).to(dtype=assignment.dtype)
+        return selected, retained_mass
 
     def _assemble_output(
         self,
@@ -715,6 +855,13 @@ class ExchangeableSlotOrganizer(nn.Module):
         candidate_codes: torch.Tensor,
         edge_quality: torch.Tensor,
         edge_active_mask: torch.Tensor,
+        raw_viable_mask: torch.Tensor,
+        edge_viable_mask: torch.Tensor,
+        effective_edge_mask: torch.Tensor,
+        candidate_module_mass_fraction: torch.Tensor,
+        candidate_env_mass_fraction: torch.Tensor,
+        selected_module_probability_mass: torch.Tensor,
+        selected_environment_probability_mass: torch.Tensor,
         cfg: UnifiedForwardConfig,
     ) -> Dict[str, torch.Tensor]:
         """Assemble selected geometry, descriptors, and organizer diagnostics."""
@@ -739,7 +886,7 @@ class ExchangeableSlotOrganizer(nn.Module):
             hyper_region_coords,
             cfg,
         )
-        hyper_strength = torch.sqrt(hyper_module_mass * hyper_env_mass + EPS) * edge_active_mask
+        hyper_strength = torch.sqrt(hyper_module_mass * hyper_env_mass + EPS) * effective_edge_mask
         hyper_module_purity = _assignment_purity(A_mh)
         hyper_env_purity = _assignment_purity(A_eh)
         mechanism_descriptor_features = _descriptor_first_features(
@@ -751,7 +898,7 @@ class ExchangeableSlotOrganizer(nn.Module):
             hyper_env_mass,
             hyper_module_purity,
             hyper_env_purity,
-            edge_active_mask,
+            effective_edge_mask,
             cfg,
         )
         (
@@ -773,8 +920,8 @@ class ExchangeableSlotOrganizer(nn.Module):
             env_tokens.shape[1],
             cfg,
         )
-        selected_candidate_mass_m = (candidate_A_mh * edge_active_mask.unsqueeze(1)).sum(dim=-1)
-        selected_candidate_mass_e = (candidate_A_eh * edge_active_mask.unsqueeze(1)).sum(dim=-1)
+        selected_candidate_mass_m = selected_module_probability_mass
+        selected_candidate_mass_e = selected_environment_probability_mass
         active_modules = module_present > 0
         threshold = float(cfg.selection_token_threshold)
         module_coverage = (
@@ -787,18 +934,29 @@ class ExchangeableSlotOrganizer(nn.Module):
             ((candidate_A_mh > 0) & active_modules.unsqueeze(-1)).sum(dim=(1, 2)).float()
             / module_entry_count.float()
         )
-        module_nonzero_fraction = (
+        selected_module_nonzero_fraction = (
             ((A_mh > 0) & active_modules.unsqueeze(-1)).sum(dim=(1, 2)).float()
             / module_entry_count.float()
         )
         candidate_env_nonzero_fraction = (candidate_A_eh > 0).float().mean(dim=(1, 2))
-        env_nonzero_fraction = (A_eh > 0).float().mean(dim=(1, 2))
+        selected_env_nonzero_fraction = (A_eh > 0).float().mean(dim=(1, 2))
+        module_mass_min, module_mass_p05, module_mass_mean = _masked_mass_statistics(
+            selected_module_probability_mass,
+            active_modules,
+        )
+        env_mass_min, env_mass_p05, env_mass_mean = _masked_mass_statistics(
+            selected_environment_probability_mass,
+            None,
+        )
+        empty_selected = edge_active_mask.to(dtype=torch.bool) & (
+            (module_mass_raw <= EPS) | (env_mass_raw <= EPS)
+        )
         return {
             "A_mh": A_mh,
             "A_eh": A_eh,
             "candidate_A_mh": candidate_A_mh,
             "candidate_A_eh": candidate_A_eh,
-            "hyper_state": candidate_state * edge_active_mask.unsqueeze(-1),
+            "hyper_state": candidate_state * effective_edge_mask.unsqueeze(-1),
             "candidate_hyper_state": candidate_state,
             "candidate_slot_codes": candidate_codes,
             "hyper_source_coords": hyper_source_coords,
@@ -816,14 +974,28 @@ class ExchangeableSlotOrganizer(nn.Module):
             "hyper_strength": hyper_strength,
             "edge_quality": edge_quality,
             "edge_active_mask": edge_active_mask,
+            "candidate_edge_viable_mask": raw_viable_mask.to(dtype=edge_active_mask.dtype),
+            "edge_viable_mask": edge_viable_mask.to(dtype=edge_active_mask.dtype),
+            "effective_edge_mask": effective_edge_mask,
+            "candidate_module_mass_fraction": candidate_module_mass_fraction,
+            "candidate_environment_mass_fraction": candidate_env_mass_fraction,
             "candidate_edge_count": edge_quality.new_full((edge_quality.shape[0],), float(edge_quality.shape[1])),
+            "selected_edge_count": edge_active_mask.sum(dim=-1),
+            "viable_selected_edge_count": effective_edge_mask.sum(dim=-1),
+            "empty_selected_edge_count": empty_selected.sum(dim=-1).to(dtype=edge_quality.dtype),
             "active_edge_count": edge_active_mask.sum(dim=-1),
             "selection_module_coverage": module_coverage,
             "selection_environment_coverage": env_coverage,
-            "candidate_module_assignment_nonzero_fraction": candidate_module_nonzero_fraction,
-            "candidate_environment_assignment_nonzero_fraction": candidate_env_nonzero_fraction,
-            "module_assignment_nonzero_fraction": module_nonzero_fraction,
-            "environment_assignment_nonzero_fraction": env_nonzero_fraction,
+            "candidate_module_nonzero_fraction": candidate_module_nonzero_fraction,
+            "candidate_environment_nonzero_fraction": candidate_env_nonzero_fraction,
+            "selected_module_nonzero_fraction": selected_module_nonzero_fraction,
+            "selected_environment_nonzero_fraction": selected_env_nonzero_fraction,
+            "selected_module_probability_mass_min": module_mass_min,
+            "selected_module_probability_mass_p05": module_mass_p05,
+            "selected_module_probability_mass_mean": module_mass_mean,
+            "selected_environment_probability_mass_min": env_mass_min,
+            "selected_environment_probability_mass_p05": env_mass_p05,
+            "selected_environment_probability_mass_mean": env_mass_mean,
             "mechanism_geometry_features": mechanism_geometry_features,
             "mechanism_mass_features": mechanism_mass_features,
             "mechanism_raw_features": mechanism_raw_features,
@@ -884,6 +1056,13 @@ class HypergraphOrganizerCore(nn.Module):
 
         if self.config.organizer_mode == "exchangeable_slots":
             self.exchangeable.set_training_progress(epoch=epoch, total_epochs=total_epochs)
+
+    def selection_state(self) -> Dict[str, Optional[int]]:
+        """Return explicit organizer selection progress for checkpoint metadata."""
+
+        if self.config.organizer_mode == "exchangeable_slots":
+            return self.exchangeable.selection_state()
+        return {"epoch": None, "total_epochs": None}
 
     def forward(
         self,

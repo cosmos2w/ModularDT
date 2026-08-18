@@ -10,6 +10,26 @@ import torch
 EPS = 1e-12
 
 
+def locality_bias(
+    radius_square: torch.Tensor,
+    *,
+    mode: str,
+    strength: float,
+    radius_cap: float,
+) -> torch.Tensor:
+    """Convert normalized squared distance into a routing-logit bias."""
+
+    if mode == "bounded_gaussian":
+        cap_square = radius_square.new_tensor(float(radius_cap) ** 2)
+        return -0.5 * float(strength) * torch.minimum(radius_square, cap_square)
+    if mode == "compact_kernel":
+        compactness = torch.relu(1.0 - radius_square).square()
+        return float(strength) * torch.log(compactness + 1.0e-6)
+    if mode == "none":
+        return torch.zeros_like(radius_square)
+    raise ValueError(f"Unsupported locality mode: {mode!r}.")
+
+
 def entmax15(
     logits: torch.Tensor,
     *,
@@ -83,4 +103,4 @@ def normalize_assignment(
     return probabilities / probabilities.sum(dim=dim, keepdim=True).clamp_min(EPS)
 
 
-__all__ = ["entmax15", "normalize_assignment"]
+__all__ = ["entmax15", "locality_bias", "normalize_assignment"]

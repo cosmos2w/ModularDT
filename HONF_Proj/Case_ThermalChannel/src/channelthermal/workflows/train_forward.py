@@ -649,6 +649,7 @@ def save_checkpoint(
             "best_metrics": dict(best_metrics or {}),
             "model_config": config_payload,
             "model_state_dict": model.state_dict(),
+            "selection_state": model.selection_state(),
             "optimizer_state_dict": None if optimizer is None else optimizer.state_dict(),
             "scaler_state_dict": None if scaler is None else scaler.state_dict(),
             "train_config": train_config,
@@ -813,6 +814,18 @@ def _read_metric_history(metrics_path: Path) -> Dict[str, list[float]]:
                     continue
                 if math.isfinite(parsed):
                     columns.setdefault(key, []).append(parsed)
+    # Read-only aliases keep plots usable for historical metrics.csv files.
+    aliases = {
+        "selected_edge_count": "active_edge_count",
+        "functional_edge_count": "active_edge_count",
+        "soft_functional_edge_count": "soft_active_edge_count",
+    }
+    for new_name, old_name in aliases.items():
+        for prefix in ("", "val_"):
+            new_key = prefix + new_name
+            old_key = prefix + old_name
+            if new_key not in columns and old_key in columns:
+                columns[new_key] = list(columns[old_key])
     return columns
 
 
@@ -825,8 +838,7 @@ def _plot_metric_group(
     ylabel: str = "value",
     log_scale: bool = True,
     y_min_zero: bool = False,
-    reference_y: Optional[float] = None,
-    reference_label: Optional[str] = None,
+    reference_lines: tuple[tuple[float, str], ...] = (),
 ) -> None:
     """Perform the plot metric group operation used by this module."""
 
@@ -841,11 +853,16 @@ def _plot_metric_group(
         if key.startswith("val_"):
             label = f"val {label}"
         ax.plot(epochs[: len(values)], values, label=label)
-    if reference_y is not None and epochs:
-        # Active-edge count is thresholded and can be lower than total H. The
-        # reference line makes `num_hyperedges` visible without changing the
-        # scalar diagnostic definition.
-        ax.axhline(float(reference_y), color="black", linestyle="--", linewidth=1.0, alpha=0.55, label=reference_label or "reference")
+    if epochs:
+        for index, (reference_y, reference_label) in enumerate(reference_lines):
+            ax.axhline(
+                float(reference_y),
+                color="black" if index == 0 else "#666666",
+                linestyle="--" if index == 0 else ":",
+                linewidth=1.0,
+                alpha=0.60,
+                label=reference_label,
+            )
     ax.set_title(title)
     ax.set_xlabel("epoch")
     ax.set_ylabel(ylabel)
@@ -853,24 +870,33 @@ def _plot_metric_group(
         ax.set_yscale("log")
     if y_min_zero:
         _, top = ax.get_ylim()
-        ax.set_ylim(bottom=0.0, top=max(float(top), float(reference_y or 0.0) * 1.10, 1.0))
+        reference_max = max((value for value, _ in reference_lines), default=0.0)
+        ax.set_ylim(bottom=0.0, top=max(float(top), float(reference_max) * 1.10, 1.0))
     ax.grid(True, alpha=0.25)
     if ax.lines:
         ax.legend(fontsize=8)
 
 
-def _resolved_num_hyperedges(run_dir: Path) -> Optional[int]:
-    """Perform the resolved num hyperedges operation used by this module."""
+def _resolved_active_edge_references(run_dir: Path) -> tuple[tuple[float, str], ...]:
+    """Return configured candidate/selection references for activity plots."""
 
     config_path = run_dir / "config_resolved.json"
     if not config_path.exists():
-        return None
+        return ()
     try:
         payload = read_json(config_path)
-        value = payload.get("model", {}).get("core_honf", {}).get("num_hyperedges")
-        return None if value is None else int(value)
+        core = payload.get("model", {}).get("core_honf", {})
+        if core.get("organizer_mode", "fixed_projection") == "exchangeable_slots":
+            references = []
+            for key in ("edge_capacity", "initial_active_edges"):
+                value = core.get(key)
+                if value is not None:
+                    references.append((float(value), f"{key}={int(value)}"))
+            return tuple(references)
+        value = core.get("num_hyperedges")
+        return () if value is None else ((float(value), f"num_hyperedges={int(value)}"),)
     except (OSError, TypeError, ValueError):
-        return None
+        return ()
 
 
 def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
@@ -891,7 +917,7 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
     # Detailed scalar diagnostics remain in metrics.csv and focused plots below.
     diagnostics_dir = run_dir / "diagnostic_plots"
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
-    num_hyperedges = _resolved_num_hyperedges(run_dir)
+    active_edge_references = _resolved_active_edge_references(run_dir)
     stale_root_plots = [
         "loss_curves.png",
         "loss_total_curve.png",
@@ -924,7 +950,7 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
             False,
         ),
         ("Temperature", ("temperature_mse", "val_temperature_mse"), "mse", True, False),
-        ("Thresholded Active H Edges", ("active_edge_count", "val_active_edge_count", "soft_active_edge_count", "val_soft_active_edge_count"), "edges", False, True),
+        ("Selected and Functional H-Edge Activity", ("selected_edge_count", "val_selected_edge_count", "functional_edge_count", "val_functional_edge_count", "soft_functional_edge_count", "val_soft_functional_edge_count"), "edges", False, True),
     ]
     fig, axes = plt.subplots(2, 3, figsize=(15.5, 7.4), constrained_layout=True)
     for ax, (title, keys, ylabel, log_scale, y_min_zero) in zip(axes.reshape(-1), panels):
@@ -936,8 +962,7 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
             ylabel=ylabel,
             log_scale=log_scale,
             y_min_zero=y_min_zero,
-            reference_y=float(num_hyperedges) if y_min_zero and num_hyperedges is not None else None,
-            reference_label=f"num_hyperedges={num_hyperedges}" if y_min_zero and num_hyperedges is not None else None,
+            reference_lines=active_edge_references if y_min_zero else (),
         )
     fig.suptitle("HONF-CL Training Overview", fontsize=13)
     fig.savefig(str(run_dir / "loss_curve.png"), dpi=160)
@@ -968,14 +993,16 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
             False,
         ),
         "honf_entropy_activity_curve.png": (
-            "HONF Entropy and Thresholded Active H Edges",
+            "HONF Entropy and Selected H-Edge Count",
             (
                 "A_mh_entropy",
                 "val_A_mh_entropy",
                 "A_eh_entropy",
                 "val_A_eh_entropy",
-                "active_edge_count",
-                "val_active_edge_count",
+                "selected_edge_count",
+                "val_selected_edge_count",
+                "functional_edge_count",
+                "val_functional_edge_count",
             ),
             "value",
             False,
@@ -1008,8 +1035,7 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
             ylabel=ylabel,
             log_scale=log_scale,
             y_min_zero=y_min_zero,
-            reference_y=float(num_hyperedges) if y_min_zero and num_hyperedges is not None else None,
-            reference_label=f"num_hyperedges={num_hyperedges}" if y_min_zero and num_hyperedges is not None else None,
+            reference_lines=active_edge_references if y_min_zero else (),
         )
         fig.savefig(str(diagnostics_dir / filename), dpi=160)
         plt.close(fig)

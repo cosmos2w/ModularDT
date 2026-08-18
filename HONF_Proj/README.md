@@ -2,7 +2,7 @@
 
 `HONF_Proj` is the installable implementation of the Hypergraph Organized Neural Field (HONF), a neural operator for continuous field prediction around a variable-size set of interacting modules. The repository contains a reusable forward core, a hierarchical inverse core, a strict configuration/runtime layer, and the complete ThermalChannel case with a reusable Stage-A thermal-disk surrogate.
 
-The checkpoint-compatible default forward profile is `enhanced_honf_pairwise`; the opt-in upgraded profile is `adaptive_sparse_additive`. The default preserves fixed-projection organization, context-fusion decoding, softmax routing, and dense execution for old saved configurations and checkpoints. The upgraded profile uses exchangeable candidate edges, descriptor-first mechanism states, entmax15 locality-aware routing, gathered pre-MLP execution, and an exact background-plus-edge additive field.
+The checkpoint-compatible default forward profile is `enhanced_honf_pairwise`; the opt-in upgraded profile is `adaptive_sparse_additive`. The default preserves fixed-projection organization, context-fusion decoding, softmax routing, and dense execution for old saved configurations and checkpoints. The upgraded profile uses exchangeable candidate edges, descriptor-first mechanism states, entmax15 routing with a bounded Gaussian environment/query locality bias, gathered pre-MLP execution, and an exact background-plus-edge additive field.
 
 ## 1. Quick default forward run with the local Stage-A checkpoint
 
@@ -70,10 +70,11 @@ Both maintained profiles use hidden width 256, dropout 0.0, LayerNorm, a (24\tim
 | Purpose | default and checkpoint-compatible | upgraded adaptive sparse architecture |
 | Organizer | `fixed_projection` | `exchangeable_slots` |
 | Edge extent | 6 fixed projections | runtime candidate capacity 8 |
-| Active selection | all six | initial 6, minimum 1, quality/coverage/novelty |
+| Active selection | all six | all viable candidates during warmup; then minimum 1 with quality/coverage/novelty (initial reference 6) |
 | Selection thresholds | n.a. | warmup 200 epochs, coverage 0.95, token mass 0.50, maximum redundancy 0.85 |
+| Candidate viability | n.a. | module and environment normalized mass fractions each above 0.01 |
 | Module/environment/query normalizer | softmax | entmax15 with alpha 1.5 |
-| Locality | none | compact environment and query kernels |
+| Locality | none | bounded Gaussian environment/query bias, strength 1.0, radius cap 3.0 |
 | Mechanism state | `residual_concat`, mechanism encoder off | `descriptor_first`, content residual scale 0.35 |
 | Field assembly | `context_fusion` | exact `edge_additive` |
 | Execution | dense | gathered before pair and edge MLPs |
@@ -81,7 +82,7 @@ Both maintained profiles use hidden width 256, dropout 0.0, LayerNorm, a (24\tim
 | Topology signature flag | false | true |
 | Default run ID | 0002 | 0003 |
 
-The upgraded organizer uses shared parameters and deterministic sinusoidal candidate codes; it has no learned edge-index embedding. Its runtime edge capacity can change without changing parameter shapes. Entmax15 provides exact zero routes, while `routing_execution="gathered"` uses those routes to avoid evaluating expensive MLPs on unselected query-module and query-edge pairs. Dense multiplication by zero is not counted as computational sparsity.
+The upgraded organizer uses shared parameters and deterministic sinusoidal candidate codes; it has no learned edge-index embedding. Its runtime edge capacity can change without changing parameter shapes. Selection progress is serialized, nonviable candidates are excluded, and selected token assignments use detached one-hot fallback before row renormalization when sparse support would otherwise vanish. Entmax15 provides exact zero routes, while `routing_execution="gathered"` renormalizes retained module incidence and query-edge probability before avoiding expensive MLPs on unselected pairs. Dense multiplication by zero is not counted as computational sparsity.
 
 The upgraded field is exactly
 

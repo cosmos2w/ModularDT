@@ -5,6 +5,7 @@ import copy
 import torch
 
 from honf_forward_core.config import BatchData, UnifiedForwardConfig
+from honf_forward_core.decoder import HypergraphGatedPairwiseKernel
 from honf_forward_core.model import HONFNeuralField
 
 
@@ -168,3 +169,77 @@ def test_gathered_query_chunks_match_one_shot() -> None:
         ]
 
     torch.testing.assert_close(reference, torch.cat(chunks, dim=1), rtol=2.0e-6, atol=2.0e-6)
+
+
+def test_gathered_module_truncation_renormalizes_each_query_edge() -> None:
+    config = _config("gathered", module_limit=1, edge_limit=2)
+    kernel = HypergraphGatedPairwiseKernel(config)
+
+    class Ones(torch.nn.Module):
+        def forward(self, values: torch.Tensor) -> torch.Tensor:
+            return torch.ones(*values.shape[:-1], config.hidden_dim, device=values.device, dtype=values.dtype)
+
+    kernel.pair_mlp = Ones()
+    query_xy = torch.tensor([[[0.0, 0.0], [1.0, 0.0]]])
+    module_centers = torch.tensor([[[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]])
+    module_tokens = torch.zeros(1, 3, config.hidden_dim)
+    module_present = torch.ones(1, 3)
+    edge_module_weight = torch.tensor([[[0.9, 0.0], [0.1, 0.5], [0.0, 0.5]]])
+    hyper_attention = torch.tensor([[[1.0, 0.0], [0.0, 1.0]]])
+
+    contexts, _, _, retained = kernel._gathered_edge_pair_context(
+        query_xy,
+        module_centers,
+        module_tokens,
+        module_present,
+        edge_module_weight,
+        hyper_attention,
+        None,
+    )
+
+    assert retained.shape == (1, 2, 2)
+    torch.testing.assert_close(retained[0, 0, 0], torch.tensor(0.9))
+    torch.testing.assert_close(retained[0, 1, 1], torch.tensor(0.5))
+    torch.testing.assert_close(contexts[0, 0, 0], torch.ones(config.hidden_dim))
+    torch.testing.assert_close(contexts[0, 1, 1], torch.ones(config.hidden_dim))
+
+
+def test_query_edge_limit_is_shared_mass_conserving_routing() -> None:
+    config = _config("gathered", module_limit=2, edge_limit=2)
+    config.module_assignment_normalizer = "softmax"
+    config.environment_assignment_normalizer = "softmax"
+    config.query_assignment_normalizer = "softmax"
+    config.environment_locality_mode = "none"
+    model = _initialized_model(config, seed=191)
+    batch = _batch()
+    seen_pair_routes: list[torch.Tensor] = []
+
+    def pair_hook(_module: torch.nn.Module, inputs: tuple[torch.Tensor, ...]) -> None:
+        seen_pair_routes.append(inputs[2].detach().clone())
+
+    handle = model.decoder.pairwise_kernel.register_forward_pre_hook(pair_hook)
+    with torch.no_grad():
+        organized = model.encode_and_organize(batch)
+        output = model.decode_queries(
+            batch.query_xy,
+            None,
+            organized,
+            organized["global_token"],
+            return_routing_maps=True,
+            return_edge_fields=True,
+        )
+    handle.remove()
+
+    routes = output["query_hyper_attention"]
+    assert len(seen_pair_routes) == 1
+    torch.testing.assert_close(seen_pair_routes[0], routes)
+    torch.testing.assert_close(routes.sum(dim=-1), torch.ones_like(routes[..., 0]))
+    assert torch.all((routes > 0).sum(dim=-1) <= 2)
+    retained = output["query_edge_retained_probability_mass"]
+    assert torch.isfinite(retained).all()
+    assert torch.all((retained > 0) & (retained <= 1.0 + 1.0e-6))
+    assert torch.any(retained < 1.0 - 1.0e-6)
+    assert output["retained_module_incidence_mass"].shape == routes.shape
+    assert torch.isfinite(output["retained_module_incidence_mass"]).all()
+    edge_nonzero = output["pred_field_by_edge"].norm(dim=-1) > 0
+    assert torch.all(edge_nonzero.sum(dim=-1) <= 2)

@@ -235,6 +235,27 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[ChannelTher
     allowed_unexpected = [key for key in incompatible.unexpected_keys if not key.startswith(critical_prefixes)]
     if allowed_missing or allowed_unexpected:
         print(f"[warning] allowed non-critical checkpoint differences: missing={allowed_missing}, unexpected={allowed_unexpected}")
+    selection_state = checkpoint.get("selection_state")
+    configured_epochs = checkpoint.get("train_config", {}).get("training", {}).get("epochs")
+    if isinstance(selection_state, dict) and selection_state.get("epoch") is not None:
+        total_epochs = selection_state.get("total_epochs", configured_epochs)
+        model.set_training_progress(
+            epoch=int(selection_state["epoch"]),
+            total_epochs=None if total_epochs is None else int(total_epochs),
+        )
+    else:
+        checkpoint_epoch = checkpoint.get("epoch", checkpoint.get("current_epoch"))
+        # Historical checkpoints restore their recorded epoch. A raw weights
+        # checkpoint with no epoch receives an explicit final inference phase.
+        inference_epoch = (
+            int(checkpoint_epoch)
+            if checkpoint_epoch is not None
+            else int(model_config.core_honf.selection_warmup_epochs)
+        )
+        model.set_training_progress(
+            epoch=inference_epoch,
+            total_epochs=None if configured_epochs is None else int(configured_epochs),
+        )
     model.eval()
     return model, checkpoint
 

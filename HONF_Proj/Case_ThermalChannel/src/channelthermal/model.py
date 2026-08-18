@@ -106,6 +106,11 @@ class ChannelThermalHONFModel(nn.Module):
 
         self.core.set_training_progress(epoch=epoch, total_epochs=total_epochs)
 
+    def selection_state(self) -> Dict[str, Optional[int]]:
+        """Return explicit selection progress for checkpoint metadata."""
+
+        return self.core.selection_state()
+
     def extract_hypergraph_plan(
         self,
         organizer_aux: Dict[str, Any],
@@ -564,14 +569,28 @@ class ChannelThermalHONFModel(nn.Module):
             "hyper_strength",
             "edge_quality",
             "edge_active_mask",
+            "candidate_edge_viable_mask",
+            "edge_viable_mask",
+            "effective_edge_mask",
             "candidate_edge_count",
+            "selected_edge_count",
+            "viable_selected_edge_count",
+            "empty_selected_edge_count",
             "active_edge_count",
             "selection_module_coverage",
             "selection_environment_coverage",
-            "candidate_module_assignment_nonzero_fraction",
-            "candidate_environment_assignment_nonzero_fraction",
-            "module_assignment_nonzero_fraction",
-            "environment_assignment_nonzero_fraction",
+            "candidate_module_mass_fraction",
+            "candidate_environment_mass_fraction",
+            "candidate_module_nonzero_fraction",
+            "candidate_environment_nonzero_fraction",
+            "selected_module_nonzero_fraction",
+            "selected_environment_nonzero_fraction",
+            "selected_module_probability_mass_min",
+            "selected_module_probability_mass_p05",
+            "selected_module_probability_mass_mean",
+            "selected_environment_probability_mass_min",
+            "selected_environment_probability_mass_p05",
+            "selected_environment_probability_mass_mean",
             "module_env_context",
             "module_centers",
             "module_present",
@@ -582,7 +601,15 @@ class ChannelThermalHONFModel(nn.Module):
         }
         org = {key: core_output[key] for key in org_keys if key in core_output}
         org["hyper_thermal_region_coords"] = core_output.get("hyper_region_coords")
-        org["active_hyperedge_mask"] = (core_output["hyper_strength"] > 0.05).to(dtype=core_output["hyper_strength"].dtype)
+        if "candidate_edge_count" in core_output:
+            # Visualize only selected viable field generators.
+            org["active_hyperedge_mask"] = core_output.get(
+                "effective_edge_mask",
+                core_output["edge_active_mask"],
+            )
+        else:
+            # Preserve the fixed-projection compatibility visualization.
+            org["active_hyperedge_mask"] = (core_output["hyper_strength"] > 0.05).to(dtype=core_output["hyper_strength"].dtype)
         org["module_centers"] = adapter.module_centers
         org["module_present"] = adapter.module_present
         org["heat_powers"] = adapter.heat_powers

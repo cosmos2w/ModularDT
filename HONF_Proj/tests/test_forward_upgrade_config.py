@@ -99,6 +99,10 @@ def test_exchangeable_mode_validates_capacity_and_limits() -> None:
     with pytest.raises(ValueError, match="limits"):
         UnifiedForwardConfig.from_dict(payload)
 
+    payload.update(query_module_limit=0, candidate_module_mass_fraction_floor=0.0)
+    with pytest.raises(ValueError, match="candidate_module_mass_fraction_floor"):
+        UnifiedForwardConfig.from_dict(payload)
+
 
 def test_mode_complete_profile_selects_upgrade_architecture() -> None:
     bundle = load_config_bundle("project://src/config_core/forward/adaptive_sparse_additive.json")
@@ -110,6 +114,11 @@ def test_mode_complete_profile_selects_upgrade_architecture() -> None:
     assert core["module_assignment_normalizer"] == "entmax15"
     assert core["environment_assignment_normalizer"] == "entmax15"
     assert core["query_assignment_normalizer"] == "entmax15"
+    assert core["environment_locality_mode"] == "bounded_gaussian"
+    assert core["environment_locality_strength"] == 1.0
+    assert core["locality_radius_cap"] == 3.0
+    assert core["candidate_module_mass_fraction_floor"] == 0.01
+    assert core["candidate_environment_mass_fraction_floor"] == 0.01
     assert core["routing_execution"] == "gathered"
     assert core["topology_signature_enabled"] is True
 

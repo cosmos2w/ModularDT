@@ -17,7 +17,7 @@ import torch.nn as nn
 
 from .config import UnifiedForwardConfig
 from .nn import FourierFeatures, LazyMLP, MLP
-from .routing import normalize_assignment
+from .routing import locality_bias, normalize_assignment
 
 
 EPS = 1e-6
@@ -175,7 +175,7 @@ class HypergraphGatedPairwiseKernel(nn.Module):
         else:
             edge_module_weight = A_mh
         if cfg.routing_execution == "gathered":
-            edge_pair_context, selected_modules, evaluated_pairs = self._gathered_edge_pair_context(
+            edge_pair_context, selected_modules, evaluated_pairs, retained_module_mass = self._gathered_edge_pair_context(
                 query_xy,
                 module_centers,
                 module_tokens,
@@ -197,6 +197,9 @@ class HypergraphGatedPairwiseKernel(nn.Module):
             evaluated_pairs = query_xy.new_tensor(
                 float(query_xy.shape[0] * query_xy.shape[1] * module_present.shape[1])
             )
+            retained_module_mass = edge_module_weight.sum(dim=1)[:, None, :].expand(
+                -1, query_xy.shape[1], -1
+            )
         pair_context = torch.einsum("bqk,bqkh->bqh", hyper_attention, edge_pair_context)
         gate = torch.sigmoid(self.pairwise_kernel_logit)
         available_modules = query_xy.new_tensor(float(module_present.shape[1]))
@@ -216,6 +219,10 @@ class HypergraphGatedPairwiseKernel(nn.Module):
             "pairwise_selected_modules": selected_modules,
             "pairwise_selection_ratio": selected_modules / available_modules.clamp_min(1.0),
             "pairwise_evaluated_pair_count": evaluated_pairs,
+            "retained_module_incidence_mass": retained_module_mass.detach(),
+            "retained_module_incidence_mass_min": retained_module_mass.detach().amin(),
+            "retained_module_incidence_mass_p05": torch.quantile(retained_module_mass.detach().float(), 0.05).to(query_xy.dtype),
+            "retained_module_incidence_mass_mean": retained_module_mass.detach().mean(),
         }
         if return_routing_maps:
             # CORE HONF diagnostic: this dense [B,Q,K] tensor is only materialized
@@ -259,11 +266,12 @@ class HypergraphGatedPairwiseKernel(nn.Module):
         edge_module_weight: torch.Tensor,
         hyper_attention: torch.Tensor,
         raw_features: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Gather active relevant modules before evaluating the pair MLP."""
 
         beta = torch.einsum("bqk,bmk->bqm", hyper_attention, edge_module_weight)
         contexts = []
+        retained_masses = []
         selected_total = 0
         evaluated_pairs = 0
         limit = int(self.config.query_module_limit)
@@ -277,6 +285,7 @@ class HypergraphGatedPairwiseKernel(nn.Module):
                 contexts.append(
                     query_xy.new_zeros(query_xy.shape[1], hyper_attention.shape[-1], module_tokens.shape[-1])
                 )
+                retained_masses.append(query_xy.new_zeros(query_xy.shape[1], hyper_attention.shape[-1]))
                 continue
             if selected_count == available:
                 selected_indices = active_indices.unsqueeze(0).expand(query_xy.shape[1], -1)
@@ -300,11 +309,15 @@ class HypergraphGatedPairwiseKernel(nn.Module):
                 )
             pair_embed = self.pair_mlp(torch.cat(pieces, dim=-1)) * selected_presence
             selected_edge_weight = edge_module_weight[batch_index][selected_indices]
+            retained_mass = selected_edge_weight.sum(dim=1)
+            selected_edge_weight = selected_edge_weight / retained_mass.unsqueeze(1).clamp_min(EPS)
             contexts.append(torch.einsum("qmk,qmh->qkh", selected_edge_weight, pair_embed))
+            retained_masses.append(retained_mass)
         return (
             torch.stack(contexts, dim=0),
             query_xy.new_tensor(float(selected_total) / float(max(query_xy.shape[0], 1))),
             query_xy.new_tensor(float(evaluated_pairs)),
+            torch.stack(retained_masses, dim=0),
         )
 
     def _selected_relative_features(
@@ -520,12 +533,14 @@ class HypergraphFieldDecoder(nn.Module):
                 hyper_logits = hyper_logits + float(cfg.hyper_geometry_bias_scale) * geometry_bias
             else:
                 geometry_bias = torch.zeros_like(hyper_logits)
-            if not context_fusion and cfg.environment_locality_mode == "compact_kernel":
+            if not context_fusion and cfg.environment_locality_mode != "none":
                 query_locality_bias = self._query_locality_bias(query_xy, organizer_output)
                 hyper_logits = hyper_logits + query_locality_bias
             else:
                 query_locality_bias = torch.zeros_like(hyper_logits)
-            edge_active_mask = organizer_output.get("edge_active_mask")
+            edge_active_mask = organizer_output.get("effective_edge_mask")
+            if not torch.is_tensor(edge_active_mask):
+                edge_active_mask = organizer_output.get("edge_active_mask")
             if not torch.is_tensor(edge_active_mask):
                 edge_active_mask = torch.ones_like(hyper_logits[:, 0, :])
             edge_active_mask = edge_active_mask.to(device=hyper_logits.device, dtype=hyper_logits.dtype)
@@ -558,6 +573,13 @@ class HypergraphFieldDecoder(nn.Module):
                         mask=edge_active_mask[:, None, :] > 0,
                     )
                     hyper_attention = self._limit_probability_routes(hyper_attention)
+            if not context_fusion and cfg.routing_execution == "gathered":
+                hyper_attention, retained_query_mass = self._limit_query_edge_routes(
+                    hyper_attention,
+                    edge_active_mask,
+                )
+            else:
+                retained_query_mass = hyper_attention.sum(dim=-1)
             hyper_value_context = torch.einsum("bqk,bkh->bqh", hyper_attention, self.hyper_value(hyper_state))
             if uses_hyper_value:
                 hyper_context = hyper_value_context
@@ -578,6 +600,13 @@ class HypergraphFieldDecoder(nn.Module):
             diagnostics["hyper_attention_effective_edges"] = torch.exp(hyper_entropy.detach()).mean()
             diagnostics["hyper_attention_max"] = hyper_attention.detach().amax(dim=-1).mean()
             diagnostics["hyper_attention_nonzero_count"] = (hyper_attention.detach() > 0).float().sum(dim=-1).mean()
+            diagnostics["effective_query_edge_count"] = (hyper_attention.detach() > 0).float().sum(dim=-1).mean()
+            diagnostics["query_edge_retained_probability_mass"] = retained_query_mass.detach()
+            diagnostics["query_edge_retained_probability_mass_min"] = retained_query_mass.detach().amin()
+            diagnostics["query_edge_retained_probability_mass_p05"] = torch.quantile(
+                retained_query_mass.detach().float(), 0.05
+            ).to(query_xy.dtype)
+            diagnostics["query_edge_retained_probability_mass_mean"] = retained_query_mass.detach().mean()
             diagnostics["hyper_geometry_bias_mean"] = geometry_bias.detach().mean()
             diagnostics["hyper_geometry_bias_std"] = geometry_bias.detach().std(unbiased=False)
             if not context_fusion:
@@ -726,7 +755,9 @@ class HypergraphFieldDecoder(nn.Module):
         background = self.background_head(torch.cat([query_state, global_state, env_context], dim=-1))
 
         geometry_features = self._hyper_geometry_features(query_xy, organizer_output)
-        edge_active_mask = organizer_output.get("edge_active_mask")
+        edge_active_mask = organizer_output.get("effective_edge_mask")
+        if not torch.is_tensor(edge_active_mask):
+            edge_active_mask = organizer_output.get("edge_active_mask")
         if not torch.is_tensor(edge_active_mask):
             edge_active_mask = torch.ones_like(hyper_attention[:, 0, :])
         if self.config.routing_execution == "gathered":
@@ -837,11 +868,6 @@ class HypergraphFieldDecoder(nn.Module):
 
         active = edge_active_mask.to(device=hyper_attention.device, dtype=torch.bool)[:, None, :]
         selected_mask = active & (hyper_attention > 0)
-        limit = int(self.config.query_edge_limit)
-        if 0 < limit < hyper_attention.shape[-1]:
-            indices = torch.topk(hyper_attention, k=limit, dim=-1).indices
-            limit_mask = torch.zeros_like(selected_mask).scatter_(-1, indices, True)
-            selected_mask = selected_mask & limit_mask.detach()
         selected_indices = torch.nonzero(selected_mask, as_tuple=False)
         batch_size, num_queries, num_edges = hyper_attention.shape
         field_dim = int(self.config.field_dim)
@@ -905,12 +931,31 @@ class HypergraphFieldDecoder(nn.Module):
         limited = probabilities * mask.to(dtype=probabilities.dtype)
         return limited / limited.sum(dim=-1, keepdim=True).clamp_min(EPS)
 
+    def _limit_query_edge_routes(
+        self,
+        probabilities: torch.Tensor,
+        edge_active_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply the gathered edge limit once and conserve retained route mass."""
+
+        active = edge_active_mask.to(device=probabilities.device, dtype=torch.bool)[:, None, :]
+        selected_mask = active & (probabilities > 0)
+        limit = int(self.config.query_edge_limit)
+        if 0 < limit < probabilities.shape[-1]:
+            indices = torch.topk(probabilities, k=limit, dim=-1).indices
+            limit_mask = torch.zeros_like(selected_mask).scatter_(-1, indices, True)
+            selected_mask = selected_mask & limit_mask.detach()
+        retained = probabilities * selected_mask.to(dtype=probabilities.dtype)
+        retained_mass = retained.sum(dim=-1)
+        normalized = retained / retained_mass.unsqueeze(-1).clamp_min(EPS)
+        return normalized, retained_mass
+
     def _query_locality_bias(
         self,
         query_xy: torch.Tensor,
         organizer_output: Dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        """Return compact region bias for sparse query-to-edge routing."""
+        """Return the configured normalized-distance bias for query-to-edge routing."""
 
         region = organizer_output["hyper_region_coords"]
         region_scale = organizer_output["hyper_region_scale"]
@@ -927,8 +972,12 @@ class HypergraphFieldDecoder(nn.Module):
             lengths = query_xy.new_tensor([max(scale_x, EPS), max(scale_y, EPS)])
             delta = _wrap_periodic_delta(delta, lengths, self.config.periodic_dimensions())
         radius_square = (delta / anisotropic_scale[:, None, :, :]).square().sum(dim=-1)
-        compactness = torch.relu(1.0 - radius_square).square()
-        return float(self.config.environment_locality_strength) * torch.log(compactness + EPS)
+        return locality_bias(
+            radius_square,
+            mode=self.config.environment_locality_mode,
+            strength=self.config.environment_locality_strength,
+            radius_cap=self.config.locality_radius_cap,
+        )
 
     def _query_features(
         self,
