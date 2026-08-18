@@ -134,3 +134,28 @@ def test_stage2_exchangeable_soft_overlay_changes_only_organizer_parameterizatio
     assert bundle.case == base.case
     assert bundle.effective["loss"] == base.effective["loss"]
     assert bundle.effective["dataset"] == base.effective["dataset"]
+
+
+def test_stage3_scheduled_profile_has_staggered_transitions_and_delayed_gathering() -> None:
+    bundle = load_config_bundle(
+        "project://src/config_core/forward/adaptive_sparse_additive.json",
+        experiment_overlay="project://src/config_core/forward/experiments/stage3_scheduled_adaptive_sparse.json",
+    )
+    core = bundle.effective["model"]["core_honf"]
+
+    assert core["edge_capacity"] == 8
+    assert core["minimum_active_edges"] == 2
+    assert (core["selection_start_epoch"], core["selection_transition_epochs"]) == (150, 250)
+    assert core["selection_warmup_mode"] == "all_viable"
+    assert core["selection_coverage_rate"] == 0.99
+    assert (core["query_sparsity_start_epoch"], core["query_sparsity_transition_epochs"]) == (250, 250)
+    assert (core["module_sparsity_start_epoch"], core["module_sparsity_transition_epochs"]) == (350, 300)
+    assert (core["environment_sparsity_start_epoch"], core["environment_sparsity_transition_epochs"]) == (350, 300)
+    assert core["environment_locality_mode"] == "gaussian_bounded"
+    assert core["environment_locality_strength"] == 0.25
+    assert core["query_locality_mode"] == "none"
+    assert core["routing_execution"] == "scheduled"
+    assert core["gathered_execution_start_epoch"] == 650
+    assert core["query_edge_retained_mass_floor"] == 0.98
+    assert core["module_incidence_retained_mass_floor"] == 0.95
+    assert bundle.effective["training"]["learning_rate"] == 1.0e-4

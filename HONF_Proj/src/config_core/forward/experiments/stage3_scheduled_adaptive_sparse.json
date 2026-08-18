@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "_note": "Phase 3: continuous adaptive edge gating, staggered softmax-to-entmax sparsity, bounded Gaussian environment locality, and delayed gathered execution.",
+  "core": {
+    "model": {
+      "core_honf": {
+        "organizer_mode": "exchangeable_slots",
+        "edge_capacity": 8,
+        "initial_active_edges": 8,
+        "minimum_active_edges": 2,
+        "edge_selection_mode": "quality_coverage",
+        "selection_start_epoch": 150,
+        "selection_transition_epochs": 250,
+        "selection_warmup_mode": "all_viable",
+        "selection_minimum_module_mass_fraction": 0.01,
+        "selection_minimum_environment_mass_fraction": 0.01,
+        "selection_coverage_rate": 0.99,
+        "candidate_module_mass_fraction_floor": 0.01,
+        "candidate_environment_mass_fraction_floor": 0.01,
+
+        "module_assignment_normalizer": "scheduled",
+        "module_sparsity_start_epoch": 350,
+        "module_sparsity_transition_epochs": 300,
+        "environment_assignment_normalizer": "scheduled",
+        "environment_sparsity_start_epoch": 350,
+        "environment_sparsity_transition_epochs": 300,
+        "query_assignment_normalizer": "scheduled",
+        "query_sparsity_start_epoch": 250,
+        "query_sparsity_transition_epochs": 250,
+
+        "environment_locality_mode": "gaussian_bounded",
+        "environment_locality_strength": 0.25,
+        "minimum_region_scale": 0.10,
+        "query_locality_mode": "none",
+
+        "mechanism_state_mode": "descriptor_first",
+        "field_assembly_mode": "edge_additive",
+        "routing_execution": "scheduled",
+        "gathered_execution_start_epoch": 650,
+        "query_edge_limit": 3,
+        "query_module_limit": 8,
+        "query_edge_retained_mass_floor": 0.98,
+        "module_incidence_retained_mass_floor": 0.95
+      }
+    },
+    "training": {
+      "learning_rate": 0.0001
+    }
+  },
+  "case": {}
+}

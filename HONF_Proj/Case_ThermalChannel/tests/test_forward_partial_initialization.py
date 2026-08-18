@@ -207,3 +207,28 @@ def test_phase1_checkpoint_initializes_exchangeable_bridge_but_skips_fixed_organ
     assert any(name.startswith("local_coupling.") for name in inventory["loaded"])
     assert inventory["source_organizer_mode"] == "fixed_projection"
     assert inventory["target_organizer_mode"] == "exchangeable_slots"
+
+
+def test_partial_initialization_does_not_import_selection_progress() -> None:
+    config = _config(
+        "edge_additive",
+        "descriptor_first",
+        organizer_mode="exchangeable_slots",
+    )
+    source = ChannelThermalHONFModel(config, attach_local_from_checkpoint=False).eval()
+    target = ChannelThermalHONFModel(config, attach_local_from_checkpoint=False).eval()
+    _initialize_lazy_parameters(source)
+    _initialize_lazy_parameters(target)
+    source.set_training_progress(epoch=600, total_epochs=700)
+    target.set_training_progress(epoch=0, total_epochs=700)
+
+    inventory = _partial_initialize_model(
+        target,
+        {"model_state_dict": source.state_dict(), "model_config": config.to_dict()},
+        source_config=config,
+    )
+
+    assert target.selection_state() == {"epoch": 0, "total_epochs": 700}
+    skipped = {item["key"]: item["reason"] for item in inventory["skipped"]}
+    assert skipped["core.organizer.exchangeable._selection_epoch_state"] == "runtime_selection_state"
+    assert skipped["core.organizer.exchangeable._selection_total_epochs_state"] == "runtime_selection_state"

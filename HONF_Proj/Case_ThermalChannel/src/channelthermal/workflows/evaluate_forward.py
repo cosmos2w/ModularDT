@@ -247,10 +247,15 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[ChannelTher
         checkpoint_epoch = checkpoint.get("epoch", checkpoint.get("current_epoch"))
         # Historical checkpoints restore their recorded epoch. A raw weights
         # checkpoint with no epoch receives an explicit final inference phase.
+        default_selection_epoch = model.selection_state().get("epoch")
         inference_epoch = (
             int(checkpoint_epoch)
             if checkpoint_epoch is not None
-            else int(model_config.core_honf.selection_warmup_epochs)
+            else int(
+                model_config.core_honf.selection_warmup_epochs
+                if default_selection_epoch is None
+                else default_selection_epoch
+            )
         )
         model.set_training_progress(
             epoch=inference_epoch,

@@ -131,3 +131,68 @@ def test_legacy_forward_config_migrates_max_modules_to_fixed_feature_reference()
     assert contexts[0][0, 2].item() == pytest.approx(4.0 / 12.0)
     assert torch.equal(contexts[0], contexts[1])
     assert torch.equal(contexts[0], contexts[2])
+
+
+def test_scheduled_adaptive_selection_is_owned_only_by_final_organizer(monkeypatch: pytest.MonkeyPatch) -> None:
+    core = UnifiedForwardConfig(
+        field_dim=5,
+        domain_length_x=12.0,
+        domain_length_y=6.0,
+        coordinate_scale=[12.0, 6.0],
+        num_env_tokens_x=4,
+        num_env_tokens_y=2,
+        num_hyperedges=3,
+        organizer_mode="exchangeable_slots",
+        edge_capacity=4,
+        initial_active_edges=4,
+        minimum_active_edges=2,
+        edge_selection_mode="quality_coverage",
+        selection_start_epoch=2,
+        selection_transition_epochs=3,
+        selection_warmup_mode="all_viable",
+        module_assignment_normalizer="scheduled",
+        module_sparsity_start_epoch=4,
+        module_sparsity_transition_epochs=3,
+        environment_assignment_normalizer="scheduled",
+        environment_sparsity_start_epoch=4,
+        environment_sparsity_transition_epochs=3,
+        query_assignment_normalizer="scheduled",
+        query_sparsity_start_epoch=3,
+        query_sparsity_transition_epochs=2,
+        environment_locality_mode="gaussian_bounded",
+        query_locality_mode="none",
+        hidden_dim=24,
+        dropout=0.0,
+        decoder_mode="enhanced_honf_pairwise",
+        pairwise_kernel_hidden_dim=24,
+        mechanism_state_mode="descriptor_first",
+        field_assembly_mode="edge_additive",
+        routing_execution="dense",
+        boundary_feature_mode="none",
+    )
+    config = ChannelThermalHONFConfig(
+        core_honf=core,
+        channelthermal=ChannelThermalSpecificConfig(
+            global_feature_schema="padding_invariant_v2",
+            internal_prediction_mode="global_head",
+            fallback_hidden_dim=24,
+            default_num_interface_points=8,
+        ),
+    )
+    model = ChannelThermalHONFModel(config, attach_local_from_checkpoint=False).eval()
+    model.set_training_progress(epoch=3, total_epochs=10)
+    calls: list[str | None] = []
+    original_forward = model.core.organizer.exchangeable.forward
+
+    def recording_forward(*args: object, **kwargs: object) -> dict[str, torch.Tensor]:
+        calls.append(kwargs.get("selection_override"))
+        return original_forward(*args, **kwargs)
+
+    monkeypatch.setattr(model.core.organizer.exchangeable, "forward", recording_forward)
+    structure, query_xy, local_query_points = _physical_inputs(4)
+    with torch.no_grad():
+        output = model(structure, query_xy, local_query_points=local_query_points)
+
+    assert calls == ["all", None]
+    assert float(output["base_organizer_aux"]["selection_transition_fraction"]) == pytest.approx(1.0 / 3.0)
+    assert float(output["organizer_aux"]["selection_transition_fraction"]) == pytest.approx(1.0 / 3.0)

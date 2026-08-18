@@ -55,7 +55,12 @@ class HONFNeuralField(nn.Module):
 
         return self.organizer.selection_state()
 
-    def encode_and_organize(self, batch: BatchData) -> Dict[str, torch.Tensor]:
+    def encode_and_organize(
+        self,
+        batch: BatchData,
+        *,
+        organizer_selection_override: Optional[str] = None,
+    ) -> Dict[str, torch.Tensor]:
         """Encode generic inputs and build static HONF organizer state.
 
         Input shapes use ``B`` cases, ``M`` module slots, ``E`` environment
@@ -134,6 +139,7 @@ class HONFNeuralField(nn.Module):
             env_coords=env_coords,
             module_present=module_present,
             geometry_mode=cfg.geometry_mode,
+            selection_override=organizer_selection_override,
         )
         organizer_output["module_features_raw"] = module_features
         output: Dict[str, torch.Tensor] = {}

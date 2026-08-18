@@ -155,6 +155,7 @@ class HypergraphGatedPairwiseKernel(nn.Module):
         organizer_output: Dict[str, torch.Tensor],
         hyper_attention: torch.Tensor,
         *,
+        gathered_execution: bool = False,
         return_routing_maps: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """Aggregate query-module interactions through hyperedge routing.
@@ -174,7 +175,7 @@ class HypergraphGatedPairwiseKernel(nn.Module):
             edge_module_weight = A_mh / A_mh.sum(dim=1, keepdim=True).clamp_min(EPS)
         else:
             edge_module_weight = A_mh
-        if cfg.routing_execution == "gathered":
+        if gathered_execution:
             edge_pair_context, selected_modules, evaluated_pairs, retained_module_mass = self._gathered_edge_pair_context(
                 query_xy,
                 module_centers,
@@ -219,6 +220,10 @@ class HypergraphGatedPairwiseKernel(nn.Module):
             "pairwise_selected_modules": selected_modules,
             "pairwise_selection_ratio": selected_modules / available_modules.clamp_min(1.0),
             "pairwise_evaluated_pair_count": evaluated_pairs,
+            "pairwise_dense_route_count": query_xy.new_tensor(
+                float(query_xy.shape[0] * query_xy.shape[1] * module_present.shape[1])
+            ),
+            "pairwise_gathered_route_count": evaluated_pairs if gathered_execution else query_xy.new_zeros(()),
             "retained_module_incidence_mass": retained_module_mass.detach(),
             "retained_module_incidence_mass_min": retained_module_mass.detach().amin(),
             "retained_module_incidence_mass_p05": torch.quantile(retained_module_mass.detach().float(), 0.05).to(query_xy.dtype),
@@ -278,28 +283,50 @@ class HypergraphGatedPairwiseKernel(nn.Module):
         for batch_index in range(query_xy.shape[0]):
             active_indices = torch.nonzero(module_present[batch_index] > 0, as_tuple=False).squeeze(-1)
             available = int(active_indices.numel())
-            selected_count = available if limit <= 0 else min(limit, available)
-            selected_total += selected_count
-            evaluated_pairs += query_xy.shape[1] * selected_count
-            if selected_count == 0:
+            if available == 0:
                 contexts.append(
                     query_xy.new_zeros(query_xy.shape[1], hyper_attention.shape[-1], module_tokens.shape[-1])
                 )
                 retained_masses.append(query_xy.new_zeros(query_xy.shape[1], hyper_attention.shape[-1]))
                 continue
-            if selected_count == available:
-                selected_indices = active_indices.unsqueeze(0).expand(query_xy.shape[1], -1)
-            else:
-                local_indices = torch.topk(
-                    beta[batch_index, :, active_indices],
-                    k=selected_count,
-                    dim=-1,
-                ).indices
-                selected_indices = active_indices[local_indices]
+            base_count = available if limit <= 0 else min(limit, available)
+            importance = beta[batch_index, :, active_indices]
+            order = torch.argsort(importance, dim=-1, descending=True)
+            ranked_indices = active_indices[order]
+            ranked_edge_weight = edge_module_weight[batch_index][ranked_indices]
+            cumulative_edge_mass = ranked_edge_weight.cumsum(dim=1)
+            routed_edges = hyper_attention[batch_index] > 0
+            mass_floor = float(self.config.module_incidence_retained_mass_floor)
+            required_by_edge = (cumulative_edge_mass < mass_floor).sum(dim=1) + 1
+            required_by_edge = torch.minimum(
+                required_by_edge,
+                torch.full_like(required_by_edge, available),
+            )
+            required_by_edge = torch.where(
+                routed_edges,
+                required_by_edge,
+                torch.zeros_like(required_by_edge),
+            )
+            selected_counts = torch.maximum(
+                required_by_edge.amax(dim=-1),
+                torch.full(
+                    (query_xy.shape[1],),
+                    base_count,
+                    device=query_xy.device,
+                    dtype=torch.long,
+                ),
+            ).clamp(max=available)
+            maximum_count = int(selected_counts.amax().item())
+            selected_total += int(selected_counts.sum().item())
+            evaluated_pairs += int(selected_counts.sum().item())
+            selected_indices = ranked_indices[:, :maximum_count]
+            selected_presence = (
+                torch.arange(maximum_count, device=query_xy.device)[None, :]
+                < selected_counts[:, None]
+            ).to(dtype=query_xy.dtype).unsqueeze(-1)
             selected_centers = module_centers[batch_index][selected_indices]
             rel = self._selected_relative_features(query_xy[batch_index], selected_centers)
             rel_encoded = self.relative_fourier(rel) if self.config.pairwise_kernel_use_fourier else rel
-            selected_presence = module_present[batch_index][selected_indices].unsqueeze(-1)
             pieces = [rel_encoded, selected_presence]
             if self.config.pairwise_kernel_include_module_token:
                 pieces.append(module_tokens[batch_index][selected_indices])
@@ -308,14 +335,16 @@ class HypergraphGatedPairwiseKernel(nn.Module):
                     raw_features[batch_index][selected_indices].to(device=query_xy.device, dtype=query_xy.dtype)
                 )
             pair_embed = self.pair_mlp(torch.cat(pieces, dim=-1)) * selected_presence
-            selected_edge_weight = edge_module_weight[batch_index][selected_indices]
+            selected_edge_weight = edge_module_weight[batch_index][selected_indices] * selected_presence
             retained_mass = selected_edge_weight.sum(dim=1)
             selected_edge_weight = selected_edge_weight / retained_mass.unsqueeze(1).clamp_min(EPS)
             contexts.append(torch.einsum("qmk,qmh->qkh", selected_edge_weight, pair_embed))
             retained_masses.append(retained_mass)
         return (
             torch.stack(contexts, dim=0),
-            query_xy.new_tensor(float(selected_total) / float(max(query_xy.shape[0], 1))),
+            query_xy.new_tensor(
+                float(selected_total) / float(max(query_xy.shape[0] * query_xy.shape[1], 1))
+            ),
             query_xy.new_tensor(float(evaluated_pairs)),
             torch.stack(retained_masses, dim=0),
         )
@@ -499,6 +528,11 @@ class HypergraphFieldDecoder(nn.Module):
         uses_direct = bool(context_fusion and self._uses_direct())
         uses_near = bool(context_fusion and self._uses_near_module())
         uses_pairwise = bool(cfg.decoder_uses("pairwise") and self.pairwise_kernel is not None)
+        execution_flag = organizer_output.get("routing_execution_gathered")
+        if torch.is_tensor(execution_flag):
+            gathered_execution = bool(float(execution_flag.detach().reshape(-1)[0]) >= 0.5)
+        else:
+            gathered_execution = cfg.routing_execution == "gathered"
         hyper_context = torch.zeros_like(query_state)
         nonhyper_context = torch.zeros_like(query_state)
         edge_pair_context: Optional[torch.Tensor] = None
@@ -545,7 +579,12 @@ class HypergraphFieldDecoder(nn.Module):
                 hyper_logits = hyper_logits + float(cfg.hyper_geometry_bias_scale) * geometry_bias
             else:
                 geometry_bias = torch.zeros_like(hyper_logits)
-            if not context_fusion and cfg.environment_locality_mode != "none":
+            query_locality_mode = (
+                cfg.environment_locality_mode
+                if cfg.query_locality_mode == "inherit_environment"
+                else cfg.query_locality_mode
+            )
+            if not context_fusion and query_locality_mode != "none":
                 query_locality_bias = self._query_locality_bias(query_xy, organizer_output)
                 hyper_logits = hyper_logits + query_locality_bias
             else:
@@ -583,9 +622,15 @@ class HypergraphFieldDecoder(nn.Module):
                         hyper_logits / max(float(cfg.hyper_attention_temperature), EPS),
                         mode=cfg.query_assignment_normalizer,
                         mask=edge_active_mask[:, None, :] > 0,
+                        entmax_blend=float(
+                            organizer_output.get(
+                                "query_sparsity_fraction",
+                                hyper_logits.new_zeros(()),
+                            )
+                        ),
                     )
                     hyper_attention = self._limit_probability_routes(hyper_attention)
-            if not context_fusion and cfg.routing_execution == "gathered":
+            if not context_fusion and gathered_execution:
                 hyper_attention, retained_query_mass = self._limit_query_edge_routes(
                     hyper_attention,
                     edge_active_mask,
@@ -627,12 +672,13 @@ class HypergraphFieldDecoder(nn.Module):
                 diagnostics["query_assignment_nonzero_fraction"] = (hyper_attention.detach() > 0).float().mean()
                 diagnostics["mean_query_nonzero_edges"] = (hyper_attention.detach() > 0).float().sum(dim=-1).mean()
                 diagnostics["query_assignment_normalizer"] = cfg.query_assignment_normalizer
-                diagnostics["routing_execution"] = cfg.routing_execution
+                diagnostics["routing_execution"] = "gathered" if gathered_execution else "dense"
             if uses_pairwise:
                 pair_context, routed_edge_context, pair_diagnostics = self.pairwise_kernel(
                     query_xy,
                     organizer_output,
                     hyper_attention,
+                    gathered_execution=gathered_execution,
                     return_routing_maps=return_routing_maps,
                 )
                 if not context_fusion:
@@ -722,6 +768,7 @@ class HypergraphFieldDecoder(nn.Module):
                     edge_pair_context=edge_pair_context,
                     organizer_output=organizer_output,
                     global_context=global_context,
+                    gathered_execution=gathered_execution,
                     return_edge_fields=bool(return_edge_fields),
                 )
             )
@@ -748,6 +795,7 @@ class HypergraphFieldDecoder(nn.Module):
         edge_pair_context: torch.Tensor,
         organizer_output: Dict[str, torch.Tensor],
         global_context: Optional[torch.Tensor],
+        gathered_execution: bool,
         return_edge_fields: bool,
     ) -> Dict[str, torch.Tensor]:
         """Assemble an exact background-plus-edge field decomposition."""
@@ -776,7 +824,7 @@ class HypergraphFieldDecoder(nn.Module):
             edge_active_mask = organizer_output.get("edge_active_mask")
         if not torch.is_tensor(edge_active_mask):
             edge_active_mask = torch.ones_like(hyper_attention[:, 0, :])
-        if self.config.routing_execution == "gathered":
+        if gathered_execution:
             edge_sum, edge_abs_mean, edge_rms, edge_energy, edge_field, selected_routes = (
                 self._gathered_edge_execution(
                     query_state,
@@ -833,6 +881,10 @@ class HypergraphFieldDecoder(nn.Module):
             "edge_head_selected_routes": selected_routes,
             "edge_head_selection_ratio": selected_routes / available_routes.clamp_min(1.0),
             "edge_head_evaluated_route_count": selected_routes,
+            "edge_head_dense_route_count": available_routes,
+            "edge_head_gathered_route_count": (
+                selected_routes if gathered_execution else query_state.new_zeros(())
+            ),
         }
         if return_edge_fields:
             output["pred_field_background"] = background
@@ -971,12 +1023,31 @@ class HypergraphFieldDecoder(nn.Module):
         """Apply the gathered edge limit once and conserve retained route mass."""
 
         active = edge_active_mask.to(device=probabilities.device, dtype=torch.bool)[:, None, :]
-        selected_mask = active & (probabilities > 0)
+        support = active & (probabilities > 0)
+        selected_mask = support
         limit = int(self.config.query_edge_limit)
         if 0 < limit < probabilities.shape[-1]:
-            indices = torch.topk(probabilities, k=limit, dim=-1).indices
-            limit_mask = torch.zeros_like(selected_mask).scatter_(-1, indices, True)
-            selected_mask = selected_mask & limit_mask.detach()
+            ranked_probability, ranked_indices = torch.sort(probabilities, dim=-1, descending=True)
+            cumulative_mass = ranked_probability.cumsum(dim=-1)
+            mass_floor = float(self.config.query_edge_retained_mass_floor)
+            required_for_mass = (cumulative_mass < mass_floor).sum(dim=-1) + 1
+            support_count = support.sum(dim=-1)
+            selected_count = torch.maximum(
+                required_for_mass,
+                torch.full_like(required_for_mass, limit),
+            )
+            selected_count = torch.minimum(selected_count, support_count)
+            ranked_position = torch.arange(
+                probabilities.shape[-1],
+                device=probabilities.device,
+            ).view(1, 1, -1)
+            ranked_mask = ranked_position < selected_count.unsqueeze(-1)
+            limit_mask = torch.zeros_like(selected_mask).scatter_(
+                -1,
+                ranked_indices,
+                ranked_mask,
+            )
+            selected_mask = support & limit_mask.detach()
         retained = probabilities * selected_mask.to(dtype=probabilities.dtype)
         retained_mass = retained.sum(dim=-1)
         normalized = retained / retained_mass.unsqueeze(-1).clamp_min(EPS)
@@ -1006,7 +1077,11 @@ class HypergraphFieldDecoder(nn.Module):
         radius_square = (delta / anisotropic_scale[:, None, :, :]).square().sum(dim=-1)
         return locality_bias(
             radius_square,
-            mode=self.config.environment_locality_mode,
+            mode=(
+                self.config.environment_locality_mode
+                if self.config.query_locality_mode == "inherit_environment"
+                else self.config.query_locality_mode
+            ),
             strength=self.config.environment_locality_strength,
             radius_cap=self.config.locality_radius_cap,
         )

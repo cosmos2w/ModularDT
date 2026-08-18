@@ -24,6 +24,12 @@ HONF_DIAGNOSTIC_KEYS = [
     "candidate_edge_count",
     "selected_edge_count",
     "viable_selected_edge_count",
+    "hard_selected_edge_count",
+    "edge_transition_gate_mean",
+    "selection_transition_fraction",
+    "module_sparsity_fraction",
+    "environment_sparsity_fraction",
+    "query_sparsity_fraction",
     "functional_edge_count",
     "soft_functional_edge_count",
     "empty_selected_edge_count",
@@ -66,6 +72,13 @@ HONF_DIAGNOSTIC_KEYS = [
     "retained_module_incidence_mass_min",
     "retained_module_incidence_mass_p05",
     "retained_module_incidence_mass_mean",
+    "pairwise_dense_route_count",
+    "pairwise_gathered_route_count",
+    "pairwise_selection_ratio",
+    "edge_head_dense_route_count",
+    "edge_head_gathered_route_count",
+    "edge_head_selection_ratio",
+    "routing_execution_gathered",
     "additive_edge_gate",
     "background_field_norm",
     "summed_edge_field_norm",
@@ -160,6 +173,8 @@ def compute_code_permutation_equivariance_diagnostics(
         "hyper_state": 1,
         "edge_quality": 1,
         "edge_active_mask": 1,
+        "hard_selected_edge_mask": 1,
+        "edge_transition_gate": 1,
         "edge_viable_mask": 1,
         "effective_edge_mask": 1,
         "candidate_module_mass_fraction": 1,
@@ -235,7 +250,7 @@ def compute_honf_diagnostics(
     effective_mask = org.get("effective_edge_mask")
     if torch.is_tensor(effective_mask):
         effective_mask = effective_mask.to(device=device, dtype=dtype)
-        viable_selected = effective_mask.sum(dim=-1).mean()
+        viable_selected = (effective_mask > 0).to(dtype=dtype).sum(dim=-1).mean()
     else:
         viable_selected = _scalar(org.get("viable_selected_edge_count"), device, dtype)
         if org.get("viable_selected_edge_count") is None:
@@ -282,6 +297,12 @@ def compute_honf_diagnostics(
         "candidate_edge_count": candidate_count,
         "selected_edge_count": selected_count,
         "viable_selected_edge_count": viable_selected,
+        "hard_selected_edge_count": _scalar(org.get("hard_selected_edge_count"), device, dtype),
+        "edge_transition_gate_mean": _scalar(org.get("edge_transition_gate"), device, dtype),
+        "selection_transition_fraction": _scalar(org.get("selection_transition_fraction"), device, dtype),
+        "module_sparsity_fraction": _scalar(org.get("module_sparsity_fraction"), device, dtype),
+        "environment_sparsity_fraction": _scalar(org.get("environment_sparsity_fraction"), device, dtype),
+        "query_sparsity_fraction": _scalar(org.get("query_sparsity_fraction"), device, dtype),
         "functional_edge_count": functional,
         "soft_functional_edge_count": soft_functional,
         "empty_selected_edge_count": empty_selected_value,
@@ -328,6 +349,13 @@ def compute_honf_diagnostics(
         "retained_module_incidence_mass_min": _scalar(routing.get("retained_module_incidence_mass_min"), device, dtype),
         "retained_module_incidence_mass_p05": _scalar(routing.get("retained_module_incidence_mass_p05"), device, dtype),
         "retained_module_incidence_mass_mean": _scalar(routing.get("retained_module_incidence_mass_mean"), device, dtype),
+        "pairwise_dense_route_count": _scalar(routing.get("pairwise_dense_route_count"), device, dtype),
+        "pairwise_gathered_route_count": _scalar(routing.get("pairwise_gathered_route_count"), device, dtype),
+        "pairwise_selection_ratio": _scalar(routing.get("pairwise_selection_ratio"), device, dtype),
+        "edge_head_dense_route_count": _scalar(routing.get("edge_head_dense_route_count"), device, dtype),
+        "edge_head_gathered_route_count": _scalar(routing.get("edge_head_gathered_route_count"), device, dtype),
+        "edge_head_selection_ratio": _scalar(routing.get("edge_head_selection_ratio"), device, dtype),
+        "routing_execution_gathered": _scalar(org.get("routing_execution_gathered"), device, dtype),
         "additive_edge_gate": _scalar(routing.get("additive_edge_gate"), device, dtype),
         "background_field_norm": _scalar(routing.get("background_field_norm"), device, dtype),
         "summed_edge_field_norm": _scalar(routing.get("summed_edge_field_norm"), device, dtype),
