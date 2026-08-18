@@ -118,6 +118,8 @@ class UnifiedForwardConfig:
     mechanism_latent_residual_scale: float = 0.35
 
     field_assembly_mode: str = "context_fusion"
+    additive_edge_gate_init: float = 0.10
+    additive_output_init_std: float = 1.0e-3
     routing_execution: str = "dense"
     query_edge_limit: int = 0
     query_module_limit: int = 0
@@ -221,6 +223,10 @@ class UnifiedForwardConfig:
             raise ValueError("mechanism_latent_residual_scale must be in [0, 1].")
         if self.field_assembly_mode not in {"context_fusion", "edge_additive"}:
             raise ValueError("field_assembly_mode must be 'context_fusion' or 'edge_additive'.")
+        if not 0.0 < float(self.additive_edge_gate_init) < 1.0:
+            raise ValueError("additive_edge_gate_init must be in (0, 1).")
+        if float(self.additive_output_init_std) <= 0.0:
+            raise ValueError("additive_output_init_std must be positive.")
         if self.field_assembly_mode == "edge_additive":
             components = DECODER_COMPONENTS.get(self.decoder_mode, set())
             if not {"hyper", "pairwise"} <= components:

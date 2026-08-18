@@ -112,6 +112,8 @@
         "mechanism_state_mode": {"enum": ["residual_concat", "descriptor_first"]},
         "mechanism_latent_residual_scale": {"type": "number", "minimum": 0, "maximum": 1},
         "field_assembly_mode": {"enum": ["context_fusion", "edge_additive"]},
+        "additive_edge_gate_init": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "additive_output_init_std": {"type": "number", "exclusiveMinimum": 0},
         "routing_execution": {"enum": ["dense", "gathered"]},
         "query_edge_limit": {"type": "integer", "minimum": 0},
         "query_module_limit": {"type": "integer", "minimum": 0},

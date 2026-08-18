@@ -439,6 +439,11 @@ class HypergraphFieldDecoder(nn.Module):
             self.background_env_key = nn.Linear(hidden_dim, hidden_dim)
             self.background_env_value = nn.Linear(hidden_dim, hidden_dim)
             self.background_global = nn.Linear(hidden_dim, hidden_dim)
+            self.background_input_norm = nn.LayerNorm(3 * hidden_dim)
+            self.edge_input_norm = nn.LayerNorm(3 * hidden_dim + 10)
+            additive_gate_init = min(max(float(config.additive_edge_gate_init), 1.0e-4), 1.0 - 1.0e-4)
+            additive_gate_logit = math.log(additive_gate_init / (1.0 - additive_gate_init))
+            self.additive_edge_gate = nn.Parameter(torch.tensor(additive_gate_logit, dtype=torch.float32))
             self.background_head = MLP(
                 3 * hidden_dim,
                 hidden_dim,
@@ -455,6 +460,13 @@ class HypergraphFieldDecoder(nn.Module):
                 dropout=float(config.dropout),
                 include_zero_dropout=True,
             )
+            output_std = float(config.additive_output_init_std)
+            for head in (self.background_head, self.edge_head):
+                final = head.net[-1]
+                if not isinstance(final, nn.Linear):
+                    raise RuntimeError("Additive output heads must end in a linear layer.")
+                nn.init.normal_(final.weight, mean=0.0, std=output_std)
+                nn.init.zeros_(final.bias)
 
     def forward(
         self,
@@ -752,7 +764,11 @@ class HypergraphFieldDecoder(nn.Module):
             global_state = torch.zeros_like(query_state)
         else:
             global_state = self.background_global(global_context).unsqueeze(1).expand_as(query_state)
-        background = self.background_head(torch.cat([query_state, global_state, env_context], dim=-1))
+        background_input = self.background_input_norm(
+            torch.cat([query_state, global_state, env_context], dim=-1)
+        )
+        background = self.background_head(background_input)
+        additive_gate = torch.sigmoid(self.additive_edge_gate)
 
         geometry_features = self._hyper_geometry_features(query_xy, organizer_output)
         edge_active_mask = organizer_output.get("effective_edge_mask")
@@ -769,6 +785,7 @@ class HypergraphFieldDecoder(nn.Module):
                     edge_pair_context,
                     hyper_attention,
                     edge_active_mask,
+                    additive_gate,
                     return_edge_fields=return_edge_fields,
                 )
             )
@@ -780,12 +797,20 @@ class HypergraphFieldDecoder(nn.Module):
                 edge_pair_context,
                 hyper_attention,
                 edge_active_mask,
+                additive_gate,
                 return_edge_fields=return_edge_fields,
             )
             selected_routes = query_state.new_tensor(
                 float(query_state.shape[0] * query_state.shape[1] * hyper_state.shape[1])
             )
         pred_field = background + edge_sum
+        background_norm = background.detach().norm(dim=-1).mean()
+        edge_norm = edge_sum.detach().norm(dim=-1).mean()
+        field_norm = pred_field.detach().norm(dim=-1).mean()
+        cancellation_ratio = torch.relu(
+            (background_norm + edge_norm - field_norm)
+            / (background_norm + edge_norm + EPS)
+        )
 
         available_routes = query_state.new_tensor(
             float(query_state.shape[0] * query_state.shape[1] * hyper_state.shape[1])
@@ -797,12 +822,13 @@ class HypergraphFieldDecoder(nn.Module):
             "edge_contribution_energy_fraction": (
                 edge_energy / edge_energy.sum(dim=1, keepdim=True).clamp_min(EPS)
             ),
-            "background_field_norm": background.detach().norm(dim=-1).mean(),
-            "summed_edge_field_norm": edge_sum.detach().norm(dim=-1).mean(),
+            "additive_edge_gate": additive_gate.detach(),
+            "background_field_norm": background_norm,
+            "summed_edge_field_norm": edge_norm,
             "edge_field_fraction": (
-                edge_sum.detach().norm(dim=-1).mean()
-                / (pred_field.detach().norm(dim=-1).mean() + EPS)
+                edge_norm / (field_norm + EPS)
             ),
+            "background_edge_cancellation_ratio": cancellation_ratio,
             "edge_head_available_routes": available_routes,
             "edge_head_selected_routes": selected_routes,
             "edge_head_selection_ratio": selected_routes / available_routes.clamp_min(1.0),
@@ -823,6 +849,7 @@ class HypergraphFieldDecoder(nn.Module):
         edge_pair_context: torch.Tensor,
         hyper_attention: torch.Tensor,
         edge_active_mask: torch.Tensor,
+        additive_gate: torch.Tensor,
         *,
         return_edge_fields: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
@@ -830,10 +857,12 @@ class HypergraphFieldDecoder(nn.Module):
 
         query_by_edge = query_state[:, :, None, :].expand(-1, -1, hyper_state.shape[1], -1)
         state_by_query = hyper_state[:, None, :, :].expand(-1, query_state.shape[1], -1, -1)
-        edge_input = torch.cat([query_by_edge, state_by_query, geometry_features, edge_pair_context], dim=-1)
+        edge_input = self.edge_input_norm(
+            torch.cat([query_by_edge, state_by_query, geometry_features, edge_pair_context], dim=-1)
+        )
         raw_edge_field = self.edge_head(edge_input)
         active = edge_active_mask.to(device=raw_edge_field.device, dtype=raw_edge_field.dtype)[:, None, :, None]
-        edge_field = active * hyper_attention.unsqueeze(-1) * raw_edge_field
+        edge_field = additive_gate * active * hyper_attention.unsqueeze(-1) * raw_edge_field
         edge_sum = edge_field.sum(dim=2)
         detached = edge_field.detach()
         edge_mean_square = detached.square().mean(dim=1)
@@ -854,6 +883,7 @@ class HypergraphFieldDecoder(nn.Module):
         edge_pair_context: torch.Tensor,
         hyper_attention: torch.Tensor,
         edge_active_mask: torch.Tensor,
+        additive_gate: torch.Tensor,
         *,
         return_edge_fields: bool,
     ) -> tuple[
@@ -879,17 +909,19 @@ class HypergraphFieldDecoder(nn.Module):
             edge_field = query_state.new_zeros(batch_size, num_queries, num_edges, field_dim)
         if selected_indices.shape[0] > 0:
             batch_index, query_index, edge_index = selected_indices.unbind(dim=1)
-            edge_input = torch.cat(
-                [
-                    query_state[batch_index, query_index],
-                    hyper_state[batch_index, edge_index],
-                    geometry_features[batch_index, query_index, edge_index],
-                    edge_pair_context[batch_index, query_index, edge_index],
-                ],
-                dim=-1,
+            edge_input = self.edge_input_norm(
+                torch.cat(
+                    [
+                        query_state[batch_index, query_index],
+                        hyper_state[batch_index, edge_index],
+                        geometry_features[batch_index, query_index, edge_index],
+                        edge_pair_context[batch_index, query_index, edge_index],
+                    ],
+                    dim=-1,
+                )
             )
             raw_selected = self.edge_head(edge_input)
-            selected_field = hyper_attention[batch_index, query_index, edge_index, None] * raw_selected
+            selected_field = additive_gate * hyper_attention[batch_index, query_index, edge_index, None] * raw_selected
             edge_sum = edge_sum.index_put(
                 (batch_index, query_index),
                 selected_field,

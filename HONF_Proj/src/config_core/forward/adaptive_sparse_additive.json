@@ -47,6 +47,8 @@
       "mechanism_state_mode": "descriptor_first",
       "mechanism_latent_residual_scale": 0.35,
       "field_assembly_mode": "edge_additive",
+      "additive_edge_gate_init": 0.10,
+      "additive_output_init_std": 0.001,
       "routing_execution": "gathered",
       "query_edge_limit": 3,
       "query_module_limit": 8,

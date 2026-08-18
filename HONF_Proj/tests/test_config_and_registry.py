@@ -75,3 +75,31 @@ def test_global_only_overlay_disables_local_dependency() -> None:
     )
     assert bundle.case["model"]["local_coupling"]["use_local_surrogate"] is False
     assert bundle.case["model"]["channelthermal"]["internal_prediction_mode"] == "global_head"
+
+
+def test_stage1_fixed_additive_overlay_changes_only_the_scientific_bridge() -> None:
+    base = load_config_bundle("project://src/config_core/forward/enhanced_honf_pairwise.json")
+    bundle = load_config_bundle(
+        "project://src/config_core/forward/enhanced_honf_pairwise.json",
+        experiment_overlay="project://src/config_core/forward/experiments/stage1_fixed_additive_soft.json",
+    )
+    core = bundle.effective["model"]["core_honf"]
+    expected = {
+        "organizer_mode": "fixed_projection",
+        "num_hyperedges": 6,
+        "mechanism_state_mode": "descriptor_first",
+        "field_assembly_mode": "edge_additive",
+        "module_assignment_normalizer": "softmax",
+        "environment_assignment_normalizer": "softmax",
+        "query_assignment_normalizer": "softmax",
+        "environment_locality_mode": "none",
+        "routing_execution": "dense",
+        "query_edge_limit": 0,
+        "query_module_limit": 0,
+        "edge_selection_mode": "all",
+    }
+    assert {key: core[key] for key in expected} == expected
+    assert bundle.effective["training"]["learning_rate"] == 1.0e-4
+    assert bundle.case == base.case
+    assert bundle.effective["loss"] == base.effective["loss"]
+    assert bundle.effective["dataset"] == base.effective["dataset"]

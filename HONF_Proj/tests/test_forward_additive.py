@@ -70,6 +70,19 @@ def test_additive_field_has_exact_exported_closure() -> None:
     assert output["edge_contribution_abs_mean"].shape == (2, 3, 3)
     assert output["edge_contribution_rms"].shape == (2, 3, 3)
     assert output["edge_contribution_energy_fraction"].shape == (2, 3, 3)
+    torch.testing.assert_close(output["additive_edge_gate"], torch.tensor(0.1), rtol=0.0, atol=1.0e-7)
+
+
+def test_additive_output_heads_start_at_small_field_scale() -> None:
+    model = _model().eval()
+    with torch.no_grad():
+        output = model(_batch(), return_edge_fields=True)
+
+    assert output["pred_field"].abs().mean() < 0.05
+    assert model.decoder.background_head.net[-1].weight.std() < 0.002
+    assert model.decoder.edge_head.net[-1].weight.std() < 0.002
+    assert torch.count_nonzero(model.decoder.background_head.net[-1].bias) == 0
+    assert torch.count_nonzero(model.decoder.edge_head.net[-1].bias) == 0
 
 
 def test_inactive_edge_contributes_exactly_zero() -> None:
@@ -79,6 +92,8 @@ def test_inactive_edge_contributes_exactly_zero() -> None:
         encoded = model.encode_and_organize(batch)
         encoded["edge_active_mask"] = encoded["edge_active_mask"].clone()
         encoded["edge_active_mask"][:, -1] = 0.0
+        encoded["effective_edge_mask"] = encoded["effective_edge_mask"].clone()
+        encoded["effective_edge_mask"][:, -1] = 0.0
         output = model.decode_queries(
             batch.query_xy,
             None,
@@ -161,7 +176,7 @@ def test_consistent_fixed_edge_permutation_preserves_total_field() -> None:
     )
 
 
-def test_additive_gradients_reach_descriptor_and_edge_encoders() -> None:
+def test_additive_gradients_reach_background_edge_descriptor_and_gate_parameters() -> None:
     model = _model().train()
     output = model(_batch())
     output["pred_field"].square().mean().backward()
@@ -176,8 +191,28 @@ def test_additive_gradients_reach_descriptor_and_edge_encoders() -> None:
         for parameter in model.decoder.edge_head.parameters()
         if parameter.grad is not None
     )
+    background_grad = sum(
+        float(parameter.grad.abs().sum())
+        for parameter in model.decoder.background_head.parameters()
+        if parameter.grad is not None
+    )
     assert descriptor_grad > 0.0
     assert edge_grad > 0.0
+    assert background_grad > 0.0
+    assert model.decoder.additive_edge_gate.grad is not None
+    assert float(model.decoder.additive_edge_gate.grad.abs()) > 0.0
+
+
+def test_fixed_organizer_reports_exactly_six_selected_viable_edges() -> None:
+    config = _config()
+    config.num_hyperedges = 6
+    model = HONFNeuralField(config).eval()
+    with torch.no_grad():
+        output = model(_batch())
+
+    assert output["edge_active_mask"].shape[-1] == 6
+    torch.testing.assert_close(output["selected_edge_count"], torch.full((2,), 6.0))
+    torch.testing.assert_close(output["viable_selected_edge_count"], torch.full((2,), 6.0))
 
 
 def test_additive_prepared_chunks_match_one_shot() -> None:
@@ -223,3 +258,21 @@ def test_field_modes_instantiate_only_their_output_modules() -> None:
     assert not any(name.startswith("edge_head.") for name in context_names)
     assert any(name.startswith("edge_head.") for name in additive_names)
     assert not any(name.startswith("pred_head.") for name in additive_names)
+    assert not any(name.startswith("background_input_norm.") for name in context_names)
+    assert "additive_edge_gate" not in context_names
+
+
+def test_context_fusion_strict_checkpoint_round_trip_is_unchanged() -> None:
+    source = _model(assembly="context_fusion", mechanism="residual_concat").eval()
+    batch = _batch()
+    with torch.no_grad():
+        expected = source(batch)["pred_field"]
+    state = source.state_dict()
+    restored = _model(assembly="context_fusion", mechanism="residual_concat").eval()
+    with torch.no_grad():
+        restored(batch)
+    restored.load_state_dict(state, strict=True)
+    with torch.no_grad():
+        actual = restored(batch)["pred_field"]
+
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)

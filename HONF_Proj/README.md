@@ -77,6 +77,7 @@ Both maintained profiles use hidden width 256, dropout 0.0, LayerNorm, a (24\tim
 | Locality | none | bounded Gaussian environment/query bias, strength 1.0, radius cap 3.0 |
 | Mechanism state | `residual_concat`, mechanism encoder off | `descriptor_first`, content residual scale 0.35 |
 | Field assembly | `context_fusion` | exact `edge_additive` |
+| Additive stabilization | n.a. | normalized head inputs, edge gate initialized to 0.1, output-head std 0.001 |
 | Execution | dense | gathered before pair and edge MLPs |
 | Query limits | unlimited | at most 8 modules and 3 edges per query |
 | Topology signature flag | false | true |
@@ -89,6 +90,10 @@ The upgraded field is exactly
 $$\widehat U(q)=U_{background}(q,g,E)+\sum_{k=1}^{K_{cap}}a_k\alpha_{qk}U_k(q,t_k,c^{pair}_{qk}).$$
 
 The background sees query, global, and environment context but no module memory. Optional `pred_field_background` and `pred_field_by_edge` outputs close exactly to `pred_field`. The shipped case profile has organizer regularization disabled and therefore has no default edge-count penalty.
+
+The additive-only decoder normalizes the background and edge head inputs, initializes both final output layers with standard deviation `0.001` and zero bias, and includes a learned sigmoid edge gate initialized to `0.1` inside every exported per-edge field. Training diagnostics report the gate, background and summed-edge norms, edge fraction, and background/edge cancellation ratio. These modules and state keys are not constructed for `context_fusion`.
+
+For the fixed-organizer bridge, apply `src/config_core/forward/experiments/stage1_fixed_additive_soft.json` to `enhanced_honf_pairwise.json`. A new run may use `--initialize-checkpoint`; this performs provenance validation and name/shape-matched parameter initialization, writes `initialization_inventory.json`, and never restores optimizer, scaler, epoch, best metrics, selection progress, or RNG state.
 
 See [Model_Explain.md](Model_Explain.md) for the complete equations, Stage-A coupling, topology signature, inverse flow, and code-to-math map.
 

@@ -203,6 +203,7 @@ The exchangeable plan velocity network uses shared token projections and permuta
 | Environment/query locality | none | bounded Gaussian, strength 1.0, radius cap 3.0 |
 | Mechanism state | `residual_concat`, encoder disabled | `descriptor_first`, residual scale 0.35 |
 | Field assembly | `context_fusion` | `edge_additive` |
+| Additive output stabilization | n.a. | input LayerNorms, sigmoid edge gate 0.1, final-layer std 0.001 |
 | Routing execution | `dense` | `gathered` |
 | Query module / edge limit | 0 / 0 | 8 / 3 |
 | Topology signature flag | false | true |
@@ -222,6 +223,7 @@ The exchangeable plan velocity network uses shared token projections and permuta
 - Sparse probabilities and sparse execution are reported separately; only gathered pre-MLP execution is called computationally sparse.
 - Adaptive warmup exposes every viable candidate. Selection progress is serialized and is independent of `train()`/`eval()` mode.
 - New diagnostics distinguish candidate, selected, viable-selected, functional, soft-functional, empty-selected, and effective query-edge counts.
+- Additive edge exports include the learned output gate, preserving exact closure while logging background/edge scale and cancellation.
 - No active-edge-count penalty is enabled in the shipped case profile.
 
 ## 16. Code-to-equation map

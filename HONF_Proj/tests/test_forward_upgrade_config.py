@@ -120,6 +120,8 @@ def test_mode_complete_profile_selects_upgrade_architecture() -> None:
     assert core["candidate_module_mass_fraction_floor"] == 0.01
     assert core["candidate_environment_mass_fraction_floor"] == 0.01
     assert core["routing_execution"] == "gathered"
+    assert core["additive_edge_gate_init"] == 0.1
+    assert core["additive_output_init_std"] == 1.0e-3
     assert core["topology_signature_enabled"] is True
 
 

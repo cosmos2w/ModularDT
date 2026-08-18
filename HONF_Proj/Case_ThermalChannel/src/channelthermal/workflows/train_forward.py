@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
+import hashlib
 import math
 import random
 from pathlib import Path
@@ -59,7 +60,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-val-batches", type=int, default=None)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--Run_ID", dest="run_id", type=str, default=None)
-    parser.add_argument("--resume-checkpoint", type=str, default=None, help="Resume training from a saved HONF-CL checkpoint.")
+    checkpoint_mode = parser.add_mutually_exclusive_group()
+    checkpoint_mode.add_argument("--resume-checkpoint", type=str, default=None, help="Resume training from a saved HONF-CL checkpoint.")
+    checkpoint_mode.add_argument(
+        "--initialize-checkpoint",
+        type=str,
+        default=None,
+        help="Initialize a new run from compatible name-and-shape matched checkpoint weights.",
+    )
     return parser.parse_args()
 
 
@@ -759,6 +767,190 @@ def _validate_resume_checkpoint(
             raise ValueError(f"Resume checkpoint normalization mismatch for {name!r}.")
 
 
+def _file_sha256(path: Path) -> str:
+    """Return the immutable digest recorded for initialization provenance."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _validate_initialization_checkpoint(
+    checkpoint: Dict[str, Any],
+    *,
+    model: ChannelThermalHONFModel,
+    dataset: GlobalChannelThermalDataset,
+    dataset_config: Dict[str, Any],
+) -> ChannelThermalHONFConfig:
+    """Validate provenance required for safe partial parameter initialization."""
+
+    validate_checkpoint_identity(
+        checkpoint,
+        case_id="ThermalChannel",
+        model_family="honf_forward",
+        workflow="forward",
+    )
+    source_config_payload = dict(checkpoint.get("model_config") or {})
+    if not source_config_payload:
+        raise ValueError("Initialization checkpoint is missing model_config provenance.")
+    source_config = ChannelThermalHONFConfig.from_dict(source_config_payload)
+
+    expected_schemas = {
+        "channel_order": list(dataset.channel_order),
+        "interface_condition_feature_names": list(dataset.interface_condition_feature_names),
+        "interface_target_names": list(dataset.interface_target_names),
+    }
+    for key, expected in expected_schemas.items():
+        saved = checkpoint.get(key)
+        if saved is None or list(saved) != expected:
+            raise ValueError(f"Initialization checkpoint field schema mismatch for {key!r}.")
+    saved_field_dim = checkpoint.get("field_dim", source_config.core_honf.field_dim)
+    if int(saved_field_dim) != int(dataset.field_dim):
+        raise ValueError("Initialization checkpoint field_dim does not match the selected field schema.")
+
+    for key in ("dataset_id", "dataset_schema", "dataset_fingerprint"):
+        expected = dataset_config.get(key)
+        saved = checkpoint.get(key)
+        if expected is not None and (saved is None or saved != expected):
+            raise ValueError(f"Initialization checkpoint dataset identity mismatch for {key!r}.")
+
+    expected_global_config = {
+        "normalize_inputs": bool(dataset_config.get("normalize_inputs", False)),
+        "normalize_targets": bool(dataset_config.get("normalize_targets", False)),
+    }
+    saved_global_config = checkpoint.get("global_normalization_config")
+    if not isinstance(saved_global_config, dict) or {
+        key: bool(saved_global_config.get(key, False)) for key in expected_global_config
+    } != expected_global_config:
+        raise ValueError("Initialization checkpoint global normalization configuration mismatch.")
+    saved_stats = checkpoint.get("global_normalization_stats")
+    if not isinstance(saved_stats, dict) or set(saved_stats) != set(dataset.normalizer.stats):
+        raise ValueError("Initialization checkpoint global normalization statistics inventory mismatch.")
+    for name, current in dataset.normalizer.stats.items():
+        if not np.allclose(
+            np.asarray(saved_stats[name]), np.asarray(current), rtol=1.0e-7, atol=1.0e-7
+        ):
+            raise ValueError(f"Initialization checkpoint normalization mismatch for {name!r}.")
+
+    expected_local_config = {
+        "normalize_inputs": bool(model.local_coupling.local_surrogate_normalize_inputs),
+        "normalize_targets": bool(model.local_coupling.local_surrogate_normalize_targets),
+    }
+    saved_local_config = checkpoint.get("local_normalization_config")
+    if model.local_surrogate_attached and (
+        not isinstance(saved_local_config, dict)
+        or {key: bool(saved_local_config.get(key, False)) for key in expected_local_config}
+        != expected_local_config
+    ):
+        raise ValueError("Initialization checkpoint local normalization configuration mismatch.")
+    if model.local_surrogate_attached:
+        local_buffer_names = {
+            "module_params_mean": "local_module_params_mean",
+            "module_params_std": "local_module_params_std",
+            "port_tokens_mean": "local_port_tokens_mean",
+            "port_tokens_std": "local_port_tokens_std",
+            "internal_temperature_mean": "local_internal_temperature_mean",
+            "internal_temperature_std": "local_internal_temperature_std",
+            "interface_targets_mean": "local_interface_targets_mean",
+            "interface_targets_std": "local_interface_targets_std",
+        }
+        expected_local_stats = {
+            public_name: getattr(model.local_coupling, buffer_name).detach().cpu().numpy()
+            for public_name, buffer_name in local_buffer_names.items()
+            if getattr(model.local_coupling, buffer_name).numel() > 0
+        }
+        saved_local_stats = checkpoint.get("local_normalization_stats")
+        if not isinstance(saved_local_stats, dict) or set(saved_local_stats) != set(expected_local_stats):
+            raise ValueError("Initialization checkpoint local normalization statistics inventory mismatch.")
+        for name, current in expected_local_stats.items():
+            if not np.allclose(
+                np.asarray(saved_local_stats[name]), current, rtol=1.0e-7, atol=1.0e-7
+            ):
+                raise ValueError(f"Initialization checkpoint local normalization mismatch for {name!r}.")
+    return source_config
+
+
+def _partial_initialize_model(
+    model: ChannelThermalHONFModel,
+    checkpoint: Dict[str, Any],
+    *,
+    source_config: ChannelThermalHONFConfig,
+) -> Dict[str, Any]:
+    """Load only compatible parameters and return a complete key inventory."""
+
+    source_state = strip_module_prefix(checkpoint["model_state_dict"])
+    target_parameters = dict(model.named_parameters())
+    target_state = model.state_dict()
+    cross_assembly = (
+        source_config.core_honf.field_assembly_mode == "context_fusion"
+        and model.config.core_honf.field_assembly_mode == "edge_additive"
+    )
+    physical_output_prefixes = (
+        "core.decoder.pred_head.",
+        "core.decoder.mean_head.",
+        "core.decoder.residual_head.",
+        "fallback_heads.internal_head.",
+        "fallback_heads.interface_head.",
+        "local_coupling.port_refinement_head.",
+    )
+    runtime_state_suffixes = (
+        "._selection_epoch_state",
+        "._selection_total_epochs_state",
+    )
+    loaded: list[str] = []
+    skipped: list[Dict[str, Any]] = []
+    unexpected: list[str] = []
+    loadable: Dict[str, torch.Tensor] = {}
+
+    for name, source_value in source_state.items():
+        if name.endswith(runtime_state_suffixes):
+            skipped.append({"key": name, "reason": "runtime_selection_state"})
+            continue
+        if cross_assembly and name.startswith(physical_output_prefixes):
+            skipped.append({"key": name, "reason": "context_to_additive_output_head"})
+            continue
+        target_value = target_parameters.get(name)
+        if target_value is None:
+            if name in target_state:
+                skipped.append({"key": name, "reason": "non_parameter_state"})
+            else:
+                unexpected.append(name)
+            continue
+        try:
+            target_shape = tuple(target_value.shape)
+        except (RuntimeError, ValueError):
+            target_shape = None
+        source_shape = tuple(source_value.shape)
+        if target_shape is None:
+            skipped.append({"key": name, "reason": "uninitialized_target_shape"})
+            continue
+        if target_shape is not None and source_shape != target_shape:
+            skipped.append(
+                {
+                    "key": name,
+                    "reason": "shape_mismatch",
+                    "source_shape": list(source_shape),
+                    "target_shape": list(target_shape),
+                }
+            )
+            continue
+        loadable[name] = source_value
+        loaded.append(name)
+
+    model.load_state_dict(loadable, strict=False)
+    missing = sorted(name for name in target_parameters if name not in loadable)
+    return {
+        "loaded": sorted(loaded),
+        "skipped": sorted(skipped, key=lambda item: str(item["key"])),
+        "missing": missing,
+        "unexpected": sorted(unexpected),
+        "source_parameter_or_state_count": len(source_state),
+        "target_parameter_count": len(target_parameters),
+    }
+
+
 def write_metrics_row(path: Path, fieldnames: Iterable[str], row: Dict[str, Any]) -> None:
     """Write metrics row."""
 
@@ -1165,6 +1357,10 @@ def run_from_config(
     max_train_batches = args.max_train_batches if args.max_train_batches is not None else training_cfg.get("max_train_batches_per_epoch")
     max_val_batches = args.max_val_batches if args.max_val_batches is not None else training_cfg.get("max_val_batches")
     resume_checkpoint = resolve_demo_path(args.resume_checkpoint) if args.resume_checkpoint else None
+    initialize_arg = getattr(args, "initialize_checkpoint", None)
+    initialize_checkpoint = resolve_demo_path(initialize_arg) if initialize_arg else None
+    if resume_checkpoint is not None and initialize_checkpoint is not None:
+        raise ValueError("--resume-checkpoint and --initialize-checkpoint are mutually exclusive.")
 
     paths_cfg = cfg.get("paths", {})
     saved_root = ensure_dir(resolve_demo_path(paths_cfg.get("saved_model_dir", "./Trained_Results/ThermalChannel/HONF_Forward_Runs")))
@@ -1231,6 +1427,57 @@ def run_from_config(
     best_temperature = math.inf
     best_predicted = math.inf
     start_epoch = 1
+    if initialize_checkpoint is not None:
+        checkpoint = load_trusted_checkpoint(initialize_checkpoint, map_location=device)
+        source_config = _validate_initialization_checkpoint(
+            checkpoint,
+            model=model,
+            dataset=train_dataset,
+            dataset_config=dataset_cfg,
+        )
+        # Materialize every lazy adapter/core parameter from the current data
+        # schema before exact shape comparison. This is a no-grad inference
+        # pass and does not restore or advance any checkpoint training state.
+        materialization_batch = recursive_to_device(next(iter(train_loader)), device)
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            model(
+                **make_model_inputs(
+                    materialization_batch,
+                    local_port_condition_mode="predicted",
+                    mixed_teacher_ratio=0.0,
+                    return_predicted_port_outputs=False,
+                    return_port_global_consistency=False,
+                )
+            )
+        model.train(was_training)
+        initialization_inventory = _partial_initialize_model(
+            model,
+            checkpoint,
+            source_config=source_config,
+        )
+        initialization_inventory.update(
+            {
+                "checkpoint_path": str(initialize_checkpoint),
+                "checkpoint_sha256": _file_sha256(initialize_checkpoint),
+                "source_field_assembly_mode": source_config.core_honf.field_assembly_mode,
+                "target_field_assembly_mode": model_config.core_honf.field_assembly_mode,
+            }
+        )
+        write_json(run_dir / "initialization_inventory.json", initialization_inventory)
+        cfg["initialization"] = {
+            "checkpoint_path": str(initialize_checkpoint),
+            "checkpoint_sha256": initialization_inventory["checkpoint_sha256"],
+            "inventory_path": str(run_dir / "initialization_inventory.json"),
+        }
+        write_json(run_dir / "config_resolved.json", cfg)
+        print(
+            f"[initialize] loaded {len(initialization_inventory['loaded'])} parameters from "
+            f"{initialize_checkpoint}; skipped={len(initialization_inventory['skipped'])}, "
+            f"missing={len(initialization_inventory['missing'])}, "
+            f"unexpected={len(initialization_inventory['unexpected'])}"
+        )
     if resume_checkpoint is not None:
         repair_metrics_csv_for_append(metrics_path)
         checkpoint = load_trusted_checkpoint(resume_checkpoint, map_location=device)

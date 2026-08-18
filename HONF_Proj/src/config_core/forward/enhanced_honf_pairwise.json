@@ -21,6 +21,18 @@
       "num_env_tokens_y": 8,
       "num_hyperedges": 6,
 
+      "organizer_mode": "fixed_projection",
+      "edge_selection_mode": "all",
+      "module_assignment_normalizer": "softmax",
+      "environment_assignment_normalizer": "softmax",
+      "query_assignment_normalizer": "softmax",
+      "environment_locality_mode": "none",
+      "mechanism_state_mode": "residual_concat",
+      "field_assembly_mode": "context_fusion",
+      "routing_execution": "dense",
+      "query_edge_limit": 0,
+      "query_module_limit": 0,
+
       "hidden_dim": 256,
       "dropout": 0.0,
       "use_layer_norm": true,
