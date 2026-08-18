@@ -887,6 +887,10 @@ def _partial_initialize_model(
         source_config.core_honf.field_assembly_mode == "context_fusion"
         and model.config.core_honf.field_assembly_mode == "edge_additive"
     )
+    fixed_to_exchangeable = (
+        source_config.core_honf.organizer_mode == "fixed_projection"
+        and model.config.core_honf.organizer_mode == "exchangeable_slots"
+    )
     physical_output_prefixes = (
         "core.decoder.pred_head.",
         "core.decoder.mean_head.",
@@ -907,6 +911,9 @@ def _partial_initialize_model(
     for name, source_value in source_state.items():
         if name.endswith(runtime_state_suffixes):
             skipped.append({"key": name, "reason": "runtime_selection_state"})
+            continue
+        if fixed_to_exchangeable and name.startswith("core.organizer."):
+            skipped.append({"key": name, "reason": "fixed_projection_organizer"})
             continue
         if cross_assembly and name.startswith(physical_output_prefixes):
             skipped.append({"key": name, "reason": "context_to_additive_output_head"})
@@ -948,6 +955,8 @@ def _partial_initialize_model(
         "unexpected": sorted(unexpected),
         "source_parameter_or_state_count": len(source_state),
         "target_parameter_count": len(target_parameters),
+        "source_organizer_mode": source_config.core_honf.organizer_mode,
+        "target_organizer_mode": model.config.core_honf.organizer_mode,
     }
 
 
@@ -1197,6 +1206,46 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
                 "val_functional_edge_count",
             ),
             "value",
+            False,
+            True,
+        ),
+        "honf_candidate_mass_purity_curve.png": (
+            "Candidate Mass Fractions and Purities",
+            (
+                "candidate_module_mass_fraction_min",
+                "val_candidate_module_mass_fraction_min",
+                "candidate_environment_mass_fraction_min",
+                "val_candidate_environment_mass_fraction_min",
+                "candidate_module_purity_mean",
+                "val_candidate_module_purity_mean",
+                "candidate_environment_purity_mean",
+                "val_candidate_environment_purity_mean",
+            ),
+            "fraction",
+            False,
+            True,
+        ),
+        "honf_candidate_scale_curve.png": (
+            "Candidate Source and Region Scales",
+            (
+                "candidate_source_scale_mean",
+                "val_candidate_source_scale_mean",
+                "candidate_region_scale_mean",
+                "val_candidate_region_scale_mean",
+            ),
+            "scale",
+            False,
+            True,
+        ),
+        "honf_edge_contribution_fraction_curve.png": (
+            "Additive Edge Contribution Fractions",
+            (
+                "edge_contribution_fraction_min",
+                "val_edge_contribution_fraction_min",
+                "edge_contribution_fraction_max",
+                "val_edge_contribution_fraction_max",
+            ),
+            "fraction",
             False,
             True,
         ),
@@ -1463,6 +1512,8 @@ def run_from_config(
                 "checkpoint_sha256": _file_sha256(initialize_checkpoint),
                 "source_field_assembly_mode": source_config.core_honf.field_assembly_mode,
                 "target_field_assembly_mode": model_config.core_honf.field_assembly_mode,
+                "source_organizer_mode": source_config.core_honf.organizer_mode,
+                "target_organizer_mode": model_config.core_honf.organizer_mode,
             }
         )
         write_json(run_dir / "initialization_inventory.json", initialization_inventory)

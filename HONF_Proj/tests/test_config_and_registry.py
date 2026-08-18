@@ -103,3 +103,34 @@ def test_stage1_fixed_additive_overlay_changes_only_the_scientific_bridge() -> N
     assert bundle.case == base.case
     assert bundle.effective["loss"] == base.effective["loss"]
     assert bundle.effective["dataset"] == base.effective["dataset"]
+
+
+def test_stage2_exchangeable_soft_overlay_changes_only_organizer_parameterization() -> None:
+    base = load_config_bundle("project://src/config_core/forward/enhanced_honf_pairwise.json")
+    bundle = load_config_bundle(
+        "project://src/config_core/forward/enhanced_honf_pairwise.json",
+        experiment_overlay="project://src/config_core/forward/experiments/stage2_exchangeable_soft.json",
+    )
+    core = bundle.effective["model"]["core_honf"]
+    expected = {
+        "organizer_mode": "exchangeable_slots",
+        "edge_capacity": 6,
+        "initial_active_edges": 6,
+        "minimum_active_edges": 1,
+        "slot_refinement_steps": 2,
+        "edge_selection_mode": "all",
+        "module_assignment_normalizer": "softmax",
+        "environment_assignment_normalizer": "softmax",
+        "query_assignment_normalizer": "softmax",
+        "environment_locality_mode": "none",
+        "mechanism_state_mode": "descriptor_first",
+        "field_assembly_mode": "edge_additive",
+        "routing_execution": "dense",
+        "query_edge_limit": 0,
+        "query_module_limit": 0,
+    }
+    assert {key: core[key] for key in expected} == expected
+    assert bundle.effective["training"]["learning_rate"] == 1.0e-4
+    assert bundle.case == base.case
+    assert bundle.effective["loss"] == base.effective["loss"]
+    assert bundle.effective["dataset"] == base.effective["dataset"]

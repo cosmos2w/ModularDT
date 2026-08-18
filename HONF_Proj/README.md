@@ -95,6 +95,8 @@ The additive-only decoder normalizes the background and edge head inputs, initia
 
 For the fixed-organizer bridge, apply `src/config_core/forward/experiments/stage1_fixed_additive_soft.json` to `enhanced_honf_pairwise.json`. A new run may use `--initialize-checkpoint`; this performs provenance validation and name/shape-matched parameter initialization, writes `initialization_inventory.json`, and never restores optimizer, scaler, epoch, best metrics, selection progress, or RNG state.
 
+For the exchangeable-soft bridge, apply `src/config_core/forward/experiments/stage2_exchangeable_soft.json` to the same base profile and initialize from the Phase-1 checkpoint. The loader reuses compatible encoders, decoder/additive heads, local coupling, and embedded Stage-A state while explicitly skipping all fixed-projection organizer parameters.
+
 See [Model_Explain.md](Model_Explain.md) for the complete equations, Stage-A coupling, topology signature, inverse flow, and code-to-math map.
 
 ## 4. Backward compatibility

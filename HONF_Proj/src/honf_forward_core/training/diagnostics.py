@@ -34,6 +34,26 @@ HONF_DIAGNOSTIC_KEYS = [
     "selected_module_nonzero_fraction",
     "candidate_environment_nonzero_fraction",
     "selected_environment_nonzero_fraction",
+    "candidate_module_mass_fraction_min",
+    "candidate_module_mass_fraction_p05",
+    "candidate_module_mass_fraction_mean",
+    "candidate_module_mass_fraction_max",
+    "candidate_environment_mass_fraction_min",
+    "candidate_environment_mass_fraction_p05",
+    "candidate_environment_mass_fraction_mean",
+    "candidate_environment_mass_fraction_max",
+    "candidate_module_purity_min",
+    "candidate_module_purity_mean",
+    "candidate_module_purity_max",
+    "candidate_environment_purity_min",
+    "candidate_environment_purity_mean",
+    "candidate_environment_purity_max",
+    "candidate_source_scale_min",
+    "candidate_source_scale_mean",
+    "candidate_source_scale_max",
+    "candidate_region_scale_min",
+    "candidate_region_scale_mean",
+    "candidate_region_scale_max",
     "selected_module_probability_mass_min",
     "selected_module_probability_mass_p05",
     "selected_module_probability_mass_mean",
@@ -50,6 +70,10 @@ HONF_DIAGNOSTIC_KEYS = [
     "background_field_norm",
     "summed_edge_field_norm",
     "edge_field_fraction",
+    "edge_contribution_fraction_min",
+    "edge_contribution_fraction_p05",
+    "edge_contribution_fraction_mean",
+    "edge_contribution_fraction_max",
     "background_edge_cancellation_ratio",
     "A_mh_entropy",
     "A_eh_entropy",
@@ -92,6 +116,88 @@ def _entropy_norm(prob: torch.Tensor, dim: int = -1) -> torch.Tensor:
 
     count = max(int(prob.shape[dim]), 2)
     return _entropy(prob, dim=dim) / math.log(float(count))
+
+
+def _distribution_stat(
+    value: Any,
+    statistic: str,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Reduce a candidate/edge diagnostic tensor with an explicit statistic."""
+
+    if not torch.is_tensor(value) or value.numel() == 0:
+        return torch.zeros((), device=device, dtype=dtype)
+    flat = value.detach().to(device=device, dtype=dtype).reshape(-1)
+    if statistic == "min":
+        return flat.amin()
+    if statistic == "p05":
+        return torch.quantile(flat.float(), 0.05).to(dtype=dtype)
+    if statistic == "mean":
+        return flat.mean()
+    if statistic == "max":
+        return flat.amax()
+    raise ValueError(f"Unknown distribution statistic: {statistic!r}.")
+
+
+def compute_code_permutation_equivariance_diagnostics(
+    reference: Dict[str, Any],
+    permuted: Dict[str, Any],
+    permutation: torch.Tensor,
+) -> Dict[str, float]:
+    """Compare two explicit-code runs after aligning anonymous edge order.
+
+    This is an opt-in diagnostic because producing ``permuted`` requires a
+    second organizer/decoder pass. Keeping it outside the standard training
+    logger avoids doubling Phase-2 execution while still providing a reusable,
+    auditable equivariance check for focused tests and evaluations.
+    """
+
+    edge_axes = {
+        "candidate_A_mh": 2,
+        "candidate_A_eh": 2,
+        "candidate_hyper_state": 1,
+        "hyper_state": 1,
+        "edge_quality": 1,
+        "edge_active_mask": 1,
+        "edge_viable_mask": 1,
+        "effective_edge_mask": 1,
+        "candidate_module_mass_fraction": 1,
+        "candidate_environment_mass_fraction": 1,
+        "candidate_module_purity": 1,
+        "candidate_environment_purity": 1,
+        "candidate_source_coords": 1,
+        "candidate_source_scale": 1,
+        "candidate_region_coords": 1,
+        "candidate_region_scale": 1,
+        "pred_field_by_edge": 2,
+    }
+    results: Dict[str, float] = {}
+    maxima = []
+    for key, edge_axis in edge_axes.items():
+        reference_value = reference.get(key)
+        permuted_value = permuted.get(key)
+        if not torch.is_tensor(reference_value) or not torch.is_tensor(permuted_value):
+            continue
+        order = permutation.to(device=reference_value.device, dtype=torch.long)
+        aligned = torch.index_select(reference_value, edge_axis, order)
+        residual = (aligned - permuted_value.to(device=aligned.device, dtype=aligned.dtype)).abs()
+        maximum = residual.amax() if residual.numel() else aligned.new_zeros(())
+        mean = residual.mean() if residual.numel() else aligned.new_zeros(())
+        results[f"code_permutation_{key}_max_error"] = float(maximum.detach().cpu())
+        results[f"code_permutation_{key}_mean_error"] = float(mean.detach().cpu())
+        maxima.append(maximum)
+    if torch.is_tensor(reference.get("pred_field")) and torch.is_tensor(permuted.get("pred_field")):
+        residual = (reference["pred_field"] - permuted["pred_field"]).abs()
+        maximum = residual.amax() if residual.numel() else reference["pred_field"].new_zeros(())
+        mean = residual.mean() if residual.numel() else reference["pred_field"].new_zeros(())
+        results["code_permutation_pred_field_max_error"] = float(maximum.detach().cpu())
+        results["code_permutation_pred_field_mean_error"] = float(mean.detach().cpu())
+        maxima.append(maximum)
+    results["code_permutation_equivariance_max_error"] = float(
+        torch.stack(maxima).amax().detach().cpu() if maxima else 0.0
+    )
+    return results
 
 
 def compute_honf_diagnostics(
@@ -139,6 +245,16 @@ def compute_honf_diagnostics(
     A_eh = org.get("A_eh")
     module_mass = org.get("hyper_module_mass")
     env_mass = org.get("hyper_env_mass")
+    candidate_module_mass_fraction = org.get("candidate_module_mass_fraction")
+    candidate_environment_mass_fraction = org.get("candidate_environment_mass_fraction")
+    candidate_module_purity = org.get("candidate_module_purity", org.get("hyper_module_purity"))
+    candidate_environment_purity = org.get("candidate_environment_purity", org.get("hyper_env_purity"))
+    candidate_source_scale = org.get("candidate_source_scale", org.get("hyper_source_scale"))
+    candidate_region_scale = org.get("candidate_region_scale", org.get("hyper_region_scale"))
+    edge_contribution_fraction = output.get(
+        "edge_contribution_energy_fraction",
+        routing.get("edge_contribution_energy_fraction"),
+    )
     if torch.is_tensor(A_mh):
         A_mh = A_mh.to(device=device, dtype=dtype)
         module_present = org.get("module_present")
@@ -180,6 +296,26 @@ def compute_honf_diagnostics(
         "selected_module_nonzero_fraction": _scalar(org.get("selected_module_nonzero_fraction"), device, dtype),
         "candidate_environment_nonzero_fraction": _scalar(org.get("candidate_environment_nonzero_fraction"), device, dtype),
         "selected_environment_nonzero_fraction": _scalar(org.get("selected_environment_nonzero_fraction"), device, dtype),
+        "candidate_module_mass_fraction_min": _distribution_stat(candidate_module_mass_fraction, "min", device, dtype),
+        "candidate_module_mass_fraction_p05": _distribution_stat(candidate_module_mass_fraction, "p05", device, dtype),
+        "candidate_module_mass_fraction_mean": _distribution_stat(candidate_module_mass_fraction, "mean", device, dtype),
+        "candidate_module_mass_fraction_max": _distribution_stat(candidate_module_mass_fraction, "max", device, dtype),
+        "candidate_environment_mass_fraction_min": _distribution_stat(candidate_environment_mass_fraction, "min", device, dtype),
+        "candidate_environment_mass_fraction_p05": _distribution_stat(candidate_environment_mass_fraction, "p05", device, dtype),
+        "candidate_environment_mass_fraction_mean": _distribution_stat(candidate_environment_mass_fraction, "mean", device, dtype),
+        "candidate_environment_mass_fraction_max": _distribution_stat(candidate_environment_mass_fraction, "max", device, dtype),
+        "candidate_module_purity_min": _distribution_stat(candidate_module_purity, "min", device, dtype),
+        "candidate_module_purity_mean": _distribution_stat(candidate_module_purity, "mean", device, dtype),
+        "candidate_module_purity_max": _distribution_stat(candidate_module_purity, "max", device, dtype),
+        "candidate_environment_purity_min": _distribution_stat(candidate_environment_purity, "min", device, dtype),
+        "candidate_environment_purity_mean": _distribution_stat(candidate_environment_purity, "mean", device, dtype),
+        "candidate_environment_purity_max": _distribution_stat(candidate_environment_purity, "max", device, dtype),
+        "candidate_source_scale_min": _distribution_stat(candidate_source_scale, "min", device, dtype),
+        "candidate_source_scale_mean": _distribution_stat(candidate_source_scale, "mean", device, dtype),
+        "candidate_source_scale_max": _distribution_stat(candidate_source_scale, "max", device, dtype),
+        "candidate_region_scale_min": _distribution_stat(candidate_region_scale, "min", device, dtype),
+        "candidate_region_scale_mean": _distribution_stat(candidate_region_scale, "mean", device, dtype),
+        "candidate_region_scale_max": _distribution_stat(candidate_region_scale, "max", device, dtype),
         "selected_module_probability_mass_min": _scalar(org.get("selected_module_probability_mass_min"), device, dtype),
         "selected_module_probability_mass_p05": _scalar(org.get("selected_module_probability_mass_p05"), device, dtype),
         "selected_module_probability_mass_mean": _scalar(org.get("selected_module_probability_mass_mean"), device, dtype),
@@ -196,6 +332,10 @@ def compute_honf_diagnostics(
         "background_field_norm": _scalar(routing.get("background_field_norm"), device, dtype),
         "summed_edge_field_norm": _scalar(routing.get("summed_edge_field_norm"), device, dtype),
         "edge_field_fraction": _scalar(routing.get("edge_field_fraction"), device, dtype),
+        "edge_contribution_fraction_min": _distribution_stat(edge_contribution_fraction, "min", device, dtype),
+        "edge_contribution_fraction_p05": _distribution_stat(edge_contribution_fraction, "p05", device, dtype),
+        "edge_contribution_fraction_mean": _distribution_stat(edge_contribution_fraction, "mean", device, dtype),
+        "edge_contribution_fraction_max": _distribution_stat(edge_contribution_fraction, "max", device, dtype),
         "background_edge_cancellation_ratio": _scalar(
             routing.get("background_edge_cancellation_ratio"), device, dtype
         ),

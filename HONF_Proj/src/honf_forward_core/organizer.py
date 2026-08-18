@@ -431,7 +431,7 @@ class ExchangeableSlotOrganizer(nn.Module):
                 slots.reshape(batch_size * capacity, hidden_dim),
             ).reshape(batch_size, capacity, hidden_dim)
             slots = self.slot_norm(slots)
-        candidate_A_mh, candidate_A_eh, _, _ = self._candidate_assignments(
+        candidate_A_mh, candidate_A_eh, candidate_region_coords, candidate_region_scale = self._candidate_assignments(
             module_tokens_for_hyper,
             env_tokens,
             slots,
@@ -441,6 +441,20 @@ class ExchangeableSlotOrganizer(nn.Module):
             cfg,
             previous_region_coords=previous_region_coords,
             previous_region_scale=previous_region_scale,
+        )
+        candidate_module_weights = candidate_A_mh / candidate_A_mh.sum(
+            dim=1, keepdim=True
+        ).clamp_min(EPS)
+        candidate_source_coords = _weighted_coords(
+            module_centers,
+            candidate_module_weights,
+            cfg,
+        )
+        _, candidate_source_scale = _weighted_scale(
+            module_centers,
+            candidate_module_weights,
+            candidate_source_coords,
+            cfg,
         )
         candidate_module_mass_raw = candidate_A_mh.sum(dim=1)
         candidate_env_mass_raw = candidate_A_eh.sum(dim=1)
@@ -468,9 +482,9 @@ class ExchangeableSlotOrganizer(nn.Module):
             promoted = torch.zeros_like(edge_viable_mask).scatter_(-1, fallback, True)
             edge_viable_mask = edge_viable_mask | (promoted & no_viable.unsqueeze(-1))
 
-        module_purity = _assignment_purity(candidate_A_mh)
-        env_purity = _assignment_purity(candidate_A_eh)
-        ordinary_purity = torch.sqrt(module_purity * env_purity)
+        candidate_module_purity = _assignment_purity(candidate_A_mh)
+        candidate_env_purity = _assignment_purity(candidate_A_eh)
+        ordinary_purity = torch.sqrt(candidate_module_purity * candidate_env_purity)
         module_attenuation = (
             candidate_module_mass_fraction / float(cfg.candidate_module_mass_fraction_floor)
         ).clamp(max=1.0)
@@ -521,6 +535,12 @@ class ExchangeableSlotOrganizer(nn.Module):
             effective_edge_mask=effective_edge_mask,
             candidate_module_mass_fraction=candidate_module_mass_fraction,
             candidate_env_mass_fraction=candidate_env_mass_fraction,
+            candidate_module_purity=candidate_module_purity,
+            candidate_env_purity=candidate_env_purity,
+            candidate_source_coords=candidate_source_coords,
+            candidate_source_scale=candidate_source_scale,
+            candidate_region_coords=candidate_region_coords,
+            candidate_region_scale=candidate_region_scale,
             selected_module_probability_mass=selected_module_probability_mass,
             selected_environment_probability_mass=selected_environment_probability_mass,
             cfg=cfg,
@@ -678,6 +698,9 @@ class ExchangeableSlotOrganizer(nn.Module):
         """Select the smallest quality/novelty set that reaches coverage."""
 
         if cfg.edge_selection_mode == "all":
+            # Phase 2 keeps every viable soft candidate active. Phase-0
+            # viability remains a hard safety invariant: a collapsed candidate
+            # cannot be selected or contribute state, routing, or field output.
             return edge_viable_mask.to(dtype=edge_quality.dtype).detach()
         # Selection phase is an epoch property, not a module train/eval-mode
         # property. This keeps validation topology identical to training during
@@ -860,6 +883,12 @@ class ExchangeableSlotOrganizer(nn.Module):
         effective_edge_mask: torch.Tensor,
         candidate_module_mass_fraction: torch.Tensor,
         candidate_env_mass_fraction: torch.Tensor,
+        candidate_module_purity: torch.Tensor,
+        candidate_env_purity: torch.Tensor,
+        candidate_source_coords: torch.Tensor,
+        candidate_source_scale: torch.Tensor,
+        candidate_region_coords: torch.Tensor,
+        candidate_region_scale: torch.Tensor,
         selected_module_probability_mass: torch.Tensor,
         selected_environment_probability_mass: torch.Tensor,
         cfg: UnifiedForwardConfig,
@@ -979,6 +1008,12 @@ class ExchangeableSlotOrganizer(nn.Module):
             "effective_edge_mask": effective_edge_mask,
             "candidate_module_mass_fraction": candidate_module_mass_fraction,
             "candidate_environment_mass_fraction": candidate_env_mass_fraction,
+            "candidate_module_purity": candidate_module_purity,
+            "candidate_environment_purity": candidate_env_purity,
+            "candidate_source_coords": candidate_source_coords,
+            "candidate_source_scale": candidate_source_scale,
+            "candidate_region_coords": candidate_region_coords,
+            "candidate_region_scale": candidate_region_scale,
             "candidate_edge_count": edge_quality.new_full((edge_quality.shape[0],), float(edge_quality.shape[1])),
             "selected_edge_count": edge_active_mask.sum(dim=-1),
             "viable_selected_edge_count": effective_edge_mask.sum(dim=-1),
@@ -1231,6 +1266,14 @@ class HypergraphOrganizerCore(nn.Module):
             "hyper_env_mass": hyper_env_mass,
             "hyper_module_purity": hyper_module_purity,
             "hyper_env_purity": hyper_env_purity,
+            "candidate_module_mass_fraction": hyper_module_mass,
+            "candidate_environment_mass_fraction": hyper_env_mass,
+            "candidate_module_purity": hyper_module_purity,
+            "candidate_environment_purity": hyper_env_purity,
+            "candidate_source_coords": hyper_source_coords,
+            "candidate_source_scale": hyper_source_scale,
+            "candidate_region_coords": hyper_region_coords,
+            "candidate_region_scale": hyper_region_scale,
             "hyper_strength": hyper_strength,
             "edge_quality": torch.sqrt(hyper_module_purity * hyper_env_purity),
             "edge_active_mask": edge_active_mask,

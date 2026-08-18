@@ -22,6 +22,10 @@
       "num_hyperedges": 6,
 
       "organizer_mode": "fixed_projection",
+      "edge_capacity": 0,
+      "initial_active_edges": 6,
+      "minimum_active_edges": 1,
+      "slot_refinement_steps": 2,
       "edge_selection_mode": "all",
       "module_assignment_normalizer": "softmax",
       "environment_assignment_normalizer": "softmax",

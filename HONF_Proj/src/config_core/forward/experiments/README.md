@@ -14,6 +14,10 @@ records the overlay path/hash and exact JSON in the run.
   and exact additive field assembly while retaining the six-edge fixed
   organizer, dense soft routing, ThermalChannel data/losses, frozen Stage A,
   predicted ports, and one-pass coupling of the comparison profile.
+- `stage2_exchangeable_soft.json`: replaces only the fixed organizer with six
+  exchangeable runtime slots while keeping every candidate selected, softmax
+  assignments, no locality, dense execution, exact additive assembly, and the
+  Phase-1 learning rate.
 
 Use `enhanced_honf_pairwise.json` as the base profile for these archived
 switches. CLI run ID/name/epoch overrides remain separate provenance.

@@ -17,7 +17,12 @@ from honf_forward_core.config import UnifiedForwardConfig
 FIELD_NAMES = ["u", "v", "p", "omega", "temperature"]
 
 
-def _config(assembly: str, mechanism: str) -> ChannelThermalHONFConfig:
+def _config(
+    assembly: str,
+    mechanism: str,
+    *,
+    organizer_mode: str = "fixed_projection",
+) -> ChannelThermalHONFConfig:
     core = UnifiedForwardConfig(
         field_dim=5,
         domain_length_x=6.0,
@@ -26,7 +31,11 @@ def _config(assembly: str, mechanism: str) -> ChannelThermalHONFConfig:
         num_env_tokens_x=4,
         num_env_tokens_y=2,
         num_hyperedges=6,
-        organizer_mode="fixed_projection",
+        organizer_mode=organizer_mode,
+        edge_capacity=6 if organizer_mode == "exchangeable_slots" else 0,
+        initial_active_edges=6,
+        minimum_active_edges=1,
+        slot_refinement_steps=2,
         edge_selection_mode="all",
         hidden_dim=16,
         dropout=0.0,
@@ -143,3 +152,58 @@ def test_context_checkpoint_partial_initialization_loads_only_expected_common_pa
     assert skipped["local_coupling.port_refinement_head.net.net.3.weight"] == "context_to_additive_output_head"
     assert all(name in dict(target.named_parameters()) for name in inventory["loaded"])
     assert not any(name.startswith("core.decoder.pred_head.") for name in inventory["loaded"])
+
+
+def test_phase1_checkpoint_initializes_exchangeable_bridge_but_skips_fixed_organizer() -> None:
+    source_config = _config("edge_additive", "descriptor_first")
+    target_config = _config(
+        "edge_additive",
+        "descriptor_first",
+        organizer_mode="exchangeable_slots",
+    )
+    source = ChannelThermalHONFModel(source_config, attach_local_from_checkpoint=False).eval()
+    target = ChannelThermalHONFModel(target_config, attach_local_from_checkpoint=False).eval()
+    _initialize_lazy_parameters(source)
+    _initialize_lazy_parameters(target)
+    with torch.no_grad():
+        source.core.decoder.background_head.net[-1].weight.fill_(0.125)
+        target.core.decoder.background_head.net[-1].weight.zero_()
+
+    checkpoint = {
+        "model_state_dict": source.state_dict(),
+        "model_config": source_config.to_dict(),
+    }
+    inventory = _partial_initialize_model(
+        target,
+        checkpoint,
+        source_config=source_config,
+    )
+
+    torch.testing.assert_close(
+        target.core.decoder.background_head.net[-1].weight,
+        torch.full_like(target.core.decoder.background_head.net[-1].weight, 0.125),
+    )
+    skipped = {item["key"]: item["reason"] for item in inventory["skipped"]}
+    source_organizer_parameters = {
+        name for name, _ in source.named_parameters() if name.startswith("core.organizer.")
+    }
+    source_parameters = dict(source.named_parameters())
+    target_parameters = dict(target.named_parameters())
+    expected_common = {
+        name
+        for name, value in source_parameters.items()
+        if not name.startswith("core.organizer.")
+        and name in target_parameters
+        and tuple(value.shape) == tuple(target_parameters[name].shape)
+    }
+    assert source_organizer_parameters
+    assert all(skipped[name] == "fixed_projection_organizer" for name in source_organizer_parameters)
+    assert not any(name.startswith("core.organizer.") for name in inventory["loaded"])
+    assert set(inventory["loaded"]) == expected_common
+    assert "core.decoder.background_head.net.3.weight" in inventory["loaded"]
+    assert "core.decoder.edge_head.net.3.weight" in inventory["loaded"]
+    assert "core.decoder.additive_edge_gate" in inventory["loaded"]
+    assert any(name.startswith("core.global_encoder.") for name in inventory["loaded"])
+    assert any(name.startswith("local_coupling.") for name in inventory["loaded"])
+    assert inventory["source_organizer_mode"] == "fixed_projection"
+    assert inventory["target_organizer_mode"] == "exchangeable_slots"

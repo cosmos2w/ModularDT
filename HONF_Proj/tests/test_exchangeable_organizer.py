@@ -8,7 +8,10 @@ import torch.nn as nn
 from honf_forward_core.config import BatchData, UnifiedForwardConfig
 from honf_forward_core.model import HONFNeuralField
 from honf_forward_core.organizer import deterministic_slot_codes
-from honf_forward_core.training.diagnostics import compute_honf_diagnostics
+from honf_forward_core.training.diagnostics import (
+    compute_code_permutation_equivariance_diagnostics,
+    compute_honf_diagnostics,
+)
 
 
 def _config(*, capacity: int = 6, initial: int = 4, minimum: int = 1) -> UnifiedForwardConfig:
@@ -136,6 +139,14 @@ def test_candidate_code_permutation_is_equivariant_and_field_invariant() -> None
         rtol=1.0e-6,
         atol=1.0e-6,
     )
+    equivariance = compute_code_permutation_equivariance_diagnostics(
+        {**reference, **reference_field},
+        {**candidate, **candidate_field},
+        permutation,
+    )
+    assert equivariance["code_permutation_equivariance_max_error"] < 1.0e-5
+    assert "code_permutation_candidate_source_scale_max_error" in equivariance
+    assert "code_permutation_pred_field_max_error" in equivariance
 
 
 def test_module_permutation_and_padding_width_preserve_field() -> None:
@@ -165,18 +176,62 @@ def test_capacity_changes_runtime_shapes_not_parameter_shapes() -> None:
         model.set_edge_capacity(6)
         output_6 = model(batch)
         parameter_shapes_6 = {name: tuple(value.shape) for name, value in model.state_dict().items()}
-        model.set_edge_capacity(10)
-        output_10 = model(batch)
-        parameter_shapes_10 = {name: tuple(value.shape) for name, value in model.state_dict().items()}
+        model.set_edge_capacity(8)
+        output_8 = model(batch)
+        parameter_shapes_8 = {name: tuple(value.shape) for name, value in model.state_dict().items()}
 
     assert output_6["candidate_A_mh"].shape[-1] == 6
-    assert output_10["candidate_A_mh"].shape[-1] == 10
-    assert parameter_shapes_6 == parameter_shapes_10
+    assert output_8["candidate_A_mh"].shape[-1] == 8
+    assert parameter_shapes_6 == parameter_shapes_8
 
-    other = _model(_config(capacity=10)).eval()
+    other = _model(_config(capacity=8)).eval()
     with torch.no_grad():
         other(batch)
-    assert {name: tuple(value.shape) for name, value in other.state_dict().items()} == parameter_shapes_10
+    assert {name: tuple(value.shape) for name, value in other.state_dict().items()} == parameter_shapes_8
+
+
+def test_stage2_soft_bridge_selects_all_six_candidates_and_exports_candidate_diagnostics() -> None:
+    payload = _config(capacity=6, initial=6).to_dict()
+    payload.update(
+        edge_selection_mode="all",
+        module_assignment_normalizer="softmax",
+        environment_assignment_normalizer="softmax",
+        query_assignment_normalizer="softmax",
+        environment_locality_mode="none",
+        routing_execution="dense",
+        query_edge_limit=0,
+        query_module_limit=0,
+    )
+    model = _model(UnifiedForwardConfig.from_dict(payload)).eval()
+    with torch.no_grad():
+        output = model(_batch(), return_edge_fields=True)
+
+    assert torch.equal(output["selected_edge_count"], torch.full((2,), 6.0))
+    assert torch.equal(output["viable_selected_edge_count"], torch.full((2,), 6.0))
+    assert torch.equal(output["edge_active_mask"], torch.ones_like(output["edge_active_mask"]))
+    assert torch.equal(output["edge_viable_mask"], torch.ones_like(output["edge_viable_mask"]))
+    assert output["candidate_module_mass_fraction"].shape == (2, 6)
+    assert output["candidate_environment_mass_fraction"].shape == (2, 6)
+    assert output["candidate_module_purity"].shape == (2, 6)
+    assert output["candidate_environment_purity"].shape == (2, 6)
+    assert output["candidate_source_scale"].shape == (2, 6, 2)
+    assert output["candidate_region_scale"].shape == (2, 6, 2)
+
+    diagnostics = compute_honf_diagnostics(
+        {"pred_field": output["pred_field"], "organizer_aux": output, "routing_aux": output}
+    )
+    required = {
+        "candidate_module_mass_fraction_min",
+        "candidate_environment_mass_fraction_min",
+        "candidate_module_purity_mean",
+        "candidate_environment_purity_mean",
+        "candidate_source_scale_mean",
+        "candidate_region_scale_mean",
+        "edge_contribution_fraction_min",
+        "edge_contribution_fraction_max",
+    }
+    assert required <= diagnostics.keys()
+    assert all(torch.isfinite(torch.tensor(diagnostics[key])) for key in required)
 
 
 def test_selection_bounds_mass_and_inactive_edges() -> None:
