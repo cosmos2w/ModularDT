@@ -3,6 +3,7 @@
   "profile_name": "thermalchannel_coupled_default",
   "case_id": "ThermalChannel",
   "plugin": "channelthermal.plugin:create_plugin",
+
   "dataset": {
     "manifest": "project://Case_ThermalChannel/Dataset/dataset_manifest.json",
     "locations": "project://Case_ThermalChannel/Dataset/dataset_locations.local.json",
@@ -23,6 +24,7 @@
     "require_converged": false,
     "allow_train_as_validation": false
   },
+  
   "model": {
     "channelthermal": {
       "material_param_dim": 6,

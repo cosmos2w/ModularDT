@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -67,3 +68,31 @@ def test_evaluate_dispatcher_rejects_multiple_single_run_ids(monkeypatch) -> Non
     )
     with pytest.raises(SystemExit):
         module.parse_args()
+
+
+def test_forward_upgrade_ladder_is_bounded_and_training_free(monkeypatch, capsys) -> None:
+    module = _load_tool("check_forward_upgrade_ladder")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "check_forward_upgrade_ladder.py",
+            "--device",
+            "cpu",
+            "--modules",
+            "3",
+            "--active-modules",
+            "2",
+            "--queries",
+            "7",
+            "--edge-capacity",
+            "6",
+            "--hidden-dim",
+            "8",
+        ],
+    )
+
+    assert module.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["training_steps"] == 0
+    assert set(payload["results"]) == {"A", "B", "C", "D", "E"}
+    assert all(result["finite"] for result in payload["results"].values())

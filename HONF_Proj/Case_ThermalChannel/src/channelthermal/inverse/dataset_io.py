@@ -19,6 +19,8 @@ from torch.utils.data import Dataset
 
 INVERSE_DATASET_SCHEMA_NAME = "thermalchannel_hierarchical_inverse_dataset"
 INVERSE_DATASET_SCHEMA_VERSION = 1
+TOPOLOGY_SET_DATASET_SCHEMA_NAME = "thermalchannel_hierarchical_inverse_topology_set"
+TOPOLOGY_SET_DATASET_SCHEMA_VERSION = 1
 
 
 def _string_dtype() -> np.dtype[Any]:
@@ -85,14 +87,20 @@ def validate_inverse_hdf5(path: str | Path) -> dict[str, Any]:
     if not artifact.is_file():
         raise FileNotFoundError(f"Inverse dataset not found: {artifact}")
     with h5py.File(artifact, "r") as h5:
-        if h5.attrs.get("schema_name") != INVERSE_DATASET_SCHEMA_NAME:
+        schema_name = str(h5.attrs.get("schema_name", ""))
+        topology_set = schema_name == TOPOLOGY_SET_DATASET_SCHEMA_NAME
+        if schema_name not in {INVERSE_DATASET_SCHEMA_NAME, TOPOLOGY_SET_DATASET_SCHEMA_NAME}:
             raise ValueError("Inverse dataset schema_name mismatch.")
-        if int(h5.attrs.get("schema_version", 0)) != INVERSE_DATASET_SCHEMA_VERSION:
+        expected_version = (
+            TOPOLOGY_SET_DATASET_SCHEMA_VERSION if topology_set else INVERSE_DATASET_SCHEMA_VERSION
+        )
+        if int(h5.attrs.get("schema_version", 0)) != expected_version:
             raise ValueError("Inverse dataset schema_version mismatch.")
         required = {
             "case_id", "source_split", "inverse_split", "variant_id", "variant_seed",
-            "design", "context", "plan", "functionals", "requests", "geometry", "normalization", "splits",
+            "design", "context", "functionals", "requests", "geometry", "normalization", "splits",
         }
+        required.add("topology" if topology_set else "plan")
         missing = sorted(required - set(h5))
         if missing:
             raise ValueError(f"Inverse dataset is missing root entries: {missing}")
@@ -106,12 +114,39 @@ def validate_inverse_hdf5(path: str | Path) -> dict[str, Any]:
             raise ValueError("variant_seed must have shape [N,V].")
         if h5["requests/active_mask"].shape != (n, variants, 4):
             raise ValueError("requests/active_mask must have shape [N,V,4].")
-        if h5["plan/compact_raw"].shape[:1] != (n,) or h5["plan/compact_raw"].shape[-1] != 12:
-            raise ValueError("plan/compact_raw must have shape [N,K,12].")
+        if topology_set:
+            if str(h5.attrs.get("topology_signature_schema_name", "")) != "honf_topology_signature":
+                raise ValueError("Topology-set dataset requires honf_topology_signature provenance.")
+            if int(h5.attrs.get("topology_signature_schema_version", 0)) != 3:
+                raise ValueError("Topology-set dataset requires topology signature schema version 3.")
+            checkpoint_sha256 = str(h5.attrs.get("forward_topology_checkpoint_sha256", ""))
+            if len(checkpoint_sha256) != 64 or any(
+                character not in "0123456789abcdefABCDEF" for character in checkpoint_sha256
+            ):
+                raise ValueError("Topology-set dataset requires a forward checkpoint SHA-256.")
+            tokens = h5["topology/tokens_raw"]
+            normalized_tokens = h5["topology/tokens_normalized"]
+            active_mask = h5["topology/active_mask"]
+            relations = h5["topology/relations"]
+            if tokens.shape[:1] != (n,) or tokens.shape[-1] != 12 or normalized_tokens.shape != tokens.shape:
+                raise ValueError("Topology tokens must share shape [N,K,12].")
+            if active_mask.shape != tokens.shape[:2]:
+                raise ValueError("topology/active_mask must have shape [N,K].")
+            if relations.ndim != 4 or relations.shape[:3] != (n, tokens.shape[1], tokens.shape[1]):
+                raise ValueError("topology/relations must have shape [N,K,K,F_r].")
+            if not np.array_equal((tokens[..., 0] > 0.5), (active_mask[...] > 0.5)):
+                raise ValueError("Topology token activity and active_mask disagree.")
+            plan_raw_path = "topology/tokens_raw"
+            plan_normalized_path = "topology/tokens_normalized"
+        else:
+            if h5["plan/compact_raw"].shape[:1] != (n,) or h5["plan/compact_raw"].shape[-1] != 12:
+                raise ValueError("plan/compact_raw must have shape [N,K,12].")
+            plan_raw_path = "plan/compact_raw"
+            plan_normalized_path = "plan/compact_normalized"
         if h5["design/model/module_present"].shape[0] != n:
             raise ValueError("Design case dimension mismatch.")
         for name in (
-            "plan/compact_raw", "plan/compact_normalized", "context/vector",
+            plan_raw_path, plan_normalized_path, "context/vector",
             "context/normalized_vector", "requests/target_normalized",
             "design/model/normalized_module_centers", "design/model/normalized_heat_powers",
         ):
@@ -126,9 +161,19 @@ def validate_inverse_hdf5(path: str | Path) -> dict[str, Any]:
         return {
             "num_cases": n,
             "variants_per_case": variants,
-            "num_edges": int(h5["plan/compact_raw"].shape[1]),
+            "num_edges": int(h5[plan_raw_path].shape[1]),
             "max_modules": int(h5["design/model/module_present"].shape[1]),
             "split_counts": {name: len(values) for name, values in split_sets.items()},
+            "plan_token_mode": "exchangeable_set" if topology_set else "indexed",
+            "topology_schema_name": (
+                str(h5.attrs["topology_signature_schema_name"]) if topology_set else ""
+            ),
+            "topology_schema_version": (
+                int(h5.attrs["topology_signature_schema_version"]) if topology_set else 0
+            ),
+            "forward_topology_checkpoint_sha256": (
+                str(h5.attrs["forward_topology_checkpoint_sha256"]) if topology_set else ""
+            ),
         }
 
 
@@ -160,11 +205,17 @@ class InverseH5Dataset(Dataset):
             self.request_schema_version = int(h5.attrs["request_schema_version"])
             self.compact_plan_schema_version = int(h5.attrs["compact_plan_schema_version"])
             self.dataset_hash = str(h5.attrs.get("dataset_hash", ""))
+            self.plan_token_mode = str(self.summary["plan_token_mode"])
+            self.plan_path = (
+                "topology/tokens_normalized"
+                if self.plan_token_mode == "exchangeable_set"
+                else "plan/compact_normalized"
+            )
             if preload:
                 paths = (
                     "context/normalized_vector", "context/vector",
                     "geometry/constraint_normalized", "geometry/constraint_raw",
-                    "geometry/constraint_mask", "plan/compact_normalized",
+                    "geometry/constraint_mask", self.plan_path,
                     "design/model/normalized_module_centers",
                     "design/model/normalized_heat_powers",
                     "design/model/module_present", "design/module_count",
@@ -211,7 +262,7 @@ class InverseH5Dataset(Dataset):
                 name: read(f"requests/{name}", case_index, variant_index)
                 for name in self.REQUEST_NAMES
             },
-            "plan": read("plan/compact_normalized", case_index).astype(np.float32),
+            "plan": read(self.plan_path, case_index).astype(np.float32),
             "layout": np.concatenate(
                 [
                     read("design/model/normalized_module_centers", case_index).astype(np.float32),
@@ -227,6 +278,8 @@ class InverseH5Dataset(Dataset):
 __all__ = [
     "INVERSE_DATASET_SCHEMA_NAME",
     "INVERSE_DATASET_SCHEMA_VERSION",
+    "TOPOLOGY_SET_DATASET_SCHEMA_NAME",
+    "TOPOLOGY_SET_DATASET_SCHEMA_VERSION",
     "InverseH5Dataset",
     "validate_inverse_hdf5",
     "write_inverse_hdf5_atomic",

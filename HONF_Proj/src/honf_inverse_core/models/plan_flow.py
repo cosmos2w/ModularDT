@@ -35,6 +35,32 @@ class SampledPlan:
     activity_logits: torch.Tensor
 
 
+class SetInteractionBlock(nn.Module):
+    """Permutation-equivariant self-attention and shared token feed-forward block."""
+
+    def __init__(self, hidden_dim: int, heads: int, dropout: float) -> None:
+        super().__init__()
+        if hidden_dim % int(heads) != 0:
+            raise ValueError("Set-attention hidden_dim must be divisible by heads.")
+        self.attention_norm = nn.LayerNorm(hidden_dim)
+        self.attention = nn.MultiheadAttention(
+            hidden_dim, int(heads), dropout=float(dropout), batch_first=True
+        )
+        self.output_norm = nn.LayerNorm(hidden_dim)
+        self.feed_forward = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.SiLU(),
+            nn.Dropout(float(dropout)),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+        )
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        normalized = self.attention_norm(tokens)
+        attended, _ = self.attention(normalized, normalized, normalized, need_weights=False)
+        tokens = tokens + attended
+        return tokens + self.feed_forward(self.output_norm(tokens))
+
+
 class ConditionalPlanFlow(nn.Module):
     """Predict velocity over `[B,K,10]` independent compact-plan attributes."""
 
@@ -47,6 +73,9 @@ class ConditionalPlanFlow(nn.Module):
         layers: int = 4,
         dropout: float = 0.05,
         sampling_steps: int = 24,
+        plan_token_mode: str = "indexed",
+        set_interaction_layers: int = 2,
+        set_attention_heads: int = 4,
     ) -> None:
         super().__init__()
         if num_edges <= 0:
@@ -54,15 +83,37 @@ class ConditionalPlanFlow(nn.Module):
         self.num_edges = int(num_edges)
         self.state_dim = len(PLAN_CONTINUOUS_INDICES)
         self.sampling_steps = int(sampling_steps)
-        self.edge_embedding = nn.Embedding(self.num_edges, hidden_dim)
+        self.plan_token_mode = str(plan_token_mode)
+        if self.plan_token_mode not in {"indexed", "exchangeable_set"}:
+            raise ValueError("plan_token_mode must be 'indexed' or 'exchangeable_set'.")
+        if self.plan_token_mode == "indexed":
+            self.edge_embedding = nn.Embedding(self.num_edges, hidden_dim)
         self.time_embedding = SinusoidalTimeEmbedding(hidden_dim)
         self.condition_projection = nn.Linear(condition_dim, hidden_dim)
         self.input_projection = nn.Linear(self.state_dim, hidden_dim)
         self.blocks = nn.Sequential(
             *[ResidualMLPBlock(hidden_dim, dropout) for _ in range(int(layers))]
         )
+        if self.plan_token_mode == "exchangeable_set":
+            if int(set_interaction_layers) <= 0:
+                raise ValueError("exchangeable_set requires positive set_interaction_layers.")
+            self.set_interactions = nn.ModuleList(
+                [
+                    SetInteractionBlock(hidden_dim, int(set_attention_heads), dropout)
+                    for _ in range(int(set_interaction_layers))
+                ]
+            )
         self.velocity_head = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, self.state_dim))
         self.activity_head = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, 1))
+
+    def set_edge_capacity(self, capacity: int) -> None:
+        """Change runtime set capacity without changing exchangeable parameters."""
+
+        if int(capacity) <= 0:
+            raise ValueError("Plan-flow edge capacity must be positive.")
+        if self.plan_token_mode != "exchangeable_set" and int(capacity) != self.num_edges:
+            raise ValueError("indexed plan flow has a fixed configured edge count.")
+        self.num_edges = int(capacity)
 
     @staticmethod
     def continuous_target(compact_plan: torch.Tensor) -> torch.Tensor:
@@ -76,15 +127,23 @@ class ConditionalPlanFlow(nn.Module):
         time: torch.Tensor,
         condition: RequestEncoding | torch.Tensor,
     ) -> PlanFlowOutput:
-        if state.ndim != 3 or state.shape[1:] != (self.num_edges, self.state_dim):
+        if state.ndim != 3 or state.shape[-1] != self.state_dim:
+            raise ValueError(f"Plan flow state must have shape [B,K,{self.state_dim}].")
+        if self.plan_token_mode == "indexed" and state.shape[1] != self.num_edges:
             raise ValueError(f"Plan flow state must have shape [B,{self.num_edges},{self.state_dim}].")
+        if self.plan_token_mode == "exchangeable_set" and state.shape[1] <= 0:
+            raise ValueError("Exchangeable plan flow requires at least one runtime token.")
         global_condition = condition.global_embedding if isinstance(condition, RequestEncoding) else condition
-        edge_ids = torch.arange(self.num_edges, device=state.device)
         hidden = self.input_projection(state)
-        hidden = hidden + self.edge_embedding(edge_ids).unsqueeze(0)
+        if self.plan_token_mode == "indexed":
+            edge_ids = torch.arange(self.num_edges, device=state.device)
+            hidden = hidden + self.edge_embedding(edge_ids).unsqueeze(0)
         hidden = hidden + self.time_embedding(time).unsqueeze(1)
         hidden = hidden + self.condition_projection(global_condition).unsqueeze(1)
         hidden = self.blocks(hidden)
+        if self.plan_token_mode == "exchangeable_set":
+            for interaction in self.set_interactions:
+                hidden = interaction(hidden)
         return PlanFlowOutput(
             velocity=self.velocity_head(hidden),
             activity_logits=self.activity_head(hidden).squeeze(-1),

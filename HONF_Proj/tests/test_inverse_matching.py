@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import numpy as np
 
-from honf_inverse_core.models.matching import match_tokens
+from honf_inverse_core.models.matching import match_tokens, set_matching_loss
 from channelthermal.inverse.evaluation.scoring import compact_plan_distance
 
 
@@ -25,3 +25,14 @@ def test_optional_matching_is_wired_into_plan_distance() -> None:
     sinkhorn = compact_plan_distance(prediction, target, matching_mode="sinkhorn")
     assert canonical > 0.0
     assert sinkhorn < canonical
+
+
+def test_hungarian_set_loss_is_zero_for_a_permutation_and_supports_null_tokens() -> None:
+    target = torch.tensor([[[0.0], [1.0], [2.0]]])
+    prediction = target[:, [2, 0, 1]]
+    assert float(set_matching_loss(prediction, target, method="hungarian")) == 0.0
+
+    shorter = target[:, :2]
+    aligned = match_tokens(target, shorter, method="hungarian")
+    assert aligned.shape == target.shape
+    assert torch.equal(aligned[:, :2].sort(dim=1).values, shorter.sort(dim=1).values)

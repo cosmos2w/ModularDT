@@ -114,6 +114,12 @@ class HierarchicalInverseDesigner(nn.Module):
     def correction_enabled(self) -> bool:
         return self.corrector is not None
 
+    def set_edge_capacity(self, capacity: int) -> None:
+        """Set runtime topology capacity for fully set-valued inverse modes."""
+
+        self.plan_flow.set_edge_capacity(capacity)
+        self.layout_flow.set_edge_capacity(capacity)
+
     def load_compatible_state_dict(self, state_dict: Mapping[str, torch.Tensor]) -> None:
         """Load schema-v1 weights, accepting only the additive ordered-plan path.
 
@@ -123,10 +129,12 @@ class HierarchicalInverseDesigner(nn.Module):
         """
 
         result = self.load_state_dict(state_dict, strict=False)
-        allowed_missing = {
-            "layout_flow.ordered_plan_projection.weight",
-            "layout_flow.ordered_plan_projection.bias",
-        }
+        allowed_missing = set()
+        if self.layout_flow.plan_conditioning_mode == "ordered_flat":
+            allowed_missing = {
+                "layout_flow.ordered_plan_projection.weight",
+                "layout_flow.ordered_plan_projection.bias",
+            }
         missing = set(result.missing_keys)
         unexpected = set(result.unexpected_keys)
         if unexpected or not missing.issubset(allowed_missing):
@@ -134,7 +142,7 @@ class HierarchicalInverseDesigner(nn.Module):
                 f"Inverse checkpoint state mismatch; missing={sorted(missing)}, "
                 f"unexpected={sorted(unexpected)}"
             )
-        if missing:
+        if missing and self.layout_flow.plan_conditioning_mode == "ordered_flat":
             nn.init.zeros_(self.layout_flow.ordered_plan_projection.weight)
             nn.init.zeros_(self.layout_flow.ordered_plan_projection.bias)
 
@@ -336,13 +344,54 @@ class HierarchicalInverseDesigner(nn.Module):
             "layout_sampling_steps", "corrector_enabled", "corrector_hidden_dim",
             "corrector_blocks", "max_plan_delta", "max_layout_delta", "dropout",
             "matching_mode",
+            "plan_token_mode", "plan_conditioning_mode", "set_interaction_layers",
+            "set_attention_heads", "topology_schema_name", "topology_schema_version",
+            "forward_topology_checkpoint_sha256",
         }
         unknown = sorted(set(model) - allowed)
         if unknown:
             raise ValueError(f"Unknown hierarchical inverse model config keys: {unknown}")
-        matching_mode = str(model.get("matching_mode", "canonical"))
+        plan_token_mode = str(model.get("plan_token_mode", "indexed"))
+        plan_conditioning_mode = str(model.get("plan_conditioning_mode", "ordered_flat"))
+        if plan_token_mode not in {"indexed", "exchangeable_set"}:
+            raise ValueError(f"Unsupported plan_token_mode: {plan_token_mode!r}")
+        if plan_conditioning_mode not in {"ordered_flat", "set_cross_attention"}:
+            raise ValueError(f"Unsupported plan_conditioning_mode: {plan_conditioning_mode!r}")
+        if (plan_token_mode == "exchangeable_set") != (
+            plan_conditioning_mode == "set_cross_attention"
+        ):
+            raise ValueError(
+                "exchangeable_set plan tokens and set_cross_attention layout conditioning "
+                "must be selected together."
+            )
+        matching_mode = str(
+            model.get("matching_mode", "sinkhorn" if plan_token_mode == "exchangeable_set" else "canonical")
+        )
         if matching_mode not in {"canonical", "hungarian", "sinkhorn"}:
             raise ValueError(f"Unsupported compact-plan matching mode: {matching_mode!r}")
+        if plan_token_mode == "exchangeable_set" and matching_mode != "sinkhorn":
+            raise ValueError("exchangeable_set training requires matching_mode='sinkhorn'.")
+        if plan_token_mode == "exchangeable_set" and bool(model.get("corrector_enabled", False)):
+            raise ValueError("The fixed-width joint corrector is not available in exchangeable_set mode.")
+        topology_schema_name = str(model.get("topology_schema_name", ""))
+        topology_schema_version = int(model.get("topology_schema_version", 0))
+        topology_checkpoint = str(model.get("forward_topology_checkpoint_sha256", ""))
+        if plan_token_mode == "exchangeable_set":
+            if topology_schema_name != "honf_topology_signature" or topology_schema_version != 3:
+                raise ValueError(
+                    "exchangeable_set requires topology_schema_name='honf_topology_signature' "
+                    "and topology_schema_version=3."
+                )
+            if (
+                len(topology_checkpoint) != 64
+                or any(character not in "0123456789abcdefABCDEF" for character in topology_checkpoint)
+                or set(topology_checkpoint) == {"0"}
+            ):
+                raise ValueError(
+                    "exchangeable_set requires the exact 64-character forward topology checkpoint SHA-256."
+                )
+        model["plan_token_mode"] = plan_token_mode
+        model["plan_conditioning_mode"] = plan_conditioning_mode
         model["matching_mode"] = matching_mode
         request_hidden = int(model.get("request_hidden_dim", 128))
         num_edges = int(model["num_edges"])
@@ -356,6 +405,9 @@ class HierarchicalInverseDesigner(nn.Module):
             layers=int(model.get("plan_layers", 4)),
             dropout=dropout,
             sampling_steps=int(model.get("plan_sampling_steps", 24)),
+            plan_token_mode=plan_token_mode,
+            set_interaction_layers=int(model.get("set_interaction_layers", 2)),
+            set_attention_heads=int(model.get("set_attention_heads", 4)),
         )
         layout = ConditionalLayoutFlow(
             num_edges=num_edges,
@@ -365,6 +417,8 @@ class HierarchicalInverseDesigner(nn.Module):
             layers=int(model.get("layout_layers", 4)),
             dropout=dropout,
             sampling_steps=int(model.get("layout_sampling_steps", 24)),
+            plan_conditioning_mode=plan_conditioning_mode,
+            set_attention_heads=int(model.get("set_attention_heads", 4)),
         )
         corrector = None
         if bool(model.get("corrector_enabled", False)):
@@ -402,6 +456,16 @@ class HierarchicalInverseDesigner(nn.Module):
         if "model_config" not in checkpoint or "model_state_dict" not in checkpoint:
             raise ValueError("Inverse checkpoint is missing model_config/model_state_dict.")
         designer = cls.from_config(checkpoint["model_config"], verifier=verifier)
+        if designer.plan_flow.plan_token_mode == "exchangeable_set":
+            for config_key, provenance_key in (
+                ("topology_schema_name", "topology_schema_name"),
+                ("topology_schema_version", "topology_schema_version"),
+                ("forward_topology_checkpoint_sha256", "forward_topology_checkpoint_sha256"),
+            ):
+                if designer.model_config.get(config_key) != provenance.get(provenance_key):
+                    raise ValueError(
+                        f"Inverse checkpoint topology provenance mismatch for {provenance_key}."
+                    )
         designer.load_compatible_state_dict(checkpoint["model_state_dict"])
         designer.to(torch.device(device)).eval()
         return designer

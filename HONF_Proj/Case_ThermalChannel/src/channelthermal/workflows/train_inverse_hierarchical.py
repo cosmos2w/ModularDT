@@ -77,6 +77,14 @@ def _provenance(dataset_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             "compact_plan_schema_version": int(h5.attrs["compact_plan_schema_version"]),
             "normalization_stats": normalization,
         }
+        if str(h5.attrs.get("topology_signature_schema_name", "")):
+            provenance.update(
+                topology_schema_name=str(h5.attrs["topology_signature_schema_name"]),
+                topology_schema_version=int(h5.attrs["topology_signature_schema_version"]),
+                forward_topology_checkpoint_sha256=str(
+                    h5.attrs["forward_topology_checkpoint_sha256"]
+                ),
+            )
         return provenance, source
 
 
@@ -105,6 +113,25 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Inverse training requires nonempty train and validation splits.")
     model_config = dict(config.get("model", {}))
     model_config.update(num_edges=summary["num_edges"], max_modules=summary["max_modules"])
+    configured_token_mode = str(model_config.get("plan_token_mode", "indexed"))
+    if configured_token_mode != summary["plan_token_mode"]:
+        raise ValueError(
+            "Inverse model/dataset topology mode mismatch: "
+            f"model={configured_token_mode!r}, dataset={summary['plan_token_mode']!r}."
+        )
+    if configured_token_mode == "exchangeable_set":
+        expected = {
+            "topology_schema_name": summary["topology_schema_name"],
+            "topology_schema_version": summary["topology_schema_version"],
+            "forward_topology_checkpoint_sha256": summary[
+                "forward_topology_checkpoint_sha256"
+            ],
+        }
+        for key, value in expected.items():
+            if model_config.get(key) != value:
+                raise ValueError(
+                    f"Exchangeable inverse config does not match dataset provenance for {key}."
+                )
     designer = HierarchicalInverseDesigner.from_config(model_config)
     provenance, source = _provenance(dataset_path)
     initialize_from = config.get("initialize_from")
@@ -114,9 +141,10 @@ def run_training(config: dict[str, Any]) -> dict[str, Any]:
         warm_start = load_inverse_checkpoint(initialization_path)
         for key in (
             "forward_checkpoint_sha256", "inverse_dataset_hash", "request_schema_version",
-            "compact_plan_schema_version",
+            "compact_plan_schema_version", "topology_schema_name", "topology_schema_version",
+            "forward_topology_checkpoint_sha256",
         ):
-            if warm_start["provenance"].get(key) != provenance.get(key):
+            if key in provenance and warm_start["provenance"].get(key) != provenance.get(key):
                 raise ValueError(f"Warm-start checkpoint provenance mismatch for {key}.")
         designer.load_compatible_state_dict(warm_start["model_state_dict"])
         initialization = {

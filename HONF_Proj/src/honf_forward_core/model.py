@@ -40,6 +40,16 @@ class HONFNeuralField(nn.Module):
         self.organizer               = HypergraphOrganizerCore(config)
         self.decoder                 = HypergraphFieldDecoder(config)
 
+    def set_edge_capacity(self, capacity: int) -> None:
+        """Set the runtime candidate-edge budget for exchangeable organization."""
+
+        self.organizer.set_edge_capacity(capacity)
+
+    def set_training_progress(self, *, epoch: int, total_epochs: Optional[int] = None) -> None:
+        """Set organizer warmup progress once per training epoch."""
+
+        self.organizer.set_training_progress(epoch=epoch, total_epochs=total_epochs)
+
     def encode_and_organize(self, batch: BatchData) -> Dict[str, torch.Tensor]:
         """Encode generic inputs and build static HONF organizer state.
 
@@ -138,6 +148,7 @@ class HONFNeuralField(nn.Module):
         query_features: Optional[torch.Tensor] = None,
         *,
         return_routing_maps: bool = False,
+        return_edge_fields: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """Map queries ``[B,Q,2]`` and organized state to fields ``[B,Q,F]``."""
 
@@ -148,9 +159,10 @@ class HONFNeuralField(nn.Module):
             global_context=global_token,
             query_features=query_features,
             return_routing_maps=bool(return_routing_maps),
+            return_edge_fields=bool(return_edge_fields),
         )
 
-    def forward(self, batch: BatchData) -> Dict[str, torch.Tensor]:
+    def forward(self, batch: BatchData, *, return_edge_fields: bool = False) -> Dict[str, torch.Tensor]:
         """Encode, organize, and decode a complete :class:`BatchData` batch."""
 
         encoded = self.encode_and_organize(batch)
@@ -160,6 +172,7 @@ class HONFNeuralField(nn.Module):
             organizer_output=encoded,
             global_token=encoded["global_token"],
             query_features=None if batch.query_features is None else batch.query_features.float(),
+            return_edge_fields=bool(return_edge_fields),
         )
         output: Dict[str, torch.Tensor] = {}
         output.update(encoded)

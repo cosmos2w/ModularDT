@@ -84,3 +84,104 @@ def test_public_loader_rejects_noninverse_and_incomplete_checkpoints(tmp_path: P
     )
     with pytest.raises(ValueError, match="provenance is incomplete"):
         HierarchicalInverseDesigner.load(incomplete)
+
+
+def test_missing_and_explicit_indexed_modes_have_identical_state_and_outputs() -> None:
+    base = {
+        "num_edges": 3,
+        "max_modules": 5,
+        "request_hidden_dim": 16,
+        "plan_hidden_dim": 24,
+        "plan_layers": 1,
+        "layout_hidden_dim": 24,
+        "layout_layers": 1,
+        "corrector_enabled": False,
+        "dropout": 0.0,
+    }
+    torch.manual_seed(277)
+    inferred = HierarchicalInverseDesigner.from_config(base).eval()
+    torch.manual_seed(277)
+    explicit = HierarchicalInverseDesigner.from_config(
+        {
+            **base,
+            "plan_token_mode": "indexed",
+            "plan_conditioning_mode": "ordered_flat",
+            "matching_mode": "canonical",
+        }
+    ).eval()
+    assert inferred.state_dict().keys() == explicit.state_dict().keys()
+    explicit.load_state_dict(inferred.state_dict(), strict=True)
+
+    plan_state = torch.randn(2, 3, inferred.plan_flow.state_dim)
+    layout_state = torch.randn(2, 5, 3)
+    plan = torch.rand(2, 3, 12)
+    plan[..., 0] = 1.0
+    time = torch.tensor([0.25, 0.75])
+    condition = torch.randn(2, 16)
+    with torch.no_grad():
+        inferred_plan = inferred.plan_flow(plan_state, time, condition)
+        explicit_plan = explicit.plan_flow(plan_state, time, condition)
+        inferred_layout = inferred.layout_flow(layout_state, time, plan, condition)
+        explicit_layout = explicit.layout_flow(layout_state, time, plan, condition)
+
+    torch.testing.assert_close(inferred_plan.velocity, explicit_plan.velocity, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(
+        inferred_plan.activity_logits, explicit_plan.activity_logits, rtol=0.0, atol=0.0
+    )
+    torch.testing.assert_close(inferred_layout.velocity, explicit_layout.velocity, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(
+        inferred_layout.presence_logits, explicit_layout.presence_logits, rtol=0.0, atol=0.0
+    )
+
+
+def test_exchangeable_checkpoint_requires_and_round_trips_topology_provenance(tmp_path: Path) -> None:
+    digest = "d" * 64
+    designer = HierarchicalInverseDesigner.from_config(
+        {
+            "num_edges": 4,
+            "max_modules": 5,
+            "request_hidden_dim": 16,
+            "plan_hidden_dim": 32,
+            "layout_hidden_dim": 32,
+            "plan_layers": 1,
+            "layout_layers": 1,
+            "plan_token_mode": "exchangeable_set",
+            "plan_conditioning_mode": "set_cross_attention",
+            "matching_mode": "sinkhorn",
+            "topology_schema_name": "honf_topology_signature",
+            "topology_schema_version": 3,
+            "forward_topology_checkpoint_sha256": digest,
+            "corrector_enabled": False,
+            "dropout": 0.0,
+        }
+    )
+    provenance = {
+        **_provenance(),
+        "topology_schema_name": "honf_topology_signature",
+        "topology_schema_version": 3,
+        "forward_topology_checkpoint_sha256": digest,
+    }
+    path = save_inverse_checkpoint(
+        tmp_path / "set_model.pt",
+        designer=designer,
+        stage="stage_plan",
+        epoch=0,
+        global_step=0,
+        provenance=provenance,
+    )
+    restored = HierarchicalInverseDesigner.load(path)
+    assert restored.plan_flow.plan_token_mode == "exchangeable_set"
+    assert restored.layout_flow.plan_conditioning_mode == "set_cross_attention"
+    assert restored.state_dict().keys() == designer.state_dict().keys()
+
+    missing = dict(provenance)
+    missing.pop("forward_topology_checkpoint_sha256")
+    with pytest.raises(ValueError, match="missing keys"):
+        save_inverse_checkpoint(
+            tmp_path / "missing.pt",
+            designer=designer,
+            stage="stage_plan",
+            epoch=0,
+            global_step=0,
+            provenance=missing,
+        )

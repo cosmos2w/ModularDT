@@ -24,6 +24,11 @@ REQUIRED_PROVENANCE_KEYS = {
     "compact_plan_schema_version",
     "normalization_stats",
 }
+TOPOLOGY_PROVENANCE_KEYS = {
+    "topology_schema_name",
+    "topology_schema_version",
+    "forward_topology_checkpoint_sha256",
+}
 
 
 def save_inverse_checkpoint(
@@ -38,6 +43,8 @@ def save_inverse_checkpoint(
     metrics: Mapping[str, float] | None = None,
 ) -> Path:
     missing = sorted(REQUIRED_PROVENANCE_KEYS - set(provenance))
+    if designer.plan_flow.plan_token_mode == "exchangeable_set":
+        missing.extend(sorted(TOPOLOGY_PROVENANCE_KEYS - set(provenance)))
     if missing:
         raise ValueError(f"Inverse checkpoint provenance is missing keys: {missing}")
     destination = Path(path).expanduser().resolve()
@@ -69,9 +76,18 @@ def load_inverse_checkpoint(path: str | Path, *, map_location: str | torch.devic
     if checkpoint.get("checkpoint_schema_name") != "honf_hierarchical_inverse":
         raise ValueError("Inverse checkpoint schema mismatch.")
     missing = sorted(REQUIRED_PROVENANCE_KEYS - set(checkpoint.get("provenance", {})))
+    if checkpoint.get("model_config", {}).get("plan_token_mode", "indexed") == "exchangeable_set":
+        missing.extend(
+            sorted(TOPOLOGY_PROVENANCE_KEYS - set(checkpoint.get("provenance", {})))
+        )
     if missing:
         raise ValueError(f"Inverse checkpoint provenance is incomplete: {missing}")
     return checkpoint
 
 
-__all__ = ["REQUIRED_PROVENANCE_KEYS", "load_inverse_checkpoint", "save_inverse_checkpoint"]
+__all__ = [
+    "REQUIRED_PROVENANCE_KEYS",
+    "TOPOLOGY_PROVENANCE_KEYS",
+    "load_inverse_checkpoint",
+    "save_inverse_checkpoint",
+]

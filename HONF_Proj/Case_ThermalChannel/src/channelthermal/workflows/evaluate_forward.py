@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -38,6 +39,12 @@ from honf_forward_core.evaluation.hypergraph_plan import (
     summarize_hypergraph_plan,
     validate_hypergraph_plan,
 )
+from honf_forward_core.evaluation.topology_signature import (
+    evaluate_structure_relations,
+    extract_topology_signature,
+    save_topology_signature,
+    summarize_topology_signature,
+)
 from honf_runtime.compat import current_timestamp, load_trusted_checkpoint, recursive_to_device, resolve_demo_path, select_device, strip_module_prefix, write_json
 from honf_runtime.checkpoints import validate_checkpoint_identity
 from channelthermal.evaluation_tools.organizer_visualization import (
@@ -46,6 +53,9 @@ from channelthermal.evaluation_tools.organizer_visualization import (
     render_channelthermal_organization_summary_matrices,
 )
 from channelthermal.evaluation_tools.routing_visualization import save_routing_diagnostics
+from channelthermal.evaluation_tools.topology_signature_visualization import (
+    render_topology_signature_diagnostics,
+)
 from channelthermal.config import ChannelThermalHONFConfig
 from channelthermal.model import ChannelThermalHONFModel
 from channelthermal.local_surrogate.model import LocalModuleConfig, LocalModuleSurrogate
@@ -74,6 +84,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--return-routing-maps", action="store_true", help="Return dense query routing maps for evaluation diagnostics.")
     parser.add_argument("--routing-view", choices=["none", "summary", "all"], default="summary")
     parser.add_argument("--export-hypergraph-plan", action="store_true", help="Export compact static organizer plan for inverse-design seeding.")
+    parser.add_argument(
+        "--export-topology-signature",
+        action="store_true",
+        help="Export the unordered schema-v3 topology signature and its diagnostic views.",
+    )
     parser.add_argument(
         "--allow-checkpoint-fallback",
         action="store_true",
@@ -246,6 +261,7 @@ def predict_case(
     local_port_condition_mode: str,
     mixed_teacher_ratio: float,
     return_routing_maps: bool = False,
+    return_topology_signature: bool = False,
 ) -> Dict[str, Any]:
     """Prepare one physical case once, then decode its query grid in chunks."""
 
@@ -256,6 +272,7 @@ def predict_case(
     routing_chunks: Dict[str, list[np.ndarray]] = {}
     first_outputs = None
     prepared_state = None
+    need_routing = bool(return_routing_maps or return_topology_signature)
     with torch.no_grad():
         for start in range(0, query_xy.shape[0], int(query_batch_size)):
             chunk = query_xy[start : start + int(query_batch_size)]
@@ -270,7 +287,8 @@ def predict_case(
                     local_query_points=batch.get("module_internal_query_points"),
                     local_port_condition_mode=local_port_condition_mode,
                     mixed_teacher_ratio=float(mixed_teacher_ratio),
-                    return_routing_maps=bool(return_routing_maps),
+                    return_routing_maps=need_routing,
+                    return_edge_fields=bool(return_topology_signature),
                     return_prepared_state=True,
                 )
                 prepared_state = outputs.pop("prepared_state")
@@ -280,14 +298,15 @@ def predict_case(
                 decoder_output = model.decode_prepared(
                     prepared_state,
                     chunk_tensor,
-                    return_routing_maps=bool(return_routing_maps),
+                    return_routing_maps=need_routing,
+                    return_edge_fields=bool(return_topology_signature),
                 )
                 outputs = {
                     "pred_field": decoder_output["pred_field"],
                     "routing_aux": {key: value for key, value in decoder_output.items() if key != "pred_field"},
                 }
             pred_chunks.append(outputs["pred_field"].detach().cpu().numpy()[0])
-            if return_routing_maps:
+            if need_routing:
                 routing_aux = outputs.get("routing_aux", {})
                 key_map = {
                     "query_hyper_attention": "query_hyper_attention",
@@ -301,6 +320,14 @@ def predict_case(
                     value = routing_aux.get(source_key)
                     if torch.is_tensor(value):
                         routing_chunks.setdefault(target_key, []).append(value.detach().cpu().numpy()[0])
+            if return_topology_signature:
+                edge_fields = outputs.get("pred_field_by_edge")
+                if edge_fields is None:
+                    edge_fields = outputs.get("routing_aux", {}).get("pred_field_by_edge")
+                if torch.is_tensor(edge_fields):
+                    routing_chunks.setdefault("pred_field_by_edge", []).append(
+                        edge_fields.detach().cpu().numpy()[0]
+                    )
     if first_outputs is None:
         raise RuntimeError("No prediction chunks were produced.")
     pred_field = np.concatenate(pred_chunks, axis=0).reshape(*x_grid.shape, model.config.field_dim)
@@ -319,12 +346,27 @@ def predict_case(
             for key, value in first_outputs.get("base_organizer_aux", {}).items()
         },
     }
-    if return_routing_maps:
+    if need_routing:
         result["routing_maps"] = {
             key: np.concatenate(chunks, axis=0)
             for key, chunks in routing_chunks.items()
             if chunks
         }
+    if return_topology_signature and prepared_state is not None:
+        structure_targets = sample.get("structure_targets", {})
+        target_coords = structure_targets.get("env_token_coords") if isinstance(structure_targets, dict) else None
+        if target_coords is not None:
+            with torch.no_grad():
+                target_query = torch.as_tensor(target_coords, dtype=torch.float32, device=device).unsqueeze(0)
+                target_output = model.decode_prepared(
+                    prepared_state,
+                    target_query,
+                    return_routing_maps=True,
+                    return_edge_fields=False,
+                )
+            target_attention = target_output.get("query_hyper_attention")
+            if torch.is_tensor(target_attention):
+                result["structure_query_hyper_attention"] = target_attention.detach().cpu().numpy()[0]
     return result
 
 
@@ -347,6 +389,16 @@ def safe_path_name(value: object) -> str:
 
     raw = str(value).strip()
     return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw) or "case"
+
+
+def file_sha256(path: str | Path) -> str:
+    """Return a streaming SHA-256 digest for artifact provenance."""
+
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def evaluation_output_dir(base_dir_arg: str | None, checkpoint_path: Path, case_id: object) -> Path:
@@ -563,9 +615,19 @@ def main(argv: list[str] | None = None) -> int:
         normalize_targets=bool(dataset_cfg.get("normalize_targets", False)),
         random_point_sampling=False,
         include_grid=True,
+        include_structure_targets=bool(args.export_topology_signature),
         normalizer=checkpoint_normalizer,
     )
-    raw_dataset = GlobalChannelThermalDataset(dataset_path, split=args.split, points_per_case=1, normalize_inputs=False, normalize_targets=False, random_point_sampling=False, include_grid=True)
+    raw_dataset = GlobalChannelThermalDataset(
+        dataset_path,
+        split=args.split,
+        points_per_case=1,
+        normalize_inputs=False,
+        normalize_targets=False,
+        random_point_sampling=False,
+        include_grid=True,
+        include_structure_targets=bool(args.export_topology_signature),
+    )
     if len(dataset) == 0:
         dataset = GlobalChannelThermalDataset(
             dataset_path,
@@ -575,9 +637,16 @@ def main(argv: list[str] | None = None) -> int:
             normalize_targets=bool(dataset_cfg.get("normalize_targets", False)),
             random_point_sampling=False,
             include_grid=True,
+            include_structure_targets=bool(args.export_topology_signature),
             normalizer=checkpoint_normalizer,
         )
-        raw_dataset = GlobalChannelThermalDataset(dataset_path, split="all", points_per_case=1, include_grid=True)
+        raw_dataset = GlobalChannelThermalDataset(
+            dataset_path,
+            split="all",
+            points_per_case=1,
+            include_grid=True,
+            include_structure_targets=bool(args.export_topology_signature),
+        )
     sample = select_sample(dataset, args.case_id, args.case_index)
     raw_sample = select_sample(raw_dataset, str(sample["case_id"]), args.case_index)
     output_dir = evaluation_output_dir(args.output_dir, checkpoint_path, raw_sample["case_id"])
@@ -597,6 +666,7 @@ def main(argv: list[str] | None = None) -> int:
             local_port_condition_mode=mode,
             mixed_teacher_ratio=float(args.mixed_teacher_ratio),
             return_routing_maps=bool(args.return_routing_maps),
+            return_topology_signature=bool(args.export_topology_signature),
         )
         predictions = denormalize_predictions(predictions, dataset, bool(dataset_cfg.get("normalize_targets", False)))
         predictions["suffix"] = suffix
@@ -699,18 +769,83 @@ def main(argv: list[str] | None = None) -> int:
             "hypergraph_plan_summary": str(plan_summary_path),
         }
 
+    topology_outputs: Dict[str, str] = {}
+    if args.export_topology_signature and primary_predictions is not None:
+        structure = raw_sample["structure"]
+        routing_maps = primary_predictions.get("routing_maps", {})
+        reference_query_xy = np.stack(
+            (np.asarray(raw_sample["x_grid"]).reshape(-1), np.asarray(raw_sample["y_grid"]).reshape(-1)),
+            axis=-1,
+        ).astype(np.float32)
+        decoder_summary = {
+            key: routing_maps[key]
+            for key in ("query_hyper_attention", "pred_field_by_edge")
+            if key in routing_maps
+        }
+        signature = extract_topology_signature(
+            primary_predictions["organizer_aux"],
+            structure["module_present"],
+            decoder_outputs=decoder_summary,
+            reference_query_xy=reference_query_xy,
+            reference_measure="channelthermal_evaluation_grid",
+            field_names=channel_order,
+            domain_length_x=float(np.asarray(structure["domain_length_x"]).reshape(-1)[0]),
+            domain_length_y=float(np.asarray(structure["domain_length_y"]).reshape(-1)[0]),
+            periodic_axes=tuple(int(axis) for axis in model.config.core_honf.periodic_axes),
+            case_id=str(raw_sample["case_id"]),
+            forward_checkpoint_sha256=file_sha256(checkpoint_path),
+        )
+        signature_path = output_dir / "topology_signature.npz"
+        save_topology_signature(signature_path, signature)
+        signature_summary_path = output_dir / "topology_signature_summary.json"
+        write_json(signature_summary_path, summarize_topology_signature(signature))
+        topology_outputs = {
+            "topology_signature_npz": str(signature_path),
+            "topology_signature_summary": str(signature_summary_path),
+        }
+
+        targets = raw_sample.get("structure_targets")
+        if isinstance(targets, dict):
+            relation_metrics = evaluate_structure_relations(
+                signature,
+                module_affinity_target=targets.get("module_affinity_target"),
+                module_affinity_mask=targets.get("module_affinity_target_mask"),
+                query_hyper_attention=primary_predictions.get("structure_query_hyper_attention"),
+                environment_module_target=targets.get("env_module_influence_target"),
+                environment_module_mask=targets.get("env_module_target_mask"),
+                active_edge_count_target=targets.get("active_edge_count_target"),
+                has_solved_targets=bool(
+                    float(np.asarray(targets.get("has_solved_structure_targets", [0.0])).reshape(-1)[0])
+                    > 0.5
+                ),
+            )
+            relation_metrics_path = output_dir / "topology_relation_metrics.json"
+            write_json(relation_metrics_path, relation_metrics)
+            topology_outputs["topology_relation_metrics"] = str(relation_metrics_path)
+        topology_outputs.update(
+            render_topology_signature_diagnostics(
+                output_dir,
+                raw_sample,
+                signature,
+                edge_fields=routing_maps.get("pred_field_by_edge"),
+                field_names=channel_order,
+            )
+        )
+
     if len(mode_summaries) == 1:
         summary = next(iter(mode_summaries.values()))
         summary["primary_export_mode"] = str(primary_predictions.get("suffix", "predicted")) if primary_predictions else "unknown"
         summary["outputs"].update(org_outputs)
         summary["outputs"].update(routing_outputs)
         summary["outputs"].update(plan_outputs)
+        summary["outputs"].update(topology_outputs)
         summary["outputs"].update(diagnostics_outputs)
     else:
         outputs = {}
         outputs.update(org_outputs)
         outputs.update(routing_outputs)
         outputs.update(plan_outputs)
+        outputs.update(topology_outputs)
         outputs.update(diagnostics_outputs)
         summary = {
             "checkpoint": str(checkpoint_path),

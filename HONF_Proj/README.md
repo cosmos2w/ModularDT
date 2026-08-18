@@ -1,162 +1,107 @@
 # HONF Project
 
-`HONF_Proj` is the installable home of the Hypergraph organized Neural Field (HONF): a neural operator for predicting continuous physical fields around a variable-size set of interacting modules. The repository separates reusable model/runtime code from physical-case code and includes one complete example, `ThermalChannel`.
+`HONF_Proj` is the installable implementation of the Hypergraph Organized Neural Field (HONF), a neural operator for continuous field prediction around a variable-size set of interacting modules. The repository contains a reusable forward core, a hierarchical inverse core, a strict configuration/runtime layer, and the complete ThermalChannel case with a reusable Stage-A thermal-disk surrogate.
 
-The project currently supports two connected directions:
+The checkpoint-compatible default forward profile is `enhanced_honf_pairwise`; the opt-in upgraded profile is `adaptive_sparse_additive`. The default preserves fixed-projection organization, context-fusion decoding, softmax routing, and dense execution for old saved configurations and checkpoints. The upgraded profile uses exchangeable candidate edges, descriptor-first mechanism states, entmax15 locality-aware routing, gathered pre-MLP execution, and an exact background-plus-edge additive field.
 
-| Direction | Question | Status |
+## 1. Quick default forward run with the local Stage-A checkpoint
+
+Run commands from `HONF_Proj` in the `ModularDT` environment. This dry-run validates the default profile, dataset, GPU 0, output location, and the exact local checkpoint without creating a run:
+
+```bash
+conda activate ModularDT
+python train.py \
+  --config src/config_core/forward/enhanced_honf_pairwise.json \
+  --local-checkpoint Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/Run_0000_base/latest_model.pt \
+  --run-id 9100 \
+  --device cuda:0 \
+  --dry-run
+```
+
+Use an unused numeric run ID. The verified local checkout already contains run ID `0002`, so the profile’s built-in ID cannot be reused for a new launch. To perform a fast one-batch correctness smoke, run:
+
+```bash
+python train.py \
+  --config src/config_core/forward/enhanced_honf_pairwise.json \
+  --local-checkpoint Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/Run_0000_base/latest_model.pt \
+  --run-id 9100 \
+  --epochs 1 \
+  --max-train-batches 1 \
+  --max-val-batches 1 \
+  --device cuda:0 \
+  --yes
+```
+
+This smoke checks end-to-end construction, strict Stage-A loading, one training batch, one validation batch, checkpoint writing, and plotting hooks; it is not meaningful model training. For a normal default run, keep the same command but remove `--epochs 1`, `--max-train-batches 1`, and `--max-val-batches 1`. Review the dry-run before adding `--yes` because the full profile requests 10,000 epochs.
+
+The `--local-checkpoint` argument takes precedence over the `best_model.pt` path stored in `Case_ThermalChannel/configs/case_default.json`. The requested `latest_model.pt` is a trusted local epoch-6357 Stage-A artifact with dimensions 7 input parameters, 5 port-token values, 2 interface outputs, hidden/latent width 128, 16 port latents, 4 heads, 4 attention layers, 6 coordinate Fourier frequencies, and dropout 0.0. Stage B loads its normalizers, copies the model, and freezes it.
+
+## 2. Architecture in one view
+
+```text
+physical design + operating context + global queries
+                    │
+                    ├── ThermalChannel input adapter: module/global features
+                    ├── ThermalChannel environment builder: 24 x 8 tokens
+                    ▼
+              reusable HONF encoders
+                    ▼
+           organizer and predicted ports
+                    ▼
+       frozen Stage-A thermal-disk surrogate
+                    ▼
+    local response fusion + one port refinement
+                    ▼
+              final organizer
+                    ▼
+      query routing + continuous field decoder
+                    ▼
+ [u, v, p, omega, T] + internal T + interface [T, qn]
+```
+
+The reusable core never imports ThermalChannel code. The case package owns physical features, datasets, Stage-A coupling, Robin flux correction, field names, losses, evaluation views, and inverse functional definitions. The top-level launchers discover that package through `channelthermal.plugin:create_plugin`.
+
+## 3. Forward profiles and concrete settings
+
+Both maintained profiles use hidden width 256, dropout 0.0, LayerNorm, a (24\times8) environment grid, four Fourier frequencies, six nominal mechanism edges, the enhanced hypergraph-plus-pairwise decoder family, predicted local ports, frozen Stage A, and one local/global refinement pass.
+
+| Setting | `enhanced_honf_pairwise.json` | `adaptive_sparse_additive.json` |
 |---|---|---|
-| Forward HONF | Given a modular design and operating context, what fields and module responses occur? | Established, checkpoint-compatible workflow with migration parity evidence |
-| Hierarchical inverse | Given desired behavior and context, which mechanisms and modular layouts should be tried? | Initial research implementation for dataset, staged training, and verified candidate studies |
+| Purpose | default and checkpoint-compatible | upgraded adaptive sparse architecture |
+| Organizer | `fixed_projection` | `exchangeable_slots` |
+| Edge extent | 6 fixed projections | runtime candidate capacity 8 |
+| Active selection | all six | initial 6, minimum 1, quality/coverage/novelty |
+| Selection thresholds | n.a. | warmup 200 epochs, coverage 0.95, token mass 0.50, maximum redundancy 0.85 |
+| Module/environment/query normalizer | softmax | entmax15 with alpha 1.5 |
+| Locality | none | compact environment and query kernels |
+| Mechanism state | `residual_concat`, mechanism encoder off | `descriptor_first`, content residual scale 0.35 |
+| Field assembly | `context_fusion` | exact `edge_additive` |
+| Execution | dense | gathered before pair and edge MLPs |
+| Query limits | unlimited | at most 8 modules and 3 edges per query |
+| Topology signature flag | false | true |
+| Default run ID | 0002 | 0003 |
 
-The forward model is the foundation. The inverse model generates candidate designs and uses a frozen autonomous forward checkpoint to verify every reported candidate. Neither direction replaces a high-fidelity solver or engineering validation.
+The upgraded organizer uses shared parameters and deterministic sinusoidal candidate codes; it has no learned edge-index embedding. Its runtime edge capacity can change without changing parameter shapes. Entmax15 provides exact zero routes, while `routing_execution="gathered"` uses those routes to avoid evaluating expensive MLPs on unselected query-module and query-edge pairs. Dense multiplication by zero is not counted as computational sparsity.
 
-## Table of contents
+The upgraded field is exactly
 
-- [1. The project in one picture](#1-the-project-in-one-picture)
-- [2. Code organization and ownership](#2-code-organization-and-ownership)
-- [3. Installation, data, and required artifacts](#3-installation-data-and-required-artifacts)
-  - [3.1 Configure the ThermalChannel datasets](#31-configure-the-thermalchannel-datasets)
-  - [3.2 Understand checkpoint dependencies](#32-understand-checkpoint-dependencies)
-  - [3.3 Paths and configuration composition](#33-paths-and-configuration-composition)
-- [4. A beginner's ThermalChannel walkthrough](#4-a-beginners-thermalchannel-walkthrough)
-  - [4.1 Always validate a launch first](#41-always-validate-a-launch-first)
-  - [4.2 Quick wiring smoke versus meaningful training](#42-quick-wiring-smoke-versus-meaningful-training)
-  - [4.3 Evaluate an existing autonomous forward checkpoint](#43-evaluate-an-existing-autonomous-forward-checkpoint)
-- [5. Forward model: from one module to the coupled channel](#5-forward-model-from-one-module-to-the-coupled-channel)
-  - [5.1 Stage A: local thermal-disk surrogate](#51-stage-a-local-thermal-disk-surrogate)
-  - [5.2 Stage B: coupled global HONF](#52-stage-b-coupled-global-honf)
-  - [5.3 Maintained Stage-B profiles](#53-maintained-stage-b-profiles)
-  - [5.4 Forward checkpoint selection and evaluation](#54-forward-checkpoint-selection-and-evaluation)
-  - [5.5 Resume a managed forward/local run](#55-resume-a-managed-forwardlocal-run)
-- [6. Hierarchical inverse design](#6-hierarchical-inverse-design)
-  - [6.1 Purpose and current scope](#61-purpose-and-current-scope)
-  - [6.2 Structured requests](#62-structured-requests)
-  - [6.3 Compact mechanism plan](#63-compact-mechanism-plan)
-  - [6.4 Build the inverse dataset](#64-build-the-inverse-dataset)
-  - [6.5 Train the four-stage hierarchy](#65-train-the-four-stage-hierarchy)
-  - [6.6 Sample, verify, correct once, and rank](#66-sample-verify-correct-once-and-rank)
-  - [6.7 Initial inverse limitations](#67-initial-inverse-limitations)
-- [7. Runs, checkpoints, and saved results](#7-runs-checkpoints-and-saved-results)
-- [8. Testing and validation](#8-testing-and-validation)
-- [9. Extending HONF to another physical case](#9-extending-honf-to-another-physical-case)
-  - [9.1 Minimum forward-case implementation](#91-minimum-forward-case-implementation)
-  - [9.2 Adding inverse support for the new case](#92-adding-inverse-support-for-the-new-case)
-- [10. Further reading and project status](#10-further-reading-and-project-status)
+$$\widehat U(q)=U_{background}(q,g,E)+\sum_{k=1}^{K_{cap}}a_k\alpha_{qk}U_k(q,t_k,c^{pair}_{qk}).$$
 
-## 1. The project in one picture
+The background sees query, global, and environment context but no module memory. Optional `pred_field_background` and `pred_field_by_edge` outputs close exactly to `pred_field`. The shipped case profile has organizer regularization disabled and therefore has no default edge-count penalty.
 
-For a physical design `D`, operating context `c`, and query coordinates `q`, the forward model predicts the channel field and local module response:
+See [Model_Explain.md](Model_Explain.md) for the complete equations, Stage-A coupling, topology signature, inverse flow, and code-to-math map.
 
-```text
-physical design D + context c + query coordinates q
-                         │
-                         ▼
-           case adapter and environment tokens
-                         │
-                         ▼
-                 reusable HONF core
-                         │
-              predicted module ports
-                         │
-                         ▼
-           frozen local-module surrogate
-                         │
-          local response fused into HONF state
-                         │
-                         ▼
-   global field + internal temperature + interface response
-```
+## 4. Backward compatibility
 
-The inverse hierarchy works in the opposite design direction but closes its loop through the same forward model:
+`UnifiedForwardConfig` gives saved configurations without upgraded fields the strict mode defaults `organizer_mode="fixed_projection"`, `mechanism_state_mode="residual_concat"`, `field_assembly_mode="context_fusion"`, softmax module/environment/query assignment, and `routing_execution="dense"`. Only modules required by the selected modes are instantiated, so old state-dict paths remain valid and old checkpoints do not acquire unexpected upgraded parameters.
 
-```text
-structured request R + context c
-              │
-              ▼
-    compact mechanism plan G          sample several plausible plans
-              │
-              ▼
-      physical modular design D       sample several layouts per plan
-              │
-              ▼
-      frozen autonomous HONF
-              │
-              ├── exact request functionals and physical outputs
-              └── realized mechanism G_hat
-                            │
-                            └── optional one-pass bounded correction
-```
+Historical forward checkpoints that contain `core_honf.max_num_modules` still load. That value is treated as migration metadata, not a runtime capacity, and their fourteen-value `legacy_v1` global feature transform uses a fixed saved denominator. Current `padding_invariant_v2` checkpoints use eighteen global features that do not depend on batch padding width.
 
-The main symbols used throughout the inverse code are:
+Stage-A/local coupling remains in `Case_ThermalChannel`; neither forward profile changes its ownership or execution order. Existing self-contained Stage-B checkpoints embed the Stage-A state and local/global normalizers, so later Stage-B evaluation does not require the original external Stage-A file.
 
-| Symbol | Meaning |
-|---|---|
-| `D` | physical design: module presence, centers, and heat powers |
-| `c` | operating/material/domain context |
-| `R` | unordered functional request tokens plus separate geometry constraints |
-| `G` | generated compact plan over the forward model's fixed hyperedges |
-| `G_hat` | compact plan realized by the final organizer when HONF evaluates `D` |
+## 5. Installation and data
 
-`Model_Explain.md` contains the full forward and inverse equations. This README focuses on how the pieces fit together and how to run them safely.
-
-## 2. Code organization and ownership
-
-```text
-HONF_Proj/
-├── train.py                         generic forward/local training dispatcher
-├── evaluate.py                      generic forward/local/compare dispatcher
-├── src/
-│   ├── honf_forward_core/           reusable encoder, organizer, decoder, tensor losses
-│   ├── honf_inverse_core/           request encoder, flows, corrector, sampling
-│   ├── honf_runtime/                config composition, plugins, paths, runs
-│   └── config_core/
-│       ├── forward/                 maintained forward launch profiles
-│       ├── inverse/                 inverse build/train/evaluation templates
-│       └── schemas/                 strict configuration schemas
-├── Case_ThermalChannel/
-│   ├── src/channelthermal/
-│   │   ├── data/                    packed-HDF5 readers and batch construction
-│   │   ├── local_surrogate/         Stage-A single-disk model and contract
-│   │   ├── training_tools/          physical channel-weight policy and case losses
-│   │   ├── workflows/               case-owned train/evaluate implementations
-│   │   ├── evaluation_tools/        forward plots and organization views
-│   │   ├── inverse/                 ThermalChannel inverse physics and artifacts
-│   │   ├── input_adapter.py         physical tensors -> reusable HONF contract
-│   │   ├── local_coupling.py        predicted ports and Stage-A coupling
-│   │   ├── model.py                 complete coupled ThermalChannel wrapper
-│   │   └── plugin.py                runtime integration and strict case config
-│   ├── scripts/inverse/             thin inverse command-line launchers
-│   ├── inverse_requests/            request/context JSON examples
-│   ├── configs/                     case-owned physics/data/loss settings
-│   ├── Dataset/                     manifest, schemas, and local path template
-│   └── artifacts/                   optional local checkpoint location
-├── Trained_Results/                 generated runs and evaluations
-├── docs/                            extension, config, checkpoint, result contracts
-├── tests/                           reusable runtime/model/inverse tests
-└── Case_ThermalChannel/tests/       case-specific contract and integration tests
-```
-
-The dependency direction is strict:
-
-```text
-generic entry points -> runtime/plugin protocol -> installed case package
-                                             └──> reusable forward/inverse core
-```
-
-- `honf_forward_core` and `honf_inverse_core` do not import ThermalChannel, HDF5, or plotting code.
-- The case package owns physical feature meaning, datasets, losses, local-module coupling, exact inverse functionals, and plots.
-- `honf_forward_core.training.weighted_channel_mse` accepts a complete ordered channel-weight vector and has no field-name or temperature convention. `channelthermal.training_tools.losses` translates the ThermalChannel loss settings and named field order into that vector.
-- `train.py` and `evaluate.py` discover a case through its configured dotted plugin factory; they do not branch on a case name.
-- The inverse launchers are currently ThermalChannel-owned because inverse dataset construction and verification require case physics.
-
-This boundary is what allows the same core to support another physical case.
-
-## 3. Installation, data, and required artifacts
-
-Run all commands below from the `HONF_Proj` directory. Python 3.10 or newer is required. Install PyTorch for the local CUDA/CPU platform first if necessary.
-
-The maintained development environment is `ModularDT`:
+Python 3.10 or newer is required. Install PyTorch for the local CUDA platform, then install the core and ThermalChannel package:
 
 ```bash
 cd HONF_Proj
@@ -164,581 +109,182 @@ conda activate ModularDT
 python -m pip install -e . -e ./Case_ThermalChannel
 ```
 
-For test and lint dependencies:
+Install test dependencies when developing:
 
 ```bash
 python -m pip install -e '.[dev]'
 ```
 
-### 3.1 Configure the ThermalChannel datasets
-
-Datasets are external and are not synchronized by Git. Copy the location map and replace both example paths:
+Datasets are external. Copy the location template and edit both paths:
 
 ```bash
-cp Case_ThermalChannel/Dataset/dataset_locations.example.json \
-   Case_ThermalChannel/Dataset/dataset_locations.local.json
+cp Case_ThermalChannel/Dataset/dataset_locations.example.json Case_ThermalChannel/Dataset/dataset_locations.local.json
 ```
 
-| Logical dataset ID | Purpose | Cases and splits |
+| Dataset ID | Purpose | Current manifest split |
 |---|---|---|
-| `thermal_disk_local_v1` | Stage-A isolated/local disk responses | 1,034: 919 train, 115 test |
-| `thermal_channel_global_v1` | Stage-B coupled channel fields | 690: 600 train, 90 test |
+| `thermal_disk_local_v1` | isolated and globally aligned Stage-A disk responses | 919 train, 115 test |
+| `thermal_channel_global_v1` | coupled channel fields and local responses | 600 train, 90 test |
 
-The local map is ignored by Git. As an alternative, `HONF_DATA_ROOT` may point to a directory containing `Processed_LocalModule_Dataset/` and
-`Processed_ChannelThermal_Dataset/`.
+The local location map is ignored by Git. `HONF_DATA_ROOT` can instead point to a directory that contains `Processed_LocalModule_Dataset/` and `Processed_ChannelThermal_Dataset/`.
 
-No trained checkpoint is bundled with the source tree; use a trusted existing artifact or train the required stage locally.
-
-Validate required HDF5 keys, size, and full SHA-256 after copying data:
+Validate the packed files and manifest hashes with:
 
 ```bash
 python tools/inspect_dataset.py --dataset-id thermal_disk_local_v1 --sha256
 python tools/inspect_dataset.py --dataset-id thermal_channel_global_v1 --sha256
 ```
 
-The manifest, field order, module tensors, interface features, padding, and normalization rules are documented in `Case_ThermalChannel/Dataset/PHYSICS_AND_DATA.md` and `Dataset/schemas/`.
+The ThermalChannel data schema and physical definitions are in [PHYSICS_AND_DATA.md](Case_ThermalChannel/Dataset/PHYSICS_AND_DATA.md). Generated PyTorch checkpoints are pickle-based trusted artifacts; do not load an untrusted `.pt` file.
 
-### 3.2 Understand checkpoint dependencies
+## 6. Configuration composition
 
-There are three checkpoint levels:
+A launch composes one core profile under `src/config_core`, the referenced case profile, an optional strict experiment overlay, and allow-listed CLI overrides. Core profiles own generic architecture, optimization, checkpoint policy, and run identity; the ThermalChannel profile owns data, feature semantics, Stage-A dependency, local coupling, physical corrections, and losses.
 
-1. Stage A writes `best_model.pt`, a local heated-disk surrogate.
-2. Stage B consumes that Stage-A checkpoint and writes a self-contained global checkpoint. The local model and normalizers are embedded, so later forward evaluation needs no separate Stage-A file.
-3. The inverse dataset/trainer consumes `best_predicted_model.pt`, and inverse evaluation checks that the configured forward checkpoint matches the SHA recorded by the inverse checkpoint.
+`project://...` paths resolve from `HONF_Proj`, while `config://...` paths resolve from the file that contains them. Unknown fields and ownership violations fail before training. Managed runs save source configurations, CLI overrides, the deterministic resolved configuration, hashes, software information, and Git state.
 
-For a new Stage-B run, pass the local checkpoint explicitly with `--local-checkpoint`, or update the case configuration's `model.local_coupling.local_surrogate_checkpoint.path`.
-Generated checkpoints are trusted PyTorch pickle artifacts; never load an untrusted `.pt` file.
+The default data/training values are 1024 sampled global points per case, train/validation batch size 48, four workers, dynamic module padding, module-count bucketing, normalized inputs and targets, learning rate (3\times10^{-4}), weight decay (10^{-5}), gradient clipping at 1.0, seed 0, AMP disabled, and 10,000 nominal epochs.
 
-### 3.3 Paths and configuration composition
+## 7. Train the upgraded forward profile
 
-A forward launch combines:
-
-- one core profile under `src/config_core/forward/`, which owns the workflow, architecture, optimizer, checkpoint policy, dataset ID, and run identity;
-- the referenced case profile `Case_ThermalChannel/configs/case_default.json`, which owns physical data, local coupling, losses, evaluation defaults, and local-module settings;
-- an optional strict experiment overlay; and
-- allow-listed command-line overrides.
-
-`project://...` paths are anchored at `HONF_Proj`; `config://...` paths are anchored at their configuration file. Unknown settings and ownership mistakes fail before a run directory is created. Every managed run stores both source profiles, overrides, the resolved configuration, hashes, software information, and Git state.
-
-## 4. A beginner's ThermalChannel walkthrough
-
-The demo is a steady incompressible channel containing a variable number of circular heated solid modules.
-The coupled reference solution contains fluid momentum/energy, solid conduction, and temperature/heat-flux interaction at every module boundary.
-
-The global output field order is:
-
-```text
-[u, v, p, omega, temperature]
-```
-
-The easiest way to understand the system is to follow its actual dependency order: inspect data, obtain Stage A, run Stage B, evaluate the autonomous forward checkpoint, and only then try inverse design.
-
-### 4.1 Always validate a launch first
-
-Forward and local training are confirmation-gated. `--dry-run` resolves and validates configuration, dataset, checkpoint dependencies, run ID, device, and destination without writing anything:
+Validate an upgraded launch with the same Stage-A dependency:
 
 ```bash
 python train.py \
-  --config src/config_core/forward/local_module_thermal_disk.json \
-  --device cuda:0 --dry-run
+  --config src/config_core/forward/adaptive_sparse_additive.json \
+  --local-checkpoint Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/Run_0000_base/latest_model.pt \
+  --run-id 9101 \
+  --device cuda:0 \
+  --dry-run
 ```
 
-Use `--yes` only after reviewing that output. A numeric run ID is unique within its result family and is never silently overwritten.
+Add `--yes` only when the validated destination and full training budget are intended. A one-batch smoke may use the same three bounding options shown in Section 1.
 
-### 4.2 Quick wiring smoke versus meaningful training
+## 8. Evaluate forward checkpoints and export topology
 
-A bounded smoke confirms data/model/checkpoint wiring; it does not produce a useful scientific model. Choose unused numeric IDs on your machine:
+Training normally writes the following selectors:
 
-```bash
-# Stage-A one-batch smoke
-python train.py \
-  --config src/config_core/forward/local_module_thermal_disk.json \
-  --run-id 9001 --epochs 1 --max-train-batches 1 --max-val-batches 1 \
-  --device cuda:0 --yes
-
-# Stage-B one-batch smoke using the resulting Stage-A checkpoint
-python train.py \
-  --config src/config_core/forward/enhanced_honf_pairwise.json \
-  --local-checkpoint Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/Run_9001_.../best_model.pt \
-  --run-id 9002 --epochs 1 --max-train-batches 1 --max-val-batches 1 \
-  --device cuda:0 --yes
-```
-
-Replace the ellipsis with the actual timestamped directory. Formal experiments use the full profile budgets and should be launched deliberately; do not infer model quality from smoke outputs.
-
-### 4.3 Evaluate an existing autonomous forward checkpoint
-
-If you already have the packed global dataset and a trusted self-contained `best_predicted_model.pt`, this is the shortest meaningful demo:
-
-```bash
-python evaluate.py \
-  --config src/config_core/forward/enhanced_honf_pairwise.json \
-  --workflow forward \
-  --checkpoint /absolute/path/to/best_predicted_model.pt \
-  --dataset /absolute/path/to/Processed_ChannelThermal_Dataset/packed_dataset.h5 \
-  --device cuda:0 --case-index 0 \
-  --organization-view all --routing-view summary \
-  --export-hypergraph-plan
-```
-
-This reconstructs the checkpoint-owned architecture and normalization, evaluates a complete test case, plots the predicted field and local responses, shows the final hypergraph organization, and exports the canonical static plan used by inverse tooling.
-
-## 5. Forward model: from one module to the coupled channel
-
-### 5.1 Stage A: local thermal-disk surrogate
-
-Stage A learns one reusable module operator. Its physical input consists of:
-
-- seven module/material/port-summary scalars;
-- a sequence of angular Robin-condition tokens `[theta, cos(theta), sin(theta), T_env, h]`; and
-- normalized query coordinates inside the circular module.
-
-The local model uses shared token/coordinate encoders and cross-attention to predict:
-
-- internal solid temperature at arbitrary disk coordinates; and
-- interface response `[T_surface, q_normal]` at the angular ports.
-
-The mixed local workflow combines standalone local training samples with active modules extracted from global channel cases, then fits one training-only normalizer shared by validation and checkpoint evaluation.
-
-Train Stage A:
-
-```bash
-python train.py \
-  --config src/config_core/forward/local_module_thermal_disk.json \
-  --device cuda:0 --dry-run
-
-python train.py \
-  --config src/config_core/forward/local_module_thermal_disk.json \
-  --device cuda:0 --yes
-```
-
-Evaluate a managed local run:
-
-```bash
-python evaluate.py \
-  --config src/config_core/forward/local_module_thermal_disk.json \
-  --workflow local_module --run-id 0001 --checkpoint best \
-  --device cuda:0 --case-index 0
-```
-
-The run is saved under `Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/` and contains `best_model.pt`, `latest_model.pt`, `loss_history.csv`, summary/config files, and local internal/interface plots.
-
-### 5.2 Stage B: coupled global HONF
-
-For each channel case, the ThermalChannel adapter converts physical tensors into the case-neutral HONF contract:
-
-- module centers/features and a `module_present` mask whose runtime width is local to the current batch;
-- case-level flow, material, heat, and geometry context;
-- a fixed `24 x 8` environment-token grid in the maintained profiles; and
-- arbitrary global query coordinates.
-
-The complete Stage-B path is:
-
-1. Shared encoders create module, environment, and global-context tokens.
-2. The HONF organizer assigns modules and environment tokens to six latent hyperedges and constructs source/region centroids, masses, and edge states.
-3. A learned port head predicts autonomous outside temperature and transfer coefficient for each module boundary point.
-4. Frozen Stage A predicts internal temperature and interface response. A physically anchored Robin flux is blended with a learned correction.
-5. Six response statistics and a local latent are fused back into each global module token.
-6. One configured local/global refinement pass samples provisional outside temperature, updates the ports, and reevaluates the local response.
-7. The final organizer is recomputed after local-response fusion.
-8. The continuous decoder predicts `[u,v,p,omega,T]` at every requested point.
-
-The main model outputs are:
-
-| Output | Meaning |
-|---|---|
-| `pred_field [B,Q,5]` | global velocity, pressure, vorticity, temperature |
-| `pred_internal_temperature [B,M,Ql,1]` | per-module solid temperature |
-| `pred_interface [B,M,P,2]` | corrected surface temperature and normal heat flux |
-| `pred_port_condition [B,M,P,5]` | final autonomous local boundary condition |
-| `organizer_aux` | final post-fusion incidences, centroids, masses, and states |
-| `routing_aux` | query routing and pairwise decoder diagnostics |
-
-The reusable forward model has no `max_num_modules` setting, learned slot embeddings, or parameter shape tied to module count. Its runtime module width `M` comes directly from the batch tensors, so a checkpoint accepts any `M` that fits available memory. The packed HDF5 maximum remains dataset metadata, while `dynamic_module_padding=true` compacts active modules and pads each batch only to `M_batch = max_b N_b`. `bucket_by_module_count=true` groups similar counts to reduce wasted activation memory, and the optional `max_modules_per_batch` dataset setting is a collation-time memory safeguard rather than model identity.
-
-Inactive padded slots are masked from organization, local inference, losses, and metrics. The ThermalChannel `padding_invariant_v2` adapter also avoids padding width in its global features: it uses active count, `log1p` count, module number density, physical occupied-area fraction, total source and source per domain area, rather than `active.mean(dim=1)`. Consequently the same physical case produces the same global context and active-module/field outputs when represented at widths 4, 12, or 32.
-
-Historical checkpoints under `Trained_Results/ThermalChannel/HONF_Forward_Runs` remain loadable. Their saved `core_honf.max_num_modules` is accepted only as legacy metadata and is migrated to `channelthermal.global_feature_schema="legacy_v1"` with a fixed reference-slot denominator. This preserves the original 14-feature parameter shape and the original value at the training width while making that legacy feature independent of runtime padding; new checkpoints serialize neither a forward-core maximum nor any module-count-dependent parameter shape.
-
-### 5.3 Maintained Stage-B profiles
-
-The two main profiles share width 256, six hyperedges, the same environment tokens, frozen Stage A, coupled losses, and predicted-port training. They differ
-in the global decoding mechanism being studied:
-
-| Profile | Decoder idea | Default run ID |
-|---|---|---:|
-| `hyper_plus_global_near.json` | hyperedge context plus global and local near-module context | `0001` |
-| `enhanced_honf_pairwise.json` | hyperedge organization plus a learned module-query pairwise kernel | `0002` |
-
-Train either profile with an explicit Stage-A dependency:
-
-```bash
-python train.py \
-  --config src/config_core/forward/hyper_plus_global_near.json \
-  --local-checkpoint /path/to/stage_a/best_model.pt \
-  --device cuda:0 --dry-run
-
-python train.py \
-  --config src/config_core/forward/hyper_plus_global_near.json \
-  --local-checkpoint /path/to/stage_a/best_model.pt \
-  --device cuda:0 --yes
-
-python train.py \
-  --config src/config_core/forward/enhanced_honf_pairwise.json \
-  --local-checkpoint /path/to/stage_a/best_model.pt \
-  --device cuda:0 --yes
-```
-
-The coupled objective includes weighted global-field MSE, internal-temperature loss, interface loss, supervised port loss, angular port smoothness, global/interface consistency, and a warm predicted-port consistency term. For the global-field term, the ThermalChannel case resolves one weight for every name in `model.channelthermal.field_names`: `temperature_weight` is applied to the channel named `temperature`, while a non-null `field_channel_weights` must be a complete ordered vector and overrides those defaults. The reusable core only performs the reduction with the resulting explicit vector; it does not assume that temperature is channel 4.
-Organizer anti-collapse regularization exists for experiments but is disabled in the maintained templates.
-
-Strict ablation overlays are under `src/config_core/forward/experiments/`. For example, the global-only fallback needs no Stage-A checkpoint:
-
-```bash
-python train.py \
-  --config src/config_core/forward/enhanced_honf_pairwise.json \
-  --experiment-overlay src/config_core/forward/experiments/global_only.json \
-  --run-id 0003 --device cuda:0 --dry-run
-```
-
-### 5.4 Forward checkpoint selection and evaluation
-
-Stage-B training can write:
-
-| Selector | Root filename | Selection criterion |
+| Selector | File | Criterion |
 |---|---|---|
 | `best` | `best_model.pt` | total validation objective |
 | `best_by_field_mse` | `best_by_field_mse_model.pt` | global field MSE |
 | `best_by_temperature_mse` | `best_by_temperature_mse_model.pt` | temperature MSE |
 | `best_predicted` | `best_predicted_model.pt` | autonomous predicted-port validation |
-| `latest` | `latest_model.pt` | latest resumable state |
+| `latest` | `latest_model.pt` | latest resumable optimizer/model state |
 
-`best_predicted` is the normal checkpoint for autonomous deployment and the required foundation for inverse data/verification.
-
-Evaluate a managed forward run by its unique numeric ID:
+`best_predicted` is the normal autonomous deployment checkpoint and the required basis for inverse dataset provenance. Evaluate a managed default run on GPU 0 with:
 
 ```bash
 python evaluate.py \
   --config src/config_core/forward/enhanced_honf_pairwise.json \
-  --workflow forward --run-id 0002 --checkpoint best_predicted \
-  --device cuda:0 --case-index 0 \
-  --organization-view all --routing-view summary \
-  --export-hypergraph-plan
+  --workflow forward \
+  --run-id 0002 \
+  --checkpoint best_predicted \
+  --device cuda:0 \
+  --case-index 0 \
+  --organization-view all \
+  --routing-view summary
 ```
 
-Forward evaluation supports `teacher`, `predicted`, `mixed`, or `both` local port conditions; full-grid decoding in query chunks; physical, matrix, and
-schematic organizer views; optional dense routing maps; and compact NPZ plan export. Run `python evaluate.py --help`, then append ThermalChannel-specific options after the generic arguments.
-
-Compare any number of compatible runs or explicit checkpoints on one dataset:
+Evaluate an explicit checkpoint by replacing `--run-id` and the selector with `--checkpoint /absolute/path/to/checkpoint.pt`. Add `--export-topology-signature` to request dense evaluation diagnostics needed for the schema-v3 unordered topology signature and per-edge field closure:
 
 ```bash
 python evaluate.py \
-  --config src/config_core/forward/enhanced_honf_pairwise.json \
-  --workflow compare --Run_ID 0001 --Run_ID 0002 \
-  --checkpoint-selector best_predicted \
-  --label hyper_plus_global_near --label enhanced_honf_pairwise \
-  --device cuda:0
+  --config src/config_core/forward/adaptive_sparse_additive.json \
+  --workflow forward \
+  --checkpoint /absolute/path/to/best_predicted_model.pt \
+  --device cuda:0 \
+  --case-index 0 \
+  --organization-view all \
+  --routing-view summary \
+  --export-topology-signature
 ```
 
-Missing checkpoint selectors and ambiguous run IDs fail by default. Use an exact checkpoint path to disambiguate. Checkpoint fallback is available only when evaluation or comparison explicitly requests it.
+The evaluation directory then contains `topology_signature.npz`, `topology_signature_summary.json`, structure diagnostics, and ThermalChannel topology views. The generic schema is `honf_topology_signature` version 3; edge order is canonicalized only for deterministic serialization, while comparisons use Hungarian active-set matching plus relation error.
 
-### 5.5 Resume a managed forward/local run
+## 9. Resume and run storage
 
-Interrupted managed runs resume in place:
+Resume a managed run in place with its exact profile and latest checkpoint:
 
 ```bash
 python train.py \
   --config src/config_core/forward/enhanced_honf_pairwise.json \
-  --resume-checkpoint Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_0002_.../latest_model.pt \
-  --device cuda:0 --yes
+  --resume-checkpoint Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_####_<timestamp>_<name>/latest_model.pt \
+  --device cuda:0 \
+  --yes
 ```
 
-Resume validates case, workflow, model family, immutable model/data/loss sections, feature schemas, dataset identity, and normalization. Current checkpoints restore model, optimizer, AMP scaler, epoch, best metrics, and Python/NumPy/Torch/CUDA random states. `--local-checkpoint` is not resume; it selects Stage A for a new Stage-B run or initializes a new local run.
+Resume validates case, workflow, model family, immutable model/data/loss sections, feature schemas, dataset identity, and normalization. It restores model, optimizer, AMP scaler, epoch, best metrics, and Python, NumPy, Torch, and CUDA random states. `--local-checkpoint` starts a new Stage-B run with a selected Stage-A dependency; it is not a resume option.
 
-## 6. Hierarchical inverse design
-
-### 6.1 Purpose and current scope
-
-The inverse model is an initial, bounded research implementation around the current ThermalChannel forward model. It is usable for contract tests, dataset construction, staged experiments, and verified candidate studies, but it is not yet as mature as the forward workflow.
-
-It factorizes the one-to-many problem as:
-
-```text
-p(D,G | R,c) = p(D | G,R,c) p(G | R,c)
-```
-
-Independent Gaussian noise in both conditional rectified flows allows several mechanisms for one request and several layouts for one mechanism. There is no iterative design optimization.
-
-The reusable inverse core contains:
-
-```text
-src/honf_inverse_core/
-├── request_schema.py, contracts.py, normalization.py
-├── models/
-│   ├── request_encoder.py            unordered request/context encoder
-│   ├── plan_flow.py                  (R,c) -> fixed-edge compact G
-│   ├── layout_flow.py                (G,R,c) -> padded layout D
-│   ├── joint_corrector.py            optional one bounded residual proposal
-│   └── hierarchical_inverse.py       public model/checkpoint API
-├── training/                         losses, stages, trainer, checkpoints
-└── sampling/                         result contracts, ranking, serialization
-```
-
-ThermalChannel-specific vocabulary, exact functionals, compact-plan extraction, geometry, frozen HONF adapter, HDF5 builder, and plots live under
-`Case_ThermalChannel/src/channelthermal/inverse/`.
-
-### 6.2 Structured requests
-
-Request schema v1 accepts one to four active tokens and intentionally supports
-only these functionals:
-
-| Functional | Meaning |
-|---|---|
-| `environment_temperature_max` | maximum predicted fluid temperature |
-| `pressure_drop` | mean inlet pressure minus mean outlet pressure |
-| `outlet_temperature_nonuniformity` | outlet-temperature standard deviation |
-| `internal_temperature_max` | largest active-module internal temperature |
-| `internal_temperature_spread` | spread of active-module peak temperatures |
-| `regional_temperature_mean` | mean fluid temperature in a normalized rectangle |
-| `regional_temperature_max` | maximum fluid temperature in that rectangle |
-
-Relations are `upper_bound`, `lower_bound`, `target_range`, and `minimize`.
-Geometry remains separate: module-count bounds, minimum center distance, wall/inlet/outlet clearances, and optional total heat. Schema v1 permits at most one regional token.
-
-Start from the strict examples in `Case_ThermalChannel/inverse_requests/`:
-
-```text
-balanced_cooling.json
-low_internal_temperature.json
-downstream_region_avoidance.json
-low_pressure_drop_and_uniform_outlet.json
-mixed_global_local_request.json
-contexts/reference_operating_context.json
-```
-
-Targets are expressed in physical units and normalized from training statistics embedded in the inverse artifact. Unknown fields, duplicate active functionals, invalid regions/ranges, and unsupported versions fail early.
-
-### 6.3 Compact mechanism plan
-
-For each fixed forward hyperedge, `G` stores activity, module-side source location, environment-region location and scale, module/environment mass,
-mass-derived strength, heat fraction, and hard module/source fraction. It does not generate dense organizer states, query routing, raw module tokens, or full
-incidence matrices.
-
-The generated `G` and verified `G_hat` use the same versioned 12-feature schema and canonical active-first edge order. This gives the hierarchy an interpretable intermediate target and exposes whether a generated layout realizes the mechanism it was conditioned on.
-
-### 6.4 Build the inverse dataset
-
-Edit the checkpoint, source-dataset, and output paths in `src/config_core/inverse/thermalchannel_inverse_data_v1.json`, including every placeholder. The forward checkpoint should be the trusted self-contained `best_predicted_model.pt` you intend to keep frozen:
-
-```bash
-python Case_ThermalChannel/scripts/inverse/build_inverse_dataset.py \
-  --config src/config_core/inverse/thermalchannel_inverse_data_v1.json \
-  --dry-run
-
-python Case_ThermalChannel/scripts/inverse/build_inverse_dataset.py \
-  --config src/config_core/inverse/thermalchannel_inverse_data_v1.json \
-  --device cuda:0 --yes
-```
-
-For each source case, the builder loads `D,c`, runs frozen HONF once in predicted-port mode, exports the final canonical plan, derives `G`, evaluates the supported physical functionals, and saves geometry/provenance.  It then creates 16 request variants by default without another forward call.
-
-Splits are assigned before augmentation, so variants of one design cannot leak between train, validation, and test. The case-major HDF5 stores each `D,c,G` once and adds a request-variant axis; the training reader flattens `(case, variant)` only when batching.
-
-Outputs include `inverse_dataset_v1.h5`, `dataset_summary.json`, split-ID hashes, and functional/request/plan histograms. A build limited by `--max-cases-per-split` is marked partial diagnostic data and normal training rejects it unless `--allow-partial-debug` is explicit.
-
-### 6.5 Train the four-stage hierarchy
-
-Edit dataset/checkpoint paths in `src/config_core/inverse/train_inverse_hierarchical_template.json`, then run:
-
-```bash
-python Case_ThermalChannel/scripts/inverse/train_inverse_hierarchical.py \
-  --config src/config_core/inverse/train_inverse_hierarchical_template.json \
-  --device cuda:0 --yes
-```
-
-Use `--smoke` only for a small one-epoch-per-stage wiring diagnostic.
-
-| Stage | Learned behavior |
-|---|---|
-| `stage_plan` | request/context to true compact plan |
-| `stage_layout_teacher_plan` | true plan to physical layout |
-| `stage_layout_mixed_plan` | layout generation under gradually mixed true/generated plans |
-| `stage_joint_consistency` | sparse frozen-HONF request/plan/geometry consistency and optional corrector |
-
-Plan and layout flows use default hidden width 256, four residual blocks, and 24 Heun sampling steps. The joint-stage consistency contribution is capped so it cannot dominate flow matching. Current inverse training supports selected stages and warm initialization but does not promise exact interrupted-run resume.
-
-Inverse runs contain `best_plan_model.pt`, `best_layout_model.pt`, `best_unguided_model.pt`, `best_corrected_model.pt`, `latest_model.pt`, `metrics.csv`, a live `loss_curve.png`, atomic `training_status.json`, `config_resolved.json`, and `summary.json`.
-Training displays nested stage, epoch, and batch progress with running total/flow losses; every completed epoch prints its summary and the latest/best checkpoint decisions.
-A failed epoch records its exception and traceback in `training_status.json`. Every checkpoint records the forward checkpoint identity, inverse dataset hash, schema versions, normalization, and model configuration.
-
-### 6.6 Sample, verify, correct once, and rank
-
-Edit `src/config_core/inverse/evaluate_inverse_hierarchical_template.json` and keep its forward checkpoint consistent with the inverse checkpoint provenance:
-
-```bash
-python Case_ThermalChannel/scripts/inverse/evaluate_inverse_hierarchical.py \
-  --config src/config_core/inverse/evaluate_inverse_hierarchical_template.json
-```
-
-Defaults sample 8 plans and 4 layouts per plan: 32 raw candidates and 32 exact HONF calls. With correction enabled, every lineage receives at most one bounded proposal and one additional HONF call. A proposal is accepted only if exact geometry remains valid and exact request violation improves.
-
-The result preserves four meanings:
-
-- `raw_unguided`: generated and verified candidates before correction;
-- `corrected`: every one-pass proposal, including worse proposals;
-- `accepted_one_pass`: one raw-or-corrected representative per lineage;
-- `final_ranked`: up to `top_k` representatives selected by request violation, geometry, plan consistency, and diversity-aware tie breaking.
-
-Raw generator success is reported before reranking. Evaluation writes summary JSON, all/top CSVs, compressed candidate arrays, a SHA-inventoried manifest, population comparison plots, and detailed field/layout/mechanism plots for top candidates.
-
-The equivalent public API attaches a case runtime because exact verification and correction require ThermalChannel physics:
-
-```python
-from honf_inverse_core.models.hierarchical_inverse import HierarchicalInverseDesigner
-from honf_inverse_core.training.checkpointing import load_inverse_checkpoint
-from channelthermal.inverse.context import load_context
-from channelthermal.inverse.evaluation.candidate_evaluator import ThermalChannelCandidateEvaluator
-from channelthermal.inverse.request import make_request_codec
-from channelthermal.inverse.verifier import FrozenThermalChannelVerifier
-from channelthermal.workflows.evaluate_inverse_hierarchical import normalizers_from_checkpoint
-
-inverse_path = ".../best_corrected_model.pt"
-checkpoint = load_inverse_checkpoint(inverse_path)
-normalizers = normalizers_from_checkpoint(checkpoint)
-request = make_request_codec(normalizers.functional).load(".../balanced_cooling.json")
-context = load_context(".../reference_operating_context.json")
-
-designer = HierarchicalInverseDesigner.load(inverse_path, device="cuda:0")
-frozen = FrozenThermalChannelVerifier(
-    ".../best_predicted_model.pt",
-    device="cuda:0",
-    dataset_path=".../packed_dataset.h5",
-)
-runtime = ThermalChannelCandidateEvaluator(designer, frozen, normalizers)
-designer.attach_verifier(runtime)
-result = designer.sample_candidates(
-    request=request,
-    context=context,
-    num_plans=8,
-    layouts_per_plan=4,
-    correct_once=True,
-    top_k=8,
-    seed=0,
-)
-serializable = result.to_dict()
-```
-
-### 6.7 Initial inverse limitations
-
-Schema/model v1 fixes the forward hyperedge count, supports at most 12 modules, generates only centers and heat powers, and assumes one module family.
-The geometry decoder has one analytic fallback rather than a general constraint solver. Stage-four differentiable probes are coarser training surrogates; final evaluation uses the exact frozen verifier.
-
-The evaluator currently aborts a request if a candidate's forward call fails instead of retaining a failed candidate record. There is no iterative correction, feasibility guarantee, or claim beyond the frozen forward surrogate's accuracy.
-
-The bounded audit entry point can study request sensitivity, plan realization, layout diversity, and correction acceptance without launching a formal run:
-
-```bash
-python Case_ThermalChannel/scripts/inverse/audit_inverse_hierarchy.py --help
-```
-
-## 7. Runs, checkpoints, and saved results
-
-Managed output is grouped by case and workflow:
+Managed output families are:
 
 ```text
 Trained_Results/ThermalChannel/
-├── Local_Module_Runs/thermal_disk/Run_<id>_<timestamp>_<name>/
-├── HONF_Forward_Runs/Run_<id>_<timestamp>_<name>/
-│   ├── configs/                       source/resolved/provenance JSON
-│   ├── environment/                   software and source-state snapshots
-│   ├── checkpoints/                   canonical checkpoint aliases
-│   ├── metrics/, plots/, logs/
-│   ├── run_manifest.json
-│   ├── best_model.pt, best_predicted_model.pt, latest_model.pt, ...
-│   └── eval_global/<timestamp>/...
-├── Inverse_Dataset_Builds/            generated inverse HDF5/diagnostics
-├── HONF_Inverse_Runs/                 staged inverse runs and evaluations
-└── Baselines/
+├── Local_Module_Runs/thermal_disk/
+├── HONF_Forward_Runs/
+├── Inverse_Dataset_Builds/
+└── HONF_Inverse_Runs/
 ```
 
-Run directories use `Run_<four-digit-id>_<local-timestamp>_<safe-name>` and a UUID in `run_manifest.json`. Status records created/running/completed/failed transitions. Failures include the exception and last recoverable epoch.
-Completion inventories checkpoint selectors and mirrors workflow-compatible root files into canonical `checkpoints/`, `metrics/`, and `plots/` subtrees.
+Run IDs are unique within a family and are never overwritten silently.
 
-Generated results, datasets, checkpoints, local resource maps, diagnostic configs, and inverse evaluation artifacts are ignored by Git. Source code,
-schemas, maintained templates, request examples, and documentation remain trackable.
+## 10. Unordered topology and inverse design
 
-## 8. Testing and validation
+The accepted forward topology schema records active masks, edge descriptors, module/environment incidences, edge relations, reference-query routing, per-field contributions, query-grid provenance, field names, case ID, and forward checkpoint SHA-256. `src/honf_forward_core/evaluation/topology_signature.py` provides validation, canonical serialization, Hungarian comparison, module-affinity reconstruction, query-to-module influence reconstruction, and compact summaries.
 
-Run the full root and ThermalChannel suites in the maintained environment:
+The opt-in inverse profile `src/config_core/inverse/train_inverse_topology_set_template.json` consumes schema-v3 topology sets. Its plan flow uses shared token projections and permutation-equivariant set self-attention with no learned edge-index embedding, supports runtime topology capacity, and trains with Sinkhorn set matching. Its layout flow uses set cross-attention from physical module slots to active plan tokens. It requires the exact SHA-256 of the forward checkpoint that created the topology dataset.
+
+The earlier indexed compact-plan flow and ordered-flat layout conditioner remain available for compatible inverse artifacts. Mode-specific modules are instantiated only for the chosen inverse profile, and the fixed-width corrector is intentionally unavailable in exchangeable-set mode.
+
+Inverse design remains a bounded research workflow. Generated candidates are ranked only after evaluation by a frozen autonomous forward checkpoint; neither forward nor inverse predictions replace a high-fidelity solver or engineering validation.
+
+## 11. Testing
+
+Run the focused forward-upgrade tests on GPU 0 when CUDA is required:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 conda run -n ModularDT pytest -q tests Case_ThermalChannel/tests
+CUDA_VISIBLE_DEVICES=0 pytest -q \
+  tests/test_forward_upgrade_config.py \
+  tests/test_forward_additive.py \
+  tests/test_exchangeable_organizer.py \
+  tests/test_sparse_routing.py \
+  tests/test_gathered_routing.py \
+  tests/test_topology_signature.py \
+  Case_ThermalChannel/tests/test_inverse_topology_set.py \
+  Case_ThermalChannel/tests/test_topology_signature_visualization.py
 ```
 
-Focused forward diagnostics:
+Run the complete feasible suite with:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 conda run -n ModularDT \
-  python Case_ThermalChannel/tests/check_global_modes.py --device cuda:0
-CUDA_VISIBLE_DEVICES=0 conda run -n ModularDT \
-  python Case_ThermalChannel/tests/check_honf_hardening.py --device cuda:0
-conda run -n ModularDT \
-  python Case_ThermalChannel/tests/check_hypergraph_plan_stability.py
+CUDA_VISIBLE_DEVICES=0 pytest -q
 ```
 
-Focused inverse regressions:
+The forward upgrade plan, acceptance gates, commands, and recorded results are maintained in `HONF_Forward_Upgrade_Codex_Goal_Plan.md`.
 
-```bash
-CUDA_VISIBLE_DEVICES=0 conda run -n ModularDT pytest -q \
-  tests/test_inverse_*.py tests/test_joint_corrector.py \
-  tests/test_layout_flow.py tests/test_plan_flow.py tests/test_request_set_encoder.py \
-  Case_ThermalChannel/tests/test_inverse_*.py
+## 12. Repository layout
+
+```text
+HONF_Proj/
+├── train.py                              generic forward/local training dispatcher
+├── evaluate.py                           generic forward/local/compare dispatcher
+├── src/
+│   ├── honf_forward_core/                reusable encoders, organizers, routing, decoder, evaluation
+│   ├── honf_inverse_core/                request encoder, indexed/set flows, matching, sampling
+│   ├── honf_runtime/                     strict config composition, plugins, paths, checkpoints, runs
+│   └── config_core/                      forward and inverse profiles plus schemas
+├── Case_ThermalChannel/
+│   ├── src/channelthermal/               case adapter, Stage A, coupling, losses, workflows, plots
+│   ├── configs/case_default.json         physical data, coupling, loss, and evaluation settings
+│   ├── Dataset/                          manifests, schemas, local path map
+│   └── scripts/inverse/                  ThermalChannel inverse launchers
+├── Trained_Results/                      generated local, forward, and inverse artifacts
+├── docs/                                 configuration, extension, checkpoint, and result contracts
+└── tests/                                reusable and case integration tests
 ```
 
-`VALIDATION.md` records forward migration parity and bounded smoke evidence. The inverse evidence in `CHANGELOG.md` is explicitly diagnostic, not a claim of production convergence.
+## 13. Extension boundary
 
-## 9. Extending HONF to another physical case
+To add another physical case, implement the plugin protocol, physical-to-generic input adapter, environment/query features, dataset loaders, named field/loss policy, and evaluation hooks. Reuse `honf_forward_core` without importing the new case into it. Add a case-owned local surrogate and coupling only if that physics needs one, and add inverse functionals only after the forward checkpoint and topology schema are stable.
 
-A new case is a physical-data/adapter/workflow plugin, not a fork of the HONF core and not a new `if case == ...` branch in the entry points.
-
-### 9.1 Minimum forward-case implementation
-
-1. Create an installable sibling package such as `Case_MyPhysics/`.
-2. Define a factory like `myphysics.plugin:create_plugin` implementing `honf_runtime.case_protocol.CasePlugin`.
-3. Add a versioned dataset manifest, exact schema documentation, an ignored machine-local location map, and reproducible train/validation readers.
-4. Adapt case tensors to `honf_forward_core.config.BatchData`: module centers, features, presence mask, context, environment tokens/features, queries, and targets.
-5. Wrap the reusable HONF core only where case-specific preprocessing, auxiliary outputs, or coupling are required.
-6. Keep physical losses, metrics, visualization, and post-processing in the case package.
-7. Add a strict case profile and a core launch profile selecting the plugin, model family, logical dataset ID, and architecture.
-8. Prove installation, dry-run, batch adaptation, inference, loss, checkpoint reconstruction, and evaluation with synthetic contract tests.
-
-If the case has a reusable local physics component, expose it as a `LocalModuleSpec` with stable input/port/query/target schemas, model/checkpoint factories, coupling adapter, freeze policy, and embedding policy.
-
-### 9.2 Adding inverse support for the new case
-
-Reuse `honf_inverse_core` only after the forward contract is stable. The case must then supply:
-
-1. a small versioned functional vocabulary and strict request codec;
-2. a versioned operating-context contract;
-3. physical design canonicalization, generated-design decoding, and exact geometry checks;
-4. a compact plan derived from that forward model's canonical organizer plan;
-5. exact functional evaluation in physical units;
-6. a frozen autonomous forward verifier that returns `G_hat` and requested physical outputs without borrowing hidden source-case inputs;
-7. split-before-augmentation dataset construction and diagnostics;
-8. case-owned staged training/evaluation adapters, plots, and tests; and
-9. provenance checks tying inverse data/checkpoints to the exact forward checkpoint and schema versions.
-
-Do not runtime-import an older demo tree or place case physics in the reusable inverse package. Start with the smallest request vocabulary and one module family, then expand only after end-to-end verification is reliable.
-
-The detailed plugin checklist is in `docs/case_plugin.md`. Configuration, checkpoint, result, and model-family rules are in `docs/configuration.md`, `docs/checkpoints.md`, `docs/results.md`, and `docs/model_family.md`.
-
-## 10. Further reading and project status
-
-- `Model_Explain.md`: detailed forward/inverse mathematics and tensor meaning.
-- `Case_ThermalChannel/Dataset/PHYSICS_AND_DATA.md`: physical and HDF5 contract.
-- `VALIDATION.md`: numerical migration and workflow validation evidence.
-- `CHANGELOG.md`: current forward and inverse implementation history.
-- `INVERSE_CODING.md`: development roadmap and design decisions for the first inverse hierarchy.
-- `SUPPORT.md`: compatibility and support expectations.
-
-The package version is `0.1.0`. The current license is deliberately all-rights-reserved because the parent repository did not provide an open-source license to carry forward. Replace it with an owner-approved license and update the placeholder repository URL in `CITATION.cff` before public distribution.
+Further contracts are in `docs/CASE_EXTENSION.md`, `docs/CONFIG_CONTRACT.md`, `docs/CHECKPOINT_CONTRACT.md`, and `docs/RESULT_CONTRACT.md`.

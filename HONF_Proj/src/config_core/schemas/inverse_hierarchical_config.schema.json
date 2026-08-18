@@ -33,6 +33,13 @@
         "corrector_hidden_dim": {"type": "integer", "minimum": 1},
         "corrector_blocks": {"type": "integer", "minimum": 1},
         "matching_mode": {"enum": ["canonical", "hungarian", "sinkhorn"]},
+        "plan_token_mode": {"enum": ["indexed", "exchangeable_set"]},
+        "plan_conditioning_mode": {"enum": ["ordered_flat", "set_cross_attention"]},
+        "set_interaction_layers": {"type": "integer", "minimum": 1},
+        "set_attention_heads": {"type": "integer", "minimum": 1},
+        "topology_schema_name": {"const": "honf_topology_signature"},
+        "topology_schema_version": {"const": 3},
+        "forward_topology_checkpoint_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
         "max_plan_delta": {"type": "number", "minimum": 0.0},
         "max_layout_delta": {"type": "number", "minimum": 0.0},
         "dropout": {"type": "number", "minimum": 0.0, "maximum": 1.0}

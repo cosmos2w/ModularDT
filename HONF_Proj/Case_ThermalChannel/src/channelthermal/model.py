@@ -96,6 +96,16 @@ class ChannelThermalHONFModel(nn.Module):
 
         return self.local_coupling.has_local_surrogate
 
+    def set_edge_capacity(self, capacity: int) -> None:
+        """Set the core runtime candidate-edge budget."""
+
+        self.core.set_edge_capacity(capacity)
+
+    def set_training_progress(self, *, epoch: int, total_epochs: Optional[int] = None) -> None:
+        """Set core organizer warmup progress once per epoch."""
+
+        self.core.set_training_progress(epoch=epoch, total_epochs=total_epochs)
+
     def extract_hypergraph_plan(
         self,
         organizer_aux: Dict[str, Any],
@@ -141,6 +151,7 @@ class ChannelThermalHONFModel(nn.Module):
         mixed_teacher_ratio: float = 0.5,
         return_predicted_port_outputs: bool = False,
         return_routing_maps: bool = False,
+        return_edge_fields: bool = False,
         return_port_global_consistency: bool = False,
         return_prepared_state: bool = False,
     ) -> Dict[str, Any]:
@@ -400,6 +411,7 @@ class ChannelThermalHONFModel(nn.Module):
             global_token=global_token,
             query_features=self._query_features(query_xy.float()),
             return_routing_maps=bool(return_routing_maps),
+            return_edge_fields=bool(return_edge_fields),
         )
         final_output: Dict[str, Any] = {}
         final_output.update(final_org_raw)
@@ -447,8 +459,29 @@ class ChannelThermalHONFModel(nn.Module):
             "module_response_latent": module_response_latent,
             "organizer_aux": org,
             "base_organizer_aux": base_org,
-            "routing_aux": {key: value for key, value in decoder_output.items() if key != "pred_field"},
+            "routing_aux": {
+                key: value
+                for key, value in decoder_output.items()
+                if key
+                not in {
+                    "pred_field",
+                    "pred_field_background",
+                    "pred_field_by_edge",
+                    "edge_contribution_abs_mean",
+                    "edge_contribution_rms",
+                    "edge_contribution_energy_fraction",
+                }
+            },
         }
+        for key in (
+            "pred_field_background",
+            "pred_field_by_edge",
+            "edge_contribution_abs_mean",
+            "edge_contribution_rms",
+            "edge_contribution_energy_fraction",
+        ):
+            if key in decoder_output:
+                result[key] = decoder_output[key]
         result["routing_aux"]["port_global_use_hyper_mechanism_encoder"] = port_global_diag.get(
             "use_hyper_mechanism_encoder",
             decoder_output["pred_field"].new_zeros(()),
@@ -468,6 +501,7 @@ class ChannelThermalHONFModel(nn.Module):
         query_xy: torch.Tensor,
         *,
         return_routing_maps: bool = False,
+        return_edge_fields: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """Decode ``query_xy [B,Q,2]`` without recomputing case/local physics."""
 
@@ -478,6 +512,7 @@ class ChannelThermalHONFModel(nn.Module):
             global_token=prepared.global_token,
             query_features=self._query_features(query_xy.float()),
             return_routing_maps=return_routing_maps,
+            return_edge_fields=return_edge_fields,
         )
 
     def _query_features(self, query_xy: torch.Tensor) -> torch.Tensor | None:
@@ -514,12 +549,29 @@ class ChannelThermalHONFModel(nn.Module):
             "A_me",
             "A_mh",
             "A_eh",
+            "candidate_A_mh",
+            "candidate_A_eh",
             "hyper_state",
+            "candidate_hyper_state",
             "hyper_source_coords",
             "hyper_region_coords",
+            "hyper_source_scale",
+            "hyper_region_scale",
             "hyper_module_mass",
             "hyper_env_mass",
+            "hyper_module_purity",
+            "hyper_env_purity",
             "hyper_strength",
+            "edge_quality",
+            "edge_active_mask",
+            "candidate_edge_count",
+            "active_edge_count",
+            "selection_module_coverage",
+            "selection_environment_coverage",
+            "candidate_module_assignment_nonzero_fraction",
+            "candidate_environment_assignment_nonzero_fraction",
+            "module_assignment_nonzero_fraction",
+            "environment_assignment_nonzero_fraction",
             "module_env_context",
             "module_centers",
             "module_present",

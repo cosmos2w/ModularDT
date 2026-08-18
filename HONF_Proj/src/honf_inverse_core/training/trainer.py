@@ -24,6 +24,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from honf_inverse_core.models.hierarchical_inverse import HierarchicalInverseDesigner
+from honf_inverse_core.models.matching import token_assignment
 from honf_inverse_core.models.rectified_flow import flow_interpolation
 from honf_inverse_core.models.request_encoder import RequestEncoding
 
@@ -198,14 +199,26 @@ class InverseTrainer:
     def _plan_loss(self, batch: Mapping[str, Any], encoding: Any) -> dict[str, torch.Tensor]:
         target_plan = batch["plan"].float()
         target = self.designer.plan_flow.continuous_target(target_plan)
-        state, velocity_target, time, _ = flow_interpolation(target)
+        if self.designer.plan_flow.plan_token_mode == "exchangeable_set":
+            noise = torch.randn_like(target)
+            assignment = token_assignment(
+                noise,
+                target,
+                method=str(self.designer.model_config["matching_mode"]),
+            )
+            target = assignment @ target
+            activity_target = (assignment @ target_plan[..., 0:1]).squeeze(-1)
+            state, velocity_target, time, _ = flow_interpolation(target, noise=noise)
+        else:
+            activity_target = target_plan[..., 0]
+            state, velocity_target, time, _ = flow_interpolation(target)
         output = self.designer.plan_flow(state, time, encoding)
         endpoint = state + (1.0 - time[:, None, None]) * output.velocity
         return plan_training_losses(
             predicted_velocity=output.velocity,
             target_velocity=velocity_target,
             activity_logits=output.activity_logits,
-            activity_target=target_plan[..., 0],
+            activity_target=activity_target,
             endpoint_estimate=endpoint,
         )
 

@@ -1,0 +1,39 @@
+{
+  "dataset_path": "Trained_Results/ThermalChannel/Inverse_Dataset_Builds/Build_####_<name>/inverse_topology_set_v1.h5",
+  "forward_checkpoint": "Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_####_<timestamp>_<name>/best_predicted_model.pt",
+  "device": "cuda:0",
+  "output_root": "Trained_Results/ThermalChannel/HONF_Inverse_Runs",
+  "run_name": "topology_set_rf_v1",
+  "batch_size": 16,
+  "num_workers": 0,
+  "learning_rate": 0.0001,
+  "weight_decay": 0.00001,
+  "allow_partial_debug": false,
+  "joint_query_grid": [32, 16],
+  "joint_local_grid_size": 18,
+  "model": {
+    "request_hidden_dim": 128,
+    "plan_hidden_dim": 256,
+    "plan_layers": 4,
+    "plan_sampling_steps": 24,
+    "layout_hidden_dim": 256,
+    "layout_layers": 4,
+    "layout_sampling_steps": 24,
+    "plan_token_mode": "exchangeable_set",
+    "plan_conditioning_mode": "set_cross_attention",
+    "set_interaction_layers": 2,
+    "set_attention_heads": 4,
+    "matching_mode": "sinkhorn",
+    "topology_schema_name": "honf_topology_signature",
+    "topology_schema_version": 3,
+    "forward_topology_checkpoint_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "corrector_enabled": false,
+    "dropout": 0.05
+  },
+  "stages": {
+    "stage_plan": {"epochs": 40, "learning_rate": 0.0001},
+    "stage_layout_teacher_plan": {"epochs": 40, "learning_rate": 0.0001},
+    "stage_layout_mixed_plan": {"epochs": 20, "learning_rate": 0.00005},
+    "stage_joint_consistency": {"epochs": 0, "learning_rate": 0.00002, "forward_batch_fraction": 0.25, "forward_sample_count": 4}
+  }
+}

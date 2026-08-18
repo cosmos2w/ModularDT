@@ -67,3 +67,52 @@ def test_layout_plan_alignment_is_finite_and_differentiable() -> None:
     loss.backward()
     assert torch.isfinite(loss)
     assert endpoint.grad is not None and torch.isfinite(endpoint.grad).all()
+
+
+def test_set_cross_attention_is_invariant_to_plan_edge_permutation() -> None:
+    torch.manual_seed(271)
+    model = ConditionalLayoutFlow(
+        num_edges=4,
+        max_modules=5,
+        condition_dim=16,
+        hidden_dim=32,
+        layers=2,
+        dropout=0.0,
+        plan_conditioning_mode="set_cross_attention",
+        set_attention_heads=4,
+    ).eval()
+    plan = torch.rand(2, 4, 12)
+    plan[..., 0] = torch.tensor([[1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 1.0, 1.0]])
+    state = torch.randn(2, 5, 3)
+    time = torch.tensor([0.3, 0.7])
+    condition = torch.randn(2, 16)
+    permutation = torch.tensor([2, 0, 3, 1])
+
+    reference = model(state, time, plan, condition)
+    permuted = model(state, time, plan[:, permutation], condition)
+
+    torch.testing.assert_close(reference.velocity, permuted.velocity, rtol=2e-6, atol=2e-6)
+    torch.testing.assert_close(reference.presence_logits, permuted.presence_logits, rtol=2e-6, atol=2e-6)
+    torch.testing.assert_close(reference.count_logits, permuted.count_logits, rtol=2e-6, atol=2e-6)
+    assert not any("ordered_plan_projection" in name for name, _ in model.named_parameters())
+
+
+def test_set_layout_runtime_edge_capacity_preserves_parameter_shapes() -> None:
+    model = ConditionalLayoutFlow(
+        num_edges=4,
+        max_modules=5,
+        condition_dim=16,
+        hidden_dim=32,
+        layers=1,
+        dropout=0.0,
+        plan_conditioning_mode="set_cross_attention",
+        set_attention_heads=4,
+    ).eval()
+    shapes = {name: tuple(value.shape) for name, value in model.state_dict().items()}
+    model.set_edge_capacity(7)
+    plan = torch.rand(1, 7, 12)
+    plan[..., 0] = 1.0
+    output = model(torch.randn(1, 5, 3), torch.zeros(1), plan, torch.randn(1, 16))
+
+    assert output.velocity.shape == (1, 5, 3)
+    assert shapes == {name: tuple(value.shape) for name, value in model.state_dict().items()}

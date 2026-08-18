@@ -63,6 +63,17 @@ LEGACY_IGNORED_CORE_KEYS = {
 }
 
 
+_FORWARD_MODE_DEFAULTS: Dict[str, Any] = {
+    "organizer_mode": "fixed_projection",
+    "mechanism_state_mode": "residual_concat",
+    "field_assembly_mode": "context_fusion",
+    "module_assignment_normalizer": "softmax",
+    "environment_assignment_normalizer": "softmax",
+    "query_assignment_normalizer": "softmax",
+    "routing_execution": "dense",
+}
+
+
 @dataclass
 class UnifiedForwardConfig:
     """Configuration for the minimal unified hypergraph neural field."""
@@ -78,6 +89,37 @@ class UnifiedForwardConfig:
     num_env_tokens_x: int = 16
     num_env_tokens_y: int = 6
     num_hyperedges: int = 4
+    organizer_mode: str = "fixed_projection"
+    edge_capacity: int = 0
+    initial_active_edges: int = 6
+    minimum_active_edges: int = 1
+    slot_refinement_steps: int = 2
+    slot_code_mode: str = "sinusoidal"
+
+    edge_selection_mode: str = "all"
+    selection_warmup_epochs: int = 200
+    selection_coverage_rate: float = 0.95
+    selection_token_threshold: float = 0.50
+    selection_maximum_redundancy: float = 0.85
+
+    module_assignment_normalizer: str = "softmax"
+    environment_assignment_normalizer: str = "softmax"
+    query_assignment_normalizer: str = "softmax"
+    entmax_alpha: float = 1.5
+
+    environment_locality_mode: str = "none"
+    environment_locality_strength: float = 1.0
+    minimum_region_scale: float = 0.05
+
+    mechanism_state_mode: str = "residual_concat"
+    mechanism_latent_residual_scale: float = 0.35
+
+    field_assembly_mode: str = "context_fusion"
+    routing_execution: str = "dense"
+    query_edge_limit: int = 0
+    query_module_limit: int = 0
+
+    topology_signature_enabled: bool = False
     hidden_dim: int = 128
     dropout: float = 0.05
     use_layer_norm: bool = True
@@ -118,6 +160,66 @@ class UnifiedForwardConfig:
     def __post_init__(self) -> None:
         """Validate mode names and numerical routing constraints."""
 
+        if self.organizer_mode not in {"fixed_projection", "exchangeable_slots"}:
+            raise ValueError("organizer_mode must be 'fixed_projection' or 'exchangeable_slots'.")
+        if self.organizer_mode == "fixed_projection" and int(self.num_hyperedges) <= 0:
+            raise ValueError("fixed_projection organizer_mode requires num_hyperedges > 0.")
+        if self.organizer_mode == "exchangeable_slots":
+            if int(self.edge_capacity) <= 0:
+                raise ValueError("exchangeable_slots organizer_mode requires edge_capacity > 0.")
+            if int(self.initial_active_edges) <= 0 or int(self.initial_active_edges) > int(self.edge_capacity):
+                raise ValueError("initial_active_edges must be in [1, edge_capacity].")
+            if int(self.minimum_active_edges) <= 0 or int(self.minimum_active_edges) > int(self.initial_active_edges):
+                raise ValueError("minimum_active_edges must be in [1, initial_active_edges].")
+        if int(self.edge_capacity) < 0:
+            raise ValueError("edge_capacity must be >= 0.")
+        if int(self.slot_refinement_steps) <= 0:
+            raise ValueError("slot_refinement_steps must be positive.")
+        if self.slot_code_mode not in {"sinusoidal", "low_discrepancy"}:
+            raise ValueError("slot_code_mode must be 'sinusoidal' or 'low_discrepancy'.")
+        if self.edge_selection_mode not in {"all", "quality_coverage"}:
+            raise ValueError("edge_selection_mode must be 'all' or 'quality_coverage'.")
+        if int(self.selection_warmup_epochs) < 0:
+            raise ValueError("selection_warmup_epochs must be >= 0.")
+        if not 0.0 < float(self.selection_coverage_rate) <= 1.0:
+            raise ValueError("selection_coverage_rate must be in (0, 1].")
+        if not 0.0 < float(self.selection_token_threshold) <= 1.0:
+            raise ValueError("selection_token_threshold must be in (0, 1].")
+        if not 0.0 <= float(self.selection_maximum_redundancy) <= 1.0:
+            raise ValueError("selection_maximum_redundancy must be in [0, 1].")
+        normalizers = {
+            self.module_assignment_normalizer,
+            self.environment_assignment_normalizer,
+            self.query_assignment_normalizer,
+        }
+        if not normalizers <= {"softmax", "entmax15"}:
+            raise ValueError("assignment normalizers must be 'softmax' or 'entmax15'.")
+        if not 1.0 < float(self.entmax_alpha) <= 2.0:
+            raise ValueError("entmax_alpha must be in (1, 2].")
+        if "entmax15" in normalizers and abs(float(self.entmax_alpha) - 1.5) > 1.0e-8:
+            raise ValueError("entmax15 assignment modes require entmax_alpha=1.5.")
+        if self.environment_locality_mode not in {"none", "compact_kernel"}:
+            raise ValueError("environment_locality_mode must be 'none' or 'compact_kernel'.")
+        if float(self.environment_locality_strength) < 0.0:
+            raise ValueError("environment_locality_strength must be >= 0.")
+        if float(self.minimum_region_scale) <= 0.0:
+            raise ValueError("minimum_region_scale must be positive.")
+        if self.mechanism_state_mode not in {"residual_concat", "descriptor_first"}:
+            raise ValueError("mechanism_state_mode must be 'residual_concat' or 'descriptor_first'.")
+        if not 0.0 <= float(self.mechanism_latent_residual_scale) <= 1.0:
+            raise ValueError("mechanism_latent_residual_scale must be in [0, 1].")
+        if self.field_assembly_mode not in {"context_fusion", "edge_additive"}:
+            raise ValueError("field_assembly_mode must be 'context_fusion' or 'edge_additive'.")
+        if self.field_assembly_mode == "edge_additive":
+            components = DECODER_COMPONENTS.get(self.decoder_mode, set())
+            if not {"hyper", "pairwise"} <= components:
+                raise ValueError("edge_additive field_assembly_mode requires a hyper-plus-pairwise decoder_mode.")
+            if self.output_mean_residual_split:
+                raise ValueError("output_mean_residual_split is available only with context_fusion field assembly.")
+        if self.routing_execution not in {"dense", "gathered"}:
+            raise ValueError("routing_execution must be 'dense' or 'gathered'.")
+        if int(self.query_edge_limit) < 0 or int(self.query_module_limit) < 0:
+            raise ValueError("gathered routing limits must be nonnegative.")
         if self.geometry_mode not in {"nonperiodic", "periodic"}:
             raise ValueError("geometry_mode must be 'nonperiodic' or 'periodic'.")
         if self.query_time_mode not in {"none", "phase", "physical_time"}:
@@ -165,7 +267,10 @@ class UnifiedForwardConfig:
     def from_dict(cls, payload: Dict[str, Any]) -> "UnifiedForwardConfig":
         """Construct a strict core configuration from a mapping."""
 
-        return _dataclass_from_dict(cls, payload)
+        resolved = dict(payload)
+        for key, value in _FORWARD_MODE_DEFAULTS.items():
+            resolved.setdefault(key, value)
+        return _dataclass_from_dict(cls, resolved)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize this core configuration to plain Python values."""

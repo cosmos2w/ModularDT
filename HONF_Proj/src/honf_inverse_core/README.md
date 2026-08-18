@@ -14,6 +14,16 @@ and supervised binary/count heads. `JointConsistencyCorrector` is optional and
 can be applied once only. Case physics, exact functionals, HDF5, and forward
 model calls do not enter this package.
 
+Two explicit topology paths are available. Missing mode fields select the
+checkpoint-compatible `indexed` plan flow and `ordered_flat` layout
+conditioning. `exchangeable_set` removes the edge embedding, uses the noisy
+flow state plus shared self-attention for token differentiation, supports
+runtime edge capacity, and trains against Sinkhorn-matched set targets.
+`set_cross_attention` pools active topology tokens and cross-attends layout
+slots to them without flattening an ordered edge axis. Its dataset provenance
+must name `honf_topology_signature` schema version 3 and the exact forward
+checkpoint SHA-256; it cannot consume the compact-plan dataset implicitly.
+
 The public inference shape is:
 
 ```python

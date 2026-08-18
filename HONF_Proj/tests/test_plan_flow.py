@@ -56,3 +56,48 @@ def test_plan_flow_shapes_losses_projection_and_request_sensitivity() -> None:
     changed_condition = encoder(changed_request, context[:1], geometry[:1])
     second = model.sample(changed_condition, steps=2, initial_noise=shared_noise)
     assert not torch.allclose(first.continuous_state, second.continuous_state)
+
+
+def test_exchangeable_plan_velocity_is_permutation_equivariant_without_edge_embeddings() -> None:
+    torch.manual_seed(269)
+    model = ConditionalPlanFlow(
+        num_edges=4,
+        condition_dim=16,
+        hidden_dim=32,
+        layers=2,
+        dropout=0.0,
+        plan_token_mode="exchangeable_set",
+        set_interaction_layers=2,
+        set_attention_heads=4,
+    ).eval()
+    state = torch.randn(2, 4, model.state_dim)
+    time = torch.tensor([0.2, 0.8])
+    condition = torch.randn(2, 16)
+    permutation = torch.tensor([2, 0, 3, 1])
+
+    reference = model(state, time, condition)
+    permuted = model(state[:, permutation], time, condition)
+
+    torch.testing.assert_close(permuted.velocity, reference.velocity[:, permutation], rtol=2e-6, atol=2e-6)
+    torch.testing.assert_close(
+        permuted.activity_logits, reference.activity_logits[:, permutation], rtol=2e-6, atol=2e-6
+    )
+    assert not any("edge_embedding" in name for name, _ in model.named_parameters())
+
+
+def test_exchangeable_plan_runtime_capacity_does_not_change_parameter_shapes() -> None:
+    model = ConditionalPlanFlow(
+        num_edges=4,
+        condition_dim=16,
+        hidden_dim=32,
+        layers=1,
+        dropout=0.0,
+        plan_token_mode="exchangeable_set",
+        set_attention_heads=4,
+    ).eval()
+    shapes = {name: tuple(value.shape) for name, value in model.state_dict().items()}
+    model.set_edge_capacity(7)
+    output = model(torch.randn(1, 7, model.state_dim), torch.zeros(1), torch.randn(1, 16))
+
+    assert output.velocity.shape == (1, 7, model.state_dim)
+    assert shapes == {name: tuple(value.shape) for name, value in model.state_dict().items()}

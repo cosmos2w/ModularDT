@@ -7,6 +7,7 @@ targets as realized ``G_hat`` solely to exercise splitting and storage.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import h5py
@@ -22,7 +23,11 @@ from channelthermal.inverse.dataset_builder import (
     build_inverse_dataset_from_records,
     case_id_sha256,
 )
-from channelthermal.inverse.dataset_io import InverseH5Dataset, validate_inverse_hdf5
+from channelthermal.inverse.dataset_io import (
+    TOPOLOGY_SET_DATASET_SCHEMA_NAME,
+    InverseH5Dataset,
+    validate_inverse_hdf5,
+)
 from channelthermal.inverse.vocabulary import NONREGIONAL_REQUEST_TYPES
 
 
@@ -143,3 +148,45 @@ def test_split_hashes_are_stable_and_disjoint() -> None:
     assert dict(zip(ids, first)) == dict(zip(reversed(ids), second))
     train_ids = [case_id for case_id, split in zip(ids, first) if split == "train"]
     assert case_id_sha256(train_ids) == case_id_sha256(list(reversed(train_ids)))
+
+
+def test_topology_set_dataset_is_schema_and_checkpoint_bound(tmp_path: Path) -> None:
+    records = [
+        _record("train-a", "train", 0, 0.0),
+        _record("train-b", "train", 1, 1.0),
+        _record("test-a", "test", 2, 2.0),
+    ]
+    compact_path = tmp_path / "compact.h5"
+    build_inverse_dataset_from_records(records, compact_path, variants_per_case=2, seed=91)
+    topology_path = tmp_path / "topology.h5"
+    shutil.copy2(compact_path, topology_path)
+    with h5py.File(topology_path, "r+") as h5:
+        tokens_raw = h5["plan/compact_raw"][...]
+        tokens_normalized = h5["plan/compact_normalized"][...]
+        del h5["plan"]
+        topology = h5.create_group("topology")
+        topology.create_dataset("tokens_raw", data=tokens_raw)
+        topology.create_dataset("tokens_normalized", data=tokens_normalized)
+        topology.create_dataset("active_mask", data=(tokens_raw[..., 0] > 0.5).astype(np.uint8))
+        topology.create_dataset(
+            "relations",
+            data=np.zeros((tokens_raw.shape[0], tokens_raw.shape[1], tokens_raw.shape[1], 9), dtype=np.float32),
+        )
+        h5.attrs["schema_name"] = TOPOLOGY_SET_DATASET_SCHEMA_NAME
+        h5.attrs["topology_signature_schema_name"] = "honf_topology_signature"
+        h5.attrs["topology_signature_schema_version"] = 3
+        h5.attrs["forward_topology_checkpoint_sha256"] = "c" * 64
+
+    summary = validate_inverse_hdf5(topology_path)
+    assert summary["plan_token_mode"] == "exchangeable_set"
+    assert summary["topology_schema_version"] == 3
+    assert summary["forward_topology_checkpoint_sha256"] == "c" * 64
+    dataset = InverseH5Dataset(topology_path, split="all")
+    assert dataset.plan_token_mode == "exchangeable_set"
+    assert dataset[0]["plan"].shape == (3, 12)
+    dataset.close()
+
+    with h5py.File(topology_path, "r+") as h5:
+        h5.attrs["forward_topology_checkpoint_sha256"] = "not-a-digest"
+    with np.testing.assert_raises_regex(ValueError, "checkpoint SHA-256"):
+        validate_inverse_hdf5(topology_path)

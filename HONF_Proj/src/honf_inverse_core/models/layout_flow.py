@@ -50,22 +50,41 @@ class ConditionalLayoutFlow(nn.Module):
         layers: int = 4,
         dropout: float = 0.05,
         sampling_steps: int = 24,
+        plan_conditioning_mode: str = "ordered_flat",
+        set_attention_heads: int = 4,
     ) -> None:
         super().__init__()
         self.num_edges = int(num_edges)
         self.max_modules = int(max_modules)
         self.sampling_steps = int(sampling_steps)
+        self.plan_conditioning_mode = str(plan_conditioning_mode)
         if self.num_edges <= 0 or self.max_modules <= 0:
-            raise ValueError("Layout flow requires positive fixed K and M.")
+            raise ValueError("Layout flow requires positive topology and module capacities.")
+        if self.plan_conditioning_mode not in {"ordered_flat", "set_cross_attention"}:
+            raise ValueError(
+                "plan_conditioning_mode must be 'ordered_flat' or 'set_cross_attention'."
+            )
         self.plan_projection = nn.Linear(12, hidden_dim)
         # The compact-plan ABI has a stable canonical edge order. Retain a
         # pooled content path for robustness, but also expose the ordered full
         # plan so q(D|G,R,c) can distinguish mechanisms whose edge sets have
         # similar averages but different source/region assignments.
-        self.ordered_plan_projection = nn.Linear(self.num_edges * 12, hidden_dim)
+        if self.plan_conditioning_mode == "ordered_flat":
+            self.ordered_plan_projection = nn.Linear(self.num_edges * 12, hidden_dim)
         self.plan_blocks = nn.Sequential(
             ResidualMLPBlock(hidden_dim, dropout), ResidualMLPBlock(hidden_dim, dropout)
         )
+        if self.plan_conditioning_mode == "set_cross_attention":
+            if hidden_dim % int(set_attention_heads) != 0:
+                raise ValueError("Set cross-attention hidden_dim must be divisible by heads.")
+            self.set_plan_pool = nn.Linear(hidden_dim * 2, hidden_dim)
+            self.plan_cross_attention = nn.MultiheadAttention(
+                hidden_dim,
+                int(set_attention_heads),
+                dropout=float(dropout),
+                batch_first=True,
+            )
+            self.plan_cross_norm = nn.LayerNorm(hidden_dim)
         self.request_projection = nn.Linear(condition_dim, hidden_dim)
         self.state_projection = nn.Linear(LAYOUT_STATE_DIM, hidden_dim)
         self.slot_embedding = nn.Embedding(self.max_modules, hidden_dim)
@@ -79,14 +98,46 @@ class ConditionalLayoutFlow(nn.Module):
             nn.Linear(hidden_dim * 2, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, self.max_modules + 1)
         )
 
+    def set_edge_capacity(self, capacity: int) -> None:
+        """Change runtime topology capacity for set conditioning only."""
+
+        if int(capacity) <= 0:
+            raise ValueError("Layout-flow edge capacity must be positive.")
+        if self.plan_conditioning_mode != "set_cross_attention" and int(capacity) != self.num_edges:
+            raise ValueError("ordered_flat layout conditioning has a fixed edge count.")
+        self.num_edges = int(capacity)
+
+    def _active_plan_mask(self, compact_plan: torch.Tensor) -> torch.Tensor:
+        active = compact_plan[..., 0] > 0.5
+        empty = ~active.any(dim=1)
+        if empty.any():
+            active = active.clone()
+            fallback = compact_plan[..., 7].argmax(dim=1)
+            active[empty, fallback[empty]] = True
+        return active
+
     def encode_plan(self, compact_plan: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        if compact_plan.ndim != 3 or compact_plan.shape[1:] != (self.num_edges, 12):
+        if compact_plan.ndim != 3 or compact_plan.shape[-1] != 12:
+            raise ValueError("compact_plan must have shape [B,K,12].")
+        if self.plan_conditioning_mode == "ordered_flat" and compact_plan.shape[1] != self.num_edges:
             raise ValueError(f"compact_plan must have shape [B,{self.num_edges},12].")
+        if compact_plan.shape[1] <= 0:
+            raise ValueError("compact_plan must contain at least one topology token.")
         tokens = self.plan_blocks(self.plan_projection(compact_plan.float()))
-        weights = compact_plan[..., 0:1].float()
-        denominator = weights.sum(dim=1).clamp_min(1.0)
-        pooled = (tokens * weights).sum(dim=1) / denominator
-        pooled = pooled + self.ordered_plan_projection(compact_plan.float().reshape(compact_plan.shape[0], -1))
+        if self.plan_conditioning_mode == "ordered_flat":
+            weights = compact_plan[..., 0:1].float()
+            denominator = weights.sum(dim=1).clamp_min(1.0)
+            pooled = (tokens * weights).sum(dim=1) / denominator
+            pooled = pooled + self.ordered_plan_projection(
+                compact_plan.float().reshape(compact_plan.shape[0], -1)
+            )
+        else:
+            active = self._active_plan_mask(compact_plan)
+            weights = active.to(tokens.dtype).unsqueeze(-1)
+            pooled_mean = (tokens * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
+            minimum = torch.finfo(tokens.dtype).min
+            pooled_max = tokens.masked_fill(~active.unsqueeze(-1), minimum).amax(dim=1)
+            pooled = self.set_plan_pool(torch.cat((pooled_mean, pooled_max), dim=-1))
         return pooled, tokens
 
     def forward(
@@ -99,13 +150,23 @@ class ConditionalLayoutFlow(nn.Module):
         if state.ndim != 3 or state.shape[1:] != (self.max_modules, LAYOUT_STATE_DIM):
             raise ValueError(f"Layout state must have shape [B,{self.max_modules},3].")
         request_global = condition.global_embedding if isinstance(condition, RequestEncoding) else condition
-        plan_global, _ = self.encode_plan(compact_plan)
+        plan_global, plan_tokens = self.encode_plan(compact_plan)
         global_condition = plan_global + self.request_projection(request_global)
         slots = torch.arange(self.max_modules, device=state.device)
         hidden = self.state_projection(state)
         hidden = hidden + self.slot_embedding(slots).unsqueeze(0)
         hidden = hidden + self.time_embedding(time).unsqueeze(1)
         hidden = hidden + global_condition.unsqueeze(1)
+        if self.plan_conditioning_mode == "set_cross_attention":
+            active_plan = self._active_plan_mask(compact_plan)
+            attended, _ = self.plan_cross_attention(
+                hidden,
+                plan_tokens,
+                plan_tokens,
+                key_padding_mask=~active_plan,
+                need_weights=False,
+            )
+            hidden = self.plan_cross_norm(hidden + attended)
         hidden = self.blocks(hidden)
         presence = self.presence_head(hidden).squeeze(-1)
         pooled_slots = hidden.mean(dim=1)

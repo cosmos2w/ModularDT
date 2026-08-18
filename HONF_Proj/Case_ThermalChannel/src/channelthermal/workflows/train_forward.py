@@ -1233,6 +1233,7 @@ def run_from_config(
         print(f"[resume] loaded {resume_checkpoint}; continuing at epoch {start_epoch} / {epochs}")
 
     for epoch in range(start_epoch, epochs + 1):
+        model.set_training_progress(epoch=epoch, total_epochs=epochs)
         train_dataset.set_epoch(epoch)
         if hasattr(train_loader.batch_sampler, "set_epoch"):
             train_loader.batch_sampler.set_epoch(epoch)

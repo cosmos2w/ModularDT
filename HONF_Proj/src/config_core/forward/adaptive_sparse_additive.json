@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "profile_name": "adaptive_sparse_additive",
+  "workflow": "forward",
+  "model_family": "honf_forward",
+  "case": {
+    "id": "ThermalChannel",
+    "config": "project://Case_ThermalChannel/configs/case_default.json",
+    "dataset_id": "thermal_channel_global_v1"
+  },
+  "model": {
+    "core_honf": {
+      "field_dim": "auto",
+      "domain_length_x": "auto",
+      "domain_length_y": "auto",
+      "module_radius": "auto",
+      "coordinate_scale": [12.0, 6.0],
+      "periodic_axes": [],
+      "local_context_scale": 0.45,
+      "num_env_tokens_x": 24,
+      "num_env_tokens_y": 8,
+      "num_hyperedges": 6,
+
+      "organizer_mode": "exchangeable_slots",
+      "edge_capacity": 8,
+      "initial_active_edges": 6,
+      "minimum_active_edges": 1,
+      "slot_refinement_steps": 2,
+      "slot_code_mode": "sinusoidal",
+      "edge_selection_mode": "quality_coverage",
+      "selection_warmup_epochs": 200,
+      "selection_coverage_rate": 0.95,
+      "selection_token_threshold": 0.50,
+      "selection_maximum_redundancy": 0.85,
+
+      "module_assignment_normalizer": "entmax15",
+      "environment_assignment_normalizer": "entmax15",
+      "query_assignment_normalizer": "entmax15",
+      "entmax_alpha": 1.5,
+      "environment_locality_mode": "compact_kernel",
+      "environment_locality_strength": 1.0,
+      "minimum_region_scale": 0.05,
+
+      "mechanism_state_mode": "descriptor_first",
+      "mechanism_latent_residual_scale": 0.35,
+      "field_assembly_mode": "edge_additive",
+      "routing_execution": "gathered",
+      "query_edge_limit": 3,
+      "query_module_limit": 8,
+      "topology_signature_enabled": true,
+
+      "hidden_dim": 256,
+      "dropout": 0.0,
+      "use_layer_norm": true,
+      "geometry_mode": "nonperiodic",
+      "query_time_mode": "none",
+      "decoder_mode": "enhanced_honf_pairwise",
+
+      "use_hyper_value_context": true,
+      "hyper_module_assignment_mode": "learned",
+      "hyper_query_attention_mode": "learned",
+      "hyper_attention_topk": 0,
+      "hyper_attention_temperature": 1.0,
+      "sparse_hyper_attention_detach_mask": true,
+
+      "pairwise_kernel_hidden_dim": 256,
+      "pairwise_kernel_num_layers": 4,
+      "pairwise_kernel_gate_init": 0.1,
+      "pairwise_kernel_use_fourier": true,
+      "pairwise_kernel_fourier_frequencies": 4,
+      "pairwise_kernel_include_module_token": true,
+      "pairwise_kernel_include_module_features": true,
+      "pairwise_kernel_normalize_by_edge_mass": true,
+
+      "query_fourier_frequencies": 4,
+      "boundary_feature_mode": "none",
+      "position_fourier_frequencies": 4,
+      "use_position_fourier_for_modules": true,
+      "use_position_fourier_for_env": true,
+      "use_hyper_mechanism_encoder": true,
+      "mechanism_include_geometry": true,
+      "mechanism_include_masses": true,
+      "mechanism_hidden_dim": null,
+      "use_hyper_geometry_bias": true,
+      "hyper_geometry_bias_scale": 1.0,
+      "use_A_me_auxiliary": true,
+
+      "direct_residual_gate_init": 0.0,
+      "output_mean_residual_split": false
+    }
+  },
+  "training": {
+    "seed": 0,
+    "device": null,
+    "epochs": 10000,
+    "learning_rate": 0.0003,
+    "weight_decay": 0.00001,
+    "amp": false,
+    "gradient_clip_norm": 1.0,
+    "plot_every_epochs": 10,
+    "port_curriculum": {
+      "schedule": "none",
+      "mode": "predicted",
+      "mixed_teacher_ratio": 0.5,
+      "teacher_epochs": 50,
+      "predicted_after_epoch": 200,
+      "mixed_teacher_ratio_start": 1.0,
+      "mixed_teacher_ratio_end": 0.0
+    },
+    "max_train_batches_per_epoch": null,
+    "max_val_batches": null
+  },
+  "checkpointing": {
+    "save_best": true,
+    "save_best_field_mse": true,
+    "save_best_temperature_mse": true,
+    "save_best_predicted": true,
+    "save_latest": true
+  },
+  "run": {
+    "id": "0003",
+    "name": "adaptive_sparse_additive",
+    "output_root": "project://Trained_Results"
+  }
+}
