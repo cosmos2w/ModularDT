@@ -7,7 +7,10 @@ import torch.nn as nn
 
 from honf_forward_core.config import BatchData, UnifiedForwardConfig
 from honf_forward_core.model import HONFNeuralField
-from honf_forward_core.organizer import deterministic_slot_codes
+from honf_forward_core.organizer import (
+    _stabilize_all_edge_softmax_assignment,
+    deterministic_slot_codes,
+)
 from honf_forward_core.training.diagnostics import (
     compute_code_permutation_equivariance_diagnostics,
     compute_honf_diagnostics,
@@ -210,6 +213,14 @@ def test_stage2_soft_bridge_selects_all_six_candidates_and_exports_candidate_dia
     assert torch.equal(output["viable_selected_edge_count"], torch.full((2,), 6.0))
     assert torch.equal(output["edge_active_mask"], torch.ones_like(output["edge_active_mask"]))
     assert torch.equal(output["edge_viable_mask"], torch.ones_like(output["edge_viable_mask"]))
+    assert torch.all(
+        output["candidate_module_mass_fraction"]
+        > payload["candidate_module_mass_fraction_floor"]
+    )
+    assert torch.all(
+        output["candidate_environment_mass_fraction"]
+        > payload["candidate_environment_mass_fraction_floor"]
+    )
     assert output["candidate_module_mass_fraction"].shape == (2, 6)
     assert output["candidate_environment_mass_fraction"].shape == (2, 6)
     assert output["candidate_module_purity"].shape == (2, 6)
@@ -232,6 +243,29 @@ def test_stage2_soft_bridge_selects_all_six_candidates_and_exports_candidate_dia
     }
     assert required <= diagnostics.keys()
     assert all(torch.isfinite(torch.tensor(diagnostics[key])) for key in required)
+
+
+def test_all_edge_softmax_floor_prevents_adversarial_slot_starvation() -> None:
+    assignment = torch.zeros(2, 5, 6)
+    assignment[..., 0] = 1.0
+    token_mask = torch.tensor(
+        [[1.0, 1.0, 1.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0, 0.0]]
+    ).unsqueeze(-1)
+
+    stabilized = _stabilize_all_edge_softmax_assignment(
+        assignment,
+        mass_fraction_floor=0.01,
+        token_mask=token_mask,
+    )
+    active = token_mask.squeeze(-1) > 0
+    torch.testing.assert_close(
+        stabilized.sum(dim=-1)[active],
+        torch.ones_like(stabilized.sum(dim=-1)[active]),
+    )
+    assert torch.count_nonzero(stabilized[~active]) == 0
+    mass_fraction = stabilized.sum(dim=1)
+    mass_fraction = mass_fraction / mass_fraction.sum(dim=-1, keepdim=True)
+    assert torch.all(mass_fraction > 0.01)
 
 
 def test_selection_bounds_mass_and_inactive_edges() -> None:

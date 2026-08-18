@@ -120,6 +120,36 @@ def _assignment_purity(assignment: torch.Tensor) -> torch.Tensor:
     return numerator / assignment.sum(dim=1).clamp_min(EPS)
 
 
+def _stabilize_all_edge_softmax_assignment(
+    assignment: torch.Tensor,
+    *,
+    mass_fraction_floor: float,
+    token_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Keep every all-edge softmax candidate strictly above its viability floor.
+
+    The affine simplex map reserves the same lower-bound probability for each
+    anonymous slot and leaves the remainder in the learned assignment. It is
+    permutation equivariant, preserves unit active-token rows, and introduces
+    no parameters or auxiliary regularization.
+    """
+
+    capacity = int(assignment.shape[-1])
+    lower_bound = float(mass_fraction_floor) * 1.001
+    if capacity * lower_bound >= 1.0:
+        raise ValueError(
+            "All-edge softmax viability requires "
+            "edge_capacity * mass_fraction_floor < 1."
+        )
+    stabilized = assignment * (1.0 - capacity * lower_bound) + lower_bound
+    if token_mask is not None:
+        stabilized = stabilized * token_mask.to(
+            device=assignment.device,
+            dtype=assignment.dtype,
+        )
+    return stabilized
+
+
 def _masked_mass_statistics(
     mass: torch.Tensor,
     token_mask: Optional[torch.Tensor],
@@ -632,6 +662,12 @@ class ExchangeableSlotOrganizer(nn.Module):
                 mode=cfg.module_assignment_normalizer,
                 mask=module_present.unsqueeze(-1) > 0,
             )
+            if cfg.edge_selection_mode == "all" and cfg.module_assignment_normalizer == "softmax":
+                candidate_A_mh = _stabilize_all_edge_softmax_assignment(
+                    candidate_A_mh,
+                    mass_fraction_floor=cfg.candidate_module_mass_fraction_floor,
+                    token_mask=module_present.unsqueeze(-1),
+                )
         module_weights = candidate_A_mh / candidate_A_mh.sum(dim=1, keepdim=True).clamp_min(EPS)
         source_coords = _weighted_coords(module_centers, module_weights, cfg)
         env_logits = torch.einsum(
@@ -650,6 +686,11 @@ class ExchangeableSlotOrganizer(nn.Module):
             env_logits,
             mode=cfg.environment_assignment_normalizer,
         )
+        if cfg.edge_selection_mode == "all" and cfg.environment_assignment_normalizer == "softmax":
+            candidate_A_eh = _stabilize_all_edge_softmax_assignment(
+                candidate_A_eh,
+                mass_fraction_floor=cfg.candidate_environment_mass_fraction_floor,
+            )
         env_weights = candidate_A_eh / candidate_A_eh.sum(dim=1, keepdim=True).clamp_min(EPS)
         region_coords = _weighted_coords(env_coords, env_weights, cfg)
         _, region_scale = _weighted_scale(env_coords, env_weights, region_coords, cfg)
