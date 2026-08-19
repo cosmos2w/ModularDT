@@ -30,6 +30,19 @@ from honf_forward_core.decoder import rectangular_boundary_features
 from honf_forward_core.config import UnifiedForwardConfig
 
 
+def test_routed_module_retention_aggregation_is_pair_weighted_across_chunks() -> None:
+    chunks = [np.asarray([1.0]), np.asarray([0.5, 0.75, 1.0])]
+
+    diagnostics = evaluate_forward.aggregate_routed_module_retention(chunks)
+
+    assert diagnostics["routed_query_edge_pair_count"] == 4.0
+    assert diagnostics["routed_module_retained_mass_mean"] == pytest.approx(0.8125)
+    assert diagnostics["routed_module_retained_mass_min"] == pytest.approx(0.5)
+    assert diagnostics["routed_module_retained_mass_p05"] == pytest.approx(
+        np.quantile(np.asarray([1.0, 0.5, 0.75, 1.0]), 0.05)
+    )
+
+
 def test_named_datasets_match_manifest_contract() -> None:
     local_map = PROJECT_ROOT / "Case_ThermalChannel" / "Dataset" / "dataset_locations.local.json"
     if not local_map.exists():

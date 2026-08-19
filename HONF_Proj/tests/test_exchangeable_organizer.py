@@ -426,6 +426,13 @@ def test_zero_selected_entmax_support_uses_detached_unit_mass_fallback() -> None
     torch.testing.assert_close(env_selected.sum(dim=-1), torch.ones(1, 3))
     assert torch.equal(module_mass, torch.zeros_like(module_mass))
     assert torch.equal(env_mass, torch.zeros_like(env_mass))
+    active_modules = torch.tensor([[True, True, False]])
+    post_module_zero_rows = (
+        active_modules & (module_selected.sum(dim=-1) <= 1.0e-8)
+    ).sum(dim=-1)
+    post_environment_zero_rows = (env_selected.sum(dim=-1) <= 1.0e-8).sum(dim=-1)
+    assert post_module_zero_rows.item() == 0
+    assert post_environment_zero_rows.item() == 0
 
 
 def test_selected_mass_diagnostics_are_finite() -> None:
@@ -443,6 +450,14 @@ def test_selected_mass_diagnostics_are_finite() -> None:
     mass_keys = [key for key in diagnostics if "mass_" in key]
     assert mass_keys
     assert all(torch.isfinite(torch.tensor(diagnostics[key])) for key in mass_keys)
+    for key in (
+        "pre_fallback_zero_support_module_rows",
+        "post_fallback_zero_support_module_rows",
+        "pre_fallback_zero_support_environment_rows",
+        "post_fallback_zero_support_environment_rows",
+    ):
+        assert key in diagnostics
+        assert torch.isfinite(torch.tensor(diagnostics[key]))
 
 
 def test_edge_count_diagnostics_have_distinct_unambiguous_semantics() -> None:

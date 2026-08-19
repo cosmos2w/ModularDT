@@ -23,6 +23,30 @@ from .routing import locality_bias, normalize_assignment
 EPS = 1e-6
 
 
+def _routed_module_retention_statistics(
+    retained_mass: torch.Tensor,
+    routed_pair_mask: torch.Tensor,
+) -> Dict[str, torch.Tensor]:
+    """Summarize retained module mass over decoder-routed query-edge pairs only."""
+
+    retained = retained_mass.detach()
+    routed = routed_pair_mask.detach().to(device=retained.device, dtype=torch.bool)
+    routed_values = retained.masked_select(routed)
+    zero = retained.new_zeros(())
+    if routed_values.numel() == 0:
+        minimum = p05 = mean = zero
+    else:
+        minimum = routed_values.amin()
+        p05 = torch.quantile(routed_values.float(), 0.05).to(dtype=retained.dtype)
+        mean = routed_values.mean()
+    return {
+        "routed_module_retained_mass_mean": mean,
+        "routed_module_retained_mass_p05": p05,
+        "routed_module_retained_mass_min": minimum,
+        "routed_query_edge_pair_count": routed.sum().to(dtype=retained.dtype),
+    }
+
+
 def _wrap_periodic_delta(
     delta: torch.Tensor,
     lengths: torch.Tensor,
@@ -204,6 +228,12 @@ class HypergraphGatedPairwiseKernel(nn.Module):
         pair_context = torch.einsum("bqk,bqkh->bqh", hyper_attention, edge_pair_context)
         gate = torch.sigmoid(self.pairwise_kernel_logit)
         available_modules = query_xy.new_tensor(float(module_present.shape[1]))
+        retained_module_mass_detached = retained_module_mass.detach()
+        routed_pair_mask = hyper_attention.detach() > 0
+        retention_diagnostics = _routed_module_retention_statistics(
+            retained_module_mass_detached,
+            routed_pair_mask,
+        )
         diagnostics = {
             "pairwise_kernel_gate": gate.detach(),
             "pairwise_context_norm": pair_context.detach().norm(dim=-1).mean(),
@@ -224,10 +254,14 @@ class HypergraphGatedPairwiseKernel(nn.Module):
                 float(query_xy.shape[0] * query_xy.shape[1] * module_present.shape[1])
             ),
             "pairwise_gathered_route_count": evaluated_pairs if gathered_execution else query_xy.new_zeros(()),
-            "retained_module_incidence_mass": retained_module_mass.detach(),
-            "retained_module_incidence_mass_min": retained_module_mass.detach().amin(),
-            "retained_module_incidence_mass_p05": torch.quantile(retained_module_mass.detach().float(), 0.05).to(query_xy.dtype),
-            "retained_module_incidence_mass_mean": retained_module_mass.detach().mean(),
+            "retained_module_incidence_mass": retained_module_mass_detached,
+            "routed_query_edge_pair_mask": routed_pair_mask,
+            "all_candidate_module_retained_mass_min": retained_module_mass_detached.amin(),
+            "all_candidate_module_retained_mass_p05": torch.quantile(
+                retained_module_mass_detached.float(), 0.05
+            ).to(query_xy.dtype),
+            "all_candidate_module_retained_mass_mean": retained_module_mass_detached.mean(),
+            **retention_diagnostics,
         }
         if return_routing_maps:
             # CORE HONF diagnostic: this dense [B,Q,K] tensor is only materialized

@@ -622,6 +622,19 @@ class ExchangeableSlotOrganizer(nn.Module):
             effective_edge_mask,
             None,
         )
+        active_module_rows = module_present > 0
+        pre_fallback_zero_support_module_rows = (
+            active_module_rows & (selected_module_probability_mass.detach() <= EPS)
+        ).sum(dim=-1)
+        post_fallback_zero_support_module_rows = (
+            active_module_rows & (A_mh.detach().sum(dim=-1) <= EPS)
+        ).sum(dim=-1)
+        pre_fallback_zero_support_environment_rows = (
+            selected_environment_probability_mass.detach() <= EPS
+        ).sum(dim=-1)
+        post_fallback_zero_support_environment_rows = (
+            A_eh.detach().sum(dim=-1) <= EPS
+        ).sum(dim=-1)
         return self._assemble_output(
             module_tokens=module_tokens,
             module_tokens_for_hyper=module_tokens_for_hyper,
@@ -654,6 +667,10 @@ class ExchangeableSlotOrganizer(nn.Module):
             candidate_region_scale=candidate_region_scale,
             selected_module_probability_mass=selected_module_probability_mass,
             selected_environment_probability_mass=selected_environment_probability_mass,
+            pre_fallback_zero_support_module_rows=pre_fallback_zero_support_module_rows,
+            post_fallback_zero_support_module_rows=post_fallback_zero_support_module_rows,
+            pre_fallback_zero_support_environment_rows=pre_fallback_zero_support_environment_rows,
+            post_fallback_zero_support_environment_rows=post_fallback_zero_support_environment_rows,
             selection_transition_fraction=selection_fraction,
             module_sparsity_fraction=module_sparsity_fraction,
             environment_sparsity_fraction=environment_sparsity_fraction,
@@ -1040,6 +1057,10 @@ class ExchangeableSlotOrganizer(nn.Module):
         candidate_region_scale: torch.Tensor,
         selected_module_probability_mass: torch.Tensor,
         selected_environment_probability_mass: torch.Tensor,
+        pre_fallback_zero_support_module_rows: torch.Tensor,
+        post_fallback_zero_support_module_rows: torch.Tensor,
+        pre_fallback_zero_support_environment_rows: torch.Tensor,
+        post_fallback_zero_support_environment_rows: torch.Tensor,
         selection_transition_fraction: float,
         module_sparsity_fraction: float,
         environment_sparsity_fraction: float,
@@ -1189,6 +1210,18 @@ class ExchangeableSlotOrganizer(nn.Module):
             "selected_environment_probability_mass_min": env_mass_min,
             "selected_environment_probability_mass_p05": env_mass_p05,
             "selected_environment_probability_mass_mean": env_mass_mean,
+            "pre_fallback_zero_support_module_rows": pre_fallback_zero_support_module_rows.to(
+                dtype=edge_quality.dtype
+            ),
+            "post_fallback_zero_support_module_rows": post_fallback_zero_support_module_rows.to(
+                dtype=edge_quality.dtype
+            ),
+            "pre_fallback_zero_support_environment_rows": pre_fallback_zero_support_environment_rows.to(
+                dtype=edge_quality.dtype
+            ),
+            "post_fallback_zero_support_environment_rows": post_fallback_zero_support_environment_rows.to(
+                dtype=edge_quality.dtype
+            ),
             "mechanism_geometry_features": mechanism_geometry_features,
             "mechanism_mass_features": mechanism_mass_features,
             "mechanism_raw_features": mechanism_raw_features,
@@ -1463,6 +1496,10 @@ class HypergraphOrganizerCore(nn.Module):
             "hard_selected_edge_count": edge_active_mask.sum(dim=-1),
             "edge_transition_gate_sum": edge_active_mask.sum(dim=-1),
             "empty_selected_edge_count": edge_active_mask.new_zeros(edge_active_mask.shape[0]),
+            "pre_fallback_zero_support_module_rows": edge_active_mask.new_zeros(edge_active_mask.shape[0]),
+            "post_fallback_zero_support_module_rows": edge_active_mask.new_zeros(edge_active_mask.shape[0]),
+            "pre_fallback_zero_support_environment_rows": edge_active_mask.new_zeros(edge_active_mask.shape[0]),
+            "post_fallback_zero_support_environment_rows": edge_active_mask.new_zeros(edge_active_mask.shape[0]),
             "active_edge_count": edge_active_mask.sum(dim=-1),
             "mechanism_geometry_features": mechanism_geometry_features,
             "mechanism_mass_features": mechanism_mass_features,
