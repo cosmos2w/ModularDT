@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 
 import torch
 
@@ -8,7 +9,12 @@ from honf_forward_core.config import BatchData, UnifiedForwardConfig
 from honf_forward_core.model import HONFNeuralField
 
 
-def _config(*, assembly: str = "edge_additive", mechanism: str = "descriptor_first") -> UnifiedForwardConfig:
+def _config(
+    *,
+    assembly: str = "edge_additive",
+    mechanism: str = "descriptor_first",
+    background: str = "dense_query_attention",
+) -> UnifiedForwardConfig:
     return UnifiedForwardConfig(
         field_dim=3,
         domain_length_x=6.0,
@@ -25,6 +31,7 @@ def _config(*, assembly: str = "edge_additive", mechanism: str = "descriptor_fir
         pairwise_kernel_num_layers=2,
         mechanism_state_mode=mechanism,
         field_assembly_mode=assembly,
+        additive_background_mode=background,
         routing_execution="dense",
     )
 
@@ -44,9 +51,16 @@ def _batch(device: torch.device | str = "cpu") -> BatchData:
     )
 
 
-def _model(*, assembly: str = "edge_additive", mechanism: str = "descriptor_first") -> HONFNeuralField:
+def _model(
+    *,
+    assembly: str = "edge_additive",
+    mechanism: str = "descriptor_first",
+    background: str = "dense_query_attention",
+) -> HONFNeuralField:
     torch.manual_seed(73)
-    return HONFNeuralField(_config(assembly=assembly, mechanism=mechanism))
+    return HONFNeuralField(
+        _config(assembly=assembly, mechanism=mechanism, background=background)
+    )
 
 
 def test_descriptor_first_organizer_features_include_scales_and_purities() -> None:
@@ -73,6 +87,123 @@ def test_additive_field_has_exact_exported_closure() -> None:
     assert output["edge_contribution_rms"].shape == (2, 3, 3)
     assert output["edge_contribution_energy_fraction"].shape == (2, 3, 3)
     torch.testing.assert_close(output["additive_edge_gate"], torch.tensor(0.1), rtol=0.0, atol=1.0e-7)
+
+
+def test_dense_background_default_is_bitwise_identical_to_explicit_mode() -> None:
+    torch.manual_seed(73)
+    default_model = HONFNeuralField(
+        UnifiedForwardConfig.from_dict(
+            {key: value for key, value in _config().to_dict().items() if key != "additive_background_mode"}
+        )
+    ).eval()
+    explicit_model = _model(background="dense_query_attention").eval()
+    with torch.no_grad():
+        default_model(_batch())
+        explicit_model(_batch())
+    explicit_model.load_state_dict(default_model.state_dict(), strict=True)
+
+    with torch.no_grad():
+        default_output = default_model(_batch(), return_edge_fields=True)
+        explicit_output = explicit_model(_batch(), return_edge_fields=True)
+
+    for key in ("pred_field", "pred_field_background", "pred_field_by_edge"):
+        assert torch.equal(default_output[key], explicit_output[key])
+
+
+def test_dense_background_matches_stage0_reference_digests() -> None:
+    model = _model(background="dense_query_attention").eval()
+    with torch.no_grad():
+        output = model(_batch(), return_edge_fields=True)
+
+    expected = {
+        "pred_field": "24d4a0e39e56f4afcc9c457e92b2ceedb9ef1ffc73547fb6d6bc0b1e185e1a0b",
+        "pred_field_background": "3fc4339b12a3089cb40b11ad4cfbaac5f12f7b34a01ce4629919b29e3b59d6ce",
+        "pred_field_by_edge": "e9c14b54947667f032d491262e2b298119af07a48b06b71206cffb5f2ec3b2a8",
+    }
+    for key, expected_digest in expected.items():
+        digest = hashlib.sha256(
+            output[key].detach().contiguous().numpy().tobytes()
+        ).hexdigest()
+        assert digest == expected_digest
+    assert len(model.state_dict()) == 84
+
+
+def test_background_modes_have_identical_parameter_structure_and_strict_loading() -> None:
+    dense = _model(background="dense_query_attention")
+    pooled = _model(background="global_pooled_attention")
+    with torch.no_grad():
+        dense(_batch())
+        pooled(_batch())
+    assert {
+        name: tuple(value.shape) for name, value in dense.state_dict().items()
+    } == {
+        name: tuple(value.shape) for name, value in pooled.state_dict().items()
+    }
+    pooled.load_state_dict(dense.state_dict(), strict=True)
+
+
+def test_pooled_background_closure_attention_size_and_query_chunk_parity() -> None:
+    model = _model(background="global_pooled_attention").eval()
+    batch = _batch()
+    with torch.no_grad():
+        organized = model.encode_and_organize(batch)
+        query_state = model.decoder.query_encoder(
+            model.decoder._query_features(batch.query_xy, None, None)
+        )
+        _, case_attention = model.decoder._additive_background_field(
+            query_state,
+            organized["env_tokens"],
+            organized["global_token"],
+        )
+        full = model.decode_queries(
+            batch.query_xy,
+            None,
+            organized,
+            organized["global_token"],
+            return_edge_fields=True,
+        )
+        chunks = [
+            model.decode_queries(
+                query_chunk,
+                None,
+                organized,
+                organized["global_token"],
+                return_edge_fields=True,
+            )
+            for query_chunk in batch.query_xy.split(5, dim=1)
+        ]
+
+    reconstructed = full["pred_field_background"] + full["pred_field_by_edge"].sum(dim=2)
+    torch.testing.assert_close(full["pred_field"], reconstructed, rtol=0.0, atol=0.0)
+    assert case_attention.shape == (2, 8)
+    assert full["background_attention_element_count"].item() == 2 * 8
+    for key in ("pred_field", "pred_field_background", "pred_field_by_edge"):
+        torch.testing.assert_close(
+            full[key],
+            torch.cat([chunk[key] for chunk in chunks], dim=1),
+            rtol=1.0e-6,
+            atol=1.0e-7,
+        )
+
+
+def test_pooled_background_gradients_reach_all_background_modules() -> None:
+    model = _model(background="global_pooled_attention").train()
+    output = model(_batch())
+    output["pred_field"].square().mean().backward()
+
+    for module_name in (
+        "background_query",
+        "background_env_key",
+        "background_env_value",
+        "background_global",
+        "background_input_norm",
+        "background_head",
+    ):
+        module = getattr(model.decoder, module_name)
+        assert any(
+            parameter.grad is not None and torch.isfinite(parameter.grad).all()
+            for parameter in module.parameters()
+        ), module_name
 
 
 def test_additive_output_heads_start_at_small_field_scale() -> None:

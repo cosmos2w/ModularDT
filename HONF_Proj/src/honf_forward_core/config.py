@@ -67,6 +67,7 @@ _FORWARD_MODE_DEFAULTS: Dict[str, Any] = {
     "organizer_mode": "fixed_projection",
     "mechanism_state_mode": "residual_concat",
     "field_assembly_mode": "context_fusion",
+    "additive_background_mode": "dense_query_attention",
     "module_assignment_normalizer": "softmax",
     "environment_assignment_normalizer": "softmax",
     "query_assignment_normalizer": "softmax",
@@ -130,6 +131,7 @@ class UnifiedForwardConfig:
     mechanism_latent_residual_scale: float = 0.35
 
     field_assembly_mode: str = "context_fusion"
+    additive_background_mode: str = "dense_query_attention"
     additive_edge_gate_init: float = 0.10
     additive_output_init_std: float = 1.0e-3
     routing_execution: str = "dense"
@@ -262,6 +264,14 @@ class UnifiedForwardConfig:
             raise ValueError("mechanism_latent_residual_scale must be in [0, 1].")
         if self.field_assembly_mode not in {"context_fusion", "edge_additive"}:
             raise ValueError("field_assembly_mode must be 'context_fusion' or 'edge_additive'.")
+        if self.additive_background_mode not in {
+            "dense_query_attention",
+            "global_pooled_attention",
+        }:
+            raise ValueError(
+                "additive_background_mode must be 'dense_query_attention' "
+                "or 'global_pooled_attention'."
+            )
         if not 0.0 < float(self.additive_edge_gate_init) < 1.0:
             raise ValueError("additive_edge_gate_init must be in (0, 1).")
         if float(self.additive_output_init_std) <= 0.0:

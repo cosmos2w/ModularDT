@@ -99,6 +99,13 @@ def normalize_assignment(
         return entmax15(logits, dim=dim, mask=mask)
     if mode not in {"softmax", "scheduled"}:
         raise ValueError(f"Unsupported assignment normalizer: {mode!r}.")
+    blend: Optional[float] = None
+    if mode == "scheduled":
+        if entmax_blend is None:
+            raise ValueError("scheduled assignment normalization requires entmax_blend.")
+        blend = min(max(float(entmax_blend), 0.0), 1.0)
+        if blend >= 1.0:
+            return entmax15(logits, dim=dim, mask=mask)
     if mask is None:
         softmax_probabilities = torch.softmax(logits, dim=dim)
         valid = None
@@ -111,14 +118,11 @@ def normalize_assignment(
         ).clamp_min(EPS)
     if mode == "softmax":
         return softmax_probabilities
-    if entmax_blend is None:
-        raise ValueError("scheduled assignment normalization requires entmax_blend.")
-    blend = min(max(float(entmax_blend), 0.0), 1.0)
+    if blend is None:  # pragma: no cover - guarded by the mode branch above.
+        raise RuntimeError("Missing scheduled assignment blend.")
     if blend <= 0.0:
         return softmax_probabilities
     entmax_probabilities = entmax15(logits, dim=dim, mask=mask)
-    if blend >= 1.0:
-        return entmax_probabilities
     probabilities = (1.0 - blend) * softmax_probabilities + blend * entmax_probabilities
     if valid is not None:
         probabilities = probabilities * valid.to(dtype=probabilities.dtype)

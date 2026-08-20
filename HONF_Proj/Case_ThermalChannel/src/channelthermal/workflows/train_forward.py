@@ -106,6 +106,178 @@ def resolve_run_id(args_value: Any, cfg: Dict[str, Any], training_cfg: Dict[str,
     return normalize_run_id(training_value if training_value is not None else top_level, "0001")
 
 
+def _optimizer_group_record(
+    name: str,
+    learning_rate: float,
+    named_parameters: list[tuple[str, torch.nn.Parameter]],
+) -> Dict[str, Any]:
+    """Build a deterministic, human-auditable optimizer-group inventory."""
+
+    ordered_names = sorted(parameter_name for parameter_name, _ in named_parameters)
+    scalar_count = 0
+    scalar_count_complete = True
+    for _, parameter in named_parameters:
+        try:
+            scalar_count += int(parameter.numel())
+        except ValueError:
+            scalar_count_complete = False
+    return {
+        "name": name,
+        "learning_rate": float(learning_rate),
+        "parameter_tensor_count": len(named_parameters),
+        "trainable_scalar_count": scalar_count if scalar_count_complete else None,
+        "scalar_count_complete": scalar_count_complete,
+        "parameter_names": ordered_names,
+        "ordered_names_sha256": hashlib.sha256("\n".join(ordered_names).encode("utf-8")).hexdigest(),
+    }
+
+
+def _optimizer_inventory_digest(groups: list[Dict[str, Any]]) -> str:
+    structure = [
+        {
+            "name": group["name"],
+            "learning_rate": group["learning_rate"],
+            "parameter_names": group["parameter_names"],
+        }
+        for group in groups
+    ]
+    return hashlib.sha256(repr(structure).encode("utf-8")).hexdigest()
+
+
+def build_forward_optimizer(
+    model: ChannelThermalHONFModel,
+    training_config: Dict[str, Any],
+) -> tuple[torch.optim.AdamW, Dict[str, Any]]:
+    """Build the legacy one-group AdamW or the optional organizer split."""
+
+    learning_rate = float(training_config.get("learning_rate", 2.0e-4))
+    weight_decay = float(training_config.get("weight_decay", 1.0e-5))
+    organizer_learning_rate = training_config.get("organizer_learning_rate")
+    trainable = [
+        (name, parameter)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    ]
+    if organizer_learning_rate is None:
+        # This is intentionally the literal historical construction path.
+        optimizer = torch.optim.AdamW(
+            [param for param in model.parameters() if param.requires_grad],
+            lr=learning_rate,
+            weight_decay=weight_decay,
+        )
+        groups = [_optimizer_group_record("all", learning_rate, trainable)]
+        mode = "single"
+    else:
+        organizer_lr = float(organizer_learning_rate)
+        if organizer_lr <= 0.0:
+            raise ValueError("organizer_learning_rate must be null or positive.")
+        organizer_parameters = [
+            item for item in trainable if item[0].startswith("core.organizer.")
+        ]
+        prediction_parameters = [
+            item for item in trainable if not item[0].startswith("core.organizer.")
+        ]
+        if not organizer_parameters:
+            raise ValueError(
+                "A split optimizer requires trainable core.organizer.* parameters; "
+                "use organizer_learning_rate=null for this model."
+            )
+        if not prediction_parameters:
+            raise ValueError("A split optimizer requires non-organizer trainable parameters.")
+        optimizer = torch.optim.AdamW(
+            [
+                {
+                    "params": [parameter for _, parameter in organizer_parameters],
+                    "lr": organizer_lr,
+                },
+                {
+                    "params": [parameter for _, parameter in prediction_parameters],
+                    "lr": learning_rate,
+                },
+            ],
+            lr=learning_rate,
+            weight_decay=weight_decay,
+        )
+        groups = [
+            _optimizer_group_record("organizer", organizer_lr, organizer_parameters),
+            _optimizer_group_record("prediction", learning_rate, prediction_parameters),
+        ]
+        mode = "split"
+    inventory = {
+        "mode": mode,
+        "weight_decay": weight_decay,
+        "groups": groups,
+        "group_structure_sha256": _optimizer_inventory_digest(groups),
+    }
+    return optimizer, inventory
+
+
+def refresh_optimizer_group_inventory(
+    model: ChannelThermalHONFModel,
+    inventory: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Refresh scalar counts after lazy parameters have seen a real batch."""
+
+    named = dict(model.named_parameters())
+    refreshed = copy.deepcopy(inventory)
+    for group in refreshed["groups"]:
+        group_parameters = [(name, named[name]) for name in group["parameter_names"]]
+        group.update(
+            _optimizer_group_record(
+                group["name"],
+                group["learning_rate"],
+                group_parameters,
+            )
+        )
+    refreshed["group_structure_sha256"] = _optimizer_inventory_digest(refreshed["groups"])
+    return refreshed
+
+
+def _print_optimizer_group_inventory(inventory: Dict[str, Any]) -> None:
+    """Print the compact launch inventory; full sorted names remain on disk."""
+
+    for group in inventory["groups"]:
+        print(
+            "[optimizer] "
+            f"group={group['name']} lr={group['learning_rate']:.6g} "
+            f"tensors={group['parameter_tensor_count']} scalars={group['trainable_scalar_count']} "
+            f"names_sha256={group['ordered_names_sha256']}"
+        )
+
+
+def _validate_optimizer_resume_compatibility(
+    checkpoint: Dict[str, Any],
+    current_inventory: Dict[str, Any],
+) -> None:
+    """Reject one-group/split or split-structure drift before optimizer restore."""
+
+    optimizer_state = checkpoint.get("optimizer_state_dict")
+    if not optimizer_state:
+        return
+    saved_group_count = len(optimizer_state.get("param_groups") or [])
+    current_group_count = len(current_inventory["groups"])
+    if saved_group_count != current_group_count:
+        raise ValueError(
+            "Resume optimizer group structure does not match this launch "
+            f"({saved_group_count} saved versus {current_group_count} current groups). "
+            "Use --initialize-checkpoint to start a new run across optimizer modes."
+        )
+    saved_inventory = checkpoint.get("optimizer_group_inventory")
+    if current_group_count > 1:
+        if not isinstance(saved_inventory, dict):
+            raise ValueError(
+                "Split-optimizer resume checkpoint lacks optimizer group provenance. "
+                "Use --initialize-checkpoint instead."
+            )
+        if saved_inventory.get("group_structure_sha256") != current_inventory.get(
+            "group_structure_sha256"
+        ):
+            raise ValueError(
+                "Resume split-optimizer membership or learning rates do not match this launch. "
+                "Use --initialize-checkpoint instead."
+            )
+
+
 def sanitize_run_suffix(value: Any) -> str:
     """Perform the sanitize run suffix operation used by this module."""
 
@@ -614,6 +786,7 @@ def save_checkpoint(
     optimizer: Optional[torch.optim.Optimizer] = None,
     scaler: Any = None,
     best_metrics: Optional[Dict[str, float]] = None,
+    optimizer_group_inventory: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Atomically save model, optimizer, schema, and normalization metadata."""
 
@@ -659,6 +832,7 @@ def save_checkpoint(
             "model_state_dict": model.state_dict(),
             "selection_state": model.selection_state(),
             "optimizer_state_dict": None if optimizer is None else optimizer.state_dict(),
+            "optimizer_group_inventory": copy.deepcopy(optimizer_group_inventory),
             "scaler_state_dict": None if scaler is None else scaler.state_dict(),
             "train_config": train_config,
             "channel_order": list(dataset.channel_order),
@@ -1396,11 +1570,7 @@ def run_from_config(
         collate_fn=collator,
     )
 
-    optimizer = torch.optim.AdamW(
-        [param for param in model.parameters() if param.requires_grad],
-        lr=float(training_cfg.get("learning_rate", 2.0e-4)),
-        weight_decay=float(training_cfg.get("weight_decay", 1.0e-5)),
-    )
+    optimizer, optimizer_group_inventory = build_forward_optimizer(model, training_cfg)
     scaler = make_grad_scaler(device, bool(training_cfg.get("amp", False)))
     epochs = int(args.epochs if args.epochs is not None else training_cfg.get("epochs", 200))
     max_train_batches = args.max_train_batches if args.max_train_batches is not None else training_cfg.get("max_train_batches_per_epoch")
@@ -1426,6 +1596,13 @@ def run_from_config(
     else:
         run_dir = ensure_dir(resume_checkpoint.parent)
     write_json(run_dir / "config_resolved.json", cfg)
+    write_json(run_dir / "optimizer_group_inventory.json", optimizer_group_inventory)
+    optimizer_inventory_announced = all(
+        bool(group["scalar_count_complete"])
+        for group in optimizer_group_inventory["groups"]
+    )
+    if optimizer_inventory_announced:
+        _print_optimizer_group_inventory(optimizer_group_inventory)
     metrics_path = run_dir / "metrics.csv"
     fieldnames = [
         "epoch",
@@ -1506,6 +1683,14 @@ def run_from_config(
             checkpoint,
             source_config=source_config,
         )
+        optimizer_group_inventory = refresh_optimizer_group_inventory(
+            model,
+            optimizer_group_inventory,
+        )
+        write_json(run_dir / "optimizer_group_inventory.json", optimizer_group_inventory)
+        if not optimizer_inventory_announced:
+            _print_optimizer_group_inventory(optimizer_group_inventory)
+            optimizer_inventory_announced = True
         initialization_inventory.update(
             {
                 "checkpoint_path": str(initialize_checkpoint),
@@ -1539,7 +1724,16 @@ def run_from_config(
             dataset=train_dataset,
             dataset_config=dataset_cfg,
         )
+        _validate_optimizer_resume_compatibility(checkpoint, optimizer_group_inventory)
         model.load_state_dict(strip_module_prefix(checkpoint["model_state_dict"]), strict=True)
+        optimizer_group_inventory = refresh_optimizer_group_inventory(
+            model,
+            optimizer_group_inventory,
+        )
+        write_json(run_dir / "optimizer_group_inventory.json", optimizer_group_inventory)
+        if not optimizer_inventory_announced:
+            _print_optimizer_group_inventory(optimizer_group_inventory)
+            optimizer_inventory_announced = True
         optimizer_state = checkpoint.get("optimizer_state_dict")
         if optimizer_state:
             optimizer.load_state_dict(optimizer_state)
@@ -1581,6 +1775,14 @@ def run_from_config(
             predicted_consistency_weight=pred_consistency_weight,
             gradient_clip_norm=gradient_clip_norm,
         )
+        optimizer_group_inventory = refresh_optimizer_group_inventory(
+            model,
+            optimizer_group_inventory,
+        )
+        write_json(run_dir / "optimizer_group_inventory.json", optimizer_group_inventory)
+        if not optimizer_inventory_announced:
+            _print_optimizer_group_inventory(optimizer_group_inventory)
+            optimizer_inventory_announced = True
         val_metrics = run_epoch(
             model,
             val_loader,
@@ -1631,22 +1833,22 @@ def run_from_config(
         if math.isfinite(total_metric) and total_metric < best_total:
             best_total = total_metric
             if bool(checkpoint_cfg.get("save_best", True)):
-                save_checkpoint(run_dir / "best_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted))
+                save_checkpoint(run_dir / "best_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         if math.isfinite(field_metric) and field_metric < best_field:
             best_field = field_metric
             if bool(checkpoint_cfg.get("save_best_field_mse", True)):
-                save_checkpoint(run_dir / "best_by_field_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_field, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted))
+                save_checkpoint(run_dir / "best_by_field_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_field, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         if math.isfinite(temp_metric) and temp_metric < best_temperature:
             best_temperature = temp_metric
             if bool(checkpoint_cfg.get("save_best_temperature_mse", True)):
-                save_checkpoint(run_dir / "best_by_temperature_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_temperature, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted))
+                save_checkpoint(run_dir / "best_by_temperature_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_temperature, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         predicted_metric = float(row["val_predicted_loss_total"])
         if math.isfinite(predicted_metric) and predicted_metric < best_predicted:
             best_predicted = predicted_metric
             if bool(checkpoint_cfg.get("save_best_predicted", True)):
-                save_checkpoint(run_dir / "best_predicted_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_predicted, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted))
+                save_checkpoint(run_dir / "best_predicted_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_predicted, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         if bool(checkpoint_cfg.get("save_latest", True)):
-            save_checkpoint(run_dir / "latest_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted))
+            save_checkpoint(run_dir / "latest_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         plot_every = max(int(training_cfg.get("plot_every_epochs", 10)), 1)
         if epoch % plot_every == 0 or epoch == epochs:
             save_global_loss_plots(metrics_path, run_dir)
@@ -1672,6 +1874,7 @@ def run_from_config(
             "train_cases": len(train_dataset),
             "val_cases": len(val_dataset),
             "model_config": model_config.to_dict(),
+            "optimizer_group_inventory": optimizer_group_inventory,
         },
     )
     print(f"[done] saved global HONF-CL physical-coupling run: {run_dir}")

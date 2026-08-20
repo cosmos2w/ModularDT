@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 
 import pytest
@@ -168,6 +169,9 @@ def test_adaptive_sparse_additive_base_is_the_dense_formal_stage3_profile() -> N
     core = bundle.effective["model"]["core_honf"]
 
     assert (core["edge_capacity"], core["initial_active_edges"], core["minimum_active_edges"]) == (8, 8, 2)
+    assert core["additive_background_mode"] == "dense_query_attention"
+    assert bundle.effective["training"]["learning_rate"] == 1.0e-4
+    assert bundle.effective["training"]["organizer_learning_rate"] is None
     assert (core["selection_start_epoch"], core["selection_transition_epochs"]) == (150, 250)
     assert core["selection_warmup_mode"] == "all_viable"
     assert core["selection_coverage_rate"] == 0.99
@@ -188,4 +192,55 @@ def test_adaptive_sparse_additive_base_is_the_dense_formal_stage3_profile() -> N
     assert core["routing_execution"] == "dense"
     assert core["query_edge_retained_mass_floor"] == 0.98
     assert core["module_incidence_retained_mass_floor"] == 0.95
-    assert bundle.effective["training"]["learning_rate"] == 1.0e-4
+
+
+@pytest.mark.parametrize(
+    ("overlay", "background_mode", "learning_rate", "organizer_learning_rate"),
+    [
+        (
+            "stage4_uniform_lr2e4_dense_background.json",
+            "dense_query_attention",
+            2.0e-4,
+            None,
+        ),
+        (
+            "stage4_split_lr_dense_background.json",
+            "dense_query_attention",
+            3.0e-4,
+            1.0e-4,
+        ),
+        (
+            "stage4_split_lr_pooled_background.json",
+            "global_pooled_attention",
+            3.0e-4,
+            1.0e-4,
+        ),
+    ],
+)
+def test_stage4_overlays_resolve_strictly_with_expected_provenance(
+    overlay: str,
+    background_mode: str,
+    learning_rate: float,
+    organizer_learning_rate: float | None,
+) -> None:
+    bundle = load_config_bundle(
+        "project://src/config_core/forward/adaptive_sparse_additive.json",
+        experiment_overlay=f"project://src/config_core/forward/experiments/{overlay}",
+    )
+    assert bundle.effective["model"]["core_honf"]["additive_background_mode"] == background_mode
+    assert bundle.effective["training"]["learning_rate"] == learning_rate
+    assert bundle.effective["training"]["organizer_learning_rate"] == organizer_learning_rate
+    assert bundle.experiment_source is not None
+    assert bundle.experiment_source.name == overlay
+    assert bundle.experiment["core"]["training"]["learning_rate"] == learning_rate
+
+
+def test_organizer_learning_rate_must_be_null_or_positive(tmp_path) -> None:
+    source = load_config_bundle("project://src/config_core/forward/adaptive_sparse_additive.json")
+    payload = copy.deepcopy(source.core)
+    payload["case"]["config"] = str(source.case_source)
+    payload["training"]["organizer_learning_rate"] = 0.0
+    path = tmp_path / "invalid_optimizer.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="organizer_learning_rate"):
+        load_config_bundle(path)

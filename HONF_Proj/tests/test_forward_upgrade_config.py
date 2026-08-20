@@ -14,6 +14,7 @@ MODE_DEFAULTS = {
     "organizer_mode": "fixed_projection",
     "mechanism_state_mode": "residual_concat",
     "field_assembly_mode": "context_fusion",
+    "additive_background_mode": "dense_query_attention",
     "module_assignment_normalizer": "softmax",
     "environment_assignment_normalizer": "softmax",
     "query_assignment_normalizer": "softmax",
@@ -72,6 +73,7 @@ def test_missing_mode_fields_resolve_to_existing_computation() -> None:
         ("organizer_mode", "projected_slots"),
         ("mechanism_state_mode", "descriptor_concat"),
         ("field_assembly_mode", "mixed_sum"),
+        ("additive_background_mode", "mean_only"),
         ("module_assignment_normalizer", "sparsemax"),
         ("environment_assignment_normalizer", "sparsemax"),
         ("query_assignment_normalizer", "sparsemax"),
@@ -123,6 +125,7 @@ def test_mode_complete_profile_selects_upgrade_architecture() -> None:
     assert core["routing_execution"] == "dense"
     assert core["additive_edge_gate_init"] == 0.1
     assert core["additive_output_init_std"] == 1.0e-3
+    assert core["additive_background_mode"] == "dense_query_attention"
     assert core["topology_signature_enabled"] is True
 
 

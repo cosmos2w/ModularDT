@@ -18,6 +18,13 @@ records the overlay path/hash and exact JSON in the run.
   exchangeable runtime slots while keeping every candidate selected, softmax
   assignments, no locality, dense execution, exact additive assembly, and the
   Phase-1 learning rate.
+- `stage4_uniform_lr2e4_dense_background.json`: Stage-4 uniform-LR control
+  using the unchanged dense query-to-environment background.
+- `stage4_split_lr_dense_background.json`: separates exchangeable-organizer
+  and prediction learning rates while retaining the dense background.
+- `stage4_split_lr_pooled_background.json`: combines the split optimizer with
+  the parameter-compatible globally pooled background efficiency experiment.
 
-Use `enhanced_honf_pairwise.json` as the base profile for these archived
-switches. CLI run ID/name/epoch overrides remain separate provenance.
+Use `enhanced_honf_pairwise.json` for the older archived switches and
+`adaptive_sparse_additive.json` for Stage 4. CLI run ID/name/epoch overrides
+remain separate provenance.

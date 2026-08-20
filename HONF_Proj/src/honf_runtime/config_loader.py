@@ -44,6 +44,7 @@ CORE_TRAINING_KEYS = {
     "device",
     "epochs",
     "learning_rate",
+    "organizer_learning_rate",
     "weight_decay",
     "amp",
     "gradient_clip_norm",
@@ -145,6 +146,9 @@ def _validate_core_sections(core: Mapping[str, Any]) -> None:
         raise ValueError("core.training.epochs must be positive.")
     if float(training.get("learning_rate", 0.0)) <= 0.0:
         raise ValueError("core.training.learning_rate must be positive.")
+    organizer_learning_rate = training.get("organizer_learning_rate")
+    if organizer_learning_rate is not None and float(organizer_learning_rate) <= 0.0:
+        raise ValueError("core.training.organizer_learning_rate must be null or positive.")
 
 
 def _canonical_hash(payload: Mapping[str, Any]) -> str:

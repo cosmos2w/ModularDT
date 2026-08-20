@@ -832,6 +832,55 @@ class HypergraphFieldDecoder(nn.Module):
             output["pred_field"] = self.pred_head(context)
         return output  # type: ignore[return-value]
 
+    def _additive_background_field(
+        self,
+        query_state: torch.Tensor,
+        env_tokens: torch.Tensor,
+        global_context: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Evaluate the configured key-compatible additive background path."""
+
+        if self.config.additive_background_mode == "dense_query_attention":
+            # Keep the legacy operation order literal: existing checkpoints in
+            # the default mode must retain bitwise-identical arithmetic.
+            env_logits = torch.einsum(
+                "bqh,beh->bqe",
+                self.background_query(query_state),
+                self.background_env_key(env_tokens),
+            ) / math.sqrt(float(query_state.shape[-1]))
+            env_attention = torch.softmax(env_logits, dim=-1)
+            env_context = torch.einsum(
+                "bqe,beh->bqh",
+                env_attention,
+                self.background_env_value(env_tokens),
+            )
+        else:
+            case_query_state = (
+                torch.zeros_like(query_state[:, 0, :])
+                if global_context is None
+                else global_context
+            )
+            env_logits = torch.einsum(
+                "bh,beh->be",
+                self.background_query(case_query_state),
+                self.background_env_key(env_tokens),
+            ) / math.sqrt(float(query_state.shape[-1]))
+            env_attention = torch.softmax(env_logits, dim=-1)
+            pooled_env_context = torch.einsum(
+                "be,beh->bh",
+                env_attention,
+                self.background_env_value(env_tokens),
+            )
+            env_context = pooled_env_context.unsqueeze(1).expand_as(query_state)
+        if global_context is None:
+            global_state = torch.zeros_like(query_state)
+        else:
+            global_state = self.background_global(global_context).unsqueeze(1).expand_as(query_state)
+        background_input = self.background_input_norm(
+            torch.cat([query_state, global_state, env_context], dim=-1)
+        )
+        return self.background_head(background_input), env_attention
+
     def _edge_additive_output(
         self,
         *,
@@ -848,21 +897,11 @@ class HypergraphFieldDecoder(nn.Module):
         """Assemble an exact background-plus-edge field decomposition."""
 
         env_tokens = organizer_output["env_tokens"]
-        env_logits = torch.einsum(
-            "bqh,beh->bqe",
-            self.background_query(query_state),
-            self.background_env_key(env_tokens),
-        ) / math.sqrt(float(query_state.shape[-1]))
-        env_attention = torch.softmax(env_logits, dim=-1)
-        env_context = torch.einsum("bqe,beh->bqh", env_attention, self.background_env_value(env_tokens))
-        if global_context is None:
-            global_state = torch.zeros_like(query_state)
-        else:
-            global_state = self.background_global(global_context).unsqueeze(1).expand_as(query_state)
-        background_input = self.background_input_norm(
-            torch.cat([query_state, global_state, env_context], dim=-1)
+        background, env_attention = self._additive_background_field(
+            query_state,
+            env_tokens,
+            global_context,
         )
-        background = self.background_head(background_input)
         additive_gate = torch.sigmoid(self.additive_edge_gate)
 
         geometry_features = self._hyper_geometry_features(query_xy, organizer_output)
@@ -912,6 +951,10 @@ class HypergraphFieldDecoder(nn.Module):
         )
         output = {
             "pred_field": pred_field,
+            "additive_background_mode": self.config.additive_background_mode,
+            "background_attention_element_count": query_state.new_tensor(
+                float(env_attention.numel())
+            ),
             "edge_contribution_abs_mean": edge_abs_mean,
             "edge_contribution_rms": edge_rms,
             "edge_contribution_energy_fraction": (

@@ -5,6 +5,8 @@ import types
 
 import torch
 
+import honf_forward_core.organizer as organizer_module
+import honf_forward_core.routing as routing_module
 from honf_forward_core.config import BatchData, UnifiedForwardConfig
 from honf_forward_core.decoder import HypergraphFieldDecoder, HypergraphGatedPairwiseKernel
 from honf_forward_core.model import HONFNeuralField
@@ -101,6 +103,72 @@ def test_scheduled_probability_endpoints_and_intermediate_are_normalized() -> No
     torch.testing.assert_close(end, sparse, rtol=0.0, atol=0.0)
     torch.testing.assert_close(middle, 0.6 * soft + 0.4 * sparse)
     torch.testing.assert_close(middle.sum(dim=-1), torch.ones(1))
+
+
+def test_scheduled_entmax_endpoint_skips_softmax_branch(monkeypatch) -> None:
+    logits = torch.tensor([[2.0, 0.5, -1.0, -3.0]])
+    original_softmax = torch.softmax
+    calls = {"softmax": 0}
+
+    def counted_softmax(*args, **kwargs):
+        calls["softmax"] += 1
+        return original_softmax(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "softmax", counted_softmax)
+    result = routing_module.normalize_assignment(
+        logits,
+        mode="scheduled",
+        entmax_blend=1.0,
+    )
+    assert calls["softmax"] == 0
+    torch.testing.assert_close(result, entmax15(logits), rtol=0.0, atol=0.0)
+
+
+def test_stabilized_entmax_endpoint_skips_stabilization(monkeypatch) -> None:
+    logits = torch.tensor([[[5.0, 0.0, -5.0]]])
+
+    def forbidden_stabilization(*args, **kwargs):
+        raise AssertionError("softmax stabilization must not execute at mu=1")
+
+    monkeypatch.setattr(
+        organizer_module,
+        "_stabilize_all_edge_softmax_assignment",
+        forbidden_stabilization,
+    )
+    result = organizer_module._scheduled_stabilized_assignment(
+        logits,
+        entmax_blend=1.0,
+        mass_fraction_floor=0.01,
+    )
+    torch.testing.assert_close(result, entmax15(logits), rtol=0.0, atol=0.0)
+
+
+def test_scheduled_endpoints_are_finite_and_normalized_with_masks() -> None:
+    logits = torch.tensor([[3.0, 1.0, -2.0, 7.0]])
+    mask = torch.tensor([[True, True, True, False]])
+    for blend in (0.0, 0.37, 1.0):
+        assignment = normalize_assignment(
+            logits,
+            mode="scheduled",
+            mask=mask,
+            entmax_blend=blend,
+        )
+        assert torch.isfinite(assignment).all()
+        assert assignment[0, -1] == 0
+        torch.testing.assert_close(assignment.sum(dim=-1), torch.ones(1))
+
+        organizer_logits = torch.stack([logits, logits], dim=1)
+        token_mask = torch.tensor([[[1.0], [0.0]]])
+        stabilized = _scheduled_stabilized_assignment(
+            organizer_logits,
+            entmax_blend=blend,
+            mass_fraction_floor=0.01,
+            mask=token_mask > 0,
+            token_mask=token_mask,
+        )
+        assert torch.isfinite(stabilized).all()
+        torch.testing.assert_close(stabilized[0, 0].sum(), torch.tensor(1.0))
+        assert torch.count_nonzero(stabilized[0, 1]) == 0
 
 
 def test_scheduled_candidate_assignment_blends_stabilized_softmax_into_exact_entmax() -> None:

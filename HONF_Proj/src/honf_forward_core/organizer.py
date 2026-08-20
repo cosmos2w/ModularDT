@@ -166,6 +166,12 @@ def _scheduled_stabilized_assignment(
     """
 
     blend = min(max(float(entmax_blend), 0.0), 1.0)
+    if blend >= 1.0:
+        return normalize_assignment(
+            logits,
+            mode="entmax15",
+            mask=mask,
+        )
     soft_assignment = normalize_assignment(
         logits,
         mode="softmax",
@@ -183,8 +189,6 @@ def _scheduled_stabilized_assignment(
         mode="entmax15",
         mask=mask,
     )
-    if blend >= 1.0:
-        return sparse_assignment
     assignment = (1.0 - blend) * stabilized_softmax + blend * sparse_assignment
     if mask is not None:
         assignment = assignment * torch.broadcast_to(
