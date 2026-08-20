@@ -159,3 +159,33 @@ def test_stage3_scheduled_profile_has_staggered_transitions_and_delayed_gatherin
     assert core["query_edge_retained_mass_floor"] == 0.98
     assert core["module_incidence_retained_mass_floor"] == 0.95
     assert bundle.effective["training"]["learning_rate"] == 1.0e-4
+
+
+def test_adaptive_sparse_additive_base_is_the_dense_formal_stage3_profile() -> None:
+    bundle = load_config_bundle(
+        "project://src/config_core/forward/adaptive_sparse_additive.json"
+    )
+    core = bundle.effective["model"]["core_honf"]
+
+    assert (core["edge_capacity"], core["initial_active_edges"], core["minimum_active_edges"]) == (8, 8, 2)
+    assert (core["selection_start_epoch"], core["selection_transition_epochs"]) == (150, 250)
+    assert core["selection_warmup_mode"] == "all_viable"
+    assert core["selection_coverage_rate"] == 0.99
+    assert core["selection_minimum_module_mass_fraction"] == 0.01
+    assert core["selection_minimum_environment_mass_fraction"] == 0.01
+    assert core["candidate_module_mass_fraction_floor"] == 0.01
+    assert core["candidate_environment_mass_fraction_floor"] == 0.01
+    assert core["module_assignment_normalizer"] == "scheduled"
+    assert core["environment_assignment_normalizer"] == "scheduled"
+    assert core["query_assignment_normalizer"] == "scheduled"
+    assert (core["module_sparsity_start_epoch"], core["module_sparsity_transition_epochs"]) == (350, 300)
+    assert (core["environment_sparsity_start_epoch"], core["environment_sparsity_transition_epochs"]) == (350, 300)
+    assert (core["query_sparsity_start_epoch"], core["query_sparsity_transition_epochs"]) == (250, 250)
+    assert core["environment_locality_mode"] == "gaussian_bounded"
+    assert core["environment_locality_strength"] == 0.25
+    assert core["minimum_region_scale"] == 0.10
+    assert core["query_locality_mode"] == "none"
+    assert core["routing_execution"] == "dense"
+    assert core["query_edge_retained_mass_floor"] == 0.98
+    assert core["module_incidence_retained_mass_floor"] == 0.95
+    assert bundle.effective["training"]["learning_rate"] == 1.0e-4

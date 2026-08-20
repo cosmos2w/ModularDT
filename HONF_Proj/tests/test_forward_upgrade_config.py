@@ -111,15 +111,16 @@ def test_mode_complete_profile_selects_upgrade_architecture() -> None:
     assert core["organizer_mode"] == "exchangeable_slots"
     assert core["mechanism_state_mode"] == "descriptor_first"
     assert core["field_assembly_mode"] == "edge_additive"
-    assert core["module_assignment_normalizer"] == "entmax15"
-    assert core["environment_assignment_normalizer"] == "entmax15"
-    assert core["query_assignment_normalizer"] == "entmax15"
-    assert core["environment_locality_mode"] == "bounded_gaussian"
-    assert core["environment_locality_strength"] == 1.0
+    assert core["module_assignment_normalizer"] == "scheduled"
+    assert core["environment_assignment_normalizer"] == "scheduled"
+    assert core["query_assignment_normalizer"] == "scheduled"
+    assert core["environment_locality_mode"] == "gaussian_bounded"
+    assert core["environment_locality_strength"] == 0.25
+    assert core["query_locality_mode"] == "none"
     assert core["locality_radius_cap"] == 3.0
     assert core["candidate_module_mass_fraction_floor"] == 0.01
     assert core["candidate_environment_mass_fraction_floor"] == 0.01
-    assert core["routing_execution"] == "gathered"
+    assert core["routing_execution"] == "dense"
     assert core["additive_edge_gate_init"] == 0.1
     assert core["additive_output_init_std"] == 1.0e-3
     assert core["topology_signature_enabled"] is True

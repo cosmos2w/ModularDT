@@ -405,6 +405,57 @@ def test_novelty_and_quality_never_promote_a_nonviable_candidate() -> None:
     assert selected[0, 2] == 0
 
 
+def test_cpu_greedy_selector_matches_previous_algorithm_exactly() -> None:
+    model = _model().eval()
+    organizer = model.organizer.exchangeable
+    organizer.set_training_progress(epoch=10, total_epochs=10)
+    generator = torch.Generator().manual_seed(419)
+    module_assignment = torch.softmax(torch.randn(2, 5, 6, generator=generator), dim=-1)
+    env_assignment = torch.softmax(torch.randn(2, 7, 6, generator=generator), dim=-1)
+    quality = torch.randn(2, 6, generator=generator)
+    codes = torch.randn(2, 6, 24, generator=generator)
+    module_present = torch.tensor(
+        [[1.0, 1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 1.0, 0.0, 0.0]]
+    )
+    viable = torch.tensor(
+        [[True, True, False, True, True, True], [True, False, True, True, True, True]]
+    )
+
+    tie_weights = torch.linspace(0.5, 1.5, codes.shape[-1], dtype=codes.dtype)
+    tie_scores = torch.einsum("bkh,h->bk", codes, tie_weights)
+    reference = torch.zeros_like(quality)
+    with torch.no_grad():
+        for batch_index in range(quality.shape[0]):
+            eligible = torch.nonzero(viable[batch_index], as_tuple=False).squeeze(-1).tolist()
+            order = sorted(
+                eligible,
+                key=lambda index: (
+                    float(quality[batch_index, index]),
+                    float(tie_scores[batch_index, index]),
+                ),
+                reverse=True,
+            )
+            selected = organizer._coverage_selection(
+                module_assignment[batch_index],
+                env_assignment[batch_index],
+                module_present[batch_index],
+                order,
+                model.config,
+            )
+            reference[batch_index, selected] = 1.0
+
+    actual = organizer._select_active_edges(
+        module_assignment,
+        env_assignment,
+        quality,
+        codes,
+        module_present,
+        viable,
+        model.config,
+    )
+    torch.testing.assert_close(actual, reference, rtol=0.0, atol=0.0)
+
+
 def test_zero_selected_entmax_support_uses_detached_unit_mass_fallback() -> None:
     assignment = torch.tensor(
         [[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]]
@@ -483,6 +534,28 @@ def test_edge_count_diagnostics_have_distinct_unambiguous_semantics() -> None:
     assert diagnostics["functional_edge_count"] == 1.0
     assert diagnostics["empty_selected_edge_count"] == 1.0
     assert diagnostics["effective_query_edge_count"] == 1.5
+
+
+def test_inactive_edges_contribute_zero_to_soft_functional_count() -> None:
+    pred = torch.zeros(1, 2, 3)
+    strength = torch.tensor([[0.20, 0.0, 0.0, 0.0]])
+    effective = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    diagnostics = compute_honf_diagnostics(
+        {
+            "pred_field": pred,
+            "organizer_aux": {
+                "hyper_strength": strength,
+                "edge_active_mask": effective,
+                "effective_edge_mask": effective,
+            },
+            "routing_aux": {},
+        },
+        edge_strength_threshold=0.05,
+        edge_strength_temperature=0.02,
+    )
+
+    expected = torch.sigmoid(torch.tensor((0.20 - 0.05) / 0.02)).item()
+    assert abs(diagnostics["soft_functional_edge_count"] - expected) < 1.0e-7
 
 
 def test_single_candidate_and_inactive_padding_have_finite_backward() -> None:

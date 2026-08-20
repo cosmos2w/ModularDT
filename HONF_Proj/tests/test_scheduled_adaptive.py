@@ -8,6 +8,7 @@ import torch
 from honf_forward_core.config import BatchData, UnifiedForwardConfig
 from honf_forward_core.decoder import HypergraphFieldDecoder, HypergraphGatedPairwiseKernel
 from honf_forward_core.model import HONFNeuralField
+from honf_forward_core.organizer import _scheduled_stabilized_assignment
 from honf_forward_core.routing import entmax15, locality_bias, normalize_assignment, schedule_fraction
 
 
@@ -100,6 +101,110 @@ def test_scheduled_probability_endpoints_and_intermediate_are_normalized() -> No
     torch.testing.assert_close(end, sparse, rtol=0.0, atol=0.0)
     torch.testing.assert_close(middle, 0.6 * soft + 0.4 * sparse)
     torch.testing.assert_close(middle.sum(dim=-1), torch.ones(1))
+
+
+def test_scheduled_candidate_assignment_blends_stabilized_softmax_into_exact_entmax() -> None:
+    logits = torch.tensor(
+        [
+            [[12.0, 3.0, -2.0, -7.0], [5.0, -1.0, -4.0, -9.0]],
+            [[8.0, 2.0, -3.0, -8.0], [4.0, 0.0, -5.0, -10.0]],
+        ]
+    )
+    floor = 0.01
+    raw_softmax = torch.softmax(logits, dim=-1)
+    lower_bound = floor * 1.001
+    expected_softmax = raw_softmax * (1.0 - logits.shape[-1] * lower_bound) + lower_bound
+    expected_entmax = entmax15(logits)
+
+    at_start = _scheduled_stabilized_assignment(
+        logits,
+        entmax_blend=0.0,
+        mass_fraction_floor=floor,
+    )
+    in_transition = _scheduled_stabilized_assignment(
+        logits,
+        entmax_blend=0.4,
+        mass_fraction_floor=floor,
+    )
+    at_end = _scheduled_stabilized_assignment(
+        logits,
+        entmax_blend=1.0,
+        mass_fraction_floor=floor,
+    )
+
+    torch.testing.assert_close(at_start, expected_softmax, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(at_end, expected_entmax, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(in_transition, 0.6 * expected_softmax + 0.4 * expected_entmax)
+    for assignment in (at_start, in_transition, at_end):
+        torch.testing.assert_close(
+            assignment.sum(dim=-1),
+            torch.ones_like(assignment.sum(dim=-1)),
+        )
+    assert torch.all(at_start > floor)
+    assert torch.count_nonzero(at_end == 0) > 0
+
+
+def test_fresh_epoch_zero_scheduled_models_keep_all_eight_candidates_viable() -> None:
+    config = _config(
+        edge_capacity=8,
+        initial_active_edges=8,
+        candidate_module_mass_fraction_floor=0.01,
+        candidate_environment_mass_fraction_floor=0.01,
+        selection_minimum_module_mass_fraction=0.01,
+        selection_minimum_environment_mass_fraction=0.01,
+        routing_execution="dense",
+    )
+    batch = _batch()
+    active_modules = batch.module_present > 0
+    for seed in (11, 29, 47, 83):
+        torch.manual_seed(seed)
+        model = HONFNeuralField(config).eval()
+        model.set_training_progress(epoch=0, total_epochs=1000)
+        with torch.no_grad():
+            output = model.encode_and_organize(batch)
+
+        assert torch.equal(output["edge_viable_mask"], torch.ones_like(output["edge_viable_mask"]))
+        assert torch.equal(output["edge_active_mask"], torch.ones_like(output["edge_active_mask"]))
+        assert torch.all(output["candidate_module_mass_fraction"] > 0.01)
+        assert torch.all(output["candidate_environment_mass_fraction"] > 0.01)
+        torch.testing.assert_close(
+            output["candidate_A_mh"].sum(dim=-1)[active_modules],
+            torch.ones_like(output["candidate_A_mh"].sum(dim=-1)[active_modules]),
+        )
+        torch.testing.assert_close(
+            output["candidate_A_eh"].sum(dim=-1),
+            torch.ones_like(output["candidate_A_eh"].sum(dim=-1)),
+        )
+
+
+def test_selection_override_all_bypasses_greedy_selection(monkeypatch) -> None:
+    model = HONFNeuralField(_config()).eval()
+    model.set_training_progress(epoch=500, total_epochs=700)
+
+    def fail_if_called(*_args: object, **_kwargs: object) -> torch.Tensor:
+        raise AssertionError("greedy selector must not run for selection_override='all'")
+
+    monkeypatch.setattr(model.organizer.exchangeable, "_select_active_edges", fail_if_called)
+    with torch.no_grad():
+        output = model.encode_and_organize(
+            _batch(),
+            organizer_selection_override="all",
+        )
+    torch.testing.assert_close(output["edge_active_mask"], output["edge_viable_mask"])
+
+
+def test_zero_selection_fraction_bypasses_greedy_selection(monkeypatch) -> None:
+    model = HONFNeuralField(_config()).eval()
+    model.set_training_progress(epoch=150, total_epochs=700)
+
+    def fail_if_called(*_args: object, **_kwargs: object) -> torch.Tensor:
+        raise AssertionError("greedy selector must not run at selection fraction zero")
+
+    monkeypatch.setattr(model.organizer.exchangeable, "_select_active_edges", fail_if_called)
+    with torch.no_grad():
+        output = model.encode_and_organize(_batch())
+    assert output["selection_transition_fraction"].item() == 0.0
+    torch.testing.assert_close(output["edge_active_mask"], output["edge_viable_mask"])
 
 
 def test_edge_gate_is_continuous_and_exactly_hard_at_transition_end() -> None:

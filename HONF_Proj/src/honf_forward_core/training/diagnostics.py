@@ -242,7 +242,6 @@ def compute_honf_diagnostics(
     threshold = float(edge_strength_threshold)
     temperature = max(float(edge_strength_temperature), EPS)
     functional = (strength > threshold).to(dtype=dtype).sum(dim=-1).mean() if strength.numel() else pred.new_zeros(())
-    soft_functional = torch.sigmoid((strength - threshold) / temperature).sum(dim=-1).mean() if strength.numel() else pred.new_zeros(())
     candidate_count = _scalar(org.get("candidate_edge_count"), device, dtype)
     if org.get("candidate_edge_count") is None:
         candidate_count = pred.new_tensor(float(strength.shape[-1]))
@@ -263,6 +262,19 @@ def compute_honf_diagnostics(
         viable_selected = _scalar(org.get("viable_selected_edge_count"), device, dtype)
         if org.get("viable_selected_edge_count") is None:
             viable_selected = selected_count
+    soft_effective_mask = (
+        (effective_mask > 0).to(dtype=dtype)
+        if torch.is_tensor(effective_mask)
+        else (selected_mask > 0).to(dtype=dtype)
+    )
+    soft_functional = (
+        (
+            torch.sigmoid((strength - threshold) / temperature)
+            * soft_effective_mask
+        ).sum(dim=-1).mean()
+        if strength.numel()
+        else pred.new_zeros(())
+    )
 
     A_mh = org.get("A_mh")
     A_eh = org.get("A_eh")
@@ -400,7 +412,13 @@ def compute_honf_diagnostics(
         "uses_hyper_value_context": _scalar(routing.get("uses_hyper_value_context"), device, dtype),
         "uses_pairwise_kernel": _scalar(routing.get("pairwise_kernel_enabled"), device, dtype),
     }
-    return {key: float(values[key].detach().cpu()) for key in HONF_DIAGNOSTIC_KEYS}
+    packed = torch.stack(
+        [values[key].reshape(()) for key in HONF_DIAGNOSTIC_KEYS]
+    ).detach().cpu()
+    return {
+        key: float(value)
+        for key, value in zip(HONF_DIAGNOSTIC_KEYS, packed.tolist())
+    }
 
 
 def organizer_regularization_loss(output: Dict[str, Any], config: Dict[str, Any] | None) -> torch.Tensor:

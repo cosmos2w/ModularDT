@@ -150,6 +150,50 @@ def _stabilize_all_edge_softmax_assignment(
     return stabilized
 
 
+def _scheduled_stabilized_assignment(
+    logits: torch.Tensor,
+    *,
+    entmax_blend: float,
+    mass_fraction_floor: float,
+    mask: Optional[torch.Tensor] = None,
+    token_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Blend viability-stabilized softmax continuously into exact entmax15.
+
+    The exact endpoints are intentional: the soft endpoint protects every
+    anonymous candidate while roles are forming, and the sparse endpoint adds
+    no artificial probability floor once the schedule has completed.
+    """
+
+    blend = min(max(float(entmax_blend), 0.0), 1.0)
+    soft_assignment = normalize_assignment(
+        logits,
+        mode="softmax",
+        mask=mask,
+    )
+    stabilized_softmax = _stabilize_all_edge_softmax_assignment(
+        soft_assignment,
+        mass_fraction_floor=mass_fraction_floor,
+        token_mask=token_mask,
+    )
+    if blend <= 0.0:
+        return stabilized_softmax
+    sparse_assignment = normalize_assignment(
+        logits,
+        mode="entmax15",
+        mask=mask,
+    )
+    if blend >= 1.0:
+        return sparse_assignment
+    assignment = (1.0 - blend) * stabilized_softmax + blend * sparse_assignment
+    if mask is not None:
+        assignment = assignment * torch.broadcast_to(
+            mask.to(device=logits.device, dtype=torch.bool),
+            logits.shape,
+        ).to(dtype=assignment.dtype)
+    return assignment / assignment.sum(dim=-1, keepdim=True).clamp_min(EPS)
+
+
 def _masked_mass_statistics(
     mass: torch.Tensor,
     token_mask: Optional[torch.Tensor],
@@ -481,6 +525,8 @@ class ExchangeableSlotOrganizer(nn.Module):
                 cfg,
                 previous_region_coords=previous_region_coords,
                 previous_region_scale=previous_region_scale,
+                module_sparsity_fraction=module_sparsity_fraction,
+                environment_sparsity_fraction=environment_sparsity_fraction,
             )
             module_weights = candidate_A_mh / candidate_A_mh.sum(dim=1, keepdim=True).clamp_min(EPS)
             env_weights = candidate_A_eh / candidate_A_eh.sum(dim=1, keepdim=True).clamp_min(EPS)
@@ -505,6 +551,8 @@ class ExchangeableSlotOrganizer(nn.Module):
             cfg,
             previous_region_coords=previous_region_coords,
             previous_region_scale=previous_region_scale,
+            module_sparsity_fraction=module_sparsity_fraction,
+            environment_sparsity_fraction=environment_sparsity_fraction,
         )
         candidate_module_weights = candidate_A_mh / candidate_A_mh.sum(
             dim=1, keepdim=True
@@ -580,16 +628,6 @@ class ExchangeableSlotOrganizer(nn.Module):
                 selection_eligible_mask = selection_eligible_mask | (
                     promoted & no_eligible.unsqueeze(-1)
                 )
-        hard_selected_mask = self._select_active_edges(
-            candidate_A_mh,
-            candidate_A_eh,
-            edge_quality,
-            codes,
-            module_present,
-            selection_eligible_mask,
-            cfg,
-            ignore_warmup=scheduled_selection,
-        )
         selection_fraction = (
             schedule_fraction(
                 progress_epoch,
@@ -599,6 +637,21 @@ class ExchangeableSlotOrganizer(nn.Module):
             if scheduled_selection
             else 1.0
         )
+        if selection_override == "all":
+            hard_selected_mask = edge_viable_mask.to(dtype=edge_quality.dtype).detach()
+        elif scheduled_selection and selection_fraction == 0.0:
+            hard_selected_mask = selection_eligible_mask.to(dtype=edge_quality.dtype).detach()
+        else:
+            hard_selected_mask = self._select_active_edges(
+                candidate_A_mh,
+                candidate_A_eh,
+                edge_quality,
+                codes,
+                module_present,
+                selection_eligible_mask,
+                cfg,
+                ignore_warmup=scheduled_selection,
+            )
         if selection_override == "all":
             edge_transition_gate = edge_viable_mask.to(dtype=edge_quality.dtype)
         elif scheduled_selection:
@@ -748,6 +801,8 @@ class ExchangeableSlotOrganizer(nn.Module):
         *,
         previous_region_coords: Optional[torch.Tensor],
         previous_region_scale: Optional[torch.Tensor],
+        module_sparsity_fraction: float,
+        environment_sparsity_fraction: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute competitive assignments and the current localized regions."""
 
@@ -760,17 +815,20 @@ class ExchangeableSlotOrganizer(nn.Module):
         if cfg.hyper_module_assignment_mode == "uniform":
             candidate_A_mh = module_present.unsqueeze(-1).expand_as(module_logits) / float(slots.shape[1])
         else:
-            module_blend = schedule_fraction(
-                int(self._selection_epoch_state.item()),
-                int(cfg.module_sparsity_start_epoch),
-                int(cfg.module_sparsity_transition_epochs),
-            )
-            candidate_A_mh = normalize_assignment(
-                module_logits,
-                mode=cfg.module_assignment_normalizer,
-                mask=module_present.unsqueeze(-1) > 0,
-                entmax_blend=module_blend,
-            )
+            if cfg.module_assignment_normalizer == "scheduled":
+                candidate_A_mh = _scheduled_stabilized_assignment(
+                    module_logits,
+                    entmax_blend=module_sparsity_fraction,
+                    mass_fraction_floor=cfg.candidate_module_mass_fraction_floor,
+                    mask=module_present.unsqueeze(-1) > 0,
+                    token_mask=module_present.unsqueeze(-1),
+                )
+            else:
+                candidate_A_mh = normalize_assignment(
+                    module_logits,
+                    mode=cfg.module_assignment_normalizer,
+                    mask=module_present.unsqueeze(-1) > 0,
+                )
             if cfg.edge_selection_mode == "all" and cfg.module_assignment_normalizer == "softmax":
                 candidate_A_mh = _stabilize_all_edge_softmax_assignment(
                     candidate_A_mh,
@@ -791,16 +849,17 @@ class ExchangeableSlotOrganizer(nn.Module):
                 previous_region_scale,
                 cfg,
             )
-        environment_blend = schedule_fraction(
-            int(self._selection_epoch_state.item()),
-            int(cfg.environment_sparsity_start_epoch),
-            int(cfg.environment_sparsity_transition_epochs),
-        )
-        candidate_A_eh = normalize_assignment(
-            env_logits,
-            mode=cfg.environment_assignment_normalizer,
-            entmax_blend=environment_blend,
-        )
+        if cfg.environment_assignment_normalizer == "scheduled":
+            candidate_A_eh = _scheduled_stabilized_assignment(
+                env_logits,
+                entmax_blend=environment_sparsity_fraction,
+                mass_fraction_floor=cfg.candidate_environment_mass_fraction_floor,
+            )
+        else:
+            candidate_A_eh = normalize_assignment(
+                env_logits,
+                mode=cfg.environment_assignment_normalizer,
+            )
         if cfg.edge_selection_mode == "all" and cfg.environment_assignment_normalizer == "softmax":
             candidate_A_eh = _stabilize_all_edge_softmax_assignment(
                 candidate_A_eh,
@@ -867,7 +926,6 @@ class ExchangeableSlotOrganizer(nn.Module):
             not ignore_warmup
             and int(self._selection_epoch_state.item()) < int(cfg.selection_warmup_epochs)
         )
-        selected_masks = []
         tie_weights = torch.linspace(
             0.5,
             1.5,
@@ -877,13 +935,26 @@ class ExchangeableSlotOrganizer(nn.Module):
         )
         tie_scores = torch.einsum("bkh,h->bk", candidate_codes, tie_weights)
         with torch.no_grad():
-            for batch_index in range(edge_quality.shape[0]):
-                viable = torch.nonzero(edge_viable_mask[batch_index], as_tuple=False).squeeze(-1).tolist()
+            # Selection is detached and K is small. Transfer each candidate
+            # array once, run the unchanged greedy algorithm on CPU, then copy
+            # only the completed mask back to the accelerator.
+            module_assignment_cpu = candidate_A_mh.detach().cpu()
+            environment_assignment_cpu = candidate_A_eh.detach().cpu()
+            quality_cpu = edge_quality.detach().cpu()
+            tie_scores_cpu = tie_scores.detach().cpu()
+            module_present_cpu = module_present.detach().cpu()
+            viable_cpu = edge_viable_mask.detach().cpu()
+            selected_masks_cpu = torch.zeros_like(quality_cpu)
+            for batch_index in range(quality_cpu.shape[0]):
+                viable = torch.nonzero(
+                    viable_cpu[batch_index],
+                    as_tuple=False,
+                ).squeeze(-1).tolist()
                 order = sorted(
                     viable,
                     key=lambda index: (
-                        float(edge_quality[batch_index, index]),
-                        float(tie_scores[batch_index, index]),
+                        float(quality_cpu[batch_index, index]),
+                        float(tie_scores_cpu[batch_index, index]),
                     ),
                     reverse=True,
                 )
@@ -893,16 +964,17 @@ class ExchangeableSlotOrganizer(nn.Module):
                     selected = order
                 else:
                     selected = self._coverage_selection(
-                        candidate_A_mh[batch_index],
-                        candidate_A_eh[batch_index],
-                        module_present[batch_index],
+                        module_assignment_cpu[batch_index],
+                        environment_assignment_cpu[batch_index],
+                        module_present_cpu[batch_index],
                         order,
                         cfg,
                     )
-                mask = torch.zeros_like(edge_quality[batch_index])
-                mask[selected] = 1.0
-                selected_masks.append(mask)
-        return torch.stack(selected_masks, dim=0).detach()
+                selected_masks_cpu[batch_index, selected] = 1.0
+        return selected_masks_cpu.to(
+            device=edge_quality.device,
+            dtype=edge_quality.dtype,
+        ).detach()
 
     def _coverage_selection(
         self,

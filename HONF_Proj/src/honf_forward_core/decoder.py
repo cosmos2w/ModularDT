@@ -181,6 +181,7 @@ class HypergraphGatedPairwiseKernel(nn.Module):
         *,
         gathered_execution: bool = False,
         return_routing_maps: bool = False,
+        reduce_pair_context: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
         """Aggregate query-module interactions through hyperedge routing.
 
@@ -225,7 +226,14 @@ class HypergraphGatedPairwiseKernel(nn.Module):
             retained_module_mass = edge_module_weight.sum(dim=1)[:, None, :].expand(
                 -1, query_xy.shape[1], -1
             )
-        pair_context = torch.einsum("bqk,bqkh->bqh", hyper_attention, edge_pair_context)
+        if reduce_pair_context:
+            pair_context = torch.einsum("bqk,bqkh->bqh", hyper_attention, edge_pair_context)
+        else:
+            pair_context = edge_pair_context.new_zeros(
+                edge_pair_context.shape[0],
+                edge_pair_context.shape[1],
+                edge_pair_context.shape[-1],
+            )
         gate = torch.sigmoid(self.pairwise_kernel_logit)
         available_modules = query_xy.new_tensor(float(module_present.shape[1]))
         retained_module_mass_detached = retained_module_mass.detach()
@@ -671,11 +679,14 @@ class HypergraphFieldDecoder(nn.Module):
                 )
             else:
                 retained_query_mass = hyper_attention.sum(dim=-1)
-            hyper_value_context = torch.einsum("bqk,bkh->bqh", hyper_attention, self.hyper_value(hyper_state))
             if uses_hyper_value:
-                hyper_context = hyper_value_context
+                hyper_context = torch.einsum(
+                    "bqk,bkh->bqh",
+                    hyper_attention,
+                    self.hyper_value(hyper_state),
+                )
             else:
-                hyper_context = torch.zeros_like(hyper_value_context)
+                hyper_context = torch.zeros_like(query_state)
             c_h_context = hyper_context
             diagnostics["hyper_value_context_norm"] = c_h_context.detach().norm(dim=-1).mean()
             diagnostics["hyper_attention_mean"] = hyper_attention.mean(dim=1)
@@ -714,12 +725,14 @@ class HypergraphFieldDecoder(nn.Module):
                     hyper_attention,
                     gathered_execution=gathered_execution,
                     return_routing_maps=return_routing_maps,
+                    reduce_pair_context=context_fusion,
                 )
                 if not context_fusion:
                     edge_pair_context = routed_edge_context
                 else:
                     del routed_edge_context
-                hyper_context = hyper_context + pair_context
+                if context_fusion:
+                    hyper_context = hyper_context + pair_context
                 diagnostics.update(pair_diagnostics)
                 if return_routing_maps:
                     diagnostics["c_pair_norm"] = pair_context.detach().norm(dim=-1)

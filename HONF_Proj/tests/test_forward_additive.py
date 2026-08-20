@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+
 import torch
 
 from honf_forward_core.config import BatchData, UnifiedForwardConfig
@@ -276,3 +278,46 @@ def test_context_fusion_strict_checkpoint_round_trip_is_unchanged() -> None:
         actual = restored(batch)["pred_field"]
 
     torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_additive_checkpoint_field_is_unchanged_when_unused_reductions_are_skipped(
+    monkeypatch,
+) -> None:
+    source = _model().eval()
+    batch = _batch()
+    with torch.no_grad():
+        source(batch, return_edge_fields=True)
+    checkpoint = copy.deepcopy(source.state_dict())
+
+    restored = _model().eval()
+    with torch.no_grad():
+        restored(batch, return_edge_fields=True)
+    restored.load_state_dict(checkpoint, strict=True)
+    checkpoint_keys = tuple(restored.state_dict())
+    with torch.no_grad():
+        optimized = restored(batch, return_edge_fields=True)
+
+    def unused_hyper_value(*_args: object, **_kwargs: object) -> torch.Tensor:
+        raise AssertionError("edge_additive must not evaluate unused hyper-value context")
+
+    monkeypatch.setattr(restored.decoder.hyper_value, "forward", unused_hyper_value)
+    pairwise = restored.decoder.pairwise_kernel
+    assert pairwise is not None
+    optimized_pairwise_forward = pairwise.forward
+
+    def legacy_pairwise_reduction(*args: object, **kwargs: object):
+        kwargs["reduce_pair_context"] = True
+        return optimized_pairwise_forward(*args, **kwargs)
+
+    monkeypatch.setattr(pairwise, "forward", legacy_pairwise_reduction)
+    with torch.no_grad():
+        legacy_extra_work = restored(batch, return_edge_fields=True)
+
+    for key in ("pred_field", "pred_field_background", "pred_field_by_edge"):
+        torch.testing.assert_close(
+            optimized[key],
+            legacy_extra_work[key],
+            rtol=0.0,
+            atol=0.0,
+        )
+    assert tuple(restored.state_dict()) == checkpoint_keys
