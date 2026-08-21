@@ -80,6 +80,35 @@ def normalize_run_id(value: Any, fallback: str = "0001") -> str:
     return f"{int(raw):04d}"
 
 
+def reuses_primary_validation_for_predicted_mode(local_port_condition_mode: str) -> bool:
+    """Return whether the primary validation pass already uses predicted ports."""
+
+    return str(local_port_condition_mode).lower() == "predicted"
+
+
+def should_save_latest_checkpoint(
+    epoch: int,
+    total_epochs: int,
+    checkpoint_config: Dict[str, Any],
+) -> bool:
+    """Apply the optional latest-checkpoint cadence while always saving the final epoch."""
+
+    if not bool(checkpoint_config.get("save_latest", True)):
+        return False
+    cadence = max(int(checkpoint_config.get("save_latest_every_epochs", 1)), 1)
+    return int(epoch) % cadence == 0 or int(epoch) == int(total_epochs)
+
+
+def pack_scalar_metrics(tensor_metrics: Dict[str, torch.Tensor]) -> Dict[str, float]:
+    """Transfer a batch of scalar metrics to the CPU in one synchronization."""
+
+    names = tuple(tensor_metrics)
+    values = torch.stack(
+        tuple(tensor_metrics[name].detach().reshape(()) for name in names)
+    ).cpu().tolist()
+    return {name: float(value) for name, value in zip(names, values)}
+
+
 def resolve_run_id(args_value: Any, cfg: Dict[str, Any], training_cfg: Dict[str, Any]) -> str:
     """Resolve Run_ID with CLI override first, then template settings.
 
@@ -723,25 +752,31 @@ def run_epoch(
                 edge_strength_threshold=float(reg_cfg.get("edge_strength_threshold", 0.05)),
                 edge_strength_temperature=float(reg_cfg.get("edge_strength_temperature", 0.05)),
             )
-            metrics = {
-                "loss_total": float(loss.detach().cpu()),
-                "loss_field": float(loss_field.detach().cpu()),
-                "loss_internal_temperature": float(loss_internal.detach().cpu()),
-                "loss_interface": float(loss_interface.detach().cpu()),
-                "loss_port_condition": float(loss_port.detach().cpu()),
-                "loss_port_smoothness": float(loss_port_smoothness.detach().cpu()),
-                "loss_port_global_consistency": float(loss_port_global.detach().cpu()),
-                "loss_predicted_consistency": float(loss_predicted_consistency.detach().cpu()),
-                "loss_predicted_consistency_internal": float(pred_cons_internal.detach().cpu()),
-                "loss_predicted_consistency_interface": float(pred_cons_interface.detach().cpu()),
-                "loss_organizer": float(loss_org.detach().cpu()),
-                "effective_port_global_consistency_weight": float(port_global_weight),
-                "effective_predicted_consistency_weight": float(predicted_consistency_weight),
-                "effective_internal_temperature_weight": float(effective_internal_temperature_weight),
-                "effective_interface_weight": float(effective_interface_weight),
-                "field_mse": float(mse.detach().cpu()),
-                "temperature_mse": float(temp_mse.detach().cpu()),
-            }
+            metrics = pack_scalar_metrics(
+                {
+                    "loss_total": loss,
+                    "loss_field": loss_field,
+                    "loss_internal_temperature": loss_internal,
+                    "loss_interface": loss_interface,
+                    "loss_port_condition": loss_port,
+                    "loss_port_smoothness": loss_port_smoothness,
+                    "loss_port_global_consistency": loss_port_global,
+                    "loss_predicted_consistency": loss_predicted_consistency,
+                    "loss_predicted_consistency_internal": pred_cons_internal,
+                    "loss_predicted_consistency_interface": pred_cons_interface,
+                    "loss_organizer": loss_org,
+                    "field_mse": mse,
+                    "temperature_mse": temp_mse,
+                }
+            )
+            metrics.update(
+                {
+                    "effective_port_global_consistency_weight": float(port_global_weight),
+                    "effective_predicted_consistency_weight": float(predicted_consistency_weight),
+                    "effective_internal_temperature_weight": float(effective_internal_temperature_weight),
+                    "effective_interface_weight": float(effective_interface_weight),
+                }
+            )
             metrics.update(honf_diag)
         for key, value in metrics.items():
             sums[key] = sums.get(key, 0.0) + float(value)
@@ -1799,7 +1834,7 @@ def run_from_config(
             predicted_consistency_weight=pred_consistency_weight,
             gradient_clip_norm=gradient_clip_norm,
         )
-        if effective_mode == "predicted" and float(effective_ratio) == 0.0:
+        if reuses_primary_validation_for_predicted_mode(effective_mode):
             predicted_val_metrics = val_metrics
         else:
             predicted_val_metrics = run_epoch(
@@ -1847,7 +1882,7 @@ def run_from_config(
             best_predicted = predicted_metric
             if bool(checkpoint_cfg.get("save_best_predicted", True)):
                 save_checkpoint(run_dir / "best_predicted_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_predicted, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
-        if bool(checkpoint_cfg.get("save_latest", True)):
+        if should_save_latest_checkpoint(epoch, epochs, checkpoint_cfg):
             save_checkpoint(run_dir / "latest_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         plot_every = max(int(training_cfg.get("plot_every_epochs", 10)), 1)
         if epoch % plot_every == 0 or epoch == epochs:

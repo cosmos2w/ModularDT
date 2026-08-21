@@ -69,6 +69,7 @@ CHECKPOINTING_KEYS = {
     "save_best_temperature_mse",
     "save_best_predicted",
     "save_latest",
+    "save_latest_every_epochs",
 }
 RUN_KEYS = {"id", "name", "output_root"}
 
@@ -149,6 +150,13 @@ def _validate_core_sections(core: Mapping[str, Any]) -> None:
     organizer_learning_rate = training.get("organizer_learning_rate")
     if organizer_learning_rate is not None and float(organizer_learning_rate) <= 0.0:
         raise ValueError("core.training.organizer_learning_rate must be null or positive.")
+    save_latest_every_epochs = checkpointing.get("save_latest_every_epochs", 1)
+    if (
+        isinstance(save_latest_every_epochs, bool)
+        or not isinstance(save_latest_every_epochs, int)
+        or save_latest_every_epochs <= 0
+    ):
+        raise ValueError("core.checkpointing.save_latest_every_epochs must be a positive integer.")
 
 
 def _canonical_hash(payload: Mapping[str, Any]) -> str:

@@ -192,6 +192,8 @@ def test_adaptive_sparse_additive_base_is_the_dense_formal_stage3_profile() -> N
     assert core["routing_execution"] == "dense"
     assert core["query_edge_retained_mass_floor"] == 0.98
     assert core["module_incidence_retained_mass_floor"] == 0.95
+    assert bundle.effective["training"]["plot_every_epochs"] == 50
+    assert bundle.effective["checkpointing"]["save_latest_every_epochs"] == 10
 
 
 @pytest.mark.parametrize(
