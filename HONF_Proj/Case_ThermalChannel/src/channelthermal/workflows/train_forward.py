@@ -99,6 +99,17 @@ def should_save_latest_checkpoint(
     return int(epoch) % cadence == 0 or int(epoch) == int(total_epochs)
 
 
+def should_save_milestone_checkpoint(
+    epoch: int,
+    checkpoint_config: Dict[str, Any],
+) -> bool:
+    """Return whether this exact epoch is an explicitly retained milestone."""
+
+    return int(epoch) in {
+        int(value) for value in checkpoint_config.get("save_epoch_milestones", [])
+    }
+
+
 def pack_scalar_metrics(tensor_metrics: Dict[str, torch.Tensor]) -> Dict[str, float]:
     """Transfer a batch of scalar metrics to the CPU in one synchronization."""
 
@@ -1884,6 +1895,8 @@ def run_from_config(
                 save_checkpoint(run_dir / "best_predicted_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_predicted, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         if should_save_latest_checkpoint(epoch, epochs, checkpoint_cfg):
             save_checkpoint(run_dir / "latest_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
+        if should_save_milestone_checkpoint(epoch, checkpoint_cfg):
+            save_checkpoint(run_dir / f"epoch_{epoch:04d}_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         plot_every = max(int(training_cfg.get("plot_every_epochs", 10)), 1)
         if epoch % plot_every == 0 or epoch == epochs:
             save_global_loss_plots(metrics_path, run_dir)

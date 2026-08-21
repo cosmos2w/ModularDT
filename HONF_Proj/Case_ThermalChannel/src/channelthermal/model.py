@@ -159,6 +159,7 @@ class ChannelThermalHONFModel(nn.Module):
         return_edge_fields: bool = False,
         return_port_global_consistency: bool = False,
         return_prepared_state: bool = False,
+        return_organizer_passes: bool = False,
     ) -> Dict[str, Any]:
         """Predict the global field and per-module thermal responses.
 
@@ -273,6 +274,7 @@ class ChannelThermalHONFModel(nn.Module):
         interface_diagnostics: Dict[str, torch.Tensor] = {}
         predicted_port_diagnostics: Dict[str, torch.Tensor] = {}
         final_pred_port_tokens = pred_port_tokens
+        provisional_org_raw: Optional[Dict[str, torch.Tensor]] = None
         if use_local_outputs:
             if local_module_params is None:
                 local_module_params = build_local_module_params_from_global(
@@ -489,6 +491,12 @@ class ChannelThermalHONFModel(nn.Module):
                 }
             },
         }
+        if return_organizer_passes:
+            result["provisional_organizer_aux"] = (
+                {}
+                if provisional_org_raw is None
+                else self._legacy_organizer_aux(provisional_org_raw, adapter, env.env_coords)
+            )
         for key in (
             "pred_field_background",
             "pred_field_by_edge",

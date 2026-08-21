@@ -237,6 +237,64 @@ def test_stage4_overlays_resolve_strictly_with_expected_provenance(
     assert bundle.experiment["core"]["training"]["learning_rate"] == learning_rate
 
 
+@pytest.mark.parametrize(
+    ("overlay", "organizer_mode", "edge_capacity"),
+    [
+        ("stage5_exchangeable_soft_organized.json", "exchangeable_slots", 6),
+        ("stage5_fixed_softmax_modern.json", "fixed_projection", 0),
+    ],
+)
+def test_stage5_profiles_are_matched_all_soft_dense_models(
+    overlay: str,
+    organizer_mode: str,
+    edge_capacity: int,
+) -> None:
+    bundle = load_config_bundle(
+        "project://src/config_core/forward/adaptive_sparse_additive.json",
+        experiment_overlay=f"project://src/config_core/forward/experiments/{overlay}",
+    )
+    core = bundle.effective["model"]["core_honf"]
+
+    assert core["organizer_mode"] == organizer_mode
+    assert core["num_hyperedges"] == 6
+    assert core["edge_capacity"] == edge_capacity
+    assert core["edge_selection_mode"] == "all"
+    assert (core["selection_start_epoch"], core["selection_transition_epochs"]) == (-1, 0)
+    for prefix in ("module", "environment", "query"):
+        assert core[f"{prefix}_assignment_normalizer"] == "softmax"
+        assert core[f"{prefix}_sparsity_start_epoch"] == -1
+        assert core[f"{prefix}_sparsity_transition_epochs"] == 0
+    assert core["environment_locality_mode"] == "none"
+    assert core["query_locality_mode"] == "none"
+    assert core["mechanism_state_mode"] == "descriptor_first"
+    assert core["field_assembly_mode"] == "edge_additive"
+    assert core["additive_background_mode"] == "dense_query_attention"
+    assert core["routing_execution"] == "dense"
+    assert core["query_edge_limit"] == 0
+    assert core["query_module_limit"] == 0
+    assert bundle.effective["training"]["learning_rate"] == 3.0e-4
+    assert bundle.effective["training"]["organizer_learning_rate"] == 1.0e-4
+    assert bundle.effective["checkpointing"]["save_epoch_milestones"] == [
+        250, 500, 1000, 1500, 2500
+    ]
+
+
+@pytest.mark.parametrize("milestones", [[250, 250], [0], [True], "250,500"])
+def test_checkpoint_milestones_reject_non_unique_positive_integer_lists(
+    tmp_path,
+    milestones,
+) -> None:
+    source = load_config_bundle("project://src/config_core/forward/adaptive_sparse_additive.json")
+    payload = copy.deepcopy(source.core)
+    payload["case"]["config"] = str(source.case_source)
+    payload["checkpointing"]["save_epoch_milestones"] = milestones
+    path = tmp_path / "invalid_milestones.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="save_epoch_milestones"):
+        load_config_bundle(path)
+
+
 def test_organizer_learning_rate_must_be_null_or_positive(tmp_path) -> None:
     source = load_config_bundle("project://src/config_core/forward/adaptive_sparse_additive.json")
     payload = copy.deepcopy(source.core)

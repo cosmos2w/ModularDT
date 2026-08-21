@@ -138,7 +138,8 @@
     "save_best_temperature_mse": true,
     "save_best_predicted": true,
     "save_latest": true,
-    "save_latest_every_epochs": 10
+    "save_latest_every_epochs": 10,
+    "save_epoch_milestones": []
   },
   "run": {
     "id": "0003",

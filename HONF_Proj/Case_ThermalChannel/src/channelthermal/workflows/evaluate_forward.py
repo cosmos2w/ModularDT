@@ -471,6 +471,13 @@ def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> 
     A_eh = np.asarray(aux.get("A_eh", np.zeros((env_coords.shape[0], 1))), dtype=np.float32)
     A_mh = np.asarray(aux.get("A_mh", np.zeros((centers.shape[0], A_eh.shape[-1]))), dtype=np.float32)
     strength = np.asarray(aux.get("hyper_strength", np.ones((A_eh.shape[-1],), dtype=np.float32)), dtype=np.float32)
+    active_mask = np.asarray(
+        aux.get(
+            "effective_edge_mask",
+            aux.get("edge_active_mask", np.ones((A_eh.shape[-1],), dtype=np.float32)),
+        ),
+        dtype=np.float32,
+    )
     return {
         "centers": centers,
         "present": present,
@@ -479,6 +486,7 @@ def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> 
         "A_eh": A_eh,
         "A_mh": A_mh,
         "strength": strength,
+        "active_hyperedge_mask": active_mask,
         "module_mass": np.asarray(aux.get("hyper_module_mass", np.zeros_like(strength)), dtype=np.float32),
         "env_mass": np.asarray(aux.get("hyper_env_mass", np.zeros_like(strength)), dtype=np.float32),
         "src": np.asarray(aux.get("hyper_source_coords", np.zeros((strength.shape[0], 2))), dtype=np.float32),
@@ -786,11 +794,28 @@ def main(argv: list[str] | None = None) -> int:
             org_outputs["organization_physical"] = str(alias)
         if args.organization_view in {"all", "matrices"} and (render_presentation or render_debug):
             matrices = output_dir / "organization_summary_matrices.png"
-            render_channelthermal_organization_summary_matrices(matrices, raw_sample, arrays, module_radius=radius, channel_order=channel_order)
+            render_channelthermal_organization_summary_matrices(
+                matrices,
+                raw_sample,
+                arrays,
+                module_radius=radius,
+                channel_order=channel_order,
+                sort_environment=False,
+            )
             org_outputs["organization_summary_matrices"] = str(matrices)
             legacy_matrices = output_dir / "organization_matrices.png"
             copy_figure_alias(matrices, legacy_matrices)
             org_outputs["organization_matrices"] = str(legacy_matrices)
+            sorted_matrices = output_dir / "organization_summary_matrices_sorted_by_dominant_edge.png"
+            render_channelthermal_organization_summary_matrices(
+                sorted_matrices,
+                raw_sample,
+                arrays,
+                module_radius=radius,
+                channel_order=channel_order,
+                sort_environment=True,
+            )
+            org_outputs["organization_summary_matrices_sorted_by_dominant_edge"] = str(sorted_matrices)
         if args.organization_view in {"all", "schematic"} and render_presentation:
             schematic = output_dir / "organization_schematic.png"
             render_channelthermal_organization_schematic_presentation(schematic, raw_sample, arrays, link_threshold=float(args.organization_link_threshold))

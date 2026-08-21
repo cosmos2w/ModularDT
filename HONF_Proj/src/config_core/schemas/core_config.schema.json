@@ -38,7 +38,12 @@
         "save_best_temperature_mse": {"type": "boolean"},
         "save_best_predicted": {"type": "boolean"},
         "save_latest": {"type": "boolean"},
-        "save_latest_every_epochs": {"type": "integer", "minimum": 1}
+        "save_latest_every_epochs": {"type": "integer", "minimum": 1},
+        "save_epoch_milestones": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 1}
+        }
       }
     },
     "run": {

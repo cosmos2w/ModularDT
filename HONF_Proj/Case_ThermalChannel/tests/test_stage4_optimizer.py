@@ -6,9 +6,13 @@ import pytest
 import torch
 from torch import nn
 
+from honf_forward_core.config import BatchData, UnifiedForwardConfig
+from honf_forward_core.model import HONFNeuralField
+
 from channelthermal.workflows.train_forward import (
     _validate_optimizer_resume_compatibility,
     build_forward_optimizer,
+    should_save_milestone_checkpoint,
 )
 
 
@@ -130,3 +134,70 @@ def test_model_only_initialization_is_independent_of_optimizer_grouping() -> Non
 
     assert incompatible.missing_keys == []
     assert incompatible.unexpected_keys == []
+
+
+class _FixedHONFWrapper(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.core = HONFNeuralField(
+            UnifiedForwardConfig.from_dict(
+                {
+                    "field_dim": 2,
+                    "domain_length_x": 4.0,
+                    "domain_length_y": 2.0,
+                    "num_env_tokens_x": 3,
+                    "num_env_tokens_y": 2,
+                    "num_hyperedges": 3,
+                    "hidden_dim": 16,
+                    "dropout": 0.0,
+                    "decoder_mode": "enhanced_honf_pairwise",
+                    "pairwise_kernel_hidden_dim": 16,
+                    "organizer_mode": "fixed_projection",
+                    "mechanism_state_mode": "descriptor_first",
+                    "field_assembly_mode": "edge_additive",
+                }
+            )
+        )
+
+    def forward(self, batch: BatchData) -> torch.Tensor:
+        return self.core(batch)["pred_field"]
+
+
+def test_fixed_projection_split_optimizer_updates_fixed_organizer_and_prediction() -> None:
+    torch.manual_seed(17)
+    model = _FixedHONFWrapper()
+    optimizer, inventory = build_forward_optimizer(model, _config(1.0e-4))
+    organizer_names = inventory["groups"][0]["parameter_names"]
+    assert "core.organizer.module_score.weight" in organizer_names
+    assert "core.organizer.env_score.weight" in organizer_names
+
+    batch = BatchData(
+        module_centers=torch.rand(1, 3, 2),
+        module_present=torch.tensor([[1.0, 1.0, 0.0]]),
+        module_features=torch.randn(1, 3, 4),
+        global_context=torch.randn(1, 3),
+        query_xy=torch.rand(1, 7, 2),
+        query_time=None,
+        target_field=None,
+        case_name="fixed-split-optimizer",
+        metadata={},
+    )
+    organizer_before = model.core.organizer.module_score.weight.detach().clone()
+    prediction_before = model.core.decoder.edge_head.net[-1].weight.detach().clone()
+    loss = model(batch).square().mean()
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+
+    assert torch.isfinite(loss)
+    assert not torch.equal(organizer_before, model.core.organizer.module_score.weight)
+    assert not torch.equal(prediction_before, model.core.decoder.edge_head.net[-1].weight)
+
+
+def test_explicit_milestone_checkpoint_schedule_retains_only_named_epochs() -> None:
+    config = {"save_epoch_milestones": [250, 500, 1000, 1500, 2500]}
+
+    assert should_save_milestone_checkpoint(250, config)
+    assert should_save_milestone_checkpoint(1500, config)
+    assert not should_save_milestone_checkpoint(1499, config)
+    assert not should_save_milestone_checkpoint(2000, config)

@@ -70,6 +70,7 @@ CHECKPOINTING_KEYS = {
     "save_best_predicted",
     "save_latest",
     "save_latest_every_epochs",
+    "save_epoch_milestones",
 }
 RUN_KEYS = {"id", "name", "output_root"}
 
@@ -157,6 +158,15 @@ def _validate_core_sections(core: Mapping[str, Any]) -> None:
         or save_latest_every_epochs <= 0
     ):
         raise ValueError("core.checkpointing.save_latest_every_epochs must be a positive integer.")
+    milestones = checkpointing.get("save_epoch_milestones", [])
+    if (
+        not isinstance(milestones, list)
+        or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in milestones)
+        or len(set(milestones)) != len(milestones)
+    ):
+        raise ValueError(
+            "core.checkpointing.save_epoch_milestones must be a list of unique positive integers."
+        )
 
 
 def _canonical_hash(payload: Mapping[str, Any]) -> str:
