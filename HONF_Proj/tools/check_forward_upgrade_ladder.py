@@ -45,7 +45,7 @@ VARIANTS = {
         "mechanism_state_mode": "descriptor_first",
         "field_assembly_mode": "edge_additive",
         "normalizer": "entmax15",
-        "locality": "compact_kernel",
+        "locality": "bounded_gaussian",
         "execution": "dense",
     },
     "E": {
@@ -53,7 +53,7 @@ VARIANTS = {
         "mechanism_state_mode": "descriptor_first",
         "field_assembly_mode": "edge_additive",
         "normalizer": "entmax15",
-        "locality": "compact_kernel",
+        "locality": "bounded_gaussian",
         "execution": "gathered",
     },
 }

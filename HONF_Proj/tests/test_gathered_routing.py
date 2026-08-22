@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import copy
+from unittest.mock import patch
 
 import torch
 
 from honf_forward_core.config import BatchData, UnifiedForwardConfig
+from honf_forward_core.decoder import (
+    HypergraphGatedPairwiseKernel,
+    _routed_module_retention_statistics,
+)
 from honf_forward_core.model import HONFNeuralField
 
 
@@ -95,6 +100,55 @@ def test_full_limit_gathered_matches_dense_with_same_weights() -> None:
         torch.testing.assert_close(dense_output[key], gathered_output[key], rtol=2.0e-6, atol=2.0e-6)
 
 
+def test_routed_module_retention_uses_only_routed_query_edge_pairs() -> None:
+    retained = torch.tensor([[[1.0, 0.0, 1.0], [0.8, 0.0, 0.4]]])
+    routed = torch.tensor([[[True, False, True], [True, False, True]]])
+
+    diagnostics = _routed_module_retention_statistics(retained, routed)
+
+    assert diagnostics["routed_query_edge_pair_count"] == 4
+    torch.testing.assert_close(diagnostics["routed_module_retained_mass_mean"], torch.tensor(0.8))
+    torch.testing.assert_close(diagnostics["routed_module_retained_mass_min"], torch.tensor(0.4))
+    torch.testing.assert_close(
+        diagnostics["routed_module_retained_mass_p05"],
+        torch.quantile(torch.tensor([1.0, 1.0, 0.8, 0.4]), 0.05),
+    )
+
+    full = _routed_module_retention_statistics(
+        torch.tensor([[[1.0, 0.0, 1.0, 0.0]]]),
+        torch.tensor([[[True, False, True, False]]]),
+    )
+    assert full["routed_module_retained_mass_mean"] == 1.0
+    assert full["routed_module_retained_mass_p05"] == 1.0
+    assert full["routed_module_retained_mass_min"] == 1.0
+
+
+def test_retention_diagnostics_do_not_change_predictions_or_checkpoint_structure() -> None:
+    model = _initialized_model(_config("gathered", module_limit=3, edge_limit=2), seed=159)
+    batch = _batch()
+    checkpoint = copy.deepcopy(model.state_dict())
+
+    with torch.no_grad():
+        revised = model(batch)["pred_field"]
+    with patch(
+        "honf_forward_core.decoder._routed_module_retention_statistics",
+        return_value={
+            "routed_module_retained_mass_mean": revised.new_zeros(()),
+            "routed_module_retained_mass_p05": revised.new_zeros(()),
+            "routed_module_retained_mass_min": revised.new_zeros(()),
+            "routed_query_edge_pair_count": revised.new_zeros(()),
+        },
+    ):
+        with torch.no_grad():
+            legacy_diagnostic_path = model(batch)["pred_field"]
+
+    torch.testing.assert_close(revised, legacy_diagnostic_path, rtol=0.0, atol=0.0)
+    assert tuple(model.state_dict()) == tuple(checkpoint)
+    restored = _initialized_model(_config("gathered", module_limit=3, edge_limit=2), seed=161)
+    restored.load_state_dict(checkpoint, strict=True)
+    assert tuple(restored.state_dict()) == tuple(checkpoint)
+
+
 def test_gathering_happens_before_pair_and_edge_mlps() -> None:
     model = _initialized_model(_config("gathered", module_limit=2, edge_limit=2), seed=167)
     pair_shapes: list[tuple[int, ...]] = []
@@ -168,3 +222,84 @@ def test_gathered_query_chunks_match_one_shot() -> None:
         ]
 
     torch.testing.assert_close(reference, torch.cat(chunks, dim=1), rtol=2.0e-6, atol=2.0e-6)
+
+
+def test_gathered_module_truncation_renormalizes_each_query_edge() -> None:
+    config = _config("gathered", module_limit=1, edge_limit=2)
+    kernel = HypergraphGatedPairwiseKernel(config)
+
+    class Ones(torch.nn.Module):
+        def forward(self, values: torch.Tensor) -> torch.Tensor:
+            return torch.ones(*values.shape[:-1], config.hidden_dim, device=values.device, dtype=values.dtype)
+
+    kernel.pair_mlp = Ones()
+    query_xy = torch.tensor([[[0.0, 0.0], [1.0, 0.0]]])
+    module_centers = torch.tensor([[[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]])
+    module_tokens = torch.zeros(1, 3, config.hidden_dim)
+    module_present = torch.ones(1, 3)
+    edge_module_weight = torch.tensor([[[0.9, 0.0], [0.1, 0.5], [0.0, 0.5]]])
+    hyper_attention = torch.tensor([[[1.0, 0.0], [0.0, 1.0]]])
+
+    contexts, _, _, retained = kernel._gathered_edge_pair_context(
+        query_xy,
+        module_centers,
+        module_tokens,
+        module_present,
+        edge_module_weight,
+        hyper_attention,
+        None,
+    )
+
+    assert retained.shape == (1, 2, 2)
+    torch.testing.assert_close(retained[0, 0, 0], torch.tensor(0.9))
+    torch.testing.assert_close(retained[0, 1, 1], torch.tensor(0.5))
+    torch.testing.assert_close(contexts[0, 0, 0], torch.ones(config.hidden_dim))
+    torch.testing.assert_close(contexts[0, 1, 1], torch.ones(config.hidden_dim))
+
+
+def test_query_edge_limit_is_shared_mass_conserving_routing() -> None:
+    config = _config("gathered", module_limit=2, edge_limit=2)
+    config.module_assignment_normalizer = "softmax"
+    config.environment_assignment_normalizer = "softmax"
+    config.query_assignment_normalizer = "softmax"
+    config.environment_locality_mode = "none"
+    model = _initialized_model(config, seed=191)
+    batch = _batch()
+    seen_pair_routes: list[torch.Tensor] = []
+
+    def pair_hook(_module: torch.nn.Module, inputs: tuple[torch.Tensor, ...]) -> None:
+        seen_pair_routes.append(inputs[2].detach().clone())
+
+    handle = model.decoder.pairwise_kernel.register_forward_pre_hook(pair_hook)
+    with torch.no_grad():
+        organized = model.encode_and_organize(batch)
+        output = model.decode_queries(
+            batch.query_xy,
+            None,
+            organized,
+            organized["global_token"],
+            return_routing_maps=True,
+            return_edge_fields=True,
+        )
+    handle.remove()
+
+    routes = output["query_hyper_attention"]
+    assert len(seen_pair_routes) == 1
+    torch.testing.assert_close(seen_pair_routes[0], routes)
+    torch.testing.assert_close(routes.sum(dim=-1), torch.ones_like(routes[..., 0]))
+    assert torch.all((routes > 0).sum(dim=-1) <= 2)
+    retained = output["query_edge_retained_probability_mass"]
+    assert torch.isfinite(retained).all()
+    assert torch.all((retained > 0) & (retained <= 1.0 + 1.0e-6))
+    assert torch.any(retained < 1.0 - 1.0e-6)
+    assert output["retained_module_incidence_mass"].shape == routes.shape
+    assert torch.isfinite(output["retained_module_incidence_mass"]).all()
+    routed_mask = output["routed_query_edge_pair_mask"]
+    assert torch.equal(routed_mask, routes > 0)
+    retained_routed = output["retained_module_incidence_mass"][routed_mask]
+    torch.testing.assert_close(
+        output["routed_module_retained_mass_mean"], retained_routed.mean()
+    )
+    assert output["routed_query_edge_pair_count"] == routed_mask.sum()
+    edge_nonzero = output["pred_field_by_edge"].norm(dim=-1) > 0
+    assert torch.all(edge_nonzero.sum(dim=-1) <= 2)

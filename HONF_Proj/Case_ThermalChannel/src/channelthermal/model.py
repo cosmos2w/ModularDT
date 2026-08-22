@@ -106,6 +106,11 @@ class ChannelThermalHONFModel(nn.Module):
 
         self.core.set_training_progress(epoch=epoch, total_epochs=total_epochs)
 
+    def selection_state(self) -> Dict[str, Optional[int]]:
+        """Return explicit selection progress for checkpoint metadata."""
+
+        return self.core.selection_state()
+
     def extract_hypergraph_plan(
         self,
         organizer_aux: Dict[str, Any],
@@ -154,6 +159,7 @@ class ChannelThermalHONFModel(nn.Module):
         return_edge_fields: bool = False,
         return_port_global_consistency: bool = False,
         return_prepared_state: bool = False,
+        return_organizer_passes: bool = False,
     ) -> Dict[str, Any]:
         """Predict the global field and per-module thermal responses.
 
@@ -232,7 +238,16 @@ class ChannelThermalHONFModel(nn.Module):
         )
         # Encode/organize only. The ChannelThermal local response changes
         # module tokens, so decoding a field here would be discarded work.
-        base_output = self.core.encode_and_organize(honf_batch)
+        final_only_selection = (
+            self.config.core_honf.organizer_mode == "exchangeable_slots"
+            and self.config.core_honf.edge_selection_mode == "quality_coverage"
+            and self.config.core_honf.selection_warmup_mode == "all_viable"
+            and int(self.config.core_honf.selection_start_epoch) >= 0
+        )
+        base_output = self.core.encode_and_organize(
+            honf_batch,
+            organizer_selection_override="all" if final_only_selection else None,
+        )
         base_org = self._legacy_organizer_aux(base_output, adapter, env.env_coords)
         base_module_state = base_output["module_tokens"]
         env_state = base_output["env_tokens"]
@@ -259,6 +274,7 @@ class ChannelThermalHONFModel(nn.Module):
         interface_diagnostics: Dict[str, torch.Tensor] = {}
         predicted_port_diagnostics: Dict[str, torch.Tensor] = {}
         final_pred_port_tokens = pred_port_tokens
+        provisional_org_raw: Optional[Dict[str, torch.Tensor]] = None
         if use_local_outputs:
             if local_module_params is None:
                 local_module_params = build_local_module_params_from_global(
@@ -313,6 +329,7 @@ class ChannelThermalHONFModel(nn.Module):
                     env_coords=env.env_coords,
                     module_present=adapter.module_present,
                     geometry_mode=self.config.core_honf.geometry_mode,
+                    selection_override="all" if final_only_selection else None,
                 )
                 provisional_org_raw["module_features_raw"] = adapter.module_features
                 outside_temperature, refinement_diag = self._global_temperature_for_all_ports(
@@ -390,7 +407,7 @@ class ChannelThermalHONFModel(nn.Module):
                     "predicted_port_interface": predicted_interface,
                 }
 
-        if local_outputs is None:
+        if local_outputs is None and not final_only_selection:
             # No local response changed the module tokens; the base organizer
             # is already the exact final organizer and must not be recomputed.
             final_org_raw = base_output
@@ -402,6 +419,7 @@ class ChannelThermalHONFModel(nn.Module):
                 env_coords=env.env_coords,
                 module_present=adapter.module_present,
                 geometry_mode=self.config.core_honf.geometry_mode,
+                selection_override=None,
             )
             final_org_raw["module_features_raw"] = adapter.module_features
         decoder_output = self.core.decode_queries(
@@ -473,6 +491,12 @@ class ChannelThermalHONFModel(nn.Module):
                 }
             },
         }
+        if return_organizer_passes:
+            result["provisional_organizer_aux"] = (
+                {}
+                if provisional_org_raw is None
+                else self._legacy_organizer_aux(provisional_org_raw, adapter, env.env_coords)
+            )
         for key in (
             "pred_field_background",
             "pred_field_by_edge",
@@ -564,14 +588,48 @@ class ChannelThermalHONFModel(nn.Module):
             "hyper_strength",
             "edge_quality",
             "edge_active_mask",
+            "hard_selected_edge_mask",
+            "edge_transition_gate",
+            "candidate_edge_viable_mask",
+            "edge_viable_mask",
+            "effective_edge_mask",
             "candidate_edge_count",
+            "selected_edge_count",
+            "viable_selected_edge_count",
+            "hard_selected_edge_count",
+            "edge_transition_gate_sum",
+            "empty_selected_edge_count",
             "active_edge_count",
             "selection_module_coverage",
             "selection_environment_coverage",
-            "candidate_module_assignment_nonzero_fraction",
-            "candidate_environment_assignment_nonzero_fraction",
-            "module_assignment_nonzero_fraction",
-            "environment_assignment_nonzero_fraction",
+            "candidate_module_mass_fraction",
+            "candidate_environment_mass_fraction",
+            "candidate_module_purity",
+            "candidate_environment_purity",
+            "candidate_source_coords",
+            "candidate_source_scale",
+            "candidate_region_coords",
+            "candidate_region_scale",
+            "candidate_module_nonzero_fraction",
+            "candidate_environment_nonzero_fraction",
+            "selected_module_nonzero_fraction",
+            "selected_environment_nonzero_fraction",
+            "selected_module_probability_mass_min",
+            "selected_module_probability_mass_p05",
+            "selected_module_probability_mass_mean",
+            "selected_environment_probability_mass_min",
+            "selected_environment_probability_mass_p05",
+            "selected_environment_probability_mass_mean",
+            "pre_fallback_zero_support_module_rows",
+            "post_fallback_zero_support_module_rows",
+            "pre_fallback_zero_support_environment_rows",
+            "post_fallback_zero_support_environment_rows",
+            "selection_transition_fraction",
+            "module_sparsity_fraction",
+            "environment_sparsity_fraction",
+            "query_sparsity_fraction",
+            "training_progress_epoch",
+            "routing_execution_gathered",
             "module_env_context",
             "module_centers",
             "module_present",
@@ -582,7 +640,15 @@ class ChannelThermalHONFModel(nn.Module):
         }
         org = {key: core_output[key] for key in org_keys if key in core_output}
         org["hyper_thermal_region_coords"] = core_output.get("hyper_region_coords")
-        org["active_hyperedge_mask"] = (core_output["hyper_strength"] > 0.05).to(dtype=core_output["hyper_strength"].dtype)
+        if self.config.core_honf.organizer_mode == "exchangeable_slots":
+            # Visualize only selected viable field generators.
+            org["active_hyperedge_mask"] = core_output.get(
+                "effective_edge_mask",
+                core_output["edge_active_mask"],
+            )
+        else:
+            # Preserve the fixed-projection compatibility visualization.
+            org["active_hyperedge_mask"] = (core_output["hyper_strength"] > 0.05).to(dtype=core_output["hyper_strength"].dtype)
         org["module_centers"] = adapter.module_centers
         org["module_present"] = adapter.module_present
         org["heat_powers"] = adapter.heat_powers

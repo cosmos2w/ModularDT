@@ -10,6 +10,29 @@ import torch
 EPS = 1e-12
 
 
+def locality_bias(
+    radius_square: torch.Tensor,
+    *,
+    mode: str,
+    strength: float,
+    radius_cap: float,
+) -> torch.Tensor:
+    """Convert normalized squared distance into a routing-logit bias."""
+
+    if mode == "bounded_gaussian":
+        cap_square = radius_square.new_tensor(float(radius_cap) ** 2)
+        return -0.5 * float(strength) * torch.minimum(radius_square, cap_square)
+    if mode == "gaussian_bounded":
+        cap = radius_square.new_tensor(float(radius_cap))
+        return -0.5 * float(strength) * torch.clamp(radius_square, max=cap)
+    if mode == "compact_kernel":
+        compactness = torch.relu(1.0 - radius_square).square()
+        return float(strength) * torch.log(compactness + 1.0e-6)
+    if mode == "none":
+        return torch.zeros_like(radius_square)
+    raise ValueError(f"Unsupported locality mode: {mode!r}.")
+
+
 def entmax15(
     logits: torch.Tensor,
     *,
@@ -68,19 +91,56 @@ def normalize_assignment(
     mode: str,
     dim: int = -1,
     mask: Optional[torch.Tensor] = None,
+    entmax_blend: Optional[float] = None,
 ) -> torch.Tensor:
     """Apply a strict dense-softmax or exact-sparse entmax normalization."""
 
     if mode == "entmax15":
         return entmax15(logits, dim=dim, mask=mask)
-    if mode != "softmax":
+    if mode not in {"softmax", "scheduled"}:
         raise ValueError(f"Unsupported assignment normalizer: {mode!r}.")
+    blend: Optional[float] = None
+    if mode == "scheduled":
+        if entmax_blend is None:
+            raise ValueError("scheduled assignment normalization requires entmax_blend.")
+        blend = min(max(float(entmax_blend), 0.0), 1.0)
+        if blend >= 1.0:
+            return entmax15(logits, dim=dim, mask=mask)
     if mask is None:
-        return torch.softmax(logits, dim=dim)
-    valid = torch.broadcast_to(mask.to(device=logits.device, dtype=torch.bool), logits.shape)
-    masked_logits = logits.masked_fill(~valid, torch.finfo(logits.dtype).min)
-    probabilities = torch.softmax(masked_logits, dim=dim) * valid.to(dtype=logits.dtype)
+        softmax_probabilities = torch.softmax(logits, dim=dim)
+        valid = None
+    else:
+        valid = torch.broadcast_to(mask.to(device=logits.device, dtype=torch.bool), logits.shape)
+        masked_logits = logits.masked_fill(~valid, torch.finfo(logits.dtype).min)
+        softmax_probabilities = torch.softmax(masked_logits, dim=dim) * valid.to(dtype=logits.dtype)
+        softmax_probabilities = softmax_probabilities / softmax_probabilities.sum(
+            dim=dim, keepdim=True
+        ).clamp_min(EPS)
+    if mode == "softmax":
+        return softmax_probabilities
+    if blend is None:  # pragma: no cover - guarded by the mode branch above.
+        raise RuntimeError("Missing scheduled assignment blend.")
+    if blend <= 0.0:
+        return softmax_probabilities
+    entmax_probabilities = entmax15(logits, dim=dim, mask=mask)
+    probabilities = (1.0 - blend) * softmax_probabilities + blend * entmax_probabilities
+    if valid is not None:
+        probabilities = probabilities * valid.to(dtype=probabilities.dtype)
     return probabilities / probabilities.sum(dim=dim, keepdim=True).clamp_min(EPS)
 
 
-__all__ = ["entmax15", "normalize_assignment"]
+def schedule_fraction(epoch: int, start_epoch: int, transition_epochs: int) -> float:
+    """Return an exact piecewise-linear schedule fraction in ``[0,1]``."""
+
+    if int(start_epoch) < 0:
+        return 0.0
+    if int(epoch) <= int(start_epoch):
+        return 0.0
+    if int(transition_epochs) <= 0:
+        return 1.0
+    if int(epoch) >= int(start_epoch) + int(transition_epochs):
+        return 1.0
+    return float(int(epoch) - int(start_epoch)) / float(int(transition_epochs))
+
+
+__all__ = ["entmax15", "locality_bias", "normalize_assignment", "schedule_fraction"]

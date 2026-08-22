@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import copy
 import csv
+import hashlib
 import math
 import random
 from pathlib import Path
@@ -59,7 +60,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-val-batches", type=int, default=None)
     parser.add_argument("--run-name", type=str, default=None)
     parser.add_argument("--Run_ID", dest="run_id", type=str, default=None)
-    parser.add_argument("--resume-checkpoint", type=str, default=None, help="Resume training from a saved HONF-CL checkpoint.")
+    checkpoint_mode = parser.add_mutually_exclusive_group()
+    checkpoint_mode.add_argument("--resume-checkpoint", type=str, default=None, help="Resume training from a saved HONF-CL checkpoint.")
+    checkpoint_mode.add_argument(
+        "--initialize-checkpoint",
+        type=str,
+        default=None,
+        help="Initialize a new run from compatible name-and-shape matched checkpoint weights.",
+    )
     return parser.parse_args()
 
 
@@ -70,6 +78,46 @@ def normalize_run_id(value: Any, fallback: str = "0001") -> str:
     if not raw.isdigit():
         raise ValueError(f"Run_ID must be a numeric serial such as '0001'; got {raw!r}.")
     return f"{int(raw):04d}"
+
+
+def reuses_primary_validation_for_predicted_mode(local_port_condition_mode: str) -> bool:
+    """Return whether the primary validation pass already uses predicted ports."""
+
+    return str(local_port_condition_mode).lower() == "predicted"
+
+
+def should_save_latest_checkpoint(
+    epoch: int,
+    total_epochs: int,
+    checkpoint_config: Dict[str, Any],
+) -> bool:
+    """Apply the optional latest-checkpoint cadence while always saving the final epoch."""
+
+    if not bool(checkpoint_config.get("save_latest", True)):
+        return False
+    cadence = max(int(checkpoint_config.get("save_latest_every_epochs", 1)), 1)
+    return int(epoch) % cadence == 0 or int(epoch) == int(total_epochs)
+
+
+def should_save_milestone_checkpoint(
+    epoch: int,
+    checkpoint_config: Dict[str, Any],
+) -> bool:
+    """Return whether this exact epoch is an explicitly retained milestone."""
+
+    return int(epoch) in {
+        int(value) for value in checkpoint_config.get("save_epoch_milestones", [])
+    }
+
+
+def pack_scalar_metrics(tensor_metrics: Dict[str, torch.Tensor]) -> Dict[str, float]:
+    """Transfer a batch of scalar metrics to the CPU in one synchronization."""
+
+    names = tuple(tensor_metrics)
+    values = torch.stack(
+        tuple(tensor_metrics[name].detach().reshape(()) for name in names)
+    ).cpu().tolist()
+    return {name: float(value) for name, value in zip(names, values)}
 
 
 def resolve_run_id(args_value: Any, cfg: Dict[str, Any], training_cfg: Dict[str, Any]) -> str:
@@ -96,6 +144,178 @@ def resolve_run_id(args_value: Any, cfg: Dict[str, Any], training_cfg: Dict[str,
             )
         return normalized_training
     return normalize_run_id(training_value if training_value is not None else top_level, "0001")
+
+
+def _optimizer_group_record(
+    name: str,
+    learning_rate: float,
+    named_parameters: list[tuple[str, torch.nn.Parameter]],
+) -> Dict[str, Any]:
+    """Build a deterministic, human-auditable optimizer-group inventory."""
+
+    ordered_names = sorted(parameter_name for parameter_name, _ in named_parameters)
+    scalar_count = 0
+    scalar_count_complete = True
+    for _, parameter in named_parameters:
+        try:
+            scalar_count += int(parameter.numel())
+        except ValueError:
+            scalar_count_complete = False
+    return {
+        "name": name,
+        "learning_rate": float(learning_rate),
+        "parameter_tensor_count": len(named_parameters),
+        "trainable_scalar_count": scalar_count if scalar_count_complete else None,
+        "scalar_count_complete": scalar_count_complete,
+        "parameter_names": ordered_names,
+        "ordered_names_sha256": hashlib.sha256("\n".join(ordered_names).encode("utf-8")).hexdigest(),
+    }
+
+
+def _optimizer_inventory_digest(groups: list[Dict[str, Any]]) -> str:
+    structure = [
+        {
+            "name": group["name"],
+            "learning_rate": group["learning_rate"],
+            "parameter_names": group["parameter_names"],
+        }
+        for group in groups
+    ]
+    return hashlib.sha256(repr(structure).encode("utf-8")).hexdigest()
+
+
+def build_forward_optimizer(
+    model: ChannelThermalHONFModel,
+    training_config: Dict[str, Any],
+) -> tuple[torch.optim.AdamW, Dict[str, Any]]:
+    """Build the legacy one-group AdamW or the optional organizer split."""
+
+    learning_rate = float(training_config.get("learning_rate", 2.0e-4))
+    weight_decay = float(training_config.get("weight_decay", 1.0e-5))
+    organizer_learning_rate = training_config.get("organizer_learning_rate")
+    trainable = [
+        (name, parameter)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    ]
+    if organizer_learning_rate is None:
+        # This is intentionally the literal historical construction path.
+        optimizer = torch.optim.AdamW(
+            [param for param in model.parameters() if param.requires_grad],
+            lr=learning_rate,
+            weight_decay=weight_decay,
+        )
+        groups = [_optimizer_group_record("all", learning_rate, trainable)]
+        mode = "single"
+    else:
+        organizer_lr = float(organizer_learning_rate)
+        if organizer_lr <= 0.0:
+            raise ValueError("organizer_learning_rate must be null or positive.")
+        organizer_parameters = [
+            item for item in trainable if item[0].startswith("core.organizer.")
+        ]
+        prediction_parameters = [
+            item for item in trainable if not item[0].startswith("core.organizer.")
+        ]
+        if not organizer_parameters:
+            raise ValueError(
+                "A split optimizer requires trainable core.organizer.* parameters; "
+                "use organizer_learning_rate=null for this model."
+            )
+        if not prediction_parameters:
+            raise ValueError("A split optimizer requires non-organizer trainable parameters.")
+        optimizer = torch.optim.AdamW(
+            [
+                {
+                    "params": [parameter for _, parameter in organizer_parameters],
+                    "lr": organizer_lr,
+                },
+                {
+                    "params": [parameter for _, parameter in prediction_parameters],
+                    "lr": learning_rate,
+                },
+            ],
+            lr=learning_rate,
+            weight_decay=weight_decay,
+        )
+        groups = [
+            _optimizer_group_record("organizer", organizer_lr, organizer_parameters),
+            _optimizer_group_record("prediction", learning_rate, prediction_parameters),
+        ]
+        mode = "split"
+    inventory = {
+        "mode": mode,
+        "weight_decay": weight_decay,
+        "groups": groups,
+        "group_structure_sha256": _optimizer_inventory_digest(groups),
+    }
+    return optimizer, inventory
+
+
+def refresh_optimizer_group_inventory(
+    model: ChannelThermalHONFModel,
+    inventory: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Refresh scalar counts after lazy parameters have seen a real batch."""
+
+    named = dict(model.named_parameters())
+    refreshed = copy.deepcopy(inventory)
+    for group in refreshed["groups"]:
+        group_parameters = [(name, named[name]) for name in group["parameter_names"]]
+        group.update(
+            _optimizer_group_record(
+                group["name"],
+                group["learning_rate"],
+                group_parameters,
+            )
+        )
+    refreshed["group_structure_sha256"] = _optimizer_inventory_digest(refreshed["groups"])
+    return refreshed
+
+
+def _print_optimizer_group_inventory(inventory: Dict[str, Any]) -> None:
+    """Print the compact launch inventory; full sorted names remain on disk."""
+
+    for group in inventory["groups"]:
+        print(
+            "[optimizer] "
+            f"group={group['name']} lr={group['learning_rate']:.6g} "
+            f"tensors={group['parameter_tensor_count']} scalars={group['trainable_scalar_count']} "
+            f"names_sha256={group['ordered_names_sha256']}"
+        )
+
+
+def _validate_optimizer_resume_compatibility(
+    checkpoint: Dict[str, Any],
+    current_inventory: Dict[str, Any],
+) -> None:
+    """Reject one-group/split or split-structure drift before optimizer restore."""
+
+    optimizer_state = checkpoint.get("optimizer_state_dict")
+    if not optimizer_state:
+        return
+    saved_group_count = len(optimizer_state.get("param_groups") or [])
+    current_group_count = len(current_inventory["groups"])
+    if saved_group_count != current_group_count:
+        raise ValueError(
+            "Resume optimizer group structure does not match this launch "
+            f"({saved_group_count} saved versus {current_group_count} current groups). "
+            "Use --initialize-checkpoint to start a new run across optimizer modes."
+        )
+    saved_inventory = checkpoint.get("optimizer_group_inventory")
+    if current_group_count > 1:
+        if not isinstance(saved_inventory, dict):
+            raise ValueError(
+                "Split-optimizer resume checkpoint lacks optimizer group provenance. "
+                "Use --initialize-checkpoint instead."
+            )
+        if saved_inventory.get("group_structure_sha256") != current_inventory.get(
+            "group_structure_sha256"
+        ):
+            raise ValueError(
+                "Resume split-optimizer membership or learning rates do not match this launch. "
+                "Use --initialize-checkpoint instead."
+            )
 
 
 def sanitize_run_suffix(value: Any) -> str:
@@ -543,25 +763,31 @@ def run_epoch(
                 edge_strength_threshold=float(reg_cfg.get("edge_strength_threshold", 0.05)),
                 edge_strength_temperature=float(reg_cfg.get("edge_strength_temperature", 0.05)),
             )
-            metrics = {
-                "loss_total": float(loss.detach().cpu()),
-                "loss_field": float(loss_field.detach().cpu()),
-                "loss_internal_temperature": float(loss_internal.detach().cpu()),
-                "loss_interface": float(loss_interface.detach().cpu()),
-                "loss_port_condition": float(loss_port.detach().cpu()),
-                "loss_port_smoothness": float(loss_port_smoothness.detach().cpu()),
-                "loss_port_global_consistency": float(loss_port_global.detach().cpu()),
-                "loss_predicted_consistency": float(loss_predicted_consistency.detach().cpu()),
-                "loss_predicted_consistency_internal": float(pred_cons_internal.detach().cpu()),
-                "loss_predicted_consistency_interface": float(pred_cons_interface.detach().cpu()),
-                "loss_organizer": float(loss_org.detach().cpu()),
-                "effective_port_global_consistency_weight": float(port_global_weight),
-                "effective_predicted_consistency_weight": float(predicted_consistency_weight),
-                "effective_internal_temperature_weight": float(effective_internal_temperature_weight),
-                "effective_interface_weight": float(effective_interface_weight),
-                "field_mse": float(mse.detach().cpu()),
-                "temperature_mse": float(temp_mse.detach().cpu()),
-            }
+            metrics = pack_scalar_metrics(
+                {
+                    "loss_total": loss,
+                    "loss_field": loss_field,
+                    "loss_internal_temperature": loss_internal,
+                    "loss_interface": loss_interface,
+                    "loss_port_condition": loss_port,
+                    "loss_port_smoothness": loss_port_smoothness,
+                    "loss_port_global_consistency": loss_port_global,
+                    "loss_predicted_consistency": loss_predicted_consistency,
+                    "loss_predicted_consistency_internal": pred_cons_internal,
+                    "loss_predicted_consistency_interface": pred_cons_interface,
+                    "loss_organizer": loss_org,
+                    "field_mse": mse,
+                    "temperature_mse": temp_mse,
+                }
+            )
+            metrics.update(
+                {
+                    "effective_port_global_consistency_weight": float(port_global_weight),
+                    "effective_predicted_consistency_weight": float(predicted_consistency_weight),
+                    "effective_internal_temperature_weight": float(effective_internal_temperature_weight),
+                    "effective_interface_weight": float(effective_interface_weight),
+                }
+            )
             metrics.update(honf_diag)
         for key, value in metrics.items():
             sums[key] = sums.get(key, 0.0) + float(value)
@@ -606,6 +832,7 @@ def save_checkpoint(
     optimizer: Optional[torch.optim.Optimizer] = None,
     scaler: Any = None,
     best_metrics: Optional[Dict[str, float]] = None,
+    optimizer_group_inventory: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Atomically save model, optimizer, schema, and normalization metadata."""
 
@@ -649,7 +876,9 @@ def save_checkpoint(
             "best_metrics": dict(best_metrics or {}),
             "model_config": config_payload,
             "model_state_dict": model.state_dict(),
+            "selection_state": model.selection_state(),
             "optimizer_state_dict": None if optimizer is None else optimizer.state_dict(),
+            "optimizer_group_inventory": copy.deepcopy(optimizer_group_inventory),
             "scaler_state_dict": None if scaler is None else scaler.state_dict(),
             "train_config": train_config,
             "channel_order": list(dataset.channel_order),
@@ -758,6 +987,199 @@ def _validate_resume_checkpoint(
             raise ValueError(f"Resume checkpoint normalization mismatch for {name!r}.")
 
 
+def _file_sha256(path: Path) -> str:
+    """Return the immutable digest recorded for initialization provenance."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _validate_initialization_checkpoint(
+    checkpoint: Dict[str, Any],
+    *,
+    model: ChannelThermalHONFModel,
+    dataset: GlobalChannelThermalDataset,
+    dataset_config: Dict[str, Any],
+) -> ChannelThermalHONFConfig:
+    """Validate provenance required for safe partial parameter initialization."""
+
+    validate_checkpoint_identity(
+        checkpoint,
+        case_id="ThermalChannel",
+        model_family="honf_forward",
+        workflow="forward",
+    )
+    source_config_payload = dict(checkpoint.get("model_config") or {})
+    if not source_config_payload:
+        raise ValueError("Initialization checkpoint is missing model_config provenance.")
+    source_config = ChannelThermalHONFConfig.from_dict(source_config_payload)
+
+    expected_schemas = {
+        "channel_order": list(dataset.channel_order),
+        "interface_condition_feature_names": list(dataset.interface_condition_feature_names),
+        "interface_target_names": list(dataset.interface_target_names),
+    }
+    for key, expected in expected_schemas.items():
+        saved = checkpoint.get(key)
+        if saved is None or list(saved) != expected:
+            raise ValueError(f"Initialization checkpoint field schema mismatch for {key!r}.")
+    saved_field_dim = checkpoint.get("field_dim", source_config.core_honf.field_dim)
+    if int(saved_field_dim) != int(dataset.field_dim):
+        raise ValueError("Initialization checkpoint field_dim does not match the selected field schema.")
+
+    for key in ("dataset_id", "dataset_schema", "dataset_fingerprint"):
+        expected = dataset_config.get(key)
+        saved = checkpoint.get(key)
+        if expected is not None and (saved is None or saved != expected):
+            raise ValueError(f"Initialization checkpoint dataset identity mismatch for {key!r}.")
+
+    expected_global_config = {
+        "normalize_inputs": bool(dataset_config.get("normalize_inputs", False)),
+        "normalize_targets": bool(dataset_config.get("normalize_targets", False)),
+    }
+    saved_global_config = checkpoint.get("global_normalization_config")
+    if not isinstance(saved_global_config, dict) or {
+        key: bool(saved_global_config.get(key, False)) for key in expected_global_config
+    } != expected_global_config:
+        raise ValueError("Initialization checkpoint global normalization configuration mismatch.")
+    saved_stats = checkpoint.get("global_normalization_stats")
+    if not isinstance(saved_stats, dict) or set(saved_stats) != set(dataset.normalizer.stats):
+        raise ValueError("Initialization checkpoint global normalization statistics inventory mismatch.")
+    for name, current in dataset.normalizer.stats.items():
+        if not np.allclose(
+            np.asarray(saved_stats[name]), np.asarray(current), rtol=1.0e-7, atol=1.0e-7
+        ):
+            raise ValueError(f"Initialization checkpoint normalization mismatch for {name!r}.")
+
+    expected_local_config = {
+        "normalize_inputs": bool(model.local_coupling.local_surrogate_normalize_inputs),
+        "normalize_targets": bool(model.local_coupling.local_surrogate_normalize_targets),
+    }
+    saved_local_config = checkpoint.get("local_normalization_config")
+    if model.local_surrogate_attached and (
+        not isinstance(saved_local_config, dict)
+        or {key: bool(saved_local_config.get(key, False)) for key in expected_local_config}
+        != expected_local_config
+    ):
+        raise ValueError("Initialization checkpoint local normalization configuration mismatch.")
+    if model.local_surrogate_attached:
+        local_buffer_names = {
+            "module_params_mean": "local_module_params_mean",
+            "module_params_std": "local_module_params_std",
+            "port_tokens_mean": "local_port_tokens_mean",
+            "port_tokens_std": "local_port_tokens_std",
+            "internal_temperature_mean": "local_internal_temperature_mean",
+            "internal_temperature_std": "local_internal_temperature_std",
+            "interface_targets_mean": "local_interface_targets_mean",
+            "interface_targets_std": "local_interface_targets_std",
+        }
+        expected_local_stats = {
+            public_name: getattr(model.local_coupling, buffer_name).detach().cpu().numpy()
+            for public_name, buffer_name in local_buffer_names.items()
+            if getattr(model.local_coupling, buffer_name).numel() > 0
+        }
+        saved_local_stats = checkpoint.get("local_normalization_stats")
+        if not isinstance(saved_local_stats, dict) or set(saved_local_stats) != set(expected_local_stats):
+            raise ValueError("Initialization checkpoint local normalization statistics inventory mismatch.")
+        for name, current in expected_local_stats.items():
+            if not np.allclose(
+                np.asarray(saved_local_stats[name]), current, rtol=1.0e-7, atol=1.0e-7
+            ):
+                raise ValueError(f"Initialization checkpoint local normalization mismatch for {name!r}.")
+    return source_config
+
+
+def _partial_initialize_model(
+    model: ChannelThermalHONFModel,
+    checkpoint: Dict[str, Any],
+    *,
+    source_config: ChannelThermalHONFConfig,
+) -> Dict[str, Any]:
+    """Load only compatible parameters and return a complete key inventory."""
+
+    source_state = strip_module_prefix(checkpoint["model_state_dict"])
+    target_parameters = dict(model.named_parameters())
+    target_state = model.state_dict()
+    cross_assembly = (
+        source_config.core_honf.field_assembly_mode == "context_fusion"
+        and model.config.core_honf.field_assembly_mode == "edge_additive"
+    )
+    fixed_to_exchangeable = (
+        source_config.core_honf.organizer_mode == "fixed_projection"
+        and model.config.core_honf.organizer_mode == "exchangeable_slots"
+    )
+    physical_output_prefixes = (
+        "core.decoder.pred_head.",
+        "core.decoder.mean_head.",
+        "core.decoder.residual_head.",
+        "fallback_heads.internal_head.",
+        "fallback_heads.interface_head.",
+        "local_coupling.port_refinement_head.",
+    )
+    runtime_state_suffixes = (
+        "._selection_epoch_state",
+        "._selection_total_epochs_state",
+    )
+    loaded: list[str] = []
+    skipped: list[Dict[str, Any]] = []
+    unexpected: list[str] = []
+    loadable: Dict[str, torch.Tensor] = {}
+
+    for name, source_value in source_state.items():
+        if name.endswith(runtime_state_suffixes):
+            skipped.append({"key": name, "reason": "runtime_selection_state"})
+            continue
+        if fixed_to_exchangeable and name.startswith("core.organizer."):
+            skipped.append({"key": name, "reason": "fixed_projection_organizer"})
+            continue
+        if cross_assembly and name.startswith(physical_output_prefixes):
+            skipped.append({"key": name, "reason": "context_to_additive_output_head"})
+            continue
+        target_value = target_parameters.get(name)
+        if target_value is None:
+            if name in target_state:
+                skipped.append({"key": name, "reason": "non_parameter_state"})
+            else:
+                unexpected.append(name)
+            continue
+        try:
+            target_shape = tuple(target_value.shape)
+        except (RuntimeError, ValueError):
+            target_shape = None
+        source_shape = tuple(source_value.shape)
+        if target_shape is None:
+            skipped.append({"key": name, "reason": "uninitialized_target_shape"})
+            continue
+        if target_shape is not None and source_shape != target_shape:
+            skipped.append(
+                {
+                    "key": name,
+                    "reason": "shape_mismatch",
+                    "source_shape": list(source_shape),
+                    "target_shape": list(target_shape),
+                }
+            )
+            continue
+        loadable[name] = source_value
+        loaded.append(name)
+
+    model.load_state_dict(loadable, strict=False)
+    missing = sorted(name for name in target_parameters if name not in loadable)
+    return {
+        "loaded": sorted(loaded),
+        "skipped": sorted(skipped, key=lambda item: str(item["key"])),
+        "missing": missing,
+        "unexpected": sorted(unexpected),
+        "source_parameter_or_state_count": len(source_state),
+        "target_parameter_count": len(target_parameters),
+        "source_organizer_mode": source_config.core_honf.organizer_mode,
+        "target_organizer_mode": model.config.core_honf.organizer_mode,
+    }
+
+
 def write_metrics_row(path: Path, fieldnames: Iterable[str], row: Dict[str, Any]) -> None:
     """Write metrics row."""
 
@@ -813,6 +1235,18 @@ def _read_metric_history(metrics_path: Path) -> Dict[str, list[float]]:
                     continue
                 if math.isfinite(parsed):
                     columns.setdefault(key, []).append(parsed)
+    # Read-only aliases keep plots usable for historical metrics.csv files.
+    aliases = {
+        "selected_edge_count": "active_edge_count",
+        "functional_edge_count": "active_edge_count",
+        "soft_functional_edge_count": "soft_active_edge_count",
+    }
+    for new_name, old_name in aliases.items():
+        for prefix in ("", "val_"):
+            new_key = prefix + new_name
+            old_key = prefix + old_name
+            if new_key not in columns and old_key in columns:
+                columns[new_key] = list(columns[old_key])
     return columns
 
 
@@ -825,8 +1259,7 @@ def _plot_metric_group(
     ylabel: str = "value",
     log_scale: bool = True,
     y_min_zero: bool = False,
-    reference_y: Optional[float] = None,
-    reference_label: Optional[str] = None,
+    reference_lines: tuple[tuple[float, str], ...] = (),
 ) -> None:
     """Perform the plot metric group operation used by this module."""
 
@@ -841,11 +1274,16 @@ def _plot_metric_group(
         if key.startswith("val_"):
             label = f"val {label}"
         ax.plot(epochs[: len(values)], values, label=label)
-    if reference_y is not None and epochs:
-        # Active-edge count is thresholded and can be lower than total H. The
-        # reference line makes `num_hyperedges` visible without changing the
-        # scalar diagnostic definition.
-        ax.axhline(float(reference_y), color="black", linestyle="--", linewidth=1.0, alpha=0.55, label=reference_label or "reference")
+    if epochs:
+        for index, (reference_y, reference_label) in enumerate(reference_lines):
+            ax.axhline(
+                float(reference_y),
+                color="black" if index == 0 else "#666666",
+                linestyle="--" if index == 0 else ":",
+                linewidth=1.0,
+                alpha=0.60,
+                label=reference_label,
+            )
     ax.set_title(title)
     ax.set_xlabel("epoch")
     ax.set_ylabel(ylabel)
@@ -853,24 +1291,33 @@ def _plot_metric_group(
         ax.set_yscale("log")
     if y_min_zero:
         _, top = ax.get_ylim()
-        ax.set_ylim(bottom=0.0, top=max(float(top), float(reference_y or 0.0) * 1.10, 1.0))
+        reference_max = max((value for value, _ in reference_lines), default=0.0)
+        ax.set_ylim(bottom=0.0, top=max(float(top), float(reference_max) * 1.10, 1.0))
     ax.grid(True, alpha=0.25)
     if ax.lines:
         ax.legend(fontsize=8)
 
 
-def _resolved_num_hyperedges(run_dir: Path) -> Optional[int]:
-    """Perform the resolved num hyperedges operation used by this module."""
+def _resolved_active_edge_references(run_dir: Path) -> tuple[tuple[float, str], ...]:
+    """Return configured candidate/selection references for activity plots."""
 
     config_path = run_dir / "config_resolved.json"
     if not config_path.exists():
-        return None
+        return ()
     try:
         payload = read_json(config_path)
-        value = payload.get("model", {}).get("core_honf", {}).get("num_hyperedges")
-        return None if value is None else int(value)
+        core = payload.get("model", {}).get("core_honf", {})
+        if core.get("organizer_mode", "fixed_projection") == "exchangeable_slots":
+            references = []
+            for key in ("edge_capacity", "initial_active_edges"):
+                value = core.get(key)
+                if value is not None:
+                    references.append((float(value), f"{key}={int(value)}"))
+            return tuple(references)
+        value = core.get("num_hyperedges")
+        return () if value is None else ((float(value), f"num_hyperedges={int(value)}"),)
     except (OSError, TypeError, ValueError):
-        return None
+        return ()
 
 
 def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
@@ -891,7 +1338,7 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
     # Detailed scalar diagnostics remain in metrics.csv and focused plots below.
     diagnostics_dir = run_dir / "diagnostic_plots"
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
-    num_hyperedges = _resolved_num_hyperedges(run_dir)
+    active_edge_references = _resolved_active_edge_references(run_dir)
     stale_root_plots = [
         "loss_curves.png",
         "loss_total_curve.png",
@@ -924,7 +1371,7 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
             False,
         ),
         ("Temperature", ("temperature_mse", "val_temperature_mse"), "mse", True, False),
-        ("Thresholded Active H Edges", ("active_edge_count", "val_active_edge_count", "soft_active_edge_count", "val_soft_active_edge_count"), "edges", False, True),
+        ("Selected and Functional H-Edge Activity", ("selected_edge_count", "val_selected_edge_count", "functional_edge_count", "val_functional_edge_count", "soft_functional_edge_count", "val_soft_functional_edge_count"), "edges", False, True),
     ]
     fig, axes = plt.subplots(2, 3, figsize=(15.5, 7.4), constrained_layout=True)
     for ax, (title, keys, ylabel, log_scale, y_min_zero) in zip(axes.reshape(-1), panels):
@@ -936,8 +1383,7 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
             ylabel=ylabel,
             log_scale=log_scale,
             y_min_zero=y_min_zero,
-            reference_y=float(num_hyperedges) if y_min_zero and num_hyperedges is not None else None,
-            reference_label=f"num_hyperedges={num_hyperedges}" if y_min_zero and num_hyperedges is not None else None,
+            reference_lines=active_edge_references if y_min_zero else (),
         )
     fig.suptitle("HONF-CL Training Overview", fontsize=13)
     fig.savefig(str(run_dir / "loss_curve.png"), dpi=160)
@@ -968,16 +1414,58 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
             False,
         ),
         "honf_entropy_activity_curve.png": (
-            "HONF Entropy and Thresholded Active H Edges",
+            "HONF Entropy and Selected H-Edge Count",
             (
                 "A_mh_entropy",
                 "val_A_mh_entropy",
                 "A_eh_entropy",
                 "val_A_eh_entropy",
-                "active_edge_count",
-                "val_active_edge_count",
+                "selected_edge_count",
+                "val_selected_edge_count",
+                "functional_edge_count",
+                "val_functional_edge_count",
             ),
             "value",
+            False,
+            True,
+        ),
+        "honf_candidate_mass_purity_curve.png": (
+            "Candidate Mass Fractions and Purities",
+            (
+                "candidate_module_mass_fraction_min",
+                "val_candidate_module_mass_fraction_min",
+                "candidate_environment_mass_fraction_min",
+                "val_candidate_environment_mass_fraction_min",
+                "candidate_module_purity_mean",
+                "val_candidate_module_purity_mean",
+                "candidate_environment_purity_mean",
+                "val_candidate_environment_purity_mean",
+            ),
+            "fraction",
+            False,
+            True,
+        ),
+        "honf_candidate_scale_curve.png": (
+            "Candidate Source and Region Scales",
+            (
+                "candidate_source_scale_mean",
+                "val_candidate_source_scale_mean",
+                "candidate_region_scale_mean",
+                "val_candidate_region_scale_mean",
+            ),
+            "scale",
+            False,
+            True,
+        ),
+        "honf_edge_contribution_fraction_curve.png": (
+            "Additive Edge Contribution Fractions",
+            (
+                "edge_contribution_fraction_min",
+                "val_edge_contribution_fraction_min",
+                "edge_contribution_fraction_max",
+                "val_edge_contribution_fraction_max",
+            ),
+            "fraction",
             False,
             True,
         ),
@@ -1008,8 +1496,7 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
             ylabel=ylabel,
             log_scale=log_scale,
             y_min_zero=y_min_zero,
-            reference_y=float(num_hyperedges) if y_min_zero and num_hyperedges is not None else None,
-            reference_label=f"num_hyperedges={num_hyperedges}" if y_min_zero and num_hyperedges is not None else None,
+            reference_lines=active_edge_references if y_min_zero else (),
         )
         fig.savefig(str(diagnostics_dir / filename), dpi=160)
         plt.close(fig)
@@ -1129,16 +1616,16 @@ def run_from_config(
         collate_fn=collator,
     )
 
-    optimizer = torch.optim.AdamW(
-        [param for param in model.parameters() if param.requires_grad],
-        lr=float(training_cfg.get("learning_rate", 2.0e-4)),
-        weight_decay=float(training_cfg.get("weight_decay", 1.0e-5)),
-    )
+    optimizer, optimizer_group_inventory = build_forward_optimizer(model, training_cfg)
     scaler = make_grad_scaler(device, bool(training_cfg.get("amp", False)))
     epochs = int(args.epochs if args.epochs is not None else training_cfg.get("epochs", 200))
     max_train_batches = args.max_train_batches if args.max_train_batches is not None else training_cfg.get("max_train_batches_per_epoch")
     max_val_batches = args.max_val_batches if args.max_val_batches is not None else training_cfg.get("max_val_batches")
     resume_checkpoint = resolve_demo_path(args.resume_checkpoint) if args.resume_checkpoint else None
+    initialize_arg = getattr(args, "initialize_checkpoint", None)
+    initialize_checkpoint = resolve_demo_path(initialize_arg) if initialize_arg else None
+    if resume_checkpoint is not None and initialize_checkpoint is not None:
+        raise ValueError("--resume-checkpoint and --initialize-checkpoint are mutually exclusive.")
 
     paths_cfg = cfg.get("paths", {})
     saved_root = ensure_dir(resolve_demo_path(paths_cfg.get("saved_model_dir", "./Trained_Results/ThermalChannel/HONF_Forward_Runs")))
@@ -1155,6 +1642,13 @@ def run_from_config(
     else:
         run_dir = ensure_dir(resume_checkpoint.parent)
     write_json(run_dir / "config_resolved.json", cfg)
+    write_json(run_dir / "optimizer_group_inventory.json", optimizer_group_inventory)
+    optimizer_inventory_announced = all(
+        bool(group["scalar_count_complete"])
+        for group in optimizer_group_inventory["groups"]
+    )
+    if optimizer_inventory_announced:
+        _print_optimizer_group_inventory(optimizer_group_inventory)
     metrics_path = run_dir / "metrics.csv"
     fieldnames = [
         "epoch",
@@ -1205,6 +1699,67 @@ def run_from_config(
     best_temperature = math.inf
     best_predicted = math.inf
     start_epoch = 1
+    if initialize_checkpoint is not None:
+        checkpoint = load_trusted_checkpoint(initialize_checkpoint, map_location=device)
+        source_config = _validate_initialization_checkpoint(
+            checkpoint,
+            model=model,
+            dataset=train_dataset,
+            dataset_config=dataset_cfg,
+        )
+        # Materialize every lazy adapter/core parameter from the current data
+        # schema before exact shape comparison. This is a no-grad inference
+        # pass and does not restore or advance any checkpoint training state.
+        materialization_batch = recursive_to_device(next(iter(train_loader)), device)
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            model(
+                **make_model_inputs(
+                    materialization_batch,
+                    local_port_condition_mode="predicted",
+                    mixed_teacher_ratio=0.0,
+                    return_predicted_port_outputs=False,
+                    return_port_global_consistency=False,
+                )
+            )
+        model.train(was_training)
+        initialization_inventory = _partial_initialize_model(
+            model,
+            checkpoint,
+            source_config=source_config,
+        )
+        optimizer_group_inventory = refresh_optimizer_group_inventory(
+            model,
+            optimizer_group_inventory,
+        )
+        write_json(run_dir / "optimizer_group_inventory.json", optimizer_group_inventory)
+        if not optimizer_inventory_announced:
+            _print_optimizer_group_inventory(optimizer_group_inventory)
+            optimizer_inventory_announced = True
+        initialization_inventory.update(
+            {
+                "checkpoint_path": str(initialize_checkpoint),
+                "checkpoint_sha256": _file_sha256(initialize_checkpoint),
+                "source_field_assembly_mode": source_config.core_honf.field_assembly_mode,
+                "target_field_assembly_mode": model_config.core_honf.field_assembly_mode,
+                "source_organizer_mode": source_config.core_honf.organizer_mode,
+                "target_organizer_mode": model_config.core_honf.organizer_mode,
+            }
+        )
+        write_json(run_dir / "initialization_inventory.json", initialization_inventory)
+        cfg["initialization"] = {
+            "checkpoint_path": str(initialize_checkpoint),
+            "checkpoint_sha256": initialization_inventory["checkpoint_sha256"],
+            "inventory_path": str(run_dir / "initialization_inventory.json"),
+        }
+        write_json(run_dir / "config_resolved.json", cfg)
+        print(
+            f"[initialize] loaded {len(initialization_inventory['loaded'])} parameters from "
+            f"{initialize_checkpoint}; skipped={len(initialization_inventory['skipped'])}, "
+            f"missing={len(initialization_inventory['missing'])}, "
+            f"unexpected={len(initialization_inventory['unexpected'])}"
+        )
     if resume_checkpoint is not None:
         repair_metrics_csv_for_append(metrics_path)
         checkpoint = load_trusted_checkpoint(resume_checkpoint, map_location=device)
@@ -1215,7 +1770,16 @@ def run_from_config(
             dataset=train_dataset,
             dataset_config=dataset_cfg,
         )
+        _validate_optimizer_resume_compatibility(checkpoint, optimizer_group_inventory)
         model.load_state_dict(strip_module_prefix(checkpoint["model_state_dict"]), strict=True)
+        optimizer_group_inventory = refresh_optimizer_group_inventory(
+            model,
+            optimizer_group_inventory,
+        )
+        write_json(run_dir / "optimizer_group_inventory.json", optimizer_group_inventory)
+        if not optimizer_inventory_announced:
+            _print_optimizer_group_inventory(optimizer_group_inventory)
+            optimizer_inventory_announced = True
         optimizer_state = checkpoint.get("optimizer_state_dict")
         if optimizer_state:
             optimizer.load_state_dict(optimizer_state)
@@ -1257,6 +1821,14 @@ def run_from_config(
             predicted_consistency_weight=pred_consistency_weight,
             gradient_clip_norm=gradient_clip_norm,
         )
+        optimizer_group_inventory = refresh_optimizer_group_inventory(
+            model,
+            optimizer_group_inventory,
+        )
+        write_json(run_dir / "optimizer_group_inventory.json", optimizer_group_inventory)
+        if not optimizer_inventory_announced:
+            _print_optimizer_group_inventory(optimizer_group_inventory)
+            optimizer_inventory_announced = True
         val_metrics = run_epoch(
             model,
             val_loader,
@@ -1273,7 +1845,7 @@ def run_from_config(
             predicted_consistency_weight=pred_consistency_weight,
             gradient_clip_norm=gradient_clip_norm,
         )
-        if effective_mode == "predicted" and float(effective_ratio) == 0.0:
+        if reuses_primary_validation_for_predicted_mode(effective_mode):
             predicted_val_metrics = val_metrics
         else:
             predicted_val_metrics = run_epoch(
@@ -1307,22 +1879,24 @@ def run_from_config(
         if math.isfinite(total_metric) and total_metric < best_total:
             best_total = total_metric
             if bool(checkpoint_cfg.get("save_best", True)):
-                save_checkpoint(run_dir / "best_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted))
+                save_checkpoint(run_dir / "best_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         if math.isfinite(field_metric) and field_metric < best_field:
             best_field = field_metric
             if bool(checkpoint_cfg.get("save_best_field_mse", True)):
-                save_checkpoint(run_dir / "best_by_field_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_field, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted))
+                save_checkpoint(run_dir / "best_by_field_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_field, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         if math.isfinite(temp_metric) and temp_metric < best_temperature:
             best_temperature = temp_metric
             if bool(checkpoint_cfg.get("save_best_temperature_mse", True)):
-                save_checkpoint(run_dir / "best_by_temperature_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_temperature, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted))
+                save_checkpoint(run_dir / "best_by_temperature_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_temperature, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         predicted_metric = float(row["val_predicted_loss_total"])
         if math.isfinite(predicted_metric) and predicted_metric < best_predicted:
             best_predicted = predicted_metric
             if bool(checkpoint_cfg.get("save_best_predicted", True)):
-                save_checkpoint(run_dir / "best_predicted_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_predicted, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted))
-        if bool(checkpoint_cfg.get("save_latest", True)):
-            save_checkpoint(run_dir / "latest_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted))
+                save_checkpoint(run_dir / "best_predicted_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_predicted, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
+        if should_save_latest_checkpoint(epoch, epochs, checkpoint_cfg):
+            save_checkpoint(run_dir / "latest_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
+        if should_save_milestone_checkpoint(epoch, checkpoint_cfg):
+            save_checkpoint(run_dir / f"epoch_{epoch:04d}_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         plot_every = max(int(training_cfg.get("plot_every_epochs", 10)), 1)
         if epoch % plot_every == 0 or epoch == epochs:
             save_global_loss_plots(metrics_path, run_dir)
@@ -1348,6 +1922,7 @@ def run_from_config(
             "train_cases": len(train_dataset),
             "val_cases": len(val_dataset),
             "model_config": model_config.to_dict(),
+            "optimizer_group_inventory": optimizer_group_inventory,
         },
     )
     print(f"[done] saved global HONF-CL physical-coupling run: {run_dir}")

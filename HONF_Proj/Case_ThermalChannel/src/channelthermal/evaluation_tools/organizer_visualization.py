@@ -466,6 +466,7 @@ def render_channelthermal_organization_summary_matrices(
     *,
     module_radius: float,
     channel_order: Optional[Sequence[str]] = None,
+    sort_environment: bool = False,
 ) -> None:
     """Render readable 2x2 assignment, mass, and physical mini-map summary."""
     del channel_order
@@ -481,7 +482,11 @@ def render_channelthermal_organization_summary_matrices(
     dst = arrays["dst"]
     colors = _hyperedge_colors(strength.shape[0])
     dominant, confidence = _dominant_env(A_eh, env_coords.shape[0])
-    sort_idx = np.lexsort((np.arange(A_eh.shape[0]), dominant)) if A_eh.size else np.arange(0)
+    sort_idx = (
+        np.lexsort((np.arange(A_eh.shape[0]), dominant))
+        if sort_environment and A_eh.size
+        else np.arange(A_eh.shape[0])
+    )
 
     fig = plt.figure(figsize=(13.6, 9.0), constrained_layout=True)
     gs = fig.add_gridspec(2, 2)
@@ -506,16 +511,20 @@ def render_channelthermal_organization_summary_matrices(
 
     A_eh_sorted = A_eh[sort_idx] if A_eh.size else A_eh
     im_eh = ax_eh.imshow(A_eh_sorted, aspect="auto", cmap="viridis", vmin=0.0, vmax=max(float(np.nanmax(A_eh)) if A_eh.size else 1.0, 1.0e-6))
-    ax_eh.set_title(f"Environment -> Hyperedge assignment A_eh{_collapse_title_suffix(arrays)}")
+    order_label = "sorted by dominant edge" if sort_environment else "physical token order"
+    ax_eh.set_title(
+        f"Environment -> Hyperedge assignment A_eh ({order_label})"
+        f"{_collapse_title_suffix(arrays)}"
+    )
     ax_eh.set_xlabel("hyperedge")
-    ax_eh.set_ylabel("sorted env token index")
+    ax_eh.set_ylabel("environment token index" if not sort_environment else "sorted env row")
     ax_eh.set_xticks(np.arange(strength.shape[0]))
     ax_eh.set_xticklabels([f"H{i}" for i in range(strength.shape[0])])
     max_ticks = min(8, A_eh_sorted.shape[0])
     if max_ticks > 0:
         tick_pos = np.linspace(0, A_eh_sorted.shape[0] - 1, max_ticks, dtype=int)
         ax_eh.set_yticks(tick_pos)
-        ax_eh.set_yticklabels([str(int(idx)) for idx in tick_pos])
+        ax_eh.set_yticklabels([str(int(sort_idx[idx])) for idx in tick_pos])
     fig.colorbar(im_eh, ax=ax_eh, fraction=0.046, pad=0.04)
     x = np.arange(strength.shape[0])
     width = 0.25

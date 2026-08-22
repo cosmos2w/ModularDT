@@ -22,6 +22,7 @@ class WorkflowRequest:
     max_train_batches: int | None = None
     max_val_batches: int | None = None
     resume_checkpoint: str | None = None
+    initialize_checkpoint: str | None = None
     local_checkpoint: str | None = None
     checkpoint: str | None = None
     saved_root: str | None = None

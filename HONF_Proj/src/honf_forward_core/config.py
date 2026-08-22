@@ -67,6 +67,7 @@ _FORWARD_MODE_DEFAULTS: Dict[str, Any] = {
     "organizer_mode": "fixed_projection",
     "mechanism_state_mode": "residual_concat",
     "field_assembly_mode": "context_fusion",
+    "additive_background_mode": "dense_query_attention",
     "module_assignment_normalizer": "softmax",
     "environment_assignment_normalizer": "softmax",
     "query_assignment_normalizer": "softmax",
@@ -98,26 +99,48 @@ class UnifiedForwardConfig:
 
     edge_selection_mode: str = "all"
     selection_warmup_epochs: int = 200
+    selection_start_epoch: int = -1
+    selection_transition_epochs: int = 0
+    selection_warmup_mode: str = "legacy"
+    selection_minimum_module_mass_fraction: float = 0.01
+    selection_minimum_environment_mass_fraction: float = 0.01
     selection_coverage_rate: float = 0.95
     selection_token_threshold: float = 0.50
     selection_maximum_redundancy: float = 0.85
+    candidate_module_mass_fraction_floor: float = 0.01
+    candidate_environment_mass_fraction_floor: float = 0.01
 
     module_assignment_normalizer: str = "softmax"
     environment_assignment_normalizer: str = "softmax"
     query_assignment_normalizer: str = "softmax"
+    module_sparsity_start_epoch: int = -1
+    module_sparsity_transition_epochs: int = 0
+    environment_sparsity_start_epoch: int = -1
+    environment_sparsity_transition_epochs: int = 0
+    query_sparsity_start_epoch: int = -1
+    query_sparsity_transition_epochs: int = 0
     entmax_alpha: float = 1.5
 
     environment_locality_mode: str = "none"
     environment_locality_strength: float = 1.0
+    query_locality_mode: str = "inherit_environment"
+    query_locality_strength: Optional[float] = None
+    locality_radius_cap: float = 3.0
     minimum_region_scale: float = 0.05
 
     mechanism_state_mode: str = "residual_concat"
     mechanism_latent_residual_scale: float = 0.35
 
     field_assembly_mode: str = "context_fusion"
+    additive_background_mode: str = "dense_query_attention"
+    additive_edge_gate_init: float = 0.10
+    additive_output_init_std: float = 1.0e-3
     routing_execution: str = "dense"
+    gathered_execution_start_epoch: int = -1
     query_edge_limit: int = 0
     query_module_limit: int = 0
+    query_edge_retained_mass_floor: float = 0.0
+    module_incidence_retained_mass_floor: float = 0.0
 
     topology_signature_enabled: bool = False
     hidden_dim: int = 128
@@ -181,27 +204,61 @@ class UnifiedForwardConfig:
             raise ValueError("edge_selection_mode must be 'all' or 'quality_coverage'.")
         if int(self.selection_warmup_epochs) < 0:
             raise ValueError("selection_warmup_epochs must be >= 0.")
+        if int(self.selection_start_epoch) < -1:
+            raise ValueError("selection_start_epoch must be >= -1.")
+        if int(self.selection_transition_epochs) < 0:
+            raise ValueError("selection_transition_epochs must be nonnegative.")
+        if self.selection_warmup_mode not in {"legacy", "all_viable"}:
+            raise ValueError("selection_warmup_mode must be 'legacy' or 'all_viable'.")
+        if not 0.0 < float(self.selection_minimum_module_mass_fraction) <= 1.0:
+            raise ValueError("selection_minimum_module_mass_fraction must be in (0, 1].")
+        if not 0.0 < float(self.selection_minimum_environment_mass_fraction) <= 1.0:
+            raise ValueError("selection_minimum_environment_mass_fraction must be in (0, 1].")
         if not 0.0 < float(self.selection_coverage_rate) <= 1.0:
             raise ValueError("selection_coverage_rate must be in (0, 1].")
         if not 0.0 < float(self.selection_token_threshold) <= 1.0:
             raise ValueError("selection_token_threshold must be in (0, 1].")
         if not 0.0 <= float(self.selection_maximum_redundancy) <= 1.0:
             raise ValueError("selection_maximum_redundancy must be in [0, 1].")
+        if not 0.0 < float(self.candidate_module_mass_fraction_floor) <= 1.0:
+            raise ValueError("candidate_module_mass_fraction_floor must be in (0, 1].")
+        if not 0.0 < float(self.candidate_environment_mass_fraction_floor) <= 1.0:
+            raise ValueError("candidate_environment_mass_fraction_floor must be in (0, 1].")
         normalizers = {
             self.module_assignment_normalizer,
             self.environment_assignment_normalizer,
             self.query_assignment_normalizer,
         }
-        if not normalizers <= {"softmax", "entmax15"}:
-            raise ValueError("assignment normalizers must be 'softmax' or 'entmax15'.")
+        if not normalizers <= {"softmax", "entmax15", "scheduled"}:
+            raise ValueError("assignment normalizers must be 'softmax', 'entmax15', or 'scheduled'.")
+        sparsity_schedules = (
+            ("module", self.module_assignment_normalizer, self.module_sparsity_start_epoch, self.module_sparsity_transition_epochs),
+            ("environment", self.environment_assignment_normalizer, self.environment_sparsity_start_epoch, self.environment_sparsity_transition_epochs),
+            ("query", self.query_assignment_normalizer, self.query_sparsity_start_epoch, self.query_sparsity_transition_epochs),
+        )
+        for name, normalizer, start, transition in sparsity_schedules:
+            if int(start) < -1 or int(transition) < 0:
+                raise ValueError(f"{name} sparsity schedule values must be >= -1/0 respectively.")
+            if normalizer == "scheduled" and (int(start) < 0 or int(transition) <= 0):
+                raise ValueError(f"scheduled {name} normalization requires a nonnegative start and positive transition.")
         if not 1.0 < float(self.entmax_alpha) <= 2.0:
             raise ValueError("entmax_alpha must be in (1, 2].")
-        if "entmax15" in normalizers and abs(float(self.entmax_alpha) - 1.5) > 1.0e-8:
-            raise ValueError("entmax15 assignment modes require entmax_alpha=1.5.")
-        if self.environment_locality_mode not in {"none", "compact_kernel"}:
-            raise ValueError("environment_locality_mode must be 'none' or 'compact_kernel'.")
+        if normalizers & {"entmax15", "scheduled"} and abs(float(self.entmax_alpha) - 1.5) > 1.0e-8:
+            raise ValueError("entmax15 and scheduled assignment modes require entmax_alpha=1.5.")
+        locality_modes = {"none", "compact_kernel", "bounded_gaussian", "gaussian_bounded"}
+        if self.environment_locality_mode not in locality_modes:
+            raise ValueError(
+                "environment_locality_mode must be 'none', 'compact_kernel', "
+                "'bounded_gaussian', or 'gaussian_bounded'."
+            )
+        if self.query_locality_mode not in locality_modes | {"inherit_environment"}:
+            raise ValueError("query_locality_mode must be a locality mode or 'inherit_environment'.")
         if float(self.environment_locality_strength) < 0.0:
             raise ValueError("environment_locality_strength must be >= 0.")
+        if self.query_locality_strength is not None and float(self.query_locality_strength) < 0.0:
+            raise ValueError("query_locality_strength must be >= 0 when provided.")
+        if float(self.locality_radius_cap) <= 0.0:
+            raise ValueError("locality_radius_cap must be positive.")
         if float(self.minimum_region_scale) <= 0.0:
             raise ValueError("minimum_region_scale must be positive.")
         if self.mechanism_state_mode not in {"residual_concat", "descriptor_first"}:
@@ -210,16 +267,36 @@ class UnifiedForwardConfig:
             raise ValueError("mechanism_latent_residual_scale must be in [0, 1].")
         if self.field_assembly_mode not in {"context_fusion", "edge_additive"}:
             raise ValueError("field_assembly_mode must be 'context_fusion' or 'edge_additive'.")
+        if self.additive_background_mode not in {
+            "dense_query_attention",
+            "global_pooled_attention",
+        }:
+            raise ValueError(
+                "additive_background_mode must be 'dense_query_attention' "
+                "or 'global_pooled_attention'."
+            )
+        if not 0.0 < float(self.additive_edge_gate_init) < 1.0:
+            raise ValueError("additive_edge_gate_init must be in (0, 1).")
+        if float(self.additive_output_init_std) <= 0.0:
+            raise ValueError("additive_output_init_std must be positive.")
         if self.field_assembly_mode == "edge_additive":
             components = DECODER_COMPONENTS.get(self.decoder_mode, set())
             if not {"hyper", "pairwise"} <= components:
                 raise ValueError("edge_additive field_assembly_mode requires a hyper-plus-pairwise decoder_mode.")
             if self.output_mean_residual_split:
                 raise ValueError("output_mean_residual_split is available only with context_fusion field assembly.")
-        if self.routing_execution not in {"dense", "gathered"}:
-            raise ValueError("routing_execution must be 'dense' or 'gathered'.")
+        if self.routing_execution not in {"dense", "gathered", "scheduled"}:
+            raise ValueError("routing_execution must be 'dense', 'gathered', or 'scheduled'.")
+        if int(self.gathered_execution_start_epoch) < -1:
+            raise ValueError("gathered_execution_start_epoch must be >= -1.")
+        if self.routing_execution == "scheduled" and int(self.gathered_execution_start_epoch) < 0:
+            raise ValueError("scheduled routing execution requires gathered_execution_start_epoch >= 0.")
         if int(self.query_edge_limit) < 0 or int(self.query_module_limit) < 0:
             raise ValueError("gathered routing limits must be nonnegative.")
+        if not 0.0 <= float(self.query_edge_retained_mass_floor) <= 1.0:
+            raise ValueError("query_edge_retained_mass_floor must be in [0, 1].")
+        if not 0.0 <= float(self.module_incidence_retained_mass_floor) <= 1.0:
+            raise ValueError("module_incidence_retained_mass_floor must be in [0, 1].")
         if self.geometry_mode not in {"nonperiodic", "periodic"}:
             raise ValueError("geometry_mode must be 'nonperiodic' or 'periodic'.")
         if self.query_time_mode not in {"none", "phase", "physical_time"}:

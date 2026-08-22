@@ -78,11 +78,15 @@ The upgraded module, environment, and query normalizers are `entmax15`. In gener
 
 $$\operatorname{entmax}_{\alpha}(z)=\arg\max_{p\in\Delta}\left(p^\top z+H_{\alpha}(p)\right),\qquad \alpha=1.5,$$
 
-which yields exact zeros while keeping the nonzero probabilities normalized. Environment routing also uses `environment_locality_mode="compact_kernel"`. Given anisotropic scale (sigma_k) bounded below by `minimum_region_scale=0.05` of each domain scale, it adds
+which yields exact zeros while keeping the nonzero probabilities normalized. Environment routing uses `environment_locality_mode="bounded_gaussian"`. Given anisotropic scale (sigma_k) bounded below by `minimum_region_scale=0.05` of each domain scale, the normalized squared distance is
 
-$$b^{loc}_{jk}=\lambda\log\left([1-\rho_{jk}^2]_+^2+\epsilon\right),\qquad \rho_{jk}^2=\sum_d\left(\frac{\Delta(Y_j,r_k)_d}{\sigma_{kd}}\right)^2,$$
+$$\rho_{jk}^2=\sum_d\left(\frac{\Delta(Y_j,r_k)_d}{\sigma_{kd}}\right)^2,$$
 
-with `environment_locality_strength=1.0`. Query routing applies the analogous compact region bias.
+and the routing-logit bias is
+
+$$b^{loc}_{jk}=-\frac{\lambda}{2}\min\left(\rho_{jk}^2,\rho_{max}^2\right),$$
+
+with `environment_locality_strength` (lambda) set to `1.0` and `locality_radius_cap` (rho_max) set to `3.0`. Query routing applies the same bounded Gaussian log-bias. The locality factor is finite and strictly positive at every distance before entmax; only entmax or an explicit active mask creates exact-zero routes. The accepted `compact_kernel` mode remains available to reconstruct configurations that explicitly selected it.
 
 Active-edge selection is detached from gradient flow. During the first 200 training epochs it takes the six highest-quality candidates. After warmup it visits candidates in descending quality order, rejects candidates whose maximum module or environment cosine overlap with any selected edge exceeds `0.85` unless needed for the minimum count, and stops when at least `0.95` of active module tokens and environment tokens each receive selected assignment mass of at least `0.50`. It therefore selects by quality, coverage, and novelty without adding an edge-count objective; the case profile’s optional organizer regularizer is disabled by default.
 
@@ -194,10 +198,12 @@ The exchangeable plan velocity network uses shared token projections and permuta
 | Fixed edges / candidate capacity | 6 / n.a. | n.a. / 8 |
 | Initial / minimum active edges | all 6 | 6 / 1 |
 | Selection | all | quality + 95% coverage + novelty |
+| Candidate module/environment mass floors | n.a. | 0.01 / 0.01 |
 | Module/environment/query normalizer | softmax / softmax / softmax | entmax15 / entmax15 / entmax15 |
-| Environment/query locality | none | compact kernel, strength 1.0 |
+| Environment/query locality | none | bounded Gaussian, strength 1.0, radius cap 3.0 |
 | Mechanism state | `residual_concat`, encoder disabled | `descriptor_first`, residual scale 0.35 |
 | Field assembly | `context_fusion` | `edge_additive` |
+| Additive output stabilization | n.a. | input LayerNorms, sigmoid edge gate 0.1, final-layer std 0.001 |
 | Routing execution | `dense` | `gathered` |
 | Query module / edge limit | 0 / 0 | 8 / 3 |
 | Topology signature flag | false | true |
@@ -215,6 +221,9 @@ The exchangeable plan velocity network uses shared token projections and permuta
 - Runtime module width and exchangeable edge capacity are tensor extents rather than learned parameter capacities.
 - Stage-A/local coupling and all physical loss semantics remain case-owned.
 - Sparse probabilities and sparse execution are reported separately; only gathered pre-MLP execution is called computationally sparse.
+- Adaptive warmup exposes every viable candidate. Selection progress is serialized and is independent of `train()`/`eval()` mode.
+- New diagnostics distinguish candidate, selected, viable-selected, functional, soft-functional, empty-selected, and effective query-edge counts.
+- Additive edge exports include the learned output gate, preserving exact closure while logging background/edge scale and cancellation.
 - No active-edge-count penalty is enabled in the shipped case profile.
 
 ## 16. Code-to-equation map

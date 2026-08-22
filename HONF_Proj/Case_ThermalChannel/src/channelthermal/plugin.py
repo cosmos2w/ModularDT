@@ -182,6 +182,13 @@ class ThermalChannelPlugin:
             "dataset sha256": resource.fingerprint,
         }
         if request.workflow == "forward":
+            if request.initialize_checkpoint:
+                initialization_checkpoint = resolve_path(request.initialize_checkpoint)
+                if not initialization_checkpoint.is_file():
+                    raise FileNotFoundError(
+                        f"Forward initialization checkpoint not found: {initialization_checkpoint}"
+                    )
+                facts["initialization checkpoint"] = str(initialization_checkpoint)
             uses_local = bool(bundle.case.get("model", {}).get("local_coupling", {}).get("use_local_surrogate", True))
             if uses_local:
                 checkpoint = self._local_checkpoint_path(bundle, request)
@@ -279,6 +286,7 @@ class ThermalChannelPlugin:
             run_name=request.run_name,
             run_id=request.run_id,
             resume_checkpoint=request.resume_checkpoint,
+            initialize_checkpoint=request.initialize_checkpoint,
             init_checkpoint=init_checkpoint,
         )
 

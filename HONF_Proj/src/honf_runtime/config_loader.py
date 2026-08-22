@@ -44,6 +44,7 @@ CORE_TRAINING_KEYS = {
     "device",
     "epochs",
     "learning_rate",
+    "organizer_learning_rate",
     "weight_decay",
     "amp",
     "gradient_clip_norm",
@@ -68,6 +69,8 @@ CHECKPOINTING_KEYS = {
     "save_best_temperature_mse",
     "save_best_predicted",
     "save_latest",
+    "save_latest_every_epochs",
+    "save_epoch_milestones",
 }
 RUN_KEYS = {"id", "name", "output_root"}
 
@@ -145,6 +148,25 @@ def _validate_core_sections(core: Mapping[str, Any]) -> None:
         raise ValueError("core.training.epochs must be positive.")
     if float(training.get("learning_rate", 0.0)) <= 0.0:
         raise ValueError("core.training.learning_rate must be positive.")
+    organizer_learning_rate = training.get("organizer_learning_rate")
+    if organizer_learning_rate is not None and float(organizer_learning_rate) <= 0.0:
+        raise ValueError("core.training.organizer_learning_rate must be null or positive.")
+    save_latest_every_epochs = checkpointing.get("save_latest_every_epochs", 1)
+    if (
+        isinstance(save_latest_every_epochs, bool)
+        or not isinstance(save_latest_every_epochs, int)
+        or save_latest_every_epochs <= 0
+    ):
+        raise ValueError("core.checkpointing.save_latest_every_epochs must be a positive integer.")
+    milestones = checkpointing.get("save_epoch_milestones", [])
+    if (
+        not isinstance(milestones, list)
+        or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in milestones)
+        or len(set(milestones)) != len(milestones)
+    ):
+        raise ValueError(
+            "core.checkpointing.save_epoch_milestones must be a list of unique positive integers."
+        )
 
 
 def _canonical_hash(payload: Mapping[str, Any]) -> str:

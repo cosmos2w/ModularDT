@@ -16,7 +16,7 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-channelthermal-honf_cl")
 
@@ -235,8 +235,119 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[ChannelTher
     allowed_unexpected = [key for key in incompatible.unexpected_keys if not key.startswith(critical_prefixes)]
     if allowed_missing or allowed_unexpected:
         print(f"[warning] allowed non-critical checkpoint differences: missing={allowed_missing}, unexpected={allowed_unexpected}")
+    selection_state = checkpoint.get("selection_state")
+    configured_epochs = checkpoint.get("train_config", {}).get("training", {}).get("epochs")
+    if isinstance(selection_state, dict) and selection_state.get("epoch") is not None:
+        total_epochs = selection_state.get("total_epochs", configured_epochs)
+        model.set_training_progress(
+            epoch=int(selection_state["epoch"]),
+            total_epochs=None if total_epochs is None else int(total_epochs),
+        )
+    else:
+        checkpoint_epoch = checkpoint.get("epoch", checkpoint.get("current_epoch"))
+        # Historical checkpoints restore their recorded epoch. A raw weights
+        # checkpoint with no epoch receives an explicit final inference phase.
+        default_selection_epoch = model.selection_state().get("epoch")
+        inference_epoch = (
+            int(checkpoint_epoch)
+            if checkpoint_epoch is not None
+            else int(
+                model_config.core_honf.selection_warmup_epochs
+                if default_selection_epoch is None
+                else default_selection_epoch
+            )
+        )
+        model.set_training_progress(
+            epoch=inference_epoch,
+            total_epochs=None if configured_epochs is None else int(configured_epochs),
+        )
     model.eval()
     return model, checkpoint
+
+
+def apply_frozen_forward_overrides(
+    model: ChannelThermalHONFModel,
+    *,
+    mechanism_latent_residual_scale: Optional[float] = None,
+    query_locality_mode: Optional[str] = None,
+    query_locality_strength: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Apply evaluation-only decoder settings without changing parameters.
+
+    Stage-6 frozen screening deliberately reuses a checkpoint's weights while
+    varying only arithmetic already represented by configuration.  The
+    descriptor-first encoder caches its residual scale as a plain Python
+    scalar, so it is updated alongside every shared core-config reference.
+    Missing overrides leave checkpoint-owned behavior exactly unchanged.
+    """
+
+    if mechanism_latent_residual_scale is not None and not (
+        0.0 <= float(mechanism_latent_residual_scale) <= 1.0
+    ):
+        raise ValueError("mechanism_latent_residual_scale must be in [0, 1].")
+    locality_modes = {
+        "none",
+        "compact_kernel",
+        "bounded_gaussian",
+        "gaussian_bounded",
+        "inherit_environment",
+    }
+    if query_locality_mode is not None and query_locality_mode not in locality_modes:
+        raise ValueError(f"Unsupported query_locality_mode={query_locality_mode!r}.")
+    if query_locality_strength is not None and float(query_locality_strength) < 0.0:
+        raise ValueError("query_locality_strength must be nonnegative.")
+
+    state_keys_before = tuple(model.state_dict())
+    candidates = (
+        model.config.core_honf,
+        model.core.config,
+        model.core.decoder.config,
+        model.core.decoder.pairwise_kernel.config,
+        model.core.organizer.config,
+    )
+    seen: set[int] = set()
+    configs = []
+    for candidate in candidates:
+        if candidate is not None and id(candidate) not in seen:
+            seen.add(id(candidate))
+            configs.append(candidate)
+
+    if mechanism_latent_residual_scale is not None:
+        value = float(mechanism_latent_residual_scale)
+        for config in configs:
+            config.mechanism_latent_residual_scale = value
+        mechanism_encoder = model.core.decoder.mechanism_encoder
+        if mechanism_encoder is None or not hasattr(mechanism_encoder, "content_scale"):
+            raise RuntimeError("Frozen mechanism-scale override requires descriptor-first encoding.")
+        mechanism_encoder.content_scale = value
+    if query_locality_mode is not None:
+        for config in configs:
+            config.query_locality_mode = str(query_locality_mode)
+    if query_locality_strength is not None:
+        value = float(query_locality_strength)
+        for config in configs:
+            config.query_locality_strength = value
+
+    state_keys_after = tuple(model.state_dict())
+    if state_keys_before != state_keys_after:
+        raise RuntimeError("Frozen evaluation override changed state_dict structure.")
+
+    core = model.config.core_honf
+    effective_query_strength = (
+        float(core.environment_locality_strength)
+        if core.query_locality_strength is None
+        else float(core.query_locality_strength)
+    )
+    return {
+        "mechanism_latent_residual_scale": float(core.mechanism_latent_residual_scale),
+        "query_locality_mode": str(core.query_locality_mode),
+        "query_locality_strength": (
+            None if core.query_locality_strength is None else float(core.query_locality_strength)
+        ),
+        "effective_query_locality_strength": effective_query_strength,
+        "state_dict_key_count": len(state_keys_before),
+        "state_dict_structure_unchanged": state_keys_before == state_keys_after,
+    }
 
 
 def select_sample(dataset: GlobalChannelThermalDataset, case_id: Optional[str], case_index: int) -> Dict[str, Any]:
@@ -250,6 +361,24 @@ def select_sample(dataset: GlobalChannelThermalDataset, case_id: Optional[str], 
                 return dataset[idx]
         raise KeyError(f"case_id={case_id!r} not found in split {dataset.split!r}.")
     return dataset[min(max(int(case_index), 0), len(dataset) - 1)]
+
+
+def aggregate_routed_module_retention(chunks: Sequence[np.ndarray]) -> Dict[str, float]:
+    """Aggregate routed-pair retention values exactly across query chunks."""
+
+    values = (
+        np.concatenate([np.asarray(chunk).reshape(-1) for chunk in chunks]).astype(
+            np.float64, copy=False
+        )
+        if chunks
+        else np.zeros((0,), dtype=np.float64)
+    )
+    return {
+        "routed_module_retained_mass_mean": float(np.mean(values)) if values.size else 0.0,
+        "routed_module_retained_mass_p05": float(np.quantile(values, 0.05)) if values.size else 0.0,
+        "routed_module_retained_mass_min": float(np.min(values)) if values.size else 0.0,
+        "routed_query_edge_pair_count": float(values.size),
+    }
 
 
 def predict_case(
@@ -270,6 +399,7 @@ def predict_case(
     query_xy = np.stack([x_grid.reshape(-1), y_grid.reshape(-1)], axis=-1).astype(np.float32)
     pred_chunks = []
     routing_chunks: Dict[str, list[np.ndarray]] = {}
+    routed_module_retention_chunks: list[np.ndarray] = []
     first_outputs = None
     prepared_state = None
     need_routing = bool(return_routing_maps or return_topology_signature)
@@ -306,8 +436,14 @@ def predict_case(
                     "routing_aux": {key: value for key, value in decoder_output.items() if key != "pred_field"},
                 }
             pred_chunks.append(outputs["pred_field"].detach().cpu().numpy()[0])
+            routing_aux = outputs.get("routing_aux", {})
+            retained_module_mass = routing_aux.get("retained_module_incidence_mass")
+            routed_pair_mask = routing_aux.get("routed_query_edge_pair_mask")
+            if torch.is_tensor(retained_module_mass) and torch.is_tensor(routed_pair_mask):
+                retained_np = retained_module_mass.detach().cpu().numpy()[0]
+                routed_np = routed_pair_mask.detach().cpu().numpy()[0].astype(bool, copy=False)
+                routed_module_retention_chunks.append(retained_np[routed_np])
             if need_routing:
-                routing_aux = outputs.get("routing_aux", {})
                 key_map = {
                     "query_hyper_attention": "query_hyper_attention",
                     "pairwise_edge_contribution": "pairwise_edge_contribution",
@@ -346,6 +482,9 @@ def predict_case(
             for key, value in first_outputs.get("base_organizer_aux", {}).items()
         },
     }
+    result["routing_aux"] = aggregate_routed_module_retention(
+        routed_module_retention_chunks
+    )
     if need_routing:
         result["routing_maps"] = {
             key: np.concatenate(chunks, axis=0)
@@ -417,6 +556,13 @@ def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> 
     A_eh = np.asarray(aux.get("A_eh", np.zeros((env_coords.shape[0], 1))), dtype=np.float32)
     A_mh = np.asarray(aux.get("A_mh", np.zeros((centers.shape[0], A_eh.shape[-1]))), dtype=np.float32)
     strength = np.asarray(aux.get("hyper_strength", np.ones((A_eh.shape[-1],), dtype=np.float32)), dtype=np.float32)
+    active_mask = np.asarray(
+        aux.get(
+            "effective_edge_mask",
+            aux.get("edge_active_mask", np.ones((A_eh.shape[-1],), dtype=np.float32)),
+        ),
+        dtype=np.float32,
+    )
     return {
         "centers": centers,
         "present": present,
@@ -425,6 +571,7 @@ def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> 
         "A_eh": A_eh,
         "A_mh": A_mh,
         "strength": strength,
+        "active_hyperedge_mask": active_mask,
         "module_mass": np.asarray(aux.get("hyper_module_mass", np.zeros_like(strength)), dtype=np.float32),
         "env_mass": np.asarray(aux.get("hyper_env_mass", np.zeros_like(strength)), dtype=np.float32),
         "src": np.asarray(aux.get("hyper_source_coords", np.zeros((strength.shape[0], 2))), dtype=np.float32),
@@ -462,8 +609,26 @@ def hypergraph_diagnostics(predictions: Dict[str, Any]) -> Dict[str, Any]:
         "hyper_strength_mean": float(np.mean(strength)) if strength.size else 0.0,
         "hyper_strength_max": float(np.max(strength)) if strength.size else 0.0,
     }
+    for key in (
+        "pre_fallback_zero_support_module_rows",
+        "post_fallback_zero_support_module_rows",
+        "pre_fallback_zero_support_environment_rows",
+        "post_fallback_zero_support_environment_rows",
+    ):
+        if key in aux:
+            static[key] = float(np.mean(np.asarray(aux[key], dtype=np.float64)))
     routing_maps = predictions.get("routing_maps", {})
-    routing = {}
+    routing_aux = predictions.get("routing_aux", {})
+    routing = {
+        key: float(routing_aux[key])
+        for key in (
+            "routed_module_retained_mass_mean",
+            "routed_module_retained_mass_p05",
+            "routed_module_retained_mass_min",
+            "routed_query_edge_pair_count",
+        )
+        if key in routing_aux
+    }
     if routing_maps:
         alpha = np.asarray(routing_maps.get("query_hyper_attention", np.zeros((0, 0, 0))), dtype=np.float64)
         pair = np.asarray(routing_maps.get("pairwise_edge_contribution", np.zeros_like(alpha)), dtype=np.float64)
@@ -714,11 +879,28 @@ def main(argv: list[str] | None = None) -> int:
             org_outputs["organization_physical"] = str(alias)
         if args.organization_view in {"all", "matrices"} and (render_presentation or render_debug):
             matrices = output_dir / "organization_summary_matrices.png"
-            render_channelthermal_organization_summary_matrices(matrices, raw_sample, arrays, module_radius=radius, channel_order=channel_order)
+            render_channelthermal_organization_summary_matrices(
+                matrices,
+                raw_sample,
+                arrays,
+                module_radius=radius,
+                channel_order=channel_order,
+                sort_environment=False,
+            )
             org_outputs["organization_summary_matrices"] = str(matrices)
             legacy_matrices = output_dir / "organization_matrices.png"
             copy_figure_alias(matrices, legacy_matrices)
             org_outputs["organization_matrices"] = str(legacy_matrices)
+            sorted_matrices = output_dir / "organization_summary_matrices_sorted_by_dominant_edge.png"
+            render_channelthermal_organization_summary_matrices(
+                sorted_matrices,
+                raw_sample,
+                arrays,
+                module_radius=radius,
+                channel_order=channel_order,
+                sort_environment=True,
+            )
+            org_outputs["organization_summary_matrices_sorted_by_dominant_edge"] = str(sorted_matrices)
         if args.organization_view in {"all", "schematic"} and render_presentation:
             schematic = output_dir / "organization_schematic.png"
             render_channelthermal_organization_schematic_presentation(schematic, raw_sample, arrays, link_threshold=float(args.organization_link_threshold))
