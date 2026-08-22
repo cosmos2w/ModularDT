@@ -1172,7 +1172,11 @@ class HypergraphFieldDecoder(nn.Module):
                 if self.config.query_locality_mode == "inherit_environment"
                 else self.config.query_locality_mode
             ),
-            strength=self.config.environment_locality_strength,
+            strength=(
+                self.config.environment_locality_strength
+                if self.config.query_locality_strength is None
+                else self.config.query_locality_strength
+            ),
             radius_cap=self.config.locality_radius_cap,
         )
 

@@ -1,0 +1,252 @@
+{
+  "additive_closure_max_abs": 5.960464477539063e-08,
+  "case_id": "0273",
+  "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1302_20260821_142505_stage5_fixed_softmax_modern/best_by_field_mse_model.pt",
+  "checkpoint_epoch": 2497,
+  "checkpoint_s0_prediction_bitwise_equal": true,
+  "checkpoint_s0_prediction_max_abs_difference": 0.0,
+  "checkpoint_sha256": "a7dd82d16597e6db6c1883b368cd54e8be90e774c007ce08d408607400427789",
+  "device": "cuda:2",
+  "field_names": [
+    "u",
+    "v",
+    "p",
+    "omega",
+    "temperature"
+  ],
+  "finite_prediction": true,
+  "frozen_overrides": {
+    "effective_query_locality_strength": 0.25,
+    "mechanism_latent_residual_scale": 0.35,
+    "query_locality_mode": "none",
+    "query_locality_strength": null,
+    "state_dict_key_count": 251,
+    "state_dict_structure_unchanged": true
+  },
+  "inverse_readiness": {
+    "all_required_organizer_tensors_present": true,
+    "edge_resolved_field_available": true,
+    "fixed_ordered_hyperedges": true,
+    "prepared_state_available": true
+  },
+  "organizer_aux_shapes": {
+    "A_eh": [
+      1,
+      192,
+      6
+    ],
+    "A_mh": [
+      1,
+      12,
+      6
+    ],
+    "hyper_env_mass": [
+      1,
+      6
+    ],
+    "hyper_env_purity": [
+      1,
+      6
+    ],
+    "hyper_module_mass": [
+      1,
+      6
+    ],
+    "hyper_module_purity": [
+      1,
+      6
+    ],
+    "hyper_region_coords": [
+      1,
+      6,
+      2
+    ],
+    "hyper_region_scale": [
+      1,
+      6,
+      2
+    ],
+    "hyper_source_coords": [
+      1,
+      6,
+      2
+    ],
+    "hyper_source_scale": [
+      1,
+      6,
+      2
+    ],
+    "hyper_state": [
+      1,
+      6,
+      256
+    ],
+    "mechanism_descriptor_features": null
+  },
+  "output_shapes": {
+    "pred_field": [
+      1,
+      256,
+      5
+    ],
+    "pred_field_background": [
+      1,
+      256,
+      5
+    ],
+    "pred_field_by_edge": [
+      1,
+      256,
+      6,
+      5
+    ]
+  },
+  "prepared_organizer_shapes": {
+    "A_eh": [
+      1,
+      192,
+      6
+    ],
+    "A_mh": [
+      1,
+      12,
+      6
+    ],
+    "hyper_env_mass": [
+      1,
+      6
+    ],
+    "hyper_env_purity": [
+      1,
+      6
+    ],
+    "hyper_module_mass": [
+      1,
+      6
+    ],
+    "hyper_module_purity": [
+      1,
+      6
+    ],
+    "hyper_region_coords": [
+      1,
+      6,
+      2
+    ],
+    "hyper_region_scale": [
+      1,
+      6,
+      2
+    ],
+    "hyper_source_coords": [
+      1,
+      6,
+      2
+    ],
+    "hyper_source_scale": [
+      1,
+      6,
+      2
+    ],
+    "hyper_state": [
+      1,
+      6,
+      256
+    ],
+    "mechanism_descriptor_features": [
+      1,
+      6,
+      16
+    ]
+  },
+  "prepared_state": {
+    "global_token": [
+      1,
+      256
+    ],
+    "organizer_keys_present": {
+      "A_eh": true,
+      "A_mh": true,
+      "hyper_env_mass": true,
+      "hyper_env_purity": true,
+      "hyper_module_mass": true,
+      "hyper_module_purity": true,
+      "hyper_region_coords": true,
+      "hyper_region_scale": true,
+      "hyper_source_coords": true,
+      "hyper_source_scale": true,
+      "hyper_state": true,
+      "mechanism_descriptor_features": true
+    },
+    "type": "PreparedChannelThermalCase"
+  },
+  "profile_source": "project://src/config_core/forward/experiments/stage6_fixed_role_consistent_additive.json",
+  "profile_values": {
+    "additive_background_mode": "dense_query_attention",
+    "edge_selection_mode": "all",
+    "environment_assignment_normalizer": "softmax",
+    "field_assembly_mode": "edge_additive",
+    "mechanism_latent_residual_scale": 0.35,
+    "mechanism_state_mode": "descriptor_first",
+    "module_assignment_normalizer": "softmax",
+    "num_hyperedges": 6,
+    "organizer_mode": "fixed_projection",
+    "query_assignment_normalizer": "softmax",
+    "query_locality_mode": "none",
+    "query_locality_strength": null,
+    "routing_execution": "dense"
+  },
+  "routing_shapes": {
+    "c_H_norm": [
+      1,
+      256
+    ],
+    "c_pair_norm": [
+      1,
+      256
+    ],
+    "dominant_hyperedge": [
+      1,
+      256
+    ],
+    "hyper_attention_entropy_map": [
+      1,
+      256
+    ],
+    "hyper_attention_mean": [
+      1,
+      6
+    ],
+    "mechanism_state": [
+      1,
+      6,
+      256
+    ],
+    "pairwise_edge_contribution": [
+      1,
+      256,
+      6
+    ],
+    "query_edge_retained_probability_mass": [
+      1,
+      256
+    ],
+    "query_hyper_attention": [
+      1,
+      256,
+      6
+    ],
+    "retained_module_incidence_mass": [
+      1,
+      256,
+      6
+    ],
+    "routed_query_edge_pair_mask": [
+      1,
+      256,
+      6
+    ]
+  },
+  "state_dict_key_count": 251,
+  "state_dict_structure_unchanged": true
+}

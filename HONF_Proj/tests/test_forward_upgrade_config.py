@@ -164,3 +164,31 @@ def test_missing_mode_checkpoint_state_reconstructs_strictly() -> None:
             rtol=0.0,
             atol=0.0,
         )
+
+
+def test_query_locality_strength_defaults_to_historical_environment_strength() -> None:
+    payload = {
+        **_config_payload(),
+        "field_assembly_mode": "edge_additive",
+        "mechanism_state_mode": "descriptor_first",
+        "query_locality_mode": "gaussian_bounded",
+        "environment_locality_strength": 0.37,
+    }
+    inherited = UnifiedForwardConfig.from_dict(payload)
+    explicit = UnifiedForwardConfig.from_dict({**payload, "query_locality_strength": 0.37})
+    inherited_model = _initialized_model(inherited, seed=53)
+    explicit_model = _initialized_model(explicit, seed=53)
+
+    with torch.no_grad():
+        inherited_output = inherited_model(_batch())["pred_field"]
+        explicit_output = explicit_model(_batch())["pred_field"]
+
+    torch.testing.assert_close(inherited_output, explicit_output, rtol=0.0, atol=0.0)
+    assert inherited_model.state_dict().keys() == explicit_model.state_dict().keys()
+
+
+def test_query_locality_strength_rejects_negative_values() -> None:
+    with pytest.raises(ValueError, match="query_locality_strength"):
+        UnifiedForwardConfig.from_dict(
+            {**_config_payload(), "query_locality_strength": -0.01}
+        )

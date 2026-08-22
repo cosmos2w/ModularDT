@@ -6,6 +6,7 @@ import torch
 from channelthermal.config import ChannelThermalHONFConfig, ChannelThermalSpecificConfig
 from channelthermal.input_adapter import ChannelThermalInputAdapter
 from channelthermal.model import ChannelThermalHONFModel
+from channelthermal.workflows.evaluate_forward import apply_frozen_forward_overrides
 from honf_forward_core.config import UnifiedForwardConfig
 
 
@@ -105,6 +106,67 @@ def test_padding_invariant_global_features_do_not_change_with_runtime_width() ->
     assert contexts[0].shape[-1] == 18
     assert torch.equal(contexts[0], contexts[1])
     assert torch.equal(contexts[0], contexts[2])
+
+
+def test_frozen_role_overrides_preserve_state_and_reference_arithmetic() -> None:
+    torch.manual_seed(47)
+    config = _config()
+    config.core_honf.mechanism_state_mode = "descriptor_first"
+    config.core_honf.field_assembly_mode = "edge_additive"
+    config.core_honf.query_locality_mode = "none"
+    model = ChannelThermalHONFModel(config, attach_local_from_checkpoint=False).eval()
+    structure, query_xy, local_query_points = _physical_inputs(4)
+    with torch.no_grad():
+        reference = model(
+            structure,
+            query_xy,
+            local_query_points=local_query_points,
+            return_routing_maps=True,
+        )
+    state_keys = tuple(model.state_dict())
+
+    reference_override = apply_frozen_forward_overrides(
+        model,
+        mechanism_latent_residual_scale=0.35,
+        query_locality_mode="none",
+    )
+    with torch.no_grad():
+        unchanged = model(
+            structure,
+            query_xy,
+            local_query_points=local_query_points,
+            return_routing_maps=True,
+        )
+
+    torch.testing.assert_close(reference["pred_field"], unchanged["pred_field"], rtol=0.0, atol=0.0)
+    torch.testing.assert_close(
+        reference["routing_aux"]["query_hyper_attention"],
+        unchanged["routing_aux"]["query_hyper_attention"],
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert reference_override["state_dict_structure_unchanged"] is True
+
+    candidate_override = apply_frozen_forward_overrides(
+        model,
+        mechanism_latent_residual_scale=0.70,
+        query_locality_mode="gaussian_bounded",
+        query_locality_strength=0.25,
+    )
+    with torch.no_grad():
+        candidate = model(
+            structure,
+            query_xy,
+            local_query_points=local_query_points,
+            return_routing_maps=True,
+        )
+
+    assert tuple(model.state_dict()) == state_keys
+    assert candidate_override["effective_query_locality_strength"] == pytest.approx(0.25)
+    assert not torch.equal(
+        unchanged["routing_aux"]["query_hyper_attention"],
+        candidate["routing_aux"]["query_hyper_attention"],
+    )
 
 
 def test_legacy_forward_config_migrates_max_modules_to_fixed_feature_reference() -> None:

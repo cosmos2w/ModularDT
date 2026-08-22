@@ -34,6 +34,7 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(PROJECT_ROOT / "Case_ThermalChannel" / "src"))
+sys.path.insert(0, str(PROJECT_ROOT / "diagnostics"))
 
 from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer  # noqa: E402
 from channelthermal.evaluation_tools.organizer_visualization import (  # noqa: E402
@@ -51,6 +52,11 @@ from channelthermal.workflows.evaluate_forward import (  # noqa: E402
     make_batch,
 )
 from honf_forward_core.evaluation import extract_topology_signature  # noqa: E402
+from frozen_override_cli import (  # noqa: E402
+    add_frozen_override_arguments,
+    apply_label_frozen_overrides,
+    resolve_frozen_overrides,
+)
 
 
 EPS = 1.0e-12
@@ -59,6 +65,13 @@ EPS = 1.0e-12
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", action="append", required=True, metavar="LABEL=PATH")
+    parser.add_argument(
+        "--edge-capacity-override",
+        action="append",
+        default=[],
+        metavar="LABEL=CAPACITY",
+        help="Evaluation-only runtime capacity override for exchangeable checkpoints.",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--split", default="test")
     parser.add_argument("--query-batch-size", type=int, default=8192)
@@ -72,6 +85,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--render-case-id", action="append", default=[])
     parser.add_argument("--organizer-passes", action="store_true")
+    add_frozen_override_arguments(parser)
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -87,6 +101,19 @@ def checkpoint_specs(values: Iterable[str]) -> dict[str, Path]:
             raise ValueError(f"Expected LABEL=PATH, got {item!r}")
         label, value = item.split("=", 1)
         result[label.strip()] = Path(value).expanduser().resolve()
+    return result
+
+
+def integer_specs(values: Iterable[str]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for item in values:
+        if "=" not in item:
+            raise ValueError(f"Expected LABEL=INTEGER, got {item!r}")
+        label, value = item.split("=", 1)
+        parsed = int(value)
+        if parsed <= 0:
+            raise ValueError(f"Capacity must be positive, got {parsed}")
+        result[label.strip()] = parsed
     return result
 
 
@@ -656,6 +683,10 @@ def render_case(output_dir: Path, sample: dict[str, Any], prediction: dict[str, 
 
 def evaluate_checkpoint(label: str, path: Path, args: argparse.Namespace, device: torch.device) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     model, checkpoint = load_model(path, device)
+    frozen_overrides = apply_label_frozen_overrides(model, label, args)
+    runtime_capacity = args.capacity_overrides.get(label)
+    if runtime_capacity is not None:
+        model.set_edge_capacity(runtime_capacity)
     dataset_cfg = checkpoint.get("train_config", {}).get("dataset", {})
     model_cfg = checkpoint.get("model_config", {})
     core_cfg = model_cfg.get("core_honf", {})
@@ -688,6 +719,8 @@ def evaluate_checkpoint(label: str, path: Path, args: argparse.Namespace, device
         "dataset": str(dataset_cfg["packed_h5_path"]), "dataset_fingerprint": dataset_cfg.get("dataset_fingerprint"),
         "organizer_mode": core_cfg.get("organizer_mode"),
         "edge_capacity": core_cfg.get("edge_capacity", core_cfg.get("num_hyperedges")),
+        "runtime_edge_capacity": runtime_capacity,
+        "frozen_overrides": frozen_overrides,
         "num_hyperedges": core_cfg.get("num_hyperedges"),
         "module_assignment_normalizer": core_cfg.get("module_assignment_normalizer"),
         "environment_assignment_normalizer": core_cfg.get("environment_assignment_normalizer"),
@@ -769,6 +802,11 @@ def evaluate_checkpoint(label: str, path: Path, args: argparse.Namespace, device
 def main() -> int:
     args = parse_args()
     specs = checkpoint_specs(args.checkpoint)
+    args.capacity_overrides = integer_specs(args.edge_capacity_override)
+    resolve_frozen_overrides(args, specs)
+    unknown_overrides = sorted(set(args.capacity_overrides) - set(specs))
+    if unknown_overrides:
+        raise ValueError(f"Capacity overrides reference unknown checkpoint labels: {unknown_overrides}")
     for path in specs.values():
         if not path.exists():
             raise FileNotFoundError(path)

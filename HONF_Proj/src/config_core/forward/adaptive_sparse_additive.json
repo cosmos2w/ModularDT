@@ -53,6 +53,7 @@
       "environment_locality_mode": "gaussian_bounded",
       "environment_locality_strength": 0.25,
       "query_locality_mode": "none",
+      "query_locality_strength": null,
       "locality_radius_cap": 3.0,
       "minimum_region_scale": 0.10,
 

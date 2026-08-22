@@ -124,6 +124,7 @@ class UnifiedForwardConfig:
     environment_locality_mode: str = "none"
     environment_locality_strength: float = 1.0
     query_locality_mode: str = "inherit_environment"
+    query_locality_strength: Optional[float] = None
     locality_radius_cap: float = 3.0
     minimum_region_scale: float = 0.05
 
@@ -254,6 +255,8 @@ class UnifiedForwardConfig:
             raise ValueError("query_locality_mode must be a locality mode or 'inherit_environment'.")
         if float(self.environment_locality_strength) < 0.0:
             raise ValueError("environment_locality_strength must be >= 0.")
+        if self.query_locality_strength is not None and float(self.query_locality_strength) < 0.0:
+            raise ValueError("query_locality_strength must be >= 0 when provided.")
         if float(self.locality_radius_cap) <= 0.0:
             raise ValueError("locality_radius_cap must be positive.")
         if float(self.minimum_region_scale) <= 0.0:

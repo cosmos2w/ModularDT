@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from channelthermal.evaluation_tools.organizer_visualization import (
     render_channelthermal_organization_summary_matrices,
@@ -124,3 +125,15 @@ def test_retained_mass_distribution_reports_exact_min_p05_and_mean() -> None:
     assert result["min"] == 0.5
     assert result["p05"] == 0.525
     assert result["mean"] == 0.75
+
+
+def test_frozen_override_cli_rejects_unknown_checkpoint_labels() -> None:
+    evaluator = _load_diagnostic("evaluate_topology_quality")
+    args = evaluator.parse_args.__globals__["argparse"].Namespace(
+        mechanism_residual_scale=["missing=0.7"],
+        query_locality_mode_override=[],
+        query_locality_strength_override=[],
+    )
+
+    with pytest.raises(ValueError, match="unknown checkpoint labels"):
+        evaluator.resolve_frozen_overrides(args, {"known": Path("known.pt")})

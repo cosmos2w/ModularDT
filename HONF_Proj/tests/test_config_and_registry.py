@@ -279,6 +279,34 @@ def test_stage5_profiles_are_matched_all_soft_dense_models(
     ]
 
 
+def test_stage6_frozen_screen_profile_resolves_to_supported_s0_control() -> None:
+    bundle = load_config_bundle(
+        "project://src/config_core/forward/adaptive_sparse_additive.json",
+        experiment_overlay=(
+            "project://src/config_core/forward/experiments/"
+            "stage6_fixed_role_consistent_additive.json"
+        ),
+    )
+    core = bundle.effective["model"]["core_honf"]
+
+    assert core["organizer_mode"] == "fixed_projection"
+    assert core["num_hyperedges"] == 6
+    assert core["edge_capacity"] == 0
+    assert core["edge_selection_mode"] == "all"
+    assert core["module_assignment_normalizer"] == "softmax"
+    assert core["environment_assignment_normalizer"] == "softmax"
+    assert core["query_assignment_normalizer"] == "softmax"
+    assert core["query_locality_mode"] == "none"
+    assert core["query_locality_strength"] is None
+    assert core["mechanism_state_mode"] == "descriptor_first"
+    assert core["mechanism_latent_residual_scale"] == 0.35
+    assert core["field_assembly_mode"] == "edge_additive"
+    assert core["additive_background_mode"] == "dense_query_attention"
+    assert core["routing_execution"] == "dense"
+    assert bundle.effective["training"]["learning_rate"] == 3.0e-4
+    assert bundle.effective["training"]["organizer_learning_rate"] == 1.0e-4
+
+
 @pytest.mark.parametrize("milestones", [[250, 250], [0], [True], "250,500"])
 def test_checkpoint_milestones_reject_non_unique_positive_integer_lists(
     tmp_path,

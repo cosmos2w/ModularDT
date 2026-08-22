@@ -265,6 +265,91 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[ChannelTher
     return model, checkpoint
 
 
+def apply_frozen_forward_overrides(
+    model: ChannelThermalHONFModel,
+    *,
+    mechanism_latent_residual_scale: Optional[float] = None,
+    query_locality_mode: Optional[str] = None,
+    query_locality_strength: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Apply evaluation-only decoder settings without changing parameters.
+
+    Stage-6 frozen screening deliberately reuses a checkpoint's weights while
+    varying only arithmetic already represented by configuration.  The
+    descriptor-first encoder caches its residual scale as a plain Python
+    scalar, so it is updated alongside every shared core-config reference.
+    Missing overrides leave checkpoint-owned behavior exactly unchanged.
+    """
+
+    if mechanism_latent_residual_scale is not None and not (
+        0.0 <= float(mechanism_latent_residual_scale) <= 1.0
+    ):
+        raise ValueError("mechanism_latent_residual_scale must be in [0, 1].")
+    locality_modes = {
+        "none",
+        "compact_kernel",
+        "bounded_gaussian",
+        "gaussian_bounded",
+        "inherit_environment",
+    }
+    if query_locality_mode is not None and query_locality_mode not in locality_modes:
+        raise ValueError(f"Unsupported query_locality_mode={query_locality_mode!r}.")
+    if query_locality_strength is not None and float(query_locality_strength) < 0.0:
+        raise ValueError("query_locality_strength must be nonnegative.")
+
+    state_keys_before = tuple(model.state_dict())
+    candidates = (
+        model.config.core_honf,
+        model.core.config,
+        model.core.decoder.config,
+        model.core.decoder.pairwise_kernel.config,
+        model.core.organizer.config,
+    )
+    seen: set[int] = set()
+    configs = []
+    for candidate in candidates:
+        if candidate is not None and id(candidate) not in seen:
+            seen.add(id(candidate))
+            configs.append(candidate)
+
+    if mechanism_latent_residual_scale is not None:
+        value = float(mechanism_latent_residual_scale)
+        for config in configs:
+            config.mechanism_latent_residual_scale = value
+        mechanism_encoder = model.core.decoder.mechanism_encoder
+        if mechanism_encoder is None or not hasattr(mechanism_encoder, "content_scale"):
+            raise RuntimeError("Frozen mechanism-scale override requires descriptor-first encoding.")
+        mechanism_encoder.content_scale = value
+    if query_locality_mode is not None:
+        for config in configs:
+            config.query_locality_mode = str(query_locality_mode)
+    if query_locality_strength is not None:
+        value = float(query_locality_strength)
+        for config in configs:
+            config.query_locality_strength = value
+
+    state_keys_after = tuple(model.state_dict())
+    if state_keys_before != state_keys_after:
+        raise RuntimeError("Frozen evaluation override changed state_dict structure.")
+
+    core = model.config.core_honf
+    effective_query_strength = (
+        float(core.environment_locality_strength)
+        if core.query_locality_strength is None
+        else float(core.query_locality_strength)
+    )
+    return {
+        "mechanism_latent_residual_scale": float(core.mechanism_latent_residual_scale),
+        "query_locality_mode": str(core.query_locality_mode),
+        "query_locality_strength": (
+            None if core.query_locality_strength is None else float(core.query_locality_strength)
+        ),
+        "effective_query_locality_strength": effective_query_strength,
+        "state_dict_key_count": len(state_keys_before),
+        "state_dict_structure_unchanged": state_keys_before == state_keys_after,
+    }
+
+
 def select_sample(dataset: GlobalChannelThermalDataset, case_id: Optional[str], case_index: int) -> Dict[str, Any]:
     """Select sample."""
 

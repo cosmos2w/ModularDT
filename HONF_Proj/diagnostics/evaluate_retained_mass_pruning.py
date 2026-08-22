@@ -29,10 +29,16 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(PROJECT_ROOT / "Case_ThermalChannel" / "src"))
+sys.path.insert(0, str(PROJECT_ROOT / "diagnostics"))
 
 from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer  # noqa: E402
 from channelthermal.evaluation_tools.plots import module_and_fluid_masks, module_radius_from_sample  # noqa: E402
 from channelthermal.workflows.evaluate_forward import load_model, make_batch  # noqa: E402
+from frozen_override_cli import (  # noqa: E402
+    add_frozen_override_arguments,
+    apply_label_frozen_overrides,
+    resolve_frozen_overrides,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--minimum-module-routes", type=int, default=1)
     parser.add_argument("--benchmark-warmup", type=int, default=5)
     parser.add_argument("--benchmark-iterations", type=int, default=20)
+    add_frozen_override_arguments(parser)
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -289,6 +296,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 def evaluate_checkpoint(label: str, path: Path, args: argparse.Namespace, device: torch.device) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     model, checkpoint = load_model(path, device)
+    frozen_overrides = apply_label_frozen_overrides(model, label, args)
     if model.config.core_honf.field_assembly_mode != "edge_additive":
         raise ValueError(f"{label}: gathered retained-mass comparison requires edge_additive mode")
     original = routing_state(model)
@@ -380,6 +388,7 @@ def evaluate_checkpoint(label: str, path: Path, args: argparse.Namespace, device
         "query_retained_mass": query_stats, "routed_module_retained_mass": module_stats,
         "runtime": runtime, "state_dict_key_count": len(state_keys_before),
         "state_dict_structure_unchanged": state_keys_before == state_keys_after,
+        "frozen_overrides": frozen_overrides,
     }
     dataset.close()
     del model, checkpoint
@@ -409,6 +418,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def main() -> int:
     args = parse_args()
     specs = parse_specs(args.checkpoint)
+    resolve_frozen_overrides(args, specs)
     args.output_dir = args.output_dir.resolve()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
