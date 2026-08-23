@@ -14,7 +14,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
@@ -47,6 +46,12 @@ from honf_forward_core.evaluation.topology_signature import (
 )
 from honf_runtime.compat import current_timestamp, load_trusted_checkpoint, recursive_to_device, resolve_demo_path, select_device, strip_module_prefix, write_json
 from honf_runtime.checkpoints import validate_checkpoint_identity
+from honf_runtime.artifact_layout import (
+    EVALUATION_LAYOUT_VERSION,
+    EvaluationArtifactLayout,
+    default_evaluation_root,
+    finalize_evaluation_job,
+)
 from channelthermal.evaluation_tools.organizer_visualization import (
     render_channelthermal_organization_overview,
     render_channelthermal_organization_schematic_presentation,
@@ -541,9 +546,13 @@ def file_sha256(path: str | Path) -> str:
 
 
 def evaluation_output_dir(base_dir_arg: str | None, checkpoint_path: Path, case_id: object) -> Path:
-    """Perform the evaluation output dir operation used by this module."""
+    """Return one timestamped job under the canonical single-case evaluation root."""
 
-    base_dir = Path(base_dir_arg) if base_dir_arg else checkpoint_path.parent / "eval_global"
+    base_dir = (
+        Path(base_dir_arg)
+        if base_dir_arg
+        else default_evaluation_root(checkpoint_path, evaluation_kind="single_case")
+    )
     return resolve_demo_path(base_dir) / f"{safe_path_name(case_id)}_{current_timestamp()}"
 
 
@@ -669,21 +678,21 @@ def hypergraph_diagnostics(predictions: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def copy_figure_alias(source: Path, alias: Path) -> None:
-    """Perform the copy figure alias operation used by this module."""
-
-    if source.resolve() != alias.resolve():
-        shutil.copyfile(source, alias)
-
-
-def summarize(raw_sample: Dict[str, Any], predictions: Dict[str, Any], checkpoint_path: Path, output_dir: Path, channel_order: list[str]) -> Dict[str, Any]:
+def summarize(
+    raw_sample: Dict[str, Any],
+    predictions: Dict[str, Any],
+    checkpoint_path: Path,
+    layout: EvaluationArtifactLayout,
+    channel_order: list[str],
+) -> Dict[str, Any]:
     """Perform the summarize operation used by this module."""
 
     pred = predictions["pred_field_grid"]
     gt = raw_sample["steady_field"][..., : pred.shape[-1]]
     _, fluid_mask = module_and_fluid_masks(raw_sample, pred)
     suffix = str(predictions.get("suffix", "predicted"))
-    npz_path = output_dir / f"evaluation_outputs_{suffix}.npz"
+    layout.ensure("arrays", "metrics")
+    npz_path = layout.arrays / f"evaluation_outputs_{suffix}.npz"
     np.savez_compressed(
         npz_path,
         pred_field_grid=pred.astype(np.float32),
@@ -699,7 +708,7 @@ def summarize(raw_sample: Dict[str, Any], predictions: Dict[str, Any], checkpoin
     field_metrics = error_metrics(pred, gt)
     field_metrics_fluid = masked_error_metrics(pred, gt, fluid_mask)
     temperature_metrics_fluid = masked_error_metrics(pred[..., 4], gt[..., 4], fluid_mask) if pred.shape[-1] >= 5 else None
-    metrics_csv_path = output_dir / f"metrics_{suffix}.csv"
+    metrics_csv_path = layout.metrics / f"metrics_{suffix}.csv"
     with metrics_csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,
@@ -748,7 +757,7 @@ def summarize(raw_sample: Dict[str, Any], predictions: Dict[str, Any], checkpoin
         "internal_interface_note": "Skipped only when internal/interface tensors are empty.",
         "interface_flux_mode": str(predictions.get("interface_flux_mode", "unknown")),
         "outputs": {
-            "global_field_quicklook": str(output_dir / f"global_field_quicklook_{suffix}.png"),
+            "global_field_quicklook": str(layout.fields / f"global_field_quicklook_{suffix}.png"),
             "npz": str(npz_path),
             "metrics_csv": str(metrics_csv_path),
         },
@@ -815,7 +824,8 @@ def main(argv: list[str] | None = None) -> int:
     sample = select_sample(dataset, args.case_id, args.case_index)
     raw_sample = select_sample(raw_dataset, str(sample["case_id"]), args.case_index)
     output_dir = evaluation_output_dir(args.output_dir, checkpoint_path, raw_sample["case_id"])
-    output_dir.mkdir(parents=True, exist_ok=True)
+    layout = EvaluationArtifactLayout.at(output_dir)
+    layout.ensure("fields")
     channel_order = dataset.channel_order or list(CHANNEL_ORDER)
     requested_modes = ["predicted", "teacher"] if args.local_port_condition_mode == "both" else [args.local_port_condition_mode]
     mode_summaries: Dict[str, Any] = {}
@@ -841,19 +851,21 @@ def main(argv: list[str] | None = None) -> int:
             primary_predictions = predictions
         temp_mode = args.temperature_display_mode or ("composite_internal" if np.asarray(predictions["pred_internal_temperature"]).size else "fluid_only")
         plot_field_quicklook(
-            output_dir / f"global_field_quicklook_{suffix}.png",
+            layout.fields / f"global_field_quicklook_{suffix}.png",
             raw_sample,
             predictions["pred_field_grid"],
             channel_order,
             pred_internal_temperature=predictions["pred_internal_temperature"],
             temperature_display_mode=temp_mode,
         )
-        internal_written = plot_internal(output_dir / f"module_internal_temperature_{suffix}.png", raw_sample, predictions["pred_internal_temperature"])
-        interface_written = plot_interface(output_dir / f"interface_curves_{suffix}.png", raw_sample, predictions["pred_interface"])
-        summary = summarize(raw_sample, predictions, checkpoint_path, output_dir, channel_order)
+        internal_path = layout.fields / f"module_internal_temperature_{suffix}.png"
+        interface_path = layout.fields / f"interface_curves_{suffix}.png"
+        internal_written = plot_internal(internal_path, raw_sample, predictions["pred_internal_temperature"])
+        interface_written = plot_interface(interface_path, raw_sample, predictions["pred_interface"])
+        summary = summarize(raw_sample, predictions, checkpoint_path, layout, channel_order)
         summary["temperature_display_mode"] = temp_mode
-        summary["outputs"]["module_internal_temperature"] = "skipped_empty" if not internal_written else str(output_dir / f"module_internal_temperature_{suffix}.png")
-        summary["outputs"]["interface_curves"] = "skipped_empty" if not interface_written else str(output_dir / f"interface_curves_{suffix}.png")
+        summary["outputs"]["module_internal_temperature"] = "skipped_empty" if not internal_written else str(internal_path)
+        summary["outputs"]["interface_curves"] = "skipped_empty" if not interface_written else str(interface_path)
         mode_summaries[suffix] = summary
 
     org_outputs: Dict[str, str] = {}
@@ -861,6 +873,7 @@ def main(argv: list[str] | None = None) -> int:
     if primary_predictions is None:
         primary_predictions = first_predictions
     if args.organization_view != "none" and primary_predictions is not None:
+        layout.ensure("organization")
         arrays = extract_organization_arrays(raw_sample, primary_predictions["organizer_aux"])
         radius = module_radius_from_sample(raw_sample, fallback=float(model.config.module_radius))
         style = str(args.organization_style)
@@ -870,15 +883,11 @@ def main(argv: list[str] | None = None) -> int:
         render_presentation = style in {"presentation", "both"}
         render_debug = style in {"debug", "both"}
         if args.organization_view in {"all", "physical"} and render_presentation:
-            overview = output_dir / "organization_overview.png"
+            overview = layout.organization / "organization_overview.png"
             render_channelthermal_organization_overview(overview, raw_sample, arrays, module_radius=radius, channel_order=channel_order, link_threshold=float(args.organization_link_threshold))
-            alias = output_dir / "organizer_visualization.png"
-            copy_figure_alias(overview, alias)
             org_outputs["organization_overview"] = str(overview)
-            org_outputs["organizer_visualization"] = str(alias)
-            org_outputs["organization_physical"] = str(alias)
         if args.organization_view in {"all", "matrices"} and (render_presentation or render_debug):
-            matrices = output_dir / "organization_summary_matrices.png"
+            matrices = layout.organization / "organization_summary_matrices.png"
             render_channelthermal_organization_summary_matrices(
                 matrices,
                 raw_sample,
@@ -888,10 +897,7 @@ def main(argv: list[str] | None = None) -> int:
                 sort_environment=False,
             )
             org_outputs["organization_summary_matrices"] = str(matrices)
-            legacy_matrices = output_dir / "organization_matrices.png"
-            copy_figure_alias(matrices, legacy_matrices)
-            org_outputs["organization_matrices"] = str(legacy_matrices)
-            sorted_matrices = output_dir / "organization_summary_matrices_sorted_by_dominant_edge.png"
+            sorted_matrices = layout.organization / "organization_summary_matrices_sorted_by_dominant_edge.png"
             render_channelthermal_organization_summary_matrices(
                 sorted_matrices,
                 raw_sample,
@@ -902,7 +908,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             org_outputs["organization_summary_matrices_sorted_by_dominant_edge"] = str(sorted_matrices)
         if args.organization_view in {"all", "schematic"} and render_presentation:
-            schematic = output_dir / "organization_schematic.png"
+            schematic = layout.organization / "organization_schematic.png"
             render_channelthermal_organization_schematic_presentation(schematic, raw_sample, arrays, link_threshold=float(args.organization_link_threshold))
             org_outputs["organization_schematic"] = str(schematic)
 
@@ -915,8 +921,9 @@ def main(argv: list[str] | None = None) -> int:
         routing_maps = primary_predictions.get("routing_maps", {})
         required = {"query_hyper_attention", "pairwise_edge_contribution", "c_H_norm", "c_pair_norm"}
         if required.issubset(routing_maps):
+            layout.ensure("routing")
             routing_outputs = save_routing_diagnostics(
-                output_dir,
+                layout.routing,
                 raw_sample,
                 routing_maps,
                 arrays,
@@ -927,11 +934,13 @@ def main(argv: list[str] | None = None) -> int:
     plan_outputs: Dict[str, str] = {}
     diagnostics_outputs: Dict[str, str] = {}
     if primary_predictions is not None:
-        diagnostics_path = output_dir / "hypergraph_diagnostics.json"
+        layout.ensure("diagnostics")
+        diagnostics_path = layout.diagnostics / "hypergraph_diagnostics.json"
         write_json(diagnostics_path, hypergraph_diagnostics(primary_predictions))
         diagnostics_outputs["hypergraph_diagnostics"] = str(diagnostics_path)
 
     if args.export_hypergraph_plan and primary_predictions is not None:
+        layout.ensure("plans")
         structure = raw_sample["structure"]
         plan = extract_hypergraph_plan(
             primary_predictions["organizer_aux"],
@@ -941,10 +950,10 @@ def main(argv: list[str] | None = None) -> int:
             domain_length_y=float(np.asarray(structure["domain_length_y"]).reshape(-1)[0]),
         )
         validate_hypergraph_plan(plan)
-        plan_path = output_dir / "hypergraph_plan.npz"
+        plan_path = layout.plans / "hypergraph_plan.npz"
         save_hypergraph_plan(plan_path, plan)
         plan_summary = summarize_hypergraph_plan(plan)
-        plan_summary_path = output_dir / "hypergraph_plan_summary.json"
+        plan_summary_path = layout.plans / "hypergraph_plan_summary.json"
         write_json(plan_summary_path, plan_summary)
         plan_outputs = {
             "hypergraph_plan_npz": str(plan_path),
@@ -953,6 +962,7 @@ def main(argv: list[str] | None = None) -> int:
 
     topology_outputs: Dict[str, str] = {}
     if args.export_topology_signature and primary_predictions is not None:
+        layout.ensure("topology")
         structure = raw_sample["structure"]
         routing_maps = primary_predictions.get("routing_maps", {})
         reference_query_xy = np.stack(
@@ -977,9 +987,9 @@ def main(argv: list[str] | None = None) -> int:
             case_id=str(raw_sample["case_id"]),
             forward_checkpoint_sha256=file_sha256(checkpoint_path),
         )
-        signature_path = output_dir / "topology_signature.npz"
+        signature_path = layout.topology / "topology_signature.npz"
         save_topology_signature(signature_path, signature)
-        signature_summary_path = output_dir / "topology_signature_summary.json"
+        signature_summary_path = layout.topology / "topology_signature_summary.json"
         write_json(signature_summary_path, summarize_topology_signature(signature))
         topology_outputs = {
             "topology_signature_npz": str(signature_path),
@@ -1001,12 +1011,12 @@ def main(argv: list[str] | None = None) -> int:
                     > 0.5
                 ),
             )
-            relation_metrics_path = output_dir / "topology_relation_metrics.json"
+            relation_metrics_path = layout.topology / "topology_relation_metrics.json"
             write_json(relation_metrics_path, relation_metrics)
             topology_outputs["topology_relation_metrics"] = str(relation_metrics_path)
         topology_outputs.update(
             render_topology_signature_diagnostics(
-                output_dir,
+                layout.topology,
                 raw_sample,
                 signature,
                 edge_fields=routing_maps.get("pred_field_by_edge"),
@@ -1016,6 +1026,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if len(mode_summaries) == 1:
         summary = next(iter(mode_summaries.values()))
+        summary["artifact_layout_version"] = EVALUATION_LAYOUT_VERSION
         summary["primary_export_mode"] = str(primary_predictions.get("suffix", "predicted")) if primary_predictions else "unknown"
         summary["outputs"].update(org_outputs)
         summary["outputs"].update(routing_outputs)
@@ -1030,6 +1041,7 @@ def main(argv: list[str] | None = None) -> int:
         outputs.update(topology_outputs)
         outputs.update(diagnostics_outputs)
         summary = {
+            "artifact_layout_version": EVALUATION_LAYOUT_VERSION,
             "checkpoint": str(checkpoint_path),
             "case_id": str(raw_sample["case_id"]),
             "primary_export_mode": str(primary_predictions.get("suffix", "predicted")) if primary_predictions else "unknown",
@@ -1037,12 +1049,12 @@ def main(argv: list[str] | None = None) -> int:
             "outputs": outputs,
         }
     write_json(output_dir / "summary.json", summary)
-    with (output_dir / "summary_compact.json").open("w", encoding="utf-8") as f:
-        if "field_metrics_fluid" in summary:
-            compact = {"case_id": summary["case_id"], "field_metrics_fluid": summary["field_metrics_fluid"], "outputs": summary["outputs"]}
-        else:
-            compact = {"case_id": summary["case_id"], "modes": {key: value.get("field_metrics_fluid") for key, value in summary.get("modes", {}).items()}, "outputs": summary["outputs"]}
-        json.dump(compact, f, indent=2)
+    finalize_evaluation_job(
+        output_dir,
+        kind="forward_single_case",
+        checkpoint_path=checkpoint_path,
+        requested_checkpoint=str(args.checkpoint),
+    )
     print(f"[done] wrote evaluation outputs to {output_dir}")
     return 0
 

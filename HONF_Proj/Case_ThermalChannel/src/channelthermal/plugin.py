@@ -353,9 +353,7 @@ class ThermalChannelPlugin:
             if run_id:
                 argv.extend(["--Run_ID", str(run_id)])
             argv.extend(["--saved-root", saved_root])
-            status = int(main(argv))
-            self._record_latest_evaluation(Path(saved_root), run_id, checkpoint, "eval_global")
-            return status
+            return int(main(argv))
 
         if request.workflow == "local_module":
             from .workflows.evaluate_local import main
@@ -391,9 +389,7 @@ class ThermalChannelPlugin:
             if run_id:
                 argv.extend(["--Run_ID", str(run_id)])
             argv.extend(["--saved-root", saved_root])
-            status = int(main(argv))
-            self._record_latest_evaluation(Path(saved_root), run_id, request.checkpoint or "best", "eval_local")
-            return status
+            return int(main(argv))
 
         if request.workflow == "compare":
             from .workflows.compare_models import main
@@ -519,44 +515,6 @@ class ThermalChannelPlugin:
                 continue
             if bool(evaluation.get(key, False)) and option not in argv:
                 argv.append(option)
-
-    @staticmethod
-    def _record_latest_evaluation(
-        saved_root: Path,
-        run_id: Any,
-        checkpoint: Any,
-        directory_name: str,
-    ) -> None:
-        """Attach the newest generated evaluation directory to its run manifest."""
-
-        if run_id:
-            normalized = f"{int(str(run_id)):04d}"
-            candidates = [path for path in saved_root.glob(f"Run_{normalized}_*") if path.is_dir()]
-            if not candidates:
-                return
-            run_dir = max(candidates, key=lambda path: path.stat().st_mtime)
-        else:
-            checkpoint_path = Path(str(checkpoint)).expanduser().resolve()
-            run_dir = checkpoint_path.parent
-        evaluation_root = run_dir / directory_name
-        children = [path for path in evaluation_root.iterdir() if path.is_dir()] if evaluation_root.exists() else []
-        if children:
-            evaluation_dir = max(children, key=lambda path: path.stat().st_mtime)
-            resolved_checkpoint = None
-            for summary_name in ("summary.json", "evaluation_summary.json"):
-                summary_path = evaluation_dir / summary_name
-                if summary_path.is_file():
-                    resolved_checkpoint = json.loads(summary_path.read_text(encoding="utf-8")).get("checkpoint")
-                    break
-            ThermalChannelPlugin._write_artifact_manifest(
-                evaluation_dir,
-                filename="evaluation_manifest.json",
-                kind=directory_name,
-                source_run=run_dir,
-                checkpoint=str(checkpoint),
-                resolved_checkpoint=resolved_checkpoint,
-            )
-            RunStore.record_evaluation(run_dir, evaluation_dir)
 
     @staticmethod
     def _write_artifact_manifest(

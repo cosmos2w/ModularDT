@@ -27,6 +27,12 @@ from honf_runtime.compat import (
     write_json,
 )
 from honf_runtime.checkpoints import validate_checkpoint_identity
+from honf_runtime.artifact_layout import (
+    EVALUATION_LAYOUT_VERSION,
+    EvaluationArtifactLayout,
+    default_evaluation_root,
+    finalize_evaluation_job,
+)
 from channelthermal.local_surrogate.model import LocalModuleConfig, LocalModuleSurrogate
 from channelthermal.evaluation_tools.plots import error_metrics, plot_local_interface, plot_local_internal
 
@@ -126,9 +132,13 @@ def safe_path_name(value: object) -> str:
 
 
 def evaluation_output_dir(base_dir_arg: str | None, checkpoint_path: Path, case_id: object) -> Path:
-    """Perform the evaluation output dir operation used by this module."""
+    """Return one timestamped job under the canonical single-case evaluation root."""
 
-    base_dir = Path(base_dir_arg) if base_dir_arg else checkpoint_path.parent / "eval_local"
+    base_dir = (
+        Path(base_dir_arg)
+        if base_dir_arg
+        else default_evaluation_root(checkpoint_path, evaluation_kind="single_case")
+    )
     return resolve_demo_path(base_dir) / f"{safe_path_name(case_id)}_{current_timestamp()}"
 
 
@@ -209,19 +219,23 @@ def main(argv: list[str] | None = None) -> int:
     n_active_modes = int(np.asarray(raw_sample.get("n_active_modes", [-1])).reshape(-1)[0])
 
     output_dir = evaluation_output_dir(args.output_dir, checkpoint_path, raw_sample["case_id"])
-    output_dir.mkdir(parents=True, exist_ok=True)
+    layout = EvaluationArtifactLayout.at(output_dir)
+    layout.ensure("fields")
+    internal_figure = layout.fields / "internal_temperature_comparison.png"
+    interface_figure = layout.fields / "interface_curve_comparison.png"
     plot_local_internal(
-        output_dir / "internal_temperature_comparison.png",
+        internal_figure,
         {**raw_sample, "internal_temperature_targets": target_internal},
         pred_internal,
         internal_metrics,
     )
     plot_local_interface(
-        output_dir / "interface_curve_comparison.png",
+        interface_figure,
         {**raw_sample, "interface_targets": target_interface},
         pred_interface,
     )
     summary = {
+        "artifact_layout_version": EVALUATION_LAYOUT_VERSION,
         "checkpoint": str(checkpoint_path),
         "case_id": str(raw_sample["case_id"]),
         "metric_note": "l2_error is the aggregate Euclidean norm over all values; rmse is usually better for visual comparison.",
@@ -253,11 +267,17 @@ def main(argv: list[str] | None = None) -> int:
         },
         "interface_targets_smoothed": bool(getattr(raw_dataset, "interface_targets_smoothed", False)),
         "outputs": {
-            "internal_temperature_comparison": str(output_dir / "internal_temperature_comparison.png"),
-            "interface_curve_comparison": str(output_dir / "interface_curve_comparison.png"),
+            "internal_temperature_comparison": str(internal_figure),
+            "interface_curve_comparison": str(interface_figure),
         },
     }
-    write_json(output_dir / "evaluation_summary.json", summary)
+    write_json(output_dir / "summary.json", summary)
+    finalize_evaluation_job(
+        output_dir,
+        kind="local_single_case",
+        checkpoint_path=checkpoint_path,
+        requested_checkpoint=str(args.checkpoint),
+    )
     print(json.dumps(summary, indent=2))
     return 0
 

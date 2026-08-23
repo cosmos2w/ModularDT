@@ -1334,9 +1334,13 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    # Keep the main PNG concise: it is for human scanning during training.
-    # Detailed scalar diagnostics remain in metrics.csv and focused plots below.
-    diagnostics_dir = run_dir / "diagnostic_plots"
+    # Managed runs write directly to the canonical tree.  The legacy fallback
+    # keeps direct case-workflow invocations compatible without mirroring one
+    # plot into both ``diagnostic_plots`` and ``plots/diagnostics``.
+    managed_run = (run_dir / "run_manifest.json").is_file()
+    training_dir = run_dir / "plots" / "training" if managed_run else run_dir
+    diagnostics_dir = run_dir / "plots" / "diagnostics" if managed_run else run_dir / "diagnostic_plots"
+    training_dir.mkdir(parents=True, exist_ok=True)
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
     active_edge_references = _resolved_active_edge_references(run_dir)
     stale_root_plots = [
@@ -1349,7 +1353,7 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
         "honf_context_curve.png",
     ]
     for filename in stale_root_plots:
-        stale_path = run_dir / filename
+        stale_path = training_dir / filename
         if stale_path.exists():
             stale_path.unlink()
 
@@ -1386,7 +1390,7 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
             reference_lines=active_edge_references if y_min_zero else (),
         )
     fig.suptitle("HONF-CL Training Overview", fontsize=13)
-    fig.savefig(str(run_dir / "loss_curve.png"), dpi=160)
+    fig.savefig(str(training_dir / "loss_curve.png"), dpi=160)
     plt.close(fig)
 
     focused = {
