@@ -3,8 +3,12 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
+import numpy as np
+
+from channelthermal.evaluation.results import summarize
 from channelthermal.workflows import evaluate_forward, evaluate_local
 from channelthermal.workflows.train_forward import save_global_loss_plots
+from honf_runtime.artifact_layout import EvaluationArtifactLayout
 
 
 def test_forward_and_local_evaluators_share_canonical_run_root(tmp_path, monkeypatch) -> None:
@@ -53,3 +57,34 @@ def test_managed_forward_training_writes_only_canonical_plot_tree(tmp_path) -> N
     assert (run_dir / "plots" / "diagnostics" / "loss_total_curve.png").is_file()
     assert not (run_dir / "loss_curve.png").exists()
     assert not (run_dir / "diagnostic_plots").exists()
+
+
+def test_forward_summary_writes_metrics_csv_and_arrays(tmp_path) -> None:
+    layout = EvaluationArtifactLayout.at(tmp_path / "evaluation")
+    prediction = np.ones((2, 3, 5), dtype=np.float32)
+    summary = summarize(
+        {
+            "case_id": "0653",
+            "steady_field": np.zeros_like(prediction),
+            "module_mask": np.zeros(prediction.shape[:2], dtype=bool),
+        },
+        {
+            "suffix": "predicted",
+            "pred_field_grid": prediction,
+            "pred_internal_temperature": np.empty((0,), dtype=np.float32),
+            "pred_interface": np.empty((0,), dtype=np.float32),
+            "pred_port_condition": np.empty((0,), dtype=np.float32),
+        },
+        Path("best_by_field_mse_model.pt"),
+        layout,
+        ["u", "v", "p", "omega", "temperature"],
+    )
+
+    metrics_path = layout.metrics / "metrics_predicted.csv"
+    with metrics_path.open(newline="", encoding="utf-8") as stream:
+        rows = list(csv.DictReader(stream))
+    assert len(rows) == 1
+    assert rows[0]["case_id"] == "0653"
+    assert rows[0]["field_mse"] == "1.0"
+    assert (layout.arrays / "evaluation_outputs_predicted.npz").is_file()
+    assert summary["outputs"]["metrics_csv"] == str(metrics_path)

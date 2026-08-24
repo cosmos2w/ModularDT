@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import hashlib
 from pathlib import Path
 from typing import Any, Dict
@@ -266,4 +267,3 @@ def summarize(
             "metrics_csv": str(metrics_csv_path),
         },
     }
-

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
@@ -264,4 +264,3 @@ def apply_frozen_forward_overrides(
         "state_dict_key_count": len(state_keys_before),
         "state_dict_structure_unchanged": state_keys_before == state_keys_after,
     }
-

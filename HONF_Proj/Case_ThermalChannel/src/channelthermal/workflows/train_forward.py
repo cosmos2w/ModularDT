@@ -63,6 +63,7 @@ from channelthermal.training.epoch import (
     internal_loss,
     make_model_inputs,
     organizer_regularization,
+    pack_scalar_metrics,
     port_condition_loss,
     port_cyclic_smoothness_loss,
     port_global_consistency_loss,
@@ -144,16 +145,6 @@ def should_save_milestone_checkpoint(
     return int(epoch) in {
         int(value) for value in checkpoint_config.get("save_epoch_milestones", [])
     }
-
-
-def pack_scalar_metrics(tensor_metrics: Dict[str, torch.Tensor]) -> Dict[str, float]:
-    """Transfer a batch of scalar metrics to the CPU in one synchronization."""
-
-    names = tuple(tensor_metrics)
-    values = torch.stack(
-        tuple(tensor_metrics[name].detach().reshape(()) for name in names)
-    ).cpu().tolist()
-    return {name: float(value) for name, value in zip(names, values)}
 
 
 def resolve_run_id(args_value: Any, cfg: Dict[str, Any], training_cfg: Dict[str, Any]) -> str:

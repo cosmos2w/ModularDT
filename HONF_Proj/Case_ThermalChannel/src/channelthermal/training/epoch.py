@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Optional
 
 import torch
@@ -16,6 +17,16 @@ from honf_forward_core.training.diagnostics import (
     organizer_regularization_loss,
 )
 from honf_runtime.compat import autocast_context, recursive_to_device
+
+
+def pack_scalar_metrics(tensor_metrics: Dict[str, torch.Tensor]) -> Dict[str, float]:
+    """Transfer a batch of scalar metrics to the CPU in one synchronization."""
+
+    names = tuple(tensor_metrics)
+    values = torch.stack(
+        tuple(tensor_metrics[name].detach().reshape(()) for name in names)
+    ).cpu().tolist()
+    return {name: float(value) for name, value in zip(names, values)}
 
 
 def organizer_regularization(output: Dict[str, Any], loss_cfg: Dict[str, Any]) -> torch.Tensor:
@@ -361,4 +372,3 @@ def run_epoch(
             )
         }
     return {key: value / count for key, value in sums.items()}
-
