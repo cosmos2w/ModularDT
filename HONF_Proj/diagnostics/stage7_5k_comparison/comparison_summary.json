@@ -1,0 +1,2285 @@
+{
+  "accuracy": {
+    "run1000_best": {
+      "channels": {
+        "omega": 0.00117629926856758,
+        "p": 0.0006835389593013176,
+        "temperature": 0.0014121628218347329,
+        "u": 0.00020187276789638658,
+        "v": 0.0001810876285256875
+      },
+      "epoch": 9655,
+      "median_case_mse": 0.00038597778869984623,
+      "near_interface_channels": {
+        "omega": 0.012483189048781011,
+        "p": 0.0010055154851379734,
+        "temperature": 0.002624862913884501,
+        "u": 0.00020179285652543628,
+        "v": 0.0007645524002714575
+      },
+      "p95_case_mse": 0.002575510527858505,
+      "pooled_normalized_fluid_mse": 0.0007309922892251409,
+      "pooled_normalized_relative_l2": 0.028099594238627755
+    },
+    "run1304_best": {
+      "channels": {
+        "omega": 0.00202746105532587,
+        "p": 0.00048518650045335386,
+        "temperature": 0.0017960159147033072,
+        "u": 0.00017976135929970253,
+        "v": 0.0002722621050242601
+      },
+      "epoch": 4793,
+      "median_case_mse": 0.0007972968164621584,
+      "near_interface_channels": {
+        "omega": 0.02234859447949079,
+        "p": 0.0012953680860893439,
+        "temperature": 0.0026628276004686383,
+        "u": 0.00043964594634890946,
+        "v": 0.0011728591729179526
+      },
+      "p95_case_mse": 0.0025971832577412774,
+      "pooled_normalized_fluid_mse": 0.0009521373869612987,
+      "pooled_normalized_relative_l2": 0.03206959387167283
+    },
+    "run1304_e5000": {
+      "channels": {
+        "omega": 0.002684881283453984,
+        "p": 0.000546049123191734,
+        "temperature": 0.0019292422260534419,
+        "u": 0.00032260671156040713,
+        "v": 0.0003957305834985269
+      },
+      "epoch": 5000,
+      "median_case_mse": 0.001028229830843099,
+      "near_interface_channels": {
+        "omega": 0.02781874534165113,
+        "p": 0.0013235413713283306,
+        "temperature": 0.0029889399850367353,
+        "u": 0.000604821962591265,
+        "v": 0.0014918074989146177
+      },
+      "p95_case_mse": 0.003018760343687583,
+      "pooled_normalized_fluid_mse": 0.0011757019855516187,
+      "pooled_normalized_relative_l2": 0.03563627294073147
+    },
+    "run1401_best": {
+      "channels": {
+        "omega": 0.0016460942650272513,
+        "p": 0.0007953541809943127,
+        "temperature": 0.0017286837354308447,
+        "u": 0.000329050407454371,
+        "v": 0.0002697890700878256
+      },
+      "epoch": 4585,
+      "median_case_mse": 0.000705895283604637,
+      "near_interface_channels": {
+        "omega": 0.01627310978176549,
+        "p": 0.0013767813866719413,
+        "temperature": 0.002841156487105276,
+        "u": 0.00034373909883802004,
+        "v": 0.0011573458840772304
+      },
+      "p95_case_mse": 0.0027392473539990052,
+      "pooled_normalized_fluid_mse": 0.000953794331798921,
+      "pooled_normalized_relative_l2": 0.03209748609124516
+    },
+    "run1401_e5000": {
+      "channels": {
+        "omega": 0.0018561538987871258,
+        "p": 0.0017058810722244198,
+        "temperature": 0.0021606273240963596,
+        "u": 0.00042040225501549326,
+        "v": 0.000332170955885936
+      },
+      "epoch": 5000,
+      "median_case_mse": 0.0010400713811843428,
+      "near_interface_channels": {
+        "omega": 0.015958337462632984,
+        "p": 0.002715192925346276,
+        "temperature": 0.0030375495987634963,
+        "u": 0.000399889989317305,
+        "v": 0.0014732073997638139
+      },
+      "p95_case_mse": 0.0037650792818694255,
+      "pooled_normalized_fluid_mse": 0.0012950471012018669,
+      "pooled_normalized_relative_l2": 0.037401277183842986
+    }
+  },
+  "analysis": "Stage7 Run1000/1304/1401 matched-budget evaluation",
+  "convergence": {
+    "run1000": {
+      "max_epoch": 10000,
+      "trailing_window_epochs": 50,
+      "val_field_mse": {
+        "1000": 0.01090229395776987,
+        "2500": 0.0032472583698108792,
+        "500": 0.024780284147709608,
+        "5000": 0.0022566431434825063
+      },
+      "val_temperature_mse": {
+        "1000": 0.008621603599749506,
+        "2500": 0.003736445854883641,
+        "500": 0.01642428827472031,
+        "5000": 0.002795838809106499
+      }
+    },
+    "run1304": {
+      "max_epoch": 5000,
+      "trailing_window_epochs": 50,
+      "val_field_mse": {
+        "1000": 0.009468467673286796,
+        "2500": 0.00414337229449302,
+        "500": 0.020296000875532627,
+        "5000": 0.0025973957090172917
+      },
+      "val_temperature_mse": {
+        "1000": 0.008485639235004783,
+        "2500": 0.004124044207856059,
+        "500": 0.01496523036621511,
+        "5000": 0.002617078775074333
+      }
+    },
+    "run1401": {
+      "max_epoch": 5000,
+      "trailing_window_epochs": 50,
+      "val_field_mse": {
+        "1000": 0.011216805083677173,
+        "2500": 0.0034105057711713016,
+        "500": 0.02298699412494898,
+        "5000": 0.0021983447659295052
+      },
+      "val_temperature_mse": {
+        "1000": 0.008380246348679066,
+        "2500": 0.0037402561865746975,
+        "500": 0.015089238295331597,
+        "5000": 0.002289453288540244
+      }
+    }
+  },
+  "decision_gates": {
+    "environment_effective_rank_above_3p5": true,
+    "environment_largest_occupancy_below_0p50": true,
+    "environment_profile_cosine_below_0p20": true,
+    "full_forward_ratio_below_1p10": true,
+    "matched_history_ratio_below_1p10": true,
+    "parameter_count_same_as_run1000": true,
+    "query_effective_rank_above_3p0": true,
+    "query_profile_cosine_below_0p55": true,
+    "region_separation_above_0p20": true
+  },
+  "efficiency": {
+    "run1000_best": {
+      "case_id": "0273",
+      "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1000_20260817_214356_enhanced_honf_pairwise/best_by_field_mse_model.pt",
+      "checkpoint_size_bytes": 31628894,
+      "epoch": 9655,
+      "field_assembly_mode": "context_fusion",
+      "frozen_overrides": {
+        "effective_query_locality_strength": 1.0,
+        "mechanism_latent_residual_scale": 0.35,
+        "query_locality_mode": "inherit_environment",
+        "query_locality_strength": null,
+        "state_dict_key_count": 237,
+        "state_dict_structure_unchanged": true
+      },
+      "full_forward": {
+        "baseline_allocated_bytes": 23166464,
+        "baseline_reserved_bytes": 39845888,
+        "incremental_peak_allocated_bytes": 380015616,
+        "incremental_peak_reserved_bytes": 440401920,
+        "mean_seconds": 0.027114339941181242,
+        "median_seconds": 0.02660467755049467,
+        "p05_seconds": 0.025714215310290455,
+        "p95_seconds": 0.027997407037764765,
+        "peak_allocated_bytes": 403182080,
+        "peak_reserved_bytes": 480247808
+      },
+      "organizer_mode": "fixed_projection",
+      "prepared_decoder": {
+        "baseline_allocated_bytes": 23166464,
+        "baseline_reserved_bytes": 39845888,
+        "incremental_peak_allocated_bytes": 379301888,
+        "incremental_peak_reserved_bytes": 438304768,
+        "mean_seconds": 0.006552789476700127,
+        "median_seconds": 0.006506665609776974,
+        "p05_seconds": 0.006411776971071958,
+        "p95_seconds": 0.006726627238094807,
+        "peak_allocated_bytes": 402468352,
+        "peak_reserved_bytes": 478150656
+      },
+      "query_count": 8192,
+      "sha256": "69914d9eeb0cae69e098e018e116764ce2d7e867fa1f260db0bbee7034729fc1",
+      "state_dict_key_count": 237,
+      "state_dict_structure_unchanged": true,
+      "total_parameters": 3508649,
+      "trainable_parameters": 2473510
+    },
+    "run1304_best": {
+      "case_id": "0273",
+      "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1304_20260822_232649_stage5_fixed_residual_concat_uniform_lr3e4/best_by_field_mse_model.pt",
+      "checkpoint_size_bytes": 37570813,
+      "epoch": 4793,
+      "field_assembly_mode": "edge_additive",
+      "frozen_overrides": {
+        "effective_query_locality_strength": 0.25,
+        "mechanism_latent_residual_scale": 0.35,
+        "query_locality_mode": "none",
+        "query_locality_strength": null,
+        "state_dict_key_count": 245,
+        "state_dict_structure_unchanged": true
+      },
+      "full_forward": {
+        "baseline_allocated_bytes": 24785920,
+        "baseline_reserved_bytes": 39845888,
+        "incremental_peak_allocated_bytes": 410152448,
+        "incremental_peak_reserved_bytes": 748683264,
+        "mean_seconds": 0.02929019199218601,
+        "median_seconds": 0.029307442717254162,
+        "p05_seconds": 0.028255866887047888,
+        "p95_seconds": 0.03069839826785028,
+        "peak_allocated_bytes": 434938368,
+        "peak_reserved_bytes": 788529152
+      },
+      "organizer_mode": "fixed_projection",
+      "prepared_decoder": {
+        "baseline_allocated_bytes": 24785920,
+        "baseline_reserved_bytes": 39845888,
+        "incremental_peak_allocated_bytes": 409423360,
+        "incremental_peak_reserved_bytes": 746586112,
+        "mean_seconds": 0.00925251585431397,
+        "median_seconds": 0.009173111524432898,
+        "p05_seconds": 0.009001089353114366,
+        "p95_seconds": 0.009490168653428555,
+        "peak_allocated_bytes": 434209280,
+        "peak_reserved_bytes": 786432000
+      },
+      "query_count": 8192,
+      "sha256": "3b1db1b7395e79e8802c6492f087bde08e04d3f303d9c8ef678b3fde0b546d76",
+      "state_dict_key_count": 245,
+      "state_dict_structure_unchanged": true,
+      "total_parameters": 3913154,
+      "trainable_parameters": 2878015
+    },
+    "run1401_best": {
+      "case_id": "0273",
+      "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1401_20260823_151126_stage7_modern_structured_context/best_by_field_mse_model.pt",
+      "checkpoint_size_bytes": 31647774,
+      "epoch": 4585,
+      "field_assembly_mode": "context_fusion",
+      "frozen_overrides": {
+        "effective_query_locality_strength": 1.0,
+        "mechanism_latent_residual_scale": 0.35,
+        "query_locality_mode": "none",
+        "query_locality_strength": null,
+        "state_dict_key_count": 237,
+        "state_dict_structure_unchanged": true
+      },
+      "full_forward": {
+        "baseline_allocated_bytes": 23166464,
+        "baseline_reserved_bytes": 39845888,
+        "incremental_peak_allocated_bytes": 380015616,
+        "incremental_peak_reserved_bytes": 440401920,
+        "mean_seconds": 0.02576835681684315,
+        "median_seconds": 0.025827192701399326,
+        "p05_seconds": 0.024858490051701664,
+        "p95_seconds": 0.026589369028806684,
+        "peak_allocated_bytes": 403182080,
+        "peak_reserved_bytes": 480247808
+      },
+      "organizer_mode": "fixed_projection",
+      "prepared_decoder": {
+        "baseline_allocated_bytes": 23166464,
+        "baseline_reserved_bytes": 39845888,
+        "incremental_peak_allocated_bytes": 379301888,
+        "incremental_peak_reserved_bytes": 438304768,
+        "mean_seconds": 0.0066937106428667905,
+        "median_seconds": 0.006651099305599928,
+        "p05_seconds": 0.006565961986780167,
+        "p95_seconds": 0.006822311133146285,
+        "peak_allocated_bytes": 402468352,
+        "peak_reserved_bytes": 478150656
+      },
+      "query_count": 8192,
+      "sha256": "5be150bd6b4fc79599af62c767fba84490ba50edcc8cc8ce85026ae27a1846b3",
+      "state_dict_key_count": 237,
+      "state_dict_structure_unchanged": true,
+      "total_parameters": 3508649,
+      "trainable_parameters": 2473510
+    },
+    "run1401_e5000": {
+      "case_id": "0273",
+      "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1401_20260823_151126_stage7_modern_structured_context/epoch_5000_model.pt",
+      "checkpoint_size_bytes": 31643874,
+      "epoch": 5000,
+      "field_assembly_mode": "context_fusion",
+      "frozen_overrides": {
+        "effective_query_locality_strength": 1.0,
+        "mechanism_latent_residual_scale": 0.35,
+        "query_locality_mode": "none",
+        "query_locality_strength": null,
+        "state_dict_key_count": 237,
+        "state_dict_structure_unchanged": true
+      },
+      "full_forward": {
+        "baseline_allocated_bytes": 23166464,
+        "baseline_reserved_bytes": 39845888,
+        "incremental_peak_allocated_bytes": 380015616,
+        "incremental_peak_reserved_bytes": 440401920,
+        "mean_seconds": 0.02575972464401275,
+        "median_seconds": 0.025835013948380947,
+        "p05_seconds": 0.02476155017502606,
+        "p95_seconds": 0.026774480752646924,
+        "peak_allocated_bytes": 403182080,
+        "peak_reserved_bytes": 480247808
+      },
+      "organizer_mode": "fixed_projection",
+      "prepared_decoder": {
+        "baseline_allocated_bytes": 23166464,
+        "baseline_reserved_bytes": 39845888,
+        "incremental_peak_allocated_bytes": 379301888,
+        "incremental_peak_reserved_bytes": 438304768,
+        "mean_seconds": 0.006615019077435136,
+        "median_seconds": 0.006579999811947346,
+        "p05_seconds": 0.006444030487909913,
+        "p95_seconds": 0.00682140477001667,
+        "peak_allocated_bytes": 402468352,
+        "peak_reserved_bytes": 478150656
+      },
+      "query_count": 8192,
+      "sha256": "cee978f0461db928b72c3b6b66cb0ef56647674f82d6ef2660a8380754a829d6",
+      "state_dict_key_count": 237,
+      "state_dict_structure_unchanged": true,
+      "total_parameters": 3508649,
+      "trainable_parameters": 2473510
+    }
+  },
+  "provenance": {
+    "checkpoints": {
+      "run1000_best": {
+        "channel_order": [
+          "u",
+          "v",
+          "p",
+          "omega",
+          "temperature"
+        ],
+        "dataset_fingerprint": "4224093c22a67af4adfecc8b21d53548e4263ec2254c230dc83c89526b36da05",
+        "dataset_id": "thermal_channel_global_v1",
+        "dataset_schema": "thermal_channel_global_hdf5_v1",
+        "epoch": 9655,
+        "label": "run1000_best",
+        "normalization_sha256": "ec125804dc49199d641b2249faf419625d2d2905ad45f9aa0c29bb0f292f963b",
+        "path": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1000_20260817_214356_enhanced_honf_pairwise/best_by_field_mse_model.pt",
+        "sha256": "69914d9eeb0cae69e098e018e116764ce2d7e867fa1f260db0bbee7034729fc1",
+        "size_bytes": 31628894,
+        "state_dict_key_count": 237
+      },
+      "run1000_latest": {
+        "channel_order": [
+          "u",
+          "v",
+          "p",
+          "omega",
+          "temperature"
+        ],
+        "dataset_fingerprint": "4224093c22a67af4adfecc8b21d53548e4263ec2254c230dc83c89526b36da05",
+        "dataset_id": "thermal_channel_global_v1",
+        "dataset_schema": "thermal_channel_global_hdf5_v1",
+        "epoch": 10000,
+        "label": "run1000_latest",
+        "normalization_sha256": "ec125804dc49199d641b2249faf419625d2d2905ad45f9aa0c29bb0f292f963b",
+        "path": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1000_20260817_214356_enhanced_honf_pairwise/latest_model.pt",
+        "sha256": "335f25e7345351c227233ac6cf697e2b2c43ae1127eae920393fd754cf75dff5",
+        "size_bytes": 31622802,
+        "state_dict_key_count": 237
+      },
+      "run1304_best": {
+        "channel_order": [
+          "u",
+          "v",
+          "p",
+          "omega",
+          "temperature"
+        ],
+        "dataset_fingerprint": "4224093c22a67af4adfecc8b21d53548e4263ec2254c230dc83c89526b36da05",
+        "dataset_id": "thermal_channel_global_v1",
+        "dataset_schema": "thermal_channel_global_hdf5_v1",
+        "epoch": 4793,
+        "label": "run1304_best",
+        "normalization_sha256": "ec125804dc49199d641b2249faf419625d2d2905ad45f9aa0c29bb0f292f963b",
+        "path": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1304_20260822_232649_stage5_fixed_residual_concat_uniform_lr3e4/best_by_field_mse_model.pt",
+        "sha256": "3b1db1b7395e79e8802c6492f087bde08e04d3f303d9c8ef678b3fde0b546d76",
+        "size_bytes": 37570813,
+        "state_dict_key_count": 245
+      },
+      "run1304_e5000": {
+        "channel_order": [
+          "u",
+          "v",
+          "p",
+          "omega",
+          "temperature"
+        ],
+        "dataset_fingerprint": "4224093c22a67af4adfecc8b21d53548e4263ec2254c230dc83c89526b36da05",
+        "dataset_id": "thermal_channel_global_v1",
+        "dataset_schema": "thermal_channel_global_hdf5_v1",
+        "epoch": 5000,
+        "label": "run1304_e5000",
+        "normalization_sha256": "ec125804dc49199d641b2249faf419625d2d2905ad45f9aa0c29bb0f292f963b",
+        "path": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1304_20260822_232649_stage5_fixed_residual_concat_uniform_lr3e4/epoch_5000_model.pt",
+        "sha256": "1eda156ee86daa2bd7e43ba4e76ddf8eebe7f63425937a1b6d26da0b47910ba1",
+        "size_bytes": 37566584,
+        "state_dict_key_count": 245
+      },
+      "run1304_latest": {
+        "channel_order": [
+          "u",
+          "v",
+          "p",
+          "omega",
+          "temperature"
+        ],
+        "dataset_fingerprint": "4224093c22a67af4adfecc8b21d53548e4263ec2254c230dc83c89526b36da05",
+        "dataset_id": "thermal_channel_global_v1",
+        "dataset_schema": "thermal_channel_global_hdf5_v1",
+        "epoch": 5000,
+        "label": "run1304_latest",
+        "normalization_sha256": "ec125804dc49199d641b2249faf419625d2d2905ad45f9aa0c29bb0f292f963b",
+        "path": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1304_20260822_232649_stage5_fixed_residual_concat_uniform_lr3e4/latest_model.pt",
+        "sha256": "e5ad04137241a0671d1b6e1a023de7b98d7406e385e49c7f39538bca4d5968a5",
+        "size_bytes": 37564140,
+        "state_dict_key_count": 245
+      },
+      "run1401_best": {
+        "channel_order": [
+          "u",
+          "v",
+          "p",
+          "omega",
+          "temperature"
+        ],
+        "dataset_fingerprint": "4224093c22a67af4adfecc8b21d53548e4263ec2254c230dc83c89526b36da05",
+        "dataset_id": "thermal_channel_global_v1",
+        "dataset_schema": "thermal_channel_global_hdf5_v1",
+        "epoch": 4585,
+        "label": "run1401_best",
+        "normalization_sha256": "ec125804dc49199d641b2249faf419625d2d2905ad45f9aa0c29bb0f292f963b",
+        "path": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1401_20260823_151126_stage7_modern_structured_context/best_by_field_mse_model.pt",
+        "sha256": "5be150bd6b4fc79599af62c767fba84490ba50edcc8cc8ce85026ae27a1846b3",
+        "size_bytes": 31647774,
+        "state_dict_key_count": 237
+      },
+      "run1401_e1000": {
+        "channel_order": [
+          "u",
+          "v",
+          "p",
+          "omega",
+          "temperature"
+        ],
+        "dataset_fingerprint": "4224093c22a67af4adfecc8b21d53548e4263ec2254c230dc83c89526b36da05",
+        "dataset_id": "thermal_channel_global_v1",
+        "dataset_schema": "thermal_channel_global_hdf5_v1",
+        "epoch": 1000,
+        "label": "run1401_e1000",
+        "normalization_sha256": "ec125804dc49199d641b2249faf419625d2d2905ad45f9aa0c29bb0f292f963b",
+        "path": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1401_20260823_151126_stage7_modern_structured_context/epoch_1000_model.pt",
+        "sha256": "bb8d7982df130324979a46905799b4aea5c6713926cbc80dfca23dfa6ae7e06f",
+        "size_bytes": 31643874,
+        "state_dict_key_count": 237
+      },
+      "run1401_e2500": {
+        "channel_order": [
+          "u",
+          "v",
+          "p",
+          "omega",
+          "temperature"
+        ],
+        "dataset_fingerprint": "4224093c22a67af4adfecc8b21d53548e4263ec2254c230dc83c89526b36da05",
+        "dataset_id": "thermal_channel_global_v1",
+        "dataset_schema": "thermal_channel_global_hdf5_v1",
+        "epoch": 2500,
+        "label": "run1401_e2500",
+        "normalization_sha256": "ec125804dc49199d641b2249faf419625d2d2905ad45f9aa0c29bb0f292f963b",
+        "path": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1401_20260823_151126_stage7_modern_structured_context/epoch_2500_model.pt",
+        "sha256": "ddd467d8d53db3c4cd311ccce71ed8d13ed79d5c9d04e1c56b5386625abb6ae9",
+        "size_bytes": 31643874,
+        "state_dict_key_count": 237
+      },
+      "run1401_e500": {
+        "channel_order": [
+          "u",
+          "v",
+          "p",
+          "omega",
+          "temperature"
+        ],
+        "dataset_fingerprint": "4224093c22a67af4adfecc8b21d53548e4263ec2254c230dc83c89526b36da05",
+        "dataset_id": "thermal_channel_global_v1",
+        "dataset_schema": "thermal_channel_global_hdf5_v1",
+        "epoch": 500,
+        "label": "run1401_e500",
+        "normalization_sha256": "ec125804dc49199d641b2249faf419625d2d2905ad45f9aa0c29bb0f292f963b",
+        "path": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1401_20260823_151126_stage7_modern_structured_context/epoch_0500_model.pt",
+        "sha256": "a6013c397a3e465fed61d1fa7e59451296cf4fa4dde2e6548f09d0152a39c661",
+        "size_bytes": 31643874,
+        "state_dict_key_count": 237
+      },
+      "run1401_e5000": {
+        "channel_order": [
+          "u",
+          "v",
+          "p",
+          "omega",
+          "temperature"
+        ],
+        "dataset_fingerprint": "4224093c22a67af4adfecc8b21d53548e4263ec2254c230dc83c89526b36da05",
+        "dataset_id": "thermal_channel_global_v1",
+        "dataset_schema": "thermal_channel_global_hdf5_v1",
+        "epoch": 5000,
+        "label": "run1401_e5000",
+        "normalization_sha256": "ec125804dc49199d641b2249faf419625d2d2905ad45f9aa0c29bb0f292f963b",
+        "path": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1401_20260823_151126_stage7_modern_structured_context/epoch_5000_model.pt",
+        "sha256": "cee978f0461db928b72c3b6b66cb0ef56647674f82d6ef2660a8380754a829d6",
+        "size_bytes": 31643874,
+        "state_dict_key_count": 237
+      },
+      "run1401_latest": {
+        "channel_order": [
+          "u",
+          "v",
+          "p",
+          "omega",
+          "temperature"
+        ],
+        "dataset_fingerprint": "4224093c22a67af4adfecc8b21d53548e4263ec2254c230dc83c89526b36da05",
+        "dataset_id": "thermal_channel_global_v1",
+        "dataset_schema": "thermal_channel_global_hdf5_v1",
+        "epoch": 5000,
+        "label": "run1401_latest",
+        "normalization_sha256": "ec125804dc49199d641b2249faf419625d2d2905ad45f9aa0c29bb0f292f963b",
+        "path": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1401_20260823_151126_stage7_modern_structured_context/latest_model.pt",
+        "sha256": "54d4fe6d321caa5a9498131d79a85df185acb1862f01b5b660626bcf25d739a0",
+        "size_bytes": 31641682,
+        "state_dict_key_count": 237
+      }
+    },
+    "consistency": {
+      "channel_order_identical": true,
+      "dataset_fingerprint_identical": true,
+      "normalization_identical": true,
+      "run1000_frozen_epoch5000_checkpoint_exists": false,
+      "run1304_epoch5000_equals_latest_state_dict": true,
+      "run1401_epoch5000_equals_latest_state_dict": true
+    },
+    "normalization": {
+      "channel_order": [
+        "u",
+        "v",
+        "p",
+        "omega",
+        "temperature"
+      ],
+      "config": {
+        "normalize_inputs": true,
+        "normalize_targets": true
+      },
+      "stats": {
+        "field_mean_by_channel": [
+          0.6403648257255554,
+          -1.8972754332935438e-05,
+          0.05561833083629608,
+          -0.00016442168271169066,
+          5.057712078094482
+        ],
+        "field_std_by_channel": [
+          0.47565558552742004,
+          0.02468797005712986,
+          0.11587750911712646,
+          0.6576206088066101,
+          7.319307327270508
+        ],
+        "heat_power_mean": [
+          1.2513340711593628
+        ],
+        "heat_power_std": [
+          0.42945152521133423
+        ],
+        "interface_condition_mean": [
+          3.09250545501709,
+          0.0,
+          0.0,
+          10.47497272491455,
+          -0.0476810596883297,
+          0.0014361493522301316,
+          14.814778327941895,
+          14.814362525939941
+        ],
+        "interface_condition_std": [
+          1.8135778903961182,
+          0.7071067690849304,
+          0.7071067690849304,
+          8.313315391540527,
+          0.3044492304325104,
+          0.3616853654384613,
+          0.0016742305597290397,
+          0.06855365633964539
+        ],
+        "interface_target_mean": [
+          11.435649871826172,
+          14.232233047485352
+        ],
+        "interface_target_std": [
+          8.238809585571289,
+          7.784190654754639
+        ],
+        "internal_temperature_mean": [
+          14.244129180908203
+        ],
+        "internal_temperature_std": [
+          8.18602466583252
+        ],
+        "sampled_point_mean_by_channel": [
+          0.6592637896537781,
+          3.473529068287462e-05,
+          0.06380244344472885,
+          0.003973810002207756,
+          6.679603099822998
+        ],
+        "sampled_point_std_by_channel": [
+          0.4040883779525757,
+          0.04603959619998932,
+          0.15212559700012207,
+          1.0206544399261475,
+          7.211366653442383
+        ]
+      }
+    },
+    "runs": {
+      "run1000": {
+        "dataset": {
+          "dataset ID": "thermal_channel_global_v1",
+          "dataset cases": 690,
+          "dataset path": "/data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5",
+          "dataset schema": "thermal_channel_global_hdf5_v1",
+          "dataset sha256": "4224093c22a67af4adfecc8b21d53548e4263ec2254c230dc83c89526b36da05",
+          "dataset splits": {
+            "test": 90,
+            "train": 600
+          },
+          "local checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/Run_0000_base/latest_model.pt",
+          "local module": "thermal_disk (frozen)"
+        },
+        "resolved_config": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1000_20260817_214356_enhanced_honf_pairwise/config_resolved.json",
+        "resolved_config_sha256": "7b9b3efbd49788b608290f40b92da414c46e6ab8461dceb3aa5b3c544d6b7e2c",
+        "run_directory": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1000_20260817_214356_enhanced_honf_pairwise",
+        "selected_config": {
+          "environment_assignment_normalizer": "softmax",
+          "field_assembly_mode": "context_fusion",
+          "learning_rate": 0.0003,
+          "mechanism_state_mode": "residual_concat",
+          "module_assignment_normalizer": "softmax",
+          "num_hyperedges": 6,
+          "organizer_learning_rate": null,
+          "organizer_mode": "fixed_projection",
+          "query_assignment_normalizer": "softmax",
+          "routing_execution": "dense",
+          "use_hyper_mechanism_encoder": false
+        },
+        "source_state": {
+          "changed_path_count": 51,
+          "commit": "2afa84759858931a236321e0086750734466dcec",
+          "dirty": true,
+          "git_available": true,
+          "repository_root": "/home/wanglz/Desktop/src/ModularDT"
+        },
+        "stage_a": {
+          "epoch": 6357,
+          "path": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/Run_0000_base/latest_model.pt",
+          "sha256": "44f5cb486dccc9d4ff8f7c9b644e40af378d7f357b8f27fd10de8a441767dbaf"
+        }
+      },
+      "run1304": {
+        "dataset": {
+          "dataset ID": "thermal_channel_global_v1",
+          "dataset cases": 690,
+          "dataset path": "/data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5",
+          "dataset schema": "thermal_channel_global_hdf5_v1",
+          "dataset sha256": "4224093c22a67af4adfecc8b21d53548e4263ec2254c230dc83c89526b36da05",
+          "dataset splits": {
+            "test": 90,
+            "train": 600
+          },
+          "local checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/Run_0000_base/best_model.pt",
+          "local module": "thermal_disk (frozen)"
+        },
+        "resolved_config": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1304_20260822_232649_stage5_fixed_residual_concat_uniform_lr3e4/config_resolved.json",
+        "resolved_config_sha256": "1488d8723322ee3cc67a8c394515ab0b504af26ff43158884000932a786df715",
+        "run_directory": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1304_20260822_232649_stage5_fixed_residual_concat_uniform_lr3e4",
+        "selected_config": {
+          "environment_assignment_normalizer": "softmax",
+          "field_assembly_mode": "edge_additive",
+          "learning_rate": 0.0003,
+          "mechanism_state_mode": "residual_concat",
+          "module_assignment_normalizer": "softmax",
+          "num_hyperedges": 6,
+          "organizer_learning_rate": 0.0003,
+          "organizer_mode": "fixed_projection",
+          "query_assignment_normalizer": "softmax",
+          "routing_execution": "dense",
+          "use_hyper_mechanism_encoder": true
+        },
+        "source_state": {
+          "changed_path_count": 6,
+          "commit": "422c19531cc759917ffffac86509c24554117a14",
+          "dirty": true,
+          "git_available": true,
+          "repository_root": "/home/wanglz/Desktop/src/ModularDT"
+        },
+        "stage_a": {
+          "epoch": 5050,
+          "path": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/Run_0000_base/best_model.pt",
+          "sha256": "1981fac0abbbe27f0521dd17d90d5b7deccb31e3e980a620dcbb9bf8b297988a"
+        }
+      },
+      "run1401": {
+        "dataset": {
+          "dataset ID": "thermal_channel_global_v1",
+          "dataset cases": 690,
+          "dataset path": "/data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5",
+          "dataset schema": "thermal_channel_global_hdf5_v1",
+          "dataset sha256": "4224093c22a67af4adfecc8b21d53548e4263ec2254c230dc83c89526b36da05",
+          "dataset splits": {
+            "test": 90,
+            "train": 600
+          },
+          "local checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/Run_0000_base/best_model.pt",
+          "local module": "thermal_disk (frozen)"
+        },
+        "resolved_config": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1401_20260823_151126_stage7_modern_structured_context/config_resolved.json",
+        "resolved_config_sha256": "71f21f8f2b2d1914c7d2fbed5b1a80a21877b3eedb181d48a98a307e45c56db2",
+        "run_directory": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1401_20260823_151126_stage7_modern_structured_context",
+        "selected_config": {
+          "environment_assignment_normalizer": "softmax",
+          "field_assembly_mode": "context_fusion",
+          "learning_rate": 0.0003,
+          "mechanism_state_mode": "residual_concat",
+          "module_assignment_normalizer": "softmax",
+          "num_hyperedges": 6,
+          "organizer_learning_rate": null,
+          "organizer_mode": "fixed_projection",
+          "query_assignment_normalizer": "softmax",
+          "routing_execution": "dense",
+          "use_hyper_mechanism_encoder": false
+        },
+        "source_state": {
+          "changed_path_count": 9,
+          "commit": "aa89abff8ae802c39f6941e8e85177d3acbf9c37",
+          "dirty": true,
+          "git_available": true,
+          "repository_root": "/home/wanglz/Desktop/src/ModularDT"
+        },
+        "stage_a": {
+          "epoch": 5050,
+          "path": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/Run_0000_base/best_model.pt",
+          "sha256": "1981fac0abbbe27f0521dd17d90d5b7deccb31e3e980a620dcbb9bf8b297988a"
+        }
+      }
+    }
+  },
+  "ratios": {
+    "run1401_best_to_run1000_best_complete_split_mse": 1.3047939709596015,
+    "run1401_best_to_run1304_best_complete_split_mse": 1.0017402371341708,
+    "run1401_to_run1000_full_forward_median": 0.9707763851819025,
+    "run1401_to_run1000_trailing50_val_field_mse_at_5000": 0.9741658854119781
+  },
+  "raw_artifacts": {
+    "accuracy": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/diagnostics/stage7_5k_accuracy/accuracy_summary.json",
+    "benchmark": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/diagnostics/stage7_5k_benchmark.json",
+    "representative_cases": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/diagnostics/stage7_5k_representative_cases",
+    "run1304_topology_trajectory": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/diagnostics/stage5_final_1304_topology/topology_quality_summary.json",
+    "topology": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/diagnostics/stage7_5k_topology/topology_quality_summary.json"
+  },
+  "topology": {
+    "run1000_best": {
+      "environment_edge_column_cosine": {
+        "mean": 0.09738599600950633,
+        "median": 0.09359577365819875,
+        "p05": 0.07387326605908455,
+        "p95": 0.12628559425197006
+      },
+      "environment_effective_rank": {
+        "mean": 5.051083360471391,
+        "median": 5.244165288174422,
+        "p05": 4.625355380033145,
+        "p95": 5.367879241052407
+      },
+      "environment_largest_dominant_occupancy": {
+        "mean": 0.2950231481481481,
+        "median": 0.2916666666666667,
+        "p05": 0.265625,
+        "p95": 0.3333333333333333
+      },
+      "environment_neighbor_l1": {
+        "mean": 0.4285544432776661,
+        "median": 0.4415245734888139,
+        "p05": 0.3949160775816132,
+        "p95": 0.44704360230626883
+      },
+      "module_edge_column_cosine": {
+        "mean": 0.9454876388073795,
+        "median": 0.9419465342044713,
+        "p05": 0.9207496544876289,
+        "p95": 0.9775988729297952
+      },
+      "module_effective_rank": {
+        "mean": 1.2047999344441915,
+        "median": 1.2174100528981877,
+        "p05": 1.0881029191625664,
+        "p95": 1.2869106832639514
+      },
+      "pairwise_edge_map_cosine": {
+        "mean": 0.46382656273056966,
+        "median": 0.462015281249738,
+        "p05": 0.41433988395129834,
+        "p95": 0.5379531631705026
+      },
+      "pairwise_edge_map_effective_rank": {
+        "mean": 2.7442766305728816,
+        "median": 2.797374443008445,
+        "p05": 2.055738253292382,
+        "p95": 3.287903563072289
+      },
+      "query_edge_column_cosine": {
+        "mean": 0.436222391640365,
+        "median": 0.43571699539582076,
+        "p05": 0.37120380267476755,
+        "p95": 0.506207638853875
+      },
+      "query_effective_rank": {
+        "mean": 3.7035501499642836,
+        "median": 3.7016031927874966,
+        "p05": 3.373200845351692,
+        "p95": 4.021909290950572
+      },
+      "query_entropy_norm_direct": {
+        "mean": 0.7615095499216675,
+        "median": 0.7633898121904741,
+        "p05": 0.7061603750658907,
+        "p95": 0.8146197230945945
+      },
+      "query_global_mean_route_l1": {
+        "mean": 0.7694395051762123,
+        "median": 0.7688821832057167,
+        "p05": 0.6761464951719818,
+        "p95": 0.8648450302723921
+      },
+      "query_largest_dominant_occupancy": {
+        "mean": 0.21927761501736112,
+        "median": 0.2181396484375,
+        "p05": 0.206475830078125,
+        "p95": 0.235699462890625
+      },
+      "query_per_edge_spatial_std": {
+        "mean": 0.15566558061198707,
+        "median": 0.15530369028696858,
+        "p05": 0.13776681088590303,
+        "p95": 0.17346265550132167
+      },
+      "region_separation_normalized": {
+        "mean": 0.3055028203387431,
+        "median": 0.3042002727890487,
+        "p05": 0.2763404824247618,
+        "p95": 0.33975027440646843
+      }
+    },
+    "run1304_best": {
+      "environment_edge_column_cosine": {
+        "mean": 0.38044670697977184,
+        "median": 0.373358302787436,
+        "p05": 0.3066105832305605,
+        "p95": 0.48305888493550064
+      },
+      "environment_effective_rank": {
+        "mean": 1.5838086177661754,
+        "median": 1.5896440194165065,
+        "p05": 1.013546230220139,
+        "p95": 2.2004542440256003
+      },
+      "environment_largest_dominant_occupancy": {
+        "mean": 0.7958912037037037,
+        "median": 0.84375,
+        "p05": 0.5463541666666667,
+        "p95": 1.0
+      },
+      "environment_neighbor_l1": {
+        "mean": 0.19374415339849552,
+        "median": 0.24400890401265624,
+        "p05": 0.025658491721080853,
+        "p95": 0.2863452128321964
+      },
+      "module_edge_column_cosine": {
+        "mean": 0.9584356878232956,
+        "median": 0.9585459194725634,
+        "p05": 0.9382279604784383,
+        "p95": 0.9783083821917316
+      },
+      "module_effective_rank": {
+        "mean": 1.0786645490191284,
+        "median": 1.0712570075352539,
+        "p05": 1.0269593803586559,
+        "p95": 1.140314012773128
+      },
+      "pairwise_edge_map_cosine": {
+        "mean": 0.9135013782978738,
+        "median": 0.91355060649534,
+        "p05": 0.8635535958594676,
+        "p95": 0.9688381926369054
+      },
+      "pairwise_edge_map_effective_rank": {
+        "mean": 1.2805113052919759,
+        "median": 1.247507058591609,
+        "p05": 1.0769790529519432,
+        "p95": 1.5000127736586117
+      },
+      "query_edge_column_cosine": {
+        "mean": 0.9477323460424893,
+        "median": 0.9514074447202625,
+        "p05": 0.905816762204488,
+        "p95": 0.9796267649098722
+      },
+      "query_effective_rank": {
+        "mean": 1.1843976168204888,
+        "median": 1.17539055290842,
+        "p05": 1.0896754339226287,
+        "p95": 1.3355068430528385
+      },
+      "query_entropy_norm_direct": {
+        "mean": 0.9448508374498876,
+        "median": 0.9470112698017699,
+        "p05": 0.9286298837404439,
+        "p95": 0.95625241540492
+      },
+      "query_global_mean_route_l1": {
+        "mean": 0.1527802291405405,
+        "median": 0.1533328413592845,
+        "p05": 0.10055272178183233,
+        "p95": 0.21190447807329074
+      },
+      "query_largest_dominant_occupancy": {
+        "mean": 0.9084404839409722,
+        "median": 0.98095703125,
+        "p05": 0.612713623046875,
+        "p95": 1.0
+      },
+      "query_per_edge_spatial_std": {
+        "mean": 0.029996275833691435,
+        "median": 0.03021890749469914,
+        "p05": 0.020716595581850718,
+        "p95": 0.04154076451881477
+      },
+      "region_separation_normalized": {
+        "mean": 0.1261972967640389,
+        "median": 0.12809481025581237,
+        "p05": 0.10172752192027835,
+        "p95": 0.14433475465830678
+      }
+    },
+    "run1304_e5000": {
+      "environment_edge_column_cosine": {
+        "mean": 0.37956005882356064,
+        "median": 0.372510084123638,
+        "p05": 0.31045834964245145,
+        "p95": 0.4763641619712366
+      },
+      "environment_effective_rank": {
+        "mean": 1.5755725882044163,
+        "median": 1.6493047451507423,
+        "p05": 1.0162300459797002,
+        "p95": 2.1402315732045016
+      },
+      "environment_largest_dominant_occupancy": {
+        "mean": 0.8047453703703705,
+        "median": 0.84375,
+        "p05": 0.546875,
+        "p95": 1.0
+      },
+      "environment_neighbor_l1": {
+        "mean": 0.19211295447624907,
+        "median": 0.2418778739196763,
+        "p05": 0.02776307952399249,
+        "p95": 0.2853101401164583
+      },
+      "module_edge_column_cosine": {
+        "mean": 0.9602408705288088,
+        "median": 0.9617508155921681,
+        "p05": 0.939170965658172,
+        "p95": 0.978211240573301
+      },
+      "module_effective_rank": {
+        "mean": 1.075583536022125,
+        "median": 1.069966715457804,
+        "p05": 1.0271886961795176,
+        "p95": 1.1374739325338277
+      },
+      "pairwise_edge_map_cosine": {
+        "mean": 0.9180546582556957,
+        "median": 0.9176724214921919,
+        "p05": 0.8704571661800101,
+        "p95": 0.9714395857023796
+      },
+      "pairwise_edge_map_effective_rank": {
+        "mean": 1.2657622733716385,
+        "median": 1.242734837151982,
+        "p05": 1.0764193908787922,
+        "p95": 1.4728097812667658
+      },
+      "query_edge_column_cosine": {
+        "mean": 0.9509202147808029,
+        "median": 0.9561585263856882,
+        "p05": 0.9095489998578558,
+        "p95": 0.9795088591017505
+      },
+      "query_effective_rank": {
+        "mean": 1.1772063238921193,
+        "median": 1.1617726910894106,
+        "p05": 1.0879110509555494,
+        "p95": 1.320045869360358
+      },
+      "query_entropy_norm_direct": {
+        "mean": 0.9467958763980838,
+        "median": 0.9481772382173114,
+        "p05": 0.9324643109588907,
+        "p95": 0.95596903559418
+      },
+      "query_global_mean_route_l1": {
+        "mean": 0.14871675370519274,
+        "median": 0.14851034423435727,
+        "p05": 0.1004291038590228,
+        "p95": 0.2073358908194731
+      },
+      "query_largest_dominant_occupancy": {
+        "mean": 0.9107137044270833,
+        "median": 0.97967529296875,
+        "p05": 0.61153564453125,
+        "p95": 1.0
+      },
+      "query_per_edge_spatial_std": {
+        "mean": 0.02933239717353276,
+        "median": 0.02902674827354064,
+        "p05": 0.020732779739523588,
+        "p95": 0.04002549011745238
+      },
+      "region_separation_normalized": {
+        "mean": 0.12562779198471985,
+        "median": 0.12716467406226117,
+        "p05": 0.1023308281765768,
+        "p95": 0.14315209530186884
+      }
+    },
+    "run1401_best": {
+      "environment_edge_column_cosine": {
+        "mean": 0.12592010223194347,
+        "median": 0.12234884857546997,
+        "p05": 0.09112619119347598,
+        "p95": 0.1632355833269617
+      },
+      "environment_effective_rank": {
+        "mean": 4.685434399178929,
+        "median": 4.733387439779621,
+        "p05": 4.018964291108904,
+        "p95": 5.147076667736389
+      },
+      "environment_largest_dominant_occupancy": {
+        "mean": 0.35804398148148153,
+        "median": 0.3177083333333333,
+        "p05": 0.2864583333333333,
+        "p95": 0.4739583333333333
+      },
+      "environment_neighbor_l1": {
+        "mean": 0.5551542247576446,
+        "median": 0.5587921664223141,
+        "p05": 0.5052459755713927,
+        "p95": 0.58362978547888
+      },
+      "module_edge_column_cosine": {
+        "mean": 0.9330038061920207,
+        "median": 0.9281822003470552,
+        "p05": 0.902200714851754,
+        "p95": 0.9736075100808161
+      },
+      "module_effective_rank": {
+        "mean": 1.2733885552140705,
+        "median": 1.2865297750618652,
+        "p05": 1.1095596046324698,
+        "p95": 1.4003806707627802
+      },
+      "pairwise_edge_map_cosine": {
+        "mean": 0.43933694900341325,
+        "median": 0.4369594032582533,
+        "p05": 0.4020086550485849,
+        "p95": 0.4949563808453004
+      },
+      "pairwise_edge_map_effective_rank": {
+        "mean": 2.7838522153826206,
+        "median": 2.8621613015991434,
+        "p05": 2.068674508401385,
+        "p95": 3.28944593687561
+      },
+      "query_edge_column_cosine": {
+        "mean": 0.41775885109795047,
+        "median": 0.41940117401987875,
+        "p05": 0.35742955029253987,
+        "p95": 0.4828887640135925
+      },
+      "query_effective_rank": {
+        "mean": 3.728070145548143,
+        "median": 3.7168410167904833,
+        "p05": 3.4262689741817054,
+        "p95": 4.00532381594155
+      },
+      "query_entropy_norm_direct": {
+        "mean": 0.7445073704095607,
+        "median": 0.7466038659986294,
+        "p05": 0.689429264418747,
+        "p95": 0.7967043500756784
+      },
+      "query_global_mean_route_l1": {
+        "mean": 0.7965354452773328,
+        "median": 0.7962035967890246,
+        "p05": 0.7066783181906741,
+        "p95": 0.8859730676135219
+      },
+      "query_largest_dominant_occupancy": {
+        "mean": 0.23453640407986112,
+        "median": 0.2330322265625,
+        "p05": 0.21617431640625,
+        "p95": 0.254620361328125
+      },
+      "query_per_edge_spatial_std": {
+        "mean": 0.1600579081688859,
+        "median": 0.15981574775848012,
+        "p05": 0.14292275399373572,
+        "p95": 0.17719409152707347
+      },
+      "region_separation_normalized": {
+        "mean": 0.2614518674672622,
+        "median": 0.2609023131895526,
+        "p05": 0.22461654176202273,
+        "p95": 0.30494474567196406
+      }
+    },
+    "run1401_e1000": {
+      "environment_edge_column_cosine": {
+        "mean": 0.1389531823380617,
+        "median": 0.1409289422614528,
+        "p05": 0.11008748023485301,
+        "p95": 0.16272816199999812
+      },
+      "environment_effective_rank": {
+        "mean": 3.850601643856763,
+        "median": 4.051738891495292,
+        "p05": 3.1341469698660247,
+        "p95": 4.233855930094722
+      },
+      "environment_largest_dominant_occupancy": {
+        "mean": 0.43055555555555547,
+        "median": 0.40625,
+        "p05": 0.359375,
+        "p95": 0.5208333333333334
+      },
+      "environment_neighbor_l1": {
+        "mean": 0.5059954935067104,
+        "median": 0.50989408673635,
+        "p05": 0.4622185315937956,
+        "p95": 0.5303057576654121
+      },
+      "module_edge_column_cosine": {
+        "mean": 0.8297064477393374,
+        "median": 0.819497441952151,
+        "p05": 0.7762345156398635,
+        "p95": 0.9193078870921089
+      },
+      "module_effective_rank": {
+        "mean": 1.6306803728079855,
+        "median": 1.6530950757275988,
+        "p05": 1.324885451474977,
+        "p95": 1.8853230364420293
+      },
+      "pairwise_edge_map_cosine": {
+        "mean": 0.3351152507898005,
+        "median": 0.33075249921002525,
+        "p05": 0.28801938931370263,
+        "p95": 0.39279148845254663
+      },
+      "pairwise_edge_map_effective_rank": {
+        "mean": 3.1953391409839798,
+        "median": 3.2259991675189275,
+        "p05": 2.3099556132801373,
+        "p95": 3.984150866953478
+      },
+      "query_edge_column_cosine": {
+        "mean": 0.32958855500694484,
+        "median": 0.3318318824786727,
+        "p05": 0.29225122455197927,
+        "p95": 0.36285199437148186
+      },
+      "query_effective_rank": {
+        "mean": 4.236855509541301,
+        "median": 4.254939346448796,
+        "p05": 4.054842427762111,
+        "p95": 4.392754138481454
+      },
+      "query_entropy_norm_direct": {
+        "mean": 0.6634689059493805,
+        "median": 0.6695875674060191,
+        "p05": 0.617450520439656,
+        "p95": 0.7000252171760429
+      },
+      "query_global_mean_route_l1": {
+        "mean": 0.9167907246236241,
+        "median": 0.9081539844760144,
+        "p05": 0.8631058819890254,
+        "p95": 0.981679907800481
+      },
+      "query_largest_dominant_occupancy": {
+        "mean": 0.2458401150173611,
+        "median": 0.24420166015625,
+        "p05": 0.219677734375,
+        "p95": 0.27283935546875
+      },
+      "query_per_edge_spatial_std": {
+        "mean": 0.18648370894867447,
+        "median": 0.18561006995911566,
+        "p05": 0.17599811564576412,
+        "p95": 0.19849158584563553
+      },
+      "region_separation_normalized": {
+        "mean": 0.25685404937817385,
+        "median": 0.2532728275953307,
+        "p05": 0.23644019339830807,
+        "p95": 0.28771083257211066
+      }
+    },
+    "run1401_e2500": {
+      "environment_edge_column_cosine": {
+        "mean": 0.1323079003546188,
+        "median": 0.13132877427132364,
+        "p05": 0.09562966558190414,
+        "p95": 0.1663706008791727
+      },
+      "environment_effective_rank": {
+        "mean": 4.474207901932357,
+        "median": 4.5392811347895226,
+        "p05": 3.6080598810643454,
+        "p95": 4.925270021832062
+      },
+      "environment_largest_dominant_occupancy": {
+        "mean": 0.3737847222222222,
+        "median": 0.375,
+        "p05": 0.28125,
+        "p95": 0.4583333333333333
+      },
+      "environment_neighbor_l1": {
+        "mean": 0.5793340870141755,
+        "median": 0.5832831883531814,
+        "p05": 0.5255121435187305,
+        "p95": 0.6078677250387637
+      },
+      "module_edge_column_cosine": {
+        "mean": 0.9023722244413619,
+        "median": 0.8983784357329734,
+        "p05": 0.8611628438736617,
+        "p95": 0.9591359400731934
+      },
+      "module_effective_rank": {
+        "mean": 1.3825115181744265,
+        "median": 1.398589562266193,
+        "p05": 1.161158244546795,
+        "p95": 1.550686129016753
+      },
+      "pairwise_edge_map_cosine": {
+        "mean": 0.3918286323500856,
+        "median": 0.3904958408650988,
+        "p05": 0.36028864681009554,
+        "p95": 0.4404577228389981
+      },
+      "pairwise_edge_map_effective_rank": {
+        "mean": 2.9447622512617,
+        "median": 3.04134550544327,
+        "p05": 2.1187939860164158,
+        "p95": 3.550938799254304
+      },
+      "query_edge_column_cosine": {
+        "mean": 0.37979756813680887,
+        "median": 0.3853489797111827,
+        "p05": 0.32628989631506466,
+        "p95": 0.4330329935545125
+      },
+      "query_effective_rank": {
+        "mean": 3.9246547073793674,
+        "median": 3.916812197863649,
+        "p05": 3.726282100908945,
+        "p95": 4.116168851525421
+      },
+      "query_entropy_norm_direct": {
+        "mean": 0.7111029366732147,
+        "median": 0.7163225273009007,
+        "p05": 0.6552455678383425,
+        "p95": 0.7622774030985482
+      },
+      "query_global_mean_route_l1": {
+        "mean": 0.8492977582138204,
+        "median": 0.8429836268338864,
+        "p05": 0.7665594856251687,
+        "p95": 0.93571753896044
+      },
+      "query_largest_dominant_occupancy": {
+        "mean": 0.24824354383680555,
+        "median": 0.2471923828125,
+        "p05": 0.231219482421875,
+        "p95": 0.270611572265625
+      },
+      "query_per_edge_spatial_std": {
+        "mean": 0.1708637259014729,
+        "median": 0.1695808642926237,
+        "p05": 0.155747673320073,
+        "p95": 0.18648918869762426
+      },
+      "region_separation_normalized": {
+        "mean": 0.25453329662326246,
+        "median": 0.2512749407579471,
+        "p05": 0.22336848756347005,
+        "p95": 0.2970928432729984
+      }
+    },
+    "run1401_e500": {
+      "environment_edge_column_cosine": {
+        "mean": 0.15258216325253438,
+        "median": 0.1549763439790686,
+        "p05": 0.13036168109262924,
+        "p95": 0.17124264764047806
+      },
+      "environment_effective_rank": {
+        "mean": 4.0415431655991005,
+        "median": 4.129005838426451,
+        "p05": 3.5098870573965413,
+        "p95": 4.392948031760143
+      },
+      "environment_largest_dominant_occupancy": {
+        "mean": 0.38848379629629626,
+        "median": 0.3854166666666667,
+        "p05": 0.328125,
+        "p95": 0.4635416666666667
+      },
+      "environment_neighbor_l1": {
+        "mean": 0.4653103533035744,
+        "median": 0.4697004586028578,
+        "p05": 0.4309979999518096,
+        "p95": 0.4858253423386706
+      },
+      "module_edge_column_cosine": {
+        "mean": 0.7914370009800644,
+        "median": 0.7732357140267803,
+        "p05": 0.7300220623125575,
+        "p95": 0.884342826631774
+      },
+      "module_effective_rank": {
+        "mean": 1.7570879413441478,
+        "median": 1.7860859969794243,
+        "p05": 1.3808167043936321,
+        "p95": 2.0052963910712247
+      },
+      "pairwise_edge_map_cosine": {
+        "mean": 0.30789532497037725,
+        "median": 0.2992861162434334,
+        "p05": 0.2480627146929714,
+        "p95": 0.37252947633419936
+      },
+      "pairwise_edge_map_effective_rank": {
+        "mean": 3.411467224156182,
+        "median": 3.4106360279056065,
+        "p05": 2.3767727180825315,
+        "p95": 4.2477279636029115
+      },
+      "query_edge_column_cosine": {
+        "mean": 0.29794914273135675,
+        "median": 0.30068715637470844,
+        "p05": 0.2697904407937154,
+        "p95": 0.3258125526582314
+      },
+      "query_effective_rank": {
+        "mean": 4.501070822934281,
+        "median": 4.5246285909808375,
+        "p05": 4.253989127936148,
+        "p95": 4.69897254360196
+      },
+      "query_entropy_norm_direct": {
+        "mean": 0.6351308006623386,
+        "median": 0.6424383832832538,
+        "p05": 0.5967504747342784,
+        "p95": 0.665446129575931
+      },
+      "query_global_mean_route_l1": {
+        "mean": 0.9592840600713457,
+        "median": 0.9503908705665882,
+        "p05": 0.9171580009563406,
+        "p95": 1.0104200723786414
+      },
+      "query_largest_dominant_occupancy": {
+        "mean": 0.20826416015625,
+        "median": 0.20770263671875,
+        "p05": 0.1950927734375,
+        "p95": 0.224737548828125
+      },
+      "query_per_edge_spatial_std": {
+        "mean": 0.19812216467046515,
+        "median": 0.1969552187679266,
+        "p05": 0.18896291006164875,
+        "p95": 0.20801274534588485
+      },
+      "region_separation_normalized": {
+        "mean": 0.26965796286938465,
+        "median": 0.2673932472168702,
+        "p05": 0.25198085309423324,
+        "p95": 0.29221258847276144
+      }
+    },
+    "run1401_e5000": {
+      "environment_edge_column_cosine": {
+        "mean": 0.12380379804672681,
+        "median": 0.12025158314215521,
+        "p05": 0.0893885685410465,
+        "p95": 0.16085670380613432
+      },
+      "environment_effective_rank": {
+        "mean": 4.730389937734505,
+        "median": 4.7940783073684,
+        "p05": 4.065133126764289,
+        "p95": 5.2062899401737734
+      },
+      "environment_largest_dominant_occupancy": {
+        "mean": 0.3567708333333333,
+        "median": 0.3229166666666667,
+        "p05": 0.2916666666666667,
+        "p95": 0.46119791666666665
+      },
+      "environment_neighbor_l1": {
+        "mean": 0.5539362975970628,
+        "median": 0.5583161809577488,
+        "p05": 0.5021678509483947,
+        "p95": 0.5821981969474509
+      },
+      "module_edge_column_cosine": {
+        "mean": 0.937138037753796,
+        "median": 0.9328139006511761,
+        "p05": 0.9081212724689476,
+        "p95": 0.9742113844949732
+      },
+      "module_effective_rank": {
+        "mean": 1.2579223721787818,
+        "median": 1.2701133839904,
+        "p05": 1.1084951167451806,
+        "p95": 1.372348276144145
+      },
+      "pairwise_edge_map_cosine": {
+        "mean": 0.4414973389733817,
+        "median": 0.44182976314419786,
+        "p05": 0.3994654586566951,
+        "p95": 0.4952232866578901
+      },
+      "pairwise_edge_map_effective_rank": {
+        "mean": 2.7752335806038078,
+        "median": 2.8372947126684522,
+        "p05": 2.080459860749029,
+        "p95": 3.27661008686033
+      },
+      "query_edge_column_cosine": {
+        "mean": 0.41821854058405317,
+        "median": 0.418106222898328,
+        "p05": 0.35437573911479603,
+        "p95": 0.484930057861595
+      },
+      "query_effective_rank": {
+        "mean": 3.7213290484331027,
+        "median": 3.7164609838802356,
+        "p05": 3.414089628951463,
+        "p95": 4.023441320085287
+      },
+      "query_entropy_norm_direct": {
+        "mean": 0.7442281805954123,
+        "median": 0.7456053858935872,
+        "p05": 0.6859852322280172,
+        "p95": 0.7987118180998358
+      },
+      "query_global_mean_route_l1": {
+        "mean": 0.7977406927719326,
+        "median": 0.7985661400657976,
+        "p05": 0.7052300334534726,
+        "p95": 0.8933642316340993
+      },
+      "query_largest_dominant_occupancy": {
+        "mean": 0.23430582682291667,
+        "median": 0.23333740234375,
+        "p05": 0.213909912109375,
+        "p95": 0.2515869140625
+      },
+      "query_per_edge_spatial_std": {
+        "mean": 0.1601160075251396,
+        "median": 0.16009431818083583,
+        "p05": 0.1423733729366173,
+        "p95": 0.17838133985355745
+      },
+      "region_separation_normalized": {
+        "mean": 0.26159571104470214,
+        "median": 0.26119822165537426,
+        "p05": 0.22410478805812784,
+        "p95": 0.3054747591810605
+      }
+    }
+  },
+  "topology_trajectories": {
+    "run1304": {
+      "1000": {
+        "environment_edge_column_cosine": {
+          "mean": 0.5089178316787609,
+          "median": 0.5026842991812054,
+          "p05": 0.4657940039087354,
+          "p95": 0.5789204487444755
+        },
+        "environment_effective_rank": {
+          "mean": 1.4684242215728358,
+          "median": 1.3653776546333747,
+          "p05": 1.0128111117511953,
+          "p95": 2.042209005349019
+        },
+        "environment_largest_dominant_occupancy": {
+          "mean": 0.8291087962962963,
+          "median": 0.90625,
+          "p05": 0.5203125,
+          "p95": 1.0
+        },
+        "environment_neighbor_l1": {
+          "mean": 0.22591159153382803,
+          "median": 0.23798977276617647,
+          "p05": 0.047672430108041175,
+          "p95": 0.33420878236227736
+        },
+        "module_edge_column_cosine": {
+          "mean": 0.9329836588015207,
+          "median": 0.9337717232259745,
+          "p05": 0.9023915342152529,
+          "p95": 0.9669625002142278
+        },
+        "module_effective_rank": {
+          "mean": 1.1883437737896616,
+          "median": 1.1920078333041726,
+          "p05": 1.0680732220187865,
+          "p95": 1.3032664630698299
+        },
+        "pairwise_edge_map_cosine": {
+          "mean": 0.7792262159415572,
+          "median": 0.7662349005381475,
+          "p05": 0.6828048925636279,
+          "p95": 0.9144619815242481
+        },
+        "pairwise_edge_map_effective_rank": {
+          "mean": 1.8080650883103504,
+          "median": 1.8283162707152019,
+          "p05": 1.3196695878706868,
+          "p95": 2.2072643319638936
+        },
+        "query_edge_column_cosine": {
+          "mean": 0.8247490059545995,
+          "median": 0.8316022308951821,
+          "p05": 0.7518756069999363,
+          "p95": 0.8912968498760538
+        },
+        "query_effective_rank": {
+          "mean": 1.6189502721831976,
+          "median": 1.5676196061869425,
+          "p05": 1.3648794358086018,
+          "p95": 1.9477240830794216
+        },
+        "query_entropy_norm_direct": {
+          "mean": 0.9238365993193747,
+          "median": 0.9361930713665008,
+          "p05": 0.8467917198546137,
+          "p95": 0.9623297385977788
+        },
+        "query_global_mean_route_l1": {
+          "mean": 0.3497703083693707,
+          "median": 0.3350797116452018,
+          "p05": 0.2432147760430546,
+          "p95": 0.5039292893475287
+        },
+        "query_largest_dominant_occupancy": {
+          "mean": 0.5131212022569445,
+          "median": 0.5302734375,
+          "p05": 0.38692626953125,
+          "p95": 0.551727294921875
+        },
+        "query_per_edge_spatial_std": {
+          "mean": 0.06569417543538682,
+          "median": 0.06280041039020072,
+          "p05": 0.04580286824491926,
+          "p95": 0.09487389002598126
+        },
+        "region_separation_normalized": {
+          "mean": 0.11764916057078953,
+          "median": 0.11894853555970888,
+          "p05": 0.10726990245388539,
+          "p95": 0.12465657618076074
+        }
+      },
+      "2500": {
+        "environment_edge_column_cosine": {
+          "mean": 0.44966775752126775,
+          "median": 0.438902347201117,
+          "p05": 0.3764448084824749,
+          "p95": 0.5681998442296143
+        },
+        "environment_effective_rank": {
+          "mean": 1.552215455275762,
+          "median": 1.4146196663937691,
+          "p05": 1.0048828156190706,
+          "p95": 2.3174552733529756
+        },
+        "environment_largest_dominant_occupancy": {
+          "mean": 0.7863425925925926,
+          "median": 0.8541666666666666,
+          "p05": 0.5075520833333333,
+          "p95": 1.0
+        },
+        "environment_neighbor_l1": {
+          "mean": 0.1999520847286601,
+          "median": 0.21540431109535757,
+          "p05": 0.017457160364910643,
+          "p95": 0.31135275487874503
+        },
+        "module_edge_column_cosine": {
+          "mean": 0.9491137014554667,
+          "median": 0.9480106969036299,
+          "p05": 0.9234453166289528,
+          "p95": 0.975405225155886
+        },
+        "module_effective_rank": {
+          "mean": 1.130863586931399,
+          "median": 1.1291691528521604,
+          "p05": 1.0422793549287075,
+          "p95": 1.211302271420704
+        },
+        "pairwise_edge_map_cosine": {
+          "mean": 0.8723545579780296,
+          "median": 0.8785606714979904,
+          "p05": 0.7765047361585019,
+          "p95": 0.967588186056595
+        },
+        "pairwise_edge_map_effective_rank": {
+          "mean": 1.4778203372957288,
+          "median": 1.4302596631520046,
+          "p05": 1.1379808375278846,
+          "p95": 1.846421730813281
+        },
+        "query_edge_column_cosine": {
+          "mean": 0.9158566541137897,
+          "median": 0.9298251234283799,
+          "p05": 0.8409975146729612,
+          "p95": 0.9648860036074722
+        },
+        "query_effective_rank": {
+          "mean": 1.3183898603266184,
+          "median": 1.2423695265352779,
+          "p05": 1.1533724865220778,
+          "p95": 1.6195935275135938
+        },
+        "query_entropy_norm_direct": {
+          "mean": 0.9592445868967813,
+          "median": 0.9639425234722984,
+          "p05": 0.9283306409063624,
+          "p95": 0.9770880942058825
+        },
+        "query_global_mean_route_l1": {
+          "mean": 0.2102701726292274,
+          "median": 0.18884197883459708,
+          "p05": 0.1388513571017671,
+          "p95": 0.320869050747892
+        },
+        "query_largest_dominant_occupancy": {
+          "mean": 0.6613986545138889,
+          "median": 0.646240234375,
+          "p05": 0.382073974609375,
+          "p95": 0.93912353515625
+        },
+        "query_per_edge_spatial_std": {
+          "mean": 0.04002634363305561,
+          "median": 0.035802310549636625,
+          "p05": 0.02684040023352672,
+          "p95": 0.060966119740579444
+        },
+        "region_separation_normalized": {
+          "mean": 0.12177368160092605,
+          "median": 0.1204307536853772,
+          "p05": 0.10054482839214957,
+          "p95": 0.13905121109319946
+        }
+      },
+      "500": {
+        "environment_edge_column_cosine": {
+          "mean": 0.583211254334158,
+          "median": 0.5798398018829366,
+          "p05": 0.5657318600974818,
+          "p95": 0.6111153222742814
+        },
+        "environment_effective_rank": {
+          "mean": 1.3822204784216214,
+          "median": 1.32125026319284,
+          "p05": 1.0077655085047208,
+          "p95": 1.8020361620004077
+        },
+        "environment_largest_dominant_occupancy": {
+          "mean": 0.824074074074074,
+          "median": 0.8984375,
+          "p05": 0.5283854166666666,
+          "p95": 1.0
+        },
+        "environment_neighbor_l1": {
+          "mean": 0.21127913845871985,
+          "median": 0.22452650694082282,
+          "p05": 0.04096084237774606,
+          "p95": 0.30536059555508405
+        },
+        "module_edge_column_cosine": {
+          "mean": 0.9196966706414819,
+          "median": 0.9189399151508695,
+          "p05": 0.8837648869552613,
+          "p95": 0.9654328373986667
+        },
+        "module_effective_rank": {
+          "mean": 1.1971758568894824,
+          "median": 1.21526021730844,
+          "p05": 1.0562973199836183,
+          "p95": 1.3452178114813107
+        },
+        "pairwise_edge_map_cosine": {
+          "mean": 0.7194791223213255,
+          "median": 0.7077948793730255,
+          "p05": 0.6344527502932731,
+          "p95": 0.8546199153286503
+        },
+        "pairwise_edge_map_effective_rank": {
+          "mean": 2.0056509812827987,
+          "median": 2.089969919915016,
+          "p05": 1.5227408780269651,
+          "p95": 2.3657042694615837
+        },
+        "query_edge_column_cosine": {
+          "mean": 0.7640979611561522,
+          "median": 0.7639016688058382,
+          "p05": 0.7100985386510947,
+          "p95": 0.8317007782175847
+        },
+        "query_effective_rank": {
+          "mean": 1.848128262498246,
+          "median": 1.8669304722088125,
+          "p05": 1.567127944056234,
+          "p95": 2.0781753040039814
+        },
+        "query_entropy_norm_direct": {
+          "mean": 0.8874094657227213,
+          "median": 0.8954958052295439,
+          "p05": 0.8103008598701433,
+          "p95": 0.9430839865385872
+        },
+        "query_global_mean_route_l1": {
+          "mean": 0.4554974306709863,
+          "median": 0.44468228565129336,
+          "p05": 0.3430617746656177,
+          "p95": 0.5843923679760756
+        },
+        "query_largest_dominant_occupancy": {
+          "mean": 0.49389512803819446,
+          "median": 0.52435302734375,
+          "p05": 0.343743896484375,
+          "p95": 0.532904052734375
+        },
+        "query_per_edge_spatial_std": {
+          "mean": 0.08536335387516253,
+          "median": 0.08351680725424204,
+          "p05": 0.06401248771401662,
+          "p95": 0.10891501366957865
+        },
+        "region_separation_normalized": {
+          "mean": 0.10836828161123119,
+          "median": 0.10756219463317498,
+          "p05": 0.10274253489838506,
+          "p95": 0.11809682084683422
+        }
+      },
+      "5000": {
+        "environment_edge_column_cosine": {
+          "mean": 0.37956005882356064,
+          "median": 0.372510084123638,
+          "p05": 0.31045834964245145,
+          "p95": 0.4763641619712366
+        },
+        "environment_effective_rank": {
+          "mean": 1.5755725882044163,
+          "median": 1.6493047451507423,
+          "p05": 1.0162300459797002,
+          "p95": 2.1402315732045016
+        },
+        "environment_largest_dominant_occupancy": {
+          "mean": 0.8047453703703705,
+          "median": 0.84375,
+          "p05": 0.546875,
+          "p95": 1.0
+        },
+        "environment_neighbor_l1": {
+          "mean": 0.19211295447624907,
+          "median": 0.2418778739196763,
+          "p05": 0.02776307952399249,
+          "p95": 0.2853101401164583
+        },
+        "module_edge_column_cosine": {
+          "mean": 0.9602408705288088,
+          "median": 0.9617508155921681,
+          "p05": 0.939170965658172,
+          "p95": 0.978211240573301
+        },
+        "module_effective_rank": {
+          "mean": 1.075583536022125,
+          "median": 1.069966715457804,
+          "p05": 1.0271886961795176,
+          "p95": 1.1374739325338277
+        },
+        "pairwise_edge_map_cosine": {
+          "mean": 0.9180546582556957,
+          "median": 0.9176724214921919,
+          "p05": 0.8704571661800101,
+          "p95": 0.9714395857023796
+        },
+        "pairwise_edge_map_effective_rank": {
+          "mean": 1.2657622733716385,
+          "median": 1.242734837151982,
+          "p05": 1.0764193908787922,
+          "p95": 1.4728097812667658
+        },
+        "query_edge_column_cosine": {
+          "mean": 0.9509202147808029,
+          "median": 0.9561585263856882,
+          "p05": 0.9095489998578558,
+          "p95": 0.9795088591017505
+        },
+        "query_effective_rank": {
+          "mean": 1.1772063238921193,
+          "median": 1.1617726910894106,
+          "p05": 1.0879110509555494,
+          "p95": 1.320045869360358
+        },
+        "query_entropy_norm_direct": {
+          "mean": 0.9467958763980838,
+          "median": 0.9481772382173114,
+          "p05": 0.9324643109588907,
+          "p95": 0.95596903559418
+        },
+        "query_global_mean_route_l1": {
+          "mean": 0.14871675370519274,
+          "median": 0.14851034423435727,
+          "p05": 0.1004291038590228,
+          "p95": 0.2073358908194731
+        },
+        "query_largest_dominant_occupancy": {
+          "mean": 0.9107137044270833,
+          "median": 0.97967529296875,
+          "p05": 0.61153564453125,
+          "p95": 1.0
+        },
+        "query_per_edge_spatial_std": {
+          "mean": 0.02933239717353276,
+          "median": 0.02902674827354064,
+          "p05": 0.020732779739523588,
+          "p95": 0.04002549011745238
+        },
+        "region_separation_normalized": {
+          "mean": 0.12562779198471985,
+          "median": 0.12716467406226117,
+          "p05": 0.1023308281765768,
+          "p95": 0.14315209530186884
+        }
+      }
+    },
+    "run1401": {
+      "1000": {
+        "environment_edge_column_cosine": {
+          "mean": 0.1389531823380617,
+          "median": 0.1409289422614528,
+          "p05": 0.11008748023485301,
+          "p95": 0.16272816199999812
+        },
+        "environment_effective_rank": {
+          "mean": 3.850601643856763,
+          "median": 4.051738891495292,
+          "p05": 3.1341469698660247,
+          "p95": 4.233855930094722
+        },
+        "environment_largest_dominant_occupancy": {
+          "mean": 0.43055555555555547,
+          "median": 0.40625,
+          "p05": 0.359375,
+          "p95": 0.5208333333333334
+        },
+        "environment_neighbor_l1": {
+          "mean": 0.5059954935067104,
+          "median": 0.50989408673635,
+          "p05": 0.4622185315937956,
+          "p95": 0.5303057576654121
+        },
+        "module_edge_column_cosine": {
+          "mean": 0.8297064477393374,
+          "median": 0.819497441952151,
+          "p05": 0.7762345156398635,
+          "p95": 0.9193078870921089
+        },
+        "module_effective_rank": {
+          "mean": 1.6306803728079855,
+          "median": 1.6530950757275988,
+          "p05": 1.324885451474977,
+          "p95": 1.8853230364420293
+        },
+        "pairwise_edge_map_cosine": {
+          "mean": 0.3351152507898005,
+          "median": 0.33075249921002525,
+          "p05": 0.28801938931370263,
+          "p95": 0.39279148845254663
+        },
+        "pairwise_edge_map_effective_rank": {
+          "mean": 3.1953391409839798,
+          "median": 3.2259991675189275,
+          "p05": 2.3099556132801373,
+          "p95": 3.984150866953478
+        },
+        "query_edge_column_cosine": {
+          "mean": 0.32958855500694484,
+          "median": 0.3318318824786727,
+          "p05": 0.29225122455197927,
+          "p95": 0.36285199437148186
+        },
+        "query_effective_rank": {
+          "mean": 4.236855509541301,
+          "median": 4.254939346448796,
+          "p05": 4.054842427762111,
+          "p95": 4.392754138481454
+        },
+        "query_entropy_norm_direct": {
+          "mean": 0.6634689059493805,
+          "median": 0.6695875674060191,
+          "p05": 0.617450520439656,
+          "p95": 0.7000252171760429
+        },
+        "query_global_mean_route_l1": {
+          "mean": 0.9167907246236241,
+          "median": 0.9081539844760144,
+          "p05": 0.8631058819890254,
+          "p95": 0.981679907800481
+        },
+        "query_largest_dominant_occupancy": {
+          "mean": 0.2458401150173611,
+          "median": 0.24420166015625,
+          "p05": 0.219677734375,
+          "p95": 0.27283935546875
+        },
+        "query_per_edge_spatial_std": {
+          "mean": 0.18648370894867447,
+          "median": 0.18561006995911566,
+          "p05": 0.17599811564576412,
+          "p95": 0.19849158584563553
+        },
+        "region_separation_normalized": {
+          "mean": 0.25685404937817385,
+          "median": 0.2532728275953307,
+          "p05": 0.23644019339830807,
+          "p95": 0.28771083257211066
+        }
+      },
+      "2500": {
+        "environment_edge_column_cosine": {
+          "mean": 0.1323079003546188,
+          "median": 0.13132877427132364,
+          "p05": 0.09562966558190414,
+          "p95": 0.1663706008791727
+        },
+        "environment_effective_rank": {
+          "mean": 4.474207901932357,
+          "median": 4.5392811347895226,
+          "p05": 3.6080598810643454,
+          "p95": 4.925270021832062
+        },
+        "environment_largest_dominant_occupancy": {
+          "mean": 0.3737847222222222,
+          "median": 0.375,
+          "p05": 0.28125,
+          "p95": 0.4583333333333333
+        },
+        "environment_neighbor_l1": {
+          "mean": 0.5793340870141755,
+          "median": 0.5832831883531814,
+          "p05": 0.5255121435187305,
+          "p95": 0.6078677250387637
+        },
+        "module_edge_column_cosine": {
+          "mean": 0.9023722244413619,
+          "median": 0.8983784357329734,
+          "p05": 0.8611628438736617,
+          "p95": 0.9591359400731934
+        },
+        "module_effective_rank": {
+          "mean": 1.3825115181744265,
+          "median": 1.398589562266193,
+          "p05": 1.161158244546795,
+          "p95": 1.550686129016753
+        },
+        "pairwise_edge_map_cosine": {
+          "mean": 0.3918286323500856,
+          "median": 0.3904958408650988,
+          "p05": 0.36028864681009554,
+          "p95": 0.4404577228389981
+        },
+        "pairwise_edge_map_effective_rank": {
+          "mean": 2.9447622512617,
+          "median": 3.04134550544327,
+          "p05": 2.1187939860164158,
+          "p95": 3.550938799254304
+        },
+        "query_edge_column_cosine": {
+          "mean": 0.37979756813680887,
+          "median": 0.3853489797111827,
+          "p05": 0.32628989631506466,
+          "p95": 0.4330329935545125
+        },
+        "query_effective_rank": {
+          "mean": 3.9246547073793674,
+          "median": 3.916812197863649,
+          "p05": 3.726282100908945,
+          "p95": 4.116168851525421
+        },
+        "query_entropy_norm_direct": {
+          "mean": 0.7111029366732147,
+          "median": 0.7163225273009007,
+          "p05": 0.6552455678383425,
+          "p95": 0.7622774030985482
+        },
+        "query_global_mean_route_l1": {
+          "mean": 0.8492977582138204,
+          "median": 0.8429836268338864,
+          "p05": 0.7665594856251687,
+          "p95": 0.93571753896044
+        },
+        "query_largest_dominant_occupancy": {
+          "mean": 0.24824354383680555,
+          "median": 0.2471923828125,
+          "p05": 0.231219482421875,
+          "p95": 0.270611572265625
+        },
+        "query_per_edge_spatial_std": {
+          "mean": 0.1708637259014729,
+          "median": 0.1695808642926237,
+          "p05": 0.155747673320073,
+          "p95": 0.18648918869762426
+        },
+        "region_separation_normalized": {
+          "mean": 0.25453329662326246,
+          "median": 0.2512749407579471,
+          "p05": 0.22336848756347005,
+          "p95": 0.2970928432729984
+        }
+      },
+      "500": {
+        "environment_edge_column_cosine": {
+          "mean": 0.15258216325253438,
+          "median": 0.1549763439790686,
+          "p05": 0.13036168109262924,
+          "p95": 0.17124264764047806
+        },
+        "environment_effective_rank": {
+          "mean": 4.0415431655991005,
+          "median": 4.129005838426451,
+          "p05": 3.5098870573965413,
+          "p95": 4.392948031760143
+        },
+        "environment_largest_dominant_occupancy": {
+          "mean": 0.38848379629629626,
+          "median": 0.3854166666666667,
+          "p05": 0.328125,
+          "p95": 0.4635416666666667
+        },
+        "environment_neighbor_l1": {
+          "mean": 0.4653103533035744,
+          "median": 0.4697004586028578,
+          "p05": 0.4309979999518096,
+          "p95": 0.4858253423386706
+        },
+        "module_edge_column_cosine": {
+          "mean": 0.7914370009800644,
+          "median": 0.7732357140267803,
+          "p05": 0.7300220623125575,
+          "p95": 0.884342826631774
+        },
+        "module_effective_rank": {
+          "mean": 1.7570879413441478,
+          "median": 1.7860859969794243,
+          "p05": 1.3808167043936321,
+          "p95": 2.0052963910712247
+        },
+        "pairwise_edge_map_cosine": {
+          "mean": 0.30789532497037725,
+          "median": 0.2992861162434334,
+          "p05": 0.2480627146929714,
+          "p95": 0.37252947633419936
+        },
+        "pairwise_edge_map_effective_rank": {
+          "mean": 3.411467224156182,
+          "median": 3.4106360279056065,
+          "p05": 2.3767727180825315,
+          "p95": 4.2477279636029115
+        },
+        "query_edge_column_cosine": {
+          "mean": 0.29794914273135675,
+          "median": 0.30068715637470844,
+          "p05": 0.2697904407937154,
+          "p95": 0.3258125526582314
+        },
+        "query_effective_rank": {
+          "mean": 4.501070822934281,
+          "median": 4.5246285909808375,
+          "p05": 4.253989127936148,
+          "p95": 4.69897254360196
+        },
+        "query_entropy_norm_direct": {
+          "mean": 0.6351308006623386,
+          "median": 0.6424383832832538,
+          "p05": 0.5967504747342784,
+          "p95": 0.665446129575931
+        },
+        "query_global_mean_route_l1": {
+          "mean": 0.9592840600713457,
+          "median": 0.9503908705665882,
+          "p05": 0.9171580009563406,
+          "p95": 1.0104200723786414
+        },
+        "query_largest_dominant_occupancy": {
+          "mean": 0.20826416015625,
+          "median": 0.20770263671875,
+          "p05": 0.1950927734375,
+          "p95": 0.224737548828125
+        },
+        "query_per_edge_spatial_std": {
+          "mean": 0.19812216467046515,
+          "median": 0.1969552187679266,
+          "p05": 0.18896291006164875,
+          "p95": 0.20801274534588485
+        },
+        "region_separation_normalized": {
+          "mean": 0.26965796286938465,
+          "median": 0.2673932472168702,
+          "p05": 0.25198085309423324,
+          "p95": 0.29221258847276144
+        }
+      },
+      "5000": {
+        "environment_edge_column_cosine": {
+          "mean": 0.12380379804672681,
+          "median": 0.12025158314215521,
+          "p05": 0.0893885685410465,
+          "p95": 0.16085670380613432
+        },
+        "environment_effective_rank": {
+          "mean": 4.730389937734505,
+          "median": 4.7940783073684,
+          "p05": 4.065133126764289,
+          "p95": 5.2062899401737734
+        },
+        "environment_largest_dominant_occupancy": {
+          "mean": 0.3567708333333333,
+          "median": 0.3229166666666667,
+          "p05": 0.2916666666666667,
+          "p95": 0.46119791666666665
+        },
+        "environment_neighbor_l1": {
+          "mean": 0.5539362975970628,
+          "median": 0.5583161809577488,
+          "p05": 0.5021678509483947,
+          "p95": 0.5821981969474509
+        },
+        "module_edge_column_cosine": {
+          "mean": 0.937138037753796,
+          "median": 0.9328139006511761,
+          "p05": 0.9081212724689476,
+          "p95": 0.9742113844949732
+        },
+        "module_effective_rank": {
+          "mean": 1.2579223721787818,
+          "median": 1.2701133839904,
+          "p05": 1.1084951167451806,
+          "p95": 1.372348276144145
+        },
+        "pairwise_edge_map_cosine": {
+          "mean": 0.4414973389733817,
+          "median": 0.44182976314419786,
+          "p05": 0.3994654586566951,
+          "p95": 0.4952232866578901
+        },
+        "pairwise_edge_map_effective_rank": {
+          "mean": 2.7752335806038078,
+          "median": 2.8372947126684522,
+          "p05": 2.080459860749029,
+          "p95": 3.27661008686033
+        },
+        "query_edge_column_cosine": {
+          "mean": 0.41821854058405317,
+          "median": 0.418106222898328,
+          "p05": 0.35437573911479603,
+          "p95": 0.484930057861595
+        },
+        "query_effective_rank": {
+          "mean": 3.7213290484331027,
+          "median": 3.7164609838802356,
+          "p05": 3.414089628951463,
+          "p95": 4.023441320085287
+        },
+        "query_entropy_norm_direct": {
+          "mean": 0.7442281805954123,
+          "median": 0.7456053858935872,
+          "p05": 0.6859852322280172,
+          "p95": 0.7987118180998358
+        },
+        "query_global_mean_route_l1": {
+          "mean": 0.7977406927719326,
+          "median": 0.7985661400657976,
+          "p05": 0.7052300334534726,
+          "p95": 0.8933642316340993
+        },
+        "query_largest_dominant_occupancy": {
+          "mean": 0.23430582682291667,
+          "median": 0.23333740234375,
+          "p05": 0.213909912109375,
+          "p95": 0.2515869140625
+        },
+        "query_per_edge_spatial_std": {
+          "mean": 0.1601160075251396,
+          "median": 0.16009431818083583,
+          "p05": 0.1423733729366173,
+          "p95": 0.17838133985355745
+        },
+        "region_separation_normalized": {
+          "mean": 0.26159571104470214,
+          "median": 0.26119822165537426,
+          "p05": 0.22410478805812784,
+          "p95": 0.3054747591810605
+        }
+      }
+    }
+  }
+}
