@@ -116,3 +116,8 @@ Evaluation*/
 Saved_Model_LocalModule/
 cache/
 cache_index.json
+HONF_Proj/diagnostics/**
+!HONF_Proj/diagnostics/README.md
+!HONF_Proj/diagnostics/*.py
+!HONF_Proj/diagnostics/evidence_manifests/
+!HONF_Proj/diagnostics/evidence_manifests/*.json

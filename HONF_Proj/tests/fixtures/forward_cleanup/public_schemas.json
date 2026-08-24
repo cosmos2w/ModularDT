@@ -1,0 +1,746 @@
+{
+  "artifact_schemas": {
+    "evaluation_layout": 2,
+    "hypergraph_plan": 2,
+    "run_manifest": 1,
+    "topology_signature": 3
+  },
+  "checkpoints": {
+    "run1000_best_field_e9655": {
+      "channel_order": [
+        "u",
+        "v",
+        "p",
+        "omega",
+        "temperature"
+      ],
+      "checkpoint_schema_version": 1,
+      "dataset_schema": "thermal_channel_global_hdf5_v1",
+      "feature_schemas": {
+        "channel_order": [
+          "u",
+          "v",
+          "p",
+          "omega",
+          "temperature"
+        ],
+        "global_context_names": [
+          "re",
+          "u_in",
+          "active_module_count",
+          "log1p_active_module_count",
+          "module_number_density",
+          "occupied_area_fraction",
+          "total_dataset_scaled_heat",
+          "total_dataset_scaled_heat_per_domain_area",
+          "mean_active_dataset_scaled_heat",
+          "max_abs_dataset_scaled_heat",
+          "domain_length_x",
+          "domain_length_y",
+          "nu",
+          "solid_alpha",
+          "fluid_alpha",
+          "solid_k",
+          "fluid_k",
+          "module_radius"
+        ],
+        "interface_condition_feature_names": [
+          "theta",
+          "normal_x",
+          "normal_y",
+          "T_outside",
+          "u_normal",
+          "u_tangent",
+          "h_proxy",
+          "h_effective"
+        ],
+        "interface_target_names": [
+          "T_surface",
+          "q_normal"
+        ],
+        "module_feature_names": [
+          "heat_dataset_scaled",
+          "abs_heat_dataset_scaled",
+          "heat_case_relative",
+          "abs_heat_case_relative",
+          "active_flag",
+          "solid_alpha",
+          "fluid_alpha",
+          "solid_k",
+          "fluid_k",
+          "module_radius"
+        ]
+      },
+      "top_level_keys": [
+        "best_metric",
+        "best_metrics",
+        "case_id",
+        "channel_order",
+        "checkpoint_schema_version",
+        "current_epoch",
+        "dataset_fingerprint",
+        "dataset_id",
+        "dataset_metadata",
+        "dataset_schema",
+        "epoch",
+        "feature_schemas",
+        "field_dim",
+        "global_normalization_config",
+        "global_normalization_stats",
+        "interface_condition_feature_names",
+        "interface_target_names",
+        "local_checkpoint_provenance",
+        "local_model_config",
+        "local_normalization_config",
+        "local_normalization_stats",
+        "local_surrogate_checkpoint_path",
+        "local_surrogate_frozen",
+        "model_config",
+        "model_family",
+        "model_state_dict",
+        "optimizer_state_dict",
+        "rng_state",
+        "scaler_state_dict",
+        "stage",
+        "train_config",
+        "workflow"
+      ]
+    },
+    "run1401_best_field_e4585": {
+      "channel_order": [
+        "u",
+        "v",
+        "p",
+        "omega",
+        "temperature"
+      ],
+      "checkpoint_schema_version": 1,
+      "dataset_schema": "thermal_channel_global_hdf5_v1",
+      "feature_schemas": {
+        "channel_order": [
+          "u",
+          "v",
+          "p",
+          "omega",
+          "temperature"
+        ],
+        "global_context_names": [
+          "re",
+          "u_in",
+          "active_module_count",
+          "log1p_active_module_count",
+          "module_number_density",
+          "occupied_area_fraction",
+          "total_dataset_scaled_heat",
+          "total_dataset_scaled_heat_per_domain_area",
+          "mean_active_dataset_scaled_heat",
+          "max_abs_dataset_scaled_heat",
+          "domain_length_x",
+          "domain_length_y",
+          "nu",
+          "solid_alpha",
+          "fluid_alpha",
+          "solid_k",
+          "fluid_k",
+          "module_radius"
+        ],
+        "interface_condition_feature_names": [
+          "theta",
+          "normal_x",
+          "normal_y",
+          "T_outside",
+          "u_normal",
+          "u_tangent",
+          "h_proxy",
+          "h_effective"
+        ],
+        "interface_target_names": [
+          "T_surface",
+          "q_normal"
+        ],
+        "module_feature_names": [
+          "heat_dataset_scaled",
+          "abs_heat_dataset_scaled",
+          "heat_case_relative",
+          "abs_heat_case_relative",
+          "active_flag",
+          "solid_alpha",
+          "fluid_alpha",
+          "solid_k",
+          "fluid_k",
+          "module_radius"
+        ]
+      },
+      "top_level_keys": [
+        "best_metric",
+        "best_metrics",
+        "case_id",
+        "channel_order",
+        "checkpoint_schema_version",
+        "current_epoch",
+        "dataset_fingerprint",
+        "dataset_id",
+        "dataset_metadata",
+        "dataset_schema",
+        "epoch",
+        "feature_schemas",
+        "field_dim",
+        "global_normalization_config",
+        "global_normalization_stats",
+        "interface_condition_feature_names",
+        "interface_target_names",
+        "local_checkpoint_provenance",
+        "local_model_config",
+        "local_normalization_config",
+        "local_normalization_stats",
+        "local_surrogate_checkpoint_path",
+        "local_surrogate_frozen",
+        "model_config",
+        "model_family",
+        "model_state_dict",
+        "optimizer_group_inventory",
+        "optimizer_state_dict",
+        "rng_state",
+        "scaler_state_dict",
+        "selection_state",
+        "stage",
+        "train_config",
+        "workflow"
+      ]
+    }
+  },
+  "dataclasses": {
+    "BatchData": [
+      {
+        "default": "<required>",
+        "name": "module_centers",
+        "type": "Any"
+      },
+      {
+        "default": "<required>",
+        "name": "module_present",
+        "type": "Any"
+      },
+      {
+        "default": "<required>",
+        "name": "module_features",
+        "type": "Any"
+      },
+      {
+        "default": "<required>",
+        "name": "global_context",
+        "type": "Any"
+      },
+      {
+        "default": "<required>",
+        "name": "query_xy",
+        "type": "Any"
+      },
+      {
+        "default": "<required>",
+        "name": "query_time",
+        "type": "Optional[Any]"
+      },
+      {
+        "default": "<required>",
+        "name": "target_field",
+        "type": "Optional[Any]"
+      },
+      {
+        "default": "<required>",
+        "name": "case_name",
+        "type": "str"
+      },
+      {
+        "default": "<required>",
+        "name": "metadata",
+        "type": "Dict[str, Any]"
+      },
+      {
+        "default": null,
+        "name": "env_coords",
+        "type": "Optional[Any]"
+      },
+      {
+        "default": null,
+        "name": "env_features",
+        "type": "Optional[Any]"
+      },
+      {
+        "default": null,
+        "name": "query_features",
+        "type": "Optional[Any]"
+      }
+    ],
+    "PreparedChannelThermalCase": [
+      {
+        "default": "<required>",
+        "name": "organizer",
+        "type": "Dict[str, torch.Tensor]"
+      },
+      {
+        "default": "<required>",
+        "name": "global_token",
+        "type": "torch.Tensor"
+      }
+    ],
+    "UnifiedForwardConfig": [
+      {
+        "default": 5,
+        "name": "field_dim",
+        "type": "int"
+      },
+      {
+        "default": 12.0,
+        "name": "domain_length_x",
+        "type": "float"
+      },
+      {
+        "default": 4.0,
+        "name": "domain_length_y",
+        "type": "float"
+      },
+      {
+        "default": 0.45,
+        "name": "module_radius",
+        "type": "float"
+      },
+      {
+        "default": null,
+        "name": "coordinate_scale",
+        "type": "Optional[list[float]]"
+      },
+      {
+        "default": null,
+        "name": "periodic_axes",
+        "type": "Optional[list[int]]"
+      },
+      {
+        "default": null,
+        "name": "local_context_scale",
+        "type": "Optional[float]"
+      },
+      {
+        "default": 16,
+        "name": "num_env_tokens_x",
+        "type": "int"
+      },
+      {
+        "default": 6,
+        "name": "num_env_tokens_y",
+        "type": "int"
+      },
+      {
+        "default": 4,
+        "name": "num_hyperedges",
+        "type": "int"
+      },
+      {
+        "default": "fixed_projection",
+        "name": "organizer_mode",
+        "type": "str"
+      },
+      {
+        "default": 0,
+        "name": "edge_capacity",
+        "type": "int"
+      },
+      {
+        "default": 6,
+        "name": "initial_active_edges",
+        "type": "int"
+      },
+      {
+        "default": 1,
+        "name": "minimum_active_edges",
+        "type": "int"
+      },
+      {
+        "default": 2,
+        "name": "slot_refinement_steps",
+        "type": "int"
+      },
+      {
+        "default": "sinusoidal",
+        "name": "slot_code_mode",
+        "type": "str"
+      },
+      {
+        "default": "all",
+        "name": "edge_selection_mode",
+        "type": "str"
+      },
+      {
+        "default": 200,
+        "name": "selection_warmup_epochs",
+        "type": "int"
+      },
+      {
+        "default": -1,
+        "name": "selection_start_epoch",
+        "type": "int"
+      },
+      {
+        "default": 0,
+        "name": "selection_transition_epochs",
+        "type": "int"
+      },
+      {
+        "default": "legacy",
+        "name": "selection_warmup_mode",
+        "type": "str"
+      },
+      {
+        "default": 0.01,
+        "name": "selection_minimum_module_mass_fraction",
+        "type": "float"
+      },
+      {
+        "default": 0.01,
+        "name": "selection_minimum_environment_mass_fraction",
+        "type": "float"
+      },
+      {
+        "default": 0.95,
+        "name": "selection_coverage_rate",
+        "type": "float"
+      },
+      {
+        "default": 0.5,
+        "name": "selection_token_threshold",
+        "type": "float"
+      },
+      {
+        "default": 0.85,
+        "name": "selection_maximum_redundancy",
+        "type": "float"
+      },
+      {
+        "default": 0.01,
+        "name": "candidate_module_mass_fraction_floor",
+        "type": "float"
+      },
+      {
+        "default": 0.01,
+        "name": "candidate_environment_mass_fraction_floor",
+        "type": "float"
+      },
+      {
+        "default": "softmax",
+        "name": "module_assignment_normalizer",
+        "type": "str"
+      },
+      {
+        "default": "softmax",
+        "name": "environment_assignment_normalizer",
+        "type": "str"
+      },
+      {
+        "default": "softmax",
+        "name": "query_assignment_normalizer",
+        "type": "str"
+      },
+      {
+        "default": -1,
+        "name": "module_sparsity_start_epoch",
+        "type": "int"
+      },
+      {
+        "default": 0,
+        "name": "module_sparsity_transition_epochs",
+        "type": "int"
+      },
+      {
+        "default": -1,
+        "name": "environment_sparsity_start_epoch",
+        "type": "int"
+      },
+      {
+        "default": 0,
+        "name": "environment_sparsity_transition_epochs",
+        "type": "int"
+      },
+      {
+        "default": -1,
+        "name": "query_sparsity_start_epoch",
+        "type": "int"
+      },
+      {
+        "default": 0,
+        "name": "query_sparsity_transition_epochs",
+        "type": "int"
+      },
+      {
+        "default": 1.5,
+        "name": "entmax_alpha",
+        "type": "float"
+      },
+      {
+        "default": "none",
+        "name": "environment_locality_mode",
+        "type": "str"
+      },
+      {
+        "default": 1.0,
+        "name": "environment_locality_strength",
+        "type": "float"
+      },
+      {
+        "default": "inherit_environment",
+        "name": "query_locality_mode",
+        "type": "str"
+      },
+      {
+        "default": null,
+        "name": "query_locality_strength",
+        "type": "Optional[float]"
+      },
+      {
+        "default": 3.0,
+        "name": "locality_radius_cap",
+        "type": "float"
+      },
+      {
+        "default": 0.05,
+        "name": "minimum_region_scale",
+        "type": "float"
+      },
+      {
+        "default": "residual_concat",
+        "name": "mechanism_state_mode",
+        "type": "str"
+      },
+      {
+        "default": 0.35,
+        "name": "mechanism_latent_residual_scale",
+        "type": "float"
+      },
+      {
+        "default": "context_fusion",
+        "name": "field_assembly_mode",
+        "type": "str"
+      },
+      {
+        "default": "dense_query_attention",
+        "name": "additive_background_mode",
+        "type": "str"
+      },
+      {
+        "default": 0.1,
+        "name": "additive_edge_gate_init",
+        "type": "float"
+      },
+      {
+        "default": 0.001,
+        "name": "additive_output_init_std",
+        "type": "float"
+      },
+      {
+        "default": "dense",
+        "name": "routing_execution",
+        "type": "str"
+      },
+      {
+        "default": -1,
+        "name": "gathered_execution_start_epoch",
+        "type": "int"
+      },
+      {
+        "default": 0,
+        "name": "query_edge_limit",
+        "type": "int"
+      },
+      {
+        "default": 0,
+        "name": "query_module_limit",
+        "type": "int"
+      },
+      {
+        "default": 0.0,
+        "name": "query_edge_retained_mass_floor",
+        "type": "float"
+      },
+      {
+        "default": 0.0,
+        "name": "module_incidence_retained_mass_floor",
+        "type": "float"
+      },
+      {
+        "default": false,
+        "name": "topology_signature_enabled",
+        "type": "bool"
+      },
+      {
+        "default": 128,
+        "name": "hidden_dim",
+        "type": "int"
+      },
+      {
+        "default": 0.05,
+        "name": "dropout",
+        "type": "float"
+      },
+      {
+        "default": true,
+        "name": "use_layer_norm",
+        "type": "bool"
+      },
+      {
+        "default": "nonperiodic",
+        "name": "geometry_mode",
+        "type": "str"
+      },
+      {
+        "default": "none",
+        "name": "query_time_mode",
+        "type": "str"
+      },
+      {
+        "default": "hyper_only",
+        "name": "decoder_mode",
+        "type": "str"
+      },
+      {
+        "default": true,
+        "name": "use_hyper_value_context",
+        "type": "bool"
+      },
+      {
+        "default": 4,
+        "name": "query_fourier_frequencies",
+        "type": "int"
+      },
+      {
+        "default": "rectangular",
+        "name": "boundary_feature_mode",
+        "type": "str"
+      },
+      {
+        "default": 2,
+        "name": "position_fourier_frequencies",
+        "type": "int"
+      },
+      {
+        "default": true,
+        "name": "use_position_fourier_for_modules",
+        "type": "bool"
+      },
+      {
+        "default": true,
+        "name": "use_position_fourier_for_env",
+        "type": "bool"
+      },
+      {
+        "default": true,
+        "name": "use_hyper_mechanism_encoder",
+        "type": "bool"
+      },
+      {
+        "default": true,
+        "name": "mechanism_include_geometry",
+        "type": "bool"
+      },
+      {
+        "default": true,
+        "name": "mechanism_include_masses",
+        "type": "bool"
+      },
+      {
+        "default": null,
+        "name": "mechanism_hidden_dim",
+        "type": "Optional[int]"
+      },
+      {
+        "default": "learned",
+        "name": "hyper_module_assignment_mode",
+        "type": "str"
+      },
+      {
+        "default": "learned",
+        "name": "hyper_query_attention_mode",
+        "type": "str"
+      },
+      {
+        "default": 0,
+        "name": "hyper_attention_topk",
+        "type": "int"
+      },
+      {
+        "default": 1.0,
+        "name": "hyper_attention_temperature",
+        "type": "float"
+      },
+      {
+        "default": true,
+        "name": "sparse_hyper_attention_detach_mask",
+        "type": "bool"
+      },
+      {
+        "default": null,
+        "name": "pairwise_kernel_hidden_dim",
+        "type": "Optional[int]"
+      },
+      {
+        "default": 3,
+        "name": "pairwise_kernel_num_layers",
+        "type": "int"
+      },
+      {
+        "default": 0.1,
+        "name": "pairwise_kernel_gate_init",
+        "type": "float"
+      },
+      {
+        "default": true,
+        "name": "pairwise_kernel_use_fourier",
+        "type": "bool"
+      },
+      {
+        "default": 2,
+        "name": "pairwise_kernel_fourier_frequencies",
+        "type": "int"
+      },
+      {
+        "default": true,
+        "name": "pairwise_kernel_include_module_token",
+        "type": "bool"
+      },
+      {
+        "default": true,
+        "name": "pairwise_kernel_include_module_features",
+        "type": "bool"
+      },
+      {
+        "default": true,
+        "name": "pairwise_kernel_normalize_by_edge_mass",
+        "type": "bool"
+      },
+      {
+        "default": true,
+        "name": "use_hyper_geometry_bias",
+        "type": "bool"
+      },
+      {
+        "default": 1.0,
+        "name": "hyper_geometry_bias_scale",
+        "type": "float"
+      },
+      {
+        "default": 0.0,
+        "name": "direct_residual_gate_init",
+        "type": "float"
+      },
+      {
+        "default": true,
+        "name": "use_A_me_auxiliary",
+        "type": "bool"
+      },
+      {
+        "default": false,
+        "name": "output_mean_residual_split",
+        "type": "bool"
+      }
+    ]
+  },
+  "schema_version": 1
+}

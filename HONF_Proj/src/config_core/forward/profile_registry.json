@@ -1,0 +1,196 @@
+{
+  "schema_version": 1,
+  "recommended_forward_profile": "stage7_structured_context",
+  "profiles": [
+    {
+      "name": "stage7_structured_context",
+      "path": "project://src/config_core/forward/stage7_structured_context.json",
+      "status": "current",
+      "base": null,
+      "mode": "fixed K=6 softmax / residual_concat / context_fusion / dense",
+      "checkpoint_families": ["Run 1401", "Run 1000 architecture class"],
+      "owner": "forward-core",
+      "stage": 7
+    },
+    {
+      "name": "enhanced_honf_pairwise",
+      "path": "project://src/config_core/forward/enhanced_honf_pairwise.json",
+      "status": "compatibility",
+      "base": null,
+      "mode": "fixed softmax / residual_concat / context_fusion",
+      "checkpoint_families": ["Run 1000"],
+      "owner": "forward-core",
+      "stage": "historical"
+    },
+    {
+      "name": "adaptive_sparse_additive",
+      "path": "project://src/config_core/forward/adaptive_sparse_additive.json",
+      "status": "compatibility",
+      "base": null,
+      "mode": "exchangeable / adaptive / additive / gathered-capable",
+      "checkpoint_families": ["Runs 1007, 1102, 1202, 1301"],
+      "owner": "forward-research",
+      "stage": "2-5"
+    },
+    {
+      "name": "hyper_plus_global_near",
+      "path": "project://src/config_core/forward/hyper_plus_global_near.json",
+      "status": "compatibility",
+      "base": null,
+      "mode": "fixed context-fusion near-field compatibility",
+      "checkpoint_families": ["pre-upgrade forward"],
+      "owner": "forward-core",
+      "stage": "historical"
+    },
+    {
+      "name": "thermal_disk_local_module",
+      "path": "project://src/config_core/forward/local_module_thermal_disk.json",
+      "status": "current",
+      "base": null,
+      "mode": "ThermalChannel Stage-A local surrogate",
+      "checkpoint_families": ["Run 0000 base"],
+      "owner": "ThermalChannel",
+      "stage": "A"
+    },
+    {
+      "name": "old_parity",
+      "path": "project://src/config_core/forward/experiments/old_parity.json",
+      "status": "frozen_experiment",
+      "base": "enhanced_honf_pairwise",
+      "mode": "historical hyper-value ablation",
+      "checkpoint_families": ["pre-upgrade ablation"],
+      "owner": "forward-research",
+      "stage": "historical"
+    },
+    {
+      "name": "uniform_h_assignment",
+      "path": "project://src/config_core/forward/experiments/uniform_h_assignment.json",
+      "status": "frozen_experiment",
+      "base": "enhanced_honf_pairwise",
+      "mode": "uniform module/query routing ablation",
+      "checkpoint_families": ["pre-upgrade ablation"],
+      "owner": "forward-research",
+      "stage": "historical"
+    },
+    {
+      "name": "global_only",
+      "path": "project://src/config_core/forward/experiments/global_only.json",
+      "status": "frozen_experiment",
+      "base": "enhanced_honf_pairwise",
+      "mode": "global fallback without Stage-A coupling",
+      "checkpoint_families": ["global-only ablation"],
+      "owner": "ThermalChannel",
+      "stage": "historical"
+    },
+    {
+      "name": "stage1_fixed_additive_soft",
+      "path": "project://src/config_core/forward/experiments/stage1_fixed_additive_soft.json",
+      "status": "frozen_experiment",
+      "base": "adaptive_sparse_additive",
+      "mode": "fixed / descriptor_first / edge_additive / dense",
+      "checkpoint_families": ["Run 1005"],
+      "owner": "forward-research",
+      "stage": 1
+    },
+    {
+      "name": "stage2_exchangeable_soft",
+      "path": "project://src/config_core/forward/experiments/stage2_exchangeable_soft.json",
+      "status": "frozen_experiment",
+      "base": "adaptive_sparse_additive",
+      "mode": "exchangeable all-soft / edge_additive / dense",
+      "checkpoint_families": ["Run 1007"],
+      "owner": "forward-research",
+      "stage": 2
+    },
+    {
+      "name": "stage3_scheduled_adaptive_sparse",
+      "path": "project://src/config_core/forward/experiments/stage3_scheduled_adaptive_sparse.json",
+      "status": "frozen_experiment",
+      "base": "adaptive_sparse_additive",
+      "mode": "scheduled adaptive entmax / gathered",
+      "checkpoint_families": ["Run 1102"],
+      "owner": "forward-research",
+      "stage": 3
+    },
+    {
+      "name": "stage4_uniform_lr2e4_dense_background",
+      "path": "project://src/config_core/forward/experiments/stage4_uniform_lr2e4_dense_background.json",
+      "status": "frozen_experiment",
+      "base": "adaptive_sparse_additive",
+      "mode": "adaptive additive dense background / uniform optimizer",
+      "checkpoint_families": ["Stage-4 control"],
+      "owner": "forward-research",
+      "stage": 4
+    },
+    {
+      "name": "stage4_split_lr_dense_background",
+      "path": "project://src/config_core/forward/experiments/stage4_split_lr_dense_background.json",
+      "status": "frozen_experiment",
+      "base": "adaptive_sparse_additive",
+      "mode": "adaptive additive dense background / split optimizer",
+      "checkpoint_families": ["Run 1202"],
+      "owner": "forward-research",
+      "stage": 4
+    },
+    {
+      "name": "stage4_split_lr_pooled_background",
+      "path": "project://src/config_core/forward/experiments/stage4_split_lr_pooled_background.json",
+      "status": "frozen_experiment",
+      "base": "adaptive_sparse_additive",
+      "mode": "adaptive additive pooled background / split optimizer",
+      "checkpoint_families": ["Stage-4 pooled control"],
+      "owner": "forward-research",
+      "stage": 4
+    },
+    {
+      "name": "stage5_exchangeable_soft_organized",
+      "path": "project://src/config_core/forward/experiments/stage5_exchangeable_soft_organized.json",
+      "status": "frozen_experiment",
+      "base": "adaptive_sparse_additive",
+      "mode": "exchangeable all-soft / residual additive",
+      "checkpoint_families": ["Run 1301"],
+      "owner": "forward-research",
+      "stage": 5
+    },
+    {
+      "name": "stage5_fixed_softmax_modern",
+      "path": "project://src/config_core/forward/experiments/stage5_fixed_softmax_modern.json",
+      "status": "frozen_experiment",
+      "base": "adaptive_sparse_additive",
+      "mode": "fixed softmax / descriptor_first / additive",
+      "checkpoint_families": ["Run 1302"],
+      "owner": "forward-research",
+      "stage": 5
+    },
+    {
+      "name": "stage5_fixed_residual_concat_modern",
+      "path": "project://src/config_core/forward/experiments/stage5_fixed_residual_concat_modern.json",
+      "status": "frozen_experiment",
+      "base": "adaptive_sparse_additive",
+      "mode": "fixed softmax / residual_concat / additive / split optimizer",
+      "checkpoint_families": ["Run 1303"],
+      "owner": "forward-research",
+      "stage": 5
+    },
+    {
+      "name": "stage5_fixed_residual_concat_uniform_lr3e4",
+      "path": "project://src/config_core/forward/experiments/stage5_fixed_residual_concat_uniform_lr3e4.json",
+      "status": "frozen_experiment",
+      "base": "adaptive_sparse_additive",
+      "mode": "fixed softmax / residual_concat / additive / shared optimizer",
+      "checkpoint_families": ["Run 1304"],
+      "owner": "forward-research",
+      "stage": 5
+    },
+    {
+      "name": "stage6_fixed_role_consistent_additive",
+      "path": "project://src/config_core/forward/experiments/stage6_fixed_role_consistent_additive.json",
+      "status": "frozen_experiment",
+      "base": "adaptive_sparse_additive",
+      "mode": "fixed residual additive frozen-screen control",
+      "checkpoint_families": ["Stage-6 S0/S2 screen"],
+      "owner": "forward-research",
+      "stage": 6
+    }
+  ]
+}

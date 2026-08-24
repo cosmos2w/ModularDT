@@ -2,11 +2,46 @@ from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
 
 import pytest
 
 from honf_runtime.config_loader import load_config_bundle
 from honf_runtime.registry import load_case_plugin, require_model_family
+
+
+def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    registry_path = project_root / "src/config_core/forward/profile_registry.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    profiles = registry["profiles"]
+    names = [profile["name"] for profile in profiles]
+    assert len(names) == len(set(names)) == 19
+    assert registry["recommended_forward_profile"] == "stage7_structured_context"
+    assert {profile["status"] for profile in profiles} <= {
+        "current",
+        "compatibility",
+        "frozen_experiment",
+        "evaluation_only",
+    }
+    by_name = {profile["name"]: profile for profile in profiles}
+    assert by_name["stage7_structured_context"]["status"] == "current"
+    assert by_name["enhanced_honf_pairwise"]["status"] == "compatibility"
+    assert by_name["stage5_fixed_residual_concat_uniform_lr3e4"]["status"] == "frozen_experiment"
+
+    for profile in profiles:
+        path = project_root / profile["path"].removeprefix("project://")
+        assert path.is_file()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert "status" not in payload
+        assert "checkpoint_compatibility" not in payload
+        if profile["base"] is None:
+            load_config_bundle(profile["path"])
+        else:
+            load_config_bundle(
+                by_name[profile["base"]]["path"],
+                experiment_overlay=profile["path"],
+            )
 
 
 def test_split_config_composes_deterministically() -> None:
@@ -194,6 +229,47 @@ def test_adaptive_sparse_additive_base_is_the_dense_formal_stage3_profile() -> N
     assert core["module_incidence_retained_mass_floor"] == 0.95
     assert bundle.effective["training"]["plot_every_epochs"] == 50
     assert bundle.effective["checkpointing"]["save_latest_every_epochs"] == 10
+
+
+def test_stage7_structured_context_profile_is_explicit_run1000_style() -> None:
+    bundle = load_config_bundle(
+        "project://src/config_core/forward/stage7_structured_context.json"
+    )
+    core = bundle.effective["model"]["core_honf"]
+
+    assert core["organizer_mode"] == "fixed_projection"
+    assert (core["num_hyperedges"], core["edge_capacity"]) == (6, 0)
+    assert core["edge_selection_mode"] == "all"
+    assert core["module_assignment_normalizer"] == "softmax"
+    assert core["environment_assignment_normalizer"] == "softmax"
+    assert core["query_assignment_normalizer"] == "softmax"
+    assert core["environment_locality_mode"] == "none"
+    assert core["query_locality_mode"] == "none"
+    assert core["mechanism_state_mode"] == "residual_concat"
+    assert core["use_hyper_mechanism_encoder"] is False
+    assert core["field_assembly_mode"] == "context_fusion"
+    assert core["routing_execution"] == "dense"
+    assert (core["query_edge_limit"], core["query_module_limit"]) == (0, 0)
+    assert core["use_hyper_value_context"] is True
+    assert core["hyper_query_attention_mode"] == "learned"
+    assert core["hyper_attention_topk"] == 0
+    assert core["hyper_attention_temperature"] == 1.0
+    assert core["use_hyper_geometry_bias"] is True
+    assert core["hyper_geometry_bias_scale"] == 1.0
+    assert core["use_A_me_auxiliary"] is True
+    assert core["direct_residual_gate_init"] == 0.0
+    assert core["output_mean_residual_split"] is False
+
+    training = bundle.effective["training"]
+    assert training["learning_rate"] == 3.0e-4
+    assert training["organizer_learning_rate"] is None
+    assert training["weight_decay"] == 1.0e-5
+    assert training["plot_every_epochs"] == 50
+    assert bundle.effective["loss"]["organizer_regularization"]["enabled"] is False
+    assert bundle.effective["checkpointing"]["save_latest_every_epochs"] == 10
+    assert bundle.effective["checkpointing"]["save_epoch_milestones"] == [
+        500, 1000, 2500, 5000, 7500, 10000
+    ]
 
 
 @pytest.mark.parametrize(
