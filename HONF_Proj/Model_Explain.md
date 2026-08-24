@@ -1,246 +1,488 @@
-# HONF model mathematics and implemented settings
+# HONF forward model: current mathematics, configuration, and code map
+
+This document describes the maintained HONF forward platform after the Stage-7
+scientific decision and repository cleanup. The current scientific baseline is
+Run 1401 best-by-field, epoch 4585. It uses fixed six-edge softmax organization,
+the organizer's raw residual hyperedge state, dense query routing, and context
+fusion. Run 1000 remains the historical golden compatibility reference.
+
+The exchangeable, adaptive, entmax, additive, and gathered mechanisms developed
+in Stages 1–6 remain loadable research modes. They are not the primary model
+described below.
+
+## 1. Which configuration is current?
+
+The profile registry at `src/config_core/forward/profile_registry.json`
+declares `stage7_structured_context` as `recommended_forward_profile` and gives
+it `status="current"`.
+
+| Role | Profile | Status |
+|---|---|---|
+| Current scientific profile | `src/config_core/forward/stage7_structured_context.json` | Run 1401 architecture and 5K training policy |
+| Historical golden profile | `src/config_core/forward/enhanced_honf_pairwise.json` | Run 1000 compatibility architecture |
+| Stage-1–6 research base | `src/config_core/forward/adaptive_sparse_additive.json` | Compatibility/research only |
+| ThermalChannel case policy | `Case_ThermalChannel/configs/case_default.json` | Current case, data, Stage-A, loss, and evaluation settings |
+
+The Stage-7 and Run-1000 profiles instantiate the same 237-key model
+architecture. Their main differences are run identity, training duration,
+plot/checkpoint cadence, and explicit modern configuration fields. Stage 7 is a
+scientific consolidation of the verified structure, not a new model family.
+
+One operational distinction is important: the profile registry recommends
+`stage7_structured_context`, but the current `train.py` and `evaluate.py` CLI
+fallback still points to `enhanced_honf_pairwise`. Use the Stage-7 profile
+explicitly for new scientific work:
+
+```bash
+python train.py --config src/config_core/forward/stage7_structured_context.json --run-id 1500 --dry-run
+python evaluate.py --config src/config_core/forward/stage7_structured_context.json --checkpoint /path/to/checkpoint.pt
+```
+
+Replace `1500` with an unused numeric run ID. The profile's recorded ID 1401
+is already occupied by the accepted run, so it is not a reusable launch ID.
+
+## 2. Problem definition and tensor contract
+
+For each case, the reusable HONF core receives:
+
+- module centers $X\in\mathbb{R}^{B\times M\times2}$;
+- module features $S\in\mathbb{R}^{B\times M\times d_m}$;
+- an active-module mask $P_M\in\{0,1\}^{B\times M}$;
+- environment coordinates $Y\in\mathbb{R}^{B\times E\times2}$ and features
+  $R\in\mathbb{R}^{B\times E\times d_e}$;
+- case context $c\in\mathbb{R}^{B\times d_c}$;
+- arbitrary query coordinates $q\in\mathbb{R}^{B\times Q\times2}$.
+
+$B$ is batch size, $M$ is the batch-local padded module width, $E$ is the
+environment-token count, $K$ is the hyperedge count, $Q$ is the query count,
+and $H$ is hidden width. Dynamic padding makes $M$ the maximum active module
+count in the current batch; it is not a learned model capacity. Inactive module
+rows remain masked through organization, Stage-A execution, losses, and
+metrics.
+
+For ThermalChannel, the predicted global field has the fixed dataset order
+
+$$
+\widehat U(q)=[\widehat u(q),\widehat v(q),\widehat p(q),
+\widehat\omega(q),\widehat T(q)]\in\mathbb{R}^{5}.
+$$
+
+The primary output contract is:
+
+| Output | Shape | Meaning |
+|---|---:|---|
+| `pred_field` | `[B,Q,5]` | Global continuous field |
+| `pred_internal_temperature` | `[B,M,Ql,1]` | Local solid temperature |
+| `pred_interface` | `[B,M,P,2]` | Interface temperature and normal flux |
+| `pred_port_condition` | `[B,M,P,5]` | Angular port tokens used by Stage A |
+| `organizer_aux` | dictionary | Incidences, hyperedge geometry, masks, and statistics |
+| `routing_aux` | dictionary | Query routing and pairwise diagnostics |
+
+## 3. ThermalChannel physical inputs
+
+`ChannelThermalInputAdapter` constructs ten module features in this order:
+
+1. dataset-scaled heat;
+2. absolute dataset-scaled heat;
+3. signed case-relative heat;
+4. absolute case-relative heat;
+5. active flag;
+6. solid diffusivity;
+7. fluid diffusivity;
+8. solid conductivity;
+9. fluid conductivity;
+10. module radius.
+
+The current `padding_invariant_v2` global context has eighteen entries:
+Reynolds number, inlet velocity, active count, `log1p` active count, module
+number density, occupied-area fraction, total scaled heat, heat per domain
+area, mean active heat, maximum absolute heat, domain lengths $L_x$ and $L_y$,
+viscosity, solid and fluid diffusivities, solid and fluid conductivities, and
+module radius.
 
-This document describes the model that is implemented in `src/honf_forward_core` and the ThermalChannel coupling implemented in `Case_ThermalChannel/src/channelthermal`. It distinguishes the checkpoint-compatible default profile from the opt-in `adaptive_sparse_additive` profile because the two profiles intentionally instantiate different organizers, mechanism encoders, field heads, and routing execution paths.
+Historical checkpoints using `legacy_v1` retain their fourteen-entry context
+and saved fixed reference-slot denominator. Runtime padding does not alter that
+historical transform.
 
-## 1. Scope, ownership, and notation
+`ChannelThermalEnvironmentBuilder` creates a cell-centered $24\times8$ grid,
+so the current profile uses $E=192$ environment tokens. Each token contains
+normalized $x$ and $y$, normalized distances to the bottom wall, top wall,
+inlet, and outlet, and centerline proximity. Query-side case features use the
+first six geometric quantities.
 
-The reusable forward core owns generic module, environment, hyperedge, query, routing, and field tensors. ThermalChannel owns the physical feature definitions, packed datasets, Stage-A local thermal-disk surrogate, local/global coupling, field names, physical losses, and visualizations. The top-level `train.py` and `evaluate.py` compose a core profile with `Case_ThermalChannel/configs/case_default.json` through the case plugin.
+## 4. Shared encoding
 
-For one batch, let (B) be the number of cases, (M) the batch-local padded module width, (E) the number of environment tokens, (K) the fixed edge count or runtime candidate-edge capacity, (Q) the number of global queries, (P) the number of angular ports, (H) the hidden width, and (F) the output-field width. The principal tensors are module centers (X\in\mathbb{R}^{B\times M\times2}), module features (S\in\mathbb{R}^{B\times M\times d_m}), module mask (P_M\in\{0,1\}^{B\times M}), environment coordinates (Y\in\mathbb{R}^{B\times E\times2}), environment features (R\in\mathbb{R}^{B\times E\times d_e}), global context (c\in\mathbb{R}^{B\times d_c}), and query coordinates (q\in\mathbb{R}^{B\times Q\times2}).
+The Stage-7 core uses hidden width $H=256$, zero dropout, layer normalization,
+four Fourier frequencies for module, environment, query, and pairwise relative
+coordinates, nonperiodic geometry, and no query-time coordinate.
 
-The ThermalChannel field order is fixed by the packed dataset and normally resolves to
+The reusable encoder can be summarized as
 
-$$U(q)=[u(q),v(q),p(q),\omega(q),T(q)]\in\mathbb{R}^{5}.$$
+$$
+g=E_g(c),
+$$
 
-Inactive module rows are masked throughout organization, Stage-A execution, losses, and metrics. No forward-core parameter shape depends on (M), and `dynamic_module_padding=true` makes (M) the maximum active count in the current batch rather than a model capacity.
+$$
+m_i=\left(E_m(S_i)+E_x\!\left(\Phi(X_i/s)\right)\right)P_{M,i},
+$$
 
-## 2. ThermalChannel inputs
+$$
+e_j=E_e([\Phi(Y_j/s),R_j])+g,
+$$
 
-`ChannelThermalInputAdapter` constructs ten module features in this exact order: dataset-scaled heat, absolute dataset-scaled heat, case-relative heat, absolute case-relative heat, active flag, solid diffusivity, fluid diffusivity, solid conductivity, fluid conductivity, and module radius.
+$$
+z_q=E_q([q/s,\Phi(q/s),f_{\mathrm{case}}(q)]).
+$$
 
-The current `padding_invariant_v2` global context has eighteen entries in this exact order: Reynolds number, inlet velocity, active count, `log1p` active count, module number density, occupied-area fraction, total scaled heat, total scaled heat per domain area, mean active scaled heat, maximum absolute scaled heat, domain length (L_x), domain length (L_y), viscosity, solid diffusivity, fluid diffusivity, solid conductivity, fluid conductivity, and module radius. Historical checkpoints that used `legacy_v1` retain the original fourteen-entry schema with a saved fixed reference-slot denominator; runtime padding never changes that historical feature.
+The global token is added to environment tokens because the selected decoder
+uses global context. The coordinate scale is `[12, 6]`; physical domain lengths
+and module radius marked `auto` are resolved from the dataset before model
+construction.
 
-`ChannelThermalEnvironmentBuilder` creates a cell-centered (24\times8) grid in both maintained forward profiles, hence (E=192). Each token contains normalized (x), normalized (y), normalized distances to the bottom wall, top wall, inlet, and outlet, plus centerline proximity. Query-side ThermalChannel features use the first six of those geometric quantities.
+## 5. Current fixed six-edge organizer
 
-## 3. Shared encoders
+### 5.1 Module-to-environment context
 
-The core maps physical tensors into hidden tokens with shared encoders and Fourier coordinate features:
+With `use_A_me_auxiliary=true`, every active module first attends over all
+environment tokens:
 
-$$m_i=E_m([S_i,\Phi_x(X_i/s_x)])P_{M,i},\qquad e_j=E_e([R_j,\Phi_y(Y_j/s_y)]),\qquad g=E_g(c),\qquad z_q=E_q([q/s_q,\Phi_q(q/s_q),f_{\mathrm{case}}(q)]).$$
+$$
+A^{ME}_{ij}=\operatorname{softmax}_{j}
+\left(\frac{(W_qm_i)^\top(W_ke_j)}{\sqrt H}\right)P_{M,i},
+$$
 
-The forward profiles use (H=256), four Fourier frequencies for module, environment, query, and pairwise relative coordinates, `dropout=0.0`, `use_layer_norm=true`, `coordinate_scale=[12,6]`, `geometry_mode="nonperiodic"`, `periodic_axes=[]`, and `query_time_mode="none"`. The domain length and module radius fields marked `auto` are resolved from the packed dataset before construction.
+$$
+\widetilde m_i=\left(m_i+0.25W_c\sum_jA^{ME}_{ij}e_j\right)P_{M,i}.
+$$
 
-When `use_A_me_auxiliary=true`, modules first attend to environment tokens:
+### 5.2 Fixed softmax incidences
 
-$$A^{ME}_{ij}=\operatorname{softmax}_{j}\left(\frac{(W_qm_i)^\top(W_ke_j)}{\sqrt H}\right)P_{M,i},\qquad \widetilde m_i=m_i+0.25W_c\sum_jA^{ME}_{ij}e_j.$$
+The accepted organizer uses `organizer_mode="fixed_projection"`, $K=6$, and
+learned edge-indexed projection columns:
 
-This Stage-A/local coupling and its case ownership are unchanged by either forward architecture profile.
+$$
+A^{MH}_{ik}=\operatorname{softmax}_{k}(W_M\widetilde m_i)_kP_{M,i}.
+$$
 
-## 4. Organizer interface and geometry
+The environment assignment includes a source-centered geometry bias:
 
-Both organizer modes return module-to-edge incidence (A^{MH}\in\mathbb{R}^{B\times M\times K}), environment-to-edge incidence (A^{EH}\in\mathbb{R}^{B\times E\times K}), an edge state (h_k\in\mathbb{R}^{H}), an active mask (a_k\in\{0,1\}), and source/region geometry. Assignment rows are normalized over the edge axis after masking.
+$$
+A^{EH}_{jk}=\operatorname{softmax}_{k}\left((W_Ee_j)_k-
+\frac{\lVert Y_j-s_k\rVert_2}{0.25\sqrt{s_x^2+s_y^2}}\right).
+$$
 
-For an active edge, normalized column weights and weighted centroids are
+All six edges are active. There is no adaptive selection, entmax sparsity,
+edge-capacity schedule, or gathered execution in the Stage-7 primary path.
+Fields such as `initial_active_edges`, `minimum_active_edges`, and
+`slot_refinement_steps` are compatibility schema fields and do not change the
+fixed organizer.
 
-$$w^M_{ik}=\frac{A^{MH}_{ik}}{\sum_iA^{MH}_{ik}+\epsilon},\qquad s_k=\sum_iw^M_{ik}X_i,$$
+### 5.3 Hyperedge geometry and state
 
-$$w^E_{jk}=\frac{A^{EH}_{jk}}{\sum_jA^{EH}_{jk}+\epsilon},\qquad r_k=\sum_jw^E_{jk}Y_j.$$
+For edge $k$, column-normalized incidence weights define source and thermal
+region centers:
 
-The diagonal source and region variances and scales are
+$$
+w^M_{ik}=\frac{A^{MH}_{ik}}{\sum_iA^{MH}_{ik}+\epsilon},\qquad
+s_k=\sum_iw^M_{ik}X_i,
+$$
 
-$$v^M_k=\sum_iw^M_{ik}\Delta(X_i,s_k)^2,\quad \sigma^M_k=\sqrt{v^M_k+\epsilon},\qquad v^E_k=\sum_jw^E_{jk}\Delta(Y_j,r_k)^2,\quad \sigma^E_k=\sqrt{v^E_k+\epsilon}.$$
+$$
+w^E_{jk}=\frac{A^{EH}_{jk}}{\sum_jA^{EH}_{jk}+\epsilon},\qquad
+r_k=\sum_jw^E_{jk}Y_j.
+$$
 
-Here (Delta) applies the minimum-image convention only on axes listed in `periodic_axes`; current ThermalChannel profiles are nonperiodic. Normalized module and environment masses are (mu^M_k=(\sum_iA^{MH}_{ik})/(\sum_{i,k}A^{MH}_{ik}+\epsilon)) and (mu^E_k=(\sum_jA^{EH}_{jk})/(\sum_{j,k}A^{EH}_{jk}+\epsilon)). Assignment purity is the fraction of a column owned by tokens for which that edge is the row-wise winner, and the selection quality is (Q_k=\sqrt{\pi^M_k\pi^E_k}).
+The organizer also calculates diagonal source/region variances and scales,
+normalized module/environment masses, assignment purities, source-to-region
+displacements, edge strengths, and diagnostic descriptors.
 
-## 5. Default compatibility organizer
+The content state is
 
-The default and saved-config fallback is `organizer_mode="fixed_projection"`. It instantiates edge-indexed output columns only in this compatibility path:
+$$
+h_k=H_{mix}\left(
+\frac{\sum_iA^{MH}_{ik}W^h_M\widetilde m_i}{\sum_iA^{MH}_{ik}+\epsilon}
++\frac{\sum_jA^{EH}_{jk}W^h_Ee_j}{\sum_jA^{EH}_{jk}+\epsilon}
+\right).
+$$
 
-$$A^{MH}_{ik}=\mathcal N_M(W_M\widetilde m_i)_kP_{M,i},\qquad A^{EH}_{jk}=\mathcal N_E((W_Ee_j)_k+b^{\mathrm{geom}}_{jk}).$$
+The profile retains `mechanism_state_mode="residual_concat"` for strict
+configuration compatibility, but sets `use_hyper_mechanism_encoder=false`.
+Consequently, the decoder uses the organizer's raw $h_k$ directly. It does not
+instantiate or apply a second descriptor/mechanism encoder on the accepted
+path.
 
-For the default profile, (mathcal N_M=mathcal N_E=\operatorname{softmax}), (K=6), every edge is active, and (b^{\mathrm{geom}}_{jk}) is the negative distance from environment token (j) to source centroid (s_k) divided by one quarter of the domain diagonal. The edge content state is
+## 6. Query routing and context-fusion decoder
 
-$$h_k=\operatorname{MLP}\left(\frac{\sum_iA^{MH}_{ik}W_M^h\widetilde m_i}{\sum_iA^{MH}_{ik}+\epsilon}+\frac{\sum_jA^{EH}_{jk}W_E^he_j}{\sum_jA^{EH}_{jk}+\epsilon}\right).$$
+The current decoder mode is `enhanced_honf_pairwise`, whose enabled components
+are hyperedge value context, hypergraph-gated query/module pair context, global
+context, and near-module context.
 
-Saved forward configurations that omit all upgraded mode fields reconstruct this path because `UnifiedForwardConfig` supplies the strict defaults `fixed_projection`, `residual_concat`, `context_fusion`, three `softmax` normalizers, and `dense` routing. The default profile also sets `use_hyper_mechanism_encoder=false`, so its edge state remains the historical organizer state rather than passing through a descriptor encoder.
+### 6.1 Query-to-edge attention
 
-## 6. Exchangeable candidate-edge organizer
+Query-to-edge logits combine state compatibility with ten learned geometric
+features relative to the edge source and region:
 
-The upgraded profile selects `organizer_mode="exchangeable_slots"`, uses candidate capacity (K_{cap}=8), starts with six active candidates during selection warmup, and enforces at least one active edge. It does not instantiate learned edge-index embeddings or edge-specific projections. Changing the runtime candidate capacity changes tensor extent without changing learned parameter shapes.
+$$
+\ell_{qk}=\frac{(W_qz_q)^\top(W_kh_k)}{\sqrt H}
++W_\gamma\gamma(q,s_k,r_k).
+$$
 
-Candidate (k) starts from a pooled case state and a deterministic sinusoidal code (d_k):
+The current query normalizer is dense softmax:
 
-$$h_k^{(0)}=W_b\bar h+\operatorname{softplus}(W_s\bar h)\odot d_k,\qquad \bar h=\operatorname{mean}_{i:P_{M,i}=1}\widetilde m_i+\operatorname{mean}_je_j.$$
+$$
+\alpha_{qk}=\operatorname{softmax}_{k}(\ell_{qk}).
+$$
 
-All candidates use the same query, key, value, GRU, and normalization maps. At refinement step (ell), competitive module and environment assignments are computed from shared dot products, weighted module and environment summaries update the slot with one shared GRU cell, and this repeats for `slot_refinement_steps=2`.
+`hyper_attention_topk=0`, `query_edge_limit=0`, and
+`routing_execution="dense"`, so no route is pruned. The Stage-7 profile also
+sets query and environment locality to `none`.
 
-The upgraded module, environment, and query normalizers are `entmax15`. In general,
+The hyperedge value context is
 
-$$\operatorname{entmax}_{\alpha}(z)=\arg\max_{p\in\Delta}\left(p^\top z+H_{\alpha}(p)\right),\qquad \alpha=1.5,$$
+$$
+c^H_q=\sum_k\alpha_{qk}W_vh_k.
+$$
 
-which yields exact zeros while keeping the nonzero probabilities normalized. Environment routing uses `environment_locality_mode="bounded_gaussian"`. Given anisotropic scale (sigma_k) bounded below by `minimum_region_scale=0.05` of each domain scale, the normalized squared distance is
+### 6.2 Hypergraph-gated pairwise context
 
-$$\rho_{jk}^2=\sum_d\left(\frac{\Delta(Y_j,r_k)_d}{\sigma_{kd}}\right)^2,$$
+For every query/module pair, a shared four-layer MLP receives relative
+geometry, module presence, the encoded module token, and the raw module
+features. Let its output be $\psi(q,i)$. With edge-mass-normalized incidence
 
-and the routing-logit bias is
+$$
+\bar A^{MH}_{ik}=\frac{A^{MH}_{ik}}{\sum_iA^{MH}_{ik}+\epsilon},
+$$
 
-$$b^{loc}_{jk}=-\frac{\lambda}{2}\min\left(\rho_{jk}^2,\rho_{max}^2\right),$$
+the edge-local and query-reduced pair contexts are
 
-with `environment_locality_strength` (lambda) set to `1.0` and `locality_radius_cap` (rho_max) set to `3.0`. Query routing applies the same bounded Gaussian log-bias. The locality factor is finite and strictly positive at every distance before entmax; only entmax or an explicit active mask creates exact-zero routes. The accepted `compact_kernel` mode remains available to reconstruct configurations that explicitly selected it.
+$$
+c^{pair}_{qk}=\sum_i\bar A^{MH}_{ik}\psi(q,i),
+$$
 
-Active-edge selection is detached from gradient flow. During the first 200 training epochs it takes the six highest-quality candidates. After warmup it visits candidates in descending quality order, rejects candidates whose maximum module or environment cosine overlap with any selected edge exceeds `0.85` unless needed for the minimum count, and stops when at least `0.95` of active module tokens and environment tokens each receive selected assignment mass of at least `0.50`. It therefore selects by quality, coverage, and novelty without adding an edge-count objective; the case profile’s optional organizer regularizer is disabled by default.
+$$
+c^{pair}_q=\sigma(\eta_{pair})\sum_k\alpha_{qk}c^{pair}_{qk}.
+$$
 
-## 7. Descriptor-first mechanism state
+The learned pairwise gate is initialized to `0.1`. Stage 7 evaluates the dense
+query/module pair tensor; gathered pre-MLP execution remains available only to
+research profiles.
 
-The upgraded mode constructs a 16-value explicit descriptor for every candidate:
+### 6.3 Final context and field head
 
-$$d_k=[s_k/s,\sigma^M_k/s,r_k/s,\sigma^E_k/s,\Delta(r_k,s_k)/s,\|\Delta(r_k,s_k)\|/\|s\|,\mu^M_k,\mu^E_k,\pi^M_k,\pi^E_k,a_k].$$
+The near-module context is Gaussian pooling over active module tokens with
+`local_context_scale=0.45`:
 
-The mechanism state is descriptor-first with a bounded content residual:
+$$
+c^{near}_q=\sum_i
+\frac{P_{M,i}\exp(-\lVert q-X_i\rVert^2/(2\sigma^2))}
+{\sum_jP_{M,j}\exp(-\lVert q-X_j\rVert^2/(2\sigma^2))+\epsilon}m_i.
+$$
 
-$$t_k=\operatorname{LayerNorm}\left(E_d(d_k)+0.35E_h(h_k)\right).$$
+The complete accepted context is
 
-Both (E_d) and (E_h) are shared over candidates. The descriptor is therefore the primary representation, while learned organizer content can refine but not replace it. The compatibility mode instead retains its historical content state and optional residual-concatenation encoder behavior.
+$$
+c_q=c^H_q+c^{pair}_q+W_gg+W_nc^{near}_q.
+$$
+
+The direct module/environment residual branch is not enabled by
+`enhanced_honf_pairwise`, and `output_mean_residual_split=false`. Therefore
 
-## 8. Query routing and pairwise module relevance
+$$
+\boxed{\widehat U(q)=H_{field}\!\left(\operatorname{LayerNorm}(c_q)\right)}.
+$$
 
-For query (q), edge logits combine learned state compatibility and ten source/region-relative geometry features:
+This is context fusion, not edge-additive output. Individual hyperedges
+organize and route latent information, but the primary model does not claim
+that the final physical field is an exact sum of separately predicted edge
+fields.
+
+## 7. ThermalChannel Stage-A coupling
+
+The generic HONF core has no ThermalChannel physics. The
+`ChannelThermalHONFModel` wrapper owns the frozen local disk surrogate and the
+coupled execution order.
 
-$$\ell_{qk}=\frac{(W_qz_q)^\top(W_kt_k)}{\sqrt H}+W_g\gamma(q,s_k,r_k)+b^{loc}_{qk}.$$
-
-Inactive candidates are masked before normalization. The default path uses dense softmax (alpha_{qk}=\operatorname{softmax}_k(\ell_{qk})). The upgraded path uses entmax15, preserves its exact zeros, and limits execution to at most `query_edge_limit=3` nonzero routes per query.
-
-The pairwise kernel describes a query relative to every relevant module with normalized (dx), (dy), distance, downstream distance, upstream distance, and lateral distance, optionally Fourier-encodes these quantities, concatenates the module token and raw module features, and applies one shared four-layer MLP. If (psi(q,i)) is this embedding and (ar A^{MH}_{ik}) is module incidence normalized by edge mass, then
-
-$$c^{pair}_{qk}=\sum_i\bar A^{MH}_{ik}\psi(q,i),\qquad c^{pair}_q=\sum_k\alpha_{qk}c^{pair}_{qk}.$$
-
-The learned pairwise gate is initialized to `0.1`. In gathered execution, module relevance is
-
-$$\beta_{qi}=\sum_k\alpha_{qk}\bar A^{MH}_{ik}.$$
-
-The implementation selects at most `query_module_limit=8` active modules per query using (eta), gathers their centers, tokens, raw features, and incidences, and only then calls the expensive pair MLP. It similarly gathers nonzero/top-ranked query-edge routes before calling the edge head. This is actual sparse execution; the dense compatibility path evaluates all pairs and routes, and merely multiplying dense results by zero is not described as computational sparsity.
-
-## 9. Field assembly
-
-### 9.1 Default context-fusion path
-
-`enhanced_honf_pairwise.json` uses `field_assembly_mode="context_fusion"` and `decoder_mode="enhanced_honf_pairwise"`. Its query context is
-
-$$c_q=c^H_q+g_q+c^{near}_q+\sigma(\eta_{pair})c^{pair}_q,\qquad c^H_q=\sum_k\alpha_{qk}W_vt_k,$$
-
-where (g_q) is the projected global token and (c^{near}_q) is distance-weighted local module context. After layer normalization, one shared field head produces
-
-$$\widehat U(q)=H_{field}(\operatorname{LayerNorm}(c_q)).$$
-
-This formula, parameter construction, and state-dict path are unchanged for old saved configs and existing forward checkpoints.
-
-### 9.2 Upgraded exact background-plus-edge path
-
-`adaptive_sparse_additive.json` uses `field_assembly_mode="edge_additive"`. A background head sees the query state, global state, and query-attended environment context but no module memory:
-
-$$U_{bg}(q)=H_{bg}([z_q,W_gg,\sum_j\rho_{qj}W_ve_j]),\qquad \rho_{qj}=\operatorname{softmax}_j((W_q^{bg}z_q)^\top(W_k^{bg}e_j)/\sqrt H).$$
-
-One shared edge head evaluates only selected active routes:
-
-$$U_k(q)=a_k\alpha_{qk}H_{edge}([z_q,t_k,\gamma(q,s_k,r_k),\sigma(\eta_{pair})c^{pair}_{qk}]).$$
-
-The output is exactly
-
-$$\boxed{\widehat U(q)=U_{bg}(q)+\sum_{k=1}^{K_{cap}}U_k(q)}.$$
-
-When `return_edge_fields=true`, the decoder returns `pred_field_background` and `pred_field_by_edge`, and their sum is numerically the returned `pred_field`. It also reports per-edge absolute mean, RMS, energy fraction, selected/available route counts, and background-versus-edge norms.
-
-## 10. ThermalChannel Stage-A coupling
-
-The Stage-A `LocalModuleSurrogate` receives seven module parameters, port tokens ([\theta,\cos\theta,\sin\theta,T_{env},h]), and optional normalized local query coordinates. It encodes module parameters and port tokens, updates learned latent queries by cross-attention to the unordered port sequence, pools a module-response latent, predicts internal solid temperature at arbitrary local coordinates, and predicts interface ([T_s,q_n]) at every port.
-
-The provided local checkpoint `Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/Run_0000_base/latest_model.pt` stores `module_param_dim=7`, `port_token_dim=5`, `interface_target_dim=2`, hidden and latent widths 128, 16 port latents, four attention heads, four cross-attention layers, six coordinate Fourier frequencies, and zero dropout. It is the epoch-6357 latest checkpoint and carries input/output normalization statistics. The forward CLI treats it as a trusted local Stage-A dependency, loads it strictly, copies its normalizers, and freezes it because `freeze_local_surrogate=true`.
-
-The global wrapper first organizes the case, predicts (T_{env}) and positive (h) at each angular port, chooses predicted, teacher, or mixed port conditions, runs Stage A only on active modules, and anchors the corrected flux at the Robin relation
-
-$$q^{Robin}_n=h(T_s-T_{env}).$$
-
-The default `local_surrogate_flux_mode="corrected_physics"` adds a learned zero-initialized residual to this physical value. Six local response statistics and the 128-value local latent are fused into each module state. With `interaction_refinement_steps=1`, the wrapper performs one provisional organization, probes global temperature just outside each port, applies one residual update to (T_{env}) and (h), reruns Stage A, fuses the final response, and recomputes the final organizer before decoding the requested field. Core changes do not move these steps or their parameters out of the ThermalChannel wrapper.
-
-The main outputs are `pred_field [B,Q,F]`, `pred_internal_temperature [B,M,Ql,1]`, `pred_interface [B,M,P,2]`, `pred_port_condition [B,M,P,5]`, `organizer_aux`, and `routing_aux`.
-
-## 11. Training objective and default data settings
-
-The case profile uses 600 training cases and 90 test cases from `thermal_channel_global_v1`, samples 1024 global points per case, uses training and validation batch size 48, four workers, input and target normalization, random training-point sampling, dynamic padding, and module-count bucketing. The default forward optimizer uses AdamW with learning rate (3\times10^{-4}), weight decay (10^{-5}), gradient clipping at 1.0, no AMP, seed 0, and a nominal 10,000 epochs.
-
-The coupled objective is a weighted sum of global field MSE, internal-temperature MSE, interface loss, autonomous port supervision, angular port smoothness, port/global consistency, and predicted-port consistency after warmup. Concrete weights in `case_default.json` are `field_mse_weight=1.0`, `temperature_weight=1.0`, `internal_temperature_weight=1.0`, `interface_weight=0.2`, `port_condition_weight=0.3`, `port_supervised_weight=0.3`, `port_smoothness_weight=0.01`, `port_global_consistency_weight=0.2`, and `predicted_consistency_weight=0.05` after 100 warmup epochs. Organizer regularization is implemented for experiments but `enabled=false`; there is no default edge-count penalty.
-
-## 12. Unordered topology signature
-
-`src/honf_forward_core/evaluation/topology_signature.py` exports `honf_topology_signature` schema version 3. A signature contains candidate and active counts, active mask, edge features, module and environment incidences, pairwise edge relations, reference-query routing summaries, per-field contribution summaries, reference-query digest/measure, field names, domain/periodicity metadata, case ID, and forward-checkpoint SHA-256. The 22 edge features include geometry, scales, masses, purities, effective module count, routing statistics, and contribution statistics; the nine relation features include module overlap, environment overlap, query co-routing, and pairwise source/region displacements and distances.
-
-Edges are semantically unordered. Canonical ordering is used only for deterministic display and NPZ serialization, and `serialization_permutation` records that operation. Comparison extracts active tokens, builds normalized feature costs, pads unequal cardinalities with an explicit unmatched cost, uses Hungarian assignment, and adds a weighted relation error after matching:
-
-$$d_{topo}(G_1,G_2)=d_{matched\ features}+\lambda_{rel}d_{relations},\qquad \lambda_{rel}=0.25\ \text{by default}.$$
-
-The exporter can also reconstruct module affinity and query-to-module influence without assigning persistent edge labels. Evaluation writes `topology_signature.npz`, `topology_signature_summary.json`, diagnostics, and case-owned plots when `--export-topology-signature` is requested.
-
-## 13. Inverse topology flow after schema v3
-
-The accepted upgraded inverse profile is `src/config_core/inverse/train_inverse_topology_set_template.json`. It sets `plan_token_mode="exchangeable_set"`, `plan_conditioning_mode="set_cross_attention"`, two set-interaction layers, four attention heads, `matching_mode="sinkhorn"`, and requires topology schema name `honf_topology_signature`, version 3, plus the exact 64-character SHA-256 of the forward checkpoint that created the targets.
-
-For a target topology set (G_1), Gaussian noise (G_0\sim\mathcal N(0,I)), and (t\sim\mathcal U[0,1]), rectified-flow training uses
-
-$$G_t=(1-t)G_0+tG_1,\qquad v^*(G_t,t)=G_1-G_0,\qquad \mathcal L_{RF}=\|v_\theta(G_t,t,R,c)-v^*\|_2^2.$$
-
-The exchangeable plan velocity network uses shared token projections and permutation-equivariant self-attention, instantiates no learned edge-index embedding, supports runtime topology capacity, and uses differentiable Sinkhorn matching for set targets. The downstream layout flow cross-attends its module-slot states to active topology tokens and masks inactive topology tokens. Its module-slot embeddings represent physical layout slots, not forward edge identity. The fixed-width indexed inverse profile and its ordered-flat layout conditioner remain available for compatible earlier inverse checkpoints and are instantiated only when selected.
-
-## 14. Concrete forward profiles
-
-| Setting | Default `enhanced_honf_pairwise` | Upgraded `adaptive_sparse_additive` |
-|---|---:|---:|
-| Organizer | `fixed_projection` | `exchangeable_slots` |
-| Fixed edges / candidate capacity | 6 / n.a. | n.a. / 8 |
-| Initial / minimum active edges | all 6 | 6 / 1 |
-| Selection | all | quality + 95% coverage + novelty |
-| Candidate module/environment mass floors | n.a. | 0.01 / 0.01 |
-| Module/environment/query normalizer | softmax / softmax / softmax | entmax15 / entmax15 / entmax15 |
-| Environment/query locality | none | bounded Gaussian, strength 1.0, radius cap 3.0 |
-| Mechanism state | `residual_concat`, encoder disabled | `descriptor_first`, residual scale 0.35 |
-| Field assembly | `context_fusion` | `edge_additive` |
-| Additive output stabilization | n.a. | input LayerNorms, sigmoid edge gate 0.1, final-layer std 0.001 |
-| Routing execution | `dense` | `gathered` |
-| Query module / edge limit | 0 / 0 | 8 / 3 |
-| Topology signature flag | false | true |
-| Hidden width / dropout | 256 / 0.0 | 256 / 0.0 |
-| Environment grid | 24 x 8 | 24 x 8 |
-| Decoder | enhanced hyper + pairwise + global + near | enhanced hyper + pairwise feeding exact additive edge fields |
-| Stage A | frozen, predicted ports, one refinement | unchanged |
-| Default run ID | 0002 | 0003 |
-
-## 15. Compatibility rules
-
-- Missing upgraded fields in a saved config resolve to the exact fixed-projection, context-fusion path; they do not silently select the adaptive architecture.
-- Only mode-specific modules are instantiated, which preserves historical state-dict names and strict checkpoint loading for the default path.
-- The upgraded forward and inverse modes do not contain learned edge-index embeddings.
-- Runtime module width and exchangeable edge capacity are tensor extents rather than learned parameter capacities.
-- Stage-A/local coupling and all physical loss semantics remain case-owned.
-- Sparse probabilities and sparse execution are reported separately; only gathered pre-MLP execution is called computationally sparse.
-- Adaptive warmup exposes every viable candidate. Selection progress is serialized and is independent of `train()`/`eval()` mode.
-- New diagnostics distinguish candidate, selected, viable-selected, functional, soft-functional, empty-selected, and effective query-edge counts.
-- Additive edge exports include the learned output gate, preserving exact closure while logging background/edge scale and cancellation.
-- No active-edge-count penalty is enabled in the shipped case profile.
-
-## 16. Code-to-equation map
-
-| Topic | Implementation |
+The current case configuration loads
+`Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/Run_0000_base/best_model.pt`
+strictly and freezes it. The Stage-A surrogate uses seven module parameters,
+five-value angular port tokens
+$[\theta,\cos\theta,\sin\theta,T_{env},h]$, hidden and latent width 128, 16 port
+latents, four attention heads, four cross-attention layers, six coordinate
+Fourier frequencies, and zero dropout.
+
+For a normal coupled forward pass, the wrapper performs:
+
+1. build physical module, environment, global, and query features;
+2. encode the case and compute a base organizer;
+3. predict angular $T_{env}$ and positive $h$ port conditions;
+4. choose predicted, teacher, or mixed ports;
+5. execute Stage A only for active modules;
+6. assemble interface temperature and corrected physical flux;
+7. fuse six local-response summary values and the 128-value local latent into
+   the module state;
+8. perform one configured outside-temperature refinement, rerun Stage A, and
+   fuse the final response;
+9. recompute the final organizer and decode the requested global queries.
+
+The corrected flux is anchored to the Robin relation
+
+$$
+q_n^{Robin}=h(T_s-T_{env}),
+$$
+
+with a learned zero-initialized correction under
+`local_surrogate_flux_mode="corrected_physics"`.
+
+`PreparedChannelThermalCase` stores the final organizer tensors and global
+token. `decode_prepared()` can then evaluate additional query chunks without
+repeating feature encoding, Stage A, refinement, or organization. This is an
+execution optimization only; it does not change the prediction formula.
+
+## 8. Current data, training, and checkpoint policy
+
+The case profile uses the `thermal_channel_global_v1` manifest with 600 training
+and 90 test cases, 1024 sampled field points per case, train and validation
+batch size 48, four workers, input and target normalization, random
+training-point sampling, dynamic module padding, and module-count bucketing.
+
+The Stage-7 training profile specifies:
+
+| Setting | Value |
+|---|---:|
+| Seed | 0 |
+| Epoch budget | 5000 |
+| Optimizer | AdamW, one parameter group |
+| Learning rate | $3\times10^{-4}$ |
+| Organizer learning rate | `null` (shared optimizer group) |
+| Weight decay | $10^{-5}$ |
+| Gradient clipping | 1.0 |
+| AMP | false |
+| Port mode | predicted, no curriculum schedule |
+| Plot cadence | 50 epochs |
+| Latest-checkpoint cadence | 10 epochs |
+| Milestones | 500, 1000, 2500, 5000, 7500, 10000 |
+
+Milestones above the 5000-epoch budget are inert unless the budget is extended.
+The accepted checkpoint is Run 1401 best-by-field at epoch 4585, not simply the
+latest epoch.
+
+The coupled objective is
+
+$$
+\mathcal L=\lambda_F\mathcal L_{field}
++\lambda_I\mathcal L_{internal}
++\lambda_\Gamma\mathcal L_{interface}
++\lambda_P\mathcal L_{port}
++\lambda_S\mathcal L_{port\ smooth}
++\lambda_G\mathcal L_{port/global}
++\lambda_C\mathcal L_{predicted\ consistency}
++\mathcal L_{organizer}.
+$$
+
+Current principal weights are `1.0`, `1.0`, `0.2`, `0.3`, `0.01`, `0.2`, and
+`0.05`, respectively. Predicted-port consistency warms up over 100 epochs. The
+interface and port-$h$ terms use smooth L1. Organizer regularization is
+implemented for research, but `enabled=false`, so it contributes zero in the
+current profile. There is no active-edge-count penalty in Stage 7.
+
+Checkpoint resume validates model identity, strict state loading, optimizer
+group count, parameter order, parameter names, and optimizer state before
+continuing. Evaluation also loads maintained checkpoint families with
+`strict=True`.
+
+## 9. Compatibility and research modes
+
+`UnifiedForwardConfig.from_dict()` supplies the historical defaults
+`fixed_projection`, `residual_concat`, `context_fusion`, softmax assignments,
+and dense execution when upgraded fields are absent. Old saved configurations
+therefore reconstruct their original path rather than silently selecting a
+research architecture.
+
+The following mechanisms remain supported but are outside the primary reading
+path:
+
+| Mechanism | Maintained implementation | Primary Stage-7 value |
+|---|---|---|
+| Exchangeable slot organizer | `organization/exchangeable.py` | fixed projection |
+| Adaptive quality/coverage selection | exchangeable organizer | all six active |
+| Scheduled softmax-to-entmax assignments | `organization/helpers.py`, `routing.py` | softmax |
+| Descriptor-first mechanism state | `decoding/pairwise.py` | raw organizer state |
+| Exact background-plus-edge fields | `decoding/research.py` | context fusion |
+| Gathered query-edge/module execution | `decoding/research.py`, `decoding/pairwise.py` | dense |
+| Topology schema v3 export | `src/honf_forward_core/evaluation/topology_signature.py` | optional evaluation feature |
+
+`adaptive_sparse_additive.json` remains the base for Stage-1–6 experimental
+overlays. Those JSON files are frozen evidence; lifecycle/status metadata lives
+in `profile_registry.json` instead of being written into historical configs.
+
+The next planned platform work is sparse execution for the accepted
+context-fusion model. It must preserve the Stage-7 scientific formula and prove
+numerical parity; it should not reactivate additive field assembly merely to
+obtain sparsity.
+
+## 10. Current code structure
+
+The Stage-7 cleanup preserved public facades and checkpoint-visible parameter
+ownership while moving optional or procedural logic into focused modules.
+
+| Responsibility | Maintained source |
 |---|---|
-| Strict forward mode defaults and validation | `src/honf_forward_core/config.py` |
-| Fixed and exchangeable organizers, descriptors, selection | `src/honf_forward_core/organizer.py` |
-| Entmax15 | `src/honf_forward_core/routing.py` |
-| Query routing, gathered pair execution, field assembly | `src/honf_forward_core/decoder.py` |
-| Core encoding and orchestration | `src/honf_forward_core/model.py` |
-| Topology schema, serialization, matching, diagnostics | `src/honf_forward_core/evaluation/topology_signature.py` |
-| Thermal physical inputs and environment features | `Case_ThermalChannel/src/channelthermal/input_adapter.py`, `environment.py` |
+| Strict core config and `BatchData` | `src/honf_forward_core/config.py` |
+| Generic encode/organize/decode orchestration | `src/honf_forward_core/model.py` |
+| Fixed organizer and stable parameter owner | `src/honf_forward_core/organizer.py` |
+| Organizer math helpers | `src/honf_forward_core/organization/helpers.py` |
+| Exchangeable/adaptive organizer | `src/honf_forward_core/organization/exchangeable.py` |
+| Context-fusion decoder and stable parameter owner | `src/honf_forward_core/decoder.py` |
+| Pairwise and optional mechanism encoders | `src/honf_forward_core/decoding/pairwise.py` |
+| Additive/gathered compatibility execution | `src/honf_forward_core/decoding/research.py` |
+| Assignment normalization and entmax | `src/honf_forward_core/routing.py` |
+| Thermal physical input and environment features | `Case_ThermalChannel/src/channelthermal/input_adapter.py`, `environment.py` |
+| Complete coupled ThermalChannel model | `Case_ThermalChannel/src/channelthermal/model.py` |
+| Non-registering ThermalChannel support methods | `Case_ThermalChannel/src/channelthermal/model_support.py` |
 | Stage-A model and coupling | `Case_ThermalChannel/src/channelthermal/local_surrogate/model.py`, `local_coupling.py` |
-| Complete coupled forward | `Case_ThermalChannel/src/channelthermal/model.py` |
-| Forward loss/training policy | `Case_ThermalChannel/src/channelthermal/training_tools/losses.py`, `workflows/train_forward.py` |
-| Exchangeable inverse plan flow | `src/honf_inverse_core/models/plan_flow.py` |
-| Set-cross-attention layout flow | `src/honf_inverse_core/models/layout_flow.py` |
-| Forward launch profiles | `src/config_core/forward/enhanced_honf_pairwise.json`, `adaptive_sparse_additive.json` |
-| Exchangeable inverse profile | `src/config_core/inverse/train_inverse_topology_set_template.json` |
+| Forward workflow facade | `Case_ThermalChannel/src/channelthermal/workflows/train_forward.py` |
+| Epoch/loss execution | `Case_ThermalChannel/src/channelthermal/training/epoch.py` |
+| Optimizer inventory and resume parity | `Case_ThermalChannel/src/channelthermal/training/optimizer.py` |
+| Checkpoint construction and validation | `Case_ThermalChannel/src/channelthermal/training/checkpoints.py` |
+| Metrics and plots | `Case_ThermalChannel/src/channelthermal/training/reporting.py` |
+| Evaluation workflow facade | `Case_ThermalChannel/src/channelthermal/workflows/evaluate_forward.py` |
+| Evaluation load, prepared decode, and results | `Case_ThermalChannel/src/channelthermal/evaluation/{loading,prepared,results}.py` |
+| Canonical artifact layout | `src/honf_runtime/artifact_layout.py`, `src/honf_runtime/run_store.py` |
+| Maintained offline diagnostics | `tools/diagnostics/` |
+
+The fixed organizer layers remain registered directly on
+`HypergraphOrganizerCore`, and context-fusion decoder layers remain registered
+directly on `HypergraphFieldDecoder`. `ResearchDecoderExecutionMixin` and
+`ChannelThermalModelSupportMixin` register no `nn.Module` children. This is why
+the cleanup can improve source organization without changing state-dict keys,
+parameter shapes, parameter order, or optimizer-resume semantics.
+
+## 11. Evaluation artifacts and frozen references
+
+The canonical evaluator writes one timestamped job containing category-owned
+artifacts such as:
+
+- `fields/` for quicklooks and local/interface plots;
+- `metrics/metrics_<mode>.csv`;
+- `arrays/evaluation_outputs_<mode>.npz`;
+- `organization/`, `routing/`, `diagnostics/`, and `plans/` when requested;
+- `summary.json` and `evaluation_manifest.json`.
+
+Generated evidence is separate from maintained diagnostic source. Historical
+diagnostic entry points remain as compatibility wrappers, while maintained
+implementations live under `tools/diagnostics/`.
+
+The compatibility contract is executable and stored at:
+
+| Evidence | Location |
+|---|---|
+| Checkpoint/hash freeze manifest | `docs/experiments/stage1_7_freeze_manifest.json` |
+| Golden numerical replay | `tests/fixtures/forward_cleanup/golden_replay.json` |
+| Public schema snapshots | `tests/fixtures/forward_cleanup/public_schemas.json` |
+| Replay command | `tools/diagnostics/replay_forward_golden.py` |
+| Architecture contract | `docs/architecture/` |
+
+Run 1000 best-by-field epoch 9655 and Run 1401 best-by-field epoch 4585 both
+strict-load all 237 state keys, restore their one-group optimizer state, and
+exactly reproduce the frozen case-0653 numerical replay. These two references
+define the maintained historical and current forward contracts.
