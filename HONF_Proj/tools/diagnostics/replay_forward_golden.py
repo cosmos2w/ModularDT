@@ -62,6 +62,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--update", action="store_true")
+    parser.add_argument(
+        "--check-fused-parity",
+        action="store_true",
+        help="Also compare accepted edge-explicit predictions with fused dense execution.",
+    )
     return parser.parse_args()
 
 
@@ -120,6 +125,8 @@ def replay_reference(
     label: str,
     reference: dict[str, Any],
     device: torch.device,
+    *,
+    check_fused_parity: bool = False,
 ) -> dict[str, Any]:
     checkpoint_path = PROJECT_ROOT / reference["checkpoint"]
     actual_checkpoint_sha = file_sha256(checkpoint_path)
@@ -172,6 +179,7 @@ def replay_reference(
         include_structure_targets=True,
         normalizer=H5Normalizer(stats),
     )
+    fused_parity: dict[str, float] | None = None
     try:
         sample = select_sample(dataset, reference["case_id"], 0)
         result = predict_case(
@@ -184,6 +192,58 @@ def replay_reference(
             return_routing_maps=True,
             return_topology_signature=True,
         )
+        if check_fused_parity:
+            configs = []
+            seen: set[int] = set()
+            for candidate in (
+                model.config.core_honf,
+                model.core.config,
+                model.core.decoder.config,
+                model.core.decoder.pairwise_kernel.config,
+            ):
+                if id(candidate) not in seen:
+                    seen.add(id(candidate))
+                    configs.append(candidate)
+            originals = [candidate.pairwise_aggregation_mode for candidate in configs]
+            state_keys_before = tuple(model.state_dict())
+            try:
+                for candidate in configs:
+                    candidate.pairwise_aggregation_mode = "fused_query_module"
+                fused = predict_case(
+                    model,
+                    sample,
+                    device,
+                    query_batch_size=int(reference["query_batch_size"]),
+                    local_port_condition_mode="predicted",
+                    mixed_teacher_ratio=0.5,
+                    return_routing_maps=True,
+                    return_topology_signature=True,
+                )
+            finally:
+                for candidate, value in zip(configs, originals):
+                    candidate.pairwise_aggregation_mode = value
+            if tuple(model.state_dict()) != state_keys_before:
+                raise RuntimeError(f"{label}: fused parity check changed state_dict structure")
+            fused_parity = {}
+            failed_outputs = []
+            for key in OUTPUT_ARRAYS:
+                historical_values = np.asarray(result[key], dtype=np.float64)
+                fused_values = np.asarray(fused[key], dtype=np.float64)
+                fused_parity[key] = float(
+                    np.max(np.abs(historical_values - fused_values))
+                )
+                if not np.allclose(
+                    historical_values,
+                    fused_values,
+                    rtol=2.0e-6,
+                    atol=2.0e-6,
+                ):
+                    failed_outputs.append(key)
+            if failed_outputs:
+                raise RuntimeError(
+                    f"{label}: fused dense parity failed rtol=atol=2e-6 for "
+                    f"{failed_outputs}: {fused_parity}"
+                )
     finally:
         dataset.close()
 
@@ -198,7 +258,7 @@ def replay_reference(
     routing = {
         key: array_record(value) for key, value in sorted(result["routing_maps"].items())
     }
-    return {
+    record = {
         "case_id": str(sample["case_id"]),
         "checkpoint_sha256": actual_checkpoint_sha,
         "epoch": int(checkpoint["epoch"]),
@@ -217,6 +277,9 @@ def replay_reference(
             key: float(value) for key, value in sorted(result["routing_aux"].items())
         },
     }
+    if fused_parity is not None:
+        print(f"{label}: fused dense parity {fused_parity}")
+    return record
 
 
 def main() -> int:
@@ -227,7 +290,15 @@ def main() -> int:
         "schema_version": 1,
         "case_contract": "ThermalChannel test case 0653, predicted ports, checkpoint normalization",
         "references": {
-            label: replay_reference(label, reference, device)
+            label: replay_reference(
+                label,
+                reference,
+                device,
+                check_fused_parity=(
+                    bool(args.check_fused_parity)
+                    and label == "run1401_best_field_e4585"
+                ),
+            )
             for label, reference in manifest["golden_references"].items()
         },
     }

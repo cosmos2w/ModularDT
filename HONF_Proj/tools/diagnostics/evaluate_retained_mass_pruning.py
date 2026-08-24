@@ -39,6 +39,11 @@ from frozen_override_cli import (  # noqa: E402
     apply_label_frozen_overrides,
     resolve_frozen_overrides,
 )
+from honf_runtime.artifact_layout import (  # noqa: E402
+    EvaluationArtifactLayout,
+    default_evaluation_root,
+    finalize_evaluation_job,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +55,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-cases", type=int, default=None)
     parser.add_argument("--query-mass-floor", type=float, default=0.98)
     parser.add_argument("--module-mass-floor", type=float, default=0.95)
+    parser.add_argument(
+        "--beta-mass-floor",
+        type=float,
+        action="append",
+        default=None,
+        help=(
+            "Retained query-module beta mass for fused Stage-7 execution; repeat "
+            "for a sweep. Defaults to .999,.995,.99,.98."
+        ),
+    )
+    parser.add_argument(
+        "--maximum-modules",
+        type=int,
+        default=0,
+        help="Optional hard query-module cap for fused execution (0 means all active modules).",
+    )
     parser.add_argument("--minimum-query-routes", type=int, default=1)
     parser.add_argument("--minimum-module-routes", type=int, default=1)
     parser.add_argument("--benchmark-warmup", type=int, default=5)
@@ -58,7 +79,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=PROJECT_ROOT / "diagnostics" / "generated" / "retained_mass_pruning",
+        default=None,
+        help="Evaluation job root; defaults to the checkpoint's canonical evaluation tree.",
     )
     return parser.parse_args()
 
@@ -106,6 +128,8 @@ def routing_state(model: Any) -> dict[str, Any]:
         for key in (
             "routing_execution", "query_edge_limit", "query_module_limit",
             "query_edge_retained_mass_floor", "module_incidence_retained_mass_floor",
+            "pairwise_aggregation_mode", "pairwise_kernel_mode",
+            "query_module_retained_mass_floor",
         )
     }
 
@@ -194,9 +218,15 @@ def decode_case(
             predictions.append(output["pred_field"][0].detach().cpu().numpy())
             retained_query = output["query_edge_retained_probability_mass"][0].detach().cpu().numpy()
             query_retention.append(retained_query.reshape(-1))
-            retained_module = output["retained_module_incidence_mass"][0].detach().cpu().numpy()
-            routed = output["routed_query_edge_pair_mask"][0].detach().cpu().numpy().astype(bool)
-            module_retention.append(retained_module[routed])
+            if "query_module_routing_beta" in output:
+                beta = output["query_module_routing_beta"][0]
+                selected = output["query_module_selected_mask"][0].to(dtype=beta.dtype)
+                retained_module = (beta * selected).sum(dim=-1).detach().cpu().numpy()
+                module_retention.append(retained_module.reshape(-1))
+            else:
+                retained_module = output["retained_module_incidence_mass"][0].detach().cpu().numpy()
+                routed = output["routed_query_edge_pair_mask"][0].detach().cpu().numpy().astype(bool)
+                module_retention.append(retained_module[routed])
             attention = output["query_hyper_attention"]
             query_routes += float((attention > 0).sum().detach().cpu())
             active_edge_mask = prepared.organizer.get(
@@ -215,7 +245,9 @@ def decode_case(
                 else tensor_scalar(output, "pairwise_available_modules")
             )
             dense_module_count = float(attention.shape[1]) * active_modules
-            if mode == "dense":
+            if state.get("pairwise_aggregation_mode") == "fused_query_module":
+                module_routes += tensor_scalar(output, "pairwise_evaluated_pair_count")
+            elif mode == "dense":
                 module_routes += dense_module_count
             else:
                 module_routes += tensor_scalar(output, "pairwise_gathered_route_count")
@@ -297,26 +329,71 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 def evaluate_checkpoint(label: str, path: Path, args: argparse.Namespace, device: torch.device) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     model, checkpoint = load_model(path, device)
     frozen_overrides = apply_label_frozen_overrides(model, label, args)
-    if model.config.core_honf.field_assembly_mode != "edge_additive":
-        raise ValueError(f"{label}: gathered retained-mass comparison requires edge_additive mode")
     original = routing_state(model)
-    dense_state = {**original, "routing_execution": "dense", "query_edge_limit": 0, "query_module_limit": 0}
-    pruned_state = {
-        **original,
-        "routing_execution": "gathered",
-        "query_edge_limit": int(args.minimum_query_routes),
-        "query_module_limit": int(args.minimum_module_routes),
-        "query_edge_retained_mass_floor": float(args.query_mass_floor),
-        "module_incidence_retained_mass_floor": float(args.module_mass_floor),
-    }
-    full_state = {
-        **original,
-        "routing_execution": "gathered",
-        "query_edge_limit": max(int(model.config.core_honf.num_hyperedges), int(model.config.core_honf.edge_capacity)),
-        "query_module_limit": 10_000,
-        "query_edge_retained_mass_floor": 0.0,
-        "module_incidence_retained_mass_floor": 0.0,
-    }
+    assembly_mode = model.config.core_honf.field_assembly_mode
+    if assembly_mode == "context_fusion":
+        beta_floors = args.beta_mass_floor or [0.999, 0.995, 0.99, 0.98]
+        if any(not 0.0 <= float(value) <= 1.0 for value in beta_floors):
+            raise ValueError("--beta-mass-floor values must be in [0, 1]")
+        if int(args.maximum_modules) < 0:
+            raise ValueError("--maximum-modules must be nonnegative")
+        dense_state = {
+            **original,
+            "pairwise_aggregation_mode": "fused_query_module",
+            "pairwise_kernel_mode": "legacy_mlp",
+            "routing_execution": "dense",
+            "query_edge_limit": 0,
+            "query_module_limit": 0,
+            "query_edge_retained_mass_floor": 0.0,
+            "query_module_retained_mass_floor": 1.0,
+        }
+        pruned_states = {
+            f"beta_{float(floor):.3f}": {
+                **dense_state,
+                "routing_execution": "gathered",
+                "query_module_limit": int(args.maximum_modules),
+                "query_module_retained_mass_floor": float(floor),
+            }
+            for floor in beta_floors
+        }
+        full_state = {
+            **dense_state,
+            "routing_execution": "gathered",
+            "query_module_limit": 0,
+            "query_module_retained_mass_floor": 1.0,
+        }
+    elif assembly_mode == "edge_additive":
+        dense_state = {
+            **original,
+            "routing_execution": "dense",
+            "query_edge_limit": 0,
+            "query_module_limit": 0,
+        }
+        pruned_states = {
+            "retained_mass_pruned": {
+                **original,
+                "routing_execution": "gathered",
+                "query_edge_limit": int(args.minimum_query_routes),
+                "query_module_limit": int(args.minimum_module_routes),
+                "query_edge_retained_mass_floor": float(args.query_mass_floor),
+                "module_incidence_retained_mass_floor": float(args.module_mass_floor),
+            }
+        }
+        full_state = {
+            **original,
+            "routing_execution": "gathered",
+            "query_edge_limit": max(
+                int(model.config.core_honf.num_hyperedges),
+                int(model.config.core_honf.edge_capacity),
+            ),
+            "query_module_limit": 10_000,
+            "query_edge_retained_mass_floor": 0.0,
+            "module_incidence_retained_mass_floor": 0.0,
+        }
+    else:
+        raise ValueError(
+            f"{label}: retained-mass comparison does not support {assembly_mode!r} field assembly"
+        )
     dataset_cfg = checkpoint.get("train_config", {}).get("dataset", {})
     stats = {key: np.asarray(value, dtype=np.float32) for key, value in checkpoint.get("global_normalization_stats", {}).items()}
     dataset = GlobalChannelThermalDataset(
@@ -329,48 +406,66 @@ def evaluate_checkpoint(label: str, path: Path, args: argparse.Namespace, device
     count = len(dataset) if args.max_cases is None else min(len(dataset), int(args.max_cases))
     field_names = list(model.config.channelthermal.field_names)
     rows: list[dict[str, Any]] = []
-    query_values: list[np.ndarray] = []
-    module_values: list[np.ndarray] = []
+    query_values: dict[str, list[np.ndarray]] = {name: [] for name in pruned_states}
+    module_values: dict[str, list[np.ndarray]] = {name: [] for name in pruned_states}
     runtime = None
     state_keys_before = tuple(model.state_dict())
     for index in range(count):
         sample = dataset[index]
         prepared = prepare_case(model, sample, device)
         dense = decode_case(model, prepared, sample, device, args.query_batch_size, "dense", dense_state)
-        pruned = decode_case(model, prepared, sample, device, args.query_batch_size, "gathered", pruned_state)
         full = decode_case(model, prepared, sample, device, args.query_batch_size, "gathered", full_state)
-        query_values.append(pruned["query_retention"])
-        module_values.append(pruned["module_retention"])
+        pruned_outputs = {
+            policy: decode_case(
+                model,
+                prepared,
+                sample,
+                device,
+                args.query_batch_size,
+                "gathered",
+                state,
+            )
+            for policy, state in pruned_states.items()
+        }
         target = np.asarray(sample["steady_field"], dtype=np.float64)
         if bool(dataset_cfg.get("normalize_targets", False)):
             target = dataset.normalizer.normalize_fields(target)
         masks = region_masks(sample)
-        for region, mask in masks.items():
-            channel_specs = [(index, name) for index, name in enumerate(field_names)] + [(None, "__all__")]
-            for channel_index, channel in channel_specs:
-                if channel_index is None:
-                    dense_values = dense["prediction"][mask]
-                    pruned_values = pruned["prediction"][mask]
-                    target_values = target[mask]
-                else:
-                    dense_values = dense["prediction"][..., channel_index][mask]
-                    pruned_values = pruned["prediction"][..., channel_index][mask]
-                    target_values = target[..., channel_index][mask]
-                dense_error = float(np.mean((dense_values - target_values) ** 2))
-                pruned_error = float(np.mean((pruned_values - target_values) ** 2))
-                rows.append({
-                    "checkpoint": label, "case_id": str(sample["case_id"]), "region": region, "channel": channel,
-                    "dense_mse": dense_error, "pruned_mse": pruned_error,
-                    "relative_mse_degradation": (pruned_error - dense_error) / max(dense_error, 1.0e-15),
-                    "dense_vs_pruned_max_abs": float(np.max(np.abs(dense["prediction"] - pruned["prediction"]))),
-                    "dense_vs_full_limit_gathered_max_abs": float(np.max(np.abs(dense["prediction"] - full["prediction"]))),
-                    "query_route_reduction": 1.0 - pruned["query_routes"] / max(pruned["dense_query_routes"], 1.0),
-                    "module_route_reduction": 1.0 - pruned["module_routes"] / max(pruned["dense_module_routes"], 1.0),
-                })
+        for policy, pruned in pruned_outputs.items():
+            query_values[policy].append(pruned["query_retention"])
+            module_values[policy].append(pruned["module_retention"])
+            for region, mask in masks.items():
+                channel_specs = [(index, name) for index, name in enumerate(field_names)] + [(None, "__all__")]
+                for channel_index, channel in channel_specs:
+                    if channel_index is None:
+                        dense_values = dense["prediction"][mask]
+                        pruned_values = pruned["prediction"][mask]
+                        target_values = target[mask]
+                    else:
+                        dense_values = dense["prediction"][..., channel_index][mask]
+                        pruned_values = pruned["prediction"][..., channel_index][mask]
+                        target_values = target[..., channel_index][mask]
+                    dense_error = float(np.mean((dense_values - target_values) ** 2))
+                    pruned_error = float(np.mean((pruned_values - target_values) ** 2))
+                    rows.append({
+                        "checkpoint": label,
+                        "policy": policy,
+                        "retained_beta_floor": pruned_states[policy]["query_module_retained_mass_floor"],
+                        "case_id": str(sample["case_id"]),
+                        "region": region,
+                        "channel": channel,
+                        "dense_mse": dense_error,
+                        "pruned_mse": pruned_error,
+                        "relative_mse_degradation": (pruned_error - dense_error) / max(dense_error, 1.0e-15),
+                        "dense_vs_pruned_max_abs": float(np.max(np.abs(dense["prediction"] - pruned["prediction"]))),
+                        "dense_vs_full_limit_gathered_max_abs": float(np.max(np.abs(dense["prediction"] - full["prediction"]))),
+                        "query_route_reduction": 1.0 - pruned["query_routes"] / max(pruned["dense_query_routes"], 1.0),
+                        "module_route_reduction": 1.0 - pruned["module_routes"] / max(pruned["dense_module_routes"], 1.0),
+                    })
         if index == 0:
             runtime = benchmark(
                 model, prepared, sample, device,
-                {"dense": dense_state, "retained_mass_pruned": pruned_state},
+                {"dense": dense_state, **pruned_states},
                 args.benchmark_warmup, args.benchmark_iterations,
             )
         print(f"[{label}] {index + 1}/{count} case={sample['case_id']}", flush=True)
@@ -378,14 +473,21 @@ def evaluate_checkpoint(label: str, path: Path, args: argparse.Namespace, device
     state_keys_after = tuple(model.state_dict())
     if state_keys_before != state_keys_after:
         raise RuntimeError("Evaluation-only routing override changed state_dict structure")
-    query_stats = distribution(np.concatenate(query_values))
-    module_stats = distribution(np.concatenate(module_values))
+    policy_stats = {
+        policy: {
+            "query_retained_mass": distribution(np.concatenate(query_values[policy])),
+            "query_module_retained_beta_mass": distribution(np.concatenate(module_values[policy])),
+        }
+        for policy in pruned_states
+    }
     info = {
         "checkpoint": str(path), "sha256": sha256_file(path),
         "epoch": int(checkpoint.get("epoch", checkpoint.get("current_epoch", -1))),
         "field_names": field_names, "evaluated_case_count": count,
-        "dense_state": dense_state, "pruned_state": pruned_state,
-        "query_retained_mass": query_stats, "routed_module_retained_mass": module_stats,
+        "dense_state": dense_state,
+        "pruned_states": pruned_states,
+        "full_retention_state": full_state,
+        "policy_retention": policy_stats,
         "runtime": runtime, "state_dict_key_count": len(state_keys_before),
         "state_dict_structure_unchanged": state_keys_before == state_keys_after,
         "frozen_overrides": frozen_overrides,
@@ -399,15 +501,28 @@ def evaluate_checkpoint(label: str, path: Path, args: argparse.Namespace, device
 
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
-    groups = sorted({(row["checkpoint"], row["region"], row["channel"]) for row in rows})
-    for checkpoint, region, channel in groups:
-        members = [row for row in rows if (row["checkpoint"], row["region"], row["channel"]) == (checkpoint, region, channel)]
+    groups = sorted(
+        {
+            (row["checkpoint"], row["policy"], row["region"], row["channel"])
+            for row in rows
+        }
+    )
+    for checkpoint, policy, region, channel in groups:
+        members = [
+            row
+            for row in rows
+            if (row["checkpoint"], row["policy"], row["region"], row["channel"])
+            == (checkpoint, policy, region, channel)
+        ]
         dense = np.asarray([row["dense_mse"] for row in members])
         pruned = np.asarray([row["pruned_mse"] for row in members])
-        result[f"{checkpoint}/{region}/{channel}"] = {
+        case_relative = (pruned - dense) / np.maximum(dense, 1.0e-15)
+        result[f"{checkpoint}/{policy}/{region}/{channel}"] = {
             "dense_mse_mean": float(dense.mean()),
             "pruned_mse_mean": float(pruned.mean()),
             "pooled_relative_mse_degradation": float((pruned.mean() - dense.mean()) / max(float(dense.mean()), 1.0e-15)),
+            "case_relative_mse_degradation_p95": float(np.quantile(case_relative, 0.95)),
+            "case_relative_mse_degradation_max": float(np.max(case_relative)),
             "max_no_prune_output_difference": float(max(row["dense_vs_full_limit_gathered_max_abs"] for row in members)),
             "query_route_reduction_mean": float(np.mean([row["query_route_reduction"] for row in members])),
             "module_route_reduction_mean": float(np.mean([row["module_route_reduction"] for row in members])),
@@ -419,8 +534,17 @@ def main() -> int:
     args = parse_args()
     specs = parse_specs(args.checkpoint)
     resolve_frozen_overrides(args, specs)
-    args.output_dir = args.output_dir.resolve()
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    first_checkpoint = next(iter(specs.values()))
+    if args.output_dir is None:
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        output_root = default_evaluation_root(
+            first_checkpoint,
+            evaluation_kind="retained_mass_pruning",
+        ) / stamp
+    else:
+        output_root = args.output_dir.resolve()
+    layout = EvaluationArtifactLayout.at(output_root)
+    layout.ensure("metrics", "diagnostics")
     device = torch.device(args.device)
     checkpoints: dict[str, Any] = {}
     rows: list[dict[str, Any]] = []
@@ -430,8 +554,8 @@ def main() -> int:
         info, current = evaluate_checkpoint(label, path, args, device)
         checkpoints[label] = info
         rows.extend(current)
-    csv_path = args.output_dir / "retained_mass_pruning_per_case_channel_region.csv"
-    json_path = args.output_dir / "retained_mass_pruning_summary.json"
+    csv_path = layout.metrics / "retained_mass_pruning_per_case_channel_region.csv"
+    json_path = layout.diagnostics / "retained_mass_pruning_summary.json"
     write_csv(csv_path, rows)
     payload = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
@@ -442,11 +566,21 @@ def main() -> int:
             "channel_mse_degradation_max": 0.05,
             "query_retained_mass_p05_min": 0.98,
             "module_retained_mass_p05_min": 0.95,
+            "query_module_retained_beta_mass_p05_reported": True,
             "route_reduction_min": 0.20,
         },
-        "artifacts": {"per_case_csv": str(csv_path)},
+        "artifacts": {
+            "per_case_csv": str(csv_path),
+            "evaluation_manifest": str(layout.root / "evaluation_manifest.json"),
+        },
     }
     json_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    finalize_evaluation_job(
+        layout.root,
+        kind="retained_mass_pruning",
+        checkpoint_path=first_checkpoint,
+        requested_checkpoint=",".join(args.checkpoint),
+    )
     print(f"[done] {json_path}")
     return 0
 

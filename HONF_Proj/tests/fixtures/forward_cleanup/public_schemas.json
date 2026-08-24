@@ -566,6 +566,21 @@
         "type": "float"
       },
       {
+        "default": "edge_explicit",
+        "name": "pairwise_aggregation_mode",
+        "type": "str"
+      },
+      {
+        "default": "legacy_mlp",
+        "name": "pairwise_kernel_mode",
+        "type": "str"
+      },
+      {
+        "default": 1.0,
+        "name": "query_module_retained_mass_floor",
+        "type": "float"
+      },
+      {
         "default": false,
         "name": "topology_signature_enabled",
         "type": "bool"

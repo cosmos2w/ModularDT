@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "_note": "Evaluation/training overlay for behavior-equivalent Stage-7 fused query-module aggregation. Sparse retained-beta execution is selected only through evaluation-time routing overrides.",
+  "core": {
+    "model": {
+      "core_honf": {
+        "pairwise_aggregation_mode": "fused_query_module",
+        "query_module_retained_mass_floor": 1.0,
+        "pairwise_kernel_mode": "legacy_mlp",
+        "routing_execution": "dense",
+        "query_module_limit": 0
+      }
+    }
+  }
+}

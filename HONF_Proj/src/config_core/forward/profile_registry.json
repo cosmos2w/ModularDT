@@ -13,6 +13,26 @@
       "stage": 7
     },
     {
+      "name": "stage7_fused_query_module",
+      "path": "project://src/config_core/forward/experiments/stage7_fused_query_module.json",
+      "status": "evaluation_only",
+      "base": "stage7_structured_context",
+      "mode": "fixed K=6 context fusion / fused query-module execution / legacy kernel",
+      "checkpoint_families": ["Run 1401 evaluation"],
+      "owner": "forward-research",
+      "stage": "7A"
+    },
+    {
+      "name": "stage7_factorized_gated_r96",
+      "path": "project://src/config_core/forward/experiments/stage7_factorized_gated_r96.json",
+      "status": "candidate",
+      "base": "stage7_structured_context",
+      "mode": "fixed K=6 context fusion / fused dense / rank-96 factorized gated kernel",
+      "checkpoint_families": ["Stage-7 Test-B candidate"],
+      "owner": "forward-research",
+      "stage": "7B"
+    },
+    {
       "name": "enhanced_honf_pairwise",
       "path": "project://src/config_core/forward/enhanced_honf_pairwise.json",
       "status": "compatibility",

@@ -163,12 +163,33 @@ class HypergraphGatedPairwiseKernel(nn.Module):
         hidden_dim = int(config.hidden_dim)
         kernel_hidden_dim = int(config.pairwise_kernel_hidden_dim or hidden_dim)
         self.relative_fourier = FourierFeatures(None, int(config.pairwise_kernel_fourier_frequencies))
-        self.pair_mlp = LazyMLP(
-            hidden_dim=kernel_hidden_dim,
-            out_dim=hidden_dim,
-            num_layers=int(config.pairwise_kernel_num_layers),
-            dropout=float(config.dropout),
-        )
+        if config.pairwise_kernel_mode == "legacy_mlp":
+            # Keep the accepted Run-1000/Run-1401 parameter path byte-for-byte
+            # stable. The candidate kernel deliberately registers no pair_mlp.
+            self.pair_mlp = LazyMLP(
+                hidden_dim=kernel_hidden_dim,
+                out_dim=hidden_dim,
+                num_layers=int(config.pairwise_kernel_num_layers),
+                dropout=float(config.dropout),
+            )
+        else:
+            rank = kernel_hidden_dim
+            layers = int(config.pairwise_kernel_num_layers)
+            self.factorized_module_encoder = LazyMLP(
+                hidden_dim=rank,
+                out_dim=rank,
+                num_layers=layers,
+                dropout=float(config.dropout),
+            )
+            self.factorized_relative_encoder = LazyMLP(
+                hidden_dim=rank,
+                out_dim=rank,
+                num_layers=layers,
+                dropout=float(config.dropout),
+            )
+            self.factorized_interaction_gate = nn.Linear(rank, rank)
+            self.factorized_norm = nn.LayerNorm(rank)
+            self.factorized_output = nn.Linear(rank, hidden_dim)
         gate_init = min(max(float(config.pairwise_kernel_gate_init), 1e-4), 1.0 - 1e-4)
         gate_logit = math.log(gate_init / (1.0 - gate_init))
         self.pairwise_kernel_logit = nn.Parameter(torch.tensor(gate_logit, dtype=torch.float32))
@@ -182,7 +203,7 @@ class HypergraphGatedPairwiseKernel(nn.Module):
         gathered_execution: bool = False,
         return_routing_maps: bool = False,
         reduce_pair_context: bool = True,
-    ) -> tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor | str]]:
         """Aggregate query-module interactions through hyperedge routing.
 
         Queries ``[B,Q,2]`` and modules ``[B,M,*]`` form pair embeddings
@@ -200,6 +221,19 @@ class HypergraphGatedPairwiseKernel(nn.Module):
             edge_module_weight = A_mh / A_mh.sum(dim=1, keepdim=True).clamp_min(EPS)
         else:
             edge_module_weight = A_mh
+        if cfg.pairwise_aggregation_mode == "fused_query_module":
+            return self._forward_fused_query_module(
+                query_xy,
+                organizer_output,
+                hyper_attention,
+                module_centers,
+                module_tokens,
+                module_present,
+                edge_module_weight,
+                gathered_execution=gathered_execution,
+                return_routing_maps=return_routing_maps,
+                reduce_pair_context=reduce_pair_context,
+            )
         if gathered_execution:
             edge_pair_context, selected_modules, evaluated_pairs, retained_module_mass = self._gathered_edge_pair_context(
                 query_xy,
@@ -278,6 +312,353 @@ class HypergraphGatedPairwiseKernel(nn.Module):
                 gate * hyper_attention[..., None] * edge_pair_context
             ).detach().norm(dim=-1)
         return gate * pair_context, gate * edge_pair_context, diagnostics
+
+    def _forward_fused_query_module(
+        self,
+        query_xy: torch.Tensor,
+        organizer_output: Dict[str, torch.Tensor],
+        hyper_attention: torch.Tensor,
+        module_centers: torch.Tensor,
+        module_tokens: torch.Tensor,
+        module_present: torch.Tensor,
+        edge_module_weight: torch.Tensor,
+        *,
+        gathered_execution: bool,
+        return_routing_maps: bool,
+        reduce_pair_context: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor | str]]:
+        """Fuse query-edge and edge-module routing before pair evaluation.
+
+        ``beta_qm = sum_k alpha_qk A_mk`` is kept unnormalized after pruning.
+        Sparse execution materializes neither ``[B,Q,M,H]`` pair embeddings
+        nor ``[B,Q,K,H]`` edge contexts. The dense legacy-kernel reference
+        evaluates all pairs but never retains a full edge-context tensor.
+        """
+
+        batch_size, num_queries = query_xy.shape[:2]
+        num_modules = module_present.shape[1]
+        hidden_dim = module_tokens.shape[-1]
+        beta = torch.einsum("bqk,bmk->bqm", hyper_attention, edge_module_weight)
+        active_mask = module_present > 0
+        beta = beta * active_mask[:, None, :].to(dtype=beta.dtype)
+        if gathered_execution:
+            selected_mask = self._retained_beta_mask(beta, active_mask)
+        else:
+            selected_mask = active_mask[:, None, :].expand(-1, num_queries, -1)
+        selected_mask = selected_mask.detach()
+        selected = torch.nonzero(selected_mask, as_tuple=False)
+        legacy_full_support = (
+            self.config.pairwise_kernel_mode == "legacy_mlp"
+            and (
+                not gathered_execution
+                or (
+                    float(self.config.query_module_retained_mass_floor) >= 1.0
+                    and int(self.config.query_module_limit) <= 0
+                )
+            )
+        )
+        if legacy_full_support:
+            dense_pair_embed = self._dense_pair_embeddings(
+                query_xy,
+                module_centers,
+                module_tokens,
+                module_present,
+                organizer_output.get("module_features_raw"),
+            )
+            pair_context = self._legacy_dense_parity_context(
+                hyper_attention,
+                edge_module_weight,
+                dense_pair_embed,
+            )
+            pair_embed = dense_pair_embed[selected[:, 0], selected[:, 1], selected[:, 2]]
+        else:
+            pair_embed = self._selected_pair_embeddings(
+                query_xy,
+                organizer_output,
+                module_centers,
+                module_tokens,
+                selected,
+            )
+            flat_query_index = selected[:, 0] * num_queries + selected[:, 1]
+            selected_beta = beta[selected[:, 0], selected[:, 1], selected[:, 2]]
+            flat_context = query_xy.new_zeros(batch_size * num_queries, hidden_dim)
+            if selected.numel() > 0:
+                flat_context = flat_context.index_add(
+                    0,
+                    flat_query_index,
+                    selected_beta[:, None] * pair_embed,
+                )
+            pair_context = flat_context.view(batch_size, num_queries, hidden_dim)
+        if not reduce_pair_context:
+            pair_context = torch.zeros_like(pair_context)
+
+        selected_counts = selected_mask.sum(dim=-1)
+        available_counts = active_mask.sum(dim=-1)[:, None].expand(-1, num_queries)
+        retained_beta = (beta * selected_mask.to(dtype=beta.dtype)).sum(dim=-1)
+        total_beta = beta.sum(dim=-1)
+        retained_fraction = retained_beta / total_beta.clamp_min(EPS)
+        floor = float(self.config.query_module_retained_mass_floor)
+        violations = retained_beta + 1.0e-7 < min(max(floor, 0.0), 1.0)
+        gate = torch.sigmoid(self.pairwise_kernel_logit)
+        selected_mean = selected_counts.to(dtype=query_xy.dtype).mean()
+        available_mean = available_counts.to(dtype=query_xy.dtype).mean()
+        evaluated_pairs = query_xy.new_tensor(float(selected.shape[0]))
+        dense_pairs = available_counts.sum().to(dtype=query_xy.dtype)
+        zero = query_xy.new_zeros(())
+        diagnostics: Dict[str, torch.Tensor | str] = {
+            "pairwise_kernel_gate": gate.detach(),
+            "pairwise_context_norm": pair_context.detach().norm(dim=-1).mean(),
+            "pairwise_edge_context_norm": pair_context.detach().norm(dim=-1).mean(),
+            "pairwise_edge_usage_mean": hyper_attention.detach().mean(),
+            "pairwise_active_hyperedge_count": (hyper_attention.detach() > 0).float().sum(dim=-1).mean(),
+            "pairwise_uses_sparse_hyper_attention": hyper_attention.new_tensor(
+                float(
+                    self.config.hyper_query_attention_mode != "uniform"
+                    and (
+                        int(self.config.hyper_attention_topk) > 0
+                        or self.config.query_assignment_normalizer == "entmax15"
+                    )
+                )
+            ),
+            "pairwise_available_modules": available_mean,
+            "pairwise_available_active_modules": available_mean,
+            "pairwise_selected_modules": selected_mean,
+            "pairwise_selection_ratio": selected_mean / available_mean.clamp_min(1.0),
+            "pairwise_evaluated_pair_count": evaluated_pairs,
+            "pairwise_dense_route_count": dense_pairs,
+            "pairwise_gathered_route_count": evaluated_pairs if gathered_execution else zero,
+            "query_module_retained_beta_mass_mean": retained_beta.detach().mean(),
+            "query_module_retained_beta_mass_p05": torch.quantile(
+                retained_beta.detach().float(), 0.05
+            ).to(dtype=query_xy.dtype),
+            "query_module_retained_beta_mass_min": retained_beta.detach().amin(),
+            "query_module_retained_beta_fraction_mean": retained_fraction.detach().mean(),
+            "query_module_retained_beta_floor_violation_fraction": violations.float().mean(),
+            "pairwise_aggregation_mode": "fused_query_module",
+            "pairwise_kernel_mode": self.config.pairwise_kernel_mode,
+            "pairwise_execution_mode": "gathered" if gathered_execution else "dense",
+        }
+
+        if return_routing_maps:
+            edge_pair_context = self._diagnostic_edge_pair_context(
+                pair_embed,
+                selected,
+                edge_module_weight,
+                batch_size=batch_size,
+                num_queries=num_queries,
+                hidden_dim=hidden_dim,
+            )
+            diagnostics["query_module_routing_beta"] = beta.detach()
+            diagnostics["query_module_selected_mask"] = selected_mask.detach()
+            diagnostics["pairwise_edge_contribution"] = (
+                gate * hyper_attention[..., None] * edge_pair_context
+            ).detach().norm(dim=-1)
+        else:
+            edge_pair_context = query_xy.new_empty(batch_size, num_queries, 0, hidden_dim)
+        return gate * pair_context, gate * edge_pair_context, diagnostics
+
+    @staticmethod
+    def _legacy_dense_parity_context(
+        hyper_attention: torch.Tensor,
+        edge_module_weight: torch.Tensor,
+        dense_pair_embed: torch.Tensor,
+    ) -> torch.Tensor:
+        """Preserve accepted dense numerics without a full edge-context tensor.
+
+        The beta contraction is algebraically identical, but its changed
+        floating-point association is amplified by accepted field heads beyond
+        the 2e-6 replay gate. Hidden-width blocks retain the historical
+        contraction order while bounding the transient edge-local allocation.
+        """
+
+        hidden_dim = dense_pair_embed.shape[-1]
+        blocks = []
+        for hidden_start in range(0, hidden_dim, 32):
+            edge_block = torch.einsum(
+                "bmk,bqmh->bqkh",
+                edge_module_weight,
+                dense_pair_embed[..., hidden_start : hidden_start + 32],
+            )
+            blocks.append(
+                torch.einsum("bqk,bqkh->bqh", hyper_attention, edge_block)
+            )
+        return torch.cat(blocks, dim=-1)
+
+    def _dense_pair_embeddings(
+        self,
+        query_xy: torch.Tensor,
+        module_centers: torch.Tensor,
+        module_tokens: torch.Tensor,
+        module_present: torch.Tensor,
+        raw_features: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Evaluate the accepted legacy pair MLP over the dense module axis."""
+
+        rel = self._relative_features(query_xy, module_centers)
+        rel_encoded = self.relative_fourier(rel) if self.config.pairwise_kernel_use_fourier else rel
+        pieces = [rel_encoded, module_present[:, None, :, None].expand(-1, query_xy.shape[1], -1, -1)]
+        if self.config.pairwise_kernel_include_module_token:
+            pieces.append(module_tokens[:, None, :, :].expand(-1, query_xy.shape[1], -1, -1))
+        if self.config.pairwise_kernel_include_module_features and torch.is_tensor(raw_features):
+            pieces.append(
+                raw_features[:, None, :, :]
+                .to(device=query_xy.device, dtype=query_xy.dtype)
+                .expand(-1, query_xy.shape[1], -1, -1)
+            )
+        return self.pair_mlp(torch.cat(pieces, dim=-1)) * module_present[:, None, :, None]
+
+    def _retained_beta_mask(
+        self,
+        beta: torch.Tensor,
+        active_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Select the smallest capped module prefix meeting retained beta mass."""
+
+        num_modules = beta.shape[-1]
+        limit = int(self.config.query_module_limit)
+        maximum = num_modules if limit <= 0 else min(limit, num_modules)
+        if maximum == 0:
+            return torch.zeros_like(beta, dtype=torch.bool)
+        ranking_scores = beta.masked_fill(~active_mask[:, None, :], float("-inf"))
+        ranked_values, ranked_indices = torch.topk(
+            ranking_scores,
+            k=maximum,
+            dim=-1,
+            largest=True,
+            sorted=True,
+        )
+        ranked_valid = torch.isfinite(ranked_values)
+        ranked_mass = torch.where(ranked_valid, ranked_values, torch.zeros_like(ranked_values))
+        floor = float(self.config.query_module_retained_mass_floor)
+        if floor <= 0.0:
+            selected_count = torch.zeros_like(ranked_mass[..., 0], dtype=torch.long)
+        else:
+            selected_count = (ranked_mass.cumsum(dim=-1) < floor).sum(dim=-1) + 1
+            selected_count = torch.minimum(selected_count, ranked_valid.sum(dim=-1))
+        selected_rank = (
+            torch.arange(maximum, device=beta.device)
+            .view(*([1] * (beta.ndim - 1)), maximum)
+            < selected_count[..., None]
+        ) & ranked_valid
+        mask = torch.zeros_like(beta, dtype=torch.bool)
+        mask.scatter_(-1, ranked_indices, selected_rank)
+        return mask
+
+    def _selected_pair_embeddings(
+        self,
+        query_xy: torch.Tensor,
+        organizer_output: Dict[str, torch.Tensor],
+        module_centers: torch.Tensor,
+        module_tokens: torch.Tensor,
+        selected: torch.Tensor,
+    ) -> torch.Tensor:
+        """Evaluate only selected active query-module pairs."""
+
+        if selected.numel() == 0:
+            return query_xy.new_empty(0, module_tokens.shape[-1])
+        batch_index, query_index, module_index = selected.unbind(dim=-1)
+        relative = self._flat_relative_features(
+            query_xy[batch_index, query_index],
+            module_centers[batch_index, module_index],
+        )
+        relative_encoded = (
+            self.relative_fourier(relative)
+            if self.config.pairwise_kernel_use_fourier
+            else relative
+        )
+        if self.config.pairwise_kernel_mode == "legacy_mlp":
+            pieces = [relative_encoded, relative.new_ones(relative.shape[0], 1)]
+            if self.config.pairwise_kernel_include_module_token:
+                pieces.append(module_tokens[batch_index, module_index])
+            raw_features = organizer_output.get("module_features_raw")
+            if self.config.pairwise_kernel_include_module_features and torch.is_tensor(raw_features):
+                pieces.append(
+                    raw_features[batch_index, module_index].to(
+                        device=query_xy.device,
+                        dtype=query_xy.dtype,
+                    )
+                )
+            return self.pair_mlp(torch.cat(pieces, dim=-1))
+
+        module_codes = self.prepare_module_codes(organizer_output)
+        module_code = module_codes[batch_index, module_index]
+        relative_code = self.factorized_relative_encoder(relative_encoded)
+        interaction = module_code * relative_code
+        interaction_gate = torch.sigmoid(
+            self.factorized_interaction_gate(module_code + relative_code)
+        )
+        return self.factorized_output(
+            self.factorized_norm(
+                module_code + relative_code + interaction_gate * interaction
+            )
+        )
+
+    def prepare_module_codes(
+        self,
+        organizer_output: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        """Encode active modules once and cache the runtime tensor in prepared state."""
+
+        cache_key = "_runtime_pairwise_factorized_module_codes"
+        cached = organizer_output.get(cache_key)
+        if torch.is_tensor(cached):
+            return cached
+        module_tokens = organizer_output["module_tokens"]
+        module_present = organizer_output["module_present"] > 0
+        selected = torch.nonzero(module_present, as_tuple=False)
+        pieces = [module_tokens.new_ones(selected.shape[0], 1)]
+        if self.config.pairwise_kernel_include_module_token:
+            pieces.append(module_tokens[selected[:, 0], selected[:, 1]])
+        raw_features = organizer_output.get("module_features_raw")
+        if self.config.pairwise_kernel_include_module_features and torch.is_tensor(raw_features):
+            pieces.append(
+                raw_features[selected[:, 0], selected[:, 1]].to(
+                    device=module_tokens.device,
+                    dtype=module_tokens.dtype,
+                )
+            )
+        encoded = self.factorized_module_encoder(torch.cat(pieces, dim=-1))
+        flat_index = selected[:, 0] * module_tokens.shape[1] + selected[:, 1]
+        flat_codes = module_tokens.new_zeros(
+            module_tokens.shape[0] * module_tokens.shape[1],
+            encoded.shape[-1],
+        )
+        flat_codes = flat_codes.index_copy(0, flat_index, encoded)
+        module_codes = flat_codes.view(module_tokens.shape[0], module_tokens.shape[1], -1)
+        organizer_output[cache_key] = module_codes
+        return module_codes
+
+    def _diagnostic_edge_pair_context(
+        self,
+        pair_embed: torch.Tensor,
+        selected: torch.Tensor,
+        edge_module_weight: torch.Tensor,
+        *,
+        batch_size: int,
+        num_queries: int,
+        hidden_dim: int,
+    ) -> torch.Tensor:
+        """Reconstruct edge-local maps only for explicit diagnostic output."""
+
+        num_edges = edge_module_weight.shape[-1]
+        flat = pair_embed.new_zeros(batch_size * num_queries * num_edges, hidden_dim)
+        if selected.numel() > 0:
+            batch_index, query_index, module_index = selected.unbind(dim=-1)
+            contributions = (
+                edge_module_weight[batch_index, module_index, :, None]
+                * pair_embed[:, None, :]
+            )
+            edge_index = torch.arange(num_edges, device=selected.device)[None, :]
+            flat_index = (
+                (batch_index[:, None] * num_queries + query_index[:, None]) * num_edges
+                + edge_index
+            )
+            flat = flat.index_add(
+                0,
+                flat_index.reshape(-1),
+                contributions.reshape(-1, hidden_dim),
+            )
+        return flat.view(batch_size, num_queries, num_edges, hidden_dim)
 
     def _dense_edge_pair_context(
         self,
@@ -415,6 +796,30 @@ class HypergraphGatedPairwiseKernel(nn.Module):
             dim=-1,
         )
 
+    def _flat_relative_features(
+        self,
+        query_xy: torch.Tensor,
+        module_centers: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return normalized geometry for aligned flat query-module pairs."""
+
+        cfg = self.config
+        scale_x, scale_y = cfg.spatial_scale()
+        lx = max(scale_x, EPS)
+        ly = max(scale_y, EPS)
+        diag = max(math.sqrt(lx * lx + ly * ly), EPS)
+        delta = query_xy - module_centers
+        if cfg.periodic_dimensions():
+            lengths = query_xy.new_tensor([lx, ly])
+            delta = _wrap_periodic_delta(delta, lengths, cfg.periodic_dimensions())
+        dx = delta[..., 0:1]
+        dy = delta[..., 1:2]
+        distance = torch.sqrt(dx.square() + dy.square() + EPS)
+        return torch.cat(
+            [dx / lx, dy / ly, distance / diag, torch.relu(dx) / lx, torch.relu(-dx) / lx, dy.abs() / ly],
+            dim=-1,
+        )
+
     def _relative_features(self, query_xy: torch.Tensor, module_centers: torch.Tensor) -> torch.Tensor:
         """Return normalized query-to-module offsets and distances ``[B,Q,M,6]``."""
 
@@ -441,4 +846,3 @@ class HypergraphGatedPairwiseKernel(nn.Module):
             ],
             dim=-1,
         )
-

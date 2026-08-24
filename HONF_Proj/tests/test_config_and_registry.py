@@ -16,13 +16,14 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     profiles = registry["profiles"]
     names = [profile["name"] for profile in profiles]
-    assert len(names) == len(set(names)) == 19
+    assert len(names) == len(set(names)) == 21
     assert registry["recommended_forward_profile"] == "stage7_structured_context"
     assert {profile["status"] for profile in profiles} <= {
         "current",
         "compatibility",
         "frozen_experiment",
         "evaluation_only",
+        "candidate",
     }
     by_name = {profile["name"]: profile for profile in profiles}
     assert by_name["stage7_structured_context"]["status"] == "current"
@@ -250,6 +251,9 @@ def test_stage7_structured_context_profile_is_explicit_run1000_style() -> None:
     assert core["field_assembly_mode"] == "context_fusion"
     assert core["routing_execution"] == "dense"
     assert (core["query_edge_limit"], core["query_module_limit"]) == (0, 0)
+    assert core["pairwise_aggregation_mode"] == "edge_explicit"
+    assert core["query_module_retained_mass_floor"] == 1.0
+    assert core["pairwise_kernel_mode"] == "legacy_mlp"
     assert core["use_hyper_value_context"] is True
     assert core["hyper_query_attention_mode"] == "learned"
     assert core["hyper_attention_topk"] == 0
@@ -270,6 +274,36 @@ def test_stage7_structured_context_profile_is_explicit_run1000_style() -> None:
     assert bundle.effective["checkpointing"]["save_epoch_milestones"] == [
         500, 1000, 2500, 5000, 7500, 10000
     ]
+
+
+def test_stage7_enhancement_overlays_are_minimal_and_strict() -> None:
+    fused = load_config_bundle(
+        "project://src/config_core/forward/stage7_structured_context.json",
+        experiment_overlay=(
+            "project://src/config_core/forward/experiments/"
+            "stage7_fused_query_module.json"
+        ),
+    )
+    fused_core = fused.effective["model"]["core_honf"]
+    assert fused_core["pairwise_aggregation_mode"] == "fused_query_module"
+    assert fused_core["pairwise_kernel_mode"] == "legacy_mlp"
+    assert fused_core["query_module_retained_mass_floor"] == 1.0
+    assert fused.effective["training"]["epochs"] == 5000
+
+    factorized = load_config_bundle(
+        "project://src/config_core/forward/stage7_structured_context.json",
+        experiment_overlay=(
+            "project://src/config_core/forward/experiments/"
+            "stage7_factorized_gated_r96.json"
+        ),
+    )
+    factorized_core = factorized.effective["model"]["core_honf"]
+    assert factorized_core["pairwise_aggregation_mode"] == "fused_query_module"
+    assert factorized_core["pairwise_kernel_mode"] == "factorized_gated"
+    assert factorized_core["pairwise_kernel_hidden_dim"] == 96
+    assert factorized_core["pairwise_kernel_num_layers"] == 2
+    assert factorized.effective["training"]["epochs"] == 500
+    assert factorized.effective["checkpointing"]["save_epoch_milestones"] == [500]
 
 
 @pytest.mark.parametrize(

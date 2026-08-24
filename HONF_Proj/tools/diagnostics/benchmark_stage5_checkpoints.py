@@ -28,11 +28,33 @@ from frozen_override_cli import (  # noqa: E402
     apply_label_frozen_overrides,
     resolve_frozen_overrides,
 )
+from honf_forward_core.config import UnifiedForwardConfig  # noqa: E402
+from honf_forward_core.decoding.pairwise import HypergraphGatedPairwiseKernel  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", action="append", required=True, metavar="LABEL=PATH")
+    parser.add_argument("--checkpoint", action="append", default=[], metavar="LABEL=PATH")
+    parser.add_argument(
+        "--synthetic-scaling",
+        action="store_true",
+        help="Benchmark edge-explicit, fused legacy, and factorized kernels over a Q/M grid.",
+    )
+    parser.add_argument(
+        "--synthetic-queries",
+        type=int,
+        nargs="+",
+        default=[8192, 65536, 262144, 1_000_000],
+    )
+    parser.add_argument(
+        "--synthetic-modules",
+        type=int,
+        nargs="+",
+        default=[5, 12, 32, 64, 128],
+    )
+    parser.add_argument("--synthetic-query-chunk-size", type=int, default=8192)
+    parser.add_argument("--synthetic-hidden-dim", type=int, default=256)
+    parser.add_argument("--synthetic-hyperedges", type=int, default=6)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--split", default="test")
     parser.add_argument("--case-id", default="0273")
@@ -67,22 +89,27 @@ def benchmark_call(
         with torch.inference_mode():
             output = function()
         del output
-    torch.cuda.synchronize(device)
-    torch.cuda.empty_cache()
-    baseline_allocated = int(torch.cuda.memory_allocated(device))
-    baseline_reserved = int(torch.cuda.memory_reserved(device))
-    torch.cuda.reset_peak_memory_stats(device)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+        torch.cuda.empty_cache()
+        baseline_allocated = int(torch.cuda.memory_allocated(device))
+        baseline_reserved = int(torch.cuda.memory_reserved(device))
+        torch.cuda.reset_peak_memory_stats(device)
+    else:
+        baseline_allocated = baseline_reserved = None
     elapsed: list[float] = []
     for _ in range(iterations):
-        torch.cuda.synchronize(device)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
         started = time.perf_counter()
         with torch.inference_mode():
             output = function()
-        torch.cuda.synchronize(device)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
         elapsed.append(time.perf_counter() - started)
         del output
-    peak_allocated = int(torch.cuda.max_memory_allocated(device))
-    peak_reserved = int(torch.cuda.max_memory_reserved(device))
+    peak_allocated = int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else None
+    peak_reserved = int(torch.cuda.max_memory_reserved(device)) if device.type == "cuda" else None
     return {
         "median_seconds": float(statistics.median(elapsed)),
         "mean_seconds": float(statistics.mean(elapsed)),
@@ -92,8 +119,12 @@ def benchmark_call(
         "baseline_reserved_bytes": baseline_reserved,
         "peak_allocated_bytes": peak_allocated,
         "peak_reserved_bytes": peak_reserved,
-        "incremental_peak_allocated_bytes": peak_allocated - baseline_allocated,
-        "incremental_peak_reserved_bytes": peak_reserved - baseline_reserved,
+        "incremental_peak_allocated_bytes": (
+            None if peak_allocated is None else peak_allocated - int(baseline_allocated)
+        ),
+        "incremental_peak_reserved_bytes": (
+            None if peak_reserved is None else peak_reserved - int(baseline_reserved)
+        ),
     }
 
 
@@ -208,18 +239,258 @@ def evaluate_checkpoint(
     return result
 
 
+def synthetic_pairwise_scaling(
+    args: argparse.Namespace,
+    device: torch.device,
+) -> dict[str, Any]:
+    """Measure prepared-decoder pairwise scaling without checkpoint or dataset I/O."""
+
+    hidden_dim = int(args.synthetic_hidden_dim)
+    num_edges = int(args.synthetic_hyperedges)
+    query_chunk_size = int(args.synthetic_query_chunk_size)
+    if hidden_dim <= 0 or num_edges <= 0 or query_chunk_size <= 0:
+        raise ValueError(
+            "Synthetic hidden dimension, hyperedge count, and query chunk size must be positive"
+        )
+    results: list[dict[str, Any]] = []
+    for num_modules in args.synthetic_modules:
+        for num_queries in args.synthetic_queries:
+            if int(num_modules) <= 0 or int(num_queries) <= 0:
+                raise ValueError("Synthetic query and module counts must be positive")
+            generator = torch.Generator(device=device).manual_seed(
+                1701 + int(num_modules) * 11 + int(num_queries)
+            )
+            query_xy = torch.rand(1, int(num_queries), 2, generator=generator, device=device)
+            module_centers = torch.rand(1, int(num_modules), 2, generator=generator, device=device)
+            module_tokens = torch.randn(
+                1,
+                int(num_modules),
+                hidden_dim,
+                generator=generator,
+                device=device,
+            )
+            raw_features = torch.randn(
+                1,
+                int(num_modules),
+                8,
+                generator=generator,
+                device=device,
+            )
+            A_mh = torch.softmax(
+                4.0
+                * torch.randn(
+                    1,
+                    int(num_modules),
+                    num_edges,
+                    generator=generator,
+                    device=device,
+                ),
+                dim=1,
+            )
+            hyper_attention = torch.softmax(
+                4.0
+                * torch.randn(
+                    1,
+                    int(num_queries),
+                    num_edges,
+                    generator=generator,
+                    device=device,
+                ),
+                dim=-1,
+            )
+
+            def config(
+                aggregation: str,
+                kernel: str,
+                *,
+                retained_mass_floor: float = 1.0,
+            ) -> UnifiedForwardConfig:
+                return UnifiedForwardConfig(
+                    field_dim=5,
+                    num_hyperedges=num_edges,
+                    hidden_dim=hidden_dim,
+                    dropout=0.0,
+                    decoder_mode="enhanced_honf_pairwise",
+                    field_assembly_mode="context_fusion",
+                    pairwise_aggregation_mode=aggregation,
+                    pairwise_kernel_mode=kernel,
+                    pairwise_kernel_hidden_dim=96 if kernel == "factorized_gated" else hidden_dim,
+                    pairwise_kernel_num_layers=2 if kernel == "factorized_gated" else 4,
+                    routing_execution="dense",
+                    query_module_retained_mass_floor=retained_mass_floor,
+                )
+
+            mode_names = (
+                "edge_explicit",
+                "fused_legacy",
+                "fused_sparse_beta_0p98",
+                "factorized_gated_r96",
+                "factorized_sparse_beta_0p98_r96",
+            )
+            organizers = {
+                name: {
+                    "module_centers": module_centers,
+                    "module_tokens": module_tokens,
+                    "module_present": torch.ones(
+                        1, int(num_modules), device=device, dtype=query_xy.dtype
+                    ),
+                    "module_features_raw": raw_features,
+                    "A_mh": A_mh,
+                }
+                for name in mode_names
+            }
+            torch.manual_seed(1701)
+            edge_explicit = HypergraphGatedPairwiseKernel(
+                config("edge_explicit", "legacy_mlp")
+            ).to(device).eval()
+            torch.manual_seed(1701)
+            fused_legacy = HypergraphGatedPairwiseKernel(
+                config("fused_query_module", "legacy_mlp")
+            ).to(device).eval()
+            torch.manual_seed(1701)
+            factorized = HypergraphGatedPairwiseKernel(
+                config("fused_query_module", "factorized_gated")
+            ).to(device).eval()
+            torch.manual_seed(1701)
+            fused_sparse = HypergraphGatedPairwiseKernel(
+                config(
+                    "fused_query_module",
+                    "legacy_mlp",
+                    retained_mass_floor=0.98,
+                )
+            ).to(device).eval()
+            torch.manual_seed(1701)
+            factorized_sparse = HypergraphGatedPairwiseKernel(
+                config(
+                    "fused_query_module",
+                    "factorized_gated",
+                    retained_mass_floor=0.98,
+                )
+            ).to(device).eval()
+            kernels = {
+                "edge_explicit": edge_explicit,
+                "fused_legacy": fused_legacy,
+                "fused_sparse_beta_0p98": fused_sparse,
+                "factorized_gated_r96": factorized,
+                "factorized_sparse_beta_0p98_r96": factorized_sparse,
+            }
+
+            def run_chunked(
+                kernel: HypergraphGatedPairwiseKernel,
+                name: str,
+            ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+                output = None
+                for start in range(0, int(num_queries), query_chunk_size):
+                    output = kernel(
+                        query_xy[:, start : start + query_chunk_size],
+                        organizers[name],
+                        hyper_attention[:, start : start + query_chunk_size],
+                        gathered_execution="sparse" in name,
+                    )
+                assert output is not None
+                return output
+
+            with torch.inference_mode():
+                initialized = {
+                    name: kernel(
+                        query_xy[:, : min(int(num_queries), query_chunk_size)],
+                        organizers[name],
+                        hyper_attention[:, : min(int(num_queries), query_chunk_size)],
+                        gathered_execution="sparse" in name,
+                    )[0]
+                    for name, kernel in kernels.items()
+                }
+            fused_legacy.load_state_dict(edge_explicit.state_dict(), strict=True)
+            fused_sparse.load_state_dict(edge_explicit.state_dict(), strict=True)
+            factorized_sparse.load_state_dict(factorized.state_dict(), strict=True)
+            with torch.inference_mode():
+                initialized["edge_explicit"] = edge_explicit(
+                    query_xy[:, : min(int(num_queries), query_chunk_size)],
+                    organizers["edge_explicit"],
+                    hyper_attention[:, : min(int(num_queries), query_chunk_size)],
+                )[0]
+                initialized["fused_legacy"] = fused_legacy(
+                    query_xy[:, : min(int(num_queries), query_chunk_size)],
+                    organizers["fused_legacy"],
+                    hyper_attention[:, : min(int(num_queries), query_chunk_size)],
+                )[0]
+            parity = float(
+                (initialized["edge_explicit"] - initialized["fused_legacy"])
+                .abs()
+                .amax()
+                .detach()
+                .cpu()
+            )
+            for name, kernel in kernels.items():
+                timing = benchmark_call(
+                    lambda kernel=kernel, name=name: run_chunked(kernel, name),
+                    device=device,
+                    warmup=int(args.warmup),
+                    iterations=int(args.iterations),
+                )
+                with torch.inference_mode():
+                    diagnostic_output = run_chunked(kernel, name)[2]
+                selected_ratio = float(
+                    diagnostic_output["pairwise_selection_ratio"].detach().cpu()
+                )
+                results.append(
+                    {
+                        "mode": name,
+                        "query_count": int(num_queries),
+                        "module_count": int(num_modules),
+                        "query_module_pair_count": int(num_queries) * int(num_modules),
+                        "query_chunk_size": min(int(num_queries), query_chunk_size),
+                        "kernel_parameters": int(
+                            sum(parameter.numel() for parameter in kernel.parameters())
+                        ),
+                        "selected_pair_ratio": selected_ratio,
+                        "evaluated_query_module_pair_count": int(
+                            round(selected_ratio * int(num_queries) * int(num_modules))
+                        ),
+                        "edge_explicit_vs_fused_max_abs": (
+                            parity if name in {"edge_explicit", "fused_legacy"} else None
+                        ),
+                        **timing,
+                    }
+                )
+            del (
+                kernels,
+                edge_explicit,
+                fused_legacy,
+                fused_sparse,
+                factorized,
+                factorized_sparse,
+                initialized,
+            )
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+    return {
+        "hidden_dim": hidden_dim,
+        "hyperedge_count": num_edges,
+        "factorized_rank": 96,
+        "query_chunk_size": query_chunk_size,
+        "routing_fixture": "seeded concentrated softmax logits (scale=4) over modules and edges",
+        "rows": results,
+    }
+
+
 def main() -> int:
     args = parse_args()
     device = torch.device(args.device)
-    if device.type != "cuda" or not torch.cuda.is_available():
-        raise RuntimeError("The Stage-5 checkpoint benchmark requires CUDA.")
+    if not args.checkpoint and not args.synthetic_scaling:
+        raise ValueError("Provide at least one --checkpoint or enable --synthetic-scaling")
+    if args.checkpoint and (device.type != "cuda" or not torch.cuda.is_available()):
+        raise RuntimeError("Checkpoint benchmarks require CUDA.")
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(f"Requested CUDA device {device}, but CUDA is unavailable")
     checkpoints: dict[str, Path] = {}
     for value in args.checkpoint:
         if "=" not in value:
             raise ValueError(f"Expected LABEL=PATH, got {value!r}")
         label, raw_path = value.split("=", 1)
         checkpoints[label] = Path(raw_path).expanduser().resolve()
-    resolve_frozen_overrides(args, checkpoints)
+    if checkpoints:
+        resolve_frozen_overrides(args, checkpoints)
     results = {
         label: evaluate_checkpoint(label, path, args, device)
         for label, path in checkpoints.items()
@@ -227,13 +498,16 @@ def main() -> int:
     payload = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
         "device": str(device),
-        "gpu_name": torch.cuda.get_device_name(device),
+        "gpu_name": torch.cuda.get_device_name(device) if device.type == "cuda" else None,
         "split": args.split,
         "case_id": str(args.case_id),
         "query_count": int(args.queries),
         "warmup": int(args.warmup),
         "iterations": int(args.iterations),
         "results": results,
+        "synthetic_pairwise_scaling": (
+            synthetic_pairwise_scaling(args, device) if args.synthetic_scaling else None
+        ),
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")

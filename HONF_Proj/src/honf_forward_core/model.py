@@ -186,7 +186,13 @@ class HONFNeuralField(nn.Module):
             return_edge_fields=bool(return_edge_fields),
         )
         output: Dict[str, torch.Tensor] = {}
-        output.update(encoded)
+        output.update(
+            {
+                key: value
+                for key, value in encoded.items()
+                if not key.startswith("_runtime_")
+            }
+        )
         output.update(decoder_output)
         return output
 

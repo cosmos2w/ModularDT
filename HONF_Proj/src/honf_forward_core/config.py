@@ -72,6 +72,9 @@ _FORWARD_MODE_DEFAULTS: Dict[str, Any] = {
     "environment_assignment_normalizer": "softmax",
     "query_assignment_normalizer": "softmax",
     "routing_execution": "dense",
+    "pairwise_aggregation_mode": "edge_explicit",
+    "pairwise_kernel_mode": "legacy_mlp",
+    "query_module_retained_mass_floor": 1.0,
 }
 
 
@@ -141,6 +144,9 @@ class UnifiedForwardConfig:
     query_module_limit: int = 0
     query_edge_retained_mass_floor: float = 0.0
     module_incidence_retained_mass_floor: float = 0.0
+    pairwise_aggregation_mode: str = "edge_explicit"
+    pairwise_kernel_mode: str = "legacy_mlp"
+    query_module_retained_mass_floor: float = 1.0
 
     topology_signature_enabled: bool = False
     hidden_dim: int = 128
@@ -297,6 +303,33 @@ class UnifiedForwardConfig:
             raise ValueError("query_edge_retained_mass_floor must be in [0, 1].")
         if not 0.0 <= float(self.module_incidence_retained_mass_floor) <= 1.0:
             raise ValueError("module_incidence_retained_mass_floor must be in [0, 1].")
+        if self.pairwise_aggregation_mode not in {"edge_explicit", "fused_query_module"}:
+            raise ValueError(
+                "pairwise_aggregation_mode must be 'edge_explicit' or "
+                "'fused_query_module'."
+            )
+        if self.pairwise_kernel_mode not in {"legacy_mlp", "factorized_gated"}:
+            raise ValueError(
+                "pairwise_kernel_mode must be 'legacy_mlp' or 'factorized_gated'."
+            )
+        if not 0.0 <= float(self.query_module_retained_mass_floor) <= 1.0:
+            raise ValueError("query_module_retained_mass_floor must be in [0, 1].")
+        if (
+            self.pairwise_aggregation_mode == "fused_query_module"
+            and self.field_assembly_mode != "context_fusion"
+        ):
+            raise ValueError(
+                "fused_query_module pairwise aggregation requires context_fusion "
+                "field assembly."
+            )
+        if (
+            self.pairwise_kernel_mode == "factorized_gated"
+            and self.pairwise_aggregation_mode != "fused_query_module"
+        ):
+            raise ValueError(
+                "factorized_gated pairwise kernels require fused_query_module "
+                "pairwise aggregation."
+            )
         if self.geometry_mode not in {"nonperiodic", "periodic"}:
             raise ValueError("geometry_mode must be 'nonperiodic' or 'periodic'.")
         if self.query_time_mode not in {"none", "phase", "physical_time"}:

@@ -37,6 +37,9 @@
       "routing_execution": "dense",
       "query_edge_limit": 0,
       "query_module_limit": 0,
+      "pairwise_aggregation_mode": "edge_explicit",
+      "query_module_retained_mass_floor": 1.0,
+      "pairwise_kernel_mode": "legacy_mlp",
 
       "hidden_dim": 256,
       "dropout": 0.0,

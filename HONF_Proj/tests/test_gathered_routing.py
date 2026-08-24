@@ -52,6 +52,39 @@ def _config(
     )
 
 
+def _context_config(
+    execution: str,
+    *,
+    aggregation: str,
+    module_limit: int = 0,
+    retained_mass_floor: float = 1.0,
+    kernel_mode: str = "legacy_mlp",
+) -> UnifiedForwardConfig:
+    return UnifiedForwardConfig(
+        field_dim=3,
+        domain_length_x=6.0,
+        domain_length_y=3.0,
+        coordinate_scale=[6.0, 3.0],
+        periodic_axes=[],
+        num_env_tokens_x=5,
+        num_env_tokens_y=3,
+        num_hyperedges=4,
+        organizer_mode="fixed_projection",
+        hidden_dim=24,
+        dropout=0.0,
+        decoder_mode="enhanced_honf_pairwise",
+        pairwise_kernel_hidden_dim=24,
+        pairwise_kernel_num_layers=2,
+        mechanism_state_mode="residual_concat",
+        field_assembly_mode="context_fusion",
+        routing_execution=execution,
+        pairwise_aggregation_mode=aggregation,
+        pairwise_kernel_mode=kernel_mode,
+        query_module_limit=module_limit,
+        query_module_retained_mass_floor=retained_mass_floor,
+    )
+
+
 def _batch() -> BatchData:
     generator = torch.Generator().manual_seed(151)
     return BatchData(
@@ -303,3 +336,263 @@ def test_query_edge_limit_is_shared_mass_conserving_routing() -> None:
     assert output["routed_query_edge_pair_count"] == routed_mask.sum()
     edge_nonzero = output["pred_field_by_edge"].norm(dim=-1) > 0
     assert torch.all(edge_nonzero.sum(dim=-1) <= 2)
+
+
+def test_fused_dense_matches_edge_explicit_dense_with_same_weights() -> None:
+    edge_explicit = _initialized_model(
+        _context_config("dense", aggregation="edge_explicit"),
+        seed=197,
+    )
+    fused = _initialized_model(
+        _context_config("dense", aggregation="fused_query_module"),
+        seed=199,
+    )
+    assert tuple(edge_explicit.state_dict()) == tuple(fused.state_dict())
+    fused.load_state_dict(copy.deepcopy(edge_explicit.state_dict()), strict=True)
+
+    with torch.no_grad():
+        batch = _batch()
+        explicit_state = edge_explicit.encode_and_organize(batch)
+        fused_state = fused.encode_and_organize(batch)
+        reference = edge_explicit.decode_queries(
+            batch.query_xy,
+            None,
+            explicit_state,
+            explicit_state["global_token"],
+            return_routing_maps=True,
+        )
+        revised = fused.decode_queries(
+            batch.query_xy,
+            None,
+            fused_state,
+            fused_state["global_token"],
+            return_routing_maps=True,
+        )
+
+    torch.testing.assert_close(
+        reference["pred_field"],
+        revised["pred_field"],
+        rtol=2.0e-6,
+        atol=2.0e-6,
+    )
+    torch.testing.assert_close(
+        reference["c_pair_norm"],
+        revised["c_pair_norm"],
+        rtol=2.0e-6,
+        atol=2.0e-6,
+    )
+
+
+def test_fused_full_retention_gathered_matches_fused_dense() -> None:
+    dense = _initialized_model(
+        _context_config("dense", aggregation="fused_query_module"),
+        seed=211,
+    )
+    gathered = _initialized_model(
+        _context_config(
+            "gathered",
+            aggregation="fused_query_module",
+            retained_mass_floor=1.0,
+        ),
+        seed=223,
+    )
+    gathered.load_state_dict(copy.deepcopy(dense.state_dict()), strict=True)
+
+    with torch.no_grad():
+        dense_output = dense(_batch())["pred_field"]
+        gathered_output = gathered(_batch())["pred_field"]
+
+    torch.testing.assert_close(dense_output, gathered_output, rtol=2.0e-6, atol=2.0e-6)
+
+
+def test_fused_sparse_retains_original_beta_mass_without_renormalizing() -> None:
+    config = _context_config(
+        "gathered",
+        aggregation="fused_query_module",
+        module_limit=1,
+        retained_mass_floor=0.8,
+    )
+    kernel = HypergraphGatedPairwiseKernel(config)
+
+    class Ones(torch.nn.Module):
+        def forward(self, values: torch.Tensor) -> torch.Tensor:
+            return torch.ones(values.shape[0], config.hidden_dim, device=values.device, dtype=values.dtype)
+
+    kernel.pair_mlp = Ones()
+    query_xy = torch.tensor([[[0.0, 0.0]]])
+    organizer_output = {
+        "module_centers": torch.tensor([[[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]]]),
+        "module_tokens": torch.zeros(1, 3, config.hidden_dim),
+        "module_present": torch.ones(1, 3),
+        "A_mh": torch.tensor([[[0.6, 0.0], [0.3, 0.5], [0.1, 0.5]]]),
+    }
+    hyper_attention = torch.tensor([[[1.0, 0.0]]])
+
+    context, edge_context, diagnostics = kernel(
+        query_xy,
+        organizer_output,
+        hyper_attention,
+        gathered_execution=True,
+        return_routing_maps=False,
+    )
+
+    gate = torch.sigmoid(kernel.pairwise_kernel_logit.detach())
+    torch.testing.assert_close(context[0, 0], torch.full((config.hidden_dim,), 0.6 * gate))
+    assert edge_context.shape == (1, 1, 0, config.hidden_dim)
+    torch.testing.assert_close(
+        diagnostics["query_module_retained_beta_mass_mean"],
+        torch.tensor(0.6),
+    )
+    assert diagnostics["query_module_retained_beta_floor_violation_fraction"] == 1.0
+    assert "query_module_routing_beta" not in diagnostics
+    assert "query_module_selected_mask" not in diagnostics
+
+
+def test_fused_gathering_happens_before_pair_mlp_and_excludes_inactive_modules() -> None:
+    model = _initialized_model(
+        _context_config(
+            "gathered",
+            aggregation="fused_query_module",
+            module_limit=1,
+            retained_mass_floor=1.0,
+        ),
+        seed=227,
+    )
+    pair_shapes: list[tuple[int, ...]] = []
+
+    def pair_hook(_module: torch.nn.Module, inputs: tuple[torch.Tensor, ...]) -> None:
+        pair_shapes.append(tuple(inputs[0].shape))
+
+    handle = model.decoder.pairwise_kernel.pair_mlp.register_forward_pre_hook(pair_hook)
+    with torch.no_grad():
+        output = model(_batch())
+    handle.remove()
+
+    assert pair_shapes
+    assert len(pair_shapes[0]) == 2
+    assert pair_shapes[0][0] == 2 * 19
+    assert int(output["pairwise_evaluated_pair_count"]) == 2 * 19
+    assert output["pairwise_available_active_modules"] == 3.5
+    assert output["pairwise_selection_ratio"] < 1.0
+
+
+def test_fused_routing_maps_are_materialized_only_when_requested() -> None:
+    model = _initialized_model(
+        _context_config("dense", aggregation="fused_query_module"),
+        seed=229,
+    )
+    with torch.no_grad():
+        batch = _batch()
+        ordinary = model(batch)
+        organized = model.encode_and_organize(batch)
+        mapped = model.decode_queries(
+            batch.query_xy,
+            None,
+            organized,
+            organized["global_token"],
+            return_routing_maps=True,
+        )
+
+    assert "query_module_routing_beta" not in ordinary
+    assert "query_module_selected_mask" not in ordinary
+    assert mapped["query_module_routing_beta"].shape == (2, 19, 8)
+    assert mapped["query_module_selected_mask"].shape == (2, 19, 8)
+
+
+def test_fused_gathered_query_chunks_match_one_shot() -> None:
+    model = _initialized_model(
+        _context_config(
+            "gathered",
+            aggregation="fused_query_module",
+            module_limit=2,
+            retained_mass_floor=0.8,
+        ),
+        seed=233,
+    )
+    batch = _batch()
+    with torch.no_grad():
+        organized = model.encode_and_organize(batch)
+        reference = model.decode_queries(
+            batch.query_xy,
+            None,
+            organized,
+            organized["global_token"],
+        )["pred_field"]
+        chunks = [
+            model.decode_queries(
+                query_chunk,
+                None,
+                organized,
+                organized["global_token"],
+            )["pred_field"]
+            for query_chunk in torch.tensor_split(batch.query_xy, 4, dim=1)
+            if query_chunk.shape[1]
+        ]
+
+    torch.testing.assert_close(reference, torch.cat(chunks, dim=1), rtol=2.0e-6, atol=2.0e-6)
+
+
+def test_factorized_module_codes_are_cached_across_query_chunks() -> None:
+    model = _initialized_model(
+        _context_config(
+            "dense",
+            aggregation="fused_query_module",
+            kernel_mode="factorized_gated",
+        ),
+        seed=239,
+    )
+    assert not any("pairwise_kernel.pair_mlp" in name for name in model.state_dict())
+    assert any(
+        name.startswith("decoder.pairwise_kernel.factorized_module_encoder")
+        for name in model.state_dict()
+    )
+    batch = _batch()
+    encoded_calls = 0
+
+    def encoder_hook(_module: torch.nn.Module, _inputs: tuple[torch.Tensor, ...]) -> None:
+        nonlocal encoded_calls
+        encoded_calls += 1
+
+    handle = model.decoder.pairwise_kernel.factorized_module_encoder.register_forward_pre_hook(
+        encoder_hook
+    )
+    with torch.no_grad():
+        organized = model.encode_and_organize(batch)
+        reference = model.decode_queries(
+            batch.query_xy,
+            None,
+            organized,
+            organized["global_token"],
+        )["pred_field"]
+        chunks = [
+            model.decode_queries(
+                query_chunk,
+                None,
+                organized,
+                organized["global_token"],
+            )["pred_field"]
+            for query_chunk in torch.tensor_split(batch.query_xy, 4, dim=1)
+            if query_chunk.shape[1]
+        ]
+    handle.remove()
+
+    assert encoded_calls == 1
+    assert "_runtime_pairwise_factorized_module_codes" in organized
+    torch.testing.assert_close(reference, torch.cat(chunks, dim=1), rtol=2.0e-6, atol=2.0e-6)
+
+
+def test_factorized_fused_backward_is_finite() -> None:
+    torch.manual_seed(241)
+    model = HONFNeuralField(
+        _context_config(
+            "dense",
+            aggregation="fused_query_module",
+            kernel_mode="factorized_gated",
+        )
+    ).train()
+    output = model(_batch())
+    output["pred_field"].square().mean().backward()
+
+    assert torch.isfinite(output["pred_field"]).all()
+    assert "_runtime_pairwise_factorized_module_codes" not in output
+    assert all(parameter.grad is None or torch.isfinite(parameter.grad).all() for parameter in model.parameters())

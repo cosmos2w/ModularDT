@@ -19,6 +19,9 @@ MODE_DEFAULTS = {
     "environment_assignment_normalizer": "softmax",
     "query_assignment_normalizer": "softmax",
     "routing_execution": "dense",
+    "pairwise_aggregation_mode": "edge_explicit",
+    "pairwise_kernel_mode": "legacy_mlp",
+    "query_module_retained_mass_floor": 1.0,
 }
 
 
@@ -78,6 +81,8 @@ def test_missing_mode_fields_resolve_to_existing_computation() -> None:
         ("environment_assignment_normalizer", "sparsemax"),
         ("query_assignment_normalizer", "sparsemax"),
         ("routing_execution", "masked_dense"),
+        ("pairwise_aggregation_mode", "edge_collapsed"),
+        ("pairwise_kernel_mode", "bilinear"),
     ],
 )
 def test_unknown_forward_mode_is_rejected(name: str, value: str) -> None:
@@ -103,6 +108,25 @@ def test_exchangeable_mode_validates_capacity_and_limits() -> None:
 
     payload.update(query_module_limit=0, candidate_module_mass_fraction_floor=0.0)
     with pytest.raises(ValueError, match="candidate_module_mass_fraction_floor"):
+        UnifiedForwardConfig.from_dict(payload)
+
+
+def test_fused_and_factorized_mode_combinations_are_validated() -> None:
+    payload = _config_payload()
+    payload["field_assembly_mode"] = "edge_additive"
+    payload["pairwise_aggregation_mode"] = "fused_query_module"
+    with pytest.raises(ValueError, match="requires context_fusion"):
+        UnifiedForwardConfig.from_dict(payload)
+
+    payload["field_assembly_mode"] = "context_fusion"
+    payload["pairwise_aggregation_mode"] = "edge_explicit"
+    payload["pairwise_kernel_mode"] = "factorized_gated"
+    with pytest.raises(ValueError, match="require fused_query_module"):
+        UnifiedForwardConfig.from_dict(payload)
+
+    payload["pairwise_aggregation_mode"] = "fused_query_module"
+    payload["query_module_retained_mass_floor"] = 1.01
+    with pytest.raises(ValueError, match="query_module_retained_mass_floor"):
         UnifiedForwardConfig.from_dict(payload)
 
 
