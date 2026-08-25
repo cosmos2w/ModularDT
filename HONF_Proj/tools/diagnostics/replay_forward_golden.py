@@ -31,7 +31,6 @@ from channelthermal.workflows.train_forward import (  # noqa: E402
 from honf_runtime.compat import strip_module_prefix  # noqa: E402
 
 
-DEFAULT_MANIFEST = PROJECT_ROOT / "docs" / "experiments" / "stage1_7_freeze_manifest.json"
 DEFAULT_FIXTURE = PROJECT_ROOT / "tests" / "fixtures" / "forward_cleanup" / "golden_replay.json"
 ORGANIZER_ARRAYS = (
     "A_mh",
@@ -58,7 +57,12 @@ OUTPUT_ARRAYS = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        required=True,
+        help="Local checkpoint/hash manifest used for this replay.",
+    )
     parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--update", action="store_true")

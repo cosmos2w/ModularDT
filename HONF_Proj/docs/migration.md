@@ -1,26 +1,25 @@
-# Migration from Demo 1
+# Migrating a physical case to modular HONF
 
-The original `1_Demo_ChannelThermal/src_HONF_CL` remains an immutable reference
-until the modular implementation and complete reruns are accepted. No dataset
-or historical run is copied into the release source tree.
+Keep physical data, checkpoints, and historical runs outside the maintained
+source tree. `Case_ThermalChannel` is the reference for separating case-owned
+physics from the reusable core and runtime.
 
 Command mapping:
 
-| Previous command | Modular command |
+| Workflow | Modular command |
 |---|---|
-| `src_HONF_CL/train_local.py` | `train.py --config src/config_core/forward/local_module_thermal_disk.json` |
-| `src_HONF_CL/train.py` | `train.py --config <core-profile>` |
-| `src_HONF_CL/evaluate_local.py` | `evaluate.py --workflow local_module --config <local-profile>` |
-| `src_HONF_CL/evaluate.py` | `evaluate.py --workflow forward --config <core-profile>` |
-| `src_HONF_CL/compare_models.py` | `evaluate.py --workflow compare --config <core-profile>` |
+| Train an optional local module | `train.py --config src/config_core/forward/local_module_thermal_disk.json` |
+| Train the coupled forward model | `train.py --config <core-profile>` |
+| Evaluate a local module | `evaluate.py --workflow local_module --config <local-profile>` |
+| Evaluate the forward model | `evaluate.py --workflow forward --config <core-profile>` |
+| Compare checkpoints | `evaluate.py --workflow compare --config <core-profile>` |
 
-Old combined JSON files are replaced by a core launch profile plus
-`Case_ThermalChannel/configs/case_default.json`. Old `Data_Saved` paths are
-replaced by logical IDs and an ignored location map. Old `Saved_Model_*`
-directories are replaced by the structured `Trained_Results/ThermalChannel`
-tree. The model parameter names, decoder options, Stage-A architecture,
-normalization behavior, physical losses, checkpoint selectors, and all
-post-processing capabilities are retained.
+Compose a core launch profile with a case-owned profile such as
+`Case_ThermalChannel/configs/case_default.json`. Resolve external datasets by
+logical ID through a machine-local ignored location map. Managed output roots
+are also local-only; model parameters, decoder options, optional local-module
+architecture, normalization, physical losses, and checkpoint selection belong
+in versioned configuration and checkpoint metadata.
 
 ## Forward architecture modes
 

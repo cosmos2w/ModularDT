@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import copy
+import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -59,15 +60,12 @@ def test_named_datasets_match_manifest_contract() -> None:
 
 
 def test_historical_local_checkpoint_loads_strictly_and_is_finite() -> None:
-    path = (
-        PROJECT_ROOT.parent
-        / "1_Demo_ChannelThermal"
-        / "Saved_Model_LocalModule"
-        / "Run_0003_20260507_224352"
-        / "latest_model.pt"
-    )
-    if not path.exists():
+    configured_path = os.environ.get("HONF_LEGACY_LOCAL_CHECKPOINT")
+    if not configured_path:
         return
+    path = Path(configured_path).expanduser().resolve()
+    if not path.is_file():
+        pytest.fail(f"HONF_LEGACY_LOCAL_CHECKPOINT does not exist: {path}")
     checkpoint = load_trusted_checkpoint(path, map_location="cpu")
     config = LocalModuleConfig.from_dict(checkpoint.get("model_config", {}))
     model = LocalModuleSurrogate(config)

@@ -14,46 +14,34 @@ __pycache__/
 # Local notes not needed for running the demo
 Notes.txt
 MODEL_EXPLAIN.txt
-0_Demo_MultiCylinder/MODEL_EXPLAIN.txt
 INVERSE_CODING.md
 Creat_Proj.md
 HONF_Proj/HONF_Forward_Upgrade_Codex_Goal_Plan.md
 
+# Historical projects and HONF research evidence retained only on local machines
+/0_Demo_MultiCylinder/
+/1_Demo_ChannelThermal/
+/Unified_Forward_Model_0/
+/HONF_Proj/diagnostics/
+/HONF_Proj/UpgradePlan/
+/HONF_Proj/Trained_Results/
+/HONF_Proj/ModelCompare.md
+/HONF_Proj/CHANGELOG.md
+/HONF_Proj/VALIDATION.md
+/HONF_Proj/docs/results.md
+/HONF_Proj/docs/experiments/
+/HONF_Proj/docs/forward_upgrade_reference.md
+/HONF_Proj/tools/diagnostics/analyze_stage5_final_comparison.py
+/HONF_Proj/tools/diagnostics/analyze_stage7_5k.py
+/HONF_Proj/tools/diagnostics/analyze_stage7_k_audit.py
+/HONF_Proj/tools/diagnostics/build_forward_freeze_manifest.py
+/HONF_Proj/tools/diagnostics/verify_stage6_profile.py
+
 # Frontend dependency/build output
 node_modules/
-0_Demo_MultiCylinder/web_demo/frontend/dist/
-0_Demo_MultiCylinder/web_demo/frontend/.vite/
-
-# Web demo generated inference cache
-0_Demo_MultiCylinder/web_demo/storage/cache/
 
 # Large datasets, training outputs, and generated visualizations
 Data_Saved/
-0_Demo_MultiCylinder/Data_Saved/
-0_Demo_MultiCylinder/Saved_Model/
-0_Demo_MultiCylinder/Saved_Model_Gen/
-0_Demo_MultiCylinder/Saved_Model_Inverse/
-0_Demo_MultiCylinder/Domain_shape/
-1_Demo_ChannelThermal/Data_Saved/
-1_Demo_ChannelThermal/Saved_Model/
-1_Demo_ChannelThermal/Saved_Model_Gen/
-1_Demo_ChannelThermal/Saved_Model_Inverse/
-1_Demo_ChannelThermal/Saved_Model_NewHONF/
-1_Demo_ChannelThermal/Domain_shape/
-1_Demo_ChannelThermal/Saved_Model_Prior/
-1_Demo_ChannelThermal/Saved_Model_HONF_CL/
-Unified_Forward_Model_0/results/*
-!Unified_Forward_Model_0/results/.gitkeep
-
-# Per-run generated config backups; keep active configs and templates tracked.
-0_Demo_MultiCylinder/Configs/Config_bk/
-0_Demo_MultiCylinder/Config_Train/Configs_bk/
-0_Demo_MultiCylinder/Config_Train/Configs_gen_bk/
-0_Demo_MultiCylinder/Config_Train/Configs_inverse_bk/
-1_Demo_ChannelThermal/Configs/Config_bk/
-1_Demo_ChannelThermal/Config_Train/Configs_bk/
-1_Demo_ChannelThermal/Config_Train/Configs_gen_bk/
-1_Demo_ChannelThermal/Config_Train/Configs_inverse_bk/
 
 # Heavy/intermediate artifacts
 *.pt
@@ -86,20 +74,6 @@ HONF_Proj/Case_ThermalChannel/Dataset/links/*
 HONF_Proj/Case_ThermalChannel/artifacts/*
 !HONF_Proj/Case_ThermalChannel/artifacts/README.md
 
-# HONF_Proj generated runs and post-processing; retain only contracts/markers
-HONF_Proj/Trained_Results/**/Run_*/
-HONF_Proj/Trained_Results/**/Eval_*/
-HONF_Proj/Trained_Results/**/CompareModels/
-HONF_Proj/Trained_Results/**/HONF_Forward_Runs/bk/
-
-# HONF hierarchical-inverse runtime artifacts. These directories contain
-# generated HDF5/NPZ datasets, copied forward checkpoints, training checkpoints,
-# per-run configs/metrics, audit reports, plots, and manifests. Keep the inverse
-# source, schemas, request examples, and reusable templates tracked instead.
-HONF_Proj/Trained_Results/ThermalChannel/Inverse_Dataset_Builds/
-HONF_Proj/Trained_Results/ThermalChannel/Inverse_Resources/
-HONF_Proj/Trained_Results/ThermalChannel/HONF_Inverse_Runs/
-
 # One-off inverse smoke/diagnostic launch profiles reference local run IDs and
 # immutable snapshots. Reusable templates and non-diagnostic data configs remain
 # visible to Git.
@@ -117,9 +91,3 @@ Evaluation*/
 Saved_Model_LocalModule/
 cache/
 cache_index.json
-HONF_Proj/diagnostics/**
-!HONF_Proj/diagnostics/README.md
-!HONF_Proj/diagnostics/*.py
-!HONF_Proj/diagnostics/Stage7_K_Scaling_Audit_Evaluation.md
-!HONF_Proj/diagnostics/evidence_manifests/
-!HONF_Proj/diagnostics/evidence_manifests/*.json

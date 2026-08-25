@@ -1,26 +1,25 @@
 # HONF forward model: current mathematics, configuration, and code map
 
-This document describes the maintained HONF forward platform after the Stage-7 scientific and model-enhancement decisions. The current scientific baseline is Run 1401 best-by-field, epoch 4585. It uses fixed six-edge softmax organization, the organizer's raw residual hyperedge state, dense query routing, and context fusion. The fused query-module executor is the promoted behavior-equivalent efficient path. Run 1000 remains the historical golden compatibility reference.
-
-Run 1600's factorized R96 kernel was rejected and stopped at epoch 500 after missing both matched-budget accuracy gates. The subsequent K-scaling audit is complete: Run 1601 is the fused K=6 execution control, Run 1602 completed to epoch 5000 as a non-promoted K=4 research reference, and Run 1603 K=8 was rejected at epoch 500. Run 1401 remains the scientific baseline.
-
-The exchangeable, adaptive, entmax, additive, and gathered mechanisms developed in Stages 1–6 remain loadable research modes. They are not the primary model described below.
+This document describes the maintained HONF forward platform. The recommended
+profile uses fixed six-edge softmax organization, the organizer's raw residual
+hyperedge state, dense query routing, and context fusion. The fused
+query-module executor is the behavior-equivalent efficient path. Exchangeable,
+adaptive, entmax, additive, and gathered mechanisms remain loadable optional
+research and checkpoint-compatibility modes.
 
 ## 1. Which configuration is current?
 
-The profile registry at `src/config_core/forward/profile_registry.json` declares `stage7_structured_context` as `recommended_forward_profile` and gives it `status="current"`. This profile remains the immutable Run-1401 architecture/reference profile; execution promotion is represented by a strict overlay rather than rewriting the base.
+The profile registry at `src/config_core/forward/profile_registry.json` declares `stage7_structured_context` as `recommended_forward_profile` and gives it `status="current"`. Efficient execution is represented by a strict overlay rather than rewriting the compatibility profile.
 
 | Role | Profile | Status |
 |---|---|---|
-| Current scientific profile | `src/config_core/forward/stage7_structured_context.json` | Run 1401 architecture and 5K training policy |
+| Recommended profile | `src/config_core/forward/stage7_structured_context.json` | Fixed K=6 architecture and 5K training policy |
 | Promoted efficient execution | `src/config_core/forward/experiments/stage7_fused_query_module.json` | Exact K=6 fused dense legacy-kernel path; sparse beta-0.98 is evaluation-only |
-| Completed K audit | `src/config_core/forward/experiments/stage7_k4_fused_audit.json`, `stage7_k8_fused_audit.json` | K=4 retained as non-promoted research; K=8 rejected at epoch 500 |
-| Rejected experiment | `src/config_core/forward/experiments/stage7_factorized_gated_r96.json` | Run 1600 stopped at epoch 500; reproducibility only |
-| Historical golden profile | `src/config_core/forward/enhanced_honf_pairwise.json` | Run 1000 compatibility architecture |
-| Stage-1–6 research base | `src/config_core/forward/adaptive_sparse_additive.json` | Compatibility/research only |
+| Compatibility profile | `src/config_core/forward/enhanced_honf_pairwise.json` | Established checkpoint architecture |
+| Optional research base | `src/config_core/forward/adaptive_sparse_additive.json` | Compatibility/research only |
 | ThermalChannel case policy | `Case_ThermalChannel/configs/case_default.json` | Current case, data, Stage-A, loss, and evaluation settings |
 
-The Stage-7 and Run-1000 profiles instantiate the same 237-key model architecture. Their main differences are run identity, training duration, plot/checkpoint cadence, and explicit modern configuration fields. The K=6 fused legacy-kernel overlay adds no parameters and preserves the 237-key checkpoint contract. Stage 7 is a scientific consolidation of the verified structure, not a new model family.
+The recommended and compatibility profiles instantiate the same 237-key model architecture. Their main differences are run identity, training duration, plot/checkpoint cadence, and explicit modern configuration fields. The K=6 fused legacy-kernel overlay adds no parameters and preserves the checkpoint contract.
 
 One operational distinction is important: the profile registry recommends
 `stage7_structured_context`, but the current `train.py` and `evaluate.py` CLI
@@ -32,8 +31,7 @@ python train.py --config src/config_core/forward/stage7_structured_context.json 
 python evaluate.py --config src/config_core/forward/stage7_structured_context.json --checkpoint /path/to/checkpoint.pt
 ```
 
-Replace `1500` with an unused numeric run ID. The profile's recorded ID 1401
-is already occupied by the accepted run, so it is not a reusable launch ID.
+Replace `1500` with an unused numeric run ID.
 
 ## 2. Problem definition and tensor contract
 
@@ -300,9 +298,8 @@ The generic HONF core has no ThermalChannel physics. The
 `ChannelThermalHONFModel` wrapper owns the frozen local disk surrogate and the
 coupled execution order.
 
-The current case configuration loads
-`Trained_Results/ThermalChannel/Local_Module_Runs/thermal_disk/Run_0000_base/best_model.pt`
-strictly and freezes it. The Stage-A surrogate uses seven module parameters,
+The case configuration loads a trusted local Stage-A checkpoint strictly and
+freezes it. The Stage-A surrogate uses seven module parameters,
 five-value angular port tokens
 $[\theta,\cos\theta,\sin\theta,T_{env},h]$, hidden and latent width 128, 16 port
 latents, four attention heads, four cross-attention layers, six coordinate
@@ -361,8 +358,8 @@ The Stage-7 training profile specifies:
 | Milestones | 500, 1000, 2500, 5000, 7500, 10000 |
 
 Milestones above the 5000-epoch budget are inert unless the budget is extended.
-The accepted checkpoint is Run 1401 best-by-field at epoch 4585, not simply the
-latest epoch.
+Checkpoint selection should follow the relevant validation criterion rather
+than automatically using the latest epoch.
 
 The coupled objective is
 
@@ -409,9 +406,9 @@ path:
 | Gathered query-edge/module execution | `decoding/research.py`, `decoding/pairwise.py` | dense |
 | Topology schema v3 export | `src/honf_forward_core/evaluation/topology_signature.py` | optional evaluation feature |
 
-`adaptive_sparse_additive.json` remains the base for Stage-1–6 experimental
-overlays. Those JSON files are frozen evidence; lifecycle/status metadata lives
-in `profile_registry.json` instead of being written into historical configs.
+`adaptive_sparse_additive.json` remains the base for optional research and
+compatibility overlays. Lifecycle/status metadata lives in
+`profile_registry.json` instead of being written into individual configs.
 
 Sparse execution for the accepted context-fusion model is implemented as the
 promoted fused gathered beta-0.98 evaluation/deployment path. It preserves the
@@ -470,17 +467,14 @@ Generated evidence is separate from maintained diagnostic source. Historical
 diagnostic entry points remain as compatibility wrappers, while maintained
 implementations live under `tools/diagnostics/`.
 
-The compatibility contract is executable and stored at:
+The reusable compatibility contract is stored at:
 
 | Evidence | Location |
 |---|---|
-| Checkpoint/hash freeze manifest | `docs/experiments/stage1_7_freeze_manifest.json` |
-| Golden numerical replay | `tests/fixtures/forward_cleanup/golden_replay.json` |
+| Golden numerical replay contract | `tests/fixtures/forward_cleanup/golden_replay.json` |
 | Public schema snapshots | `tests/fixtures/forward_cleanup/public_schemas.json` |
 | Replay command | `tools/diagnostics/replay_forward_golden.py` |
 | Architecture contract | `docs/architecture/` |
 
-Run 1000 best-by-field epoch 9655 and Run 1401 best-by-field epoch 4585 both
-strict-load all 237 state keys, restore their one-group optimizer state, and
-exactly reproduce the frozen case-0653 numerical replay. These two references
-define the maintained historical and current forward contracts.
+Trusted local checkpoints can be replayed against these schemas and fixtures;
+checkpoint binaries and generated replay evidence remain local-only.

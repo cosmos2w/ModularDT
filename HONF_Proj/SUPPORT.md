@@ -1,8 +1,8 @@
 # Support and compatibility
 
 This 0.1.x release supports Python 3.10 or newer, PyTorch CPU execution, and
-CUDA when provided by the installed PyTorch build. The validated environment
-is recorded in `VALIDATION.md` and in every run manifest.
+CUDA when provided by the installed PyTorch build. Each managed run records
+its environment and software inventory in its run manifest.
 
 For a reproducible report, include the command, core/case/overlay configs,
 `run_manifest.json`, `environment/software.json`, checkpoint selector, dataset

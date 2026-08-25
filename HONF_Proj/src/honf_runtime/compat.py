@@ -27,8 +27,8 @@ from .reproducibility import seed_all
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-# Backward-compatible name used by copied workflow code.  It now points to the
-# new project root, not 1_Demo_ChannelThermal.
+# Backward-compatible name used by migrated workflow code. It points to the
+# maintained project root.
 DEMO_ROOT = PROJECT_ROOT
 EPS = 1.0e-6
 

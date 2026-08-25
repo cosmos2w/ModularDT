@@ -24,13 +24,17 @@ from honf_forward_core.evaluation.topology_signature import SCHEMA_VERSION as TO
 from honf_runtime.artifact_layout import EVALUATION_LAYOUT_VERSION  # noqa: E402
 
 
-DEFAULT_MANIFEST = PROJECT_ROOT / "docs" / "experiments" / "stage1_7_freeze_manifest.json"
 DEFAULT_OUTPUT = PROJECT_ROOT / "tests" / "fixtures" / "forward_cleanup" / "public_schemas.json"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        required=True,
+        help="Local checkpoint manifest used to snapshot checkpoint contracts.",
+    )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     return parser.parse_args()
 
