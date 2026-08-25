@@ -37,7 +37,13 @@
         "save_best_field_mse": {"type": "boolean"},
         "save_best_temperature_mse": {"type": "boolean"},
         "save_best_predicted": {"type": "boolean"},
-        "save_latest": {"type": "boolean"}
+        "save_latest": {"type": "boolean"},
+        "save_latest_every_epochs": {"type": "integer", "minimum": 1},
+        "save_epoch_milestones": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 1}
+        }
       }
     },
     "run": {
@@ -99,16 +105,24 @@
         "selection_coverage_rate": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
         "selection_token_threshold": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
         "selection_maximum_redundancy": {"type": "number", "minimum": 0, "maximum": 1},
+        "candidate_module_mass_fraction_floor": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "candidate_environment_mass_fraction_floor": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
         "module_assignment_normalizer": {"enum": ["softmax", "entmax15"]},
         "environment_assignment_normalizer": {"enum": ["softmax", "entmax15"]},
         "query_assignment_normalizer": {"enum": ["softmax", "entmax15"]},
         "entmax_alpha": {"type": "number", "exclusiveMinimum": 1, "maximum": 2},
-        "environment_locality_mode": {"enum": ["none", "compact_kernel"]},
+        "environment_locality_mode": {"enum": ["none", "compact_kernel", "bounded_gaussian", "gaussian_bounded"]},
         "environment_locality_strength": {"type": "number", "minimum": 0},
+        "query_locality_mode": {"enum": ["none", "compact_kernel", "bounded_gaussian", "gaussian_bounded", "inherit_environment"]},
+        "query_locality_strength": {"type": ["number", "null"], "minimum": 0},
+        "locality_radius_cap": {"type": "number", "exclusiveMinimum": 0},
         "minimum_region_scale": {"type": "number", "exclusiveMinimum": 0},
         "mechanism_state_mode": {"enum": ["residual_concat", "descriptor_first"]},
         "mechanism_latent_residual_scale": {"type": "number", "minimum": 0, "maximum": 1},
         "field_assembly_mode": {"enum": ["context_fusion", "edge_additive"]},
+        "additive_background_mode": {"enum": ["dense_query_attention", "global_pooled_attention"]},
+        "additive_edge_gate_init": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "additive_output_init_std": {"type": "number", "exclusiveMinimum": 0},
         "routing_execution": {"enum": ["dense", "gathered"]},
         "query_edge_limit": {"type": "integer", "minimum": 0},
         "query_module_limit": {"type": "integer", "minimum": 0},
@@ -158,6 +172,7 @@
         "device": {"type": ["string", "null"]},
         "epochs": {"type": "integer", "minimum": 1},
         "learning_rate": {"type": "number", "exclusiveMinimum": 0},
+        "organizer_learning_rate": {"type": ["number", "null"], "exclusiveMinimum": 0},
         "weight_decay": {"type": "number", "minimum": 0},
         "amp": {"type": "boolean"},
         "gradient_clip_norm": {"type": ["number", "null"], "exclusiveMinimum": 0},

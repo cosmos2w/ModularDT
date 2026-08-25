@@ -1,0 +1,509 @@
+{
+  "artifacts": {
+    "per_case_csv": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/diagnostics/stage5_pruning_existing_finalists_20cases/retained_mass_pruning_per_case_channel_region.csv"
+  },
+  "checkpoints": {
+    "stage1_1005_best": {
+      "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1005_20260818_114516_stage1_fixed_additive_soft_init/best_by_field_mse_model.pt",
+      "dense_state": {
+        "module_incidence_retained_mass_floor": 0.0,
+        "query_edge_limit": 0,
+        "query_edge_retained_mass_floor": 0.0,
+        "query_module_limit": 0,
+        "routing_execution": "dense"
+      },
+      "epoch": 499,
+      "evaluated_case_count": 20,
+      "field_names": [
+        "u",
+        "v",
+        "p",
+        "omega",
+        "temperature"
+      ],
+      "pruned_state": {
+        "module_incidence_retained_mass_floor": 0.95,
+        "query_edge_limit": 1,
+        "query_edge_retained_mass_floor": 0.98,
+        "query_module_limit": 1,
+        "routing_execution": "gathered"
+      },
+      "query_retained_mass": {
+        "mean": 0.9921825919118419,
+        "min": 0.9800001978874207,
+        "p05": 0.9818563401699066
+      },
+      "routed_module_retained_mass": {
+        "mean": 0.9981916936368729,
+        "min": 0.950045645236969,
+        "p05": 0.9835119247436523
+      },
+      "runtime": {
+        "dense": {
+          "mean_seconds": 0.009050219133496285,
+          "median_seconds": 0.009015395771712065,
+          "peak_allocated_bytes": 434221056,
+          "peak_reserved_bytes": 788529152
+        },
+        "retained_mass_pruned": {
+          "mean_seconds": 0.006600287789478898,
+          "median_seconds": 0.006547864526510239,
+          "peak_allocated_bytes": 262033920,
+          "peak_reserved_bytes": 788529152
+        }
+      },
+      "sha256": "ba262fd2e45a46ddb47ab651bbeeba39ee54027bbb26186232867a5048730e57",
+      "state_dict_key_count": 251,
+      "state_dict_structure_unchanged": true
+    },
+    "stage2_1007_best": {
+      "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1007_20260818_161422_adaptive_sparse_additive/best_by_field_mse_model.pt",
+      "dense_state": {
+        "module_incidence_retained_mass_floor": 0.0,
+        "query_edge_limit": 0,
+        "query_edge_retained_mass_floor": 0.0,
+        "query_module_limit": 0,
+        "routing_execution": "dense"
+      },
+      "epoch": 547,
+      "evaluated_case_count": 20,
+      "field_names": [
+        "u",
+        "v",
+        "p",
+        "omega",
+        "temperature"
+      ],
+      "pruned_state": {
+        "module_incidence_retained_mass_floor": 0.95,
+        "query_edge_limit": 1,
+        "query_edge_retained_mass_floor": 0.98,
+        "query_module_limit": 1,
+        "routing_execution": "gathered"
+      },
+      "query_retained_mass": {
+        "mean": 0.9901106818302651,
+        "min": 0.9800000190734863,
+        "p05": 0.9812831848859787
+      },
+      "routed_module_retained_mass": {
+        "mean": 0.9999999960477489,
+        "min": 0.9999998807907104,
+        "p05": 0.9999999403953552
+      },
+      "runtime": {
+        "dense": {
+          "mean_seconds": 0.009173169871792198,
+          "median_seconds": 0.009132870472967625,
+          "peak_allocated_bytes": 437656576,
+          "peak_reserved_bytes": 790626304
+        },
+        "retained_mass_pruned": {
+          "mean_seconds": 0.006880677025765181,
+          "median_seconds": 0.006815919652581215,
+          "peak_allocated_bytes": 289635328,
+          "peak_reserved_bytes": 790626304
+        }
+      },
+      "sha256": "2e903f4286dcbd7b93685ac057e48c2f4cd12a2f3b629e1bff1f72d340bc9c23",
+      "state_dict_key_count": 261,
+      "state_dict_structure_unchanged": true
+    }
+  },
+  "device": "cuda:0",
+  "generated_at": "2026-08-21 12:21:11 EDT",
+  "promotion_gates": {
+    "aggregate_mse_degradation_max": 0.02,
+    "channel_mse_degradation_max": 0.05,
+    "module_retained_mass_p05_min": 0.95,
+    "query_retained_mass_p05_min": 0.98,
+    "route_reduction_min": 0.2
+  },
+  "split": "test",
+  "summary": {
+    "stage1_1005_best/far_field_fluid/__all__": {
+      "dense_mse_mean": 0.01015931151341647,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.012211946888363594,
+      "pruned_mse_mean": 0.010283376486040652,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/far_field_fluid/omega": {
+      "dense_mse_mean": 0.006900834268890321,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.007707216784587648,
+      "pruned_mse_mean": 0.00695402049459517,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/far_field_fluid/p": {
+      "dense_mse_mean": 0.011182735417969525,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.025039178591697984,
+      "pruned_mse_mean": 0.01146274192724377,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/far_field_fluid/temperature": {
+      "dense_mse_mean": 0.023742975457571446,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.0076171845180816435,
+      "pruned_mse_mean": 0.02392383008264005,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/far_field_fluid/u": {
+      "dense_mse_mean": 0.00567612376762554,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.014490468907430484,
+      "pruned_mse_mean": 0.005758373462595045,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/far_field_fluid/v": {
+      "dense_mse_mean": 0.003293888398911804,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.007294589470448625,
+      "pruned_mse_mean": 0.0033179159625433387,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/fluid/__all__": {
+      "dense_mse_mean": 0.018263044161722065,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.00857092364153207,
+      "pruned_mse_mean": 0.018419575318694113,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/fluid/omega": {
+      "dense_mse_mean": 0.03354186089709401,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": -0.0025166471685175162,
+      "pruned_mse_mean": 0.03345744786784053,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/fluid/p": {
+      "dense_mse_mean": 0.01542975939810276,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.024877444367547265,
+      "pruned_mse_mean": 0.0158136123791337,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/fluid/temperature": {
+      "dense_mse_mean": 0.023994683241471648,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.009720542308434612,
+      "pruned_mse_mean": 0.02422792457509786,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/fluid/u": {
+      "dense_mse_mean": 0.008559242496266961,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.007240520482822764,
+      "pruned_mse_mean": 0.00862121586687863,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/fluid/v": {
+      "dense_mse_mean": 0.00978967286646366,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.019204192134290962,
+      "pruned_mse_mean": 0.009977675625123084,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/near_interface_fluid/__all__": {
+      "dense_mse_mean": 0.12586594223976136,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.0015096066160778362,
+      "pruned_mse_mean": 0.12605595029890537,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/near_interface_fluid/omega": {
+      "dense_mse_mean": 0.45442392230033873,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": -0.0035700732123978007,
+      "pruned_mse_mean": 0.45280159562826156,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/near_interface_fluid/p": {
+      "dense_mse_mean": 0.052976807300001386,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.03633870166269572,
+      "pruned_mse_mean": 0.05490191569551826,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/near_interface_fluid/temperature": {
+      "dense_mse_mean": 0.028857980808243155,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.021609499363615524,
+      "pruned_mse_mean": 0.029481587326154114,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/near_interface_fluid/u": {
+      "dense_mse_mean": 0.03800527914427221,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": -0.021912096083995074,
+      "pruned_mse_mean": 0.03717250381596386,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/near_interface_fluid/v": {
+      "dense_mse_mean": 0.05506573165766895,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.01555294376587916,
+      "pruned_mse_mean": 0.055922165885567664,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/whole/__all__": {
+      "dense_mse_mean": 0.1767173908650875,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.008869618804379432,
+      "pruned_mse_mean": 0.17828480675816535,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/whole/omega": {
+      "dense_mse_mean": 0.5325948610901833,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.00933134769760751,
+      "pruned_mse_mean": 0.5375646889209748,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/whole/p": {
+      "dense_mse_mean": 0.03972099293023348,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": -0.0022143797797347744,
+      "pruned_mse_mean": 0.03963303556665778,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/whole/temperature": {
+      "dense_mse_mean": 0.027243090234696864,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.013749141111342594,
+      "pruned_mse_mean": 0.02761765932664275,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/whole/u": {
+      "dense_mse_mean": 0.025438454048708082,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": -0.010210568191434191,
+      "pruned_mse_mean": 0.025178712978959083,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage1_1005_best/whole/v": {
+      "dense_mse_mean": 0.2585895605385303,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.032184244791666664,
+      "pooled_relative_mse_degradation": 0.010984169432720115,
+      "pruned_mse_mean": 0.2614299520850182,
+      "query_route_reduction_mean": 0.5127176920572916
+    },
+    "stage2_1007_best/far_field_fluid/__all__": {
+      "dense_mse_mean": 0.0028671032749116422,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.007078194528444647,
+      "pruned_mse_mean": 0.0028873971896246076,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/far_field_fluid/omega": {
+      "dense_mse_mean": 0.001947050157468766,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.007750681037499776,
+      "pruned_mse_mean": 0.00196214112220332,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/far_field_fluid/p": {
+      "dense_mse_mean": 0.0023752743523800745,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.018066753468729636,
+      "pruned_mse_mean": 0.0024181878485251217,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/far_field_fluid/temperature": {
+      "dense_mse_mean": 0.007630812108982354,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.004275360708010805,
+      "pruned_mse_mean": 0.0076634365832433105,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/far_field_fluid/u": {
+      "dense_mse_mean": 0.0014344702096423135,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.00459365571891454,
+      "pruned_mse_mean": 0.0014410596719244494,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/far_field_fluid/v": {
+      "dense_mse_mean": 0.0009479098138399422,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.0044844764987114405,
+      "pruned_mse_mean": 0.0009521606931230054,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/fluid/__all__": {
+      "dense_mse_mean": 0.00621411669999361,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.002457710970800817,
+      "pruned_mse_mean": 0.006229389202781021,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/fluid/omega": {
+      "dense_mse_mean": 0.01294902889057994,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.0002491528662299365,
+      "pruned_mse_mean": 0.012952255178242921,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/fluid/p": {
+      "dense_mse_mean": 0.0040841846028342845,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.006592808493200313,
+      "pruned_mse_mean": 0.004111110849771648,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/fluid/temperature": {
+      "dense_mse_mean": 0.008362320926971733,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.010448772083916529,
+      "pruned_mse_mean": 0.008449696912430226,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/fluid/u": {
+      "dense_mse_mean": 0.0023278803913854063,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.004369914628828393,
+      "pruned_mse_mean": 0.002338053029961884,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/fluid/v": {
+      "dense_mse_mean": 0.0033471693575847896,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": -0.015338022530379457,
+      "pruned_mse_mean": 0.0032958303985651583,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/near_interface_fluid/__all__": {
+      "dense_mse_mean": 0.050261277984827754,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": -0.004474090706099612,
+      "pruned_mse_mean": 0.05003640446811915,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/near_interface_fluid/omega": {
+      "dense_mse_mean": 0.1837492872029543,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 8.183100713235838e-05,
+      "pruned_mse_mean": 0.18376432359218597,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/near_interface_fluid/p": {
+      "dense_mse_mean": 0.02254724260419607,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": -0.0200519870423019,
+      "pruned_mse_mean": 0.022095125587657093,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/near_interface_fluid/temperature": {
+      "dense_mse_mean": 0.012133822240866721,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.023691517466438817,
+      "pruned_mse_mean": 0.012421290902420879,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/near_interface_fluid/u": {
+      "dense_mse_mean": 0.01094311410561204,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": -0.007930893283418096,
+      "pruned_mse_mean": 0.010856325435452164,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/near_interface_fluid/v": {
+      "dense_mse_mean": 0.021932927961461245,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": -0.04048583950063834,
+      "pruned_mse_mean": 0.021044954960234463,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/whole/__all__": {
+      "dense_mse_mean": 0.1289575632661581,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.003779629165591208,
+      "pruned_mse_mean": 0.12944497503340244,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/whole/omega": {
+      "dense_mse_mean": 0.3626124389469624,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.0026976915952836252,
+      "pruned_mse_mean": 0.3635906554758549,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/whole/p": {
+      "dense_mse_mean": 0.02347117578610778,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": -0.00912777971031979,
+      "pruned_mse_mean": 0.023256936063989996,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/whole/temperature": {
+      "dense_mse_mean": 0.009313159412704409,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.007550583779032854,
+      "pruned_mse_mean": 0.009383479203097522,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/whole/u": {
+      "dense_mse_mean": 0.01804601140320301,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": -0.009628135816244875,
+      "pruned_mse_mean": 0.017872261954471468,
+      "query_route_reduction_mean": 0.39665425618489586
+    },
+    "stage2_1007_best/whole/v": {
+      "dense_mse_mean": 0.23134503439068793,
+      "max_no_prune_output_difference": 2.86102294921875e-06,
+      "module_route_reduction_mean": 0.0,
+      "pooled_relative_mse_degradation": 0.007679016262900614,
+      "pruned_mse_mean": 0.23312153667211533,
+      "query_route_reduction_mean": 0.39665425618489586
+    }
+  }
+}

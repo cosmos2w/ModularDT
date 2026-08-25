@@ -5,7 +5,7 @@ import torch
 
 from honf_forward_core.config import BatchData, UnifiedForwardConfig
 from honf_forward_core.model import HONFNeuralField
-from honf_forward_core.routing import entmax15, normalize_assignment
+from honf_forward_core.routing import entmax15, locality_bias, normalize_assignment
 
 
 def test_entmax15_has_exact_zeros_nonnegative_unit_mass() -> None:
@@ -28,6 +28,54 @@ def test_entmax15_masking_and_empty_rows_are_exact() -> None:
     assert torch.count_nonzero(probabilities[1]) == 0
 
 
+def test_bounded_gaussian_locality_is_finite_smooth_inside_cap_and_bounded() -> None:
+    radius_square = torch.tensor([0.0, 0.25, 1.0, 4.0, 9.0, 16.0], requires_grad=True)
+    bias = locality_bias(
+        radius_square,
+        mode="bounded_gaussian",
+        strength=1.0,
+        radius_cap=3.0,
+    )
+
+    torch.testing.assert_close(
+        bias,
+        torch.tensor([0.0, -0.125, -0.5, -2.0, -4.5, -4.5]),
+        rtol=0.0,
+        atol=0.0,
+    )
+    assert torch.isfinite(bias).all()
+    assert torch.all(torch.exp(bias) > 0)
+    bias[:4].sum().backward()
+    torch.testing.assert_close(radius_square.grad[:4], torch.full((4,), -0.5))
+
+
+def test_compact_locality_formula_remains_available() -> None:
+    radius_square = torch.tensor([0.0, 0.25, 1.0, 4.0])
+    expected = torch.log(torch.relu(1.0 - radius_square).square() + 1.0e-6)
+
+    actual = locality_bias(
+        radius_square,
+        mode="compact_kernel",
+        strength=1.0,
+        radius_cap=3.0,
+    )
+
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_bounded_gaussian_does_not_preempt_entmax_at_unit_radius() -> None:
+    radius_square = torch.tensor([[0.0, 1.21]])
+    gaussian_routes = entmax15(
+        locality_bias(radius_square, mode="bounded_gaussian", strength=1.0, radius_cap=3.0)
+    )
+    compact_routes = entmax15(
+        locality_bias(radius_square, mode="compact_kernel", strength=1.0, radius_cap=3.0)
+    )
+
+    assert gaussian_routes[0, 1] > 0
+    assert compact_routes[0, 1] == 0
+
+
 @pytest.mark.parametrize("mode", ["softmax", "entmax15"])
 def test_assignment_normalizers_have_finite_gradients(mode: str) -> None:
     logits = torch.tensor([[1.7, 0.9, -0.2, -1.5]], requires_grad=True)
@@ -48,7 +96,7 @@ def test_entmax15_cpu_and_cuda_match() -> None:
     torch.testing.assert_close(cpu, cuda, rtol=1.0e-6, atol=1.0e-6)
 
 
-def _config(*, periodic: bool = False) -> UnifiedForwardConfig:
+def _config(*, periodic: bool = False, locality_mode: str = "bounded_gaussian") -> UnifiedForwardConfig:
     return UnifiedForwardConfig(
         field_dim=2,
         domain_length_x=6.0,
@@ -67,8 +115,9 @@ def _config(*, periodic: bool = False) -> UnifiedForwardConfig:
         environment_assignment_normalizer="entmax15",
         query_assignment_normalizer="entmax15",
         entmax_alpha=1.5,
-        environment_locality_mode="compact_kernel",
+        environment_locality_mode=locality_mode,
         environment_locality_strength=1.0,
+        locality_radius_cap=3.0,
         minimum_region_scale=0.08,
         hidden_dim=20,
         dropout=0.0,
@@ -117,8 +166,8 @@ def test_entmax_model_routes_are_sparse_normalized_and_finite() -> None:
     )
     assert torch.count_nonzero(output["candidate_A_mh"] == 0) > 0
     assert torch.count_nonzero(output["candidate_A_eh"] == 0) > 0
-    assert output["candidate_module_assignment_nonzero_fraction"].max() < 1.0
-    assert output["candidate_environment_assignment_nonzero_fraction"].max() < 1.0
+    assert output["candidate_module_nonzero_fraction"].max() < 1.0
+    assert output["candidate_environment_nonzero_fraction"].max() < 1.0
     assert output["query_assignment_nonzero_fraction"] < 1.0
     assert output["routing_execution"] == "dense"
     assert torch.isfinite(output["pred_field"]).all()

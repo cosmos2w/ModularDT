@@ -7,7 +7,14 @@ import torch.nn as nn
 
 from honf_forward_core.config import BatchData, UnifiedForwardConfig
 from honf_forward_core.model import HONFNeuralField
-from honf_forward_core.organizer import deterministic_slot_codes
+from honf_forward_core.organizer import (
+    _stabilize_all_edge_softmax_assignment,
+    deterministic_slot_codes,
+)
+from honf_forward_core.training.diagnostics import (
+    compute_code_permutation_equivariance_diagnostics,
+    compute_honf_diagnostics,
+)
 
 
 def _config(*, capacity: int = 6, initial: int = 4, minimum: int = 1) -> UnifiedForwardConfig:
@@ -135,6 +142,14 @@ def test_candidate_code_permutation_is_equivariant_and_field_invariant() -> None
         rtol=1.0e-6,
         atol=1.0e-6,
     )
+    equivariance = compute_code_permutation_equivariance_diagnostics(
+        {**reference, **reference_field},
+        {**candidate, **candidate_field},
+        permutation,
+    )
+    assert equivariance["code_permutation_equivariance_max_error"] < 1.0e-5
+    assert "code_permutation_candidate_source_scale_max_error" in equivariance
+    assert "code_permutation_pred_field_max_error" in equivariance
 
 
 def test_module_permutation_and_padding_width_preserve_field() -> None:
@@ -164,18 +179,93 @@ def test_capacity_changes_runtime_shapes_not_parameter_shapes() -> None:
         model.set_edge_capacity(6)
         output_6 = model(batch)
         parameter_shapes_6 = {name: tuple(value.shape) for name, value in model.state_dict().items()}
-        model.set_edge_capacity(10)
-        output_10 = model(batch)
-        parameter_shapes_10 = {name: tuple(value.shape) for name, value in model.state_dict().items()}
+        model.set_edge_capacity(8)
+        output_8 = model(batch)
+        parameter_shapes_8 = {name: tuple(value.shape) for name, value in model.state_dict().items()}
 
     assert output_6["candidate_A_mh"].shape[-1] == 6
-    assert output_10["candidate_A_mh"].shape[-1] == 10
-    assert parameter_shapes_6 == parameter_shapes_10
+    assert output_8["candidate_A_mh"].shape[-1] == 8
+    assert parameter_shapes_6 == parameter_shapes_8
 
-    other = _model(_config(capacity=10)).eval()
+    other = _model(_config(capacity=8)).eval()
     with torch.no_grad():
         other(batch)
-    assert {name: tuple(value.shape) for name, value in other.state_dict().items()} == parameter_shapes_10
+    assert {name: tuple(value.shape) for name, value in other.state_dict().items()} == parameter_shapes_8
+
+
+def test_stage2_soft_bridge_selects_all_six_candidates_and_exports_candidate_diagnostics() -> None:
+    payload = _config(capacity=6, initial=6).to_dict()
+    payload.update(
+        edge_selection_mode="all",
+        module_assignment_normalizer="softmax",
+        environment_assignment_normalizer="softmax",
+        query_assignment_normalizer="softmax",
+        environment_locality_mode="none",
+        routing_execution="dense",
+        query_edge_limit=0,
+        query_module_limit=0,
+    )
+    model = _model(UnifiedForwardConfig.from_dict(payload)).eval()
+    with torch.no_grad():
+        output = model(_batch(), return_edge_fields=True)
+
+    assert torch.equal(output["selected_edge_count"], torch.full((2,), 6.0))
+    assert torch.equal(output["viable_selected_edge_count"], torch.full((2,), 6.0))
+    assert torch.equal(output["edge_active_mask"], torch.ones_like(output["edge_active_mask"]))
+    assert torch.equal(output["edge_viable_mask"], torch.ones_like(output["edge_viable_mask"]))
+    assert torch.all(
+        output["candidate_module_mass_fraction"]
+        > payload["candidate_module_mass_fraction_floor"]
+    )
+    assert torch.all(
+        output["candidate_environment_mass_fraction"]
+        > payload["candidate_environment_mass_fraction_floor"]
+    )
+    assert output["candidate_module_mass_fraction"].shape == (2, 6)
+    assert output["candidate_environment_mass_fraction"].shape == (2, 6)
+    assert output["candidate_module_purity"].shape == (2, 6)
+    assert output["candidate_environment_purity"].shape == (2, 6)
+    assert output["candidate_source_scale"].shape == (2, 6, 2)
+    assert output["candidate_region_scale"].shape == (2, 6, 2)
+
+    diagnostics = compute_honf_diagnostics(
+        {"pred_field": output["pred_field"], "organizer_aux": output, "routing_aux": output}
+    )
+    required = {
+        "candidate_module_mass_fraction_min",
+        "candidate_environment_mass_fraction_min",
+        "candidate_module_purity_mean",
+        "candidate_environment_purity_mean",
+        "candidate_source_scale_mean",
+        "candidate_region_scale_mean",
+        "edge_contribution_fraction_min",
+        "edge_contribution_fraction_max",
+    }
+    assert required <= diagnostics.keys()
+    assert all(torch.isfinite(torch.tensor(diagnostics[key])) for key in required)
+
+
+def test_all_edge_softmax_floor_prevents_adversarial_slot_starvation() -> None:
+    assignment = torch.zeros(2, 5, 6)
+    assignment[..., 0] = 1.0
+    token_mask = torch.tensor(
+        [[1.0, 1.0, 1.0, 0.0, 0.0], [1.0, 1.0, 1.0, 1.0, 0.0]]
+    ).unsqueeze(-1)
+
+    stabilized = _stabilize_all_edge_softmax_assignment(
+        assignment,
+        mass_fraction_floor=0.01,
+        token_mask=token_mask,
+    )
+    active = token_mask.squeeze(-1) > 0
+    torch.testing.assert_close(
+        stabilized.sum(dim=-1)[active],
+        torch.ones_like(stabilized.sum(dim=-1)[active]),
+    )
+    assert torch.count_nonzero(stabilized[~active]) == 0
+    mass_fraction = stabilized.sum(dim=1)
+    mass_fraction = mass_fraction / mass_fraction.sum(dim=-1, keepdim=True)
+    assert torch.all(mass_fraction > 0.01)
 
 
 def test_selection_bounds_mass_and_inactive_edges() -> None:
@@ -201,12 +291,271 @@ def test_selection_bounds_mass_and_inactive_edges() -> None:
     assert torch.any(output["candidate_A_eh"].std(dim=-1) > 0)
 
 
-def test_training_warmup_uses_initial_active_count() -> None:
+def test_training_warmup_uses_all_viable_candidates() -> None:
     model = _model().train()
     model.set_training_progress(epoch=0, total_epochs=10)
     output = model(_batch())
 
-    torch.testing.assert_close(output["active_edge_count"], torch.full((2,), 4.0))
+    torch.testing.assert_close(output["selected_edge_count"], output["edge_viable_mask"].sum(dim=-1))
+    torch.testing.assert_close(output["selected_edge_count"], torch.full((2,), 6.0))
+
+
+def test_validation_uses_the_same_epoch_warmup_selection_as_training() -> None:
+    model = _model()
+    model.set_training_progress(epoch=0, total_epochs=10)
+    batch = _batch()
+
+    model.train()
+    with torch.no_grad():
+        training_output = model(batch)
+    model.eval()
+    with torch.no_grad():
+        validation_output = model(batch)
+
+    torch.testing.assert_close(training_output["edge_active_mask"], validation_output["edge_active_mask"])
+    torch.testing.assert_close(validation_output["selected_edge_count"], torch.full((2,), 6.0))
+
+
+def test_selection_progress_survives_strict_state_dict_round_trip() -> None:
+    source = _model().eval()
+    source.set_training_progress(epoch=0, total_epochs=10)
+    batch = _batch()
+    with torch.no_grad():
+        expected = source(batch)["edge_active_mask"]
+    state = copy.deepcopy(source.state_dict())
+
+    restored = _model().eval()
+    with torch.no_grad():
+        restored(batch)
+    restored.load_state_dict(state, strict=True)
+    with torch.no_grad():
+        actual = restored(batch)["edge_active_mask"]
+
+    assert restored.selection_state() == {"epoch": 0, "total_epochs": 10}
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+
+def test_nonviable_candidates_are_zero_everywhere_and_cannot_generate_fields(monkeypatch) -> None:
+    config = _config()
+    config.edge_selection_mode = "all"
+    model = _model(config).eval()
+    batch = _batch()
+    organizer = model.organizer.exchangeable
+
+    def fixed_assignments(
+        module_tokens: torch.Tensor,
+        env_tokens: torch.Tensor,
+        slots: torch.Tensor,
+        module_centers: torch.Tensor,
+        env_coords: torch.Tensor,
+        module_present: torch.Tensor,
+        cfg: UnifiedForwardConfig,
+        **_kwargs: object,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        module_row = module_tokens.new_tensor([0.70, 0.29998, 0.0, 0.0, 1.0e-5, 1.0e-5])
+        env_row = env_tokens.new_tensor([0.30, 0.69998, 0.0, 0.0, 1.0e-5, 1.0e-5])
+        A_mh = module_row.view(1, 1, -1).expand(module_tokens.shape[0], module_tokens.shape[1], -1)
+        A_mh = A_mh * module_present.unsqueeze(-1)
+        A_eh = env_row.view(1, 1, -1).expand(env_tokens.shape[0], env_tokens.shape[1], -1)
+        coords = env_coords.new_zeros(env_coords.shape[0], slots.shape[1], 2)
+        scale = env_coords.new_ones(env_coords.shape[0], slots.shape[1], 2)
+        return A_mh, A_eh, coords, scale
+
+    monkeypatch.setattr(organizer, "_candidate_assignments", fixed_assignments)
+    with torch.no_grad():
+        encoded = model.encode_and_organize(batch)
+        decoded = model.decode_queries(
+            batch.query_xy,
+            None,
+            encoded,
+            encoded["global_token"],
+            return_routing_maps=True,
+            return_edge_fields=True,
+        )
+
+    nonviable = encoded["edge_viable_mask"] == 0
+    assert torch.count_nonzero(encoded["edge_active_mask"][nonviable]) == 0
+    assert torch.count_nonzero(encoded["A_mh"].transpose(1, 2)[nonviable]) == 0
+    assert torch.count_nonzero(encoded["A_eh"].transpose(1, 2)[nonviable]) == 0
+    assert torch.count_nonzero(encoded["hyper_state"][nonviable]) == 0
+    assert torch.count_nonzero(decoded["query_hyper_attention"].transpose(1, 2)[nonviable]) == 0
+    assert torch.count_nonzero(decoded["pred_field_by_edge"].transpose(1, 2)[nonviable]) == 0
+
+
+def test_novelty_and_quality_never_promote_a_nonviable_candidate() -> None:
+    model = _model().eval()
+    organizer = model.organizer.exchangeable
+    organizer.set_training_progress(epoch=10, total_epochs=10)
+    module_assignment = torch.tensor([[[0.6, 0.4, 0.0], [0.5, 0.5, 0.0]]])
+    env_assignment = torch.tensor([[[0.5, 0.5, 0.0], [0.6, 0.4, 0.0]]])
+    quality = torch.tensor([[0.8, 0.7, 100.0]])
+    codes = torch.zeros(1, 3, 24)
+    viable = torch.tensor([[True, True, False]])
+
+    selected = organizer._select_active_edges(
+        module_assignment,
+        env_assignment,
+        quality,
+        codes,
+        torch.ones(1, 2),
+        viable,
+        model.config,
+    )
+
+    assert selected[0, 2] == 0
+
+
+def test_cpu_greedy_selector_matches_previous_algorithm_exactly() -> None:
+    model = _model().eval()
+    organizer = model.organizer.exchangeable
+    organizer.set_training_progress(epoch=10, total_epochs=10)
+    generator = torch.Generator().manual_seed(419)
+    module_assignment = torch.softmax(torch.randn(2, 5, 6, generator=generator), dim=-1)
+    env_assignment = torch.softmax(torch.randn(2, 7, 6, generator=generator), dim=-1)
+    quality = torch.randn(2, 6, generator=generator)
+    codes = torch.randn(2, 6, 24, generator=generator)
+    module_present = torch.tensor(
+        [[1.0, 1.0, 1.0, 1.0, 0.0], [1.0, 1.0, 1.0, 0.0, 0.0]]
+    )
+    viable = torch.tensor(
+        [[True, True, False, True, True, True], [True, False, True, True, True, True]]
+    )
+
+    tie_weights = torch.linspace(0.5, 1.5, codes.shape[-1], dtype=codes.dtype)
+    tie_scores = torch.einsum("bkh,h->bk", codes, tie_weights)
+    reference = torch.zeros_like(quality)
+    with torch.no_grad():
+        for batch_index in range(quality.shape[0]):
+            eligible = torch.nonzero(viable[batch_index], as_tuple=False).squeeze(-1).tolist()
+            order = sorted(
+                eligible,
+                key=lambda index: (
+                    float(quality[batch_index, index]),
+                    float(tie_scores[batch_index, index]),
+                ),
+                reverse=True,
+            )
+            selected = organizer._coverage_selection(
+                module_assignment[batch_index],
+                env_assignment[batch_index],
+                module_present[batch_index],
+                order,
+                model.config,
+            )
+            reference[batch_index, selected] = 1.0
+
+    actual = organizer._select_active_edges(
+        module_assignment,
+        env_assignment,
+        quality,
+        codes,
+        module_present,
+        viable,
+        model.config,
+    )
+    torch.testing.assert_close(actual, reference, rtol=0.0, atol=0.0)
+
+
+def test_zero_selected_entmax_support_uses_detached_unit_mass_fallback() -> None:
+    assignment = torch.tensor(
+        [[[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]]]
+    )
+    selected_mask = torch.tensor([[0.0, 0.0, 0.0, 1.0]])
+    module_selected, module_mass = _model().organizer.exchangeable._mask_and_renormalize(
+        assignment,
+        selected_mask,
+        torch.tensor([[1.0, 1.0, 0.0]]),
+    )
+    env_selected, env_mass = _model().organizer.exchangeable._mask_and_renormalize(
+        assignment,
+        selected_mask,
+        None,
+    )
+
+    torch.testing.assert_close(module_selected.sum(dim=-1)[0, :2], torch.ones(2))
+    assert module_selected.sum(dim=-1)[0, 2] == 0
+    torch.testing.assert_close(env_selected.sum(dim=-1), torch.ones(1, 3))
+    assert torch.equal(module_mass, torch.zeros_like(module_mass))
+    assert torch.equal(env_mass, torch.zeros_like(env_mass))
+    active_modules = torch.tensor([[True, True, False]])
+    post_module_zero_rows = (
+        active_modules & (module_selected.sum(dim=-1) <= 1.0e-8)
+    ).sum(dim=-1)
+    post_environment_zero_rows = (env_selected.sum(dim=-1) <= 1.0e-8).sum(dim=-1)
+    assert post_module_zero_rows.item() == 0
+    assert post_environment_zero_rows.item() == 0
+
+
+def test_selected_mass_diagnostics_are_finite() -> None:
+    model = _model().eval()
+    with torch.no_grad():
+        output = model(_batch())
+    diagnostics = compute_honf_diagnostics(
+        {
+            "pred_field": output["pred_field"],
+            "organizer_aux": output,
+            "routing_aux": output,
+        }
+    )
+
+    mass_keys = [key for key in diagnostics if "mass_" in key]
+    assert mass_keys
+    assert all(torch.isfinite(torch.tensor(diagnostics[key])) for key in mass_keys)
+    for key in (
+        "pre_fallback_zero_support_module_rows",
+        "post_fallback_zero_support_module_rows",
+        "pre_fallback_zero_support_environment_rows",
+        "post_fallback_zero_support_environment_rows",
+    ):
+        assert key in diagnostics
+        assert torch.isfinite(torch.tensor(diagnostics[key]))
+
+
+def test_edge_count_diagnostics_have_distinct_unambiguous_semantics() -> None:
+    pred = torch.zeros(1, 2, 3)
+    strength = torch.tensor([[0.20, 0.01, 0.01, 0.01]])
+    shared = {
+        "pred_field": pred,
+        "organizer_aux": {
+            "hyper_strength": strength,
+            "candidate_edge_count": torch.tensor([4.0]),
+            "edge_active_mask": torch.tensor([[1.0, 1.0, 1.0, 0.0]]),
+            "effective_edge_mask": torch.tensor([[1.0, 1.0, 0.0, 0.0]]),
+            "empty_selected_edge_count": torch.tensor([1.0]),
+        },
+        "routing_aux": {"effective_query_edge_count": torch.tensor(1.5)},
+    }
+
+    diagnostics = compute_honf_diagnostics(shared)
+
+    assert diagnostics["candidate_edge_count"] == 4.0
+    assert diagnostics["selected_edge_count"] == 3.0
+    assert diagnostics["viable_selected_edge_count"] == 2.0
+    assert diagnostics["functional_edge_count"] == 1.0
+    assert diagnostics["empty_selected_edge_count"] == 1.0
+    assert diagnostics["effective_query_edge_count"] == 1.5
+
+
+def test_inactive_edges_contribute_zero_to_soft_functional_count() -> None:
+    pred = torch.zeros(1, 2, 3)
+    strength = torch.tensor([[0.20, 0.0, 0.0, 0.0]])
+    effective = torch.tensor([[1.0, 0.0, 0.0, 0.0]])
+    diagnostics = compute_honf_diagnostics(
+        {
+            "pred_field": pred,
+            "organizer_aux": {
+                "hyper_strength": strength,
+                "edge_active_mask": effective,
+                "effective_edge_mask": effective,
+            },
+            "routing_aux": {},
+        },
+        edge_strength_threshold=0.05,
+        edge_strength_temperature=0.02,
+    )
+
+    expected = torch.sigmoid(torch.tensor((0.20 - 0.05) / 0.02)).item()
+    assert abs(diagnostics["soft_functional_edge_count"] - expected) < 1.0e-7
 
 
 def test_single_candidate_and_inactive_padding_have_finite_backward() -> None:

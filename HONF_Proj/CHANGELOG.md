@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Canonical run artifact layout
+
+- Managed forward and local training now write plots directly to
+  `plots/training/` and `plots/diagnostics/`, eliminating the mirrored legacy
+  `diagnostic_plots/` tree for new runs.
+- Single-case evaluations now live under `evaluations/single_case/` and group
+  field, organization, routing, topology, plan, metric, array, and diagnostic
+  artifacts into named subdirectories.
+- Removed byte-identical organizer figure aliases and the redundant compact
+  summary. Evaluation schema-v2 manifests inventory the exact categorized job
+  and attach that directory directly to the source run without an mtime scan.
+- Historical run layouts and root checkpoint selectors remain readable; no
+  existing run is moved or deleted.
+
 ### Hierarchical inverse generator and evaluation workflow
 
 - Audited the initial inverse release surface, reorganized the root README as a

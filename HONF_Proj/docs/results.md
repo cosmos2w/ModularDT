@@ -15,13 +15,37 @@ The manifest also records the final completed epoch and workflow-owned
 `best_*` summary metrics. New manifests also carry the human-readable run name
 and explicit UTC start, update, and end timestamps.
 
-Case workflows retain their checkpoint-compatible root filenames. On
-completion, the runtime hard-links (or copies when linking is unavailable)
-those artifacts into canonical `checkpoints/`, `metrics/`, and `plots/`
-subtrees, so legacy evaluators and release tooling can coexist. Evaluation creates a
-timestamped `eval_global/` or `eval_local/` child and records its absolute path
-in the run manifest. Comparison outputs are explicit user-selected artifacts
-because they can draw from several source runs.
+Case workflows retain checkpoint-compatible root filenames. On completion, the
+runtime hard-links (or copies when linking is unavailable) checkpoint and metric
+artifacts into canonical `checkpoints/` and `metrics/` subtrees, so historical
+commands remain valid. Managed training writes plots directly to
+`plots/training/` and `plots/diagnostics/`; it does not create a second
+`diagnostic_plots/` tree or mirror root PNGs.
+
+Single-case evaluation writes one timestamped job under
+`evaluations/single_case/` and records that exact directory in the run manifest:
+
+```text
+evaluations/single_case/<case>_<timestamp>/
+├── summary.json
+├── evaluation_manifest.json
+├── fields/
+├── organization/
+├── routing/
+├── topology/
+├── plans/
+├── metrics/
+├── arrays/
+└── diagnostics/
+```
+
+Only categories requested by the evaluation are created. Each figure has one
+canonical filename; legacy aliases such as `organizer_visualization.png` and
+`organization_matrices.png` are not copied. The manifest inventories every
+artifact with its category. Historical `eval_global/`, `eval_local/`,
+`diagnostic_plots/`, and root-level plot trees remain readable and are not
+automatically moved or deleted. Comparison outputs remain explicit
+user-selected artifacts because they can draw from several source runs.
 
 Single-run evaluation validates the source manifest and loads that run's
 immutable `configs/resolved_config.json` before applying dataset selection or

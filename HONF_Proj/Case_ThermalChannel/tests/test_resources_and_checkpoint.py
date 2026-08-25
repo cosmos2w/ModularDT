@@ -22,8 +22,25 @@ from honf_runtime.registry import load_object
 from channelthermal.local_surrogate.spec import THERMAL_DISK_SPEC
 from channelthermal.workflows.train_local import save_checkpoint
 from channelthermal.workflows.evaluate_forward import latest_run_dir, resolve_checkpoint_arg
+from channelthermal.workflows import evaluate_forward
+from channelthermal.config import ChannelThermalHONFConfig
+from channelthermal.model import ChannelThermalHONFModel
 from channelthermal.environment import ChannelThermalEnvironmentBuilder
 from honf_forward_core.decoder import rectangular_boundary_features
+from honf_forward_core.config import UnifiedForwardConfig
+
+
+def test_routed_module_retention_aggregation_is_pair_weighted_across_chunks() -> None:
+    chunks = [np.asarray([1.0]), np.asarray([0.5, 0.75, 1.0])]
+
+    diagnostics = evaluate_forward.aggregate_routed_module_retention(chunks)
+
+    assert diagnostics["routed_query_edge_pair_count"] == 4.0
+    assert diagnostics["routed_module_retained_mass_mean"] == pytest.approx(0.8125)
+    assert diagnostics["routed_module_retained_mass_min"] == pytest.approx(0.5)
+    assert diagnostics["routed_module_retained_mass_p05"] == pytest.approx(
+        np.quantile(np.asarray([1.0, 0.5, 0.75, 1.0]), 0.05)
+    )
 
 
 def test_named_datasets_match_manifest_contract() -> None:
@@ -109,6 +126,44 @@ def test_current_local_checkpoint_contains_resume_state(tmp_path, monkeypatch) -
     assert checkpoint["optimizer_state_dict"] is not None
     assert checkpoint["epoch"] == 3
     assert set(checkpoint["rng_state"]) == {"python", "numpy", "torch", "cuda"}
+
+
+def test_forward_evaluation_loader_restores_explicit_selection_state(monkeypatch) -> None:
+    core = UnifiedForwardConfig(
+        field_dim=5,
+        num_env_tokens_x=3,
+        num_env_tokens_y=2,
+        organizer_mode="exchangeable_slots",
+        edge_capacity=4,
+        initial_active_edges=3,
+        minimum_active_edges=1,
+        selection_warmup_epochs=5,
+        hidden_dim=16,
+        dropout=0.0,
+        decoder_mode="enhanced_honf_pairwise",
+        pairwise_kernel_hidden_dim=16,
+        mechanism_state_mode="descriptor_first",
+        field_assembly_mode="edge_additive",
+    )
+    config = ChannelThermalHONFConfig(core_honf=core)
+    source = ChannelThermalHONFModel(config, attach_local_from_checkpoint=False)
+    source.set_training_progress(epoch=2, total_epochs=10)
+    checkpoint = {
+        "checkpoint_schema_version": 1,
+        "case_id": "ThermalChannel",
+        "model_family": "honf_forward",
+        "workflow": "forward",
+        "model_config": config.to_dict(),
+        "model_state_dict": source.state_dict(),
+        "selection_state": {"epoch": 2, "total_epochs": 10},
+        "train_config": {"training": {"epochs": 10}},
+    }
+    monkeypatch.setattr(evaluate_forward, "load_trusted_checkpoint", lambda *_args, **_kwargs: checkpoint)
+
+    restored, _ = evaluate_forward.load_model(Path("unused.pt"), torch.device("cpu"))
+
+    assert restored.selection_state() == {"epoch": 2, "total_epochs": 10}
+    assert not restored.training
 
 
 def test_evaluation_manifest_inventories_artifacts(tmp_path) -> None:

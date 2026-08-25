@@ -14,9 +14,8 @@ import hashlib
 import json
 import os
 import re
-import shutil
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib-channelthermal-honf_cl")
 
@@ -47,6 +46,12 @@ from honf_forward_core.evaluation.topology_signature import (
 )
 from honf_runtime.compat import current_timestamp, load_trusted_checkpoint, recursive_to_device, resolve_demo_path, select_device, strip_module_prefix, write_json
 from honf_runtime.checkpoints import validate_checkpoint_identity
+from honf_runtime.artifact_layout import (
+    EVALUATION_LAYOUT_VERSION,
+    EvaluationArtifactLayout,
+    default_evaluation_root,
+    finalize_evaluation_job,
+)
 from channelthermal.evaluation_tools.organizer_visualization import (
     render_channelthermal_organization_overview,
     render_channelthermal_organization_schematic_presentation,
@@ -59,6 +64,57 @@ from channelthermal.evaluation_tools.topology_signature_visualization import (
 from channelthermal.config import ChannelThermalHONFConfig
 from channelthermal.model import ChannelThermalHONFModel
 from channelthermal.local_surrogate.model import LocalModuleConfig, LocalModuleSurrogate
+from channelthermal.evaluation import loading as _evaluation_loading
+from channelthermal.evaluation import results as _evaluation_results
+from channelthermal.evaluation.loading import (
+    apply_frozen_forward_overrides,
+    checkpoint_file_name,
+    latest_run_dir,
+    load_model,
+    make_batch,
+    normalize_run_id,
+    numpy_to_batched_tensor,
+    resolve_checkpoint_arg,
+)
+from channelthermal.evaluation.prepared import (
+    aggregate_routed_module_retention,
+    predict_case,
+    select_sample,
+)
+from channelthermal.evaluation.results import (
+    denormalize_predictions,
+    evaluation_output_dir,
+    extract_organization_arrays,
+    file_sha256,
+    hypergraph_diagnostics,
+    safe_path_name,
+    summarize,
+)
+
+
+def load_model(
+    checkpoint_path: Path,
+    device: torch.device,
+) -> tuple[ChannelThermalHONFModel, Dict[str, Any]]:
+    """Preserve the workflow-level trusted-loader injection contract."""
+
+    _evaluation_loading.load_trusted_checkpoint = load_trusted_checkpoint
+    return _evaluation_loading.load_model(checkpoint_path, device)
+
+
+def evaluation_output_dir(
+    base_dir_arg: str | None,
+    checkpoint_path: Path,
+    case_id: object,
+) -> Path:
+    """Preserve the workflow-level timestamp injection contract."""
+
+    _evaluation_results.current_timestamp = current_timestamp
+    return _evaluation_results.evaluation_output_dir(
+        base_dir_arg,
+        checkpoint_path,
+        case_id,
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -95,499 +151,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Permit best_predicted to fall back to best only when explicitly requested.",
     )
     return parser.parse_args(argv)
-
-
-def checkpoint_file_name(selector: str) -> str:
-    """Perform the checkpoint file name operation used by this module."""
-
-    cleaned = str(selector).strip().lower()
-    if cleaned in {"best_predicted", "predicted", "autonomous"}:
-        return "best_predicted_model.pt"
-    if cleaned in {"best", "best_total"}:
-        return "best_model.pt"
-    if cleaned in {"best_by_field_mse", "field"}:
-        return "best_by_field_mse_model.pt"
-    if cleaned in {"best_by_temperature_mse", "temperature"}:
-        return "best_by_temperature_mse_model.pt"
-    if cleaned in {"latest", "lastest"}:
-        return "latest_model.pt"
-    raise ValueError(f"Unknown checkpoint selector: {selector}")
-
-
-def normalize_run_id(value: str) -> str:
-    """Normalize run id."""
-
-    raw = str(value).strip()
-    if not raw.isdigit():
-        raise ValueError(f"Run_ID must be numeric, e.g. 0002; got {raw!r}.")
-    return f"{int(raw):04d}"
-
-
-def latest_run_dir(saved_root: Path, run_id: str) -> Path:
-    """Perform the latest run dir operation used by this module."""
-
-    normalized = normalize_run_id(run_id)
-    patterns = (f"Run_{normalized}_*", f"{normalized}_*", f"{normalized}*")
-    matches = sorted({path for pattern in patterns for path in saved_root.glob(pattern) if path.is_dir()})
-    if not matches:
-        raise FileNotFoundError(f"No saved HONF-CL runs found under {saved_root} with Run_ID={normalized!r}.")
-    if len(matches) > 1:
-        candidates = "\n  ".join(str(path) for path in matches)
-        raise RuntimeError(
-            f"Run_ID={normalized!r} is ambiguous under {saved_root}; pass an explicit checkpoint path:\n  "
-            f"{candidates}"
-        )
-    def sort_key(path: Path) -> tuple[int, str, float, str]:
-        """Perform the sort key operation used by this module."""
-
-        match = re.search(rf"Run_{normalized}_(\d{{8}}_\d{{6}})", path.name)
-        # Prefer the global timestamped run naming scheme over older
-        # compatibility names, then choose the newest timestamp/mtime.
-        return (1 if match else 0, match.group(1) if match else "", path.stat().st_mtime, path.name)
-
-    return sorted(matches, key=sort_key)[-1]
-
-
-def resolve_checkpoint_arg(args: argparse.Namespace) -> Path:
-    """Resolve checkpoint arg."""
-
-    selector = str(args.checkpoint)
-    if args.run_id:
-        run_dir = latest_run_dir(resolve_demo_path(args.saved_root), args.run_id)
-        candidate = (run_dir / checkpoint_file_name(selector)).resolve()
-        if (
-            not candidate.exists()
-            and selector.lower() in {"best_predicted", "predicted", "autonomous"}
-            and bool(args.allow_checkpoint_fallback)
-        ):
-            fallback = (run_dir / "best_model.pt").resolve()
-            print(f"[warning] {candidate.name} not found; falling back to {fallback.name}.")
-            return fallback
-        return candidate
-    candidate = resolve_demo_path(selector)
-    if candidate.suffix == ".pt" or candidate.exists():
-        return candidate
-    raise ValueError("--Run_ID is required when --checkpoint is a named selector.")
-
-
-def numpy_to_batched_tensor(value: Any) -> Any:
-    """Perform the numpy to batched tensor operation used by this module."""
-
-    if isinstance(value, np.ndarray):
-        return torch.from_numpy(value).unsqueeze(0)
-    if isinstance(value, dict):
-        return {key: numpy_to_batched_tensor(item) for key, item in value.items()}
-    return value
-
-
-def make_batch(sample: Dict[str, Any], query_xy: np.ndarray, device: torch.device) -> Dict[str, Any]:
-    """Create batch."""
-
-    payload = {key: value for key, value in sample.items() if key not in {"x_grid", "y_grid", "steady_field", "rms_field", "case_id"}}
-    payload["query_xy"] = query_xy.astype(np.float32)
-    return recursive_to_device(numpy_to_batched_tensor(payload), device)
-
-
-def load_model(checkpoint_path: Path, device: torch.device) -> tuple[ChannelThermalHONFModel, Dict[str, Any]]:
-    """Load model."""
-
-    checkpoint = load_trusted_checkpoint(checkpoint_path, map_location="cpu")
-    validate_checkpoint_identity(
-        checkpoint,
-        case_id="ThermalChannel",
-        model_family="honf_forward",
-        workflow="forward",
-    )
-    model_config = ChannelThermalHONFConfig.from_dict(checkpoint.get("model_config", {}))
-    model = ChannelThermalHONFModel(model_config, attach_local_from_checkpoint=False)
-    if bool(model_config.channelthermal.use_local_surrogate):
-        local_config_payload = checkpoint.get("local_model_config")
-        if isinstance(local_config_payload, dict):
-            local_model = LocalModuleSurrogate(LocalModuleConfig.from_dict(local_config_payload))
-            model.local_coupling.set_local_surrogate(
-                local_model,
-                freeze=bool(checkpoint.get("local_surrogate_frozen", model_config.channelthermal.freeze_local_surrogate)),
-                normalization_config=checkpoint.get("local_normalization_config", {}),
-                normalization_stats=checkpoint.get("local_normalization_stats", {}),
-            )
-            model.local_coupling.local_surrogate_checkpoint_path = checkpoint.get("local_checkpoint_provenance", checkpoint.get("local_surrogate_checkpoint_path"))
-        elif model_config.channelthermal.local_surrogate_checkpoint_path:
-            print("[warning] checkpoint lacks embedded local_model_config; falling back to external local checkpoint path.")
-            model.local_coupling.attach_from_checkpoint(
-                model_config.channelthermal.local_surrogate_checkpoint_path,
-                freeze=bool(model_config.channelthermal.freeze_local_surrogate),
-                map_location="cpu",
-            )
-    model = model.to(device)
-    global_norm_cfg = checkpoint.get("global_normalization_config", checkpoint.get("train_config", {}).get("dataset", {}))
-    model.set_global_target_normalization(checkpoint.get("global_normalization_stats", {}), normalize_targets=bool(global_norm_cfg.get("normalize_targets", False)))
-    state = strip_module_prefix(checkpoint["model_state_dict"])
-    incompatible = model.load_state_dict(state, strict=False)
-    critical_prefixes = ("core.", "local_coupling.", "local_coupling.local_surrogate")
-    bad_missing = [key for key in incompatible.missing_keys if key.startswith(critical_prefixes)]
-    bad_unexpected = [key for key in incompatible.unexpected_keys if key.startswith(critical_prefixes)]
-    if bad_missing or bad_unexpected:
-        raise RuntimeError(
-            "Critical checkpoint state mismatch: "
-            f"missing={bad_missing}, unexpected={bad_unexpected}"
-        )
-    allowed_missing = [key for key in incompatible.missing_keys if not key.startswith(critical_prefixes)]
-    allowed_unexpected = [key for key in incompatible.unexpected_keys if not key.startswith(critical_prefixes)]
-    if allowed_missing or allowed_unexpected:
-        print(f"[warning] allowed non-critical checkpoint differences: missing={allowed_missing}, unexpected={allowed_unexpected}")
-    model.eval()
-    return model, checkpoint
-
-
-def select_sample(dataset: GlobalChannelThermalDataset, case_id: Optional[str], case_index: int) -> Dict[str, Any]:
-    """Select sample."""
-
-    if len(dataset) == 0:
-        raise RuntimeError("No global channel thermal cases are available for evaluation.")
-    if case_id is not None:
-        for idx, candidate in enumerate(dataset.selected_case_ids):
-            if str(candidate) == str(case_id):
-                return dataset[idx]
-        raise KeyError(f"case_id={case_id!r} not found in split {dataset.split!r}.")
-    return dataset[min(max(int(case_index), 0), len(dataset) - 1)]
-
-
-def predict_case(
-    model: ChannelThermalHONFModel,
-    sample: Dict[str, Any],
-    device: torch.device,
-    *,
-    query_batch_size: int,
-    local_port_condition_mode: str,
-    mixed_teacher_ratio: float,
-    return_routing_maps: bool = False,
-    return_topology_signature: bool = False,
-) -> Dict[str, Any]:
-    """Prepare one physical case once, then decode its query grid in chunks."""
-
-    x_grid = sample["x_grid"]
-    y_grid = sample["y_grid"]
-    query_xy = np.stack([x_grid.reshape(-1), y_grid.reshape(-1)], axis=-1).astype(np.float32)
-    pred_chunks = []
-    routing_chunks: Dict[str, list[np.ndarray]] = {}
-    first_outputs = None
-    prepared_state = None
-    need_routing = bool(return_routing_maps or return_topology_signature)
-    with torch.no_grad():
-        for start in range(0, query_xy.shape[0], int(query_batch_size)):
-            chunk = query_xy[start : start + int(query_batch_size)]
-            if prepared_state is None:
-                batch = make_batch(sample, chunk, device)
-                outputs = model(
-                    batch["structure"],
-                    batch["query_xy"],
-                    interface_condition=batch.get("interface_condition"),
-                    local_module_params=batch.get("local_module_params"),
-                    teacher_port_tokens=batch.get("teacher_port_tokens"),
-                    local_query_points=batch.get("module_internal_query_points"),
-                    local_port_condition_mode=local_port_condition_mode,
-                    mixed_teacher_ratio=float(mixed_teacher_ratio),
-                    return_routing_maps=need_routing,
-                    return_edge_fields=bool(return_topology_signature),
-                    return_prepared_state=True,
-                )
-                prepared_state = outputs.pop("prepared_state")
-                first_outputs = outputs
-            else:
-                chunk_tensor = torch.from_numpy(chunk).unsqueeze(0).to(device=device)
-                decoder_output = model.decode_prepared(
-                    prepared_state,
-                    chunk_tensor,
-                    return_routing_maps=need_routing,
-                    return_edge_fields=bool(return_topology_signature),
-                )
-                outputs = {
-                    "pred_field": decoder_output["pred_field"],
-                    "routing_aux": {key: value for key, value in decoder_output.items() if key != "pred_field"},
-                }
-            pred_chunks.append(outputs["pred_field"].detach().cpu().numpy()[0])
-            if need_routing:
-                routing_aux = outputs.get("routing_aux", {})
-                key_map = {
-                    "query_hyper_attention": "query_hyper_attention",
-                    "pairwise_edge_contribution": "pairwise_edge_contribution",
-                    "c_H_norm": "c_H_norm",
-                    "c_pair_norm": "c_pair_norm",
-                    "dominant_hyperedge": "dominant_hyperedge",
-                    "hyper_attention_entropy_map": "hyper_attention_entropy",
-                }
-                for source_key, target_key in key_map.items():
-                    value = routing_aux.get(source_key)
-                    if torch.is_tensor(value):
-                        routing_chunks.setdefault(target_key, []).append(value.detach().cpu().numpy()[0])
-            if return_topology_signature:
-                edge_fields = outputs.get("pred_field_by_edge")
-                if edge_fields is None:
-                    edge_fields = outputs.get("routing_aux", {}).get("pred_field_by_edge")
-                if torch.is_tensor(edge_fields):
-                    routing_chunks.setdefault("pred_field_by_edge", []).append(
-                        edge_fields.detach().cpu().numpy()[0]
-                    )
-    if first_outputs is None:
-        raise RuntimeError("No prediction chunks were produced.")
-    pred_field = np.concatenate(pred_chunks, axis=0).reshape(*x_grid.shape, model.config.field_dim)
-    result = {
-        "pred_field_grid": pred_field.astype(np.float32),
-        "pred_internal_temperature": first_outputs["pred_internal_temperature"].detach().cpu().numpy()[0],
-        "pred_interface": first_outputs["pred_interface"].detach().cpu().numpy()[0],
-        "pred_port_condition": first_outputs["pred_port_condition"].detach().cpu().numpy()[0],
-        "interface_flux_mode": first_outputs.get("interface_source", "unknown"),
-        "organizer_aux": {
-            key: value.detach().cpu().numpy()[0] if torch.is_tensor(value) and value.ndim > 0 else value
-            for key, value in first_outputs["organizer_aux"].items()
-        },
-        "base_organizer_aux": {
-            key: value.detach().cpu().numpy()[0] if torch.is_tensor(value) and value.ndim > 0 else value
-            for key, value in first_outputs.get("base_organizer_aux", {}).items()
-        },
-    }
-    if need_routing:
-        result["routing_maps"] = {
-            key: np.concatenate(chunks, axis=0)
-            for key, chunks in routing_chunks.items()
-            if chunks
-        }
-    if return_topology_signature and prepared_state is not None:
-        structure_targets = sample.get("structure_targets", {})
-        target_coords = structure_targets.get("env_token_coords") if isinstance(structure_targets, dict) else None
-        if target_coords is not None:
-            with torch.no_grad():
-                target_query = torch.as_tensor(target_coords, dtype=torch.float32, device=device).unsqueeze(0)
-                target_output = model.decode_prepared(
-                    prepared_state,
-                    target_query,
-                    return_routing_maps=True,
-                    return_edge_fields=False,
-                )
-            target_attention = target_output.get("query_hyper_attention")
-            if torch.is_tensor(target_attention):
-                result["structure_query_hyper_attention"] = target_attention.detach().cpu().numpy()[0]
-    return result
-
-
-def denormalize_predictions(predictions: Dict[str, Any], dataset: GlobalChannelThermalDataset, normalize_targets: bool) -> Dict[str, Any]:
-    """Convert normalized predictions."""
-
-    if not normalize_targets:
-        return predictions
-    out = dict(predictions)
-    out["pred_field_grid"] = dataset.normalizer.denormalize_fields(out["pred_field_grid"])
-    if np.asarray(out["pred_internal_temperature"]).size:
-        out["pred_internal_temperature"] = dataset.normalizer.denormalize_internal_temperature(out["pred_internal_temperature"])
-    if np.asarray(out["pred_interface"]).size:
-        out["pred_interface"] = dataset.normalizer.denormalize_interface_targets(out["pred_interface"])
-    return out
-
-
-def safe_path_name(value: object) -> str:
-    """Perform the safe path name operation used by this module."""
-
-    raw = str(value).strip()
-    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in raw) or "case"
-
-
-def file_sha256(path: str | Path) -> str:
-    """Return a streaming SHA-256 digest for artifact provenance."""
-
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def evaluation_output_dir(base_dir_arg: str | None, checkpoint_path: Path, case_id: object) -> Path:
-    """Perform the evaluation output dir operation used by this module."""
-
-    base_dir = Path(base_dir_arg) if base_dir_arg else checkpoint_path.parent / "eval_global"
-    return resolve_demo_path(base_dir) / f"{safe_path_name(case_id)}_{current_timestamp()}"
-
-
-def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> Dict[str, np.ndarray]:
-    """Extract organization arrays."""
-
-    centers = np.asarray(sample["structure"]["module_centers"], dtype=np.float32)
-    present = np.asarray(sample["structure"]["module_present"] > 0.5)
-    env_coords = np.asarray(aux.get("env_coords", np.zeros((0, 2))), dtype=np.float32)
-    A_eh = np.asarray(aux.get("A_eh", np.zeros((env_coords.shape[0], 1))), dtype=np.float32)
-    A_mh = np.asarray(aux.get("A_mh", np.zeros((centers.shape[0], A_eh.shape[-1]))), dtype=np.float32)
-    strength = np.asarray(aux.get("hyper_strength", np.ones((A_eh.shape[-1],), dtype=np.float32)), dtype=np.float32)
-    return {
-        "centers": centers,
-        "present": present,
-        "heat": np.asarray(sample["structure"].get("heat_powers", np.zeros((centers.shape[0],))), dtype=np.float32),
-        "env_coords": env_coords,
-        "A_eh": A_eh,
-        "A_mh": A_mh,
-        "strength": strength,
-        "module_mass": np.asarray(aux.get("hyper_module_mass", np.zeros_like(strength)), dtype=np.float32),
-        "env_mass": np.asarray(aux.get("hyper_env_mass", np.zeros_like(strength)), dtype=np.float32),
-        "src": np.asarray(aux.get("hyper_source_coords", np.zeros((strength.shape[0], 2))), dtype=np.float32),
-        "dst": np.asarray(aux.get("hyper_thermal_region_coords", aux.get("hyper_region_coords", np.zeros((strength.shape[0], 2)))), dtype=np.float32),
-    }
-
-
-def _entropy(values: np.ndarray, axis: int = -1) -> np.ndarray:
-    """Perform the entropy operation used by this module."""
-
-    arr = np.asarray(values, dtype=np.float64)
-    arr = np.clip(arr, 1.0e-12, None)
-    return -np.sum(arr * np.log(arr), axis=axis)
-
-
-def hypergraph_diagnostics(predictions: Dict[str, Any]) -> Dict[str, Any]:
-    """Perform the hypergraph diagnostics operation used by this module."""
-
-    aux = predictions["organizer_aux"]
-    base = predictions.get("base_organizer_aux", {})
-    A_mh = np.asarray(aux.get("A_mh", np.zeros((0, 0))), dtype=np.float64)
-    A_eh = np.asarray(aux.get("A_eh", np.zeros((0, 0))), dtype=np.float64)
-    strength = np.asarray(aux.get("hyper_strength", np.zeros((0,))), dtype=np.float64)
-    module_mass = np.asarray(aux.get("hyper_module_mass", np.zeros_like(strength)), dtype=np.float64)
-    env_mass = np.asarray(aux.get("hyper_env_mass", np.zeros_like(strength)), dtype=np.float64)
-    num_h = max(int(strength.shape[0]), 1)
-    static = {
-        "active_edge_count": float(np.sum(strength > 0.05)),
-        "A_mh_entropy": float(np.mean(_entropy(A_mh, axis=-1))) if A_mh.size else 0.0,
-        "A_eh_entropy": float(np.mean(_entropy(A_eh, axis=-1))) if A_eh.size else 0.0,
-        "module_mass_entropy_norm": float(_entropy(module_mass, axis=-1) / np.log(max(num_h, 2))) if module_mass.size else 0.0,
-        "env_mass_entropy_norm": float(_entropy(env_mass, axis=-1) / np.log(max(num_h, 2))) if env_mass.size else 0.0,
-        "module_mass_max": float(np.max(module_mass)) if module_mass.size else 0.0,
-        "env_mass_max": float(np.max(env_mass)) if env_mass.size else 0.0,
-        "hyper_strength_mean": float(np.mean(strength)) if strength.size else 0.0,
-        "hyper_strength_max": float(np.max(strength)) if strength.size else 0.0,
-    }
-    routing_maps = predictions.get("routing_maps", {})
-    routing = {}
-    if routing_maps:
-        alpha = np.asarray(routing_maps.get("query_hyper_attention", np.zeros((0, 0, 0))), dtype=np.float64)
-        pair = np.asarray(routing_maps.get("pairwise_edge_contribution", np.zeros_like(alpha)), dtype=np.float64)
-        c_h = np.asarray(routing_maps.get("c_H_norm", np.zeros((0, 0))), dtype=np.float64)
-        c_pair = np.asarray(routing_maps.get("c_pair_norm", np.zeros((0, 0))), dtype=np.float64)
-        if alpha.size:
-            entropy = _entropy(alpha, axis=-1)
-            routing.update(
-                {
-                    "query_attention_entropy": float(np.mean(entropy)),
-                    "query_attention_effective_edges": float(np.mean(np.exp(entropy))),
-                    "query_attention_max": float(np.mean(np.max(alpha, axis=-1))),
-                    "pairwise_edge_contribution_mean": float(np.mean(pair)) if pair.size else 0.0,
-                    "c_H_norm_mean": float(np.mean(c_h)) if c_h.size else 0.0,
-                    "c_pair_norm_mean": float(np.mean(c_pair)) if c_pair.size else 0.0,
-                }
-            )
-    changes = {}
-    for key, out_key in (
-        ("A_mh", "A_mh_change_norm"),
-        ("A_eh", "A_eh_change_norm"),
-        ("hyper_source_coords", "source_coordinate_shift"),
-        ("hyper_region_coords", "region_coordinate_shift"),
-        ("hyper_module_mass", "module_mass_shift"),
-        ("hyper_env_mass", "env_mass_shift"),
-        ("hyper_strength", "strength_shift"),
-    ):
-        if key in aux and key in base:
-            final_arr = np.asarray(aux[key], dtype=np.float64)
-            base_arr = np.asarray(base[key], dtype=np.float64)
-            if final_arr.shape == base_arr.shape:
-                changes[out_key] = float(np.linalg.norm(final_arr - base_arr))
-    return {
-        "static_organization": static,
-        "routing": routing,
-        "base_vs_final": changes,
-        "note": "Organization/routing/plan diagnostics are computed from predicted mode when both teacher and predicted modes are evaluated.",
-    }
-
-
-def copy_figure_alias(source: Path, alias: Path) -> None:
-    """Perform the copy figure alias operation used by this module."""
-
-    if source.resolve() != alias.resolve():
-        shutil.copyfile(source, alias)
-
-
-def summarize(raw_sample: Dict[str, Any], predictions: Dict[str, Any], checkpoint_path: Path, output_dir: Path, channel_order: list[str]) -> Dict[str, Any]:
-    """Perform the summarize operation used by this module."""
-
-    pred = predictions["pred_field_grid"]
-    gt = raw_sample["steady_field"][..., : pred.shape[-1]]
-    _, fluid_mask = module_and_fluid_masks(raw_sample, pred)
-    suffix = str(predictions.get("suffix", "predicted"))
-    npz_path = output_dir / f"evaluation_outputs_{suffix}.npz"
-    np.savez_compressed(
-        npz_path,
-        pred_field_grid=pred.astype(np.float32),
-        gt_field_grid=gt.astype(np.float32),
-        pred_internal_temperature=predictions["pred_internal_temperature"].astype(np.float32),
-        pred_interface=predictions["pred_interface"].astype(np.float32),
-        pred_port_condition=predictions["pred_port_condition"].astype(np.float32),
-    )
-    channel_metrics = {
-        str(name): masked_error_metrics(pred[..., idx], gt[..., idx], fluid_mask)
-        for idx, name in enumerate(channel_order[: pred.shape[-1]])
-    }
-    field_metrics = error_metrics(pred, gt)
-    field_metrics_fluid = masked_error_metrics(pred, gt, fluid_mask)
-    temperature_metrics_fluid = masked_error_metrics(pred[..., 4], gt[..., 4], fluid_mask) if pred.shape[-1] >= 5 else None
-    metrics_csv_path = output_dir / f"metrics_{suffix}.csv"
-    with metrics_csv_path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "case_id",
-                "suffix",
-                "field_mse",
-                "field_rmse",
-                "field_mae",
-                "field_relative_l2",
-                "fluid_mse",
-                "fluid_rmse",
-                "fluid_mae",
-                "fluid_relative_l2",
-                "temperature_fluid_mse",
-                "temperature_fluid_rmse",
-                "temperature_fluid_mae",
-            ],
-        )
-        writer.writeheader()
-        writer.writerow(
-            {
-                "case_id": str(raw_sample["case_id"]),
-                "suffix": suffix,
-                "field_mse": field_metrics.get("mse"),
-                "field_rmse": field_metrics.get("rmse"),
-                "field_mae": field_metrics.get("mae"),
-                "field_relative_l2": field_metrics.get("relative_l2"),
-                "fluid_mse": field_metrics_fluid.get("mse"),
-                "fluid_rmse": field_metrics_fluid.get("rmse"),
-                "fluid_mae": field_metrics_fluid.get("mae"),
-                "fluid_relative_l2": field_metrics_fluid.get("relative_l2"),
-                "temperature_fluid_mse": None if temperature_metrics_fluid is None else temperature_metrics_fluid.get("mse"),
-                "temperature_fluid_rmse": None if temperature_metrics_fluid is None else temperature_metrics_fluid.get("rmse"),
-                "temperature_fluid_mae": None if temperature_metrics_fluid is None else temperature_metrics_fluid.get("mae"),
-            }
-        )
-    return {
-        "checkpoint": str(checkpoint_path),
-        "case_id": str(raw_sample["case_id"]),
-        "phase": "prompt3_physical_coupling",
-        "field_metrics": field_metrics,
-        "field_metrics_fluid": field_metrics_fluid,
-        "temperature_metrics_fluid": temperature_metrics_fluid,
-        "field_channel_metrics_fluid": channel_metrics,
-        "internal_interface_note": "Skipped only when internal/interface tensors are empty.",
-        "interface_flux_mode": str(predictions.get("interface_flux_mode", "unknown")),
-        "outputs": {
-            "global_field_quicklook": str(output_dir / f"global_field_quicklook_{suffix}.png"),
-            "npz": str(npz_path),
-            "metrics_csv": str(metrics_csv_path),
-        },
-    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -650,7 +213,8 @@ def main(argv: list[str] | None = None) -> int:
     sample = select_sample(dataset, args.case_id, args.case_index)
     raw_sample = select_sample(raw_dataset, str(sample["case_id"]), args.case_index)
     output_dir = evaluation_output_dir(args.output_dir, checkpoint_path, raw_sample["case_id"])
-    output_dir.mkdir(parents=True, exist_ok=True)
+    layout = EvaluationArtifactLayout.at(output_dir)
+    layout.ensure("fields")
     channel_order = dataset.channel_order or list(CHANNEL_ORDER)
     requested_modes = ["predicted", "teacher"] if args.local_port_condition_mode == "both" else [args.local_port_condition_mode]
     mode_summaries: Dict[str, Any] = {}
@@ -676,19 +240,21 @@ def main(argv: list[str] | None = None) -> int:
             primary_predictions = predictions
         temp_mode = args.temperature_display_mode or ("composite_internal" if np.asarray(predictions["pred_internal_temperature"]).size else "fluid_only")
         plot_field_quicklook(
-            output_dir / f"global_field_quicklook_{suffix}.png",
+            layout.fields / f"global_field_quicklook_{suffix}.png",
             raw_sample,
             predictions["pred_field_grid"],
             channel_order,
             pred_internal_temperature=predictions["pred_internal_temperature"],
             temperature_display_mode=temp_mode,
         )
-        internal_written = plot_internal(output_dir / f"module_internal_temperature_{suffix}.png", raw_sample, predictions["pred_internal_temperature"])
-        interface_written = plot_interface(output_dir / f"interface_curves_{suffix}.png", raw_sample, predictions["pred_interface"])
-        summary = summarize(raw_sample, predictions, checkpoint_path, output_dir, channel_order)
+        internal_path = layout.fields / f"module_internal_temperature_{suffix}.png"
+        interface_path = layout.fields / f"interface_curves_{suffix}.png"
+        internal_written = plot_internal(internal_path, raw_sample, predictions["pred_internal_temperature"])
+        interface_written = plot_interface(interface_path, raw_sample, predictions["pred_interface"])
+        summary = summarize(raw_sample, predictions, checkpoint_path, layout, channel_order)
         summary["temperature_display_mode"] = temp_mode
-        summary["outputs"]["module_internal_temperature"] = "skipped_empty" if not internal_written else str(output_dir / f"module_internal_temperature_{suffix}.png")
-        summary["outputs"]["interface_curves"] = "skipped_empty" if not interface_written else str(output_dir / f"interface_curves_{suffix}.png")
+        summary["outputs"]["module_internal_temperature"] = "skipped_empty" if not internal_written else str(internal_path)
+        summary["outputs"]["interface_curves"] = "skipped_empty" if not interface_written else str(interface_path)
         mode_summaries[suffix] = summary
 
     org_outputs: Dict[str, str] = {}
@@ -696,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     if primary_predictions is None:
         primary_predictions = first_predictions
     if args.organization_view != "none" and primary_predictions is not None:
+        layout.ensure("organization")
         arrays = extract_organization_arrays(raw_sample, primary_predictions["organizer_aux"])
         radius = module_radius_from_sample(raw_sample, fallback=float(model.config.module_radius))
         style = str(args.organization_style)
@@ -705,22 +272,32 @@ def main(argv: list[str] | None = None) -> int:
         render_presentation = style in {"presentation", "both"}
         render_debug = style in {"debug", "both"}
         if args.organization_view in {"all", "physical"} and render_presentation:
-            overview = output_dir / "organization_overview.png"
+            overview = layout.organization / "organization_overview.png"
             render_channelthermal_organization_overview(overview, raw_sample, arrays, module_radius=radius, channel_order=channel_order, link_threshold=float(args.organization_link_threshold))
-            alias = output_dir / "organizer_visualization.png"
-            copy_figure_alias(overview, alias)
             org_outputs["organization_overview"] = str(overview)
-            org_outputs["organizer_visualization"] = str(alias)
-            org_outputs["organization_physical"] = str(alias)
         if args.organization_view in {"all", "matrices"} and (render_presentation or render_debug):
-            matrices = output_dir / "organization_summary_matrices.png"
-            render_channelthermal_organization_summary_matrices(matrices, raw_sample, arrays, module_radius=radius, channel_order=channel_order)
+            matrices = layout.organization / "organization_summary_matrices.png"
+            render_channelthermal_organization_summary_matrices(
+                matrices,
+                raw_sample,
+                arrays,
+                module_radius=radius,
+                channel_order=channel_order,
+                sort_environment=False,
+            )
             org_outputs["organization_summary_matrices"] = str(matrices)
-            legacy_matrices = output_dir / "organization_matrices.png"
-            copy_figure_alias(matrices, legacy_matrices)
-            org_outputs["organization_matrices"] = str(legacy_matrices)
+            sorted_matrices = layout.organization / "organization_summary_matrices_sorted_by_dominant_edge.png"
+            render_channelthermal_organization_summary_matrices(
+                sorted_matrices,
+                raw_sample,
+                arrays,
+                module_radius=radius,
+                channel_order=channel_order,
+                sort_environment=True,
+            )
+            org_outputs["organization_summary_matrices_sorted_by_dominant_edge"] = str(sorted_matrices)
         if args.organization_view in {"all", "schematic"} and render_presentation:
-            schematic = output_dir / "organization_schematic.png"
+            schematic = layout.organization / "organization_schematic.png"
             render_channelthermal_organization_schematic_presentation(schematic, raw_sample, arrays, link_threshold=float(args.organization_link_threshold))
             org_outputs["organization_schematic"] = str(schematic)
 
@@ -733,8 +310,9 @@ def main(argv: list[str] | None = None) -> int:
         routing_maps = primary_predictions.get("routing_maps", {})
         required = {"query_hyper_attention", "pairwise_edge_contribution", "c_H_norm", "c_pair_norm"}
         if required.issubset(routing_maps):
+            layout.ensure("routing")
             routing_outputs = save_routing_diagnostics(
-                output_dir,
+                layout.routing,
                 raw_sample,
                 routing_maps,
                 arrays,
@@ -745,11 +323,13 @@ def main(argv: list[str] | None = None) -> int:
     plan_outputs: Dict[str, str] = {}
     diagnostics_outputs: Dict[str, str] = {}
     if primary_predictions is not None:
-        diagnostics_path = output_dir / "hypergraph_diagnostics.json"
+        layout.ensure("diagnostics")
+        diagnostics_path = layout.diagnostics / "hypergraph_diagnostics.json"
         write_json(diagnostics_path, hypergraph_diagnostics(primary_predictions))
         diagnostics_outputs["hypergraph_diagnostics"] = str(diagnostics_path)
 
     if args.export_hypergraph_plan and primary_predictions is not None:
+        layout.ensure("plans")
         structure = raw_sample["structure"]
         plan = extract_hypergraph_plan(
             primary_predictions["organizer_aux"],
@@ -759,10 +339,10 @@ def main(argv: list[str] | None = None) -> int:
             domain_length_y=float(np.asarray(structure["domain_length_y"]).reshape(-1)[0]),
         )
         validate_hypergraph_plan(plan)
-        plan_path = output_dir / "hypergraph_plan.npz"
+        plan_path = layout.plans / "hypergraph_plan.npz"
         save_hypergraph_plan(plan_path, plan)
         plan_summary = summarize_hypergraph_plan(plan)
-        plan_summary_path = output_dir / "hypergraph_plan_summary.json"
+        plan_summary_path = layout.plans / "hypergraph_plan_summary.json"
         write_json(plan_summary_path, plan_summary)
         plan_outputs = {
             "hypergraph_plan_npz": str(plan_path),
@@ -771,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
 
     topology_outputs: Dict[str, str] = {}
     if args.export_topology_signature and primary_predictions is not None:
+        layout.ensure("topology")
         structure = raw_sample["structure"]
         routing_maps = primary_predictions.get("routing_maps", {})
         reference_query_xy = np.stack(
@@ -795,9 +376,9 @@ def main(argv: list[str] | None = None) -> int:
             case_id=str(raw_sample["case_id"]),
             forward_checkpoint_sha256=file_sha256(checkpoint_path),
         )
-        signature_path = output_dir / "topology_signature.npz"
+        signature_path = layout.topology / "topology_signature.npz"
         save_topology_signature(signature_path, signature)
-        signature_summary_path = output_dir / "topology_signature_summary.json"
+        signature_summary_path = layout.topology / "topology_signature_summary.json"
         write_json(signature_summary_path, summarize_topology_signature(signature))
         topology_outputs = {
             "topology_signature_npz": str(signature_path),
@@ -819,12 +400,12 @@ def main(argv: list[str] | None = None) -> int:
                     > 0.5
                 ),
             )
-            relation_metrics_path = output_dir / "topology_relation_metrics.json"
+            relation_metrics_path = layout.topology / "topology_relation_metrics.json"
             write_json(relation_metrics_path, relation_metrics)
             topology_outputs["topology_relation_metrics"] = str(relation_metrics_path)
         topology_outputs.update(
             render_topology_signature_diagnostics(
-                output_dir,
+                layout.topology,
                 raw_sample,
                 signature,
                 edge_fields=routing_maps.get("pred_field_by_edge"),
@@ -834,6 +415,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if len(mode_summaries) == 1:
         summary = next(iter(mode_summaries.values()))
+        summary["artifact_layout_version"] = EVALUATION_LAYOUT_VERSION
         summary["primary_export_mode"] = str(primary_predictions.get("suffix", "predicted")) if primary_predictions else "unknown"
         summary["outputs"].update(org_outputs)
         summary["outputs"].update(routing_outputs)
@@ -848,6 +430,7 @@ def main(argv: list[str] | None = None) -> int:
         outputs.update(topology_outputs)
         outputs.update(diagnostics_outputs)
         summary = {
+            "artifact_layout_version": EVALUATION_LAYOUT_VERSION,
             "checkpoint": str(checkpoint_path),
             "case_id": str(raw_sample["case_id"]),
             "primary_export_mode": str(primary_predictions.get("suffix", "predicted")) if primary_predictions else "unknown",
@@ -855,12 +438,12 @@ def main(argv: list[str] | None = None) -> int:
             "outputs": outputs,
         }
     write_json(output_dir / "summary.json", summary)
-    with (output_dir / "summary_compact.json").open("w", encoding="utf-8") as f:
-        if "field_metrics_fluid" in summary:
-            compact = {"case_id": summary["case_id"], "field_metrics_fluid": summary["field_metrics_fluid"], "outputs": summary["outputs"]}
-        else:
-            compact = {"case_id": summary["case_id"], "modes": {key: value.get("field_metrics_fluid") for key, value in summary.get("modes", {}).items()}, "outputs": summary["outputs"]}
-        json.dump(compact, f, indent=2)
+    finalize_evaluation_job(
+        output_dir,
+        kind="forward_single_case",
+        checkpoint_path=checkpoint_path,
+        requested_checkpoint=str(args.checkpoint),
+    )
     print(f"[done] wrote evaluation outputs to {output_dir}")
     return 0
 

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "_note": "Stage-7 Test-B candidate: fixed K=6 context fusion with fused dense routing and a rank-96 factorized gated pair kernel, trained from scratch.",
+  "core": {
+    "model": {
+      "core_honf": {
+        "pairwise_aggregation_mode": "fused_query_module",
+        "query_module_retained_mass_floor": 1.0,
+        "pairwise_kernel_mode": "factorized_gated",
+        "pairwise_kernel_hidden_dim": 96,
+        "pairwise_kernel_num_layers": 2,
+        "routing_execution": "dense",
+        "query_module_limit": 0
+      }
+    },
+    "training": {
+      "epochs": 500
+    },
+    "checkpointing": {
+      "save_epoch_milestones": [500]
+    }
+  }
+}

@@ -68,7 +68,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-val-batches", type=int, default=None)
     parser.add_argument("--run-id", "--Run_ID", dest="run_id", default=None)
     parser.add_argument("--run-name", default=None)
-    parser.add_argument("--resume-checkpoint", default=None)
+    checkpoint_mode = parser.add_mutually_exclusive_group()
+    checkpoint_mode.add_argument("--resume-checkpoint", default=None)
+    checkpoint_mode.add_argument(
+        "--initialize-checkpoint",
+        default=None,
+        help="Start a new forward run from compatible name-and-shape matched checkpoint weights.",
+    )
     parser.add_argument(
         "--local-checkpoint",
         default=None,
@@ -108,6 +114,7 @@ def main() -> int:
         max_train_batches=args.max_train_batches,
         max_val_batches=args.max_val_batches,
         resume_checkpoint=args.resume_checkpoint,
+        initialize_checkpoint=args.initialize_checkpoint,
         local_checkpoint=args.local_checkpoint,
     )
     plugin_path = str(bundle.case.get("plugin", ""))

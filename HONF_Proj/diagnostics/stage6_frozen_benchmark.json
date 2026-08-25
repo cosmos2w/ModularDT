@@ -1,0 +1,104 @@
+{
+  "case_id": "0273",
+  "device": "cuda:2",
+  "generated_at": "2026-08-22 12:32:31 EDT",
+  "gpu_name": "NVIDIA RTX 6000 Ada Generation",
+  "iterations": 40,
+  "query_count": 8192,
+  "results": {
+    "best_s0": {
+      "case_id": "0273",
+      "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1302_20260821_142505_stage5_fixed_softmax_modern/best_by_field_mse_model.pt",
+      "checkpoint_size_bytes": 38376597,
+      "epoch": 2497,
+      "field_assembly_mode": "edge_additive",
+      "frozen_overrides": {
+        "effective_query_locality_strength": 0.25,
+        "mechanism_latent_residual_scale": 0.35,
+        "query_locality_mode": "none",
+        "query_locality_strength": null,
+        "state_dict_key_count": 251,
+        "state_dict_structure_unchanged": true
+      },
+      "full_forward": {
+        "baseline_allocated_bytes": 25051136,
+        "baseline_reserved_bytes": 41943040,
+        "incremental_peak_allocated_bytes": 410151936,
+        "incremental_peak_reserved_bytes": 748683264,
+        "mean_seconds": 0.028533259080722927,
+        "median_seconds": 0.028327558655291796,
+        "p05_seconds": 0.027817835053429007,
+        "p95_seconds": 0.030030333390459418,
+        "peak_allocated_bytes": 435203072,
+        "peak_reserved_bytes": 790626304
+      },
+      "organizer_mode": "fixed_projection",
+      "prepared_decoder": {
+        "baseline_allocated_bytes": 25051136,
+        "baseline_reserved_bytes": 41943040,
+        "incremental_peak_allocated_bytes": 409422848,
+        "incremental_peak_reserved_bytes": 744488960,
+        "mean_seconds": 0.008975110482424498,
+        "median_seconds": 0.008894303347915411,
+        "p05_seconds": 0.008849813649430872,
+        "p95_seconds": 0.009154199529439211,
+        "peak_allocated_bytes": 434473984,
+        "peak_reserved_bytes": 786432000
+      },
+      "query_count": 8192,
+      "sha256": "a7dd82d16597e6db6c1883b368cd54e8be90e774c007ce08d408607400427789",
+      "state_dict_key_count": 251,
+      "state_dict_structure_unchanged": true,
+      "total_parameters": 3979458,
+      "trainable_parameters": 2944319
+    },
+    "best_s2": {
+      "case_id": "0273",
+      "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1302_20260821_142505_stage5_fixed_softmax_modern/best_by_field_mse_model.pt",
+      "checkpoint_size_bytes": 38376597,
+      "epoch": 2497,
+      "field_assembly_mode": "edge_additive",
+      "frozen_overrides": {
+        "effective_query_locality_strength": 0.25,
+        "mechanism_latent_residual_scale": 0.35,
+        "query_locality_mode": "gaussian_bounded",
+        "query_locality_strength": 0.25,
+        "state_dict_key_count": 251,
+        "state_dict_structure_unchanged": true
+      },
+      "full_forward": {
+        "baseline_allocated_bytes": 25051136,
+        "baseline_reserved_bytes": 41943040,
+        "incremental_peak_allocated_bytes": 410151936,
+        "incremental_peak_reserved_bytes": 748683264,
+        "mean_seconds": 0.02856174788903445,
+        "median_seconds": 0.02836722880601883,
+        "p05_seconds": 0.0281011993996799,
+        "p95_seconds": 0.02964290287345648,
+        "peak_allocated_bytes": 435203072,
+        "peak_reserved_bytes": 790626304
+      },
+      "organizer_mode": "fixed_projection",
+      "prepared_decoder": {
+        "baseline_allocated_bytes": 25051136,
+        "baseline_reserved_bytes": 41943040,
+        "incremental_peak_allocated_bytes": 409422848,
+        "incremental_peak_reserved_bytes": 744488960,
+        "mean_seconds": 0.00912541151046753,
+        "median_seconds": 0.009009822271764278,
+        "p05_seconds": 0.008962202910333871,
+        "p95_seconds": 0.009521098434925079,
+        "peak_allocated_bytes": 434473984,
+        "peak_reserved_bytes": 786432000
+      },
+      "query_count": 8192,
+      "sha256": "a7dd82d16597e6db6c1883b368cd54e8be90e774c007ce08d408607400427789",
+      "state_dict_key_count": 251,
+      "state_dict_structure_unchanged": true,
+      "total_parameters": 3979458,
+      "trainable_parameters": 2944319
+    }
+  },
+  "split": "test",
+  "warmup": 10
+}

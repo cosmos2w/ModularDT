@@ -1,10 +1,8 @@
-"""CORE HONF hypergraph-centric field decoder.
+"""Stable decoder facade centered on the Stage-7 context-fusion path.
 
-Inputs are query coordinates, optional query time, organizer outputs, and an
-encoded global context token. Outputs include `pred_field`, hyperedge routing
-diagnostics, optional c_H value context diagnostics, and pairwise-kernel
-diagnostics. This module is reusable across domains; ChannelThermal-specific
-environment semantics are supplied before the core is called.
+Checkpoint-visible layers remain registered directly on
+``HypergraphFieldDecoder``.  The inherited research mixin contains no module
+state and only preserves additive/gathered compatibility execution.
 """
 
 from __future__ import annotations
@@ -16,350 +14,24 @@ import torch
 import torch.nn as nn
 
 from .config import UnifiedForwardConfig
+from .decoding.pairwise import (
+    DescriptorFirstMechanismEncoder,
+    HyperedgeMechanismEncoder,
+    HypergraphGatedPairwiseKernel,
+    _routed_module_retention_statistics,
+    _wrap_periodic_delta,
+    rectangular_boundary_features,
+    sparse_topk_softmax,
+)
+from .decoding.research import ResearchDecoderExecutionMixin
 from .nn import FourierFeatures, LazyMLP, MLP
-from .routing import normalize_assignment
+from .routing import locality_bias, normalize_assignment
 
 
 EPS = 1e-6
 
 
-def _wrap_periodic_delta(
-    delta: torch.Tensor,
-    lengths: torch.Tensor,
-    periodic_axes: tuple[int, ...],
-) -> torch.Tensor:
-    """Apply the minimum-image convention only along declared axes."""
-
-    if not periodic_axes:
-        return delta
-    wrapped = torch.remainder(delta + 0.5 * lengths, lengths) - 0.5 * lengths
-    mask = torch.tensor(
-        [axis in periodic_axes for axis in range(2)],
-        device=delta.device,
-        dtype=torch.bool,
-    )
-    return torch.where(mask, wrapped, delta)
-
-
-def rectangular_boundary_features(query_xy: torch.Tensor, Lx: float, Ly: float) -> torch.Tensor:
-    """Legacy rectangle features retained for historical checkpoint configs."""
-
-    lx = max(float(Lx), EPS)
-    ly = max(float(Ly), EPS)
-    x = query_xy[..., 0:1]
-    y = query_xy[..., 1:2]
-    return torch.cat([x / lx, y / ly, y / ly, (ly - y) / ly, x / lx, (lx - x) / lx], dim=-1)
-
-
-def sparse_topk_softmax(
-    logits: torch.Tensor,
-    topk: int,
-    temperature: float = 1.0,
-    detach_mask: bool = True,
-) -> torch.Tensor:
-    """Softmax over all hyperedges or query-local top-k hyperedges."""
-
-    k = int(topk)
-    temperature = max(float(temperature), EPS)
-    if k <= 0 or k >= logits.shape[-1]:
-        return torch.softmax(logits / temperature, dim=-1)
-    _, indices = torch.topk(logits, k=k, dim=-1)
-    mask = torch.zeros_like(logits, dtype=torch.bool).scatter_(-1, indices, True)
-    if detach_mask:
-        mask = mask.detach()
-    masked_logits = logits.masked_fill(~mask, torch.finfo(logits.dtype).min)
-    return torch.softmax(masked_logits / temperature, dim=-1)
-
-
-class HyperedgeMechanismEncoder(nn.Module):
-    """Enrich hyperedge state with generic source-region mechanism descriptors."""
-
-    def __init__(self, config: UnifiedForwardConfig):
-        """Initialize HyperedgeMechanismEncoder and its required state."""
-
-        super().__init__()
-        hidden_dim = int(config.hidden_dim)
-        mechanism_hidden_dim = int(config.mechanism_hidden_dim or hidden_dim)
-        self.net = LazyMLP(
-            hidden_dim=mechanism_hidden_dim,
-            out_dim=hidden_dim,
-            num_layers=2,
-            dropout=float(config.dropout),
-        )
-
-    def forward(self, hyper_state: torch.Tensor, mechanism_features: torch.Tensor) -> torch.Tensor:
-        """Refine ``hyper_state [B,K,H]`` using descriptors ``[B,K,D]``."""
-
-        mechanism_delta = self.net(torch.cat([hyper_state, mechanism_features], dim=-1))
-        return hyper_state + mechanism_delta
-
-
-class DescriptorFirstMechanismEncoder(nn.Module):
-    """Construct edge state primarily from explicit mechanism descriptors."""
-
-    def __init__(self, config: UnifiedForwardConfig):
-        """Initialize shared descriptor and bounded content projections."""
-
-        super().__init__()
-        hidden_dim = int(config.hidden_dim)
-        mechanism_hidden_dim = int(config.mechanism_hidden_dim or hidden_dim)
-        self.descriptor_encoder = LazyMLP(
-            hidden_dim=mechanism_hidden_dim,
-            out_dim=hidden_dim,
-            num_layers=2,
-            dropout=float(config.dropout),
-        )
-        self.content_encoder = MLP(
-            hidden_dim,
-            mechanism_hidden_dim,
-            hidden_dim,
-            num_layers=2,
-            dropout=float(config.dropout),
-            include_zero_dropout=True,
-        )
-        self.content_scale = float(config.mechanism_latent_residual_scale)
-        self.norm = nn.LayerNorm(hidden_dim) if config.use_layer_norm else nn.Identity()
-
-    def forward(self, hyper_state: torch.Tensor, mechanism_features: torch.Tensor) -> torch.Tensor:
-        """Combine descriptor state with a bounded shared content residual."""
-
-        mechanism_state = self.descriptor_encoder(mechanism_features)
-        content_state = self.content_encoder(hyper_state)
-        return self.norm(mechanism_state + self.content_scale * content_state)
-
-
-class HypergraphGatedPairwiseKernel(nn.Module):
-    """Query-module pairwise kernel routed through learned hypergraph incidences."""
-
-    def __init__(self, config: UnifiedForwardConfig):
-        """Initialize HypergraphGatedPairwiseKernel and its required state."""
-
-        super().__init__()
-        self.config = config
-        hidden_dim = int(config.hidden_dim)
-        kernel_hidden_dim = int(config.pairwise_kernel_hidden_dim or hidden_dim)
-        self.relative_fourier = FourierFeatures(None, int(config.pairwise_kernel_fourier_frequencies))
-        self.pair_mlp = LazyMLP(
-            hidden_dim=kernel_hidden_dim,
-            out_dim=hidden_dim,
-            num_layers=int(config.pairwise_kernel_num_layers),
-            dropout=float(config.dropout),
-        )
-        gate_init = min(max(float(config.pairwise_kernel_gate_init), 1e-4), 1.0 - 1e-4)
-        gate_logit = math.log(gate_init / (1.0 - gate_init))
-        self.pairwise_kernel_logit = nn.Parameter(torch.tensor(gate_logit, dtype=torch.float32))
-
-    def forward(
-        self,
-        query_xy: torch.Tensor,
-        organizer_output: Dict[str, torch.Tensor],
-        hyper_attention: torch.Tensor,
-        *,
-        return_routing_maps: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
-        """Aggregate query-module interactions through hyperedge routing.
-
-        Queries ``[B,Q,2]`` and modules ``[B,M,*]`` form pair embeddings
-        ``[B,Q,M,H]``. ``A_mh [B,M,K]`` pools them per hyperedge and
-        ``hyper_attention [B,Q,K]`` reduces them to context ``[B,Q,H]``.
-        Diagnostics stay scalar unless routing maps are requested.
-        """
-
-        cfg = self.config
-        module_centers = organizer_output["module_centers"]
-        module_tokens = organizer_output["module_tokens"]
-        module_present = organizer_output["module_present"].to(device=query_xy.device, dtype=query_xy.dtype)
-        A_mh = organizer_output["A_mh"].to(device=query_xy.device, dtype=query_xy.dtype)
-        if cfg.pairwise_kernel_normalize_by_edge_mass:
-            edge_module_weight = A_mh / A_mh.sum(dim=1, keepdim=True).clamp_min(EPS)
-        else:
-            edge_module_weight = A_mh
-        if cfg.routing_execution == "gathered":
-            edge_pair_context, selected_modules, evaluated_pairs = self._gathered_edge_pair_context(
-                query_xy,
-                module_centers,
-                module_tokens,
-                module_present,
-                edge_module_weight,
-                hyper_attention,
-                organizer_output.get("module_features_raw"),
-            )
-        else:
-            edge_pair_context = self._dense_edge_pair_context(
-                query_xy,
-                module_centers,
-                module_tokens,
-                module_present,
-                edge_module_weight,
-                organizer_output.get("module_features_raw"),
-            )
-            selected_modules = query_xy.new_tensor(float(module_present.shape[1]))
-            evaluated_pairs = query_xy.new_tensor(
-                float(query_xy.shape[0] * query_xy.shape[1] * module_present.shape[1])
-            )
-        pair_context = torch.einsum("bqk,bqkh->bqh", hyper_attention, edge_pair_context)
-        gate = torch.sigmoid(self.pairwise_kernel_logit)
-        available_modules = query_xy.new_tensor(float(module_present.shape[1]))
-        diagnostics = {
-            "pairwise_kernel_gate": gate.detach(),
-            "pairwise_context_norm": pair_context.detach().norm(dim=-1).mean(),
-            "pairwise_edge_context_norm": edge_pair_context.detach().norm(dim=-1).mean(),
-            "pairwise_edge_usage_mean": hyper_attention.detach().mean(),
-            "pairwise_active_hyperedge_count": (hyper_attention.detach() > 0).float().sum(dim=-1).mean(),
-            "pairwise_uses_sparse_hyper_attention": hyper_attention.new_tensor(
-                float(
-                    cfg.hyper_query_attention_mode != "uniform"
-                    and (int(cfg.hyper_attention_topk) > 0 or cfg.query_assignment_normalizer == "entmax15")
-                )
-            ),
-            "pairwise_available_modules": available_modules,
-            "pairwise_selected_modules": selected_modules,
-            "pairwise_selection_ratio": selected_modules / available_modules.clamp_min(1.0),
-            "pairwise_evaluated_pair_count": evaluated_pairs,
-        }
-        if return_routing_maps:
-            # CORE HONF diagnostic: this dense [B,Q,K] tensor is only materialized
-            # for explicit evaluation-time routing maps, never during normal train.
-            diagnostics["pairwise_edge_contribution"] = (
-                gate * hyper_attention[..., None] * edge_pair_context
-            ).detach().norm(dim=-1)
-        return gate * pair_context, gate * edge_pair_context, diagnostics
-
-    def _dense_edge_pair_context(
-        self,
-        query_xy: torch.Tensor,
-        module_centers: torch.Tensor,
-        module_tokens: torch.Tensor,
-        module_present: torch.Tensor,
-        edge_module_weight: torch.Tensor,
-        raw_features: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        """Evaluate the pair MLP over every padded query-module pair."""
-
-        rel = self._relative_features(query_xy, module_centers)
-        rel_encoded = self.relative_fourier(rel) if self.config.pairwise_kernel_use_fourier else rel
-        pieces = [rel_encoded, module_present[:, None, :, None].expand(-1, query_xy.shape[1], -1, -1)]
-        if self.config.pairwise_kernel_include_module_token:
-            pieces.append(module_tokens[:, None, :, :].expand(-1, query_xy.shape[1], -1, -1))
-        if self.config.pairwise_kernel_include_module_features and torch.is_tensor(raw_features):
-            pieces.append(
-                raw_features[:, None, :, :]
-                .to(device=query_xy.device, dtype=query_xy.dtype)
-                .expand(-1, query_xy.shape[1], -1, -1)
-            )
-        pair_embed = self.pair_mlp(torch.cat(pieces, dim=-1)) * module_present[:, None, :, None]
-        return torch.einsum("bmk,bqmh->bqkh", edge_module_weight, pair_embed)
-
-    def _gathered_edge_pair_context(
-        self,
-        query_xy: torch.Tensor,
-        module_centers: torch.Tensor,
-        module_tokens: torch.Tensor,
-        module_present: torch.Tensor,
-        edge_module_weight: torch.Tensor,
-        hyper_attention: torch.Tensor,
-        raw_features: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Gather active relevant modules before evaluating the pair MLP."""
-
-        beta = torch.einsum("bqk,bmk->bqm", hyper_attention, edge_module_weight)
-        contexts = []
-        selected_total = 0
-        evaluated_pairs = 0
-        limit = int(self.config.query_module_limit)
-        for batch_index in range(query_xy.shape[0]):
-            active_indices = torch.nonzero(module_present[batch_index] > 0, as_tuple=False).squeeze(-1)
-            available = int(active_indices.numel())
-            selected_count = available if limit <= 0 else min(limit, available)
-            selected_total += selected_count
-            evaluated_pairs += query_xy.shape[1] * selected_count
-            if selected_count == 0:
-                contexts.append(
-                    query_xy.new_zeros(query_xy.shape[1], hyper_attention.shape[-1], module_tokens.shape[-1])
-                )
-                continue
-            if selected_count == available:
-                selected_indices = active_indices.unsqueeze(0).expand(query_xy.shape[1], -1)
-            else:
-                local_indices = torch.topk(
-                    beta[batch_index, :, active_indices],
-                    k=selected_count,
-                    dim=-1,
-                ).indices
-                selected_indices = active_indices[local_indices]
-            selected_centers = module_centers[batch_index][selected_indices]
-            rel = self._selected_relative_features(query_xy[batch_index], selected_centers)
-            rel_encoded = self.relative_fourier(rel) if self.config.pairwise_kernel_use_fourier else rel
-            selected_presence = module_present[batch_index][selected_indices].unsqueeze(-1)
-            pieces = [rel_encoded, selected_presence]
-            if self.config.pairwise_kernel_include_module_token:
-                pieces.append(module_tokens[batch_index][selected_indices])
-            if self.config.pairwise_kernel_include_module_features and torch.is_tensor(raw_features):
-                pieces.append(
-                    raw_features[batch_index][selected_indices].to(device=query_xy.device, dtype=query_xy.dtype)
-                )
-            pair_embed = self.pair_mlp(torch.cat(pieces, dim=-1)) * selected_presence
-            selected_edge_weight = edge_module_weight[batch_index][selected_indices]
-            contexts.append(torch.einsum("qmk,qmh->qkh", selected_edge_weight, pair_embed))
-        return (
-            torch.stack(contexts, dim=0),
-            query_xy.new_tensor(float(selected_total) / float(max(query_xy.shape[0], 1))),
-            query_xy.new_tensor(float(evaluated_pairs)),
-        )
-
-    def _selected_relative_features(
-        self,
-        query_xy: torch.Tensor,
-        selected_centers: torch.Tensor,
-    ) -> torch.Tensor:
-        """Return geometry for gathered centers shaped ``[Q,R,2]``."""
-
-        cfg = self.config
-        scale_x, scale_y = cfg.spatial_scale()
-        lx = max(scale_x, EPS)
-        ly = max(scale_y, EPS)
-        diag = max(math.sqrt(lx * lx + ly * ly), EPS)
-        delta = query_xy[:, None, :] - selected_centers
-        if cfg.periodic_dimensions():
-            lengths = query_xy.new_tensor([lx, ly])
-            delta = _wrap_periodic_delta(delta, lengths, cfg.periodic_dimensions())
-        dx = delta[..., 0:1]
-        dy = delta[..., 1:2]
-        distance = torch.sqrt(dx.square() + dy.square() + EPS)
-        return torch.cat(
-            [dx / lx, dy / ly, distance / diag, torch.relu(dx) / lx, torch.relu(-dx) / lx, dy.abs() / ly],
-            dim=-1,
-        )
-
-    def _relative_features(self, query_xy: torch.Tensor, module_centers: torch.Tensor) -> torch.Tensor:
-        """Return normalized query-to-module offsets and distances ``[B,Q,M,6]``."""
-
-        cfg = self.config
-        scale_x, scale_y = cfg.spatial_scale()
-        lx = max(scale_x, EPS)
-        ly = max(scale_y, EPS)
-        diag = max(math.sqrt(lx * lx + ly * ly), EPS)
-        delta = query_xy[:, :, None, :] - module_centers[:, None, :, :]
-        if cfg.periodic_dimensions():
-            lengths = torch.tensor([lx, ly], device=query_xy.device, dtype=query_xy.dtype)
-            delta = _wrap_periodic_delta(delta, lengths, cfg.periodic_dimensions())
-        dx = delta[..., 0:1]
-        dy = delta[..., 1:2]
-        distance = torch.sqrt(dx.square() + dy.square() + EPS)
-        return torch.cat(
-            [
-                dx / lx,
-                dy / ly,
-                distance / diag,
-                torch.relu(dx) / lx,
-                torch.relu(-dx) / lx,
-                dy.abs() / ly,
-            ],
-            dim=-1,
-        )
-
-
-class HypergraphFieldDecoder(nn.Module):
+class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
     """Decode query fields from organized hyperedge state and ablated context."""
 
     def __init__(self, config: UnifiedForwardConfig):
@@ -426,6 +98,11 @@ class HypergraphFieldDecoder(nn.Module):
             self.background_env_key = nn.Linear(hidden_dim, hidden_dim)
             self.background_env_value = nn.Linear(hidden_dim, hidden_dim)
             self.background_global = nn.Linear(hidden_dim, hidden_dim)
+            self.background_input_norm = nn.LayerNorm(3 * hidden_dim)
+            self.edge_input_norm = nn.LayerNorm(3 * hidden_dim + 10)
+            additive_gate_init = min(max(float(config.additive_edge_gate_init), 1.0e-4), 1.0 - 1.0e-4)
+            additive_gate_logit = math.log(additive_gate_init / (1.0 - additive_gate_init))
+            self.additive_edge_gate = nn.Parameter(torch.tensor(additive_gate_logit, dtype=torch.float32))
             self.background_head = MLP(
                 3 * hidden_dim,
                 hidden_dim,
@@ -442,6 +119,13 @@ class HypergraphFieldDecoder(nn.Module):
                 dropout=float(config.dropout),
                 include_zero_dropout=True,
             )
+            output_std = float(config.additive_output_init_std)
+            for head in (self.background_head, self.edge_head):
+                final = head.net[-1]
+                if not isinstance(final, nn.Linear):
+                    raise RuntimeError("Additive output heads must end in a linear layer.")
+                nn.init.normal_(final.weight, mean=0.0, std=output_std)
+                nn.init.zeros_(final.bias)
 
     def forward(
         self,
@@ -474,6 +158,11 @@ class HypergraphFieldDecoder(nn.Module):
         uses_direct = bool(context_fusion and self._uses_direct())
         uses_near = bool(context_fusion and self._uses_near_module())
         uses_pairwise = bool(cfg.decoder_uses("pairwise") and self.pairwise_kernel is not None)
+        execution_flag = organizer_output.get("routing_execution_gathered")
+        if torch.is_tensor(execution_flag):
+            gathered_execution = bool(float(execution_flag.detach().reshape(-1)[0]) >= 0.5)
+        else:
+            gathered_execution = cfg.routing_execution == "gathered"
         hyper_context = torch.zeros_like(query_state)
         nonhyper_context = torch.zeros_like(query_state)
         edge_pair_context: Optional[torch.Tensor] = None
@@ -520,12 +209,19 @@ class HypergraphFieldDecoder(nn.Module):
                 hyper_logits = hyper_logits + float(cfg.hyper_geometry_bias_scale) * geometry_bias
             else:
                 geometry_bias = torch.zeros_like(hyper_logits)
-            if not context_fusion and cfg.environment_locality_mode == "compact_kernel":
+            query_locality_mode = (
+                cfg.environment_locality_mode
+                if cfg.query_locality_mode == "inherit_environment"
+                else cfg.query_locality_mode
+            )
+            if not context_fusion and query_locality_mode != "none":
                 query_locality_bias = self._query_locality_bias(query_xy, organizer_output)
                 hyper_logits = hyper_logits + query_locality_bias
             else:
                 query_locality_bias = torch.zeros_like(hyper_logits)
-            edge_active_mask = organizer_output.get("edge_active_mask")
+            edge_active_mask = organizer_output.get("effective_edge_mask")
+            if not torch.is_tensor(edge_active_mask):
+                edge_active_mask = organizer_output.get("edge_active_mask")
             if not torch.is_tensor(edge_active_mask):
                 edge_active_mask = torch.ones_like(hyper_logits[:, 0, :])
             edge_active_mask = edge_active_mask.to(device=hyper_logits.device, dtype=hyper_logits.dtype)
@@ -556,13 +252,29 @@ class HypergraphFieldDecoder(nn.Module):
                         hyper_logits / max(float(cfg.hyper_attention_temperature), EPS),
                         mode=cfg.query_assignment_normalizer,
                         mask=edge_active_mask[:, None, :] > 0,
+                        entmax_blend=float(
+                            organizer_output.get(
+                                "query_sparsity_fraction",
+                                hyper_logits.new_zeros(()),
+                            )
+                        ),
                     )
                     hyper_attention = self._limit_probability_routes(hyper_attention)
-            hyper_value_context = torch.einsum("bqk,bkh->bqh", hyper_attention, self.hyper_value(hyper_state))
-            if uses_hyper_value:
-                hyper_context = hyper_value_context
+            if not context_fusion and gathered_execution:
+                hyper_attention, retained_query_mass = self._limit_query_edge_routes(
+                    hyper_attention,
+                    edge_active_mask,
+                )
             else:
-                hyper_context = torch.zeros_like(hyper_value_context)
+                retained_query_mass = hyper_attention.sum(dim=-1)
+            if uses_hyper_value:
+                hyper_context = torch.einsum(
+                    "bqk,bkh->bqh",
+                    hyper_attention,
+                    self.hyper_value(hyper_state),
+                )
+            else:
+                hyper_context = torch.zeros_like(query_state)
             c_h_context = hyper_context
             diagnostics["hyper_value_context_norm"] = c_h_context.detach().norm(dim=-1).mean()
             diagnostics["hyper_attention_mean"] = hyper_attention.mean(dim=1)
@@ -578,6 +290,13 @@ class HypergraphFieldDecoder(nn.Module):
             diagnostics["hyper_attention_effective_edges"] = torch.exp(hyper_entropy.detach()).mean()
             diagnostics["hyper_attention_max"] = hyper_attention.detach().amax(dim=-1).mean()
             diagnostics["hyper_attention_nonzero_count"] = (hyper_attention.detach() > 0).float().sum(dim=-1).mean()
+            diagnostics["effective_query_edge_count"] = (hyper_attention.detach() > 0).float().sum(dim=-1).mean()
+            diagnostics["query_edge_retained_probability_mass"] = retained_query_mass.detach()
+            diagnostics["query_edge_retained_probability_mass_min"] = retained_query_mass.detach().amin()
+            diagnostics["query_edge_retained_probability_mass_p05"] = torch.quantile(
+                retained_query_mass.detach().float(), 0.05
+            ).to(query_xy.dtype)
+            diagnostics["query_edge_retained_probability_mass_mean"] = retained_query_mass.detach().mean()
             diagnostics["hyper_geometry_bias_mean"] = geometry_bias.detach().mean()
             diagnostics["hyper_geometry_bias_std"] = geometry_bias.detach().std(unbiased=False)
             if not context_fusion:
@@ -586,19 +305,22 @@ class HypergraphFieldDecoder(nn.Module):
                 diagnostics["query_assignment_nonzero_fraction"] = (hyper_attention.detach() > 0).float().mean()
                 diagnostics["mean_query_nonzero_edges"] = (hyper_attention.detach() > 0).float().sum(dim=-1).mean()
                 diagnostics["query_assignment_normalizer"] = cfg.query_assignment_normalizer
-                diagnostics["routing_execution"] = cfg.routing_execution
+                diagnostics["routing_execution"] = "gathered" if gathered_execution else "dense"
             if uses_pairwise:
                 pair_context, routed_edge_context, pair_diagnostics = self.pairwise_kernel(
                     query_xy,
                     organizer_output,
                     hyper_attention,
+                    gathered_execution=gathered_execution,
                     return_routing_maps=return_routing_maps,
+                    reduce_pair_context=context_fusion,
                 )
                 if not context_fusion:
                     edge_pair_context = routed_edge_context
                 else:
                     del routed_edge_context
-                hyper_context = hyper_context + pair_context
+                if context_fusion:
+                    hyper_context = hyper_context + pair_context
                 diagnostics.update(pair_diagnostics)
                 if return_routing_maps:
                     diagnostics["c_pair_norm"] = pair_context.detach().norm(dim=-1)
@@ -681,6 +403,7 @@ class HypergraphFieldDecoder(nn.Module):
                     edge_pair_context=edge_pair_context,
                     organizer_output=organizer_output,
                     global_context=global_context,
+                    gathered_execution=gathered_execution,
                     return_edge_fields=bool(return_edge_fields),
                 )
             )
@@ -697,220 +420,12 @@ class HypergraphFieldDecoder(nn.Module):
             output["pred_field"] = self.pred_head(context)
         return output  # type: ignore[return-value]
 
-    def _edge_additive_output(
-        self,
-        *,
-        query_xy: torch.Tensor,
-        query_state: torch.Tensor,
-        hyper_state: torch.Tensor,
-        hyper_attention: torch.Tensor,
-        edge_pair_context: torch.Tensor,
-        organizer_output: Dict[str, torch.Tensor],
-        global_context: Optional[torch.Tensor],
-        return_edge_fields: bool,
-    ) -> Dict[str, torch.Tensor]:
-        """Assemble an exact background-plus-edge field decomposition."""
-
-        env_tokens = organizer_output["env_tokens"]
-        env_logits = torch.einsum(
-            "bqh,beh->bqe",
-            self.background_query(query_state),
-            self.background_env_key(env_tokens),
-        ) / math.sqrt(float(query_state.shape[-1]))
-        env_attention = torch.softmax(env_logits, dim=-1)
-        env_context = torch.einsum("bqe,beh->bqh", env_attention, self.background_env_value(env_tokens))
-        if global_context is None:
-            global_state = torch.zeros_like(query_state)
-        else:
-            global_state = self.background_global(global_context).unsqueeze(1).expand_as(query_state)
-        background = self.background_head(torch.cat([query_state, global_state, env_context], dim=-1))
-
-        geometry_features = self._hyper_geometry_features(query_xy, organizer_output)
-        edge_active_mask = organizer_output.get("edge_active_mask")
-        if not torch.is_tensor(edge_active_mask):
-            edge_active_mask = torch.ones_like(hyper_attention[:, 0, :])
-        if self.config.routing_execution == "gathered":
-            edge_sum, edge_abs_mean, edge_rms, edge_energy, edge_field, selected_routes = (
-                self._gathered_edge_execution(
-                    query_state,
-                    hyper_state,
-                    geometry_features,
-                    edge_pair_context,
-                    hyper_attention,
-                    edge_active_mask,
-                    return_edge_fields=return_edge_fields,
-                )
-            )
-        else:
-            edge_sum, edge_abs_mean, edge_rms, edge_energy, edge_field = self._dense_edge_execution(
-                query_state,
-                hyper_state,
-                geometry_features,
-                edge_pair_context,
-                hyper_attention,
-                edge_active_mask,
-                return_edge_fields=return_edge_fields,
-            )
-            selected_routes = query_state.new_tensor(
-                float(query_state.shape[0] * query_state.shape[1] * hyper_state.shape[1])
-            )
-        pred_field = background + edge_sum
-
-        available_routes = query_state.new_tensor(
-            float(query_state.shape[0] * query_state.shape[1] * hyper_state.shape[1])
-        )
-        output = {
-            "pred_field": pred_field,
-            "edge_contribution_abs_mean": edge_abs_mean,
-            "edge_contribution_rms": edge_rms,
-            "edge_contribution_energy_fraction": (
-                edge_energy / edge_energy.sum(dim=1, keepdim=True).clamp_min(EPS)
-            ),
-            "background_field_norm": background.detach().norm(dim=-1).mean(),
-            "summed_edge_field_norm": edge_sum.detach().norm(dim=-1).mean(),
-            "edge_field_fraction": (
-                edge_sum.detach().norm(dim=-1).mean()
-                / (pred_field.detach().norm(dim=-1).mean() + EPS)
-            ),
-            "edge_head_available_routes": available_routes,
-            "edge_head_selected_routes": selected_routes,
-            "edge_head_selection_ratio": selected_routes / available_routes.clamp_min(1.0),
-            "edge_head_evaluated_route_count": selected_routes,
-        }
-        if return_edge_fields:
-            output["pred_field_background"] = background
-            if edge_field is None:
-                raise RuntimeError("Requested edge fields were not materialized.")
-            output["pred_field_by_edge"] = edge_field
-        return output
-
-    def _dense_edge_execution(
-        self,
-        query_state: torch.Tensor,
-        hyper_state: torch.Tensor,
-        geometry_features: torch.Tensor,
-        edge_pair_context: torch.Tensor,
-        hyper_attention: torch.Tensor,
-        edge_active_mask: torch.Tensor,
-        *,
-        return_edge_fields: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        """Evaluate every candidate edge head as the dense reference path."""
-
-        query_by_edge = query_state[:, :, None, :].expand(-1, -1, hyper_state.shape[1], -1)
-        state_by_query = hyper_state[:, None, :, :].expand(-1, query_state.shape[1], -1, -1)
-        edge_input = torch.cat([query_by_edge, state_by_query, geometry_features, edge_pair_context], dim=-1)
-        raw_edge_field = self.edge_head(edge_input)
-        active = edge_active_mask.to(device=raw_edge_field.device, dtype=raw_edge_field.dtype)[:, None, :, None]
-        edge_field = active * hyper_attention.unsqueeze(-1) * raw_edge_field
-        edge_sum = edge_field.sum(dim=2)
-        detached = edge_field.detach()
-        edge_mean_square = detached.square().mean(dim=1)
-        edge_rms = torch.where(edge_mean_square > 0, torch.sqrt(edge_mean_square), edge_mean_square)
-        return (
-            edge_sum,
-            detached.abs().mean(dim=1),
-            edge_rms,
-            detached.square().sum(dim=1),
-            edge_field if return_edge_fields else None,
-        )
-
-    def _gathered_edge_execution(
-        self,
-        query_state: torch.Tensor,
-        hyper_state: torch.Tensor,
-        geometry_features: torch.Tensor,
-        edge_pair_context: torch.Tensor,
-        hyper_attention: torch.Tensor,
-        edge_active_mask: torch.Tensor,
-        *,
-        return_edge_fields: bool,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        Optional[torch.Tensor],
-        torch.Tensor,
-    ]:
-        """Evaluate the shared edge head only on selected nonzero routes."""
-
-        active = edge_active_mask.to(device=hyper_attention.device, dtype=torch.bool)[:, None, :]
-        selected_mask = active & (hyper_attention > 0)
-        limit = int(self.config.query_edge_limit)
-        if 0 < limit < hyper_attention.shape[-1]:
-            indices = torch.topk(hyper_attention, k=limit, dim=-1).indices
-            limit_mask = torch.zeros_like(selected_mask).scatter_(-1, indices, True)
-            selected_mask = selected_mask & limit_mask.detach()
-        selected_indices = torch.nonzero(selected_mask, as_tuple=False)
-        batch_size, num_queries, num_edges = hyper_attention.shape
-        field_dim = int(self.config.field_dim)
-        edge_sum = query_state.new_zeros(batch_size, num_queries, field_dim)
-        abs_sum = query_state.new_zeros(batch_size * num_edges, field_dim)
-        square_sum = query_state.new_zeros(batch_size * num_edges, field_dim)
-        edge_field: Optional[torch.Tensor] = None
-        if return_edge_fields:
-            edge_field = query_state.new_zeros(batch_size, num_queries, num_edges, field_dim)
-        if selected_indices.shape[0] > 0:
-            batch_index, query_index, edge_index = selected_indices.unbind(dim=1)
-            edge_input = torch.cat(
-                [
-                    query_state[batch_index, query_index],
-                    hyper_state[batch_index, edge_index],
-                    geometry_features[batch_index, query_index, edge_index],
-                    edge_pair_context[batch_index, query_index, edge_index],
-                ],
-                dim=-1,
-            )
-            raw_selected = self.edge_head(edge_input)
-            selected_field = hyper_attention[batch_index, query_index, edge_index, None] * raw_selected
-            edge_sum = edge_sum.index_put(
-                (batch_index, query_index),
-                selected_field,
-                accumulate=True,
-            )
-            flat_edge_index = batch_index * num_edges + edge_index
-            detached = selected_field.detach()
-            abs_sum = abs_sum.index_add(0, flat_edge_index, detached.abs())
-            square_sum = square_sum.index_add(0, flat_edge_index, detached.square())
-            if edge_field is not None:
-                edge_field = edge_field.index_put(
-                    (batch_index, query_index, edge_index),
-                    selected_field,
-                    accumulate=False,
-                )
-        abs_mean = abs_sum.reshape(batch_size, num_edges, field_dim) / float(max(num_queries, 1))
-        edge_energy = square_sum.reshape(batch_size, num_edges, field_dim)
-        mean_square = edge_energy / float(max(num_queries, 1))
-        edge_rms = torch.where(mean_square > 0, torch.sqrt(mean_square), mean_square)
-        return (
-            edge_sum,
-            abs_mean,
-            edge_rms,
-            edge_energy,
-            edge_field,
-            query_state.new_tensor(float(selected_indices.shape[0])),
-        )
-
-    def _limit_probability_routes(self, probabilities: torch.Tensor) -> torch.Tensor:
-        """Optionally retain only the highest-probability query routes."""
-
-        limit = int(self.config.hyper_attention_topk)
-        if limit <= 0 or limit >= probabilities.shape[-1]:
-            return probabilities
-        indices = torch.topk(probabilities, k=limit, dim=-1).indices
-        mask = torch.zeros_like(probabilities, dtype=torch.bool).scatter_(-1, indices, True)
-        if self.config.sparse_hyper_attention_detach_mask:
-            mask = mask.detach()
-        limited = probabilities * mask.to(dtype=probabilities.dtype)
-        return limited / limited.sum(dim=-1, keepdim=True).clamp_min(EPS)
-
     def _query_locality_bias(
         self,
         query_xy: torch.Tensor,
         organizer_output: Dict[str, torch.Tensor],
     ) -> torch.Tensor:
-        """Return compact region bias for sparse query-to-edge routing."""
+        """Return the configured normalized-distance bias for query-to-edge routing."""
 
         region = organizer_output["hyper_region_coords"]
         region_scale = organizer_output["hyper_region_scale"]
@@ -927,8 +442,20 @@ class HypergraphFieldDecoder(nn.Module):
             lengths = query_xy.new_tensor([max(scale_x, EPS), max(scale_y, EPS)])
             delta = _wrap_periodic_delta(delta, lengths, self.config.periodic_dimensions())
         radius_square = (delta / anisotropic_scale[:, None, :, :]).square().sum(dim=-1)
-        compactness = torch.relu(1.0 - radius_square).square()
-        return float(self.config.environment_locality_strength) * torch.log(compactness + EPS)
+        return locality_bias(
+            radius_square,
+            mode=(
+                self.config.environment_locality_mode
+                if self.config.query_locality_mode == "inherit_environment"
+                else self.config.query_locality_mode
+            ),
+            strength=(
+                self.config.environment_locality_strength
+                if self.config.query_locality_strength is None
+                else self.config.query_locality_strength
+            ),
+            radius_cap=self.config.locality_radius_cap,
+        )
 
     def _query_features(
         self,

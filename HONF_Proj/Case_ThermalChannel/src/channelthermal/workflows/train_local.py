@@ -680,6 +680,12 @@ def run_from_config(
     else:
         with history_path.open("w", newline="", encoding="utf-8") as f:
             csv.DictWriter(f, fieldnames=history_fields).writeheader()
+    loss_plot_path = (
+        run_dir / "plots" / "training" / "loss_curve.png"
+        if (run_dir / "run_manifest.json").is_file()
+        else run_dir / "loss_curve.png"
+    )
+    loss_plot_path.parent.mkdir(parents=True, exist_ok=True)
 
     best_metric = math.inf
     start_epoch = 1
@@ -777,7 +783,7 @@ def run_from_config(
         if epoch % plot_every == 0 or epoch == epochs:
             save_local_loss_curve(
                 history_path,
-                run_dir / "loss_curve.png",
+                loss_plot_path,
                 include_smoothness=bool(loss_cfg.get("plot_smoothness_loss", False)),
             )
         print(
