@@ -28,10 +28,7 @@ The launch-visible implementation commit is
   encoder, sigmoid-gated multiplicative interaction, LayerNorm, and output
   projection. Prepared module codes are private runtime state, not parameters
   or public model outputs.
-- Added exactly two strict overlays:
-  `stage7_fused_query_module.json` and
-  `stage7_factorized_gated_r96.json`. The recommended profile remains
-  `stage7_structured_context`.
+- The initial enhancement added `stage7_fused_query_module.json` and `stage7_factorized_gated_r96.json`. The accepted-decision cleanup retains both for provenance, marks fused execution as promoted and factorized R96 as rejected, and adds only the two strict K-audit overlays requested for K=4 and K=8. The recommended profile remains `stage7_structured_context`.
 - Extended the maintained golden replay, retained-mass evaluator, and existing
   checkpoint benchmark. Generated evidence uses ignored scratch output or
   managed evaluation manifests.
@@ -145,11 +142,15 @@ python train.py \
 4. Run 1600 best, factorized fused sparse: not promoted to full scientific
    evaluation because entry 3 failed the mandatory epoch-500 accuracy gate.
 
-The later K-scaling audit is prepared but not launched. It should use the
-retained Run-1401 architecture plus fused execution, train only K=4 and K=8
-variants to epoch 500 initially, and admit K=12 only if K=8 shows clear
-unsaturated capacity. No audit overlay or run was created in this round, so the
-two-overlay limit and minimal formal-run count remain intact.
+At the time of this model-enhancement decision, the K-scaling audit was configuration-complete but not launched. Run 1601 used the exact promoted K=6 fused dense legacy-kernel model; Run 1602 and Run 1603 used strict overlays changing `num_hyperedges` only to 4 or 8, plus the required `[500, 2500, 5000]` checkpoint milestones. The later completed outcomes are recorded in `Stage7_K_Scaling_Audit_Evaluation.md`: Run 1602 is a non-promoted K=4 research reference after continuation to epoch 5000, Run 1603 K=8 was rejected at epoch 500, and K=12 remains unjustified.
+
+Validated launch commands:
+
+```bash
+python train.py --config project://src/config_core/forward/stage7_structured_context.json --experiment-overlay project://src/config_core/forward/experiments/stage7_fused_query_module.json --workflow forward --device cuda:2 --epochs 500 --run-id 1601 --run-name stage7_fused_query_module --yes
+python train.py --config project://src/config_core/forward/stage7_structured_context.json --experiment-overlay project://src/config_core/forward/experiments/stage7_k4_fused_audit.json --workflow forward --device cuda:2 --epochs 500 --run-id 1602 --run-name stage7_k4_fused_audit --yes
+python train.py --config project://src/config_core/forward/stage7_structured_context.json --experiment-overlay project://src/config_core/forward/experiments/stage7_k8_fused_audit.json --workflow forward --device cuda:2 --epochs 500 --run-id 1603 --run-name stage7_k8_fused_audit --yes
+```
 
 There is no unresolved correctness or compatibility failure. The unresolved
 scientific result is explicit: prescribed beta thresholds do not remove active

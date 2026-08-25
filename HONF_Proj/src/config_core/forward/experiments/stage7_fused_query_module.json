@@ -4,6 +4,7 @@
   "core": {
     "model": {
       "core_honf": {
+        "num_hyperedges": 6,
         "pairwise_aggregation_mode": "fused_query_module",
         "query_module_retained_mass_floor": 1.0,
         "pairwise_kernel_mode": "legacy_mlp",

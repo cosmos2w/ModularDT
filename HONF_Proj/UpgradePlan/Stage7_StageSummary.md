@@ -703,6 +703,16 @@ The profile is [`stage7_structured_context.json`](../src/config_core/forward/sta
 
 The scientific question is narrow: can the modern codebase recover Run-1000-like natural organization and accuracy while retaining variable module counts, modern Stage-A coupling, prepared decoding, provenance, diagnostics, and artifact management?
 
+### 7.9 Stage-7 model-enhancement decision
+
+Run 1401 best-by-field at epoch 4585 remains the accepted scientific K=6 baseline. Its full `stage7_structured_context.json` profile is retained unchanged as the historical/scientific architecture reference so strict 237-key checkpoints continue to load without translation.
+
+The behavior-equivalent fused query-module/gathered executor is promoted as the efficient execution path through `stage7_fused_query_module.json`. Formal training uses K=6, the legacy pair kernel, dense routing, full beta mass, and no module cap. Sparse retained-beta 0.98 remains an evaluation-time gathered override and is not a training curriculum.
+
+Run 1600's rank-96 factorized gated kernel was rejected and stopped at epoch 500 after its trailing-50 field and temperature MSE missed the matched-budget gates by more than 2x despite healthy topology and lower execution cost. Its overlay and managed evidence remain available for reproducibility, but it is not an active candidate.
+
+The subsequent K-scaling audit used Run 1601 as the exact promoted K=6 fused control and strict overlays changing only `num_hyperedges` to 4 for Run 1602 or 8 for Run 1603. Run 1602 continued to epoch 5000 and is retained as a non-promoted research reference; Run 1603 was rejected at epoch 500. All runs used the unchanged Stage-7 data, Stage-A coupling, loss, seed, optimizer, hidden width, environment resolution, softmax assignments, raw hyperedge state, context fusion, and fused dense legacy-kernel execution.
+
 ## 8. Cross-stage quantitative evidence
 
 ### 8.1 Complete-split predictive accuracy
@@ -836,4 +846,4 @@ The completed milestone evaluation compared epochs 500, 1000, 2500, and 5000 on 
 \text{field MSE and stability}.
 \]
 
-The next phase may therefore introduce sparse context-fusion execution as an evaluation/deployment optimization while keeping epoch 4585 as the numerical reference.
+Sparse context-fusion execution has been validated and promoted as an evaluation/deployment optimization while Run 1401 epoch 4585 remains the numerical reference. The K-scaling audit is complete: Run 1601 is the K=6 fused execution control, Run 1602 is a completed non-promoted K=4 research reference, and Run 1603 K=8 was rejected at epoch 500.

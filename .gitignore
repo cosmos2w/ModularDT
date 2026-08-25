@@ -90,6 +90,7 @@ HONF_Proj/Case_ThermalChannel/artifacts/*
 HONF_Proj/Trained_Results/**/Run_*/
 HONF_Proj/Trained_Results/**/Eval_*/
 HONF_Proj/Trained_Results/**/CompareModels/
+HONF_Proj/Trained_Results/**/HONF_Forward_Runs/bk/
 
 # HONF hierarchical-inverse runtime artifacts. These directories contain
 # generated HDF5/NPZ datasets, copied forward checkpoints, training checkpoints,
@@ -119,5 +120,6 @@ cache_index.json
 HONF_Proj/diagnostics/**
 !HONF_Proj/diagnostics/README.md
 !HONF_Proj/diagnostics/*.py
+!HONF_Proj/diagnostics/Stage7_K_Scaling_Audit_Evaluation.md
 !HONF_Proj/diagnostics/evidence_manifests/
 !HONF_Proj/diagnostics/evidence_manifests/*.json

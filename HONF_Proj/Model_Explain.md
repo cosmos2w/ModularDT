@@ -1,32 +1,26 @@
 # HONF forward model: current mathematics, configuration, and code map
 
-This document describes the maintained HONF forward platform after the Stage-7
-scientific decision and repository cleanup. The current scientific baseline is
-Run 1401 best-by-field, epoch 4585. It uses fixed six-edge softmax organization,
-the organizer's raw residual hyperedge state, dense query routing, and context
-fusion. Run 1000 remains the historical golden compatibility reference.
+This document describes the maintained HONF forward platform after the Stage-7 scientific and model-enhancement decisions. The current scientific baseline is Run 1401 best-by-field, epoch 4585. It uses fixed six-edge softmax organization, the organizer's raw residual hyperedge state, dense query routing, and context fusion. The fused query-module executor is the promoted behavior-equivalent efficient path. Run 1000 remains the historical golden compatibility reference.
 
-The exchangeable, adaptive, entmax, additive, and gathered mechanisms developed
-in Stages 1–6 remain loadable research modes. They are not the primary model
-described below.
+Run 1600's factorized R96 kernel was rejected and stopped at epoch 500 after missing both matched-budget accuracy gates. The subsequent K-scaling audit is complete: Run 1601 is the fused K=6 execution control, Run 1602 completed to epoch 5000 as a non-promoted K=4 research reference, and Run 1603 K=8 was rejected at epoch 500. Run 1401 remains the scientific baseline.
+
+The exchangeable, adaptive, entmax, additive, and gathered mechanisms developed in Stages 1–6 remain loadable research modes. They are not the primary model described below.
 
 ## 1. Which configuration is current?
 
-The profile registry at `src/config_core/forward/profile_registry.json`
-declares `stage7_structured_context` as `recommended_forward_profile` and gives
-it `status="current"`.
+The profile registry at `src/config_core/forward/profile_registry.json` declares `stage7_structured_context` as `recommended_forward_profile` and gives it `status="current"`. This profile remains the immutable Run-1401 architecture/reference profile; execution promotion is represented by a strict overlay rather than rewriting the base.
 
 | Role | Profile | Status |
 |---|---|---|
 | Current scientific profile | `src/config_core/forward/stage7_structured_context.json` | Run 1401 architecture and 5K training policy |
+| Promoted efficient execution | `src/config_core/forward/experiments/stage7_fused_query_module.json` | Exact K=6 fused dense legacy-kernel path; sparse beta-0.98 is evaluation-only |
+| Completed K audit | `src/config_core/forward/experiments/stage7_k4_fused_audit.json`, `stage7_k8_fused_audit.json` | K=4 retained as non-promoted research; K=8 rejected at epoch 500 |
+| Rejected experiment | `src/config_core/forward/experiments/stage7_factorized_gated_r96.json` | Run 1600 stopped at epoch 500; reproducibility only |
 | Historical golden profile | `src/config_core/forward/enhanced_honf_pairwise.json` | Run 1000 compatibility architecture |
 | Stage-1–6 research base | `src/config_core/forward/adaptive_sparse_additive.json` | Compatibility/research only |
 | ThermalChannel case policy | `Case_ThermalChannel/configs/case_default.json` | Current case, data, Stage-A, loss, and evaluation settings |
 
-The Stage-7 and Run-1000 profiles instantiate the same 237-key model
-architecture. Their main differences are run identity, training duration,
-plot/checkpoint cadence, and explicit modern configuration fields. Stage 7 is a
-scientific consolidation of the verified structure, not a new model family.
+The Stage-7 and Run-1000 profiles instantiate the same 237-key model architecture. Their main differences are run identity, training duration, plot/checkpoint cadence, and explicit modern configuration fields. The K=6 fused legacy-kernel overlay adds no parameters and preserves the 237-key checkpoint contract. Stage 7 is a scientific consolidation of the verified structure, not a new model family.
 
 One operational distinction is important: the profile registry recommends
 `stage7_structured_context`, but the current `train.py` and `evaluate.py` CLI
@@ -34,7 +28,7 @@ fallback still points to `enhanced_honf_pairwise`. Use the Stage-7 profile
 explicitly for new scientific work:
 
 ```bash
-python train.py --config src/config_core/forward/stage7_structured_context.json --run-id 1500 --dry-run
+python train.py --config src/config_core/forward/stage7_structured_context.json --experiment-overlay src/config_core/forward/experiments/stage7_fused_query_module.json --run-id 1500 --dry-run
 python evaluate.py --config src/config_core/forward/stage7_structured_context.json --checkpoint /path/to/checkpoint.pt
 ```
 
@@ -245,9 +239,7 @@ $$
 
 ### 6.2 Hypergraph-gated pairwise context
 
-For every query/module pair, a shared four-layer MLP receives relative
-geometry, module presence, the encoded module token, and the raw module
-features. Let its output be $\psi(q,i)$. With edge-mass-normalized incidence
+For every query/module pair, a shared four-layer legacy MLP receives relative geometry, module presence, the encoded module token, and the raw module features. Let its output be $\psi(q,i)$. With edge-mass-normalized incidence
 
 $$
 \bar A^{MH}_{ik}=\frac{A^{MH}_{ik}}{\sum_iA^{MH}_{ik}+\epsilon},
@@ -263,9 +255,15 @@ $$
 c^{pair}_q=\sigma(\eta_{pair})\sum_k\alpha_{qk}c^{pair}_{qk}.
 $$
 
-The learned pairwise gate is initialized to `0.1`. Stage 7 evaluates the dense
-query/module pair tensor; gathered pre-MLP execution remains available only to
-research profiles.
+The promoted executor contracts routing first,
+
+$$
+\beta_{qi}=\sum_k\alpha_{qk}\bar A^{MH}_{ik},
+\qquad
+c^{pair}_q=\sigma(\eta_{pair})\sum_i\beta_{qi}\psi(q,i),
+$$
+
+which is algebraically equivalent to the accepted edge-explicit computation at full support while avoiding the full query-edge-module intermediate; the frozen Run-1401 output replay is numerically exact. The learned pairwise gate remains initialized to `0.1`, the legacy MLP parameter path remains unchanged, and K=6 checkpoints retain the same 237 keys. Dense full-beta execution is used for training. Evaluation may gather the smallest module set reaching retained beta mass 0.98 without renormalizing truncated beta; this is an evaluation override, not a training curriculum.
 
 ### 6.3 Final context and field head
 
@@ -415,10 +413,10 @@ path:
 overlays. Those JSON files are frozen evidence; lifecycle/status metadata lives
 in `profile_registry.json` instead of being written into historical configs.
 
-The next planned platform work is sparse execution for the accepted
-context-fusion model. It must preserve the Stage-7 scientific formula and prove
-numerical parity; it should not reactivate additive field assembly merely to
-obtain sparsity.
+Sparse execution for the accepted context-fusion model is implemented as the
+promoted fused gathered beta-0.98 evaluation/deployment path. It preserves the
+Stage-7 scientific formula and full-support numerical parity without
+reactivating additive field assembly.
 
 ## 10. Current code structure
 

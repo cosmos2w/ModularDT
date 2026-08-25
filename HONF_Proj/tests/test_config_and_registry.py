@@ -16,7 +16,7 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     profiles = registry["profiles"]
     names = [profile["name"] for profile in profiles]
-    assert len(names) == len(set(names)) == 21
+    assert len(names) == len(set(names)) == 23
     assert registry["recommended_forward_profile"] == "stage7_structured_context"
     assert {profile["status"] for profile in profiles} <= {
         "current",
@@ -24,9 +24,16 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
         "frozen_experiment",
         "evaluation_only",
         "candidate",
+        "promoted_execution",
+        "rejected",
+        "completed_research",
     }
     by_name = {profile["name"]: profile for profile in profiles}
     assert by_name["stage7_structured_context"]["status"] == "current"
+    assert by_name["stage7_fused_query_module"]["status"] == "promoted_execution"
+    assert by_name["stage7_factorized_gated_r96"]["status"] == "rejected"
+    assert by_name["stage7_k4_fused_audit"]["status"] == "completed_research"
+    assert by_name["stage7_k8_fused_audit"]["status"] == "rejected"
     assert by_name["enhanced_honf_pairwise"]["status"] == "compatibility"
     assert by_name["stage5_fixed_residual_concat_uniform_lr3e4"]["status"] == "frozen_experiment"
 
@@ -285,9 +292,24 @@ def test_stage7_enhancement_overlays_are_minimal_and_strict() -> None:
         ),
     )
     fused_core = fused.effective["model"]["core_honf"]
+    assert fused_core["num_hyperedges"] == 6
     assert fused_core["pairwise_aggregation_mode"] == "fused_query_module"
     assert fused_core["pairwise_kernel_mode"] == "legacy_mlp"
+    assert fused_core["routing_execution"] == "dense"
     assert fused_core["query_module_retained_mass_floor"] == 1.0
+    assert fused_core["query_module_limit"] == 0
+    assert fused.experiment["core"] == {
+        "model": {
+            "core_honf": {
+                "num_hyperedges": 6,
+                "pairwise_aggregation_mode": "fused_query_module",
+                "query_module_retained_mass_floor": 1.0,
+                "pairwise_kernel_mode": "legacy_mlp",
+                "routing_execution": "dense",
+                "query_module_limit": 0,
+            }
+        }
+    }
     assert fused.effective["training"]["epochs"] == 5000
 
     factorized = load_config_bundle(
@@ -304,6 +326,51 @@ def test_stage7_enhancement_overlays_are_minimal_and_strict() -> None:
     assert factorized_core["pairwise_kernel_num_layers"] == 2
     assert factorized.effective["training"]["epochs"] == 500
     assert factorized.effective["checkpointing"]["save_epoch_milestones"] == [500]
+
+
+@pytest.mark.parametrize(
+    ("overlay", "num_hyperedges"),
+    [
+        ("stage7_k4_fused_audit.json", 4),
+        ("stage7_k8_fused_audit.json", 8),
+    ],
+)
+def test_stage7_k_audit_overlays_change_only_k_and_requested_milestones(
+    overlay: str,
+    num_hyperedges: int,
+) -> None:
+    base_path = "project://src/config_core/forward/stage7_structured_context.json"
+    fused = load_config_bundle(
+        base_path,
+        experiment_overlay=(
+            "project://src/config_core/forward/experiments/"
+            "stage7_fused_query_module.json"
+        ),
+    )
+    audit = load_config_bundle(
+        base_path,
+        experiment_overlay=f"project://src/config_core/forward/experiments/{overlay}",
+    )
+
+    expected_overlay_core = {
+        "num_hyperedges": num_hyperedges,
+        "pairwise_aggregation_mode": "fused_query_module",
+        "query_module_retained_mass_floor": 1.0,
+        "pairwise_kernel_mode": "legacy_mlp",
+        "routing_execution": "dense",
+        "query_module_limit": 0,
+    }
+    assert audit.experiment["core"] == {
+        "model": {"core_honf": expected_overlay_core},
+        "checkpointing": {"save_epoch_milestones": [500, 2500, 5000]},
+    }
+
+    fused_effective = copy.deepcopy(fused.effective)
+    fused_effective["model"]["core_honf"]["num_hyperedges"] = num_hyperedges
+    fused_effective["checkpointing"]["save_epoch_milestones"] = [500, 2500, 5000]
+    assert audit.effective == fused_effective
+    assert audit.effective["training"]["epochs"] == 5000
+    assert audit.effective["training"]["seed"] == 0
 
 
 @pytest.mark.parametrize(
