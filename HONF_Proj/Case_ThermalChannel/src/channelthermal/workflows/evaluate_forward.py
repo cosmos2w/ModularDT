@@ -53,6 +53,7 @@ from honf_runtime.artifact_layout import (
     finalize_evaluation_job,
 )
 from channelthermal.evaluation_tools.organizer_visualization import (
+    render_case_adaptive_residual_summary,
     render_channelthermal_organization_overview,
     render_channelthermal_organization_schematic_presentation,
     render_channelthermal_organization_summary_matrices,
@@ -300,6 +301,13 @@ def main(argv: list[str] | None = None) -> int:
             schematic = layout.organization / "organization_schematic.png"
             render_channelthermal_organization_schematic_presentation(schematic, raw_sample, arrays, link_threshold=float(args.organization_link_threshold))
             org_outputs["organization_schematic"] = str(schematic)
+        if (
+            "residual_fraction_trace" in primary_predictions["organizer_aux"]
+            and np.asarray(arrays["residual_fraction_trace"]).size
+        ):
+            residual_summary = layout.organization / "residual_mechanism_summary.png"
+            render_case_adaptive_residual_summary(residual_summary, arrays)
+            org_outputs["residual_mechanism_summary"] = str(residual_summary)
 
     if arrays is None and primary_predictions is not None:
         arrays = extract_organization_arrays(raw_sample, primary_predictions["organizer_aux"])

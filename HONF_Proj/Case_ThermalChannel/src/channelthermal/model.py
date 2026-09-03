@@ -329,6 +329,7 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
                     module_centers=adapter.module_centers,
                     env_coords=env.env_coords,
                     module_present=adapter.module_present,
+                    global_token=global_token,
                     geometry_mode=self.config.core_honf.geometry_mode,
                     selection_override="all" if final_only_selection else None,
                 )
@@ -419,6 +420,7 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
                 module_centers=adapter.module_centers,
                 env_coords=env.env_coords,
                 module_present=adapter.module_present,
+                global_token=global_token,
                 geometry_mode=self.config.core_honf.geometry_mode,
                 selection_override=None,
             )

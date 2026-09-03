@@ -140,6 +140,7 @@ class HONFNeuralField(nn.Module):
             module_present=module_present,
             geometry_mode=cfg.geometry_mode,
             selection_override=organizer_selection_override,
+            global_token=global_token,
         )
         organizer_output["module_features_raw"] = module_features
         output: Dict[str, torch.Tensor] = {}

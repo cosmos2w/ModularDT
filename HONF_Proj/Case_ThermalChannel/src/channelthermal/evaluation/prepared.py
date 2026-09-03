@@ -53,8 +53,14 @@ def predict_case(
     mixed_teacher_ratio: float,
     return_routing_maps: bool = False,
     return_topology_signature: bool = False,
+    return_prepared_state: bool = False,
 ) -> Dict[str, Any]:
-    """Prepare one physical case once, then decode its query grid in chunks."""
+    """Prepare one physical case once, then decode its query grid in chunks.
+
+    Evaluation-only diagnostics may request the retained prepared state.  The
+    default remains the historical compact result and does not expose the
+    wrapper-internal state to callers.
+    """
 
     x_grid = sample["x_grid"]
     y_grid = sample["y_grid"]
@@ -168,5 +174,6 @@ def predict_case(
             target_attention = target_output.get("query_hyper_attention")
             if torch.is_tensor(target_attention):
                 result["structure_query_hyper_attention"] = target_attention.detach().cpu().numpy()[0]
+    if return_prepared_state and prepared_state is not None:
+        result["_prepared_state"] = prepared_state
     return result
-

@@ -8,8 +8,10 @@ import numpy as np
 import pytest
 
 from channelthermal.evaluation_tools.organizer_visualization import (
+    render_case_adaptive_residual_summary,
     render_channelthermal_organization_summary_matrices,
 )
+from channelthermal.evaluation_tools.routing_visualization import save_routing_diagnostics
 from channelthermal.workflows.evaluate_forward import extract_organization_arrays
 
 
@@ -55,6 +57,69 @@ def test_extract_organization_arrays_preserves_effective_active_mask() -> None:
     np.testing.assert_array_equal(
         arrays["active_hyperedge_mask"], np.asarray([1.0, 1.0, 0.0], dtype=np.float32)
     )
+
+
+def test_residual_arrays_and_summary_figure_keep_hard_active_order(tmp_path) -> None:
+    sample = _sample()
+    env_coords = np.stack(
+        np.meshgrid(np.linspace(0.0, 4.0, 4), np.linspace(0.0, 2.0, 3)), axis=-1
+    ).reshape(-1, 2).astype(np.float32)
+    arrays = extract_organization_arrays(
+        sample,
+        {
+            "A_me": np.full((2, env_coords.shape[0]), 1.0 / env_coords.shape[0], dtype=np.float32),
+            "A_mh": np.asarray([[0.8, 0.2, 0.1], [0.2, 0.8, 0.9]], dtype=np.float32),
+            "A_eh": np.full((env_coords.shape[0], 3), 1.0 / 3.0, dtype=np.float32),
+            "env_coords": env_coords,
+            "hyper_strength": np.asarray([0.8, 0.3, 0.2], dtype=np.float32),
+            "effective_edge_mask": np.asarray([1.0, 1.0, 0.0], dtype=np.float32),
+            "case_adaptive_edge_count": np.asarray(2.0, dtype=np.float32),
+            "case_adaptive_edge_cap": np.asarray(3.0, dtype=np.float32),
+            "case_adaptive_soft_edge_count": np.asarray(2.4, dtype=np.float32),
+            "residual_fraction_trace": np.asarray([1.0, 0.4, 0.01, 0.0], dtype=np.float32),
+            "residual_marginal_explained_fraction": np.asarray([0.6, 0.39, 0.01], dtype=np.float32),
+            "residual_mechanism_strength": np.asarray([0.8, 0.3, 0.2], dtype=np.float32),
+            "residual_module_factor": np.asarray([[0.8, 0.2, 0.1], [0.2, 0.8, 0.9]], dtype=np.float32),
+            "residual_environment_factor": np.full((env_coords.shape[0], 3), 1.0 / env_coords.shape[0], dtype=np.float32),
+            "residual_coupling_row_mass": np.asarray([0.5, 0.5], dtype=np.float32),
+            "case_adaptive_cap_hit": np.asarray(0.0, dtype=np.float32),
+        },
+    )
+
+    assert arrays["case_adaptive_soft_edge_count"].item() == pytest.approx(2.4)
+    render_case_adaptive_residual_summary(tmp_path / "residual_summary.png", arrays)
+    assert (tmp_path / "residual_summary.png").is_file()
+
+
+def test_routing_summary_masks_inactive_packed_columns(tmp_path) -> None:
+    sample = _sample()
+    arrays = extract_organization_arrays(
+        sample,
+        {
+            "A_mh": np.ones((2, 3), dtype=np.float32) / 3.0,
+            "A_eh": np.ones((2, 3), dtype=np.float32) / 3.0,
+            "env_coords": np.asarray([[0.0, 0.0], [1.0, 1.0]], dtype=np.float32),
+            "hyper_strength": np.asarray([0.9, 0.8, 0.7], dtype=np.float32),
+            "effective_edge_mask": np.asarray([1.0, 0.0, 0.0], dtype=np.float32),
+        },
+    )
+    height, width = sample["x_grid"].shape
+    paths = save_routing_diagnostics(
+        tmp_path,
+        sample,
+        {
+            "query_hyper_attention": np.ones((height, width, 3), dtype=np.float32) / 3.0,
+            "pairwise_edge_contribution": np.ones((height, width, 3), dtype=np.float32),
+            "c_H_norm": np.ones((height, width), dtype=np.float32),
+            "c_pair_norm": np.ones((height, width), dtype=np.float32),
+        },
+        arrays,
+        module_radius=0.4,
+        routing_view="none",
+    )
+    summary = json.loads(Path(paths["routing_summary"]).read_text(encoding="utf-8"))
+    assert summary["active_hyperedges"] == [0]
+    assert summary["alpha_mean_by_hyperedge"][1:] == [0.0, 0.0]
 
 
 def test_environment_matrix_exports_physical_and_explicit_sorted_views(tmp_path) -> None:

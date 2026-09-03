@@ -25,6 +25,33 @@ def _hyperedge_colors(num_h: int) -> List[Tuple[float, float, float, float]]:
     return [cmap(idx) for idx in range(max(int(num_h), 1))]
 
 
+def _active_hyperedge_indices(arrays: Dict[str, np.ndarray], count: int | None = None) -> List[int]:
+    """Return hard-active packed mechanisms in extraction/column order.
+
+    A supplied active/effective mask is authoritative.  In particular, do not
+    infer residual-organizer support from strength: a padded mechanism can have
+    a nonzero analytic strength while remaining hard-inactive.  Historical
+    arrays without an explicit mask retain the strength-based compatibility
+    fallback.
+    """
+
+    strength = np.asarray(arrays.get("strength", arrays.get("hyper_strength", np.zeros((0,)))), dtype=np.float64).reshape(-1)
+    if count is None:
+        count = int(strength.shape[0])
+    count = max(int(count), 0)
+    explicit = "active_hyperedge_mask" in arrays or "effective_edge_mask" in arrays
+    source = arrays.get("active_hyperedge_mask", arrays.get("effective_edge_mask"))
+    if source is not None:
+        mask = np.asarray(source, dtype=np.float64).reshape(-1)
+        active = [idx for idx in range(count) if idx < mask.shape[0] and mask[idx] > 0.5]
+        if active or explicit:
+            return active
+    active = [idx for idx in range(count) if idx < strength.shape[0] and strength[idx] > 0.05]
+    if active:
+        return active
+    return list(range(count))
+
+
 def _convex_hull(points: np.ndarray) -> np.ndarray:
     """Perform the convex hull operation used by this module."""
 
@@ -87,11 +114,25 @@ def _temperature_image(sample: Dict[str, Any], channel_order: Optional[Sequence[
     return np.asarray(arr[..., idx], dtype=np.float32)
 
 
-def _dominant_env(A_eh: np.ndarray, env_count: int) -> Tuple[np.ndarray, np.ndarray]:
+def _dominant_env(
+    A_eh: np.ndarray,
+    env_count: int,
+    active_mask: np.ndarray | None = None,
+) -> Tuple[np.ndarray, np.ndarray]:
     """Perform the dominant env operation used by this module."""
 
     if A_eh.size:
-        return A_eh.argmax(axis=-1), A_eh.max(axis=-1)
+        values = np.asarray(A_eh, dtype=np.float64)
+        if active_mask is not None and values.ndim == 2:
+            mask = np.asarray(active_mask, dtype=bool).reshape(-1)
+            if mask.shape[0] >= values.shape[-1] and np.any(mask[: values.shape[-1]]):
+                values = values.copy()
+                values[:, ~mask[: values.shape[-1]]] = -np.inf
+            elif mask.shape[0] >= values.shape[-1]:
+                return np.zeros((values.shape[0],), dtype=np.int64), np.zeros((values.shape[0],), dtype=np.float32)
+        dominant = values.argmax(axis=-1)
+        confidence = np.maximum(values.max(axis=-1), 0.0)
+        return dominant, confidence.astype(np.float32)
     return np.zeros((env_count,), dtype=np.int64), np.ones((env_count,), dtype=np.float32)
 
 
@@ -102,10 +143,16 @@ def _collapse_title_suffix(arrays: Dict[str, np.ndarray]) -> str:
     if A_eh.size == 0:
         return ""
     eps = 1.0e-12
-    dominant = A_eh.argmax(axis=-1)
+    active = _active_hyperedge_indices(arrays, A_eh.shape[-1])
+    if active:
+        values = A_eh[:, active]
+    else:
+        values = np.zeros((A_eh.shape[0], 1), dtype=np.float64)
+    dominant_local = values.argmax(axis=-1)
+    dominant = np.asarray([active[idx] for idx in dominant_local], dtype=np.int64) if active else np.zeros((A_eh.shape[0],), dtype=np.int64)
     counts = np.bincount(dominant, minlength=A_eh.shape[-1]).astype(np.float64)
     frac = counts / max(float(counts.sum()), eps)
-    env_mass = A_eh.mean(axis=0)
+    env_mass = values.mean(axis=0)
     env_mass = env_mass / max(float(env_mass.sum()), eps)
     entropy = -float(np.sum(env_mass * np.log(np.maximum(env_mass, eps))))
     return f" | dom={float(np.max(frac)):.2f}, softEff={float(np.exp(entropy)):.2f}"
@@ -139,9 +186,10 @@ def _summary_rows(arrays: Dict[str, np.ndarray]) -> List[List[str]]:
     strength = arrays["strength"]
     module_mass = arrays["module_mass"]
     env_mass = arrays["env_mass"]
-    dominant, _ = _dominant_env(A_eh, arrays["env_coords"].shape[0])
+    active = _active_hyperedge_indices(arrays, strength.shape[0])
+    dominant, _ = _dominant_env(A_eh, arrays["env_coords"].shape[0], arrays.get("active_hyperedge_mask"))
     rows: List[List[str]] = []
-    for hidx in range(strength.shape[0]):
+    for hidx in active:
         top, _ = _top_modules(A_mh, present, hidx)
         rows.append(
             [
@@ -200,8 +248,9 @@ def _draw_region_hulls(ax: Any, arrays: Dict[str, np.ndarray], colors: Sequence[
     strength = arrays["strength"]
     if env_coords.size == 0:
         return
-    dominant, _ = _dominant_env(A_eh, env_coords.shape[0])
-    for hidx in range(strength.shape[0]):
+    active = _active_hyperedge_indices(arrays, strength.shape[0])
+    dominant, _ = _dominant_env(A_eh, env_coords.shape[0], arrays.get("active_hyperedge_mask"))
+    for hidx in active:
         pts = env_coords[dominant == hidx]
         if pts.shape[0] >= 3:
             hull = _convex_hull(pts)
@@ -219,7 +268,9 @@ def _draw_env_tokens(ax: Any, arrays: Dict[str, np.ndarray], colors: Sequence[Tu
     env_coords = arrays["env_coords"]
     if env_coords.size == 0:
         return
-    dominant, confidence = _dominant_env(arrays["A_eh"], env_coords.shape[0])
+    dominant, confidence = _dominant_env(
+        arrays["A_eh"], env_coords.shape[0], arrays.get("active_hyperedge_mask")
+    )
     facecolors = []
     for hidx, conf in zip(dominant, confidence):
         rgba = list(colors[int(hidx) % len(colors)])
@@ -243,7 +294,7 @@ def _draw_sources_regions_links(
     strength = arrays["strength"]
     src = arrays["src"]
     dst = arrays["dst"]
-    for hidx in range(strength.shape[0]):
+    for hidx in _active_hyperedge_indices(arrays, strength.shape[0]):
         color = colors[hidx]
         alpha = float(np.clip(0.28 + 0.65 * strength[hidx], 0.28, 0.95))
         ax.annotate(
@@ -348,6 +399,197 @@ def render_channelthermal_organization_overview(
     plt.close(fig)
 
 
+def render_case_adaptive_residual_summary(
+    output_path: Path,
+    arrays: Dict[str, np.ndarray],
+    *,
+    title: str = "Case-adaptive residual mechanism summary",
+) -> None:
+    """Render one compact residual-extraction summary for a selected case.
+
+    The figure intentionally summarizes the extraction sequence in four panels:
+    residual waterfall, coupling decomposition, marginal gains/support, and a
+    source-to-region map.  It never writes one image per packed mechanism and
+    uses the hard active mask for all presentation geometry.
+    """
+
+    strength = np.asarray(arrays.get("residual_mechanism_strength", arrays.get("strength", [])), dtype=np.float64).reshape(-1)
+    trace = np.asarray(arrays.get("residual_fraction_trace", []), dtype=np.float64).reshape(-1)
+    marginal = np.asarray(arrays.get("residual_marginal_explained_fraction", []), dtype=np.float64).reshape(-1)
+    survival = np.asarray(arrays.get("edge_survival_weight", []), dtype=np.float64).reshape(-1)
+    if strength.size == 0:
+        strength = np.asarray(arrays.get("strength", []), dtype=np.float64).reshape(-1)
+    packed_count = int(max(strength.size, trace.size - 1, marginal.size, survival.size))
+    if packed_count <= 0:
+        packed_count = 1
+        strength = np.zeros((1,), dtype=np.float64)
+    if trace.size == 0:
+        trace = np.ones((packed_count + 1,), dtype=np.float64)
+    elif trace.size < packed_count + 1:
+        trace = np.pad(trace, (0, packed_count + 1 - trace.size), constant_values=float(trace[-1]))
+    trace = trace[: packed_count + 1]
+    if marginal.size < packed_count:
+        marginal = np.pad(marginal, (0, packed_count - marginal.size), constant_values=0.0)
+    marginal = marginal[:packed_count]
+    if survival.size < packed_count:
+        survival = np.pad(survival, (0, packed_count - survival.size), constant_values=0.0)
+    survival = survival[:packed_count]
+    if strength.size < packed_count:
+        strength = np.pad(strength, (0, packed_count - strength.size), constant_values=0.0)
+    strength = strength[:packed_count]
+    active = _active_hyperedge_indices(arrays, packed_count)
+    count_values = np.asarray(arrays.get("case_adaptive_edge_count", [len(active)]), dtype=np.float64).reshape(-1)
+    cap_values = np.asarray(arrays.get("case_adaptive_edge_cap", [packed_count]), dtype=np.float64).reshape(-1)
+    stop_values = np.asarray(arrays.get("residual_stop_fraction", [0.02]), dtype=np.float64).reshape(-1)
+    case_count = int(round(float(count_values[0]))) if count_values.size else len(active)
+    case_cap = int(round(float(cap_values[0]))) if cap_values.size else packed_count
+    stop_fraction = float(stop_values[0]) if stop_values.size else 0.02
+
+    A_me = np.asarray(arrays.get("A_me", np.zeros((0, 0))), dtype=np.float64)
+    row_mass = np.asarray(arrays.get("residual_coupling_row_mass", np.zeros((0,))), dtype=np.float64).reshape(-1)
+    initial = A_me * row_mass[:, None] if A_me.ndim == 2 and A_me.shape[0] == row_mass.size else np.zeros((0, 0), dtype=np.float64)
+    module_factor = np.asarray(arrays.get("residual_module_factor", np.zeros((0, packed_count))), dtype=np.float64)
+    env_factor = np.asarray(arrays.get("residual_environment_factor", np.zeros((0, packed_count))), dtype=np.float64)
+    reconstructed = np.zeros_like(initial)
+    if initial.size and module_factor.ndim == 2 and env_factor.ndim == 2:
+        for hidx in active:
+            if hidx >= module_factor.shape[1] or hidx >= env_factor.shape[1]:
+                continue
+            reconstructed += strength[hidx] * np.outer(module_factor[:, hidx], env_factor[:, hidx])
+    residual = np.maximum(initial - reconstructed, 0.0) if initial.size else np.zeros((0, 0), dtype=np.float64)
+    cap_hit = np.asarray(arrays.get("case_adaptive_cap_hit", [0.0]), dtype=np.float64).reshape(-1)
+    final_residual = float(trace[min(max(case_count, 0), trace.size - 1)])
+    cap_warning = " — CAP HIT" if cap_hit.size and cap_hit[0] > 0.5 else ""
+
+    fig = plt.figure(figsize=(14.0, 9.0), constrained_layout=True)
+    gs = fig.add_gridspec(2, 2)
+    ax_trace = fig.add_subplot(gs[0, 0])
+    ax_gain = fig.add_subplot(gs[1, 0])
+    ax_map = fig.add_subplot(gs[1, 1])
+    fig.suptitle(f"{title}{cap_warning}", fontsize=14)
+
+    steps = np.arange(trace.size)
+    ax_trace.plot(steps, trace, marker="o", color="#2166ac", lw=2.0, label=r"$\rho_r$")
+    ax_trace.axhline(stop_fraction, color="#b2182b", ls="--", lw=1.2, label=f"stop={stop_fraction:.3g}")
+    ax_trace.axvline(case_count, color="#4d4d4d", ls=":", lw=1.2, label=f"K_case={case_count}")
+    ax_trace.set(title=f"Residual waterfall (K_cap={case_cap})", xlabel="extraction step r", ylabel="unexplained fraction")
+    ax_trace.set_ylim(bottom=0.0)
+    ax_trace.grid(alpha=0.22)
+    ax_trace.legend(fontsize=8, loc="best")
+
+    if initial.size:
+        # Keep the complete decomposition in one compact panel grid: initial
+        # coupling, one heatmap per hard-active rank-one component, and the
+        # residual left after those selected components.  This preserves the
+        # extraction order without writing one image per mechanism.
+        components: list[tuple[str, np.ndarray]] = [("initial $\\widetilde C$", initial)]
+        for hidx in active:
+            if (
+                module_factor.ndim == 2
+                and env_factor.ndim == 2
+                and hidx < module_factor.shape[1]
+                and hidx < env_factor.shape[1]
+            ):
+                component = strength[hidx] * np.outer(module_factor[:, hidx], env_factor[:, hidx])
+            else:
+                component = np.zeros_like(initial)
+            components.append((f"H{hidx}: $\\lambda a b^T$", component))
+        components.append(("final residual", residual))
+        n_components = len(components)
+        n_cols = min(4, max(1, n_components))
+        n_rows = int(np.ceil(n_components / float(n_cols)))
+        coupling_grid = gs[0, 1].subgridspec(n_rows, n_cols, wspace=0.12, hspace=0.30)
+        vmax = max(
+            max(float(np.nanmax(matrix)) for _, matrix in components if matrix.size),
+            1.0e-8,
+        )
+        coupling_axes = []
+        images = []
+        module_count = initial.shape[0]
+        environment_count = initial.shape[1]
+        module_step = max(1, int(np.ceil(module_count / 12.0)))
+        environment_step = max(1, int(np.ceil(environment_count / 12.0)))
+        module_ticks = np.arange(0, module_count, module_step)
+        environment_ticks = np.arange(0, environment_count, environment_step)
+        for component_index, (component_title, matrix) in enumerate(components):
+            row_index, column_index = divmod(component_index, n_cols)
+            axis = fig.add_subplot(coupling_grid[row_index, column_index])
+            image = axis.imshow(matrix, aspect="auto", cmap="magma", vmin=0.0, vmax=vmax)
+            images.append(image)
+            coupling_axes.append(axis)
+            axis.set_title(component_title, fontsize=8, pad=3)
+            if column_index == 0:
+                axis.set_yticks(module_ticks)
+                axis.set_yticklabels([f"M{i}" for i in module_ticks], fontsize=6)
+            else:
+                axis.set_yticks([])
+            if row_index == n_rows - 1:
+                axis.set_xticks(environment_ticks)
+                axis.set_xticklabels([f"E{i}" for i in environment_ticks], rotation=90, fontsize=6)
+            else:
+                axis.set_xticks([])
+        for component_index in range(n_components, n_rows * n_cols):
+            row_index, column_index = divmod(component_index, n_cols)
+            fig.add_subplot(coupling_grid[row_index, column_index]).axis("off")
+        fig.colorbar(images[0], ax=coupling_axes, fraction=0.025, pad=0.02, label="coupling")
+    else:
+        coupling_grid = gs[0, 1].subgridspec(1, 1)
+        ax_coupling = fig.add_subplot(coupling_grid[0, 0])
+        ax_coupling.text(0.5, 0.5, "coupling arrays unavailable", ha="center", va="center")
+        ax_coupling.set_xticks([])
+        ax_coupling.set_yticks([])
+        ax_coupling.set_title("Initial coupling → residual reconstruction")
+
+    x = np.arange(packed_count)
+    width = 0.72
+    ax_gain.bar(x, marginal, width=width, color="#67a9cf", alpha=0.88, label="marginal explained")
+    ax_gain.set_xlabel("mechanism / extraction order")
+    ax_gain.set_ylabel("marginal explained fraction")
+    ax_gain.set_xticks(x)
+    ax_gain.set_xticklabels([f"H{i}" for i in x], rotation=45, ha="right")
+    ax_gain.grid(axis="y", alpha=0.22)
+    ax_survival = ax_gain.twinx()
+    ax_survival.plot(x, survival, color="#ef8a62", marker="o", lw=1.6, label="soft/hard support")
+    ax_survival.plot(x, strength, color="#5e3c99", marker="x", lw=1.2, alpha=0.85, label="strength")
+    ax_survival.set_ylim(bottom=0.0)
+    ax_survival.set_ylabel("support / strength")
+    if active:
+        ax_gain.axvspan(-0.5, max(active) + 0.5, color="#bdbdbd", alpha=0.08)
+    lines, labels = ax_gain.get_legend_handles_labels()
+    lines2, labels2 = ax_survival.get_legend_handles_labels()
+    ax_gain.legend(lines + lines2, labels + labels2, fontsize=8, loc="upper right")
+    ax_gain.set_title("Mechanism gains and support")
+
+    centers = np.asarray(arrays.get("centers", np.zeros((0, 2))), dtype=np.float64)
+    present = np.asarray(arrays.get("present", np.ones((centers.shape[0],), dtype=bool))).astype(bool).reshape(-1)
+    src = np.asarray(arrays.get("src", np.zeros((packed_count, 2))), dtype=np.float64)
+    dst = np.asarray(arrays.get("dst", np.zeros((packed_count, 2))), dtype=np.float64)
+    if centers.ndim == 2 and centers.shape[1] >= 2 and centers.size:
+        ax_map.scatter(centers[present, 0], centers[present, 1], c="#252525", s=42, label="active module")
+    colors = _hyperedge_colors(packed_count)
+    for hidx in active:
+        if hidx >= src.shape[0] or hidx >= dst.shape[0] or src.shape[1] < 2 or dst.shape[1] < 2:
+            continue
+        ax_map.plot([src[hidx, 0], dst[hidx, 0]], [src[hidx, 1], dst[hidx, 1]], color=colors[hidx], lw=1.4, alpha=0.72)
+        ax_map.scatter(src[hidx, 0], src[hidx, 1], marker="x", color=colors[hidx], s=48)
+        ax_map.scatter(dst[hidx, 0], dst[hidx, 1], marker="*", color=colors[hidx], edgecolor="black", s=86)
+        ax_map.text(dst[hidx, 0], dst[hidx, 1], f" H{hidx}", fontsize=8, va="center")
+    ax_map.set_title(
+        f"Active source-to-region mechanisms (K_case={case_count}, K_cap={case_cap}, "
+        f"final residual={final_residual:.3g})"
+    )
+    ax_map.set_xlabel("x")
+    ax_map.set_ylabel("y")
+    ax_map.grid(alpha=0.18)
+    if centers.size or src.size or dst.size:
+        ax_map.set_aspect("equal", adjustable="datalim")
+    fig.text(0.5, 0.01, f"final residual={final_residual:.4g}{cap_warning}; inactive packed mechanisms are omitted", ha="center", fontsize=9, color="#444444")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(str(output_path), dpi=180)
+    plt.close(fig)
+
+
 def render_channelthermal_organization_schematic_presentation(
     output_path: Path,
     sample: Dict[str, Any],
@@ -368,17 +610,22 @@ def render_channelthermal_organization_schematic_presentation(
     module_mass = arrays["module_mass"]
     env_mass = arrays["env_mass"]
     colors = _hyperedge_colors(strength.shape[0])
-    dominant, _ = _dominant_env(A_eh, arrays["env_coords"].shape[0])
-    active = [idx for idx in np.argsort(-strength) if strength[idx] >= min_strength]
+    active_mask = _active_hyperedge_indices(arrays, strength.shape[0])
+    dominant, _ = _dominant_env(
+        A_eh, arrays["env_coords"].shape[0], arrays.get("active_hyperedge_mask")
+    )
+    # The supplied hard mask is authoritative for residual mechanisms.  Keep
+    # ``min_strength`` as a compatibility filter only for historical arrays
+    # that have no mask at all.
+    if "active_hyperedge_mask" in arrays or "effective_edge_mask" in arrays:
+        active = active_mask
+    else:
+        active = [idx for idx in active_mask if strength[idx] >= min_strength]
     hidden_count = max(0, strength.shape[0] - len(active))
     if len(active) > max_hyperedges:
         hidden_count += len(active) - max_hyperedges
         active = active[:max_hyperedges]
     active = sorted(int(idx) for idx in active)
-    if not active and strength.shape[0] > 0:
-        active = [int(np.argmax(strength))]
-        hidden_count = max(0, strength.shape[0] - 1)
-
     module_indices = list(np.flatnonzero(present))
     if centers.size and module_indices:
         module_indices.sort(key=lambda idx: (-float(centers[idx, 1]), int(idx)))
@@ -481,13 +728,35 @@ def render_channelthermal_organization_summary_matrices(
     src = arrays["src"]
     dst = arrays["dst"]
     colors = _hyperedge_colors(strength.shape[0])
-    dominant, confidence = _dominant_env(A_eh, env_coords.shape[0])
+    active = _active_hyperedge_indices(arrays, strength.shape[0])
+    display_indices = list(active)
+    if not display_indices and strength.shape[0] > 0:
+        # Keep empty/malformed debug inputs renderable without presenting an
+        # inactive packed column as a real mechanism.
+        display_indices = [-1]
+    display_strength = (
+        strength[display_indices]
+        if display_indices and display_indices[0] >= 0
+        else np.zeros((1,), dtype=np.float32)
+    )
+    display_module_mass = (
+        module_mass[display_indices]
+        if display_indices and display_indices[0] >= 0
+        else np.zeros((1,), dtype=np.float32)
+    )
+    display_env_mass = (
+        env_mass[display_indices]
+        if display_indices and display_indices[0] >= 0
+        else np.zeros((1,), dtype=np.float32)
+    )
+    display_A_mh = A_mh[:, display_indices] if display_indices and display_indices[0] >= 0 else np.zeros((A_mh.shape[0], 1), dtype=np.float32)
+    display_A_eh = A_eh[:, display_indices] if display_indices and display_indices[0] >= 0 else np.zeros((A_eh.shape[0], 1), dtype=np.float32)
+    dominant, confidence = _dominant_env(A_eh, env_coords.shape[0], arrays.get("active_hyperedge_mask"))
     sort_idx = (
         np.lexsort((np.arange(A_eh.shape[0]), dominant))
         if sort_environment and A_eh.size
         else np.arange(A_eh.shape[0])
     )
-
     fig = plt.figure(figsize=(13.6, 9.0), constrained_layout=True)
     gs = fig.add_gridspec(2, 2)
     ax_mh = fig.add_subplot(gs[0, 0])
@@ -495,55 +764,56 @@ def render_channelthermal_organization_summary_matrices(
     ax_bar = fig.add_subplot(gs[1, 0])
     ax_map = fig.add_subplot(gs[1, 1])
 
-    im_mh = ax_mh.imshow(A_mh, aspect="auto", cmap="viridis", vmin=0.0, vmax=max(float(np.nanmax(A_mh)) if A_mh.size else 1.0, 1.0e-6))
-    ax_mh.set_title("Module -> Hyperedge assignment A_mh")
+    im_mh = ax_mh.imshow(display_A_mh, aspect="auto", cmap="viridis", vmin=0.0, vmax=max(float(np.nanmax(display_A_mh)) if display_A_mh.size else 1.0, 1.0e-6))
+    ax_mh.set_title("Module -> active mechanism assignment A_mh")
     ax_mh.set_xlabel("hyperedge")
     ax_mh.set_ylabel("module")
-    ax_mh.set_xticks(np.arange(strength.shape[0]))
-    ax_mh.set_xticklabels([f"H{i}" for i in range(strength.shape[0])])
+    ax_mh.set_xticks(np.arange(len(display_indices)))
+    ax_mh.set_xticklabels(["none" if i < 0 else f"H{i}" for i in display_indices])
     ax_mh.set_yticks(np.arange(centers.shape[0]))
     ax_mh.set_yticklabels([f"M{i}" for i in range(centers.shape[0])])
-    if A_mh.shape[0] * A_mh.shape[1] <= 120:
-        for i in range(A_mh.shape[0]):
-            for j in range(A_mh.shape[1]):
-                ax_mh.text(j, i, f"{A_mh[i, j]:.2f}", ha="center", va="center", fontsize=7, color="white" if A_mh[i, j] > 0.5 else "black")
+    if display_A_mh.shape[0] * display_A_mh.shape[1] <= 120:
+        for i in range(display_A_mh.shape[0]):
+            for j in range(display_A_mh.shape[1]):
+                ax_mh.text(j, i, f"{display_A_mh[i, j]:.2f}", ha="center", va="center", fontsize=7, color="white" if display_A_mh[i, j] > 0.5 else "black")
     fig.colorbar(im_mh, ax=ax_mh, fraction=0.046, pad=0.04)
 
-    A_eh_sorted = A_eh[sort_idx] if A_eh.size else A_eh
-    im_eh = ax_eh.imshow(A_eh_sorted, aspect="auto", cmap="viridis", vmin=0.0, vmax=max(float(np.nanmax(A_eh)) if A_eh.size else 1.0, 1.0e-6))
+    display_sort_idx = sort_idx if display_A_eh.shape[0] else np.arange(display_A_eh.shape[0])
+    A_eh_sorted = display_A_eh[display_sort_idx] if display_A_eh.size else display_A_eh
+    im_eh = ax_eh.imshow(A_eh_sorted, aspect="auto", cmap="viridis", vmin=0.0, vmax=max(float(np.nanmax(display_A_eh)) if display_A_eh.size else 1.0, 1.0e-6))
     order_label = "sorted by dominant edge" if sort_environment else "physical token order"
     ax_eh.set_title(
-        f"Environment -> Hyperedge assignment A_eh ({order_label})"
+        f"Environment -> active mechanism assignment A_eh ({order_label})"
         f"{_collapse_title_suffix(arrays)}"
     )
     ax_eh.set_xlabel("hyperedge")
     ax_eh.set_ylabel("environment token index" if not sort_environment else "sorted env row")
-    ax_eh.set_xticks(np.arange(strength.shape[0]))
-    ax_eh.set_xticklabels([f"H{i}" for i in range(strength.shape[0])])
+    ax_eh.set_xticks(np.arange(len(display_indices)))
+    ax_eh.set_xticklabels(["none" if i < 0 else f"H{i}" for i in display_indices])
     max_ticks = min(8, A_eh_sorted.shape[0])
     if max_ticks > 0:
         tick_pos = np.linspace(0, A_eh_sorted.shape[0] - 1, max_ticks, dtype=int)
         ax_eh.set_yticks(tick_pos)
-        ax_eh.set_yticklabels([str(int(sort_idx[idx])) for idx in tick_pos])
+        ax_eh.set_yticklabels([str(int(display_sort_idx[idx])) for idx in tick_pos])
     fig.colorbar(im_eh, ax=ax_eh, fraction=0.046, pad=0.04)
-    x = np.arange(strength.shape[0])
+    x = np.arange(len(display_indices))
     width = 0.25
-    ax_bar.bar(x - width, module_mass, width, label="module_mass", color="#d95f02", alpha=0.78)
-    ax_bar.bar(x, env_mass, width, label="env_mass", color="#1b9e77", alpha=0.78)
-    ax_bar.bar(x + width, strength, width, label="hyper_strength", color="#7570b3", alpha=0.78)
+    ax_bar.bar(x - width, display_module_mass, width, label="module_mass", color="#d95f02", alpha=0.78)
+    ax_bar.bar(x, display_env_mass, width, label="env_mass", color="#1b9e77", alpha=0.78)
+    ax_bar.bar(x + width, display_strength, width, label="hyper_strength", color="#7570b3", alpha=0.78)
     ax_bar.set_title("Hyperedge mass and strength")
     ax_bar.set_xlabel("hyperedge")
     ax_bar.set_ylabel("value")
     ax_bar.set_xticks(x)
-    ax_bar.set_xticklabels([f"H{i}" for i in range(strength.shape[0])])
-    ax_bar.set_ylim(0.0, max(1.0, float(np.nanmax([np.nanmax(module_mass) if module_mass.size else 0, np.nanmax(env_mass) if env_mass.size else 0, np.nanmax(strength) if strength.size else 0])) * 1.15))
+    ax_bar.set_xticklabels(["none" if i < 0 else f"H{i}" for i in display_indices])
+    ax_bar.set_ylim(0.0, max(1.0, float(np.nanmax([np.nanmax(display_module_mass) if display_module_mass.size else 0, np.nanmax(display_env_mass) if display_env_mass.size else 0, np.nanmax(display_strength) if display_strength.size else 0])) * 1.15))
     ax_bar.grid(axis="y", alpha=0.25)
     ax_bar.legend(fontsize=8)
 
     extent = _domain_extent(sample, env_coords)
     _draw_env_tokens(ax_map, arrays, colors)
     _draw_module_circles(ax_map, arrays, module_radius, label=True)
-    for hidx in range(strength.shape[0]):
+    for hidx in active:
         ax_map.plot([src[hidx, 0], dst[hidx, 0]], [src[hidx, 1], dst[hidx, 1]], color=colors[hidx], lw=1.0 + 2.0 * float(strength[hidx]), alpha=0.55)
         ax_map.scatter(src[hidx, 0], src[hidx, 1], marker="x", s=42, color=colors[hidx], linewidth=1.5)
         ax_map.scatter(dst[hidx, 0], dst[hidx, 1], marker="*", s=90, color=colors[hidx], edgecolor="black", linewidth=0.45)
@@ -555,14 +825,14 @@ def render_channelthermal_organization_summary_matrices(
     ax_map.set_aspect("equal", adjustable="box")
     if confidence.size:
         ax_map.text(0.01, 0.01, "color = dominant H; size/opacity = confidence", transform=ax_map.transAxes, fontsize=8, va="bottom", bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.75})
-    if strength.size:
-        dominant_cmap = ListedColormap(colors[: strength.shape[0]])
-        dominant_norm = BoundaryNorm(np.arange(strength.shape[0] + 1) - 0.5, strength.shape[0])
+    if active:
+        dominant_cmap = ListedColormap([colors[idx] for idx in active])
+        dominant_norm = BoundaryNorm(np.arange(len(active) + 1) - 0.5, len(active))
         dominant_mappable = plt.cm.ScalarMappable(cmap=dominant_cmap, norm=dominant_norm)
         dominant_mappable.set_array([])
         cbar = fig.colorbar(dominant_mappable, ax=ax_map, fraction=0.046, pad=0.04)
-        cbar.set_ticks(np.arange(strength.shape[0]))
-        cbar.set_ticklabels([f"H{i}" for i in range(strength.shape[0])])
+        cbar.set_ticks(np.arange(len(active)))
+        cbar.set_ticklabels([f"H{i}" for i in active])
         cbar.set_label("env token dominant H")
 
     fig.savefig(str(output_path), dpi=180)

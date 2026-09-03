@@ -342,7 +342,13 @@ def run_epoch(
                     "effective_interface_weight": float(effective_interface_weight),
                 }
             )
+            # Keep the metrics row schema stable when an older/fake model
+            # omits optional organizer diagnostics.  In particular, the
+            # case-adaptive residual metrics are direct organizer values and
+            # should not be reconstructed here from legacy edge strength.
             metrics.update(honf_diag)
+            for key in HONF_DIAGNOSTIC_KEYS:
+                metrics.setdefault(key, float(honf_diag.get(key, 0.0)))
         for key, value in metrics.items():
             sums[key] = sums.get(key, 0.0) + float(value)
         count += 1

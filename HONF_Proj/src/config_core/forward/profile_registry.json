@@ -3,6 +3,16 @@
   "recommended_forward_profile": "stage7_structured_context",
   "profiles": [
     {
+      "name": "case_adaptive_residual_context",
+      "path": "project://src/config_core/forward/case_adaptive_residual_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "case-adaptive residual mechanisms / context fusion / fused dense / legacy kernel",
+      "checkpoint_families": ["case-adaptive residual v1"],
+      "owner": "forward-research",
+      "stage": "next"
+    },
+    {
       "name": "stage7_structured_context",
       "path": "project://src/config_core/forward/stage7_structured_context.json",
       "status": "current",

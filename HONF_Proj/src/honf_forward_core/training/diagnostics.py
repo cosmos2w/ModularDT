@@ -17,7 +17,6 @@ from typing import Any, Dict
 
 import torch
 
-
 EPS = 1.0e-8
 
 HONF_DIAGNOSTIC_KEYS = [
@@ -25,6 +24,18 @@ HONF_DIAGNOSTIC_KEYS = [
     "selected_edge_count",
     "viable_selected_edge_count",
     "hard_selected_edge_count",
+    "case_adaptive_edge_count_mean",
+    "case_adaptive_edge_cap_mean",
+    "case_adaptive_soft_edge_count_mean",
+    "case_adaptive_stop_reached_fraction",
+    "case_adaptive_cap_hit_fraction",
+    "residual_fraction_final_mean",
+    "residual_fraction_final_max",
+    "residual_first_marginal_mean",
+    "residual_last_active_marginal_mean",
+    "case_adaptive_stop_margin_mean",
+    "case_adaptive_stop_margin_min",
+    "residual_monotonic_violation_max",
     "edge_transition_gate_mean",
     "selection_transition_fraction",
     "module_sparsity_fraction",
@@ -161,6 +172,191 @@ def _distribution_stat(
     raise ValueError(f"Unknown distribution statistic: {statistic!r}.")
 
 
+def _case_vector(
+    value: Any,
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Return a per-case vector from a direct organizer diagnostic.
+
+    Residual-organizer values such as counts, stop margins, and violation
+    bounds are normally ``[B]``.  The small amount of shape tolerance here
+    keeps diagnostics usable with scalar test fixtures and with a future
+    organizer that stores an extra singleton dimension, without changing the
+    legacy organizer path.
+    """
+
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        value = value.to(device=device, dtype=dtype)
+    else:
+        try:
+            value = torch.as_tensor(value, device=device, dtype=dtype)
+        except (TypeError, ValueError):
+            return None
+    if value.numel() == 0:
+        return None
+    if value.ndim == 0:
+        return value.expand(batch_size)
+    if value.shape[0] == batch_size:
+        return value.reshape(batch_size, -1).mean(dim=-1)
+    return value.reshape(-1).mean().expand(batch_size)
+
+
+def _case_adaptive_count_vector(
+    organizer: Dict[str, Any],
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Read the residual organizer's explicit hard count, if available."""
+
+    count = _case_vector(
+        organizer.get("case_adaptive_edge_count"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if count is not None:
+        return count
+    hard_mask = organizer.get("hard_case_edge_mask")
+    if torch.is_tensor(hard_mask) and hard_mask.numel():
+        hard_mask = hard_mask.to(device=device, dtype=dtype)
+        if hard_mask.ndim >= 2 and hard_mask.shape[0] == batch_size:
+            return hard_mask.reshape(batch_size, -1).sum(dim=-1)
+    return None
+
+
+def _residual_fraction_at_hard_count(
+    organizer: Dict[str, Any],
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Return the final residual at each case's direct hard mechanism count."""
+
+    explicit = _case_vector(
+        organizer.get("residual_fraction_final"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if explicit is not None:
+        return explicit
+    trace = organizer.get("residual_fraction_trace")
+    if not torch.is_tensor(trace) or trace.numel() == 0 or trace.ndim < 2:
+        return None
+    trace = trace.to(device=device, dtype=dtype)
+    if trace.shape[0] != batch_size or trace.shape[-1] == 0:
+        return None
+    trace = trace.reshape(batch_size, -1)
+    count = _case_adaptive_count_vector(
+        organizer,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if count is None:
+        return trace[:, -1]
+    indices = count.round().long().clamp(min=0, max=trace.shape[-1] - 1)
+    return trace.gather(dim=1, index=indices[:, None]).squeeze(dim=1)
+
+
+def _residual_first_marginal(
+    organizer: Dict[str, Any],
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Return the first extracted marginal explained fraction per case."""
+
+    explicit = _case_vector(
+        organizer.get("residual_first_marginal"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if explicit is not None:
+        return explicit
+    marginal = organizer.get("residual_marginal_explained_fraction")
+    if not torch.is_tensor(marginal) or marginal.numel() == 0 or marginal.ndim < 2:
+        return None
+    marginal = marginal.to(device=device, dtype=dtype)
+    if marginal.shape[0] != batch_size or marginal.shape[-1] == 0:
+        return None
+    return marginal.reshape(batch_size, -1)[:, 0]
+
+
+def _residual_last_active_marginal(
+    organizer: Dict[str, Any],
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Return the marginal explained fraction at each case's final active step."""
+
+    explicit = _case_vector(
+        organizer.get("residual_last_active_marginal"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if explicit is not None:
+        return explicit
+    marginal = organizer.get("residual_marginal_explained_fraction")
+    if not torch.is_tensor(marginal) or marginal.numel() == 0 or marginal.ndim < 2:
+        return None
+    marginal = marginal.to(device=device, dtype=dtype)
+    if marginal.shape[0] != batch_size or marginal.shape[-1] == 0:
+        return None
+    marginal = marginal.reshape(batch_size, -1)
+    count = _case_adaptive_count_vector(
+        organizer,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if count is None:
+        indices = marginal.new_full((batch_size,), marginal.shape[-1] - 1, dtype=torch.long)
+    else:
+        indices = count.round().long().clamp(min=1, max=marginal.shape[-1]) - 1
+    return marginal.gather(dim=1, index=indices[:, None]).squeeze(dim=1)
+
+
+def _residual_monotonic_violation(
+    organizer: Dict[str, Any],
+    *,
+    batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Read the organizer's violation bound, with a trace-only fallback."""
+
+    explicit = _case_vector(
+        organizer.get("residual_monotonic_violation_max"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if explicit is not None:
+        return explicit
+    trace = organizer.get("residual_fraction_trace")
+    if not torch.is_tensor(trace) or trace.numel() == 0 or trace.ndim < 2:
+        return None
+    trace = trace.to(device=device, dtype=dtype)
+    if trace.shape[0] != batch_size or trace.shape[-1] < 2:
+        return trace.new_zeros(batch_size)
+    trace = trace.reshape(batch_size, -1)
+    return torch.relu(trace[:, 1:] - trace[:, :-1]).amax(dim=-1)
+
+
 def compute_code_permutation_equivariance_diagnostics(
     reference: Dict[str, Any],
     permuted: Dict[str, Any],
@@ -276,6 +472,95 @@ def compute_honf_diagnostics(
         else pred.new_zeros(())
     )
 
+    # Case-adaptive residual metrics are intentionally sourced from the
+    # organizer's explicit support/count contract.  In particular, do not
+    # infer a residual K from ``hyper_strength``: that threshold belongs to
+    # the legacy functional-edge diagnostic and has different semantics.
+    batch_size = int(pred.shape[0])
+    case_adaptive_count = _case_vector(
+        org.get("case_adaptive_edge_count"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    case_adaptive_cap = _case_vector(
+        org.get("case_adaptive_edge_cap"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    residual_mode = any(
+        key in org
+        for key in (
+            "case_adaptive_edge_count",
+            "case_adaptive_edge_cap",
+            "residual_fraction_trace",
+            "residual_marginal_explained_fraction",
+        )
+    )
+    edge_survival = org.get("edge_survival_weight")
+    explicit_soft_count = _case_vector(
+        org.get("case_adaptive_soft_edge_count"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    if explicit_soft_count is not None:
+        case_adaptive_soft_count = explicit_soft_count
+    elif residual_mode and torch.is_tensor(edge_survival) and edge_survival.numel() and edge_survival.ndim >= 2:
+        edge_survival = edge_survival.to(device=device, dtype=dtype)
+        case_adaptive_soft_count = edge_survival.reshape(batch_size, -1).sum(dim=-1)
+    else:
+        case_adaptive_soft_count = None
+    stop_reached = _case_vector(
+        org.get("case_adaptive_stop_reached"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    cap_hit = _case_vector(
+        org.get("case_adaptive_cap_hit"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    stop_margin = _case_vector(
+        org.get("case_adaptive_stop_margin"),
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    residual_final = _residual_fraction_at_hard_count(
+        org,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    residual_first = _residual_first_marginal(
+        org,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    residual_last = _residual_last_active_marginal(
+        org,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+    residual_violation = _residual_monotonic_violation(
+        org,
+        batch_size=batch_size,
+        device=device,
+        dtype=dtype,
+    )
+
+    def _mean_or_zero(value: torch.Tensor | None) -> torch.Tensor:
+        return value.mean() if value is not None else pred.new_zeros(())
+
+    def _max_or_zero(value: torch.Tensor | None) -> torch.Tensor:
+        return value.amax() if value is not None else pred.new_zeros(())
+
     A_mh = org.get("A_mh")
     A_eh = org.get("A_eh")
     module_mass = org.get("hyper_module_mass")
@@ -318,6 +603,18 @@ def compute_honf_diagnostics(
         "selected_edge_count": selected_count,
         "viable_selected_edge_count": viable_selected,
         "hard_selected_edge_count": _scalar(org.get("hard_selected_edge_count"), device, dtype),
+        "case_adaptive_edge_count_mean": _mean_or_zero(case_adaptive_count),
+        "case_adaptive_edge_cap_mean": _mean_or_zero(case_adaptive_cap),
+        "case_adaptive_soft_edge_count_mean": _mean_or_zero(case_adaptive_soft_count),
+        "case_adaptive_stop_reached_fraction": _mean_or_zero(stop_reached),
+        "case_adaptive_cap_hit_fraction": _mean_or_zero(cap_hit),
+        "residual_fraction_final_mean": _mean_or_zero(residual_final),
+        "residual_fraction_final_max": _max_or_zero(residual_final),
+        "residual_first_marginal_mean": _mean_or_zero(residual_first),
+        "residual_last_active_marginal_mean": _mean_or_zero(residual_last),
+        "case_adaptive_stop_margin_mean": _mean_or_zero(stop_margin),
+        "case_adaptive_stop_margin_min": stop_margin.amin() if stop_margin is not None else pred.new_zeros(()),
+        "residual_monotonic_violation_max": _max_or_zero(residual_violation),
         "edge_transition_gate_mean": _scalar(org.get("edge_transition_gate"), device, dtype),
         "selection_transition_fraction": _scalar(org.get("selection_transition_fraction"), device, dtype),
         "module_sparsity_fraction": _scalar(org.get("module_sparsity_fraction"), device, dtype),

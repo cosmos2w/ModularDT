@@ -151,6 +151,83 @@ def _resolved_active_edge_references(run_dir: Path) -> tuple[tuple[float, str], 
         return ()
 
 
+def _save_organizer_health_plot(history: Dict[str, list[float]], diagnostics_dir: Path) -> None:
+    """Write one compact case-adaptive residual-organizer health figure.
+
+    The figure is intentionally separate from the loss overview: its panels
+    show the hard/soft mechanism support, residual progress, and stop/cap
+    outcomes without duplicating any prediction or physical-loss curves.
+    Historical fixed-organizer metrics do not contain these columns, so no
+    empty/not-applicable image is emitted for those runs.
+    """
+
+    health_keys = (
+        "case_adaptive_edge_count_mean",
+        "case_adaptive_soft_edge_count_mean",
+        "residual_fraction_final_mean",
+        "case_adaptive_stop_reached_fraction",
+        "case_adaptive_cap_hit_fraction",
+    )
+    if not any(
+        any(abs(float(value)) > 0.0 for value in history.get(key, []))
+        or any(abs(float(value)) > 0.0 for value in history.get(f"val_{key}", []))
+        for key in health_keys
+    ):
+        return
+
+    import matplotlib.pyplot as plt
+
+    panels = [
+        (
+            "Hard mechanism count",
+            ("case_adaptive_edge_count_mean", "val_case_adaptive_edge_count_mean"),
+            "count",
+            False,
+            True,
+        ),
+        (
+            "Soft effective mechanism count",
+            ("case_adaptive_soft_edge_count_mean", "val_case_adaptive_soft_edge_count_mean"),
+            "count",
+            False,
+            True,
+        ),
+        (
+            "Final residual fraction",
+            ("residual_fraction_final_mean", "val_residual_fraction_final_mean"),
+            "fraction",
+            True,
+            False,
+        ),
+        (
+            "Stop reached / cap hit",
+            (
+                "case_adaptive_stop_reached_fraction",
+                "val_case_adaptive_stop_reached_fraction",
+                "case_adaptive_cap_hit_fraction",
+                "val_case_adaptive_cap_hit_fraction",
+            ),
+            "fraction",
+            False,
+            True,
+        ),
+    ]
+    fig, axes = plt.subplots(2, 2, figsize=(10.0, 6.8), constrained_layout=True)
+    for ax, (title, keys, ylabel, log_scale, y_min_zero) in zip(axes.reshape(-1), panels):
+        _plot_metric_group(
+            ax,
+            history,
+            keys,
+            title=title,
+            ylabel=ylabel,
+            log_scale=log_scale,
+            y_min_zero=y_min_zero,
+        )
+    fig.suptitle("Case-Adaptive Organizer Health", fontsize=13)
+    fig.savefig(str(diagnostics_dir / "honf_organizer_health_curve.png"), dpi=160)
+    plt.close(fig)
+
+
 def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
     """Save readable grouped plots instead of one overcrowded metric figure."""
 
@@ -336,3 +413,4 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
         fig.savefig(str(diagnostics_dir / filename), dpi=160)
         plt.close(fig)
 
+    _save_organizer_health_plot(history, diagnostics_dir)

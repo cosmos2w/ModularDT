@@ -39,3 +39,14 @@ family.
 An empty validation split is an error. Reusing training samples for validation
 requires `allow_train_as_validation: true` in the applicable case dataset or
 local-module namespace and is announced as a warning.
+
+## Case-adaptive residual candidate
+
+`src/config_core/forward/case_adaptive_residual_context.json` is a complete
+research candidate and is intentionally not the recommended profile. Its
+`organizer_mode="case_adaptive_residual"` setting uses `num_hyperedges=0` to
+make clear that there is no global scientific K. Runtime mechanism tensors are
+packed to the largest active module count in a batch; hard K is selected per
+case at evaluation, while differentiable survival weights are used during
+training. The profile keeps context fusion, dense fused query-module routing,
+the legacy pairwise kernel, and disabled organizer count regularization.

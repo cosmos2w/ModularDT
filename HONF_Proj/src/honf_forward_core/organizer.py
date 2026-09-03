@@ -29,6 +29,7 @@ from .organization.helpers import (
     _weighted_scale,
     deterministic_slot_codes,
 )
+from .organization.residual_adaptive import CaseAdaptiveResidualOrganizer
 from .routing import normalize_assignment
 
 
@@ -42,6 +43,9 @@ class HypergraphOrganizerCore(nn.Module):
         self.config = config
         if config.organizer_mode == "exchangeable_slots":
             self.exchangeable = ExchangeableSlotOrganizer(config)
+            return
+        if config.organizer_mode == "case_adaptive_residual":
+            self.case_adaptive_residual = CaseAdaptiveResidualOrganizer(config)
             return
         hidden_dim = int(config.hidden_dim)
         num_hyperedges = int(config.num_hyperedges)
@@ -90,6 +94,7 @@ class HypergraphOrganizerCore(nn.Module):
         candidate_codes: Optional[torch.Tensor] = None,
         edge_capacity: Optional[int] = None,
         selection_override: Optional[str] = None,
+        global_token: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Build incidences, hyperedge states, geometry, and diagnostics.
 
@@ -115,6 +120,16 @@ class HypergraphOrganizerCore(nn.Module):
                 candidate_codes=candidate_codes,
                 edge_capacity=edge_capacity,
                 selection_override=selection_override,
+            )
+        if cfg.organizer_mode == "case_adaptive_residual":
+            return self.case_adaptive_residual(
+                module_tokens=module_tokens,
+                env_tokens=env_tokens,
+                module_centers=module_centers,
+                env_coords=env_coords,
+                module_present=module_present,
+                cfg=cfg,
+                global_token=global_token,
             )
 
         batch_size, _, hidden_dim = module_tokens.shape

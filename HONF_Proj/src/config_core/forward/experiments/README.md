@@ -11,6 +11,17 @@ These files are strict overlays rather than complete profiles. Apply one with `-
 
 `stage7_structured_context.json` remains the historical/scientific Run-1401 architecture profile and numerical checkpoint reference. It is intentionally not rewritten to select fused or sparse execution.
 
+## Case-adaptive residual candidate
+
+`../case_adaptive_residual_context.json` is a complete, standalone research
+candidate rather than an overlay. It keeps the Stage-7 physical/training
+settings and uses `organizer_mode="case_adaptive_residual"` with
+`num_hyperedges=0`, shared sequential residual extraction, soft training
+survival, hard case-specific evaluation support, and fused dense
+query-module routing. Its 2500-epoch budget and milestone list are explicit;
+it does not change `recommended_forward_profile` or enable organizer count
+regularization.
+
 ## Historical experiment overlays
 
 - `old_parity.json`: disables hyperedge value context.

@@ -225,8 +225,32 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
             if not torch.is_tensor(edge_active_mask):
                 edge_active_mask = torch.ones_like(hyper_logits[:, 0, :])
             edge_active_mask = edge_active_mask.to(device=hyper_logits.device, dtype=hyper_logits.dtype)
+            residual_support = organizer_output.get("edge_survival_weight")
+            adaptive_support = torch.is_tensor(residual_support)
+            if adaptive_support:
+                residual_support = residual_support.to(
+                    device=hyper_logits.device,
+                    dtype=hyper_logits.dtype,
+                )
+                if residual_support.shape != edge_active_mask.shape:
+                    raise ValueError(
+                        "edge_survival_weight must have shape [B,K] matching the runtime hyperedge axis."
+                    )
+                # The residual organizer exports either differentiable soft
+                # support during training or a detached 0/1 hard mask during
+                # evaluation.  Apply it as a log prior before normalization;
+                # masking again below makes hard-inactive attention exactly
+                # zero instead of merely underflowing to a tiny probability.
+                residual_support_mask = residual_support > 0
+                hyper_logits = hyper_logits + torch.log(residual_support.clamp_min(EPS))[:, None, :]
+                hyper_logits = hyper_logits.masked_fill(
+                    ~residual_support_mask[:, None, :],
+                    torch.finfo(hyper_logits.dtype).min,
+                )
             uses_descriptive_query_normalizer = (
-                not context_fusion or cfg.query_assignment_normalizer != "softmax"
+                adaptive_support
+                or not context_fusion
+                or cfg.query_assignment_normalizer != "softmax"
             )
             if uses_descriptive_query_normalizer:
                 hyper_logits = hyper_logits.masked_fill(
@@ -236,6 +260,9 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
             if cfg.hyper_query_attention_mode == "uniform":
                 if not uses_descriptive_query_normalizer:
                     hyper_attention = torch.full_like(hyper_logits, 1.0 / float(max(hyper_logits.shape[-1], 1)))
+                elif adaptive_support:
+                    hyper_attention = residual_support[:, None, :].expand_as(hyper_logits)
+                    hyper_attention = hyper_attention / hyper_attention.sum(dim=-1, keepdim=True).clamp_min(EPS)
                 else:
                     hyper_attention = edge_active_mask[:, None, :].expand_as(hyper_logits)
                     hyper_attention = hyper_attention / hyper_attention.sum(dim=-1, keepdim=True).clamp_min(EPS)
@@ -260,6 +287,37 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
                         ),
                     )
                     hyper_attention = self._limit_probability_routes(hyper_attention)
+            if adaptive_support:
+                # Only the boolean support is applied a second time; the
+                # fractional training weight was already used as the log
+                # routing prior above.
+                hyper_attention = hyper_attention * residual_support_mask[:, None, :].to(
+                    dtype=hyper_attention.dtype
+                )
+                hyper_attention = hyper_attention / hyper_attention.sum(dim=-1, keepdim=True).clamp_min(EPS)
+                diagnostics["case_adaptive_support_mean"] = residual_support.detach().mean()
+                hard_support = organizer_output.get("hard_case_edge_mask")
+                if not torch.is_tensor(hard_support):
+                    hard_support = residual_support.detach() > 0
+                diagnostics["case_adaptive_active_edge_count"] = (
+                    (hard_support.to(
+                        device=hyper_logits.device,
+                        dtype=hyper_logits.dtype,
+                    ).sum(dim=-1).mean())
+                )
+                # Preserve the organizer's per-case soft count in the merged
+                # model output.  During evaluation ``edge_survival_weight`` is
+                # intentionally hard, so deriving this diagnostic from that
+                # tensor would silently report K_hard instead of the true
+                # soft-support effective count.
+                soft_count = organizer_output.get("case_adaptive_soft_edge_count")
+                if torch.is_tensor(soft_count):
+                    diagnostics["case_adaptive_soft_edge_count"] = soft_count.detach().to(
+                        device=hyper_logits.device,
+                        dtype=hyper_logits.dtype,
+                    )
+                else:
+                    diagnostics["case_adaptive_soft_edge_count"] = residual_support.detach().sum(dim=-1)
             if not context_fusion and gathered_execution:
                 hyper_attention, retained_query_mass = self._limit_query_edge_routes(
                     hyper_attention,

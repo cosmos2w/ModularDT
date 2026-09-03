@@ -61,35 +61,190 @@ def evaluation_output_dir(base_dir_arg: str | None, checkpoint_path: Path, case_
     return resolve_demo_path(base_dir) / f"{safe_path_name(case_id)}_{current_timestamp()}"
 
 
-def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> Dict[str, np.ndarray]:
-    """Extract organization arrays."""
+def _as_numpy(value: Any, dtype: Any = np.float32) -> np.ndarray:
+    """Convert tensors and array-like values without retaining a computation graph."""
 
-    centers = np.asarray(sample["structure"]["module_centers"], dtype=np.float32)
-    present = np.asarray(sample["structure"]["module_present"] > 0.5)
-    env_coords = np.asarray(aux.get("env_coords", np.zeros((0, 2))), dtype=np.float32)
-    A_eh = np.asarray(aux.get("A_eh", np.zeros((env_coords.shape[0], 1))), dtype=np.float32)
-    A_mh = np.asarray(aux.get("A_mh", np.zeros((centers.shape[0], A_eh.shape[-1]))), dtype=np.float32)
-    strength = np.asarray(aux.get("hyper_strength", np.ones((A_eh.shape[-1],), dtype=np.float32)), dtype=np.float32)
-    active_mask = np.asarray(
-        aux.get(
-            "effective_edge_mask",
-            aux.get("edge_active_mask", np.ones((A_eh.shape[-1],), dtype=np.float32)),
-        ),
-        dtype=np.float32,
+    if value is None:
+        return np.asarray([], dtype=dtype)
+    if hasattr(value, "detach"):
+        value = value.detach().cpu().numpy()
+    return np.asarray(value, dtype=dtype)
+
+
+def _aux_array(
+    aux: Dict[str, Any],
+    key: str,
+    default: Any,
+    *,
+    ndim: int | None = None,
+    dtype: Any = np.float32,
+) -> np.ndarray:
+    """Read one auxiliary array and remove only an explicit singleton batch axis."""
+
+    value = aux.get(key, default)
+    array = _as_numpy(value, dtype=dtype)
+    if ndim is not None and array.ndim == ndim + 1 and array.shape[0] == 1:
+        array = array[0]
+    return array
+
+
+def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> Dict[str, np.ndarray]:
+    """Extract presentation and case-adaptive organization arrays.
+
+    The returned arrays are always a single case (the evaluation workflow
+    removes its batch axis before calling this helper).  A singleton batch axis
+    is nevertheless accepted so direct diagnostics can use the helper too.
+    Residual fields are optional for historical organizers and receive explicit
+    shape-compatible defaults in that case.
+    """
+
+    centers = _as_numpy(sample["structure"]["module_centers"])
+    if centers.ndim == 3 and centers.shape[0] == 1:
+        centers = centers[0]
+    present = _as_numpy(sample["structure"]["module_present"]) > 0.5
+    if present.ndim == 2 and present.shape[0] == 1:
+        present = present[0]
+    env_coords = _aux_array(aux, "env_coords", np.zeros((0, 2)), ndim=2)
+    if env_coords.ndim != 2:
+        env_coords = env_coords.reshape(-1, 2) if env_coords.size else np.zeros((0, 2), dtype=np.float32)
+    A_eh = _aux_array(aux, "A_eh", np.zeros((env_coords.shape[0], 1)), ndim=2)
+    if A_eh.ndim != 2:
+        A_eh = np.zeros((env_coords.shape[0], 1), dtype=np.float32)
+    edge_count = int(A_eh.shape[-1])
+    A_mh = _aux_array(aux, "A_mh", np.zeros((centers.shape[0], edge_count)), ndim=2)
+    if A_mh.ndim != 2:
+        A_mh = np.zeros((centers.shape[0], edge_count), dtype=np.float32)
+    if A_mh.shape[-1] != edge_count:
+        edge_count = int(A_mh.shape[-1])
+        if A_eh.shape[-1] != edge_count:
+            A_eh = A_eh[:, :edge_count] if A_eh.shape[-1] > edge_count else np.pad(
+                A_eh, ((0, 0), (0, edge_count - A_eh.shape[-1]))
+            )
+    strength = _aux_array(aux, "hyper_strength", np.ones((edge_count,), dtype=np.float32), ndim=1)
+    if strength.ndim != 1:
+        strength = strength.reshape(-1)
+    edge_count = min(edge_count, int(strength.shape[0])) if strength.size else edge_count
+    if edge_count <= 0:
+        edge_count = 1
+        strength = np.zeros((1,), dtype=np.float32)
+        A_mh = np.zeros((centers.shape[0], 1), dtype=np.float32)
+        A_eh = np.zeros((env_coords.shape[0], 1), dtype=np.float32)
+    else:
+        strength = strength[:edge_count]
+        A_mh = A_mh[:, :edge_count]
+        A_eh = A_eh[:, :edge_count]
+    active_source = aux.get("effective_edge_mask", aux.get("edge_active_mask"))
+    if active_source is None:
+        active_source = np.ones((edge_count,), dtype=np.float32)
+    active_mask = _as_numpy(active_source).reshape(-1)[:edge_count]
+    if active_mask.size < edge_count:
+        active_mask = np.pad(active_mask, (0, edge_count - active_mask.size), constant_values=0.0)
+    A_me = _aux_array(
+        aux,
+        "A_me",
+        np.zeros((centers.shape[0], env_coords.shape[0]), dtype=np.float32),
+        ndim=2,
     )
+    if A_me.ndim != 2:
+        A_me = np.zeros((centers.shape[0], env_coords.shape[0]), dtype=np.float32)
+    source = _aux_array(aux, "hyper_source_coords", np.zeros((edge_count, 2)), ndim=2)
+    region = _aux_array(
+        aux,
+        "hyper_thermal_region_coords",
+        aux.get("hyper_region_coords", np.zeros((edge_count, 2))),
+        ndim=2,
+    )
+    if source.ndim != 2 or source.shape[-1] != 2:
+        source = np.zeros((edge_count, 2), dtype=np.float32)
+    if region.ndim != 2 or region.shape[-1] != 2:
+        region = np.zeros((edge_count, 2), dtype=np.float32)
+
+    def edge_array(key: str, default: Any) -> np.ndarray:
+        values = _aux_array(aux, key, default, ndim=1)
+        values = values.reshape(-1)
+        if values.size < edge_count:
+            values = np.pad(values, (0, edge_count - values.size), constant_values=0.0)
+        return values[:edge_count]
+
+    def matrix_array(key: str, default: Any, rows: int) -> np.ndarray:
+        values = _aux_array(aux, key, default, ndim=2)
+        if values.ndim != 2:
+            return np.zeros((rows, edge_count), dtype=np.float32)
+        out = np.zeros((rows, edge_count), dtype=np.float32)
+        out[: min(rows, values.shape[0]), : min(edge_count, values.shape[1])] = values[:rows, :edge_count]
+        return out
+
+    residual_trace = _aux_array(
+        aux,
+        "residual_fraction_trace",
+        np.ones((edge_count + 1,), dtype=np.float32),
+        ndim=1,
+    ).reshape(-1)
+    if residual_trace.size < edge_count + 1:
+        residual_trace = np.pad(
+            residual_trace,
+            (0, edge_count + 1 - residual_trace.size),
+            constant_values=float(residual_trace[-1]) if residual_trace.size else 1.0,
+        )
+    residual_trace = residual_trace[: edge_count + 1]
+    cap = int(np.sum(present))
+    case_count = _aux_array(aux, "case_adaptive_edge_count", np.asarray(np.sum(active_mask > 0.5)), ndim=0).reshape(-1)
+    case_cap = _aux_array(aux, "case_adaptive_edge_cap", np.asarray(cap), ndim=0).reshape(-1)
+    cap_hit = _aux_array(aux, "case_adaptive_cap_hit", np.asarray(0.0), ndim=0).reshape(-1)
+    stop_reached = _aux_array(aux, "case_adaptive_stop_reached", np.asarray(0.0), ndim=0).reshape(-1)
+    stop_margin = _aux_array(aux, "case_adaptive_stop_margin", np.asarray(0.0), ndim=0).reshape(-1)
     return {
         "centers": centers,
         "present": present,
-        "heat": np.asarray(sample["structure"].get("heat_powers", np.zeros((centers.shape[0],))), dtype=np.float32),
+        "heat": _as_numpy(sample["structure"].get("heat_powers", np.zeros((centers.shape[0],)))),
         "env_coords": env_coords,
+        "A_me": A_me,
         "A_eh": A_eh,
         "A_mh": A_mh,
         "strength": strength,
         "active_hyperedge_mask": active_mask,
-        "module_mass": np.asarray(aux.get("hyper_module_mass", np.zeros_like(strength)), dtype=np.float32),
-        "env_mass": np.asarray(aux.get("hyper_env_mass", np.zeros_like(strength)), dtype=np.float32),
-        "src": np.asarray(aux.get("hyper_source_coords", np.zeros((strength.shape[0], 2))), dtype=np.float32),
-        "dst": np.asarray(aux.get("hyper_thermal_region_coords", aux.get("hyper_region_coords", np.zeros((strength.shape[0], 2)))), dtype=np.float32),
+        "effective_edge_mask": active_mask,
+        "hard_case_edge_mask": edge_array("hard_case_edge_mask", active_mask),
+        "edge_survival_weight": edge_array("edge_survival_weight", active_mask),
+        "module_mass": edge_array("hyper_module_mass", np.zeros_like(strength)),
+        "env_mass": edge_array("hyper_env_mass", np.zeros_like(strength)),
+        "src": source[:edge_count],
+        "dst": region[:edge_count],
+        "case_adaptive_edge_count": case_count,
+        "case_adaptive_edge_cap": case_cap,
+        "case_adaptive_stop_reached": stop_reached,
+        "case_adaptive_cap_hit": cap_hit,
+        "case_adaptive_stop_margin": stop_margin,
+        "residual_fraction_trace": residual_trace,
+        "residual_marginal_explained_fraction": edge_array(
+            "residual_marginal_explained_fraction", np.zeros((edge_count,))
+        ),
+        "residual_mechanism_strength": edge_array("residual_mechanism_strength", strength),
+        "residual_module_factor": matrix_array(
+            "residual_module_factor", np.zeros((centers.shape[0], edge_count)), centers.shape[0]
+        ),
+        "residual_environment_factor": matrix_array(
+            "residual_environment_factor", np.zeros((env_coords.shape[0], edge_count)), env_coords.shape[0]
+        ),
+        "residual_coupling_row_mass": _aux_array(
+            aux,
+            "residual_coupling_row_mass",
+            np.zeros((centers.shape[0],), dtype=np.float32),
+            ndim=1,
+        ).reshape(-1)[: centers.shape[0]],
+        "residual_stop_fraction": _aux_array(aux, "residual_stop_fraction", np.asarray(0.02), ndim=0).reshape(-1),
+        "residual_soft_stop_temperature": _aux_array(
+            aux, "residual_soft_stop_temperature", np.asarray(0.05), ndim=0
+        ).reshape(-1),
+        "case_adaptive_soft_edge_count": _aux_array(
+            aux,
+            "case_adaptive_soft_edge_count",
+            np.asarray(np.sum(edge_array("edge_survival_weight", active_mask)), dtype=np.float32),
+            ndim=0,
+        ).reshape(-1),
+        # Keep the short alias consumed by historical diagnostics while the
+        # explicit case-adaptive name remains the canonical export.
+        "soft_edge_count": np.asarray(np.sum(edge_array("edge_survival_weight", active_mask)), dtype=np.float32),
     }
 
 
@@ -99,6 +254,77 @@ def _entropy(values: np.ndarray, axis: int = -1) -> np.ndarray:
     arr = np.asarray(values, dtype=np.float64)
     arr = np.clip(arr, 1.0e-12, None)
     return -np.sum(arr * np.log(arr), axis=axis)
+
+
+def _mean_aux(aux: Dict[str, Any], key: str, default: float = 0.0) -> float:
+    """Return a finite scalar mean for optional organizer diagnostics."""
+
+    value = aux.get(key)
+    if value is None:
+        return float(default)
+    values = _as_numpy(value, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    return float(np.mean(values)) if values.size else float(default)
+
+
+def _max_aux(aux: Dict[str, Any], key: str, default: float = 0.0) -> float:
+    """Return a finite scalar maximum for optional organizer diagnostics."""
+
+    value = aux.get(key)
+    if value is None:
+        return float(default)
+    values = _as_numpy(value, dtype=np.float64)
+    values = values[np.isfinite(values)]
+    return float(np.max(values)) if values.size else float(default)
+
+
+def _residual_summary(aux: Dict[str, Any]) -> Dict[str, float]:
+    """Summarize case-adaptive counts and residual traces without guessing K."""
+
+    trace = _as_numpy(aux.get("residual_fraction_trace"), dtype=np.float64)
+    if trace.size == 0:
+        return {}
+    if trace.ndim == 1:
+        trace = trace[None, :]
+    count = _as_numpy(aux.get("case_adaptive_edge_count"), dtype=np.float64).reshape(-1)
+    if count.size == 0:
+        count = np.full((trace.shape[0],), trace.shape[1] - 1, dtype=np.float64)
+    if count.size == 1 and trace.shape[0] > 1:
+        count = np.repeat(count, trace.shape[0])
+    count = np.clip(np.rint(count[: trace.shape[0]]).astype(np.int64), 0, trace.shape[1] - 1)
+    rows = np.arange(trace.shape[0])
+    final = trace[rows, count]
+    margins = _as_numpy(aux.get("case_adaptive_stop_margin"), dtype=np.float64)
+    margins = margins[np.isfinite(margins)]
+    summary = {
+        "case_adaptive_edge_count_mean": float(np.mean(count)) if count.size else 0.0,
+        "case_adaptive_edge_cap_mean": _mean_aux(aux, "case_adaptive_edge_cap"),
+        "case_adaptive_soft_edge_count_mean": _mean_aux(
+            aux,
+            "case_adaptive_soft_edge_count",
+            _mean_aux(aux, "soft_edge_count"),
+        ),
+        "case_adaptive_stop_reached_fraction": _mean_aux(aux, "case_adaptive_stop_reached"),
+        "case_adaptive_cap_hit_fraction": _mean_aux(aux, "case_adaptive_cap_hit"),
+        "residual_fraction_final_mean": float(np.mean(final)) if final.size else 0.0,
+        "residual_fraction_final_max": float(np.max(final)) if final.size else 0.0,
+        "case_adaptive_stop_margin_mean": _mean_aux(aux, "case_adaptive_stop_margin"),
+        "case_adaptive_stop_margin_min": float(np.min(margins)) if margins.size else 0.0,
+        "residual_monotonic_violation_max": _max_aux(aux, "residual_monotonic_violation_max"),
+    }
+    marginal = _as_numpy(aux.get("residual_marginal_explained_fraction"), dtype=np.float64)
+    if marginal.size:
+        if marginal.ndim == 1:
+            marginal = marginal[None, :]
+        first = marginal[:, 0]
+        last_indices = np.clip(count - 1, 0, marginal.shape[1] - 1)
+        last = marginal[np.arange(min(marginal.shape[0], last_indices.size)), last_indices[: marginal.shape[0]]]
+        summary["residual_first_marginal_mean"] = float(np.mean(first))
+        summary["residual_last_active_marginal_mean"] = float(np.mean(last))
+    else:
+        summary["residual_first_marginal_mean"] = 0.0
+        summary["residual_last_active_marginal_mean"] = 0.0
+    return summary
 
 
 def hypergraph_diagnostics(predictions: Dict[str, Any]) -> Dict[str, Any]:
@@ -112,8 +338,11 @@ def hypergraph_diagnostics(predictions: Dict[str, Any]) -> Dict[str, Any]:
     module_mass = np.asarray(aux.get("hyper_module_mass", np.zeros_like(strength)), dtype=np.float64)
     env_mass = np.asarray(aux.get("hyper_env_mass", np.zeros_like(strength)), dtype=np.float64)
     num_h = max(int(strength.shape[0]), 1)
+    residual_summary = _residual_summary(aux)
+    case_adaptive = bool(residual_summary) or "case_adaptive_edge_count" in aux
+    direct_active_count = _mean_aux(aux, "case_adaptive_edge_count")
     static = {
-        "active_edge_count": float(np.sum(strength > 0.05)),
+        "active_edge_count": direct_active_count if case_adaptive else float(np.sum(strength > 0.05)),
         "A_mh_entropy": float(np.mean(_entropy(A_mh, axis=-1))) if A_mh.size else 0.0,
         "A_eh_entropy": float(np.mean(_entropy(A_eh, axis=-1))) if A_eh.size else 0.0,
         "module_mass_entropy_norm": float(_entropy(module_mass, axis=-1) / np.log(max(num_h, 2))) if module_mass.size else 0.0,
@@ -130,7 +359,8 @@ def hypergraph_diagnostics(predictions: Dict[str, Any]) -> Dict[str, Any]:
         "post_fallback_zero_support_environment_rows",
     ):
         if key in aux:
-            static[key] = float(np.mean(np.asarray(aux[key], dtype=np.float64)))
+            static[key] = float(np.mean(_as_numpy(aux[key], dtype=np.float64)))
+    static.update(residual_summary)
     routing_maps = predictions.get("routing_maps", {})
     routing_aux = predictions.get("routing_aux", {})
     routing = {

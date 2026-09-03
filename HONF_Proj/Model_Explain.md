@@ -5,7 +5,9 @@ profile uses fixed six-edge softmax organization, the organizer's raw residual
 hyperedge state, dense query routing, and context fusion. The fused
 query-module executor is the behavior-equivalent efficient path. Exchangeable,
 adaptive, entmax, additive, and gathered mechanisms remain loadable optional
-research and checkpoint-compatibility modes.
+research and checkpoint-compatibility modes. The registry also contains the
+standalone `case_adaptive_residual_context` candidate; it is not accepted or
+recommended until its bounded evaluation gates pass.
 
 ## 1. Which configuration is current?
 
@@ -15,6 +17,7 @@ The profile registry at `src/config_core/forward/profile_registry.json` declares
 |---|---|---|
 | Recommended profile | `src/config_core/forward/stage7_structured_context.json` | Fixed K=6 architecture and 5K training policy |
 | Promoted efficient execution | `src/config_core/forward/experiments/stage7_fused_query_module.json` | Exact K=6 fused dense legacy-kernel path; sparse beta-0.98 is evaluation-only |
+| Optional residual candidate | `src/config_core/forward/case_adaptive_residual_context.json` | Case-specific residual mechanism count; 2500-epoch research candidate |
 | Compatibility profile | `src/config_core/forward/enhanced_honf_pairwise.json` | Established checkpoint architecture |
 | Optional research base | `src/config_core/forward/adaptive_sparse_additive.json` | Compatibility/research only |
 | ThermalChannel case policy | `Case_ThermalChannel/configs/case_default.json` | Current case, data, Stage-A, loss, and evaluation settings |
@@ -414,6 +417,18 @@ Sparse execution for the accepted context-fusion model is implemented as the
 promoted fused gathered beta-0.98 evaluation/deployment path. It preserves the
 Stage-7 scientific formula and full-support numerical parity without
 reactivating additive field assembly.
+
+The optional `case_adaptive_residual_context` profile changes only the
+organizer. It builds a normalized nonnegative module-environment coupling,
+extracts shared rank-one mechanisms sequentially, subtracts each explained
+component, and stops independently per case when the residual fraction reaches
+the configured tolerance. `num_hyperedges=0` is a profile declaration that no
+global scientific K exists; tensor packing still uses the batch-local active
+module width. Soft survival supports training and a hard residual mask supports
+evaluation. The candidate retains the established encoders, context-fusion
+decoder, fused beta routing, legacy pairwise kernel, ThermalChannel coupling,
+losses, and disabled organizer regularization. Residual traces and counts are
+evaluation diagnostics, not topology-signature schema changes.
 
 ## 10. Current code structure
 

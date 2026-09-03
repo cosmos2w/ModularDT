@@ -51,9 +51,14 @@ def _as_grid(values: np.ndarray, sample: Dict[str, Any]) -> np.ndarray:
 def _active_edges(arrays: Dict[str, np.ndarray], num_hyperedges: int) -> list[int]:
     """Perform the active edges operation used by this module."""
 
-    mask = np.asarray(arrays.get("active_hyperedge_mask", np.ones((num_hyperedges,), dtype=np.float32))).reshape(-1)
+    explicit = "active_hyperedge_mask" in arrays or "effective_edge_mask" in arrays
+    mask = np.asarray(
+        arrays.get("active_hyperedge_mask", arrays.get("effective_edge_mask", np.ones((num_hyperedges,), dtype=np.float32)))
+    ).reshape(-1)
     strength = np.asarray(arrays.get("strength", arrays.get("hyper_strength", np.ones((num_hyperedges,), dtype=np.float32)))).reshape(-1)
     active = [idx for idx in range(num_hyperedges) if idx < mask.shape[0] and mask[idx] > 0.5]
+    if active or explicit:
+        return active
     if not active:
         active = [idx for idx in range(num_hyperedges) if idx < strength.shape[0] and strength[idx] > 0.05]
     return active or list(range(num_hyperedges))
@@ -79,7 +84,8 @@ def _overlay_geometry(ax: Any, arrays: Dict[str, np.ndarray], module_radius: flo
     src = np.asarray(arrays.get("src", np.zeros((0, 2))), dtype=np.float32)
     dst = np.asarray(arrays.get("dst", np.zeros((0, 2))), dtype=np.float32)
     count = min(src.shape[0], dst.shape[0], len(colors))
-    for hidx in range(count):
+    active = _active_edges(arrays, count)
+    for hidx in active:
         ax.scatter(src[hidx, 0], src[hidx, 1], marker="x", s=42, color=colors[hidx], linewidth=1.8, zorder=8)
         ax.scatter(dst[hidx, 0], dst[hidx, 1], marker="*", s=92, color=colors[hidx], edgecolor="black", linewidth=0.45, zorder=8)
         ax.plot([src[hidx, 0], dst[hidx, 0]], [src[hidx, 1], dst[hidx, 1]], color=colors[hidx], lw=0.9, alpha=0.50, zorder=4)
@@ -168,14 +174,29 @@ def _plot_dominant(
     """Perform the plot dominant operation used by this module."""
 
     num_h = int(max(np.nanmax(dominant) + 1 if dominant.size else 1, np.asarray(arrays.get("strength", [1])).shape[0]))
+    active = _active_edges(arrays, num_h)
     colors = _colors(num_h)
-    cmap = plt.get_cmap("tab20", max(num_h, 1))
+    if active:
+        local_index = {edge: index for index, edge in enumerate(active)}
+        mapped = np.full(dominant.shape, -1, dtype=np.int64)
+        for edge, index in local_index.items():
+            mapped[dominant == edge] = index
+        dominant_to_plot = mapped
+        cmap = plt.get_cmap("tab20", max(len(active), 1))
+        vmax = max(len(active) - 0.5, 0.5)
+    else:
+        dominant_to_plot = np.full(dominant.shape, -1, dtype=np.int64)
+        cmap = plt.get_cmap("Greys", 1)
+        vmax = 0.5
     extent = _domain_extent(sample)
     fig, ax = plt.subplots(figsize=(10.5, 4.8), constrained_layout=True)
-    im = ax.imshow(dominant, origin="lower", extent=extent, cmap=cmap, vmin=-0.5, vmax=max(num_h - 0.5, 0.5), aspect="auto")
-    _format_axis(ax, sample, arrays, module_radius, colors, "Dominant query hyperedge argmax_k alpha_qk")
+    im = ax.imshow(dominant_to_plot, origin="lower", extent=extent, cmap=cmap, vmin=-0.5, vmax=vmax, aspect="auto")
+    _format_axis(ax, sample, arrays, module_radius, colors, "Dominant active mechanism argmax_r alpha_qr")
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label("hyperedge")
+    cbar.set_label("active mechanism (packed index)")
+    if active:
+        cbar.set_ticks(np.arange(len(active)))
+        cbar.set_ticklabels([f"H{edge}" for edge in active])
     fig.savefig(str(output_path), dpi=180)
     plt.close(fig)
 
@@ -227,8 +248,27 @@ def save_routing_diagnostics(
     pair = _as_grid(np.asarray(routing_maps["pairwise_edge_contribution"], dtype=np.float32), sample)
     c_h = _as_grid(np.asarray(routing_maps["c_H_norm"], dtype=np.float32), sample)
     c_pair = _as_grid(np.asarray(routing_maps["c_pair_norm"], dtype=np.float32), sample)
-    dominant = _as_grid(np.asarray(routing_maps.get("dominant_hyperedge", np.argmax(alpha, axis=-1)), dtype=np.int64), sample)
+    supplied_dominant = routing_maps.get("dominant_hyperedge")
+    dominant = _as_grid(
+        np.asarray(supplied_dominant if supplied_dominant is not None else np.argmax(alpha, axis=-1), dtype=np.int64),
+        sample,
+    )
     entropy = _as_grid(np.asarray(routing_maps.get("hyper_attention_entropy", np.zeros(alpha.shape[:2])), dtype=np.float32), sample)
+    active = _active_edges(organizer_arrays, int(alpha.shape[-1]))
+    if active:
+        valid = np.zeros((alpha.shape[-1],), dtype=bool)
+        valid[active] = True
+        alpha = alpha.copy()
+        alpha[..., ~valid] = 0.0
+        pair = pair.copy()
+        pair[..., ~valid] = 0.0
+        # If an upstream map was computed before support masking, recompute its
+        # dominant index from the surviving route rather than exposing an
+        # inactive packed column in the summary.
+        masked_dominant = np.argmax(alpha[..., active], axis=-1)
+        dominant = np.asarray(active, dtype=np.int64)[masked_dominant]
+    else:
+        dominant = np.full(dominant.shape, -1, dtype=np.int64)
 
     npz_path = output_dir / "routing_maps.npz"
     np.savez_compressed(
@@ -239,10 +279,16 @@ def save_routing_diagnostics(
         c_pair_norm=c_pair.astype(np.float32),
         dominant_hyperedge=dominant.astype(np.int64),
         hyper_attention_entropy=entropy.astype(np.float32),
+        active_hyperedge_mask=np.asarray(
+            [1.0 if idx in active else 0.0 for idx in range(alpha.shape[-1])], dtype=np.float32
+        ),
     )
     summary = {
         "num_hyperedges": int(alpha.shape[-1]),
-        "active_hyperedges": _active_edges(organizer_arrays, int(alpha.shape[-1])),
+        "active_hyperedges": active,
+        "active_hyperedge_mask": np.asarray(
+            [1.0 if idx in active else 0.0 for idx in range(alpha.shape[-1])], dtype=np.float32
+        ).tolist(),
         "alpha_mean_by_hyperedge": np.nanmean(alpha.reshape(-1, alpha.shape[-1]), axis=0).astype(float).tolist(),
         "pairwise_contribution_mean_by_hyperedge": np.nanmean(pair.reshape(-1, pair.shape[-1]), axis=0).astype(float).tolist(),
         "c_H_norm_mean": float(np.nanmean(c_h)),

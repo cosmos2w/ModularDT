@@ -38,9 +38,13 @@ class ChannelThermalModelSupportMixin:
             "hyper_state",
             "candidate_hyper_state",
             "hyper_source_coords",
+            "hyper_source_variance",
             "hyper_region_coords",
+            "hyper_region_variance",
             "hyper_source_scale",
             "hyper_region_scale",
+            "hyper_module_mass_raw",
+            "hyper_env_mass_raw",
             "hyper_module_mass",
             "hyper_env_mass",
             "hyper_module_purity",
@@ -97,15 +101,40 @@ class ChannelThermalModelSupportMixin:
             "module_tokens",
             "env_tokens",
             "module_features_raw",
+            # Case-adaptive residual organizer diagnostics. Keep these in the
+            # compatibility view so downstream training/reporting code can
+            # consume the organizer's direct values without reconstructing
+            # them from legacy strength thresholds.
+            "residual_stop_fraction",
+            "residual_soft_stop_temperature",
+            "residual_fraction_trace",
+            "residual_marginal_explained_fraction",
+            "residual_mechanism_strength",
+            "residual_module_factor",
+            "residual_environment_factor",
+            "residual_coupling_row_mass",
+            "edge_survival_weight",
+            "hard_case_edge_mask",
+            "case_adaptive_edge_count",
+            "case_adaptive_edge_cap",
+            "case_adaptive_soft_edge_count",
+            "case_adaptive_stop_reached",
+            "case_adaptive_cap_hit",
+            "case_adaptive_stop_margin",
+            "residual_monotonic_violation_max",
         }
         org = {key: core_output[key] for key in org_keys if key in core_output}
         org["hyper_thermal_region_coords"] = core_output.get("hyper_region_coords")
-        if self.config.core_honf.organizer_mode == "exchangeable_slots":
-            # Visualize only selected viable field generators.
-            org["active_hyperedge_mask"] = core_output.get(
-                "effective_edge_mask",
-                core_output["edge_active_mask"],
-            )
+        if self.config.core_honf.organizer_mode in {"exchangeable_slots", "case_adaptive_residual"}:
+            # Visualize only the effective field generators. For the residual
+            # organizer this is the support used by the decoder (soft during
+            # training, hard during evaluation).
+            effective_mask = core_output.get("effective_edge_mask")
+            if effective_mask is None:
+                effective_mask = core_output.get("edge_active_mask")
+            if effective_mask is None:
+                effective_mask = torch.ones_like(core_output["hyper_strength"])
+            org["active_hyperedge_mask"] = effective_mask
         else:
             # Preserve the fixed-projection compatibility visualization.
             org["active_hyperedge_mask"] = (core_output["hyper_strength"] > 0.05).to(dtype=core_output["hyper_strength"].dtype)

@@ -16,7 +16,7 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     profiles = registry["profiles"]
     names = [profile["name"] for profile in profiles]
-    assert len(names) == len(set(names)) == 23
+    assert len(names) == len(set(names)) == 24
     assert registry["recommended_forward_profile"] == "stage7_structured_context"
     assert {profile["status"] for profile in profiles} <= {
         "current",
@@ -36,6 +36,8 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
     assert by_name["stage7_k8_fused_audit"]["status"] == "rejected"
     assert by_name["enhanced_honf_pairwise"]["status"] == "compatibility"
     assert by_name["stage5_fixed_residual_concat_uniform_lr3e4"]["status"] == "frozen_experiment"
+    assert by_name["case_adaptive_residual_context"]["status"] == "candidate"
+    assert registry["recommended_forward_profile"] != "case_adaptive_residual_context"
 
     for profile in profiles:
         path = project_root / profile["path"].removeprefix("project://")
