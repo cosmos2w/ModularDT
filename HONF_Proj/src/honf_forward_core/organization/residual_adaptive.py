@@ -388,8 +388,12 @@ class CaseAdaptiveResidualOrganizer(nn.Module):
             coupling.square().sum(dim=-1),
             active_module_mask,
         )
-        coupling_norm = torch.sqrt(coupling_norm_sq).unsqueeze(-1).unsqueeze(-1)
-        normalized_coupling = coupling / coupling_norm.clamp_min(EPS)
+        # Clamp the squared norm before ``sqrt``.  Clamping only the resulting
+        # norm keeps the value path finite but leaves ``sqrt'(0)`` singular;
+        # a sufficiently negative learned coupling can then produce finite
+        # outputs and NaN gradients once softplus underflows to exact zero.
+        coupling_norm = torch.sqrt(coupling_norm_sq.clamp_min(EPS)).unsqueeze(-1).unsqueeze(-1)
+        normalized_coupling = coupling / coupling_norm
         coupling_row_mass = normalized_coupling.sum(dim=-1)
 
         A_me = normalized_coupling / coupling_row_mass.unsqueeze(-1).clamp_min(EPS)

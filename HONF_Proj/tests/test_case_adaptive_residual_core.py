@@ -272,6 +272,30 @@ def test_residual_core_is_module_order_invariant_and_has_gradients() -> None:
     assert output["edge_survival_weight"].grad.abs().sum() > 0
 
 
+def test_zero_coupling_underflow_has_finite_backward() -> None:
+    """The Frobenius normalizer must not expose ``sqrt'(0)`` to autograd."""
+
+    torch.manual_seed(7)
+    model = HONFNeuralField(_config()).train()
+    organizer = model.organizer.case_adaptive_residual
+    with torch.no_grad():
+        organizer.coupling_module_query.weight.zero_()
+        organizer.coupling_module_query.bias.zero_()
+        organizer.coupling_environment_key.weight.zero_()
+        organizer.coupling_environment_key.bias.zero_()
+        for parameter in organizer.coupling_geometry.parameters():
+            parameter.zero_()
+        organizer.coupling_geometry[-1].bias.fill_(-1000.0)
+
+    output = model(_batch(seed=29))
+    assert torch.equal(output["residual_coupling_row_mass"], torch.zeros_like(output["residual_coupling_row_mass"]))
+    assert torch.isfinite(output["pred_field"]).all()
+    output["pred_field"].square().mean().backward()
+    for parameter in organizer.parameters():
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
+
+
 def test_decoder_uses_soft_and_hard_residual_support() -> None:
     config = _config()
     model = HONFNeuralField(config)
