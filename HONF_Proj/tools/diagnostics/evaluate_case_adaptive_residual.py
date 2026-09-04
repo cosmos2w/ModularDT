@@ -1825,6 +1825,15 @@ def summarize_rows(rows: list[dict[str, Any]], *, include_by_checkpoint: bool = 
         for key in sorted({key for row in rows for key in row})
         if key.startswith("benchmark_") and key not in numeric_keys
     )
+    numeric_keys.extend(
+        key
+        for key in sorted({key for row in rows for key in row})
+        if (
+            key.endswith("_mse")
+            or key.startswith("predictive_full_grid_")
+        )
+        and key not in numeric_keys
+    )
     for key in numeric_keys:
         values = np.asarray([float(row[key]) for row in rows if row.get(key) is not None and np.isfinite(float(row[key]))], dtype=np.float64)
         if values.size:
