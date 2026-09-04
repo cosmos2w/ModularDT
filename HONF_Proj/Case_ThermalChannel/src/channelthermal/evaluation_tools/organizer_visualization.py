@@ -142,6 +142,19 @@ def _collapse_title_suffix(arrays: Dict[str, np.ndarray]) -> str:
     A_eh = np.asarray(arrays.get("A_eh", np.zeros((0, 0))), dtype=np.float64)
     if A_eh.size == 0:
         return ""
+    selection_suffix = ""
+    predictive_count = np.asarray(
+        arrays.get("predictive_edge_count", []), dtype=np.float64
+    ).reshape(-1)
+    probe_error = np.asarray(
+        arrays.get("predictive_probe_relative_rms", []), dtype=np.float64
+    ).reshape(-1)
+    if predictive_count.size and np.isfinite(predictive_count[0]):
+        selection_suffix = (
+            f" | probe K={int(round(float(predictive_count[0])))}/{A_eh.shape[-1]}"
+        )
+        if probe_error.size and np.isfinite(probe_error[0]):
+            selection_suffix += f", d={float(probe_error[0]):.4g}"
     eps = 1.0e-12
     active = _active_hyperedge_indices(arrays, A_eh.shape[-1])
     if active:
@@ -155,7 +168,10 @@ def _collapse_title_suffix(arrays: Dict[str, np.ndarray]) -> str:
     env_mass = values.mean(axis=0)
     env_mass = env_mass / max(float(env_mass.sum()), eps)
     entropy = -float(np.sum(env_mass * np.log(np.maximum(env_mass, eps))))
-    return f" | dom={float(np.max(frac)):.2f}, softEff={float(np.exp(entropy)):.2f}"
+    return (
+        selection_suffix
+        + f" | dom={float(np.max(frac)):.2f}, softEff={float(np.exp(entropy)):.2f}"
+    )
 
 
 def _heat_scale(heat: np.ndarray) -> np.ndarray:

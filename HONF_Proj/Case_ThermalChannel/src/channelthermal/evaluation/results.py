@@ -137,8 +137,14 @@ def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> 
     # organizers.  Phase 2 also exports a differentiable soft support, but it
     # must never reactivate padded candidates in standard evaluation views.
     active_source = aux.get(
-        "hard_case_edge_mask",
-        aux.get("effective_edge_mask", aux.get("edge_active_mask")),
+        "predictive_selected_mask",
+        aux.get(
+            "predictive_edge_mask",
+            aux.get(
+                "hard_case_edge_mask",
+                aux.get("effective_edge_mask", aux.get("edge_active_mask")),
+            ),
+        ),
     )
     if active_source is None:
         active_source = np.ones((edge_count,), dtype=np.float32)
@@ -212,8 +218,22 @@ def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> 
         )
     residual_trace = residual_trace[: edge_count + 1]
     cap = int(np.sum(present))
-    case_count = _aux_array(aux, "case_adaptive_edge_count", np.asarray(np.sum(active_mask > 0.5)), ndim=0).reshape(-1)
-    case_cap = _aux_array(aux, "case_adaptive_edge_cap", np.asarray(cap), ndim=0).reshape(-1)
+    case_count = _aux_array(
+        aux,
+        "predictive_edge_count",
+        aux.get("case_adaptive_edge_count", np.asarray(np.sum(active_mask > 0.5))),
+        ndim=0,
+    ).reshape(-1)
+    case_cap = _aux_array(
+        aux,
+        "case_adaptive_edge_cap",
+        np.asarray(
+            edge_count
+            if "predictive_selected_mask" in aux or "predictive_edge_mask" in aux
+            else cap
+        ),
+        ndim=0,
+    ).reshape(-1)
     cap_hit = _aux_array(aux, "case_adaptive_cap_hit", np.asarray(0.0), ndim=0).reshape(-1)
     stop_reached = _aux_array(aux, "case_adaptive_stop_reached", np.asarray(0.0), ndim=0).reshape(-1)
     stop_margin = _aux_array(aux, "case_adaptive_stop_margin", np.asarray(0.0), ndim=0).reshape(-1)
@@ -243,6 +263,20 @@ def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> 
         "case_adaptive_stop_reached": stop_reached,
         "case_adaptive_cap_hit": cap_hit,
         "case_adaptive_stop_margin": stop_margin,
+        "predictive_edge_mask": edge_array("predictive_edge_mask", active_mask),
+        "predictive_selected_mask": edge_array("predictive_selected_mask", active_mask),
+        "predictive_edge_count": _aux_array(
+            aux, "predictive_edge_count", np.asarray(np.nan), ndim=0
+        ).reshape(-1),
+        "predictive_probe_relative_rms": _aux_array(
+            aux, "predictive_probe_relative_rms", np.asarray(np.nan), ndim=0
+        ).reshape(-1),
+        "predictive_probe_channel_relative_rms": _aux_array(
+            aux,
+            "predictive_probe_channel_relative_rms",
+            np.zeros((0,), dtype=np.float32),
+            ndim=1,
+        ).reshape(-1),
         "residual_fraction_trace": residual_trace,
         "residual_marginal_explained_fraction": edge_array(
             "residual_marginal_explained_fraction", np.zeros((edge_count,))

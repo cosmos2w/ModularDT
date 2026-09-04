@@ -12,6 +12,7 @@ and decoder remain reusable across domains.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any, Dict, Optional
 
 import torch
@@ -19,6 +20,10 @@ import torch.nn as nn
 
 from honf_forward_core.model import HONFNeuralField
 from honf_forward_core.config import BatchData
+from honf_forward_core.selection.predictive_rank import (
+    build_deterministic_case_probes,
+    select_probe_fidelity_support,
+)
 from .config import ChannelThermalHONFConfig
 from .environment import ChannelThermalEnvironmentBuilder
 from .input_adapter import ChannelThermalInputAdapter
@@ -162,6 +167,9 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
         return_prepared_state: bool = False,
         return_organizer_passes: bool = False,
         return_organizer_diagnostics: bool = False,
+        case_edge_selection_mode: Optional[str] = None,
+        case_edge_probe_relative_rms_tolerance: Optional[float] = None,
+        case_edge_probe_channel_tolerance: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Predict the global field and per-module thermal responses.
 
@@ -430,6 +438,77 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
                 return_residual_interaction_tensor=request_organizer_diagnostics,
             )
             final_org_raw["module_features_raw"] = adapter.module_features
+        resolved_case_selection = str(
+            self.config.core_honf.case_edge_selection_mode
+            if case_edge_selection_mode is None
+            else case_edge_selection_mode
+        )
+        if resolved_case_selection not in {"none", "probe_fidelity"}:
+            raise ValueError(
+                "case_edge_selection_mode must be 'none' or 'probe_fidelity'."
+            )
+        if resolved_case_selection == "probe_fidelity":
+            if self.training:
+                raise RuntimeError(
+                    "probe_fidelity case-edge selection is evaluation-only; call model.eval()."
+                )
+            if self.config.core_honf.organizer_mode != "fixed_projection":
+                raise ValueError(
+                    "probe_fidelity case-edge selection requires fixed_projection organization."
+                )
+            if query_xy.device.type == "cuda":
+                torch.cuda.synchronize(query_xy.device)
+            selection_started = time.perf_counter()
+            probe_xy, probe_valid = build_deterministic_case_probes(
+                env.env_coords,
+                adapter.module_centers,
+                adapter.module_present,
+                module_radius=float(self.config.core_honf.module_radius),
+                limit=int(self.config.core_honf.case_edge_probe_limit),
+                source=str(self.config.core_honf.case_edge_probe_source),
+                domain_length_x=float(self.config.core_honf.domain_length_x),
+                domain_length_y=float(self.config.core_honf.domain_length_y),
+            )
+
+            def decode_probe_fields(
+                probe_queries: torch.Tensor,
+                probe_organizer: Dict[str, Any],
+                probe_global_token: torch.Tensor,
+            ) -> torch.Tensor:
+                return self.core.decode_queries(
+                    query_xy=probe_queries.float(),
+                    query_time=None,
+                    organizer_output=probe_organizer,
+                    global_token=probe_global_token,
+                    query_features=self._query_features(probe_queries.float()),
+                )["pred_field"]
+
+            final_org_raw = select_probe_fidelity_support(
+                final_org_raw,
+                global_token,
+                probe_xy,
+                probe_valid,
+                decode_probe_fields,
+                relative_rms_tolerance=float(
+                    self.config.core_honf.case_edge_probe_relative_rms_tolerance
+                    if case_edge_probe_relative_rms_tolerance is None
+                    else case_edge_probe_relative_rms_tolerance
+                ),
+                channel_tolerance=float(
+                    self.config.core_honf.case_edge_probe_channel_tolerance
+                    if case_edge_probe_channel_tolerance is None
+                    else case_edge_probe_channel_tolerance
+                ),
+                search=str(self.config.core_honf.case_edge_probe_search),
+            )
+            if query_xy.device.type == "cuda":
+                torch.cuda.synchronize(query_xy.device)
+            final_org_raw["predictive_selection_seconds"] = final_org_raw[
+                "hyper_state"
+            ].new_full(
+                (batch,),
+                float(time.perf_counter() - selection_started),
+            )
         decoder_output = self.core.decode_queries(
             query_xy=query_xy.float(),
             query_time=None,

@@ -136,10 +136,33 @@ class ChannelThermalModelSupportMixin:
             "case_adaptive_stop_margin",
             "residual_monotonic_violation_max",
             "case_adaptive_support_gap",
+            # Evaluation-only predictive-rank metadata.  The mask routes
+            # decoder queries only; the full fixed organizer bank above is
+            # retained unchanged in prepared state.
+            "predictive_edge_mask",
+            "predictive_selected_mask",
+            "predictive_edge_count",
+            "predictive_edge_selected_code",
+            "predictive_probe_relative_rms",
+            "predictive_probe_channel_relative_rms",
+            "predictive_probe_count",
+            "predictive_full_edge_count",
+            "predictive_candidate_count",
+            "predictive_probe_relative_rms_tolerance",
+            "predictive_probe_channel_tolerance",
+            "predictive_selection_seconds",
+            "case_edge_selection_mode",
+            "case_edge_probe_source",
+            "case_edge_probe_search",
         }
         org = {key: core_output[key] for key in org_keys if key in core_output}
         org["hyper_thermal_region_coords"] = core_output.get("hyper_region_coords")
-        if self.config.core_honf.organizer_mode in {
+        predictive_mask = core_output.get(
+            "predictive_selected_mask", core_output.get("predictive_edge_mask")
+        )
+        if torch.is_tensor(predictive_mask):
+            org["active_hyperedge_mask"] = predictive_mask
+        elif self.config.core_honf.organizer_mode in {
             "exchangeable_slots",
             "case_adaptive_residual",
             "case_adaptive_tensor_residual",

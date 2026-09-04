@@ -106,6 +106,17 @@ class UnifiedForwardConfig:
     residual_interaction_dim: int = 32
     residual_mechanism_cap_multiplier: float = 1.5
 
+    # Evaluation-only case-specific query routing.  This is deliberately
+    # separate from ``edge_selection_mode``: the organizer always constructs
+    # and trains the complete fixed bank, while probe fidelity may retain a
+    # smaller routing support after case preparation.
+    case_edge_selection_mode: str = "none"
+    case_edge_probe_source: str = "environment_plus_module_local"
+    case_edge_probe_limit: int = 256
+    case_edge_probe_relative_rms_tolerance: float = 0.005
+    case_edge_probe_channel_tolerance: float = 0.01
+    case_edge_probe_search: str = "exhaustive_small_bank"
+
     edge_selection_mode: str = "all"
     selection_warmup_epochs: int = 200
     selection_start_epoch: int = -1
@@ -266,6 +277,31 @@ class UnifiedForwardConfig:
                 raise ValueError(
                     "case_adaptive_tensor_residual requires fused_query_module pairwise aggregation."
                 )
+        if self.case_edge_selection_mode not in {"none", "probe_fidelity"}:
+            raise ValueError(
+                "case_edge_selection_mode must be 'none' or 'probe_fidelity'."
+            )
+        if self.case_edge_probe_source != "environment_plus_module_local":
+            raise ValueError(
+                "case_edge_probe_source must be 'environment_plus_module_local'."
+            )
+        if int(self.case_edge_probe_limit) <= 0:
+            raise ValueError("case_edge_probe_limit must be positive.")
+        if float(self.case_edge_probe_relative_rms_tolerance) < 0.0:
+            raise ValueError("case_edge_probe_relative_rms_tolerance must be nonnegative.")
+        if float(self.case_edge_probe_channel_tolerance) < 0.0:
+            raise ValueError("case_edge_probe_channel_tolerance must be nonnegative.")
+        if self.case_edge_probe_search != "exhaustive_small_bank":
+            raise ValueError(
+                "case_edge_probe_search must be 'exhaustive_small_bank'."
+            )
+        if (
+            self.case_edge_selection_mode == "probe_fidelity"
+            and self.organizer_mode != "fixed_projection"
+        ):
+            raise ValueError(
+                "probe_fidelity case-edge selection requires fixed_projection organization."
+            )
         if int(self.edge_capacity) < 0:
             raise ValueError("edge_capacity must be >= 0.")
         if int(self.slot_refinement_steps) <= 0:

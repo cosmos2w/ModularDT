@@ -90,6 +90,77 @@ def test_channelthermal_outputs_are_invariant_to_runtime_padding_width() -> None
         )
 
 
+def test_probe_fidelity_selection_is_cached_routing_only_and_chunk_invariant() -> None:
+    torch.manual_seed(43)
+    model = ChannelThermalHONFModel(_config(), attach_local_from_checkpoint=False).eval()
+    structure, query_xy, local_query_points = _physical_inputs(4)
+    with torch.no_grad():
+        historical = model(
+            structure,
+            query_xy,
+            local_query_points=local_query_points,
+            return_prepared_state=True,
+        )
+        explicitly_disabled = model(
+            structure,
+            query_xy,
+            local_query_points=local_query_points,
+            case_edge_selection_mode="none",
+        )
+        selected = model(
+            structure,
+            query_xy[:, :1],
+            local_query_points=local_query_points,
+            case_edge_selection_mode="probe_fidelity",
+            case_edge_probe_relative_rms_tolerance=1.0e6,
+            case_edge_probe_channel_tolerance=1.0e6,
+            return_prepared_state=True,
+            return_routing_maps=True,
+        )
+        selected_from_full_query = model(
+            structure,
+            query_xy,
+            local_query_points=local_query_points,
+            case_edge_selection_mode="probe_fidelity",
+            case_edge_probe_relative_rms_tolerance=1.0e6,
+            case_edge_probe_channel_tolerance=1.0e6,
+            return_prepared_state=True,
+        )
+        prepared = selected["prepared_state"]
+        full_decode = model.decode_prepared(prepared, query_xy)["pred_field"]
+        chunk_decode = torch.cat(
+            [model.decode_prepared(prepared, chunk)["pred_field"] for chunk in query_xy.split(1, dim=1)],
+            dim=1,
+        )
+
+    torch.testing.assert_close(
+        historical["pred_field"], explicitly_disabled["pred_field"], rtol=0.0, atol=0.0
+    )
+    assert int(prepared.organizer["predictive_edge_count"].item()) == 1
+    assert torch.equal(
+        prepared.organizer["predictive_selected_mask"],
+        selected_from_full_query["prepared_state"].organizer["predictive_selected_mask"],
+    )
+    assert prepared.organizer["A_mh"].shape[-1] == 3
+    assert prepared.organizer["hyper_state"].shape[-2] == 3
+    mask = prepared.organizer["predictive_selected_mask"] > 0
+    attention = selected["routing_aux"]["query_hyper_attention"]
+    assert torch.count_nonzero(attention[..., ~mask[0]]) == 0
+    torch.testing.assert_close(full_decode, chunk_decode, rtol=1.0e-6, atol=1.0e-6)
+
+
+def test_probe_fidelity_selection_rejects_training_execution() -> None:
+    model = ChannelThermalHONFModel(_config(), attach_local_from_checkpoint=False).train()
+    structure, query_xy, local_query_points = _physical_inputs(4)
+    with pytest.raises(RuntimeError, match="evaluation-only"):
+        model(
+            structure,
+            query_xy,
+            local_query_points=local_query_points,
+            case_edge_selection_mode="probe_fidelity",
+        )
+
+
 def test_padding_invariant_global_features_do_not_change_with_runtime_width() -> None:
     adapter = ChannelThermalInputAdapter(global_feature_schema="padding_invariant_v2")
     contexts = []

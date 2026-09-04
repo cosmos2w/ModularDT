@@ -226,13 +226,43 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
             if not torch.is_tensor(edge_active_mask):
                 edge_active_mask = torch.ones_like(hyper_logits[:, 0, :])
             edge_active_mask = edge_active_mask.to(device=hyper_logits.device, dtype=hyper_logits.dtype)
+            base_hyper_logits = hyper_logits
+            predictive_edge_mask = organizer_output.get("predictive_edge_mask")
+            predictive_support = torch.is_tensor(predictive_edge_mask)
+            predictive_subset = False
+            predictive_full_rows: Optional[torch.Tensor] = None
+            if predictive_support:
+                predictive_edge_mask = predictive_edge_mask.to(
+                    device=hyper_logits.device,
+                    dtype=hyper_logits.dtype,
+                )
+                if predictive_edge_mask.shape != edge_active_mask.shape:
+                    raise ValueError(
+                        "predictive_edge_mask must have shape [B,K] matching the runtime hyperedge axis."
+                    )
+                if bool((predictive_edge_mask.sum(dim=-1) <= 0).any()):
+                    raise ValueError("predictive_edge_mask must retain at least one edge per case.")
+                predictive_full_rows = (predictive_edge_mask > 0).all(dim=-1)
+                predictive_subset = bool((~predictive_full_rows).any())
+                if predictive_subset:
+                    # Selection is query-routing-only: the full organizer
+                    # state and incidences stay intact, and only query logits
+                    # are masked before attention normalization.
+                    edge_active_mask = predictive_edge_mask
+                    hyper_logits = hyper_logits.masked_fill(
+                        predictive_edge_mask[:, None, :] <= 0,
+                        torch.finfo(hyper_logits.dtype).min,
+                    )
             # Phase 2 advertises a separate hard mask and soft survival tensor.
             # Keep this route distinct from the Phase-1 edge_survival_weight
             # branch so the established adaptive arithmetic remains unchanged.
             tensor_hard_support = organizer_output.get("hard_case_edge_mask")
             tensor_soft_support = organizer_output.get("edge_survival_soft")
             tensor_support = torch.is_tensor(tensor_hard_support) and torch.is_tensor(tensor_soft_support)
-            base_hyper_logits = hyper_logits
+            if predictive_support and tensor_support:
+                raise ValueError(
+                    "predictive_edge_mask cannot be combined with tensor-residual support."
+                )
             if tensor_support:
                 tensor_hard_support = tensor_hard_support.to(
                     device=hyper_logits.device,
@@ -257,6 +287,10 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
                 )
             residual_support = organizer_output.get("edge_survival_weight")
             adaptive_support = torch.is_tensor(residual_support)
+            if predictive_support and adaptive_support:
+                raise ValueError(
+                    "predictive_edge_mask cannot be combined with residual-adaptive support."
+                )
             if adaptive_support and not tensor_support:
                 residual_support = residual_support.to(
                     device=hyper_logits.device,
@@ -280,6 +314,7 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
             uses_descriptive_query_normalizer = (
                 tensor_support
                 or adaptive_support
+                or predictive_subset
                 or not context_fusion
                 or cfg.query_assignment_normalizer != "softmax"
             )
@@ -305,6 +340,17 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
                         temperature=float(cfg.hyper_attention_temperature),
                         detach_mask=bool(cfg.sparse_hyper_attention_detach_mask),
                     )
+                elif predictive_subset and cfg.query_assignment_normalizer == "softmax":
+                    hyper_attention = sparse_topk_softmax(
+                        hyper_logits,
+                        topk=int(cfg.hyper_attention_topk),
+                        temperature=float(cfg.hyper_attention_temperature),
+                        detach_mask=bool(cfg.sparse_hyper_attention_detach_mask),
+                    )
+                    hyper_attention = hyper_attention * edge_active_mask[:, None, :]
+                    hyper_attention = hyper_attention / hyper_attention.sum(
+                        dim=-1, keepdim=True
+                    ).clamp_min(EPS)
                 else:
                     hyper_attention = normalize_assignment(
                         hyper_logits / max(float(cfg.hyper_attention_temperature), EPS),
@@ -318,6 +364,31 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
                         ),
                     )
                     hyper_attention = self._limit_probability_routes(hyper_attention)
+            if (
+                predictive_subset
+                and predictive_full_rows is not None
+                and bool(predictive_full_rows.any())
+            ):
+                # A batched search may mix subset rows with an all-edge row.
+                # Restore the historical all-edge arithmetic exactly for that
+                # row so an all-ones mask is a strict identity operation.
+                if cfg.hyper_query_attention_mode == "uniform":
+                    historical_attention = torch.full_like(
+                        base_hyper_logits,
+                        1.0 / float(max(base_hyper_logits.shape[-1], 1)),
+                    )
+                else:
+                    historical_attention = sparse_topk_softmax(
+                        base_hyper_logits,
+                        topk=int(cfg.hyper_attention_topk),
+                        temperature=float(cfg.hyper_attention_temperature),
+                        detach_mask=bool(cfg.sparse_hyper_attention_detach_mask),
+                    )
+                hyper_attention = torch.where(
+                    predictive_full_rows[:, None, None],
+                    historical_attention,
+                    hyper_attention,
+                )
             if tensor_support:
                 # ``hyper_attention`` above is the hard masked route.  Build a
                 # second soft route from the unmasked logits, then blend with
@@ -389,6 +460,10 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
                     )
                 else:
                     diagnostics["case_adaptive_soft_edge_count"] = residual_support.detach().sum(dim=-1)
+            if predictive_support:
+                diagnostics["case_edge_selection_mode"] = "probe_fidelity"
+                diagnostics["predictive_edge_mask"] = predictive_edge_mask.detach()
+                diagnostics["predictive_edge_count"] = predictive_edge_mask.detach().sum(dim=-1)
             if not context_fusion and gathered_execution:
                 hyper_attention, retained_query_mass = self._limit_query_edge_routes(
                     hyper_attention,

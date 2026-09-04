@@ -80,6 +80,9 @@ def predict_case(
     return_topology_signature: bool = False,
     return_prepared_state: bool = False,
     return_interaction_tensor: bool = False,
+    case_edge_selection_mode: str | None = None,
+    case_edge_probe_relative_rms_tolerance: float | None = None,
+    case_edge_probe_channel_tolerance: float | None = None,
 ) -> Dict[str, Any]:
     """Prepare one physical case once, then decode its query grid in chunks.
 
@@ -115,6 +118,9 @@ def predict_case(
                     return_routing_maps=need_routing,
                     return_edge_fields=bool(return_topology_signature),
                     return_prepared_state=True,
+                    case_edge_selection_mode=case_edge_selection_mode,
+                    case_edge_probe_relative_rms_tolerance=case_edge_probe_relative_rms_tolerance,
+                    case_edge_probe_channel_tolerance=case_edge_probe_channel_tolerance,
                     **_interaction_tensor_request_kwargs(model, return_interaction_tensor),
                 )
                 prepared_state = outputs.pop("prepared_state")
