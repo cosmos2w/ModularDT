@@ -161,6 +161,7 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
         return_port_global_consistency: bool = False,
         return_prepared_state: bool = False,
         return_organizer_passes: bool = False,
+        return_organizer_diagnostics: bool = False,
     ) -> Dict[str, Any]:
         """Predict the global field and per-module thermal responses.
 
@@ -245,9 +246,11 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
             and self.config.core_honf.selection_warmup_mode == "all_viable"
             and int(self.config.core_honf.selection_start_epoch) >= 0
         )
+        request_organizer_diagnostics = bool(return_organizer_diagnostics or return_routing_maps)
         base_output = self.core.encode_and_organize(
             honf_batch,
             organizer_selection_override="all" if final_only_selection else None,
+            return_residual_interaction_tensor=request_organizer_diagnostics,
         )
         base_org = self._legacy_organizer_aux(base_output, adapter, env.env_coords)
         base_module_state = base_output["module_tokens"]
@@ -332,6 +335,7 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
                     global_token=global_token,
                     geometry_mode=self.config.core_honf.geometry_mode,
                     selection_override="all" if final_only_selection else None,
+                    return_residual_interaction_tensor=request_organizer_diagnostics,
                 )
                 provisional_org_raw["module_features_raw"] = adapter.module_features
                 outside_temperature, refinement_diag = self._global_temperature_for_all_ports(
@@ -423,6 +427,7 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
                 global_token=global_token,
                 geometry_mode=self.config.core_honf.geometry_mode,
                 selection_override=None,
+                return_residual_interaction_tensor=request_organizer_diagnostics,
             )
             final_org_raw["module_features_raw"] = adapter.module_features
         decoder_output = self.core.decode_queries(

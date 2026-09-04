@@ -3,6 +3,16 @@
   "recommended_forward_profile": "stage7_structured_context",
   "profiles": [
     {
+      "name": "case_adaptive_tensor_residual_context",
+      "path": "project://src/config_core/forward/case_adaptive_tensor_residual_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "case-adaptive tensor residual mechanisms / vector interaction rank / context fusion / fused dense / legacy kernel",
+      "checkpoint_families": ["Run 1701 Phase-2 candidate"],
+      "owner": "forward-research",
+      "stage": "phase2"
+    },
+    {
       "name": "case_adaptive_residual_context",
       "path": "project://src/config_core/forward/case_adaptive_residual_context.json",
       "status": "candidate",

@@ -22,6 +22,14 @@ query-module routing. Its 2500-epoch budget and milestone list are explicit;
 it does not change `recommended_forward_profile` or enable organizer count
 regularization.
 
+`../case_adaptive_tensor_residual_context.json` is the Phase-2 complete
+candidate. It keeps the same physical and decoder contract while requesting a
+32-dimensional residual interaction tensor, vector-factor rank diagnostics,
+`K/cap=1.5`, and a 500-epoch candidate run (`1701`,
+`case_adaptive_tensor_residual_v2`). Tensor export is an explicit evaluation
+request; the profile is a candidate and does not change the recommended
+forward profile or the Run-1700/Run-1401 configurations.
+
 ## Historical experiment overlays
 
 - `old_parity.json`: disables hyperedge value context.

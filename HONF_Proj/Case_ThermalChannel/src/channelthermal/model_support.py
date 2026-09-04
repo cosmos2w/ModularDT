@@ -33,6 +33,10 @@ class ChannelThermalModelSupportMixin:
             "A_me",
             "A_mh",
             "A_eh",
+            "A_mh_hard",
+            "A_mh_soft",
+            "A_eh_hard",
+            "A_eh_soft",
             "candidate_A_mh",
             "candidate_A_eh",
             "hyper_state",
@@ -88,6 +92,8 @@ class ChannelThermalModelSupportMixin:
             "post_fallback_zero_support_module_rows",
             "pre_fallback_zero_support_environment_rows",
             "post_fallback_zero_support_environment_rows",
+            "empty_support_count",
+            "fallback_support_count",
             "selection_transition_fraction",
             "module_sparsity_fraction",
             "environment_sparsity_fraction",
@@ -109,11 +115,18 @@ class ChannelThermalModelSupportMixin:
             "residual_soft_stop_temperature",
             "residual_fraction_trace",
             "residual_marginal_explained_fraction",
+            # Phase-2 tensor residual diagnostics.  The full interaction
+            # tensor is opt-in, but when the organizer supplies it the
+            # compatibility view must preserve it for explicit evaluation
+            # requests rather than silently dropping it.
+            "residual_interaction_tensor",
+            "residual_content_factor",
             "residual_mechanism_strength",
             "residual_module_factor",
             "residual_environment_factor",
             "residual_coupling_row_mass",
             "edge_survival_weight",
+            "edge_survival_soft",
             "hard_case_edge_mask",
             "case_adaptive_edge_count",
             "case_adaptive_edge_cap",
@@ -122,14 +135,30 @@ class ChannelThermalModelSupportMixin:
             "case_adaptive_cap_hit",
             "case_adaptive_stop_margin",
             "residual_monotonic_violation_max",
+            "case_adaptive_support_gap",
         }
         org = {key: core_output[key] for key in org_keys if key in core_output}
         org["hyper_thermal_region_coords"] = core_output.get("hyper_region_coords")
-        if self.config.core_honf.organizer_mode in {"exchangeable_slots", "case_adaptive_residual"}:
+        if self.config.core_honf.organizer_mode in {
+            "exchangeable_slots",
+            "case_adaptive_residual",
+            "case_adaptive_tensor_residual",
+        }:
             # Visualize only the effective field generators. For the residual
-            # organizer this is the support used by the decoder (soft during
-            # training, hard during evaluation).
-            effective_mask = core_output.get("effective_edge_mask")
+            # organizers this is the hard/effective support used by the
+            # decoder.  ``edge_survival_soft`` is a gradient surrogate and
+            # must not change the compatibility mask used for reports.
+            if self.config.core_honf.organizer_mode == "case_adaptive_tensor_residual":
+                # Phase 2 guarantees hard forward support in train and eval;
+                # prefer its explicit hard mask even if a caller also retains
+                # a soft/effective surrogate for debugging.
+                effective_mask = core_output.get("hard_case_edge_mask")
+                if effective_mask is None:
+                    effective_mask = core_output.get("effective_edge_mask")
+            else:
+                effective_mask = core_output.get("effective_edge_mask")
+            if effective_mask is None:
+                effective_mask = core_output.get("hard_case_edge_mask")
             if effective_mask is None:
                 effective_mask = core_output.get("edge_active_mask")
             if effective_mask is None:

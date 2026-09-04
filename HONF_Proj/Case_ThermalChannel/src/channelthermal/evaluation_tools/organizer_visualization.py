@@ -407,16 +407,20 @@ def render_case_adaptive_residual_summary(
 ) -> None:
     """Render one compact residual-extraction summary for a selected case.
 
-    The figure intentionally summarizes the extraction sequence in four panels:
-    residual waterfall, coupling decomposition, marginal gains/support, and a
-    source-to-region map.  It never writes one image per packed mechanism and
-    uses the hard active mask for all presentation geometry.
+    The figure intentionally summarizes the extraction sequence in one figure:
+    residual waterfall, coupling/tensor decomposition, marginal gains/support,
+    content factors when available, and a source-to-region map. It never writes
+    one image per packed mechanism and uses the hard active mask for all
+    presentation geometry.
     """
 
     strength = np.asarray(arrays.get("residual_mechanism_strength", arrays.get("strength", [])), dtype=np.float64).reshape(-1)
     trace = np.asarray(arrays.get("residual_fraction_trace", []), dtype=np.float64).reshape(-1)
     marginal = np.asarray(arrays.get("residual_marginal_explained_fraction", []), dtype=np.float64).reshape(-1)
-    survival = np.asarray(arrays.get("edge_survival_weight", []), dtype=np.float64).reshape(-1)
+    survival = np.asarray(
+        arrays.get("edge_survival_soft", arrays.get("edge_survival_weight", [])),
+        dtype=np.float64,
+    ).reshape(-1)
     if strength.size == 0:
         strength = np.asarray(arrays.get("strength", []), dtype=np.float64).reshape(-1)
     packed_count = int(max(strength.size, trace.size - 1, marginal.size, survival.size))
@@ -445,28 +449,69 @@ def render_case_adaptive_residual_summary(
     case_cap = int(round(float(cap_values[0]))) if cap_values.size else packed_count
     stop_fraction = float(stop_values[0]) if stop_values.size else 0.02
 
+    interaction_tensor = np.asarray(
+        arrays.get("residual_interaction_tensor", np.zeros((0, 0, 0))),
+        dtype=np.float64,
+    )
+    if interaction_tensor.ndim == 4 and interaction_tensor.shape[0] == 1:
+        interaction_tensor = interaction_tensor[0]
+    tensor_mode = bool(interaction_tensor.ndim == 3 and interaction_tensor.size)
     A_me = np.asarray(arrays.get("A_me", np.zeros((0, 0))), dtype=np.float64)
     row_mass = np.asarray(arrays.get("residual_coupling_row_mass", np.zeros((0,))), dtype=np.float64).reshape(-1)
-    initial = A_me * row_mass[:, None] if A_me.ndim == 2 and A_me.shape[0] == row_mass.size else np.zeros((0, 0), dtype=np.float64)
+    if tensor_mode:
+        # The organizer extracts factors from the normalized residual
+        # ``R_0 = C / ||C||_1``.  Normalize the optional raw interaction tensor
+        # before summing over content channels so the component heatmaps and
+        # final residual are on the same scale as the extracted factors.
+        interaction_mass = float(np.sum(interaction_tensor))
+        normalized_tensor = (
+            interaction_tensor / interaction_mass
+            if interaction_mass > 1.0e-12
+            else np.zeros_like(interaction_tensor)
+        )
+        initial = np.sum(normalized_tensor, axis=-1)
+    else:
+        initial = (
+            A_me * row_mass[:, None]
+            if A_me.ndim == 2 and A_me.shape[0] == row_mass.size
+            else np.zeros((0, 0), dtype=np.float64)
+        )
     module_factor = np.asarray(arrays.get("residual_module_factor", np.zeros((0, packed_count))), dtype=np.float64)
     env_factor = np.asarray(arrays.get("residual_environment_factor", np.zeros((0, packed_count))), dtype=np.float64)
+    content_factor = np.asarray(arrays.get("residual_content_factor", np.zeros((0, packed_count))), dtype=np.float64)
     reconstructed = np.zeros_like(initial)
     if initial.size and module_factor.ndim == 2 and env_factor.ndim == 2:
         for hidx in active:
             if hidx >= module_factor.shape[1] or hidx >= env_factor.shape[1]:
                 continue
-            reconstructed += strength[hidx] * np.outer(module_factor[:, hidx], env_factor[:, hidx])
+            component = strength[hidx] * np.outer(module_factor[:, hidx], env_factor[:, hidx])
+            if tensor_mode and content_factor.ndim == 2 and hidx < content_factor.shape[1]:
+                component = component * float(np.sum(content_factor[:, hidx]))
+            reconstructed += component
     residual = np.maximum(initial - reconstructed, 0.0) if initial.size else np.zeros((0, 0), dtype=np.float64)
     cap_hit = np.asarray(arrays.get("case_adaptive_cap_hit", [0.0]), dtype=np.float64).reshape(-1)
     final_residual = float(trace[min(max(case_count, 0), trace.size - 1)])
     cap_warning = " — CAP HIT" if cap_hit.size and cap_hit[0] > 0.5 else ""
 
-    fig = plt.figure(figsize=(14.0, 9.0), constrained_layout=True)
-    gs = fig.add_gridspec(2, 2)
-    ax_trace = fig.add_subplot(gs[0, 0])
-    ax_gain = fig.add_subplot(gs[1, 0])
-    ax_map = fig.add_subplot(gs[1, 1])
-    fig.suptitle(f"{title}{cap_warning}", fontsize=14)
+    if tensor_mode:
+        fig = plt.figure(figsize=(16.0, 12.0), constrained_layout=True)
+        gs = fig.add_gridspec(3, 2, height_ratios=[1.0, 1.8, 1.15])
+        tensor_slot = gs[1, :]
+        ax_trace = fig.add_subplot(gs[0, 0])
+        ax_gain = fig.add_subplot(gs[0, 1])
+        ax_content = fig.add_subplot(gs[2, 0])
+        ax_map = fig.add_subplot(gs[2, 1])
+    else:
+        fig = plt.figure(figsize=(14.0, 9.0), constrained_layout=True)
+        gs = fig.add_gridspec(2, 2)
+        tensor_slot = gs[0, 1]
+        ax_trace = fig.add_subplot(gs[0, 0])
+        ax_gain = fig.add_subplot(gs[1, 0])
+        ax_map = fig.add_subplot(gs[1, 1])
+    figure_title = f"{title}{cap_warning}"
+    if tensor_mode:
+        figure_title += " — vector interaction tensor"
+    fig.suptitle(figure_title, fontsize=14)
 
     steps = np.arange(trace.size)
     ax_trace.plot(steps, trace, marker="o", color="#2166ac", lw=2.0, label=r"$\rho_r$")
@@ -479,10 +524,13 @@ def render_case_adaptive_residual_summary(
 
     if initial.size:
         # Keep the complete decomposition in one compact panel grid: initial
-        # coupling, one heatmap per hard-active rank-one component, and the
-        # residual left after those selected components.  This preserves the
-        # extraction order without writing one image per mechanism.
-        components: list[tuple[str, np.ndarray]] = [("initial $\\widetilde C$", initial)]
+        # coupling/tensor, one heatmap per hard-active rank-one component, and
+        # the residual left after those selected components.  For Phase 2 the
+        # tensor is summarized over content channels in this panel; the
+        # companion content-factor panel retains the channel decomposition.
+        initial_title = "initial $\\widetilde C$" if not tensor_mode else r"initial normalized $R_0$: $\sum_c C_{ijc}$"
+        component_title = r"H{}: $\lambda ab^T$" if not tensor_mode else r"H{}: $\sum_c\lambda ab^Tw_c$"
+        components: list[tuple[str, np.ndarray]] = [(initial_title, initial)]
         for hidx in active:
             if (
                 module_factor.ndim == 2
@@ -491,14 +539,16 @@ def render_case_adaptive_residual_summary(
                 and hidx < env_factor.shape[1]
             ):
                 component = strength[hidx] * np.outer(module_factor[:, hidx], env_factor[:, hidx])
+                if tensor_mode and content_factor.ndim == 2 and hidx < content_factor.shape[1]:
+                    component = component * float(np.sum(content_factor[:, hidx]))
             else:
                 component = np.zeros_like(initial)
-            components.append((f"H{hidx}: $\\lambda a b^T$", component))
+            components.append((component_title.format(hidx), component))
         components.append(("final residual", residual))
         n_components = len(components)
         n_cols = min(4, max(1, n_components))
         n_rows = int(np.ceil(n_components / float(n_cols)))
-        coupling_grid = gs[0, 1].subgridspec(n_rows, n_cols, wspace=0.12, hspace=0.30)
+        coupling_grid = tensor_slot.subgridspec(n_rows, n_cols, wspace=0.12, hspace=0.30)
         vmax = max(
             max(float(np.nanmax(matrix)) for _, matrix in components if matrix.size),
             1.0e-8,
@@ -533,12 +583,32 @@ def render_case_adaptive_residual_summary(
             fig.add_subplot(coupling_grid[row_index, column_index]).axis("off")
         fig.colorbar(images[0], ax=coupling_axes, fraction=0.025, pad=0.02, label="coupling")
     else:
-        coupling_grid = gs[0, 1].subgridspec(1, 1)
+        coupling_grid = tensor_slot.subgridspec(1, 1)
         ax_coupling = fig.add_subplot(coupling_grid[0, 0])
         ax_coupling.text(0.5, 0.5, "coupling arrays unavailable", ha="center", va="center")
         ax_coupling.set_xticks([])
         ax_coupling.set_yticks([])
         ax_coupling.set_title("Initial coupling → residual reconstruction")
+
+    if tensor_mode:
+        if content_factor.ndim == 2 and content_factor.size:
+            content_values = content_factor[:, active] if active else np.zeros((content_factor.shape[0], 1), dtype=np.float64)
+            content_image = ax_content.imshow(content_values, aspect="auto", cmap="coolwarm")
+            ax_content.set_title("Interaction-content factors $w_{cr}$ (hard-active H)")
+            ax_content.set_xlabel("mechanism")
+            ax_content.set_ylabel("interaction channel c")
+            ax_content.set_xticks(np.arange(len(active)) if active else [0])
+            ax_content.set_xticklabels([f"H{i}" for i in active] if active else ["none"])
+            channel_step = max(1, int(np.ceil(content_values.shape[0] / 12.0)))
+            channel_ticks = np.arange(0, content_values.shape[0], channel_step)
+            ax_content.set_yticks(channel_ticks)
+            ax_content.set_yticklabels([f"C{i}" for i in channel_ticks], fontsize=7)
+            fig.colorbar(content_image, ax=ax_content, fraction=0.046, pad=0.04, label="w")
+        else:
+            ax_content.text(0.5, 0.5, "interaction-content factors unavailable", ha="center", va="center")
+            ax_content.set_xticks([])
+            ax_content.set_yticks([])
+            ax_content.set_title("Interaction-content factors $w_{cr}$")
 
     x = np.arange(packed_count)
     width = 0.72

@@ -139,6 +139,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--organization-style", choices=["presentation", "debug", "both"], default="presentation")
     parser.add_argument("--organization-link-threshold", type=float, default=0.25)
     parser.add_argument("--return-routing-maps", action="store_true", help="Return dense query routing maps for evaluation diagnostics.")
+    parser.add_argument(
+        "--tensor-diagnostics",
+        "--return-interaction-tensor",
+        dest="tensor_diagnostics",
+        action="store_true",
+        help="Explicitly request the Phase-2 interaction tensor for rank/content diagnostics and the residual summary figure.",
+    )
     parser.add_argument("--routing-view", choices=["none", "summary", "all"], default="summary")
     parser.add_argument("--export-hypergraph-plan", action="store_true", help="Export compact static organizer plan for inverse-design seeding.")
     parser.add_argument(
@@ -232,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
             mixed_teacher_ratio=float(args.mixed_teacher_ratio),
             return_routing_maps=bool(args.return_routing_maps),
             return_topology_signature=bool(args.export_topology_signature),
+            return_interaction_tensor=bool(args.tensor_diagnostics),
         )
         predictions = denormalize_predictions(predictions, dataset, bool(dataset_cfg.get("normalize_targets", False)))
         predictions["suffix"] = suffix

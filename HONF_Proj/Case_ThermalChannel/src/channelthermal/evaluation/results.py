@@ -133,7 +133,13 @@ def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> 
         strength = strength[:edge_count]
         A_mh = A_mh[:, :edge_count]
         A_eh = A_eh[:, :edge_count]
-    active_source = aux.get("effective_edge_mask", aux.get("edge_active_mask"))
+    # Hard support is the presentation/topology contract for both adaptive
+    # organizers.  Phase 2 also exports a differentiable soft support, but it
+    # must never reactivate padded candidates in standard evaluation views.
+    active_source = aux.get(
+        "hard_case_edge_mask",
+        aux.get("effective_edge_mask", aux.get("edge_active_mask")),
+    )
     if active_source is None:
         active_source = np.ones((edge_count,), dtype=np.float32)
     active_mask = _as_numpy(active_source).reshape(-1)[:edge_count]
@@ -174,6 +180,24 @@ def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> 
         out[: min(rows, values.shape[0]), : min(edge_count, values.shape[1])] = values[:rows, :edge_count]
         return out
 
+    content_factor = _aux_array(
+        aux,
+        "residual_content_factor",
+        np.zeros((0, edge_count), dtype=np.float32),
+        ndim=2,
+    )
+    if content_factor.ndim != 2:
+        content_factor = np.zeros((0, edge_count), dtype=np.float32)
+    elif content_factor.shape[1] != edge_count:
+        if content_factor.shape[1] > edge_count:
+            content_factor = content_factor[:, :edge_count]
+        else:
+            content_factor = np.pad(
+                content_factor,
+                ((0, 0), (0, edge_count - content_factor.shape[1])),
+                constant_values=0.0,
+            )
+
     residual_trace = _aux_array(
         aux,
         "residual_fraction_trace",
@@ -205,6 +229,10 @@ def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> 
         "active_hyperedge_mask": active_mask,
         "effective_edge_mask": active_mask,
         "hard_case_edge_mask": edge_array("hard_case_edge_mask", active_mask),
+        "edge_survival_soft": edge_array(
+            "edge_survival_soft",
+            aux.get("edge_survival_weight", active_mask),
+        ),
         "edge_survival_weight": edge_array("edge_survival_weight", active_mask),
         "module_mass": edge_array("hyper_module_mass", np.zeros_like(strength)),
         "env_mass": edge_array("hyper_env_mass", np.zeros_like(strength)),
@@ -226,6 +254,13 @@ def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> 
         "residual_environment_factor": matrix_array(
             "residual_environment_factor", np.zeros((env_coords.shape[0], edge_count)), env_coords.shape[0]
         ),
+        "residual_content_factor": content_factor,
+        "residual_interaction_tensor": _aux_array(
+            aux,
+            "residual_interaction_tensor",
+            np.zeros((0, 0, 0), dtype=np.float32),
+            ndim=3,
+        ),
         "residual_coupling_row_mass": _aux_array(
             aux,
             "residual_coupling_row_mass",
@@ -239,12 +274,12 @@ def extract_organization_arrays(sample: Dict[str, Any], aux: Dict[str, Any]) -> 
         "case_adaptive_soft_edge_count": _aux_array(
             aux,
             "case_adaptive_soft_edge_count",
-            np.asarray(np.sum(edge_array("edge_survival_weight", active_mask)), dtype=np.float32),
+            np.asarray(np.sum(edge_array("edge_survival_soft", active_mask)), dtype=np.float32),
             ndim=0,
         ).reshape(-1),
         # Keep the short alias consumed by historical diagnostics while the
         # explicit case-adaptive name remains the canonical export.
-        "soft_edge_count": np.asarray(np.sum(edge_array("edge_survival_weight", active_mask)), dtype=np.float32),
+        "soft_edge_count": np.asarray(np.sum(edge_array("edge_survival_soft", active_mask)), dtype=np.float32),
     }
 
 
@@ -254,6 +289,132 @@ def _entropy(values: np.ndarray, axis: int = -1) -> np.ndarray:
     arr = np.asarray(values, dtype=np.float64)
     arr = np.clip(arr, 1.0e-12, None)
     return -np.sum(arr * np.log(arr), axis=axis)
+
+
+def effective_rank(values: Any) -> float:
+    """Return entropy effective rank for an evaluation-only matrix diagnostic."""
+
+    array = _as_numpy(values, dtype=np.float64)
+    if array.ndim != 2 or min(array.shape) == 0:
+        return 0.0
+    array = np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0)
+    singular = np.linalg.svd(array, compute_uv=False)
+    energy = singular * singular
+    total = float(energy.sum())
+    if total <= 1.0e-12:
+        return 0.0
+    probability = energy / total
+    return float(np.exp(-np.sum(probability * np.log(np.maximum(probability, 1.0e-12)))))
+
+
+def mean_column_cosine(values: Any) -> float:
+    """Return the mean off-diagonal cosine between nonzero matrix columns."""
+
+    array = _as_numpy(values, dtype=np.float64)
+    if array.ndim != 2 or array.shape[1] < 2:
+        return 1.0 if array.ndim == 2 and array.shape[1] == 1 else 0.0
+    norms = np.linalg.norm(array, axis=0)
+    valid = norms > 1.0e-12
+    if int(valid.sum()) < 2:
+        return 1.0 if int(valid.sum()) == 1 else 0.0
+    normalized = array[:, valid] / norms[valid][None, :]
+    cosine = normalized.T @ normalized
+    upper = cosine[np.triu_indices(cosine.shape[0], k=1)]
+    return float(np.mean(upper)) if upper.size else 0.0
+
+
+def interaction_tensor_effective_ranks(interaction_tensor: Any) -> Dict[str, float]:
+    """Calculate effective ranks of the three Phase-2 tensor unfoldings.
+
+    The input is the optional single-case tensor ``[M,E,D_I]``.  This helper
+    intentionally performs SVD only in evaluation/reporting code; training
+    diagnostics should consume the organizer's cheap scalar summaries.
+    """
+
+    tensor = _as_numpy(interaction_tensor, dtype=np.float64)
+    if tensor.ndim == 4 and tensor.shape[0] == 1:
+        tensor = tensor[0]
+    if tensor.ndim != 3 or 0 in tensor.shape:
+        return {
+            "interaction_tensor_module_effective_rank": 0.0,
+            "interaction_tensor_environment_effective_rank": 0.0,
+            "interaction_tensor_content_effective_rank": 0.0,
+        }
+    module_unfolding = tensor.reshape(tensor.shape[0], -1)
+    environment_unfolding = np.transpose(tensor, (1, 0, 2)).reshape(tensor.shape[1], -1)
+    content_unfolding = np.transpose(tensor, (2, 0, 1)).reshape(tensor.shape[2], -1)
+    return {
+        "interaction_tensor_module_effective_rank": effective_rank(module_unfolding),
+        "interaction_tensor_environment_effective_rank": effective_rank(environment_unfolding),
+        "interaction_tensor_content_effective_rank": effective_rank(content_unfolding),
+    }
+
+
+def interaction_tensor_diagnostics(
+    interaction_tensor: Any,
+    module_present: Any = None,
+) -> Dict[str, Any]:
+    """Return Phase-2 tensor shape, positivity, inactive-padding, and rank facts."""
+
+    tensor = _as_numpy(interaction_tensor, dtype=np.float64)
+    if tensor.ndim == 4 and tensor.shape[0] == 1:
+        tensor = tensor[0]
+    if tensor.ndim != 3:
+        return {}
+    ranks = interaction_tensor_effective_ranks(tensor)
+    finite = bool(np.isfinite(tensor).all())
+    finite_values = tensor[np.isfinite(tensor)]
+    if finite_values.size:
+        tensor_min = float(np.min(finite_values))
+        tensor_max = float(np.max(finite_values))
+    else:
+        tensor_min = 0.0
+        tensor_max = 0.0
+    result: Dict[str, Any] = {
+        "interaction_tensor_shape": [int(value) for value in tensor.shape],
+        "interaction_tensor_finite": finite,
+        "interaction_tensor_nonnegative": bool(tensor_min >= -1.0e-7) if finite_values.size else finite,
+        "interaction_tensor_min": tensor_min,
+        "interaction_tensor_max": tensor_max,
+        **ranks,
+    }
+    present = _as_numpy(module_present, dtype=np.float64) if module_present is not None else np.ones((tensor.shape[0],), dtype=np.float64)
+    if present.ndim == 2 and present.shape[0] == 1:
+        present = present[0]
+    present = present.reshape(-1)
+    inactive = np.flatnonzero(present[: tensor.shape[0]] <= 0.5)
+    result["interaction_tensor_inactive_module_max"] = (
+        float(np.max(np.abs(tensor[inactive]))) if inactive.size else 0.0
+    )
+    result["interaction_tensor_zero_baseline"] = bool(np.isclose(tensor_min, 0.0)) if finite_values.size else finite
+    return result
+
+
+def support_diagnostics(aux: Dict[str, Any]) -> Dict[str, Any]:
+    """Summarize Phase-2 hard/soft support consistency without changing outputs."""
+
+    hard_value = aux.get("hard_case_edge_mask", aux.get("hard_selected_edge_mask", aux.get("edge_active_mask")))
+    if hard_value is None:
+        return {}
+    hard = _as_numpy(hard_value, dtype=np.float64)
+    soft_value = aux.get("edge_survival_soft", aux.get("edge_survival_weight"))
+    effective_value = aux.get("effective_edge_mask", aux.get("edge_active_mask"))
+    result: Dict[str, Any] = {}
+    if soft_value is not None:
+        soft = _as_numpy(soft_value, dtype=np.float64)
+        if soft.shape == hard.shape:
+            result["soft_hard_support_gap_mean"] = float(np.mean(np.abs(soft - hard))) if hard.size else 0.0
+            result["soft_hard_support_gap_max"] = float(np.max(np.abs(soft - hard))) if hard.size else 0.0
+            result["soft_support_effective_k"] = float(np.sum(soft)) if soft.size else 0.0
+    if effective_value is not None:
+        effective = _as_numpy(effective_value, dtype=np.float64)
+        if effective.shape == hard.shape:
+            gap = np.abs(effective - hard)
+            result["hard_forward_support_gap_mean"] = float(np.mean(gap)) if gap.size else 0.0
+            result["hard_forward_support_gap_max"] = float(np.max(gap)) if gap.size else 0.0
+            result["hard_forward_support_exact"] = bool(np.all(gap <= 1.0e-6))
+    result["hard_support_count"] = float(np.sum(hard > 0.5)) if hard.size else 0.0
+    return result
 
 
 def _mean_aux(aux: Dict[str, Any], key: str, default: float = 0.0) -> float:
@@ -296,6 +457,9 @@ def _residual_summary(aux: Dict[str, Any]) -> Dict[str, float]:
     final = trace[rows, count]
     margins = _as_numpy(aux.get("case_adaptive_stop_margin"), dtype=np.float64)
     margins = margins[np.isfinite(margins)]
+    cap_values = _as_numpy(aux.get("case_adaptive_edge_cap"), dtype=np.float64).reshape(-1)
+    if cap_values.size == 1 and count.size > 1:
+        cap_values = np.repeat(cap_values, count.size)
     summary = {
         "case_adaptive_edge_count_mean": float(np.mean(count)) if count.size else 0.0,
         "case_adaptive_edge_cap_mean": _mean_aux(aux, "case_adaptive_edge_cap"),
@@ -311,7 +475,14 @@ def _residual_summary(aux: Dict[str, Any]) -> Dict[str, float]:
         "case_adaptive_stop_margin_mean": _mean_aux(aux, "case_adaptive_stop_margin"),
         "case_adaptive_stop_margin_min": float(np.min(margins)) if margins.size else 0.0,
         "residual_monotonic_violation_max": _max_aux(aux, "residual_monotonic_violation_max"),
+        "case_adaptive_k_over_cap_mean": float(np.mean(count / np.maximum(cap_values[: count.size], 1.0)))
+        if cap_values.size >= count.size
+        else 0.0,
     }
+    final_values = final[np.isfinite(final)]
+    summary["residual_fraction_final_p95"] = (
+        float(np.quantile(final_values, 0.95)) if final_values.size else 0.0
+    )
     marginal = _as_numpy(aux.get("residual_marginal_explained_fraction"), dtype=np.float64)
     if marginal.size:
         if marginal.ndim == 1:
@@ -321,9 +492,13 @@ def _residual_summary(aux: Dict[str, Any]) -> Dict[str, float]:
         last = marginal[np.arange(min(marginal.shape[0], last_indices.size)), last_indices[: marginal.shape[0]]]
         summary["residual_first_marginal_mean"] = float(np.mean(first))
         summary["residual_last_active_marginal_mean"] = float(np.mean(last))
+        for index in range(min(3, marginal.shape[1])):
+            values = marginal[:, index]
+            summary[f"residual_marginal_{index + 1}_mean"] = float(np.mean(values))
     else:
         summary["residual_first_marginal_mean"] = 0.0
         summary["residual_last_active_marginal_mean"] = 0.0
+    summary.update(support_diagnostics(aux))
     return summary
 
 
@@ -340,7 +515,11 @@ def hypergraph_diagnostics(predictions: Dict[str, Any]) -> Dict[str, Any]:
     num_h = max(int(strength.shape[0]), 1)
     residual_summary = _residual_summary(aux)
     case_adaptive = bool(residual_summary) or "case_adaptive_edge_count" in aux
-    direct_active_count = _mean_aux(aux, "case_adaptive_edge_count")
+    direct_active_count = _mean_aux(
+        aux,
+        "case_adaptive_edge_count",
+        residual_summary.get("case_adaptive_edge_count_mean", 0.0),
+    )
     static = {
         "active_edge_count": direct_active_count if case_adaptive else float(np.sum(strength > 0.05)),
         "A_mh_entropy": float(np.mean(_entropy(A_mh, axis=-1))) if A_mh.size else 0.0,
@@ -361,6 +540,20 @@ def hypergraph_diagnostics(predictions: Dict[str, Any]) -> Dict[str, Any]:
         if key in aux:
             static[key] = float(np.mean(_as_numpy(aux[key], dtype=np.float64)))
     static.update(residual_summary)
+    tensor = aux.get("residual_interaction_tensor")
+    if tensor is not None:
+        module_present = aux.get("module_present")
+        static.update(interaction_tensor_diagnostics(tensor, module_present))
+    content_factor = aux.get("residual_content_factor")
+    if content_factor is not None:
+        content_array = _as_numpy(content_factor, dtype=np.float64)
+        if content_array.ndim == 3 and content_array.shape[0] == 1:
+            content_array = content_array[0]
+        static["residual_content_factor_effective_rank"] = effective_rank(content_array)
+        static["residual_content_factor_nonzero_fraction"] = (
+            float(np.mean(np.abs(content_array) > 1.0e-8)) if content_array.size else 0.0
+        )
+        static["residual_content_factor_column_cosine"] = mean_column_cosine(content_array)
     routing_maps = predictions.get("routing_maps", {})
     routing_aux = predictions.get("routing_aux", {})
     routing = {
@@ -428,14 +621,29 @@ def summarize(
     suffix = str(predictions.get("suffix", "predicted"))
     layout.ensure("arrays", "metrics")
     npz_path = layout.arrays / f"evaluation_outputs_{suffix}.npz"
-    np.savez_compressed(
-        npz_path,
-        pred_field_grid=pred.astype(np.float32),
-        gt_field_grid=gt.astype(np.float32),
-        pred_internal_temperature=predictions["pred_internal_temperature"].astype(np.float32),
-        pred_interface=predictions["pred_interface"].astype(np.float32),
-        pred_port_condition=predictions["pred_port_condition"].astype(np.float32),
-    )
+    array_payload: Dict[str, Any] = {
+        "pred_field_grid": pred.astype(np.float32),
+        "gt_field_grid": gt.astype(np.float32),
+        "pred_internal_temperature": predictions["pred_internal_temperature"].astype(np.float32),
+        "pred_interface": predictions["pred_interface"].astype(np.float32),
+        "pred_port_condition": predictions["pred_port_condition"].astype(np.float32),
+    }
+    # Phase-2's full interaction tensor is expensive and therefore only
+    # arrives when explicitly requested by the caller.  Persist it in the
+    # existing managed array artifact when present; ordinary evaluations keep
+    # the historical compact payload.
+    organizer_aux = predictions.get("organizer_aux", {})
+    for key in (
+        "residual_interaction_tensor",
+        "residual_content_factor",
+        "edge_survival_soft",
+        "hard_case_edge_mask",
+    ):
+        if key in organizer_aux:
+            value = _as_numpy(organizer_aux[key], dtype=np.float32)
+            if value.size:
+                array_payload[key] = value
+    np.savez_compressed(npz_path, **array_payload)
     channel_metrics = {
         str(name): masked_error_metrics(pred[..., idx], gt[..., idx], fluid_mask)
         for idx, name in enumerate(channel_order[: pred.shape[-1]])

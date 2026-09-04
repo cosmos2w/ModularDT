@@ -167,6 +167,7 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
         nonhyper_context = torch.zeros_like(query_state)
         edge_pair_context: Optional[torch.Tensor] = None
         hyper_state = organizer_output["hyper_state"]
+        tensor_support = False
         diagnostics: Dict[str, torch.Tensor | str] = {"decoder_mode": cfg.decoder_mode}
         if not context_fusion:
             diagnostics["field_assembly_mode"] = cfg.field_assembly_mode
@@ -225,9 +226,38 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
             if not torch.is_tensor(edge_active_mask):
                 edge_active_mask = torch.ones_like(hyper_logits[:, 0, :])
             edge_active_mask = edge_active_mask.to(device=hyper_logits.device, dtype=hyper_logits.dtype)
+            # Phase 2 advertises a separate hard mask and soft survival tensor.
+            # Keep this route distinct from the Phase-1 edge_survival_weight
+            # branch so the established adaptive arithmetic remains unchanged.
+            tensor_hard_support = organizer_output.get("hard_case_edge_mask")
+            tensor_soft_support = organizer_output.get("edge_survival_soft")
+            tensor_support = torch.is_tensor(tensor_hard_support) and torch.is_tensor(tensor_soft_support)
+            base_hyper_logits = hyper_logits
+            if tensor_support:
+                tensor_hard_support = tensor_hard_support.to(
+                    device=hyper_logits.device,
+                    dtype=hyper_logits.dtype,
+                )
+                tensor_soft_support = tensor_soft_support.to(
+                    device=hyper_logits.device,
+                    dtype=hyper_logits.dtype,
+                )
+                if tensor_hard_support.shape != edge_active_mask.shape:
+                    raise ValueError(
+                        "hard_case_edge_mask must have shape [B,K] matching the runtime hyperedge axis."
+                    )
+                if tensor_soft_support.shape != edge_active_mask.shape:
+                    raise ValueError(
+                        "edge_survival_soft must have shape [B,K] matching the runtime hyperedge axis."
+                    )
+                edge_active_mask = tensor_hard_support
+                hyper_logits = hyper_logits.masked_fill(
+                    tensor_hard_support[:, None, :] <= 0,
+                    torch.finfo(hyper_logits.dtype).min,
+                )
             residual_support = organizer_output.get("edge_survival_weight")
             adaptive_support = torch.is_tensor(residual_support)
-            if adaptive_support:
+            if adaptive_support and not tensor_support:
                 residual_support = residual_support.to(
                     device=hyper_logits.device,
                     dtype=hyper_logits.dtype,
@@ -248,7 +278,8 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
                     torch.finfo(hyper_logits.dtype).min,
                 )
             uses_descriptive_query_normalizer = (
-                adaptive_support
+                tensor_support
+                or adaptive_support
                 or not context_fusion
                 or cfg.query_assignment_normalizer != "softmax"
             )
@@ -260,7 +291,7 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
             if cfg.hyper_query_attention_mode == "uniform":
                 if not uses_descriptive_query_normalizer:
                     hyper_attention = torch.full_like(hyper_logits, 1.0 / float(max(hyper_logits.shape[-1], 1)))
-                elif adaptive_support:
+                elif adaptive_support and not tensor_support:
                     hyper_attention = residual_support[:, None, :].expand_as(hyper_logits)
                     hyper_attention = hyper_attention / hyper_attention.sum(dim=-1, keepdim=True).clamp_min(EPS)
                 else:
@@ -287,7 +318,47 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
                         ),
                     )
                     hyper_attention = self._limit_probability_routes(hyper_attention)
-            if adaptive_support:
+            if tensor_support:
+                # ``hyper_attention`` above is the hard masked route.  Build a
+                # second soft route from the unmasked logits, then blend with
+                # stop-gradient hard values.  The resulting forward tensor is
+                # exactly hard-supported in both train and eval.
+                hard_attention = hyper_attention
+                soft_logits = base_hyper_logits + torch.log(
+                    tensor_soft_support.clamp_min(EPS)
+                )[:, None, :]
+                soft_mask = tensor_soft_support[:, None, :] > 0
+                if cfg.hyper_query_attention_mode == "uniform":
+                    soft_attention = tensor_soft_support[:, None, :].expand_as(soft_logits)
+                    soft_attention = soft_attention / soft_attention.sum(
+                        dim=-1,
+                        keepdim=True,
+                    ).clamp_min(EPS)
+                else:
+                    soft_attention = normalize_assignment(
+                        soft_logits / max(float(cfg.hyper_attention_temperature), EPS),
+                        mode=cfg.query_assignment_normalizer,
+                        mask=soft_mask,
+                        entmax_blend=float(
+                            organizer_output.get(
+                                "query_sparsity_fraction",
+                                soft_logits.new_zeros(()),
+                            )
+                        ),
+                    )
+                    soft_attention = self._limit_probability_routes(soft_attention)
+                hyper_attention = soft_attention + (hard_attention - soft_attention).detach()
+                diagnostics["case_adaptive_support_mean"] = tensor_soft_support.detach().mean()
+                diagnostics["case_adaptive_active_edge_count"] = tensor_hard_support.detach().sum(dim=-1).mean()
+                soft_count = organizer_output.get("case_adaptive_soft_edge_count")
+                if torch.is_tensor(soft_count):
+                    diagnostics["case_adaptive_soft_edge_count"] = soft_count.detach().to(
+                        device=hyper_logits.device,
+                        dtype=hyper_logits.dtype,
+                    )
+                else:
+                    diagnostics["case_adaptive_soft_edge_count"] = tensor_soft_support.detach().sum(dim=-1)
+            elif adaptive_support:
                 # Only the boolean support is applied a second time; the
                 # fractional training weight was already used as the log
                 # routing prior above.
@@ -404,7 +475,7 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
             diagnostics["pairwise_active_hyperedge_count"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
             diagnostics["pairwise_uses_sparse_hyper_attention"] = torch.zeros((), device=query_xy.device, dtype=query_xy.dtype)
             diagnostics.setdefault("hyper_value_context_norm", torch.zeros((), device=query_xy.device, dtype=query_xy.dtype))
-            if return_routing_maps:
+            if return_routing_maps and not tensor_support:
                 batch, num_query = query_xy.shape[:2]
                 num_hyper = int(organizer_output.get("hyper_state", query_xy.new_zeros(batch, 0, query_state.shape[-1])).shape[1])
                 diagnostics["query_hyper_attention"] = query_xy.new_zeros(batch, num_query, num_hyper)

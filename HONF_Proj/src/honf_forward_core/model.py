@@ -60,6 +60,7 @@ class HONFNeuralField(nn.Module):
         batch: BatchData,
         *,
         organizer_selection_override: Optional[str] = None,
+        return_residual_interaction_tensor: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """Encode generic inputs and build static HONF organizer state.
 
@@ -141,6 +142,7 @@ class HONFNeuralField(nn.Module):
             geometry_mode=cfg.geometry_mode,
             selection_override=organizer_selection_override,
             global_token=global_token,
+            return_residual_interaction_tensor=bool(return_residual_interaction_tensor),
         )
         organizer_output["module_features_raw"] = module_features
         output: Dict[str, torch.Tensor] = {}
@@ -174,10 +176,19 @@ class HONFNeuralField(nn.Module):
             return_edge_fields=bool(return_edge_fields),
         )
 
-    def forward(self, batch: BatchData, *, return_edge_fields: bool = False) -> Dict[str, torch.Tensor]:
+    def forward(
+        self,
+        batch: BatchData,
+        *,
+        return_edge_fields: bool = False,
+        return_residual_interaction_tensor: bool = False,
+    ) -> Dict[str, torch.Tensor]:
         """Encode, organize, and decode a complete :class:`BatchData` batch."""
 
-        encoded = self.encode_and_organize(batch)
+        encoded = self.encode_and_organize(
+            batch,
+            return_residual_interaction_tensor=bool(return_residual_interaction_tensor),
+        )
         decoder_output = self.decode_queries(
             query_xy=batch.query_xy.float(),
             query_time=None if batch.query_time is None else batch.query_time.float(),

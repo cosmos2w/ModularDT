@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Dict, Optional, Sequence
 
 import numpy as np
@@ -10,6 +11,30 @@ import torch
 from channelthermal.data.datasets import GlobalChannelThermalDataset
 from channelthermal.evaluation.loading import make_batch
 from channelthermal.model import ChannelThermalHONFModel
+
+
+def _interaction_tensor_request_kwargs(model: Any, requested: bool) -> dict[str, bool]:
+    """Return an opt-in wrapper flag for Phase-2 interaction tensors."""
+
+    if not requested:
+        return {}
+    try:
+        parameters = inspect.signature(model.forward).parameters
+    except (TypeError, ValueError):  # pragma: no cover - unusual proxy models
+        return {}
+    accepts_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values())
+    for name in (
+        "return_interaction_tensor",
+        "return_residual_interaction_tensor",
+        "return_tensor_diagnostics",
+        # ChannelThermal's public facade names the opt-in organizer bundle
+        # ``return_organizer_diagnostics`` while the generic core uses the
+        # more specific residual-tensor spelling.
+        "return_organizer_diagnostics",
+    ):
+        if name in parameters or accepts_kwargs:
+            return {name: True}
+    return {}
 
 
 def select_sample(dataset: GlobalChannelThermalDataset, case_id: Optional[str], case_index: int) -> Dict[str, Any]:
@@ -54,12 +79,14 @@ def predict_case(
     return_routing_maps: bool = False,
     return_topology_signature: bool = False,
     return_prepared_state: bool = False,
+    return_interaction_tensor: bool = False,
 ) -> Dict[str, Any]:
     """Prepare one physical case once, then decode its query grid in chunks.
 
     Evaluation-only diagnostics may request the retained prepared state.  The
     default remains the historical compact result and does not expose the
-    wrapper-internal state to callers.
+    wrapper-internal state to callers.  The interaction tensor is similarly
+    opt-in because it is only needed for Phase-2 rank/visualization reports.
     """
 
     x_grid = sample["x_grid"]
@@ -88,6 +115,7 @@ def predict_case(
                     return_routing_maps=need_routing,
                     return_edge_fields=bool(return_topology_signature),
                     return_prepared_state=True,
+                    **_interaction_tensor_request_kwargs(model, return_interaction_tensor),
                 )
                 prepared_state = outputs.pop("prepared_state")
                 first_outputs = outputs

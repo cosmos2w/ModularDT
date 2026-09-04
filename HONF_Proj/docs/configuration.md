@@ -50,3 +50,14 @@ packed to the largest active module count in a batch; hard K is selected per
 case at evaluation, while differentiable survival weights are used during
 training. The profile keeps context fusion, dense fused query-module routing,
 the legacy pairwise kernel, and disabled organizer count regularization.
+
+The Phase-2 tensor candidate is
+`src/config_core/forward/case_adaptive_tensor_residual_context.json`. It is a
+separate complete profile (`organizer_mode="case_adaptive_tensor_residual"`)
+with 32-dimensional residual interaction vectors, a 1.5 K/cap multiplier,
+one refinement step, and a 500-epoch research run (`1701`). Its full
+`residual_interaction_tensor` is emitted only when evaluation is explicitly
+requested with `--tensor-diagnostics`; otherwise the forward output remains
+compact. The candidate adds rank, support-gap, content-factor, and K-by-M
+diagnostics without changing the recommended profile or the Run-1700/Run-1401
+configs.

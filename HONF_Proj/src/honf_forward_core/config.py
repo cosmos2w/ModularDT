@@ -103,6 +103,8 @@ class UnifiedForwardConfig:
     residual_soft_stop_temperature: float = 0.05
     residual_factor_refinement_steps: int = 2
     residual_coupling_fourier_frequencies: int = 2
+    residual_interaction_dim: int = 32
+    residual_mechanism_cap_multiplier: float = 1.5
 
     edge_selection_mode: str = "all"
     selection_warmup_epochs: int = 200
@@ -197,10 +199,11 @@ class UnifiedForwardConfig:
             "fixed_projection",
             "exchangeable_slots",
             "case_adaptive_residual",
+            "case_adaptive_tensor_residual",
         }:
             raise ValueError(
                 "organizer_mode must be 'fixed_projection', 'exchangeable_slots', "
-                "or 'case_adaptive_residual'."
+                "'case_adaptive_residual', or 'case_adaptive_tensor_residual'."
             )
         if self.organizer_mode == "fixed_projection" and int(self.num_hyperedges) <= 0:
             raise ValueError("fixed_projection organizer_mode requires num_hyperedges > 0.")
@@ -231,6 +234,37 @@ class UnifiedForwardConfig:
             if self.pairwise_aggregation_mode != "fused_query_module":
                 raise ValueError(
                     "case_adaptive_residual requires fused_query_module pairwise aggregation."
+                )
+        if self.organizer_mode == "case_adaptive_tensor_residual":
+            if int(self.num_hyperedges) != 0:
+                raise ValueError(
+                    "case_adaptive_tensor_residual organizer_mode requires num_hyperedges == 0."
+                )
+            if int(self.edge_capacity) != 0:
+                raise ValueError(
+                    "case_adaptive_tensor_residual organizer_mode requires edge_capacity == 0."
+                )
+            if int(self.minimum_active_edges) <= 0:
+                raise ValueError("case_adaptive_tensor_residual requires minimum_active_edges >= 1.")
+            if int(self.residual_interaction_dim) <= 0:
+                raise ValueError("residual_interaction_dim must be positive.")
+            if float(self.residual_mechanism_cap_multiplier) < 1.0:
+                raise ValueError("residual_mechanism_cap_multiplier must be >= 1.")
+            if not 0.0 < float(self.residual_stop_fraction) < 1.0:
+                raise ValueError("residual_stop_fraction must be in (0, 1).")
+            if float(self.residual_soft_stop_temperature) <= 0.0:
+                raise ValueError("residual_soft_stop_temperature must be positive.")
+            if int(self.residual_factor_refinement_steps) <= 0:
+                raise ValueError("residual_factor_refinement_steps must be positive.")
+            if int(self.residual_coupling_fourier_frequencies) < 0:
+                raise ValueError("residual_coupling_fourier_frequencies must be nonnegative.")
+            if self.field_assembly_mode != "context_fusion":
+                raise ValueError(
+                    "case_adaptive_tensor_residual requires context_fusion field assembly."
+                )
+            if self.pairwise_aggregation_mode != "fused_query_module":
+                raise ValueError(
+                    "case_adaptive_tensor_residual requires fused_query_module pairwise aggregation."
                 )
         if int(self.edge_capacity) < 0:
             raise ValueError("edge_capacity must be >= 0.")

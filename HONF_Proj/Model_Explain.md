@@ -6,7 +6,8 @@ hyperedge state, dense query routing, and context fusion. The fused
 query-module executor is the behavior-equivalent efficient path. Exchangeable,
 adaptive, entmax, additive, and gathered mechanisms remain loadable optional
 research and checkpoint-compatibility modes. The registry also contains the
-standalone `case_adaptive_residual_context` candidate; it is not accepted or
+standalone `case_adaptive_residual_context` candidate and the Phase-2
+`case_adaptive_tensor_residual_context` candidate; neither is accepted or
 recommended until its bounded evaluation gates pass.
 
 ## 1. Which configuration is current?
@@ -18,6 +19,7 @@ The profile registry at `src/config_core/forward/profile_registry.json` declares
 | Recommended profile | `src/config_core/forward/stage7_structured_context.json` | Fixed K=6 architecture and 5K training policy |
 | Promoted efficient execution | `src/config_core/forward/experiments/stage7_fused_query_module.json` | Exact K=6 fused dense legacy-kernel path; sparse beta-0.98 is evaluation-only |
 | Optional residual candidate | `src/config_core/forward/case_adaptive_residual_context.json` | Case-specific residual mechanism count; 2500-epoch research candidate |
+| Phase-2 tensor candidate | `src/config_core/forward/case_adaptive_tensor_residual_context.json` | 32-dimensional residual interaction tensor and rank/support diagnostics; 500-epoch research candidate |
 | Compatibility profile | `src/config_core/forward/enhanced_honf_pairwise.json` | Established checkpoint architecture |
 | Optional research base | `src/config_core/forward/adaptive_sparse_additive.json` | Compatibility/research only |
 | ThermalChannel case policy | `Case_ThermalChannel/configs/case_default.json` | Current case, data, Stage-A, loss, and evaluation settings |
@@ -429,6 +431,17 @@ evaluation. The candidate retains the established encoders, context-fusion
 decoder, fused beta routing, legacy pairwise kernel, ThermalChannel coupling,
 losses, and disabled organizer regularization. Residual traces and counts are
 evaluation diagnostics, not topology-signature schema changes.
+
+The Phase-2 `case_adaptive_tensor_residual_context` candidate keeps that
+contract while exposing vector-valued residual mechanisms. For active
+mechanism $h$, the interaction tensor has shape
+$[M,E,D_I]$ with $D_I=32$ and is summarized by module, environment, and
+content unfoldings. Content factors, environment-factor cosine/rank, region
+separation, query/pairwise rank, support gaps, and the observed per-case K
+distribution are evaluation-only diagnostics. The candidate uses
+$K_{cap}=\lceil1.5M_b\rceil$ (with the configured minimum) as a case-size cap,
+one factor-refinement step, and a 500-epoch training budget; the full tensor is requested explicitly with
+`--tensor-diagnostics` so normal inference does not carry the extra array.
 
 ## 10. Current code structure
 
