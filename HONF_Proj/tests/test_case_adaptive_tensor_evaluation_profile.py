@@ -87,6 +87,10 @@ def _phase2_aux() -> dict[str, np.ndarray]:
         "case_adaptive_edge_cap": np.asarray(3.0, dtype=np.float32),
         "case_adaptive_cap_hit": np.asarray(0.0, dtype=np.float32),
         "case_adaptive_stop_reached": np.asarray(1.0, dtype=np.float32),
+        "residual_monotonic_violation_max": np.asarray(0.0, dtype=np.float32),
+        "empty_selected_edge_count": np.asarray(0.0, dtype=np.float32),
+        "post_fallback_zero_support_module_rows": np.asarray(0.0, dtype=np.float32),
+        "post_fallback_zero_support_environment_rows": np.asarray(0.0, dtype=np.float32),
         "residual_stop_fraction": np.asarray(0.01, dtype=np.float32),
         "residual_fraction_trace": np.asarray([1.0, 0.4, 0.01, 0.0], dtype=np.float32),
         "residual_marginal_explained_fraction": np.asarray(
@@ -198,6 +202,10 @@ def test_phase2_summary_reports_k_by_module_and_tensor_availability() -> None:
             "interaction_tensor_finite": True,
             "interaction_tensor_nonnegative": True,
             "hard_forward_support_exact": True,
+            "residual_monotonic_violation_max": 0.0,
+            "empty_selected_edge_count": 0.0,
+            "post_fallback_zero_support_module_rows": 0.0,
+            "post_fallback_zero_support_environment_rows": 0.0,
         },
         {
             "checkpoint": "tensor",
@@ -209,6 +217,10 @@ def test_phase2_summary_reports_k_by_module_and_tensor_availability() -> None:
             "interaction_tensor_finite": True,
             "interaction_tensor_nonnegative": True,
             "hard_forward_support_exact": True,
+            "residual_monotonic_violation_max": 0.0,
+            "empty_selected_edge_count": 0.0,
+            "post_fallback_zero_support_module_rows": 0.0,
+            "post_fallback_zero_support_environment_rows": 0.0,
         },
     ]
     summary = evaluator.summarize_rows(rows)
@@ -217,6 +229,23 @@ def test_phase2_summary_reports_k_by_module_and_tensor_availability() -> None:
     assert summary["case_adaptive_k_by_module_count"]["2"]["hard_k_histogram"] == {"2": 1}
     assert summary["case_adaptive_k_by_module_count"]["3"]["cap_mean"] == pytest.approx(5.0)
     assert summary["k_by_module_count"] == summary["case_adaptive_k_by_module_count"]
+    assert summary["residual_monotonic_violation_max_max"] == pytest.approx(0.0)
+    assert summary["empty_selected_edge_count_max"] == pytest.approx(0.0)
+    assert summary["post_fallback_zero_support_module_rows_max"] == pytest.approx(0.0)
+    assert summary["post_fallback_zero_support_environment_rows_max"] == pytest.approx(0.0)
+
+
+def test_phase2_case_metrics_preserve_hard_gate_counters() -> None:
+    evaluator = _load_evaluator()
+    aux = _phase2_aux()
+    arrays = extract_organization_arrays(_sample(), aux)
+    hard_mask = np.asarray(arrays["active_hyperedge_mask"], dtype=bool)
+    metrics = evaluator._phase2_case_metrics(_sample(), arrays, aux, hard_mask, 2.0)
+
+    assert metrics["residual_monotonic_violation_max"] == pytest.approx(0.0)
+    assert metrics["empty_selected_edge_count"] == pytest.approx(0.0)
+    assert metrics["post_fallback_zero_support_module_rows"] == pytest.approx(0.0)
+    assert metrics["post_fallback_zero_support_environment_rows"] == pytest.approx(0.0)
 
 
 def test_phase2_tensor_request_is_opt_in_and_visual_is_one_summary(tmp_path: Path) -> None:

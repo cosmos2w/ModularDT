@@ -229,6 +229,10 @@ def _phase2_case_metrics(
         "hard_forward_support_exact": None,
         "hard_support_count": None,
         "soft_support_effective_k": None,
+        "residual_monotonic_violation_max": None,
+        "empty_selected_edge_count": None,
+        "post_fallback_zero_support_module_rows": None,
+        "post_fallback_zero_support_environment_rows": None,
         "case_adaptive_k_over_module_count": None,
         "case_adaptive_k_over_cap": None,
     }
@@ -257,6 +261,18 @@ def _phase2_case_metrics(
 
     support = support_diagnostics(aux)
     metrics.update({key: value for key, value in support.items() if key in metrics})
+    metrics["residual_monotonic_violation_max"] = _as_max_float(
+        aux.get("residual_monotonic_violation_max")
+    )
+    metrics["empty_selected_edge_count"] = _as_max_float(
+        aux.get("empty_selected_edge_count")
+    )
+    metrics["post_fallback_zero_support_module_rows"] = _as_max_float(
+        aux.get("post_fallback_zero_support_module_rows")
+    )
+    metrics["post_fallback_zero_support_environment_rows"] = _as_max_float(
+        aux.get("post_fallback_zero_support_environment_rows")
+    )
     module_assignment = _active_matrix(arrays.get("A_mh"), hard_mask)
     environment_assignment = _active_matrix(arrays.get("A_eh"), hard_mask)
     if module_assignment.size:
@@ -306,6 +322,18 @@ def _as_float(value: Any, default: float = 0.0) -> float:
     values = np.asarray(value, dtype=np.float64).reshape(-1)
     values = values[np.isfinite(values)]
     return float(values.mean()) if values.size else float(default)
+
+
+def _as_max_float(value: Any, default: float = 0.0) -> float:
+    """Reduce an optional scalar/array to its finite maximum."""
+
+    if value is None:
+        return float(default)
+    if hasattr(value, "detach"):
+        value = value.detach().cpu().numpy()
+    values = np.asarray(value, dtype=np.float64).reshape(-1)
+    values = values[np.isfinite(values)]
+    return float(values.max()) if values.size else float(default)
 
 
 def _near_interface_mask(sample: dict[str, Any], fluid_mask: np.ndarray) -> np.ndarray:
@@ -1134,6 +1162,10 @@ def summarize_rows(rows: list[dict[str, Any]], *, include_by_checkpoint: bool = 
         "hard_forward_support_gap_max",
         "hard_support_count",
         "soft_support_effective_k",
+        "residual_monotonic_violation_max",
+        "empty_selected_edge_count",
+        "post_fallback_zero_support_module_rows",
+        "post_fallback_zero_support_environment_rows",
     ]
     for key in numeric_keys:
         values = np.asarray([float(row[key]) for row in rows if row.get(key) is not None and np.isfinite(float(row[key]))], dtype=np.float64)
@@ -1141,6 +1173,7 @@ def summarize_rows(rows: list[dict[str, Any]], *, include_by_checkpoint: bool = 
             summary[f"{key}_mean"] = float(values.mean())
             summary[f"{key}_median"] = float(np.median(values))
             summary[f"{key}_p95"] = float(np.quantile(values, 0.95))
+            summary[f"{key}_max"] = float(values.max())
     counts = np.asarray([round(float(row["case_adaptive_edge_count"])) for row in rows], dtype=np.int64)
     summary["case_adaptive_count_histogram"] = {str(int(value)): int(np.sum(counts == value)) for value in sorted(set(counts.tolist()))}
     summary["interaction_tensor_available_count"] = int(
