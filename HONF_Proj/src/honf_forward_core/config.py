@@ -78,11 +78,94 @@ _FORWARD_MODE_DEFAULTS: Dict[str, Any] = {
 }
 
 
+FORWARD_ARCHITECTURES = {
+    "legacy_honf",
+    "dense_pairwise_field",
+    "geometry_latent_field",
+    "sparse_interface_honf",
+}
+
+LEGACY_ARCHITECTURE_KEYS = {
+    "num_hyperedges", "organizer_mode", "edge_capacity", "initial_active_edges",
+    "minimum_active_edges", "slot_refinement_steps", "slot_code_mode",
+    "residual_stop_fraction", "residual_soft_stop_temperature",
+    "residual_factor_refinement_steps", "residual_coupling_fourier_frequencies",
+    "residual_interaction_dim", "residual_mechanism_cap_multiplier",
+    "case_edge_selection_mode", "case_edge_probe_source", "case_edge_probe_limit",
+    "case_edge_probe_relative_rms_tolerance", "case_edge_probe_channel_tolerance",
+    "case_edge_probe_search", "edge_selection_mode", "selection_warmup_epochs",
+    "selection_start_epoch", "selection_transition_epochs", "selection_warmup_mode",
+    "selection_minimum_module_mass_fraction", "selection_minimum_environment_mass_fraction",
+    "selection_coverage_rate", "selection_token_threshold", "selection_maximum_redundancy",
+    "candidate_module_mass_fraction_floor", "candidate_environment_mass_fraction_floor",
+    "module_assignment_normalizer", "environment_assignment_normalizer",
+    "query_assignment_normalizer", "module_sparsity_start_epoch",
+    "module_sparsity_transition_epochs", "environment_sparsity_start_epoch",
+    "environment_sparsity_transition_epochs", "query_sparsity_start_epoch",
+    "query_sparsity_transition_epochs", "entmax_alpha", "environment_locality_mode",
+    "environment_locality_strength", "query_locality_mode", "query_locality_strength",
+    "locality_radius_cap", "minimum_region_scale", "mechanism_state_mode",
+    "mechanism_latent_residual_scale", "field_assembly_mode", "additive_background_mode",
+    "additive_edge_gate_init", "additive_output_init_std", "routing_execution",
+    "gathered_execution_start_epoch", "query_edge_limit", "query_module_limit",
+    "query_edge_retained_mass_floor", "module_incidence_retained_mass_floor",
+    "pairwise_aggregation_mode", "pairwise_kernel_mode", "query_module_retained_mass_floor",
+    "topology_signature_enabled", "decoder_mode", "use_hyper_value_context",
+    "use_hyper_mechanism_encoder", "mechanism_include_geometry", "mechanism_include_masses",
+    "mechanism_hidden_dim", "hyper_module_assignment_mode", "hyper_query_attention_mode",
+    "hyper_attention_topk", "hyper_attention_temperature", "sparse_hyper_attention_detach_mask",
+    "pairwise_kernel_hidden_dim", "pairwise_kernel_num_layers", "pairwise_kernel_gate_init",
+    "pairwise_kernel_use_fourier", "pairwise_kernel_fourier_frequencies",
+    "pairwise_kernel_include_module_token", "pairwise_kernel_include_module_features",
+    "pairwise_kernel_normalize_by_edge_mass", "use_hyper_geometry_bias",
+    "hyper_geometry_bias_scale", "direct_residual_gate_init", "use_A_me_auxiliary",
+    "output_mean_residual_split",
+}
+
+
+@dataclass
+class InterfaceFieldConfig:
+    """Matched-family settings shared by non-legacy interface fields."""
+
+    message_hidden_dim: int = 128
+    attention_heads: int = 4
+    coarse_latent_count: int = 8
+    coarse_blocks: int = 1
+    main_latent_count: int = 16
+    main_latent_blocks: int = 2
+    local_radius_factor: float = 2.5
+    relative_fourier_frequencies: int = 4
+    receiver_chunk_size: int = 128
+    activation_checkpointing: bool = False
+
+    def __post_init__(self) -> None:
+        if int(self.message_hidden_dim) <= 0:
+            raise ValueError("interface_model.message_hidden_dim must be positive.")
+        if int(self.attention_heads) <= 0:
+            raise ValueError("interface_model.attention_heads must be positive.")
+        if int(self.coarse_latent_count) <= 0 or int(self.coarse_blocks) <= 0:
+            raise ValueError("interface_model coarse latent count/blocks must be positive.")
+        if int(self.main_latent_count) <= 0 or int(self.main_latent_blocks) <= 0:
+            raise ValueError("interface_model main latent count/blocks must be positive.")
+        if float(self.local_radius_factor) <= 0.0:
+            raise ValueError("interface_model.local_radius_factor must be positive.")
+        if int(self.relative_fourier_frequencies) < 0:
+            raise ValueError("interface_model.relative_fourier_frequencies must be nonnegative.")
+        if int(self.receiver_chunk_size) <= 0:
+            raise ValueError("interface_model.receiver_chunk_size must be positive.")
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any] | None) -> "InterfaceFieldConfig":
+        return _dataclass_from_dict(cls, dict(payload or {}))
+
+
 @dataclass
 class UnifiedForwardConfig:
     """Configuration for the minimal unified hypergraph neural field."""
 
     field_dim: int = 5
+    forward_architecture: str = "legacy_honf"
+    interface_model: Optional[InterfaceFieldConfig] = None
     domain_length_x: float = 12.0
     domain_length_y: float = 4.0
     module_radius: float = 0.45
@@ -205,6 +288,21 @@ class UnifiedForwardConfig:
 
     def __post_init__(self) -> None:
         """Validate mode names and numerical routing constraints."""
+
+        if isinstance(self.interface_model, dict):
+            self.interface_model = InterfaceFieldConfig.from_dict(self.interface_model)
+        if self.forward_architecture not in FORWARD_ARCHITECTURES:
+            allowed = ", ".join(sorted(FORWARD_ARCHITECTURES))
+            raise ValueError(f"forward_architecture must be one of: {allowed}")
+        if self.forward_architecture == "legacy_honf":
+            if self.interface_model is not None:
+                raise ValueError("legacy_honf does not accept an interface_model block.")
+        elif self.forward_architecture == "sparse_interface_honf":
+            raise ValueError("sparse_interface_honf is reserved for Stage 2 and is not implemented yet.")
+        elif self.interface_model is None:
+            raise ValueError(f"{self.forward_architecture} requires an interface_model block.")
+        if self.interface_model is not None and int(self.hidden_dim) % int(self.interface_model.attention_heads) != 0:
+            raise ValueError("hidden_dim must be divisible by interface_model.attention_heads.")
 
         if self.organizer_mode not in {
             "fixed_projection",
@@ -482,12 +580,24 @@ class UnifiedForwardConfig:
         resolved = dict(payload)
         for key, value in _FORWARD_MODE_DEFAULTS.items():
             resolved.setdefault(key, value)
+        if isinstance(resolved.get("interface_model"), dict):
+            resolved["interface_model"] = InterfaceFieldConfig.from_dict(resolved["interface_model"])
         return _dataclass_from_dict(cls, resolved)
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize this core configuration to plain Python values."""
 
-        return _to_plain_dict(self)
+        payload = _to_plain_dict(self)
+        # Historical resolved configs/checkpoints predate the architecture
+        # selector. Keep their serialized shape unchanged and do not inject an
+        # empty new-family block while loading or resaving them.
+        if self.forward_architecture == "legacy_honf":
+            payload.pop("forward_architecture", None)
+            payload.pop("interface_model", None)
+        else:
+            for key in LEGACY_ARCHITECTURE_KEYS:
+                payload.pop(key, None)
+        return payload
 
     def decoder_uses(self, component: str) -> bool:
         """Report whether ``decoder_mode`` enables a named context component."""

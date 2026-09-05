@@ -3,6 +3,26 @@
   "recommended_forward_profile": "stage7_structured_context",
   "profiles": [
     {
+      "name": "dense_pairwise_interface_context",
+      "path": "project://src/config_core/forward/dense_pairwise_interface_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "contextualized dense pairwise neural-integral field adaptation / shared coarse and local paths",
+      "checkpoint_families": ["Run 1800 Stage-1 candidate"],
+      "owner": "forward-research",
+      "stage": "sparse-interface-stage1"
+    },
+    {
+      "name": "geometry_latent_interface_context",
+      "path": "project://src/config_core/forward/geometry_latent_interface_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "geometry-aware Set-Transformer/Perceiver-style adaptation / 16 main plus 8 coarse latents",
+      "checkpoint_families": ["Run 1801 Stage-1 candidate"],
+      "owner": "forward-research",
+      "stage": "sparse-interface-stage1"
+    },
+    {
       "name": "case_adaptive_tensor_residual_context",
       "path": "project://src/config_core/forward/case_adaptive_tensor_residual_context.json",
       "status": "candidate",

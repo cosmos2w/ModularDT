@@ -19,6 +19,44 @@ from honf_forward_core.training.diagnostics import (
 from honf_runtime.compat import autocast_context, recursive_to_device
 
 
+INTERFACE_DIAGNOSTIC_KEYS = (
+    "interaction_local_neighbor_count_mean",
+    "interaction_main_context_norm_mean",
+    "interaction_coarse_context_norm_mean",
+    "interaction_local_context_norm_mean",
+    "interaction_total_latent_count",
+)
+
+GRADIENT_DIAGNOSTIC_GROUPS = ("encoder", "backend", "head", "local_coupling")
+GRADIENT_DIAGNOSTIC_KEYS = (
+    "preclip_gradient_norm",
+    "gradient_clip_scale",
+    "parameter_update_norm",
+    *[f"preclip_gradient_norm_{group}" for group in GRADIENT_DIAGNOSTIC_GROUPS],
+    *[f"parameter_update_norm_{group}" for group in GRADIENT_DIAGNOSTIC_GROUPS],
+)
+
+
+def _diagnostic_parameter_group(name: str) -> str:
+    if name.startswith("core.global_encoder.") or name.startswith("core.module_") or name.startswith("core.env_encoder."):
+        return "encoder"
+    if name.startswith("core.backend.") or name.startswith("core.common.coarse") or name.startswith("core.common.local"):
+        return "backend"
+    if name.startswith("core.common.field_head.") or name.startswith("local_coupling.port_head."):
+        return "head"
+    return "local_coupling"
+
+
+def _fp64_group_norm(named_values: list[tuple[str, torch.Tensor]]) -> tuple[float, Dict[str, float]]:
+    total = 0.0
+    by_group = {group: 0.0 for group in GRADIENT_DIAGNOSTIC_GROUPS}
+    for name, value in named_values:
+        squared = float(value.detach().double().square().sum().cpu())
+        total += squared
+        by_group[_diagnostic_parameter_group(name)] += squared
+    return math.sqrt(total), {group: math.sqrt(value) for group, value in by_group.items()}
+
+
 def pack_scalar_metrics(tensor_metrics: Dict[str, torch.Tensor]) -> Dict[str, float]:
     """Transfer a batch of scalar metrics to the CPU in one synchronization."""
 
@@ -223,12 +261,14 @@ def run_epoch(
     effective_interface_weight: float,
     predicted_consistency_weight: float,
     gradient_clip_norm: float = 0.0,
+    record_gradient_diagnostics: bool = False,
 ) -> Dict[str, float]:
     """Run one train/validation epoch and return averaged loss/diagnostic scalars."""
 
     training = optimizer is not None
     model.train(training)
     sums: Dict[str, float] = {}
+    one_shot_metrics: Dict[str, float] = {}
     count = 0
     iterator = tqdm(loader, leave=False, desc="train" if training else "val")
     for batch_idx, batch in enumerate(iterator, start=1):
@@ -293,20 +333,60 @@ def run_epoch(
         if training:
             optimizer.zero_grad(set_to_none=True)
             clip_norm = float(gradient_clip_norm or 0.0)
+            capture_update = bool(record_gradient_diagnostics and batch_idx == 1)
             if scaler is not None and scaler.is_enabled():
                 scaler.scale(loss).backward()
-                if clip_norm > 0.0:
+                if clip_norm > 0.0 or capture_update:
                     # AMP gradients must be unscaled before clipping; otherwise
                     # the threshold applies to scaled values and is meaningless.
                     scaler.unscale_(optimizer)
+                named_gradients = [
+                    (name, parameter.grad)
+                    for name, parameter in model.named_parameters()
+                    if parameter.requires_grad and parameter.grad is not None
+                ] if capture_update else []
+                before = {
+                    name: parameter.detach().clone()
+                    for name, parameter in model.named_parameters()
+                    if capture_update and parameter.requires_grad
+                }
+                if capture_update:
+                    total_grad, grouped_grad = _fp64_group_norm(named_gradients)
+                if clip_norm > 0.0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 loss.backward()
+                named_gradients = [
+                    (name, parameter.grad)
+                    for name, parameter in model.named_parameters()
+                    if parameter.requires_grad and parameter.grad is not None
+                ] if capture_update else []
+                before = {
+                    name: parameter.detach().clone()
+                    for name, parameter in model.named_parameters()
+                    if capture_update and parameter.requires_grad
+                }
+                if capture_update:
+                    total_grad, grouped_grad = _fp64_group_norm(named_gradients)
                 if clip_norm > 0.0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 optimizer.step()
+            if capture_update:
+                named_updates = [
+                    (name, parameter.detach() - before[name])
+                    for name, parameter in model.named_parameters()
+                    if parameter.requires_grad and name in before
+                ]
+                total_update, grouped_update = _fp64_group_norm(named_updates)
+                one_shot_metrics = {
+                    "preclip_gradient_norm": total_grad,
+                    "gradient_clip_scale": min(1.0, clip_norm / max(total_grad, 1.0e-300)) if clip_norm > 0.0 else 1.0,
+                    "parameter_update_norm": total_update,
+                    **{f"preclip_gradient_norm_{key}": value for key, value in grouped_grad.items()},
+                    **{f"parameter_update_norm_{key}": value for key, value in grouped_update.items()},
+                }
         with torch.no_grad():
             pred = output["pred_field"].detach()
             mse = torch.mean((pred - target) ** 2)
@@ -342,13 +422,35 @@ def run_epoch(
                     "effective_interface_weight": float(effective_interface_weight),
                 }
             )
+            interaction_aux = output.get("interaction_aux")
+            if isinstance(interaction_aux, dict):
+                mapping = {
+                    "interaction_local_neighbor_count_mean": "local_neighbor_count",
+                    "interaction_main_context_norm_mean": "main_context_norm",
+                    "interaction_coarse_context_norm_mean": "coarse_context_norm",
+                    "interaction_local_context_norm_mean": "local_context_norm",
+                }
+                for metric_name, aux_name in mapping.items():
+                    value = interaction_aux.get(aux_name)
+                    metrics[metric_name] = float(value.detach().float().mean().cpu()) if torch.is_tensor(value) else math.nan
+                metrics["interaction_total_latent_count"] = float(
+                    interaction_aux.get("coarse_latent_count", 0) + interaction_aux.get("main_latent_count", 0)
+                )
+            else:
+                metrics.update({key: math.nan for key in INTERFACE_DIAGNOSTIC_KEYS})
             # Keep the metrics row schema stable when an older/fake model
             # omits optional organizer diagnostics.  In particular, the
             # case-adaptive residual metrics are direct organizer values and
             # should not be reconstructed here from legacy edge strength.
-            metrics.update(honf_diag)
-            for key in HONF_DIAGNOSTIC_KEYS:
-                metrics.setdefault(key, float(honf_diag.get(key, 0.0)))
+            architecture = getattr(getattr(model.config, "core_honf", None), "forward_architecture", "legacy_honf")
+            if architecture == "legacy_honf":
+                metrics.update(honf_diag)
+                for key in HONF_DIAGNOSTIC_KEYS:
+                    metrics.setdefault(key, float(honf_diag.get(key, 0.0)))
+            else:
+                # Topology quantities are not applicable to these baselines;
+                # NaN is intentional and avoids fabricated K=1/zero metrics.
+                metrics.update({key: math.nan for key in HONF_DIAGNOSTIC_KEYS})
         for key, value in metrics.items():
             sums[key] = sums.get(key, 0.0) + float(value)
         count += 1
@@ -377,4 +479,8 @@ def run_epoch(
                 *HONF_DIAGNOSTIC_KEYS,
             )
         }
-    return {key: value / count for key, value in sums.items()}
+    averaged = {key: value / count for key, value in sums.items()}
+    if training:
+        averaged.update({key: math.nan for key in GRADIENT_DIAGNOSTIC_KEYS})
+        averaged.update(one_shot_metrics)
+    return averaged

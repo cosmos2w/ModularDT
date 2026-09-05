@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 
 from honf_forward_core.model import HONFNeuralField
+from honf_forward_core.interface_fields import InterfaceFieldCore
 from honf_forward_core.config import BatchData
 from honf_forward_core.selection.predictive_rank import (
     build_deterministic_case_probes,
@@ -34,6 +35,10 @@ from .local_coupling import (
     teacher_port_tokens_from_interface_condition,
 )
 from .model_support import ChannelThermalModelSupportMixin
+from .interface_field_coupling import (
+    PreparedInterfaceChannelThermalCase,
+    forward_interface_field,
+)
 
 
 @dataclass(frozen=True)
@@ -58,7 +63,10 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
         super().__init__()
         self.config = config
         hidden = int(config.core_honf.hidden_dim)
-        self.core = HONFNeuralField(config.core_honf)
+        if config.core_honf.forward_architecture == "legacy_honf":
+            self.core = HONFNeuralField(config.core_honf)
+        else:
+            self.core = InterfaceFieldCore(config.core_honf)
         self.input_adapter = ChannelThermalInputAdapter(
             global_feature_schema=str(config.channelthermal.global_feature_schema),
             legacy_active_fraction_reference_slots=config.channelthermal.legacy_active_fraction_reference_slots,
@@ -105,6 +113,8 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
     def set_edge_capacity(self, capacity: int) -> None:
         """Set the core runtime candidate-edge budget."""
 
+        if self.config.core_honf.forward_architecture != "legacy_honf":
+            raise ValueError("Edge capacity is owned by legacy_honf and is not applicable here.")
         self.core.set_edge_capacity(capacity)
 
     def set_training_progress(self, *, epoch: int, total_epochs: Optional[int] = None) -> None:
@@ -133,6 +143,8 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
         generated physical design.
         """
 
+        if self.config.core_honf.forward_architecture != "legacy_honf":
+            raise ValueError("Hypergraph plans are not defined for interface-field baselines.")
         from honf_forward_core.evaluation.hypergraph_plan import extract_hypergraph_plan
 
         return extract_hypergraph_plan(
@@ -187,6 +199,37 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
         diagnostics. ``local_port_condition_mode`` selects teacher, predicted,
         or mixed boundary conditions during training and evaluation.
         """
+
+        if query_xy is None:
+            raise ValueError("query_xy is required.")
+        if self.config.core_honf.forward_architecture != "legacy_honf":
+            return forward_interface_field(
+                self,
+                structure=structure,
+                query_xy=query_xy,
+                re=re,
+                u_in=u_in,
+                module_centers=module_centers,
+                heat_powers=heat_powers,
+                module_present=module_present,
+                material_params=material_params,
+                interface_condition=interface_condition,
+                local_module_params=local_module_params,
+                teacher_port_tokens=teacher_port_tokens,
+                local_query_points=local_query_points,
+                local_port_condition_mode=local_port_condition_mode,
+                mixed_teacher_ratio=mixed_teacher_ratio,
+                return_predicted_port_outputs=return_predicted_port_outputs,
+                return_routing_maps=return_routing_maps,
+                return_edge_fields=return_edge_fields,
+                return_port_global_consistency=return_port_global_consistency,
+                return_prepared_state=return_prepared_state,
+                return_organizer_passes=return_organizer_passes,
+                return_organizer_diagnostics=return_organizer_diagnostics,
+                case_edge_selection_mode=case_edge_selection_mode,
+                case_edge_probe_relative_rms_tolerance=case_edge_probe_relative_rms_tolerance,
+                case_edge_probe_channel_tolerance=case_edge_probe_channel_tolerance,
+            )
 
         if structure is not None:
             re = structure.get("re", re)
@@ -608,13 +651,24 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
 
     def decode_prepared(
         self,
-        prepared: PreparedChannelThermalCase,
+        prepared: PreparedChannelThermalCase | PreparedInterfaceChannelThermalCase,
         query_xy: torch.Tensor,
         *,
         return_routing_maps: bool = False,
         return_edge_fields: bool = False,
     ) -> Dict[str, torch.Tensor]:
         """Decode ``query_xy [B,Q,2]`` without recomputing case/local physics."""
+
+        if isinstance(prepared, PreparedInterfaceChannelThermalCase):
+            if prepared.architecture != self.config.core_honf.forward_architecture:
+                raise ValueError("Prepared interface-field architecture does not match the model.")
+            return self.core.decode_queries(
+                prepared.prepared,
+                query_xy.float(),
+                query_features=self._query_features(query_xy.float()),
+                return_routing_maps=return_routing_maps,
+                return_edge_fields=return_edge_fields,
+            )
 
         return self.core.decode_queries(
             query_xy=query_xy.float(),

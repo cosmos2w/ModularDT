@@ -1,0 +1,260 @@
+{
+  "selection": "physical_descriptor_maximin",
+  "split": "test",
+  "count": 20,
+  "anchors": [
+    "0273",
+    "0653"
+  ],
+  "descriptor_names": [
+    "active_module_count",
+    "minimum_nearest_spacing",
+    "median_pair_spacing",
+    "layout_spread",
+    "close_pair_fraction"
+  ],
+  "case_ids": [
+    "0273",
+    "0653",
+    "0277",
+    "0291",
+    "0298",
+    "0680",
+    "0281",
+    "0654",
+    "0643",
+    "0644",
+    "0276",
+    "0667",
+    "0274",
+    "0293",
+    "0657",
+    "0665",
+    "0282",
+    "0292",
+    "0688",
+    "0284"
+  ],
+  "cases": [
+    {
+      "case_id": "0273",
+      "dataset_index": 0,
+      "descriptors": {
+        "active_module_count": 3.0,
+        "minimum_nearest_spacing": 1.6668308504065141,
+        "median_pair_spacing": 2.2633458535064617,
+        "layout_spread": 1.321580081518486,
+        "close_pair_fraction": 0.6666666666666666
+      }
+    },
+    {
+      "case_id": "0653",
+      "dataset_index": 50,
+      "descriptors": {
+        "active_module_count": 5.0,
+        "minimum_nearest_spacing": 1.221350128408056,
+        "median_pair_spacing": 3.4355804065483455,
+        "layout_spread": 2.535571801918177,
+        "close_pair_fraction": 0.4
+      }
+    },
+    {
+      "case_id": "0277",
+      "dataset_index": 4,
+      "descriptors": {
+        "active_module_count": 3.0,
+        "minimum_nearest_spacing": 1.6037035565721678,
+        "median_pair_spacing": 4.752663198362402,
+        "layout_spread": 2.686734504697386,
+        "close_pair_fraction": 0.3333333333333333
+      }
+    },
+    {
+      "case_id": "0291",
+      "dataset_index": 18,
+      "descriptors": {
+        "active_module_count": 5.0,
+        "minimum_nearest_spacing": 1.2666589378712396,
+        "median_pair_spacing": 3.243015578366969,
+        "layout_spread": 2.483136438134902,
+        "close_pair_fraction": 0.3
+      }
+    },
+    {
+      "case_id": "0298",
+      "dataset_index": 25,
+      "descriptors": {
+        "active_module_count": 7.0,
+        "minimum_nearest_spacing": 1.1165922507436903,
+        "median_pair_spacing": 3.8039028017891,
+        "layout_spread": 2.6542237099959194,
+        "close_pair_fraction": 0.2857142857142857
+      }
+    },
+    {
+      "case_id": "0680",
+      "dataset_index": 77,
+      "descriptors": {
+        "active_module_count": 10.0,
+        "minimum_nearest_spacing": 1.1088630722016335,
+        "median_pair_spacing": 3.3519891235058994,
+        "layout_spread": 2.706429399742392,
+        "close_pair_fraction": 0.28888888888888886
+      }
+    },
+    {
+      "case_id": "0281",
+      "dataset_index": 8,
+      "descriptors": {
+        "active_module_count": 3.0,
+        "minimum_nearest_spacing": 3.7994934900634805,
+        "median_pair_spacing": 6.250769655569125,
+        "layout_spread": 3.474585477204142,
+        "close_pair_fraction": 0.0
+      }
+    },
+    {
+      "case_id": "0654",
+      "dataset_index": 51,
+      "descriptors": {
+        "active_module_count": 5.0,
+        "minimum_nearest_spacing": 2.515054862849344,
+        "median_pair_spacing": 3.76153764178657,
+        "layout_spread": 2.926197687348446,
+        "close_pair_fraction": 0.0
+      }
+    },
+    {
+      "case_id": "0643",
+      "dataset_index": 40,
+      "descriptors": {
+        "active_module_count": 3.0,
+        "minimum_nearest_spacing": 1.1307711310513262,
+        "median_pair_spacing": 6.911231978017289,
+        "layout_spread": 3.4684000962345003,
+        "close_pair_fraction": 0.3333333333333333
+      }
+    },
+    {
+      "case_id": "0644",
+      "dataset_index": 41,
+      "descriptors": {
+        "active_module_count": 3.0,
+        "minimum_nearest_spacing": 1.6100042119660583,
+        "median_pair_spacing": 1.778068086620798,
+        "layout_spread": 1.0479310373032638,
+        "close_pair_fraction": 1.0
+      }
+    },
+    {
+      "case_id": "0276",
+      "dataset_index": 3,
+      "descriptors": {
+        "active_module_count": 3.0,
+        "minimum_nearest_spacing": 2.3558644529508532,
+        "median_pair_spacing": 3.2269734630387292,
+        "layout_spread": 2.25631319200169,
+        "close_pair_fraction": 0.3333333333333333
+      }
+    },
+    {
+      "case_id": "0667",
+      "dataset_index": 64,
+      "descriptors": {
+        "active_module_count": 7.0,
+        "minimum_nearest_spacing": 1.2457567955500533,
+        "median_pair_spacing": 4.392741826220083,
+        "layout_spread": 3.56388235724706,
+        "close_pair_fraction": 0.14285714285714285
+      }
+    },
+    {
+      "case_id": "0274",
+      "dataset_index": 1,
+      "descriptors": {
+        "active_module_count": 3.0,
+        "minimum_nearest_spacing": 2.816295849279631,
+        "median_pair_spacing": 4.9372142610375525,
+        "layout_spread": 2.5518410199793347,
+        "close_pair_fraction": 0.0
+      }
+    },
+    {
+      "case_id": "0293",
+      "dataset_index": 20,
+      "descriptors": {
+        "active_module_count": 7.0,
+        "minimum_nearest_spacing": 1.1799454247492276,
+        "median_pair_spacing": 2.352484121881848,
+        "layout_spread": 2.2807285788015856,
+        "close_pair_fraction": 0.5238095238095238
+      }
+    },
+    {
+      "case_id": "0657",
+      "dataset_index": 54,
+      "descriptors": {
+        "active_module_count": 5.0,
+        "minimum_nearest_spacing": 1.6163262242210523,
+        "median_pair_spacing": 3.992525177237277,
+        "layout_spread": 2.4783970157865833,
+        "close_pair_fraction": 0.1
+      }
+    },
+    {
+      "case_id": "0665",
+      "dataset_index": 62,
+      "descriptors": {
+        "active_module_count": 7.0,
+        "minimum_nearest_spacing": 1.9620579838555812,
+        "median_pair_spacing": 4.014866398588723,
+        "layout_spread": 3.307371527127846,
+        "close_pair_fraction": 0.23809523809523808
+      }
+    },
+    {
+      "case_id": "0282",
+      "dataset_index": 9,
+      "descriptors": {
+        "active_module_count": 3.0,
+        "minimum_nearest_spacing": 2.4388164908595,
+        "median_pair_spacing": 4.6535652116679245,
+        "layout_spread": 2.9418634604187304,
+        "close_pair_fraction": 0.3333333333333333
+      }
+    },
+    {
+      "case_id": "0292",
+      "dataset_index": 19,
+      "descriptors": {
+        "active_module_count": 5.0,
+        "minimum_nearest_spacing": 1.2362084307712509,
+        "median_pair_spacing": 2.5715404316087094,
+        "layout_spread": 1.5333959458009192,
+        "close_pair_fraction": 0.5
+      }
+    },
+    {
+      "case_id": "0688",
+      "dataset_index": 85,
+      "descriptors": {
+        "active_module_count": 10.0,
+        "minimum_nearest_spacing": 1.3743822099949734,
+        "median_pair_spacing": 4.0321511339286085,
+        "layout_spread": 3.197820716182364,
+        "close_pair_fraction": 0.24444444444444444
+      }
+    },
+    {
+      "case_id": "0284",
+      "dataset_index": 11,
+      "descriptors": {
+        "active_module_count": 5.0,
+        "minimum_nearest_spacing": 1.6100042119660583,
+        "median_pair_spacing": 3.885463558698363,
+        "layout_spread": 3.053698666609132,
+        "close_pair_fraction": 0.4
+      }
+    }
+  ]
+}

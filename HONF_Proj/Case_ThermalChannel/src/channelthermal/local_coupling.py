@@ -126,8 +126,20 @@ class PortConditionHead(nn.Module):
         batch, num_modules, _ = module_state.shape
         theta_tokens = self.fixed_theta_tokens(ntheta, module_state.device, module_state.dtype)
         theta_features = self.theta_encoder(theta_tokens).view(1, 1, int(ntheta), -1).expand(batch, num_modules, -1, -1)
-        module_features = torch.cat([module_state, module_env_context], dim=-1)
-        module_features = module_features[:, :, None, :].expand(-1, -1, int(ntheta), -1)
+        if module_env_context.ndim == 3:
+            # Historical HONF path: one organizer context per module.
+            context_features = module_env_context[:, :, None, :].expand(-1, -1, int(ntheta), -1)
+        elif module_env_context.ndim == 4:
+            # Matched interface-field path: a continuous context at each
+            # physical port. This keeps ports autonomous without a hidden
+            # legacy organizer broadcast.
+            if int(module_env_context.shape[-2]) != int(ntheta):
+                raise ValueError("Per-port interaction context does not match ntheta.")
+            context_features = module_env_context
+        else:
+            raise ValueError("module_env_context must have shape [B,M,H] or [B,M,P,H].")
+        state_features = module_state[:, :, None, :].expand(-1, -1, int(ntheta), -1)
+        module_features = torch.cat([state_features, context_features], dim=-1)
         heat = heat_powers[:, :, None, None].expand(-1, -1, int(ntheta), 1)
         present = module_present[:, :, None, None].expand(-1, -1, int(ntheta), 1)
         global_features = global_token[:, None, None, :].expand(-1, num_modules, int(ntheta), -1)

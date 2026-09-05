@@ -6,5 +6,11 @@ and wraps the core output in the legacy evaluator contract.
 
 from .config import ChannelThermalHONFConfig
 from .model import ChannelThermalHONFModel, PreparedChannelThermalCase
+from .interface_field_coupling import PreparedInterfaceChannelThermalCase
 
-__all__ = ["ChannelThermalHONFConfig", "ChannelThermalHONFModel", "PreparedChannelThermalCase"]
+__all__ = [
+    "ChannelThermalHONFConfig",
+    "ChannelThermalHONFModel",
+    "PreparedChannelThermalCase",
+    "PreparedInterfaceChannelThermalCase",
+]

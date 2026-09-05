@@ -17,6 +17,7 @@ import csv
 import hashlib
 import math
 import random
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -56,6 +57,8 @@ from channelthermal.training.checkpoints import (
     save_checkpoint,
 )
 from channelthermal.training.epoch import (
+    GRADIENT_DIAGNOSTIC_KEYS,
+    INTERFACE_DIAGNOSTIC_KEYS,
     effective_local_loss_weights,
     effective_port_condition_settings,
     effective_port_global_weight,
@@ -497,7 +500,12 @@ def run_from_config(
         "effective_interface_weight",
         "field_mse",
         "temperature_mse",
+        *INTERFACE_DIAGNOSTIC_KEYS,
         *HONF_DIAGNOSTIC_KEYS,
+        *GRADIENT_DIAGNOSTIC_KEYS,
+        "train_wall_seconds",
+        "val_wall_seconds",
+        "peak_cuda_memory_mb",
         "val_loss_total",
         "val_loss_field",
         "val_loss_internal_temperature",
@@ -515,6 +523,7 @@ def run_from_config(
         "val_effective_interface_weight",
         "val_field_mse",
         "val_temperature_mse",
+        *[f"val_{key}" for key in INTERFACE_DIAGNOSTIC_KEYS],
         *[f"val_{key}" for key in HONF_DIAGNOSTIC_KEYS],
         "val_predicted_loss_total",
         "val_predicted_field_mse",
@@ -624,6 +633,9 @@ def run_from_config(
         _restore_rng_state(checkpoint)
         print(f"[resume] loaded {resume_checkpoint}; continuing at epoch {start_epoch} / {epochs}")
 
+    total_train_seconds = 0.0
+    total_val_seconds = 0.0
+    peak_cuda_memory_mb = 0.0
     for epoch in range(start_epoch, epochs + 1):
         model.set_training_progress(epoch=epoch, total_epochs=epochs)
         train_dataset.set_epoch(epoch)
@@ -633,6 +645,9 @@ def run_from_config(
         eff_internal, eff_interface = effective_local_loss_weights(loss_cfg, effective_mode, effective_ratio)
         pred_consistency_weight = predicted_consistency_weight_for_epoch(epoch, loss_cfg)
         gradient_clip_norm = float(training_cfg.get("gradient_clip_norm", 0.0) or 0.0)
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
+        train_started = time.perf_counter()
         train_metrics = run_epoch(
             model,
             train_loader,
@@ -648,7 +663,10 @@ def run_from_config(
             effective_interface_weight=eff_interface,
             predicted_consistency_weight=pred_consistency_weight,
             gradient_clip_norm=gradient_clip_norm,
+            record_gradient_diagnostics=(epoch in {1, 2, 5, 10, 20} or epoch % 50 == 0),
         )
+        train_wall_seconds = time.perf_counter() - train_started
+        total_train_seconds += train_wall_seconds
         optimizer_group_inventory = refresh_optimizer_group_inventory(
             model,
             optimizer_group_inventory,
@@ -657,6 +675,7 @@ def run_from_config(
         if not optimizer_inventory_announced:
             _print_optimizer_group_inventory(optimizer_group_inventory)
             optimizer_inventory_announced = True
+        val_started = time.perf_counter()
         val_metrics = run_epoch(
             model,
             val_loader,
@@ -692,6 +711,14 @@ def run_from_config(
                 predicted_consistency_weight=0.0,
                 gradient_clip_norm=gradient_clip_norm,
             )
+        val_wall_seconds = time.perf_counter() - val_started
+        total_val_seconds += val_wall_seconds
+        epoch_peak_memory_mb = (
+            float(torch.cuda.max_memory_allocated(device)) / (1024.0 * 1024.0)
+            if device.type == "cuda"
+            else 0.0
+        )
+        peak_cuda_memory_mb = max(peak_cuda_memory_mb, epoch_peak_memory_mb)
         row = {
             "epoch": epoch,
             **train_metrics,
@@ -699,6 +726,9 @@ def run_from_config(
             "val_predicted_loss_total": predicted_val_metrics.get("loss_total", math.nan),
             "val_predicted_field_mse": predicted_val_metrics.get("field_mse", math.nan),
             "val_predicted_temperature_mse": predicted_val_metrics.get("temperature_mse", math.nan),
+            "train_wall_seconds": train_wall_seconds,
+            "val_wall_seconds": val_wall_seconds,
+            "peak_cuda_memory_mb": epoch_peak_memory_mb,
         }
         write_metrics_row(metrics_path, fieldnames, row)
         total_metric = float(row["val_loss_total"])
@@ -751,6 +781,11 @@ def run_from_config(
             "val_cases": len(val_dataset),
             "model_config": model_config.to_dict(),
             "optimizer_group_inventory": optimizer_group_inventory,
+            "trainable_parameter_count": count_parameters(model),
+            "actual_train_wall_seconds": total_train_seconds,
+            "actual_validation_wall_seconds": total_val_seconds,
+            "actual_total_epoch_wall_seconds": total_train_seconds + total_val_seconds,
+            "peak_cuda_memory_mb": peak_cuda_memory_mb,
         },
     )
     print(f"[done] saved global HONF-CL physical-coupling run: {run_dir}")

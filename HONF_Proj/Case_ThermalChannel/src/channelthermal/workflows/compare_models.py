@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import os
 import time
@@ -28,7 +29,7 @@ import torch
 from tqdm.auto import tqdm
 
 from channelthermal.data.datasets import CHANNEL_ORDER, GlobalChannelThermalDataset, H5Normalizer
-from channelthermal.evaluation_tools.plots import module_and_fluid_masks
+from channelthermal.evaluation_tools.plots import module_and_fluid_masks, module_radius_from_sample
 from honf_runtime.compat import current_timestamp, load_trusted_checkpoint, resolve_demo_path, select_device, write_json
 from honf_runtime.checkpoints import validate_checkpoint_identity
 from channelthermal.workflows.evaluate_forward import (
@@ -72,6 +73,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--dataset", default=None, help="Optional packed HDF5 dataset path override.")
     parser.add_argument("--split", default="test")
     parser.add_argument("--case-ratio", type=float, default=1.0, help="Fraction of selected split cases to evaluate, in (0, 1].")
+    parser.add_argument(
+        "--case-list",
+        default=None,
+        help="Optional JSON file containing a case_ids list; preserves its declared order.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default=None)
     parser.add_argument("--query-batch-size", type=int, default=32768)
@@ -95,6 +101,7 @@ def ensure_dirs(root: Path) -> Dict[str, Path]:
         "tables": root / "tables",
         "fig_recon": root / "figures" / "reconstruction",
         "fig_hyper": root / "figures" / "hypergraph",
+        "fig_interaction": root / "figures" / "interaction",
         "fig_summary": root / "figures" / "summary",
         "debug_npz": root / "debug_npz",
     }
@@ -312,6 +319,25 @@ def selected_case_indices(dataset: GlobalChannelThermalDataset, ratio: float, se
     return np.sort(rng.choice(total, size=count, replace=False).astype(np.int64))
 
 
+def listed_case_indices(dataset: GlobalChannelThermalDataset, case_list: str | None) -> np.ndarray | None:
+    """Resolve an explicit physical-descriptor-selected case list."""
+
+    if case_list is None:
+        return None
+    path = resolve_demo_path(case_list)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    case_ids = payload.get("case_ids") if isinstance(payload, dict) else payload
+    if not isinstance(case_ids, list) or not case_ids:
+        raise ValueError("--case-list must contain a non-empty case_ids list.")
+    lookup = {str(case_id): index for index, case_id in enumerate(dataset.selected_case_ids)}
+    missing = [str(case_id) for case_id in case_ids if str(case_id) not in lookup]
+    if missing:
+        raise KeyError(f"Case IDs are absent from split {dataset.split!r}: {missing}")
+    if len({str(value) for value in case_ids}) != len(case_ids):
+        raise ValueError("--case-list contains duplicate case IDs.")
+    return np.asarray([lookup[str(case_id)] for case_id in case_ids], dtype=np.int64)
+
+
 def finite_float(value: Any) -> float:
     """Perform the finite float operation used by this module."""
 
@@ -447,6 +473,18 @@ def reconstruction_metrics(
     row["global_field_fluid_norm_l2"] = normalized_relative_l2(pred_norm["field"], target_norm["field"], fluid_mask)
     row["global_field_all_norm_l2"] = normalized_relative_l2(pred_norm["field"], target_norm["field"])
     module_present = np.asarray(raw_sample["structure"]["module_present"], dtype=np.float32) > 0.5
+    centers = np.asarray(raw_sample["structure"]["module_centers"], dtype=np.float64)[module_present]
+    if centers.size:
+        points = np.stack([raw_sample["x_grid"], raw_sample["y_grid"]], axis=-1)
+        distance = np.linalg.norm(points[..., None, :] - centers[None, None, :, :], axis=-1).min(axis=-1)
+        radius = float(module_radius_from_sample(raw_sample))
+        near_mask = fluid_mask & (distance <= 2.5 * radius)
+        far_mask = fluid_mask & ~near_mask
+        row["global_field_near_interface_norm_l2"] = normalized_relative_l2(pred_norm["field"], target_norm["field"], near_mask)
+        row["global_field_far_fluid_norm_l2"] = normalized_relative_l2(pred_norm["field"], target_norm["field"], far_mask)
+    else:
+        row["global_field_near_interface_norm_l2"] = float("nan")
+        row["global_field_far_fluid_norm_l2"] = row["global_field_fluid_norm_l2"]
     if np.any(module_present):
         row["internal_module_cell_norm_l2"] = normalized_relative_l2(
             pred_norm["internal"][module_present, :, 0],
@@ -480,6 +518,10 @@ def hypergraph_metrics(base_row: Dict[str, Any], raw_sample: Dict[str, Any], pre
 
     row = dict(base_row)
     aux = predictions.get("organizer_aux", {})
+    if not aux:
+        row["topology_applicable"] = False
+        return row
+    row["topology_applicable"] = True
     structure_targets = raw_sample.get("structure_targets", {})
     arrays = extract_organization_arrays(raw_sample, aux)
     A_mh = matrix_row_normalize(np.asarray(arrays.get("A_mh", np.zeros((0, 0))), dtype=np.float64))
@@ -756,7 +798,42 @@ def save_debug_npz(path: Path, predictions: Dict[str, Any], raw_sample: Dict[str
         "pred_interface": np.asarray(predictions["pred_interface"], dtype=np.float32),
         "gt_interface": np.asarray(raw_sample["interface_target"], dtype=np.float32),
     }
+    for key, value in predictions.get("routing_maps", {}).items():
+        if key in {"dense_environment_attention", "latent_query_attention"}:
+            payload[key] = np.asarray(value, dtype=np.float32)
     np.savez_compressed(path, **payload)
+
+
+def plot_interface_field_attention(
+    path: Path,
+    predictions: Dict[str, Any],
+    raw_sample: Dict[str, Any],
+    *,
+    routing_key: str,
+    title: str,
+) -> None:
+    """Plot the strongest source influence at every physical receiver."""
+
+    attention = predictions.get("routing_maps", {}).get(routing_key)
+    if attention is None:
+        return
+    attention = np.asarray(attention, dtype=np.float64)
+    x_grid = np.asarray(raw_sample["x_grid"])
+    y_grid = np.asarray(raw_sample["y_grid"])
+    if attention.ndim != 2 or attention.shape[0] != x_grid.size:
+        raise ValueError(
+            f"{routing_key} must have shape [grid_points, sources], got {attention.shape}."
+        )
+    strongest = np.max(attention, axis=-1).reshape(x_grid.shape)
+    fig, ax = plt.subplots(figsize=(7.2, 4.7), constrained_layout=True)
+    image = ax.pcolormesh(x_grid, y_grid, strongest, shading="auto", cmap="viridis")
+    fig.colorbar(image, ax=ax, label="maximum normalized attention weight")
+    ax.set_aspect("equal")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_title(title)
+    fig.savefig(path)
+    plt.close(fig)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -782,7 +859,9 @@ def main(argv: list[str] | None = None) -> int:
         raise RuntimeError(
             f"Comparison split={args.split!r} contains no cases; select a non-empty split explicitly."
         )
-    case_indices = selected_case_indices(raw_dataset, args.case_ratio, args.seed)
+    case_indices = listed_case_indices(raw_dataset, args.case_list)
+    if case_indices is None:
+        case_indices = selected_case_indices(raw_dataset, args.case_ratio, args.seed)
     selected_case_rows = [
         {"case_order": int(order), "dataset_index": int(idx), "case_id": str(raw_dataset.selected_case_ids[int(idx)]), "split": actual_split}
         for order, idx in enumerate(case_indices)
@@ -849,6 +928,7 @@ def main(argv: list[str] | None = None) -> int:
                 "checkpoint_selector": str(args.checkpoint_selector),
                 "normalize_inputs": bool(dataset_cfg.get("normalize_inputs", False)),
                 "normalize_targets": checkpoint_targets_normalized,
+                "forward_architecture": str(model.config.core_honf.forward_architecture),
                 "dataset_path": str(resolve_demo_path(dataset_path)),
             }
         )
@@ -896,6 +976,24 @@ def main(argv: list[str] | None = None) -> int:
             per_case_rows.append(metric_row)
             per_module_rows.extend(module_rows)
             hyper_rows.append(hypergraph_metrics(base_row, raw_sample, predictions))
+            if args.return_routing_maps and case_id in {"0273", "0653"}:
+                architecture = str(model.config.core_honf.forward_architecture)
+                if architecture == "dense_pairwise_field":
+                    plot_interface_field_attention(
+                        paths["fig_interaction"] / f"dense_pairwise_adaptation__{safe_label(case_id)}.png",
+                        predictions,
+                        raw_sample,
+                        routing_key="dense_environment_attention",
+                        title=f"Dense pairwise environmental influence (adaptation) — case {case_id}",
+                    )
+                elif architecture == "geometry_latent_field":
+                    plot_interface_field_attention(
+                        paths["fig_interaction"] / f"geometry_latent_adaptation__{safe_label(case_id)}.png",
+                        predictions,
+                        raw_sample,
+                        routing_key="latent_query_attention",
+                        title=f"Geometry-latent query attention (adaptation) — case {case_id}",
+                    )
             if args.save_debug_npz:
                 npz_name = f"{safe_label(spec['label'])}__{safe_label(case_id)}.npz"
                 physical_predictions = denormalize_predictions(dict(predictions), input_dataset, checkpoint_targets_normalized)
@@ -909,6 +1007,7 @@ def main(argv: list[str] | None = None) -> int:
             "dataset_path": str(resolve_demo_path(dataset_path)),
             "split": actual_split,
             "case_ratio": float(args.case_ratio),
+            "case_list": None if args.case_list is None else str(resolve_demo_path(args.case_list)),
             "seed": int(args.seed),
             "checkpoint_selector": str(args.checkpoint_selector),
             "local_port_condition_mode": str(args.local_port_condition_mode),

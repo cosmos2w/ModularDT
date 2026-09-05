@@ -153,11 +153,24 @@ def predict_case(
                     "c_pair_norm": "c_pair_norm",
                     "dominant_hyperedge": "dominant_hyperedge",
                     "hyper_attention_entropy_map": "hyper_attention_entropy",
+                    "dense_module_context_norm": "dense_module_context_norm",
+                    "main_context_norm": "main_context_norm",
+                    "coarse_context_norm": "coarse_context_norm",
+                    "local_context_norm": "local_context_norm",
+                    "local_neighbor_count": "local_neighbor_count",
                 }
                 for source_key, target_key in key_map.items():
                     value = routing_aux.get(source_key)
                     if torch.is_tensor(value):
                         routing_chunks.setdefault(target_key, []).append(value.detach().cpu().numpy()[0])
+                for source_key in ("dense_environment_attention", "latent_query_attention"):
+                    value = routing_aux.get(source_key)
+                    if torch.is_tensor(value):
+                        # The backend reports [batch, heads, query, source].  A
+                        # head mean leaves a compact, receiver-indexed influence
+                        # map that concatenates correctly across query chunks.
+                        compact = value.detach().float().mean(dim=1).cpu().numpy()[0]
+                        routing_chunks.setdefault(source_key, []).append(compact)
             if return_topology_signature:
                 edge_fields = outputs.get("pred_field_by_edge")
                 if edge_fields is None:
@@ -182,6 +195,11 @@ def predict_case(
         "base_organizer_aux": {
             key: value.detach().cpu().numpy()[0] if torch.is_tensor(value) and value.ndim > 0 else value
             for key, value in first_outputs.get("base_organizer_aux", {}).items()
+        },
+        "interaction_aux": {
+            key: value.detach().cpu().numpy()[0] if torch.is_tensor(value) and value.ndim > 0 else value
+            for key, value in first_outputs.get("interaction_aux", {}).items()
+            if key not in {"dense_environment_attention", "latent_query_attention"}
         },
     }
     result["routing_aux"] = aggregate_routed_module_retention(
