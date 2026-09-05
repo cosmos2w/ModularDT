@@ -26,10 +26,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.patches import Circle, Rectangle
 from tqdm.auto import tqdm
 
 from channelthermal.data.datasets import CHANNEL_ORDER, GlobalChannelThermalDataset, H5Normalizer
-from channelthermal.evaluation_tools.plots import module_and_fluid_masks, module_radius_from_sample
+from channelthermal.evaluation_tools.plots import error_metrics, module_and_fluid_masks, module_radius_from_sample
 from honf_runtime.compat import current_timestamp, load_trusted_checkpoint, resolve_demo_path, select_device, write_json
 from honf_runtime.checkpoints import validate_checkpoint_identity
 from channelthermal.workflows.evaluate_forward import (
@@ -368,6 +369,41 @@ def normalized_relative_l2(prediction: np.ndarray, target: np.ndarray, mask: Opt
     return float(np.linalg.norm(diff, ord=2) / max(float(np.linalg.norm(target_flat, ord=2)), EPS))
 
 
+def record_physical_error(
+    row: Dict[str, Any],
+    prefix: str,
+    prediction: np.ndarray,
+    target: np.ndarray,
+    mask: Optional[np.ndarray] = None,
+) -> None:
+    """Record dataset-native physical errors with their actual value count."""
+
+    pred = np.asarray(prediction)
+    truth = np.asarray(target)
+    if mask is not None:
+        selected = np.asarray(mask, dtype=bool)
+        pred = pred[selected]
+        truth = truth[selected]
+    metrics = error_metrics(pred, truth)
+    for name in ("mse", "rmse", "mae", "relative_l2", "num_values"):
+        row[f"{prefix}_physical_{name}"] = float(metrics[name])
+
+
+def _finite_values(value: Any) -> np.ndarray:
+    array = np.asarray(value, dtype=np.float64).reshape(-1)
+    return array[np.isfinite(array)]
+
+
+def _record_distribution(row: Dict[str, Any], prefix: str, value: Any) -> None:
+    values = _finite_values(value)
+    if values.size == 0:
+        return
+    row[f"{prefix}_mean"] = float(np.mean(values))
+    row[f"{prefix}_median"] = float(np.median(values))
+    row[f"{prefix}_p95"] = float(np.quantile(values, 0.95))
+    row[f"{prefix}_max"] = float(np.max(values))
+
+
 def row_normalized_entropy(values: np.ndarray, axis: int = -1) -> float:
     """Perform the row normalized entropy operation used by this module."""
 
@@ -468,6 +504,9 @@ def reconstruction_metrics(
         checkpoint_targets_normalized=checkpoint_targets_normalized,
     )
     _, fluid_mask = module_and_fluid_masks(raw_sample, pred_norm["field"])
+    physical_predictions = denormalize_predictions(
+        dict(predictions), dataset, checkpoint_targets_normalized
+    )
     row = dict(base_row)
     row["target_space"] = target_space
     row["global_field_fluid_norm_l2"] = normalized_relative_l2(pred_norm["field"], target_norm["field"], fluid_mask)
@@ -495,6 +534,74 @@ def reconstruction_metrics(
     for idx, name in enumerate(channel_order[: pred_norm["field"].shape[-1]]):
         row[f"field_{name}_fluid_norm_l2"] = normalized_relative_l2(pred_norm["field"][..., idx], target_norm["field"][..., idx], fluid_mask)
         row[f"field_{name}_all_norm_l2"] = normalized_relative_l2(pred_norm["field"][..., idx], target_norm["field"][..., idx])
+        record_physical_error(
+            row,
+            f"field_{name}_fluid",
+            np.asarray(physical_predictions["pred_field_grid"])[..., idx],
+            np.asarray(raw_sample["steady_field"])[..., idx],
+            fluid_mask,
+        )
+
+    active_ports = np.broadcast_to(
+        module_present[:, None], np.asarray(raw_sample["teacher_port_tokens"]).shape[:2]
+    )
+    record_physical_error(
+        row,
+        "internal_temperature",
+        np.asarray(physical_predictions["pred_internal_temperature"])[..., 0],
+        np.asarray(raw_sample["module_internal_temperature_points"]),
+        np.broadcast_to(
+            module_present[:, None],
+            np.asarray(raw_sample["module_internal_temperature_points"]).shape,
+        ),
+    )
+    record_physical_error(
+        row,
+        "interface_t_surface",
+        np.asarray(physical_predictions["pred_interface"])[..., 0],
+        np.asarray(raw_sample["interface_target"])[..., 0],
+        active_ports,
+    )
+    record_physical_error(
+        row,
+        "interface_q_normal",
+        np.asarray(physical_predictions["pred_interface"])[..., 1],
+        np.asarray(raw_sample["interface_target"])[..., 1],
+        active_ports,
+    )
+    pred_ports = np.asarray(predictions["pred_port_condition"])
+    provisional_ports = np.asarray(
+        predictions.get("pred_port_condition_raw", predictions["pred_port_condition"])
+    )
+    target_ports = np.asarray(raw_sample["teacher_port_tokens"])
+    record_physical_error(
+        row, "port_t_env_final", pred_ports[..., 3], target_ports[..., 3], active_ports
+    )
+    record_physical_error(
+        row,
+        "port_t_env_provisional",
+        provisional_ports[..., 3],
+        target_ports[..., 3],
+        active_ports,
+    )
+    h_valid = np.asarray(
+        raw_sample.get("interface_condition_valid_mask", np.ones_like(active_ports)),
+        dtype=bool,
+    )
+    record_physical_error(
+        row,
+        "port_h_effective_final",
+        pred_ports[..., 4],
+        target_ports[..., 4],
+        active_ports & h_valid,
+    )
+    record_physical_error(
+        row,
+        "port_h_effective_provisional",
+        provisional_ports[..., 4],
+        target_ports[..., 4],
+        active_ports & h_valid,
+    )
     module_rows, local_summary = per_module_metric_rows(
         base_row=base_row,
         pred=pred_norm,
@@ -567,6 +674,195 @@ def hypergraph_metrics(base_row: Dict[str, Any], raw_sample: Dict[str, Any], pre
     return row
 
 
+def interaction_metrics(base_row: Dict[str, Any], predictions: Dict[str, Any]) -> Dict[str, Any]:
+    """Summarize new-family branches and real sparse-support execution.
+
+    Sparse support quantities intentionally come from ``interaction_aux`` and
+    never masquerade as the legacy organizer's ``A_mh``/``A_eh`` metrics.
+    Context-norm fractions are magnitude diagnostics, not causal ablations.
+    """
+
+    row = dict(base_row)
+    aux = predictions.get("interaction_aux", {})
+    routing = predictions.get("routing_maps", {})
+    architecture = str(aux.get("forward_architecture", "legacy_honf"))
+    row["forward_architecture"] = architecture
+    row["support_topology_applicable"] = architecture == "sparse_interface_honf"
+
+    for source_key, metric_prefix in (
+        ("main_context_norm", "query_main_context_norm"),
+        ("coarse_context_norm", "query_coarse_context_norm"),
+        ("local_context_norm", "query_local_context_norm"),
+        ("main_context_fraction", "query_main_context_norm_fraction"),
+        ("coarse_context_fraction", "query_coarse_context_norm_fraction"),
+        ("local_context_fraction", "query_local_context_norm_fraction"),
+        ("local_neighbor_count", "query_local_neighbor_count"),
+    ):
+        value = routing.get(source_key, aux.get(source_key))
+        if value is not None:
+            _record_distribution(row, metric_prefix, value)
+    query_neighbours = _finite_values(
+        routing.get("local_neighbor_count", aux.get("local_neighbor_count", []))
+    )
+    if query_neighbours.size:
+        row["query_local_neighbor_incidence_count"] = float(np.sum(query_neighbours))
+        coarse_count_value = finite_float(aux.get("coarse_latent_count", 0))
+        coarse_latent_count = int(coarse_count_value) if math.isfinite(coarse_count_value) else 0
+        row["query_coarse_read_pair_count"] = float(
+            query_neighbours.size * max(coarse_latent_count, 0)
+        )
+
+    for source_key, metric_prefix in (
+        ("initial_port_main_context_norm", "port_main_context_norm"),
+        ("initial_port_coarse_context_norm", "port_coarse_context_norm"),
+        ("initial_port_local_context_norm", "port_local_context_norm"),
+        ("initial_port_main_context_fraction", "port_main_context_norm_fraction"),
+        ("initial_port_coarse_context_fraction", "port_coarse_context_norm_fraction"),
+        ("initial_port_local_context_fraction", "port_local_context_norm_fraction"),
+        ("initial_port_local_neighbor_count", "port_local_neighbor_count"),
+    ):
+        if source_key in aux:
+            _record_distribution(row, metric_prefix, aux[source_key])
+    port_neighbours = _finite_values(aux.get("initial_port_local_neighbor_count", []))
+    if port_neighbours.size:
+        row["port_local_neighbor_incidence_count"] = float(np.sum(port_neighbours))
+        coarse_count_value = finite_float(aux.get("coarse_latent_count", 0))
+        coarse_latent_count = int(coarse_count_value) if math.isfinite(coarse_count_value) else 0
+        row["port_coarse_read_pair_count"] = float(
+            port_neighbours.size * max(coarse_latent_count, 0)
+        )
+
+    if architecture != "sparse_interface_honf":
+        return row
+
+    centres = np.asarray(aux.get("support_centres", np.zeros((0, 2))), dtype=np.float64)
+    group_count = int(centres.shape[0]) if centres.ndim == 2 else 0
+    count_per_case = _finite_values(aux.get("group_count_per_case", []))
+    if count_per_case.size:
+        group_count = int(round(float(count_per_case[0])))
+    elif aux.get("group_count") is not None:
+        group_count = int(round(float(aux["group_count"])))
+    row["support_group_count"] = float(group_count)
+    row["support_spacing"] = finite_float(aux.get("support_spacing"))
+
+    module_indices = np.asarray(aux.get("module_group_indices", np.zeros((2, 0))), dtype=np.int64)
+    environment_indices = np.asarray(
+        aux.get("environment_group_indices", np.zeros((2, 0))), dtype=np.int64
+    )
+    observed_module_incidence_count = (
+        module_indices.shape[1]
+        if module_indices.ndim == 2 and module_indices.shape[0] == 2
+        else 0
+    )
+    observed_environment_incidence_count = (
+        environment_indices.shape[1]
+        if environment_indices.ndim == 2 and environment_indices.shape[0] == 2
+        else 0
+    )
+    module_count_per_case = _finite_values(
+        aux.get("module_group_incidence_count_per_case", [])
+    )
+    environment_count_per_case = _finite_values(
+        aux.get("environment_group_incidence_count_per_case", [])
+    )
+    row["support_module_group_incidence_count"] = float(
+        module_count_per_case[0]
+        if module_count_per_case.size
+        else observed_module_incidence_count
+    )
+    row["support_environment_group_incidence_count"] = float(
+        environment_count_per_case[0]
+        if environment_count_per_case.size
+        else observed_environment_incidence_count
+    )
+    row["support_preparation_incidence_count_per_pass"] = float(
+        row["support_module_group_incidence_count"]
+        + row["support_environment_group_incidence_count"]
+    )
+    for source_key, metric_prefix in (
+        ("group_module_degree", "support_group_unique_module_degree"),
+        ("group_environment_degree", "support_group_environment_sample_degree"),
+        ("module_support_degree", "support_module_group_degree"),
+        ("group_occupancy", "support_geometric_occupancy"),
+        ("group_occupancy_envelope", "support_occupancy_envelope"),
+        ("group_covered_volume_ratio", "support_covered_volume_ratio"),
+        ("group_state_norm", "support_group_state_norm"),
+        ("module_geometric_membership", "support_module_geometric_membership"),
+        ("module_learned_membership", "support_module_learned_score"),
+        ("environment_geometric_membership", "support_environment_geometric_membership"),
+        ("environment_learned_membership", "support_environment_learned_score"),
+    ):
+        if source_key in aux:
+            _record_distribution(row, metric_prefix, aux[source_key])
+    for geometric_key, learned_key, metric_prefix in (
+        (
+            "module_geometric_membership",
+            "module_learned_membership",
+            "support_module_effective_membership",
+        ),
+        (
+            "environment_geometric_membership",
+            "environment_learned_membership",
+            "support_environment_effective_membership",
+        ),
+    ):
+        if geometric_key in aux and learned_key in aux:
+            geometric = np.asarray(aux[geometric_key], dtype=np.float64)
+            learned = np.asarray(aux[learned_key], dtype=np.float64)
+            if geometric.shape == learned.shape:
+                _record_distribution(row, metric_prefix, geometric * learned)
+
+    query_group_index = np.asarray(
+        routing.get("group_read_group_index", np.zeros((0, 0), dtype=np.int64)),
+        dtype=np.int64,
+    )
+    port_group_index = np.asarray(
+        aux.get("initial_port_group_read_group_index", np.zeros((0, 0), dtype=np.int64)),
+        dtype=np.int64,
+    )
+    query_ids = query_group_index[query_group_index >= 0]
+    port_ids = port_group_index[port_group_index >= 0]
+    raw_id_arrays = [
+        values.reshape(-1)
+        for values in (query_group_index, port_group_index)
+        if values.size
+    ]
+    raw_ids = np.concatenate(raw_id_arrays) if raw_id_arrays else np.zeros((0,), dtype=np.int64)
+    row["support_p2_query_read_incidence_count"] = float(query_ids.size)
+    row["support_p0_port_read_incidence_count"] = float(port_ids.size)
+    row["support_p0_p2_shared_group_id_namespace_valid"] = (
+        float(
+            bool(
+                np.all(
+                    (raw_ids == -1)
+                    | ((raw_ids >= 0) & (raw_ids < group_count))
+                )
+            )
+        )
+        if raw_ids.size
+        else float("nan")
+    )
+    row["support_p0_p2_shared_group_count"] = float(
+        np.intersect1d(np.unique(port_ids), np.unique(query_ids)).size
+    )
+    for source_key, metric_prefix in (
+        ("group_read_degree", "support_p2_query_group_degree"),
+        ("group_read_weight_mass", "support_p2_query_nonnull_weight_mass"),
+        ("group_read_max_weight", "support_p2_query_max_group_weight"),
+    ):
+        value = routing.get(source_key, aux.get(source_key))
+        if value is not None:
+            _record_distribution(row, metric_prefix, value)
+    for source_key, metric_prefix in (
+        ("initial_port_group_read_degree", "support_p0_port_group_degree"),
+        ("initial_port_group_read_weight_mass", "support_p0_port_nonnull_weight_mass"),
+        ("initial_port_group_read_max_weight", "support_p0_port_max_group_weight"),
+    ):
+        if source_key in aux:
+            _record_distribution(row, metric_prefix, aux[source_key])
+    return row
+
+
 def summarize_rows(rows: Sequence[Dict[str, Any]], group_key: str, metric_names: Sequence[str]) -> List[Dict[str, Any]]:
     """Aggregate metrics per group, preserving declared model order when available."""
 
@@ -589,6 +885,7 @@ def summarize_rows(rows: Sequence[Dict[str, Any]], group_key: str, metric_names:
                 continue
             summary[f"{metric}_mean"] = float(np.mean(values))
             summary[f"{metric}_median"] = float(np.median(values))
+            summary[f"{metric}_p95"] = float(np.quantile(values, 0.95))
             summary[f"{metric}_std"] = float(np.std(values))
             summary[f"{metric}_min"] = float(np.min(values))
             summary[f"{metric}_max"] = float(np.max(values))
@@ -742,7 +1039,18 @@ def plot_metric_bar_panels(path: Path, summary_rows: Sequence[Dict[str, Any]], m
     plt.close(fig)
 
 
-def save_figures(paths: Dict[str, Path], per_case_rows: Sequence[Dict[str, Any]], summary_rows: Sequence[Dict[str, Any]], hyper_rows: Sequence[Dict[str, Any]], hyper_summary_rows: Sequence[Dict[str, Any]], channel_order: Sequence[str], return_routing_maps: bool) -> None:
+def save_figures(
+    paths: Dict[str, Path],
+    per_case_rows: Sequence[Dict[str, Any]],
+    summary_rows: Sequence[Dict[str, Any]],
+    hyper_rows: Sequence[Dict[str, Any]],
+    hyper_summary_rows: Sequence[Dict[str, Any]],
+    interaction_rows: Sequence[Dict[str, Any]],
+    interaction_summary_rows: Sequence[Dict[str, Any]],
+    cost_summary_rows: Sequence[Dict[str, Any]],
+    channel_order: Sequence[str],
+    return_routing_maps: bool,
+) -> None:
     """Save figures."""
 
     setup_plot_style()
@@ -785,6 +1093,58 @@ def save_figures(paths: Dict[str, Path], per_case_rows: Sequence[Dict[str, Any]]
         routing_metrics = ["routing_query_attention_entropy", "routing_query_attention_effective_edges", "routing_query_attention_max"]
         plot_violin(paths["fig_hyper"] / "routing_metrics_violin.png", hyper_rows, routing_metrics, "Routing Metrics", ylabel="Metric value")
         plot_grouped_bar(paths["fig_hyper"] / "routing_metrics_bar.png", hyper_summary_rows, routing_metrics, "Mean Routing Metrics")
+        context_fraction_metrics = [
+            "query_main_context_norm_fraction_mean",
+            "query_coarse_context_norm_fraction_mean",
+            "query_local_context_norm_fraction_mean",
+            "port_main_context_norm_fraction_mean",
+            "port_coarse_context_norm_fraction_mean",
+            "port_local_context_norm_fraction_mean",
+        ]
+        plot_metric_bar_panels(
+            paths["fig_interaction"] / "context_norm_fraction_summary.png",
+            interaction_summary_rows,
+            context_fraction_metrics,
+            "Context-norm fractions (magnitude proxies, not causal reliance)",
+            ylabel="Mean norm fraction",
+        )
+        plot_violin(
+            paths["fig_interaction"] / "query_context_norm_fractions_violin.png",
+            interaction_rows,
+            [
+                "query_main_context_norm_fraction_mean",
+                "query_coarse_context_norm_fraction_mean",
+                "query_local_context_norm_fraction_mean",
+            ],
+            "Per-case query context-norm fractions (magnitude proxies)",
+            ylabel="Within-case mean norm fraction",
+        )
+    plot_metric_bar_panels(
+        paths["fig_interaction"] / "sparse_support_execution_summary.png",
+        interaction_summary_rows,
+        [
+            "support_group_count",
+            "support_module_group_incidence_count",
+            "support_environment_group_incidence_count",
+            "support_group_unique_module_degree_mean",
+            "support_p2_query_group_degree_mean",
+            "support_p0_port_group_degree_mean",
+        ],
+        "Sparse support execution (non-applicable models remain blank)",
+        ylabel="Mean observed value",
+    )
+    plot_metric_bar_panels(
+        paths["fig_summary"] / "matched_case_evaluation_cost.png",
+        cost_summary_rows,
+        [
+            "evaluation_wall_time_seconds",
+            "evaluation_queries_per_second",
+            "evaluation_cuda_incremental_peak_allocated_mib",
+            "evaluation_cuda_incremental_peak_reserved_mib",
+        ],
+        "Measured matched-case evaluation cost",
+        ylabel="Mean observed value",
+    )
 
 
 def save_debug_npz(path: Path, predictions: Dict[str, Any], raw_sample: Dict[str, Any]) -> None:
@@ -797,10 +1157,53 @@ def save_debug_npz(path: Path, predictions: Dict[str, Any], raw_sample: Dict[str
         "gt_internal_temperature": np.asarray(raw_sample["module_internal_temperature_points"], dtype=np.float32),
         "pred_interface": np.asarray(predictions["pred_interface"], dtype=np.float32),
         "gt_interface": np.asarray(raw_sample["interface_target"], dtype=np.float32),
+        "pred_port_condition": np.asarray(predictions["pred_port_condition"], dtype=np.float32),
+        "pred_port_condition_raw": np.asarray(
+            predictions.get("pred_port_condition_raw", predictions["pred_port_condition"]),
+            dtype=np.float32,
+        ),
+        "gt_port_condition": np.asarray(raw_sample["teacher_port_tokens"], dtype=np.float32),
+        "port_h_valid_mask": np.asarray(
+            raw_sample.get(
+                "interface_condition_valid_mask",
+                np.ones(np.asarray(raw_sample["teacher_port_tokens"]).shape[:-1], dtype=np.float32),
+            ),
+            dtype=np.float32,
+        ),
+        "module_centers": np.asarray(raw_sample["structure"]["module_centers"], dtype=np.float32),
+        "module_present": np.asarray(raw_sample["structure"]["module_present"], dtype=np.float32),
+        "x_grid": np.asarray(raw_sample["x_grid"], dtype=np.float32),
+        "y_grid": np.asarray(raw_sample["y_grid"], dtype=np.float32),
     }
     for key, value in predictions.get("routing_maps", {}).items():
-        if key in {"dense_environment_attention", "latent_query_attention"}:
-            payload[key] = np.asarray(value, dtype=np.float32)
+        if key in {
+            "dense_environment_attention",
+            "latent_query_attention",
+            "group_read_degree",
+            "group_read_weight_mass",
+            "group_read_max_weight",
+            "group_read_group_index",
+            "group_read_geometric_weight",
+            "group_read_normalized_weight",
+            "main_context_norm",
+            "coarse_context_norm",
+            "local_context_norm",
+            "main_context_fraction",
+            "coarse_context_fraction",
+            "local_context_fraction",
+            "local_neighbor_count",
+        }:
+            payload[key] = np.asarray(
+                value,
+                dtype=np.int64 if key == "group_read_group_index" else np.float32,
+            )
+    for key, value in predictions.get("interaction_aux", {}).items():
+        if key.startswith("support_") or key.startswith("group_") or key.startswith(
+            "module_"
+        ) or key.startswith("environment_") or key.startswith("initial_port_"):
+            if isinstance(value, str) or value is None:
+                continue
+            payload[f"interaction__{key}"] = np.asarray(value)
     np.savez_compressed(path, **payload)
 
 
@@ -832,6 +1235,313 @@ def plot_interface_field_attention(
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_title(title)
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def _dominant_sparse_group(group_index: np.ndarray, weight: np.ndarray) -> np.ndarray:
+    indices = np.asarray(group_index, dtype=np.int64)
+    weights = np.asarray(weight, dtype=np.float64)
+    if indices.shape != weights.shape or indices.ndim < 2:
+        return np.zeros((0,), dtype=np.int64)
+    valid = indices >= 0
+    scores = np.where(valid, weights, -np.inf)
+    slot = np.argmax(scores, axis=-1)
+    dominant = np.take_along_axis(indices, slot[..., None], axis=-1)[..., 0]
+    return np.where(np.any(valid, axis=-1), dominant, -1)
+
+
+def plot_sparse_interface_groups(
+    path: Path,
+    predictions: Dict[str, Any],
+    raw_sample: Dict[str, Any],
+    *,
+    title: str,
+) -> None:
+    """Show support memberships, shared P0/P2 IDs, and bounded query degree."""
+
+    aux = predictions.get("interaction_aux", {})
+    routing = predictions.get("routing_maps", {})
+    centres = np.asarray(aux.get("support_centres", np.zeros((0, 2))), dtype=np.float64)
+    query_index = np.asarray(
+        routing.get("group_read_group_index", np.zeros((0, 0))), dtype=np.int64
+    )
+    query_weight = np.asarray(
+        routing.get("group_read_normalized_weight", np.zeros_like(query_index, dtype=np.float64)),
+        dtype=np.float64,
+    )
+    port_index = np.asarray(
+        aux.get("initial_port_group_read_group_index", np.zeros((0, 0, 0))),
+        dtype=np.int64,
+    )
+    port_weight = np.asarray(
+        aux.get(
+            "initial_port_group_read_normalized_weight",
+            np.zeros_like(port_index, dtype=np.float64),
+        ),
+        dtype=np.float64,
+    )
+    x_grid = np.asarray(raw_sample["x_grid"], dtype=np.float64)
+    y_grid = np.asarray(raw_sample["y_grid"], dtype=np.float64)
+    if centres.ndim != 2 or centres.shape[-1] != 2 or centres.shape[0] == 0:
+        return
+    if query_index.ndim != 2 or query_index.shape[0] != x_grid.size:
+        return
+
+    count = int(centres.shape[0])
+    spacing = finite_float(aux.get("support_spacing"))
+    cmap = plt.get_cmap("turbo", max(count, 2))
+    norm = matplotlib.colors.Normalize(vmin=-0.5, vmax=max(count - 0.5, 0.5))
+    fig, axes_grid = plt.subplots(2, 2, figsize=(14.4, 9.6), constrained_layout=True)
+    axes = axes_grid.reshape(-1)
+
+    module_centres = np.asarray(raw_sample["structure"]["module_centers"], dtype=np.float64)
+    module_present = np.asarray(raw_sample["structure"]["module_present"], dtype=np.float64) > 0.5
+    module_group = np.asarray(aux.get("module_group_indices", np.zeros((2, 0))), dtype=np.int64)
+    geometric = np.asarray(aux.get("module_geometric_membership", np.zeros((0,))), dtype=np.float64)
+    learned = np.asarray(aux.get("module_learned_membership", np.ones_like(geometric)), dtype=np.float64)
+    group_degree = np.asarray(
+        aux.get("group_module_degree", np.zeros((count,))), dtype=np.float64
+    ).reshape(-1)
+    if module_group.ndim == 2 and module_group.shape[0] == 2:
+        for incidence, (source, group) in enumerate(module_group.T):
+            module_index = int(source) % max(module_centres.shape[0], 1)
+            if module_index >= module_centres.shape[0] or group < 0 or group >= count:
+                continue
+            geometric_strength = (
+                float(geometric[incidence]) if incidence < geometric.size else 0.0
+            )
+            learned_strength = (
+                float(learned[incidence]) if incidence < learned.size else 0.0
+            )
+            endpoints_x = [module_centres[module_index, 0], centres[group, 0]]
+            endpoints_y = [module_centres[module_index, 1], centres[group, 1]]
+            axes[0].plot(
+                endpoints_x,
+                endpoints_y,
+                color=cmap(norm(group)),
+                alpha=min(0.9, 0.08 + 0.82 * max(geometric_strength, 0.0)),
+                linewidth=0.8,
+            )
+            axes[1].plot(
+                endpoints_x,
+                endpoints_y,
+                color=cmap(norm(group)),
+                alpha=min(0.9, 0.08 + 0.82 * max(learned_strength, 0.0)),
+                linewidth=0.5
+                + 1.5 * max(geometric_strength * learned_strength, 0.0),
+            )
+    if math.isfinite(spacing):
+        for group, centre in enumerate(centres):
+            for ax in axes[:2]:
+                ax.add_patch(
+                    Rectangle(
+                        (centre[0] - 2.0 * spacing, centre[1] - 2.0 * spacing),
+                        4.0 * spacing,
+                        4.0 * spacing,
+                        fill=False,
+                        edgecolor=cmap(norm(group)),
+                        linewidth=0.55,
+                        alpha=0.32,
+                    )
+                )
+    radius = float(module_radius_from_sample(raw_sample))
+    for module_index in np.flatnonzero(module_present):
+        for ax in axes:
+            ax.add_patch(
+                Circle(
+                    module_centres[module_index],
+                    radius,
+                    facecolor="none",
+                    edgecolor="black",
+                    linewidth=1.0,
+                )
+            )
+    for ax in axes[:2]:
+        ax.scatter(
+            centres[:, 0], centres[:, 1], c=np.arange(count), cmap=cmap, norm=norm, s=24
+        )
+        for group, centre in enumerate(centres):
+            degree = int(group_degree[group]) if group < group_degree.size else 0
+            ax.text(
+                centre[0],
+                centre[1],
+                f"{group}\nM={degree}",
+                fontsize=5.5,
+                ha="center",
+                va="bottom",
+            )
+    axes[0].set_title("Cubic supports; geometric membership is line opacity")
+    axes[1].set_title("Learned typed membership opacity; effective weight is width")
+
+    dominant_query = _dominant_sparse_group(query_index, query_weight).reshape(x_grid.shape)
+    masked_query = np.ma.masked_less(dominant_query, 0)
+    image = axes[2].pcolormesh(
+        x_grid, y_grid, masked_query, shading="auto", cmap=cmap, norm=norm
+    )
+    dominant_port = _dominant_sparse_group(port_index, port_weight)
+    teacher_ports = np.asarray(raw_sample["teacher_port_tokens"], dtype=np.float64)
+    if dominant_port.shape == teacher_ports.shape[:2]:
+        port_xy = module_centres[:, None, :] + radius * teacher_ports[..., 1:3]
+        valid_port = np.broadcast_to(module_present[:, None], dominant_port.shape) & (dominant_port >= 0)
+        axes[2].scatter(
+            port_xy[..., 0][valid_port],
+            port_xy[..., 1][valid_port],
+            c=dominant_port[valid_port],
+            cmap=cmap,
+            norm=norm,
+            s=7,
+            edgecolors="black",
+            linewidths=0.15,
+            label="P0 physical ports",
+        )
+        axes[2].legend(loc="upper right", frameon=True, fontsize=8)
+    fig.colorbar(image, ax=axes[2], label="shared support-group row ID")
+    axes[2].set_title("P2 query routes with P0 port routes in the same ID namespace")
+
+    query_degree = np.asarray(
+        routing.get("group_read_degree", np.zeros((x_grid.size,))), dtype=np.float64
+    )
+    if query_degree.size == x_grid.size:
+        degree_image = axes[3].pcolormesh(
+            x_grid,
+            y_grid,
+            query_degree.reshape(x_grid.shape),
+            shading="auto",
+            cmap="viridis",
+            vmin=0.0,
+            vmax=float(4 ** centres.shape[-1]),
+        )
+        fig.colorbar(degree_image, ax=axes[3], label="actual support incidences")
+    axes[3].set_title(f"Sparse query degree (bounded by {4 ** centres.shape[-1]})")
+    for ax in axes:
+        ax.set_aspect("equal")
+        ax.set_xlim(float(np.nanmin(x_grid)), float(np.nanmax(x_grid)))
+        ax.set_ylim(float(np.nanmin(y_grid)), float(np.nanmax(y_grid)))
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+    fig.suptitle(title)
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def plot_anchor_physical_predictions(
+    path: Path,
+    predictions: Dict[str, Any],
+    raw_sample: Dict[str, Any],
+    dataset: GlobalChannelThermalDataset,
+    *,
+    checkpoint_targets_normalized: bool,
+    title: str,
+) -> None:
+    """Plot dataset-native field, port, and interface evidence for one anchor."""
+
+    physical = denormalize_predictions(
+        dict(predictions), dataset, checkpoint_targets_normalized
+    )
+    pred_field = np.asarray(physical["pred_field_grid"], dtype=np.float64)
+    gt_field = np.asarray(raw_sample["steady_field"], dtype=np.float64)
+    temperature_index = min(4, pred_field.shape[-1] - 1)
+    pred_temperature = pred_field[..., temperature_index]
+    gt_temperature = gt_field[..., temperature_index]
+    temperature_error = pred_temperature - gt_temperature
+    x_grid = np.asarray(raw_sample["x_grid"], dtype=np.float64)
+    y_grid = np.asarray(raw_sample["y_grid"], dtype=np.float64)
+    module_present = np.asarray(raw_sample["structure"]["module_present"], dtype=np.float64) > 0.5
+    teacher_ports = np.asarray(raw_sample["teacher_port_tokens"], dtype=np.float64)
+    active_ports = np.broadcast_to(module_present[:, None], teacher_ports.shape[:2])
+    valid_h = active_ports & np.asarray(
+        raw_sample.get("interface_condition_valid_mask", np.ones_like(active_ports)),
+        dtype=bool,
+    )
+    pred_ports = np.asarray(predictions["pred_port_condition"], dtype=np.float64)
+    provisional_ports = np.asarray(
+        predictions.get("pred_port_condition_raw", predictions["pred_port_condition"]),
+        dtype=np.float64,
+    )
+    pred_interface = np.asarray(physical["pred_interface"], dtype=np.float64)
+    gt_interface = np.asarray(raw_sample["interface_target"], dtype=np.float64)
+
+    fig, axes = plt.subplots(2, 4, figsize=(17.0, 8.3), constrained_layout=True)
+    field_vmin = float(np.nanmin([np.nanmin(gt_temperature), np.nanmin(pred_temperature)]))
+    field_vmax = float(np.nanmax([np.nanmax(gt_temperature), np.nanmax(pred_temperature)]))
+    error_limit = max(float(np.nanmax(np.abs(temperature_error))), EPS)
+    for ax, values, subtitle, cmap, vmin, vmax in (
+        (axes[0, 0], gt_temperature, "Temperature target", "inferno", field_vmin, field_vmax),
+        (axes[0, 1], pred_temperature, "Temperature prediction", "inferno", field_vmin, field_vmax),
+        (axes[0, 2], temperature_error, "Temperature signed error", "RdBu_r", -error_limit, error_limit),
+    ):
+        image = ax.pcolormesh(x_grid, y_grid, values, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+        fig.colorbar(image, ax=ax)
+        ax.set_title(subtitle)
+        ax.set_aspect("equal")
+
+    def parity(
+        ax: Any,
+        target: np.ndarray,
+        prediction: np.ndarray,
+        mask: np.ndarray,
+        subtitle: str,
+        *,
+        provisional: Optional[np.ndarray] = None,
+    ) -> None:
+        target_values = np.asarray(target)[mask]
+        prediction_values = np.asarray(prediction)[mask]
+        if provisional is not None:
+            provisional_values = np.asarray(provisional)[mask]
+            ax.scatter(
+                target_values,
+                provisional_values,
+                s=8,
+                alpha=0.4,
+                marker="x",
+                color="#999999",
+                label="provisional",
+            )
+        ax.scatter(
+            target_values,
+            prediction_values,
+            s=8,
+            alpha=0.55,
+            color="#4477AA",
+            label="final" if provisional is not None else None,
+        )
+        if target_values.size:
+            lower = float(min(np.nanmin(target_values), np.nanmin(prediction_values)))
+            upper = float(max(np.nanmax(target_values), np.nanmax(prediction_values)))
+            if provisional is not None:
+                lower = min(lower, float(np.nanmin(provisional_values)))
+                upper = max(upper, float(np.nanmax(provisional_values)))
+            ax.plot([lower, upper], [lower, upper], color="black", linewidth=1.0, linestyle="--")
+        ax.set_xlabel("target")
+        ax.set_ylabel("prediction")
+        ax.set_title(subtitle)
+        if provisional is not None:
+            ax.legend(frameon=False, fontsize=7)
+
+    parity(
+        axes[0, 3],
+        teacher_ports[..., 3],
+        pred_ports[..., 3],
+        active_ports,
+        "Port T_env",
+        provisional=provisional_ports[..., 3],
+    )
+    parity(
+        axes[1, 0],
+        teacher_ports[..., 4],
+        pred_ports[..., 4],
+        valid_h,
+        "Port h_effective",
+        provisional=provisional_ports[..., 4],
+    )
+    parity(axes[1, 1], gt_interface[..., 0], pred_interface[..., 0], active_ports, "Interface T_surface")
+    parity(axes[1, 2], gt_interface[..., 1], pred_interface[..., 1], active_ports, "Interface q_normal")
+    internal_target = np.asarray(raw_sample["module_internal_temperature_points"], dtype=np.float64)
+    internal_pred = np.asarray(physical["pred_internal_temperature"], dtype=np.float64)[..., 0]
+    internal_mask = np.broadcast_to(module_present[:, None], internal_target.shape)
+    parity(axes[1, 3], internal_target, internal_pred, internal_mask, "Internal temperature")
+    fig.suptitle(title)
     fig.savefig(path)
     plt.close(fig)
 
@@ -871,6 +1581,8 @@ def main(argv: list[str] | None = None) -> int:
     per_case_rows: List[Dict[str, Any]] = []
     per_module_rows: List[Dict[str, Any]] = []
     hyper_rows: List[Dict[str, Any]] = []
+    interaction_rows: List[Dict[str, Any]] = []
+    cost_rows: List[Dict[str, Any]] = []
     manifest_rows: List[Dict[str, Any]] = []
     channel_order = list(CHANNEL_ORDER)
 
@@ -945,6 +1657,15 @@ def main(argv: list[str] | None = None) -> int:
             sample = input_dataset[int(dataset_idx)]
             case_id = str(raw_sample["case_id"])
             case_iter.set_postfix_str(case_id)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+                cuda_allocated_before = int(torch.cuda.memory_allocated(device))
+                cuda_reserved_before = int(torch.cuda.memory_reserved(device))
+                torch.cuda.reset_peak_memory_stats(device)
+            else:
+                cuda_allocated_before = 0
+                cuda_reserved_before = 0
+            prediction_started = time.perf_counter()
             with torch.no_grad():
                 predictions = predict_case(
                     model,
@@ -955,6 +1676,15 @@ def main(argv: list[str] | None = None) -> int:
                     mixed_teacher_ratio=float(args.mixed_teacher_ratio),
                     return_routing_maps=bool(args.return_routing_maps),
                 )
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+                cuda_peak_allocated = int(torch.cuda.max_memory_allocated(device))
+                cuda_peak_reserved = int(torch.cuda.max_memory_reserved(device))
+            else:
+                cuda_peak_allocated = 0
+                cuda_peak_reserved = 0
+            prediction_seconds = time.perf_counter() - prediction_started
+            query_count = int(np.asarray(raw_sample["x_grid"]).size)
             base_row = {
                 "model_index": int(spec["model_index"]),
                 "model_label": str(spec["label"]),
@@ -965,6 +1695,48 @@ def main(argv: list[str] | None = None) -> int:
                 "case_id": case_id,
                 "split": actual_split,
             }
+            cost_rows.append(
+                {
+                    **base_row,
+                    "evaluation_wall_time_seconds": float(prediction_seconds),
+                    "evaluation_grid_query_count": float(query_count),
+                    "evaluation_queries_per_second": float(
+                        query_count / max(prediction_seconds, EPS)
+                    ),
+                    "evaluation_cuda_allocated_before_mib": float(
+                        cuda_allocated_before / (1024.0**2)
+                    )
+                    if device.type == "cuda"
+                    else float("nan"),
+                    "evaluation_cuda_peak_allocated_mib": float(
+                        cuda_peak_allocated / (1024.0**2)
+                    )
+                    if device.type == "cuda"
+                    else float("nan"),
+                    "evaluation_cuda_reserved_before_mib": float(
+                        cuda_reserved_before / (1024.0**2)
+                    )
+                    if device.type == "cuda"
+                    else float("nan"),
+                    "evaluation_cuda_incremental_peak_allocated_mib": float(
+                        max(cuda_peak_allocated - cuda_allocated_before, 0) / (1024.0**2)
+                    )
+                    if device.type == "cuda"
+                    else float("nan"),
+                    "evaluation_cuda_incremental_peak_reserved_mib": float(
+                        max(cuda_peak_reserved - cuda_reserved_before, 0) / (1024.0**2)
+                    )
+                    if device.type == "cuda"
+                    else float("nan"),
+                    "evaluation_cuda_peak_reserved_mib": float(
+                        cuda_peak_reserved / (1024.0**2)
+                    )
+                    if device.type == "cuda"
+                    else float("nan"),
+                    "query_batch_size": float(args.query_batch_size),
+                    "device": str(device),
+                }
+            )
             metric_row, module_rows = reconstruction_metrics(
                 base_row=base_row,
                 predictions=predictions,
@@ -976,23 +1748,43 @@ def main(argv: list[str] | None = None) -> int:
             per_case_rows.append(metric_row)
             per_module_rows.extend(module_rows)
             hyper_rows.append(hypergraph_metrics(base_row, raw_sample, predictions))
-            if args.return_routing_maps and case_id in {"0273", "0653"}:
+            interaction_rows.append(interaction_metrics(base_row, predictions))
+            if case_id in {"0273", "0653"}:
                 architecture = str(model.config.core_honf.forward_architecture)
-                if architecture == "dense_pairwise_field":
+                plot_anchor_physical_predictions(
+                    paths["fig_interaction"]
+                    / f"{safe_label(spec['label'])}__{safe_label(case_id)}__physical.png",
+                    predictions,
+                    raw_sample,
+                    input_dataset,
+                    checkpoint_targets_normalized=checkpoint_targets_normalized,
+                    title=f"{spec['label']} — physical predictions — case {case_id}",
+                )
+                if args.return_routing_maps and architecture == "dense_pairwise_field":
                     plot_interface_field_attention(
-                        paths["fig_interaction"] / f"dense_pairwise_adaptation__{safe_label(case_id)}.png",
+                        paths["fig_interaction"]
+                        / f"{safe_label(spec['label'])}__{safe_label(case_id)}__dense_pairwise_adaptation.png",
                         predictions,
                         raw_sample,
                         routing_key="dense_environment_attention",
                         title=f"Dense pairwise environmental influence (adaptation) — case {case_id}",
                     )
-                elif architecture == "geometry_latent_field":
+                elif args.return_routing_maps and architecture == "geometry_latent_field":
                     plot_interface_field_attention(
-                        paths["fig_interaction"] / f"geometry_latent_adaptation__{safe_label(case_id)}.png",
+                        paths["fig_interaction"]
+                        / f"{safe_label(spec['label'])}__{safe_label(case_id)}__geometry_latent_adaptation.png",
                         predictions,
                         raw_sample,
                         routing_key="latent_query_attention",
                         title=f"Geometry-latent query attention (adaptation) — case {case_id}",
+                    )
+                elif args.return_routing_maps and architecture == "sparse_interface_honf":
+                    plot_sparse_interface_groups(
+                        paths["fig_interaction"]
+                        / f"{safe_label(spec['label'])}__{safe_label(case_id)}__sparse_supports.png",
+                        predictions,
+                        raw_sample,
+                        title=f"Sparse interface HONF support execution — case {case_id}",
                     )
             if args.save_debug_npz:
                 npz_name = f"{safe_label(spec['label'])}__{safe_label(case_id)}.npz"
@@ -1014,6 +1806,15 @@ def main(argv: list[str] | None = None) -> int:
             "mixed_teacher_ratio": float(args.mixed_teacher_ratio),
             "return_routing_maps": bool(args.return_routing_maps),
             "save_debug_npz": bool(args.save_debug_npz),
+            "evaluation_cost_scope": (
+                "one synchronized predict_case call per matched case; excludes dataset I/O, "
+                "checkpoint loading, metrics, and plotting"
+            ),
+            "evaluation_cost_warmups_per_case": 0,
+            "physical_error_space": (
+                "dataset-native units per field/interface/port quantity; no mixed-unit "
+                "cross-channel physical aggregate"
+            ),
             "num_models": len(model_specs),
             "num_cases": len(case_indices),
         },
@@ -1044,15 +1845,51 @@ def main(argv: list[str] | None = None) -> int:
             "env_module_influence_target_rows",
         },
     )
+    interaction_metrics_to_summarize = numeric_metric_names(
+        interaction_rows,
+        exclude={
+            *common_summary_exclude,
+            "forward_architecture",
+            "support_topology_applicable",
+        },
+    )
+    cost_metrics_to_summarize = numeric_metric_names(
+        cost_rows,
+        exclude={
+            *common_summary_exclude,
+            "evaluation_grid_query_count",
+            "query_batch_size",
+            "device",
+        },
+    )
     model_summary_rows = summarize_rows(per_case_rows, "model_label", reconstruction_metrics_to_summarize)
     hyper_summary_rows = summarize_rows(hyper_rows, "model_label", hyper_metrics_to_summarize)
+    interaction_summary_rows = summarize_rows(
+        interaction_rows, "model_label", interaction_metrics_to_summarize
+    )
+    cost_summary_rows = summarize_rows(cost_rows, "model_label", cost_metrics_to_summarize)
 
     write_csv(paths["tables"] / "per_case_metrics.csv", per_case_rows)
     write_csv(paths["tables"] / "per_module_metrics.csv", per_module_rows)
     write_csv(paths["tables"] / "model_summary_metrics.csv", model_summary_rows)
     write_csv(paths["tables"] / "hypergraph_case_metrics.csv", hyper_rows)
     write_csv(paths["tables"] / "hypergraph_summary_metrics.csv", hyper_summary_rows)
-    save_figures(paths, per_case_rows, model_summary_rows, hyper_rows, hyper_summary_rows, channel_order, bool(args.return_routing_maps))
+    write_csv(paths["tables"] / "interaction_case_metrics.csv", interaction_rows)
+    write_csv(paths["tables"] / "interaction_summary_metrics.csv", interaction_summary_rows)
+    write_csv(paths["tables"] / "evaluation_cost_case_metrics.csv", cost_rows)
+    write_csv(paths["tables"] / "evaluation_cost_summary_metrics.csv", cost_summary_rows)
+    save_figures(
+        paths,
+        per_case_rows,
+        model_summary_rows,
+        hyper_rows,
+        hyper_summary_rows,
+        interaction_rows,
+        interaction_summary_rows,
+        cost_summary_rows,
+        channel_order,
+        bool(args.return_routing_maps),
+    )
     print(f"[done] wrote comparison outputs to {output_root}")
     return 0
 

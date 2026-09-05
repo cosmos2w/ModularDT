@@ -2,30 +2,37 @@
 
 from __future__ import annotations
 
+import copy
+from pathlib import Path
+
 import pytest
 import torch
 
 from channelthermal.config import ChannelThermalHONFConfig
+from channelthermal.evaluation import loading as evaluation_loading
 from channelthermal.model import ChannelThermalHONFModel
 
 
 def _model(architecture: str) -> ChannelThermalHONFModel:
+    interface_model = {
+        "message_hidden_dim": 24,
+        "attention_heads": 4,
+        "coarse_latent_count": 4,
+        "coarse_blocks": 1,
+        "main_latent_count": 4,
+        "main_latent_blocks": 2,
+        "local_radius_factor": 2.5,
+        "relative_fourier_frequencies": 2,
+        "receiver_chunk_size": 3,
+        "activation_checkpointing": False,
+    }
+    if architecture == "sparse_interface_honf":
+        interface_model["support_spacing_factor"] = 4.0
     config = ChannelThermalHONFConfig.from_dict(
         {
             "core_honf": {
                 "forward_architecture": architecture,
-                "interface_model": {
-                    "message_hidden_dim": 24,
-                    "attention_heads": 4,
-                    "coarse_latent_count": 4,
-                    "coarse_blocks": 1,
-                    "main_latent_count": 4,
-                    "main_latent_blocks": 2,
-                    "local_radius_factor": 2.5,
-                    "relative_fourier_frequencies": 2,
-                    "receiver_chunk_size": 3,
-                    "activation_checkpointing": False,
-                },
+                "interface_model": interface_model,
                 "hidden_dim": 32,
                 "field_dim": 5,
                 "domain_length_x": 12.0,
@@ -66,7 +73,9 @@ def _inputs() -> dict[str, torch.Tensor]:
     }
 
 
-@pytest.mark.parametrize("architecture", ["dense_pairwise_field", "geometry_latent_field"])
+@pytest.mark.parametrize(
+    "architecture", ["dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf"]
+)
 def test_interface_fields_are_finite_chunk_independent_and_coordinate_differentiable(architecture: str) -> None:
     model = _model(architecture)
     inputs = _inputs()
@@ -74,13 +83,16 @@ def test_interface_fields_are_finite_chunk_independent_and_coordinate_differenti
     assert torch.isfinite(output["pred_field"]).all()
     assert output["organizer_aux"] == {}
     assert "local_neighbor_count" in output["interaction_aux"]
-    routing_key = (
-        "dense_environment_attention"
-        if architecture == "dense_pairwise_field"
-        else "latent_query_attention"
-    )
+    routing_key = {
+        "dense_pairwise_field": "dense_environment_attention",
+        "geometry_latent_field": "latent_query_attention",
+        "sparse_interface_honf": "group_read_group_index",
+    }[architecture]
     assert routing_key in output["routing_aux"]
-    assert output["routing_aux"][routing_key].shape[:3] == (2, 4, 7)
+    if architecture == "sparse_interface_honf":
+        assert output["routing_aux"][routing_key].shape == (2, 7, 16)
+    else:
+        assert output["routing_aux"][routing_key].shape[:3] == (2, 4, 7)
     prepared = output["prepared_state"]
     whole = model.decode_prepared(prepared, inputs["query_xy"])["pred_field"]
     split = torch.cat(
@@ -97,7 +109,9 @@ def test_interface_fields_are_finite_chunk_independent_and_coordinate_differenti
     assert torch.isfinite(gradient).all()
 
 
-@pytest.mark.parametrize("architecture", ["dense_pairwise_field", "geometry_latent_field"])
+@pytest.mark.parametrize(
+    "architecture", ["dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf"]
+)
 def test_interface_fields_preserve_joint_module_permutation(architecture: str) -> None:
     model = _model(architecture)
     inputs = _inputs()
@@ -123,3 +137,76 @@ def test_new_family_config_does_not_serialize_legacy_organizer_settings() -> Non
     assert "interface_model" in config
     assert "organizer_mode" not in config
     assert "decoder_mode" not in config
+
+
+def test_sparse_environment_work_is_cached_while_group_states_refresh() -> None:
+    model = _model("sparse_interface_honf")
+    output = model(**_inputs(), return_prepared_state=True)
+    prepared = output["prepared_state"].prepared
+    cache = prepared.backend_state.cache
+    cache.environment = None
+    calls = {"membership": 0, "message": 0}
+
+    def count_membership(_module, _inputs, _output) -> None:
+        calls["membership"] += 1
+
+    def count_message(_module, _inputs, _output) -> None:
+        calls["message"] += 1
+
+    membership_hook = model.core.backend.environment_membership.register_forward_hook(count_membership)
+    message_hook = model.core.backend.environment_message.register_forward_hook(count_message)
+    try:
+        states = []
+        for offset in (0.0, 0.1, 0.2):
+            state = model.core.prepare(
+                prepared.encoded,
+                prepared.encoded.module_tokens + offset * prepared.encoded.module_present[..., None],
+                layout_cache=cache,
+            ).backend_state
+            states.append(state.group_state)
+    finally:
+        membership_hook.remove()
+        message_hook.remove()
+
+    assert calls == {"membership": 1, "message": 1}
+    assert cache.environment is not None
+    assert not torch.equal(states[0], states[1])
+    assert not torch.equal(states[1], states[2])
+
+
+def test_sparse_interface_checkpoint_reconstructs_strictly_with_bit_exact_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _model("sparse_interface_honf")
+    inputs = _inputs()
+    with torch.no_grad():
+        expected = source(**inputs)
+    checkpoint = {
+        "checkpoint_schema_version": 1,
+        "case_id": "ThermalChannel",
+        "model_family": "honf_forward",
+        "workflow": "forward",
+        "epoch": 7,
+        "model_config": source.config.to_dict(),
+        "model_state_dict": copy.deepcopy(source.state_dict()),
+        "train_config": {"training": {"epochs": 500}},
+    }
+    monkeypatch.setattr(
+        evaluation_loading,
+        "load_trusted_checkpoint",
+        lambda *_args, **_kwargs: checkpoint,
+    )
+
+    restored, loaded = evaluation_loading.load_model(Path("unused.pt"), torch.device("cpu"))
+    with torch.no_grad():
+        actual = restored(**inputs)
+
+    assert loaded is checkpoint
+    assert restored.config.core_honf.forward_architecture == "sparse_interface_honf"
+    assert restored.config.core_honf.interface_model is not None
+    assert restored.config.core_honf.interface_model.support_spacing_factor == pytest.approx(4.0)
+    assert tuple(restored.state_dict()) == tuple(source.state_dict())
+    torch.testing.assert_close(actual["pred_field"], expected["pred_field"], rtol=0.0, atol=0.0)
+    torch.testing.assert_close(
+        actual["pred_port_condition"], expected["pred_port_condition"], rtol=0.0, atol=0.0
+    )

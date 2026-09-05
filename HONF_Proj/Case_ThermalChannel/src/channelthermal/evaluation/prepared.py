@@ -13,6 +13,52 @@ from channelthermal.evaluation.loading import make_batch
 from channelthermal.model import ChannelThermalHONFModel
 
 
+# Sparse-interface layouts are flattened across a case batch rather than
+# padded with a leading batch dimension.  ``predict_case`` always evaluates
+# one physical case, but blindly removing axis 0 from these arrays would still
+# discard all but the first group (or the first row of a COO incidence list).
+_SPARSE_FLATTENED_INTERACTION_KEYS = {
+    "support_centres",
+    "support_lattice_keys",
+    "support_group_batch",
+    "support_case_group_offsets",
+    "module_group_indices",
+    "module_geometric_membership",
+    "module_learned_membership",
+    "module_weighted_membership",
+    "environment_group_indices",
+    "environment_geometric_membership",
+    "environment_learned_membership",
+    "environment_weighted_membership",
+    "group_occupancy",
+    "group_occupancy_envelope",
+    "group_covered_volume_ratio",
+    "group_module_degree",
+    "group_environment_degree",
+    "group_state_norm",
+}
+
+
+def serialize_interaction_aux(aux: Dict[str, Any]) -> Dict[str, Any]:
+    """Detach one-case interaction diagnostics without truncating sparse COO data."""
+
+    architecture = str(aux.get("forward_architecture", ""))
+    result: Dict[str, Any] = {}
+    for key, value in aux.items():
+        if not torch.is_tensor(value):
+            result[key] = value
+            continue
+        array = value.detach().cpu().numpy()
+        if (
+            architecture == "sparse_interface_honf"
+            and key in _SPARSE_FLATTENED_INTERACTION_KEYS
+        ):
+            result[key] = array
+        else:
+            result[key] = array[0] if array.ndim > 0 else array
+    return result
+
+
 def _interaction_tensor_request_kwargs(model: Any, requested: bool) -> dict[str, bool]:
     """Return an opt-in wrapper flag for Phase-2 interaction tensors."""
 
@@ -157,7 +203,16 @@ def predict_case(
                     "main_context_norm": "main_context_norm",
                     "coarse_context_norm": "coarse_context_norm",
                     "local_context_norm": "local_context_norm",
+                    "main_context_fraction": "main_context_fraction",
+                    "coarse_context_fraction": "coarse_context_fraction",
+                    "local_context_fraction": "local_context_fraction",
                     "local_neighbor_count": "local_neighbor_count",
+                    "group_read_degree": "group_read_degree",
+                    "group_read_weight_mass": "group_read_weight_mass",
+                    "group_read_max_weight": "group_read_max_weight",
+                    "group_read_group_index": "group_read_group_index",
+                    "group_read_geometric_weight": "group_read_geometric_weight",
+                    "group_read_normalized_weight": "group_read_normalized_weight",
                 }
                 for source_key, target_key in key_map.items():
                     value = routing_aux.get(source_key)
@@ -187,6 +242,9 @@ def predict_case(
         "pred_internal_temperature": first_outputs["pred_internal_temperature"].detach().cpu().numpy()[0],
         "pred_interface": first_outputs["pred_interface"].detach().cpu().numpy()[0],
         "pred_port_condition": first_outputs["pred_port_condition"].detach().cpu().numpy()[0],
+        "pred_port_condition_raw": first_outputs.get(
+            "pred_port_condition_raw", first_outputs["pred_port_condition"]
+        ).detach().cpu().numpy()[0],
         "interface_flux_mode": first_outputs.get("interface_source", "unknown"),
         "organizer_aux": {
             key: value.detach().cpu().numpy()[0] if torch.is_tensor(value) and value.ndim > 0 else value
@@ -196,11 +254,13 @@ def predict_case(
             key: value.detach().cpu().numpy()[0] if torch.is_tensor(value) and value.ndim > 0 else value
             for key, value in first_outputs.get("base_organizer_aux", {}).items()
         },
-        "interaction_aux": {
-            key: value.detach().cpu().numpy()[0] if torch.is_tensor(value) and value.ndim > 0 else value
-            for key, value in first_outputs.get("interaction_aux", {}).items()
-            if key not in {"dense_environment_attention", "latent_query_attention"}
-        },
+        "interaction_aux": serialize_interaction_aux(
+            {
+                key: value
+                for key, value in first_outputs.get("interaction_aux", {}).items()
+                if key not in {"dense_environment_attention", "latent_query_attention"}
+            }
+        ),
     }
     result["routing_aux"] = aggregate_routed_module_retention(
         routed_module_retention_chunks

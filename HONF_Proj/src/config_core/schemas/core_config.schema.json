@@ -87,6 +87,7 @@
             "main_latent_count": {"type": "integer", "minimum": 1},
             "main_latent_blocks": {"type": "integer", "minimum": 1},
             "local_radius_factor": {"type": "number", "exclusiveMinimum": 0},
+            "support_spacing_factor": {"type": "number", "exclusiveMinimum": 0},
             "relative_fourier_frequencies": {"type": "integer", "minimum": 0},
             "receiver_chunk_size": {"type": "integer", "minimum": 1},
             "activation_checkpointing": {"type": "boolean"}

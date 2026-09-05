@@ -134,6 +134,7 @@ class InterfaceFieldConfig:
     main_latent_count: int = 16
     main_latent_blocks: int = 2
     local_radius_factor: float = 2.5
+    support_spacing_factor: Optional[float] = None
     relative_fourier_frequencies: int = 4
     receiver_chunk_size: int = 128
     activation_checkpointing: bool = False
@@ -149,6 +150,8 @@ class InterfaceFieldConfig:
             raise ValueError("interface_model main latent count/blocks must be positive.")
         if float(self.local_radius_factor) <= 0.0:
             raise ValueError("interface_model.local_radius_factor must be positive.")
+        if self.support_spacing_factor is not None and float(self.support_spacing_factor) <= 0.0:
+            raise ValueError("interface_model.support_spacing_factor must be positive when provided.")
         if int(self.relative_fourier_frequencies) < 0:
             raise ValueError("interface_model.relative_fourier_frequencies must be nonnegative.")
         if int(self.receiver_chunk_size) <= 0:
@@ -297,10 +300,17 @@ class UnifiedForwardConfig:
         if self.forward_architecture == "legacy_honf":
             if self.interface_model is not None:
                 raise ValueError("legacy_honf does not accept an interface_model block.")
-        elif self.forward_architecture == "sparse_interface_honf":
-            raise ValueError("sparse_interface_honf is reserved for Stage 2 and is not implemented yet.")
         elif self.interface_model is None:
             raise ValueError(f"{self.forward_architecture} requires an interface_model block.")
+        elif self.forward_architecture == "sparse_interface_honf":
+            if self.interface_model.support_spacing_factor is None:
+                raise ValueError(
+                    "sparse_interface_honf requires interface_model.support_spacing_factor."
+                )
+        elif self.interface_model.support_spacing_factor is not None:
+            raise ValueError(
+                "interface_model.support_spacing_factor is only valid for sparse_interface_honf."
+            )
         if self.interface_model is not None and int(self.hidden_dim) % int(self.interface_model.attention_heads) != 0:
             raise ValueError("hidden_dim must be divisible by interface_model.attention_heads.")
 
@@ -597,6 +607,15 @@ class UnifiedForwardConfig:
         else:
             for key in LEGACY_ARCHITECTURE_KEYS:
                 payload.pop(key, None)
+            interface_payload = payload.get("interface_model")
+            if isinstance(interface_payload, dict):
+                if self.forward_architecture != "sparse_interface_honf":
+                    interface_payload.pop("support_spacing_factor", None)
+                else:
+                    # Main latent settings belong only to the latent-attention
+                    # baseline and are not sparse-HONF capacity parameters.
+                    interface_payload.pop("main_latent_count", None)
+                    interface_payload.pop("main_latent_blocks", None)
         return payload
 
     def decoder_uses(self, component: str) -> bool:

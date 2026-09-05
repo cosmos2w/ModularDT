@@ -151,12 +151,16 @@ def forward_interface_field(
             env_features=env.env_features,
         )
     )
-    base_module_state = encoded.module_tokens
-    prepared0 = model.core.prepare(encoded, base_module_state)
     if teacher_port_tokens is None and interface_condition is not None:
         teacher_port_tokens = teacher_port_tokens_from_interface_condition(interface_condition.float())
     ntheta = model._infer_ntheta(interface_condition, teacher_port_tokens)
     physical_port_xy = _port_coordinates(model, adapter.module_centers, ntheta)
+    # Sparse HONF constructs the occupied support table from the actual port
+    # footprint once.  The same case-local cache (including environment work)
+    # is reused while group states refresh after each local response.
+    layout_cache = model.core.build_layout(encoded, physical_port_xy)
+    base_module_state = encoded.module_tokens
+    prepared0 = model.core.prepare(encoded, base_module_state, layout_cache=layout_cache)
     initial_port_context, initial_read_aux = _read_port_context(model, prepared0, physical_port_xy)
     pred_port_tokens = model.local_coupling.port_head(
         base_module_state,
@@ -216,7 +220,7 @@ def forward_interface_field(
         if int(model.config.channelthermal.interaction_refinement_steps) == 1 and (
             str(local_port_condition_mode).lower() != "teacher" or teacher_port_tokens is None
         ):
-            prepared1 = model.core.prepare(encoded, module_state)
+            prepared1 = model.core.prepare(encoded, module_state, layout_cache=layout_cache)
             outside_temperature, _ = _decode_temperature(
                 model, prepared1, _outside_coordinates(model, local_ports_used, adapter.module_centers)
             )
@@ -275,7 +279,11 @@ def forward_interface_field(
                 "predicted_port_interface": predicted_interface,
             }
 
-    final_prepared = prepared0 if local_outputs is None else model.core.prepare(encoded, module_state)
+    final_prepared = (
+        prepared0
+        if local_outputs is None
+        else model.core.prepare(encoded, module_state, layout_cache=layout_cache)
+    )
     decoder_output = model.core.decode_queries(
         final_prepared,
         query_xy.float(),
@@ -285,7 +293,13 @@ def forward_interface_field(
     )
     interaction_aux: Dict[str, Any] = dict(final_prepared.interaction_aux)
     interaction_aux.update(decoder_output.pop("_interaction_aux"))
-    interaction_aux["initial_port_local_neighbor_count"] = initial_read_aux["local_neighbor_count"]
+    for key, value in initial_read_aux.items():
+        if torch.is_tensor(value) and value.ndim >= 2 and value.shape[1] == physical_port_xy.shape[1] * ntheta:
+            interaction_aux[f"initial_port_{key}"] = value.reshape(
+                value.shape[0], physical_port_xy.shape[1], ntheta, *value.shape[2:]
+            )
+        else:
+            interaction_aux[f"initial_port_{key}"] = value
 
     if local_outputs is not None:
         pred_internal = local_outputs["internal_temperature"]

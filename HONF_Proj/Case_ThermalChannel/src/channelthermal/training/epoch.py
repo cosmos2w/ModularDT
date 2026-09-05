@@ -24,7 +24,21 @@ INTERFACE_DIAGNOSTIC_KEYS = (
     "interaction_main_context_norm_mean",
     "interaction_coarse_context_norm_mean",
     "interaction_local_context_norm_mean",
+    "interaction_main_context_fraction_mean",
+    "interaction_coarse_context_fraction_mean",
+    "interaction_local_context_fraction_mean",
     "interaction_total_latent_count",
+    "interaction_group_count",
+    "interaction_module_group_incidence_count",
+    "interaction_environment_group_incidence_count",
+    "interaction_group_read_degree_mean",
+    "interaction_group_read_weight_mass_mean",
+    "interaction_group_module_degree_mean",
+    "interaction_group_module_degree_max",
+    "interaction_group_environment_degree_mean",
+    "interaction_group_occupancy_mean",
+    "interaction_group_occupancy_envelope_mean",
+    "interaction_group_covered_volume_ratio_mean",
 )
 
 GRADIENT_DIAGNOSTIC_GROUPS = ("encoder", "backend", "head", "local_coupling")
@@ -429,12 +443,39 @@ def run_epoch(
                     "interaction_main_context_norm_mean": "main_context_norm",
                     "interaction_coarse_context_norm_mean": "coarse_context_norm",
                     "interaction_local_context_norm_mean": "local_context_norm",
+                    "interaction_main_context_fraction_mean": "main_context_fraction",
+                    "interaction_coarse_context_fraction_mean": "coarse_context_fraction",
+                    "interaction_local_context_fraction_mean": "local_context_fraction",
+                    "interaction_group_read_degree_mean": "group_read_degree",
+                    "interaction_group_read_weight_mass_mean": "group_read_weight_mass",
+                    "interaction_group_module_degree_mean": "group_module_degree",
+                    "interaction_group_environment_degree_mean": "group_environment_degree",
+                    "interaction_group_occupancy_mean": "group_occupancy",
+                    "interaction_group_occupancy_envelope_mean": "group_occupancy_envelope",
+                    "interaction_group_covered_volume_ratio_mean": "group_covered_volume_ratio",
                 }
                 for metric_name, aux_name in mapping.items():
                     value = interaction_aux.get(aux_name)
                     metrics[metric_name] = float(value.detach().float().mean().cpu()) if torch.is_tensor(value) else math.nan
                 metrics["interaction_total_latent_count"] = float(
                     interaction_aux.get("coarse_latent_count", 0) + interaction_aux.get("main_latent_count", 0)
+                )
+                for key in (
+                    "group_count",
+                    "module_group_incidence_count",
+                    "environment_group_incidence_count",
+                ):
+                    value = interaction_aux.get(f"{key}_per_case")
+                    metrics[f"interaction_{key}"] = (
+                        float(value.detach().float().mean().cpu())
+                        if torch.is_tensor(value) and value.numel()
+                        else math.nan
+                    )
+                group_module_degree = interaction_aux.get("group_module_degree")
+                metrics["interaction_group_module_degree_max"] = (
+                    float(group_module_degree.detach().float().max().cpu())
+                    if torch.is_tensor(group_module_degree) and group_module_degree.numel()
+                    else math.nan
                 )
             else:
                 metrics.update({key: math.nan for key in INTERFACE_DIAGNOSTIC_KEYS})

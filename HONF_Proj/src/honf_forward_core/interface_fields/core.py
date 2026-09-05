@@ -11,6 +11,7 @@ from honf_forward_core.config import BatchData, UnifiedForwardConfig
 from honf_forward_core.nn import FourierFeatures, LazyMLP
 from .common import SharedInterfaceContext
 from .dense_pairwise import DensePairwiseField
+from .group_operator import SparseInterfaceHONF, SparseLayoutCache
 from .latent_attention import GeometryLatentField
 from .types import EncodedInterfaceCase, InterfaceRead, PreparedInterfaceField
 
@@ -58,8 +59,17 @@ class InterfaceFieldCore(nn.Module):
                 heads,
                 frequencies,
             )
+        elif config.forward_architecture == "sparse_interface_honf":
+            if options.support_spacing_factor is None:
+                raise ValueError("sparse_interface_honf requires support_spacing_factor.")
+            self.backend = SparseInterfaceHONF(
+                hidden,
+                int(options.message_hidden_dim),
+                frequencies,
+                float(options.support_spacing_factor),
+            )
         else:
-            raise ValueError(f"Unsupported Stage-1 interface architecture: {config.forward_architecture!r}")
+            raise ValueError(f"Unsupported interface architecture: {config.forward_architecture!r}")
         self.receiver_chunk_size = int(options.receiver_chunk_size)
 
     def set_training_progress(self, *, epoch: int, total_epochs: Optional[int] = None) -> None:
@@ -129,8 +139,12 @@ class InterfaceFieldCore(nn.Module):
         module_states: torch.Tensor,
         layout_cache: Any = None,
     ) -> PreparedInterfaceField:
-        del layout_cache
-        backend_state = self.backend.prepare(encoded, module_states)
+        if self.config.forward_architecture == "sparse_interface_honf":
+            if not isinstance(layout_cache, SparseLayoutCache):
+                raise ValueError("sparse_interface_honf requires a SparseLayoutCache built from module ports.")
+            backend_state = self.backend.prepare(encoded, module_states, layout_cache)
+        else:
+            backend_state = self.backend.prepare(encoded, module_states)
         coarse_state = self.common.prepare_coarse(
             module_states, encoded.env_tokens, encoded.module_present, encoded.env_weights
         )
@@ -143,7 +157,27 @@ class InterfaceFieldCore(nn.Module):
                 else 0
             ),
         }
+        if self.config.forward_architecture == "sparse_interface_honf":
+            aux.update(self.backend.preparation_aux(backend_state))
         return PreparedInterfaceField(encoded, module_states, backend_state, coarse_state, aux)
+
+    def build_layout(
+        self,
+        encoded: EncodedInterfaceCase,
+        module_port_coordinates: torch.Tensor,
+        *,
+        port_quadrature_weights: torch.Tensor | None = None,
+    ) -> SparseLayoutCache | None:
+        """Build sparse case geometry once; dense/latent families need no cache."""
+
+        if self.config.forward_architecture != "sparse_interface_honf":
+            return None
+        return self.backend.build_layout(
+            encoded,
+            module_port_coordinates,
+            module_radius=float(self.config.module_radius),
+            port_quadrature_weights=port_quadrature_weights,
+        )
 
     def _receiver_features(self, prepared: PreparedInterfaceField, receivers: torch.Tensor) -> torch.Tensor:
         return self.receiver_fourier(receivers / prepared.encoded.coordinate_scale)
@@ -184,11 +218,18 @@ class InterfaceFieldCore(nn.Module):
             coarse_norms.append(torch.linalg.vector_norm(coarse, dim=-1))
             local_norms.append(torch.linalg.vector_norm(local, dim=-1))
             backend_aux_chunks.append(backend_aux)
+        main_values = torch.cat(main_norms, dim=1)
+        coarse_values = torch.cat(coarse_norms, dim=1)
+        local_values = torch.cat(local_norms, dim=1)
+        branch_total = (main_values + coarse_values + local_values).clamp_min(1.0e-12)
         aux: Dict[str, torch.Tensor] = {
             "local_neighbor_count": torch.cat(neighbour_counts, dim=1),
-            "main_context_norm": torch.cat(main_norms, dim=1),
-            "coarse_context_norm": torch.cat(coarse_norms, dim=1),
-            "local_context_norm": torch.cat(local_norms, dim=1),
+            "main_context_norm": main_values,
+            "coarse_context_norm": coarse_values,
+            "local_context_norm": local_values,
+            "main_context_fraction": main_values / branch_total,
+            "coarse_context_fraction": coarse_values / branch_total,
+            "local_context_fraction": local_values / branch_total,
         }
         if backend_aux_chunks:
             for key in backend_aux_chunks[0]:

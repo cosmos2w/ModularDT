@@ -23,6 +23,16 @@
       "stage": "sparse-interface-stage1"
     },
     {
+      "name": "sparse_interface_honf_context",
+      "path": "project://src/config_core/forward/sparse_interface_honf_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "sparse multi-entity interface HONF / cubic-support groups / shared coarse and local paths",
+      "checkpoint_families": ["Run 1802 Stage-2 candidate"],
+      "owner": "forward-research",
+      "stage": "sparse-interface-stage2"
+    },
+    {
       "name": "case_adaptive_tensor_residual_context",
       "path": "project://src/config_core/forward/case_adaptive_tensor_residual_context.json",
       "status": "candidate",
