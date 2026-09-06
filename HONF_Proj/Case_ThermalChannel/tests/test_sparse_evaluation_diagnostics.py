@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
-
 from channelthermal.evaluation.prepared import serialize_interaction_aux
 from channelthermal.workflows.compare_models import (
     interaction_metrics,
@@ -15,6 +14,8 @@ from channelthermal.workflows.compare_models import (
     plot_sparse_interface_groups,
     reconstruction_metrics,
     save_debug_npz,
+    summarize_physical_strata,
+    summarize_rows,
 )
 
 
@@ -181,6 +182,58 @@ def test_reconstruction_metrics_include_masked_physical_port_and_interface_error
     assert row["port_h_effective_provisional_physical_mae"] == pytest.approx(5.0)
     assert row["port_t_env_final_physical_num_values"] == 2.0
     assert row["port_h_effective_final_physical_num_values"] == 1.0
+    assert row["global_field_fluid_norm_sse"] == pytest.approx(20.0)
+    assert row["global_field_fluid_norm_num_values"] == pytest.approx(20.0)
+    assert row["pressure_drop_inlet_minus_outlet_physical_prediction"] == pytest.approx(0.0)
+    assert row["mean_outlet_temperature_physical_prediction"] == pytest.approx(1.0)
+    assert row["mean_active_module_temperature_physical_abs_error"] == pytest.approx(1.0)
+    assert row["module_count_stratum"] == "1"
+
+
+def test_stage3_summary_preserves_pooled_denominators_and_physical_strata() -> None:
+    rows = [
+        {
+            "model_index": 0,
+            "model_label": "candidate",
+            "global_field_fluid_norm_l2": 1.0,
+            "global_field_fluid_norm_sse": 4.0,
+            "global_field_fluid_norm_target_sse": 16.0,
+            "global_field_fluid_norm_num_values": 2.0,
+            "module_count_stratum": "3",
+            "spacing_stratum": "crowded_<1r",
+            "wall_proximity_stratum": "near_<1p5r",
+            "heating_heterogeneity_stratum": "low_cv_<0p25",
+        },
+        {
+            "model_index": 0,
+            "model_label": "candidate",
+            "global_field_fluid_norm_l2": 2.0,
+            "global_field_fluid_norm_sse": 12.0,
+            "global_field_fluid_norm_target_sse": 48.0,
+            "global_field_fluid_norm_num_values": 6.0,
+            "module_count_stratum": "3",
+            "spacing_stratum": "separated_>=2p5r",
+            "wall_proximity_stratum": "interior_>=2p5r",
+            "heating_heterogeneity_stratum": "high_cv_>=0p35",
+        },
+    ]
+    summary = summarize_rows(
+        rows,
+        "model_label",
+        [
+            "global_field_fluid_norm_l2",
+            "global_field_fluid_norm_sse",
+            "global_field_fluid_norm_target_sse",
+            "global_field_fluid_norm_num_values",
+        ],
+    )[0]
+    assert summary["global_field_fluid_pooled_mse"] == pytest.approx(2.0)
+    assert summary["global_field_fluid_pooled_relative_l2"] == pytest.approx(0.5)
+    strata = summarize_physical_strata(rows)
+    module = [row for row in strata if row["stratum_name"] == "module_count_stratum"]
+    assert len(module) == 1
+    assert module[0]["num_cases"] == 2
+    assert module[0]["global_field_fluid_norm_l2_mean"] == pytest.approx(1.5)
 
 
 def test_debug_npz_keeps_sparse_route_ids_and_port_evidence(tmp_path) -> None:

@@ -47,10 +47,9 @@ from channelthermal.workflows.evaluate_forward import (
 EPS = 1.0e-12
 PALETTE = [
     "#4477AA",
-    "#EE6677",
-    "#228833",
     "#CCBB44",
-    "#66CCEE",
+    "#EE7733",
+    "#668844",
     "#AA3377",
     "#BBBBBB",
     "#000000",
@@ -86,6 +85,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mixed-teacher-ratio", type=float, default=0.5)
     parser.add_argument("--return-routing-maps", action="store_true")
     parser.add_argument("--save-debug-npz", action="store_true")
+    parser.add_argument(
+        "--anchor-case-id",
+        action="append",
+        default=[],
+        help="Case ID to render with matched physical/routing figures; repeat as needed. Defaults to 0273 and 0653.",
+    )
     parser.add_argument("--checkpoint-load-retries", type=int, default=5, help="Retries for reading checkpoints that may be actively written.")
     parser.add_argument("--checkpoint-load-retry-delay", type=float, default=2.0, help="Seconds to wait between checkpoint read retries.")
     parser.add_argument("--allow-checkpoint-fallback", action="store_true", help="Permit substitution of another best checkpoint if the requested file is unreadable.")
@@ -369,6 +374,50 @@ def normalized_relative_l2(prediction: np.ndarray, target: np.ndarray, mask: Opt
     return float(np.linalg.norm(diff, ord=2) / max(float(np.linalg.norm(target_flat, ord=2)), EPS))
 
 
+def squared_error_components(
+    prediction: np.ndarray,
+    target: np.ndarray,
+    mask: Optional[np.ndarray] = None,
+) -> Dict[str, float]:
+    """Return raw sums and counts needed for pooled MSE/relative-L2 metrics."""
+
+    pred = np.asarray(prediction, dtype=np.float64)
+    truth = np.asarray(target, dtype=np.float64)
+    if mask is not None:
+        selected = np.asarray(mask, dtype=bool)
+        if pred.ndim == selected.ndim + 1:
+            pred = pred[selected, :]
+            truth = truth[selected, :]
+        else:
+            pred = pred[selected]
+            truth = truth[selected]
+    diff = pred.reshape(-1) - truth.reshape(-1)
+    truth_flat = truth.reshape(-1)
+    return {
+        "sse": float(np.dot(diff, diff)) if diff.size else 0.0,
+        "target_sse": float(np.dot(truth_flat, truth_flat)) if truth_flat.size else 0.0,
+        "num_values": float(diff.size),
+    }
+
+
+def record_normalized_error(
+    row: Dict[str, Any],
+    prefix: str,
+    prediction: np.ndarray,
+    target: np.ndarray,
+    mask: Optional[np.ndarray] = None,
+) -> None:
+    """Record equal-case relative L2 plus auditable pooled-error components."""
+
+    parts = squared_error_components(prediction, target, mask)
+    row[f"{prefix}_norm_l2"] = float(
+        math.sqrt(parts["sse"] / max(parts["target_sse"], EPS))
+    )
+    row[f"{prefix}_norm_sse"] = parts["sse"]
+    row[f"{prefix}_norm_target_sse"] = parts["target_sse"]
+    row[f"{prefix}_norm_num_values"] = parts["num_values"]
+
+
 def record_physical_error(
     row: Dict[str, Any],
     prefix: str,
@@ -385,8 +434,87 @@ def record_physical_error(
         pred = pred[selected]
         truth = truth[selected]
     metrics = error_metrics(pred, truth)
-    for name in ("mse", "rmse", "mae", "relative_l2", "num_values"):
+    components = squared_error_components(pred, truth)
+    metrics.update(components)
+    for name in ("sse", "target_sse", "mse", "rmse", "mae", "relative_l2", "num_values"):
         row[f"{prefix}_physical_{name}"] = float(metrics[name])
+
+
+def _record_scalar_kpi(row: Dict[str, Any], prefix: str, prediction: float, target: float) -> None:
+    error = float(prediction - target)
+    row[f"{prefix}_physical_prediction"] = float(prediction)
+    row[f"{prefix}_physical_target"] = float(target)
+    row[f"{prefix}_physical_error"] = error
+    row[f"{prefix}_physical_abs_error"] = abs(error)
+    row[f"{prefix}_physical_relative_error"] = abs(error) / max(abs(float(target)), EPS)
+
+
+def _layout_descriptors(raw_sample: Dict[str, Any], radius: float) -> Dict[str, Any]:
+    structure = raw_sample["structure"]
+    present = np.asarray(structure["module_present"], dtype=np.float64) > 0.5
+    centres = np.asarray(structure["module_centers"], dtype=np.float64)[present]
+    heat = np.asarray(
+        structure.get("heat_powers", np.ones_like(structure["module_present"])),
+        dtype=np.float64,
+    )[present]
+    module_count = int(centres.shape[0])
+    if module_count > 1:
+        distances = np.linalg.norm(centres[:, None, :] - centres[None, :, :], axis=-1)
+        np.fill_diagonal(distances, np.inf)
+        minimum_surface_gap_radii = float((np.min(distances) - 2.0 * radius) / radius)
+    else:
+        minimum_surface_gap_radii = float("nan")
+    length_x = float(
+        np.asarray(structure.get("domain_length_x", [np.max(raw_sample["x_grid"])]))
+        .reshape(-1)[0]
+    )
+    length_y = float(
+        np.asarray(structure.get("domain_length_y", [np.max(raw_sample["y_grid"])]))
+        .reshape(-1)[0]
+    )
+    wall_clearance_radii = float(
+        np.min(
+            np.stack(
+                [
+                    centres[:, 0] - radius,
+                    length_x - radius - centres[:, 0],
+                    centres[:, 1] - radius,
+                    length_y - radius - centres[:, 1],
+                ],
+                axis=-1,
+            )
+        )
+        / radius
+    )
+    heat_cv = float(np.std(heat) / max(abs(float(np.mean(heat))), EPS))
+    return {
+        "active_module_count": float(module_count),
+        "minimum_module_surface_gap_radii": minimum_surface_gap_radii,
+        "minimum_wall_clearance_radii": wall_clearance_radii,
+        "active_heat_power_cv": heat_cv,
+        "module_count_stratum": str(module_count),
+        "spacing_stratum": (
+            "crowded_<1r"
+            if minimum_surface_gap_radii < 1.0
+            else "intermediate_1r_to_2p5r"
+            if minimum_surface_gap_radii < 2.5
+            else "separated_>=2p5r"
+        ),
+        "wall_proximity_stratum": (
+            "near_<1p5r"
+            if wall_clearance_radii < 1.5
+            else "middle_1p5r_to_2p5r"
+            if wall_clearance_radii < 2.5
+            else "interior_>=2p5r"
+        ),
+        "heating_heterogeneity_stratum": (
+            "low_cv_<0p25"
+            if heat_cv < 0.25
+            else "medium_cv_0p25_to_0p35"
+            if heat_cv < 0.35
+            else "high_cv_>=0p35"
+        ),
+    }
 
 
 def _finite_values(value: Any) -> np.ndarray:
@@ -509,18 +637,42 @@ def reconstruction_metrics(
     )
     row = dict(base_row)
     row["target_space"] = target_space
-    row["global_field_fluid_norm_l2"] = normalized_relative_l2(pred_norm["field"], target_norm["field"], fluid_mask)
-    row["global_field_all_norm_l2"] = normalized_relative_l2(pred_norm["field"], target_norm["field"])
+    record_normalized_error(
+        row, "global_field_fluid", pred_norm["field"], target_norm["field"], fluid_mask
+    )
+    record_normalized_error(row, "global_field_all", pred_norm["field"], target_norm["field"])
     module_present = np.asarray(raw_sample["structure"]["module_present"], dtype=np.float32) > 0.5
     centers = np.asarray(raw_sample["structure"]["module_centers"], dtype=np.float64)[module_present]
+    radius = float(module_radius_from_sample(raw_sample))
+    row.update(_layout_descriptors(raw_sample, radius))
     if centers.size:
         points = np.stack([raw_sample["x_grid"], raw_sample["y_grid"]], axis=-1)
         distance = np.linalg.norm(points[..., None, :] - centers[None, None, :, :], axis=-1).min(axis=-1)
-        radius = float(module_radius_from_sample(raw_sample))
-        near_mask = fluid_mask & (distance <= 2.5 * radius)
-        far_mask = fluid_mask & ~near_mask
-        row["global_field_near_interface_norm_l2"] = normalized_relative_l2(pred_norm["field"], target_norm["field"], near_mask)
-        row["global_field_far_fluid_norm_l2"] = normalized_relative_l2(pred_norm["field"], target_norm["field"], far_mask)
+        surface_distance = distance - radius
+        near_mask = fluid_mask & (surface_distance >= 0.0) & (surface_distance <= 0.25)
+        far_mask = fluid_mask & (surface_distance >= 1.0)
+        local_radius_mask = fluid_mask & (distance <= 2.5 * radius)
+        outside_local_radius_mask = fluid_mask & ~local_radius_mask
+        record_normalized_error(
+            row, "global_field_near_interface", pred_norm["field"], target_norm["field"], near_mask
+        )
+        record_normalized_error(
+            row, "global_field_far_fluid", pred_norm["field"], target_norm["field"], far_mask
+        )
+        record_normalized_error(
+            row,
+            "global_field_local_radius",
+            pred_norm["field"],
+            target_norm["field"],
+            local_radius_mask,
+        )
+        record_normalized_error(
+            row,
+            "global_field_outside_local_radius",
+            pred_norm["field"],
+            target_norm["field"],
+            outside_local_radius_mask,
+        )
     else:
         row["global_field_near_interface_norm_l2"] = float("nan")
         row["global_field_far_fluid_norm_l2"] = row["global_field_fluid_norm_l2"]
@@ -532,8 +684,19 @@ def reconstruction_metrics(
     else:
         row["internal_module_cell_norm_l2"] = float("nan")
     for idx, name in enumerate(channel_order[: pred_norm["field"].shape[-1]]):
-        row[f"field_{name}_fluid_norm_l2"] = normalized_relative_l2(pred_norm["field"][..., idx], target_norm["field"][..., idx], fluid_mask)
-        row[f"field_{name}_all_norm_l2"] = normalized_relative_l2(pred_norm["field"][..., idx], target_norm["field"][..., idx])
+        record_normalized_error(
+            row,
+            f"field_{name}_fluid",
+            pred_norm["field"][..., idx],
+            target_norm["field"][..., idx],
+            fluid_mask,
+        )
+        record_normalized_error(
+            row,
+            f"field_{name}_all",
+            pred_norm["field"][..., idx],
+            target_norm["field"][..., idx],
+        )
         record_physical_error(
             row,
             f"field_{name}_fluid",
@@ -602,6 +765,34 @@ def reconstruction_metrics(
         target_ports[..., 4],
         active_ports & h_valid,
     )
+    physical_field = np.asarray(physical_predictions["pred_field_grid"], dtype=np.float64)
+    target_field = np.asarray(raw_sample["steady_field"], dtype=np.float64)
+    x_grid = np.asarray(raw_sample["x_grid"], dtype=np.float64)
+    inlet_mask = fluid_mask & np.isclose(x_grid, float(np.min(x_grid)), rtol=0.0, atol=1.0e-8)
+    outlet_mask = fluid_mask & np.isclose(x_grid, float(np.max(x_grid)), rtol=0.0, atol=1.0e-8)
+    if physical_field.shape[-1] >= 3 and np.any(inlet_mask) and np.any(outlet_mask):
+        pressure_drop_pred = float(np.mean(physical_field[..., 2][inlet_mask]) - np.mean(physical_field[..., 2][outlet_mask]))
+        pressure_drop_target = float(np.mean(target_field[..., 2][inlet_mask]) - np.mean(target_field[..., 2][outlet_mask]))
+        _record_scalar_kpi(row, "pressure_drop_inlet_minus_outlet", pressure_drop_pred, pressure_drop_target)
+        row["pressure_drop_inlet_probe_count"] = float(np.count_nonzero(inlet_mask))
+        row["pressure_drop_outlet_probe_count"] = float(np.count_nonzero(outlet_mask))
+    if physical_field.shape[-1] >= 5 and np.any(outlet_mask):
+        _record_scalar_kpi(
+            row,
+            "mean_outlet_temperature",
+            float(np.mean(physical_field[..., 4][outlet_mask])),
+            float(np.mean(target_field[..., 4][outlet_mask])),
+        )
+        row["mean_outlet_temperature_probe_count"] = float(np.count_nonzero(outlet_mask))
+    if np.any(module_present):
+        internal_prediction = np.asarray(physical_predictions["pred_internal_temperature"], dtype=np.float64)[..., 0]
+        internal_target = np.asarray(raw_sample["module_internal_temperature_points"], dtype=np.float64)
+        _record_scalar_kpi(
+            row,
+            "mean_active_module_temperature",
+            float(np.mean(internal_prediction[module_present])),
+            float(np.mean(internal_target[module_present])),
+        )
     module_rows, local_summary = per_module_metric_rows(
         base_row=base_row,
         pred=pred_norm,
@@ -889,8 +1080,98 @@ def summarize_rows(rows: Sequence[Dict[str, Any]], group_key: str, metric_names:
             summary[f"{metric}_std"] = float(np.std(values))
             summary[f"{metric}_min"] = float(np.min(values))
             summary[f"{metric}_max"] = float(np.max(values))
+        for metric in metric_names:
+            if metric.endswith("_norm_sse"):
+                prefix = metric[: -len("_norm_sse")]
+                target_key = f"{prefix}_norm_target_sse"
+                count_key = f"{prefix}_norm_num_values"
+                sse = sum(finite_float(row.get(metric)) for row in subset)
+                target_sse = sum(finite_float(row.get(target_key)) for row in subset)
+                count = sum(finite_float(row.get(count_key)) for row in subset)
+                if all(math.isfinite(value) for value in (sse, target_sse, count)) and count > 0.0:
+                    summary[f"{prefix}_pooled_mse"] = float(sse / count)
+                    summary[f"{prefix}_pooled_relative_l2"] = float(
+                        math.sqrt(sse / max(target_sse, EPS))
+                    )
+                    summary[f"{prefix}_pooled_sse"] = float(sse)
+                    summary[f"{prefix}_pooled_target_sse"] = float(target_sse)
+                    summary[f"{prefix}_pooled_num_values"] = float(count)
+            elif metric.endswith("_physical_sse"):
+                prefix = metric[: -len("_physical_sse")]
+                target_key = f"{prefix}_physical_target_sse"
+                count_key = f"{prefix}_physical_num_values"
+                sse = sum(finite_float(row.get(metric)) for row in subset)
+                target_sse = sum(finite_float(row.get(target_key)) for row in subset)
+                count = sum(finite_float(row.get(count_key)) for row in subset)
+                if all(math.isfinite(value) for value in (sse, target_sse, count)) and count > 0.0:
+                    summary[f"{prefix}_physical_pooled_mse"] = float(sse / count)
+                    summary[f"{prefix}_physical_pooled_relative_l2"] = float(
+                        math.sqrt(sse / max(target_sse, EPS))
+                    )
+                    summary[f"{prefix}_physical_pooled_sse"] = float(sse)
+                    summary[f"{prefix}_physical_pooled_target_sse"] = float(target_sse)
+                    summary[f"{prefix}_physical_pooled_num_values"] = float(count)
         out.append(summary)
     return out
+
+
+STRATUM_COLUMNS = (
+    "module_count_stratum",
+    "spacing_stratum",
+    "wall_proximity_stratum",
+    "heating_heterogeneity_stratum",
+)
+
+STRATUM_METRICS = (
+    "global_field_fluid_norm_l2",
+    "global_field_near_interface_norm_l2",
+    "global_field_far_fluid_norm_l2",
+    "field_temperature_fluid_physical_mae",
+    "port_t_env_final_physical_mae",
+    "port_h_effective_final_physical_mae",
+    "internal_temperature_physical_mae",
+    "interface_t_surface_physical_mae",
+    "interface_q_normal_physical_mae",
+    "pressure_drop_inlet_minus_outlet_physical_abs_error",
+    "mean_outlet_temperature_physical_abs_error",
+    "mean_active_module_temperature_physical_abs_error",
+)
+
+
+def summarize_physical_strata(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Aggregate the predeclared physical layout strata without error-based selection."""
+
+    output: List[Dict[str, Any]] = []
+    for column in STRATUM_COLUMNS:
+        values = sorted({str(row[column]) for row in rows if column in row})
+        for model_label in model_labels_in_order(rows):
+            for value in values:
+                subset = [
+                    row
+                    for row in rows
+                    if str(row.get("model_label")) == model_label
+                    and str(row.get(column)) == value
+                ]
+                if not subset:
+                    continue
+                record: Dict[str, Any] = {
+                    "model_label": model_label,
+                    "stratum_name": column,
+                    "stratum_value": value,
+                    "num_cases": len(subset),
+                }
+                for metric in STRATUM_METRICS:
+                    metric_values = np.asarray(
+                        [finite_float(row.get(metric)) for row in subset], dtype=np.float64
+                    )
+                    metric_values = metric_values[np.isfinite(metric_values)]
+                    if metric_values.size:
+                        record[f"{metric}_mean"] = float(np.mean(metric_values))
+                        record[f"{metric}_median"] = float(np.median(metric_values))
+                        record[f"{metric}_p95"] = float(np.quantile(metric_values, 0.95))
+                        record[f"{metric}_max"] = float(np.max(metric_values))
+                output.append(record)
+    return output
 
 
 def model_labels_in_order(rows: Sequence[Dict[str, Any]]) -> List[str]:
@@ -1585,6 +1866,7 @@ def main(argv: list[str] | None = None) -> int:
     cost_rows: List[Dict[str, Any]] = []
     manifest_rows: List[Dict[str, Any]] = []
     channel_order = list(CHANNEL_ORDER)
+    anchor_case_ids = set(args.anchor_case_id or ["0273", "0653"])
 
     model_bar = tqdm(model_specs, desc="models", unit="model")
     for spec in model_bar:
@@ -1749,7 +2031,7 @@ def main(argv: list[str] | None = None) -> int:
             per_module_rows.extend(module_rows)
             hyper_rows.append(hypergraph_metrics(base_row, raw_sample, predictions))
             interaction_rows.append(interaction_metrics(base_row, predictions))
-            if case_id in {"0273", "0653"}:
+            if case_id in anchor_case_ids:
                 architecture = str(model.config.core_honf.forward_architecture)
                 plot_anchor_physical_predictions(
                     paths["fig_interaction"]
@@ -1806,6 +2088,7 @@ def main(argv: list[str] | None = None) -> int:
             "mixed_teacher_ratio": float(args.mixed_teacher_ratio),
             "return_routing_maps": bool(args.return_routing_maps),
             "save_debug_npz": bool(args.save_debug_npz),
+            "anchor_case_ids": sorted(anchor_case_ids),
             "evaluation_cost_scope": (
                 "one synchronized predict_case call per matched case; excludes dataset I/O, "
                 "checkpoint loading, metrics, and plotting"
@@ -1815,6 +2098,27 @@ def main(argv: list[str] | None = None) -> int:
                 "dataset-native units per field/interface/port quantity; no mixed-unit "
                 "cross-channel physical aggregate"
             ),
+            "fixed_physical_probe_definitions": {
+                "pressure_drop": (
+                    "mean pressure on the 64 fixed fluid-grid coordinates at x=min(x_grid) "
+                    "minus the mean on the 64 fixed fluid-grid coordinates at x=max(x_grid); "
+                    "the difference is pressure-gauge invariant"
+                ),
+                "mean_outlet_temperature": (
+                    "mean temperature on the same 64 fixed fluid-grid coordinates at x=max(x_grid)"
+                ),
+                "module_temperature_kpi": (
+                    "mean predicted internal temperature over every sampled internal cell of every "
+                    "active module; stable within a fixed case, not an identity-matched KPI across "
+                    "different module counts"
+                ),
+            },
+            "physical_stratum_definitions": {
+                "module_count": "exact active count in {3,5,7,10}",
+                "spacing": "minimum module-surface gap divided by radius: <1, 1-2.5, >=2.5",
+                "wall_proximity": "minimum module-surface wall clearance divided by radius: <1.5, 1.5-2.5, >=2.5",
+                "heating_heterogeneity": "active-module heat-power coefficient of variation: <0.25, 0.25-0.35, >=0.35",
+            },
             "num_models": len(model_specs),
             "num_cases": len(case_indices),
         },
@@ -1868,6 +2172,7 @@ def main(argv: list[str] | None = None) -> int:
         interaction_rows, "model_label", interaction_metrics_to_summarize
     )
     cost_summary_rows = summarize_rows(cost_rows, "model_label", cost_metrics_to_summarize)
+    stratum_summary_rows = summarize_physical_strata(per_case_rows)
 
     write_csv(paths["tables"] / "per_case_metrics.csv", per_case_rows)
     write_csv(paths["tables"] / "per_module_metrics.csv", per_module_rows)
@@ -1878,6 +2183,7 @@ def main(argv: list[str] | None = None) -> int:
     write_csv(paths["tables"] / "interaction_summary_metrics.csv", interaction_summary_rows)
     write_csv(paths["tables"] / "evaluation_cost_case_metrics.csv", cost_rows)
     write_csv(paths["tables"] / "evaluation_cost_summary_metrics.csv", cost_summary_rows)
+    write_csv(paths["tables"] / "physical_stratum_metrics.csv", stratum_summary_rows)
     save_figures(
         paths,
         per_case_rows,
