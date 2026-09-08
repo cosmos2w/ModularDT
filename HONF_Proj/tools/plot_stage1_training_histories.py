@@ -121,6 +121,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Output path for the optional accuracy-cost figure.",
     )
+    parser.add_argument(
+        "--accuracy-cost-inference-axis-label",
+        default="mean evaluation wall time per case (s)",
+        help="Optional x-axis label for the inference-cost panel.",
+    )
     return parser.parse_args()
 
 
@@ -306,10 +311,11 @@ def _load_training_costs(
                 epoch = _finite_float(metric_row, "epoch")
                 if epoch is not None and epoch > max_epoch:
                     continue
-                value = _finite_float(metric_row, "train_wall_seconds")
-                if value is not None and value >= 0.0:
-                    total += value
-                    seen = True
+                for wall_key in ("train_wall_seconds", "val_wall_seconds"):
+                    value = _finite_float(metric_row, wall_key)
+                    if value is not None and value >= 0.0:
+                        total += value
+                        seen = True
         if seen and total > 0.0:
             costs[label] = total
     return costs
@@ -367,8 +373,8 @@ def plot_accuracy_cost(
         (
             axes[1],
             "training",
-            f"Measured training cost through epoch {max_epoch}",
-            f"cumulative training wall time through epoch {max_epoch} (s)",
+            f"Measured train + validation cost through epoch {max_epoch}",
+            f"cumulative train + validation wall time through epoch {max_epoch} (s)",
         ),
     )
     accuracy_label = (
@@ -412,7 +418,7 @@ def plot_accuracy_cost(
     fig.text(
         0.5,
         0.045,
-        f"Accuracy: {accuracy_label}; lower is better. Costs are measured through epoch {max_epoch} and use separate sources.",
+        f"Accuracy: {accuracy_label}; lower is better. Costs are measured through epoch {max_epoch}; training sums train + validation wall time.",
         ha="center",
         va="bottom",
         fontsize=8,
@@ -772,6 +778,7 @@ def main() -> int:
             args.accuracy_cost_metric,
             args.max_epoch,
             args.accuracy_cost_output_figure,
+            inference_axis_label=args.accuracy_cost_inference_axis_label,
         )
     return 0
 

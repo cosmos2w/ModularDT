@@ -150,6 +150,82 @@ def measure(
     }
 
 
+_OUTPUT_AGREEMENT_KEYS = (
+    ("pred_field", "field"),
+    ("pred_port_condition", "port"),
+    ("pred_interface", "interface"),
+    ("pred_internal_temperature", "internal"),
+)
+
+
+def _output_agreement(
+    reference: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    rtol: float,
+    atol: float,
+) -> dict[str, Any]:
+    """Compare public checkpoint outputs without retaining diagnostic maps."""
+
+    agreement: dict[str, Any] = {}
+    for key, label in _OUTPUT_AGREEMENT_KEYS:
+        reference_value = reference.get(key)
+        candidate_value = candidate.get(key)
+        entry: dict[str, Any] = {
+            "rtol": float(rtol),
+            "atol": float(atol),
+            "available": False,
+            "allclose": None,
+            "max_abs": None,
+        }
+        if not torch.is_tensor(reference_value) or not torch.is_tensor(candidate_value):
+            agreement[label] = entry
+            continue
+        entry["available"] = True
+        entry["reference_shape"] = list(reference_value.shape)
+        entry["candidate_shape"] = list(candidate_value.shape)
+        if reference_value.shape != candidate_value.shape:
+            entry["allclose"] = False
+            agreement[label] = entry
+            continue
+        reference_cpu = reference_value.detach().float().cpu()
+        candidate_cpu = candidate_value.detach().float().cpu()
+        difference = (candidate_cpu - reference_cpu).abs()
+        entry["max_abs"] = float(difference.max().cpu()) if difference.numel() else 0.0
+        reference_norm = torch.linalg.vector_norm(reference_cpu)
+        entry["relative_l2"] = float(
+            (torch.linalg.vector_norm(difference) / reference_norm.clamp_min(1.0e-12)).cpu()
+        )
+        entry["allclose"] = bool(
+            torch.allclose(
+                reference_cpu,
+                candidate_cpu,
+                rtol=float(rtol),
+                atol=float(atol),
+            )
+        )
+        agreement[label] = entry
+    return agreement
+
+
+def _public_output_snapshot(outputs: dict[str, Any]) -> dict[str, torch.Tensor]:
+    """Retain only public output tensors on CPU for numerical comparisons."""
+
+    return {
+        key: outputs[key].detach().cpu()
+        for key, _ in _OUTPUT_AGREEMENT_KEYS
+        if torch.is_tensor(outputs.get(key))
+    }
+
+
+def _agreement_tolerances(routing_mode: str, receiver_chunk_size: int) -> tuple[float, float]:
+    """Use strict map-only tolerance when the execution chunk is unchanged."""
+
+    if routing_mode == "detailed" and int(receiver_chunk_size) == 128:
+        return 2.0e-6, 2.0e-7
+    return 2.0e-5, 2.0e-6
+
+
 def _checkpoint_labels(checkpoints: list[Path], labels: list[str]) -> list[str]:
     """Resolve explicit labels while preserving the historical one-checkpoint CLI."""
 
@@ -470,6 +546,20 @@ def main() -> int:
                     "mixed_teacher_ratio": 0.0,
                 }
 
+                # Keep one untimed chunk-128 summary output as the numerical
+                # reference.  Each measured full-forward mode below gets one
+                # corresponding untimed output comparison; timing calls remain
+                # unchanged and never retain the comparison tensors.
+                with torch.inference_mode(), _runtime_receiver_chunk_size(model, 128):
+                    agreement_reference_output = model(
+                        batch["structure"],
+                        batch["query_xy"],
+                        return_routing_maps=False,
+                        **forward_kwargs,
+                    )
+                agreement_reference = _public_output_snapshot(agreement_reference_output)
+                del agreement_reference_output
+
                 for routing_mode in routing_modes:
                     request_routing_maps = routing_mode == "detailed"
                     for receiver_chunk_size in receiver_chunk_sizes:
@@ -504,6 +594,25 @@ def main() -> int:
                                     **forward_kwargs,
                                 )
 
+                        effective_receiver_chunk_size = (
+                            int(model.core.receiver_chunk_size)
+                            if receiver_chunk_size is None
+                            else int(receiver_chunk_size)
+                        )
+                        with torch.inference_mode():
+                            agreement_candidate = configured_full_forward()
+                        agreement_rtol, agreement_atol = _agreement_tolerances(
+                            routing_mode,
+                            effective_receiver_chunk_size,
+                        )
+                        output_agreement = _output_agreement(
+                            agreement_reference,
+                            agreement_candidate,
+                            rtol=agreement_rtol,
+                            atol=agreement_atol,
+                        )
+                        del agreement_candidate
+
                         phase_specs = (
                             ("full_forward", int(query_xy.shape[0]), configured_full_forward),
                             ("physical_preparation_plus_one_query", 1, configured_prepare_with_one_query),
@@ -514,6 +623,11 @@ def main() -> int:
                                 device,
                                 warmups=int(args.warmups),
                                 repetitions=int(args.repetitions),
+                            )
+                            agreement_fields = (
+                                {"output_agreement": output_agreement}
+                                if phase == "full_forward"
+                                else {}
                             )
                             rows.append(
                                 {
@@ -530,6 +644,7 @@ def main() -> int:
                                     ),
                                     "routing_mode": routing_mode,
                                     "status": "ok",
+                                    **agreement_fields,
                                     **result,
                                 }
                             )
@@ -606,6 +721,7 @@ def main() -> int:
                             }
                         )
                 del prepared, batch
+                del agreement_reference
 
             if args.training_step:
                 training_result = _training_step_measurement(
@@ -648,6 +764,15 @@ def main() -> int:
             "configured" if value is None else int(value) for value in receiver_chunk_sizes
         ],
         "routing_modes": routing_modes,
+        "output_agreement": {
+            "reference": "untimed full_forward with receiver_chunk_size=128 and routing_mode=summary",
+            "keys": [label for _, label in _OUTPUT_AGREEMENT_KEYS],
+            "metrics": ["max_abs", "relative_l2", "allclose"],
+            "tolerances": {
+                "chunk_change_or_summary": {"rtol": 2.0e-5, "atol": 2.0e-6},
+                "same_chunk_detailed": {"rtol": 2.0e-6, "atol": 2.0e-7},
+            },
+        },
         "training_step_requested": bool(args.training_step),
         "synchronized": True,
         "scope": (

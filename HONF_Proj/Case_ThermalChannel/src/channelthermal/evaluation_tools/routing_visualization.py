@@ -432,11 +432,11 @@ def plot_reader_anchor_npz_maps(
         notes.extend(f"{model_label}/{case_id}: {note}" for note in artifact_notes)
 
     columns = (
-        ("G", "geometric availability G", "viridis", False),
-        ("mass", "read mass", "magma", True),
-        ("conditional", "maximum conditional/read weight", "plasma", True),
-        ("main", "main context norm", "cividis", False),
-        ("temperature", "physical fluid temperature absolute error", "inferno", False),
+        ("G", "G", "viridis", False),
+        ("mass", "read mass", "viridis", False),
+        ("conditional", "max pi", "plasma", False),
+        ("main", "group context norm", "cividis", False),
+        ("temperature", "|temperature error|", "inferno", False),
     )
     norms: dict[str, Normalize | LogNorm | None] = {}
     for name, _, _, logarithmic in columns:
@@ -460,15 +460,41 @@ def plot_reader_anchor_npz_maps(
             upper = max(float(np.max(finite)), lower + 1.0e-8)
             norms[name] = Normalize(vmin=lower, vmax=upper)
 
+    # G and the candidate read mass are the same weighted geometric quantity
+    # for this endpoint.  Reuse one linear norm so the two panels remain
+    # directly comparable if their floating-point reductions differ slightly.
+    geometric_mass_values = np.concatenate(
+        [
+            values[np.isfinite(values)]
+            for item in loaded
+            for values in (item["maps"]["G"], item["maps"]["mass"])
+            if values is not None and np.isfinite(values).any()
+        ]
+    ) if any(
+        item["maps"][name] is not None and np.isfinite(item["maps"][name]).any()
+        for item in loaded
+        for name in ("G", "mass")
+    ) else np.asarray([])
+    if geometric_mass_values.size:
+        shared_geometric_norm = Normalize(vmin=0.0, vmax=max(float(np.max(geometric_mass_values)), 1.0e-8))
+        norms["G"] = shared_geometric_norm
+        norms["mass"] = shared_geometric_norm
+
     row_count = len(loaded)
-    fig, axes = plt.subplots(
-        row_count,
+    fig = plt.figure(figsize=(4.0 * len(columns), 3.35 * row_count + 0.9), constrained_layout=False)
+    grid = fig.add_gridspec(
+        row_count + 1,
         len(columns),
-        figsize=(4.1 * len(columns), 3.7 * row_count),
-        squeeze=False,
-        constrained_layout=False,
+        height_ratios=[1.0] * row_count + [0.11],
+        hspace=0.42,
+        wspace=0.27,
     )
-    fig.subplots_adjust(left=0.16, right=0.96, bottom=0.16, top=0.88, wspace=0.28, hspace=0.36)
+    axes = np.empty((row_count, len(columns)), dtype=object)
+    for row_index in range(row_count):
+        for column_index in range(len(columns)):
+            axes[row_index, column_index] = fig.add_subplot(grid[row_index, column_index])
+    colorbar_axes = [fig.add_subplot(grid[row_count, column_index]) for column_index in range(len(columns))]
+    fig.subplots_adjust(left=0.14, right=0.98, bottom=0.16, top=0.88)
     conditional_fallback = any("conditional pi reconstructed" in note for note in notes)
     images: dict[str, Any] = {}
     for row_index, item in enumerate(loaded):
@@ -505,12 +531,20 @@ def plot_reader_anchor_npz_maps(
     for column_index, (name, label, cmap, _) in enumerate(columns):
         norm = norms[name]
         image = images.get(name)
+        colorbar_axis = colorbar_axes[column_index]
         if image is not None and norm is not None:
-            fig.colorbar(image, ax=axes[:, column_index].tolist(), label=label, fraction=0.03, pad=0.02)
-    note = "Shared column scales across saved anchors/models; maps are debug-NPZ reads only."
+            colorbar = fig.colorbar(image, cax=colorbar_axis, orientation="horizontal")
+            colorbar.set_label(label, fontsize=8, labelpad=2)
+            colorbar.ax.tick_params(labelsize=7, pad=1)
+        else:
+            colorbar_axis.set_visible(False)
+    note = (
+        "Shared column scales; maps are diagnostic identity views, not evidence of useful coupling. "
+        "|temperature error| is evaluated only on saved fluid-mask cells."
+    )
     if conditional_fallback:
         note += " Conditional column reconstructs pi from positive normalized weights; all-zero rows are unavailable."
-    fig.suptitle("Saved reader maps on matched anchors", fontsize=13)
+    fig.suptitle("Reader maps on matched anchors", fontsize=13)
     fig.text(0.5, 0.035, note, ha="center", va="bottom", fontsize=8, color="#555555")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(str(output_path), dpi=180)
