@@ -112,6 +112,43 @@ def test_interface_fields_are_finite_chunk_independent_and_coordinate_differenti
 @pytest.mark.parametrize(
     "architecture", ["dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf"]
 )
+def test_routing_maps_are_opt_in_and_inference_chunk_override_preserves_outputs(architecture: str) -> None:
+    model = _model(architecture)
+    inputs = _inputs()
+    with torch.no_grad():
+        summary_output = model(**inputs, return_prepared_state=True, return_routing_maps=False)
+
+    routing_key = {
+        "dense_pairwise_field": "dense_environment_attention",
+        "geometry_latent_field": "latent_query_attention",
+        "sparse_interface_honf": "group_read_group_index",
+    }[architecture]
+    assert routing_key not in summary_output["routing_aux"]
+    assert not any(routing_key in key for key in summary_output["interaction_aux"])
+    prepared = summary_output["prepared_state"]
+    if architecture == "geometry_latent_field":
+        assert "module_attention" not in prepared.prepared.backend_state
+        assert "environment_attention" not in prepared.prepared.backend_state
+
+    with torch.no_grad():
+        configured = model.decode_prepared(prepared, inputs["query_xy"])
+        large_chunk = model.decode_prepared(
+            prepared,
+            inputs["query_xy"],
+            receiver_chunk_size=2048,
+        )
+    assert model.core.receiver_chunk_size == 3
+    torch.testing.assert_close(
+        configured["pred_field"],
+        large_chunk["pred_field"],
+        rtol=2.0e-5,
+        atol=2.0e-6,
+    )
+
+
+@pytest.mark.parametrize(
+    "architecture", ["dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf"]
+)
 def test_interface_fields_preserve_joint_module_permutation(architecture: str) -> None:
     model = _model(architecture)
     inputs = _inputs()

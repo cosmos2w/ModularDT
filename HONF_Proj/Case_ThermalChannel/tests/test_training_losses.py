@@ -9,6 +9,26 @@ from channelthermal.training_tools.losses import (
 )
 
 
+def test_group_gradient_diagnostics_separate_bypasses_without_double_counting_total() -> None:
+    from channelthermal.training.epoch import _fp64_group_norm
+
+    values = [
+        ("core.backend.module_message.weight", torch.tensor([3.0])),
+        ("core.backend.receiver_query.weight", torch.tensor([4.0])),
+        ("core.common.coarse_query.weight", torch.tensor([12.0])),
+        ("core.common.local_message.weight", torch.tensor([0.0])),
+        ("core.common.field_head.weight", torch.tensor([5.0])),
+    ]
+    total, groups = _fp64_group_norm(values)
+    assert groups["backend"] == pytest.approx(13.0)
+    assert groups["group_prepare"] == pytest.approx(3.0)
+    assert groups["group_receiver"] == pytest.approx(4.0)
+    assert groups["coarse"] == pytest.approx(12.0)
+    assert groups["local"] == 0.0
+    assert groups["head"] == pytest.approx(5.0)
+    assert total == pytest.approx(194.0 ** 0.5)
+
+
 def test_channelthermal_temperature_weight_follows_field_name_not_index() -> None:
     field_names = ["temperature", "u", "v", "p", "omega"]
     pred = torch.zeros(1, 1, len(field_names))

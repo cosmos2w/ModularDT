@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -21,6 +22,32 @@ class PreparedInterfaceChannelThermalCase:
 
     architecture: str
     prepared: PreparedInterfaceField
+
+
+@contextmanager
+def _interface_read_role(model: Any, role: str):
+    """Annotate one physical read for diagnostic hooks.
+
+    The marker is temporary so historical ``core.read`` and
+    ``core.decode_queries`` callers keep their existing signatures.  A
+    backend hook may inspect ``model.core._interface_read_role`` while the
+    read is executing; ordinary model execution ignores it.
+    """
+
+    core = model.core
+    marker = "_interface_read_role"
+    previous = getattr(core, marker, None)
+    setattr(core, marker, str(role))
+    try:
+        yield
+    finally:
+        if previous is None:
+            try:
+                delattr(core, marker)
+            except AttributeError:
+                pass
+        else:
+            setattr(core, marker, previous)
 
 
 def _port_coordinates(model: Any, module_centers: torch.Tensor, ntheta: int) -> torch.Tensor:
@@ -43,23 +70,42 @@ def _outside_coordinates(model: Any, port_tokens: torch.Tensor, module_centers: 
     )
 
 
-def _decode_temperature(model: Any, prepared: PreparedInterfaceField, coordinates: torch.Tensor) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+def _decode_temperature(
+    model: Any,
+    prepared: PreparedInterfaceField,
+    coordinates: torch.Tensor,
+    *,
+    read_role: str = "p1_refinement",
+    return_routing_maps: bool = False,
+) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     batch = int(coordinates.shape[0])
     leading = coordinates.shape[1:-1]
     flat = coordinates.reshape(batch, -1, coordinates.shape[-1])
-    decoded = model.core.decode_queries(
-        prepared,
-        flat,
-        query_features=model._query_features(flat),
-        return_routing_maps=True,
-    )
+    with _interface_read_role(model, read_role):
+        decoded = model.core.decode_queries(
+            prepared,
+            flat,
+            query_features=model._query_features(flat),
+            return_routing_maps=bool(return_routing_maps),
+        )
     temperature = model._temperature_from_field_output(decoded["pred_field"]).reshape(batch, *leading)
     return temperature, decoded
 
 
-def _read_port_context(model: Any, prepared: PreparedInterfaceField, port_xy: torch.Tensor) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+def _read_port_context(
+    model: Any,
+    prepared: PreparedInterfaceField,
+    port_xy: torch.Tensor,
+    *,
+    return_routing_maps: bool = False,
+) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     batch, modules, ports, dimension = port_xy.shape
-    read = model.core.read(prepared, port_xy.reshape(batch, modules * ports, dimension))
+    with _interface_read_role(model, "p0_port"):
+        read = model.core.read(
+            prepared,
+            port_xy.reshape(batch, modules * ports, dimension),
+            return_routing_maps=bool(return_routing_maps),
+        )
     return read.context.reshape(batch, modules, ports, -1), read.interaction_aux
 
 
@@ -161,7 +207,12 @@ def forward_interface_field(
     layout_cache = model.core.build_layout(encoded, physical_port_xy)
     base_module_state = encoded.module_tokens
     prepared0 = model.core.prepare(encoded, base_module_state, layout_cache=layout_cache)
-    initial_port_context, initial_read_aux = _read_port_context(model, prepared0, physical_port_xy)
+    initial_port_context, initial_read_aux = _read_port_context(
+        model,
+        prepared0,
+        physical_port_xy,
+        return_routing_maps=bool(return_routing_maps),
+    )
     pred_port_tokens = model.local_coupling.port_head(
         base_module_state,
         initial_port_context,
@@ -180,6 +231,7 @@ def forward_interface_field(
     interface_diagnostics: Dict[str, torch.Tensor] = {}
     predicted_port_diagnostics: Dict[str, torch.Tensor] = {}
     prepared1 = None
+    provisional_read_aux: Dict[str, torch.Tensor] = {}
     if use_local_outputs:
         if local_module_params is None:
             local_module_params = build_local_module_params_from_global(
@@ -221,9 +273,18 @@ def forward_interface_field(
             str(local_port_condition_mode).lower() != "teacher" or teacher_port_tokens is None
         ):
             prepared1 = model.core.prepare(encoded, module_state, layout_cache=layout_cache)
-            outside_temperature, _ = _decode_temperature(
-                model, prepared1, _outside_coordinates(model, local_ports_used, adapter.module_centers)
+            outside_temperature, provisional_decode = _decode_temperature(
+                model,
+                prepared1,
+                _outside_coordinates(model, local_ports_used, adapter.module_centers),
+                read_role="p1_refinement",
+                return_routing_maps=bool(return_routing_maps),
             )
+            provisional_read_aux = {
+                key: value
+                for key, value in provisional_decode.items()
+                if key != "pred_field" and torch.is_tensor(value)
+            }
             refined_ports = model.local_coupling.port_refinement_head(
                 module_state,
                 local_ports_used,
@@ -284,13 +345,14 @@ def forward_interface_field(
         if local_outputs is None
         else model.core.prepare(encoded, module_state, layout_cache=layout_cache)
     )
-    decoder_output = model.core.decode_queries(
-        final_prepared,
-        query_xy.float(),
-        query_features=model._query_features(query_xy.float()),
-        return_routing_maps=return_routing_maps,
-        return_interaction_aux=True,
-    )
+    with _interface_read_role(model, "p2_field"):
+        decoder_output = model.core.decode_queries(
+            final_prepared,
+            query_xy.float(),
+            query_features=model._query_features(query_xy.float()),
+            return_routing_maps=return_routing_maps,
+            return_interaction_aux=True,
+        )
     interaction_aux: Dict[str, Any] = dict(final_prepared.interaction_aux)
     interaction_aux.update(decoder_output.pop("_interaction_aux"))
     for key, value in initial_read_aux.items():
@@ -315,7 +377,11 @@ def forward_interface_field(
         indices = model._port_subset_indices(ntheta, device)
         selected = final_pred_port_tokens.index_select(-2, indices)
         temperature, consistency_diag = _decode_temperature(
-            model, final_prepared, _outside_coordinates(model, selected, adapter.module_centers)
+            model,
+            final_prepared,
+            _outside_coordinates(model, selected, adapter.module_centers),
+            read_role="p2_port_global_consistency",
+            return_routing_maps=bool(return_routing_maps),
         )
         target_temperature = selected[..., 3]
         consistency_mask = adapter.module_present[:, :, None].expand_as(temperature)
@@ -348,6 +414,7 @@ def forward_interface_field(
     if return_organizer_passes:
         result["provisional_organizer_aux"] = {}
         result["provisional_interaction_aux"] = {} if prepared1 is None else prepared1.interaction_aux
+        result["provisional_read_aux"] = provisional_read_aux
     result.update(interface_diagnostics)
     result.update(predicted_port_diagnostics)
     if consistency_diag:

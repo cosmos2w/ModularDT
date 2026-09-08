@@ -8,8 +8,13 @@ from itertools import product
 
 import torch
 
-from honf_forward_core.interface_fields.group_operator import SparseInterfaceHONF
+from honf_forward_core.interface_fields.group_operator import (
+    SparseGroupState,
+    SparseInterfaceHONF,
+    SparseLayoutCache,
+)
 from honf_forward_core.interface_fields.supports import (
+    SparseSupportLayout,
     build_sparse_support_layout,
     cubic_bspline,
     lookup_sparse_supports,
@@ -104,7 +109,9 @@ def _receiver_matrix(layout: object, receivers: torch.Tensor) -> tuple[torch.Ten
     return matrix.reshape(receivers.shape[0], receivers.shape[1], layout.num_groups), lookup.degree
 
 
-def _learned_operator_case() -> tuple[
+def _learned_operator_case(
+    *, group_read_mode: str = "null_softmax"
+) -> tuple[
     SparseInterfaceHONF,
     EncodedInterfaceCase,
     torch.Tensor,
@@ -135,6 +142,7 @@ def _learned_operator_case() -> tuple[
         message_hidden_dim=12,
         fourier_frequencies=2,
         support_spacing_factor=1.0,
+        group_read_mode=group_read_mode,
     ).double().eval()
     module_states = torch.randn((1, 2, hidden_dim), dtype=torch.float64, requires_grad=True)
     receivers = torch.tensor(
@@ -586,6 +594,28 @@ def test_environment_quadrature_duplication_and_receiver_chunking_are_invariant(
     torch.testing.assert_close(whole, dense_receiver)
 
 
+def test_layout_scoped_support_search_matches_uncached_exact_lookup() -> None:
+    ports, present, port_weights, environment, environment_weights = _geometry()
+    layout = build_sparse_support_layout(
+        ports,
+        present,
+        environment,
+        environment_weights,
+        spacing=1.0,
+        port_quadrature_weights=port_weights,
+    )
+    assert layout.support_search is not None
+    receivers = torch.tensor(
+        [[[-20.0, -20.0], [-0.25, 0.05], [0.10, 0.20], [2.30, 1.20], [20.0, 20.0]]],
+        dtype=ports.dtype,
+    )
+    cached = lookup_sparse_supports(layout, receivers)
+    uncached = lookup_sparse_supports(replace(layout, support_search=None), receivers)
+    torch.testing.assert_close(cached.receiver_group_indices, uncached.receiver_group_indices)
+    torch.testing.assert_close(cached.support_weight, uncached.support_weight)
+    torch.testing.assert_close(cached.degree, uncached.degree)
+
+
 def test_support_transition_is_smooth_and_matches_directional_finite_difference() -> None:
     environment = torch.tensor([[[-1.5], [-0.5], [0.5], [1.5]]], dtype=torch.float64)
     environment_weights = torch.full((1, 4), 0.5, dtype=torch.float64)
@@ -620,3 +650,312 @@ def test_support_transition_is_smooth_and_matches_directional_finite_difference(
         torch.tensor(analytic), torch.tensor(finite_difference), rtol=2.0e-5, atol=2.0e-6
     )
     assert abs(centre_value) < 1.0e-14
+
+
+def _geometry_envelope_reference_read(
+    operator: SparseInterfaceHONF,
+    state: object,
+    encoded: EncodedInterfaceCase,
+    receivers: torch.Tensor,
+    receiver_features: torch.Tensor,
+    *,
+    logit_shift: float = 0.0,
+) -> torch.Tensor:
+    """Tiny dense oracle for the conditional geometry-envelope formula."""
+
+    layout = state.cache.layout
+    lookup = lookup_sparse_supports(layout, receivers)
+    flat_count = int(receivers.shape[0] * receivers.shape[1])
+    query = operator.receiver_query(
+        torch.cat(
+            [
+                receiver_features,
+                encoded.global_token[:, None, :].expand(-1, receivers.shape[1], -1),
+            ],
+            dim=-1,
+        )
+    ).reshape(flat_count, operator.hidden_dim)
+    receiver_index, group_index = lookup.receiver_group_indices
+    relative = (
+        receivers.reshape(flat_count, layout.spatial_dim)[receiver_index]
+        - layout.centres[group_index]
+    ) / layout.spacing
+    logits = (
+        (query[receiver_index] * state.group_keys[group_index]).sum(dim=-1)
+        / math.sqrt(float(operator.hidden_dim))
+        + operator.receiver_bias(operator.relative_fourier(relative)).squeeze(-1)
+        + float(logit_shift)
+    )
+    geometric = layout.occupancy_envelope[group_index] * lookup.geometric_weight
+    contexts = []
+    for receiver in range(flat_count):
+        rows = receiver_index == receiver
+        if not bool(rows.any()):
+            contexts.append(state.group_values.new_zeros(operator.hidden_dim))
+            continue
+        weights = geometric[rows]
+        conditional = torch.softmax(torch.log(weights) + logits[rows], dim=0)
+        availability = weights.sum()
+        contexts.append(
+            availability * (conditional[:, None] * state.group_values[group_index[rows]]).sum(dim=0)
+        )
+    return torch.stack(contexts, dim=0).reshape(
+        receivers.shape[0], receivers.shape[1], operator.hidden_dim
+    )
+
+
+def test_geometry_envelope_reader_matches_dense_formula_and_preserves_available_mass() -> None:
+    operator, encoded, ports, port_weights, module_states, receivers = _learned_operator_case(
+        group_read_mode="geometry_envelope_attention"
+    )
+    cache = operator.build_layout(
+        encoded,
+        ports,
+        module_radius=1.0,
+        port_quadrature_weights=port_weights,
+    )
+    state = operator.prepare(encoded, module_states, cache)
+    receiver_features = _receiver_features(receivers)
+    context, aux = operator.read(
+        state,
+        encoded,
+        receivers,
+        receiver_features,
+        return_routing_maps=True,
+    )
+    expected = _geometry_envelope_reference_read(
+        operator, state, encoded, receivers, receiver_features
+    )
+    torch.testing.assert_close(context, expected, rtol=2.0e-11, atol=2.0e-12)
+    weights = aux["group_read_normalized_weight"]
+    availability = aux["group_read_geometric_availability"]
+    torch.testing.assert_close(weights.sum(dim=-1), availability, rtol=2.0e-11, atol=2.0e-12)
+    torch.testing.assert_close(aux["group_read_weight_mass"], availability)
+    torch.testing.assert_close(aux["group_read_null_weight_mass"], torch.zeros_like(availability))
+    assert torch.isfinite(context).all()
+
+
+def test_geometry_envelope_reader_is_invariant_to_common_logit_shift() -> None:
+    operator, encoded, ports, port_weights, module_states, receivers = _learned_operator_case(
+        group_read_mode="geometry_envelope_attention"
+    )
+    cache = operator.build_layout(
+        encoded,
+        ports,
+        module_radius=1.0,
+        port_quadrature_weights=port_weights,
+    )
+    state = operator.prepare(encoded, module_states, cache)
+    receiver_features = _receiver_features(receivers)
+    original = _geometry_envelope_reference_read(
+        operator, state, encoded, receivers, receiver_features
+    )
+    shifted = _geometry_envelope_reference_read(
+        operator,
+        state,
+        encoded,
+        receivers,
+        receiver_features,
+        logit_shift=-60.0,
+    )
+    torch.testing.assert_close(original, shifted, rtol=2.0e-12, atol=2.0e-12)
+
+
+def test_geometry_envelope_reader_returns_zero_for_unsupported_receivers_and_has_finite_boundary_gradients() -> None:
+    operator, encoded, ports, port_weights, module_states, receivers = _learned_operator_case(
+        group_read_mode="geometry_envelope_attention"
+    )
+    cache = operator.build_layout(
+        encoded,
+        ports,
+        module_radius=1.0,
+        port_quadrature_weights=port_weights,
+    )
+    state = operator.prepare(encoded, module_states, cache)
+    boundary = cache.layout.centres[:1].detach() + torch.tensor(
+        [[2.0, 0.0]], dtype=receivers.dtype
+    ) * cache.layout.spacing
+    query = torch.cat(
+        [boundary.reshape(1, 1, 2), torch.tensor([[[100.0, 100.0]]], dtype=receivers.dtype)],
+        dim=1,
+    ).requires_grad_(True)
+    context, aux = operator.read(
+        state,
+        encoded,
+        query,
+        _receiver_features(query),
+        return_routing_maps=False,
+    )
+    assert torch.equal(context[:, 1], torch.zeros_like(context[:, 1]))
+    assert torch.equal(aux["group_read_geometric_availability"][:, 1], torch.zeros_like(aux["group_read_geometric_availability"][:, 1]))
+    gradient = torch.autograd.grad(context[:, 0].sum(), query)[0]
+    assert torch.isfinite(gradient).all()
+
+
+def test_geometry_envelope_reader_is_mixed_batch_and_chunk_safe() -> None:
+    operator, encoded, ports, port_weights, module_states, receivers = _learned_operator_case(
+        group_read_mode="geometry_envelope_attention"
+    )
+    shift = torch.tensor([3.0, 2.0], dtype=encoded.module_centers.dtype)
+    batched_encoded = replace(
+        encoded,
+        module_tokens=encoded.module_tokens.repeat(2, 1, 1),
+        env_tokens=encoded.env_tokens.repeat(2, 1, 1),
+        global_token=encoded.global_token.repeat(2, 1),
+        module_centers=torch.cat([encoded.module_centers, encoded.module_centers + shift], dim=0),
+        env_coords=torch.cat([encoded.env_coords, encoded.env_coords + shift], dim=0),
+        module_present=encoded.module_present.repeat(2, 1),
+        module_features=encoded.module_features.repeat(2, 1, 1),
+        env_weights=encoded.env_weights.repeat(2, 1),
+        coordinate_scale=encoded.coordinate_scale.repeat(2, 1, 1),
+    )
+    batched_ports = torch.cat([ports, ports + shift], dim=0)
+    batched_weights = port_weights.repeat(2, 1, 1)
+    batched_states = module_states.detach().repeat(2, 1, 1).requires_grad_(True)
+    batched_receivers = torch.cat([receivers, receivers + shift], dim=0)
+    cache = operator.build_layout(
+        batched_encoded,
+        batched_ports,
+        module_radius=1.0,
+        port_quadrature_weights=batched_weights,
+    )
+    state = operator.prepare(batched_encoded, batched_states, cache)
+    context, aux = operator.read(
+        state,
+        batched_encoded,
+        batched_receivers,
+        _receiver_features(batched_receivers),
+        return_routing_maps=True,
+    )
+    assert context.shape == (2, receivers.shape[1], operator.hidden_dim)
+    assert aux["group_read_geometric_availability"].shape == (2, receivers.shape[1])
+    torch.testing.assert_close(
+        aux["group_read_normalized_weight"].sum(dim=-1),
+        aux["group_read_geometric_availability"],
+        rtol=2.0e-11,
+        atol=2.0e-12,
+    )
+    gradient = torch.autograd.grad(context.sum(), batched_states)[0]
+    assert torch.isfinite(gradient).all()
+
+
+def test_geometry_envelope_reader_handles_float32_tiny_availability_and_extreme_logits() -> None:
+    operator, encoded, ports, port_weights, module_states, receivers = _learned_operator_case(
+        group_read_mode="geometry_envelope_attention"
+    )
+    operator = operator.float()
+    encoded = replace(
+        encoded,
+        module_tokens=encoded.module_tokens.float(),
+        env_tokens=encoded.env_tokens.float(),
+        global_token=encoded.global_token.float(),
+        module_centers=encoded.module_centers.float(),
+        env_coords=encoded.env_coords.float(),
+        module_present=encoded.module_present.float(),
+        module_features=encoded.module_features.float(),
+        env_weights=encoded.env_weights.float(),
+        coordinate_scale=encoded.coordinate_scale.float(),
+    )
+    ports = ports.float()
+    port_weights = port_weights.float()
+    module_states = module_states.detach().float().requires_grad_(True)
+    receivers = receivers.detach().float().requires_grad_(True)
+    cache = operator.build_layout(
+        encoded,
+        ports,
+        module_radius=1.0,
+        port_quadrature_weights=port_weights,
+    )
+    tiny_envelope = torch.full_like(cache.layout.occupancy_envelope, 1.0e-40).requires_grad_()
+    cache = replace(
+        cache,
+        layout=replace(
+            cache.layout,
+            occupancy_envelope=tiny_envelope,
+        ),
+    )
+    state = operator.prepare(encoded, module_states, cache)
+    # Initialize the lazy receiver modules before applying a large common
+    # bias to exercise the stable log-sum-exp path at both signs.
+    receiver_features = _receiver_features(receivers)
+    context, _ = operator.read(
+        state, encoded, receivers, receiver_features, return_routing_maps=False
+    )
+    receiver_last = operator.receiver_bias.net[-1]
+    assert isinstance(receiver_last, torch.nn.Linear)
+    with torch.no_grad():
+        receiver_last.bias.fill_(1000.0)
+    positive, _ = operator.read(
+        state, encoded, receivers, _receiver_features(receivers), return_routing_maps=False
+    )
+    with torch.no_grad():
+        receiver_last.bias.fill_(-1000.0)
+    negative, _ = operator.read(
+        state, encoded, receivers, _receiver_features(receivers), return_routing_maps=False
+    )
+    # A linear projection keeps the tiny context's coordinate/envelope
+    # derivative observable; squaring it would underflow to zero in FP32.
+    loss = context.sum() + positive.sum() + negative.sum()
+    gradients = torch.autograd.grad(loss, (module_states, receivers, tiny_envelope))
+    assert torch.isfinite(positive).all()
+    assert torch.isfinite(negative).all()
+    assert all(torch.isfinite(value).all() for value in gradients)
+    assert torch.count_nonzero(gradients[-1]) > 0
+
+
+def test_geometry_envelope_reader_has_the_single_group_interpolation_limit() -> None:
+    dtype = torch.float64
+    operator = SparseInterfaceHONF(
+        hidden_dim=2,
+        message_hidden_dim=4,
+        fourier_frequencies=1,
+        support_spacing_factor=1.0,
+        group_read_mode="geometry_envelope_attention",
+    ).double().eval()
+    layout = SparseSupportLayout(
+        lattice_keys=torch.zeros((1, 2), dtype=torch.long),
+        centres=torch.zeros((1, 2), dtype=dtype),
+        group_batch=torch.zeros((1,), dtype=torch.long),
+        case_group_offsets=torch.tensor([0, 1], dtype=torch.long),
+        module_group_indices=torch.tensor([[0], [0]], dtype=torch.long),
+        module_support_weight=torch.ones((1,), dtype=dtype),
+        environment_group_indices=torch.tensor([[0], [0]], dtype=torch.long),
+        environment_geometric_weight=torch.ones((1,), dtype=dtype),
+        occupancy=torch.ones((1,), dtype=dtype),
+        occupancy_envelope=torch.tensor([0.75], dtype=dtype),
+        covered_volume_ratio=torch.ones((1,), dtype=dtype),
+        origin=torch.zeros((1, 2), dtype=dtype),
+        spacing=torch.tensor(1.0, dtype=dtype),
+        batch_size=1,
+        module_width=1,
+        environment_width=1,
+        spatial_dimension=2,
+    )
+    cache = SparseLayoutCache(layout=layout)
+    values = torch.tensor([[1.25, -0.75]], dtype=dtype)
+    state = SparseGroupState(
+        cache=cache,
+        group_state=torch.zeros((1, 2), dtype=dtype),
+        group_keys=torch.zeros((1, 2), dtype=dtype),
+        group_values=values,
+        module_learned_membership=torch.ones((1,), dtype=dtype),
+        module_pool=torch.zeros((1, 2), dtype=dtype),
+    )
+    encoded = EncodedInterfaceCase(
+        module_tokens=torch.zeros((1, 1, 2), dtype=dtype),
+        env_tokens=torch.zeros((1, 1, 2), dtype=dtype),
+        global_token=torch.zeros((1, 2), dtype=dtype),
+        module_centers=torch.zeros((1, 1, 2), dtype=dtype),
+        env_coords=torch.zeros((1, 1, 2), dtype=dtype),
+        module_present=torch.ones((1, 1), dtype=dtype),
+        module_features=torch.zeros((1, 1, 1), dtype=dtype),
+        env_features=None,
+        env_weights=torch.ones((1, 1), dtype=dtype),
+        coordinate_scale=torch.ones((1, 1, 2), dtype=dtype),
+    )
+    receivers = torch.zeros((1, 1, 2), dtype=dtype)
+    receiver_features = _receiver_features(receivers)
+    context, aux = operator.read(state, encoded, receivers, receiver_features)
+    expected_availability = torch.tensor(0.75 * (2.0 / 3.0) ** 2, dtype=dtype)
+    torch.testing.assert_close(aux["group_read_geometric_availability"], expected_availability.reshape(1, 1))
+    torch.testing.assert_close(context[0, 0], expected_availability * values[0])

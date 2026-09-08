@@ -656,8 +656,14 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
         *,
         return_routing_maps: bool = False,
         return_edge_fields: bool = False,
+        receiver_chunk_size: Optional[int] = None,
     ) -> Dict[str, torch.Tensor]:
-        """Decode ``query_xy [B,Q,2]`` without recomputing case/local physics."""
+        """Decode ``query_xy [B,Q,2]`` without recomputing case/local physics.
+
+        ``receiver_chunk_size`` is an evaluation-time execution override for
+        the matched interface-field families.  Omitting it preserves the
+        checkpoint-configured chunk size used by training and ordinary calls.
+        """
 
         if isinstance(prepared, PreparedInterfaceChannelThermalCase):
             if prepared.architecture != self.config.core_honf.forward_architecture:
@@ -668,6 +674,7 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
                 query_features=self._query_features(query_xy.float()),
                 return_routing_maps=return_routing_maps,
                 return_edge_fields=return_edge_fields,
+                receiver_chunk_size=receiver_chunk_size,
             )
 
         return self.core.decode_queries(

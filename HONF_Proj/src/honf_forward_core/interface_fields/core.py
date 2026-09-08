@@ -67,6 +67,7 @@ class InterfaceFieldCore(nn.Module):
                 int(options.message_hidden_dim),
                 frequencies,
                 float(options.support_spacing_factor),
+                group_read_mode=str(options.group_read_mode),
             )
         else:
             raise ValueError(f"Unsupported interface architecture: {config.forward_architecture!r}")
@@ -138,13 +139,19 @@ class InterfaceFieldCore(nn.Module):
         encoded: EncodedInterfaceCase,
         module_states: torch.Tensor,
         layout_cache: Any = None,
+        *,
+        return_routing_maps: bool = False,
     ) -> PreparedInterfaceField:
         if self.config.forward_architecture == "sparse_interface_honf":
             if not isinstance(layout_cache, SparseLayoutCache):
                 raise ValueError("sparse_interface_honf requires a SparseLayoutCache built from module ports.")
             backend_state = self.backend.prepare(encoded, module_states, layout_cache)
         else:
-            backend_state = self.backend.prepare(encoded, module_states)
+            backend_state = self.backend.prepare(
+                encoded,
+                module_states,
+                return_routing_maps=bool(return_routing_maps),
+            )
         coarse_state = self.common.prepare_coarse(
             module_states, encoded.env_tokens, encoded.module_present, encoded.env_weights
         )
@@ -186,19 +193,35 @@ class InterfaceFieldCore(nn.Module):
         self,
         prepared: PreparedInterfaceField,
         receiver_coordinates: torch.Tensor,
+        *,
+        receiver_chunk_size: Optional[int] = None,
+        return_routing_maps: bool = False,
     ) -> InterfaceRead:
+        """Read receivers with an optional evaluation-only chunk override.
+
+        The configured chunk size remains the training/default execution
+        policy.  ``receiver_chunk_size`` affects only this call and does not
+        enter the model configuration or checkpoint state.
+        """
         receivers = receiver_coordinates.float()
+        chunk_size = self.receiver_chunk_size if receiver_chunk_size is None else int(receiver_chunk_size)
+        if chunk_size <= 0:
+            raise ValueError("receiver_chunk_size must be positive.")
         contexts = []
         neighbour_counts = []
         main_norms = []
         coarse_norms = []
         local_norms = []
-        backend_aux_chunks: list[Dict[str, torch.Tensor]] = []
-        for start in range(0, int(receivers.shape[1]), self.receiver_chunk_size):
-            chunk = receivers[:, start : start + self.receiver_chunk_size]
+        backend_aux_chunks: list[tuple[Dict[str, torch.Tensor], int]] = []
+        for start in range(0, int(receivers.shape[1]), chunk_size):
+            chunk = receivers[:, start : start + chunk_size]
             receiver_features = self._receiver_features(prepared, chunk)
             main, backend_aux = self.backend.read(
-                prepared.backend_state, prepared.encoded, chunk, receiver_features
+                prepared.backend_state,
+                prepared.encoded,
+                chunk,
+                receiver_features,
+                return_routing_maps=bool(return_routing_maps),
             )
             coarse = self.common.read_coarse(
                 receiver_features, prepared.encoded.global_token, prepared.coarse_state
@@ -217,7 +240,7 @@ class InterfaceFieldCore(nn.Module):
             main_norms.append(torch.linalg.vector_norm(main, dim=-1))
             coarse_norms.append(torch.linalg.vector_norm(coarse, dim=-1))
             local_norms.append(torch.linalg.vector_norm(local, dim=-1))
-            backend_aux_chunks.append(backend_aux)
+            backend_aux_chunks.append((backend_aux, int(chunk.shape[1])))
         main_values = torch.cat(main_norms, dim=1)
         coarse_values = torch.cat(coarse_norms, dim=1)
         local_values = torch.cat(local_norms, dim=1)
@@ -232,11 +255,38 @@ class InterfaceFieldCore(nn.Module):
             "local_context_fraction": local_values / branch_total,
         }
         if backend_aux_chunks:
-            for key in backend_aux_chunks[0]:
-                values = [chunk[key] for chunk in backend_aux_chunks if key in chunk]
-                if values and all(torch.is_tensor(value) and value.ndim >= 2 for value in values):
-                    concat_dim = 2 if values[0].ndim == 4 else 1
-                    aux[key] = torch.cat(values, dim=concat_dim)
+            keys = {key for chunk_aux, _ in backend_aux_chunks for key in chunk_aux}
+            for key in keys:
+                values_and_widths = [
+                    (chunk_aux[key], width)
+                    for chunk_aux, width in backend_aux_chunks
+                    if key in chunk_aux
+                ]
+                values = [value for value, _ in values_and_widths]
+                if not values or not all(torch.is_tensor(value) for value in values):
+                    continue
+                first = values[0]
+                # Backend summaries such as latent_count are batch-level and
+                # repeated for each receiver chunk.  Keep one copy rather
+                # than accidentally concatenating it across chunks.
+                if first.ndim == 0 or (first.ndim == 1 and first.shape[0] == receivers.shape[0]):
+                    aux[key] = first
+                    continue
+                # Query-local tensors use [B,Q,...] while attention maps use
+                # [B,H,Q,S].  The chunk widths are retained explicitly so a
+                # query count equal to the number of heads cannot confuse the
+                # axis selection.
+                if first.ndim >= 4 and all(
+                    value.shape[2] == width for value, width in values_and_widths
+                ):
+                    aux[key] = torch.cat(values, dim=2)
+                    continue
+                if first.ndim >= 2 and all(
+                    value.shape[1] == width for value, width in values_and_widths
+                ):
+                    aux[key] = torch.cat(values, dim=1)
+                    continue
+                aux[key] = first
         return InterfaceRead(torch.cat(contexts, dim=1), aux)
 
     def decode_queries(
@@ -248,10 +298,16 @@ class InterfaceFieldCore(nn.Module):
         return_routing_maps: bool = False,
         return_edge_fields: bool = False,
         return_interaction_aux: bool = False,
+        receiver_chunk_size: Optional[int] = None,
     ) -> Dict[str, Any]:
         if return_edge_fields:
             raise ValueError("Per-edge fields are not defined for interface-field baselines.")
-        read = self.read(prepared, query_xy)
+        read = self.read(
+            prepared,
+            query_xy,
+            receiver_chunk_size=receiver_chunk_size,
+            return_routing_maps=bool(return_routing_maps),
+        )
         receiver_features = self._receiver_features(prepared, query_xy.float())
         pred_field = self.common.predict_field(
             query_xy.float(),

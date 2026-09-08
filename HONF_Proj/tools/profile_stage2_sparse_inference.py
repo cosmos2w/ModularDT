@@ -8,7 +8,7 @@ import csv
 import json
 import statistics
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Callable
 
@@ -60,6 +60,26 @@ def parse_args() -> argparse.Namespace:
         help="Prepared-decode query count (default: 8192).",
     )
     parser.add_argument(
+        "--receiver-chunk-size",
+        type=int,
+        action="append",
+        default=None,
+        help=(
+            "Runtime receiver chunk size for interface-field inference. Repeat to compare sizes; "
+            "omitting it uses the checkpoint-configured value (normally 128)."
+        ),
+    )
+    parser.add_argument(
+        "--routing-mode",
+        choices=("summary", "detailed"),
+        action="append",
+        default=None,
+        help=(
+            "Inference diagnostics mode: summary keeps cheap per-receiver scalars, while detailed "
+            "also returns routing maps. Repeat to measure both modes."
+        ),
+    )
+    parser.add_argument(
         "--training-step",
         action="store_true",
         help=(
@@ -68,6 +88,22 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     return parser.parse_args()
+
+
+@contextmanager
+def _runtime_receiver_chunk_size(model: Any, chunk_size: int | None):
+    """Temporarily override only the execution chunk, without changing config."""
+
+    core = getattr(model, "core", None)
+    if chunk_size is None or not hasattr(core, "receiver_chunk_size"):
+        yield
+        return
+    previous = int(core.receiver_chunk_size)
+    core.receiver_chunk_size = int(chunk_size)
+    try:
+        yield
+    finally:
+        core.receiver_chunk_size = previous
 
 
 def measure(
@@ -374,6 +410,10 @@ def main() -> int:
         raise ValueError("--warmups must be nonnegative and --repetitions must be positive.")
     if args.prepared_query_count < 1:
         raise ValueError("--prepared-query-count must be positive.")
+    receiver_chunk_sizes = [None] if args.receiver_chunk_size is None else [int(value) for value in args.receiver_chunk_size]
+    if any(value is not None and value <= 0 for value in receiver_chunk_sizes):
+        raise ValueError("--receiver-chunk-size values must be positive.")
+    routing_modes = ["summary"] if args.routing_mode is None else [str(value) for value in args.routing_mode]
     device = torch.device(args.device)
     if device.type != "cuda":
         raise ValueError("This utility records synchronized CUDA timings; select a CUDA device.")
@@ -430,48 +470,69 @@ def main() -> int:
                     "mixed_teacher_ratio": 0.0,
                 }
 
-                def full_forward(
-                    model: torch.nn.Module = model,
-                    batch: dict[str, Any] = batch,
-                    forward_kwargs: dict[str, Any] = forward_kwargs,
-                ) -> Any:
-                    return model(batch["structure"], batch["query_xy"], **forward_kwargs)
+                for routing_mode in routing_modes:
+                    request_routing_maps = routing_mode == "detailed"
+                    for receiver_chunk_size in receiver_chunk_sizes:
+                        def configured_full_forward(
+                            model: torch.nn.Module = model,
+                            batch: dict[str, Any] = batch,
+                            forward_kwargs: dict[str, Any] = forward_kwargs,
+                            request_routing_maps: bool = request_routing_maps,
+                            receiver_chunk_size: int | None = receiver_chunk_size,
+                        ) -> Any:
+                            with _runtime_receiver_chunk_size(model, receiver_chunk_size):
+                                return model(
+                                    batch["structure"],
+                                    batch["query_xy"],
+                                    return_routing_maps=request_routing_maps,
+                                    **forward_kwargs,
+                                )
 
-                def prepare_with_one_query(
-                    model: torch.nn.Module = model,
-                    batch: dict[str, Any] = batch,
-                    forward_kwargs: dict[str, Any] = forward_kwargs,
-                ) -> Any:
-                    return model(
-                        batch["structure"],
-                        batch["query_xy"][:, :1],
-                        return_prepared_state=True,
-                        **forward_kwargs,
-                    )
+                        def configured_prepare_with_one_query(
+                            model: torch.nn.Module = model,
+                            batch: dict[str, Any] = batch,
+                            forward_kwargs: dict[str, Any] = forward_kwargs,
+                            request_routing_maps: bool = request_routing_maps,
+                            receiver_chunk_size: int | None = receiver_chunk_size,
+                        ) -> Any:
+                            with _runtime_receiver_chunk_size(model, receiver_chunk_size):
+                                return model(
+                                    batch["structure"],
+                                    batch["query_xy"][:, :1],
+                                    return_prepared_state=True,
+                                    return_routing_maps=request_routing_maps,
+                                    **forward_kwargs,
+                                )
 
-                phase_specs = (
-                    ("full_forward", int(query_xy.shape[0]), full_forward),
-                    ("physical_preparation_plus_one_query", 1, prepare_with_one_query),
-                )
-                for phase, query_count, function in phase_specs:
-                    result = measure(
-                        function,
-                        device,
-                        warmups=int(args.warmups),
-                        repetitions=int(args.repetitions),
-                    )
-                    rows.append(
-                        {
-                            "label": label,
-                            "checkpoint": str(checkpoint_path),
-                            "architecture": architecture,
-                            "case_id": str(case_id),
-                            "phase": phase,
-                            "query_count": query_count,
-                            "status": "ok",
-                            **result,
-                        }
-                    )
+                        phase_specs = (
+                            ("full_forward", int(query_xy.shape[0]), configured_full_forward),
+                            ("physical_preparation_plus_one_query", 1, configured_prepare_with_one_query),
+                        )
+                        for phase, query_count, function in phase_specs:
+                            result = measure(
+                                function,
+                                device,
+                                warmups=int(args.warmups),
+                                repetitions=int(args.repetitions),
+                            )
+                            rows.append(
+                                {
+                                    "label": label,
+                                    "checkpoint": str(checkpoint_path),
+                                    "architecture": architecture,
+                                    "case_id": str(case_id),
+                                    "phase": phase,
+                                    "query_count": query_count,
+                                    "receiver_chunk_size": (
+                                        int(model.core.receiver_chunk_size)
+                                        if receiver_chunk_size is None and hasattr(model.core, "receiver_chunk_size")
+                                        else receiver_chunk_size
+                                    ),
+                                    "routing_mode": routing_mode,
+                                    "status": "ok",
+                                    **result,
+                                }
+                            )
 
                 if architecture != "legacy_honf":
                     result = measure(
@@ -494,35 +555,56 @@ def main() -> int:
                     )
 
                 with torch.inference_mode():
-                    prepared = prepare_with_one_query()["prepared_state"]
+                    prepared = model(
+                        batch["structure"],
+                        batch["query_xy"][:, :1],
+                        return_prepared_state=True,
+                        **forward_kwargs,
+                    )["prepared_state"]
                 prepared_query_count = min(int(args.prepared_query_count), int(query_xy.shape[0]))
                 prepared_query = batch["query_xy"][:, :prepared_query_count]
 
-                def prepared_decode(
-                    model: torch.nn.Module = model,
-                    prepared: Any = prepared,
-                    prepared_query: torch.Tensor = prepared_query,
-                ) -> Any:
-                    return model.decode_prepared(prepared, prepared_query)
+                for routing_mode in routing_modes:
+                    request_routing_maps = routing_mode == "detailed"
+                    for receiver_chunk_size in receiver_chunk_sizes:
+                        def prepared_decode(
+                            model: torch.nn.Module = model,
+                            prepared: Any = prepared,
+                            prepared_query: torch.Tensor = prepared_query,
+                            request_routing_maps: bool = request_routing_maps,
+                            receiver_chunk_size: int | None = receiver_chunk_size,
+                        ) -> Any:
+                            return model.decode_prepared(
+                                prepared,
+                                prepared_query,
+                                return_routing_maps=request_routing_maps,
+                                receiver_chunk_size=receiver_chunk_size,
+                            )
 
-                result = measure(
-                    prepared_decode,
-                    device,
-                    warmups=int(args.warmups),
-                    repetitions=int(args.repetitions),
-                )
-                rows.append(
-                    {
-                        "label": label,
-                        "checkpoint": str(checkpoint_path),
-                        "architecture": architecture,
-                        "case_id": str(case_id),
-                        "phase": "prepared_decode",
-                        "query_count": prepared_query_count,
-                        "status": "ok",
-                        **result,
-                    }
-                )
+                        result = measure(
+                            prepared_decode,
+                            device,
+                            warmups=int(args.warmups),
+                            repetitions=int(args.repetitions),
+                        )
+                        rows.append(
+                            {
+                                "label": label,
+                                "checkpoint": str(checkpoint_path),
+                                "architecture": architecture,
+                                "case_id": str(case_id),
+                                "phase": "prepared_decode",
+                                "query_count": prepared_query_count,
+                                "receiver_chunk_size": (
+                                    int(model.core.receiver_chunk_size)
+                                    if receiver_chunk_size is None and hasattr(model.core, "receiver_chunk_size")
+                                    else receiver_chunk_size
+                                ),
+                                "routing_mode": routing_mode,
+                                "status": "ok",
+                                **result,
+                            }
+                        )
                 del prepared, batch
 
             if args.training_step:
@@ -562,6 +644,10 @@ def main() -> int:
         "warmups": int(args.warmups),
         "repetitions": int(args.repetitions),
         "prepared_query_count": int(args.prepared_query_count),
+        "receiver_chunk_sizes": [
+            "configured" if value is None else int(value) for value in receiver_chunk_sizes
+        ],
+        "routing_modes": routing_modes,
         "training_step_requested": bool(args.training_step),
         "synchronized": True,
         "scope": (
@@ -569,7 +655,9 @@ def main() -> int:
             "are synchronized CUDA phases; prepared_decode uses the first configured "
             "8192 queries (or the full case when smaller). New-family models also "
             "report adapter/encoding plus real layout construction. Optional training_step "
-            "uses the canonical run_epoch path on a nonpersistent packed 48x1024 batch."
+            "uses the canonical run_epoch path on a nonpersistent packed 48x1024 batch. "
+            "Routing modes and receiver chunk sizes are runtime execution controls; "
+            "they do not rewrite checkpoint configuration."
         ),
         "rows": rows,
     }
@@ -584,6 +672,8 @@ def main() -> int:
             "case_id",
             "phase",
             "query_count",
+            "receiver_chunk_size",
+            "routing_mode",
             "status",
             "blocker",
             "training_batch_size",

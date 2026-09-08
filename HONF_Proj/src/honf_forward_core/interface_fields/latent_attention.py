@@ -50,7 +50,13 @@ class GeometryLatentField(nn.Module):
         self.read_bias = LazyMLP(hidden_dim, out_dim=num_heads, num_layers=2)
         self.read_attention = BiasedMultiheadAttention(hidden_dim, num_heads)
 
-    def prepare(self, encoded: EncodedInterfaceCase, module_states: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def prepare(
+        self,
+        encoded: EncodedInterfaceCase,
+        module_states: torch.Tensor,
+        *,
+        return_routing_maps: bool = True,
+    ) -> Dict[str, torch.Tensor]:
         batch = int(module_states.shape[0])
         dimension = int(encoded.module_centers.shape[-1])
         refs_norm = _reference_coordinates(self.latent_count, dimension, module_states.device, module_states.dtype)
@@ -62,24 +68,32 @@ class GeometryLatentField(nn.Module):
         env_relative = (refs_batch[:, :, None, :] - encoded.env_coords[:, None, :, :]) / encoded.coordinate_scale
         env_bias = self.env_bias(self.relative_fourier(env_relative)).permute(0, 3, 1, 2)
         module_context, module_attention = self.module_attention(
-            seeds, module_states, bias=module_bias, source_mask=encoded.module_present, return_attention=True
+            seeds,
+            module_states,
+            bias=module_bias,
+            source_mask=encoded.module_present,
+            return_attention=bool(return_routing_maps),
         )
         env_context, env_attention = self.env_attention(
             seeds,
             encoded.env_tokens,
             bias=env_bias,
             log_weights=torch.log(encoded.env_weights.clamp_min(torch.finfo(encoded.env_weights.dtype).tiny)),
-            return_attention=True,
+            return_attention=bool(return_routing_maps),
         )
         latents = seeds + module_context + env_context
         for block in self.blocks:
             latents = block(latents)
-        return {
+        state: Dict[str, torch.Tensor] = {
             "latents": latents,
             "reference_coords": refs_batch,
-            "module_attention": module_attention,
-            "environment_attention": env_attention,
         }
+        if return_routing_maps:
+            if module_attention is not None:
+                state["module_attention"] = module_attention
+            if env_attention is not None:
+                state["environment_attention"] = env_attention
+        return state
 
     def read(
         self,
@@ -87,6 +101,8 @@ class GeometryLatentField(nn.Module):
         encoded: EncodedInterfaceCase,
         receivers: torch.Tensor,
         receiver_features: torch.Tensor,
+        *,
+        return_routing_maps: bool = True,
     ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         query = self.read_query(
             torch.cat(
@@ -96,8 +112,15 @@ class GeometryLatentField(nn.Module):
         )
         relative = (receivers[:, :, None, :] - state["reference_coords"][:, None, :, :]) / encoded.coordinate_scale
         bias = self.read_bias(self.relative_fourier(relative)).permute(0, 3, 1, 2)
-        context, attention = self.read_attention(query, state["latents"], bias=bias, return_attention=True)
-        return context, {
-            "latent_query_attention": attention,
+        context, attention = self.read_attention(
+            query,
+            state["latents"],
+            bias=bias,
+            return_attention=bool(return_routing_maps),
+        )
+        aux: Dict[str, torch.Tensor] = {
             "latent_count": context.new_full((context.shape[0],), float(self.latent_count)),
         }
+        if return_routing_maps and attention is not None:
+            aux["latent_query_attention"] = attention
+        return context, aux

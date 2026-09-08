@@ -33,6 +33,16 @@
       "stage": "sparse-interface-stage2"
     },
     {
+      "name": "sparse_interface_geometry_read_context",
+      "path": "project://src/config_core/forward/sparse_interface_geometry_read_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "sparse interface HONF / geometry-envelope conditional group reader / shared coarse and local paths",
+      "checkpoint_families": ["Run 1805 reader-recovery candidate"],
+      "owner": "forward-research",
+      "stage": "sparse-interface-reader-recovery"
+    },
+    {
       "name": "case_adaptive_tensor_residual_context",
       "path": "project://src/config_core/forward/case_adaptive_tensor_residual_context.json",
       "status": "candidate",

@@ -33,6 +33,7 @@ INTERFACE_DIAGNOSTIC_KEYS = (
     "interaction_environment_group_incidence_count",
     "interaction_group_read_degree_mean",
     "interaction_group_read_weight_mass_mean",
+    "interaction_group_read_geometric_availability_mean",
     "interaction_group_module_degree_mean",
     "interaction_group_module_degree_max",
     "interaction_group_environment_degree_mean",
@@ -41,7 +42,10 @@ INTERFACE_DIAGNOSTIC_KEYS = (
     "interaction_group_covered_volume_ratio_mean",
 )
 
-GRADIENT_DIAGNOSTIC_GROUPS = ("encoder", "backend", "head", "local_coupling")
+GRADIENT_DIAGNOSTIC_GROUPS = (
+    "encoder", "backend", "head", "local_coupling",
+    "group_prepare", "group_receiver", "coarse", "local",
+)
 GRADIENT_DIAGNOSTIC_KEYS = (
     "preclip_gradient_norm",
     "gradient_clip_scale",
@@ -61,6 +65,22 @@ def _diagnostic_parameter_group(name: str) -> str:
     return "local_coupling"
 
 
+def _diagnostic_detail_group(name: str) -> str | None:
+    """Split sparse learning from its bypasses; retain historical backend totals."""
+    if name.startswith("core.common.coarse"):
+        return "coarse"
+    if name.startswith("core.common.local"):
+        return "local"
+    if name.startswith(("core.backend.receiver_query.", "core.backend.receiver_bias.", "core.backend.group_key.")):
+        return "group_receiver"
+    if name.startswith(tuple(f"core.backend.{part}." for part in (
+        "module_membership", "environment_membership", "module_message",
+        "environment_message", "group_input", "group_residual", "group_norm", "group_value",
+    ))):
+        return "group_prepare"
+    return None
+
+
 def _fp64_group_norm(named_values: list[tuple[str, torch.Tensor]]) -> tuple[float, Dict[str, float]]:
     total = 0.0
     by_group = {group: 0.0 for group in GRADIENT_DIAGNOSTIC_GROUPS}
@@ -68,6 +88,9 @@ def _fp64_group_norm(named_values: list[tuple[str, torch.Tensor]]) -> tuple[floa
         squared = float(value.detach().double().square().sum().cpu())
         total += squared
         by_group[_diagnostic_parameter_group(name)] += squared
+        detail = _diagnostic_detail_group(name)
+        if detail is not None:
+            by_group[detail] += squared
     return math.sqrt(total), {group: math.sqrt(value) for group, value in by_group.items()}
 
 
@@ -448,6 +471,7 @@ def run_epoch(
                     "interaction_local_context_fraction_mean": "local_context_fraction",
                     "interaction_group_read_degree_mean": "group_read_degree",
                     "interaction_group_read_weight_mass_mean": "group_read_weight_mass",
+                    "interaction_group_read_geometric_availability_mean": "group_read_geometric_availability",
                     "interaction_group_module_degree_mean": "group_module_degree",
                     "interaction_group_environment_degree_mean": "group_environment_degree",
                     "interaction_group_occupancy_mean": "group_occupancy",

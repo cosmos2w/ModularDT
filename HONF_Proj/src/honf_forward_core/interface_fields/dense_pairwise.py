@@ -37,7 +37,14 @@ class DensePairwiseField(nn.Module):
             return checkpoint(module, values, use_reentrant=False)
         return module(values)
 
-    def prepare(self, encoded: EncodedInterfaceCase, module_states: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def prepare(
+        self,
+        encoded: EncodedInterfaceCase,
+        module_states: torch.Tensor,
+        *,
+        return_routing_maps: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+        del return_routing_maps
         centers = encoded.module_centers
         env_coords = encoded.env_coords
         scale = encoded.coordinate_scale
@@ -84,6 +91,8 @@ class DensePairwiseField(nn.Module):
         encoded: EncodedInterfaceCase,
         receivers: torch.Tensor,
         receiver_features: torch.Tensor,
+        *,
+        return_routing_maps: bool = True,
     ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         modules = int(state["module_tokens"].shape[1])
         relative = (receivers[:, :, None, :] - encoded.module_centers[:, None, :, :]) / encoded.coordinate_scale
@@ -104,9 +113,14 @@ class DensePairwiseField(nn.Module):
             state["env_tokens"],
             bias=env_bias,
             log_weights=torch.log(encoded.env_weights.clamp_min(torch.finfo(encoded.env_weights.dtype).tiny)),
-            return_attention=True,
+            return_attention=bool(return_routing_maps),
         )
-        return module_context + env_context, {
-            "dense_environment_attention": env_attention,
+        aux: Dict[str, torch.Tensor] = {
+            # This scalar per receiver is retained for training summaries.  The
+            # potentially large attention tensor is only materialized when the
+            # caller explicitly asks for routing maps.
             "dense_module_context_norm": torch.linalg.vector_norm(module_context, dim=-1),
         }
+        if return_routing_maps and env_attention is not None:
+            aux["dense_environment_attention"] = env_attention
+        return module_context + env_context, aux

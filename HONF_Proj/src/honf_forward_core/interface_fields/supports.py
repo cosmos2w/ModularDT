@@ -43,6 +43,7 @@ class SparseSupportLayout:
     module_width: int
     environment_width: int
     spatial_dimension: int
+    support_search: SparseSupportSearch | None = None
 
     @property
     def num_groups(self) -> int:
@@ -94,6 +95,24 @@ class SparseReceiverIncidence:
     @property
     def geometric_weight(self) -> torch.Tensor:
         return self.support_weight
+
+
+@dataclass(frozen=True)
+class SparseSupportSearch:
+    """Layout-scoped exact search data for integer support keys.
+
+    ``active_table`` is already lexicographically sorted by the support
+    builder.  The mixed-radix code is only an index; candidate rows are still
+    compared against the matched active row, so this never changes matching
+    semantics.  The index is intentionally scoped to one immutable layout.
+    """
+
+    active_table: torch.Tensor
+    key_min: torch.Tensor
+    key_spans: torch.Tensor
+    key_strides: torch.Tensor
+    active_codes: torch.Tensor
+    key_space: int
 
 
 def cubic_bspline(relative_coordinate: torch.Tensor) -> torch.Tensor:
@@ -150,6 +169,61 @@ class _Candidates:
     support_weight: torch.Tensor
 
 
+def _encode_support_rows(
+    rows: torch.Tensor,
+    *,
+    key_min: torch.Tensor,
+    key_strides: torch.Tensor,
+    key_space: int,
+) -> torch.Tensor:
+    """Encode ``[batch,key...]`` rows after their range was validated."""
+
+    key_code = ((rows[:, 1:] - key_min) * key_strides).sum(dim=-1)
+    return rows[:, 0] * int(key_space) + key_code
+
+
+def _prepare_support_search(active_table: torch.Tensor) -> SparseSupportSearch | None:
+    """Prepare a collision-free sorted integer index when its range is safe."""
+
+    if active_table.ndim != 2 or active_table.shape[0] == 0:
+        return None
+    key_min = active_table[:, 1:].amin(dim=0)
+    key_max = active_table[:, 1:].amax(dim=0)
+    spans = [int(value) + 1 for value in (key_max - key_min).tolist()]
+    int64_max = torch.iinfo(torch.long).max
+    key_space = 1
+    for span in spans:
+        if span <= 0 or key_space > int64_max // span:
+            return None
+        key_space *= span
+    batch_space = int(active_table[:, 0].amax().item()) + 1
+    if batch_space <= 0 or key_space > int64_max // batch_space:
+        return None
+    strides = [1] * len(spans)
+    for index in range(len(spans) - 2, -1, -1):
+        strides[index] = strides[index + 1] * spans[index + 1]
+    key_strides = active_table.new_tensor(strides)
+    active_codes = _encode_support_rows(
+        active_table,
+        key_min=key_min,
+        key_strides=key_strides,
+        key_space=key_space,
+    )
+    # ``torch.unique(sorted=True)`` creates lexicographically sorted rows, and
+    # this encoding preserves that order.  Keep a defensive fallback if a
+    # future builder changes that ordering assumption.
+    if active_codes.numel() > 1 and bool((active_codes[1:] < active_codes[:-1]).any()):
+        return None
+    return SparseSupportSearch(
+        active_table=active_table,
+        key_min=key_min,
+        key_spans=active_table.new_tensor(spans),
+        key_strides=key_strides,
+        active_codes=active_codes,
+        key_space=key_space,
+    )
+
+
 def _enumerate_candidates(
     coordinates: torch.Tensor,
     source_batch: torch.Tensor,
@@ -180,6 +254,8 @@ def _enumerate_candidates(
 def _match_active_groups(
     active_table: torch.Tensor,
     candidate_table: torch.Tensor,
+    *,
+    search: SparseSupportSearch | None = None,
 ) -> torch.Tensor:
     """Match candidate ``[batch,key...]`` rows to active rows without all-pairs work."""
 
@@ -188,6 +264,36 @@ def _match_active_groups(
         return candidate_table.new_empty((0,), dtype=torch.long)
     if active_table.shape[0] == 0:
         return candidate_table.new_full((candidate_count,), -1, dtype=torch.long)
+    if search is not None:
+        # Candidate keys outside the prepared active range cannot match.  The
+        # range mask also guarantees that mixed-radix arithmetic cannot
+        # overflow for a valid lookup even when a receiver lies far away.
+        in_range = (
+            (candidate_table[:, 1:] >= search.key_min)
+            & (candidate_table[:, 1:] < search.key_min + search.key_spans)
+        ).all(dim=-1)
+        matched = candidate_table.new_full((candidate_count,), -1, dtype=torch.long)
+        if bool(in_range.any()):
+            valid_candidates = candidate_table[in_range]
+            codes = _encode_support_rows(
+                valid_candidates,
+                key_min=search.key_min,
+                key_strides=search.key_strides,
+                key_space=search.key_space,
+            )
+            positions = torch.searchsorted(search.active_codes, codes)
+            within = positions < int(search.active_codes.shape[0])
+            if bool(within.any()):
+                valid_indices = torch.nonzero(in_range, as_tuple=False).reshape(-1)
+                candidate_positions = valid_indices[within]
+                safe_positions = positions[within]
+                exact = (
+                    search.active_table.index_select(0, safe_positions)
+                    == candidate_table.index_select(0, candidate_positions)
+                ).all(dim=-1)
+                if bool(exact.any()):
+                    matched[candidate_positions[exact]] = safe_positions[exact]
+        return matched
     joined = torch.cat([active_table, candidate_table], dim=0)
     _, inverse = torch.unique(joined, dim=0, sorted=True, return_inverse=True)
     active_inverse = inverse[: active_table.shape[0]]
@@ -345,6 +451,7 @@ def build_sparse_support_layout(
         sorted=True,
         return_inverse=True,
     )
+    support_search = _prepare_support_search(active_table)
     group_batch = active_table[:, 0]
     lattice_keys = active_table[:, 1:]
     num_groups = int(lattice_keys.shape[0])
@@ -376,7 +483,7 @@ def build_sparse_support_layout(
     env_candidate_table = torch.cat(
         [env_candidates.batch[retained_env_candidate, None], env_candidates.keys[retained_env_candidate]], dim=-1
     )
-    matched_groups = _match_active_groups(active_table, env_candidate_table)
+    matched_groups = _match_active_groups(active_table, env_candidate_table, search=support_search)
     env_volume = env_weights.reshape(-1).repeat_interleave(candidate_count_per_point)[retained_env_candidate]
     env_geometric = env_volume * env_candidates.support_weight[retained_env_candidate]
     matched = (matched_groups >= 0) & (env_geometric > 0.0)
@@ -413,6 +520,7 @@ def build_sparse_support_layout(
         module_width=module_width,
         environment_width=environment_width,
         spatial_dimension=dimension,
+        support_search=support_search,
     )
 
 
@@ -442,8 +550,13 @@ def lookup_sparse_supports(
     )
     nonzero = candidates.support_weight > 0.0
     candidate_table = torch.cat([candidates.batch[nonzero, None], candidates.keys[nonzero]], dim=-1)
-    active_table = torch.cat([layout.group_batch[:, None], layout.lattice_keys], dim=-1)
-    matched_group = _match_active_groups(active_table, candidate_table)
+    search = layout.support_search
+    active_table = (
+        search.active_table
+        if search is not None
+        else torch.cat([layout.group_batch[:, None], layout.lattice_keys], dim=-1)
+    )
+    matched_group = _match_active_groups(active_table, candidate_table, search=search)
     matched = matched_group >= 0
     receiver_indices = candidates.source[nonzero][matched]
     support_weight = candidates.support_weight[nonzero][matched]

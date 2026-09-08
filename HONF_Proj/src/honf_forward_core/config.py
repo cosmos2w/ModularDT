@@ -135,6 +135,9 @@ class InterfaceFieldConfig:
     main_latent_blocks: int = 2
     local_radius_factor: float = 2.5
     support_spacing_factor: Optional[float] = None
+    # Historical sparse readers include an explicit null entry.  The
+    # geometry-envelope mode is opt-in for the reader-recovery experiment.
+    group_read_mode: str = "null_softmax"
     relative_fourier_frequencies: int = 4
     receiver_chunk_size: int = 128
     activation_checkpointing: bool = False
@@ -152,6 +155,11 @@ class InterfaceFieldConfig:
             raise ValueError("interface_model.local_radius_factor must be positive.")
         if self.support_spacing_factor is not None and float(self.support_spacing_factor) <= 0.0:
             raise ValueError("interface_model.support_spacing_factor must be positive when provided.")
+        if self.group_read_mode not in {"null_softmax", "geometry_envelope_attention"}:
+            raise ValueError(
+                "interface_model.group_read_mode must be 'null_softmax' or "
+                "'geometry_envelope_attention'."
+            )
         if int(self.relative_fourier_frequencies) < 0:
             raise ValueError("interface_model.relative_fourier_frequencies must be nonnegative.")
         if int(self.receiver_chunk_size) <= 0:
@@ -611,6 +619,7 @@ class UnifiedForwardConfig:
             if isinstance(interface_payload, dict):
                 if self.forward_architecture != "sparse_interface_honf":
                     interface_payload.pop("support_spacing_factor", None)
+                    interface_payload.pop("group_read_mode", None)
                 else:
                     # Main latent settings belong only to the latent-attention
                     # baseline and are not sparse-HONF capacity parameters.
