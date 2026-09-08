@@ -383,6 +383,33 @@ class SparseInterfaceHONF(nn.Module):
         if not return_routing_maps:
             return context.reshape(receivers.shape[0], receivers.shape[1], self.hidden_dim), aux
 
+        if self.group_read_mode == "null_softmax":
+            # Historical context/mass above retain their original arithmetic.
+            # Diagnostic conditional attention must remain meaningful even
+            # when that FP32 null read underflows. Normalize positive g in
+            # log space instead of dividing by a clamped subnormal mass.
+            positive = selected_geometric > 0.0
+            diagnostic_receivers = selected_receiver[positive]
+            diagnostic_log_weight = selected_logits[positive].double() + torch.log(
+                selected_geometric[positive].double()
+            )
+            diagnostic_max = torch.full(
+                (flat_count,), -torch.inf, device=logits.device, dtype=torch.float64
+            )
+            diagnostic_max.scatter_reduce_(
+                0, diagnostic_receivers, diagnostic_log_weight, reduce="amax", include_self=True
+            )
+            diagnostic_exp = torch.exp(diagnostic_log_weight - diagnostic_max[diagnostic_receivers])
+            diagnostic_mass = torch.zeros_like(diagnostic_max)
+            diagnostic_mass.index_add_(0, diagnostic_receivers, diagnostic_exp)
+            conditional_weight = torch.zeros_like(selected_geometric)
+            conditional_weight[positive] = (
+                diagnostic_exp / diagnostic_mass[diagnostic_receivers]
+            ).to(logits.dtype)
+            aux["group_read_log_partition"] = (
+                diagnostic_max + torch.log(diagnostic_mass)
+            ).to(logits.dtype).reshape(receivers.shape[0], receivers.shape[1])
+
         # The remaining summaries and per-slot arrays are intentionally
         # detailed exports.  They are requested by selected diagnostics and
         # evaluations, rather than materialized on every training read.

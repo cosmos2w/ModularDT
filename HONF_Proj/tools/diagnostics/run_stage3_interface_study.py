@@ -669,8 +669,8 @@ def _subset_physical_errors(
 ) -> dict[str, float | None]:
     """Provide canonical local/port errors when a reduced query subset is used."""
 
-    from channelthermal.evaluation_tools.plots import error_metrics
     from channelthermal.evaluation.results import denormalize_predictions
+    from channelthermal.evaluation_tools.plots import error_metrics
 
     physical = denormalize_predictions(dict(predictions), dataset, normalized_targets)
     result: dict[str, float | None] = {}
@@ -901,13 +901,23 @@ def _audit_read_summary(
             "supported": _finite_stats(value, supported_mask),
         }
 
-    geometric_slots = _first_aux(aux, "group_read_geometric_weight")
+    # ``group_read_geometric_weight`` is the historical incidence factor B.
+    # Availability is the effective envelope aB, which the detailed reader
+    # exports separately.  Never infer availability from B: doing so counts
+    # support geometry as if the occupancy envelope were one.
+    effective_geometric_slots = _first_aux(
+        aux, "group_read_effective_geometric_weight"
+    )
     add(
         "availability",
         "group_read_geometric_availability",
         "group_read_geometry_availability",
         "group_read_availability",
-        derive=(lambda: geometric_slots.sum(dim=-1) if torch.is_tensor(geometric_slots) else None),
+        derive=(
+            lambda: effective_geometric_slots.sum(dim=-1)
+            if torch.is_tensor(effective_geometric_slots)
+            else None
+        ),
     )
     # Prefer the per-receiver values.  Slot maps are retained as a fallback
     # for older checkpoints and are incidence-masked by _metric_masks.
@@ -1170,8 +1180,6 @@ def _canonical_backward_diagnostics(
 ) -> dict[str, Any]:
     """Run one canonical physical batch with gradients and a zero-step optimizer."""
 
-    from torch.utils.data import DataLoader, Subset
-
     from channelthermal.data.collation import ChannelThermalBatchCollator
     from channelthermal.training.epoch import (
         effective_local_loss_weights,
@@ -1179,6 +1187,7 @@ def _canonical_backward_diagnostics(
         predicted_consistency_weight_for_epoch,
         run_epoch,
     )
+    from torch.utils.data import DataLoader, Subset
 
     index_by_case = {str(case_id): index for index, case_id in enumerate(dataset.selected_case_ids)}
     indices = [index_by_case[str(case_id)] for case_id in case_ids]
@@ -1459,6 +1468,8 @@ def run_checkpoint_audit(args: argparse.Namespace) -> dict[str, Any]:
             "Stored checkpoints are evaluated without regenerating missing milestones or changing parameters.",
             "Canonical backward uses one deterministic four-case batch and a zero-learning-rate optimizer; no checkpoint parameter update is retained.",
             "P1 is reported only when the physical coupling path executes its provisional refinement decode; P2 excludes the separate p2_port_global_consistency diagnostic read.",
+            "Detailed historical null-softmax conditional_mixture and log_z exports use the diagnostic-only positive-g FP64 log-space normalization when routing maps are requested. This preserves the historical context, nonnull mass, logits, and training arithmetic while avoiding float32 tiny-clamp underflow in the conditional summaries.",
+            "The stored Run-1802 audit artifact predates that diagnostic correction. Its epoch500 training-case 0632 conditional_mixture/log_z rows were produced by the old clamped path (conditional-mixture maximum 61.44 versus value norms about 16.27, with finite log_z counts 551/768, 546/768, and 5549/8192 for P0, P1, and P2) and remain historical pre-correction values until the bounded 3-checkpoint x 8-case replay is run. The four epoch500 anchor holdouts had minimum recorded nonnull mass about 9.8e-36, above float32 tiny 1.18e-38.",
         ],
     }
 

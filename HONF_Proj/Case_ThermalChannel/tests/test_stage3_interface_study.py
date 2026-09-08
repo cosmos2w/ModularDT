@@ -111,7 +111,12 @@ def test_audit_read_summary_separates_supported_and_null_mass() -> None:
     summary = stage3._audit_read_summary(
         {
             "group_read_degree": torch.tensor([[2.0, 0.0]]),
-            "group_read_geometric_weight": torch.tensor([[[0.2, 0.3], [0.0, 0.0]]]),
+            # B is the raw incidence factor; availability must use aB from
+            # the explicitly exported effective geometric slots.
+            "group_read_geometric_weight": torch.tensor([[[0.9, 0.9], [0.0, 0.0]]]),
+            "group_read_effective_geometric_weight": torch.tensor(
+                [[[0.2, 0.3], [0.0, 0.0]]]
+            ),
             "group_read_weight_mass": torch.tensor([[0.4, 0.0]]),
             "group_read_conditional_mixture_norm": torch.tensor([[1.5, 0.0]]),
         }
@@ -120,6 +125,17 @@ def test_audit_read_summary_separates_supported_and_null_mass() -> None:
     assert summary["unsupported_receiver_fraction"] == 0.5
     assert summary["availability"]["all"]["mean"] == pytest.approx(0.25)
     assert summary["null_mass"]["supported"]["mean"] == pytest.approx(0.6)
+
+
+def test_audit_read_summary_omits_availability_without_effective_geometry() -> None:
+    summary = stage3._audit_read_summary(
+        {
+            "group_read_degree": torch.tensor([[1.0]]),
+            # Raw B alone is not an availability measurement.
+            "group_read_geometric_weight": torch.tensor([[[0.9]]]),
+        }
+    )
+    assert "availability" not in summary
 
 
 def test_audit_read_summary_excludes_padded_receivers_and_slots() -> None:

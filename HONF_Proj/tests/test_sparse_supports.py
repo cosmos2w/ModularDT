@@ -903,6 +903,44 @@ def test_geometry_envelope_reader_handles_float32_tiny_availability_and_extreme_
     assert torch.count_nonzero(gradients[-1]) > 0
 
 
+def test_historical_underflow_keeps_context_but_exports_true_conditional_diagnostics() -> None:
+    operator, encoded, ports, port_weights, module_states, receivers = _learned_operator_case()
+    operator = operator.float()
+    encoded = replace(encoded, **{
+        name: value.float() for name, value in vars(encoded).items() if torch.is_tensor(value)
+    })
+    receivers = receivers.detach().float()
+    cache = operator.build_layout(
+        encoded, ports.float(), module_radius=1.0, port_quadrature_weights=port_weights.float()
+    )
+    state = operator.prepare(encoded, module_states.float(), cache)
+    state = replace(state, group_keys=torch.zeros_like(state.group_keys), group_values=torch.ones_like(state.group_values))
+    features = _receiver_features(receivers)
+    operator.read(state, encoded, receivers, features)
+    with torch.no_grad():
+        for parameter in operator.receiver_bias.parameters():
+            parameter.zero_()
+        operator.receiver_bias.net[-1].bias.fill_(-110.0)
+    summary_context, summary = operator.read(state, encoded, receivers, features)
+    context, detailed = operator.read(state, encoded, receivers, features, return_routing_maps=True)
+    torch.testing.assert_close(context, summary_context, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(detailed["group_read_weight_mass"], summary["group_read_weight_mass"], rtol=0.0, atol=0.0)
+    supported = detailed["group_read_geometric_availability"] > 0
+    assert torch.count_nonzero(context) == 0
+    torch.testing.assert_close(
+        detailed["group_read_conditional_weight"].sum(-1)[supported],
+        torch.ones_like(detailed["group_read_weight_mass"][supported]),
+    )
+    torch.testing.assert_close(
+        detailed["group_read_conditional_value_norm"][supported],
+        torch.full_like(detailed["group_read_weight_mass"][supported], math.sqrt(operator.hidden_dim)),
+    )
+    torch.testing.assert_close(
+        detailed["group_read_log_partition"][supported],
+        -110.0 + torch.log(detailed["group_read_geometric_availability"][supported]),
+    )
+
+
 def test_geometry_envelope_reader_has_the_single_group_interpolation_limit() -> None:
     dtype = torch.float64
     operator = SparseInterfaceHONF(
