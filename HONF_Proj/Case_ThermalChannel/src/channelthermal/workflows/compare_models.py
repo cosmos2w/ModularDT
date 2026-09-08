@@ -1438,7 +1438,10 @@ def save_figures(
 def save_debug_npz(path: Path, predictions: Dict[str, Any], raw_sample: Dict[str, Any]) -> None:
     """Save debug npz."""
 
+    _, fluid_mask = module_and_fluid_masks(raw_sample, np.asarray(predictions["pred_field_grid"]))
     payload = {
+        "fluid_mask": np.asarray(fluid_mask, dtype=bool),
+        "module_radius": np.asarray(module_radius_from_sample(raw_sample), dtype=np.float64),
         "pred_field_grid": np.asarray(predictions["pred_field_grid"], dtype=np.float32),
         "gt_field_grid": np.asarray(raw_sample["steady_field"], dtype=np.float32),
         "pred_internal_temperature": np.asarray(predictions["pred_internal_temperature"], dtype=np.float32),

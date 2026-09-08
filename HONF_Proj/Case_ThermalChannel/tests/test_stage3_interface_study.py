@@ -97,6 +97,158 @@ def test_duplicated_environment_proxy_preserves_query_features() -> None:
     assert model.environment_builder is original
 
 
+def test_interface_read_role_marker_is_scoped() -> None:
+    from channelthermal import interface_field_coupling as coupling
+
+    model = SimpleNamespace(core=SimpleNamespace())
+    assert not hasattr(model.core, "_interface_read_role")
+    with coupling._interface_read_role(model, "p1_refinement"):
+        assert model.core._interface_read_role == "p1_refinement"
+    assert not hasattr(model.core, "_interface_read_role")
+
+
+def test_audit_read_summary_separates_supported_and_null_mass() -> None:
+    summary = stage3._audit_read_summary(
+        {
+            "group_read_degree": torch.tensor([[2.0, 0.0]]),
+            "group_read_geometric_weight": torch.tensor([[[0.2, 0.3], [0.0, 0.0]]]),
+            "group_read_weight_mass": torch.tensor([[0.4, 0.0]]),
+            "group_read_conditional_mixture_norm": torch.tensor([[1.5, 0.0]]),
+        }
+    )
+    assert summary["available"] is True
+    assert summary["unsupported_receiver_fraction"] == 0.5
+    assert summary["availability"]["all"]["mean"] == pytest.approx(0.25)
+    assert summary["null_mass"]["supported"]["mean"] == pytest.approx(0.6)
+
+
+def test_audit_read_summary_excludes_padded_receivers_and_slots() -> None:
+    summary = stage3._audit_read_summary(
+        {
+            "group_read_degree": torch.tensor([[2.0, 0.0]]),
+            "group_read_group_index": torch.tensor([[[7, -1], [-1, -1]]]),
+            "group_read_logit_mean": torch.tensor([[4.0, 100.0]]),
+            "group_read_logit_std": torch.tensor([[0.5, 9.0]]),
+            "group_read_logit": torch.tensor([[[10.0, 0.0], [0.0, 0.0]]]),
+            "group_read_dot_product": torch.tensor([[[10.0, 0.0], [0.0, 0.0]]]),
+            "main_context_norm": torch.tensor([[1.0, 99.0]]),
+        },
+        active_receiver_mask=torch.tensor([[True, False]]),
+    )
+    assert summary["receiver_count"] == 1
+    assert summary["execution_receiver_count"] == 2
+    assert summary["padded_receiver_count"] == 1
+    assert summary["unsupported_receiver_fraction"] == 0.0
+    assert summary["logits"]["all"]["mean"] == pytest.approx(4.0)
+    assert summary["logit_spread"]["all"]["mean"] == pytest.approx(0.5)
+    assert summary["main_context_norm"]["all"]["mean"] == pytest.approx(1.0)
+    # The per-slot fallback is filtered by group index, so its reserved zero
+    # slot does not dilute the observed logit.
+    assert summary["dot_product_logits"]["all"]["mean"] == pytest.approx(10.0)
+
+
+def test_phase_execution_and_incremental_comparison_are_explicit() -> None:
+    outputs = {
+        "interaction_aux": {
+            "initial_port_group_read_degree": torch.ones(1, 2),
+            "group_read_degree": torch.ones(1, 4),
+        },
+        "provisional_read_aux": {"group_read_degree": torch.ones(1, 2)},
+    }
+    assert stage3._phase_execution_summary(outputs) == {
+        "P0_initial_port": True,
+        "P1_refinement": True,
+        "P2_field": True,
+    }
+    normal = {"pred_field": torch.tensor([10.0])}
+    p0 = {"pred_field": torch.tensor([8.0])}
+    p0_p1 = {"pred_field": torch.tensor([6.0])}
+    relative_to_normal = stage3._summarize_outputs(normal, p0_p1)
+    incremental = stage3._summarize_outputs(p0, p0_p1)
+    assert relative_to_normal["pred_field"]["mean_abs"] == pytest.approx(4.0)
+    assert incremental["pred_field"]["mean_abs"] == pytest.approx(2.0)
+    assert incremental["pred_field"]["max_relative"] == pytest.approx(0.25)
+
+
+def test_vector_response_norm_summary_respects_topology_masks() -> None:
+    values = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+    connected = torch.tensor([[True, False, True, False]])
+    assert stage3._vector_response_norm_summary(values, connected) == {
+        "count": 2,
+        "mean": pytest.approx(2.0),
+        "p95": pytest.approx(2.9),
+        "max": pytest.approx(3.0),
+    }
+    assert stage3._vector_response_norm_summary(values, ~connected) == {
+        "count": 2,
+        "mean": pytest.approx(3.0),
+        "p95": pytest.approx(3.9),
+        "max": pytest.approx(4.0),
+    }
+
+
+def test_support_counts_separate_actual_degree_from_routing_slot_capacity() -> None:
+    counts = stage3._support_counts(
+        {"interaction_aux": {"support_centres": torch.zeros(3, 2)}},
+        {
+            "group_read_degree": torch.tensor([[2.0, 0.0, 3.0]]),
+            "group_read_group_index": torch.full((1, 3, 16), -1, dtype=torch.long),
+        },
+    )
+    assert counts["query_group_read_value_count"] == 5
+    assert counts["query_group_read_degree_sum"] == 5
+    assert counts["query_group_read_slot_capacity"] == 48
+    assert counts["query_group_read_degree_mean"] == pytest.approx(5.0 / 3.0)
+    assert counts["query_group_read_degree_max"] == pytest.approx(3.0)
+
+
+def test_synthetic_scaling_aggregates_degree_and_preserves_chunk_configuration() -> None:
+    class FakeModel:
+        def __init__(self) -> None:
+            self.core = SimpleNamespace(receiver_chunk_size=128)
+            self.decode_chunks: list[tuple[int, int | None, bool]] = []
+
+        def __call__(self, structure, query_xy, **kwargs):
+            del structure, query_xy
+            assert kwargs["return_routing_maps"] is False
+            prepared = SimpleNamespace(
+                prepared=SimpleNamespace(
+                    backend_state=SimpleNamespace(
+                        cache=SimpleNamespace(layout=SimpleNamespace(spatial_dimension=2))
+                    )
+                )
+            )
+            return {"prepared_state": prepared, "routing_aux": {}}
+
+        def decode_prepared(self, prepared, query_xy, **kwargs):
+            del prepared
+            self.decode_chunks.append(
+                (int(query_xy.shape[1]), kwargs["receiver_chunk_size"], kwargs["return_routing_maps"])
+            )
+            return {
+                "pred_field": query_xy.new_zeros((query_xy.shape[0], query_xy.shape[1], 1)),
+                "group_read_degree": query_xy.new_full((query_xy.shape[0], query_xy.shape[1]), 2.0),
+            }
+
+    model = FakeModel()
+    query_xy = torch.zeros(1, 5, 2)
+    prediction, _prepared, extras = stage3._prepared_synthetic_forward(
+        model,
+        {},
+        query_xy,
+        torch.device("cpu"),
+        query_batch_size=2,
+        receiver_chunk_size=2048,
+        return_routing_maps=False,
+    )
+    assert prediction.shape == (1, 5, 1)
+    assert extras["support"]["query_group_read_value_count"] == 10.0
+    assert extras["support"]["query_group_read_degree_sum"] == 10.0
+    assert extras["support"]["query_group_read_slot_capacity"] == 80.0
+    assert model.core.receiver_chunk_size == 128
+    assert model.decode_chunks == [(2, 2048, False), (2, 2048, False), (1, 2048, False)]
+
+
 def test_geometry_perturbation_is_copied_and_valid() -> None:
     sample = _sample()
     model = _dummy_model()
@@ -112,6 +264,7 @@ def test_geometry_perturbation_is_copied_and_valid() -> None:
     "task,arguments",
     [
         ("interventions", ["--sparse-checkpoint", "s=/tmp/s.pt"]),
+        ("checkpoint_audit", ["--sparse-checkpoint", "a=/tmp/a.pt"] * 3),
         ("gradients", ["--sparse-checkpoint", "s=/tmp/s.pt"]),
         ("quadrature", ["--checkpoint", "a=/tmp/a.pt"] * 4),
         ("scaling", ["--checkpoint", "a=/tmp/a.pt"] * 3),
@@ -124,3 +277,25 @@ def test_parser_has_explicit_output_and_task_entrypoint(task: str, arguments: li
     assert parsed.task == task
     assert callable(parsed.handler)
     assert str(parsed.output) == "/tmp/stage3.json"
+
+
+def test_scaling_parser_accepts_bounded_checkpoint_count_and_runtime_controls() -> None:
+    parser = stage3.build_parser()
+    parsed = parser.parse_args(
+        [
+            "scaling",
+            "--checkpoint",
+            "candidate=/tmp/candidate.pt",
+            "--shape",
+            "128,3072,262144",
+            "--receiver-chunk-size",
+            "2048",
+            "--routing-mode",
+            "summary",
+            "--output",
+            "/tmp/stage3.json",
+        ]
+    )
+    assert parsed.receiver_chunk_size == 2048
+    assert parsed.routing_mode == "summary"
+    assert parsed.shape == ["128,3072,262144"]

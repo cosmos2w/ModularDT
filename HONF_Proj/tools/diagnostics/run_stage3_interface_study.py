@@ -54,7 +54,7 @@ from channelthermal.evaluation.prepared import select_sample
 from honf_forward_core.interface_fields.supports import lookup_receivers
 from honf_runtime.compat import load_trusted_checkpoint, resolve_demo_path, select_device
 
-STUDY_SCHEMA_VERSION = 1
+STUDY_SCHEMA_VERSION = 2
 DEFAULT_QUERY_BATCH_SIZE = 32768
 DEFAULT_CASE_IDS = ("0273", "0653")
 DEFAULT_SCALING_SHAPES = (
@@ -173,7 +173,14 @@ def _sample_case_index(dataset: GlobalChannelThermalDataset, case_id: str) -> in
     raise KeyError(f"case_id={case_id!r} is absent from split={dataset.split!r}.")
 
 
-def _load_dataset(checkpoint: Mapping[str, Any], args: argparse.Namespace) -> tuple[GlobalChannelThermalDataset, Path]:
+def _load_dataset(
+    checkpoint: Mapping[str, Any],
+    args: argparse.Namespace,
+    *,
+    split_override: str | None = None,
+    points_per_case_override: int | None = None,
+    random_point_sampling_override: bool | None = None,
+) -> tuple[GlobalChannelThermalDataset, Path]:
     dataset_cfg = dict(checkpoint.get("train_config", {}).get("dataset", {}))
     raw_path = args.dataset or dataset_cfg.get("packed_h5_path")
     if raw_path is None:
@@ -186,11 +193,15 @@ def _load_dataset(checkpoint: Mapping[str, Any], args: argparse.Namespace) -> tu
     normalizer = H5Normalizer(stats) if stats else None
     dataset = GlobalChannelThermalDataset(
         dataset_path,
-        split=str(args.split),
-        points_per_case=1,
+        split=str(args.split if split_override is None else split_override),
+        points_per_case=1 if points_per_case_override is None else int(points_per_case_override),
         normalize_inputs=bool(dataset_cfg.get("normalize_inputs", False)),
         normalize_targets=bool(dataset_cfg.get("normalize_targets", False)),
-        random_point_sampling=False,
+        random_point_sampling=(
+            False
+            if random_point_sampling_override is None
+            else bool(random_point_sampling_override)
+        ),
         include_grid=True,
         include_structure_targets=False,
         normalizer=normalizer,
@@ -198,6 +209,26 @@ def _load_dataset(checkpoint: Mapping[str, Any], args: argparse.Namespace) -> tu
     if len(dataset) == 0:
         raise RuntimeError(f"No cases available in dataset={dataset_path} split={args.split!r}.")
     return dataset, dataset_path
+
+
+def _load_raw_sample(
+    dataset_path: Path,
+    split: str,
+    case_id: str,
+) -> dict[str, Any]:
+    """Load one physical target sample without checkpoint normalization."""
+
+    raw_dataset = GlobalChannelThermalDataset(
+        dataset_path,
+        split=str(split),
+        points_per_case=1,
+        normalize_inputs=False,
+        normalize_targets=False,
+        random_point_sampling=False,
+        include_grid=True,
+        include_structure_targets=False,
+    )
+    return select_sample(raw_dataset, str(case_id), 0)
 
 
 def _load_model_spec(spec: CheckpointSpec, device: torch.device) -> tuple[Any, dict[str, Any]]:
@@ -237,7 +268,16 @@ def _query_points(sample: Mapping[str, Any], count: int) -> np.ndarray:
     return points[indices]
 
 
-def _forward_batch(model: Any, sample: Mapping[str, Any], query_xy: np.ndarray | torch.Tensor, device: torch.device, *, return_prepared_state: bool = False, return_routing_maps: bool = False) -> dict[str, Any]:
+def _forward_batch(
+    model: Any,
+    sample: Mapping[str, Any],
+    query_xy: np.ndarray | torch.Tensor,
+    device: torch.device,
+    *,
+    return_prepared_state: bool = False,
+    return_routing_maps: bool = False,
+    return_organizer_passes: bool = False,
+) -> dict[str, Any]:
     """Run one direct, evaluation-only model forward from an adapted sample."""
 
     if torch.is_tensor(query_xy):
@@ -256,6 +296,7 @@ def _forward_batch(model: Any, sample: Mapping[str, Any], query_xy: np.ndarray |
         local_port_condition_mode="predicted",
         return_prepared_state=bool(return_prepared_state),
         return_routing_maps=bool(return_routing_maps),
+        return_organizer_passes=bool(return_organizer_passes),
     )
     return outputs
 
@@ -385,11 +426,32 @@ def _patch_instance(obj: Any, name: str, replacement: Callable[..., Any]) -> tup
 
 @contextmanager
 def sparse_context_intervention(model: Any, mode: str) -> Iterator[None]:
-    """Temporarily remove one sparse branch without changing model parameters."""
+    """Temporarily remove one sparse branch without changing parameters.
+
+    ``port_main_zero`` and ``field_main_zero`` are historical broad hooks and
+    retain their original scopes for comparability.  The phase-explicit modes
+    use the temporary role markers emitted by the physical coupling wrapper:
+    ``p0_port_main_zero`` (initial interface), ``p0_p1_main_zero`` (interface
+    feedback), and ``p2_field_main_zero`` (isolated final field read).
+    Long names are accepted as aliases for study output readability.
+    """
 
     if _architecture(model) != "sparse_interface_honf":
         raise ValueError(f"This intervention requires sparse_interface_honf, got {_architecture(model)!r}.")
-    if mode not in {"port_main_zero", "field_main_zero"}:
+    aliases = {
+        "initial_interface_read_only": "p0_port_main_zero",
+        "interface_feedback_route": "p0_p1_main_zero",
+        "final_field_read_only": "p2_field_main_zero",
+    }
+    mode = aliases.get(str(mode), str(mode))
+    valid_modes = {
+        "port_main_zero",
+        "field_main_zero",
+        "p0_port_main_zero",
+        "p0_p1_main_zero",
+        "p2_field_main_zero",
+    }
+    if mode not in valid_modes:
         raise ValueError(f"Unknown sparse intervention mode={mode!r}.")
     core = model.core
     backend = core.backend
@@ -398,7 +460,17 @@ def sparse_context_intervention(model: Any, mode: str) -> Iterator[None]:
 
     def backend_read(*args: Any, **kwargs: Any) -> Any:
         main, aux = original_backend_read(*args, **kwargs)
-        if (mode == "port_main_zero" and state["port"]) or (mode == "field_main_zero" and state["decode"]):
+        role = getattr(core, "_interface_read_role", None)
+        phase_suppressed = (
+            (mode == "p0_port_main_zero" and role == "p0_port")
+            or (mode == "p0_p1_main_zero" and role in {"p0_port", "p1_refinement"})
+            or (mode == "p2_field_main_zero" and role == "p2_field")
+        )
+        historical_suppressed = (
+            (mode == "port_main_zero" and state["port"])
+            or (mode == "field_main_zero" and state["decode"])
+        )
+        if phase_suppressed or historical_suppressed:
             main = torch.zeros_like(main)
         return main, aux
 
@@ -481,11 +553,914 @@ def _state_keys(model: Any) -> tuple[str, ...]:
 
 
 def _summarize_outputs(base: Mapping[str, Any], variant: Mapping[str, Any]) -> dict[str, Any]:
+    """Summarize one variant relative to an explicitly supplied reference."""
+
     summary: dict[str, Any] = {}
     for key in ("pred_field", "pred_interface", "pred_port_condition", "pred_internal_temperature"):
         if key in base and key in variant and torch.is_tensor(base[key]) and torch.is_tensor(variant[key]):
             summary[key] = _relative_difference(variant[key], base[key])
     return summary
+
+
+def _phase_execution_summary(outputs: Mapping[str, Any]) -> dict[str, bool]:
+    """Record which tagged physical reads actually executed for one forward."""
+
+    interaction = outputs.get("interaction_aux", {})
+    if not isinstance(interaction, Mapping):
+        interaction = {}
+    provisional = outputs.get("provisional_read_aux", {})
+    if not isinstance(provisional, Mapping):
+        provisional = {}
+    return {
+        "P0_initial_port": any(
+            key.startswith("initial_port_") and key.endswith("group_read_degree")
+            for key in interaction
+        ),
+        "P1_refinement": "group_read_degree" in provisional,
+        "P2_field": "group_read_degree" in interaction,
+    }
+
+
+def _prediction_payload(outputs: Mapping[str, Any], sample: Mapping[str, Any]) -> dict[str, np.ndarray]:
+    """Convert one direct model output to the canonical evaluation payload."""
+
+    def array(key: str) -> np.ndarray:
+        value = outputs.get(key)
+        if not torch.is_tensor(value):
+            return np.asarray(value if value is not None else [], dtype=np.float32)
+        result = value.detach().cpu().numpy()
+        return result[0] if result.ndim and result.shape[0] == 1 else result
+
+    field = array("pred_field")
+    grid_shape = np.asarray(sample["x_grid"]).shape
+    if field.ndim == 3 and field.shape[0] == 1:
+        field = field[0]
+    if field.ndim == 2 and field.shape[0] == int(np.prod(grid_shape)):
+        field = field.reshape(*grid_shape, field.shape[-1])
+    return {
+        "pred_field_grid": np.asarray(field, dtype=np.float32),
+        "pred_internal_temperature": np.asarray(array("pred_internal_temperature"), dtype=np.float32),
+        "pred_interface": np.asarray(array("pred_interface"), dtype=np.float32),
+        "pred_port_condition": np.asarray(array("pred_port_condition"), dtype=np.float32),
+        "pred_port_condition_raw": np.asarray(
+            array("pred_port_condition_raw"), dtype=np.float32
+        ),
+    }
+
+
+def _canonical_ground_truth_errors(
+    outputs: Mapping[str, Any],
+    sample: Mapping[str, Any],
+    raw_sample: Mapping[str, Any],
+    dataset: GlobalChannelThermalDataset,
+    model: Any,
+    checkpoint: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Reuse the matched comparison evaluator for intervention error rows."""
+
+    predictions = _prediction_payload(outputs, sample)
+    grid_shape = np.asarray(raw_sample["x_grid"]).shape
+    field = predictions["pred_field_grid"]
+    normalized_targets = bool(
+        checkpoint.get("train_config", {}).get("dataset", {}).get("normalize_targets", False)
+    )
+    if field.ndim != 3 or tuple(field.shape[:2]) != tuple(grid_shape):
+        return {
+            "status": "query_subset_only",
+            "query_count": int(field.shape[0]) if field.ndim else 0,
+            "expected_grid_count": int(np.prod(grid_shape)),
+            "target_space": "physical_denormalized",
+            "checkpoint_targets_normalized": normalized_targets,
+            "port_interface_internal": _subset_physical_errors(
+                predictions, raw_sample, dataset, normalized_targets
+            ),
+        }
+
+    # Keep this import lazy: the study's unit tests exercise parser and hook
+    # behavior without importing the plotting-heavy comparison workflow.
+    from channelthermal.workflows.compare_models import reconstruction_metrics
+
+    row, _ = reconstruction_metrics(
+        base_row={"case_id": str(raw_sample.get("case_id", sample.get("case_id", "unknown")))},
+        predictions=predictions,
+        raw_sample=dict(raw_sample),
+        dataset=dataset,
+        checkpoint_targets_normalized=normalized_targets,
+        channel_order=list(model.config.channelthermal.field_names),
+    )
+    return {
+        "status": "full_grid",
+        "target_space": row.get("target_space"),
+        "checkpoint_targets_normalized": normalized_targets,
+        "physical_metrics_denormalized": True,
+        "metrics": {
+            key: value
+            for key, value in row.items()
+            if key != "case_id" and isinstance(value, (int, float, np.integer, np.floating))
+        },
+    }
+
+
+def _subset_physical_errors(
+    predictions: Mapping[str, np.ndarray],
+    raw_sample: Mapping[str, Any],
+    dataset: GlobalChannelThermalDataset,
+    normalized_targets: bool,
+) -> dict[str, float | None]:
+    """Provide canonical local/port errors when a reduced query subset is used."""
+
+    from channelthermal.evaluation_tools.plots import error_metrics
+    from channelthermal.evaluation.results import denormalize_predictions
+
+    physical = denormalize_predictions(dict(predictions), dataset, normalized_targets)
+    result: dict[str, float | None] = {}
+    target_internal = np.asarray(raw_sample["module_internal_temperature_points"], dtype=np.float64)
+    target_interface = np.asarray(raw_sample["interface_target"], dtype=np.float64)
+    target_ports = np.asarray(raw_sample["teacher_port_tokens"], dtype=np.float64)
+    present = np.asarray(raw_sample["structure"]["module_present"], dtype=bool)
+    active_ports = np.broadcast_to(present[:, None], target_ports.shape[:2])
+    pred_internal = np.asarray(physical["pred_internal_temperature"], dtype=np.float64)
+    pred_interface = np.asarray(physical["pred_interface"], dtype=np.float64)
+    pred_ports = np.asarray(physical["pred_port_condition"], dtype=np.float64)
+
+    def masked(name: str, pred: np.ndarray, target: np.ndarray, mask: np.ndarray) -> None:
+        selected_pred = np.asarray(pred)[np.asarray(mask, dtype=bool)]
+        selected_target = np.asarray(target)[np.asarray(mask, dtype=bool)]
+        result[name] = (
+            float(error_metrics(selected_pred, selected_target)["relative_l2"])
+            if selected_pred.size
+            else None
+        )
+
+    masked(
+        "internal_temperature_physical_relative_l2",
+        pred_internal[..., 0],
+        target_internal,
+        np.broadcast_to(present[:, None], target_internal.shape),
+    )
+    masked(
+        "interface_t_surface_physical_relative_l2",
+        pred_interface[..., 0],
+        target_interface[..., 0],
+        active_ports,
+    )
+    masked(
+        "interface_q_normal_physical_relative_l2",
+        pred_interface[..., 1],
+        target_interface[..., 1],
+        active_ports,
+    )
+    masked(
+        "port_t_env_final_physical_relative_l2",
+        pred_ports[..., 3],
+        target_ports[..., 3],
+        active_ports,
+    )
+    valid_h = np.asarray(raw_sample.get("interface_condition_valid_mask", np.ones_like(active_ports)), dtype=bool)
+    masked(
+        "port_h_effective_final_physical_relative_l2",
+        pred_ports[..., 4],
+        target_ports[..., 4],
+        active_ports & valid_h,
+    )
+    return result
+
+
+def _error_deltas(base: Mapping[str, Any], variant: Mapping[str, Any]) -> dict[str, float]:
+    """Return intervened-minus-normal deltas for canonical error metrics."""
+
+    base_metrics = base.get("metrics", base.get("port_interface_internal", {}))
+    variant_metrics = variant.get("metrics", variant.get("port_interface_internal", {}))
+    result: dict[str, float] = {}
+    for key, value in variant_metrics.items():
+        if key not in base_metrics or not isinstance(value, (int, float)):
+            continue
+        reference = base_metrics[key]
+        if not isinstance(reference, (int, float)):
+            continue
+        if not (math.isfinite(float(value)) and math.isfinite(float(reference))):
+            continue
+        if key.endswith("_norm_l2") or key.endswith("_physical_relative_l2"):
+            result[key] = float(value) - float(reference)
+    return result
+
+
+def _finite_stats(value: Any, mask: Any = None) -> dict[str, Any] | None:
+    """Summarize one diagnostic tensor, optionally on supported receivers."""
+
+    if value is None:
+        return None
+    tensor = value.detach().float() if torch.is_tensor(value) else torch.as_tensor(value, dtype=torch.float32)
+    if mask is not None:
+        support = mask.detach().bool() if torch.is_tensor(mask) else torch.as_tensor(mask, dtype=torch.bool)
+        if support.ndim > tensor.ndim:
+            return None
+        while support.ndim < tensor.ndim:
+            support = support.unsqueeze(-1)
+        try:
+            support = support.expand_as(tensor)
+            tensor = tensor[support]
+        except RuntimeError:
+            return None
+    flat = tensor.reshape(-1)
+    flat = flat[torch.isfinite(flat)]
+    if not flat.numel():
+        return {"count": 0, "mean": None, "std": None, "min": None, "p05": None, "p95": None, "max": None}
+    quantiles = torch.quantile(flat, flat.new_tensor([0.05, 0.95]))
+    return {
+        "count": int(flat.numel()),
+        "mean": float(flat.mean().cpu()),
+        "std": float(flat.std(unbiased=False).cpu()),
+        "min": float(flat.min().cpu()),
+        "p05": float(quantiles[0].cpu()),
+        "p95": float(quantiles[1].cpu()),
+        "max": float(flat.max().cpu()),
+    }
+
+
+def _first_aux(aux: Mapping[str, Any], *names: str) -> Any:
+    for name in names:
+        if name in aux:
+            return aux[name]
+    return None
+
+
+def _audit_read_summary(
+    aux: Mapping[str, Any],
+    active_receiver_mask: Any = None,
+) -> dict[str, Any]:
+    """Separate reader statistics while excluding padded receivers and slots.
+
+    ``group_read_*`` maps are rectangular by construction.  In P0/P1 the
+    rectangle also contains module rows that are padding for smaller cases;
+    detailed slot exports additionally reserve ``-1`` entries for missing
+    group incidences.  The reader's per-receiver summaries are preferred for
+    logits/norms, and slot maps are filtered by their real group index before
+    they are summarized.
+    """
+
+    degree = _first_aux(aux, "group_read_degree")
+    if degree is None:
+        return {"available": False, "reason": "reader_diagnostics_not_returned"}
+    degree_tensor = (
+        degree.detach().float()
+        if torch.is_tensor(degree)
+        else torch.as_tensor(degree, dtype=torch.float32)
+    )
+
+    def _mask_for_shape(mask: Any, shape: torch.Size | tuple[int, ...]) -> torch.Tensor | None:
+        if mask is None:
+            return torch.ones(shape, dtype=torch.bool, device=degree_tensor.device)
+        result = mask.detach().bool() if torch.is_tensor(mask) else torch.as_tensor(mask, dtype=torch.bool)
+        result = result.to(device=degree_tensor.device)
+        if result.ndim > len(shape):
+            return None
+        if result.ndim == 1 and len(shape) >= 2 and result.shape[0] == shape[1]:
+            result = result.unsqueeze(0)
+        # P1 port refinement decodes flatten module/port receivers while P0
+        # retains [batch, module, port].  Expand a [batch, module] presence
+        # mask across that flattened port axis when necessary.
+        if (
+            result.ndim == 2
+            and len(shape) == 2
+            and result.shape[0] == shape[0]
+            and result.shape[1] > 0
+            and shape[1] % result.shape[1] == 0
+        ):
+            result = result.repeat_interleave(shape[1] // result.shape[1], dim=1)
+        while result.ndim < len(shape):
+            result = result.unsqueeze(-1)
+        try:
+            return result.expand(shape)
+        except RuntimeError:
+            return None
+
+    active = _mask_for_shape(active_receiver_mask, degree_tensor.shape)
+    if active is None:
+        raise ValueError(
+            "active_receiver_mask is not broadcastable to group_read_degree: "
+            f"{tuple(np.shape(active_receiver_mask))} vs {tuple(degree_tensor.shape)}"
+        )
+    supported = active & (degree_tensor > 0.0)
+    slot_index = _first_aux(aux, "group_read_group_index")
+    slot_index_tensor = None
+    if slot_index is not None:
+        slot_index_tensor = (
+            slot_index.detach()
+            if torch.is_tensor(slot_index)
+            else torch.as_tensor(slot_index)
+        ).to(device=degree_tensor.device)
+
+    def _metric_masks(value: Any) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        tensor = value if torch.is_tensor(value) else torch.as_tensor(value)
+        active_mask = _mask_for_shape(active, tensor.shape)
+        supported_mask = _mask_for_shape(supported, tensor.shape)
+        if active_mask is None or supported_mask is None:
+            return None, None
+        # A detailed slot map has the receiver axes followed by a slot axis.
+        # Filter by actual incidence IDs so zero-filled reserved slots never
+        # affect logits, values, or conditional routing summaries.
+        if slot_index_tensor is not None and tensor.ndim >= slot_index_tensor.ndim:
+            same_shape = tensor.shape[: slot_index_tensor.ndim] == slot_index_tensor.shape
+            if same_shape:
+                valid_slots = slot_index_tensor >= 0
+                valid_slots = _mask_for_shape(valid_slots, tensor.shape)
+                if valid_slots is not None:
+                    active_mask = active_mask & valid_slots
+                    supported_mask = supported_mask & valid_slots
+        return active_mask, supported_mask
+
+    summary: dict[str, Any] = {
+        "available": True,
+        # ``receiver_count`` is the active physical receiver count.  The
+        # execution count remains visible so padded execution is auditable.
+        "receiver_count": int(active.sum().cpu()),
+        "execution_receiver_count": int(degree_tensor.numel()),
+        "padded_receiver_count": int((~active).sum().cpu()),
+        "unsupported_receiver_fraction": (
+            float(((active & ~supported).float().sum() / active.float().sum()).cpu())
+            if bool(active.any())
+            else None
+        ),
+        "degree": {
+            "execution": _finite_stats(degree_tensor),
+            "all": _finite_stats(degree_tensor, active),
+            "supported": _finite_stats(degree_tensor, supported),
+        },
+    }
+
+    def add(name: str, *keys: str, derive: Callable[[], Any] | None = None) -> None:
+        value = _first_aux(aux, *keys)
+        if value is None and derive is not None:
+            value = derive()
+        if value is None:
+            return
+        active_mask, supported_mask = _metric_masks(value)
+        summary[name] = {
+            "all": _finite_stats(value, active_mask),
+            "supported": _finite_stats(value, supported_mask),
+        }
+
+    geometric_slots = _first_aux(aux, "group_read_geometric_weight")
+    add(
+        "availability",
+        "group_read_geometric_availability",
+        "group_read_geometry_availability",
+        "group_read_availability",
+        derive=(lambda: geometric_slots.sum(dim=-1) if torch.is_tensor(geometric_slots) else None),
+    )
+    # Prefer the per-receiver values.  Slot maps are retained as a fallback
+    # for older checkpoints and are incidence-masked by _metric_masks.
+    add(
+        "logits",
+        "group_read_logit_mean",
+        "group_read_logits",
+        "group_read_logit",
+        "group_read_attention_logit",
+    )
+    add("logit_spread", "group_read_logit_std")
+    add(
+        "log_z",
+        "group_read_log_z",
+        "group_read_logsumexp",
+        "group_read_log_normalizer",
+        "group_read_log_partition",
+    )
+    effective_mass = _first_aux(aux, "group_read_weight_mass", "group_read_effective_mass")
+    add(
+        "effective_read_mass",
+        "group_read_weight_mass",
+        "group_read_effective_mass",
+    )
+    add("nonnull_mass", "group_read_weight_mass", "group_read_nonnull_mass")
+    null_mass = _first_aux(
+        aux,
+        "group_read_null_mass",
+        "group_read_null_weight",
+        "group_read_null_weight_mass",
+    )
+    if null_mass is None and effective_mass is not None:
+        # This fallback is valid for the historical null-softmax metric where
+        # weight_mass explicitly denotes the non-null branch mass.  A corrected
+        # reader can provide group_read_null_mass to avoid this interpretation.
+        null_mass = 1.0 - effective_mass
+    add("null_mass", derive=(lambda: null_mass))
+    add(
+        "values",
+        "group_read_value_norm_mean",
+        "group_read_value_norm",
+        "group_value_norm",
+        "group_read_group_value_norm",
+    )
+    add(
+        "conditional_mixture",
+        "group_read_conditional_value_norm",
+        "group_read_conditional_mixture_norm",
+        "group_read_conditional_context_norm",
+        "group_read_context_norm_before_null",
+    )
+    add("conditional_value_norm_mean", "group_read_conditional_value_norm_mean")
+    add(
+        "conditional_weights",
+        "group_read_conditional_weight",
+        "group_read_conditional_weights",
+    )
+    add(
+        "dot_product_logits",
+        "group_read_dot_product_mean",
+        "group_read_dot_product_logits",
+        "group_read_logit_dot",
+        "group_read_dot_product",
+    )
+    add(
+        "bias_logits",
+        "group_read_bias_mean",
+        "group_read_bias_logits",
+        "group_read_logit_bias",
+        "group_read_bias",
+    )
+    add("query_norm", "group_read_query_norm", "receiver_query_norm")
+    add("key_norm", "group_read_key_norm_mean", "group_read_key_norm", "group_key_norm")
+    # These branch summaries are produced by the core reader for each phase;
+    # keeping them alongside reader metrics exposes main/coarse/local reliance.
+    add("main_context_norm", "main_context_norm")
+    add("coarse_context_norm", "coarse_context_norm")
+    add("local_context_norm", "local_context_norm")
+    add("main_context_fraction", "main_context_fraction")
+    add("coarse_context_fraction", "coarse_context_fraction")
+    add("local_context_fraction", "local_context_fraction")
+    add("context_norm", "group_read_context_norm")
+    return summary
+
+
+def _strip_aux_prefix(aux: Mapping[str, Any], prefix: str) -> dict[str, Any]:
+    return {
+        key[len(prefix) :]: value
+        for key, value in aux.items()
+        if key.startswith(prefix)
+    }
+
+
+def _audit_phase_summaries(
+    outputs: Mapping[str, Any],
+    active_receiver_mask: Any = None,
+) -> dict[str, Any]:
+    """Collect P0/P1/P2 summaries from explicit coupling role outputs."""
+
+    interaction = outputs.get("interaction_aux", {})
+    if not isinstance(interaction, Mapping):
+        interaction = {}
+    provisional = outputs.get("provisional_read_aux", {})
+    if not isinstance(provisional, Mapping):
+        provisional = {}
+    p0 = _strip_aux_prefix(interaction, "initial_port_")
+    return {
+        "P0_initial_port": {
+            "role": "p0_port",
+            "read": _audit_read_summary(p0, active_receiver_mask),
+        },
+        "P1_refinement": {
+            "role": "p1_refinement",
+            "read": _audit_read_summary(provisional, active_receiver_mask),
+        },
+        "P2_field": {
+            "role": "p2_field",
+            "read": _audit_read_summary(interaction),
+        },
+    }
+
+
+@contextmanager
+def _temporary_group_read_mode(model: Any, mode: str) -> Iterator[bool]:
+    """Set a reader mode on whichever config/backend owner exposes it."""
+
+    targets: list[Any] = []
+    for candidate in (
+        getattr(getattr(model, "config", None), "core_honf", None),
+        getattr(getattr(getattr(model, "config", None), "core_honf", None), "interface_model", None),
+        getattr(getattr(getattr(model, "core", None), "config", None), "interface_model", None),
+        getattr(getattr(model, "core", None), "backend", None),
+    ):
+        if candidate is not None and all(id(candidate) != id(item) for item in targets):
+            targets.append(candidate)
+    saved: list[tuple[Any, str, Any]] = []
+    for target in targets:
+        if hasattr(target, "group_read_mode"):
+            saved.append((target, "group_read_mode", getattr(target, "group_read_mode")))
+            setattr(target, "group_read_mode", str(mode))
+    try:
+        yield bool(saved)
+    finally:
+        for target, name, value in reversed(saved):
+            setattr(target, name, value)
+
+
+@contextmanager
+def _shift_receiver_bias(model: Any, shift: float) -> Iterator[bool]:
+    """Apply one temporary common receiver-logit offset for reader replay."""
+
+    backend = getattr(getattr(model, "core", None), "backend", None)
+    bias = getattr(backend, "receiver_bias", None)
+    if bias is None or not hasattr(bias, "forward"):
+        yield False
+        return
+    original = bias.forward
+
+    def shifted_forward(*args: Any, **kwargs: Any) -> torch.Tensor:
+        return original(*args, **kwargs) + float(shift)
+
+    bias.forward = shifted_forward
+    try:
+        yield True
+    finally:
+        bias.forward = original
+
+
+def _reader_replay(
+    model: Any,
+    sample: Mapping[str, Any],
+    query_np: np.ndarray,
+    device: torch.device,
+    *,
+    shift: float,
+) -> dict[str, Any]:
+    """Compare old/new readers on one shared prepared group state."""
+
+    with torch.no_grad():
+        base = _forward_batch(
+            model,
+            sample,
+            query_np,
+            device,
+            return_prepared_state=True,
+            return_routing_maps=False,
+        )
+    prepared_wrapper = base.get("prepared_state")
+    if prepared_wrapper is None:
+        return {"available": False, "reason": "prepared_state_not_returned"}
+    prepared = prepared_wrapper.prepared
+    queries = torch.from_numpy(np.asarray(query_np, dtype=np.float32)).unsqueeze(0).to(device)
+    result: dict[str, Any] = {"available": True, "common_logit_shift": float(shift)}
+    for mode in ("null_softmax", "geometry_envelope_attention"):
+        with _temporary_group_read_mode(model, mode) as mode_available:
+            if not mode_available:
+                result[mode] = {"available": False, "reason": "reader_mode_not_exposed"}
+                continue
+            with torch.no_grad():
+                baseline = model.core.read(prepared, queries).context
+                with _shift_receiver_bias(model, shift) as shift_available:
+                    shifted = model.core.read(prepared, queries).context
+        result[mode] = {
+            "available": True,
+            "shift_hook_available": bool(shift_available),
+            "shift_difference": _relative_difference(shifted, baseline)
+            if shift_available
+            else None,
+            "old_new_context_reference": _relative_difference(baseline, result.get("_reference_context", baseline)),
+        }
+        if "_reference_context" not in result:
+            result["_reference_context"] = baseline.detach()
+    reference = result.pop("_reference_context", None)
+    if reference is not None:
+        for mode in ("null_softmax", "geometry_envelope_attention"):
+            if result.get(mode, {}).get("available"):
+                with _temporary_group_read_mode(model, mode) as mode_available:
+                    if mode_available:
+                        with torch.no_grad():
+                            current = model.core.read(prepared, queries).context
+                        result[mode]["relative_to_first_mode"] = _relative_difference(current, reference)
+    return result
+
+
+def _deterministic_training_case_ids(
+    dataset: GlobalChannelThermalDataset,
+    count: int = 4,
+) -> list[str]:
+    """Choose fixed training IDs at evenly spaced module-count ranks."""
+
+    if len(dataset) == 0:
+        raise RuntimeError("Cannot select audit training cases from an empty split.")
+    ordered = sorted(
+        zip(dataset.selected_module_counts, dataset.selected_case_ids),
+        key=lambda item: (int(item[0]), str(item[1])),
+    )
+    target_count = min(int(count), len(ordered))
+    positions = np.linspace(0, len(ordered) - 1, target_count, dtype=np.int64)
+    selected: list[str] = []
+    for position in positions.tolist():
+        case_id = str(ordered[int(position)][1])
+        if case_id not in selected:
+            selected.append(case_id)
+    if len(selected) < target_count:
+        for _, case_id in ordered:
+            text_id = str(case_id)
+            if text_id not in selected:
+                selected.append(text_id)
+            if len(selected) == target_count:
+                break
+    return selected
+
+
+def _canonical_backward_diagnostics(
+    model: Any,
+    checkpoint: Mapping[str, Any],
+    dataset: GlobalChannelThermalDataset,
+    case_ids: Sequence[str],
+    device: torch.device,
+) -> dict[str, Any]:
+    """Run one canonical physical batch with gradients and a zero-step optimizer."""
+
+    from torch.utils.data import DataLoader, Subset
+
+    from channelthermal.data.collation import ChannelThermalBatchCollator
+    from channelthermal.training.epoch import (
+        effective_local_loss_weights,
+        effective_port_condition_settings,
+        predicted_consistency_weight_for_epoch,
+        run_epoch,
+    )
+
+    index_by_case = {str(case_id): index for index, case_id in enumerate(dataset.selected_case_ids)}
+    indices = [index_by_case[str(case_id)] for case_id in case_ids]
+    train_cfg = checkpoint.get("train_config", {})
+    dataset_cfg = train_cfg.get("dataset", {}) if isinstance(train_cfg, Mapping) else {}
+    training_cfg = train_cfg.get("training", {}) if isinstance(train_cfg, Mapping) else {}
+    loss_cfg = train_cfg.get("loss", {}) if isinstance(train_cfg, Mapping) else {}
+    if not isinstance(loss_cfg, Mapping):
+        loss_cfg = {}
+    collator = ChannelThermalBatchCollator(
+        dynamic_module_padding=bool(dataset_cfg.get("dynamic_module_padding", True)),
+        max_modules_per_batch=(
+            None
+            if dataset_cfg.get("max_modules_per_batch") is None
+            else int(dataset_cfg["max_modules_per_batch"])
+        ),
+    )
+    loader = DataLoader(
+        Subset(dataset, indices),
+        batch_size=len(indices),
+        shuffle=False,
+        num_workers=0,
+        collate_fn=collator,
+    )
+    # A zero learning rate keeps the canonical optimizer branch (and its
+    # gradient bookkeeping) while guaranteeing that this audit cannot update
+    # the stored checkpoint in memory.
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.0, weight_decay=0.0)
+    epoch = int(checkpoint.get("epoch", checkpoint.get("current_epoch", 0)))
+    mode, ratio = effective_port_condition_settings(epoch, dict(training_cfg))
+    internal_weight, interface_weight = effective_local_loss_weights(dict(loss_cfg), mode, ratio)
+    before = {
+        name: parameter.detach().clone()
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    }
+    metrics = run_epoch(
+        model,
+        loader,
+        device,
+        dict(loss_cfg),
+        optimizer=optimizer,
+        scaler=None,
+        amp=False,
+        max_batches=1,
+        local_port_condition_mode=mode,
+        mixed_teacher_ratio=float(ratio),
+        effective_internal_temperature_weight=float(internal_weight),
+        effective_interface_weight=float(interface_weight),
+        predicted_consistency_weight=predicted_consistency_weight_for_epoch(epoch, dict(loss_cfg)),
+        gradient_clip_norm=float(
+            training_cfg.get("gradient_clip_norm", training_cfg.get("grad_clip_norm", 0.0))
+        ),
+        record_gradient_diagnostics=True,
+    )
+    max_delta = 0.0
+    for name, parameter in model.named_parameters():
+        if name in before:
+            max_delta = max(max_delta, float((parameter.detach() - before[name]).abs().max().cpu()))
+    model.eval()
+    optimizer.zero_grad(set_to_none=True)
+    gradient_groups = {
+        group: {
+            "gradient_norm": metrics.get(f"preclip_gradient_norm_{group}"),
+            "parameter_update_norm": metrics.get(f"parameter_update_norm_{group}"),
+        }
+        for group in ("group_prepare", "group_receiver", "coarse", "local", "backend")
+    }
+    return {
+        "case_ids": [str(case_id) for case_id in case_ids],
+        "module_counts": [
+            int(dataset.selected_module_counts[index_by_case[str(case_id)]])
+            for case_id in case_ids
+        ],
+        "epoch": epoch,
+        "local_port_condition_mode": str(mode),
+        "mixed_teacher_ratio": float(ratio),
+        "metrics": {
+            key: value
+            for key, value in metrics.items()
+            if isinstance(value, (int, float, np.integer, np.floating))
+        },
+        "gradient_groups": gradient_groups,
+        "max_parameter_delta_after_zero_step": float(max_delta),
+        "optimizer_update_applied": bool(max_delta > 0.0),
+    }
+
+
+def _audit_preparation_summary(aux: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep support/layout observations compact while retaining train/holdout rows."""
+
+    keys = (
+        "group_count_per_case",
+        "module_group_incidence_count_per_case",
+        "environment_group_incidence_count_per_case",
+        "group_occupancy",
+        "group_occupancy_envelope",
+        "group_state_norm",
+        "module_learned_membership",
+        "environment_learned_membership",
+    )
+    result: dict[str, Any] = {}
+    for key in keys:
+        value = aux.get(key)
+        if value is None:
+            continue
+        result[key] = _finite_stats(value)
+    return result
+
+
+def run_checkpoint_audit(args: argparse.Namespace) -> dict[str, Any]:
+    """Audit stored Run-1802 milestones on fixed holdout/train cases."""
+
+    specs = parse_checkpoint_specs(args.sparse_checkpoint or args.checkpoint)
+    if len(specs) != 3:
+        raise ValueError("checkpoint_audit requires exactly three stored checkpoints (10, 50, 500)")
+    device = select_device(args.device)
+    first_checkpoint = load_trusted_checkpoint(specs[0].path, map_location="cpu")
+    first_train_cfg = first_checkpoint.get("train_config", {})
+    first_dataset_cfg = first_train_cfg.get("dataset", {}) if isinstance(first_train_cfg, Mapping) else {}
+    training_split = str(first_dataset_cfg.get("train_split", "train"))
+    training_points = int(first_dataset_cfg.get("points_per_case", 4096))
+    training_dataset, training_dataset_path = _load_dataset(
+        first_checkpoint,
+        args,
+        split_override=training_split,
+        points_per_case_override=training_points,
+        random_point_sampling_override=False,
+    )
+    training_case_ids = [str(value) for value in (args.training_case_id or [])]
+    if not training_case_ids:
+        training_case_ids = _deterministic_training_case_ids(training_dataset, count=4)
+    missing_train = [case_id for case_id in training_case_ids if case_id not in training_dataset.selected_case_ids]
+    if missing_train:
+        raise KeyError(f"Audit training case IDs are absent from split={training_split!r}: {missing_train}")
+    holdout_case_ids = [str(value) for value in (args.case_id or ("0273", "0653", "0298", "0302"))]
+    if len(holdout_case_ids) != 4:
+        raise ValueError("checkpoint_audit requires exactly four holdout anchors")
+
+    checkpoint_rows: list[dict[str, Any]] = []
+    for spec in specs:
+        model, checkpoint = _load_model_spec(spec, device)
+        dataset, dataset_path = _load_dataset(checkpoint, args)
+        train_dataset, _ = _load_dataset(
+            checkpoint,
+            args,
+            split_override=training_split,
+            points_per_case_override=training_points,
+            random_point_sampling_override=False,
+        )
+        cases: list[dict[str, Any]] = []
+        ordered_cases = [("holdout", case_id) for case_id in holdout_case_ids] + [
+            ("training", case_id) for case_id in training_case_ids
+        ]
+        for sample_kind, case_id in ordered_cases:
+            source_dataset = dataset if sample_kind == "holdout" else train_dataset
+            sample = select_sample(source_dataset, case_id, 0)
+            query_np = _query_points(sample, int(args.query_count))
+            with torch.no_grad():
+                outputs = _forward_batch(
+                    model,
+                    sample,
+                    query_np,
+                    device,
+                    return_routing_maps=True,
+                    return_organizer_passes=True,
+                )
+            interaction_aux = outputs.get("interaction_aux", {})
+            if not isinstance(interaction_aux, Mapping):
+                interaction_aux = {}
+            module_present = sample["structure"].get("module_present")
+            if module_present is not None:
+                module_present = torch.as_tensor(module_present, dtype=torch.bool)
+                if module_present.ndim == 1:
+                    module_present = module_present.unsqueeze(0)
+            phases = _audit_phase_summaries(outputs, module_present)
+            cases.append(
+                {
+                    "case_id": str(case_id),
+                    "sample_kind": sample_kind,
+                    "module_count": int(
+                        np.asarray(sample["structure"]["module_present"], dtype=np.float32).reshape(-1).sum()
+                    ),
+                    "query_count": int(len(query_np)),
+                    "preparation": _audit_preparation_summary(interaction_aux),
+                    "phases": phases,
+                }
+            )
+
+        epoch = int(checkpoint.get("epoch", checkpoint.get("current_epoch", -1)))
+        canonical = _canonical_backward_diagnostics(
+            model,
+            checkpoint,
+            train_dataset,
+            training_case_ids,
+            device,
+        )
+        replay: dict[str, Any] | None = None
+        # Use the earliest requested milestone for the common-offset replay so
+        # the historical reader is still measurable before its late collapse;
+        # the full phase/gradient trajectory remains recorded at all three.
+        if epoch == 10:
+            replay_sample = select_sample(dataset, holdout_case_ids[0], 0)
+            replay_query = _query_points(replay_sample, int(args.query_count))
+            replay = _reader_replay(
+                model,
+                replay_sample,
+                replay_query,
+                device,
+                shift=float(args.reader_replay_shift),
+            )
+        checkpoint_rows.append(
+            {
+                "checkpoint": _checkpoint_record(spec, checkpoint, model),
+                "dataset": str(dataset_path),
+                "training_dataset": str(training_dataset_path),
+                "cases": cases,
+                "canonical_backward": canonical,
+                "reader_replay": replay,
+            }
+        )
+    reduced_table: list[dict[str, Any]] = []
+    for checkpoint_row in checkpoint_rows:
+        epoch = int(checkpoint_row["checkpoint"]["epoch"])
+        backward = checkpoint_row["canonical_backward"]
+        gradients = backward.get("gradient_groups", {})
+        for case in checkpoint_row["cases"]:
+            for phase_name, phase in case["phases"].items():
+                read = phase.get("read", {})
+
+                def metric(path: Sequence[str]) -> Any:
+                    value: Any = read
+                    for key in path:
+                        if not isinstance(value, Mapping):
+                            return None
+                        value = value.get(key)
+                    return value
+
+                reduced_table.append(
+                    {
+                        "epoch": epoch,
+                        "case_id": case["case_id"],
+                        "sample_kind": case["sample_kind"],
+                        "module_count": case["module_count"],
+                        "phase": phase_name,
+                        "receiver_count": read.get("receiver_count"),
+                        "unsupported_receiver_fraction": read.get("unsupported_receiver_fraction"),
+                        "availability_mean": metric(("availability", "all", "mean")),
+                        "logit_mean": metric(("logits", "all", "mean")),
+                        # ``logits`` is the mean compatibility per receiver;
+                        # ``logit_spread`` is the within-receiver std exported
+                        # by the detailed reader.
+                        "logit_std_mean": metric(("logit_spread", "all", "mean")),
+                        "nonnull_mass_mean": metric(("nonnull_mass", "all", "mean")),
+                        "null_mass_mean": metric(("null_mass", "all", "mean")),
+                        "value_norm_mean": metric(("values", "all", "mean")),
+                        "conditional_mixture_norm_mean": metric(("conditional_mixture", "all", "mean")),
+                        "group_prepare_gradient_norm": gradients.get("group_prepare", {}).get("gradient_norm"),
+                        "group_receiver_gradient_norm": gradients.get("group_receiver", {}).get("gradient_norm"),
+                        "coarse_gradient_norm": gradients.get("coarse", {}).get("gradient_norm"),
+                        "local_gradient_norm": gradients.get("local", {}).get("gradient_norm"),
+                    }
+                )
+    return {
+        "schema_version": STUDY_SCHEMA_VERSION,
+        "task": "checkpoint_audit",
+        "run_label": "Run 1802",
+        "checkpoints_requested": [int(value) for value in (10, 50, 500)],
+        "holdout_case_ids": holdout_case_ids,
+        "training_case_ids": training_case_ids,
+        "training_split": training_split,
+        "training_case_selection": "module-count sorted IDs at evenly spaced ranks",
+        "query_count": int(args.query_count),
+        "reader_replay_shift": float(args.reader_replay_shift),
+        "results": checkpoint_rows,
+        "reduced_diagnosis_table": reduced_table,
+        "limitations": [
+            "Stored checkpoints are evaluated without regenerating missing milestones or changing parameters.",
+            "Canonical backward uses one deterministic four-case batch and a zero-learning-rate optimizer; no checkpoint parameter update is retained.",
+            "P1 is reported only when the physical coupling path executes its provisional refinement decode; P2 excludes the separate p2_port_global_consistency diagnostic read.",
+        ],
+    }
 
 
 def run_interventions(args: argparse.Namespace) -> dict[str, Any]:
@@ -496,6 +1471,10 @@ def run_interventions(args: argparse.Namespace) -> dict[str, Any]:
     spec = specs[0]
     model, checkpoint = _load_model_spec(spec, device)
     dataset, dataset_path = _load_dataset(checkpoint, args)
+    raw_samples = {
+        str(case_id): _load_raw_sample(dataset_path, args.split, str(case_id))
+        for case_id in (args.case_id or dataset.selected_case_ids[:4])[:4]
+    }
     case_ids = list(args.case_id or dataset.selected_case_ids[:4])[:4]
     state_before = _state_keys(model)
     rows: list[dict[str, Any]] = []
@@ -504,13 +1483,40 @@ def run_interventions(args: argparse.Namespace) -> dict[str, Any]:
         queries_np = _query_points(sample, int(args.query_count))
         queries = torch.from_numpy(queries_np).unsqueeze(0).to(device)
         with torch.no_grad():
-            base = _forward_batch(model, sample, queries_np, device, return_routing_maps=True)
+            base = _forward_batch(
+                model,
+                sample,
+                queries_np,
+                device,
+                return_routing_maps=True,
+                return_organizer_passes=True,
+            )
         base_kpis = _kpi_values(base, queries, model)
         variants: dict[str, dict[str, Any]] = {}
         with sparse_context_intervention(model, "port_main_zero"), torch.no_grad():
-            variants["port_main_zero"] = _forward_batch(model, sample, queries_np, device, return_routing_maps=True)
+            variants["port_main_zero"] = _forward_batch(
+                model, sample, queries_np, device, return_routing_maps=True, return_organizer_passes=True
+            )
         with sparse_context_intervention(model, "field_main_zero"), torch.no_grad():
-            variants["field_main_zero"] = _forward_batch(model, sample, queries_np, device, return_routing_maps=True)
+            variants["field_main_zero"] = _forward_batch(
+                model, sample, queries_np, device, return_routing_maps=True, return_organizer_passes=True
+            )
+        # Phase-explicit scopes preserve the historical broad hooks above while
+        # isolating P0, P0+P1 feedback, and the final P2 field read.
+        for mode, label in (
+            ("p0_port_main_zero", "initial_interface_read_only"),
+            ("p0_p1_main_zero", "interface_feedback_route"),
+            ("p2_field_main_zero", "final_field_read_only"),
+        ):
+            with sparse_context_intervention(model, mode), torch.no_grad():
+                variants[label] = _forward_batch(
+                    model,
+                    sample,
+                    queries_np,
+                    device,
+                    return_routing_maps=True,
+                    return_organizer_passes=True,
+                )
         module_index = int(np.flatnonzero(_active_centers(sample)[1])[0])
         perturbation_scale = float(args.perturbation_scale) * _module_radius(model)
         direction = _direction_for_sample(sample, model, module_index, perturbation_scale)
@@ -526,6 +1532,7 @@ def run_interventions(args: argparse.Namespace) -> dict[str, Any]:
         row = {
             "case_id": str(sample["case_id"]),
             "base_kpis": base_kpis,
+            "phase_execution": _phase_execution_summary(base),
             "interventions": {},
             "geometry_perturbation": {
                 "module_index": module_index,
@@ -534,8 +1541,15 @@ def run_interventions(args: argparse.Namespace) -> dict[str, Any]:
                 "coarse_clamped": True,
             },
         }
+        raw_sample = raw_samples[str(case_id)]
+        base_errors = _canonical_ground_truth_errors(
+            base, sample, raw_sample, dataset, model, checkpoint
+        )
+        row["ground_truth_errors"] = {"normal": base_errors}
         row["interventions"]["port_main_zero"] = _summarize_outputs(base, variants["port_main_zero"])
         row["interventions"]["field_main_zero"] = _summarize_outputs(base, variants["field_main_zero"])
+        for label in ("initial_interface_read_only", "interface_feedback_route", "final_field_read_only"):
+            row["interventions"][label] = _summarize_outputs(base, variants[label])
         row["interventions"]["coarse_clamped_geometry_perturbation"] = _summarize_outputs(
             geometry_base, variants["coarse_clamped_geometry_perturbation"]
         )
@@ -545,6 +1559,33 @@ def run_interventions(args: argparse.Namespace) -> dict[str, Any]:
                 queries,
                 model,
             )
+            if name != "coarse_clamped_geometry_perturbation":
+                errors = _canonical_ground_truth_errors(
+                    variant, sample, raw_sample, dataset, model, checkpoint
+                )
+                row["ground_truth_errors"][name] = errors
+                row["interventions"][name]["error_deltas"] = _error_deltas(base_errors, errors)
+        # P1-only is not separately identifiable from these physical passes:
+        # the feedback route is a nested P0+P1 suppression.  Compare the two
+        # variant tensors and canonical error rows directly instead of
+        # subtracting relative-to-normal summary statistics.
+        p0_label = "initial_interface_read_only"
+        p0_p1_label = "interface_feedback_route"
+        p0_errors = row["ground_truth_errors"].get(p0_label)
+        p0_p1_errors = row["ground_truth_errors"].get(p0_p1_label)
+        if p0_label in variants and p0_p1_label in variants:
+            incremental: dict[str, Any] = {
+                "prediction_differences": _summarize_outputs(
+                    variants[p0_label], variants[p0_p1_label]
+                ),
+                "reference": "initial_interface_read_only",
+                "interpretation": "incremental P1 effect conditional on P0 suppression; not a pure P1-only intervention",
+            }
+            if isinstance(p0_errors, Mapping) and isinstance(p0_p1_errors, Mapping):
+                incremental["ground_truth_error_deltas"] = _error_deltas(
+                    p0_errors, p0_p1_errors
+                )
+            row["interventions"][p0_p1_label]["incremental_vs_initial_interface"] = incremental
         rows.append(row)
     return {
         "schema_version": STUDY_SCHEMA_VERSION,
@@ -555,7 +1596,16 @@ def run_interventions(args: argparse.Namespace) -> dict[str, Any]:
         "limitations": [
             "Branch interventions are evaluation-only reliance diagnostics, not retraining ablations.",
             "The coarse-clamped geometry result is a model perturbation; it is not a physical reference solve.",
+            "Historical port_main_zero and field_main_zero scopes are retained; phase-explicit rows isolate P0, P0+P1, and P2 reads using coupling role markers.",
+            "P1-only is not separately identifiable from the phase-explicit set; incremental_vs_initial_interface compares P0+P1 suppression directly against P0-only suppression.",
         ],
+        "phase_attribution": {
+            "P0_initial_port": "suppress main sparse read only while the initial port context is consumed",
+            "P1_refinement": "reported through the nested P0+P1 feedback route when a provisional refinement decode executes",
+            "P2_field": "suppress main sparse read only during the final field decode",
+            "P1_only_separately_identifiable": False,
+            "incremental_definition": "direct P0+P1 variant minus P0-only variant comparison in output and canonical error spaces",
+        },
         "state_dict_structure_unchanged": state_before == _state_keys(model),
     }
 
@@ -752,17 +1802,51 @@ def _support_counts(prepared: Any, routing_aux: Mapping[str, Any] | None = None)
             return int(np.prod(shape)) if shape else 1
         return int(shape[axis]) if len(shape) > axis else 0
 
+    def value_tensor(key: str) -> torch.Tensor | None:
+        value = aux.get(key)
+        if value is None:
+            value = routing.get(key)
+        if value is None:
+            return None
+        return value.detach() if torch.is_tensor(value) else torch.as_tensor(value)
+
+    def support_slot_width() -> int | None:
+        prepared_interface = getattr(prepared, "prepared", None)
+        backend_state = getattr(prepared_interface, "backend_state", None)
+        cache = getattr(backend_state, "cache", None)
+        layout = getattr(cache, "layout", None)
+        dimension = getattr(layout, "spatial_dimension", None)
+        if dimension is None:
+            return None
+        return 4 ** int(dimension)
+
     counts: dict[str, float | int] = {
         "support_group_count": count_shape("support_centres", 0),
         "module_group_incidence_count": count_shape("module_group_indices", 1),
         "environment_group_incidence_count": count_shape("environment_group_indices", 1),
-        "query_group_read_value_count": count_shape("group_read_group_index"),
+        # Detailed routing maps use fixed local slots and include padded -1
+        # entries.  The actual read count comes from group_read_degree below.
+        "query_group_read_value_count": 0,
+        "query_group_read_degree_sum": 0,
+        "query_group_read_slot_capacity": count_shape("group_read_group_index"),
     }
-    degree = routing.get("group_read_degree", aux.get("group_read_degree"))
-    if degree is not None:
-        tensor = degree.detach() if torch.is_tensor(degree) else torch.as_tensor(degree)
-        counts["query_group_read_degree_mean"] = float(tensor.float().mean().cpu())
-        counts["query_group_read_degree_max"] = float(tensor.float().max().cpu())
+    degree = value_tensor("group_read_degree")
+    if degree is None:
+        group_indices = value_tensor("group_read_group_index")
+        if group_indices is not None:
+            actual_count = int((group_indices >= 0).sum().item())
+            counts["query_group_read_value_count"] = actual_count
+            counts["query_group_read_degree_sum"] = actual_count
+    else:
+        actual_count = int(degree.sum().item())
+        counts["query_group_read_value_count"] = actual_count
+        counts["query_group_read_degree_sum"] = actual_count
+        if counts["query_group_read_slot_capacity"] == 0:
+            slot_width = support_slot_width()
+            if slot_width is not None:
+                counts["query_group_read_slot_capacity"] = int(degree.numel()) * slot_width
+        counts["query_group_read_degree_mean"] = float(degree.float().mean().cpu())
+        counts["query_group_read_degree_max"] = float(degree.float().max().cpu())
     return counts
 
 
@@ -776,41 +1860,84 @@ def _synthetic_query_tensor(Q: int, lx: float, ly: float, device: torch.device) 
     return torch.rand(1, int(Q), 2, generator=generator, device=device) * torch.tensor([lx, ly], device=device)
 
 
-def _prepared_synthetic_forward(model: Any, structure: Mapping[str, torch.Tensor], query_xy: torch.Tensor, device: torch.device, *, query_batch_size: int) -> tuple[torch.Tensor, Any, dict[str, Any]]:
-    first = model(
-        structure,
-        query_xy[:, :1],
-        local_port_condition_mode="predicted",
-        return_prepared_state=True,
-        return_routing_maps=True,
-    )
-    prepared = first.pop("prepared_state")
-    outputs = []
-    support = _support_counts(prepared, first.get("routing_aux", {}))
-    # The one-query call above exists only to build the physical prepared
-    # state. Scaling read counts cover the requested Q-query decode below.
-    support["query_group_read_value_count"] = 0.0
-    for start in range(0, int(query_xy.shape[1]), int(query_batch_size)):
-        chunk = query_xy[:, start : start + int(query_batch_size)]
-        decoded = model.decode_prepared(prepared, chunk, return_routing_maps=True)
-        outputs.append(decoded["pred_field"])
-        support_chunk = _support_counts(prepared, decoded)
-        for key, value in support_chunk.items():
-            if key == "query_group_read_value_count":
-                support[key] = float(support.get(key, 0.0)) + float(value)
-            elif key.endswith(("count", "value_count")):
-                support[key] = max(float(support.get(key, 0.0)), float(value))
-            elif key.endswith("mean"):
-                support[key] = float(value)
-            elif key.endswith("max"):
-                support[key] = max(float(support.get(key, 0.0)), float(value))
-    return torch.cat(outputs, dim=1), prepared, {"support": support}
+@contextmanager
+def _runtime_receiver_chunk_size(model: Any, chunk_size: int | None) -> Iterator[None]:
+    """Temporarily override interface read chunking for scaling measurements."""
+
+    core = getattr(model, "core", None)
+    if chunk_size is None or not hasattr(core, "receiver_chunk_size"):
+        yield
+        return
+    previous = int(core.receiver_chunk_size)
+    core.receiver_chunk_size = int(chunk_size)
+    try:
+        yield
+    finally:
+        core.receiver_chunk_size = previous
+
+
+def _prepared_synthetic_forward(
+    model: Any,
+    structure: Mapping[str, torch.Tensor],
+    query_xy: torch.Tensor,
+    device: torch.device,
+    *,
+    query_batch_size: int,
+    receiver_chunk_size: int | None = None,
+    return_routing_maps: bool = False,
+) -> tuple[torch.Tensor, Any, dict[str, Any]]:
+    del device
+    with _runtime_receiver_chunk_size(model, receiver_chunk_size):
+        first = model(
+            structure,
+            query_xy[:, :1],
+            local_port_condition_mode="predicted",
+            return_prepared_state=True,
+            return_routing_maps=bool(return_routing_maps),
+        )
+        prepared = first.pop("prepared_state")
+        outputs = []
+        support = _support_counts(prepared, first.get("routing_aux", {}))
+        # The one-query call above exists only to build the physical prepared
+        # state. Scaling read counts cover the requested Q-query decode below.
+        support["query_group_read_value_count"] = 0.0
+        support["query_group_read_degree_sum"] = 0.0
+        support["query_group_read_slot_capacity"] = 0.0
+        for start in range(0, int(query_xy.shape[1]), int(query_batch_size)):
+            chunk = query_xy[:, start : start + int(query_batch_size)]
+            decoded = model.decode_prepared(
+                prepared,
+                chunk,
+                return_routing_maps=bool(return_routing_maps),
+                receiver_chunk_size=receiver_chunk_size,
+            )
+            outputs.append(decoded["pred_field"])
+            support_chunk = _support_counts(prepared, decoded)
+            for key, value in support_chunk.items():
+                if key in {
+                    "query_group_read_value_count",
+                    "query_group_read_degree_sum",
+                    "query_group_read_slot_capacity",
+                }:
+                    support[key] = float(support.get(key, 0.0)) + float(value)
+                elif key.endswith(("count", "value_count")):
+                    support[key] = max(float(support.get(key, 0.0)), float(value))
+                elif key.endswith("mean"):
+                    support[key] = float(value)
+                elif key.endswith("max"):
+                    support[key] = max(float(support.get(key, 0.0)), float(value))
+        return torch.cat(outputs, dim=1), prepared, {"support": support}
 
 
 def run_scaling(args: argparse.Namespace) -> dict[str, Any]:
     specs = parse_checkpoint_specs(args.checkpoint)
-    if len(specs) != 3:
-        raise ValueError("scaling requires exactly three explicitly labelled new-family checkpoints")
+    if not specs:
+        raise ValueError("scaling requires at least one explicitly labelled checkpoint")
+    receiver_chunk_size = args.receiver_chunk_size
+    if receiver_chunk_size is not None and int(receiver_chunk_size) <= 0:
+        raise ValueError("--receiver-chunk-size must be positive")
+    routing_mode = str(args.routing_mode)
+    return_routing_maps = routing_mode == "detailed"
     shapes = [parse_shape(value) for value in args.shape] if args.shape else list(DEFAULT_SCALING_SHAPES)
     device = select_device(args.device)
     model_records: list[dict[str, Any]] = []
@@ -838,13 +1965,27 @@ def run_scaling(args: argparse.Namespace) -> dict[str, Any]:
                 "shape": {"M": int(module_count), "E": int(env_count), "Q": int(query_count)},
                 "architecture": architecture,
                 "domain": {"length_x": lx, "length_y": ly, "area": lx * ly},
+                "receiver_chunk_size": (
+                    int(model.core.receiver_chunk_size)
+                    if receiver_chunk_size is None and hasattr(model.core, "receiver_chunk_size")
+                    else receiver_chunk_size
+                ),
+                "routing_mode": routing_mode,
                 "status": "ok",
             }
             try:
                 with temporary_domain(model, lx, ly), synthetic_environment(model, env_count, lx, ly):
                     for _ in range(max(0, int(args.warmup))):
                         with torch.no_grad():
-                            _prepared_synthetic_forward(model, structure, queries[:, : min(query_count, int(args.query_batch_size))], device, query_batch_size=int(args.query_batch_size))
+                            _prepared_synthetic_forward(
+                                model,
+                                structure,
+                                queries[:, : min(query_count, int(args.query_batch_size))],
+                                device,
+                                query_batch_size=int(args.query_batch_size),
+                                receiver_chunk_size=receiver_chunk_size,
+                                return_routing_maps=return_routing_maps,
+                            )
                     if device.type == "cuda":
                         torch.cuda.synchronize(device)
                         torch.cuda.reset_peak_memory_stats(device)
@@ -856,7 +1997,15 @@ def run_scaling(args: argparse.Namespace) -> dict[str, Any]:
                             torch.cuda.synchronize(device)
                         started = time.perf_counter()
                         with torch.no_grad():
-                            prediction, _prepared, extras = _prepared_synthetic_forward(model, structure, queries, device, query_batch_size=int(args.query_batch_size))
+                            prediction, _prepared, extras = _prepared_synthetic_forward(
+                                model,
+                                structure,
+                                queries,
+                                device,
+                                query_batch_size=int(args.query_batch_size),
+                                receiver_chunk_size=receiver_chunk_size,
+                                return_routing_maps=return_routing_maps,
+                            )
                         if device.type == "cuda":
                             torch.cuda.synchronize(device)
                         timings.append(time.perf_counter() - started)
@@ -868,7 +2017,15 @@ def run_scaling(args: argparse.Namespace) -> dict[str, Any]:
                     row["support_counts"] = support or {}
                     if query_count <= int(args.chunk_equality_limit):
                         with torch.no_grad():
-                            all_at_once, _, _ = _prepared_synthetic_forward(model, structure, queries, device, query_batch_size=query_count)
+                            all_at_once, _, _ = _prepared_synthetic_forward(
+                                model,
+                                structure,
+                                queries,
+                                device,
+                                query_batch_size=query_count,
+                                receiver_chunk_size=receiver_chunk_size,
+                                return_routing_maps=return_routing_maps,
+                            )
                         row["small_chunk_equality"] = _relative_difference(prediction, all_at_once)
                     else:
                         row["small_chunk_equality"] = None
@@ -896,10 +2053,15 @@ def run_scaling(args: argparse.Namespace) -> dict[str, Any]:
         "shapes": [{"M": m, "E": e, "Q": q} for m, e, q in shapes],
         "warmup_repetitions": int(args.warmup),
         "measured_repetitions": int(args.repetitions),
+        "receiver_chunk_size": (
+            "configured" if receiver_chunk_size is None else int(receiver_chunk_size)
+        ),
+        "routing_mode": routing_mode,
         "results": model_records,
         "limitations": [
             "Synthetic layouts are execution-only and make no physical-accuracy claim.",
             "Support counts are observed tensors/read incidences, not FLOP estimates.",
+            "receiver_chunk_size and routing_mode are runtime controls; checkpoint configuration is unchanged.",
         ],
     }
 
@@ -1121,6 +2283,28 @@ def _module_support_probe_indices(
 ) -> tuple[int | None, int | None, dict[str, int]]:
     """Find receivers connected/not connected to one module's sparse groups."""
 
+    connected_mask, counts = _module_support_receiver_mask(
+        prepared_wrapper, receivers, module_index
+    )
+    if connected_mask.shape[0] != 1:
+        raise ValueError("module support probe selection expects a single case batch")
+    connected = connected_mask[0]
+    inside = torch.where(connected)[0]
+    outside = torch.where(~connected)[0]
+    return (
+        int(inside[0]) if inside.numel() else None,
+        int(outside[0]) if outside.numel() else None,
+        counts,
+    )
+
+
+def _module_support_receiver_mask(
+    prepared_wrapper: Any,
+    receivers: torch.Tensor,
+    module_index: int,
+) -> tuple[torch.Tensor, dict[str, int]]:
+    """Return a topology mask for receivers incident to one module's groups."""
+
     prepared = prepared_wrapper.prepared
     layout = prepared.backend_state.cache.layout
     source, groups = layout.module_group_indices
@@ -1128,19 +2312,32 @@ def _module_support_probe_indices(
     lookup = lookup_receivers(layout, receivers)
     receiver_index, receiver_groups = lookup.receiver_group_indices
     connected_rows = torch.isin(receiver_groups, module_groups)
-    connected = torch.zeros(receivers.shape[1], dtype=torch.bool, device=receivers.device)
-    connected[receiver_index[connected_rows]] = True
-    inside = torch.where(connected)[0]
-    outside = torch.where(~connected)[0]
-    return (
-        int(inside[0]) if inside.numel() else None,
-        int(outside[0]) if outside.numel() else None,
-        {
-            "module_group_count": int(module_groups.numel()),
-            "connected_receiver_count": int(connected.sum().item()),
-            "disconnected_receiver_count": int((~connected).sum().item()),
-        },
+    connected_flat = torch.zeros(
+        lookup.batch_size * lookup.receiver_width,
+        dtype=torch.bool,
+        device=receivers.device,
     )
+    connected_flat[receiver_index[connected_rows]] = True
+    connected = connected_flat.reshape(lookup.batch_size, lookup.receiver_width)
+    return connected, {
+        "module_group_count": int(module_groups.numel()),
+        "connected_receiver_count": int(connected.sum().item()),
+        "disconnected_receiver_count": int((~connected).sum().item()),
+    }
+
+
+def _vector_response_norm_summary(values: torch.Tensor, mask: torch.Tensor) -> dict[str, Any]:
+    """Summarize vector-response norms on one topology-mask partition."""
+
+    stats = _finite_stats(values, mask)
+    if stats is None:
+        return {"count": 0, "mean": None, "p95": None, "max": None}
+    return {
+        "count": stats["count"],
+        "mean": stats["mean"],
+        "p95": stats["p95"],
+        "max": stats["max"],
+    }
 
 
 def _conditional_state_fine_path(
@@ -1194,6 +2391,72 @@ def _conditional_state_fine_path(
     return rows
 
 
+def _conditional_state_vector_response_norms(
+    model: Any,
+    prepared_wrapper: Any,
+    receivers: torch.Tensor,
+    module_index: int,
+    connected_mask: torch.Tensor,
+    state_steps: Sequence[float] = (1.0e-3, 5.0e-4),
+) -> dict[str, Any]:
+    """Measure sparse vector response norms for one encoded module-state direction.
+
+    The prepared geometry/cache and encoded global context are held fixed.  Only
+    the selected module's encoded state is shifted, and the direct backend read
+    excludes the coarse/local routes.  The connected/disconnected partitions
+    are support-incidence topology masks, not learned effective-weight masks.
+    """
+
+    prepared = prepared_wrapper.prepared
+    base_states = prepared.module_states.detach()
+    direction = torch.ones_like(base_states[:, int(module_index)])
+    direction = direction / torch.linalg.vector_norm(direction).clamp_min(1.0e-12)
+    selector = torch.zeros_like(base_states)
+    selector[:, int(module_index)] = direction
+
+    def vector_response(delta: float) -> torch.Tensor:
+        states = base_states + float(delta) * selector
+        refreshed = model.core.prepare(
+            prepared.encoded,
+            states,
+            layout_cache=prepared.backend_state.cache,
+        )
+        receiver_features = model.core._receiver_features(refreshed, receivers)
+        main, _ = model.core.backend.read(
+            refreshed.backend_state,
+            refreshed.encoded,
+            receivers,
+            receiver_features,
+        )
+        return main
+
+    connected_mask = connected_mask.to(device=receivers.device, dtype=torch.bool)
+    rows: dict[str, Any] = {}
+    for step in state_steps:
+        step = float(step)
+        with torch.no_grad():
+            plus = vector_response(step)
+            minus = vector_response(-step)
+            response = (plus - minus) / (2.0 * step)
+            norms = torch.linalg.vector_norm(response.float(), dim=-1)
+        rows[f"h={step:g}"] = {
+            "step": step,
+            "connected": _vector_response_norm_summary(norms, connected_mask),
+            "disconnected": _vector_response_norm_summary(norms, ~connected_mask),
+        }
+    return {
+        "status": "ok",
+        "mask_kind": "topological_support_incidence",
+        "mask_definition": "receiver has at least one positive geometric lookup incidence from the selected module's support groups",
+        "module_index": int(module_index),
+        "state_direction": "unit normalized all-ones direction in encoded module-state coordinates",
+        "geometry_fixed": True,
+        "global_context_fixed": True,
+        "coarse_local_excluded": True,
+        "steps": rows,
+    }
+
+
 def run_gradients(args: argparse.Namespace) -> dict[str, Any]:
     specs = parse_checkpoint_specs(args.sparse_checkpoint or args.checkpoint)
     if len(specs) != 1:
@@ -1229,6 +2492,7 @@ def run_gradients(args: argparse.Namespace) -> dict[str, Any]:
         inside_index, outside_index, support_counts = _module_support_probe_indices(
             base["prepared_state"], query, module_index
         )
+        vector_response_anchors = {"0298", "0302"}
         row: dict[str, Any] = {
             "layout_index": order,
             "case_id": str(sample["case_id"]),
@@ -1241,7 +2505,23 @@ def run_gradients(args: argparse.Namespace) -> dict[str, Any]:
             "full_path": {},
             "fine_path": {"inside": {}, "outside": {}},
             "conditional_prepared_state_fine_path": {},
+            "conditional_vector_response_norms": {
+                "status": "not_requested",
+                "reason": "bounded vector summaries are restricted to anchors 0298 and 0302",
+                "mask_kind": "topological_support_incidence",
+            },
         }
+        if str(case_id) in vector_response_anchors:
+            connected_mask, _ = _module_support_receiver_mask(
+                base["prepared_state"], query, module_index
+            )
+            row["conditional_vector_response_norms"] = _conditional_state_vector_response_norms(
+                model,
+                base["prepared_state"],
+                query,
+                module_index,
+                connected_mask,
+            )
         for branch, index in (("inside", inside_index), ("outside", outside_index)):
             if index is None:
                 row["conditional_prepared_state_fine_path"][branch] = {
@@ -1306,6 +2586,17 @@ def run_gradients(args: argparse.Namespace) -> dict[str, Any]:
         "dataset": str(dataset_path),
         "step_sizes": [float(value) for value in step_radii],
         "results": layout_rows,
+        "gradient_attribution": {
+            "full_path": "autograd and central finite differences include the sparse main, coarse, and local routes",
+            "fine_path": "fine_path_only zeros common.read_coarse and common.read_local during decode, isolating the sparse backend read after the prepared state is built",
+            "conditional_prepared_state_fine_path": "refreshes group states and calls the backend read directly; coarse and local routes are omitted",
+            "module_support_connectivity": "connected means sparse lookup contains at least one support group belonging to the selected module; it is topological incidence, not proof of nonzero learned or geometric weight",
+            "conditional_vector_response_norms": "for anchors 0298 and 0302, central finite differences of the direct sparse backend vector response are summarized over connected/disconnected topology masks at h=1e-3 and 5e-4; geometry, encoded global context, coarse, and local routes are fixed/excluded",
+            "conditional_vector_response_anchor_case_ids": ["0298", "0302"],
+            "conditional_vector_response_steps": [1.0e-3, 5.0e-4],
+            "conditional_vector_response_mask_kind": "topological_support_incidence",
+            "support_transition": "the aligned final layout changes lattice support between central-difference sides; finite differences can straddle that topology change while autograd is the local derivative at the aligned layout",
+        },
         "limitations": [
             "Autograd-versus-FD agreement validates the learned implementation only; it is not a physical derivative validation.",
             "Fine-path rows are conditional sparse reads with coarse and local routes clamped to zero.",
@@ -1618,6 +2909,18 @@ def build_parser() -> argparse.ArgumentParser:
     interventions.add_argument("--perturbation-scale", type=float, default=0.1)
     interventions.set_defaults(handler=run_interventions)
 
+    audit = subparsers.add_parser(
+        "checkpoint_audit",
+        aliases=["audit"],
+        help="bounded stored-checkpoint reader and gradient diagnosis",
+    )
+    _add_common_arguments(audit)
+    audit.add_argument("--checkpoint", action="append", default=[], metavar="LABEL=PATH")
+    audit.add_argument("--sparse-checkpoint", action="append", default=[], metavar="LABEL=PATH")
+    audit.add_argument("--training-case-id", action="append", default=None)
+    audit.add_argument("--reader-replay-shift", type=float, default=-60.0)
+    audit.set_defaults(handler=run_checkpoint_audit)
+
     gradients = subparsers.add_parser("gradients", help="fixed-KPI autograd versus central finite differences")
     _add_common_arguments(gradients)
     _add_single_model_checkpoint_arguments(gradients)
@@ -1638,6 +2941,18 @@ def build_parser() -> argparse.ArgumentParser:
     scaling.add_argument("--warmup", type=int, default=1)
     scaling.add_argument("--repetitions", type=int, default=5)
     scaling.add_argument("--chunk-equality-limit", type=int, default=8192)
+    scaling.add_argument(
+        "--receiver-chunk-size",
+        type=int,
+        default=None,
+        help="Runtime interface receiver chunk override; omit to use checkpoint configuration.",
+    )
+    scaling.add_argument(
+        "--routing-mode",
+        choices=("summary", "detailed"),
+        default="summary",
+        help="Keep cheap routing summaries, or request detailed routing maps.",
+    )
     scaling.set_defaults(handler=run_scaling)
 
     requests = subparsers.add_parser("requests", help="bounded pair/triple model predictions and pending reference requests")

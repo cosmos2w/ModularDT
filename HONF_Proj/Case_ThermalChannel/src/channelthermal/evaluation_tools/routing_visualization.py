@@ -18,6 +18,7 @@ from typing import Any, Dict, Sequence
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import LogNorm, Normalize
 from matplotlib.lines import Line2D
 from matplotlib.patches import Circle
 
@@ -228,6 +229,290 @@ def _plot_context_norms(
         im = ax.imshow(values, origin="lower", extent=extent, cmap=cmap, vmin=0.0, vmax=vmax, aspect="auto")
         _format_axis(ax, sample, arrays, module_radius, colors, title)
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.savefig(str(output_path), dpi=180)
+    plt.close(fig)
+
+
+def _reader_npz_scalar(values: np.ndarray, grid_shape: tuple[int, int]) -> np.ndarray:
+    """Convert one saved receiver vector to its saved query-grid shape."""
+
+    array = np.asarray(values, dtype=np.float64)
+    if array.shape[:2] == grid_shape:
+        if array.ndim == 2:
+            return array
+        if array.ndim == 3 and array.shape[-1] == 1:
+            return array[..., 0]
+    if array.size == int(np.prod(grid_shape)):
+        return array.reshape(grid_shape)
+    if array.ndim == 2 and array.shape[0] == int(np.prod(grid_shape)):
+        return array[:, 0].reshape(grid_shape)
+    raise ValueError(f"Saved reader map has shape {array.shape}, expected a scalar map for {grid_shape}.")
+
+
+def _reader_npz_first(data: Any, keys: Sequence[str]) -> tuple[np.ndarray | None, str | None]:
+    for key in keys:
+        if key in data.files:
+            return np.asarray(data[key]), key
+    return None, None
+
+
+def _reader_npz_maps(data: Any, grid_shape: tuple[int, int]) -> tuple[dict[str, np.ndarray | None], list[str]]:
+    """Read the five compact scalar maps from one saved debug NPZ."""
+
+    notes: list[str] = []
+    geometric, geometric_key = _reader_npz_first(
+        data,
+        (
+            "group_read_geometric_availability",
+            "interaction__group_read_geometric_availability",
+            "group_read_effective_geometric_weight",
+            "interaction__group_read_effective_geometric_weight",
+        ),
+    )
+    if geometric is None:
+        geometric_weight, _ = _reader_npz_first(
+            data,
+            ("group_read_geometric_weight", "interaction__group_read_geometric_weight"),
+        )
+        group_index, _ = _reader_npz_first(
+            data,
+            ("group_read_group_index", "interaction__group_read_group_index"),
+        )
+        occupancy, _ = _reader_npz_first(
+            data,
+            ("group_occupancy_envelope", "interaction__group_occupancy_envelope"),
+        )
+        if geometric_weight is not None and group_index is not None and occupancy is not None:
+            weight = np.asarray(geometric_weight, dtype=np.float64)
+            indices = np.asarray(group_index, dtype=np.int64)
+            envelope = np.asarray(occupancy, dtype=np.float64).reshape(-1)
+            if weight.shape == indices.shape and weight.ndim >= 2 and envelope.size:
+                valid = (indices >= 0) & (indices < envelope.size)
+                safe_indices = np.where(valid, indices, 0)
+                effective = np.where(valid, weight * envelope[safe_indices], 0.0)
+                geometric = np.nansum(effective, axis=-1)
+                geometric_key = "reconstructed_occupancy_envelope_times_geometric_weight"
+                notes.append(
+                    "G reconstructed as sum of occupancy_envelope[group] * B with invalid group slots masked"
+                )
+        if geometric is None:
+            geometric_key = None
+            notes.append(
+                "geometric availability G unavailable; saved B lacks effective G or occupancy-envelope/group-index inputs"
+            )
+    if geometric is not None and geometric.ndim >= 2 and geometric.shape[:2] != grid_shape:
+        geometric = np.nansum(geometric, axis=-1)
+    mass, _ = _reader_npz_first(
+        data,
+        ("group_read_weight_mass", "interaction__group_read_weight_mass"),
+    )
+    conditional, conditional_key = _reader_npz_first(
+        data,
+        ("group_read_conditional_weight", "interaction__group_read_conditional_weight"),
+    )
+    if conditional is None:
+        normalized, _ = _reader_npz_first(
+            data,
+            ("group_read_normalized_weight", "interaction__group_read_normalized_weight"),
+        )
+        if normalized is not None:
+            normalized = np.asarray(normalized, dtype=np.float64)
+            if normalized.ndim >= 2 and normalized.shape[:2] != grid_shape:
+                positive = np.where(np.isfinite(normalized) & (normalized > 0.0), normalized, 0.0)
+                denominator = np.sum(positive, axis=-1)
+                conditional = np.full_like(positive, np.nan, dtype=np.float64)
+                valid_rows = denominator > 0.0
+                conditional[valid_rows] = positive[valid_rows] / denominator[valid_rows, None]
+                conditional_key = "reconstructed_conditional_from_normalized_weight"
+                notes.append(
+                    "conditional pi reconstructed from positive normalized read weights; all-zero rows are unavailable"
+                )
+            else:
+                conditional_key = None
+                notes.append("conditional pi unavailable; normalized read weights have no saved slot axis")
+    main_context, _ = _reader_npz_first(
+        data,
+        ("main_context_norm", "interaction__main_context_norm"),
+    )
+    pred_field, _ = _reader_npz_first(data, ("pred_field_grid",))
+    gt_field, _ = _reader_npz_first(data, ("gt_field_grid",))
+    if conditional is not None and conditional.ndim >= 2 and conditional.shape[:2] != grid_shape:
+        finite_rows = np.isfinite(conditional).any(axis=-1)
+        collapsed = np.full(conditional.shape[:-1], np.nan, dtype=np.float64)
+        if np.any(finite_rows):
+            collapsed[finite_rows] = np.nanmax(conditional[finite_rows], axis=-1)
+        conditional = collapsed
+    if pred_field is not None and gt_field is not None:
+        temperature_error = np.abs(pred_field[..., 4] - gt_field[..., 4])
+        fluid_mask, _ = _reader_npz_first(data, ("fluid_mask",))
+        if fluid_mask is None:
+            x_grid = np.asarray(data["x_grid"], dtype=np.float64) if "x_grid" in data.files else None
+            y_grid = np.asarray(data["y_grid"], dtype=np.float64) if "y_grid" in data.files else None
+            centers = np.asarray(data["module_centers"], dtype=np.float64) if "module_centers" in data.files else None
+            present = np.asarray(data["module_present"], dtype=np.float64).reshape(-1) if "module_present" in data.files else None
+            radius_values = np.asarray(data["module_radius"], dtype=np.float64).reshape(-1) if "module_radius" in data.files else np.asarray([], dtype=np.float64)
+            radius = float(radius_values[0]) if radius_values.size and np.isfinite(radius_values[0]) else 0.45
+            if x_grid is not None and y_grid is not None and centers is not None and present is not None:
+                module_mask = np.zeros(x_grid.shape, dtype=bool)
+                for module_idx in np.flatnonzero(present > 0.5):
+                    if module_idx < centers.shape[0]:
+                        module_mask |= np.hypot(x_grid - centers[module_idx, 0], y_grid - centers[module_idx, 1]) <= radius
+                fluid_mask = ~module_mask
+                notes.append(
+                    "canonical fluid_mask absent; temperature error uses a legacy circle mask from saved centers/radius"
+                )
+        if fluid_mask is not None:
+            temperature_error = np.where(
+                _reader_npz_scalar(np.asarray(fluid_mask), grid_shape).astype(bool),
+                temperature_error,
+                np.nan,
+            )
+        else:
+            temperature_error = None
+            notes.append("fluid temperature mask unavailable; temperature error panel is omitted")
+    else:
+        temperature_error = None
+
+    maps: dict[str, np.ndarray | None] = {}
+    for name, values in (
+        ("G", geometric),
+        ("mass", mass),
+        ("conditional", conditional),
+        ("main", main_context),
+        ("temperature", temperature_error),
+    ):
+        maps[name] = None if values is None else _reader_npz_scalar(values, grid_shape)
+    if geometric_key is None:
+        notes.append("geometric availability G is absent")
+    if conditional_key is None:
+        notes.append("conditional pi is absent")
+    return maps, notes
+
+
+def plot_reader_anchor_npz_maps(
+    artifacts: Sequence[tuple[str, str, Path]],
+    output_path: Path,
+    *,
+    module_radius: float = 0.45,
+) -> None:
+    """Plot shared-scale reader maps from saved anchor debug NPZ files.
+
+    Each artifact is ``(model_label, case_id, debug_npz_path)``.  The function
+    only reads saved arrays; it does not load checkpoints or run inference.
+    Rows may contain old and new reader artifacts, while every metric column
+    shares one color scale across all rows.
+    """
+
+    if not artifacts:
+        raise ValueError("At least one saved reader NPZ is required.")
+    loaded: list[dict[str, Any]] = []
+    notes: list[str] = []
+    for model_label, case_id, path in artifacts:
+        with np.load(path, allow_pickle=False) as data:
+            x_grid = np.asarray(data["x_grid"], dtype=np.float64)
+            y_grid = np.asarray(data["y_grid"], dtype=np.float64)
+            grid_shape = tuple(int(value) for value in x_grid.shape)
+            maps, artifact_notes = _reader_npz_maps(data, grid_shape)
+            centers = np.asarray(data["module_centers"], dtype=np.float64)
+            present = np.asarray(data["module_present"], dtype=np.float64)
+            radius_values = np.asarray(data["module_radius"], dtype=np.float64).reshape(-1) if "module_radius" in data.files else np.asarray([], dtype=np.float64)
+            saved_radius = float(radius_values[0]) if radius_values.size and np.isfinite(radius_values[0]) else float(module_radius)
+        loaded.append(
+            {
+                "label": model_label,
+                "case": case_id,
+                "x": x_grid,
+                "y": y_grid,
+                "maps": maps,
+                "centers": centers,
+                "present": present,
+                "radius": saved_radius,
+            }
+        )
+        notes.extend(f"{model_label}/{case_id}: {note}" for note in artifact_notes)
+
+    columns = (
+        ("G", "geometric availability G", "viridis", False),
+        ("mass", "read mass", "magma", True),
+        ("conditional", "maximum conditional/read weight", "plasma", True),
+        ("main", "main context norm", "cividis", False),
+        ("temperature", "physical fluid temperature absolute error", "inferno", False),
+    )
+    norms: dict[str, Normalize | LogNorm | None] = {}
+    for name, _, _, logarithmic in columns:
+        finite = np.concatenate(
+            [
+                values[np.isfinite(values)]
+                for item in loaded
+                if (values := item["maps"][name]) is not None
+                and np.isfinite(values).any()
+            ]
+        ) if any(item["maps"][name] is not None and np.isfinite(item["maps"][name]).any() for item in loaded) else np.asarray([])
+        if finite.size == 0:
+            norms[name] = None
+        elif logarithmic and np.any(finite > 0.0):
+            positive = finite[finite > 0.0]
+            lower = float(np.min(positive))
+            upper = float(np.max(positive))
+            norms[name] = LogNorm(vmin=lower, vmax=upper if upper > lower else lower * 10.0)
+        else:
+            lower = 0.0 if name in {"G", "mass", "conditional", "temperature"} else float(np.min(finite))
+            upper = max(float(np.max(finite)), lower + 1.0e-8)
+            norms[name] = Normalize(vmin=lower, vmax=upper)
+
+    row_count = len(loaded)
+    fig, axes = plt.subplots(
+        row_count,
+        len(columns),
+        figsize=(4.1 * len(columns), 3.7 * row_count),
+        squeeze=False,
+        constrained_layout=False,
+    )
+    fig.subplots_adjust(left=0.16, right=0.96, bottom=0.16, top=0.88, wspace=0.28, hspace=0.36)
+    conditional_fallback = any("conditional pi reconstructed" in note for note in notes)
+    images: dict[str, Any] = {}
+    for row_index, item in enumerate(loaded):
+        sample = {"x_grid": item["x"], "y_grid": item["y"]}
+        geometry = {"centers": item["centers"], "present": item["present"]}
+        for column_index, (name, label, cmap, _) in enumerate(columns):
+            axis = axes[row_index][column_index]
+            values = item["maps"][name]
+            norm = norms[name]
+            if values is None or norm is None:
+                axis.text(0.5, 0.5, "saved map unavailable", ha="center", va="center", fontsize=8)
+                axis.set_axis_off()
+                continue
+            image = axis.imshow(
+                values,
+                origin="lower",
+                extent=_domain_extent(sample),
+                cmap=cmap,
+                norm=norm,
+                aspect="auto",
+            )
+            images.setdefault(name, image)
+            _format_axis(axis, sample, geometry, float(item["radius"]), [], label)
+            if column_index == 0:
+                axis.text(
+                    -0.08,
+                    0.5,
+                    f"{item['label']}\ncase {item['case']}",
+                    transform=axis.transAxes,
+                    ha="right",
+                    va="center",
+                    fontsize=8,
+                )
+    for column_index, (name, label, cmap, _) in enumerate(columns):
+        norm = norms[name]
+        image = images.get(name)
+        if image is not None and norm is not None:
+            fig.colorbar(image, ax=axes[:, column_index].tolist(), label=label, fraction=0.03, pad=0.02)
+    note = "Shared column scales across saved anchors/models; maps are debug-NPZ reads only."
+    if conditional_fallback:
+        note += " Conditional column reconstructs pi from positive normalized weights; all-zero rows are unavailable."
+    fig.suptitle("Saved reader maps on matched anchors", fontsize=13)
+    fig.text(0.5, 0.035, note, ha="center", va="bottom", fontsize=8, color="#555555")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(str(output_path), dpi=180)
     plt.close(fig)
 

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 from channelthermal.evaluation.prepared import serialize_interaction_aux
+from channelthermal.evaluation_tools.routing_visualization import _reader_npz_maps
 from channelthermal.workflows.compare_models import (
     interaction_metrics,
     plot_anchor_physical_predictions,
@@ -28,6 +29,41 @@ class _IdentityNormalizer:
 
     def normalize_interface_targets(self, values: np.ndarray) -> np.ndarray:
         return np.asarray(values)
+
+
+def test_reader_npz_maps_reconstructs_g_from_nonunit_occupancy_and_pi(tmp_path: object) -> None:
+    """The legacy NPZ adapter must preserve G=aB and mark all-zero pi rows unavailable."""
+
+    path = tmp_path / "reader_maps.npz"
+    np.savez(
+        path,
+        x_grid=np.asarray([[0.0, 1.0]], dtype=np.float32),
+        y_grid=np.asarray([[0.0, 0.0]], dtype=np.float32),
+        group_read_geometric_weight=np.asarray(
+            [[0.5, 0.25], [0.4, 0.0]], dtype=np.float32
+        ),
+        group_read_group_index=np.asarray([[0, 1], [1, -1]], dtype=np.int64),
+        interaction__group_occupancy_envelope=np.asarray([0.2, 0.8], dtype=np.float32),
+        group_read_normalized_weight=np.asarray(
+            [[2.0, 1.0], [0.0, 0.0]], dtype=np.float32
+        ),
+        pred_field_grid=np.ones((1, 2, 5), dtype=np.float32),
+        gt_field_grid=np.zeros((1, 2, 5), dtype=np.float32),
+        fluid_mask=np.asarray([[True, False]], dtype=bool),
+    )
+
+    with np.load(path, allow_pickle=False) as data:
+        maps, notes = _reader_npz_maps(data, (1, 2))
+
+    np.testing.assert_allclose(maps["G"], np.asarray([[0.30, 0.32]]), rtol=1.0e-7, atol=1.0e-7)
+    assert maps["conditional"] is not None
+    assert maps["conditional"][0, 0] == pytest.approx(2.0 / 3.0)
+    assert np.isnan(maps["conditional"][0, 1])
+    assert maps["temperature"] is not None
+    assert maps["temperature"][0, 0] == pytest.approx(1.0)
+    assert np.isnan(maps["temperature"][0, 1])
+    assert any("occupancy_envelope" in note for note in notes)
+    assert any("all-zero rows" in note for note in notes)
 
 
 def _physical_case() -> tuple[dict[str, object], dict[str, object]]:
