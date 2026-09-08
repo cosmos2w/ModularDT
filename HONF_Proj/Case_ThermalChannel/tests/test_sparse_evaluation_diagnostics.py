@@ -245,6 +245,8 @@ def test_debug_npz_keeps_sparse_route_ids_and_port_evidence(tmp_path) -> None:
                 "group_read_normalized_weight": np.asarray(
                     [[0.6, 0.4, 0.0, 0.0]], dtype=np.float32
                 ),
+                "group_read_geometric_availability": np.asarray([0.7], dtype=np.float32),
+                "group_read_conditional_weight": np.asarray([[0.6, 0.4, 0.0, 0.0]], dtype=np.float32),
             },
             "interaction_aux": {
                 "support_centres": np.asarray([[0.0, 0.0], [1.0, 0.0]]),
@@ -258,6 +260,8 @@ def test_debug_npz_keeps_sparse_route_ids_and_port_evidence(tmp_path) -> None:
 
     with np.load(path) as payload:
         assert payload["group_read_group_index"].dtype == np.int64
+        np.testing.assert_allclose(payload["group_read_geometric_availability"], [0.7])
+        assert payload["group_read_conditional_weight"].shape == (1, 4)
         assert payload["interaction__module_group_indices"].shape == (2, 2)
         assert payload["pred_port_condition"].shape == (2, 2, 5)
         assert payload["gt_port_condition"].shape == (2, 2, 5)

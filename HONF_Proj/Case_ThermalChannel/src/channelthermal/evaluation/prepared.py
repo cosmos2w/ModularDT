@@ -36,6 +36,8 @@ _SPARSE_FLATTENED_INTERACTION_KEYS = {
     "group_module_degree",
     "group_environment_degree",
     "group_state_norm",
+    "group_key_norm",
+    "group_value_norm",
 }
 
 
@@ -209,6 +211,11 @@ def predict_case(
                     "local_neighbor_count": "local_neighbor_count",
                     "group_read_degree": "group_read_degree",
                     "group_read_weight_mass": "group_read_weight_mass",
+                    "group_read_geometric_availability": "group_read_geometric_availability",
+                    "group_read_conditional_weight": "group_read_conditional_weight",
+                    "group_read_conditional_value_norm": "group_read_conditional_value_norm",
+                    "group_read_logit_mean": "group_read_logit_mean",
+                    "group_read_logit_std": "group_read_logit_std",
                     "group_read_max_weight": "group_read_max_weight",
                     "group_read_group_index": "group_read_group_index",
                     "group_read_geometric_weight": "group_read_geometric_weight",

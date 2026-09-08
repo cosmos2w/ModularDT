@@ -117,6 +117,7 @@ def test_routing_maps_are_opt_in_and_inference_chunk_override_preserves_outputs(
     inputs = _inputs()
     with torch.no_grad():
         summary_output = model(**inputs, return_prepared_state=True, return_routing_maps=False)
+        detailed_output = model(**inputs, return_prepared_state=True, return_routing_maps=True)
 
     routing_key = {
         "dense_pairwise_field": "dense_environment_attention",
@@ -125,10 +126,19 @@ def test_routing_maps_are_opt_in_and_inference_chunk_override_preserves_outputs(
     }[architecture]
     assert routing_key not in summary_output["routing_aux"]
     assert not any(routing_key in key for key in summary_output["interaction_aux"])
+    torch.testing.assert_close(
+        summary_output["pred_field"],
+        detailed_output["pred_field"],
+        rtol=2.0e-6,
+        atol=2.0e-7,
+    )
     prepared = summary_output["prepared_state"]
     if architecture == "geometry_latent_field":
         assert "module_attention" not in prepared.prepared.backend_state
         assert "environment_attention" not in prepared.prepared.backend_state
+        detailed_backend_state = detailed_output["prepared_state"].prepared.backend_state
+        assert "module_attention" in detailed_backend_state
+        assert "environment_attention" in detailed_backend_state
 
     with torch.no_grad():
         configured = model.decode_prepared(prepared, inputs["query_xy"])
@@ -144,6 +154,47 @@ def test_routing_maps_are_opt_in_and_inference_chunk_override_preserves_outputs(
         rtol=2.0e-5,
         atol=2.0e-6,
     )
+
+    configured_coordinates = inputs["query_xy"].clone().requires_grad_(True)
+    large_chunk_coordinates = inputs["query_xy"].clone().requires_grad_(True)
+    configured_values = model.decode_prepared(
+        prepared,
+        configured_coordinates,
+        return_routing_maps=False,
+    )["pred_field"]
+    large_chunk_values = model.decode_prepared(
+        prepared,
+        large_chunk_coordinates,
+        receiver_chunk_size=2048,
+        return_routing_maps=False,
+    )["pred_field"]
+    configured_gradient = torch.autograd.grad(configured_values.sum(), configured_coordinates)[0]
+    large_chunk_gradient = torch.autograd.grad(large_chunk_values.sum(), large_chunk_coordinates)[0]
+    torch.testing.assert_close(configured_values, large_chunk_values, rtol=2.0e-5, atol=2.0e-6)
+    torch.testing.assert_close(configured_gradient, large_chunk_gradient, rtol=3.0e-5, atol=3.0e-6)
+    assert torch.isfinite(configured_gradient).all()
+    assert torch.isfinite(large_chunk_gradient).all()
+
+    summary_coordinates = inputs["query_xy"].clone().requires_grad_(True)
+    detailed_coordinates = inputs["query_xy"].clone().requires_grad_(True)
+    summary_values = model.decode_prepared(
+        prepared,
+        summary_coordinates,
+        receiver_chunk_size=2048,
+        return_routing_maps=False,
+    )["pred_field"]
+    detailed_values = model.decode_prepared(
+        detailed_output["prepared_state"],
+        detailed_coordinates,
+        receiver_chunk_size=2048,
+        return_routing_maps=True,
+    )["pred_field"]
+    summary_gradient = torch.autograd.grad(summary_values.sum(), summary_coordinates)[0]
+    detailed_gradient = torch.autograd.grad(detailed_values.sum(), detailed_coordinates)[0]
+    torch.testing.assert_close(summary_values, detailed_values, rtol=2.0e-6, atol=2.0e-7)
+    torch.testing.assert_close(summary_gradient, detailed_gradient, rtol=3.0e-5, atol=3.0e-6)
+    assert torch.isfinite(summary_gradient).all()
+    assert torch.isfinite(detailed_gradient).all()
 
 
 @pytest.mark.parametrize(

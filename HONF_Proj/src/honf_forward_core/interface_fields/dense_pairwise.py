@@ -92,7 +92,7 @@ class DensePairwiseField(nn.Module):
         receivers: torch.Tensor,
         receiver_features: torch.Tensor,
         *,
-        return_routing_maps: bool = True,
+        return_routing_maps: bool = False,
     ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         modules = int(state["module_tokens"].shape[1])
         relative = (receivers[:, :, None, :] - encoded.module_centers[:, None, :, :]) / encoded.coordinate_scale

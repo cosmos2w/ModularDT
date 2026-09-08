@@ -85,6 +85,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--mixed-teacher-ratio", type=float, default=0.5)
     parser.add_argument("--return-routing-maps", action="store_true")
     parser.add_argument("--save-debug-npz", action="store_true")
+    parser.add_argument("--skip-figures", action="store_true", help="Write metric tables and requested debug arrays without rendering the standard figure gallery.")
+    parser.add_argument(
+        "--debug-case-id", action="append", default=[],
+        help="Restrict requested debug NPZ exports to these case IDs; omitted means all evaluated cases.",
+    )
     parser.add_argument(
         "--anchor-case-id",
         action="append",
@@ -1039,6 +1044,8 @@ def interaction_metrics(base_row: Dict[str, Any], predictions: Dict[str, Any]) -
     for source_key, metric_prefix in (
         ("group_read_degree", "support_p2_query_group_degree"),
         ("group_read_weight_mass", "support_p2_query_nonnull_weight_mass"),
+        ("group_read_geometric_availability", "support_p2_query_geometric_availability"),
+        ("group_read_conditional_value_norm", "support_p2_query_conditional_value_norm"),
         ("group_read_max_weight", "support_p2_query_max_group_weight"),
     ):
         value = routing.get(source_key, aux.get(source_key))
@@ -1462,6 +1469,11 @@ def save_debug_npz(path: Path, predictions: Dict[str, Any], raw_sample: Dict[str
             "latent_query_attention",
             "group_read_degree",
             "group_read_weight_mass",
+            "group_read_geometric_availability",
+            "group_read_conditional_weight",
+            "group_read_conditional_value_norm",
+            "group_read_logit_mean",
+            "group_read_logit_std",
             "group_read_max_weight",
             "group_read_group_index",
             "group_read_geometric_weight",
@@ -2031,7 +2043,7 @@ def main(argv: list[str] | None = None) -> int:
             per_module_rows.extend(module_rows)
             hyper_rows.append(hypergraph_metrics(base_row, raw_sample, predictions))
             interaction_rows.append(interaction_metrics(base_row, predictions))
-            if case_id in anchor_case_ids:
+            if case_id in anchor_case_ids and not args.skip_figures:
                 architecture = str(model.config.core_honf.forward_architecture)
                 plot_anchor_physical_predictions(
                     paths["fig_interaction"]
@@ -2068,7 +2080,7 @@ def main(argv: list[str] | None = None) -> int:
                         raw_sample,
                         title=f"Sparse interface HONF support execution — case {case_id}",
                     )
-            if args.save_debug_npz:
+            if args.save_debug_npz and (not args.debug_case_id or case_id in args.debug_case_id):
                 npz_name = f"{safe_label(spec['label'])}__{safe_label(case_id)}.npz"
                 physical_predictions = denormalize_predictions(dict(predictions), input_dataset, checkpoint_targets_normalized)
                 save_debug_npz(paths["debug_npz"] / npz_name, physical_predictions, raw_sample)
@@ -2088,6 +2100,8 @@ def main(argv: list[str] | None = None) -> int:
             "mixed_teacher_ratio": float(args.mixed_teacher_ratio),
             "return_routing_maps": bool(args.return_routing_maps),
             "save_debug_npz": bool(args.save_debug_npz),
+            "debug_case_ids": list(args.debug_case_id),
+            "skip_figures": bool(args.skip_figures),
             "anchor_case_ids": sorted(anchor_case_ids),
             "evaluation_cost_scope": (
                 "one synchronized predict_case call per matched case; excludes dataset I/O, "
@@ -2184,18 +2198,19 @@ def main(argv: list[str] | None = None) -> int:
     write_csv(paths["tables"] / "evaluation_cost_case_metrics.csv", cost_rows)
     write_csv(paths["tables"] / "evaluation_cost_summary_metrics.csv", cost_summary_rows)
     write_csv(paths["tables"] / "physical_stratum_metrics.csv", stratum_summary_rows)
-    save_figures(
-        paths,
-        per_case_rows,
-        model_summary_rows,
-        hyper_rows,
-        hyper_summary_rows,
-        interaction_rows,
-        interaction_summary_rows,
-        cost_summary_rows,
-        channel_order,
-        bool(args.return_routing_maps),
-    )
+    if not args.skip_figures:
+        save_figures(
+            paths,
+            per_case_rows,
+            model_summary_rows,
+            hyper_rows,
+            hyper_summary_rows,
+            interaction_rows,
+            interaction_summary_rows,
+            cost_summary_rows,
+            channel_order,
+            bool(args.return_routing_maps),
+        )
     print(f"[done] wrote comparison outputs to {output_root}")
     return 0
 

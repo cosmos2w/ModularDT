@@ -302,9 +302,9 @@ class SparseInterfaceHONF(nn.Module):
             selected_group = group_index[selected]
             selected_geometric = geometric[selected]
             selected_logits = logits[selected]
-            # A double precision scalar reduction keeps log(g) and the
-            # receiver-wise max finite for float32 support weights as small as
-            # 1e-40.  The returned context remains in the model's dtype.
+            # Double precision scalar normalization preserves derivatives
+            # through subnormal float32 support weights (the focused tiny-g
+            # test exercises this). Context vectors remain in the model dtype.
             normalization_dtype = (
                 torch.float64
                 if selected_geometric.dtype in {torch.float16, torch.bfloat16, torch.float32}

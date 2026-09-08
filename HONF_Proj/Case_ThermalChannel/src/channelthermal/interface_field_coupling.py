@@ -206,7 +206,12 @@ def forward_interface_field(
     # is reused while group states refresh after each local response.
     layout_cache = model.core.build_layout(encoded, physical_port_xy)
     base_module_state = encoded.module_tokens
-    prepared0 = model.core.prepare(encoded, base_module_state, layout_cache=layout_cache)
+    prepared0 = model.core.prepare(
+        encoded,
+        base_module_state,
+        layout_cache=layout_cache,
+        return_routing_maps=bool(return_routing_maps),
+    )
     initial_port_context, initial_read_aux = _read_port_context(
         model,
         prepared0,
@@ -272,7 +277,12 @@ def forward_interface_field(
         if int(model.config.channelthermal.interaction_refinement_steps) == 1 and (
             str(local_port_condition_mode).lower() != "teacher" or teacher_port_tokens is None
         ):
-            prepared1 = model.core.prepare(encoded, module_state, layout_cache=layout_cache)
+            prepared1 = model.core.prepare(
+                encoded,
+                module_state,
+                layout_cache=layout_cache,
+                return_routing_maps=bool(return_routing_maps),
+            )
             outside_temperature, provisional_decode = _decode_temperature(
                 model,
                 prepared1,
@@ -343,7 +353,12 @@ def forward_interface_field(
     final_prepared = (
         prepared0
         if local_outputs is None
-        else model.core.prepare(encoded, module_state, layout_cache=layout_cache)
+        else model.core.prepare(
+            encoded,
+            module_state,
+            layout_cache=layout_cache,
+            return_routing_maps=bool(return_routing_maps),
+        )
     )
     with _interface_read_role(model, "p2_field"):
         decoder_output = model.core.decode_queries(

@@ -55,7 +55,7 @@ class GeometryLatentField(nn.Module):
         encoded: EncodedInterfaceCase,
         module_states: torch.Tensor,
         *,
-        return_routing_maps: bool = True,
+        return_routing_maps: bool = False,
     ) -> Dict[str, torch.Tensor]:
         batch = int(module_states.shape[0])
         dimension = int(encoded.module_centers.shape[-1])
@@ -102,7 +102,7 @@ class GeometryLatentField(nn.Module):
         receivers: torch.Tensor,
         receiver_features: torch.Tensor,
         *,
-        return_routing_maps: bool = True,
+        return_routing_maps: bool = False,
     ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         query = self.read_query(
             torch.cat(
