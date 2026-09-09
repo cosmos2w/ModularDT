@@ -1,5 +1,7 @@
 # HONF interface-operator study: Stage-3 evaluation and continuation decision
 
+Follow-up (2026-09-09): the [exact epoch-2,500 comparison](HONF_Epoch2500_Comparison_Report.md) finds Legacy ahead of Dense in overall field error, while Dense leads the hydrodynamic channels. The original matched-500 evidence and decision below are preserved.
+
 ## Decision
 
 At the matched 500-epoch budget, the **dense pairwise field adaptation (Run 1804)** is the strongest candidate and the only run recommended for a user-launched continuation. It has the lowest pooled fluid-field normalized MSE and relative L2, the best equal-case field-error distribution, and the best field result in every predefined physical stratum. The geometry-latent adaptation is useful on several local/module and thermal KPIs, but its far-field error is materially worse. Sparse-interface HONF constructs and executes the intended bounded-support topology, yet its learned main-group read has collapsed to essentially zero magnitude; it is the slowest model on the present 3–10-module cases and has the worst field accuracy at epoch 500.

@@ -1,5 +1,7 @@
 # HONF group-reader recovery
 
+Follow-up (2026-09-09): the [exact epoch-2,500 comparison](HONF_Epoch2500_Comparison_Report.md) updates the later-training ranking and thermal conclusions. The measurements and causal findings below remain the epoch-500 closeout evidence.
+
 ## Evidence status
 
 This study tests whether separating geometric group availability from learned relative attention recovers useful module coupling and field reconstruction. One fresh 500-epoch run on physical GPU 0 completed. On the existing 90-case development holdout, pooled normalized fluid MSE falls from 0.028678 to 0.018054 (37.0%) and relative L2 from 0.176003 to 0.139648 (20.7%) versus Run 1802; 85 of 90 paired cases improve. The candidate remains behind Dense 1804 (0.098741 L2) and Legacy 1401 (0.117148 L2). Activation alone is not treated as success; phase-specific ground-truth tests below assess usefulness.
