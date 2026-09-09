@@ -1,5 +1,7 @@
 # HONF interface-operator study: Stage-3 evaluation and continuation decision
 
+Completed continuation (2026-09-09): the [exact epoch-5,000 comparison](HONF_Epoch5000_Comparison_Report.md) finds Dense regaining the overall field lead, with specific near-interface and physical-quantity exceptions. Historical results below are preserved.
+
 Follow-up (2026-09-09): the [exact epoch-2,500 comparison](HONF_Epoch2500_Comparison_Report.md) finds Legacy ahead of Dense in overall field error, while Dense leads the hydrodynamic channels. The original matched-500 evidence and decision below are preserved.
 
 ## Decision

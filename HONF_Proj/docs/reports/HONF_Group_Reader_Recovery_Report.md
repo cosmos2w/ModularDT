@@ -1,5 +1,7 @@
 # HONF group-reader recovery
 
+Completed continuation (2026-09-09): see the [exact epoch-5,000 comparison](HONF_Epoch5000_Comparison_Report.md). Dense leads overall reconstruction; Reader retains numerical group activity but its relative field deficit grows. The original 500-epoch recovery findings remain unchanged.
+
 Follow-up (2026-09-09): the [exact epoch-2,500 comparison](HONF_Epoch2500_Comparison_Report.md) updates the later-training ranking and thermal conclusions. The measurements and causal findings below remain the epoch-500 closeout evidence.
 
 ## Evidence status

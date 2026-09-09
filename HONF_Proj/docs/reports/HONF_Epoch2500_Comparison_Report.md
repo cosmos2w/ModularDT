@@ -1,5 +1,7 @@
 # HONF comparison at epoch 2,500
 
+Follow-up (2026-09-09): the [exact epoch-5,000 comparison](HONF_Epoch5000_Comparison_Report.md) finds Dense regaining the overall field and most thermal leads. The fixed-2,500 measurements below are preserved.
+
 Date: 2026-09-09. Exact stored epoch-2,500 checkpoints for Legacy 1401, Dense 1804, and Geometry Reader 1805 were evaluated on the same 90-case development holdout. **The overall field ranking changes from Dense < Legacy < Reader at epoch 500 to Legacy < Dense < Reader at epoch 2,500.** Dense still leads on all four hydrodynamic field channels; Legacy's temperature advantage determines the combined normalized-field ranking. Reader improves substantially but has not caught either comparator.
 
 This is a follow-up to the [interface study](HONF_Interface_Study_Report.md) and [group-reader recovery study](HONF_Group_Reader_Recovery_Report.md). Their historical measurements remain intact. The authorized Run-1804/GPU-0 and Run-1805/GPU-1 continuations were left unchanged. No epoch-5,000 comparison, new training, or additional continuation was launched for this analysis.
