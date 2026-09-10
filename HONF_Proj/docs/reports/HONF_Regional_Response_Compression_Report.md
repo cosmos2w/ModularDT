@@ -161,8 +161,11 @@ The ordinary run manifest records its start at **2026-09-10 13:36:49 UTC** (09:3
 | 10 | 0.518891 | 1.582103 | 1.11048 / 1.78146 | 0.02638 / 0.03507 |
 | 50 | 0.203376 | 0.392818 | 0.14661 / 0.59829 | 0.03992 / 0.03915 |
 | 100 | 0.093828 | 0.186004 | 0.08950 / 1.00067 | 0.02309 / 0.01469 |
+| 250 | 0.073293 | 0.165052 | 0.02477 / 0.43372 | 0.02846 / 0.02320 |
 
 These sampled validation metrics and evolving-batch gradients are distinct from exact-endpoint full-grid error and fixed-checkpoint intervention results.
+
+The intermediate trajectory is not monotonic. Median validation field MSE is 0.090747 over epochs 101–150, 0.064197 over 151–200, and 0.045080 over 201–250. The epoch-250 score is above its recent median; neither that point nor the best point is substituted for the required exact-500 evaluation.
 
 Commands executed from `HONF_Proj/`:
 

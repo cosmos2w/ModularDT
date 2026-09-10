@@ -1502,6 +1502,9 @@ def run_timing_protocol(args: argparse.Namespace) -> dict[str, Any]:
                 }
             )
 
+        # Real-case tensors must not become baseline allocations for the
+        # following synthetic measurements or the next model.
+        del batch, query_tensor, forward_kwargs
         synthetic_rows: list[dict[str, Any]] = []
         for module_count, env_count, query_count in shapes:
             lx, ly = _scaled_domain(module_count)
@@ -1609,6 +1612,7 @@ def run_timing_protocol(args: argparse.Namespace) -> dict[str, Any]:
                 else shape_row["variants"].get(normal_variant)
             )
             synthetic_rows.append(shape_row)
+            del structure, queries, grid_environment
         model_records.append(
             {
                 "checkpoint": _checkpoint_record(spec, checkpoint, model),
@@ -1619,6 +1623,8 @@ def run_timing_protocol(args: argparse.Namespace) -> dict[str, Any]:
                 "state_dict_structure_unchanged": state_before == _state_keys(model),
             }
         )
+        dataset.close()
+        del model, checkpoint, dataset
     execution_test = bool(getattr(args, "execution_test", False))
     return {
         "schema_version": 1,
@@ -2902,14 +2908,14 @@ def _endpoint_figure_timing_summary(payload: Mapping[str, Any]) -> dict[str, dic
             variant = "dense_projection_cached"
         else:
             continue
-        real_cases = model.get("real_cases")
+        real_cases = model.get("real_anchors")
         if not isinstance(real_cases, Sequence) or len(real_cases) != 2:
-            raise ValueError(f"timing artifact {label} must contain exactly two real_cases[] entries")
+            raise ValueError(f"timing artifact {label} must contain exactly two real_anchors[] entries")
         median_ms: list[float] = []
         peak_bytes: list[float] = []
         for case in real_cases:
             if not isinstance(case, Mapping):
-                raise ValueError(f"timing artifact {label} has an invalid real_cases[] entry")
+                raise ValueError(f"timing artifact {label} has an invalid real_anchors[] entry")
             variants = case.get("variants")
             details = variants.get(variant) if isinstance(variants, Mapping) else None
             phase = details.get("phases", {}).get("full_forward") if isinstance(details, Mapping) else None
