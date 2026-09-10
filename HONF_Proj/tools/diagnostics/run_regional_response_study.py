@@ -2638,7 +2638,14 @@ def _endpoint_figure_render_cover(path: Path, case_id: str, data: Mapping[str, A
     axis.set_xlabel("fine environment x")
     axis.set_ylabel("fine environment y")
     axis.set_aspect("equal")
-    axis.legend(loc="upper right", fontsize=7, frameon=True)
+    axis.legend(
+        loc="lower center",
+        bbox_to_anchor=(0.5, 1.14),
+        ncol=1,
+        fontsize=7,
+        frameon=True,
+        borderaxespad=0.0,
+    )
     scalar = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
     scalar.set_array(np.asarray(region_values, dtype=float))
     colorbar = fig.colorbar(scalar, ax=axis, pad=0.02)
@@ -2818,6 +2825,7 @@ def _endpoint_figure_render_anchor_predictions(
         return False, []
     temperatures: list[np.ndarray] = []
     errors: list[np.ndarray] = []
+    fluid_masks: dict[str, np.ndarray] = {}
     for _case_id, native, dense in records:
         target = np.asarray(native.get("gt_field_grid", dense.get("gt_field_grid")), dtype=float)
         native_prediction = np.asarray(native["pred_field_grid"], dtype=float)
@@ -2830,8 +2838,23 @@ def _endpoint_figure_render_anchor_predictions(
         dense_temperature = dense_prediction[..., channel]
         if native_temperature.shape != target_temperature.shape or dense_temperature.shape != target_temperature.shape:
             raise ValueError(f"case {_case_id}: native/Dense/reference field grids do not match")
-        temperatures.extend([target_temperature, native_temperature, dense_temperature])
-        errors.extend([native_temperature - target_temperature, dense_temperature - target_temperature])
+        if "fluid_mask" not in native:
+            raise KeyError(f"case {_case_id}: native endpoint NPZ lacks required stored fluid_mask key")
+        fluid_mask = np.asarray(native["fluid_mask"])
+        if fluid_mask.dtype != np.bool_ or fluid_mask.shape != target_temperature.shape:
+            raise ValueError(
+                f"case {_case_id}: stored fluid_mask must be boolean with shape "
+                f"{target_temperature.shape}, got {fluid_mask.shape} {fluid_mask.dtype}"
+            )
+        if not bool(fluid_mask.any()):
+            raise ValueError(f"case {_case_id}: stored fluid_mask has no fluid cells")
+        fluid_masks[_case_id] = fluid_mask
+        temperatures.extend(
+            [array[fluid_mask] for array in (target_temperature, native_temperature, dense_temperature)]
+        )
+        errors.extend(
+            [array[fluid_mask] for array in (native_temperature - target_temperature, dense_temperature - target_temperature)]
+        )
     finite_temperature_parts = [array[np.isfinite(array)] for array in temperatures if np.isfinite(array).any()]
     finite_error_parts = [array[np.isfinite(array)] for array in errors if np.isfinite(array).any()]
     if not finite_temperature_parts or not finite_error_parts:
@@ -2852,20 +2875,53 @@ def _endpoint_figure_render_anchor_predictions(
         dense_temperature = dense_prediction[..., channel]
         native_error = native_temperature - target_temperature
         dense_error = dense_temperature - target_temperature
+        fluid_mask = fluid_masks[case_id]
+        target_temperature_plot = np.ma.array(
+            target_temperature,
+            mask=np.logical_or(~fluid_mask, ~np.isfinite(target_temperature)),
+        )
+        native_temperature_plot = np.ma.array(
+            native_temperature,
+            mask=np.logical_or(~fluid_mask, ~np.isfinite(native_temperature)),
+        )
+        dense_temperature_plot = np.ma.array(
+            dense_temperature,
+            mask=np.logical_or(~fluid_mask, ~np.isfinite(dense_temperature)),
+        )
+        native_error_plot = np.ma.array(
+            native_error,
+            mask=np.logical_or(~fluid_mask, ~np.isfinite(native_error)),
+        )
+        dense_error_plot = np.ma.array(
+            dense_error,
+            mask=np.logical_or(~fluid_mask, ~np.isfinite(dense_error)),
+        )
         x_grid = np.asarray(native.get("x_grid", dense.get("x_grid")), dtype=float)
         y_grid = np.asarray(native.get("y_grid", dense.get("y_grid")), dtype=float)
         if x_grid.shape != target_temperature.shape or y_grid.shape != target_temperature.shape:
             raise ValueError(f"case {case_id}: stored x_grid/y_grid do not match temperature field shape")
         panels = (
-            (target_temperature, "reference temperature (dataset physical units)", "inferno", field_min, field_max),
-            (native_temperature, "Regional response HONF @500 (physical units)", "inferno", field_min, field_max),
-            (dense_temperature, "Dense 1804 @500 (physical units)", "inferno", field_min, field_max),
-            (native_error, "Regional − reference (physical units)", "coolwarm", -error_limit, error_limit),
-            (dense_error, "Dense − reference (physical units)", "coolwarm", -error_limit, error_limit),
+            (target_temperature_plot, "Reference fluid temperature\n(dataset physical units)", "inferno", field_min, field_max),
+            (native_temperature_plot, "Regional HONF @500 fluid temperature\n(physical units)", "inferno", field_min, field_max),
+            (dense_temperature_plot, "Dense 1804 @500 fluid temperature\n(physical units)", "inferno", field_min, field_max),
+            (native_error_plot, "Regional − reference\n(fluid physical units)", "coolwarm", -error_limit, error_limit),
+            (dense_error_plot, "Dense − reference\n(fluid physical units)", "coolwarm", -error_limit, error_limit),
         )
+        temperature_cmap = plt.get_cmap("inferno").copy()
+        temperature_cmap.set_bad("#d9d9d9")
+        error_cmap = plt.get_cmap("coolwarm").copy()
+        error_cmap.set_bad("#d9d9d9")
         for column, (values, title, cmap, vmin, vmax) in enumerate(panels):
             axis = axes[row_index, column]
-            image = axis.pcolormesh(x_grid, y_grid, values, shading="auto", cmap=cmap, vmin=vmin, vmax=vmax)
+            image = axis.pcolormesh(
+                x_grid,
+                y_grid,
+                values,
+                shading="auto",
+                cmap=temperature_cmap if cmap == "inferno" else error_cmap,
+                vmin=vmin,
+                vmax=vmax,
+            )
             axis.set_title(title, fontsize=8)
             axis.set_aspect("equal")
             axis.set_xticks([])
@@ -2877,25 +2933,37 @@ def _endpoint_figure_render_anchor_predictions(
             {
                 "case_id": case_id,
                 "field_channel": int(channel),
-                "native_temperature_abs_error_mean": float(np.nanmean(np.abs(native_error))),
-                "dense_temperature_abs_error_mean": float(np.nanmean(np.abs(dense_error))),
-                "native_temperature_signed_error_mean": float(np.nanmean(native_error)),
-                "dense_temperature_signed_error_mean": float(np.nanmean(dense_error)),
+                "field_mask_key": "fluid_mask",
+                "fluid_cell_count": int(np.sum(fluid_mask)),
+                "native_temperature_abs_error_mean": float(np.nanmean(np.abs(native_error[fluid_mask]))),
+                "dense_temperature_abs_error_mean": float(np.nanmean(np.abs(dense_error[fluid_mask]))),
+                "native_temperature_signed_error_mean": float(np.nanmean(native_error[fluid_mask])),
+                "dense_temperature_signed_error_mean": float(np.nanmean(dense_error[fluid_mask])),
             }
         )
-    fig.suptitle("Four-anchor native predictions/errors against reference and Dense 1804 matched at epoch 500")
+    fig.suptitle(
+        "Four-anchor fluid-temperature predictions/errors against reference and Dense 1804 matched at epoch 500"
+    )
+    fig.text(
+        0.5,
+        0.005,
+        "Grey cells: stored fluid_mask=False (solid); error summaries use fluid cells only.",
+        ha="center",
+        va="bottom",
+        fontsize=8,
+    )
     fig.savefig(path, dpi=160, bbox_inches="tight")
     plt.close(fig)
     return True, metric_rows
 
 
-def _endpoint_figure_timing_summary(payload: Mapping[str, Any]) -> dict[str, dict[str, float]]:
+def _endpoint_figure_timing_summary(payload: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     """Reduce the matched two-anchor timing schema to one row per model."""
 
     models = payload.get("models")
     if not isinstance(models, Sequence):
         raise ValueError("timing artifact must contain models[]")
-    output: dict[str, dict[str, float]] = {}
+    output: dict[str, dict[str, Any]] = {}
     for model in models:
         if not isinstance(model, Mapping):
             raise ValueError("timing artifact models[] entries must be objects")
@@ -2905,7 +2973,7 @@ def _endpoint_figure_timing_summary(payload: Mapping[str, Any]) -> dict[str, dic
             variant = "regional_native_prepared"
         elif architecture == "dense_pairwise_field":
             label = "Dense 1804 @500"
-            variant = "dense_projection_cached"
+            variant = "dense_default"
         else:
             continue
         real_cases = model.get("real_anchors")
@@ -2930,6 +2998,7 @@ def _endpoint_figure_timing_summary(payload: Mapping[str, Any]) -> dict[str, dic
         if label in output:
             raise ValueError(f"timing artifact contains duplicate model architecture {architecture!r}")
         output[label] = {
+            "timing_variant": variant,
             "full_forward_median_ms_over_two_anchors": float(np.median(median_ms)),
             "peak_allocated_mib_over_two_anchors": float(np.median(peak_bytes) / (1024.0**2)),
         }
@@ -2943,7 +3012,7 @@ def _endpoint_figure_render_convergence_cost(
     path: Path,
     histories: Sequence[tuple[str, Path, Mapping[str, Sequence[float]]]],
     model_rows: Mapping[str, Sequence[Mapping[str, Any]]],
-    timing_summary: Mapping[str, Mapping[str, float]],
+    timing_summary: Mapping[str, Mapping[str, Any]],
 ) -> tuple[bool, list[dict[str, Any]]]:
     """Render sampled validation convergence, measured cost, and peak allocation."""
 
@@ -2994,17 +3063,19 @@ def _endpoint_figure_render_convergence_cost(
     for index, row in enumerate(accuracy_rows):
         x_value = float(row["full_forward_median_ms_over_two_anchors"])
         y_value = float(row["equal_case90_global_field_fluid_norm_l2_mean"])
-        cost_axis.scatter(x_value, y_value, s=58, color=colors[index], label=row["model_label"], alpha=0.85)
-        cost_axis.annotate(str(row["model_label"]), (x_value, y_value), xytext=(5, 4), textcoords="offset points", fontsize=7)
+        variant_label = str(row["timing_variant"])
+        display_label = f"{row['model_label']} ({variant_label})"
+        cost_axis.scatter(x_value, y_value, s=58, color=colors[index], label=display_label, alpha=0.85)
+        cost_axis.annotate(display_label, (x_value, y_value), xytext=(5, 4), textcoords="offset points", fontsize=7)
         memory_axis.bar(index, float(row["peak_allocated_mib_over_two_anchors"]), color=colors[index], label=row["model_label"])
-    cost_axis.set_xlabel("median full-forward time over two anchors (ms)")
+    cost_axis.set_xlabel("median full-forward time over two anchors (ms; timing variant shown in labels)")
     cost_axis.set_ylabel("equal-case mean fluid relative L2 (90 cases)")
-    cost_axis.set_title("Accuracy versus measured cost")
+    cost_axis.set_title("Accuracy versus measured cost (Dense default full-forward)")
     cost_axis.grid(alpha=0.25)
     cost_axis.legend(fontsize=7)
     memory_axis.set_xticks(range(len(accuracy_rows)), ["Regional", "Dense"])
     memory_axis.set_ylabel("median peak allocated (MiB)")
-    memory_axis.set_title("Peak allocation")
+    memory_axis.set_title("Peak allocation (same timing variants)")
     memory_axis.grid(axis="y", alpha=0.25)
     fig.suptitle("Regional response HONF @500 — sampled convergence and measured cost")
     fig.savefig(path, dpi=165, bbox_inches="tight")
@@ -3091,7 +3162,7 @@ def run_endpoint_figures(args: argparse.Namespace) -> dict[str, Any]:
         "limitations": [
             "Fine environment region IDs are deterministic membership metadata; they are not learned probabilities.",
             "Attention weights are learned receiver routing summaries, and state L2 norms are regional response-state magnitudes; neither is a causal influence estimate.",
-            "Anchor maps use the native temperature channel and compare the same stored reference target against native and Dense predictions.",
+            "Anchor maps use temperature channel 4 and the native stored fluid_mask for reference, native, Dense, and error panels; errors are summarized over fluid cells only and solid cells are neutral grey.",
             "Convergence uses the maintained named-column history reader so historical CSV schema changes are not interpreted positionally.",
         ],
     }
@@ -3118,7 +3189,7 @@ def run_endpoint_figures(args: argparse.Namespace) -> dict[str, Any]:
             )
         native_npz[case_id] = _endpoint_figure_load_npz(native_path)
         dense_npz[case_id] = _endpoint_figure_load_npz(dense_path)
-        required_native_keys = {"regional_response_states", "regional_environment_attention"}
+        required_native_keys = {"regional_response_states", "regional_environment_attention", "fluid_mask"}
         missing_native_keys = sorted(required_native_keys.difference(native_npz[case_id]))
         if missing_native_keys:
             raise KeyError(f"native endpoint NPZ for case {case_id} is missing keys: {missing_native_keys}")
@@ -3127,6 +3198,14 @@ def run_endpoint_figures(args: argparse.Namespace) -> dict[str, Any]:
                 raise KeyError(f"anchor endpoint NPZ for case {case_id} is missing required field key: {key}")
         manifest["inputs"].setdefault("native_debug_npz", {})[case_id] = str(native_path)
         manifest["inputs"].setdefault("dense_debug_npz", {})[case_id] = str(dense_path)
+    manifest["inputs"]["anchor_field_mask"] = {
+        "key": "fluid_mask",
+        "source": "native endpoint debug NPZ per anchor case",
+        "applied_to": "reference, Regional, Dense, and signed-error temperature panels",
+        "dense_npz_key_available": False,
+        "solid_display": "neutral grey",
+        "error_summary_scope": "stored fluid_mask=True cells only",
+    }
 
     native_anchor = case_ids[0]
     cover_path = figure_dir / "regional_cover_24x8_48.png"
@@ -3270,6 +3349,10 @@ def run_endpoint_figures(args: argparse.Namespace) -> dict[str, Any]:
     timing_payload = _json.loads(timing_path.read_text())
     timing_summary = _endpoint_figure_timing_summary(timing_payload)
     manifest["inputs"]["timing"] = str(timing_path)
+    manifest["inputs"]["timing_variants"] = {
+        label: str(summary["timing_variant"])
+        for label, summary in timing_summary.items()
+    }
     histories: list[tuple[str, Path, Mapping[str, Sequence[float]]]] = []
     history_specs = (
         ("Regional response HONF @500", ("native_history",)),
