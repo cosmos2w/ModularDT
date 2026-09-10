@@ -928,6 +928,19 @@ def interaction_metrics(base_row: Dict[str, Any], predictions: Dict[str, Any]) -
             port_neighbours.size * max(coarse_latent_count, 0)
         )
 
+    if architecture == "regional_response_honf":
+        regional_count = _finite_values(aux.get("regional_response_count", []))
+        if regional_count.size:
+            row["regional_response_count"] = float(np.mean(regional_count))
+        attention = np.asarray(routing.get("regional_environment_attention", []), dtype=np.float64)
+        if attention.size:
+            row["regional_environment_read_value_count"] = float(np.isfinite(attention).sum())
+            if attention.ndim >= 2:
+                row["regional_environment_read_pair_count"] = float(
+                    attention.shape[0] * attention.shape[1]
+                )
+        return row
+
     if architecture != "sparse_interface_honf":
         return row
 
@@ -1469,6 +1482,7 @@ def save_debug_npz(path: Path, predictions: Dict[str, Any], raw_sample: Dict[str
     for key, value in predictions.get("routing_maps", {}).items():
         if key in {
             "dense_environment_attention",
+            "regional_environment_attention",
             "latent_query_attention",
             "group_read_degree",
             "group_read_weight_mass",
@@ -1493,6 +1507,34 @@ def save_debug_npz(path: Path, predictions: Dict[str, Any], raw_sample: Dict[str
                 value,
                 dtype=np.int64 if key == "group_read_group_index" else np.float32,
             )
+    prepared_case = predictions.get("_prepared_state")
+    prepared = getattr(prepared_case, "prepared", None)
+    if prepared is not None and str(getattr(prepared_case, "architecture", "")) == "regional_response_honf":
+        encoded = getattr(prepared, "encoded", None)
+        backend_state = getattr(prepared, "backend_state", None)
+        if encoded is not None and isinstance(backend_state, dict):
+            # Keep the regional sources and their geometry explicit.  Fine
+            # environment arrays are named separately so these exports cannot
+            # be mistaken for the 192-token outer/coarse route.
+            state_keys = {
+                "regional_response_states": "regional_response_states",
+                "regional_coords": "regional_coords",
+                "regional_weights": "regional_quadrature_mass",
+                "regional_valid": "regional_valid",
+                "regional_ids": "regional_ids",
+            }
+            for source_key, target_key in state_keys.items():
+                value = backend_state.get(source_key)
+                if torch.is_tensor(value):
+                    payload[target_key] = value.detach().cpu().numpy()[0]
+            for source_key, target_key in (
+                ("env_coords", "fine_env_coords"),
+                ("env_weights", "fine_env_quadrature_weights"),
+                ("env_region_ids", "fine_env_region_ids"),
+            ):
+                value = getattr(encoded, source_key, None)
+                if torch.is_tensor(value):
+                    payload[target_key] = value.detach().cpu().numpy()[0]
     for key, value in predictions.get("interaction_aux", {}).items():
         if key.startswith("support_") or key.startswith("group_") or key.startswith(
             "module_"
@@ -1963,6 +2005,7 @@ def main(argv: list[str] | None = None) -> int:
                 cuda_allocated_before = 0
                 cuda_reserved_before = 0
             prediction_started = time.perf_counter()
+            architecture = str(model.config.core_honf.forward_architecture)
             with torch.no_grad():
                 predictions = predict_case(
                     model,
@@ -1972,6 +2015,9 @@ def main(argv: list[str] | None = None) -> int:
                     local_port_condition_mode=str(args.local_port_condition_mode),
                     mixed_teacher_ratio=float(args.mixed_teacher_ratio),
                     return_routing_maps=bool(args.return_routing_maps),
+                    return_prepared_state=bool(
+                        architecture == "regional_response_honf" and case_id in anchor_case_ids
+                    ),
                 )
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
@@ -2065,6 +2111,15 @@ def main(argv: list[str] | None = None) -> int:
                         raw_sample,
                         routing_key="dense_environment_attention",
                         title=f"Dense pairwise environmental influence (adaptation) — case {case_id}",
+                    )
+                elif args.return_routing_maps and architecture == "regional_response_honf":
+                    plot_interface_field_attention(
+                        paths["fig_interaction"]
+                        / f"{safe_label(spec['label'])}__{safe_label(case_id)}__regional_response_attention.png",
+                        predictions,
+                        raw_sample,
+                        routing_key="regional_environment_attention",
+                        title=f"Regional response environmental read — case {case_id}",
                     )
                 elif args.return_routing_maps and architecture == "geometry_latent_field":
                     plot_interface_field_attention(

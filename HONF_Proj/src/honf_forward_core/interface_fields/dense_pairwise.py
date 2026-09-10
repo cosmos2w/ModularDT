@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Dict
-
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from honf_forward_core.nn import FourierFeatures, LazyMLP
+
 from .common import BiasedMultiheadAttention
 from .types import EncodedInterfaceCase
 
@@ -37,19 +36,25 @@ class DensePairwiseField(nn.Module):
             return checkpoint(module, values, use_reentrant=False)
         return module(values)
 
-    def prepare(
+    def prepare_fine_messages(
         self,
         encoded: EncodedInterfaceCase,
         module_states: torch.Tensor,
-        *,
-        return_routing_maps: bool = False,
-    ) -> Dict[str, torch.Tensor]:
-        del return_routing_maps
+    ) -> dict[str, torch.Tensor]:
+        """Prepare Dense's simultaneous fine MM/ME/EM messages.
+
+        The regional backend reuses this exact preparation and only changes
+        what happens after the fine ``EM`` reduction.  In particular, all
+        three typed messages consume the input ``module_states``; the module
+        update is not fed back into the environmental message in the same
+        pass.
+        """
+
         centers = encoded.module_centers
         env_coords = encoded.env_coords
         scale = encoded.coordinate_scale
         present = encoded.module_present
-        batch, modules, _ = module_states.shape
+        _batch, modules, _ = module_states.shape
         env_count = int(encoded.env_tokens.shape[1])
         active_count = present.sum(dim=1, keepdim=True).clamp_min(0.0)
 
@@ -81,41 +86,145 @@ class DensePairwiseField(nn.Module):
         zi_for_env = module_states[:, None, :, :].expand(-1, env_count, -1, -1)
         em = self._mlp(self.em_message, torch.cat([ej_sources, zi_for_env, em_features], dim=-1))
         a_em = (em * present[:, None, :, None]).sum(dim=2) / (1.0 + active_count[:, :, None])
-        global_env = encoded.global_token[:, None, :].expand(-1, env_count, -1)
-        contextual_env = encoded.env_tokens + self.env_update(torch.cat([encoded.env_tokens, a_em, global_env], dim=-1))
-        return {"module_tokens": contextual_modules, "env_tokens": contextual_env}
+        return {
+            "module_tokens": contextual_modules,
+            # Keep the fine encoded environment available to the common
+            # coarse route and to frozen evaluation utilities.
+            "env_tokens": encoded.env_tokens,
+            "environment_messages": a_em,
+        }
 
-    def read(
+    def prepare(
         self,
-        state: Dict[str, torch.Tensor],
+        encoded: EncodedInterfaceCase,
+        module_states: torch.Tensor,
+        *,
+        return_routing_maps: bool = False,
+    ) -> dict[str, torch.Tensor]:
+        del return_routing_maps
+        fine = self.prepare_fine_messages(encoded, module_states)
+        global_env = encoded.global_token[:, None, :].expand(-1, fine["env_tokens"].shape[1], -1)
+        contextual_env = fine["env_tokens"] + self.env_update(
+            torch.cat([fine["env_tokens"], fine["environment_messages"], global_env], dim=-1)
+        )
+        return {"module_tokens": fine["module_tokens"], "env_tokens": contextual_env}
+
+    def read_module(
+        self,
+        state: dict[str, torch.Tensor],
         encoded: EncodedInterfaceCase,
         receivers: torch.Tensor,
         receiver_features: torch.Tensor,
-        *,
-        return_routing_maps: bool = False,
-    ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    ) -> torch.Tensor:
+        """Read Dense's direct nonlinear query--module contribution."""
+
         modules = int(state["module_tokens"].shape[1])
         relative = (receivers[:, :, None, :] - encoded.module_centers[:, None, :, :]) / encoded.coordinate_scale
         relative_features = self.relative_fourier(relative)
         source = state["module_tokens"][:, None, :, :].expand(-1, receivers.shape[1], -1, -1)
         global_features = encoded.global_token[:, None, None, :].expand(-1, receivers.shape[1], modules, -1)
-        module_messages = self._mlp(self.query_module_message, torch.cat([source, relative_features, global_features], dim=-1))
-        module_context = self.query_module_output(
+        module_messages = self._mlp(
+            self.query_module_message,
+            torch.cat([source, relative_features, global_features], dim=-1),
+        )
+        return self.query_module_output(
             (module_messages * encoded.module_present[:, None, :, None]).sum(dim=2)
             / (1.0 + encoded.module_present.sum(dim=1)[:, None, None])
         )
 
+    def project_environment_sources(self, source: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Project prepared environmental sources for reuse across reads."""
+
+        return self.env_attention.project_source(source)
+
+    def read_environment_projected(
+        self,
+        projected_key: torch.Tensor,
+        projected_value: torch.Tensor,
+        encoded: EncodedInterfaceCase,
+        receivers: torch.Tensor,
+        receiver_features: torch.Tensor,
+        source_coords: torch.Tensor,
+        source_weights: torch.Tensor,
+        *,
+        source_mask: torch.Tensor | None = None,
+        return_routing_maps: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Read projected environmental sources with supplied geometry/mass."""
+
+        source_relative = (receivers[:, :, None, :] - source_coords[:, None, :, :]) / encoded.coordinate_scale
+        source_bias = self._mlp(
+            self.env_geometry_bias,
+            self.relative_fourier(source_relative),
+        ).permute(0, 3, 1, 2)
+        env_query = self.env_query(receiver_features)
+        projected_query = self.env_attention.project_query(env_query)
+        if source_mask is None:
+            # Caller-owned sources are expected to have positive quadrature
+            # masses.  Keep their exact ratios, including subnormal values.
+            log_weights = torch.log(source_weights)
+        else:
+            # Padded regional slots are masked by the attention reader.  Give
+            # those slots a finite placeholder only for log evaluation so a
+            # zero padding mass cannot produce ``log(0)``; retained positive
+            # masses are never clamped or otherwise altered.
+            safe_weights = torch.where(
+                source_mask > 0.5,
+                source_weights,
+                torch.ones_like(source_weights),
+            )
+            log_weights = torch.log(safe_weights)
+        return self.env_attention.read_projected(
+            projected_query,
+            projected_key,
+            projected_value,
+            bias=source_bias,
+            source_mask=source_mask,
+            log_weights=log_weights,
+            return_attention=bool(return_routing_maps),
+        )
+
+    def read_environment(
+        self,
+        state: dict[str, torch.Tensor],
+        encoded: EncodedInterfaceCase,
+        receivers: torch.Tensor,
+        receiver_features: torch.Tensor,
+        *,
+        return_routing_maps: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Read Dense's environmental contribution independently."""
+
         env_relative = (receivers[:, :, None, :] - encoded.env_coords[:, None, :, :]) / encoded.coordinate_scale
         env_bias = self._mlp(self.env_geometry_bias, self.relative_fourier(env_relative)).permute(0, 3, 1, 2)
         env_query = self.env_query(receiver_features)
-        env_context, env_attention = self.env_attention(
+        return self.env_attention(
             env_query,
             state["env_tokens"],
             bias=env_bias,
             log_weights=torch.log(encoded.env_weights.clamp_min(torch.finfo(encoded.env_weights.dtype).tiny)),
             return_attention=bool(return_routing_maps),
         )
-        aux: Dict[str, torch.Tensor] = {
+
+    def read(
+        self,
+        state: dict[str, torch.Tensor],
+        encoded: EncodedInterfaceCase,
+        receivers: torch.Tensor,
+        receiver_features: torch.Tensor,
+        *,
+        return_routing_maps: bool = False,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        module_context = self.read_module(state, encoded, receivers, receiver_features)
+
+        env_context, env_attention = self.read_environment(
+            state,
+            encoded,
+            receivers,
+            receiver_features,
+            return_routing_maps=bool(return_routing_maps),
+        )
+        aux: dict[str, torch.Tensor] = {
             # This scalar per receiver is retained for training summaries.  The
             # potentially large attention tensor is only materialized when the
             # caller explicitly asks for routing maps.

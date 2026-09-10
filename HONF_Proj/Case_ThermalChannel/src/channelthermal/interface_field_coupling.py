@@ -173,15 +173,22 @@ def forward_interface_field(
         domain_length_x=None if domain_length_x is None else domain_length_x.to(device=device, dtype=dtype),
         domain_length_y=None if domain_length_y is None else domain_length_y.to(device=device, dtype=dtype),
     )
-    env = model.environment_builder(
-        batch_size=batch,
-        num_env_tokens_x=int(model.config.core_honf.num_env_tokens_x),
-        num_env_tokens_y=int(model.config.core_honf.num_env_tokens_y),
-        domain_length_x=float(model.config.core_honf.domain_length_x),
-        domain_length_y=float(model.config.core_honf.domain_length_y),
-        device=device,
-        dtype=dtype,
-    )
+    environment_kwargs = {
+        "batch_size": batch,
+        "num_env_tokens_x": int(model.config.core_honf.num_env_tokens_x),
+        "num_env_tokens_y": int(model.config.core_honf.num_env_tokens_y),
+        "domain_length_x": float(model.config.core_honf.domain_length_x),
+        "domain_length_y": float(model.config.core_honf.domain_length_y),
+        "device": device,
+        "dtype": dtype,
+    }
+    if str(model.config.core_honf.forward_architecture) == "regional_response_honf":
+        environment_kwargs["response_region_block_shape"] = tuple(
+            model.config.core_honf.interface_model.response_region_block_shape
+        )
+    # Keep the historical builder call signature byte-for-byte compatible for
+    # the established families; only the regional candidate requests IDs.
+    env = model.environment_builder(**environment_kwargs)
     encoded = model.core.encode_case(
         BatchData(
             module_centers=adapter.module_centers,
@@ -195,6 +202,7 @@ def forward_interface_field(
             metadata={},
             env_coords=env.env_coords,
             env_features=env.env_features,
+            env_region_ids=getattr(env, "env_region_ids", None),
         )
     )
     if teacher_port_tokens is None and interface_condition is not None:

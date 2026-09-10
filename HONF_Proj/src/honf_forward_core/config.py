@@ -83,6 +83,7 @@ FORWARD_ARCHITECTURES = {
     "dense_pairwise_field",
     "geometry_latent_field",
     "sparse_interface_honf",
+    "regional_response_honf",
 }
 
 LEGACY_ARCHITECTURE_KEYS = {
@@ -141,6 +142,10 @@ class InterfaceFieldConfig:
     relative_fourier_frequencies: int = 4
     receiver_chunk_size: int = 128
     activation_checkpointing: bool = False
+    # Physical extents of one response region along the adapter-provided
+    # environment grid axes.  The adapter owns membership; the backend only
+    # consumes the resulting IDs, masses, and centroids.
+    response_region_block_shape: list[int] = field(default_factory=lambda: [2, 2])
 
     def __post_init__(self) -> None:
         if int(self.message_hidden_dim) <= 0:
@@ -164,6 +169,16 @@ class InterfaceFieldConfig:
             raise ValueError("interface_model.relative_fourier_frequencies must be nonnegative.")
         if int(self.receiver_chunk_size) <= 0:
             raise ValueError("interface_model.receiver_chunk_size must be positive.")
+        if (
+            not isinstance(self.response_region_block_shape, (list, tuple))
+            or len(self.response_region_block_shape) != 2
+            or any(isinstance(value, bool) or not isinstance(value, int) or int(value) <= 0
+                   for value in self.response_region_block_shape)
+        ):
+            raise ValueError(
+                "interface_model.response_region_block_shape must contain two positive integers."
+            )
+        self.response_region_block_shape = [int(value) for value in self.response_region_block_shape]
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any] | None) -> "InterfaceFieldConfig":
@@ -625,6 +640,8 @@ class UnifiedForwardConfig:
                     # baseline and are not sparse-HONF capacity parameters.
                     interface_payload.pop("main_latent_count", None)
                     interface_payload.pop("main_latent_blocks", None)
+                if self.forward_architecture != "regional_response_honf":
+                    interface_payload.pop("response_region_block_shape", None)
         return payload
 
     def decoder_uses(self, component: str) -> bool:
@@ -649,6 +666,12 @@ class BatchData:
     env_coords: Optional[Any] = None
     env_features: Optional[Any] = None
     query_features: Optional[Any] = None
+    # Optional adapter-owned physical region IDs aligned with ``env_coords``.
+    # They are consumed only by regional-response families; established
+    # families ignore the field and retain the fine environment route.  Keep
+    # this after the historical fields so positional BatchData construction
+    # retains its prior ordering.
+    env_region_ids: Optional[Any] = None
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "BatchData":

@@ -28,6 +28,10 @@ class ChannelThermalEnvironment:
 
     env_coords: torch.Tensor
     env_features: torch.Tensor
+    # Optional deterministic region IDs aligned with ``env_coords``.  The
+    # regional-response experiment requests these from the case adapter;
+    # existing families leave them unset and keep their original route.
+    env_region_ids: torch.Tensor | None = None
 
 
 class ChannelThermalEnvironmentBuilder:
@@ -50,6 +54,50 @@ class ChannelThermalEnvironmentBuilder:
         "inlet_distance_norm",
         "outlet_distance_norm",
     )
+
+    @staticmethod
+    def region_ids_from_coordinates(
+        coordinates: torch.Tensor,
+        *,
+        num_env_tokens_x: int,
+        num_env_tokens_y: int,
+        block_shape: tuple[int, int] | list[int],
+    ) -> torch.Tensor:
+        """Derive physical grid-region IDs without relying on token order.
+
+        The current adapter emits a cell-centred rectangular grid, with x
+        varying fastest in its flattened representation.  Region assignment
+        is nevertheless based on sorted physical coordinate ranks so a token
+        permutation leaves the IDs permuted with the tokens, and exact
+        duplicate samples share one region.  The metadata dimensions provide
+        the expected number of blocks; no reshape of an arbitrary sequence is
+        performed.
+        """
+
+        if coordinates.ndim != 2 or coordinates.shape[-1] != 2:
+            raise ValueError("coordinates must have shape [E, 2].")
+        if not isinstance(block_shape, (tuple, list)) or len(block_shape) != 2:
+            raise ValueError("block_shape must contain two positive integers.")
+        if any(isinstance(value, bool) or not isinstance(value, int) or int(value) <= 0 for value in block_shape):
+            raise ValueError("block_shape must contain two positive integers.")
+        nx = int(num_env_tokens_x)
+        ny = int(num_env_tokens_y)
+        if nx <= 0 or ny <= 0:
+            raise ValueError("Environment grid dimensions must be positive.")
+        block_x, block_y = (int(block_shape[0]), int(block_shape[1]))
+        x_values, x_rank = torch.unique(coordinates[:, 0], sorted=True, return_inverse=True)
+        y_values, y_rank = torch.unique(coordinates[:, 1], sorted=True, return_inverse=True)
+        # This builder owns a rectangular grid, so every configured physical
+        # row/column must be represented.  Exact duplicate quadrature samples
+        # are still fine because ``unique`` removes them before ranking.
+        if int(x_values.numel()) != nx or int(y_values.numel()) != ny:
+            raise ValueError(
+                "Environment coordinates do not match the configured rectangular grid metadata."
+            )
+        regions_x = (nx + block_x - 1) // block_x
+        region_x = x_rank.to(torch.long) // block_x
+        region_y = y_rank.to(torch.long) // block_y
+        return region_y * regions_x + region_x
 
     @staticmethod
     def query_features(
@@ -79,6 +127,7 @@ class ChannelThermalEnvironmentBuilder:
         domain_length_y: float,
         device: torch.device,
         dtype: torch.dtype,
+        response_region_block_shape: tuple[int, int] | list[int] | None = None,
     ) -> ChannelThermalEnvironment:
         """Build a cell-centered ``nx*ny`` environment grid for each case."""
 
@@ -105,7 +154,17 @@ class ChannelThermalEnvironmentBuilder:
             ],
             dim=-1,
         )
+        env_region_ids = None
+        if response_region_block_shape is not None:
+            ids = self.region_ids_from_coordinates(
+                coords,
+                num_env_tokens_x=nx,
+                num_env_tokens_y=ny,
+                block_shape=response_region_block_shape,
+            )
+            env_region_ids = ids.unsqueeze(0).expand(batch_size, -1)
         return ChannelThermalEnvironment(
             env_coords=coords.unsqueeze(0).expand(batch_size, -1, -1),
             env_features=features.unsqueeze(0).expand(batch_size, -1, -1),
+            env_region_ids=env_region_ids,
         )

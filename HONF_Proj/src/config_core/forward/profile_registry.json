@@ -13,6 +13,16 @@
       "stage": "sparse-interface-stage1"
     },
     {
+      "name": "regional_response_interface_context",
+      "path": "project://src/config_core/forward/regional_response_interface_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "dense fine joint responses / shared 2x2 regional environmental response states",
+      "checkpoint_families": ["Run 1806 regional-response candidate"],
+      "owner": "forward-research",
+      "stage": "regional-response-stage1"
+    },
+    {
       "name": "geometry_latent_interface_context",
       "path": "project://src/config_core/forward/geometry_latent_interface_context.json",
       "status": "candidate",

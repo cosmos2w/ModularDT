@@ -225,7 +225,11 @@ def predict_case(
                     value = routing_aux.get(source_key)
                     if torch.is_tensor(value):
                         routing_chunks.setdefault(target_key, []).append(value.detach().cpu().numpy()[0])
-                for source_key in ("dense_environment_attention", "latent_query_attention"):
+                for source_key in (
+                    "dense_environment_attention",
+                    "regional_environment_attention",
+                    "latent_query_attention",
+                ):
                     value = routing_aux.get(source_key)
                     if torch.is_tensor(value):
                         # The backend reports [batch, heads, query, source].  A
@@ -265,7 +269,11 @@ def predict_case(
             {
                 key: value
                 for key, value in first_outputs.get("interaction_aux", {}).items()
-                if key not in {"dense_environment_attention", "latent_query_attention"}
+                if key not in {
+                    "dense_environment_attention",
+                    "regional_environment_attention",
+                    "latent_query_attention",
+                }
             }
         ),
     }

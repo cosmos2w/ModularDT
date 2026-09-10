@@ -13,6 +13,7 @@ from .common import SharedInterfaceContext
 from .dense_pairwise import DensePairwiseField
 from .group_operator import SparseInterfaceHONF, SparseLayoutCache
 from .latent_attention import GeometryLatentField
+from .regional_response import RegionalResponseField
 from .types import EncodedInterfaceCase, InterfaceRead, PreparedInterfaceField
 
 
@@ -69,6 +70,15 @@ class InterfaceFieldCore(nn.Module):
                 float(options.support_spacing_factor),
                 group_read_mode=str(options.group_read_mode),
             )
+        elif config.forward_architecture == "regional_response_honf":
+            self.backend = RegionalResponseField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                response_region_block_shape=tuple(options.response_region_block_shape),
+                activation_checkpointing=bool(options.activation_checkpointing),
+            )
         else:
             raise ValueError(f"Unsupported interface architecture: {config.forward_architecture!r}")
         self.receiver_chunk_size = int(options.receiver_chunk_size)
@@ -107,6 +117,15 @@ class InterfaceFieldCore(nn.Module):
         env_coords = batch.env_coords.to(device=module_centers.device, dtype=module_centers.dtype)
         if env_coords.ndim == 2:
             env_coords = env_coords.unsqueeze(0).expand(module_centers.shape[0], -1, -1)
+        env_region_ids = None
+        if batch.env_region_ids is not None:
+            env_region_ids = batch.env_region_ids.to(device=module_centers.device, dtype=torch.long)
+            if env_region_ids.ndim == 1:
+                env_region_ids = env_region_ids.unsqueeze(0).expand(module_centers.shape[0], -1)
+            elif env_region_ids.ndim == 2 and env_region_ids.shape[0] == 1 and module_centers.shape[0] != 1:
+                env_region_ids = env_region_ids.expand(module_centers.shape[0], -1)
+            if env_region_ids.ndim != 2 or tuple(env_region_ids.shape) != tuple(env_coords.shape[:2]):
+                raise ValueError("env_region_ids must align with env_coords as [B,E].")
         env_input = self.position_fourier(env_coords / scale)
         env_features = None
         if batch.env_features is not None:
@@ -132,6 +151,7 @@ class InterfaceFieldCore(nn.Module):
             env_features=env_features,
             env_weights=env_weights,
             coordinate_scale=scale,
+            env_region_ids=env_region_ids,
         )
 
     def prepare(
@@ -146,6 +166,13 @@ class InterfaceFieldCore(nn.Module):
             if not isinstance(layout_cache, SparseLayoutCache):
                 raise ValueError("sparse_interface_honf requires a SparseLayoutCache built from module ports.")
             backend_state = self.backend.prepare(encoded, module_states, layout_cache)
+        elif self.config.forward_architecture == "regional_response_honf":
+            backend_state = self.backend.prepare(
+                encoded,
+                module_states,
+                region_ids=encoded.env_region_ids,
+                return_routing_maps=bool(return_routing_maps),
+            )
         else:
             backend_state = self.backend.prepare(
                 encoded,

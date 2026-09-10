@@ -22,6 +22,8 @@ from honf_runtime.compat import autocast_context, recursive_to_device
 INTERFACE_DIAGNOSTIC_KEYS = (
     "interaction_local_neighbor_count_mean",
     "interaction_main_context_norm_mean",
+    "interaction_direct_module_context_norm_mean",
+    "interaction_regional_context_norm_mean",
     "interaction_coarse_context_norm_mean",
     "interaction_local_context_norm_mean",
     "interaction_main_context_fraction_mean",
@@ -40,11 +42,16 @@ INTERFACE_DIAGNOSTIC_KEYS = (
     "interaction_group_occupancy_mean",
     "interaction_group_occupancy_envelope_mean",
     "interaction_group_covered_volume_ratio_mean",
+    "interaction_regional_response_count_mean",
 )
 
 GRADIENT_DIAGNOSTIC_GROUPS = (
     "encoder", "backend", "head", "local_coupling",
     "group_prepare", "group_receiver", "coarse", "local",
+    # Regional-response detail rows are additive observations.  The
+    # historical aggregate groups above remain unchanged so old runs retain
+    # their established interpretation.
+    "regional_prepare", "regional_receiver", "direct_module",
 )
 GRADIENT_DIAGNOSTIC_KEYS = (
     "preclip_gradient_norm",
@@ -71,6 +78,26 @@ def _diagnostic_detail_group(name: str) -> str | None:
         return "coarse"
     if name.startswith("core.common.local"):
         return "local"
+    if name.startswith((
+        "core.backend.query_module_message.",
+        "core.backend.query_module_output.",
+    )):
+        return "direct_module"
+    # Dense and regional backends intentionally share the typed EM/update
+    # names.  These rows therefore describe environmental response
+    # preparation for Dense as well; the report labels them as such rather
+    # than treating the labels as proof of the regional candidate's grouping.
+    if name.startswith((
+        "core.backend.em_message.",
+        "core.backend.env_update.",
+    )):
+        return "regional_prepare"
+    if name.startswith((
+        "core.backend.env_query.",
+        "core.backend.env_geometry_bias.",
+        "core.backend.env_attention.",
+    )):
+        return "regional_receiver"
     if name.startswith(("core.backend.receiver_query.", "core.backend.receiver_bias.", "core.backend.group_key.")):
         return "group_receiver"
     if name.startswith(tuple(f"core.backend.{part}." for part in (
@@ -464,6 +491,8 @@ def run_epoch(
                 mapping = {
                     "interaction_local_neighbor_count_mean": "local_neighbor_count",
                     "interaction_main_context_norm_mean": "main_context_norm",
+                    "interaction_direct_module_context_norm_mean": "dense_module_context_norm",
+                    "interaction_regional_context_norm_mean": "regional_context_norm",
                     "interaction_coarse_context_norm_mean": "coarse_context_norm",
                     "interaction_local_context_norm_mean": "local_context_norm",
                     "interaction_main_context_fraction_mean": "main_context_fraction",
@@ -477,6 +506,7 @@ def run_epoch(
                     "interaction_group_occupancy_mean": "group_occupancy",
                     "interaction_group_occupancy_envelope_mean": "group_occupancy_envelope",
                     "interaction_group_covered_volume_ratio_mean": "group_covered_volume_ratio",
+                    "interaction_regional_response_count_mean": "regional_response_count",
                 }
                 for metric_name, aux_name in mapping.items():
                     value = interaction_aux.get(aux_name)

@@ -22,6 +22,10 @@ class EncodedInterfaceCase:
     env_features: torch.Tensor | None
     env_weights: torch.Tensor
     coordinate_scale: torch.Tensor
+    # Optional adapter-supplied physical region IDs aligned with ``env_coords``.
+    # IDs are intentionally kept separate from encoded tokens so the common
+    # coarse route can continue to consume the original fine environment.
+    env_region_ids: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)

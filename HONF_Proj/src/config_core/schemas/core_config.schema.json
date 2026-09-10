@@ -75,7 +75,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "forward_architecture": {"enum": ["legacy_honf", "dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf"]},
+        "forward_architecture": {"enum": ["legacy_honf", "dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf", "regional_response_honf"]},
         "interface_model": {
           "type": "object",
           "additionalProperties": false,
@@ -91,7 +91,13 @@
             "group_read_mode": {"enum": ["null_softmax", "geometry_envelope_attention"]},
             "relative_fourier_frequencies": {"type": "integer", "minimum": 0},
             "receiver_chunk_size": {"type": "integer", "minimum": 1},
-            "activation_checkpointing": {"type": "boolean"}
+            "activation_checkpointing": {"type": "boolean"},
+            "response_region_block_shape": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": {"type": "integer", "minimum": 1}
+            }
           }
         },
         "field_dim": {"$ref": "#/$defs/integer_or_auto"},
