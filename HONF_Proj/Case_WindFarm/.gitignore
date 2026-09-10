@@ -1,0 +1,17 @@
+# The source dataset is linked from /data and is intentionally not versioned.
+Dataset/links/*
+!Dataset/links/.gitkeep
+Dataset/raw/*
+!Dataset/raw/.gitkeep
+Dataset/dataset_locations.local.json
+
+# Machine-generated profiles, split arrays, and figures stay local.
+diagnostics/generated/*
+!diagnostics/generated/.gitkeep
+
+# Python caches and local test/build artifacts.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/

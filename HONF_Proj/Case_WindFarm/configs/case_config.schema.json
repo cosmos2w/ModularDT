@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://honf.example/schemas/windfarm-preprocessing-case-config-v1.json",
+  "title": "WindFarm preprocessing case profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile_name",
+    "case_id",
+    "workflow",
+    "plugin",
+    "dataset",
+    "preprocessing",
+    "visualization"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "profile_name": {"type": "string", "minLength": 1},
+    "case_id": {"const": "WindFarm"},
+    "workflow": {"const": "preprocessing_only"},
+    "plugin": {"type": ["string", "null"]},
+    "dataset": {"$ref": "#/$defs/dataset"},
+    "preprocessing": {"$ref": "#/$defs/preprocessing"},
+    "visualization": {"$ref": "#/$defs/visualization"}
+  },
+  "$defs": {
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest",
+        "locations",
+        "compact_dataset_id",
+        "volume_dataset_id",
+        "group_key"
+      ],
+      "properties": {
+        "manifest": {"type": "string", "minLength": 1},
+        "locations": {"type": "string", "minLength": 1},
+        "compact_dataset_id": {"const": "wind_farm_tensor_v1"},
+        "volume_dataset_id": {"const": "wind_farm_volume_v1"},
+        "group_key": {"const": "layout_index"},
+        "require_complete_volume_runs": {"type": "boolean"},
+        "memory_map_volume": {"type": "boolean"},
+        "allow_npz_metadata_fallback": {"type": "boolean"}
+      }
+    },
+    "preprocessing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "check_required_keys",
+        "check_shapes_and_dtypes",
+        "check_finite_fields",
+        "check_offset_invariants",
+        "mask_padded_rasters",
+        "preserve_source_row_order",
+        "write_group_split_metadata",
+        "group_split"
+      ],
+      "properties": {
+        "check_required_keys": {"type": "boolean"},
+        "check_shapes_and_dtypes": {"type": "boolean"},
+        "check_finite_fields": {"type": "boolean"},
+        "check_offset_invariants": {"type": "boolean"},
+        "mask_padded_rasters": {"type": "boolean"},
+        "preserve_source_row_order": {"type": "boolean"},
+        "write_group_split_metadata": {"type": "boolean"},
+        "group_split": {"$ref": "#/$defs/group_split"}
+      }
+    },
+    "group_split": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy",
+        "seed",
+        "train_fraction",
+        "validation_fraction",
+        "test_fraction"
+      ],
+      "properties": {
+        "strategy": {"const": "layout_grouped_holdout"},
+        "seed": {"type": "integer"},
+        "train_fraction": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "validation_fraction": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "test_fraction": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1}
+      }
+    },
+    "visualization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fields",
+        "representative_cases",
+        "hub_height_m",
+        "vertical_plane_y_m",
+        "streamwise_plane_y_m",
+        "crosswind_plane_x_m",
+        "camera"
+      ],
+      "properties": {
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"enum": ["speed", "ux", "uy", "uz"]}
+        },
+        "representative_cases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "hub_height_m": {"type": "number"},
+        "vertical_plane_y_m": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "number"}
+        },
+        "streamwise_plane_y_m": {"type": "number"},
+        "crosswind_plane_x_m": {"type": "number"},
+        "camera": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["elevation_deg", "azimuth_deg"],
+          "properties": {
+            "elevation_deg": {"type": "number", "minimum": -90, "maximum": 90},
+            "azimuth_deg": {"type": "number"}
+          }
+        },
+        "hub_stride_xy": {"type": "integer", "minimum": 1},
+        "vertical_stride_xz": {"type": "integer", "minimum": 1},
+        "shared_colour_scale_for_comparisons": {"type": "boolean"}
+      }
+    }
+  }
+}

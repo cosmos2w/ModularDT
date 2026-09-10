@@ -1,0 +1,358 @@
+{
+  "schema_version": 1,
+  "case_id": "WindFarm",
+  "dataset_family": "wind_farm",
+  "description": "Uploaded wind-farm CFD package: compact masked rasters plus ragged full-volume OpenFOAM fields.",
+  "datasets": {
+    "wind_farm_tensor_v1": {
+      "description": "Compact 600-case bundle with padded layout metadata, hub/vertical velocity rasters, masks, and wake-loss targets.",
+      "format": "npz",
+      "schema": "wind_farm_tensor_npz_v1",
+      "filename": "family_tensor.npz",
+      "relative_path": "family_tensor.npz",
+      "size_bytes": 954965970,
+      "sha256": "8c29cfad0d0e241c94aa54d4b6b02fdc0e9f7f2d1c5aa2d8f16a1309c0d2fc4c",
+      "num_cases": 600,
+      "num_layouts": 200,
+      "splits": {
+        "all": 600
+      },
+      "split_policy": {
+        "group_key": "layout_index",
+        "rows_per_layout": 3,
+        "wind_directions_deg": [270, 285, 300],
+        "note": "No source split is supplied; any later split must keep each layout group intact."
+      },
+      "required_keys": [
+        "U_hub",
+        "valid_hub",
+        "rotor_hub",
+        "U_vert",
+        "valid_vert",
+        "x_D",
+        "y_D",
+        "z_D",
+        "turbine_xy_D",
+        "n_turbines",
+        "wd_deg",
+        "wake_loss_pct",
+        "case",
+        "layout",
+        "layout_index",
+        "descriptors",
+        "descriptor_names",
+        "sampled_params",
+        "sampled_param_names",
+        "calib_ratio",
+        "U_ref",
+        "D_m",
+        "hub_height_m",
+        "domain_inside_window",
+        "gap_filled_nodes",
+        "vert_plane_y_m"
+      ],
+      "array_schema": {
+        "U_hub": {
+          "shape": [600, 305, 401, 2],
+          "dtype": "float32",
+          "units": "m/s",
+          "meaning": "Hub-height velocity components [Ux, Uy], ordered [case, y, x, component]."
+        },
+        "valid_hub": {
+          "shape": [600, 305, 401],
+          "dtype": "uint8",
+          "units": "boolean",
+          "meaning": "1 where the hub-height cell is simulated; 0 where the padded raster is invalid."
+        },
+        "rotor_hub": {
+          "shape": [600, 305, 401],
+          "dtype": "uint8",
+          "units": "boolean",
+          "meaning": "Rasterized actuator-disk/rotor locations at hub height."
+        },
+        "U_vert": {
+          "shape": [600, 2, 51, 401, 2],
+          "dtype": "float32",
+          "units": "m/s",
+          "meaning": "Vertical velocity components [Ux, Uz], ordered [case, plane, z, x, component]."
+        },
+        "valid_vert": {
+          "shape": [600, 2, 51, 401],
+          "dtype": "uint8",
+          "units": "boolean",
+          "meaning": "1 where the vertical-plane cell is simulated; 0 where the padded raster is invalid."
+        },
+        "x_D": {
+          "shape": [401],
+          "dtype": "float32",
+          "units": "rotor diameters",
+          "meaning": "Compact-grid x coordinate, -20D through 30D, downstream in the plotting frame."
+        },
+        "y_D": {
+          "shape": [305],
+          "dtype": "float32",
+          "units": "rotor diameters",
+          "meaning": "Compact-grid y coordinate, -19D through 19D, crosswind in the plotting frame."
+        },
+        "z_D": {
+          "shape": [51],
+          "dtype": "float32",
+          "units": "rotor diameters",
+          "meaning": "Compact-grid z coordinate, 0D through 6.25D."
+        },
+        "turbine_xy_D": {
+          "shape": [600, 30, 2],
+          "dtype": "float32",
+          "units": "rotor diameters",
+          "meaning": "Padded turbine centres; first n_turbines rows are active and remaining rows are NaN."
+        },
+        "n_turbines": {
+          "shape": [600],
+          "dtype": "int16",
+          "units": "count",
+          "meaning": "Active turbine count for each row, ranging from 6 to 30."
+        },
+        "wd_deg": {
+          "shape": [600],
+          "dtype": "float32",
+          "units": "degrees",
+          "meaning": "Wind-direction category: 270, 285, or 300."
+        },
+        "wake_loss_pct": {
+          "shape": [600],
+          "dtype": "float32",
+          "units": "percent",
+          "meaning": "Scalar wake-loss/regression target."
+        },
+        "case": {
+          "shape": [600],
+          "dtype": "unicode[20]",
+          "units": "identifier",
+          "meaning": "Readable row IDs such as gen_0000_wd270."
+        },
+        "layout": {
+          "shape": [600],
+          "dtype": "unicode[12]",
+          "units": "identifier",
+          "meaning": "Readable layout IDs such as gen_0000."
+        },
+        "layout_index": {
+          "shape": [600],
+          "dtype": "int16",
+          "units": "group ID",
+          "meaning": "Leakage-safe grouping key, 0 through 199, repeated once per wind direction."
+        },
+        "descriptors": {
+          "shape": [600, 6],
+          "dtype": "float32",
+          "units": "mixed dimensionless descriptors",
+          "columns": ["N", "min_sep_D", "mean_nn_D", "density", "anisotropy", "nn_dispersion"]
+        },
+        "descriptor_names": {
+          "shape": [6],
+          "dtype": "unicode[14]",
+          "units": "identifier",
+          "meaning": "Column names for descriptors."
+        },
+        "sampled_params": {
+          "shape": [600, 4],
+          "dtype": "float32",
+          "units": "mixed generator parameters",
+          "columns": ["req_min_sep_D", "sep_capped", "slack", "clump"]
+        },
+        "sampled_param_names": {
+          "shape": [4],
+          "dtype": "unicode[14]",
+          "units": "identifier",
+          "meaning": "Column names for sampled_params."
+        },
+        "calib_ratio": {
+          "shape": [],
+          "dtype": "float32",
+          "units": "dimensionless",
+          "meaning": "Source calibration ratio, observed value approximately 0.769758."
+        },
+        "U_ref": {
+          "shape": [],
+          "dtype": "float32",
+          "units": "m/s",
+          "meaning": "Reference inflow speed, 9 m/s."
+        },
+        "D_m": {
+          "shape": [],
+          "dtype": "float32",
+          "units": "m",
+          "meaning": "Rotor diameter, 80 m."
+        },
+        "hub_height_m": {
+          "shape": [],
+          "dtype": "float32",
+          "units": "m",
+          "meaning": "Hub height, 70 m."
+        },
+        "domain_inside_window": {
+          "shape": [600],
+          "dtype": "uint8",
+          "units": "boolean",
+          "meaning": "Source quality flag; all observed rows equal 1."
+        },
+        "gap_filled_nodes": {
+          "shape": [600],
+          "dtype": "int32",
+          "units": "count",
+          "meaning": "Number of source grid nodes filled during compact raster preparation."
+        },
+        "vert_plane_y_m": {
+          "shape": [2],
+          "dtype": "float32",
+          "units": "m",
+          "meaning": "Vertical-plane crosswind locations, observed as 0 m and 400 m."
+        }
+      }
+    },
+    "wind_farm_volume_v1": {
+      "description": "Ragged full-volume cell-centred OpenFOAM fields for the same 600 runs and row order as the compact bundle.",
+      "format": "directory_of_npy",
+      "schema": "wind_farm_volume_npy_v1",
+      "filename": "family_volume",
+      "relative_path": "family_volume",
+      "size_bytes": 59628041920,
+      "sha256": null,
+      "fingerprint_status": "not_computed_for_59_6_gb_resource",
+      "num_cases": 600,
+      "num_layouts": 200,
+      "splits": {
+        "all": 600
+      },
+      "split_policy": {
+        "group_key": "layout_index",
+        "row_order": "matches wind_farm_tensor_v1 case order"
+      },
+      "required_keys": [
+        "U.npy",
+        "p.npy",
+        "k.npy",
+        "epsilon.npy",
+        "run_cell_offsets.npy",
+        "run_shape.npy",
+        "run_x_offsets.npy",
+        "run_y_offsets.npy",
+        "run_z_offsets.npy",
+        "x_cell_m.npy",
+        "y_cell_m.npy",
+        "z_cell_m.npy",
+        "case.npy",
+        "layout_index.npy",
+        "wd_deg.npy",
+        "source_time.npy",
+        "completed.npy"
+      ],
+      "cell_order": "C-order reshape from flat arrays to (nz, ny, nx); x varies fastest.",
+      "total_cells": 2484440512,
+      "arrays": {
+        "U.npy": {
+          "shape": [2484440512, 3],
+          "dtype": "float32",
+          "units": "m/s",
+          "meaning": "Cell-centred velocity [Ux, Uy, Uz]."
+        },
+        "p.npy": {
+          "shape": [2484440512],
+          "dtype": "float32",
+          "units": "m^2/s^2",
+          "meaning": "Kinematic pressure."
+        },
+        "k.npy": {
+          "shape": [2484440512],
+          "dtype": "float32",
+          "units": "m^2/s^2",
+          "meaning": "Turbulent kinetic energy."
+        },
+        "epsilon.npy": {
+          "shape": [2484440512],
+          "dtype": "float32",
+          "units": "m^2/s^3",
+          "meaning": "Turbulent dissipation rate."
+        },
+        "run_cell_offsets.npy": {
+          "shape": [601],
+          "dtype": "int64",
+          "units": "cell index",
+          "meaning": "Start/end offsets for each run's flattened cell fields."
+        },
+        "run_shape.npy": {
+          "shape": [600, 3],
+          "dtype": "int32",
+          "units": "count",
+          "meaning": "Per-run (nx, ny, nz) dimensions."
+        },
+        "run_x_offsets.npy": {
+          "shape": [601],
+          "dtype": "int64",
+          "units": "axis index",
+          "meaning": "Offsets into x_cell_m.npy."
+        },
+        "run_y_offsets.npy": {
+          "shape": [601],
+          "dtype": "int64",
+          "units": "axis index",
+          "meaning": "Offsets into y_cell_m.npy."
+        },
+        "run_z_offsets.npy": {
+          "shape": [601],
+          "dtype": "int64",
+          "units": "axis index",
+          "meaning": "Offsets into z_cell_m.npy."
+        },
+        "x_cell_m.npy": {
+          "shape": [181485],
+          "dtype": "float32",
+          "units": "m",
+          "meaning": "Concatenated per-run x cell-centre coordinates."
+        },
+        "y_cell_m.npy": {
+          "shape": [126721],
+          "dtype": "float32",
+          "units": "m",
+          "meaning": "Concatenated per-run y cell-centre coordinates."
+        },
+        "z_cell_m.npy": {
+          "shape": [38400],
+          "dtype": "float32",
+          "units": "m",
+          "meaning": "Concatenated per-run z cell-centre coordinates."
+        },
+        "case.npy": {
+          "shape": [600],
+          "dtype": "unicode[20]",
+          "units": "identifier",
+          "meaning": "Run names matching the compact bundle."
+        },
+        "layout_index.npy": {
+          "shape": [600],
+          "dtype": "int16",
+          "units": "group ID",
+          "meaning": "Leakage-safe layout grouping key."
+        },
+        "wd_deg.npy": {
+          "shape": [600],
+          "dtype": "float32",
+          "units": "degrees",
+          "meaning": "Wind-direction category matching the compact bundle."
+        },
+        "source_time.npy": {
+          "shape": [600],
+          "dtype": "float32",
+          "units": "solver time",
+          "meaning": "OpenFOAM final-time directory selected for each run."
+        },
+        "completed.npy": {
+          "shape": [600],
+          "dtype": "uint8",
+          "units": "boolean",
+          "meaning": "Build-integrity marker; every observed value is 1."
+        }
+      }
+    }
+  }
+}

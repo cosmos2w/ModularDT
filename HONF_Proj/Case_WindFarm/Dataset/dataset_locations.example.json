@@ -1,0 +1,4 @@
+{
+  "wind_farm_tensor_v1": "project://Case_WindFarm/Dataset/links/wind_farm/family_tensor.npz",
+  "wind_farm_volume_v1": "project://Case_WindFarm/Dataset/links/wind_farm/family_volume"
+}
