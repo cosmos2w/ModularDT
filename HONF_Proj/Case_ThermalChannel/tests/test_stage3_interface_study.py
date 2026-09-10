@@ -276,6 +276,111 @@ def test_geometry_perturbation_is_copied_and_valid() -> None:
     assert stage3._family_module_indices(sample, "triple") is None
 
 
+def _regional_jvp_fixture() -> tuple[SimpleNamespace, SimpleNamespace, dict[str, torch.Tensor]]:
+    from honf_forward_core.interface_fields.regional_response import RegionalResponseField
+    from honf_forward_core.interface_fields.types import EncodedInterfaceCase
+
+    torch.manual_seed(41)
+    backend = RegionalResponseField(8, 8, 2, 2).double()
+    encoded = EncodedInterfaceCase(
+        module_tokens=torch.randn(1, 2, 8, dtype=torch.float64),
+        env_tokens=torch.randn(1, 4, 8, dtype=torch.float64),
+        global_token=torch.randn(1, 8, dtype=torch.float64),
+        module_centers=torch.tensor([[[0.25, 0.5], [0.75, 0.5]]], dtype=torch.float64),
+        env_coords=torch.tensor(
+            [[[0.125, 0.25], [0.375, 0.25], [0.625, 0.75], [0.875, 0.75]]],
+            dtype=torch.float64,
+        ),
+        module_present=torch.ones(1, 2, dtype=torch.float64),
+        module_features=torch.randn(1, 2, 3, dtype=torch.float64),
+        env_features=None,
+        env_weights=torch.ones(1, 4, dtype=torch.float64),
+        coordinate_scale=torch.ones(1, 1, 2, dtype=torch.float64),
+        env_region_ids=torch.tensor([[0, 0, 1, 1]]),
+    )
+    module_states = torch.randn(1, 2, 8, dtype=torch.float64)
+    backend_state = backend.prepare(encoded, module_states, region_ids=encoded.env_region_ids)
+
+    class Core:
+        def __init__(self) -> None:
+            self.backend = backend
+
+        @staticmethod
+        def _receiver_features(_prepared: object, receivers: torch.Tensor) -> torch.Tensor:
+            return receivers.new_zeros((receivers.shape[0], receivers.shape[1], 8))
+
+    model = SimpleNamespace(
+        config=SimpleNamespace(core_honf=SimpleNamespace(forward_architecture="regional_response_honf")),
+        core=Core(),
+    )
+    prepared = SimpleNamespace(
+        encoded=encoded,
+        module_states=module_states,
+        backend_state=backend_state,
+    )
+    receivers = {
+        "ports": torch.tensor([[[0.25, 0.5], [0.75, 0.5]]], dtype=torch.float64),
+        "field": torch.tensor([[[0.2, 0.2], [0.8, 0.8]]], dtype=torch.float64),
+    }
+    return model, prepared, receivers
+
+
+def test_regional_encoded_module_jvp_reports_shared_state_and_both_receivers() -> None:
+    model, prepared, receivers = _regional_jvp_fixture()
+    result = stage3.regional_encoded_module_jvp(
+        model,
+        prepared,
+        receivers,
+        module_index=0,
+        receiver_masks={"ports": torch.tensor([[True, False]])},
+        steps=(1.0e-3,),
+    )
+    assert result["probe_kind"].startswith("native_regional_read_only")
+    assert result["regional_support"]["source_count"] == 4
+    assert result["receivers"]["ports"]["masked_receiver_count"] == 1
+    assert result["receivers"]["field"]["masked_receiver_count"] == 2
+    assert result["regional_state"]["steps"]["h=0.001"]["probe_count"] == 2
+    assert result["receivers"]["ports"]["steps"]["h=0.001"]["summary"]["probe_count"] == 1
+    assert result["receivers"]["field"]["steps"]["h=0.001"]["summary"]["probe_count"] == 2
+    assert result["interpretation"]["global_dependence"].startswith("all positive-mass regions")
+
+
+def test_regional_coordinate_probe_reuses_existing_directional_helpers(monkeypatch) -> None:
+    calls: list[tuple[str, bool, float]] = []
+
+    def fake_autograd(*_args, fine: bool, **_kwargs) -> float:
+        calls.append(("autograd", fine, 0.0))
+        return 2.0
+
+    def fake_finite(*_args, step: float, device: torch.device, fine: bool, **_kwargs) -> float:
+        assert device.type == "cpu"
+        calls.append(("finite", fine, step))
+        return 1.5
+
+    monkeypatch.setattr(stage3, "_autograd_directional", fake_autograd)
+    monkeypatch.setattr(stage3, "_finite_difference_directional", fake_finite)
+    model = SimpleNamespace(
+        config=SimpleNamespace(core_honf=SimpleNamespace(forward_architecture="regional_response_honf"))
+    )
+    result = stage3.regional_coordinate_direction_probe(
+        model,
+        {},
+        torch.zeros(1, 2, 2),
+        module_index=0,
+        direction=np.asarray([3.0, 4.0]),
+        device=torch.device("cpu"),
+        steps=(0.01, 0.005),
+    )
+    assert result["direction"] == pytest.approx([0.6, 0.8])
+    assert result["scalar"] == "mean_normalized_predicted_temperature"
+    assert result["steps"]["h=0.01"]["relative_difference"] == pytest.approx(1.0 / 3.0)
+    assert calls == [
+        ("autograd", False, 0.0),
+        ("finite", False, 0.01),
+        ("finite", False, 0.005),
+    ]
+
+
 @pytest.mark.parametrize(
     "task,arguments",
     [

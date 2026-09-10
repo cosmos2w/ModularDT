@@ -2287,6 +2287,282 @@ def _finite_difference_directional(
     return float(((plus_value - minus_value) / (2.0 * float(step))).detach().cpu())
 
 
+def _regional_jvp_summary(
+    jvp: torch.Tensor,
+    finite_difference: torch.Tensor,
+    mask: torch.Tensor,
+) -> dict[str, Any]:
+    """Summarize a regional JVP and central difference on receiver rows."""
+
+    if jvp.shape != finite_difference.shape:
+        raise ValueError(
+            "regional JVP and finite-difference tensors must have identical shapes, "
+            f"got {tuple(jvp.shape)} and {tuple(finite_difference.shape)}."
+        )
+    if jvp.ndim < 2:
+        raise ValueError("regional JVP tensors must include receiver and feature axes.")
+    receiver_mask = mask.to(device=jvp.device, dtype=torch.bool)
+    if receiver_mask.ndim == 1:
+        receiver_mask = receiver_mask.unsqueeze(0)
+    if tuple(receiver_mask.shape) != tuple(jvp.shape[:2]):
+        raise ValueError(
+            "regional receiver masks must align with the first two JVP axes, "
+            f"got {tuple(receiver_mask.shape)} and {tuple(jvp.shape[:2])}."
+        )
+    jvp_values = jvp[receiver_mask].float()
+    finite_values = finite_difference[receiver_mask].float()
+    difference = jvp_values - finite_values
+    jvp_norm = torch.linalg.vector_norm(jvp_values, dim=-1)
+    finite_norm = torch.linalg.vector_norm(finite_values, dim=-1)
+    difference_norm = torch.linalg.vector_norm(difference, dim=-1)
+    if not jvp_norm.numel():
+        return {
+            "probe_count": 0,
+            "jvp_norm_mean": 0.0,
+            "finite_difference_norm_mean": 0.0,
+            "jvp_fd_difference_norm_mean": 0.0,
+            "jvp_fd_difference_norm_max": 0.0,
+            "jvp_fd_relative_difference_mean": 0.0,
+        }
+    return {
+        "probe_count": int(jvp_values.shape[0]),
+        "jvp_norm_mean": float(jvp_norm.mean().detach().cpu()),
+        "finite_difference_norm_mean": float(finite_norm.mean().detach().cpu()),
+        "jvp_fd_difference_norm_mean": float(difference_norm.mean().detach().cpu()),
+        "jvp_fd_difference_norm_max": float(difference_norm.max().detach().cpu()),
+        "jvp_fd_relative_difference_mean": float(
+            (difference_norm / finite_norm.clamp_min(torch.finfo(finite_norm.dtype).tiny)).mean()
+            .detach()
+            .cpu()
+        ),
+    }
+
+
+def regional_encoded_module_jvp(
+    model: Any,
+    prepared: Any,
+    receivers: Mapping[str, torch.Tensor],
+    module_index: int,
+    *,
+    receiver_masks: Mapping[str, torch.Tensor] | None = None,
+    steps: Sequence[float] = (1.0e-3, 5.0e-4),
+) -> dict[str, Any]:
+    """Probe one encoded module direction through native regional states.
+
+    ``prepared`` is the differentiable prepared interface object returned by
+    the ChannelThermal wrapper (the value of ``prepared_state.prepared``).
+    Every receiver set is read from freshly prepared regional states, so the
+    same module-state perturbation is tested at physical ports and field
+    receivers.  The common coarse/local and direct module paths are excluded
+    deliberately: this datum measures the native regional route and its
+    shared states.  All positive-mass regions remain globally available; the
+    optional masks only remove padded regional slots or inactive module ports.
+    """
+
+    if _architecture(model) != "regional_response_honf":
+        raise ValueError(
+            "regional_encoded_module_jvp requires regional_response_honf, "
+            f"got {_architecture(model)!r}."
+        )
+    if not isinstance(receivers, Mapping) or not receivers:
+        raise ValueError("receivers must contain at least one named [B,Q,2] tensor.")
+    prepared_field = getattr(prepared, "prepared", prepared)
+    encoded = getattr(prepared_field, "encoded", None)
+    base_states = getattr(prepared_field, "module_states", None)
+    if encoded is None or base_states is None:
+        raise ValueError("prepared must expose encoded and module_states fields.")
+    backend = getattr(getattr(model, "core", None), "backend", None)
+    if backend is None or not hasattr(backend, "read_regional"):
+        raise ValueError("regional_encoded_module_jvp requires the native regional backend API.")
+    region_ids = getattr(encoded, "env_region_ids", None)
+    if region_ids is None:
+        raise ValueError("regional_encoded_module_jvp requires encoded env_region_ids.")
+    if base_states.ndim != 3:
+        raise ValueError("prepared module_states must have shape [B,M,H].")
+    module_index = int(module_index)
+    if module_index < 0 or module_index >= int(base_states.shape[1]):
+        raise IndexError(f"module_index={module_index} is outside module width {base_states.shape[1]}.")
+    step_values = tuple(float(value) for value in steps)
+    if not step_values or any(value <= 0.0 or not math.isfinite(value) for value in step_values):
+        raise ValueError("steps must contain one or more finite positive values.")
+
+    base_states = base_states.detach()
+    direction = torch.zeros_like(base_states)
+    direction[:, module_index] = 1.0
+    direction = direction / torch.linalg.vector_norm(direction).clamp_min(1.0e-12)
+
+    def prepare_states(states: torch.Tensor) -> Mapping[str, torch.Tensor]:
+        return backend.prepare(
+            encoded,
+            states,
+            region_ids=region_ids,
+            return_routing_maps=False,
+        )
+
+    def regional_states(states: torch.Tensor) -> torch.Tensor:
+        return prepare_states(states)["regional_response_states"]
+
+    def regional_read(states: torch.Tensor, probe: torch.Tensor) -> torch.Tensor:
+        backend_state = prepare_states(states)
+        receiver_features = model.core._receiver_features(prepared_field, probe)
+        value, _ = backend.read_regional(
+            backend_state,
+            encoded,
+            probe,
+            receiver_features,
+            return_routing_maps=False,
+        )
+        return value
+
+    base_state = prepare_states(base_states)
+    regional_valid = base_state.get("regional_valid")
+    if regional_valid is None:
+        regional_valid = torch.ones(
+            base_state["regional_response_states"].shape[:2],
+            device=base_states.device,
+            dtype=torch.bool,
+        )
+    regional_state_jvp = torch.autograd.functional.jvp(
+        regional_states,
+        (base_states,),
+        (direction,),
+        create_graph=False,
+        strict=False,
+    )[1]
+    regional_state_fd: dict[str, torch.Tensor] = {}
+    for step in step_values:
+        with torch.no_grad():
+            plus = regional_states(base_states + step * direction)
+            minus = regional_states(base_states - step * direction)
+        regional_state_fd[f"h={step:g}"] = (plus - minus) / (2.0 * step)
+
+    output: dict[str, Any] = {
+        "module_index": module_index,
+        "state_direction": "unit normalized all-ones direction in encoded module-state coordinates",
+        "probe_kind": "native_regional_read_only; direct_module/coarse/local routes excluded",
+        "geometry_fixed": True,
+        "global_context_fixed": True,
+        "regional_support": {
+            "source_count": int(encoded.env_coords.shape[1]),
+            "region_count_per_batch": regional_valid.sum(dim=1),
+            "region_ids": base_state.get("regional_ids"),
+            "region_mass": base_state.get("regional_weights"),
+            "region_centroids": base_state.get("regional_coords"),
+        },
+        "regional_state": {
+            "jvp": _finite_stats(regional_state_jvp, regional_valid),
+            "steps": {
+                key: _regional_jvp_summary(regional_state_jvp, value, regional_valid)
+                for key, value in regional_state_fd.items()
+            },
+        },
+        "receivers": {},
+        "interpretation": {
+            "regional_state": "one shared regional response state is refreshed and read at every receiver set",
+            "global_dependence": "all positive-mass regions remain available to every port and field receiver; no disconnected-zero claim is made",
+            "jvp_fd": "autograd/central-FD agreement is implementation self-consistency, not physical sensitivity validation",
+        },
+    }
+    masks = receiver_masks or {}
+    for receiver_kind, probe in receivers.items():
+        if not torch.is_tensor(probe) or probe.ndim != 3 or probe.shape[-1] != 2:
+            raise ValueError(f"receiver {receiver_kind!r} must have shape [B,Q,2].")
+        receiver_mask = masks.get(receiver_kind)
+        if receiver_mask is None:
+            receiver_mask = torch.ones(probe.shape[:2], device=probe.device, dtype=torch.bool)
+        else:
+            receiver_mask = receiver_mask.to(device=probe.device, dtype=torch.bool)
+        receiver_jvp = torch.autograd.functional.jvp(
+            lambda states: regional_read(states, probe),
+            (base_states,),
+            (direction,),
+            create_graph=False,
+            strict=False,
+        )[1]
+        receiver_steps: dict[str, Any] = {}
+        for step in step_values:
+            with torch.no_grad():
+                plus = regional_read(base_states + step * direction, probe)
+                minus = regional_read(base_states - step * direction, probe)
+            finite = (plus - minus) / (2.0 * step)
+            receiver_steps[f"h={step:g}"] = {
+                "step": step,
+                "summary": _regional_jvp_summary(receiver_jvp, finite, receiver_mask),
+            }
+        output["receivers"][str(receiver_kind)] = {
+            "receiver_count": int(probe.shape[1]),
+            "masked_receiver_count": int(receiver_mask.sum().item()),
+            "steps": receiver_steps,
+        }
+    return output
+
+
+def regional_coordinate_direction_probe(
+    model: Any,
+    sample: Mapping[str, Any],
+    query_xy: torch.Tensor,
+    module_index: int,
+    direction: np.ndarray,
+    device: torch.device,
+    *,
+    steps: Sequence[float] = (1.0e-2, 5.0e-3),
+) -> dict[str, Any]:
+    """Reuse the established coordinate-direction AD/FD check for a regional model."""
+
+    if _architecture(model) != "regional_response_honf":
+        raise ValueError(
+            "regional_coordinate_direction_probe requires regional_response_honf, "
+            f"got {_architecture(model)!r}."
+        )
+    direction_array = np.asarray(direction, dtype=np.float64).reshape(-1)
+    if direction_array.shape != (2,) or not np.isfinite(direction_array).all():
+        raise ValueError("direction must be a finite 2-vector.")
+    norm = float(np.linalg.norm(direction_array))
+    if norm == 0.0:
+        raise ValueError("direction must be nonzero.")
+    direction_array = direction_array / norm
+    step_values = tuple(float(value) for value in steps)
+    if not step_values or any(value <= 0.0 or not math.isfinite(value) for value in step_values):
+        raise ValueError("steps must contain one or more finite positive values.")
+    autograd_value = _autograd_directional(
+        model,
+        sample,
+        query_xy,
+        module_index,
+        direction_array,
+        device,
+        fine=False,
+    )
+    rows: dict[str, Any] = {}
+    for step in step_values:
+        finite_value = _finite_difference_directional(
+            model,
+            sample,
+            query_xy,
+            module_index,
+            direction_array,
+            device=device,
+            step=step,
+            fine=False,
+        )
+        rows[f"h={step:g}"] = {
+            "step": step,
+            "autograd": autograd_value,
+            "central_fd": finite_value,
+            "absolute_difference": abs(autograd_value - finite_value),
+            "relative_difference": abs(autograd_value - finite_value) / max(abs(finite_value), 1.0e-12),
+        }
+    return {
+        "module_index": int(module_index),
+        "direction": direction_array.tolist(),
+        "direction_space": "module-center coordinates",
+        "scalar": "mean_normalized_predicted_temperature",
+        "path": "full regional model including regional, direct-module, coarse, local, and physical paths",
+        "steps": rows,
+        "interpretation": "AD/central-FD agreement checks implementation self-consistency only; it is not physical sensitivity validation",
+    }
+
+
 def _module_support_probe_indices(
     prepared_wrapper: Any,
     receivers: torch.Tensor,

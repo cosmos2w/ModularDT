@@ -238,3 +238,45 @@ def test_native_module_permutation_and_padding_do_not_change_the_read() -> None:
         receiver_features,
     )
     torch.testing.assert_close(reference, padded, rtol=1.0e-5, atol=1.0e-6)
+
+
+def test_native_variable_region_padding_masks_invalid_state_gradients() -> None:
+    encoded = _encoded(batch=2, environment=6)
+    model = RegionalResponseField(12, 8, 3, 2).double()
+    module_states = torch.randn(
+        2,
+        3,
+        12,
+        generator=torch.Generator().manual_seed(55),
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    region_ids = torch.tensor(
+        [[0, 0, 1, 1, 2, 2], [0, 0, 0, 0, -1, -1]],
+    )
+    state = model.prepare(encoded, module_states, region_ids=region_ids)
+    state["regional_response_states"].retain_grad()
+    receivers = torch.rand(
+        2,
+        5,
+        2,
+        generator=torch.Generator().manual_seed(56),
+        dtype=torch.float64,
+    )
+    receiver_features = torch.randn(
+        2,
+        5,
+        12,
+        generator=torch.Generator().manual_seed(57),
+        dtype=torch.float64,
+    )
+    context, _ = model.read(state, encoded, receivers, receiver_features)
+    context.square().sum().backward()
+
+    assert state["regional_valid"].tolist() == [[True, True, True], [True, False, False]]
+    assert module_states.grad is not None and torch.isfinite(module_states.grad).all()
+    assert state["regional_response_states"].grad is not None
+    torch.testing.assert_close(
+        state["regional_response_states"].grad[1, 1:],
+        torch.zeros_like(state["regional_response_states"].grad[1, 1:]),
+    )

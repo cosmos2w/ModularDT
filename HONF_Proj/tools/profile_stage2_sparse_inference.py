@@ -286,15 +286,20 @@ def _new_family_encoding_and_layout(
         if domain_length_y is None
         else domain_length_y.to(device=device, dtype=dtype),
     )
-    env = model.environment_builder(
-        batch_size=batch_size,
-        num_env_tokens_x=int(model.config.core_honf.num_env_tokens_x),
-        num_env_tokens_y=int(model.config.core_honf.num_env_tokens_y),
-        domain_length_x=float(model.config.core_honf.domain_length_x),
-        domain_length_y=float(model.config.core_honf.domain_length_y),
-        device=device,
-        dtype=dtype,
-    )
+    environment_kwargs = {
+        "batch_size": batch_size,
+        "num_env_tokens_x": int(model.config.core_honf.num_env_tokens_x),
+        "num_env_tokens_y": int(model.config.core_honf.num_env_tokens_y),
+        "domain_length_x": float(model.config.core_honf.domain_length_x),
+        "domain_length_y": float(model.config.core_honf.domain_length_y),
+        "device": device,
+        "dtype": dtype,
+    }
+    if architecture == "regional_response_honf":
+        environment_kwargs["response_region_block_shape"] = tuple(
+            model.config.core_honf.interface_model.response_region_block_shape
+        )
+    env = model.environment_builder(**environment_kwargs)
     encoded = model.core.encode_case(
         BatchData(
             module_centers=adapter.module_centers,
@@ -308,6 +313,7 @@ def _new_family_encoding_and_layout(
             metadata={},
             env_coords=env.env_coords,
             env_features=env.env_features,
+            env_region_ids=getattr(env, "env_region_ids", None),
         )
     )
     interface_condition = batch.get("interface_condition")
