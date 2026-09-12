@@ -18,6 +18,9 @@ layout is deliberately explicit::
 
 The five parent exact-500 table sets are read from their maintained historical
 locations.  Their files are referenced in the manifest and are never copied.
+If a candidate has no separate saved-best table set, its exact-500 tables may
+also be referenced for the saved-best phase only after the trusted saved-best
+checkpoint proves to be the same epoch-500 model.
 """
 
 from __future__ import annotations
@@ -316,6 +319,14 @@ def _checkpoint_path(project: Path, table_dir: Path, value: str | None) -> Path 
     return path.resolve() if path.is_absolute() else None
 
 
+def _load_trusted_checkpoint(path: Path) -> Mapping[str, Any]:
+    """Load one local checkpoint on CPU through the maintained trusted loader."""
+
+    from honf_runtime.compat import load_trusted_checkpoint
+
+    return load_trusted_checkpoint(path, map_location="cpu")
+
+
 def _load_checkpoint_epoch(project: Path, table_dir: Path, checkpoint: str | None) -> int | None:
     parsed = _checkpoint_epoch_from_name(checkpoint)
     if parsed is not None:
@@ -324,9 +335,7 @@ def _load_checkpoint_epoch(project: Path, table_dir: Path, checkpoint: str | Non
     if path is None:
         return None
     try:
-        from honf_runtime.compat import load_trusted_checkpoint
-
-        state = load_trusted_checkpoint(path, map_location="cpu")
+        state = _load_trusted_checkpoint(path)
     except Exception as exc:  # pragma: no cover - depends on checkpoint format
         raise ValueError(f"Could not read selected checkpoint epoch from {path}: {exc}") from exc
     for key in ("epoch", "current_epoch"):
@@ -336,6 +345,186 @@ def _load_checkpoint_epoch(project: Path, table_dir: Path, checkpoint: str | Non
             except (TypeError, ValueError):
                 pass
     return None
+
+
+def _checkpoint_epoch_from_payload(payload: Mapping[str, Any]) -> int | None:
+    for key in ("epoch", "current_epoch"):
+        if key not in payload:
+            continue
+        try:
+            return int(payload[key])
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _tensor_values_match(left: Any, right: Any) -> bool:
+    """Compare two checkpoint tensor values exactly after moving them to CPU."""
+
+    try:
+        import torch
+
+        if torch.is_tensor(left) and torch.is_tensor(right):
+            left_cpu = left.detach().cpu()
+            right_cpu = right.detach().cpu()
+            return (
+                tuple(left_cpu.shape) == tuple(right_cpu.shape)
+                and left_cpu.dtype == right_cpu.dtype
+                and bool(torch.equal(left_cpu, right_cpu))
+            )
+    except (ImportError, AttributeError, TypeError, RuntimeError):
+        pass
+    try:
+        left_array = np.asarray(left)
+        right_array = np.asarray(right)
+    except (TypeError, ValueError):
+        return False
+    return (
+        left_array.shape == right_array.shape
+        and left_array.dtype == right_array.dtype
+        and bool(np.array_equal(left_array, right_array))
+    )
+
+
+def _model_state_dicts_match(
+    endpoint_payload: Mapping[str, Any], best_payload: Mapping[str, Any]
+) -> tuple[bool, int, str | None]:
+    """Return whether two checkpoint model states have the same tensor values."""
+
+    endpoint_state = endpoint_payload.get("model_state_dict")
+    best_state = best_payload.get("model_state_dict")
+    if not isinstance(endpoint_state, Mapping) or not isinstance(best_state, Mapping):
+        return False, 0, "checkpoint is missing a mapping-valued model_state_dict"
+    endpoint_keys = set(endpoint_state)
+    best_keys = set(best_state)
+    if endpoint_keys != best_keys:
+        missing = sorted(endpoint_keys - best_keys)
+        extra = sorted(best_keys - endpoint_keys)
+        return False, 0, f"model_state_dict keys differ (missing={missing}, extra={extra})"
+    for key in sorted(endpoint_keys):
+        if not _tensor_values_match(endpoint_state[key], best_state[key]):
+            return False, len(endpoint_keys), f"model_state_dict tensor differs at {key!r}"
+    return True, len(endpoint_keys), None
+
+
+def _candidate_run_dir(project: Path, run: str, endpoint: TableSet) -> Path | None:
+    """Resolve the managed candidate run directory owning the endpoint checkpoint."""
+
+    endpoint_path = _checkpoint_path(project, endpoint.table_dir, endpoint.checkpoint)
+    if endpoint_path is not None:
+        for candidate in (endpoint_path.parent, endpoint_path.parent.parent):
+            if candidate.name.startswith(f"Run_{run}_") and candidate.is_dir():
+                return candidate.resolve()
+    run_root = project / RUN_ROOT_RELATIVE
+    candidates = sorted(path.resolve() for path in run_root.glob(f"Run_{run}_*") if path.is_dir())
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _candidate_best_checkpoint(project: Path, run: str, endpoint: TableSet) -> Path | None:
+    """Find the saved field-best checkpoint for the candidate owning endpoint."""
+
+    run_dir = _candidate_run_dir(project, run, endpoint)
+    if run_dir is None:
+        return None
+    # The historical filename is the policy identity.  The canonical alias is
+    # accepted only when a managed run has already materialized that alias.
+    for candidate in (
+        run_dir / "best_by_field_mse_model.pt",
+        run_dir / "checkpoints" / "best_field.pt",
+    ):
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def _reuse_exact_endpoint_for_best(
+    project: Path,
+    run: str,
+    endpoint: TableSet,
+    best_table_dir: Path,
+) -> TableSet:
+    """Reuse endpoint tables for saved-best only after strict checkpoint proof."""
+
+    if not endpoint.available:
+        return _unavailable(
+            run,
+            "best_field",
+            best_table_dir,
+            "saved-best table reuse refused because the candidate exact500 endpoint tables are unavailable",
+        )
+    endpoint_path = _checkpoint_path(project, endpoint.table_dir, endpoint.checkpoint)
+    best_path = _candidate_best_checkpoint(project, run, endpoint)
+    if endpoint_path is None or not endpoint_path.is_file():
+        return _unavailable(
+            run,
+            "best_field",
+            best_table_dir,
+            f"saved-best table reuse refused because the exact500 checkpoint is unavailable: {endpoint.checkpoint!r}",
+        )
+    if best_path is None:
+        return _unavailable(
+            run,
+            "best_field",
+            best_table_dir,
+            "saved-best table reuse refused because best_by_field_mse_model.pt is unavailable",
+        )
+    try:
+        endpoint_payload = _load_trusted_checkpoint(endpoint_path)
+        best_payload = _load_trusted_checkpoint(best_path)
+    except (OSError, RuntimeError, ValueError, TypeError) as exc:  # pragma: no cover - local checkpoint files
+        return _unavailable(
+            run,
+            "best_field",
+            best_table_dir,
+            f"saved-best table reuse refused because trusted checkpoint loading failed: {exc}",
+        )
+    endpoint_epoch = _checkpoint_epoch_from_payload(endpoint_payload)
+    if endpoint_epoch is None:
+        endpoint_epoch = _checkpoint_epoch_from_name(str(endpoint_path))
+    best_epoch = _checkpoint_epoch_from_payload(best_payload)
+    if endpoint_epoch != 500 or best_epoch != 500:
+        return _unavailable(
+            run,
+            "best_field",
+            best_table_dir,
+            "saved-best table reuse refused because the endpoint and saved-best checkpoints are not both epoch500 "
+            f"(endpoint_epoch={endpoint_epoch!r}, saved_best_epoch={best_epoch!r})",
+        )
+    matches, tensor_count, mismatch = _model_state_dicts_match(endpoint_payload, best_payload)
+    if not matches:
+        return _unavailable(
+            run,
+            "best_field",
+            best_table_dir,
+            "saved-best table reuse refused because endpoint and saved-best model weights differ"
+            + (f": {mismatch}" if mismatch else ""),
+        )
+    if endpoint.rows is None or endpoint.summary is None:
+        return _unavailable(
+            run,
+            "best_field",
+            best_table_dir,
+            "saved-best table reuse refused because endpoint rows or summary are unavailable",
+        )
+    reason = (
+        "reused exact500 endpoint evaluation tables in place for saved-best: "
+        f"trusted CPU comparison found all {tensor_count} model_state_dict tensors equal; "
+        "endpoint and best_by_field_mse_model.pt are both epoch500"
+    )
+    return TableSet(
+        run,
+        RUN_LABELS[run],
+        "best_field",
+        endpoint.table_dir,
+        "available",
+        reason=reason,
+        rows=endpoint.rows,
+        # Keep the source summary's endpoint checkpoint for table provenance;
+        # the selected saved-best checkpoint is carried by TableSet.checkpoint.
+        summary=endpoint.summary,
+        checkpoint=str(best_path),
+        checkpoint_epoch=best_epoch,
+    )
 
 
 def _source_manifest(table_dir: Path) -> dict[str, Any]:
@@ -752,6 +941,9 @@ def _history_source(project: Path, study: Path, run: str) -> tuple[Path | None, 
         for candidate in (directory / "metrics.csv", directory / "metrics" / "metrics.csv"):
             if candidate.is_file():
                 metric_paths.append(candidate)
+                # Run closeout also exposes metrics/metrics.csv as an alias.
+                # Select one history per run directory, preferring the writer's path.
+                break
     if len(metric_paths) > 1:
         raise ValueError(f"Multiple managed history files found for candidate run {run}: {metric_paths}")
     return (metric_paths[0], "managed NStage2 run history") if metric_paths else (None, None)
@@ -934,10 +1126,12 @@ def reduce_nstage2(root: str | Path | None = None) -> dict[str, Any]:
     """Write the NStage2 comparison artifacts and return their manifest.
 
     Parent exact-500 tables are required because they are the comparison
-    reference.  Missing candidate endpoint/best tables are represented as an
+    reference.  Missing candidate endpoint tables are represented as an
     ordinary ``unavailable`` status with a reason; no candidate score is
-    synthesized.  Parent saved-best comparisons are intentionally omitted:
-    no matched best-through-500 parent checkpoint set exists.
+    synthesized.  A missing candidate saved-best table set can reuse the
+    exact-500 endpoint tables only after trusted checkpoint identity proof.
+    Parent saved-best comparisons are intentionally omitted: no matched
+    best-through-500 parent checkpoint set exists.
     """
 
     project, study = _resolve_roots(root)
@@ -968,16 +1162,18 @@ def reduce_nstage2(root: str | Path | None = None) -> dict[str, Any]:
     for run in CANDIDATE_RUNS:
         _validate_against_reference(exact[run], reference)
 
-    best: dict[str, TableSet] = {
-        run: _load_table_set(
-            project,
-            run,
-            "best_field",
-            _candidate_table_dir(study, run, "best_field"),
-            required=False,
-        )
-        for run in CANDIDATE_RUNS
-    }
+    best: dict[str, TableSet] = {}
+    for run in CANDIDATE_RUNS:
+        best_table_dir = _candidate_table_dir(study, run, "best_field")
+        loaded = _load_table_set(project, run, "best_field", best_table_dir, required=False)
+        if loaded.available or best_table_dir.is_dir():
+            # A maintained saved-best evaluation, when present, is authoritative.
+            best[run] = loaded
+        else:
+            # The endpoint evaluator is the only evaluation allowed to supply
+            # these rows.  Reuse it only after proving the saved-best checkpoint
+            # is the same epoch-500 model as the endpoint checkpoint.
+            best[run] = _reuse_exact_endpoint_for_best(project, run, exact[run], best_table_dir)
     for item in best.values():
         _validate_against_reference(item, reference)
 
@@ -1028,7 +1224,8 @@ def reduce_nstage2(root: str | Path | None = None) -> dict[str, Any]:
         "best_field": {
             "runs": [item.status_row() for item in best.values()],
             "candidate_statuses": best_statuses,
-            "selection": "candidate saved-best table with actual checkpoint epoch read from its checkpoint",
+            "selection": "candidate saved-best table with actual checkpoint epoch read from its checkpoint; "
+            "when best_field tables are absent, exact500 endpoint tables may be reused only for an equal epoch500 model",
         },
         "parent_best_through_500": {
             "status": "unavailable",
@@ -1049,7 +1246,8 @@ def reduce_nstage2(root: str | Path | None = None) -> dict[str, Any]:
             "equal_case_distribution": "unweighted distribution of per-case relative-L2 or relative-error rows",
             "paired_delta": "candidate minus baseline; negative means lower reported error",
             "exact_endpoint": "epoch 500 evaluation tables selected by the epoch_0500 checkpoint",
-            "best_field": "candidate saved-best table only; actual checkpoint epoch is recorded when available",
+            "best_field": "candidate saved-best table; when absent, exact500 endpoint tables are reused only after "
+            "trusted CPU proof of equal epoch500 model_state_dict tensors; actual checkpoint epoch is recorded",
             "engineering_kpi_columns": list(ENGINEERING_KPI_BASES),
             "engineering_kpi_source": "maintained per_case_metrics.csv columns; equal-case distributions preserve the evaluator's signed, absolute, and relative error columns",
             "population": "90-case development holdout; not independent physical-reference validation",
