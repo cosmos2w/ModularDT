@@ -831,10 +831,10 @@ def _a_hierarchy_plot(records: list[dict[str, Any]], case_id: str | None = None)
     if not traces:
         return None
     return plot(
-        f"Track A vertical hierarchy from exact tree exports{f' · case {case_id}' if case_id else ''}",
+        f"A response hierarchy{f' · case {case_id}' if case_id else ''}",
         traces,
         height=520,
-        xaxis={"title": "deterministic tree-layout order (actual coordinates in hover)", "gridcolor": "#e8edf1", "dtick": 1},
+        xaxis={"title": "Tree layout order (coordinates in hover)", "gridcolor": "#e8edf1", "nticks": 8},
         yaxis={"title": "tree level (higher is coarser)", "dtick": 1, "gridcolor": "#e8edf1"},
     )
 
@@ -1353,7 +1353,7 @@ def _timing_stat_rows(
                             "checkpoint_epoch": checkpoint_epoch,
                             "checkpoint_context": context,
                             "timing_chunk": effective_chunk,
-                            "query_count": effective_chunk,
+                            "query_count": case.get("query_count", shape.get("Q")),
                             "kind": kind,
                             "case_id": case_id,
                             "shape": shape,
@@ -1497,7 +1497,7 @@ def _dedupe_timing_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
             model_key,
             _timing_workload_key(row),
             str(row.get("phase")),
-            row.get("query_count"),
+            row.get("timing_chunk"),
         )
         previous = selected.get(key)
         if previous is None or _timing_context_rank(row) < _timing_context_rank(previous):
@@ -1507,7 +1507,7 @@ def _dedupe_timing_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _timing_plot(
     rows: list[dict[str, Any]],
-    query_count: int,
+    receiver_chunk: int,
     workload: str | None = None,
     phase: str = "full_forward",
 ) -> dict[str, Any] | None:
@@ -1517,7 +1517,7 @@ def _timing_plot(
     subset = [
         row
         for row in _dedupe_timing_rows(rows)
-        if row.get("query_count") == query_count
+        if row.get("timing_chunk") == receiver_chunk
         and row.get("checkpoint_context") in contexts
         and _timing_workload_key(row) == workload
         and row.get("phase") == phase
@@ -1552,7 +1552,7 @@ def _timing_plot(
     workload_label = _timing_workload_label(workload)
     context_label = ", ".join(sorted({str(row.get("checkpoint_context")) for row in subset}))
     figure = plot(
-        f"{workload_label}<br>{TIMING_PHASE_LABELS.get(phase, phase)} · chunk {query_count}",
+        f"{workload_label}<br>{TIMING_PHASE_LABELS.get(phase, phase)} · chunk {receiver_chunk}",
         [trace],
         height=460,
         barmode="group",
@@ -1657,9 +1657,8 @@ def _accuracy_cost_plot(headline: list[dict[str, str]], timing_rows: list[dict[s
                 "hovertemplate": "%{text}<br>exact500 accuracy=%{y:.4g}<br>measured full-forward=%{x:.4g} ms<br>run=%{customdata[0]}<br>timing=%{customdata[1]}<br>shape=%{customdata[2]}<extra></extra>",
             }
         )
-    contexts = ", ".join(sorted({str(row.get("checkpoint_context")) for _, _, _, row in points}))
     return plot(
-        f"Accuracy vs measured full-forward cost · fixed synthetic shape E=3072, M=128, Q=262144 · {contexts}",
+        "Accuracy vs full-forward cost · chunk 2048<br>M=128 · E=3072 · Q=262144",
         traces,
         height=500,
         xaxis={"title": "measured full-forward median (ms)", "type": "log"},

@@ -92,7 +92,7 @@ def test_parent_chunk128_timing_is_ingested_as_exact500(tmp_path: Path) -> None:
             {
                 "architecture": "dense_pairwise_field",
                 "checkpoint": {"label": "Dense1804_at500", "epoch": 500},
-                "real_anchors": [{"case_id": "0273", "receiver_chunk_size": 128, "normal": {"phases": phases}}],
+                "real_anchors": [{"case_id": "0273", "query_count": 8192, "receiver_chunk_size": 128, "normal": {"phases": phases}}],
                 "synthetic_shapes": [
                     {
                         "shape": {"E": 768, "M": 32, "Q": 65536},
@@ -109,7 +109,8 @@ def test_parent_chunk128_timing_is_ingested_as_exact500(tmp_path: Path) -> None:
     rows = [row for row in rows if row["source"] == str(path)]
     assert rows
     assert {row["checkpoint_context"] for row in rows} == {"parent exact500"}
-    assert {row["query_count"] for row in rows} == {128}
+    assert {row["timing_chunk"] for row in rows} == {128}
+    assert {row["query_count"] for row in rows} == {8192, 65536}
     assert {row["kind"] for row in rows} == {"real", "synthetic"}
     assert {row["case_id"] for row in rows if row["kind"] == "real"} == {"0273"}
 
@@ -270,7 +271,8 @@ def test_timing_plot_deduplicates_parent_exact500_before_mature(tmp_path: Path) 
             "architecture": "dense_pairwise_field",
             "model": "Dense1804_at500",
             "checkpoint_context": "parent exact500",
-            "query_count": 2048,
+            "query_count": 8192,
+            "timing_chunk": 2048,
             "kind": "real",
             "case_id": "0273",
             "shape": {},
@@ -285,7 +287,8 @@ def test_timing_plot_deduplicates_parent_exact500_before_mature(tmp_path: Path) 
             "architecture": "dense_pairwise_field",
             "model": "Dense1804_at5000",
             "checkpoint_context": "parent mature checkpoint5000",
-            "query_count": 2048,
+            "query_count": 8192,
+            "timing_chunk": 2048,
             "kind": "real",
             "case_id": "0273",
             "shape": {},
