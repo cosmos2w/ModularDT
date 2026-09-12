@@ -1002,10 +1002,10 @@ def _b_topology_plot(records: list[dict[str, Any]], case_id: str | None = None) 
     # Each box denotes a computation, not one learned state. In particular,
     # the eight coarse seeds are shared by all groups, not indexed by group ID.
     nodes = {
-        "modules": (0.0, 3.5, "Encoded modules"),
+        "modules": (0.0, 3.5, "Encoded<br>modules"),
         "environment": (0.0, 0.0, "Fine environment"),
-        "groups": (1.0, 3.5, "Existing group states"),
-        "group_attention": (2.0, 3.5, "Group-source attention<br>occupancy weighted"),
+        "groups": (1.0, 3.5, "Existing<br>group states"),
+        "group_attention": (2.0, 3.5, "Group-source<br>attention<br>occupancy weighted"),
         "env_attention": (2.0, 0.0, "Environment-source<br>attention"),
         "seeds": (1.0, 1.7, "8 coarse seeds<br>shared queries + residual"),
         "processor": (3.0, 1.7, "Sum + 1 processor<br>8 coarse states"),
@@ -1176,7 +1176,7 @@ def _b_influence_plot(study: Path) -> dict[str, Any] | None:
         )
     ]
     return plot(
-        "Track B conditional influence · near port vs farthest fixed field probe · AD/FD discrepancies shown in hover",
+        "B conditional influence · near port / far field",
         traces,
         height=520,
         barmode="group",
