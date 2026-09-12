@@ -1364,7 +1364,22 @@ def count_backend_operations(model: Any) -> Iterator[dict[str, int]]:
     """Count actual rows sent through the expensive backend neural blocks."""
 
     backend = getattr(getattr(model, "core", None), "backend", None)
+    architecture = str(
+        getattr(getattr(getattr(model, "config", None), "core_honf", None), "forward_architecture", "")
+    )
+    hierarchical = architecture == "hierarchical_regional_honf"
     counts: dict[str, int] = {}
+    if hierarchical:
+        # Keep the A schema stable even when a probe returns no incidence
+        # rows (for example, an all-padding receiver batch).
+        for key in (
+            "hierarchical_overlap_transition_rows",
+            "reference_regional_environment_pairs",
+            "reference_fine_environment_pairs",
+            "reference_regional_environment_head_dot_products",
+            "reference_fine_environment_head_dot_products",
+        ):
+            counts[key] = 0
     hooks: list[Any] = []
     names = (
         "mm_message",
@@ -1423,7 +1438,69 @@ def count_backend_operations(model: Any) -> Iterator[dict[str, int]]:
 
             hooks.append(module.register_forward_pre_hook(source_hook, with_kwargs=True))
     original_read = None if backend is None else backend.read
+    original_segmented_read = None
     if backend is not None:
+        if hierarchical and hasattr(backend, "_segmented_read"):
+            original_segmented_read = backend._segmented_read
+
+            def counted_segmented_read(*args: Any, **kwargs: Any) -> Any:
+                # This hook observes the actual ragged incidence passed to the
+                # concrete reader.  It deliberately counts only scalar rows;
+                # geometry/head neural work remains covered by the module
+                # hooks below and the head-dot counter in counted_read.
+                state = args[0] if args else kwargs.get("state")
+                receivers = args[2] if len(args) > 2 else kwargs.get("receivers")
+                incidence = args[4] if len(args) > 4 else kwargs.get("incidence")
+                if state is not None and receivers is not None and incidence is not None:
+                    eta = getattr(incidence, "eta", None)
+                    if torch.is_tensor(eta):
+                        # A transition row has a strict fractional carrier
+                        # and is therefore affected by the multilevel opening
+                        # blend.  This is a routing-row diagnostic, not an
+                        # additional neural operation.
+                        transition_rows = int(((eta > 0) & (eta < 1)).sum().item())
+                        counts["hierarchical_overlap_transition_rows"] = (
+                            counts.get("hierarchical_overlap_transition_rows", 0) + transition_rows
+                        )
+                    level_offsets = state.get("tree_level_offsets")
+                    tree_valid = state.get("tree_valid")
+                    if torch.is_tensor(level_offsets) and torch.is_tensor(tree_valid):
+                        query_count = int(receivers.shape[1])
+                        batch_count = int(receivers.shape[0])
+                        fine_count = int(state["env_tokens"].shape[1]) if "env_tokens" in state else 0
+                        if int(level_offsets.numel()) >= 2:
+                            level1_start = int(level_offsets[1].item())
+                            level1_stop = (
+                                int(level_offsets[2].item())
+                                if int(level_offsets.numel()) > 2
+                                else level1_start
+                            )
+                            valid_level1 = tree_valid[:, level1_start:level1_stop].sum()
+                            regional_pairs = int(valid_level1.item()) * query_count
+                        else:
+                            regional_pairs = 0
+                        fine_pairs = batch_count * query_count * fine_count
+                        counts["reference_regional_environment_pairs"] = (
+                            counts.get("reference_regional_environment_pairs", 0) + regional_pairs
+                        )
+                        counts["reference_fine_environment_pairs"] = (
+                            counts.get("reference_fine_environment_pairs", 0) + fine_pairs
+                        )
+                        attention = getattr(backend, "env_attention", None)
+                        if attention is not None:
+                            heads = int(attention.num_heads)
+                            counts["reference_regional_environment_head_dot_products"] = (
+                                counts.get("reference_regional_environment_head_dot_products", 0)
+                                + regional_pairs * heads
+                            )
+                            counts["reference_fine_environment_head_dot_products"] = (
+                                counts.get("reference_fine_environment_head_dot_products", 0)
+                                + fine_pairs * heads
+                            )
+                return original_segmented_read(*args, **kwargs)
+
+            backend._segmented_read = counted_segmented_read
+
         def counted_read(*args, **kwargs):
             value = original_read(*args, **kwargs)
             aux = value[1]
@@ -1449,6 +1526,8 @@ def count_backend_operations(model: Any) -> Iterator[dict[str, int]]:
     finally:
         if backend is not None:
             backend.read = original_read
+            if original_segmented_read is not None:
+                backend._segmented_read = original_segmented_read
         for hook in hooks:
             hook.remove()
 
@@ -1754,11 +1833,22 @@ def run_timing_protocol(args: argparse.Namespace) -> dict[str, Any]:
                                     query_batch_size=int(args.query_batch_size),
                                     receiver_chunk_size=receiver_chunk,
                                 )
+                    support_counts: dict[str, Any]
+                    if architecture == "hierarchical_regional_honf":
+                        support_counts = {
+                            "status": "not_applicable",
+                            "reason": (
+                                "support_counts is a group-reader summary; use operation_rows "
+                                "for hierarchical ragged incidence, traversal, and geometry counts."
+                            ),
+                        }
+                    else:
+                        support_counts = extras.get("support", {})
                     variant_row.update(
                         measured
                         | {
                             "operation_rows": counter,
-                            "support_counts": extras.get("support", {}),
+                            "support_counts": support_counts,
                             "prepared_projection_count": operation_state.get("prepared_projection_count"),
                         }
                     )

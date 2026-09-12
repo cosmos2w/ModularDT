@@ -19,6 +19,7 @@ from run_regional_response_study import (
     backend_read_zero,
     build_region_partition,
     capture_environment_contexts,
+    count_backend_operations,
     dense_projection_cache,
     frozen_dense_read,
     frozen_projected_attention,
@@ -47,6 +48,43 @@ class _FakeLatentBackend:
         return torch.full((1, 2, 3), 7.0), {"route": "latent"}
 
 
+class _CounterAttention(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.num_heads = 2
+        self.key = torch.nn.Linear(1, 1)
+        self.value = torch.nn.Linear(1, 1)
+
+
+class _FakeHierarchicalCounterBackend(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.env_attention = _CounterAttention()
+        self._read_calls = 0
+
+    def _segmented_read(self, state, encoded, receivers, receiver_features, incidence, **_kwargs):
+        del state, encoded, receiver_features
+        return receivers.new_zeros(receivers.shape[0], receivers.shape[1], 1), None
+
+    def read(self, state, encoded, receivers, receiver_features, **kwargs):
+        self._read_calls += 1
+        incidence = SimpleNamespace(
+            eta=receivers.new_tensor([0.25, 1.0, 0.5]),
+        )
+        value, _ = self._segmented_read(
+            state,
+            encoded,
+            receivers,
+            receiver_features,
+            incidence,
+            **kwargs,
+        )
+        return value, {
+            "hierarchical_traversal_rows": receivers.new_tensor(4.0),
+            "hierarchical_incidence_rows": receivers.new_tensor(3.0),
+        }
+
+
 def _fake_model() -> SimpleNamespace:
     backend = _FakeRegionalBackend()
     core = SimpleNamespace(backend=backend, _interface_read_role="p2_field")
@@ -61,6 +99,15 @@ def _fake_latent_model() -> SimpleNamespace:
     core = SimpleNamespace(backend=backend, _interface_read_role="p2_field")
     config = SimpleNamespace(
         core_honf=SimpleNamespace(forward_architecture="geometry_latent_field")
+    )
+    return SimpleNamespace(core=core, config=config)
+
+
+def _fake_hierarchical_counter_model() -> SimpleNamespace:
+    backend = _FakeHierarchicalCounterBackend()
+    core = SimpleNamespace(backend=backend)
+    config = SimpleNamespace(
+        core_honf=SimpleNamespace(forward_architecture="hierarchical_regional_honf")
     )
     return SimpleNamespace(core=core, config=config)
 
@@ -102,6 +149,46 @@ def test_latent_phase_family_uses_shared_role_scoped_read_removal() -> None:
     with _phase_variant_context(model, "latent", "p2"):
         value, _ = model.core.backend.read(None, None, None, None)
     torch.testing.assert_close(value, torch.full((1, 2, 3), 7.0))
+
+
+def test_hierarchical_operation_counter_counts_transition_and_reference_rows() -> None:
+    model = _fake_hierarchical_counter_model()
+    backend = model.core.backend
+    state = {
+        "tree_level_offsets": torch.tensor([0, 1, 3]),
+        "tree_levels": torch.tensor([0, 1, 1]),
+        "tree_valid": torch.tensor([[True, True, True]]),
+        "env_tokens": torch.zeros((1, 5, 1)),
+    }
+    encoded = SimpleNamespace()
+    receivers_two = torch.zeros((1, 2, 1))
+    features_two = torch.zeros_like(receivers_two)
+    receivers_three = torch.zeros((1, 3, 1))
+    features_three = torch.zeros_like(receivers_three)
+    original_read = backend.read
+    original_segmented_read = backend._segmented_read
+
+    with count_backend_operations(model) as counts:
+        backend.read(state, encoded, receivers_two, features_two)
+        backend.read(state, encoded, receivers_three, features_three)
+
+    assert counts["hierarchical_traversal_rows"] == 8
+    assert counts["hierarchical_incidence_rows"] == 6
+    assert counts["hierarchical_overlap_transition_rows"] == 4
+    assert counts["hierarchical_head_dot_products"] == 12
+    assert counts["reference_regional_environment_pairs"] == 10
+    assert counts["reference_fine_environment_pairs"] == 25
+    assert counts["reference_regional_environment_head_dot_products"] == 20
+    assert counts["reference_fine_environment_head_dot_products"] == 50
+    assert counts["environment_projected_key_rows"] == 0
+    assert counts["environment_projected_value_rows"] == 0
+    assert backend.read.__func__ is original_read.__func__
+    assert backend._segmented_read.__func__ is original_segmented_read.__func__
+
+    # Restoration is part of the counter contract: a later read must not
+    # mutate the already-collected operation totals.
+    backend.read(state, encoded, receivers_two, features_two)
+    assert counts["hierarchical_incidence_rows"] == 6
 
 
 def test_timing_geometry_summary_does_not_claim_latent_source_topology() -> None:
