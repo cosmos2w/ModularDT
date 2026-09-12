@@ -66,6 +66,32 @@ MODEL_COLORS = {
     "B": "#315f7c",
     "Reader": "#7c5aa6",
 }
+TIMING_PHASES = (
+    "full_forward",
+    "physical_preparation_plus_one_query",
+    "prepared_decode",
+    "encoding_plus_layout_construction",
+)
+TIMING_PHASE_LABELS = {
+    "full_forward": "full forward",
+    "physical_preparation_plus_one_query": "physical preparation + one query",
+    "prepared_decode": "prepared decode",
+    "encoding_plus_layout_construction": "encoding + layout construction",
+}
+TIMING_REAL_CASES = ("0273", "0653")
+TIMING_SYNTHETIC_WORKLOADS = (
+    ("synthetic:E=768 M=32 Q=65536", "synthetic E=768 M=32 Q=65536"),
+    ("synthetic:E=3072 M=128 Q=262144", "synthetic E=3072 M=128 Q=262144"),
+)
+TIMING_ARCHITECTURE_LABELS = {
+    "legacy_honf": "Legacy",
+    "geometry_latent_field": "Latent",
+    "dense_pairwise_field": "Dense",
+    "sparse_interface_honf": "Reader",
+    "regional_response_honf": "Regional",
+    "hierarchical_regional_honf": "A",
+    "group_mediated_reader": "B",
+}
 
 OLD_DEBUG_ROOTS = {
     "Dense": (
@@ -1387,32 +1413,176 @@ def _timing_rows(study: Path) -> list[dict[str, Any]]:
                 context="parent exact500",
             )
         )
+    parent_timing_chunk128 = study / "comparison/parent_timing_chunk128.json"
+    payload = read_json(parent_timing_chunk128, {})
+    if isinstance(payload, dict):
+        rows.extend(
+            _timing_stat_rows(
+                payload,
+                parent_timing_chunk128,
+                track="parent",
+                run="parent",
+                timing_chunk=128,
+                context="parent exact500",
+            )
+        )
     return rows
 
 
-def _timing_plot(rows: list[dict[str, Any]], query_count: int) -> dict[str, Any] | None:
-    contexts = {"candidate endpoint500"} if query_count == 128 else {"candidate endpoint500", "parent exact500", "parent mature checkpoint5000"}
-    subset = [row for row in rows if row.get("query_count") == query_count and row.get("checkpoint_context") in contexts]
+def _timing_workload_key(row: dict[str, Any]) -> str:
+    if row.get("kind") == "real":
+        return f"real:{row.get('case_id', '')}"
+    shape = row.get("shape") if isinstance(row.get("shape"), dict) else {}
+    values = []
+    for key in ("E", "M", "Q"):
+        value = shape.get(key)
+        try:
+            values.append(f"{key}={int(value)}")
+        except (TypeError, ValueError):
+            values.append(f"{key}={value}")
+    return "synthetic:" + " ".join(values)
+
+
+def _timing_workload_options() -> list[tuple[str, str, str]]:
+    options: list[tuple[str, str, str]] = []
+    for case_id in TIMING_REAL_CASES:
+        workload = f"real:{case_id}"
+        for phase in TIMING_PHASES:
+            options.append((f"{workload}|{phase}", f"real {case_id} · {TIMING_PHASE_LABELS[phase]}", workload))
+    for workload, label in TIMING_SYNTHETIC_WORKLOADS:
+        options.append((f"{workload}|full_forward", f"{label} · full forward", workload))
+    return options
+
+
+def _timing_workload_label(workload: str) -> str:
+    if workload.startswith("real:"):
+        return f"real {workload.split(':', 1)[1]}"
+    for key, label in TIMING_SYNTHETIC_WORKLOADS:
+        if workload == key:
+            return label
+    return workload
+
+
+def _timing_model_label(row: dict[str, Any]) -> str:
+    run = str(row.get("run", ""))
+    if run in RUN_DISPLAY:
+        return RUN_DISPLAY[run]
+    architecture = str(row.get("architecture", ""))
+    if architecture in TIMING_ARCHITECTURE_LABELS:
+        return TIMING_ARCHITECTURE_LABELS[architecture]
+    return _display_model(row)
+
+
+def _timing_context_rank(row: dict[str, Any]) -> int:
+    return {
+        "candidate endpoint500": 0,
+        "parent exact500": 1,
+        "parent mature checkpoint5000": 2,
+    }.get(str(row.get("checkpoint_context")), 99)
+
+
+def _dedupe_timing_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one measured row per model/workload/phase/chunk.
+
+    Candidate endpoint rows remain distinct from parent rows.  When a parent
+    model is present in both exact500 and mature checkpoint timing artifacts,
+    exact500 wins for the same workload and phase.
+    """
+
+    selected: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        model_key = str(row.get("run")) if row.get("track") != "parent" else str(row.get("architecture"))
+        key = (
+            str(row.get("track")),
+            model_key,
+            _timing_workload_key(row),
+            str(row.get("phase")),
+            row.get("query_count"),
+        )
+        previous = selected.get(key)
+        if previous is None or _timing_context_rank(row) < _timing_context_rank(previous):
+            selected[key] = row
+    return list(selected.values())
+
+
+def _timing_plot(
+    rows: list[dict[str, Any]],
+    query_count: int,
+    workload: str | None = None,
+    phase: str = "full_forward",
+) -> dict[str, Any] | None:
+    if workload is None:
+        workload = "real:0273"
+    contexts = {"candidate endpoint500", "parent exact500", "parent mature checkpoint5000"}
+    subset = [
+        row
+        for row in _dedupe_timing_rows(rows)
+        if row.get("query_count") == query_count
+        and row.get("checkpoint_context") in contexts
+        and _timing_workload_key(row) == workload
+        and row.get("phase") == phase
+    ]
     if not subset:
         return None
-    phases = sorted({row["phase"] for row in subset})
-    traces = []
-    for phase in phases:
-        phase_rows = [row for row in subset if row["phase"] == phase]
-        traces.append(
-            bar_trace(
-                [f"{row['track']} · {row['model']} · {row.get('case_id') or row.get('shape_label')} · {row.get('checkpoint_context')}" for row in phase_rows],
-                [row["median_ms"] for row in phase_rows],
-                phase,
-                "#315f7c" if phase == "full_forward" else "#d38b54",
-                offsetgroup=phase,
-                customdata=[[row.get("peak_allocated_mib"), row.get("case_id"), row.get("shape_label")] for row in phase_rows],
-                hovertemplate="%{x}<br>median=%{y:.4g} ms<br>peak allocated=%{customdata[0]:.4g} MiB<extra></extra>",
-            )
-        )
-    label = "scientific/evaluation chunk 128" if query_count == 128 else "inference receiver chunk 2048"
-    context_label = "candidate endpoint500" if query_count == 128 else "candidate plus matched parent timing contexts"
-    return plot(f"Measured timing · {label} · {context_label}", traces, height=460, barmode="group", xaxis={"title": "timing source / case / shape"}, yaxis={"title": "median milliseconds", "gridcolor": "#e8edf1"})
+    model_order = {name: index for index, name in enumerate(HISTORY_ORDER)}
+    subset.sort(key=lambda row: (model_order.get(_timing_model_label(row), len(model_order)), _timing_model_label(row)))
+    labels = [_timing_model_label(row) for row in subset]
+    customdata = [
+        [
+            row.get("checkpoint_context"),
+            Path(str(row.get("source", ""))).name,
+            row.get("case_id"),
+            row.get("shape_label"),
+            row.get("peak_allocated_mib"),
+        ]
+        for row in subset
+    ]
+    trace = bar_trace(
+        labels,
+        [row["median_ms"] for row in subset],
+        TIMING_PHASE_LABELS.get(phase, phase),
+        "#315f7c" if phase == "full_forward" else "#d38b54",
+        customdata=customdata,
+        hovertemplate=(
+            "%{x}<br>median=%{y:.4g} ms<br>provenance=%{customdata[0]}"
+            "<br>source=%{customdata[1]}<br>case=%{customdata[2]}<br>shape=%{customdata[3]}"
+            "<br>peak allocated=%{customdata[4]:.4g} MiB<extra></extra>"
+        ),
+    )
+    workload_label = _timing_workload_label(workload)
+    context_label = ", ".join(sorted({str(row.get("checkpoint_context")) for row in subset}))
+    figure = plot(
+        f"{workload_label}<br>{TIMING_PHASE_LABELS.get(phase, phase)} · chunk {query_count}",
+        [trace],
+        height=460,
+        barmode="group",
+        xaxis={"title": "model / track"},
+        yaxis={"title": "median milliseconds", "gridcolor": "#e8edf1"},
+    )
+    figure["layout"]["margin"]["t"] = 105
+    figure["layout"]["annotations"] = [{
+        "text": context_label, "xref": "paper", "yref": "paper", "x": 0,
+        "y": 1.10, "xanchor": "left", "showarrow": False,
+        "font": {"size": 10, "color": "#60717e"},
+    }]
+    return figure
+
+
+def _timing_variant_spec(rows: list[dict[str, Any]], query_count: int) -> dict[str, Any] | None:
+    figures: dict[str, dict[str, Any]] = {}
+    options = _timing_workload_options()
+    for key, _label, workload in options:
+        phase = key.rsplit("|", 1)[1]
+        figure = _timing_plot(rows, query_count, workload, phase)
+        if figure is not None:
+            figures[key] = figure
+    if not figures:
+        return None
+    selector_id = f"timing_{query_count}_workload_phase"
+    return {
+        "figures": figures,
+        "selectors": [{"id": selector_id, "label": "workload / phase", "options": [(key, label) for key, label, _workload in options]}],
+    }
 
 
 def _accuracy_cost_plot(headline: list[dict[str, str]], timing_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1444,7 +1614,10 @@ def _accuracy_cost_plot(headline: list[dict[str, str]], timing_rows: list[dict[s
         if (
             row.get("kind") != "synthetic"
             or row.get("phase") != "full_forward"
+            or shape.get("E") != 3072
+            or shape.get("M") != 128
             or shape.get("Q") != 262144
+            or row.get("timing_chunk") != 2048
             or row.get("checkpoint_context") not in context_priority
         ):
             continue
@@ -1459,11 +1632,9 @@ def _accuracy_cost_plot(headline: list[dict[str, str]], timing_rows: list[dict[s
         old = selected.get(run)
         new_key = (
             context_priority[str(row["checkpoint_context"])],
-            0 if row.get("timing_chunk") == 2048 else 1,
         )
         old_key = (
             context_priority[str(old["checkpoint_context"])],
-            0 if old.get("timing_chunk") == 2048 else 1,
         ) if old is not None else None
         if old is None or new_key < old_key:
             selected[run] = row
@@ -1604,8 +1775,8 @@ def _render_page(
         _figure_card("b_routing", "Track B measured shared support IDs by receiver", figures.get("b_routing")),
         _figure_card("b_influence", "Track B local versus coarse conditional influence", figures.get("b_influence")),
         _figure_card("intervention", "Formal P0/P1/P2 ground-truth deltas", figures.get("intervention")),
-        _figure_card("timing128", "Scientific timing at evaluation chunk 128", figures.get("timing128")),
-        _figure_card("timing2048", "Inference timing at receiver chunk 2048", figures.get("timing2048")),
+        _variant_card("timing128", "Scientific timing at evaluation chunk 128", figures.get("timing128"), variants.get("timing128")),
+        _variant_card("timing2048", "Inference timing at receiver chunk 2048", figures.get("timing2048"), variants.get("timing2048")),
         _figure_card("accuracy_cost", "Accuracy versus measured full-forward cost", figures.get("accuracy_cost")),
     ]
     cases = "".join(f'<option value="{escape(case)}">{escape(case)}</option>' for case in anchor_data["cases"])
@@ -1644,7 +1815,8 @@ function renderVariant(name) {{
   const spec=variants[name]; if(!spec) return;
   const key=spec.selectors.map(selector=>document.getElementById(selector.id).value).join('|');
   const figure=spec.figures[key], target=document.getElementById('fig_'+name);
-  if(!figure||!figure.data||!figure.data.length) {{ target.innerHTML='<div class="missing">This case/level scientific export is unavailable.</div>'; return; }}
+  if(!figure||!figure.data||!figure.data.length) {{ if(target.data) Plotly.purge(target); target.innerHTML='<div class="missing">This workload/phase scientific export is unavailable.</div>'; return; }}
+  if(target.querySelector('.missing')) target.replaceChildren();
   Plotly.react(target,figure.data,figure.layout,{{responsive:true,displaylogo:false}});
 }}
 for (const [name,spec] of Object.entries(variants)) {{ for (const selector of spec.selectors) document.getElementById(selector.id).addEventListener('change',()=>renderVariant(name)); renderVariant(name); }}
@@ -1698,6 +1870,8 @@ def render_nstage2(root: str | Path | None = None, output: str | Path | None = N
         for case_id in b_cases
         if (figure := _b_topology_plot(organization, case_id)) is not None
     }
+    timing128_spec = _timing_variant_spec(timing_rows, 128)
+    timing2048_spec = _timing_variant_spec(timing_rows, 2048)
     variants: dict[str, dict[str, Any]] = {}
     if a_hierarchy_figures:
         variants["a_hierarchy"] = {
@@ -1722,6 +1896,12 @@ def render_nstage2(root: str | Path | None = None, output: str | Path | None = N
             "figures": b_topology_figures,
             "selectors": [{"id": "b_topology_case", "label": "case", "options": [(case, case) for case in b_cases]}],
         }
+    if timing128_spec:
+        variants["timing128"] = timing128_spec
+    if timing2048_spec:
+        variants["timing2048"] = timing2048_spec
+    timing128_initial = next(iter(timing128_spec["figures"].values()), None) if timing128_spec else None
+    timing2048_initial = next(iter(timing2048_spec["figures"].values()), None) if timing2048_spec else None
     figures: dict[str, dict[str, Any] | None] = {
         "headline": _headline_plot(reduction["headline"]),
         "channels": _channel_plot(reduction["channels"]),
@@ -1741,8 +1921,8 @@ def render_nstage2(root: str | Path | None = None, output: str | Path | None = N
         "b_routing": _b_source_routing_plot(study),
         "b_influence": _b_influence_plot(study),
         "intervention": _intervention_plot(intervention_rows),
-        "timing128": _timing_plot(timing_rows, 128),
-        "timing2048": _timing_plot(timing_rows, 2048),
+        "timing128": timing128_initial,
+        "timing2048": timing2048_initial,
         "accuracy_cost": _accuracy_cost_plot(reduction["headline"], timing_rows),
     }
     best_rows = reduction["best"]
@@ -1757,6 +1937,7 @@ def render_nstage2(root: str | Path | None = None, output: str | Path | None = N
         "track_a/timing_chunk2048.json",
         "track_b/timing_chunk128.json",
         "track_b/timing_chunk2048.json",
+        "comparison/parent_timing_chunk128.json",
     ):
         if (study / relative).is_file():
             source_links.append("../" + relative)
@@ -1769,8 +1950,8 @@ def render_nstage2(root: str | Path | None = None, output: str | Path | None = N
         "Anchor maps use the five fixed cases 0273, 0653, 0283, 0298, and 0302 and retain shared per-case/channel scales; aligned models use the shared canonical stored fluid mask.",
         "Track A hierarchy panels require exact tree_levels/tree_children/tree_coords/tree_bounds_min/tree_bounds_max/tree_states/tree_mass/tree_valid exports; selected receiver rows come only from track_a/probes.json.",
         "Track B routing and influence panels come only from track_b/probes.json. The far_field point is the farthest fixed field probe and may share support groups with the near port. AD/FD disagreement values are fixed-step diagnostics shown for context; their magnitude is not a confirmed convergence or causal claim.",
-        "Timing panels preserve real case IDs and synthetic E/M/Q shape labels. Candidate timing is read from the two chunk files per track; inference chunk 2048 also shows matched parent exact500 and mature checkpoint5000 context when present.",
-        "Accuracy-versus-cost uses the fixed E=3072, M=128, Q=262144 shape and prefers candidate endpoint500, then parent exact500, then mature checkpoint5000 timing; every point keeps its checkpoint context.",
+        "Timing panels use fixed workload/phase selectors: real 0273 and 0653 at four measured phases, plus the two synthetic shapes at full forward. X axes use short model labels; hover and titles retain exact500 versus mature checkpoint5000 provenance. Parent exact500 replaces a duplicated mature row for the same model/workload/phase/chunk, while candidate endpoint500 rows remain distinct.",
+        "Accuracy-versus-cost uses only chunk-2048 measurements at the fixed E=3072, M=128, Q=262144 shape and prefers candidate endpoint500, then parent exact500, then mature checkpoint5000 timing; every point keeps its checkpoint context.",
         "Formal intervention panels read only track_a/interventions.json and track_b/interventions.json; epoch-10 execution-check JSON is excluded.",
     ]
     if not _formal_probe_results(study, "track_a"):

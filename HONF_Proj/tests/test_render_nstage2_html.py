@@ -79,6 +79,41 @@ def test_timing_keeps_synthetic_shape_and_memory(tmp_path: Path) -> None:
     assert all(row["peak_allocated_mib"] is not None for row in synthetic)
 
 
+def test_parent_chunk128_timing_is_ingested_as_exact500(tmp_path: Path) -> None:
+    study = tmp_path / "nstage2"
+    comparison = study / "comparison"
+    comparison.mkdir(parents=True)
+    phases = {
+        name: {"median_ms": float(index + 1), "peak_allocated_bytes": 2 * 1024 * 1024}
+        for index, name in enumerate(renderer.TIMING_PHASES)
+    }
+    payload = {
+        "models": [
+            {
+                "architecture": "dense_pairwise_field",
+                "checkpoint": {"label": "Dense1804_at500", "epoch": 500},
+                "real_anchors": [{"case_id": "0273", "receiver_chunk_size": 128, "normal": {"phases": phases}}],
+                "synthetic_shapes": [
+                    {
+                        "shape": {"E": 768, "M": 32, "Q": 65536},
+                        "receiver_chunk_size": 128,
+                        "normal": {"median_ms": 7.0, "peak_allocated_bytes": 4 * 1024 * 1024},
+                    }
+                ],
+            }
+        ]
+    }
+    path = comparison / "parent_timing_chunk128.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    rows = renderer._timing_rows(study)
+    rows = [row for row in rows if row["source"] == str(path)]
+    assert rows
+    assert {row["checkpoint_context"] for row in rows} == {"parent exact500"}
+    assert {row["query_count"] for row in rows} == {128}
+    assert {row["kind"] for row in rows} == {"real", "synthetic"}
+    assert {row["case_id"] for row in rows if row["kind"] == "real"} == {"0273"}
+
+
 def test_formal_intervention_reader_ignores_epoch10_and_uses_gt_deltas(tmp_path: Path) -> None:
     study = tmp_path / "nstage2"
     (study / "track_a").mkdir(parents=True)
@@ -208,8 +243,60 @@ def test_accuracy_cost_prefers_endpoint500_candidate_and_fixed_large_shape() -> 
             "timing_chunk": 2048,
             "median_ms": 1.0,
         },
+        {
+            "run": "parent",
+            "architecture": "dense_pairwise_field",
+            "kind": "synthetic",
+            "phase": "full_forward",
+            "checkpoint_context": "parent exact500",
+            "shape": {"E": 3072, "M": 128, "Q": 262144},
+            "timing_chunk": 128,
+            "median_ms": 0.1,
+        },
     ]
     figure = renderer._accuracy_cost_plot(headline, timing)
     assert figure is not None
     assert "Q=262144" in figure["layout"]["title"]["text"]
     assert {trace["name"] for trace in figure["data"]} == {"Dense", "A"}
+    dense = next(trace for trace in figure["data"] if trace["name"] == "Dense")
+    assert dense["x"] == [10.0]
+
+
+def test_timing_plot_deduplicates_parent_exact500_before_mature(tmp_path: Path) -> None:
+    rows = [
+        {
+            "track": "parent",
+            "run": "parent",
+            "architecture": "dense_pairwise_field",
+            "model": "Dense1804_at500",
+            "checkpoint_context": "parent exact500",
+            "query_count": 2048,
+            "kind": "real",
+            "case_id": "0273",
+            "shape": {},
+            "shape_label": "",
+            "phase": "full_forward",
+            "median_ms": 10.0,
+            "source": str(tmp_path / "exact.json"),
+        },
+        {
+            "track": "parent",
+            "run": "parent",
+            "architecture": "dense_pairwise_field",
+            "model": "Dense1804_at5000",
+            "checkpoint_context": "parent mature checkpoint5000",
+            "query_count": 2048,
+            "kind": "real",
+            "case_id": "0273",
+            "shape": {},
+            "shape_label": "",
+            "phase": "full_forward",
+            "median_ms": 1.0,
+            "source": str(tmp_path / "mature.json"),
+        },
+    ]
+    figure = renderer._timing_plot(rows, 2048, "real:0273", "full_forward")
+    assert figure is not None
+    assert figure["data"][0]["x"] == ["Dense"]
+    assert figure["data"][0]["y"] == [10.0]
+    assert figure["data"][0]["customdata"][0][0] == "parent exact500"
