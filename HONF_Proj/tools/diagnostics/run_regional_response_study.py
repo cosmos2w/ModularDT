@@ -1058,6 +1058,8 @@ def _regular_environment(
     batch_size: int,
     device: torch.device,
     dtype: torch.dtype,
+    *,
+    hierarchical: bool = False,
 ) -> ChannelThermalEnvironment:
     nx, ny = _regular_grid_shape(int(env_count), float(lx), float(ly))
     return ChannelThermalEnvironmentBuilder()(
@@ -1069,6 +1071,7 @@ def _regular_environment(
         device=device,
         dtype=dtype,
         response_region_block_shape=DEFAULT_BLOCK_SHAPE,
+        response_tree_block_shape=DEFAULT_BLOCK_SHAPE if hierarchical else None,
     )
 
 
@@ -1081,7 +1084,10 @@ def regular_synthetic_environment(model: Any, env_count: int, lx: float, ly: flo
     class RegularEnvironmentBuilder:
         def __call__(self, *, batch_size: int, device: torch.device, dtype: torch.dtype, **kwargs: Any) -> ChannelThermalEnvironment:
             del kwargs
-            return _regular_environment(env_count, lx, ly, batch_size, device, dtype)
+            return _regular_environment(
+                env_count, lx, ly, batch_size, device, dtype,
+                hierarchical=str(model.config.core_honf.forward_architecture) == "hierarchical_regional_honf",
+            )
 
         def query_features(self, *args: Any, **kwargs: Any) -> Any:
             return original.query_features(*args, **kwargs)
@@ -1166,6 +1172,8 @@ def _timing_variants(model: Any) -> tuple[tuple[str, Any], ...]:
         # Regional prepares projected K/V once per physical module state and
         # reuses them across receiver chunks within each fresh preparation.
         return (("regional_native_prepared", None),)
+    if architecture == "hierarchical_regional_honf":
+        return (("hierarchical_native_prepared", None),)
     return (("default", None),)
 
 
@@ -1200,6 +1208,16 @@ def _timing_geometry_organization(model: Any) -> dict[str, Any]:
             "read_organization": "deterministic coordinate support followed by learned group read",
             "deterministic_support": True,
             "topology_export": "support/layout fields are emitted by the sparse prepared-state exports",
+            "coarse_module_source": str(model.config.core_honf.interface_model.coarse_module_source),
+        }
+    if architecture == "hierarchical_regional_honf":
+        return {
+            "source_organization": "adapter-supplied nested physical regions with fine leaves",
+            "read_organization": "smooth mass partition followed by gathered learned attention",
+            "response_region_block_shape": list(model.config.core_honf.interface_model.response_region_block_shape),
+            "response_tree_opening_interval": list(model.config.core_honf.interface_model.response_tree_opening_interval),
+            "deterministic_support": True,
+            "topology_export": "tree levels, boxes, mass and sparse receiver incidences",
         }
     if architecture == "regional_response_honf":
         response_region_shape = getattr(
@@ -1355,6 +1373,9 @@ def count_backend_operations(model: Any) -> Iterator[dict[str, int]]:
         "env_update",
         "env_geometry_bias",
         "query_module_message",
+        "module_message",
+        "environment_message",
+        "receiver_bias",
     )
     if backend is not None:
         for name in names:
@@ -1369,9 +1390,65 @@ def count_backend_operations(model: Any) -> Iterator[dict[str, int]]:
                     counts[key] += int(np.prod(tuple(int(value) for value in tensor.shape[:-1]))) if tensor.ndim else 1
 
             hooks.append(module.register_forward_hook(hook))
+        # Source projections are real rows, independently of the number of
+        # receiver chunks that reuse them in the native regional families.
+        attention = getattr(backend, "env_attention", None)
+        if attention is not None:
+            for projection in ("key", "value"):
+                module = getattr(attention, projection)
+                key = f"environment_projected_{projection}_rows"
+                counts[key] = 0
+
+                def projection_hook(_module, _inputs, output, *, key=key):
+                    counts[key] += int(np.prod(output.shape[:-1]))
+
+                hooks.append(module.register_forward_hook(projection_hook))
+    common = getattr(getattr(model, "core", None), "common", None)
+    if common is not None:
+        for name in ("coarse_module_attention", "coarse_group_attention", "coarse_env_attention"):
+            module = getattr(common, name, None)
+            if module is None:
+                continue
+
+            def source_hook(module, args, kwargs, *, name=name):
+                query, source = args[:2]
+                rows = int(query.shape[0] * query.shape[1] * source.shape[1])
+                counts[f"{name}_pairs"] = counts.get(f"{name}_pairs", 0) + rows
+                head_key = f"{name}_head_dot_products"
+                counts[head_key] = counts.get(head_key, 0) + rows * int(module.num_heads)
+                mask = kwargs.get("source_mask")
+                if mask is not None:
+                    valid_key = f"{name}_valid_pairs"
+                    counts[valid_key] = counts.get(valid_key, 0) + int((mask > 0.5).sum().item()) * int(query.shape[1])
+
+            hooks.append(module.register_forward_pre_hook(source_hook, with_kwargs=True))
+    original_read = None if backend is None else backend.read
+    if backend is not None:
+        def counted_read(*args, **kwargs):
+            value = original_read(*args, **kwargs)
+            aux = value[1]
+            for key in ("hierarchical_traversal_rows", "hierarchical_incidence_rows"):
+                if key in aux:
+                    counts[key] = counts.get(key, 0) + int(aux[key].item())
+            if "hierarchical_incidence_rows" in aux:
+                key = "hierarchical_head_dot_products"
+                counts[key] = counts.get(key, 0) + int(aux["hierarchical_incidence_rows"].item()) * int(backend.env_attention.num_heads)
+                state = args[0]
+                levels = state["tree_levels"]
+                for level in range(int(state["tree_level_offsets"].numel()) - 1):
+                    counts[f"hierarchical_level_{level}_nodes_per_case"] = int(
+                        (state["tree_valid"][0] & (levels == level)).sum().item()
+                    )
+            if "group_read_degree" in aux:
+                counts["group_read_incidence_rows"] = counts.get("group_read_incidence_rows", 0) + int(aux["group_read_degree"].sum().item())
+            return value
+
+        backend.read = counted_read
     try:
         yield counts
     finally:
+        if backend is not None:
+            backend.read = original_read
         for hook in hooks:
             hook.remove()
 
@@ -2238,7 +2315,7 @@ def _run_optimizer_step(
 
 
 def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
-    """Run two real physical optimizer steps without reserving a managed run."""
+    """Run selected real physical optimizer steps without reserving a managed run."""
     from channelthermal.data.datasets import GlobalChannelThermalDataset
     from channelthermal.model import ChannelThermalHONFModel
     from channelthermal.training.optimizer import build_forward_optimizer
@@ -2286,14 +2363,14 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     small_ids = [str(value) for value in (args.small_case_id or _smoke_case_ids(train_dataset, count=int(args.case_count), large=False))]
     large_ids = [str(value) for value in (args.large_case_id or _smoke_case_ids(train_dataset, count=int(args.case_count), large=True))]
     model.train()
-    small = _run_optimizer_step(
-        model, checkpoint, train_dataset, small_ids, device,
-        points_per_case=int(args.points_per_case), batch_size=int(args.batch_size), optimizer=optimizer,
-    )
-    large = _run_optimizer_step(
-        model, checkpoint, train_dataset, large_ids, device,
-        points_per_case=int(args.points_per_case), batch_size=int(args.batch_size), optimizer=optimizer,
-    )
+    batch_kind = getattr(args, "batch_kind", "both")
+    steps = {}
+    for kind, case_ids in (("small", small_ids), ("large", large_ids)):
+        if batch_kind in {"both", kind}:
+            steps[f"{kind}_module_batch"] = _run_optimizer_step(
+                model, checkpoint, train_dataset, case_ids, device,
+                points_per_case=int(args.points_per_case), batch_size=int(args.batch_size), optimizer=optimizer,
+            )
     model.eval()
     train_dataset.close()
     return {
@@ -2304,11 +2381,11 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         "fresh_model": True,
         "frozen_stage_a_attached": bool(model.local_surrogate_attached),
         "dataset": str(dataset_path),
-        "steps": {"small_module_batch": small, "large_module_batch": large},
+        "steps": steps,
         "managed_run_reserved": False,
         "checkpoint_saved": False,
         "limitations": [
-            "These two real batches establish physical forward/backward/update execution only; they are not an accuracy result.",
+            "These real batches establish physical forward/backward/update execution only; they are not an accuracy result.",
             "The model and optimizer are initialized from the profile; no candidate weights are loaded or saved.",
             "First-step explicit parameter deltas exclude still-lazy parameters before their initial materialization; canonical gradient/update diagnostics are retained.",
         ],
@@ -4138,6 +4215,10 @@ def build_parser() -> argparse.ArgumentParser:
     smoke.add_argument("--points-per-case", type=int, default=1024)
     smoke.add_argument("--batch-size", type=int, default=48)
     smoke.add_argument("--case-count", type=int, default=48)
+    smoke.add_argument(
+        "--batch-kind", choices=("both", "small", "large"), default="both",
+        help="execute only the remaining batch when an earlier smoke stopped after its first update",
+    )
     smoke.add_argument("--small-case-id", action="append", default=None)
     smoke.add_argument("--large-case-id", action="append", default=None)
     smoke.set_defaults(handler=run_smoke)

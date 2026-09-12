@@ -52,6 +52,7 @@ GRADIENT_DIAGNOSTIC_GROUPS = (
     # historical aggregate groups above remain unchanged so old runs retain
     # their established interpretation.
     "regional_prepare", "regional_receiver", "direct_module",
+    "coarse_group_source", "coarse_env_source",
 )
 GRADIENT_DIAGNOSTIC_KEYS = (
     "preclip_gradient_norm",
@@ -118,6 +119,12 @@ def _fp64_group_norm(named_values: list[tuple[str, torch.Tensor]]) -> tuple[floa
         detail = _diagnostic_detail_group(name)
         if detail is not None:
             by_group[detail] += squared
+        # Source-level detail supplements, rather than replaces, the existing
+        # coarse/backend totals. These are ordinary gradient/update logs.
+        if name.startswith("core.common.coarse_group_attention."):
+            by_group["coarse_group_source"] += squared
+        elif name.startswith("core.common.coarse_env_attention."):
+            by_group["coarse_env_source"] += squared
     return math.sqrt(total), {group: math.sqrt(value) for group, value in by_group.items()}
 
 

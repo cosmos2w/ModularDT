@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Dict
 
 import torch
-import torch.nn as nn
+from torch import nn
 
 from honf_forward_core.nn import MLP, FourierFeatures, LazyMLP
 
@@ -46,6 +45,66 @@ class SparseGroupState:
     group_values: torch.Tensor
     module_learned_membership: torch.Tensor
     module_pool: torch.Tensor
+
+
+@dataclass(frozen=True)
+class PackedCoarseGroupSources:
+    """Per-case packed group sources for the shared coarse reader.
+
+    Sparse layouts store groups in one flattened, case-major array because
+    that is the efficient representation for incidence lists.  The coarse
+    attention route expects a padded batch source tensor instead.  This small
+    payload keeps that conversion explicit: ``valid`` identifies real groups,
+    while padded state/occupancy rows stay on the same device and in the live
+    autograd graph as the source ``SparseGroupState``.
+    """
+
+    group_states: torch.Tensor
+    occupancy: torch.Tensor
+    valid: torch.Tensor
+
+
+def packed_coarse_group_sources(state: SparseGroupState) -> PackedCoarseGroupSources:
+    """Pack positive-occupancy groups by case for coarse attention.
+
+    ``SparseSupportLayout.occupancy`` is the sum of active geometric module
+    footprint weights before learned memberships are applied.  Each active
+    module's normalized footprint contributes unit mass, so the packed mass
+    per case is the active module count (up to the support arithmetic's
+    floating-point precision).  No source state is detached or moved to CPU.
+    """
+
+    layout = state.cache.layout
+    batch_size = int(layout.batch_size)
+    hidden_dim = int(state.group_state.shape[-1])
+    positive_occupancy = layout.occupancy > 0.0
+    positive_indices = torch.nonzero(positive_occupancy, as_tuple=False).reshape(-1)
+    positive_group_batch = layout.group_batch.index_select(0, positive_indices)
+    counts = torch.bincount(positive_group_batch, minlength=batch_size)
+    max_groups = int(counts.max().item()) if counts.numel() else 0
+
+    packed_states = state.group_state.new_zeros((batch_size, max_groups, hidden_dim))
+    packed_occupancy = layout.occupancy.new_zeros((batch_size, max_groups))
+    packed_valid = torch.zeros(
+        (batch_size, max_groups), device=state.group_state.device, dtype=torch.bool
+    )
+    if positive_indices.numel() > 0:
+        case_starts = torch.cumsum(counts, dim=0) - counts
+        positive_slots = torch.arange(
+            positive_indices.numel(), device=positive_indices.device, dtype=torch.long
+        ) - case_starts.index_select(0, positive_group_batch)
+        packed_states[positive_group_batch, positive_slots] = state.group_state.index_select(
+            0, positive_indices
+        )
+        packed_occupancy[positive_group_batch, positive_slots] = layout.occupancy.index_select(
+            0, positive_indices
+        )
+        packed_valid[positive_group_batch, positive_slots] = True
+    return PackedCoarseGroupSources(
+        group_states=packed_states,
+        occupancy=packed_occupancy,
+        valid=packed_valid,
+    )
 
 
 def _zero_last_bias(module: LazyMLP) -> None:
@@ -90,6 +149,12 @@ class SparseInterfaceHONF(nn.Module):
 
         self.receiver_query = LazyMLP(hidden_dim, num_layers=2)
         self.receiver_bias = LazyMLP(message_hidden_dim, out_dim=1, num_layers=2)
+
+    @staticmethod
+    def packed_coarse_group_sources(state: SparseGroupState) -> PackedCoarseGroupSources:
+        """Return live, per-case group sources for ``SharedInterfaceContext``."""
+
+        return packed_coarse_group_sources(state)
 
     def build_layout(
         self,
@@ -220,7 +285,7 @@ class SparseInterfaceHONF(nn.Module):
         receiver_features: torch.Tensor,
         *,
         return_routing_maps: bool = False,
-    ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Read group values at physical receivers.
 
         ``null_softmax`` retains the historical explicit-null arithmetic.  In
@@ -365,7 +430,7 @@ class SparseInterfaceHONF(nn.Module):
             include_self=True,
         )
 
-        aux: Dict[str, torch.Tensor] = {
+        aux: dict[str, torch.Tensor] = {
             "group_read_degree": lookup.degree.reshape(receivers.shape[0], receivers.shape[1]),
             "group_read_weight_mass": nonnull_mass.reshape(receivers.shape[0], receivers.shape[1]),
             "group_read_max_weight": dominant_weight.reshape(receivers.shape[0], receivers.shape[1]),
@@ -583,7 +648,7 @@ class SparseInterfaceHONF(nn.Module):
         return context.reshape(receivers.shape[0], receivers.shape[1], self.hidden_dim), aux
 
     @staticmethod
-    def preparation_aux(state: SparseGroupState) -> Dict[str, torch.Tensor | int | float]:
+    def preparation_aux(state: SparseGroupState) -> dict[str, torch.Tensor | int | float]:
         layout = state.cache.layout
         group_count_per_case = torch.diff(layout.case_group_offsets)
         module_incidence_batch = layout.group_batch.index_select(

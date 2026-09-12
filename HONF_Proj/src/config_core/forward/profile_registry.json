@@ -3,6 +3,26 @@
   "recommended_forward_profile": "stage7_structured_context",
   "profiles": [
     {
+      "name": "nstage2_hierarchical_regional_context",
+      "path": "project://src/config_core/forward/nstage2_hierarchical_regional_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "shared multiresolution joint responses / smooth mass-preserving gathered tree attention",
+      "checkpoint_families": ["Run 1807 NStage2-A candidate"],
+      "owner": "forward-research",
+      "stage": "nstage2-a"
+    },
+    {
+      "name": "nstage2_group_mediated_reader_context",
+      "path": "project://src/config_core/forward/nstage2_group_mediated_reader_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "geometry-envelope local groups / group-state coarse module source / retained environmental background",
+      "checkpoint_families": ["Run 1808 NStage2-B candidate"],
+      "owner": "forward-research",
+      "stage": "nstage2-b"
+    },
+    {
       "name": "dense_pairwise_interface_context",
       "path": "project://src/config_core/forward/dense_pairwise_interface_context.json",
       "status": "candidate",

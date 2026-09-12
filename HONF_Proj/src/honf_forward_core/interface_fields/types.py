@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict
+from typing import Any, Dict, TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from .response_hierarchy import EnvironmentHierarchy, HierarchyGeometry
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,8 @@ class EncodedInterfaceCase:
     # IDs are intentionally kept separate from encoded tokens so the common
     # coarse route can continue to consume the original fine environment.
     env_region_ids: torch.Tensor | None = None
+    env_hierarchy: EnvironmentHierarchy | None = None
+    env_hierarchy_geometry: HierarchyGeometry | None = None
 
 
 @dataclass(frozen=True)

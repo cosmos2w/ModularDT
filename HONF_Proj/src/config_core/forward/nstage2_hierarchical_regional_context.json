@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "profile_name": "nstage2_hierarchical_regional_context",
+  "workflow": "forward",
+  "model_family": "honf_forward",
+  "case": {
+    "id": "ThermalChannel",
+    "config": "project://Case_ThermalChannel/configs/case_default.json",
+    "dataset_id": "thermal_channel_global_v1"
+  },
+  "model": {
+    "core_honf": {
+      "forward_architecture": "hierarchical_regional_honf",
+      "interface_model": {
+        "message_hidden_dim": 128,
+        "attention_heads": 4,
+        "coarse_latent_count": 8,
+        "coarse_blocks": 1,
+        "main_latent_count": 16,
+        "main_latent_blocks": 2,
+        "local_radius_factor": 2.5,
+        "relative_fourier_frequencies": 4,
+        "receiver_chunk_size": 128,
+        "activation_checkpointing": true,
+        "response_region_block_shape": [
+          2,
+          2
+        ],
+        "response_tree_opening_interval": [
+          1.0,
+          2.0
+        ],
+        "coarse_module_source": "module_states"
+      },
+      "field_dim": "auto",
+      "domain_length_x": "auto",
+      "domain_length_y": "auto",
+      "module_radius": "auto",
+      "coordinate_scale": [
+        12.0,
+        6.0
+      ],
+      "periodic_axes": [],
+      "num_env_tokens_x": 24,
+      "num_env_tokens_y": 8,
+      "hidden_dim": 256,
+      "dropout": 0.0,
+      "use_layer_norm": true,
+      "geometry_mode": "nonperiodic",
+      "query_time_mode": "none",
+      "query_fourier_frequencies": 4,
+      "boundary_feature_mode": "none",
+      "position_fourier_frequencies": 4,
+      "use_position_fourier_for_modules": true,
+      "use_position_fourier_for_env": true
+    }
+  },
+  "training": {
+    "seed": 0,
+    "device": "cuda:0",
+    "epochs": 500,
+    "learning_rate": 0.0003,
+    "organizer_learning_rate": null,
+    "weight_decay": 1e-05,
+    "amp": false,
+    "gradient_clip_norm": 1.0,
+    "plot_every_epochs": 50,
+    "port_curriculum": {
+      "schedule": "none",
+      "mode": "predicted",
+      "mixed_teacher_ratio": 0.0,
+      "teacher_epochs": 0,
+      "predicted_after_epoch": 0,
+      "mixed_teacher_ratio_start": 0.0,
+      "mixed_teacher_ratio_end": 0.0
+    },
+    "max_train_batches_per_epoch": null,
+    "max_val_batches": null
+  },
+  "checkpointing": {
+    "save_best": true,
+    "save_best_field_mse": true,
+    "save_best_temperature_mse": true,
+    "save_best_predicted": true,
+    "save_latest": true,
+    "save_latest_every_epochs": 10,
+    "save_epoch_milestones": [
+      10,
+      50,
+      100,
+      250,
+      500,
+      1000,
+      2500,
+      5000
+    ]
+  },
+  "run": {
+    "id": "1807",
+    "name": "nstage2_hierarchical_regional",
+    "output_root": "project://Trained_Results"
+  },
+  "_note": "NStage2-A: fine environmental leaves and repeated 2x2 parents formed from pre-update joint statistics; shared env_update; gathered smooth near/far response read. Parent training and physical settings are retained."
+}

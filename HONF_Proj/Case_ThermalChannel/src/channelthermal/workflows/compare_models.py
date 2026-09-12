@@ -928,6 +928,22 @@ def interaction_metrics(base_row: Dict[str, Any], predictions: Dict[str, Any]) -
             port_neighbours.size * max(coarse_latent_count, 0)
         )
 
+    if architecture == "hierarchical_regional_honf":
+        for source_key, metric_prefix in (
+            ("hierarchical_selected_count", "hierarchical_selected_count"),
+            ("hierarchical_context_norm", "hierarchical_context_norm"),
+        ):
+            value = routing.get(source_key, aux.get(source_key))
+            if value is not None:
+                _record_distribution(row, metric_prefix, value)
+        count = _finite_values(aux.get("hierarchical_response_count", []))
+        if count.size:
+            row["hierarchical_response_count"] = float(np.mean(count))
+        selected = _finite_values(routing.get("hierarchical_selected_count", []))
+        if selected.size:
+            row["hierarchical_environment_read_pair_count"] = float(selected.sum())
+        return row
+
     if architecture == "regional_response_honf":
         regional_count = _finite_values(aux.get("regional_response_count", []))
         if regional_count.size:
@@ -1483,6 +1499,8 @@ def save_debug_npz(path: Path, predictions: Dict[str, Any], raw_sample: Dict[str
         if key in {
             "dense_environment_attention",
             "regional_environment_attention",
+            "hierarchical_context_norm",
+            "hierarchical_selected_count",
             "latent_query_attention",
             "group_read_degree",
             "group_read_weight_mass",
@@ -1509,7 +1527,9 @@ def save_debug_npz(path: Path, predictions: Dict[str, Any], raw_sample: Dict[str
             )
     prepared_case = predictions.get("_prepared_state")
     prepared = getattr(prepared_case, "prepared", None)
-    if prepared is not None and str(getattr(prepared_case, "architecture", "")) == "regional_response_honf":
+    if prepared is not None and str(getattr(prepared_case, "architecture", "")) in {
+        "regional_response_honf", "hierarchical_regional_honf",
+    }:
         encoded = getattr(prepared, "encoded", None)
         backend_state = getattr(prepared, "backend_state", None)
         if encoded is not None and isinstance(backend_state, dict):
@@ -1523,6 +1543,17 @@ def save_debug_npz(path: Path, predictions: Dict[str, Any], raw_sample: Dict[str
                 "regional_valid": "regional_valid",
                 "regional_ids": "regional_ids",
             }
+            if str(prepared_case.architecture) == "hierarchical_regional_honf":
+                state_keys = {
+                    key: key for key in (
+                        "tree_states", "tree_coords", "tree_mass", "tree_valid",
+                        "tree_bounds_min", "tree_bounds_max",
+                    )
+                }
+                for key in ("tree_levels", "tree_level_offsets", "tree_children"):
+                    value = backend_state.get(key)
+                    if torch.is_tensor(value):
+                        payload[key] = value.detach().cpu().numpy()
             for source_key, target_key in state_keys.items():
                 value = backend_state.get(source_key)
                 if torch.is_tensor(value):
@@ -1538,7 +1569,7 @@ def save_debug_npz(path: Path, predictions: Dict[str, Any], raw_sample: Dict[str
     for key, value in predictions.get("interaction_aux", {}).items():
         if key.startswith("support_") or key.startswith("group_") or key.startswith(
             "module_"
-        ) or key.startswith("environment_") or key.startswith("initial_port_"):
+        ) or key.startswith("environment_") or key.startswith("initial_port_") or key.startswith("hierarchical_"):
             if isinstance(value, str) or value is None:
                 continue
             payload[f"interaction__{key}"] = np.asarray(value)
@@ -2016,7 +2047,8 @@ def main(argv: list[str] | None = None) -> int:
                     mixed_teacher_ratio=float(args.mixed_teacher_ratio),
                     return_routing_maps=bool(args.return_routing_maps),
                     return_prepared_state=bool(
-                        architecture == "regional_response_honf" and case_id in anchor_case_ids
+                        architecture in {"regional_response_honf", "hierarchical_regional_honf"}
+                        and case_id in anchor_case_ids
                     ),
                 )
             if device.type == "cuda":

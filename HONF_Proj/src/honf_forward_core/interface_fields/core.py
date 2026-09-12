@@ -11,9 +11,11 @@ from honf_forward_core.config import BatchData, UnifiedForwardConfig
 from honf_forward_core.nn import FourierFeatures, LazyMLP
 from .common import SharedInterfaceContext
 from .dense_pairwise import DensePairwiseField
-from .group_operator import SparseInterfaceHONF, SparseLayoutCache
+from .group_operator import SparseInterfaceHONF, SparseLayoutCache, packed_coarse_group_sources
+from .hierarchical_regional import HierarchicalRegionalField
 from .latent_attention import GeometryLatentField
 from .regional_response import RegionalResponseField
+from .response_hierarchy import prepare_hierarchy_geometry
 from .types import EncodedInterfaceCase, InterfaceRead, PreparedInterfaceField
 
 
@@ -43,6 +45,7 @@ class InterfaceFieldCore(nn.Module):
             coarse_blocks=int(options.coarse_blocks),
             local_radius_factor=float(options.local_radius_factor),
             fourier_frequencies=frequencies,
+            coarse_module_source=str(options.coarse_module_source),
         )
         if config.forward_architecture == "dense_pairwise_field":
             self.backend = DensePairwiseField(
@@ -77,6 +80,16 @@ class InterfaceFieldCore(nn.Module):
                 heads,
                 frequencies,
                 response_region_block_shape=tuple(options.response_region_block_shape),
+                activation_checkpointing=bool(options.activation_checkpointing),
+            )
+        elif config.forward_architecture == "hierarchical_regional_honf":
+            self.backend = HierarchicalRegionalField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                response_region_block_shape=tuple(options.response_region_block_shape),
+                response_tree_opening_interval=tuple(options.response_tree_opening_interval),
                 activation_checkpointing=bool(options.activation_checkpointing),
             )
         else:
@@ -140,6 +153,15 @@ class InterfaceFieldCore(nn.Module):
             (module_centers.shape[0], env_coords.shape[1]),
             1.0 / float(env_coords.shape[1]),
         ) * domain_volume
+        env_hierarchy = (
+            batch.env_hierarchy.to(module_centers.device)
+            if batch.env_hierarchy is not None else None
+        )
+        hierarchy_geometry = None
+        if self.config.forward_architecture == "hierarchical_regional_honf":
+            if env_hierarchy is None:
+                raise ValueError("hierarchical_regional_honf requires adapter-supplied env_hierarchy.")
+            hierarchy_geometry = prepare_hierarchy_geometry(env_hierarchy, env_weights, env_coords)
         return EncodedInterfaceCase(
             module_tokens=module_tokens,
             env_tokens=env_tokens,
@@ -152,6 +174,8 @@ class InterfaceFieldCore(nn.Module):
             env_weights=env_weights,
             coordinate_scale=scale,
             env_region_ids=env_region_ids,
+            env_hierarchy=env_hierarchy,
+            env_hierarchy_geometry=hierarchy_geometry,
         )
 
     def prepare(
@@ -179,8 +203,17 @@ class InterfaceFieldCore(nn.Module):
                 module_states,
                 return_routing_maps=bool(return_routing_maps),
             )
+        coarse_kwargs = {}
+        if self.config.interface_model.coarse_module_source == "group_states":
+            groups = packed_coarse_group_sources(backend_state)
+            coarse_kwargs = {
+                "packed_group_states": groups.group_states,
+                "packed_group_occupancy": groups.occupancy,
+                "packed_group_valid": groups.valid,
+            }
         coarse_state = self.common.prepare_coarse(
-            module_states, encoded.env_tokens, encoded.module_present, encoded.env_weights
+            module_states, encoded.env_tokens, encoded.module_present, encoded.env_weights,
+            **coarse_kwargs,
         )
         aux: Dict[str, Any] = {
             "forward_architecture": self.config.forward_architecture,
@@ -191,7 +224,7 @@ class InterfaceFieldCore(nn.Module):
                 else 0
             ),
         }
-        if self.config.forward_architecture == "sparse_interface_honf":
+        if self.config.forward_architecture in {"sparse_interface_honf", "hierarchical_regional_honf"}:
             aux.update(self.backend.preparation_aux(backend_state))
         return PreparedInterfaceField(encoded, module_states, backend_state, coarse_state, aux)
 
@@ -293,6 +326,24 @@ class InterfaceFieldCore(nn.Module):
                 if not values or not all(torch.is_tensor(value) for value in values):
                     continue
                 first = values[0]
+                if key in {"hierarchical_traversal_rows", "hierarchical_incidence_rows"}:
+                    aux[key] = torch.stack(values).sum()
+                    continue
+                if key.startswith("hierarchical_incidence_"):
+                    # The optional tree maps are ragged incidence rows, not
+                    # dense receiver/source arrays. Preserve every row and
+                    # translate chunk-local query indices to this read call.
+                    if key == "hierarchical_incidence_query":
+                        offset = 0
+                        shifted = []
+                        for chunk_aux, width in backend_aux_chunks:
+                            if key in chunk_aux:
+                                shifted.append(chunk_aux[key] + offset)
+                            offset += width
+                        aux[key] = torch.cat(shifted, dim=0)
+                    else:
+                        aux[key] = torch.cat(values, dim=0)
+                    continue
                 # Backend summaries such as latent_count are batch-level and
                 # repeated for each receiver chunk.  Keep one copy rather
                 # than accidentally concatenating it across chunks.

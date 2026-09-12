@@ -141,6 +141,22 @@ def test_sparse_interaction_serialization_preserves_flattened_topology() -> None
     assert serialized["initial_port_group_read_group_index"].shape == (1, 2, 4)
 
 
+def test_hierarchical_serialization_keeps_ragged_incidence_rows():
+    aux = {
+        "forward_architecture": "hierarchical_regional_honf",
+        "hierarchical_incidence_query": torch.tensor([0, 0, 1]),
+        "hierarchical_incidence_node": torch.tensor([3, 4, 5]),
+        "hierarchical_incidence_attention": torch.ones(3, 4),
+        "initial_port_hierarchical_incidence_node": torch.tensor([1, 2]),
+        "hierarchical_selected_count": torch.tensor([[2.0, 1.0]]),
+    }
+    serialized = serialize_interaction_aux(aux)
+    assert serialized["hierarchical_incidence_node"].shape == (3,)
+    assert serialized["hierarchical_incidence_attention"].shape == (3, 4)
+    assert serialized["initial_port_hierarchical_incidence_node"].shape == (2,)
+    np.testing.assert_array_equal(serialized["hierarchical_selected_count"], [2.0, 1.0])
+
+
 def test_sparse_interaction_metrics_report_real_incidence_and_shared_ids() -> None:
     predictions = {
         "interaction_aux": {

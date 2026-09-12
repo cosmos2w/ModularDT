@@ -159,14 +159,27 @@ class SharedInterfaceContext(nn.Module):
         coarse_blocks: int,
         local_radius_factor: float,
         fourier_frequencies: int,
+        coarse_module_source: str = "module_states",
     ) -> None:
         super().__init__()
         self.hidden_dim = int(hidden_dim)
         self.local_radius_factor = float(local_radius_factor)
+        self.coarse_module_source = str(coarse_module_source)
+        if self.coarse_module_source not in {"module_states", "group_states"}:
+            raise ValueError(
+                "coarse_module_source must be either 'module_states' or 'group_states'."
+            )
         self.relative_fourier = FourierFeatures(None, fourier_frequencies)
         self.receiver_fourier = FourierFeatures(None, fourier_frequencies)
         self.coarse_seeds = nn.Parameter(torch.randn(coarse_latent_count, hidden_dim) / math.sqrt(float(hidden_dim)))
-        self.coarse_module_attention = BiasedMultiheadAttention(hidden_dim, num_heads)
+        # Keep the historical module names and parameter ownership exactly in
+        # the default mode.  In group-source mode, do not construct a second
+        # source network: the experiment replaces the module source route
+        # with one same-width/head-count attention module.
+        if self.coarse_module_source == "module_states":
+            self.coarse_module_attention = BiasedMultiheadAttention(hidden_dim, num_heads)
+        else:
+            self.coarse_group_attention = BiasedMultiheadAttention(hidden_dim, num_heads)
         self.coarse_env_attention = BiasedMultiheadAttention(hidden_dim, num_heads)
         self.coarse_blocks = nn.ModuleList(
             PreNormAttentionBlock(hidden_dim, num_heads) for _ in range(int(coarse_blocks))
@@ -183,11 +196,64 @@ class SharedInterfaceContext(nn.Module):
         env_tokens: torch.Tensor,
         module_present: torch.Tensor,
         env_weights: torch.Tensor,
+        packed_group_states: torch.Tensor | None = None,
+        packed_group_occupancy: torch.Tensor | None = None,
+        packed_group_valid: torch.Tensor | None = None,
+        *,
+        group_source_enabled: bool = True,
     ) -> torch.Tensor:
         seeds = self.coarse_seeds.unsqueeze(0).expand(module_states.shape[0], -1, -1)
-        module_context, _ = self.coarse_module_attention(
-            seeds, module_states, source_mask=module_present
-        )
+        if self.coarse_module_source == "module_states":
+            # Preserve the historical call and arithmetic verbatim when the
+            # option is absent.  Extra group-source arguments are ignored in
+            # this branch so old callers/checkpoints remain compatible.
+            module_context, _ = self.coarse_module_attention(
+                seeds, module_states, source_mask=module_present
+            )
+        else:
+            if not group_source_enabled:
+                # This is the diagnostic group-source-only intervention.  It
+                # happens before the unchanged coarse processor, while the
+                # environmental background below remains active.
+                module_context = torch.zeros_like(seeds)
+            else:
+                if packed_group_states is None:
+                    raise ValueError(
+                        "group_states coarse preparation requires packed_group_states."
+                    )
+                if packed_group_occupancy is None:
+                    raise ValueError(
+                        "group_states coarse preparation requires packed_group_occupancy."
+                    )
+                if packed_group_valid is None:
+                    packed_group_valid = packed_group_occupancy > 0.0
+                self._validate_packed_group_sources(
+                    packed_group_states,
+                    packed_group_occupancy,
+                    packed_group_valid,
+                    batch_size=int(module_states.shape[0]),
+                )
+                source_occupancy = packed_group_occupancy.to(
+                    device=packed_group_states.device,
+                    dtype=packed_group_states.dtype,
+                )
+                module_context, _ = self.coarse_group_attention(
+                    seeds,
+                    packed_group_states,
+                    source_mask=packed_group_valid,
+                    log_weights=torch.log(
+                        source_occupancy.clamp_min(torch.finfo(source_occupancy.dtype).tiny)
+                    ),
+                )
+                # BiasedMultiheadAttention's output projection has a bias. If
+                # a batch item has no occupied groups, masking all rows would
+                # otherwise expose that bias as fictitious group information.
+                # Keep the supported rows unchanged and make empty cases
+                # genuinely background-only.
+                has_group_source = packed_group_valid.to(dtype=torch.bool).any(dim=-1)
+                module_context = module_context * has_group_source[:, None, None].to(
+                    dtype=module_context.dtype
+                )
         env_context, _ = self.coarse_env_attention(
             seeds, env_tokens, log_weights=torch.log(env_weights.clamp_min(torch.finfo(env_weights.dtype).tiny))
         )
@@ -195,6 +261,40 @@ class SharedInterfaceContext(nn.Module):
         for block in self.coarse_blocks:
             coarse = block(coarse)
         return coarse
+
+    def _validate_packed_group_sources(
+        self,
+        group_states: torch.Tensor,
+        occupancy: torch.Tensor,
+        valid: torch.Tensor,
+        *,
+        batch_size: int,
+    ) -> None:
+        if group_states.ndim != 3:
+            raise ValueError("packed_group_states must have shape [B,G,H].")
+        if occupancy.ndim != 2 or valid.ndim != 2:
+            raise ValueError("packed_group_occupancy and packed_group_valid must have shape [B,G].")
+        if group_states.shape[:2] != occupancy.shape or occupancy.shape != valid.shape:
+            raise ValueError("Packed group states, occupancy, and validity masks must align.")
+        if int(group_states.shape[0]) != batch_size:
+            raise ValueError("Packed group sources must match the module-state batch size.")
+        if int(group_states.shape[-1]) != self.hidden_dim:
+            raise ValueError(
+                f"packed_group_states hidden width must be {self.hidden_dim}, got {group_states.shape[-1]}."
+            )
+        if not torch.is_floating_point(group_states) or not torch.is_floating_point(occupancy):
+            raise ValueError("Packed group states and occupancy must use floating-point tensors.")
+        if valid.dtype not in {torch.bool, torch.float16, torch.float32, torch.float64, torch.bfloat16}:
+            raise ValueError("packed_group_valid must be boolean or floating point.")
+        if group_states.device != occupancy.device or occupancy.device != valid.device:
+            raise ValueError("Packed group states, occupancy, and validity masks must share a device.")
+        if not bool(torch.isfinite(occupancy).all()):
+            raise ValueError("packed_group_occupancy must be finite.")
+        if bool((occupancy < 0.0).any()):
+            raise ValueError("packed_group_occupancy must be nonnegative.")
+        occupied = valid > 0.5
+        if bool((occupied & (occupancy <= 0.0)).any()):
+            raise ValueError("Valid packed group sources must have strictly positive occupancy.")
 
     def read_coarse(
         self,

@@ -18,8 +18,12 @@ Environment feature columns:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from honf_forward_core.interface_fields.response_hierarchy import EnvironmentHierarchy
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,7 @@ class ChannelThermalEnvironment:
     # regional-response experiment requests these from the case adapter;
     # existing families leave them unset and keep their original route.
     env_region_ids: torch.Tensor | None = None
+    env_hierarchy: EnvironmentHierarchy | None = None
 
 
 class ChannelThermalEnvironmentBuilder:
@@ -128,6 +133,7 @@ class ChannelThermalEnvironmentBuilder:
         device: torch.device,
         dtype: torch.dtype,
         response_region_block_shape: tuple[int, int] | list[int] | None = None,
+        response_tree_block_shape: tuple[int, int] | list[int] | None = None,
     ) -> ChannelThermalEnvironment:
         """Build a cell-centered ``nx*ny`` environment grid for each case."""
 
@@ -163,8 +169,21 @@ class ChannelThermalEnvironmentBuilder:
                 block_shape=response_region_block_shape,
             )
             env_region_ids = ids.unsqueeze(0).expand(batch_size, -1)
+        env_hierarchy = None
+        if response_tree_block_shape is not None:
+            from honf_forward_core.interface_fields.response_hierarchy import (
+                build_rectangular_environment_hierarchy,
+            )
+
+            env_hierarchy = build_rectangular_environment_hierarchy(
+                coords,
+                grid_shape=(nx, ny),
+                block_shape=response_tree_block_shape,
+                bounds=((0.0, lx), (0.0, ly)),
+            )
         return ChannelThermalEnvironment(
             env_coords=coords.unsqueeze(0).expand(batch_size, -1, -1),
             env_features=features.unsqueeze(0).expand(batch_size, -1, -1),
             env_region_ids=env_region_ids,
+            env_hierarchy=env_hierarchy,
         )

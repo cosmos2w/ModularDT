@@ -26,7 +26,7 @@ class PreparedInterfaceChannelThermalCase:
 
 @contextmanager
 def _interface_read_role(model: Any, role: str):
-    """Annotate one physical read for diagnostic hooks.
+    """Annotate one physical preparation or read for diagnostic hooks.
 
     The marker is temporary so historical ``core.read`` and
     ``core.decode_queries`` callers keep their existing signatures.  A
@@ -182,12 +182,16 @@ def forward_interface_field(
         "device": device,
         "dtype": dtype,
     }
-    if str(model.config.core_honf.forward_architecture) == "regional_response_honf":
+    architecture = str(model.config.core_honf.forward_architecture)
+    if architecture in {"regional_response_honf", "hierarchical_regional_honf"}:
         environment_kwargs["response_region_block_shape"] = tuple(
             model.config.core_honf.interface_model.response_region_block_shape
         )
-    # Keep the historical builder call signature byte-for-byte compatible for
-    # the established families; only the regional candidate requests IDs.
+    if architecture == "hierarchical_regional_honf":
+        environment_kwargs["response_tree_block_shape"] = tuple(
+            model.config.core_honf.interface_model.response_region_block_shape
+        )
+    # Only regional families request geometric metadata from the adapter.
     env = model.environment_builder(**environment_kwargs)
     encoded = model.core.encode_case(
         BatchData(
@@ -203,6 +207,7 @@ def forward_interface_field(
             env_coords=env.env_coords,
             env_features=env.env_features,
             env_region_ids=getattr(env, "env_region_ids", None),
+            env_hierarchy=getattr(env, "env_hierarchy", None),
         )
     )
     if teacher_port_tokens is None and interface_condition is not None:
@@ -214,12 +219,13 @@ def forward_interface_field(
     # is reused while group states refresh after each local response.
     layout_cache = model.core.build_layout(encoded, physical_port_xy)
     base_module_state = encoded.module_tokens
-    prepared0 = model.core.prepare(
-        encoded,
-        base_module_state,
-        layout_cache=layout_cache,
-        return_routing_maps=bool(return_routing_maps),
-    )
+    with _interface_read_role(model, "p0_port"):
+        prepared0 = model.core.prepare(
+            encoded,
+            base_module_state,
+            layout_cache=layout_cache,
+            return_routing_maps=bool(return_routing_maps),
+        )
     initial_port_context, initial_read_aux = _read_port_context(
         model,
         prepared0,
@@ -285,12 +291,13 @@ def forward_interface_field(
         if int(model.config.channelthermal.interaction_refinement_steps) == 1 and (
             str(local_port_condition_mode).lower() != "teacher" or teacher_port_tokens is None
         ):
-            prepared1 = model.core.prepare(
-                encoded,
-                module_state,
-                layout_cache=layout_cache,
-                return_routing_maps=bool(return_routing_maps),
-            )
+            with _interface_read_role(model, "p1_refinement"):
+                prepared1 = model.core.prepare(
+                    encoded,
+                    module_state,
+                    layout_cache=layout_cache,
+                    return_routing_maps=bool(return_routing_maps),
+                )
             outside_temperature, provisional_decode = _decode_temperature(
                 model,
                 prepared1,
@@ -358,16 +365,17 @@ def forward_interface_field(
                 "predicted_port_interface": predicted_interface,
             }
 
-    final_prepared = (
-        prepared0
-        if local_outputs is None
-        else model.core.prepare(
-            encoded,
-            module_state,
-            layout_cache=layout_cache,
-            return_routing_maps=bool(return_routing_maps),
+    with _interface_read_role(model, "p2_field"):
+        final_prepared = (
+            prepared0
+            if local_outputs is None
+            else model.core.prepare(
+                encoded,
+                module_state,
+                layout_cache=layout_cache,
+                return_routing_maps=bool(return_routing_maps),
+            )
         )
-    )
     with _interface_read_role(model, "p2_field"):
         decoder_output = model.core.decode_queries(
             final_prepared,
@@ -379,7 +387,9 @@ def forward_interface_field(
     interaction_aux: Dict[str, Any] = dict(final_prepared.interaction_aux)
     interaction_aux.update(decoder_output.pop("_interaction_aux"))
     for key, value in initial_read_aux.items():
-        if torch.is_tensor(value) and value.ndim >= 2 and value.shape[1] == physical_port_xy.shape[1] * ntheta:
+        if (not key.startswith("hierarchical_incidence_")
+                and torch.is_tensor(value) and value.ndim >= 2
+                and value.shape[1] == physical_port_xy.shape[1] * ntheta):
             interaction_aux[f"initial_port_{key}"] = value.reshape(
                 value.shape[0], physical_port_xy.shape[1], ntheta, *value.shape[2:]
             )

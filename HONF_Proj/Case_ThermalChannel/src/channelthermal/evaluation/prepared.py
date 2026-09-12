@@ -51,7 +51,14 @@ def serialize_interaction_aux(aux: Dict[str, Any]) -> Dict[str, Any]:
             result[key] = value
             continue
         array = value.detach().cpu().numpy()
-        if (
+        tree_key = key.removeprefix("initial_port_")
+        if architecture == "hierarchical_regional_honf" and tree_key in {
+            "hierarchical_incidence_batch", "hierarchical_incidence_query",
+            "hierarchical_incidence_node", "hierarchical_incidence_eta",
+            "hierarchical_incidence_attention",
+        }:
+            result[key] = array
+        elif (
             architecture == "sparse_interface_honf"
             and key in _SPARSE_FLATTENED_INTERACTION_KEYS
         ):
@@ -202,6 +209,8 @@ def predict_case(
                     "dominant_hyperedge": "dominant_hyperedge",
                     "hyper_attention_entropy_map": "hyper_attention_entropy",
                     "dense_module_context_norm": "dense_module_context_norm",
+                    "hierarchical_context_norm": "hierarchical_context_norm",
+                    "hierarchical_selected_count": "hierarchical_selected_count",
                     "main_context_norm": "main_context_norm",
                     "coarse_context_norm": "coarse_context_norm",
                     "local_context_norm": "local_context_norm",

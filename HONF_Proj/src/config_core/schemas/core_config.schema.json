@@ -75,7 +75,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "forward_architecture": {"enum": ["legacy_honf", "dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf", "regional_response_honf"]},
+        "forward_architecture": {"enum": ["legacy_honf", "dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf", "regional_response_honf", "hierarchical_regional_honf"]},
         "interface_model": {
           "type": "object",
           "additionalProperties": false,
@@ -89,6 +89,11 @@
             "local_radius_factor": {"type": "number", "exclusiveMinimum": 0},
             "support_spacing_factor": {"type": "number", "exclusiveMinimum": 0},
             "group_read_mode": {"enum": ["null_softmax", "geometry_envelope_attention"]},
+            "coarse_module_source": {"enum": ["module_states", "group_states"]},
+            "response_tree_opening_interval": {
+              "type": "array", "minItems": 2, "maxItems": 2,
+              "items": {"type": "number", "exclusiveMinimum": 0}
+            },
             "relative_fourier_frequencies": {"type": "integer", "minimum": 0},
             "receiver_chunk_size": {"type": "integer", "minimum": 1},
             "activation_checkpointing": {"type": "boolean"},

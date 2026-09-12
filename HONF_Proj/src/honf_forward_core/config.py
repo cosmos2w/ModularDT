@@ -10,6 +10,7 @@ wall, inlet, outlet, or material assumptions.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
+import math
 from typing import Any, Dict, Optional
 
 try:
@@ -84,6 +85,7 @@ FORWARD_ARCHITECTURES = {
     "geometry_latent_field",
     "sparse_interface_honf",
     "regional_response_honf",
+    "hierarchical_regional_honf",
 }
 
 LEGACY_ARCHITECTURE_KEYS = {
@@ -146,6 +148,8 @@ class InterfaceFieldConfig:
     # environment grid axes.  The adapter owns membership; the backend only
     # consumes the resulting IDs, masses, and centroids.
     response_region_block_shape: list[int] = field(default_factory=lambda: [2, 2])
+    response_tree_opening_interval: list[float] = field(default_factory=lambda: [1.0, 2.0])
+    coarse_module_source: str = "module_states"
 
     def __post_init__(self) -> None:
         if int(self.message_hidden_dim) <= 0:
@@ -179,6 +183,17 @@ class InterfaceFieldConfig:
                 "interface_model.response_region_block_shape must contain two positive integers."
             )
         self.response_region_block_shape = [int(value) for value in self.response_region_block_shape]
+        interval = self.response_tree_opening_interval
+        if (
+            not isinstance(interval, (list, tuple)) or len(interval) != 2
+            or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                   or not math.isfinite(float(value)) for value in interval)
+            or not 0.0 < float(interval[0]) < float(interval[1])
+        ):
+            raise ValueError("interface_model.response_tree_opening_interval must contain increasing positive radii.")
+        self.response_tree_opening_interval = [float(value) for value in interval]
+        if self.coarse_module_source not in {"module_states", "group_states"}:
+            raise ValueError("interface_model.coarse_module_source must be 'module_states' or 'group_states'.")
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any] | None) -> "InterfaceFieldConfig":
@@ -336,6 +351,10 @@ class UnifiedForwardConfig:
             )
         if self.interface_model is not None and int(self.hidden_dim) % int(self.interface_model.attention_heads) != 0:
             raise ValueError("hidden_dim must be divisible by interface_model.attention_heads.")
+        if (self.interface_model is not None
+                and self.interface_model.coarse_module_source == "group_states"
+                and self.forward_architecture != "sparse_interface_honf"):
+            raise ValueError("coarse_module_source='group_states' requires sparse_interface_honf group preparation.")
 
         if self.organizer_mode not in {
             "fixed_projection",
@@ -640,8 +659,12 @@ class UnifiedForwardConfig:
                     # baseline and are not sparse-HONF capacity parameters.
                     interface_payload.pop("main_latent_count", None)
                     interface_payload.pop("main_latent_blocks", None)
-                if self.forward_architecture != "regional_response_honf":
+                if self.forward_architecture not in {"regional_response_honf", "hierarchical_regional_honf"}:
                     interface_payload.pop("response_region_block_shape", None)
+                if self.forward_architecture != "hierarchical_regional_honf":
+                    interface_payload.pop("response_tree_opening_interval", None)
+                if self.interface_model.coarse_module_source == "module_states":
+                    interface_payload.pop("coarse_module_source", None)
         return payload
 
     def decoder_uses(self, component: str) -> bool:
@@ -672,6 +695,9 @@ class BatchData:
     # this after the historical fields so positional BatchData construction
     # retains its prior ordering.
     env_region_ids: Optional[Any] = None
+    # Optional typed hierarchy supplied by the case adapter, aligned to the
+    # original fine environment. Historical batches leave it unset.
+    env_hierarchy: Optional[Any] = None
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "BatchData":
@@ -691,7 +717,10 @@ class BatchData:
         payload: Dict[str, Any] = {}
         for item in fields(self):
             value = getattr(self, item.name)
-            payload[item.name] = value.to(device) if torch.is_tensor(value) else value
+            payload[item.name] = (
+                value.to(device) if torch.is_tensor(value) or (item.name == "env_hierarchy" and value is not None)
+                else value
+            )
         return BatchData(**payload)
 
 

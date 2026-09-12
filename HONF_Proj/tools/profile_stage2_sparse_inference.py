@@ -295,8 +295,12 @@ def _new_family_encoding_and_layout(
         "device": device,
         "dtype": dtype,
     }
-    if architecture == "regional_response_honf":
+    if architecture in {"regional_response_honf", "hierarchical_regional_honf"}:
         environment_kwargs["response_region_block_shape"] = tuple(
+            model.config.core_honf.interface_model.response_region_block_shape
+        )
+    if architecture == "hierarchical_regional_honf":
+        environment_kwargs["response_tree_block_shape"] = tuple(
             model.config.core_honf.interface_model.response_region_block_shape
         )
     env = model.environment_builder(**environment_kwargs)
@@ -314,6 +318,7 @@ def _new_family_encoding_and_layout(
             env_coords=env.env_coords,
             env_features=env.env_features,
             env_region_ids=getattr(env, "env_region_ids", None),
+            env_hierarchy=getattr(env, "env_hierarchy", None),
         )
     )
     interface_condition = batch.get("interface_condition")
