@@ -496,7 +496,7 @@ def common_read_zero(model: Any, *, role: str, component: str) -> Iterator[None]
 
 @contextlib.contextmanager
 def _reader_phase_intervention(model: Any, *, roles: Sequence[str]) -> Iterator[None]:
-    """Reader/group removal using the physical coupling role marker."""
+    """Shared interface-reader removal using the physical coupling role marker."""
 
     with backend_read_zero(model, roles=roles, component="main"):
         yield
@@ -505,7 +505,7 @@ def _reader_phase_intervention(model: Any, *, roles: Sequence[str]) -> Iterator[
 def _phase_variant_context(model: Any, family: str, mode: str) -> contextlib.AbstractContextManager[Any]:
     """Map one plan intervention to role-scoped hooks."""
 
-    if family == "reader":
+    if family in {"reader", "latent"}:
         if mode == "p0":
             return _reader_phase_intervention(model, roles=("p0_port",))
         if mode == "p1_only":
@@ -543,6 +543,8 @@ def _phase_variant_context(model: Any, family: str, mode: str) -> contextlib.Abs
 def _family_for_architecture(architecture: str) -> str:
     if architecture == "dense_pairwise_field":
         return "dense"
+    if architecture == "geometry_latent_field":
+        return "latent"
     if architecture == "sparse_interface_honf":
         return "reader"
     if architecture == "regional_response_honf":
@@ -644,7 +646,7 @@ def run_interventions(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "task": "interventions",
-        "stage": "endpoint500" if family == "regional" else "mature_checkpoint",
+        "stage": f"endpoint{int(checkpoint['epoch'])}" if family == "regional" else "mature_checkpoint",
         "checkpoint": _checkpoint_record(spec, checkpoint, model),
         "dataset": str(dataset_path),
         "case_ids": case_ids,
@@ -1167,6 +1169,70 @@ def _timing_variants(model: Any) -> tuple[tuple[str, Any], ...]:
     return (("default", None),)
 
 
+def _timing_geometry_organization(model: Any) -> dict[str, Any]:
+    """Describe architecture-owned geometry organization without inferring topology.
+
+    Environment grids are shared inputs to the matched timing protocol, but the
+    model families organize those inputs differently.  Keep this summary
+    declarative and architecture-specific so downstream tables do not mistake
+    the synthetic grid or a learned attention map for deterministic support.
+    """
+
+    architecture = str(model.config.core_honf.forward_architecture)
+    if architecture == "dense_pairwise_field":
+        return {
+            "source_organization": "fine environment grid",
+            "read_organization": "learned dense attention over fine sources",
+            "deterministic_support": False,
+            "topology_export": "none; attention is learned and query-dependent",
+        }
+    if architecture == "geometry_latent_field":
+        return {
+            "source_organization": "fine environment grid encoded into learned latent state",
+            "read_organization": "learned receiver attention over fixed latent references",
+            "latent_count": int(getattr(model.core.backend, "latent_count", 0)),
+            "deterministic_support": False,
+            "topology_export": "none; latent/read attention is learned and query-dependent",
+        }
+    if architecture == "sparse_interface_honf":
+        return {
+            "source_organization": "fine environment and module coordinates",
+            "read_organization": "deterministic coordinate support followed by learned group read",
+            "deterministic_support": True,
+            "topology_export": "support/layout fields are emitted by the sparse prepared-state exports",
+        }
+    if architecture == "regional_response_honf":
+        response_region_shape = getattr(
+            getattr(model.config.core_honf, "interface_model", None),
+            "response_region_block_shape",
+            None,
+        )
+        return {
+            "source_organization": "adapter-supplied environment region IDs and weighted centroids",
+            "read_organization": "learned attention over valid regional response states",
+            "response_region_block_shape": (
+                None
+                if response_region_shape is None
+                else [int(value) for value in response_region_shape]
+            ),
+            "deterministic_support": True,
+            "topology_export": "region IDs, masses, and centroids are emitted by regional prepared-state exports",
+        }
+    if architecture == "legacy_honf":
+        return {
+            "source_organization": "legacy organizer environment tokens",
+            "read_organization": "legacy organizer/hypergraph contract",
+            "deterministic_support": None,
+            "topology_export": "legacy wrapper limitation; no matched new-family support export",
+        }
+    return {
+        "source_organization": "unknown",
+        "read_organization": "unknown",
+        "deterministic_support": None,
+        "topology_export": "unavailable for unsupported architecture",
+    }
+
+
 def _measure_phase(
     function: Any,
     device: torch.device,
@@ -1343,6 +1409,19 @@ def run_timing_protocol(args: argparse.Namespace) -> dict[str, Any]:
         state_before = _state_keys(model)
         real_rows: list[dict[str, Any]] = []
         architecture = str(model.config.core_honf.forward_architecture)
+        phase_limitations: dict[str, dict[str, str]] = {}
+        if architecture == "legacy_honf":
+            # The legacy ChannelThermal wrapper has no maintained
+            # InterfaceFieldCore.encode_case/build_layout boundary.  Keep
+            # the omission explicit instead of timing a partial proxy.
+            phase_limitations["encoding_plus_layout_construction"] = {
+                "status": "unsupported",
+                "label": "legacy_wrapper_limitation",
+                "reason": (
+                    "legacy_honf uses the legacy organizer wrapper and has no "
+                    "matched encode_case/build_layout phase"
+                ),
+            }
         for case_id in [str(value) for value in (args.case_id or ANCHOR_CASE_IDS[:2])]:
             sample = select_sample(dataset, case_id, 0)
             query_np = _query_points(sample, int(args.query_count))
@@ -1379,11 +1458,20 @@ def run_timing_protocol(args: argparse.Namespace) -> dict[str, Any]:
             def encoding_layout() -> Any:
                 return _new_family_encoding_and_layout(model, batch)
 
-            phase_functions = (
-                ("encoding_plus_layout_construction", encoding_layout),
-                ("physical_preparation_plus_one_query", prepare_one),
-                ("full_forward", full_forward),
-            )
+            if architecture == "legacy_honf":
+                # The legacy ChannelThermal wrapper has no maintained
+                # InterfaceFieldCore.encode_case/build_layout boundary.  Keep
+                # the omission explicit instead of timing a partial proxy.
+                phase_functions = (
+                    ("physical_preparation_plus_one_query", prepare_one),
+                    ("full_forward", full_forward),
+                )
+            else:
+                phase_functions = (
+                    ("encoding_plus_layout_construction", encoding_layout),
+                    ("physical_preparation_plus_one_query", prepare_one),
+                    ("full_forward", full_forward),
+                )
             # Keep output checks outside timed calls.  The first reference is
             # the normal path at the measured chunk, while the second follows
             # the established profiler's chunk-128 reference convention.
@@ -1526,7 +1614,14 @@ def run_timing_protocol(args: argparse.Namespace) -> dict[str, Any]:
                 "shape": {"M": module_count, "E": env_count, "Q": query_count},
                 "grid_shape": {"nx": grid_nx, "ny": grid_ny},
                 "realized_source_count": int(grid_environment.env_coords.shape[1]),
-                "realized_region_count": realized_region_count,
+                # Region membership is an adapter-owned Regional contract;
+                # reporting the synthetic builder's IDs for other families
+                # would imply topology they do not use.
+                "realized_region_count": (
+                    realized_region_count
+                    if architecture == "regional_response_honf"
+                    else None
+                ),
                 "receiver_chunk_size": receiver_chunk,
                 "variants": {},
             }
@@ -1618,6 +1713,8 @@ def run_timing_protocol(args: argparse.Namespace) -> dict[str, Any]:
                 "checkpoint": _checkpoint_record(spec, checkpoint, model),
                 "architecture": architecture,
                 "dataset": str(dataset_path),
+                "geometry_organization": _timing_geometry_organization(model),
+                "phase_limitations": phase_limitations,
                 "real_anchors": real_rows,
                 "synthetic_shapes": synthetic_rows,
                 "state_dict_structure_unchanged": state_before == _state_keys(model),
@@ -1641,9 +1738,11 @@ def run_timing_protocol(args: argparse.Namespace) -> dict[str, Any]:
         "limitations": [
             *(["This bounded helper execution test is a smoke check for the timing path and is not an endpoint benchmark."] if execution_test else []),
             "Synthetic shapes measure execution only and use realized even rectangular grids; they are not physical-accuracy evidence.",
-            "Encoding/layout, physical preparation, prepared decode, and full forward are measured as separate phases on real anchors.",
+            "Where an architecture exposes the matched boundary, encoding/layout, physical preparation, prepared decode, and full forward are measured as separate phases on real anchors.",
             "Operation rows are collected in an untimed matched pass and count actual backend output rows.",
             "Peak reserved memory can retain allocator history; peak allocated is reported separately.",
+            "Legacy timing omits encoding_plus_layout_construction and labels that phase as legacy_wrapper_limitation because no matched new-family boundary exists.",
+            "Synthetic realized_region_count is reported only for Regional; Dense, latent, Reader, and Legacy do not expose deterministic region topology through this harness.",
         ],
     }
 

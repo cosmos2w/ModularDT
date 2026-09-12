@@ -71,8 +71,21 @@ def test_duplicate_environment_preserves_token_values() -> None:
     assert duplicated.env_features.shape == (1, 6, 7)
     assert torch.equal(duplicated.env_coords[:, :3], duplicated.env_coords[:, 3:])
     assert torch.equal(duplicated.env_features[:, :3], duplicated.env_features[:, 3:])
+    assert duplicated.env_region_ids is None
     with pytest.raises(ValueError):
         stage3.duplicate_environment_bundle(environment, factor=1)
+
+
+def test_duplicate_environment_preserves_regional_membership() -> None:
+    environment = stage3.ChannelThermalEnvironment(
+        env_coords=torch.zeros(2, 4, 2),
+        env_features=torch.zeros(2, 4, 7),
+        env_region_ids=torch.tensor([[0, 0, 1, 1], [0, 1, 1, 0]]),
+    )
+    duplicated = stage3.duplicate_environment_bundle(environment, factor=3)
+    assert duplicated.env_region_ids.shape == (2, 12)
+    for block in duplicated.env_region_ids.split(4, dim=1):
+        assert torch.equal(block, environment.env_region_ids)
 
 
 def test_duplicated_environment_proxy_preserves_query_features() -> None:

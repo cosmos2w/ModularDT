@@ -11,8 +11,11 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "diagnostics"))
 
 from run_regional_response_study import (
+    _family_for_architecture,
+    _phase_variant_context,
     _regular_environment,
     _regular_grid_shape,
+    _timing_geometry_organization,
     backend_read_zero,
     build_region_partition,
     capture_environment_contexts,
@@ -37,11 +40,27 @@ class _FakeRegionalBackend:
         return torch.full((1, 2, 3), 4.0), torch.ones((1, 1, 2, 2))
 
 
+class _FakeLatentBackend:
+    latent_count = 16
+
+    def read(self, *_args, **_kwargs):
+        return torch.full((1, 2, 3), 7.0), {"route": "latent"}
+
+
 def _fake_model() -> SimpleNamespace:
     backend = _FakeRegionalBackend()
     core = SimpleNamespace(backend=backend, _interface_read_role="p2_field")
     config = SimpleNamespace(
         core_honf=SimpleNamespace(forward_architecture="regional_response_honf")
+    )
+    return SimpleNamespace(core=core, config=config)
+
+
+def _fake_latent_model() -> SimpleNamespace:
+    backend = _FakeLatentBackend()
+    core = SimpleNamespace(backend=backend, _interface_read_role="p2_field")
+    config = SimpleNamespace(
+        core_honf=SimpleNamespace(forward_architecture="geometry_latent_field")
     )
     return SimpleNamespace(core=core, config=config)
 
@@ -69,6 +88,27 @@ def test_regional_removal_is_role_scoped() -> None:
         value, aux = model.core.backend.read(None, None, None, None)
     torch.testing.assert_close(value, torch.full((1, 2, 3), 9.0))
     assert aux == {"route": "combined"}
+
+
+def test_latent_phase_family_uses_shared_role_scoped_read_removal() -> None:
+    model = _fake_latent_model()
+    assert _family_for_architecture("geometry_latent_field") == "latent"
+    with _phase_variant_context(model, "latent", "p2"):
+        value, aux = model.core.backend.read(None, None, None, None)
+    torch.testing.assert_close(value, torch.zeros((1, 2, 3)))
+    assert aux == {"route": "latent"}
+
+    model.core._interface_read_role = "p1_refinement"
+    with _phase_variant_context(model, "latent", "p2"):
+        value, _ = model.core.backend.read(None, None, None, None)
+    torch.testing.assert_close(value, torch.full((1, 2, 3), 7.0))
+
+
+def test_timing_geometry_summary_does_not_claim_latent_source_topology() -> None:
+    summary = _timing_geometry_organization(_fake_latent_model())
+    assert summary["latent_count"] == 16
+    assert summary["deterministic_support"] is False
+    assert "learned" in summary["topology_export"]
 
 
 def test_study_partition_accepts_duplicate_coordinates_with_explicit_ids() -> None:

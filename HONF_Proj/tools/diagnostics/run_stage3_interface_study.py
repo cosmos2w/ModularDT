@@ -1630,6 +1630,10 @@ def duplicate_environment_bundle(environment: ChannelThermalEnvironment, factor:
     return ChannelThermalEnvironment(
         env_coords=torch.cat([environment.env_coords] * factor, dim=1),
         env_features=torch.cat([environment.env_features] * factor, dim=1),
+        env_region_ids=(
+            None if environment.env_region_ids is None
+            else torch.cat([environment.env_region_ids] * factor, dim=1)
+        ),
     )
 
 
@@ -1666,8 +1670,8 @@ def _output_tensors(outputs: Mapping[str, Any]) -> dict[str, torch.Tensor]:
 
 def run_quadrature(args: argparse.Namespace) -> dict[str, Any]:
     specs = parse_checkpoint_specs(args.checkpoint)
-    if len(specs) != 4:
-        raise ValueError("quadrature requires exactly four explicitly labelled checkpoints")
+    if not specs:
+        raise ValueError("quadrature requires at least one explicitly labelled checkpoint")
     device = select_device(args.device)
     case_id = str((args.case_id or list(DEFAULT_CASE_IDS))[0])
     model_records: list[dict[str, Any]] = []
@@ -3214,7 +3218,7 @@ def build_parser() -> argparse.ArgumentParser:
     gradients.add_argument("--step-radius", action="append", type=float, default=None, metavar="FRACTION_OF_R")
     gradients.set_defaults(handler=run_gradients)
 
-    quadrature = subparsers.add_parser("quadrature", help="environment duplication consistency for four models")
+    quadrature = subparsers.add_parser("quadrature", help="environment duplication consistency for the labelled models")
     _add_common_arguments(quadrature)
     quadrature.add_argument("--checkpoint", action="append", required=True, metavar="LABEL=PATH")
     quadrature.add_argument("--duplication-factor", type=int, default=2)
