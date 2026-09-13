@@ -28,6 +28,7 @@ from ..data import (
     collate_windfarm,
 )
 from ..geometry import ENV_TOKEN_SHAPE
+from ..loss_plot import render_loss_history
 from ..model import WindFarmForwardModel
 from ..normalization import (
     VelocityNormalizer,
@@ -561,7 +562,12 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
 
     channel_weights = torch.as_tensor(cfg.get("loss", {}).get("channel_weights", [1.0, 1.0, 1.0]), dtype=torch.float32, device=device)
     history: list[dict[str, Any]] = _read_history(run_dir / "metrics.csv") if resume_payload is not None else []
-    receiver_chunk_size = int(core_payload.get("interface_model", {}).get("receiver_chunk_size", 128))
+    receiver_chunk_size = int(
+        dataset_cfg.get(
+            "receiver_chunk_size",
+            core_payload.get("interface_model", {}).get("receiver_chunk_size", 128),
+        )
+    )
     gradient_clip_norm = float(training_cfg.get("gradient_clip_norm", 1.0))
     for epoch in range(start_epoch, epochs + 1):
         train_generator.manual_seed(int(seed) + 104729 + 1000003 * int(epoch))
@@ -688,6 +694,13 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
         }
         history.append(row)
         _write_history(run_dir / "metrics.csv", history)
+        plot_every = int(training_cfg.get("plot_every_epochs", 50))
+        if epoch == 1 or (plot_every > 0 and epoch % plot_every == 0) or epoch == epochs:
+            render_loss_history(
+                history,
+                run_dir / "plots" / "loss_history.png",
+                title=f"{run_dir.name}: WindFarm loss history through epoch {epoch}",
+            )
         print(
             f"[windfarm] epoch={epoch} loss={train_metrics['loss']:.6g} "
             f"val_volume={val_metrics.get('volume_mse', float('nan')):.6g} updates={update_count}"

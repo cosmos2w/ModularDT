@@ -37,6 +37,7 @@ DATASET_KEYS = {
     "num_workers",
     "dynamic_module_padding",
     "max_modules_per_batch",
+    "receiver_chunk_size",
     "q_train",
     "q_volume",
     "q_band",
@@ -144,6 +145,8 @@ class WindFarmPlugin:
             raise ValueError("dataset.env_token_shape must contain three positive dimensions.")
         if int(dataset.get("batch_size", 8)) <= 0:
             raise ValueError("dataset.batch_size must be positive.")
+        if int(dataset.get("receiver_chunk_size", 128)) <= 0:
+            raise ValueError("dataset.receiver_chunk_size must be positive.")
         for name in ("q_train", "q_volume", "q_band"):
             if int(dataset.get(name, 0)) <= 0:
                 raise ValueError(f"dataset.{name} must be positive.")
