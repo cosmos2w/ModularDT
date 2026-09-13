@@ -58,7 +58,7 @@ def _wrap_periodic_delta(
         return delta
     wrapped = torch.remainder(delta + 0.5 * lengths, lengths) - 0.5 * lengths
     mask = torch.tensor(
-        [axis in periodic_axes for axis in range(2)],
+        [axis in periodic_axes for axis in range(delta.shape[-1])],
         device=delta.device,
         dtype=torch.bool,
     )
@@ -206,7 +206,7 @@ class HypergraphGatedPairwiseKernel(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor | str]]:
         """Aggregate query-module interactions through hyperedge routing.
 
-        Queries ``[B,Q,2]`` and modules ``[B,M,*]`` form pair embeddings
+        Queries ``[B,Q,d]`` and modules ``[B,M,*]`` form pair embeddings
         ``[B,Q,M,H]``. ``A_mh [B,M,K]`` pools them per hyperedge and
         ``hyper_attention [B,Q,K]`` reduces them to context ``[B,Q,H]``.
         Diagnostics stay scalar unless routing maps are requested.
@@ -777,22 +777,33 @@ class HypergraphGatedPairwiseKernel(nn.Module):
         query_xy: torch.Tensor,
         selected_centers: torch.Tensor,
     ) -> torch.Tensor:
-        """Return geometry for gathered centers shaped ``[Q,R,2]``."""
+        """Return geometry for gathered centers shaped ``[Q,R,d]``."""
 
         cfg = self.config
-        scale_x, scale_y = cfg.spatial_scale()
-        lx = max(scale_x, EPS)
-        ly = max(scale_y, EPS)
-        diag = max(math.sqrt(lx * lx + ly * ly), EPS)
+        scale_values = cfg.spatial_scale()
+        lx = max(float(scale_values[0]), EPS)
         delta = query_xy[:, None, :] - selected_centers
+        if cfg.spatial_dim == 2:
+            ly = max(float(scale_values[1]), EPS)
+            diag = max(math.sqrt(lx * lx + ly * ly), EPS)
+        else:
+            scales = query_xy.new_tensor(scale_values).clamp_min(EPS)
+            diag = torch.sqrt(scales.square().sum()).clamp_min(EPS)
         if cfg.periodic_dimensions():
-            lengths = query_xy.new_tensor([lx, ly])
+            lengths = query_xy.new_tensor(scale_values) if cfg.spatial_dim == 2 else scales
             delta = _wrap_periodic_delta(delta, lengths, cfg.periodic_dimensions())
         dx = delta[..., 0:1]
-        dy = delta[..., 1:2]
-        distance = torch.sqrt(dx.square() + dy.square() + EPS)
+        if cfg.spatial_dim == 2:
+            dy = delta[..., 1:2]
+            distance = torch.sqrt(dx.square() + dy.square() + EPS)
+            return torch.cat(
+                [dx / lx, dy / ly, distance / diag, torch.relu(dx) / lx, torch.relu(-dx) / lx, dy.abs() / ly],
+                dim=-1,
+            )
+        distance = torch.sqrt(delta.square().sum(dim=-1, keepdim=True) + EPS)
+        transverse = torch.sqrt((delta[..., 1:] / scales[1:]).square().sum(dim=-1, keepdim=True) + EPS)
         return torch.cat(
-            [dx / lx, dy / ly, distance / diag, torch.relu(dx) / lx, torch.relu(-dx) / lx, dy.abs() / ly],
+            [delta / scales, distance / diag, torch.relu(dx) / lx, torch.relu(-dx) / lx, transverse],
             dim=-1,
         )
 
@@ -804,45 +815,73 @@ class HypergraphGatedPairwiseKernel(nn.Module):
         """Return normalized geometry for aligned flat query-module pairs."""
 
         cfg = self.config
-        scale_x, scale_y = cfg.spatial_scale()
-        lx = max(scale_x, EPS)
-        ly = max(scale_y, EPS)
-        diag = max(math.sqrt(lx * lx + ly * ly), EPS)
+        scale_values = cfg.spatial_scale()
+        lx = max(float(scale_values[0]), EPS)
         delta = query_xy - module_centers
+        if cfg.spatial_dim == 2:
+            ly = max(float(scale_values[1]), EPS)
+            diag = max(math.sqrt(lx * lx + ly * ly), EPS)
+        else:
+            scales = query_xy.new_tensor(scale_values).clamp_min(EPS)
+            diag = torch.sqrt(scales.square().sum()).clamp_min(EPS)
         if cfg.periodic_dimensions():
-            lengths = query_xy.new_tensor([lx, ly])
+            lengths = query_xy.new_tensor(scale_values) if cfg.spatial_dim == 2 else scales
             delta = _wrap_periodic_delta(delta, lengths, cfg.periodic_dimensions())
         dx = delta[..., 0:1]
-        dy = delta[..., 1:2]
-        distance = torch.sqrt(dx.square() + dy.square() + EPS)
+        if cfg.spatial_dim == 2:
+            dy = delta[..., 1:2]
+            distance = torch.sqrt(dx.square() + dy.square() + EPS)
+            return torch.cat(
+                [dx / lx, dy / ly, distance / diag, torch.relu(dx) / lx, torch.relu(-dx) / lx, dy.abs() / ly],
+                dim=-1,
+            )
+        distance = torch.sqrt(delta.square().sum(dim=-1, keepdim=True) + EPS)
+        transverse = torch.sqrt((delta[..., 1:] / scales[1:]).square().sum(dim=-1, keepdim=True) + EPS)
         return torch.cat(
-            [dx / lx, dy / ly, distance / diag, torch.relu(dx) / lx, torch.relu(-dx) / lx, dy.abs() / ly],
+            [delta / scales, distance / diag, torch.relu(dx) / lx, torch.relu(-dx) / lx, transverse],
             dim=-1,
         )
 
     def _relative_features(self, query_xy: torch.Tensor, module_centers: torch.Tensor) -> torch.Tensor:
-        """Return normalized query-to-module offsets and distances ``[B,Q,M,6]``."""
+        """Return normalized query-to-module offsets and distances ``[B,Q,M,d+4]``."""
 
         cfg = self.config
-        scale_x, scale_y = cfg.spatial_scale()
-        lx = max(scale_x, EPS)
-        ly = max(scale_y, EPS)
-        diag = max(math.sqrt(lx * lx + ly * ly), EPS)
+        scale_values = cfg.spatial_scale()
+        lx = max(float(scale_values[0]), EPS)
         delta = query_xy[:, :, None, :] - module_centers[:, None, :, :]
+        if cfg.spatial_dim == 2:
+            ly = max(float(scale_values[1]), EPS)
+            diag = max(math.sqrt(lx * lx + ly * ly), EPS)
+        else:
+            scales = query_xy.new_tensor(scale_values).clamp_min(EPS)
+            diag = torch.sqrt(scales.square().sum()).clamp_min(EPS)
         if cfg.periodic_dimensions():
-            lengths = torch.tensor([lx, ly], device=query_xy.device, dtype=query_xy.dtype)
+            lengths = torch.tensor(scale_values, device=query_xy.device, dtype=query_xy.dtype) if cfg.spatial_dim == 2 else scales
             delta = _wrap_periodic_delta(delta, lengths, cfg.periodic_dimensions())
         dx = delta[..., 0:1]
-        dy = delta[..., 1:2]
-        distance = torch.sqrt(dx.square() + dy.square() + EPS)
+        if cfg.spatial_dim == 2:
+            dy = delta[..., 1:2]
+            distance = torch.sqrt(dx.square() + dy.square() + EPS)
+            return torch.cat(
+                [
+                    dx / lx,
+                    dy / ly,
+                    distance / diag,
+                    torch.relu(dx) / lx,
+                    torch.relu(-dx) / lx,
+                    dy.abs() / ly,
+                ],
+                dim=-1,
+            )
+        distance = torch.sqrt(delta.square().sum(dim=-1, keepdim=True) + EPS)
+        transverse = torch.sqrt((delta[..., 1:] / scales[1:]).square().sum(dim=-1, keepdim=True) + EPS)
         return torch.cat(
             [
-                dx / lx,
-                dy / ly,
+                delta / scales,
                 distance / diag,
                 torch.relu(dx) / lx,
                 torch.relu(-dx) / lx,
-                dy.abs() / ly,
+                transverse,
             ],
             dim=-1,
         )

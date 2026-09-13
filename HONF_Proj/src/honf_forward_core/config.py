@@ -326,10 +326,19 @@ class UnifiedForwardConfig:
     direct_residual_gate_init: float = 0.0
     use_A_me_auxiliary: bool = True
     output_mean_residual_split: bool = False
+    # Historical profiles omit this field and therefore continue to use the
+    # original two-dimensional parameter/feature path.  A three-dimensional
+    # path is opt-in and is intentionally limited to the supported WindFarm
+    # fixed organizer and dense interface backend.  It is appended to retain
+    # the positional order of every pre-existing configuration field.
+    spatial_dim: int = 2
 
     def __post_init__(self) -> None:
         """Validate mode names and numerical routing constraints."""
 
+        if int(self.spatial_dim) not in {2, 3}:
+            raise ValueError("spatial_dim must be 2 or 3.")
+        self.spatial_dim = int(self.spatial_dim)
         if isinstance(self.interface_model, dict):
             self.interface_model = InterfaceFieldConfig.from_dict(self.interface_model)
         if self.forward_architecture not in FORWARD_ARCHITECTURES:
@@ -591,12 +600,47 @@ class UnifiedForwardConfig:
         if self.local_context_scale is not None and float(self.local_context_scale) <= 0.0:
             raise ValueError("local_context_scale must be positive when provided.")
         if self.coordinate_scale is not None:
-            if len(self.coordinate_scale) != 2 or any(float(value) <= 0.0 for value in self.coordinate_scale):
-                raise ValueError("coordinate_scale must contain two positive values for the current 2-D core.")
+            if len(self.coordinate_scale) != self.spatial_dim or any(
+                float(value) <= 0.0 for value in self.coordinate_scale
+            ):
+                raise ValueError(
+                    f"coordinate_scale must contain {self.spatial_dim} positive values."
+                )
+        if self.spatial_dim == 3:
+            if self.coordinate_scale is None:
+                raise ValueError("spatial_dim=3 requires an explicit three-value coordinate_scale.")
+            if self.forward_architecture not in {"legacy_honf", "dense_pairwise_field"}:
+                raise ValueError(
+                    "spatial_dim=3 is supported only by legacy_honf or dense_pairwise_field."
+                )
+            if self.forward_architecture == "legacy_honf" and self.organizer_mode != "fixed_projection":
+                raise ValueError("spatial_dim=3 legacy_honf requires fixed_projection organization.")
+            if self.geometry_mode != "nonperiodic":
+                raise ValueError("spatial_dim=3 currently supports only nonperiodic geometry.")
+            if self.periodic_axes not in (None, []):
+                raise ValueError("spatial_dim=3 currently does not support periodic_axes.")
+            if self.boundary_feature_mode != "none":
+                raise ValueError("spatial_dim=3 requires boundary_feature_mode='none'.")
+            if self.forward_architecture == "legacy_honf":
+                if self.field_assembly_mode != "context_fusion":
+                    raise ValueError("spatial_dim=3 legacy_honf requires context_fusion assembly.")
+                if self.pairwise_kernel_mode != "legacy_mlp":
+                    raise ValueError("spatial_dim=3 legacy_honf requires the legacy_mlp pair kernel.")
+                if self.pairwise_aggregation_mode != "fused_query_module":
+                    raise ValueError("spatial_dim=3 legacy_honf requires fused_query_module aggregation.")
+                if self.routing_execution != "dense" or self.edge_selection_mode != "all":
+                    raise ValueError("spatial_dim=3 legacy_honf requires dense full-support routing.")
+                if self.query_edge_limit != 0 or self.query_module_limit != 0:
+                    raise ValueError("spatial_dim=3 legacy_honf does not support query routing truncation.")
+                if self.hyper_attention_topk != 0:
+                    raise ValueError("spatial_dim=3 legacy_honf does not support hyperedge top-k routing.")
         if self.periodic_axes is not None:
             axes = [int(value) for value in self.periodic_axes]
-            if len(set(axes)) != len(axes) or any(value not in {0, 1} for value in axes):
-                raise ValueError("periodic_axes must contain unique axis indices from {0,1}.")
+            allowed_axes = set(range(self.spatial_dim))
+            if len(set(axes)) != len(axes) or any(value not in allowed_axes for value in axes):
+                raise ValueError(
+                    f"periodic_axes must contain unique axis indices from {sorted(allowed_axes)}."
+                )
         if self.hyper_module_assignment_mode not in {"learned", "uniform"}:
             raise ValueError("hyper_module_assignment_mode must be 'learned' or 'uniform'.")
         if self.hyper_query_attention_mode not in {"learned", "uniform"}:
@@ -611,11 +655,15 @@ class UnifiedForwardConfig:
         if self.decoder_mode == "enhanced_honf_pairwise_only":
             self.use_hyper_value_context = False
 
-    def spatial_scale(self) -> tuple[float, float]:
-        """Return neutral 2-D coordinate scales with legacy length fallback."""
+    def spatial_scale(self) -> tuple[float, ...]:
+        """Return coordinate scales with the historical 2-D fallback."""
 
         if self.coordinate_scale is not None:
-            return float(self.coordinate_scale[0]), float(self.coordinate_scale[1])
+            return tuple(float(value) for value in self.coordinate_scale)
+        # The 3-D validator requires an explicit scale.  Keep a direct error
+        # here as a guard for callers that inspect a partially-built object.
+        if self.spatial_dim == 3:
+            raise ValueError("spatial_dim=3 requires an explicit coordinate_scale.")
         return float(self.domain_length_x), float(self.domain_length_y)
 
     def periodic_dimensions(self) -> tuple[int, ...]:
@@ -623,7 +671,7 @@ class UnifiedForwardConfig:
 
         if self.periodic_axes is not None:
             return tuple(sorted(int(value) for value in self.periodic_axes))
-        return (0, 1) if self.geometry_mode == "periodic" else ()
+        return tuple(range(self.spatial_dim)) if self.geometry_mode == "periodic" else ()
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "UnifiedForwardConfig":
@@ -640,6 +688,11 @@ class UnifiedForwardConfig:
         """Serialize this core configuration to plain Python values."""
 
         payload = _to_plain_dict(self)
+        # Keep historical resolved configurations byte-for-byte compatible
+        # when the new dimension selector is at its omitted/default value.
+        # New 3-D checkpoints retain the explicit selector.
+        if self.spatial_dim == 2:
+            payload.pop("spatial_dim", None)
         # Historical resolved configs/checkpoints predate the architecture
         # selector. Keep their serialized shape unchanged and do not inject an
         # empty new-family block while loading or resaving them.
@@ -698,6 +751,9 @@ class BatchData:
     # Optional typed hierarchy supplied by the case adapter, aligned to the
     # original fine environment. Historical batches leave it unset.
     env_hierarchy: Optional[Any] = None
+    # Optional adapter-owned environmental quadrature mass.  Appended after
+    # all historical fields so positional BatchData construction is stable.
+    env_weights: Optional[Any] = None
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "BatchData":
@@ -708,7 +764,12 @@ class BatchData:
     def to_dict(self) -> Dict[str, Any]:
         """Describe batch values as serializable metadata."""
 
-        return _to_plain_dict(self)
+        payload = _to_plain_dict(self)
+        # Keep the historical absent-measure representation unchanged.  A
+        # supplied tensor is still described explicitly for adapter diagnostics.
+        if self.env_weights is None:
+            payload.pop("env_weights", None)
+        return payload
 
     def to(self, device: Any) -> "BatchData":
         """Move tensor fields to a device and return a new BatchData object."""
