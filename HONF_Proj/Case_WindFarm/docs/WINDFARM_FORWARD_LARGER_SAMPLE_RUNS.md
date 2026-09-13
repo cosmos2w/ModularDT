@@ -61,3 +61,8 @@ be treated as the same training budget as the initial study: each epoch uses
 8 times as many supervised samples, while doubling batch size halves the
 approximate optimizer-update count per epoch. There is no new test evaluation
 or automatic follow-on run in this launch task.
+
+For future launches, the training workflow saves the figure at
+`plots/training/loss_history.png`. Runs 2102/2103 were already running when
+this path correction was made; their existing outputs and processes were
+left unchanged.

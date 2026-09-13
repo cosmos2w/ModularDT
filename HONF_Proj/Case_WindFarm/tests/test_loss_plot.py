@@ -34,7 +34,7 @@ def test_render_loss_history_writes_png_atomically(tmp_path: Path) -> None:
             "val_band_mse": 0.7,
         },
     ]
-    output = render_loss_history(history, tmp_path / "plots" / "loss_history.png", title="numeric test")
+    output = render_loss_history(history, tmp_path / "plots" / "training" / "loss_history.png", title="numeric test")
     assert output.is_file()
     assert output.stat().st_size > 0
     assert not list(output.parent.glob(".loss_history.*.tmp.png"))

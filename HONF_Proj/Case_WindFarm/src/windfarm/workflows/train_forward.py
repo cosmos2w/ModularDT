@@ -698,7 +698,7 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
         if epoch == 1 or (plot_every > 0 and epoch % plot_every == 0) or epoch == epochs:
             render_loss_history(
                 history,
-                run_dir / "plots" / "loss_history.png",
+                run_dir / "plots" / "training" / "loss_history.png",
                 title=f"{run_dir.name}: WindFarm loss history through epoch {epoch}",
             )
         print(
