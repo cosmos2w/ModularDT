@@ -684,7 +684,8 @@ def _plot_histories(histories: Mapping[str, Sequence[Mapping[str, Any]]], output
             if val_points:
                 axis.plot(*zip(*val_points, strict=True), color=colors[model], linestyle="--", label=f"{model} validation")
             axis.set_title(title)
-            axis.set_ylabel("MSE")
+            axis.set_ylabel("MSE (log scale)")
+            axis.set_yscale("log")
             axis.grid(alpha=0.25)
     axes[1].set_xlabel("Epoch")
     axes[0].legend(loc="best", fontsize="small", ncol=2)

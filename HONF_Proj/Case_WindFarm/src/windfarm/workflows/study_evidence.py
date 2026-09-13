@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -73,11 +74,77 @@ def _vertical_profile(case: Any, predict: Any, baseline: Any, output: Path) -> d
             "reference_channel_span_mps": np.ptp(target, axis=0).tolist()}
 
 
-def _routing_summary(model: Any, case: Any, prepared: Any, device: torch.device, figure: Path) -> dict[str, Any]:
+def _sparse_routing_z_ticks(spatial: Any, max_ticks: int = 3) -> None:
+    """Keep the physical 3-D aspect while making the z-axis readable."""
+    lower, upper = (float(value) for value in spatial.get_zlim())
+    if np.isfinite(lower) and np.isfinite(upper):
+        if np.isclose(lower, upper):
+            ticks = np.asarray([lower], dtype=float)
+        else:
+            ticks = np.linspace(lower, upper, num=min(max_ticks, 3))
+        spatial.set_zticks(ticks)
+    spatial.set_xlabel("x / D", labelpad=8)
+    spatial.set_ylabel("y / D", labelpad=8)
+    spatial.set_zlabel("z / D", labelpad=10)
+    spatial.zaxis.set_tick_params(labelsize=8, pad=2)
+
+
+def render_saved_routing_summary(summary: dict[str, Any], case: Any, figure: Path) -> None:
+    """Render a saved routing summary without model inference or volume reads."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    fig = plt.figure(figsize=(15, 6), layout="constrained")
+    spatial = fig.add_subplot(1, 2, 2, projection="3d")
+    spatial.set_box_aspect(case.support.extent_D)
+    if summary.get("architecture") == "legacy_honf":
+        coords = np.asarray(summary["query_coords_D"], dtype=float).reshape(-1, 3)
+        dominant = np.asarray(summary["dominant_edge"], dtype=int).reshape(-1)
+        native_slice_z_m = float(summary["native_slice_z_m"])
+        ax = fig.add_subplot(1, 2, 1)
+        ax.scatter(coords[:, 0], coords[:, 1], c=dominant, cmap="tab10", s=10, vmin=0, vmax=9)
+        centers = np.asarray(case.module_centers)
+        ax.scatter(centers[:, 0], centers[:, 1], marker="x", c="black", s=22)
+        ax.set(xlabel="x / D", ylabel="y / D",
+               title=f"Dominant latent edge on z={native_slice_z_m:.2f} m slice")
+        ax.set_aspect("equal", adjustable="box")
+        source = np.asarray(summary["hyper_source_coords"], dtype=float)
+        region = np.asarray(summary["hyper_region_coords"], dtype=float)
+        if source.ndim == 3:
+            source = source[0]
+        if region.ndim == 3:
+            region = region[0]
+        for edge, (a, b) in enumerate(zip(source, region)):
+            color = plt.get_cmap("tab10")(edge)
+            spatial.scatter(*a, c=[color], marker="o", s=55)
+            spatial.scatter(*b, c=[color], marker="^", s=55)
+            spatial.plot(*np.stack((a, b)).T, c=color, alpha=.7)
+            ax.scatter([], [], c=[color], s=16, label=f"Edge {edge}")
+        ax.legend(loc="upper center", bbox_to_anchor=(.5, -.18), ncol=6, fontsize=8)
+        spatial.set_title("3-D source (circle) / region (triangle) centroids", fontsize=11)
+    else:
+        mean_attention = np.asarray(summary["mean_environment_attention"], dtype=float).reshape(-1)
+        env = np.asarray(case.env_coords, dtype=float)
+        if mean_attention.size != env.shape[0]:
+            raise ValueError("saved environment attention does not match native environment coordinates")
+        artist = spatial.scatter(env[:, 0], env[:, 1], env[:, 2], c=mean_attention, s=12, cmap="viridis")
+        fig.colorbar(artist, ax=spatial, shrink=.6, pad=.1, orientation="horizontal",
+                     label="Mean environment attention")
+        spatial.set_title("Environment attention averaged over heads/receivers", fontsize=11)
+        ax = fig.add_subplot(1, 2, 1)
+        names = [key for key in ("dense_module_context_norm", "main_context_norm", "coarse_context_norm", "local_context_norm") if key in summary]
+        ax.barh(names, [summary[key] for key in names])
+        ax.set(xlabel="Mean context norm", title="Executed dense contribution summaries")
+    spatial.scatter(*np.asarray(case.module_centers).T, c="black", marker="x", s=12)
+    _sparse_routing_z_ticks(spatial)
+    fig.suptitle(f"{case.case}: bounded routing diagnostic; no physical edge labels", fontsize=12)
+    figure.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(figure, dpi=150, bbox_inches="tight", pad_inches=.2)
+    plt.close(fig)
+
+
+def _routing_summary(model: Any, case: Any, prepared: Any, device: torch.device, figure: Path) -> dict[str, Any]:
     plane = native_plane(case.run, "z", 70.)
     chosen = np.linspace(0, len(plane["coords_D"]) - 1, 512, dtype=np.int64)
     coords = plane["coords_D"][chosen]
@@ -87,10 +154,6 @@ def _routing_summary(model: Any, case: Any, prepared: Any, device: torch.device,
                               receiver_chunk_size=128, return_routing_maps=True)
     summary: dict[str, Any] = {"receiver_count": 512, "architecture": model.architecture,
                                "native_slice_z_m": plane["actual_m"]}
-    fig = plt.figure(figsize=(15, 6), layout="constrained")
-    spatial = fig.add_subplot(1, 2, 2, projection="3d")
-    spatial.set(xlabel="x / D", ylabel="y / D", zlabel="z / D")
-    spatial.set_box_aspect(case.support.extent_D)
     if model.architecture == "legacy_honf":
         for key in ("hyper_source_coords", "hyper_region_coords", "A_mh"):
             summary[key] = prepared.encoded[key].detach().cpu().tolist()
@@ -100,31 +163,10 @@ def _routing_summary(model: Any, case: Any, prepared: Any, device: torch.device,
             summary["mean_query_edge_attention"] = values.mean(dim=1).cpu().tolist()
             summary["query_coords_D"] = coords.tolist()
             summary["dominant_edge"] = values.argmax(dim=-1).cpu().tolist()
-            ax = fig.add_subplot(1, 2, 1)
-            ax.scatter(coords[:, 0], coords[:, 1], c=values.argmax(dim=-1)[0].cpu(), cmap="tab10", s=10, vmin=0, vmax=9)
-            ax.scatter(case.module_centers[:, 0], case.module_centers[:, 1], marker="x", c="black", s=22)
-            ax.set(xlabel="x / D", ylabel="y / D", title=f"Dominant latent edge on z={plane['actual_m']:.2f} m slice")
-            ax.set_aspect("equal", adjustable="box")
-            source = prepared.encoded["hyper_source_coords"][0].detach().cpu().numpy()
-            region = prepared.encoded["hyper_region_coords"][0].detach().cpu().numpy()
-            for edge, (a, b) in enumerate(zip(source, region)):
-                color = plt.get_cmap("tab10")(edge)
-                spatial.scatter(*a, c=[color], marker="o", s=55)
-                spatial.scatter(*b, c=[color], marker="^", s=55)
-                spatial.plot(*np.stack((a, b)).T, c=color, alpha=.7)
-                ax.scatter([], [], c=[color], s=16, label=f"Edge {edge}")
-            ax.legend(loc="upper center", bbox_to_anchor=(.5, -.18), ncol=6, fontsize=8)
-            spatial.set_title("3-D source (circle) / region (triangle) centroids", fontsize=11)
     else:
         attention = output.get("dense_environment_attention")
         if attention is not None:
             summary["mean_environment_attention"] = attention.detach().mean(dim=(1, 2)).cpu().tolist()
-            mean_attention = attention.detach().mean(dim=(1, 2))[0].cpu().numpy()
-            env = case.env_coords
-            artist = spatial.scatter(env[:, 0], env[:, 1], env[:, 2], c=mean_attention, s=12, cmap="viridis")
-            fig.colorbar(artist, ax=spatial, shrink=.6, pad=.1, orientation="horizontal",
-                         label="Mean environment attention")
-            spatial.set_title("Environment attention averaged over heads/receivers", fontsize=11)
         for key in ("dense_module_context_norm", "main_context_norm", "coarse_context_norm", "local_context_norm"):
             if key in output:
                 summary[key] = float(output[key].detach().mean())
@@ -134,14 +176,7 @@ def _routing_summary(model: Any, case: Any, prepared: Any, device: torch.device,
             summary["local_zero_neighbor_fraction"] = float((counts == 0).float().mean())
             summary["local_support_radius_D"] = float(model.config.module_radius) * float(
                 model.config.interface_model.local_radius_factor)
-        ax = fig.add_subplot(1, 2, 1)
-        names = [key for key in ("dense_module_context_norm", "main_context_norm", "coarse_context_norm", "local_context_norm") if key in summary]
-        ax.barh(names, [summary[key] for key in names])
-        ax.set(xlabel="Mean context norm", title="Executed dense contribution summaries")
-    spatial.scatter(*case.module_centers.T, c="black", marker="x", s=12)
-    fig.suptitle(f"{case.case}: bounded routing diagnostic; no physical edge labels", fontsize=12)
-    fig.savefig(figure, dpi=150, bbox_inches="tight", pad_inches=.2)
-    plt.close(fig)
+    render_saved_routing_summary(summary, case, figure)
     summary["figure"] = str(figure)
     return summary
 
@@ -274,7 +309,10 @@ def run_study(*, checkpoint: str | Path, volume_path: str | Path, derived_view: 
     else:
         raise ValueError(f"Unknown WindFarm evidence mode: {mode}")
     result.update({"checkpoint": str(Path(checkpoint).resolve()), "epoch": int(payload["epoch"]),
-                   "mode": mode, "selected_validation_rows": rows, "device": str(device)})
+                   "mode": mode, "selected_validation_rows": rows, "device": str(device),
+                   "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+                   "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
+                   "torch_version": str(torch.__version__)})
     atomic_write_json(output / f"{mode}_evidence.json", result)
     del model
     gc.collect()
