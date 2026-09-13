@@ -4,8 +4,9 @@
 
 Both authorized runs completed 500 epochs and 26,500 optimizer updates with
 process exit code 0. Classic selected epoch 470 and dense epoch 495 using
-validation volume MSE only. All planned prediction and representation evidence is complete. Controlled
-timing on idle physical GPU 0 remains pending because of an unrelated job.
+validation volume MSE only. All planned prediction, representation and controlled cost evidence is complete.
+The user approved idle physical GPU 1 for sequential timing because GPU 0
+remained occupied by an unrelated run.
 
 ## Source and scope
 
@@ -277,21 +278,80 @@ epoch 495 achieved scheduled validation volume MSE 0.0039383326, versus
 
 Both models completed all five endpoint stages with exit code 0. Each selected
 checkpoint received exactly one reserved-test evaluation. Controlled timing
-on idle GPU 0 remains unavailable.
+subsequently completed on idle GPU 1 with explicit user approval.
 
 The 500-epoch endpoint is an initial resource-bounded assessment. Any future
-same-run continuation command will be reported separately and left unexecuted.
+same-run continuation commands below remain unexecuted.
 
-## Controlled cost limitation
+## Controlled cost measurements
 
-At 2026-09-13 07:09 UTC, physical GPU 0 remained occupied by unrelated
-ThermalChannel Run 1807, PID 3915145, using 34,686 MiB. That process had reached
-epoch 2461 of 5000; its recent five-epoch mean was about 24 seconds per epoch,
-suggesting roughly 17 hours still required. It was not interrupted. This
-prevents the specified same-idle-physical-GPU-0 comparison during this closeout.
-No controlled latency ratio is claimed. The real disposable memory/update
-evidence above remains valid for its stated execution conditions, while
-controlled timing commands are left unexecuted below.
+With explicit user approval, both selected models were benchmarked sequentially
+on otherwise idle physical GPU 1, an NVIDIA RTX 6000 Ada Generation, using
+PyTorch 2.6.0+cu124 (`CUDA_VISIBLE_DEVICES=1`, logical `cuda:0`). Classic ran
+first, then dense; both root evaluation processes exited 0. GPU 1 had no other
+compute process before the pair and was free again afterwards. Unrelated
+ThermalChannel jobs on GPUs 0/2 remained untouched. This approved device
+substitution resolves the earlier GPU-0 availability blocker.
+
+All times below are measured medians. Both models use diagnostics-off inference,
+E512, the same three geometry-selected cases, and receiver chunk 1024. CUDA
+synchronization surrounds GPU measurements. CPU sampling includes mmap target
+gathering before discarding the targets; these are warmed in-process/OS-cache
+measurements, not cold-storage throughput. Other GPUs still share the host, so
+CPU timing does not describe an otherwise idle machine.
+
+CPU sampling, transfer and prepare use three warmups/ten repeats for both Q
+values. Prepared reads use three/ten for Q8192 and one/three for Q65536. Peak
+memory includes the resident model and live inputs/allocator scope; it is
+allocated/reserved CUDA memory, not process RSS or only incremental scratch.
+
+| Model | Row | Q | CPU sampling [ms] | Transfer [ms] | Prepare [ms] | Prepared read [ms] | Read peak allocated / reserved [MiB] |
+|---|---:|---:|---:|---:|---:|---:|---|
+| classic | 506 | 8192 | 2.246 | 0.144 | 3.388 | 35.986 | 52.76 / 70.00 |
+| classic | 506 | 65536 | 18.814 | 0.286 | 3.092 | 277.656 | 57.16 / 72.00 |
+| classic | 47 | 8192 | 2.237 | 0.141 | 3.122 | 37.998 | 55.65 / 72.00 |
+| classic | 47 | 65536 | 21.868 | 0.306 | 3.509 | 288.998 | 60.17 / 74.00 |
+| classic | 426 | 8192 | 2.279 | 0.147 | 3.178 | 37.594 | 127.18 / 156.00 |
+| classic | 426 | 65536 | 21.101 | 0.283 | 3.118 | 299.485 | 131.58 / 158.00 |
+| dense | 506 | 8192 | 2.309 | 0.145 | 3.373 | 31.564 | 606.58 / 780.00 |
+| dense | 506 | 65536 | 21.781 | 0.319 | 3.505 | 245.423 | 665.86 / 838.00 |
+| dense | 47 | 8192 | 2.086 | 0.139 | 3.185 | 30.509 | 606.58 / 772.00 |
+| dense | 47 | 65536 | 21.103 | 0.287 | 3.359 | 245.220 | 665.86 / 840.00 |
+| dense | 426 | 8192 | 2.462 | 0.143 | 3.275 | 33.847 | 606.62 / 996.00 |
+| dense | 426 | 65536 | 20.751 | 0.329 | 3.375 | 271.106 | 665.90 / 1058.00 |
+
+Native inference includes one prepare, coordinate generation, chunk transfer,
+decode and CPU output transfer over every native center. It excludes target
+error reduction and plotting. These are one-pass, no-warmup measurements,
+not a repeated-run variance estimate. No full prediction volume is saved.
+
+| Model | Row | Native cells | Complete inference [s] | Peak allocated / reserved [MiB] |
+|---|---:|---:|---:|---|
+| classic | 506 | 1,739,904 | 7.912 | 52.76 / 70.00 |
+| classic | 426 | 6,384,000 | 28.784 | 127.18 / 156.00 |
+| dense | 506 | 1,739,904 | 6.294 | 606.58 / 780.00 |
+| dense | 426 | 6,384,000 | 25.833 | 606.62 / 1038.00 |
+
+The single disposable training update uses the same training rows
+`[0,1,2,6,7,8,9,10]`, sample seed 42/epoch 0, B8, Q1024 (768 volume + 256 band),
+a fresh AdamW state, backward, gradient clipping and an actual optimizer update.
+It measures a fresh-optimizer step, not steady-state resumed-optimizer throughput.
+Both loaded models were discarded afterwards; no managed checkpoint changed.
+
+| Model | Parameters | Step [ms] | Loss | Preclip gradient norm | Sampled update norm | Peak allocated / reserved [MiB] |
+|---|---:|---:|---:|---:|---:|---|
+| classic | 1,696,286 | 178.831 | 0.01295083 | 0.254300 | 0.015844 | 1818.10 / 1948.00 |
+| dense | 3,628,551 | 251.125 | 0.00549556 | 0.176985 | 0.015870 | 2382.38 / 2684.00 |
+
+At this execution setting, dense prepared reads took 0.80–0.91× classic time,
+while its disposable training step took 1.40× classic time and used more allocated memory.
+This small fixed-order benchmark is a controlled comparison on this GPU, not
+a hardware-independent performance claim. Preparation depends on E and turbine
+count; native output count affects requested query work rather than creating
+millions of environmental tokens. The previously recorded chunk/repeat checks
+establish the numerical consistency of chunk 1024 versus training chunk 128.
+
+Raw timings, every repeat and memory measurements: [classic](/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_study/timing/classic/timing_evidence.json), [dense](/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_study/timing/dense/timing_evidence.json).
 
 ## Completed prediction evidence
 
@@ -529,7 +589,7 @@ early missing-PYTHONPATH import failure and one rejected working-directory typo;
 both occurred before model evaluation. The corrected commands succeeded. No
 numerical failure, OOM, rescue architecture, extra successful test evaluation
 or managed third run occurred. The historical golden-fixture mismatch and
-unavailable controlled GPU-0 timing are documented separately above.
+approved GPU-1 timing substitution are documented separately above.
 
 Source additions cover geometry/data/normalization, the thin model/plugin,
 field-only train/evaluate workflows, study reduction/rendering/diagnostic tools,
@@ -578,15 +638,15 @@ with labels `classic|dense:best_selection_val|exact500_val|reserved_test_best`,
 both run histories, and `--require-all-endpoints`. It only reads saved metrics;
 it does not perform another inference or reserved-test evaluation.
 
-**Unexecuted controlled timing**, sequentially on physical GPU 0 once idle:
+**Executed controlled timing**, sequentially on approved idle physical GPU 1:
 
 ```bash
-rtk proxy env CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src:Case_WindFarm/src "$wf_python" -u evaluate.py \
+rtk proxy env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src:Case_WindFarm/src "$wf_python" -u evaluate.py \
   --config project://src/config_core/forward/windfarm_classic_k6.json \
   --workflow forward --checkpoint "$wf_classic/best_model.pt" --device cuda:0 \
   --study-mode timing --output-dir "$wf_study/timing/classic"
 
-rtk proxy env CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src:Case_WindFarm/src "$wf_python" -u evaluate.py \
+rtk proxy env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src:Case_WindFarm/src "$wf_python" -u evaluate.py \
   --config project://src/config_core/forward/windfarm_dense_pairwise.json \
   --workflow forward --checkpoint "$wf_dense/best_model.pt" --device cuda:0 \
   --study-mode timing --output-dir "$wf_study/timing/dense"
@@ -599,9 +659,10 @@ use three warmups and ten repeats; large reads use one warmup/three repeats.
 Full-native inference uses one explicitly labeled pass. CUDA synchronization
 surrounds GPU timings. The disposable update changes only the loaded in-memory
 model, which is discarded; no managed checkpoint or optimizer is rewritten.
-The user was asked whether idle GPU 1 may substitute for the explicitly required
-GPU 0. Without that approval, timing remains unexecuted and no speed ratio is
-claimed.
+The user explicitly approved idle GPU 1 in place of the plan’s GPU 0. Both
+commands completed successfully; their logs are `final_endpoint_logs/classic_timing.log`
+and `final_endpoint_logs/dense_timing.log`. Other GPUs’ training logs are not used
+for this controlled comparison.
 
 ## Recommendation and unexecuted continuation
 
