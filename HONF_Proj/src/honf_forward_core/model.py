@@ -113,7 +113,15 @@ class HONFNeuralField(nn.Module):
         module_features = torch.where(active, module_features, torch.zeros_like(module_features))
 
         global_token = self.global_encoder(global_context_raw)
-        module_pos = module_centers / scales.clamp_min(1e-6)
+        if cfg.spatial_dim == 2:
+            scale_x, scale_y = cfg.spatial_scale()
+            module_pos = torch.stack(
+                [module_centers[..., 0] / max(scale_x, 1e-6),
+                 module_centers[..., 1] / max(scale_y, 1e-6)],
+                dim=-1,
+            )
+        else:
+            module_pos = module_centers / scales.clamp_min(1e-6)
         if cfg.use_position_fourier_for_modules:
             module_pos_encoded = self.position_fourier(module_pos)
         else:
@@ -140,7 +148,14 @@ class HONFNeuralField(nn.Module):
         # Preserve per-case coordinates. Earlier code encoded only env_coords[0],
         # which was correct solely when every case shared one fixed domain.
         env_coords_for_features = env_coords
-        env_norm = env_coords_for_features / scales.clamp_min(1e-6)
+        if cfg.spatial_dim == 2:
+            env_norm = torch.stack(
+                [env_coords_for_features[..., 0] / max(scale_x, 1e-6),
+                 env_coords_for_features[..., 1] / max(scale_y, 1e-6)],
+                dim=-1,
+            )
+        else:
+            env_norm = env_coords_for_features / scales.clamp_min(1e-6)
         if cfg.use_position_fourier_for_env:
             env_pos_encoded = self.position_fourier(env_norm)
         else:
