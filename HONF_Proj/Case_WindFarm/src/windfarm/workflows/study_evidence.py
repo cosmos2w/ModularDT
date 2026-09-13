@@ -128,6 +128,12 @@ def _routing_summary(model: Any, case: Any, prepared: Any, device: torch.device,
         for key in ("dense_module_context_norm", "main_context_norm", "coarse_context_norm", "local_context_norm"):
             if key in output:
                 summary[key] = float(output[key].detach().mean())
+        if "local_neighbor_count" in output:
+            counts = output["local_neighbor_count"].detach()
+            summary["local_neighbor_count_mean"] = float(counts.mean())
+            summary["local_zero_neighbor_fraction"] = float((counts == 0).float().mean())
+            summary["local_support_radius_D"] = float(model.config.module_radius) * float(
+                model.config.interface_model.local_radius_factor)
         ax = fig.add_subplot(1, 2, 1)
         names = [key for key in ("dense_module_context_norm", "main_context_norm", "coarse_context_norm", "local_context_norm") if key in summary]
         ax.barh(names, [summary[key] for key in names])
@@ -219,6 +225,10 @@ def _timing(model: Any, view: Any, rows: list[int], normalizer: Any,
                                    seed=42, fixed_sampling=True)
     batch = _as_device_batch(collate_windfarm([dataset[i] for i in range(8)]), device)
     step = disposable_update(model, batch)
+    step.update({"training_rows": training_rows[:8].astype(int).tolist(),
+                 "sample_seed": 42, "sample_epoch": 0,
+                 "volume_queries": dataset.volume_queries, "band_queries": dataset.band_queries,
+                 "optimizer_scope": "fresh AdamW state; one measured update; model discarded"})
     return {"cases": results, "training_step": step,
             "trainable_parameters": sum(p.numel() for p in model.parameters() if p.requires_grad),
             "native_inference_scope": "prepare once plus all native coordinates, transfer, decode and CPU output transfer; outputs discarded",
@@ -253,9 +263,12 @@ def run_study(*, checkpoint: str | Path, volume_path: str | Path, derived_view: 
             batches.append(case_batch(case, sample.coords_D, normalizer=normalizer,
                                       velocity_mps=sample.velocity_mps).to(device))
         result = {"geometry": geometry_diagnostics(model, batches),
+                  "geometry_sample_spec": {"volume_queries": 512, "seed_components": "[42, row, 802]"},
+                  "independent_sample_spec": {"q_volume": 32768, "q_band": 8192, "seed": 314159},
                   "independent_sample": evaluate_rows(model, view, rows[:3], normalizer=normalizer,
                                                       q_volume=32768, q_band=8192, seed=314159,
-                                                      baseline=baseline, receiver_chunk_size=1024)}
+                                                      baseline=baseline, receiver_chunk_size=1024,
+                                                      strata_reference_rows=split.train)}
     elif mode == "timing":
         result = _timing(model, view, rows, normalizer, split.train, device)
     else:

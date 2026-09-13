@@ -2,10 +2,10 @@
 
 ## Execution status
 
-Implementation and execution are in progress. This document does **not** yet
-claim completed training or final model results. The authorized study contains
-two from-scratch 500-epoch runs only. Numeric results and actual run-owned
-artifact paths will be added after execution.
+Both authorized from-scratch 500-epoch runs are active. This document does
+**not** yet claim completed training or final model results. The source branch
+has been committed and pushed normally; endpoint evidence will be added after
+training.
 
 ## Source and scope
 
@@ -216,6 +216,38 @@ definitions. They do not make compact rasters interchangeable with native
 targets. Full details are in the derived `sampling_metadata.json`.
 
 ## Training, endpoint comparison and limitations
+
+The ordinary root allocator created these two runs from integrated source
+commit `415ad6a`:
+
+| Model | ID | Physical GPU | Actual managed directory |
+|---|---:|---:|---|
+| Classic K6 | 2100 | 0 | `Trained_Results/WindFarm/HONF_Forward_Runs/Run_2100_20260913_014741_windfarm_classic_k6_velocity` |
+| Dense | 2101 | 2 | `Trained_Results/WindFarm/HONF_Forward_Runs/Run_2101_20260913_014752_windfarm_dense_velocity` |
+
+Each process sees only its assigned physical GPU and uses logical `cuda:0`.
+Logical batch eight runs directly, without accumulation or a resource-driven
+model variant. Both visit 420 rows in 53 optimizer updates per epoch. Startup
+and progress logs are the ignored study-root `training_classic.log` and
+`training_dense.log`; metrics and checkpoints are run-owned. The literal
+`val_volume=nan` printed on non-validation epochs means validation was not
+scheduled, not a nonfinite training result; CSV validation cells are blank.
+
+Executed from `HONF_Proj` (stdout/stderr redirected to the logs above):
+
+```bash
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src:Case_WindFarm/src \
+/home/wanglz/miniconda3/envs/ModularDT/bin/python -u train.py \
+  --config project://src/config_core/forward/windfarm_classic_k6.json \
+  --workflow forward --device cuda:0 --epochs 500 \
+  --run-id 2100 --run-name windfarm_classic_k6_velocity --yes
+
+CUDA_VISIBLE_DEVICES=2 PYTHONPATH=src:Case_WindFarm/src \
+/home/wanglz/miniconda3/envs/ModularDT/bin/python -u train.py \
+  --config project://src/config_core/forward/windfarm_dense_pairwise.json \
+  --workflow forward --device cuda:0 --epochs 500 \
+  --run-id 2101 --run-name windfarm_dense_velocity --yes
+```
 
 Pending actual execution: both managed 500-epoch histories, validation-only
 checkpoint selection, one reserved-test comparison, native-volume reductions,

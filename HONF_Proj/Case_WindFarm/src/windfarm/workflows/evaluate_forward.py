@@ -507,14 +507,29 @@ def evaluate_rows(
             "mean_nn_D": "mean per-turbine nearest-neighbor spacing in rotor diameters",
             "nn_dispersion": "standard deviation of per-turbine nearest-neighbor spacing in rotor diameters",
         },
+        "descriptor_source_note": (
+            "Nearest-neighbor descriptors are recomputed from row-specific native turbine centers; "
+            "no equivalence to a stored compact-descriptor formula is claimed."
+        ),
     }
     for key, indexes in sorted(strata.items()):
         values = np.asarray([case_rows[index]["volume_rmse_mps"] for index in indexes], dtype=np.float64)
+        layouts = {int(case_rows[index]["layout_index"]) for index in indexes}
         summary["strata"][key] = {
             "cases": len(indexes),
+            "layouts": len(layouts),
+            "volume_sample_count": int(sum(int(case_rows[index]["volume_count"]) for index in indexes)),
             "mean_volume_rmse_mps": float(values.mean()),
             "median_volume_rmse_mps": float(np.median(values)),
             "max_volume_rmse_mps": float(values.max()),
+            "overlap_note": (
+                "Strata overlap by construction: a case contributes to every applicable "
+                "turbine-count, direction, volume, and geometry stratum."
+            ),
+            "descriptor_source_note": (
+                "Nearest-neighbor descriptors use row-specific native turbine centers; "
+                "stored compact-descriptor formula equivalence is not claimed."
+            ),
         }
     return summary
 
@@ -649,7 +664,71 @@ def evaluate_cli(
             or payload.get("model_config", {}).get("interface_model", {}).get("receiver_chunk_size", 128)
         ),
     )
-    result.update({"checkpoint": str(checkpoint_path), "split": selected_split, "workflow": workflow})
+    partition_metadata = split.metadata.get("partitions", {})
+    split_rows_metadata = split.metadata.get("rows", {})
+    split_groups_metadata = split.metadata.get("groups", {})
+
+    def _partition_counts(name: str) -> dict[str, int | None]:
+        values = partition_metadata.get(name, {}) if isinstance(partition_metadata, Mapping) else {}
+        if not isinstance(values, Mapping):
+            values = {}
+        rows_value = values.get("rows")
+        if rows_value is None and isinstance(split_rows_metadata, Mapping):
+            rows_value = split_rows_metadata.get(name)
+        groups_value = values.get("groups")
+        if groups_value is None and isinstance(split_groups_metadata, Mapping):
+            groups_value = split_groups_metadata.get(name)
+        rows = np.asarray(getattr(split, name), dtype=np.int64)
+        if rows_value is None:
+            rows_value = int(rows.size)
+        if groups_value is None:
+            layout_values = np.asarray(view.volume.array("layout_index"))[rows]
+            groups_value = int(np.unique(layout_values).size)
+        return {
+            "rows": int(rows_value),
+            "layouts": int(groups_value),
+        }
+
+    checkpoint_epoch = payload.get("epoch", payload.get("current_epoch"))
+    checkpoint_name = checkpoint_path.name
+    if checkpoint_name.startswith("best"):
+        checkpoint_role = "best_validation_checkpoint"
+    elif checkpoint_name.startswith("epoch_0500") and checkpoint_epoch == 500:
+        checkpoint_role = "fixed_epoch_500"
+    else:
+        checkpoint_role = "explicit_checkpoint"
+    result.update(
+        {
+            "checkpoint": str(checkpoint_path),
+            "checkpoint_epoch": None if checkpoint_epoch is None else int(checkpoint_epoch),
+            "split": selected_split,
+            "workflow": workflow,
+            "q_volume": q_volume,
+            "q_band": q_band,
+            "sample_seed": int(dataset_cfg.get("sample_seed", 42)),
+            "layout_counts": {
+                "evaluated_rows": int(result["rows"]),
+                "evaluated_layouts": int(result["layout_level"]["layouts"]),
+                "train": _partition_counts("train"),
+                "validation": _partition_counts("validation"),
+                "test": _partition_counts("test"),
+            },
+            "quadrature_units": "m3",
+            "quadrature_source": "adapter-owned factorized native cell-centre support weights",
+            "selection_metric_provenance": {
+                "metric": "validation volume standardized MSE" if checkpoint_role == "best_validation_checkpoint" else None,
+                "selection_split": "validation" if checkpoint_role == "best_validation_checkpoint" else None,
+                "checkpoint_selector": checkpoint_name,
+                "checkpoint_path": str(checkpoint_path),
+                "checkpoint_role": checkpoint_role,
+                "validation_only_selection": checkpoint_role == "best_validation_checkpoint",
+                "fixed_epoch": 500 if checkpoint_role == "fixed_epoch_500" else None,
+                "checkpoint_best_epoch": payload.get("best_epoch"),
+                "checkpoint_best_metric": payload.get("best_metric"),
+                "reserved_test_used_for_selection": False,
+            },
+        }
+    )
     target = Path(output_dir).expanduser().resolve() if output_dir else checkpoint_path.parent / "evaluations" / selected_split
     _write_results(target, result)
     print(f"[windfarm-eval] split={selected_split} rows={result['rows']} output={target}")
