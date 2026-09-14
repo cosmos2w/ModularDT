@@ -11,6 +11,7 @@ import numpy as np
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(_ROOT / "tools" / "diagnostics"), str(_ROOT / "src")]
 
+import nstage2_reduction as reduction
 import render_nstage2_html as renderer
 
 
@@ -22,6 +23,118 @@ def _map_arrays(*, with_mask: bool) -> dict[str, np.ndarray]:
     if with_mask:
         arrays["fluid_mask"] = np.array([[True, True, False], [True, False, True]])
     return arrays
+
+
+def test_mature_root_forms_write_maturity_namespace_without_touching_default(tmp_path: Path, monkeypatch) -> None:
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "diagnostics").mkdir()
+    nstage2 = project / reduction.STUDY_RELATIVE / "nstage2"
+    maturity = nstage2 / "maturity5000"
+    maturity.mkdir(parents=True)
+    parent = project / reduction.STUDY_RELATIVE / "five_model_epoch5000"
+    parent.mkdir(parents=True)
+    historical = nstage2 / "figures/index.html"
+    historical.parent.mkdir(parents=True)
+    historical.write_text("historical500", encoding="utf-8")
+    plotly_js = tmp_path / "plotly.js"
+    plotly_js.write_text("", encoding="utf-8")
+
+    # The default resolver root is repository-global, so point it at this
+    # isolated fixture while exercising the no-root CLI form.
+    monkeypatch.setattr(reduction, "PROJECT_ROOT", project)
+    roots = [None, project, nstage2, parent, maturity]
+    for index, root in enumerate(roots):
+        output = None if root is None else tmp_path / f"mature_{index}.html"
+        rendered = renderer.render_nstage2(root, output, plotly_js, endpoint_epoch5000=True)
+        assert rendered.exists()
+    assert (maturity / "figures/index.html").exists()
+    assert historical.read_text(encoding="utf-8") == "historical500"
+
+
+def test_mature_comparison_and_missing_parent_anchor_sources_are_explicit(tmp_path: Path) -> None:
+    comparison = tmp_path / "comparison"
+    comparison.mkdir(parents=True)
+    (comparison / "exact500_headline.csv").write_text("run\n1807\n", encoding="utf-8")
+    (comparison / "exact5000_headline.csv").write_text("run\n1808\n", encoding="utf-8")
+    assert renderer._comparison_files(comparison, 500)["headline"][0]["run"] == "1807"
+    assert renderer._comparison_files(comparison, 5000)["headline"][0]["run"] == "1808"
+
+    project = tmp_path / "project"
+    study = project / "nstage2/maturity5000"
+    missing = study / "comparison/missing_parent_anchors/debug_npz"
+    missing.mkdir(parents=True)
+    source = missing / "Reader1805__5000__0283.npz"
+    np.savez(source)
+    assert renderer._npz_candidates(project, study, "Reader", "0283", 5000) == [source]
+
+
+def test_mature_isolated_timing_keeps_provenance_and_model_label(tmp_path: Path) -> None:
+    study = tmp_path / "nstage2/maturity5000"
+    comparison = study / "comparison"
+    comparison.mkdir(parents=True)
+    payload = {
+        "architecture": "group_mediated_reader",
+        "checkpoint": {"label": "B1808_endpoint5000", "epoch": 5000},
+        "synthetic_shapes": [
+            {
+                "shape": {"E": 3072, "M": 128, "Q": 262144},
+                "normal": {"median_ms": 7.0, "peak_allocated_bytes": 4 * 1024 * 1024},
+            }
+        ],
+    }
+    source = comparison / "timing_1808_chunk2048.json"
+    source.write_text(json.dumps(payload), encoding="utf-8")
+    rows = renderer._timing_rows(study, 5000)
+    rows = [row for row in rows if row["source"] == str(source)]
+    assert len(rows) == 1
+    assert rows[0]["checkpoint_context"] == "isolated endpoint5000"
+    assert renderer._timing_model_label(rows[0]) == "B"
+    assert rows[0]["timing_chunk"] == 2048
+
+
+def test_timing_deduplication_keeps_reader_and_track_b_separate() -> None:
+    common = {
+        "kind": "real",
+        "case_id": "0273",
+        "shape": {},
+        "shape_label": "",
+        "phase": "full_forward",
+        "timing_chunk": 2048,
+        "query_count": 8192,
+    }
+    rows = [
+        {
+            **common,
+            "run": "parent",
+            "architecture": "sparse_interface_honf",
+            "model": "Reader1805_at5000",
+            "checkpoint_context": "matched endpoint5000",
+            "median_ms": 10.0,
+        },
+        {
+            **common,
+            "run": "parent",
+            "architecture": "sparse_interface_honf",
+            "model": "nstage2-b",
+            "checkpoint_context": "matched endpoint5000",
+            "median_ms": 20.0,
+        },
+        {
+            **common,
+            "run": "parent",
+            "architecture": "sparse_interface_honf",
+            "model": "nstage2-b",
+            "checkpoint_context": "isolated endpoint5000",
+            "median_ms": 21.0,
+        },
+    ]
+    figure = renderer._timing_plot(rows, 2048, "real:0273", "full_forward")
+    assert figure is not None
+    trace = figure["data"][0]
+    assert trace["x"] == ["Reader", "B"]
+    assert trace["y"] == [10.0, 21.0]
+    assert trace["customdata"][1][0] == "isolated endpoint5000"
 
 
 def test_old_sources_are_model_owned_and_dense_uses_canonical_mask(tmp_path: Path) -> None:
@@ -133,6 +246,7 @@ def test_formal_intervention_reader_ignores_epoch10_and_uses_gt_deltas(tmp_path:
         ],
     }
     (study / "track_a" / "interventions.json").write_text(json.dumps(payload), encoding="utf-8")
+    (study / "track_a" / "interventions_best_field.json").write_text(json.dumps(payload), encoding="utf-8")
     rows = renderer._formal_intervention_rows(study)
     assert rows == [
         {
@@ -147,6 +261,8 @@ def test_formal_intervention_reader_ignores_epoch10_and_uses_gt_deltas(tmp_path:
             "source": str(study / "track_a" / "interventions.json"),
         }
     ]
+    selected_rows = renderer._formal_intervention_rows(study, selected=True)
+    assert selected_rows[0]["checkpoint"] == "A1807_at500"
 
 
 def test_a_record_requires_exact_tree_keys(tmp_path: Path) -> None:
@@ -261,6 +377,101 @@ def test_accuracy_cost_prefers_endpoint500_candidate_and_fixed_large_shape() -> 
     assert {trace["name"] for trace in figure["data"]} == {"Dense", "A"}
     dense = next(trace for trace in figure["data"] if trace["name"] == "Dense")
     assert dense["x"] == [10.0]
+
+
+def test_accuracy_cost_resolves_mature_track_b_from_checkpoint_label() -> None:
+    headline = [
+        {"run": "1805", "status": "available", "global_field_fluid_norm_pooled_relative_l2": "0.1"},
+        {"run": "1808", "status": "available", "global_field_fluid_norm_pooled_relative_l2": "0.2"},
+    ]
+    timing = [
+        {
+            "run": "parent",
+            "architecture": "sparse_interface_honf",
+            "model": "Reader1805_at5000",
+            "kind": "synthetic",
+            "phase": "full_forward",
+            "checkpoint_context": "isolated endpoint5000",
+            "shape": {"E": 3072, "M": 128, "Q": 262144},
+            "timing_chunk": 2048,
+            "median_ms": 10.0,
+        },
+        {
+            "run": "parent",
+            "architecture": "sparse_interface_honf",
+            "model": "nstage2-b",
+            "kind": "synthetic",
+            "phase": "full_forward",
+            "checkpoint_context": "isolated endpoint5000",
+            "shape": {"E": 3072, "M": 128, "Q": 262144},
+            "timing_chunk": 2048,
+            "median_ms": 20.0,
+        },
+    ]
+    figure = renderer._accuracy_cost_plot(headline, timing, 5000)
+    assert figure is not None
+    assert {trace["name"] for trace in figure["data"]} == {"Reader", "B"}
+    b = next(trace for trace in figure["data"] if trace["name"] == "B")
+    assert b["x"] == [20.0]
+
+
+def test_mature_accuracy_cost_selector_separates_exact_and_selected_accuracy() -> None:
+    exact = [
+        {"run": "1807", "status": "available", "global_field_fluid_norm_pooled_relative_l2": "0.4"},
+    ]
+    selected = [
+        {"run": "1807", "status": "available", "global_field_fluid_norm_pooled_relative_l2": "0.2"},
+    ]
+    timing = [
+        {
+            "run": "1807",
+            "architecture": "hierarchical_regional_honf",
+            "kind": "synthetic",
+            "phase": "full_forward",
+            "checkpoint_context": "isolated endpoint5000",
+            "shape": {"E": 3072, "M": 128, "Q": 262144},
+            "timing_chunk": 2048,
+            "median_ms": 5.0,
+        },
+    ]
+    spec = renderer._accuracy_cost_variant_spec(exact, selected, timing, 5000)
+    assert spec is not None
+    assert set(spec["figures"]) == {"exact5000", "selected5000"}
+    selector = spec["selectors"][0]
+    assert selector["id"] == "accuracy_cost_policy"
+    assert [option[0] for option in selector["options"]] == ["exact5000", "selected5000"]
+    exact_trace = spec["figures"]["exact5000"]["data"][0]
+    selected_figure = spec["figures"]["selected5000"]
+    selected_trace = selected_figure["data"][0]
+    assert exact_trace["y"] == [0.4]
+    assert selected_trace["y"] == [0.2]
+    assert "selected through epoch 5000" in selected_figure["layout"]["yaxis"]["title"]["text"]
+    assert "same exact epoch 5000 timing proxy" in selected_figure["layout"]["title"]["text"]
+    assert "selected checkpoint not timed" in selected_figure["layout"]["title"]["text"]
+    assert "selected through epoch 5000 accuracy" in selected_trace["hovertemplate"]
+
+
+def test_mature_trajectory_plot_uses_full_grid_epochs_and_all_models() -> None:
+    rows = []
+    for run, model in renderer.MODEL_RUNS.items():
+        for epoch in (500, 2500, 5000):
+            rows.append(
+                {
+                    "run": model,
+                    "model": renderer.MODEL_LABELS[run],
+                    "status": "available",
+                    "phase": f"exact{epoch}",
+                    "checkpoint_epoch": str(epoch),
+                    "checkpoint": f"{run}_{epoch}",
+                    "global_field_fluid_norm_pooled_relative_l2": str(epoch / 10000),
+                }
+            )
+    figure = renderer._trajectory_plot(rows, 5000)
+    assert figure is not None
+    assert len(figure["data"]) == len(renderer.MODEL_RUNS)
+    assert figure["layout"]["xaxis"]["tickvals"] == [500, 2500, 5000]
+    assert "500 / 2500 / 5000" in figure["layout"]["title"]["text"]
+    assert all(trace["x"] == [500, 2500, 5000] for trace in figure["data"])
 
 
 def test_timing_plot_deduplicates_parent_exact500_before_mature(tmp_path: Path) -> None:

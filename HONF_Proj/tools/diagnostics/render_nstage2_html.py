@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
 import re
 import sys
 from collections import defaultdict
@@ -25,7 +26,13 @@ if str(_THIS_DIR) not in sys.path:
 
 # Keep the established renderer's Plotly/layout/array handling as the only
 # presentation dependency.  This file only adapts the NStage2 artifact names.
-from nstage2_reduction import ANCHORS, RUN_LABELS, RUN_TRACK, _resolve_roots  # type: ignore[import-not-found]
+from nstage2_reduction import (  # type: ignore[import-not-found]
+    ANCHORS,
+    PARENT_RUNS,
+    RUN_LABELS,
+    RUN_TRACK,
+    _resolve_roots,
+)
 from render_honf_maturity_html import (  # type: ignore[import-not-found]
     array_grid,
     bar_trace,
@@ -44,17 +51,31 @@ from render_honf_maturity_html import (  # type: ignore[import-not-found]
 
 __all__ = ["render_nstage2"]
 
+MATURE_STUDY_NAME = "maturity5000"
+MATURE_PARENT_STUDY_NAME = "five_model_epoch5000"
+
 CHANNELS = ("u", "v", "p", "omega", "temperature")
 CHANNEL_LABELS = {"u": "u velocity", "v": "v velocity", "p": "pressure", "omega": "vorticity", "temperature": "temperature"}
 MODEL_ORDER = ("A", "Regional", "Dense", "B", "Reader")
-MODEL_RUNS = {"A": "1807", "Regional": "1806", "Dense": "1804", "B": "1808", "Reader": "1805"}
+MODEL_RUNS = {
+    "Legacy": "1401",
+    "Latent": "1801",
+    "A": "1807",
+    "Regional": "1806",
+    "Dense": "1804",
+    "B": "1808",
+    "Reader": "1805",
+}
 MODEL_LABELS = {
+    "Legacy": RUN_LABELS["1401"],
+    "Latent": RUN_LABELS["1801"],
     "A": RUN_LABELS["1807"],
     "Regional": RUN_LABELS["1806"],
     "Dense": RUN_LABELS["1804"],
     "B": RUN_LABELS["1808"],
     "Reader": RUN_LABELS["1805"],
 }
+MATURE_MODEL_ORDER = ("Legacy", "Latent", "Dense", "Reader", "Regional", "A", "B")
 HISTORY_ORDER = ("Legacy", "Latent", "Dense", "Reader", "Regional", "A", "B")
 RUN_DISPLAY = {"1401": "Legacy", "1801": "Latent", **{run: model for model, run in MODEL_RUNS.items()}}
 MODEL_COLORS = {
@@ -91,6 +112,8 @@ TIMING_ARCHITECTURE_LABELS = {
     "regional_response_honf": "Regional",
     "hierarchical_regional_honf": "A",
     "group_mediated_reader": "B",
+    "nstage2-a": "A",
+    "nstage2-b": "B",
 }
 
 OLD_DEBUG_ROOTS = {
@@ -110,20 +133,216 @@ OLD_DEBUG_PREFIXES = {
     "Reader": ("Geometry-envelope_sparse_HONF", "Reader_1805", "Run_1805"),
     "Regional": ("Regional_response_HONF", "Regional_1806", "Run_1806"),
 }
+MATURE_DEBUG_PREFIXES = {
+    "Legacy": ("Legacy_1401", "Legacy1401", "Legacy"),
+    "Latent": ("Latent_1801", "Latent1801", "Latent"),
+    "Dense": ("Dense_1804", "Dense1804", "Dense"),
+    "Reader": ("Reader_1805", "Reader1805", "Reader"),
+    "Regional": ("Regional_1806", "Regional1806", "Regional"),
+}
 
 
-def _comparison_files(comparison: Path) -> dict[str, list[dict[str, str]]]:
+def _read_first_csv(comparison: Path, names: Iterable[str]) -> list[dict[str, str]]:
+    """Read the first existing candidate among explicit artifact names."""
+
+    for name in names:
+        path = comparison / name
+        if path.is_file():
+            return read_csv(path)
+    return []
+
+
+def _comparison_files(comparison: Path, endpoint_epoch: int = 500) -> dict[str, list[dict[str, str]]]:
+    prefix = "exact5000" if endpoint_epoch == 5000 else "exact500"
     names = {
-        "headline": "exact500_headline.csv",
-        "channels": "exact500_channels.csv",
-        "physical": "exact500_physical.csv",
-        "kpis": "exact500_engineering_kpis.csv",
-        "pairs": "exact500_pairs.csv",
-        "pair_summary": "exact500_pair_summary.csv",
-        "best": "best_field_headline.csv",
-        "history": "learning_curves.csv",
+        "headline": (f"{prefix}_headline.csv",),
+        "channels": (f"{prefix}_channels.csv",),
+        "physical": (f"{prefix}_physical.csv",),
+        "kpis": (f"{prefix}_engineering_kpis.csv",),
+        "pairs": (f"{prefix}_pairs.csv",),
+        "pair_summary": (f"{prefix}_pair_summary.csv",),
+        # Mature reducers may call this phase selected rather than best_field;
+        # the first name preserves the historical 500 renderer exactly.
+        "best": ("best_field_headline.csv", "selected_headline.csv", "best_selected_headline.csv"),
+        "history": ("learning_curves.csv",),
+        "trajectory": ("trajectory_headline.csv",),
     }
-    return {key: read_csv(comparison / name) for key, name in names.items()}
+    return {key: _read_first_csv(comparison, candidates) for key, candidates in names.items()}
+
+
+def _historical_parent_study(study: Path) -> Path:
+    """Locate the maintained five-model mature study beside either study root."""
+
+    candidates = (
+        study.parent / MATURE_PARENT_STUDY_NAME,
+        study.parent.parent / MATURE_PARENT_STUDY_NAME,
+    )
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    # Keep the path deterministic for source links and unavailable notes when
+    # a fixture has not materialized the historical study yet.
+    return candidates[0]
+
+
+def _mature_study_root(study: Path) -> Path:
+    """Resolve a mature study root from project, nstage2, or nested inputs."""
+
+    for candidate in (study, *study.parents):
+        if candidate.name == MATURE_STUDY_NAME:
+            return candidate
+    for candidate in (study, *study.parents):
+        if candidate.name == "nstage2":
+            return candidate / MATURE_STUDY_NAME
+    return study / MATURE_STUDY_NAME
+
+
+def _row_run(row: dict[str, Any]) -> str:
+    value = str(row.get("run", ""))
+    if value in MODEL_RUNS.values():
+        return value
+    model = str(row.get("model", ""))
+    if model:
+        for run, label in RUN_LABELS.items():
+            if model == label or model.startswith(label) or label.startswith(model):
+                return run
+        for run, model_name in RUN_DISPLAY.items():
+            if model == model_name or model.startswith(model_name) or model_name.startswith(model):
+                return run
+    return value
+
+
+def _parent_headline_rows(parent: Path, endpoint_epoch: int) -> list[dict[str, str]]:
+    rows = read_csv(parent / "reduction" / "headline.csv")
+    output: list[dict[str, str]] = []
+    for source in rows:
+        if str(source.get("epoch", "")) not in {str(endpoint_epoch), ""}:
+            continue
+        run = _row_run(source)
+        if run not in PARENT_RUNS:
+            continue
+        row = dict(source)
+        row.update(
+            {
+                "run": run,
+                "model": RUN_LABELS[run],
+                "phase": f"exact{endpoint_epoch}",
+                "status": "available",
+                "table_dir": str(parent / "evaluation" / "tables"),
+                "checkpoint_epoch": str(endpoint_epoch),
+            }
+        )
+        row["global_field_fluid_norm_pooled_mse"] = row.get("mse", "")
+        row["global_field_fluid_norm_pooled_relative_l2"] = row.get("relative_l2", "")
+        row["global_field_fluid_norm_num_values"] = row.get("num_values", "")
+        row["global_field_fluid_norm_equal_case_n"] = "90"
+        row["global_field_fluid_norm_equal_case_mean"] = row.get("equal_case_mean", "")
+        row["global_field_fluid_norm_equal_case_median"] = row.get("median", "")
+        row["global_field_fluid_norm_equal_case_std"] = ""
+        row["global_field_fluid_norm_equal_case_p05"] = ""
+        row["global_field_fluid_norm_equal_case_p95"] = row.get("p95", "")
+        row["global_field_fluid_norm_equal_case_min"] = ""
+        row["global_field_fluid_norm_equal_case_max"] = row.get("max", "")
+        output.append(row)
+    return output
+
+
+def _parent_metric_rows(parent: Path, name: str, endpoint_epoch: int) -> list[dict[str, str]]:
+    rows = read_csv(parent / "reduction" / name)
+    output: list[dict[str, str]] = []
+    for source in rows:
+        if str(source.get("epoch", "")) not in {str(endpoint_epoch), ""}:
+            continue
+        run = _row_run(source)
+        if run not in PARENT_RUNS:
+            continue
+        row = dict(source)
+        row.update(
+            {
+                "run": run,
+                "model": RUN_LABELS[run],
+                "phase": f"exact{endpoint_epoch}",
+                "status": "available",
+                "table_dir": str(parent / "evaluation" / "tables"),
+                "checkpoint_epoch": str(endpoint_epoch),
+            }
+        )
+        if "metric" not in row and "base" in row:
+            row["metric"] = row["base"]
+        output.append(row)
+    return output
+
+
+def _parent_selected_rows(parent: Path) -> list[dict[str, str]]:
+    rows = read_csv(parent / "reduction" / "best_selected_headline.csv")
+    output: list[dict[str, str]] = []
+    for source in rows:
+        run = _row_run(source)
+        if run not in PARENT_RUNS:
+            continue
+        row = dict(source)
+        row.update(
+            {
+                "run": run,
+                "model": RUN_LABELS[run],
+                "phase": "best_field",
+                "status": "available",
+                "table_dir": str(parent / "best_field_evaluation" / "tables"),
+            }
+        )
+        row["global_field_fluid_norm_pooled_mse"] = row.get("mse", "")
+        row["global_field_fluid_norm_pooled_relative_l2"] = row.get("relative_l2", "")
+        row["global_field_fluid_norm_num_values"] = row.get("num_values", "")
+        row["global_field_fluid_norm_equal_case_n"] = "90"
+        row["global_field_fluid_norm_equal_case_mean"] = row.get("equal_case_mean", "")
+        output.append(row)
+    return output
+
+
+def _merge_mature_parent_rows(
+    project: Path,
+    study: Path,
+    reduction: dict[str, list[dict[str, str]]],
+    endpoint_epoch: int,
+) -> dict[str, list[dict[str, str]]]:
+    """Fill missing historical rows from maintained parent reductions in place.
+
+    Mature candidate reducers are allowed to emit only the two new runs.  The
+    five parent rows remain sourced from ``five_model_epoch5000/reduction``;
+    this helper adapts their existing schema for the NStage2 renderer without
+    copying tables or checkpoint artifacts.
+    """
+
+    if endpoint_epoch != 5000:
+        return reduction
+    parent = _historical_parent_study(study)
+    sources = {
+        "headline": _parent_headline_rows(parent, endpoint_epoch),
+        "channels": _parent_metric_rows(parent, "pooled_metrics.csv", endpoint_epoch),
+        "physical": _parent_metric_rows(parent, "pooled_metrics.csv", endpoint_epoch),
+        "best": _parent_selected_rows(parent),
+    }
+    merged = {key: list(rows) for key, rows in reduction.items()}
+    for key, parent_rows in sources.items():
+        if not parent_rows:
+            continue
+        present = {_row_run(row) for row in merged.get(key, [])}
+        merged.setdefault(key, []).extend(row for row in parent_rows if _row_run(row) not in present)
+    # Pair rows need candidate deltas and are therefore not derivable from the
+    # parent-only reduction.  Preserve an unavailable panel until the mature
+    # reducer supplies its explicit matched pairs.
+    return merged
+
+
+def _merge_mature_history_rows(study: Path, rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Append missing parent trajectories while preserving candidate history."""
+
+    parent = _historical_parent_study(study)
+    parent_rows = read_csv(parent / "history" / "history_trajectory.csv")
+    if not parent_rows:
+        return rows
+    present = {_row_run(row) for row in rows}
+    return list(rows) + [row for row in parent_rows if _row_run(row) not in present]
 
 
 def _display_model(row: dict[str, Any]) -> str:
@@ -148,7 +367,7 @@ def _available_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if str(row.get("status", "available")) == "available"]
 
 
-def _headline_plot(rows: list[dict[str, str]]) -> dict[str, Any] | None:
+def _headline_plot(rows: list[dict[str, str]], endpoint_epoch: int = 500) -> dict[str, Any] | None:
     if not rows:
         return None
     labels = [_display_model(row) for row in rows]
@@ -162,7 +381,7 @@ def _headline_plot(rows: list[dict[str, str]]) -> dict[str, Any] | None:
         if any(value is not None for value in values):
             traces.append(bar_trace(labels, values, name, color))
     return plot(
-        "NStage2 exact epoch 500 endpoint across the matched 90 cases",
+        f"NStage2 exact epoch {endpoint_epoch} endpoint across the matched 90 cases",
         traces,
         height=450,
         barmode="group",
@@ -171,7 +390,7 @@ def _headline_plot(rows: list[dict[str, str]]) -> dict[str, Any] | None:
     ) if traces else None
 
 
-def _channel_plot(rows: list[dict[str, str]]) -> dict[str, Any] | None:
+def _channel_plot(rows: list[dict[str, str]], endpoint_epoch: int = 500) -> dict[str, Any] | None:
     rows = _available_rows(rows)
     if not rows:
         return None
@@ -186,7 +405,9 @@ def _channel_plot(rows: list[dict[str, str]]) -> dict[str, Any] | None:
         if any(value is not None for value in values):
             traces.append(bar_trace(labels, values, CHANNEL_LABELS[channel], color, offsetgroup=channel))
     return plot(
-        "Exact endpoint normalized channel relative L2",
+        "Exact endpoint normalized channel relative L2"
+        if endpoint_epoch == 500
+        else f"Exact epoch {endpoint_epoch} normalized channel relative L2",
         traces,
         height=470,
         barmode="group",
@@ -195,7 +416,7 @@ def _channel_plot(rows: list[dict[str, str]]) -> dict[str, Any] | None:
     ) if traces else None
 
 
-def _physical_plot(rows: list[dict[str, str]]) -> dict[str, Any] | None:
+def _physical_plot(rows: list[dict[str, str]], endpoint_epoch: int = 500) -> dict[str, Any] | None:
     rows = _available_rows(rows)
     labels = (
         ("global_field_fluid_norm", "fluid field"),
@@ -214,7 +435,9 @@ def _physical_plot(rows: list[dict[str, str]]) -> dict[str, Any] | None:
         if subset and any(value is not None for value in values):
             traces.append(bar_trace([_display_model(row) for row in subset], values, label, MODEL_COLORS.get(_display_model(subset[0]), "#315f7c"), offsetgroup=metric))
     return plot(
-        "Exact endpoint near / far / physical field outcomes",
+        "Exact endpoint near / far / physical field outcomes"
+        if endpoint_epoch == 500
+        else f"Exact epoch {endpoint_epoch} near / far / physical field outcomes",
         traces,
         height=460,
         barmode="group",
@@ -223,7 +446,11 @@ def _physical_plot(rows: list[dict[str, str]]) -> dict[str, Any] | None:
     ) if traces else None
 
 
-def _pair_plots(rows: list[dict[str, str]], summary_rows: list[dict[str, str]]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+def _pair_plots(
+    rows: list[dict[str, str]],
+    summary_rows: list[dict[str, str]],
+    endpoint_epoch: int = 500,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     metric = "global_field_fluid_norm"
     case_groups: dict[str, list[float]] = defaultdict(list)
     for row in rows:
@@ -238,7 +465,9 @@ def _pair_plots(rows: list[dict[str, str]], summary_rows: list[dict[str, str]]) 
     for pair, values in case_groups.items():
         box_traces.append({"type": "box", "name": pair, "y": values, "boxmean": True, "marker": {"color": MODEL_COLORS.get("A" if pair.startswith("A") else "B", "#315f7c")}})
     case_plot = plot(
-        "Exact endpoint paired per-case deltas (candidate minus baseline)",
+        "Exact endpoint paired per-case deltas (candidate minus baseline)"
+        if endpoint_epoch == 500
+        else f"Exact epoch {endpoint_epoch} paired per-case deltas (candidate minus baseline)",
         box_traces,
         height=430,
         showlegend=False,
@@ -253,7 +482,9 @@ def _pair_plots(rows: list[dict[str, str]], summary_rows: list[dict[str, str]]) 
         if value is not None:
             summary.append((str(row.get("pair", "")), value))
     summary_plot = plot(
-        "Exact endpoint paired mean deltas",
+        "Exact endpoint paired mean deltas"
+        if endpoint_epoch == 500
+        else f"Exact epoch {endpoint_epoch} paired mean deltas",
         [bar_trace([item[0] for item in summary], [item[1] for item in summary], "mean candidate − baseline", "#315f7c")],
         height=410,
         showlegend=False,
@@ -275,7 +506,7 @@ def _kpi_label(metric: str) -> str:
     )
 
 
-def _kpi_plot(rows: list[dict[str, str]]) -> dict[str, Any] | None:
+def _kpi_plot(rows: list[dict[str, str]], endpoint_epoch: int = 500) -> dict[str, Any] | None:
     rows = _available_rows(rows)
     groups: dict[str, list[dict[str, str]]] = defaultdict(list)
     for row in rows:
@@ -289,7 +520,9 @@ def _kpi_plot(rows: list[dict[str, str]]) -> dict[str, Any] | None:
         if any(value is not None for value in values):
             traces.append(bar_trace([_display_model(row) for row in subset], values, _kpi_label(metric), MODEL_COLORS.get(_display_model(subset[0]), "#315f7c"), offsetgroup=metric))
     return plot(
-        "Exact endpoint engineering KPI error distributions",
+        "Exact endpoint engineering KPI error distributions"
+        if endpoint_epoch == 500
+        else f"Exact epoch {endpoint_epoch} engineering KPI error distributions",
         traces,
         height=520,
         barmode="group",
@@ -335,7 +568,65 @@ def _history_plot(rows: list[dict[str, Any]], field: str, x_field: str, title: s
     return plot(title, traces, height=430, xaxis={"title": x_title}, yaxis={"title": field, "type": "log", "gridcolor": "#e8edf1"}) if traces else None
 
 
-def _npz_candidates(project: Path, study: Path, model: str, case_id: str) -> list[Path]:
+def _trajectory_plot(rows: list[dict[str, str]], endpoint_epoch: int = 5000) -> dict[str, Any] | None:
+    """Plot the reducer's full-grid 500/2500/endpoint evaluation trajectory."""
+
+    allowed_epochs = {500, 2500, endpoint_epoch}
+    grouped: dict[str, dict[int, dict[str, str]]] = defaultdict(dict)
+    for row in _available_rows(rows):
+        run = _row_run(row)
+        if run not in MODEL_RUNS.values():
+            continue
+        epoch = safe_float(row, "checkpoint_epoch")
+        if epoch is None:
+            match = re.search(r"(?:exact|epoch)(\d+)", str(row.get("phase", "")), re.IGNORECASE)
+            epoch = float(match.group(1)) if match else None
+        if epoch is None or int(epoch) not in allowed_epochs:
+            continue
+        value = safe_float(row, "global_field_fluid_norm_pooled_relative_l2")
+        if value is None:
+            continue
+        grouped[run][int(epoch)] = row
+
+    traces = []
+    for model in MATURE_MODEL_ORDER:
+        run = MODEL_RUNS[model]
+        subset = grouped.get(run, {})
+        if not subset:
+            continue
+        epochs = sorted(subset)
+        traces.append(
+            line_trace(
+                epochs,
+                [safe_float(subset[epoch], "global_field_fluid_norm_pooled_relative_l2") for epoch in epochs],
+                model,
+                MODEL_COLORS.get(model, "#315f7c"),
+                mode="lines+markers",
+                customdata=[[subset[epoch].get("phase", ""), subset[epoch].get("checkpoint", "")] for epoch in epochs],
+                hovertemplate=(
+                    "%{fullData.name}<br>checkpoint epoch=%{x}<br>pooled relative L2=%{y:.4g}"
+                    "<br>phase=%{customdata[0]}<br>source checkpoint=%{customdata[1]}<extra></extra>"
+                ),
+            )
+        )
+    if not traces:
+        return None
+    return plot(
+        f"Full-grid exact endpoint trajectory · checkpoints 500 / 2500 / {endpoint_epoch}",
+        traces,
+        height=480,
+        xaxis={"title": "full-grid checkpoint epoch", "tickmode": "array", "tickvals": sorted(allowed_epochs)},
+        yaxis={"title": "pooled fluid relative L2", "type": "log", "gridcolor": "#e8edf1"},
+    )
+
+
+def _npz_candidates(
+    project: Path,
+    study: Path,
+    model: str,
+    case_id: str,
+    endpoint_epoch: int = 500,
+) -> list[Path]:
     """Return only sources whose run/model ownership is known.
 
     The old comparison directories contain several architectures in one debug
@@ -348,7 +639,8 @@ def _npz_candidates(project: Path, study: Path, model: str, case_id: str) -> lis
     run = MODEL_RUNS[model]
     paths: list[Path] = []
     if model in {"A", "B"}:
-        root = study / RUN_TRACK[run] / "endpoint500" / "debug_npz"
+        endpoint_name = f"endpoint{endpoint_epoch}"
+        root = study / RUN_TRACK[run] / endpoint_name / "debug_npz"
         if root.is_dir():
             paths.extend(sorted(root.rglob("*.npz")))
         token = str(case_id)
@@ -359,6 +651,22 @@ def _npz_candidates(project: Path, study: Path, model: str, case_id: str) -> lis
         explicit_run = [path for path in paths if re.search(r"Run[_-]?\d+", path.name, re.IGNORECASE)]
         if explicit_run:
             paths = [path for path in explicit_run if re.search(rf"Run[_-]?{run}(?:[_-]|$)", path.name, re.IGNORECASE)]
+        return sorted(dict.fromkeys(paths))
+
+    if endpoint_epoch == 5000:
+        roots = [
+            study / "comparison/missing_parent_anchors/debug_npz",
+            _historical_parent_study(study) / "evaluation" / "debug_npz",
+            project / "diagnostics/generated/interface_operator_study/epoch5000_comparison/evaluation/debug_npz",
+        ]
+        token = f"__{endpoint_epoch}__{case_id}.npz"
+        prefixes = MATURE_DEBUG_PREFIXES.get(model, ())
+        for root in roots:
+            if not root.is_dir():
+                continue
+            for path in sorted(root.glob("*.npz")):
+                if path.name.endswith(token) and any(path.name.startswith(prefix + "__") for prefix in prefixes):
+                    paths.append(path)
         return sorted(dict.fromkeys(paths))
 
     if model not in OLD_DEBUG_ROOTS:
@@ -402,13 +710,22 @@ def _canonical_mask_for_case(
     project: Path,
     study: Path,
     case_id: str,
+    endpoint_epoch: int = 500,
 ) -> dict[str, Any] | None:
     """Load one shared stored mask from aligned Reader/Regional targets."""
 
     candidates: list[Path] = []
-    for model in ("Reader", "Regional"):
-        candidates.extend(_npz_candidates(project, study, model, case_id))
-    candidates = sorted(dict.fromkeys(candidates))
+    source_models = ("Reader", "Regional")
+    if endpoint_epoch == 5000:
+        # Parent arrays are preferred because they are the maintained common
+        # grid source.  Candidate arrays provide a bounded fallback for an
+        # anchor (notably 0283) for which historical parent exports are absent.
+        source_models = ("Reader", "Regional", "A", "B", "Dense", "Latent", "Legacy")
+    for model in source_models:
+        candidates.extend(_npz_candidates(project, study, model, case_id, endpoint_epoch))
+    # Preserve the source-model priority above so Reader/Regional remain the
+    # canonical parent grid when their mature exports are present.
+    candidates = list(dict.fromkeys(candidates))
     if not candidates:
         return None
     reference: dict[str, Any] | None = None
@@ -665,14 +982,19 @@ def _organization_record(path: Path, project: Path, model: str, case_id: str) ->
     return record
 
 
-def _load_anchor_data(project: Path, study: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    data: dict[str, Any] = {"cases": list(ANCHORS), "models": list(MODEL_ORDER), "channels": list(CHANNELS), "entries": {}, "organization": []}
+def _load_anchor_data(
+    project: Path,
+    study: Path,
+    endpoint_epoch: int = 500,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    models = MATURE_MODEL_ORDER if endpoint_epoch == 5000 else MODEL_ORDER
+    data: dict[str, Any] = {"cases": list(ANCHORS), "models": list(models), "channels": list(CHANNELS), "entries": {}, "organization": []}
     statuses: list[dict[str, Any]] = []
     for case_id in ANCHORS:
         data["entries"][case_id] = {}
-        canonical_mask = _canonical_mask_for_case(project, study, case_id)
-        for model in MODEL_ORDER:
-            candidates = _npz_candidates(project, study, model, case_id)
+        canonical_mask = _canonical_mask_for_case(project, study, case_id, endpoint_epoch)
+        for model in models:
+            candidates = _npz_candidates(project, study, model, case_id, endpoint_epoch)
             if not candidates:
                 statuses.append({"model": model, "case_id": case_id, "status": "unavailable", "reason": "matching debug NPZ has not arrived"})
                 continue
@@ -1185,7 +1507,7 @@ def _b_influence_plot(study: Path) -> dict[str, Any] | None:
     )
 
 
-def _formal_intervention_rows(study: Path) -> list[dict[str, Any]]:
+def _formal_intervention_rows(study: Path, *, selected: bool = False) -> list[dict[str, Any]]:
     """Read only the final per-track JSON intervention contract.
 
     The epoch-10 ``*_execution_check`` files intentionally contain four-query
@@ -1195,8 +1517,9 @@ def _formal_intervention_rows(study: Path) -> list[dict[str, Any]]:
     """
 
     rows: list[dict[str, Any]] = []
+    filename = "interventions_best_field.json" if selected else "interventions.json"
     for track, model in (("track_a", "A"), ("track_b", "B")):
-        path = study / track / "interventions.json"
+        path = study / track / filename
         payload = read_json(path, {})
         if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
             continue
@@ -1257,7 +1580,10 @@ def _intervention_rows(study: Path) -> list[dict[str, Any]]:
     return _formal_intervention_rows(study)
 
 
-def _intervention_plot(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _intervention_plot(
+    rows: list[dict[str, Any]],
+    title: str = "Formal P0/P1/P2 ground-truth deltas",
+) -> dict[str, Any] | None:
     if not rows:
         return None
     preferred = (
@@ -1285,7 +1611,7 @@ def _intervention_plot(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
                 )
             )
     return plot(
-        f"Formal P0/P1/P2 ground-truth deltas · {metric}",
+        f"{title} · {metric}",
         traces,
         height=460,
         barmode="group",
@@ -1307,6 +1633,8 @@ def _timing_stat_rows(
     models = payload.get("models") or []
     if not models and isinstance(payload.get("rows"), list):
         models = [{"architecture": track, "real_cases": payload["rows"]}]
+    if not models and isinstance(payload.get("architecture"), str):
+        models = [payload]
     for model in models:
         if not isinstance(model, dict):
             continue
@@ -1367,8 +1695,9 @@ def _timing_stat_rows(
     return rows
 
 
-def _timing_rows(study: Path) -> list[dict[str, Any]]:
+def _timing_rows(study: Path, endpoint_epoch: int = 500) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    endpoint_label = f"candidate endpoint{endpoint_epoch}"
     for track, run in (("track_a", "1807"), ("track_b", "1808")):
         for query_count, filename in ((128, "timing_chunk128.json"), (2048, "timing_chunk2048.json")):
             path = study / track / filename
@@ -1381,13 +1710,55 @@ def _timing_rows(study: Path) -> list[dict[str, Any]]:
                         track=track,
                         run=run,
                         timing_chunk=query_count,
-                        context="candidate endpoint500",
+                        context=endpoint_label,
                     )
                 )
+
+    parent = _historical_parent_study(study)
+    if endpoint_epoch == 5000:
+        # One matched file is authoritative for the mature chunk-2048
+        # comparison.  The track files are still retained for chunk 128 and
+        # as a fallback while the matched export is being produced.
+        matched = study / "comparison/matched_timing_chunk2048.json"
+        payload = read_json(matched, {})
+        if isinstance(payload, dict):
+            rows.extend(
+                _timing_stat_rows(
+                    payload,
+                    matched,
+                    track="parent",
+                    run="parent",
+                    timing_chunk=2048,
+                    context="matched endpoint5000",
+                )
+            )
+        # Isolated per-model reruns are preferred when available because a
+        # multi-model process can retain allocator state between models.  The
+        # file names are intentionally broad enough for future isolated
+        # rerun labels while the payload still supplies the model identity.
+        for isolated in sorted(study.glob("comparison/timing_*_chunk2048.json")):
+            payload = read_json(isolated, {})
+            if isinstance(payload, dict):
+                rows.extend(
+                    _timing_stat_rows(
+                        payload,
+                        isolated,
+                        track="parent",
+                        run="parent",
+                        timing_chunk=2048,
+                        context="isolated endpoint5000",
+                    )
+                )
+        # Historical Legacy/Latent (and any model absent from the matched
+        # export) stay explicitly identified as a reused mature measurement.
+        mature_context = "historical mature checkpoint5000"
+    else:
+        mature_context = "parent mature checkpoint5000"
+
     # Existing mature timing artifacts are valid measured full-forward costs,
     # but their checkpoint context is explicit and is never presented as a
     # candidate's endpoint timing.
-    mature = study.parent / "five_model_epoch5000/timing/five_model_timing.json"
+    mature = parent / "timing/five_model_timing.json"
     payload = read_json(mature, {})
     if isinstance(payload, dict):
         rows.extend(
@@ -1397,35 +1768,36 @@ def _timing_rows(study: Path) -> list[dict[str, Any]]:
                 track="parent",
                 run="parent",
                 timing_chunk=None,
-                context="parent mature checkpoint5000",
+                context=mature_context,
             )
         )
-    exact_parent_timing = study.parent / "regional_response/timing/regional_vs_dense.json"
-    payload = read_json(exact_parent_timing, {})
-    if isinstance(payload, dict):
-        rows.extend(
-            _timing_stat_rows(
-                payload,
-                exact_parent_timing,
-                track="parent",
-                run="parent",
-                timing_chunk=None,
-                context="parent exact500",
+    if endpoint_epoch == 500:
+        exact_parent_timing = study.parent / "regional_response/timing/regional_vs_dense.json"
+        payload = read_json(exact_parent_timing, {})
+        if isinstance(payload, dict):
+            rows.extend(
+                _timing_stat_rows(
+                    payload,
+                    exact_parent_timing,
+                    track="parent",
+                    run="parent",
+                    timing_chunk=None,
+                    context="parent exact500",
+                )
             )
-        )
-    parent_timing_chunk128 = study / "comparison/parent_timing_chunk128.json"
-    payload = read_json(parent_timing_chunk128, {})
-    if isinstance(payload, dict):
-        rows.extend(
-            _timing_stat_rows(
-                payload,
-                parent_timing_chunk128,
-                track="parent",
-                run="parent",
-                timing_chunk=128,
-                context="parent exact500",
+        parent_timing_chunk128 = study / "comparison/parent_timing_chunk128.json"
+        payload = read_json(parent_timing_chunk128, {})
+        if isinstance(payload, dict):
+            rows.extend(
+                _timing_stat_rows(
+                    payload,
+                    parent_timing_chunk128,
+                    track="parent",
+                    run="parent",
+                    timing_chunk=128,
+                    context="parent exact500",
+                )
             )
-        )
     return rows
 
 
@@ -1463,10 +1835,35 @@ def _timing_workload_label(workload: str) -> str:
     return workload
 
 
+def _timing_declared_model(row: dict[str, Any]) -> str | None:
+    """Resolve a model from the checkpoint label before architecture aliases.
+
+    Reader and mature Track B both use the sparse-interface architecture name,
+    so architecture alone cannot be a stable identity for timing deduplication.
+    The checkpoint label carries the run family in those exports.
+    """
+
+    value = str(row.get("model", "")).strip()
+    if not value:
+        return None
+    lowered = value.lower()
+    if lowered in {"nstage2-a", "nstage2_a"}:
+        return "A"
+    if lowered in {"nstage2-b", "nstage2_b"}:
+        return "B"
+    for model in MATURE_MODEL_ORDER:
+        if value == model or value.startswith(model):
+            return model
+    return None
+
+
 def _timing_model_label(row: dict[str, Any]) -> str:
     run = str(row.get("run", ""))
     if run in RUN_DISPLAY:
         return RUN_DISPLAY[run]
+    declared = _timing_declared_model(row)
+    if declared is not None:
+        return declared
     architecture = str(row.get("architecture", ""))
     if architecture in TIMING_ARCHITECTURE_LABELS:
         return TIMING_ARCHITECTURE_LABELS[architecture]
@@ -1476,24 +1873,44 @@ def _timing_model_label(row: dict[str, Any]) -> str:
 def _timing_context_rank(row: dict[str, Any]) -> int:
     return {
         "candidate endpoint500": 0,
-        "parent exact500": 1,
-        "parent mature checkpoint5000": 2,
+        "candidate endpoint5000": 0,
+        "isolated endpoint5000": 0,
+        "matched endpoint5000": 1,
+        "parent exact5000": 2,
+        "parent exact500": 2,
+        "parent mature checkpoint5000": 3,
+        "historical mature checkpoint5000": 3,
     }.get(str(row.get("checkpoint_context")), 99)
 
 
 def _dedupe_timing_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep one measured row per model/workload/phase/chunk.
 
-    Candidate endpoint rows remain distinct from parent rows.  When a parent
-    model is present in both exact500 and mature checkpoint timing artifacts,
-    exact500 wins for the same workload and phase.
+    Candidate endpoint rows remain distinct from parent rows.  For mature
+    chunk-2048 measurements an isolated per-model rerun wins over the matched
+    multi-model export, whose allocator carryover can bias peak memory.  When
+    a parent model is present in both exact500 and mature checkpoint timing
+    artifacts, the explicitly higher-priority source wins for the same
+    workload and phase.
     """
 
     selected: dict[tuple[Any, ...], dict[str, Any]] = {}
     for row in rows:
-        model_key = str(row.get("run")) if row.get("track") != "parent" else str(row.get("architecture"))
+        # Checkpoint labels distinguish Reader from mature Track B even though
+        # both exports declare sparse_interface_honf.  Architecture remains a
+        # fallback for unlabeled legacy timing records.
+        run = str(row.get("run", ""))
+        declared = _timing_declared_model(row)
+        model_key = (
+            f"run:{run}"
+            if run in MODEL_RUNS.values()
+            else f"run:{MODEL_RUNS[declared]}"
+            if declared is not None
+            else f"architecture:{row.get('architecture')}"
+            if row.get("architecture")
+            else f"run:{run}"
+        )
         key = (
-            str(row.get("track")),
             model_key,
             _timing_workload_key(row),
             str(row.get("phase")),
@@ -1513,7 +1930,16 @@ def _timing_plot(
 ) -> dict[str, Any] | None:
     if workload is None:
         workload = "real:0273"
-    contexts = {"candidate endpoint500", "parent exact500", "parent mature checkpoint5000"}
+    contexts = {
+        "candidate endpoint500",
+        "candidate endpoint5000",
+        "matched endpoint5000",
+        "isolated endpoint5000",
+        "parent exact500",
+        "parent exact5000",
+        "parent mature checkpoint5000",
+        "historical mature checkpoint5000",
+    }
     subset = [
         row
         for row in _dedupe_timing_rows(rows)
@@ -1585,11 +2011,22 @@ def _timing_variant_spec(rows: list[dict[str, Any]], query_count: int) -> dict[s
     }
 
 
-def _accuracy_cost_plot(headline: list[dict[str, str]], timing_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Compare exact-500 accuracy to one fixed measured full-forward shape."""
+def _accuracy_cost_plot(
+    headline: list[dict[str, str]],
+    timing_rows: list[dict[str, Any]],
+    endpoint_epoch: int = 500,
+    *,
+    accuracy_rows: list[dict[str, str]] | None = None,
+    accuracy_policy: str | None = None,
+    timing_policy: str | None = None,
+) -> dict[str, Any] | None:
+    """Compare one accuracy policy to one fixed measured full-forward shape."""
 
+    selected_accuracy = accuracy_rows is not None or accuracy_policy is not None
+    accuracy_rows = headline if accuracy_rows is None else accuracy_rows
+    accuracy_policy = accuracy_policy or f"exact epoch {endpoint_epoch}"
     accuracy: dict[str, float] = {}
-    for row in _available_rows(headline):
+    for row in _available_rows(accuracy_rows):
         run = str(row.get("run", ""))
         value = safe_float(row, "global_field_fluid_norm_pooled_relative_l2")
         if run in {"1401", "1801", "1804", "1805", "1806", "1807", "1808"} and value is not None:
@@ -1602,11 +2039,18 @@ def _accuracy_cost_plot(headline: list[dict[str, str]], timing_rows: list[dict[s
         "regional_response_honf": "1806",
         "hierarchical_regional_honf": "1807",
         "group_mediated_reader": "1808",
+        "nstage2-a": "1807",
+        "nstage2-b": "1808",
     }
     context_priority = {
         "candidate endpoint500": 0,
-        "parent exact500": 1,
-        "parent mature checkpoint5000": 2,
+        "candidate endpoint5000": 0,
+        "isolated endpoint5000": 0,
+        "matched endpoint5000": 1,
+        "parent exact5000": 2,
+        "parent exact500": 2,
+        "parent mature checkpoint5000": 3,
+        "historical mature checkpoint5000": 3,
     }
     selected: dict[str, dict[str, Any]] = {}
     for row in timing_rows:
@@ -1623,7 +2067,8 @@ def _accuracy_cost_plot(headline: list[dict[str, str]], timing_rows: list[dict[s
             continue
         run = str(row.get("run"))
         if run == "parent":
-            run = run_by_architecture.get(str(row.get("architecture")), "")
+            declared = _timing_declared_model(row)
+            run = MODEL_RUNS.get(declared, "") if declared is not None else run_by_architecture.get(str(row.get("architecture")), "")
         if run not in accuracy:
             continue
         cost = safe_float(row, "median_ms")
@@ -1654,29 +2099,87 @@ def _accuracy_cost_plot(headline: list[dict[str, str]], timing_rows: list[dict[s
                 "name": _label_for_run(run),
                 "marker": {"size": 11, "color": MODEL_COLORS.get(_label_for_run(run), "#315f7c")},
                 "customdata": [[run, row.get("checkpoint_context"), row.get("shape_label"), row.get("source")]],
-                "hovertemplate": "%{text}<br>exact500 accuracy=%{y:.4g}<br>measured full-forward=%{x:.4g} ms<br>run=%{customdata[0]}<br>timing=%{customdata[1]}<br>shape=%{customdata[2]}<extra></extra>",
+                "hovertemplate": (
+                    f"%{{text}}<br>{accuracy_policy} accuracy=%{{y:.4g}}"
+                    f"<br>measured full-forward=%{{x:.4g}} ms<br>run=%{{customdata[0]}}"
+                    f"<br>timing=%{{customdata[1]}}<br>shape=%{{customdata[2]}}<extra></extra>"
+                    if selected_accuracy
+                    else f"%{{text}}<br>exact{endpoint_epoch} accuracy=%{{y:.4g}}<br>measured full-forward=%{{x:.4g}} ms<br>run=%{{customdata[0]}}<br>timing=%{{customdata[1]}}<br>shape=%{{customdata[2]}}<extra></extra>"
+                ),
             }
         )
-    return plot(
-        "Accuracy vs full-forward cost · chunk 2048<br>M=128 · E=3072 · Q=262144",
+    title = "Accuracy vs full-forward cost · chunk 2048<br>M=128 · E=3072 · Q=262144"
+    if selected_accuracy:
+        timing_policy = timing_policy or f"exact epoch {endpoint_epoch} timing proxy; selected checkpoint was not timed separately"
+        title += f"<br>{accuracy_policy} accuracy<br>timing = {timing_policy}"
+    figure = plot(
+        title,
         traces,
         height=500,
         xaxis={"title": "measured full-forward median (ms)", "type": "log"},
-        yaxis={"title": "exact epoch 500 pooled relative L2", "type": "log"},
+        yaxis={"title": f"{accuracy_policy} pooled relative L2", "type": "log"},
     )
+    if selected_accuracy:
+        # The mature selector adds a third title line; reserve room so Plotly
+        # does not place that provenance text over the plotting area.
+        figure["layout"]["margin"]["t"] = 124
+    return figure
 
 
-def _table_card(rows: list[dict[str, str]], parent_selection: dict[str, Any]) -> str:
+def _accuracy_cost_variant_spec(
+    exact_rows: list[dict[str, str]],
+    selected_rows: list[dict[str, str]],
+    timing_rows: list[dict[str, Any]],
+    endpoint_epoch: int,
+) -> dict[str, Any] | None:
+    """Build the mature exact-versus-selected accuracy selector."""
+
+    figures: dict[str, dict[str, Any]] = {}
+    exact = _accuracy_cost_plot(exact_rows, timing_rows, endpoint_epoch)
+    if exact is not None:
+        figures["exact5000"] = exact
+    selected = _accuracy_cost_plot(
+        exact_rows,
+        timing_rows,
+        endpoint_epoch,
+        accuracy_rows=selected_rows,
+        accuracy_policy=f"selected through epoch {endpoint_epoch}",
+        timing_policy=f"same exact epoch {endpoint_epoch} timing proxy (selected checkpoint not timed)",
+    )
+    if selected is not None:
+        figures["selected5000"] = selected
+    if not figures:
+        return None
+    options = []
+    if "exact5000" in figures:
+        options.append(("exact5000", f"exact epoch {endpoint_epoch} accuracy"))
+    if "selected5000" in figures:
+        options.append(("selected5000", f"selected through epoch {endpoint_epoch} accuracy (exact timing proxy)"))
+    return {
+        "figures": figures,
+        "selectors": [{"id": "accuracy_cost_policy", "label": "accuracy policy", "options": options}],
+    }
+
+
+def _table_card(rows: list[dict[str, str]], parent_selection: dict[str, Any], endpoint_epoch: int = 500) -> str:
     headers = ("run", "model", "status", "checkpoint_epoch", "global_field_fluid_norm_pooled_relative_l2", "reason")
     body = []
     for row in rows:
         body.append("<tr>" + "".join(f"<td>{escape(row.get(header, ''))}</td>" for header in headers) + "</tr>")
     if not body:
         body.append('<tr><td colspan="6">No saved-best candidate rows are available yet.</td></tr>')
-    parent_reason = escape(parent_selection.get("reason", "Parent selected comparison unavailable."))
+    if endpoint_epoch == 500:
+        title = "Saved-best candidate tables"
+        description = f"This policy is separate from exact epoch {endpoint_epoch}. Parent saved-best comparison is unavailable: {parent_selection.get('reason', 'Parent selected comparison unavailable.')}"
+    else:
+        title = f"Selected checkpoint comparison · epoch {endpoint_epoch} endpoint"
+        description = (
+            "Selected checkpoint rows are separate from the exact endpoint. Historical parent selections are reused "
+            "from the maintained five-model maturity reduction; their tables and checkpoints remain in place."
+        )
     return f"""
-<section class="card"><h2>Saved-best candidate tables</h2>
-<p class="muted">This policy is separate from exact epoch 500. Parent saved-best comparison is unavailable: {parent_reason}</p>
+<section class="card"><h2>{escape(title)}</h2>
+<p class="muted">{escape(description)}</p>
 <div class="table-wrap"><table><thead><tr>{''.join(f'<th>{escape(header)}</th>' for header in headers)}</tr></thead><tbody>{''.join(body)}</tbody></table></div></section>
 """
 
@@ -1754,14 +2257,29 @@ def _render_page(
     best_rows: list[dict[str, str]],
     parent_selection: dict[str, Any],
     plotly: str,
+    endpoint_epoch: int = 500,
 ) -> None:
+    endpoint_label = f"Exact {endpoint_epoch}"
+    if endpoint_epoch == 500:
+        evidence_boundary = (
+            "A missing candidate table, debug export, timing file, or intervention remains an unavailable panel. "
+            "Parent saved-best weights are unavailable, so no selected-parent comparison is drawn. Attention, "
+            "membership, support, and tree values describe model exports; they are not causal influence or physical truth."
+        )
+    else:
+        evidence_boundary = (
+            "A missing mature candidate table, debug export, timing file, or intervention remains an unavailable panel. "
+            "Exact endpoint and selected checkpoint rows are separate policies; historical parent rows and arrays are "
+            "referenced from the maintained five-model maturity study. Attention, membership, support, and tree values "
+            "describe model exports; they are not causal influence or physical truth."
+        )
     cards = [
-        _figure_card("headline", "Exact 500 headline", figures.get("headline")),
-        _figure_card("channels", "Exact 500 normalized channels", figures.get("channels")),
-        _figure_card("pair_case", "Exact 500 requested case-pair distributions", figures.get("pair_case")),
-        _figure_card("pair_summary", "Exact 500 requested pair summaries", figures.get("pair_summary")),
-        _figure_card("physical", "Exact 500 near / far / physical fields", figures.get("physical")),
-        _figure_card("kpis", "Exact 500 physical engineering KPIs", figures.get("kpis")),
+        _figure_card("headline", f"{endpoint_label} headline", figures.get("headline")),
+        _figure_card("channels", f"{endpoint_label} normalized channels", figures.get("channels")),
+        _figure_card("pair_case", f"{endpoint_label} requested case-pair distributions", figures.get("pair_case")),
+        _figure_card("pair_summary", f"{endpoint_label} requested pair summaries", figures.get("pair_summary")),
+        _figure_card("physical", f"{endpoint_label} near / far / physical fields", figures.get("physical")),
+        _figure_card("kpis", f"{endpoint_label} physical engineering KPIs", figures.get("kpis")),
         _figure_card("history_epoch", "Validation field histories by epoch", figures.get("history_epoch")),
         _figure_card("history_time", "Validation field histories by logged active time", figures.get("history_time")),
         _figure_card("history_temperature_epoch", "Validation temperature histories by epoch", figures.get("history_temperature_epoch")),
@@ -1776,8 +2294,19 @@ def _render_page(
         _figure_card("intervention", "Formal P0/P1/P2 ground-truth deltas", figures.get("intervention")),
         _variant_card("timing128", "Scientific timing at evaluation chunk 128", figures.get("timing128"), variants.get("timing128")),
         _variant_card("timing2048", "Inference timing at receiver chunk 2048", figures.get("timing2048"), variants.get("timing2048")),
-        _figure_card("accuracy_cost", "Accuracy versus measured full-forward cost", figures.get("accuracy_cost")),
+        _variant_card("accuracy_cost", "Accuracy versus measured full-forward cost", figures.get("accuracy_cost"), variants.get("accuracy_cost")),
     ]
+    if endpoint_epoch == 5000:
+        if figures.get("trajectory"):
+            cards.append(_figure_card("trajectory", "Full-grid 500 / 2500 / 5000 endpoint trajectory", figures["trajectory"]))
+        if figures.get("intervention_selected"):
+            cards.append(
+                _figure_card(
+                    "intervention_selected",
+                    "Selected checkpoint P0/P1/P2 ground-truth deltas",
+                    figures["intervention_selected"],
+                )
+            )
     cases = "".join(f'<option value="{escape(case)}">{escape(case)}</option>' for case in anchor_data["cases"])
     models = "".join(f'<option value="{escape(model)}">{escape(model)} · {escape(MODEL_LABELS[model])}</option>' for model in anchor_data["models"])
     channels = "".join(f'<option value="{escape(channel)}">{escape(CHANNEL_LABELS[channel])}</option>' for channel in anchor_data["channels"])
@@ -1785,6 +2314,11 @@ def _render_page(
     note_html = "".join(f"<li>{escape(note)}</li>" for note in notes)
     figure_json = js({key: value for key, value in figures.items() if value})
     variant_json = js(variants)
+    map_description = (
+        f"Exact epoch {endpoint_epoch} checkpoint maps. Ground truth and prediction share a color scale across available models for each case/channel. Signed error uses a symmetric scale. Aligned models share the canonical stored fluid mask from the Reader/Regional source when available."
+        if endpoint_epoch == 5000
+        else "Ground truth and prediction share a color scale across available models for each case/channel. Signed error uses a symmetric scale. Aligned models share the canonical stored fluid mask from the Reader/Regional source when available."
+    )
     body = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>HONF NStage2 comparison</title>
@@ -1798,11 +2332,11 @@ h1{{margin:0 0 6px;font-size:27px}} h2{{margin:0 0 10px;font-size:16px}} p{{colo
 .table-wrap{{overflow:auto}} table{{border-collapse:collapse;width:100%;font-size:12px}} th,td{{border:1px solid var(--line);padding:6px 8px;text-align:left;white-space:nowrap}} th{{background:#eef5f8}}
 ul{{margin:8px 0 4px 18px}} a{{color:#315f7c}} @media(min-width:1000px){{.grid{{display:grid;grid-template-columns:1fr 1fr;gap:18px}}.grid .card{{margin-bottom:0}}}}
 </style></head><body><main>
-<header><h1>HONF NStage2 · matched epoch 500 comparison</h1>
+<header><h1>HONF NStage2 · matched epoch {endpoint_epoch} comparison</h1>
 <p>Offline evidence page for Tracks A (hierarchical regional) and B (group-mediated reader). Exact endpoint tables, saved-best tables, maps, timings, and interventions are shown only when their source artifacts exist.</p>
-<div class="notice"><strong>Evidence boundary.</strong> A missing candidate table, debug export, timing file, or intervention remains an unavailable panel. Parent saved-best weights are unavailable, so no selected-parent comparison is drawn. Attention, membership, support, and tree values describe model exports; they are not causal influence or physical truth.</div></header>
-{_table_card(best_rows, parent_selection)}
-<section class="card"><h2>Five-anchor field maps</h2><p class="muted">Ground truth and prediction share a color scale across available models for each case/channel. Signed error uses a symmetric scale. Aligned models share the canonical stored fluid mask from the Reader/Regional source when available.</p>
+<div class="notice"><strong>Evidence boundary.</strong> {escape(evidence_boundary)}</div></header>
+{_table_card(best_rows, parent_selection, endpoint_epoch)}
+<section class="card"><h2>Five-anchor field maps</h2><p class="muted">{escape(map_description)}</p>
 <div class="controls"><label>anchor <select id="anchor_case">{cases}</select></label><label>model <select id="anchor_model">{models}</select></label><label>channel <select id="anchor_channel">{channels}</select></label></div><div id="anchor_maps" class="plot"></div></section>
 <div class="grid">{''.join(cards)}</div>
 <details><summary>Sources and unavailable evidence</summary><p class="muted">The reducer's comparison CSV/JSON files remain the source of numerical values. Debug NPZ and timing paths are listed only for auditability.</p><ul>{links}</ul><ul>{note_html}</ul></details>
@@ -1824,19 +2358,38 @@ for (const [name,spec] of Object.entries(variants)) {{ for (const selector of sp
     output.write_text(body, encoding="utf-8")
 
 
-def render_nstage2(root: str | Path | None = None, output: str | Path | None = None, plotly_js: str | Path | None = None) -> Path:
-    """Render ``nstage2/figures/index.html`` from available study artifacts."""
+def render_nstage2(
+    root: str | Path | None = None,
+    output: str | Path | None = None,
+    plotly_js: str | Path | None = None,
+    endpoint_epoch5000: bool = False,
+) -> Path:
+    """Render the historical exact-500 or explicit mature exact-5000 page."""
 
-    project, study = _resolve_roots(root)
+    endpoint_epoch = 5000 if endpoint_epoch5000 else 500
+    # Pass the endpoint through the reducer's resolver so project, nstage2,
+    # parent-study, and already-nested maturity roots all share the same
+    # namespace rule.  The local normalization keeps this renderer compatible
+    # with older resolver call sites and protects the historical default path.
+    try:
+        project, study = _resolve_roots(root, endpoint_epoch)
+    except TypeError:
+        project, study = _resolve_roots(root)
+    if endpoint_epoch5000:
+        study = _mature_study_root(study)
     comparison = study / "comparison"
-    reduction = _comparison_files(comparison)
+    reduction = _comparison_files(comparison, endpoint_epoch)
+    reduction = _merge_mature_parent_rows(project, study, reduction, endpoint_epoch)
     manifest = read_json(comparison / "comparison.json", {})
-    anchor_data, statuses = _load_anchor_data(project, study)
+    anchor_data, statuses = _load_anchor_data(project, study, endpoint_epoch)
     organization = anchor_data.pop("organization", [])
     intervention_rows = _formal_intervention_rows(study)
-    timing_rows = _timing_rows(study)
+    selected_intervention_rows = _formal_intervention_rows(study, selected=True) if endpoint_epoch == 5000 else []
+    timing_rows = _timing_rows(study, endpoint_epoch)
     history = _history_rows(reduction["history"])
-    pair_case, pair_summary = _pair_plots(reduction["pairs"], reduction["pair_summary"])
+    if endpoint_epoch == 5000:
+        history = _history_rows(_merge_mature_history_rows(study, reduction["history"]))
+    pair_case, pair_summary = _pair_plots(reduction["pairs"], reduction["pair_summary"], endpoint_epoch)
     a_records = [row for row in organization if row.get("model") == "A" and row.get("status") == "available"]
     b_records = [row for row in organization if row.get("model") == "B" and row.get("status") == "available"]
     a_cases = sorted({str(row["case_id"]) for row in a_records})
@@ -1871,6 +2424,17 @@ def render_nstage2(root: str | Path | None = None, output: str | Path | None = N
     }
     timing128_spec = _timing_variant_spec(timing_rows, 128)
     timing2048_spec = _timing_variant_spec(timing_rows, 2048)
+    best_rows = reduction["best"]
+    accuracy_cost_variant = (
+        _accuracy_cost_variant_spec(reduction["headline"], best_rows, timing_rows, endpoint_epoch)
+        if endpoint_epoch == 5000
+        else None
+    )
+    accuracy_cost_figure = (
+        accuracy_cost_variant["figures"].get("exact5000")
+        if accuracy_cost_variant is not None
+        else _accuracy_cost_plot(reduction["headline"], timing_rows, endpoint_epoch)
+    )
     variants: dict[str, dict[str, Any]] = {}
     if a_hierarchy_figures:
         variants["a_hierarchy"] = {
@@ -1899,19 +2463,22 @@ def render_nstage2(root: str | Path | None = None, output: str | Path | None = N
         variants["timing128"] = timing128_spec
     if timing2048_spec:
         variants["timing2048"] = timing2048_spec
+    if accuracy_cost_variant:
+        variants["accuracy_cost"] = accuracy_cost_variant
     timing128_initial = next(iter(timing128_spec["figures"].values()), None) if timing128_spec else None
     timing2048_initial = next(iter(timing2048_spec["figures"].values()), None) if timing2048_spec else None
     figures: dict[str, dict[str, Any] | None] = {
-        "headline": _headline_plot(reduction["headline"]),
-        "channels": _channel_plot(reduction["channels"]),
+        "headline": _headline_plot(reduction["headline"], endpoint_epoch),
+        "channels": _channel_plot(reduction["channels"], endpoint_epoch),
         "pair_case": pair_case,
         "pair_summary": pair_summary,
-        "physical": _physical_plot(reduction["physical"]),
-        "kpis": _kpi_plot(reduction["kpis"]),
+        "physical": _physical_plot(reduction["physical"], endpoint_epoch),
+        "kpis": _kpi_plot(reduction["kpis"], endpoint_epoch),
         "history_epoch": _history_plot(history, "val_field_mse", "epoch", "Validation field MSE by epoch", "training epoch"),
         "history_time": _history_plot(history, "val_field_mse", "logged_active_seconds", "Validation field MSE by logged active time", "cumulative logged train + validation seconds"),
         "history_temperature_epoch": _history_plot(history, "val_temperature_mse", "epoch", "Validation temperature MSE by epoch", "training epoch"),
         "history_temperature_time": _history_plot(history, "val_temperature_mse", "logged_active_seconds", "Validation temperature MSE by logged active time", "cumulative logged train + validation seconds"),
+        "trajectory": _trajectory_plot(reduction["trajectory"], endpoint_epoch) if endpoint_epoch == 5000 else None,
         "a_hierarchy": next(iter(a_hierarchy_figures.values()), None),
         "a_receivers": _a_receiver_plot(study),
         "a_mass_response": next(iter(a_mass_figures.values()), None),
@@ -1920,13 +2487,23 @@ def render_nstage2(root: str | Path | None = None, output: str | Path | None = N
         "b_routing": _b_source_routing_plot(study),
         "b_influence": _b_influence_plot(study),
         "intervention": _intervention_plot(intervention_rows),
+        "intervention_selected": _intervention_plot(
+            selected_intervention_rows,
+            "Selected checkpoint P0/P1/P2 ground-truth deltas",
+        ),
         "timing128": timing128_initial,
         "timing2048": timing2048_initial,
-        "accuracy_cost": _accuracy_cost_plot(reduction["headline"], timing_rows),
+        "accuracy_cost": accuracy_cost_figure,
     }
-    best_rows = reduction["best"]
-    parent_selection = manifest.get("parent_best_through_500", {}) if isinstance(manifest, dict) else {}
-    source_links = [f"../comparison/{name}" for name in sorted(path.name for path in comparison.glob("*.csv"))]
+    parent_selection_key = "parent_best_through_5000" if endpoint_epoch == 5000 else "parent_best_through_500"
+    parent_selection = manifest.get(parent_selection_key, {}) if isinstance(manifest, dict) else {}
+    target = Path(output).expanduser().resolve() if output is not None else study / "figures" / "index.html"
+    output_dir = target.parent.resolve()
+
+    def source_link(path: Path) -> str:
+        return os.path.relpath(path.resolve(), output_dir)
+
+    source_links = [source_link(path) for path in sorted(comparison.glob("*.csv"))]
     for relative in (
         "track_a/probes.json",
         "track_b/probes.json",
@@ -1937,35 +2514,83 @@ def render_nstage2(root: str | Path | None = None, output: str | Path | None = N
         "track_b/timing_chunk128.json",
         "track_b/timing_chunk2048.json",
         "comparison/parent_timing_chunk128.json",
+        "comparison/matched_timing_chunk2048.json",
     ):
-        if (study / relative).is_file():
-            source_links.append("../" + relative)
-    mature_timing = study.parent / "five_model_epoch5000/timing/five_model_timing.json"
+        path = study / relative
+        if path.is_file():
+            source_links.append(source_link(path))
+    if endpoint_epoch == 5000:
+        source_links.extend(source_link(path) for path in sorted(study.glob("comparison/timing_*_chunk2048.json")))
+    mature_timing = _historical_parent_study(study) / "timing/five_model_timing.json"
     if mature_timing.is_file():
-        source_links.append("../../five_model_epoch5000/timing/five_model_timing.json")
+        source_links.append(source_link(mature_timing))
+    if endpoint_epoch == 5000:
+        for relative in (
+            "reduction/headline.csv",
+            "reduction/pooled_metrics.csv",
+            "reduction/best_selected_headline.csv",
+            "evaluation/debug_npz",
+        ):
+            path = _historical_parent_study(study) / relative
+            if path.is_file():
+                source_links.append(source_link(path))
+        for relative in ("track_a/interventions_best_field.json", "track_b/interventions_best_field.json"):
+            path = study / relative
+            if path.is_file():
+                source_links.append(source_link(path))
     notes = [
-        "Exact endpoint values come from exact500_* reducer outputs; candidate rows remain visibly unavailable until the 90-case tables arrive.",
-        "Saved-best candidate rows are separate from exact epoch 500. Parent best-through-500 weights are not selected from history minima.",
+        (
+            "Exact endpoint values come from exact500_* reducer outputs; candidate rows remain visibly unavailable until the 90-case tables arrive."
+            if endpoint_epoch == 500
+            else "Exact endpoint values come from exact5000_* reducer outputs; candidate rows remain visibly unavailable until the 90-case tables arrive. Historical parent rows are reused in place from the maintained five-model epoch5000 reduction."
+        ),
+        (
+            "Saved-best candidate rows are separate from exact epoch 500. Parent best-through-500 weights are not selected from history minima."
+            if endpoint_epoch == 500
+            else "Selected checkpoint rows are separate from exact epoch 5000. Mature parent selected rows remain sourced from the maintained five-model reduction, while candidate selected rows come from the maturity5000 artifacts."
+        ),
         "Anchor maps use the five fixed cases 0273, 0653, 0283, 0298, and 0302 and retain shared per-case/channel scales; aligned models use the shared canonical stored fluid mask.",
         "Track A hierarchy panels require exact tree_levels/tree_children/tree_coords/tree_bounds_min/tree_bounds_max/tree_states/tree_mass/tree_valid exports; selected receiver rows come only from track_a/probes.json.",
         "Track B routing and influence panels come only from track_b/probes.json. The far_field point is the farthest fixed field probe and may share support groups with the near port. AD/FD disagreement values are fixed-step diagnostics shown for context; their magnitude is not a confirmed convergence or causal claim.",
-        "Timing panels use fixed workload/phase selectors: real 0273 and 0653 at four measured phases, plus the two synthetic shapes at full forward. X axes use short model labels; hover and titles retain exact500 versus mature checkpoint5000 provenance. Parent exact500 replaces a duplicated mature row for the same model/workload/phase/chunk, while candidate endpoint500 rows remain distinct.",
-        "Accuracy-versus-cost uses only chunk-2048 measurements at the fixed E=3072, M=128, Q=262144 shape and prefers candidate endpoint500, then parent exact500, then mature checkpoint5000 timing; every point keeps its checkpoint context.",
+        (
+            "Timing panels use fixed workload/phase selectors: real 0273 and 0653 at four measured phases, plus the two synthetic shapes at full forward. X axes use short model labels; hover and titles retain exact500 versus mature checkpoint5000 provenance. Parent exact500 replaces a duplicated mature row for the same model/workload/phase/chunk, while candidate endpoint500 rows remain distinct."
+            if endpoint_epoch == 500
+            else "Timing panels use fixed workload/phase selectors: real 0273 and 0653 at four measured phases, plus the two synthetic shapes at full forward. Isolated endpoint5000 reruns are preferred when available, followed by the matched endpoint5000 export; historical Legacy/Latent timing remains explicitly labeled as reused mature measurement."
+        ),
+        (
+            "Accuracy-versus-cost uses only chunk-2048 measurements at the fixed E=3072, M=128, Q=262144 shape and prefers candidate endpoint500, then parent exact500, then mature checkpoint5000 timing; every point keeps its checkpoint context."
+            if endpoint_epoch == 500
+            else "Accuracy-versus-cost uses only chunk-2048 measurements at the fixed E=3072, M=128, Q=262144 shape and prefers isolated/matched endpoint5000 timing, then historical mature timing. Its selector compares exact epoch 5000 accuracy with selected-through-5000 accuracy using the same exact endpoint timing proxy; selected checkpoints were not timed separately, and each point keeps its checkpoint context."
+        ),
         "Formal intervention panels read only track_a/interventions.json and track_b/interventions.json; epoch-10 execution-check JSON is excluded.",
     ]
+    if endpoint_epoch == 5000:
+        notes.append(
+            "The full-grid trajectory reads trajectory_headline.csv at exact epochs 500, 2500, and 5000; it is a distinct evaluation trajectory from the sampled training/validation histories."
+            if figures.get("trajectory")
+            else "The full-grid 500/2500/5000 trajectory is unavailable until trajectory_headline.csv arrives; sampled training/validation histories remain separate."
+        )
+        notes.append(
+            "The optional selected-checkpoint intervention panel reads only track_a/interventions_best_field.json and track_b/interventions_best_field.json; exact endpoint interventions remain in the separate formal panel."
+            if selected_intervention_rows
+            else "Selected-checkpoint intervention files are unavailable; the exact endpoint intervention panel remains separate."
+        )
     if not _formal_probe_results(study, "track_a"):
         notes.append("Track A selected receiver diagnostics are unavailable until track_a/probes.json arrives.")
     if not _formal_probe_results(study, "track_b"):
         notes.append("Track B source routing and conditional influence diagnostics are unavailable until track_b/probes.json arrives.")
     if not intervention_rows:
         notes.append("Formal intervention deltas are unavailable until track_a/interventions.json or track_b/interventions.json arrives.")
-    if not any(row.get("checkpoint_context") == "candidate endpoint500" for row in timing_rows):
-        notes.append("Candidate scientific/inference timing files are unavailable; parent timing remains labeled checkpoint 5000.")
+    if not any(row.get("checkpoint_context") == f"candidate endpoint{endpoint_epoch}" for row in timing_rows):
+        notes.append(
+            "Candidate scientific/inference timing files are unavailable; parent timing remains labeled checkpoint 5000."
+            if endpoint_epoch == 500
+            else "Candidate mature scientific/inference timing files are unavailable; historical parent timing remains explicitly labeled."
+        )
     notes.extend(f"{row['model']} case {row['case_id']}: {row.get('reason', row.get('source', 'available'))}" for row in statuses if row.get("status") != "available")
     notes.extend(f"{row['model']} case {row['case_id']}: {row['mask_source']}" for row in statuses if row.get("mask_source") and row.get("mask_source") != "stored fluid_mask")
-    target = Path(output).expanduser().resolve() if output is not None else study / "figures" / "index.html"
     plotly_source_text = plotly_source(Path(plotly_js).expanduser() if plotly_js is not None else None)
-    _render_page(target, figures, variants, anchor_data, source_links, notes, best_rows, parent_selection, plotly_source_text)
+    _render_page(target, figures, variants, anchor_data, source_links, notes, best_rows, parent_selection, plotly_source_text, endpoint_epoch)
     return target
 
 
@@ -1974,8 +2599,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=None, help="repository root or NStage2 study root")
     parser.add_argument("--output", type=Path, default=None, help="offline HTML path (default: nstage2/figures/index.html)")
     parser.add_argument("--plotly-js", type=Path, default=None, help="optional local Plotly JS file")
+    parser.add_argument(
+        "--endpoint-epoch5000",
+        action="store_true",
+        help="render the mature NStage2 endpoint from nstage2/maturity5000 into maturity5000/figures",
+    )
     args = parser.parse_args(argv)
-    path = render_nstage2(args.root, args.output, args.plotly_js)
+    path = render_nstage2(args.root, args.output, args.plotly_js, args.endpoint_epoch5000)
     print(path)
     return 0
 

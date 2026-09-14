@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import sys
 from pathlib import Path
 
@@ -118,6 +119,74 @@ def test_exact_endpoint_does_not_relabel_an_available_earlier_checkpoint() -> No
     for select in (reduction._filter_table_rows, reduction._summary_rows):
         assert select(rows[:1], "1807", "exact500") == []
         assert select(rows, "1807", "exact500") == rows[1:]
+
+
+def test_mature_exact_endpoint_selects_epoch5000_and_uses_mature_paths(tmp_path: Path) -> None:
+    rows = [
+        {"checkpoint": "Run_1807_example/epoch_0500_model.pt", "epoch": "500"},
+        {"checkpoint": "Run_1807_example/epoch_2500_model.pt", "epoch": "2500"},
+        {"checkpoint": "Run_1807_example/epoch_5000_model.pt", "epoch": "5000"},
+    ]
+    assert reduction._filter_table_rows(rows, "1807", "exact5000") == [rows[-1]]
+    assert reduction._summary_rows(rows, "1807", "exact5000") == [rows[-1]]
+    assert reduction._candidate_table_dir(
+        tmp_path / "maturity5000", "1807", "exact5000", 5000
+    ) == tmp_path / "maturity5000/track_a/endpoint5000/tables"
+    project = tmp_path / "project"
+    assert reduction._parent_table_dir(project, "1801", 5000) == (
+        project / reduction.STUDY_RELATIVE / "five_model_epoch5000/evaluation/tables"
+    )
+
+
+def test_mature_root_resolution_never_falls_back_to_historical_nstage2(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "diagnostics").mkdir()
+    nstage2 = project / reduction.STUDY_RELATIVE / "nstage2"
+    maturity = nstage2 / "maturity5000"
+    maturity.mkdir(parents=True)
+    parent = project / reduction.STUDY_RELATIVE / "five_model_epoch5000"
+    parent.mkdir(parents=True)
+
+    assert reduction._resolve_roots(project, 5000)[1] == maturity
+    assert reduction._resolve_roots(nstage2, 5000)[1] == maturity
+    assert reduction._resolve_roots(parent, 5000)[1] == maturity
+    assert reduction._resolve_roots(maturity, 5000)[1] == maturity
+    assert reduction._resolve_roots(project)[1] == nstage2
+
+    default_project_mature = reduction.PROJECT_ROOT / reduction.STUDY_RELATIVE / "nstage2/maturity5000"
+    assert reduction._resolve_roots(None, 5000)[1] == default_project_mature
+
+
+def test_history_endpoint5000_keeps_milestones_and_larger_windows(
+    tmp_path: Path, monkeypatch
+) -> None:
+    history = tmp_path / "history.csv"
+    with history.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["run", "epoch", "field_mse"])
+        writer.writeheader()
+        for epoch in (499, 500, 1000, 2500, 4951, 5000):
+            writer.writerow({"run": "1807", "epoch": epoch, "field_mse": epoch / 10000})
+
+    monkeypatch.setattr(
+        reduction,
+        "_history_source",
+        lambda project, study, run: (history, "fixture history"),
+    )
+    comparison = tmp_path / "comparison"
+    reduction._history_outputs(tmp_path, tmp_path / "study", comparison, 5000)
+
+    curves = reduction.read_csv(comparison / "learning_curves.csv")
+    assert max(int(row["epoch"]) for row in curves) == 5000
+    windows = reduction.read_csv(comparison / "history_windows.csv")
+    assert {int(row["requested_window_epochs"]) for row in windows} == set(
+        reduction.HISTORY_WINDOW_SIZES
+    )
+    milestones = reduction.read_csv(comparison / "history_milestones.csv")
+    assert {int(row["milestone_epoch"]) for row in milestones} == {500, 1000, 2500, 5000}
+    manifest = json.loads((comparison / "history_manifest.json").read_text())
+    assert manifest["budget_epoch"] == 5000
+    assert manifest["milestones"] == [500, 1000, 2500, 5000]
 
 
 def test_sparse_gradient_history_is_not_zero_filled_or_counted_twice(tmp_path: Path) -> None:

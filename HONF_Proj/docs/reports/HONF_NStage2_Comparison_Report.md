@@ -1,5 +1,327 @@
 # HONF NStage2 comparison: hierarchical regional reading and group-mediated coarse communication
 
+## Mature epoch-5000 assessment (current; supersedes the historical section below)
+
+**Status:** both NStage2 candidates completed the authorized 5,000-epoch continuation. This is the current history and maturity assessment as of 2026-09-14. It uses the exact epoch-5,000 checkpoint and a separately recorded best-field checkpoint for each of the seven runs, full-grid evaluation on 90 cases, the all-epoch history exports, and the final isolated execution artifacts. The epoch-500 assessment is retained verbatim below for provenance and is not the current endpoint conclusion.
+
+**Decision-relevant finding:** the two experiments partially fulfill their original intentions. A makes the intended multiresolution environmental response operator active and lowers the largest synthetic environmental geometry-row count by 87.36%, but the full-grid exact endpoint is less accurate than Regional and slower at the tested large shape. Its selected global L2 is only 0.07% higher than Regional, but one seed does not establish equivalence. B makes the intended group-mediated coarse path active, including compact local influence and nonzero distant coarse influence even when no local group is shared, but its full-grid accuracy remains worse than Reader. Thus the mechanisms are demonstrated; the requested accuracy and efficiency improvements are not jointly demonstrated.
+
+### Scope, metric rule, and provenance
+
+The headline accuracy is the pooled relative L2 of `global_field_fluid_norm` over 90 cases and 3,496,800 values. Temperature-channel L2 is `field_temperature_fluid_norm`; internal temperature is the physical relative L2 of `internal_temperature_physical`. Exact means the checkpoint at epoch 5,000. Selected means the checkpoint stored as `best_by_field_mse_model.pt`, with the actual checkpoint epoch read from metadata. The selected result is reported beside, never substituted for, the exact endpoint.
+
+The mature reducers contain 19,530 long metric rows in each exact and selected seven-run table set (7 × 90 cases × 31 metrics) and 58,590 rows in the three-point trajectory set. The five historical aliases are filtered from their shared 25,000-row history export; each alias has 5,000 unique epochs. Runs 1807 and 1808 each have 5,000 rows and 5,000 unique epochs in their own `metrics.csv`. The history manifest, milestone table, windows, last-50 summaries, and gradient/update extraction are [here](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/history_manifest.json), [here](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/history_milestones.csv), [here](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/history_windows.csv), [here](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/last50_window.csv), and [here](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/gradient_updates.csv).
+
+The pooled full-grid metrics below are the mature accuracy evidence. Sampled validation MSE is used only to describe convergence and checkpoint selection. It must not be used as a proxy for mature full-grid accuracy. The five selected diagnostic anchors (0273, 0653, 0283, 0298, 0302) were fixed before seeing the NStage2 results; they are mechanism probes, not a representative accuracy sample.
+
+New GPU0 work comprised six candidate 90-case evaluations (exact 2500, exact 5000, and validation-selected for each candidate: 540 case-model evaluations), phase interventions at both mature selection policies, exact-5000 probes, and bounded timing. Existing parent 90-case tables were reused in place; only missing parent figure exports for anchor 0283 were evaluated (five case-model evaluations). No checkpoint was copied or model retrained. The work was completed on branch agent/honf-core-next.
+
+### Checkpoint identity, continuation, and selection
+
+| run | model | exact checkpoint | selected checkpoint | selected epoch |
+|---|---|---|---|---:|
+| 1401 | Legacy | `epoch_5000_model.pt` | `best_by_field_mse_model.pt` | 4585 |
+| 1801 | Latent | `epoch_5000_model.pt` | `best_by_field_mse_model.pt` | 4973 |
+| 1804 | Dense | `epoch_5000_model.pt` | `best_by_field_mse_model.pt` | 4738 |
+| 1805 | Reader | `epoch_5000_model.pt` | `best_by_field_mse_model.pt` | 4777 |
+| 1806 | Regional | `epoch_5000_model.pt` | `best_by_field_mse_model.pt` | 4933 |
+| 1807 | NStage2-A hierarchical Regional | `epoch_5000_model.pt` | `best_by_field_mse_model.pt` | 4795 |
+| 1808 | NStage2-B group-mediated Reader | `epoch_5000_model.pt` | `best_by_field_mse_model.pt` | 4933 |
+
+All seven endpoint checkpoints were inspected with the trusted CPU compatibility loader and report 65,000 optimizer steps. Both candidate run directories retain checkpoints at epochs 10, 50, 100, 250, 500, 1000, 2500, and 5000. The optimizer state is present: AdamW, one parameter group, learning rate 3e-4, weight decay 1e-5, gradient clip norm 1, and no AMP. Runs 1807 and 1808 explicitly resumed from their own `epoch_0500_model.pt`, restoring model and optimizer state before continuing through epoch 5,000. Runs 1801 and 1806 likewise record `epoch_0500_model.pt`; 1804 and 1805 record `latest_model.pt` as their continuation source. The latter two `latest_model.pt` paths are mutable and now refer to the completed run; the epoch-500 checkpoint remains the stable continuation artifact.
+
+Best metrics in the candidate manifests are sampled validation selections: A's best field MSE is 0.0015917181 and best temperature MSE is 0.0013060530, while its epoch-5,000 sampled values are 0.0037394360 and 0.0036623067. B's selected field checkpoint is epoch 4,933; its separately selected temperature checkpoint is epoch 4,976; its final sampled values are 0.0065654425 and 0.0081152407. Best files and `latest_model.pt` are mutable paths. The selected epochs in the table above and the mature selected CSVs are the durable interpretation; a future overwrite of a best-path file must not silently change this comparison. Candidate and parent continuation metadata are in the [A run manifest](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1807_20260912_091246_nstage2_hierarchical_regional/run_manifest.json), [B run manifest](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1808_20260912_091247_nstage2_group_mediated_reader/run_manifest.json), and the corresponding parent manifests.
+
+### Exact versus selected full-grid accuracy
+
+| run | model | exact global L2 | exact T L2 | exact internal T L2 | selected global L2 | selected T L2 | selected internal T L2 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 1401 | Legacy | 0.03740128 | 0.05228520 | 0.0347417 | 0.03209749 | 0.04676776 | 0.0294603 |
+| 1801 | Latent | 0.09039916 | 0.10842416 | 0.0606211 | 0.07947922 | 0.10352078 | 0.0595797 |
+| 1804 | Dense | 0.02966079 | 0.04070498 | 0.0257436 | 0.02896025 | 0.03867008 | 0.0268048 |
+| 1805 | Reader | 0.06586534 | 0.08569642 | 0.0441225 | 0.06463271 | 0.08360105 | 0.0437002 |
+| 1806 | Regional | 0.03118834 | 0.04474921 | 0.0261330 | 0.02819232 | 0.03645150 | 0.0266958 |
+| 1807 | NStage2-A | 0.04353545 | 0.05788759 | 0.0293366 | 0.02821198 | 0.03572134 | 0.0261229 |
+| 1808 | NStage2-B | 0.07099612 | 0.09211638 | 0.0476533 | 0.06583577 | 0.08888801 | 0.0464224 |
+
+The exact and selected equal-case means are respectively: Legacy 0.03470481/0.02982266, Latent 0.07249954/0.05607779, Dense 0.02643349/0.02561642, Reader 0.05456526/0.05359384, Regional 0.02822093/0.02472507, A 0.04053920/0.02509314, and B 0.06139364/0.05587598. Full distributions, case metrics, and pairings are in the [exact headline and tables](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/exact5000_headline.csv) and [selected headline and tables](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/best_field_headline.csv).
+
+Relative to the directly intended parents, A exact is 0.04353545 versus Regional's 0.03118834, a +39.59% error increase. A selected is 0.02821198 versus Regional selected 0.02819232, only +0.07%; this is a small observed selected-checkpoint difference, not an exact-endpoint win or an equivalence test. B exact is 0.07099612 versus Reader's 0.06586534, +7.79%, and B selected is 0.06583577 versus Reader selected 0.06463271, +1.86%. A's selected checkpoint improves its own exact global L2 by 35.20%; B's selected checkpoint improves its own exact global L2 by 7.27%.
+
+Per-case behavior does not reverse the aggregate conclusion. A's worst exact case is 0283 (0.067845 versus Regional 0.073074), and its selected value is 0.072319 versus Regional selected 0.078212. A selected beats Regional on four of the five fixed diagnostic anchors, but wins only 37 of 90 paired cases overall, so those anchors cannot establish representative accuracy. B's worst exact case is 0298 (0.157118 versus Reader 0.177697), and selected is 0.156022 versus 0.172508. B's largest paired regression is case 0292: +0.039688 exact and +0.031612 selected relative to Reader. These difficult-case results are available in the [exact](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/exact5000_difficult_cases.csv) and [selected](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/best_field_difficult_cases.csv) tables.
+
+### Error tails and paired outcomes
+
+Lower pooled error does not guarantee improvement on most cases. In exact/selected global-L2 pairings, A wins 20/75 cases against Legacy, 88/90 against Latent, 3/55 against Dense, 66/90 against Reader, and 2/37 against Regional (each denominator is 90). B wins 2/2 against Legacy, 76/15 against Latent, 0/0 against Dense, 8/23 against Reader, and 0/0 against Regional. In particular, selected B has lower pooled L2 than Latent while losing on 75 cases; Latent's difficult-case tail drives that aggregate comparison.
+
+| Run | Exact p95 / worst case L2 | Selected p95 / worst case L2 |
+|---|---:|---:|
+| 1401 | 0.060236 / 0.080615 | 0.050556 / 0.074153 |
+| 1801 | 0.189624 / 0.240695 | 0.175542 / 0.229308 |
+| 1804 | 0.052161 / 0.064715 | 0.052812 / 0.063981 |
+| 1805 | 0.130381 / 0.177697 | 0.127950 / 0.172508 |
+| 1806 | 0.050395 / 0.073074 | 0.049550 / 0.078212 |
+| 1807 | 0.060291 / 0.067845 | 0.049966 / 0.072319 |
+| 1808 | 0.134581 / 0.157118 | 0.131454 / 0.156022 |
+
+Anchor 0283 remains unfavorable for A in absolute error even though it improves Regional there. Selected A also has high errors on 0300 (0.058750), 0298 (0.054648), and 0287 (0.051841). B's largest exact errors cluster around 0298–0301; improvements on its worst case do not remove regressions on 0292, 0288, and 0290. The HTML keeps all five anchors and seven models available with common per-case/channel color scales; these maps show exact-5000 predictions, not selected predictions.
+
+### Three-point full-grid trajectory
+
+| model | epoch 500 | epoch 2,500 | epoch 5,000 |
+|---|---:|---:|---:|
+| Legacy 1401 | 0.117148 | 0.045285 | 0.037401 |
+| Latent 1801 | 0.145333 | 0.085111 | 0.090399 |
+| Dense 1804 | 0.098741 | 0.048835 | 0.029661 |
+| Reader 1805 | 0.139648 | 0.074600 | 0.065865 |
+| Regional 1806 | 0.096652 | 0.047089 | 0.031188 |
+| NStage2-A 1807 | 0.101586 | 0.050182 | 0.043535 |
+| NStage2-B 1808 | 0.143726 | 0.086246 | 0.070996 |
+
+The complete trajectory, including channel, physical, engineering, and stratum rows, is in the [trajectory headline](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/trajectory_headline.csv), [trajectory pooled metrics](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/trajectory_pooled_metrics.csv), and [trajectory figures](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/figures/index.html). The HTML index renders all seven models across the five fixed diagnostic anchors. Epoch 1,000 is available in the recorded sampled histories and milestone export, but no separate full-grid epoch-1,000 evaluation was requested.
+
+The sampled validation milestones show why endpoint-only reading is misleading. Values below are field MSE / temperature MSE at epochs 500, 1,000, 2,500, and 5,000, in that order:
+
+| run | 500 field/T | 1,000 field/T | 2,500 field/T | 5,000 field/T |
+|---|---|---|---|---|
+| 1401 | 0.023596/0.020334 | 0.007721/0.006390 | 0.003029/0.003253 | 0.001933/0.002501 |
+| 1801 | 0.027213/0.020740 | 0.022522/0.016170 | 0.009922/0.011577 | 0.011433/0.012041 |
+| 1804 | 0.016619/0.012350 | 0.008000/0.005499 | 0.003883/0.007027 | 0.001714/0.001681 |
+| 1805 | 0.027529/0.018355 | 0.014281/0.011263 | 0.007134/0.007573 | 0.005553/0.006868 |
+| 1806 | 0.015880/0.014394 | 0.006865/0.005911 | 0.003683/0.005551 | 0.001981/0.002099 |
+| 1807 | 0.020270/0.011281 | 0.006962/0.004021 | 0.004023/0.007518 | 0.003739/0.003662 |
+| 1808 | 0.028115/0.024769 | 0.016257/0.014110 | 0.010715/0.011008 | 0.006565/0.008115 |
+
+A's validation field MSE rises from its selected 0.0015917 near epoch 4,795 to 0.0037394 at the exact endpoint; temperature similarly rises from 0.0013061 near 4,800 to 0.0036623. This late rebound explains the large exact/selected gap. B's late validation curves are flatter, but still favor selection. The mature reducer records endpoint samples in [history milestones](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/history_milestones.csv).
+
+The OLS slopes below were calculated from the named-column learning_curves.csv rows using the stated trailing windows; they are validation MSE change per epoch; positive means late worsening. Each cell is final 50 / 250 / 500 epochs, with field followed by temperature:
+
+| run | field slope (50/250/500) | temperature slope (50/250/500) |
+|---|---|---|
+| 1401 | +1.05e-5 / +1.76e-6 / +8.96e-8 | +1.24e-5 / +1.17e-6 / −6.44e-8 |
+| 1801 | +2.22e-5 / +2.12e-6 / −1.71e-6 | +1.66e-5 / +7.01e-7 / −2.15e-6 |
+| 1804 | −4.74e-6 / −2.54e-6 / −1.19e-7 | −6.73e-6 / +3.54e-7 / −2.17e-7 |
+| 1805 | −1.08e-5 / +1.53e-6 / −7.55e-7 | +1.03e-5 / +2.32e-6 / −3.89e-7 |
+| 1806 | −5.47e-5 / +8.91e-7 / −2.77e-7 | −2.84e-5 / +8.95e-7 / −1.53e-7 |
+| 1807 | +9.88e-5 / +7.97e-6 / +9.02e-7 | +5.73e-5 / +4.57e-6 / +4.16e-7 |
+| 1808 | −4.02e-6 / −1.39e-6 / −4.30e-7 | +3.02e-6 / −5.34e-7 / −6.13e-7 |
+
+A is the only candidate with a positive field and temperature slope over all three late windows, with the strongest rebound over 50 and 250 epochs. B has small negative field slopes and a mixed temperature slope, consistent with a flatter late endpoint. The last-50 train/validation means (field train/val; temperature train/val) are: Dense 0.000518/0.001821; 0.000870/0.001817; Regional 0.001851/0.003056; 0.001813/0.002454; A 0.001983/0.003630; 0.002133/0.002743; Reader 0.001464/0.006184; 0.001446/0.007503; B 0.001497/0.006456; 0.001680/0.008490. These are bounded sampled train/validation gaps, not full-grid generalization estimates. Legacy and Latent remain separately interpretable historical baselines: their last-50 field/temperature validation means are 0.002450/0.002747 and 0.009525/0.011556, respectively.
+
+### Channels, physical fields, and strata
+
+The five fluid-channel relative L2 values are listed as `u / v / p / omega / T`, exact first and selected second. This shows that A's selected checkpoint improves all five channels relative to its exact endpoint, while its exact omega and temperature remain above Regional; B's selected gains are modest and its temperature remains above Reader.
+
+| run | exact u/v/p/omega/T | selected u/v/p/omega/T |
+|---|---|---|
+| 1401 | 0.02127/0.01730/0.04915/0.04120/0.05229 | 0.01882/0.01559/0.03356/0.03880/0.04677 |
+| 1801 | 0.04799/0.07060/0.12477/0.09501/0.10842 | 0.04009/0.06530/0.09568/0.08596/0.10352 |
+| 1804 | 0.01436/0.01312/0.02557/0.04189/0.04070 | 0.01264/0.01287/0.02486/0.04203/0.03867 |
+| 1805 | 0.02900/0.05907/0.08251/0.06636/0.08570 | 0.02862/0.05751/0.08055/0.06625/0.08360 |
+| 1806 | 0.01386/0.01502/0.02853/0.04187/0.04475 | 0.01201/0.01282/0.02611/0.04092/0.03645 |
+| 1807 | 0.01852/0.03549/0.03670/0.05623/0.05789 | 0.01241/0.01297/0.02459/0.04189/0.03572 |
+| 1808 | 0.03526/0.06461/0.08682/0.07101/0.09212 | 0.02917/0.05929/0.07820/0.06631/0.08889 |
+
+The combined field/physical table is `global / near-interface / far-fluid / internal-temperature`, exact first and selected second. A exact is worse than Regional in both near-interface and far-fluid regions as well as globally, while selected A is close to Regional across these regions. B's coarse/group route does not remove its Reader-level near/far error gap.
+
+| run | exact global/near/far/internal T | selected global/near/far/internal T |
+|---|---|---|
+| 1401 | 0.03740/0.03369/0.04178/0.03474 | 0.03210/0.03254/0.03476/0.02946 |
+| 1801 | 0.09040/0.06873/0.08509/0.06062 | 0.07948/0.05850/0.07231/0.05958 |
+| 1804 | 0.02966/0.03509/0.02649/0.02574 | 0.02896/0.03504/0.02537/0.02680 |
+| 1805 | 0.06587/0.04744/0.06376/0.04412 | 0.06463/0.04670/0.06288/0.04370 |
+| 1806 | 0.03119/0.03593/0.02810/0.02613 | 0.02819/0.03412/0.02449/0.02670 |
+| 1807 | 0.04354/0.04914/0.03706/0.02934 | 0.02821/0.03484/0.02368/0.02612 |
+| 1808 | 0.07100/0.05134/0.06639/0.04765 | 0.06584/0.04759/0.06168/0.04642 |
+
+The [exact physical](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/exact5000_physical.csv), [selected physical](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/best_field_physical.csv), [exact engineering](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/exact5000_engineering_kpis.csv), and [selected engineering](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/best_field_engineering_kpis.csv) tables include interface, port, outlet-temperature, and pressure-drop fields. At the exact endpoint, A's physical relative L2 is 0.02934 internally and 0.14128 for interface normal flux; B is 0.04765 internally and 0.11898 for interface normal flux. Those interface quantities should not be collapsed into the global fluid-field conclusion.
+
+Stratum values below are global fluid relative L2 for `module count 3 / 10`, `crowded / separated spacing`, `near-wall / interior`, and `high heating CV`, exact first and selected second:
+
+| run | exact 3/10 | selected 3/10 | exact crowded/separated | selected crowded/separated | exact near/interior | selected near/interior | exact high-CV | selected high-CV |
+|---|---|---|---|---|---|---|---|---|
+| 1401 | 0.02795/0.03306 | 0.02508/0.02608 | 0.03957/0.02788 | 0.03339/0.02405 | 0.03942/0.02466 | 0.03434/0.02322 | 0.04546 | 0.03993 |
+| 1801 | 0.04213/0.05881 | 0.02770/0.03518 | 0.09425/0.04454 | 0.08314/0.03119 | 0.09786/0.04709 | 0.08699/0.02950 | 0.12481 | 0.11532 |
+| 1804 | 0.01759/0.02524 | 0.01728/0.02327 | 0.03228/0.01842 | 0.03185/0.01814 | 0.03252/0.01943 | 0.03140/0.02000 | 0.03756 | 0.03641 |
+| 1805 | 0.03470/0.04225 | 0.03425/0.04129 | 0.07026/0.03797 | 0.06878/0.03776 | 0.06936/0.03745 | 0.06814/0.03661 | 0.09202 | 0.08973 |
+| 1806 | 0.01807/0.02980 | 0.01646/0.02274 | 0.03436/0.02072 | 0.03079/0.01735 | 0.03465/0.01983 | 0.03259/0.01783 | 0.03676 | 0.03541 |
+| 1807 | 0.02882/0.04991 | 0.01718/0.02333 | 0.04773/0.03060 | 0.03110/0.01758 | 0.04513/0.03336 | 0.03235/0.01892 | 0.04963 | 0.03559 |
+| 1808 | 0.04069/0.04954 | 0.03753/0.04166 | 0.07537/0.04827 | 0.06986/0.04361 | 0.07242/0.04484 | 0.06860/0.04064 | 0.08959 | 0.08497 |
+
+A exact is above Regional exact in every listed difficult stratum; A selected is close to Regional selected and slightly better near-wall, but slightly worse in the other listed strata. B remains above Reader in the listed strata except high heating-CV, where B is slightly lower (0.08959 exact versus Reader 0.09202; 0.08497 selected versus 0.08973). The complete [exact strata](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/exact5000_strata.csv) and [selected strata](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/best_field_strata.csv) tables contain every axis and stratum.
+
+### Physical quantities and sources of the error gap
+
+A's exact normalized MSE excess over Regional is 0.00085416. Vorticity, transverse velocity, and temperature contribute about 36.1%, 26.9%, and 25.0% of that net gap. Under selected-checkpoint comparison the net difference shrinks to 0.000001027: lower pressure and temperature error offset higher velocity/vorticity error. B's selected MSE excess over Reader is 0.00014531; temperature contributes +0.00014415 while pressure improves by −0.00005263. This is a response-quality limitation, especially thermal, rather than evidence that groups are inactive. Exact/selected per-channel contributions are retained in the comparison directory.
+
+| Metric (physical relative L2 unless labelled MAE) | Dense exact / selected | Regional exact / selected | A exact / selected | Reader exact / selected | B exact / selected |
+|---|---:|---:|---:|---:|---:|
+| Surface temperature | .037510 / .038985 | .039070 / .039013 | .045289 / .038566 | .059751 / .059217 | .062988 / .061555 |
+| Normal heat flux | .103487 / .106147 | .105374 / .099310 | .141275 / .115563 | .105010 / .109735 | .118980 / .116038 |
+| Final port outside temperature | .073197 / .066986 | .079636 / .066842 | .089112 / .066252 | .081575 / .080956 | .084025 / .083764 |
+| Final effective heat transfer coefficient | .046379 / .048127 | .047771 / .048077 | .044822 / .049332 | .048912 / .049677 | .052099 / .050150 |
+| Pressure-drop equal-case MAE | .001031 / .001003 | .001310 / .001106 | .002395 / .000802 | .002140 / .002182 | .002950 / .002510 |
+| Outlet-temperature equal-case MAE | .155314 / .148095 | .194222 / .138512 | .266388 / .139971 | .275935 / .266911 | .340681 / .300566 |
+| Active-module-temperature equal-case MAE | .113180 / .156714 | .098947 / .150262 | .149588 / .150928 | .216052 / .210359 | .224965 / .207214 |
+
+MAEs retain the dataset's physical units and are averaged equally over cases; they are not relative L2. Selected A's flux L2 remains 16.4% above selected Regional despite its lower field-temperature L2. The early claim of several thermal benefits therefore needs a quantity- and checkpoint-specific qualification.
+
+### Phase interventions and prediction differences
+
+P0 removal recomputes the downstream predicted-port physical loop. P1-only preserves normal P0 and removes the affected feedback route before downstream recomputation. P2 removes only the final field-read route and cannot retrospectively change completed internal/interface predictions. A removes its hierarchical environmental context while preserving direct QM, coarse, and local paths. B removes both local group context and the group-source coarse contribution at the chosen phase, preserving environmental coarse background; the two extra P2 tests remove just one of these group routes. Fixed-level-1 is A's P2-only read on the same prepared learned weights, not a separately trained Regional model.
+
+The following are equal means across the five fixed anchors. Each GT delta is intervened minus normal relative L2: positive means worse. The prediction-difference column averages absolute changes over the full normalized field, including masked/non-fluid positions; it is not a ground-truth error measure.
+
+| Track / policy | Intervention | Global fluid GT delta | Temperature GT delta | Mean absolute prediction difference |
+|---|---|---:|---:|---:|
+| A exact | P0 | −.000118 | +.000167 | .003849 |
+| A exact | P1-only | +.022882 | +.014064 | .014862 |
+| A exact | P2 | +.488604 | +.310132 | .285805 |
+| A exact | Fixed level 1, P2 | +.001708 | +.002730 | .011017 |
+| A selected | P0 | +.002489 | +.000425 | .003634 |
+| A selected | P1-only | +.012188 | +.028296 | .014413 |
+| A selected | P2 | +.498433 | +.278227 | .288928 |
+| A selected | Fixed level 1, P2 | +.007156 | +.003196 | .010414 |
+| B exact | P0 | +.003627 | +.000399 | .004744 |
+| B exact | P1-only | +.002805 | +.000118 | .009811 |
+| B exact | P2, both group routes | +.359314 | +.527203 | .244201 |
+| B exact | P2 coarse-group only | +.120420 | +.276102 | .098325 |
+| B exact | P2 local only | +.294058 | +.275296 | .202930 |
+| B selected | P0 | +.003971 | −.000095 | .004623 |
+| B selected | P1-only | +.004381 | +.001741 | .008873 |
+| B selected | P2, both group routes | +.369860 | +.537768 | .242250 |
+| B selected | P2 coarse-group only | +.122456 | +.280661 | .095793 |
+| B selected | P2 local only | +.303888 | +.287667 | .199176 |
+
+Physical GT changes provide separate evidence that the shared routes carry useful coupling information:
+
+| Track / policy | Phase | Internal T delta | Surface T delta | Heat-flux delta |
+|---|---|---:|---:|---:|
+| A exact | P0 | +.005560 | +.001916 | +.034926 |
+| A exact | P1-only | +.034448 | +.048043 | +.034392 |
+| A selected | P0 | +.011009 | +.002481 | +.095029 |
+| A selected | P1-only | +.015288 | +.020488 | +.072113 |
+| B exact | P0 | +.057041 | +.072876 | +.186536 |
+| B exact | P1-only | +.122240 | +.154686 | +.128038 |
+| B selected | P0 | +.058238 | +.073940 | +.204848 |
+| B selected | P1-only | +.123431 | +.157228 | +.120668 |
+
+A's mature P1 removal worsens global fluid reconstruction on all five anchors under both policies. This revises the epoch-500 finding, when removal helped four of five anchors. At exact 5000, A's P1 removal also worsens internal T, surface T, and flux on all five; selected internal/surface T are exceptions on 0283 and 0298. Exact P1 temperature removal helps 0653 even though its global field error worsens. P0 removal improves A's global error on 0283 under both policies and makes the exact five-anchor mean slightly negative. Fixed-level-1 improves exact global L2 on 0283 and 0298 and selected global L2 on 0283; the epoch-500 all-five deterioration under fixed-level reading does not persist universally.
+
+B's P0 removal worsens global reconstruction on all five anchors under both policies, yet its temperature removal helps 0283 and 0302. B's P1 global removal helps 0283/0298 at exact 5000 and 0298 at selected 4933, whereas it worsened all five at epoch 500. P1 temperature removal helps 0298 and 0302 under both mature policies, while P1 internal/surface/flux removal still worsens all five. Each P2 route removal worsens global and temperature L2 on every anchor under both policies. Coarse-group-only removal increases far-fluid L2 by .158498 exact and .158093 selected on average, establishing useful distant reconstruction dependence. These effects are nonlinear interventions, not additive percentages of model contribution.
+
+Full per-case results, including exceptions and physical outputs, are in [A exact](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/track_a/interventions.json), [A selected](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/track_a/interventions_best_field.json), [B exact](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/track_b/interventions.json), and [B selected](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/track_b/interventions_best_field.json). P2 physical-output changes around numerical repeat noise do not support retrospective physical attribution.
+
+### Geometry, signed derivatives, and probes
+
+Geometry quality is assessed through coverage, conditional connectivity, numerical smoothness, useful physical effects, and executed work. There is no supplied ground-truth grouping against which an attention picture could certify physical organization. Learned attention/state norms in the HTML are kept distinct from deterministic geometric weights and measured influence.
+
+A retains 258 nodes on the ordinary 192-source environment (levels 192, 48, 12, 3, 2, 1). Its receiver-weighted quadrature mass ranges from 71.9999983 to 72.0000008 for supplied total mass 72. This is representation mass accounting, not a claim of physical field conservation. All 192 fine EM source responses show conditional dependence on the chosen encoded module. Geometry/global/background inputs are held fixed and the same refreshed response states are read at eight actual ports and 32 field receivers.
+
+| A probe case | Hierarchical JVP norm, ports / field | Direct QM JVP norm, ports / field |
+|---|---:|---:|
+| 0273 | .071124 / .057734 | .253411 / .107451 |
+| 0298 | .055624 / .061487 | .115285 / .040631 |
+
+At field receivers, hierarchy AD/FD relative differences at h=.001/.0005 are 1.782%/3.615% for 0273 and 2.103%/4.145% for 0298; direct-QM checks span roughly .497–3.286% across ports/fields. A's field routing uses 1,548 incidences and 1,767 traversal visits for 32 receivers; port routing uses 512/568 and 497/554 on 0273/0298. Selected-node JVP norms are .018193 and .000697; an omitted zero-weight node has zero AD JVP. Omitted-node finite differences have small nonzero float32 residuals (some components up to .000238), so this is not a bitwise-zero FD claim.
+
+A's prescribed shell tests retain h=.01/.005. The largest reported AD/FD relative difference is 1.904% at h=.01; the largest at h=.005 is .933%. At the near-plus boundary the float32 opening rounds to one, with zero parent complement, while the float64 scalar reference retains a parent weight about 1.33e−8. At far-minus the opening is about 5.33e−8 and at far-plus it is zero. These record support-transition behavior and precision limits without tuning the steps.
+
+| B conditional field receiver | Shared local groups | Local JVP norm | Coarse-group JVP norm |
+|---|---|---:|---:|
+| 0273 far | 11, 12, 13 | 8.63e−10 | .083269 |
+| 0298 far | none | 0 | .123264 |
+
+The 0298 disconnected local JVP and FD are exactly zero at both prescribed steps; coarse communication remains nonzero. The very weak 0273 local far signal has FD norms around 1.2–1.3e−7, so its relative discrepancy is noise-dominated. Near local JVP norms are .283909/.452638 for 0273/0298, with AD/FD differences .386%/.746% and .314%/.516% at h=.001/.0005. Across all receivers, coarse-path relative discrepancies range about 2.06–9.99%; weak/zero local rows produce much larger relative averages. Detaching the packed group states makes coarse-group JVP exactly zero at both ports and field receivers on repeated checks. This establishes the intended path of module dependence, not absence of other full-model module effects.
+
+Full predicted-port physical-loop coordinate checks use signed AD below and the existing h=.0045/.00225. Scalars are the diagnostic mean-temperature and pressure-drop functionals; FD percentages are numerical consistency errors relative to AD.
+
+| Track / case / scalar | Signed AD | FD relative error at h=.0045 / .00225 |
+|---|---:|---:|
+| A / 0273 / temperature | −.001666522 | .1443% / .4533% |
+| A / 0273 / pressure drop | +.010002107 | .0840% / .1505% |
+| A / 0298 / temperature | −.002098537 | .0415% / .2747% |
+| A / 0298 / pressure drop | +.026843803 | .0439% / .0315% |
+| B / 0273 / temperature | −.026846539 | .0323% / .0077% |
+| B / 0273 / pressure drop | +.004191030 | .1304% / .4996% |
+| B / 0298 / temperature | +.041031659 | .0456% / .0254% |
+| B / 0298 / pressure drop | +.044377286 | .0410% / .1012% |
+
+The aligned 0298 B transition moves module 6 by .0194564373 at port 31, changing group incidence count from 20 to 16. Temperature AD is +.056767266 with FD discrepancies .015404%/.012359%; pressure-drop AD is −.096611343 with .033080%/.012479%. Complete signed values, step sizes, and all receiver checks are retained in [A probes](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/track_a/probes.json) and [B probes](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/track_b/probes.json).
+
+These are frozen-model self-consistency checks. The [16 physical-reference requests](../../diagnostics/generated/interface_operator_study/stage3/reference_requests/pending_reference_requests.json) still have status reference_verification_pending; their directory contains no solver-response files. No new physical sensitivity validation is claimed.
+
+### Execution cost, memory scope, and chunk-size separation
+
+These measurements ran sequentially on physical GPU0 (RTX 6000 Ada, 49,140 MiB), with no competing compute process on that GPU. Unrelated jobs on other GPUs make whole-host/training wall-clock comparisons less controlled. Real anchors use 8,192 queries, two warmups and five measured repetitions. Synthetic shapes use one warmup and three repetitions. Outer query batches are 32,768, receiver chunks 2,048, and detailed maps are off. The synthetic layouts are execution tests, not physical-accuracy evidence at those scales.
+
+The initial multi-model timing process showed signs of allocation carryover after its first model. Therefore A's first record is retained, and the other four models were rerun in separate processes using the same helper/protocol. Those isolated rows supersede the later rows of the combined file. The original measurements remain local; no helper arithmetic or tolerance was changed.
+
+Each cell below is full-forward median milliseconds / peak allocated MiB / peak reserved MiB. Allocated and reserved peaks are distinct, and phase measurements are separate experiments rather than additive parts of one timed forward.
+
+| Model | Real 0273 | Real 0653 | Synthetic M32/E768/Q65536 | Synthetic M128/E3072/Q262144 |
+|---|---:|---:|---:|---:|
+| Dense 1804 | 34.277 / 461.01 / 618 | 33.745 / 461.01 / 618 | 350.748 / 1727.50 / 2042 | 5351.800 / 6707.28 / 9038 |
+| Regional 1806 | 31.902 / 149.00 / 214 | 33.845 / 149.00 / 214 | 165.486 / 485.81 / 782 | 2131.740 / 2268.10 / 2896 |
+| A 1807 | 88.292 / 530.15 / 1058 | 87.300 / 529.61 / 1074 | 476.630 / 706.49 / 1020 | 2722.719 / 2297.01 / 2904 |
+| Reader 1805 | 39.350 / 115.68 / 218 | 42.442 / 138.29 / 254 | 129.221 / 231.65 / 294 | 445.961 / 242.83 / 374 |
+| B 1808 | 41.238 / 115.68 / 218 | 44.165 / 138.29 / 254 | 138.557 / 231.65 / 294 | 473.499 / 242.83 / 374 |
+
+On the largest shape A is 27.72% slower than Regional, with 2,297.01 versus 2,268.10 MiB allocated. It is faster and uses less memory than Dense at that scale, but Regional is the directly relevant parent. On ordinary anchors A is about 2.6–2.8 times slower than Regional and uses about 530 versus 149 MiB. B is 6.18% slower than Reader on the largest shape with matching peak allocated/reserved memory; these short samples do not establish a stable small percentage across sessions.
+
+For anchor 0273, encoding/layout, physical preparation plus one query, and prepared decode medians are respectively A 10.232/55.823/39.809 ms, Regional 1.421/27.960/8.579, Dense 1.219/23.050/13.313, Reader 3.981/28.591/12.845, and B 3.882/30.009/12.542. Both preparation and reading remain costly for A. Full phase values for both anchors are in the timing JSONs; no kernel-level bottleneck claim is inferred from row counts alone.
+
+| Model | Small synthetic, chunk 128 → 2048 | Largest synthetic, chunk 128 → 2048 |
+|---|---:|---:|
+| A | 5027.571 → 476.630 ms (10.55×) | 23106.200 → 2722.719 ms (8.49×) |
+| B | 1789.909 → 138.557 ms (12.92×) | 6889.796 → 473.499 ms (14.55×) |
+
+On 0273/0653, A changes from 632.096/640.755 to 88.292/87.300 ms; B changes from 244.513/241.973 to 41.238/44.165 ms. These are inference execution gains. Training and scientific reconstruction evaluation retain receiver chunk 128. A's real-anchor allocated peak rises from 84.22 MiB to roughly 530 MiB with the larger chunk; B's rises from roughly 79.5 MiB to 115.7/138.3 MiB. The largest synthetic peaks are dominated by other work and remain similar across chunks.
+
+A's largest environmental geometry-row count is 27,029,597 versus Regional 213,910,272 and Dense 855,641,088: reductions of 87.36% and 96.84%. Four-head dot products number 108,118,388; geometry rows are not multiplied by heads again. Traversal visits number 29,826,107, and 23,060,800 fractional-overlap rows are a subset of the selected incidences, not an additional independent read count. The largest hierarchy has 4,098 nodes across levels 3072, 768, 192, 48, 12, 3, 2, 1. Across three physical preparation passes A executes 12,294 environmental-update and projected-source rows, versus Regional 2,304. Direct MM (49,152), ME and EM (1,179,648 each), and QM (35,651,712) rows remain unchanged. Common coarse environmental/module pairs are 73,728/3,072. On real anchors A saves only 2.16%/.39% of Regional's environmental geometry rows. This is actual sparse neural work, but it does not guarantee lower execution time.
+
+B retains 4,430,632 local group-read/receiver-bias incidences on the largest shape, 48,768 environmental-message rows, and 8,325 module-message rows. Its 480 group sources create 11,520 coarse-group pairs versus Reader's 3,072 raw-module pairs; four-head products are 46,080 versus 12,288. Environmental coarse pairs remain 73,728. No reduction in group count or width was the experiment's objective.
+
+Historical Legacy and Latent timing is reused separately from the prior five-model GPU0 session: largest-shape medians are 1701.731 ms / 14,428.29 MiB allocated for Legacy and 224.421 ms / 241.10 MiB for Latent; small-shape medians are 115.834 and 82.166 ms. Real 0273/0653 medians are Legacy 27.103/25.324 ms and Latent 28.338/27.106 ms. The HTML labels these reused observations. They give historical cost context, not newly controlled training-speed evidence.
+
+At atol=2e−6 and rtol=2e−5, the selected five-model real-anchor timing records contain 16 output-agreement flags per model across both cross-chunk and same-chunk comparisons: 3 false for A, 3 Dense, 3 Regional, 5 Reader, and 7 B. Maximum absolute discrepancy is at most 1.14441e−5 and maximum relative L2 discrepancy at most 2.10669e−6. Same-chunk repeated computations also have discrepancies, so cross-chunk differences cannot all be assigned to chunking alone. No tolerance was loosened and no blanket allclose claim is made.
+
+Sources: [A first matched record](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/matched_timing_chunk2048.json), isolated [Dense](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/timing_1804_chunk2048.json), [Reader](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/timing_1805_chunk2048.json), [Regional](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/timing_1806_chunk2048.json), [B](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/comparison/timing_1808_chunk2048.json), and candidate [A chunk 128](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/track_a/timing_chunk128.json) / [B chunk 128](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/track_b/timing_chunk128.json). The selected-accuracy cost figure uses these exact-5000 timing measurements as an explicitly labelled proxy; selected checkpoints were not separately timed.
+
+### Gradient/update and data-quality caveats
+
+The gradient export has 105 finite diagnostic records for each of 1801, 1804, 1805, 1806, 1807, and 1808, at early epochs and regular milestones. Blank fields are unrecorded NaNs, not zeros. Legacy 1401 has no component/clip/timing/memory records in this export. Finite clip scales below one occur 18/105 times in Latent, 33/105 Dense, 23/105 Reader, 29/105 Regional, 35/105 A, and 25/105 B; every endpoint scale is 1.0.
+
+At epoch 5,000, total preclip gradient/update norms are Latent 0.25755/0.19128, Dense 0.31021/0.04064, Reader 0.08452/0.02884, Regional 0.30269/0.03437, A 0.46126/0.16557, and B 0.19093/0.07565. A's route-specific endpoint gradient norms are regional-prepare 0.00665, regional-receiver 0.06541, coarse-environment source 0.00199, and direct module 0.07165; B's group-prepare 0.03419, group-receiver 0.00433, coarse-group source 0.00926, and coarse-environment source 0.00138. Architecture-inapplicable components are recorded as numeric zero; unrecorded components remain NaN/blank.
+
+The candidate all-history training/validation time sums are A 108,303.69 / 11,712.21 seconds and B 85,164.13 / 9,676.45 seconds. Recorded training peak allocations are A 24,337.71 MiB and B 29,326.58 MiB. These are historical logged costs across the actual training environments, not a matched architecture speed ratio. A's endpoint regional-prepare/read update norms are .07740/.06235; B's group-prepare/read/coarse-group update norms are .03699/.02125/.01726, confirming ongoing updates in the relevant routes.
+
+Training and validation wall-time columns are per-epoch records. The continuation summary totals reset at the resumed epoch and therefore exclude the first 500 epochs; the all-row CSV sums include all 5,000 rows. Manifest elapsed time also includes pauses and orchestration. This scope difference explains why summary continuation seconds, all-row CSV seconds, and manifest wall seconds should not be added together. The fresh timing table above is an isolated forward measurement, not a training-cost estimate.
+
+No new training was performed for this assessment. The mature command list is [commands.md](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/commands.md); the [maturity-5000 comparison directory](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/) contains the exact, selected, trajectory, intervention, probe, history, timing, and figure artifacts. The focused diagnostic reducer/renderer suite passes 24 tests; these are separate from the historical model/optimizer tests below. Ruff and ordinary diff checks pass. The mature HTML was inspected in Firefox, including both accuracy policies and all model/anchor selectors.
+
+
+### What changes from the epoch-500 conclusion, and next research decision
+
+| Initial intention or early observation | Mature evidence | Assessment |
+|---|---|---|
+| A: shared multiresolution states at ports and field queries, with full environmental coverage | Nonzero conditional module-response influence at both receiver types; supplied mass retained; useful mature P1/P2 effects | Mechanism demonstrated on bounded probes |
+| A: reduce repeated environmental read work while preserving useful reconstruction | 87.36% fewer largest-shape environmental rows; selected L2 .028212 versus Regional .028192; exact L2 .043535 versus .031188; largest latency +27.72% | Work-count objective achieved; practical accuracy/efficiency advantage not established |
+| A: early thermal benefits and early weak P1 field usefulness | Mature P1 removal now harms all five global fields; exact thermal errors worsen versus Regional; selected temperature improves but flux remains +16.4% | Early conclusions require these phase- and quantity-specific revisions |
+| B: route long-range module information through existing groups | Disconnected local influence can be zero while coarse-group influence is nonzero; coarse-only P2 removal worsens far-field reconstruction | Intended communication route and useful dependence demonstrated |
+| B: improve Reader's reconstruction quality | Global L2 is +7.79% exact and +1.86% selected; temperature remains worse; some high-heat/tail cases improve | Quality hypothesis not supported as an overall replacement |
+| Longer training should resolve an early assessment | Both improve substantially over epoch 500, but A has a late rebound and B retains a parent-relative error deficit | The maturity question is now assessed; more epochs alone are not an evidence-based next step |
+
+Retain Regional 1806 as the practical accuracy/cost reference, Dense 1804 as the dense baseline, Latent 1801 as the trained latent-attention baseline, Reader 1805 as the compact group-reader reference, and Legacy 1401 as historical context. Selected A at epoch 4795 is a competitive reconstruction checkpoint, but its exact endpoint and current implementation do not establish a better practical model.
+
+For A, the next bounded research work should first preserve its learned computation while investigating traversal/gather/segmented-read and preparation overhead, then remeasure actual latency and memory. Separately investigate the late validation/field rebound using existing histories and retained checkpoints before changing optimization. Neither an implementation speedup nor an optimization change has been executed here. For B, deprioritize further continuation as the default: stronger coarse dependence alone does not improve the response representation enough. Any future representation change should target the measured temperature and difficult-case errors as a separate experiment.
+
+Do not merge A and B on the strength of these results. No additional architecture, width sweep, count objective, or training continuation was launched. The repeatedly examined development holdout and one seed do not establish independent-test performance, across-seed superiority, or solver-validated perturbation sensitivities.
+
+The [mature HTML preview](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/figures/index.html) contains matched exact field maps, selected-checkpoint results, full-grid trajectories, sampled learning curves, geometry and influence views, interventions, and measured cost. Actual execution commands are in [commands.md](../../diagnostics/generated/interface_operator_study/nstage2/maturity5000/commands.md). The historical HTML and the original epoch-500 evidence below remain separate; historical best-file paths now point to mature selections, so their old numerical tables must not be regenerated by silently reloading current best files. The old unexecuted continuation recommendations below describe the earlier decision, not a new action request.
+
+## Historical epoch-500 assessment (preserved verbatim; superseded by the mature section above)
+
 **Status:** complete at the authorized epoch-500 endpoints, 2026-09-12. Both runs exited successfully. Exact endpoints, separately saved-best checkpoints, formal phase/influence probes, matched GPU0 timing, and offline figure validation are complete. No continuation was launched.
 
 **Main findings:** A reduces the largest-shape environmental receiver interactions by 87.36% relative to Regional, but its current implementation remains 28.1% slower at inference chunk 2,048. It improves several thermal/physical quantities while its exact-500 aggregate field L2 is 5.10% worse; its separately selected epoch-491 checkpoint is substantially better than its own endpoint. B establishes useful local and distant group-mediated paths at roughly Reader's execution cost, but has 2.92% worse aggregate L2 and a larger temperature deficit. These are two early research results with different merits, not evidence for a combined model.
