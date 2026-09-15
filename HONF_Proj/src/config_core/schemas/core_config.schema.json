@@ -106,19 +106,20 @@
           }
         },
         "field_dim": {"$ref": "#/$defs/integer_or_auto"},
+        "spatial_dim": {"type": "integer", "minimum": 2, "maximum": 3},
         "domain_length_x": {"$ref": "#/$defs/positive_or_auto"},
         "domain_length_y": {"$ref": "#/$defs/positive_or_auto"},
         "module_radius": {"$ref": "#/$defs/positive_or_auto"},
         "coordinate_scale": {
           "type": ["array", "null"],
           "minItems": 2,
-          "maxItems": 2,
+          "maxItems": 3,
           "items": {"type": "number", "exclusiveMinimum": 0}
         },
         "periodic_axes": {
           "type": ["array", "null"],
           "uniqueItems": true,
-          "items": {"type": "integer", "minimum": 0, "maximum": 1}
+          "items": {"type": "integer", "minimum": 0, "maximum": 2}
         },
         "local_context_scale": {"type": ["number", "null"], "exclusiveMinimum": 0},
         "num_env_tokens_x": {"type": "integer", "minimum": 1},

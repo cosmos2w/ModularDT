@@ -1,0 +1,4 @@
+endpoint,n_layouts,directions_per_layout,replicates,seed,estimate_mean_dense_minus_classic_volume_rmse_mps,bootstrap_lower_2_5_percent_mps,bootstrap_upper_97_5_percent_mps,descriptive_scope
+best_validation,30,3,10000,42,-0.008648325321781968,-0.010454224354535753,-0.007177524937239168,held-out layouts only; not population-generalization
+epoch2500_validation,30,3,10000,42,-0.00915698278695345,-0.01061516576938124,-0.007885138428666527,held-out layouts only; not population-generalization
+best_test,30,3,10000,42,-0.00829343448082606,-0.009275649335338839,-0.007413584884100904,held-out layouts only; not population-generalization

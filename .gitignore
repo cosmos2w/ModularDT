@@ -74,6 +74,9 @@ HONF_Proj/Case_ThermalChannel/Dataset/links/*
 HONF_Proj/Case_ThermalChannel/artifacts/*
 !HONF_Proj/Case_ThermalChannel/artifacts/README.md
 
+# WindFarm native forward-study derived index and geometry sidecars
+HONF_Proj/Case_WindFarm/Dataset/derived/
+
 # One-off inverse smoke/diagnostic launch profiles reference local run IDs and
 # immutable snapshots. Reusable templates and non-diagnostic data configs remain
 # visible to Git.

@@ -34,7 +34,7 @@ def _masked_softmax(logits: torch.Tensor, mask: Optional[torch.Tensor], dim: int
 
 
 def _as_batched_coords(coords: torch.Tensor, batch_size: int) -> torch.Tensor:
-    """Broadcast shared ``[N,2]`` coordinates to ``[B,N,2]`` when needed."""
+    """Broadcast shared ``[N,d]`` coordinates to ``[B,N,d]`` when needed."""
 
     if coords.ndim == 2:
         return coords.unsqueeze(0).expand(batch_size, -1, -1)
@@ -47,40 +47,26 @@ def _relative_delta(src: torch.Tensor, dst: torch.Tensor, cfg: UnifiedForwardCon
     delta = dst - src
     periodic_axes = cfg.periodic_dimensions()
     if periodic_axes:
-        scale_x, scale_y = cfg.spatial_scale()
-        lengths = torch.tensor(
-            [max(scale_x, EPS), max(scale_y, EPS)],
-            device=delta.device,
-            dtype=delta.dtype,
-        )
+        lengths = delta.new_tensor([max(float(value), EPS) for value in cfg.spatial_scale()])
         wrapped = torch.remainder(delta + 0.5 * lengths, lengths) - 0.5 * lengths
-        mask = torch.tensor(
-            [axis in periodic_axes for axis in range(2)],
-            device=delta.device,
-            dtype=torch.bool,
-        )
+        mask = torch.tensor([axis in periodic_axes for axis in range(cfg.spatial_dim)], device=delta.device, dtype=torch.bool)
         delta = torch.where(mask, wrapped, delta)
     return delta
 
 
 def _weighted_coords(coords: torch.Tensor, weights: torch.Tensor, cfg: UnifiedForwardConfig) -> torch.Tensor:
-    """Reduce node coordinates ``[B,N,2]`` into ``K`` weighted centroids."""
+    """Reduce node coordinates ``[B,N,d]`` into ``K`` weighted centroids."""
 
     denom = weights.sum(dim=1).clamp_min(EPS).unsqueeze(-1)
     periodic_axes = cfg.periodic_dimensions()
     if not periodic_axes:
         return torch.einsum("bnk,bnd->bkd", weights, coords) / denom
 
-    scale_x, scale_y = cfg.spatial_scale()
-    lengths = torch.tensor(
-        [max(scale_x, EPS), max(scale_y, EPS)],
-        device=coords.device,
-        dtype=coords.dtype,
-    )
+    lengths = coords.new_tensor([max(float(value), EPS) for value in cfg.spatial_scale()])
     if periodic_axes != (0, 1):
         normalized_weights = weights / weights.sum(dim=1, keepdim=True).clamp_min(EPS)
         outputs = []
-        for axis in range(2):
+        for axis in range(cfg.spatial_dim):
             if axis in periodic_axes:
                 angles = 2.0 * math.pi * coords[..., axis] / lengths[axis]
                 sin_sum = torch.einsum("bnk,bn->bk", normalized_weights, torch.sin(angles))
@@ -233,10 +219,9 @@ def _descriptor_first_features(
 ) -> torch.Tensor:
     """Build normalized mechanism descriptors with geometry as primary state."""
 
-    scale_x, scale_y = cfg.spatial_scale()
-    scales = hyper_source_coords.new_tensor([max(scale_x, EPS), max(scale_y, EPS)])
+    scales = hyper_source_coords.new_tensor([max(float(value), EPS) for value in cfg.spatial_scale()])
     displacement = _relative_delta(hyper_source_coords, hyper_region_coords, cfg)
-    distance_scale = max(math.sqrt(scale_x**2 + scale_y**2), EPS)
+    distance_scale = max(math.sqrt(sum(float(value) ** 2 for value in cfg.spatial_scale())), EPS)
     distance = torch.sqrt(displacement.square().sum(dim=-1, keepdim=True) + EPS) / distance_scale
     return torch.cat(
         [
@@ -267,6 +252,8 @@ def _mechanism_descriptors(
     module_present: torch.Tensor,
     env_count: int,
     cfg: UnifiedForwardConfig,
+    *,
+    weighted_environment: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Generic source-region descriptors for hyperedge field mechanisms.
 
@@ -275,43 +262,71 @@ def _mechanism_descriptors(
     They deliberately avoid case-specific wall, plume, or thermal rules.
     """
 
-    scale_x, scale_y = cfg.spatial_scale()
-    lx = max(scale_x, EPS)
-    ly = max(scale_y, EPS)
-    diag = max(math.sqrt(lx * lx + ly * ly), EPS)
+    scales = [max(float(value), EPS) for value in cfg.spatial_scale()]
+    lx = scales[0]
+    diag = max(math.sqrt(sum(value * value for value in scales)), EPS)
     displacement = _relative_delta(hyper_source_coords, hyper_region_coords, cfg)
     dx = displacement[..., 0:1]
-    dy = displacement[..., 1:2]
     if 0 in cfg.periodic_dimensions():
         downstream = torch.remainder(hyper_region_coords[..., 0:1] - hyper_source_coords[..., 0:1], lx) / lx
         upstream = torch.remainder(hyper_source_coords[..., 0:1] - hyper_region_coords[..., 0:1], lx) / lx
     else:
         downstream = torch.relu(dx) / lx
         upstream = torch.relu(-dx) / lx
-    lateral = dy.abs() / ly
-    distance = torch.sqrt(dx.square() + dy.square() + EPS) / diag
-    mechanism_geometry_features = torch.cat(
-        [
-            hyper_source_coords[..., 0:1] / lx,
-            hyper_source_coords[..., 1:2] / ly,
-            hyper_region_coords[..., 0:1] / lx,
-            hyper_region_coords[..., 1:2] / ly,
-            dx / lx,
-            dy / ly,
-            distance,
-            downstream,
-            upstream,
-            lateral,
-        ],
-        dim=-1,
-    )
+    if cfg.spatial_dim == 2:
+        # Keep the historical feature order and arithmetic exactly for old
+        # checkpoints.  The 3-D branch below adds signed dz through the full
+        # displacement vector and uses a scaled transverse magnitude.
+        ly = scales[1]
+        dy = displacement[..., 1:2]
+        lateral = dy.abs() / ly
+        distance = torch.sqrt(dx.square() + dy.square() + EPS) / diag
+        mechanism_geometry_features = torch.cat(
+            [
+                hyper_source_coords[..., 0:1] / lx,
+                hyper_source_coords[..., 1:2] / ly,
+                hyper_region_coords[..., 0:1] / lx,
+                hyper_region_coords[..., 1:2] / ly,
+                dx / lx,
+                dy / ly,
+                distance,
+                downstream,
+                upstream,
+                lateral,
+            ],
+            dim=-1,
+        )
+    else:
+        transverse = displacement[..., 1:] / hyper_source_coords.new_tensor(scales[1:])
+        lateral = torch.sqrt(transverse.square().sum(dim=-1, keepdim=True) + EPS)
+        distance = torch.sqrt(displacement.square().sum(dim=-1, keepdim=True) + EPS) / diag
+        mechanism_geometry_features = torch.cat(
+            [
+                hyper_source_coords / hyper_source_coords.new_tensor(scales),
+                hyper_region_coords / hyper_source_coords.new_tensor(scales),
+                displacement / hyper_source_coords.new_tensor(scales),
+                distance,
+                downstream,
+                upstream,
+                lateral,
+            ],
+            dim=-1,
+        )
 
     module_count = module_present.sum(dim=-1, keepdim=True).clamp_min(1.0)
     env_count_t = module_present.new_tensor(float(max(env_count, 1)))
     module_raw_norm = module_mass_raw / module_count
     env_raw_norm = env_mass_raw / env_count_t
     module_raw_log = torch.log1p(module_mass_raw) / torch.log1p(module_count)
-    env_raw_log = torch.log1p(env_mass_raw) / torch.log1p(env_count_t)
+    if weighted_environment:
+        # Adapter masses are normalized to a case-mean-one effective measure
+        # before pooling.  Express the log descriptor from the per-token
+        # effective mass as well, so splitting a token's mass over duplicate
+        # coordinates leaves all geometry/content summaries unchanged.
+        env_raw_log = torch.log1p(env_raw_norm)
+    else:
+        # Historical branch: retain the exact token-count normalization.
+        env_raw_log = torch.log1p(env_mass_raw) / torch.log1p(env_count_t)
     mechanism_mass_features = torch.stack(
         [
             hyper_module_mass,
@@ -360,4 +375,3 @@ def deterministic_slot_codes(
         raise ValueError(f"Unsupported slot code mode: {mode!r}.")
     codes = codes - codes.mean(dim=0, keepdim=True)
     return codes / torch.sqrt(codes.square().mean().clamp_min(EPS))
-

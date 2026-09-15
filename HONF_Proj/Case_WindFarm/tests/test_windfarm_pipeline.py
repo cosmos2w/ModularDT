@@ -84,6 +84,12 @@ def test_optional_npz_fallback_reads_metadata_only(tmp_path: Path) -> None:
     assert metadata["layout_index"].tolist() == [7]
     assert float(metadata["D_m"]) == 80.0
     assert "U_hub" not in metadata
+    geometry_only = dataset.compact_metadata(
+        allow_npz_fallback=True,
+        names=("case", "layout_index", "wd_deg", "D_m"),
+    )
+    assert set(geometry_only) == {"case", "layout_index", "wd_deg", "D_m"}
+    assert "wake_loss_pct" not in geometry_only
 
 
 def test_profile_has_row_aware_shapes_and_three_direction_groups(tmp_path: Path) -> None:

@@ -100,6 +100,7 @@ class HypergraphOrganizerCore(nn.Module):
         selection_override: Optional[str] = None,
         global_token: Optional[torch.Tensor] = None,
         return_residual_interaction_tensor: bool = False,
+        env_weights: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         """Build incidences, hyperedge states, geometry, and diagnostics.
 
@@ -107,7 +108,7 @@ class HypergraphOrganizerCore(nn.Module):
         ``K`` hyperedges. ``A_me [B,M,E]`` optionally supplies module-to-
         environment context; ``A_mh [B,M,K]`` and ``A_eh [B,E,K]`` aggregate
         both node types. The output ``hyper_state [B,K,H]`` is accompanied by
-        source/region centroids ``[B,K,2]`` and mechanism descriptors. Inactive
+        source/region centroids ``[B,K,spatial_dim]`` and mechanism descriptors. Inactive
         module rows receive zero assignment mass.
         """
 
@@ -151,12 +152,46 @@ class HypergraphOrganizerCore(nn.Module):
         batch_size, _, hidden_dim = module_tokens.shape
         env_coords_b = _as_batched_coords(env_coords.to(module_tokens.device, module_tokens.dtype), batch_size)
         module_present = module_present.to(device=module_tokens.device, dtype=module_tokens.dtype)
+        if (
+            env_coords_b.ndim != 3
+            or env_coords_b.shape[0] != batch_size
+            or env_coords_b.shape[-1] != cfg.spatial_dim
+        ):
+            raise ValueError(
+                f"env_coords must have shape [B,E,{cfg.spatial_dim}] after batching."
+            )
+        if env_coords_b.shape[1] != env_tokens.shape[1]:
+            raise ValueError("env_coords and env_tokens must have matching environment counts.")
+        if env_weights is not None:
+            env_weights = env_weights.to(device=module_tokens.device, dtype=module_tokens.dtype)
+            if env_weights.ndim == 1:
+                if int(env_weights.shape[0]) != int(env_coords_b.shape[1]):
+                    raise ValueError("env_weights must align with env_coords as [E] or [B,E].")
+                env_weights = env_weights.unsqueeze(0).expand(batch_size, -1)
+            elif env_weights.ndim != 2 or tuple(env_weights.shape) != tuple(env_coords_b.shape[:2]):
+                raise ValueError("env_weights must have shape [B,E] matching env_coords.")
+            if not bool(torch.isfinite(env_weights).all()) or bool((env_weights <= 0.0).any()):
+                raise ValueError("env_weights must contain finite strictly positive masses.")
+            # Pooling ratios are invariant to a case-wide scale.  Normalize
+            # supplied physical masses to mean one for effective-token-count
+            # descriptors, while retaining the raw measure in the output for
+            # adapter/evaluation reporting.
+            relative_env_weights = env_weights / env_weights.mean(dim=1, keepdim=True).clamp_min(
+                torch.finfo(env_weights.dtype).tiny
+            )
+        else:
+            relative_env_weights = None
 
         if cfg.use_A_me_auxiliary:
             q = self.me_query(module_tokens)
             k = self.me_key(env_tokens)
             logits = torch.einsum("bmh,beh->bme", q, k) / math.sqrt(float(hidden_dim))
-            A_me = torch.softmax(logits, dim=-1) * module_present.unsqueeze(-1)
+            if env_weights is None:
+                # Keep the historical unweighted arithmetic branch intact.
+                A_me = torch.softmax(logits, dim=-1) * module_present.unsqueeze(-1)
+            else:
+                A_me = torch.softmax(logits + torch.log(relative_env_weights).unsqueeze(1), dim=-1)
+                A_me = A_me * module_present.unsqueeze(-1)
             module_env_context = torch.einsum("bme,beh->bmh", A_me, env_tokens)
             module_tokens_for_hyper = module_tokens + 0.25 * self.me_context_proj(module_env_context)
             module_tokens_for_hyper = module_tokens_for_hyper * module_present.unsqueeze(-1)
@@ -200,8 +235,7 @@ class HypergraphOrganizerCore(nn.Module):
         env_logits = self.env_score(env_tokens)
         delta = _relative_delta(hyper_source_coords[:, None, :, :], env_coords_b[:, :, None, :], cfg)
         dist = torch.sqrt(delta.square().sum(dim=-1) + EPS)
-        scale_x, scale_y = cfg.spatial_scale()
-        scale = 0.25 * math.sqrt(scale_x**2 + scale_y**2)
+        scale = 0.25 * math.sqrt(sum(float(value) ** 2 for value in cfg.spatial_scale()))
         geometry_bias = -dist / max(scale, EPS)
         if cfg.environment_assignment_normalizer == "softmax":
             A_eh = torch.softmax(env_logits + geometry_bias, dim=-1)
@@ -211,9 +245,13 @@ class HypergraphOrganizerCore(nn.Module):
                 mode=cfg.environment_assignment_normalizer,
             )
 
-        env_mass_raw = A_eh.sum(dim=1)
+        if env_weights is None:
+            weighted_A_eh = A_eh
+        else:
+            weighted_A_eh = A_eh * relative_env_weights[:, :, None]
+        env_mass_raw = weighted_A_eh.sum(dim=1)
         hyper_env_mass = env_mass_raw / env_mass_raw.sum(dim=-1, keepdim=True).clamp_min(EPS)
-        region_weights = A_eh / A_eh.sum(dim=1, keepdim=True).clamp_min(EPS)
+        region_weights = weighted_A_eh / weighted_A_eh.sum(dim=1, keepdim=True).clamp_min(EPS)
         hyper_region_coords = _weighted_coords(env_coords_b, region_weights, cfg)
         hyper_region_variance, hyper_region_scale = _weighted_scale(
             env_coords_b,
@@ -223,7 +261,7 @@ class HypergraphOrganizerCore(nn.Module):
         )
         hyper_strength = torch.sqrt(hyper_module_mass * hyper_env_mass + EPS)
         hyper_module_purity = _assignment_purity(A_mh)
-        hyper_env_purity = _assignment_purity(A_eh)
+        hyper_env_purity = _assignment_purity(weighted_A_eh)
         edge_active_mask = torch.ones_like(hyper_strength)
         mechanism_descriptor_features = _descriptor_first_features(
             hyper_source_coords,
@@ -255,11 +293,12 @@ class HypergraphOrganizerCore(nn.Module):
             module_present,
             env_tokens.shape[1],
             cfg,
+            weighted_environment=env_weights is not None,
         )
 
         module_summary = torch.einsum("bmk,bmh->bkh", A_mh, self.module_to_hyper(module_tokens_for_hyper))
         module_summary = module_summary / module_mass_raw.unsqueeze(-1).clamp_min(EPS)
-        env_summary = torch.einsum("bek,beh->bkh", A_eh, self.env_to_hyper(env_tokens))
+        env_summary = torch.einsum("bek,beh->bkh", weighted_A_eh, self.env_to_hyper(env_tokens))
         env_summary = env_summary / env_mass_raw.unsqueeze(-1).clamp_min(EPS)
         hyper_state = self.hyper_mix(module_summary + env_summary)
 
@@ -318,6 +357,7 @@ class HypergraphOrganizerCore(nn.Module):
             "module_tokens_for_hyper": module_tokens_for_hyper,
             "env_tokens": env_tokens,
             "env_coords": env_coords_b,
+            **({"env_weights": env_weights} if env_weights is not None else {}),
             "module_centers": module_centers,
             "module_present": module_present,
             "A_me": A_me,

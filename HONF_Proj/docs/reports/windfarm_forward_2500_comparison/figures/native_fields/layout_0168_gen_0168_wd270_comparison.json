@@ -1,0 +1,137 @@
+{
+  "geometry": {
+    "row": 504,
+    "layout_index": 168,
+    "case": "gen_0168_wd270",
+    "wind_direction_deg": 270.0,
+    "n_turbines": 9,
+    "support_extent_D": [
+      28.6944580078125,
+      14.720489501953125,
+      6.137460674345493
+    ],
+    "support_volume_D3": 2592.441710523755,
+    "min_spacing_D": 2.60061839042054,
+    "mean_spacing_D": 2.6006184637110414
+  },
+  "planes": [
+    {
+      "fixed_axis": "z",
+      "requested_m": 70.0,
+      "actual_m": 70.86994934082031,
+      "shape": [
+        132,
+        210,
+        3
+      ],
+      "figure": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/windfarm_forward_2500_comparison/figures/native_fields/layout_0168_gen_0168_wd270_native_z_comparison.png"
+    },
+    {
+      "fixed_axis": "y",
+      "requested_m": 0.0,
+      "actual_m": 1.6064887046813965,
+      "shape": [
+        64,
+        210,
+        3
+      ],
+      "figure": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/windfarm_forward_2500_comparison/figures/native_fields/layout_0168_gen_0168_wd270_native_y_comparison.png"
+    },
+    {
+      "fixed_axis": "x",
+      "requested_m": 0.0,
+      "actual_m": 4.306912422180176,
+      "shape": [
+        64,
+        132,
+        3
+      ],
+      "figure": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/windfarm_forward_2500_comparison/figures/native_fields/layout_0168_gen_0168_wd270_native_x_comparison.png"
+    }
+  ],
+  "latent_organization": {
+    "available": true,
+    "label": "latent organization; not physical wake topology",
+    "architecture": "legacy_honf",
+    "fixed_axis": "z",
+    "actual_m": 70.86994934082031,
+    "grid_shape": [
+      132,
+      210
+    ],
+    "hyper_source_coords_D": [
+      [
+        0.2165263593196869,
+        -0.022256195545196533,
+        0.875
+      ],
+      [
+        -0.7228415608406067,
+        -0.23410630226135254,
+        0.8749999403953552
+      ],
+      [
+        -0.6610381603240967,
+        -0.02094908058643341,
+        0.875
+      ],
+      [
+        -0.09906462579965591,
+        0.12374722957611084,
+        0.8749999403953552
+      ],
+      [
+        0.4423261880874634,
+        0.11109481751918793,
+        0.875
+      ],
+      [
+        0.4536725878715515,
+        -0.07726127654314041,
+        0.8750000596046448
+      ]
+    ],
+    "hyper_region_coords_D": [
+      [
+        8.123101234436035,
+        0.39443033933639526,
+        1.7922372817993164
+      ],
+      [
+        3.9402427673339844,
+        0.92322838306427,
+        2.9595420360565186
+      ],
+      [
+        0.6565958857536316,
+        0.6985722780227661,
+        4.248047828674316
+      ],
+      [
+        6.9900312423706055,
+        -0.263824462890625,
+        3.480757236480713
+      ],
+      [
+        7.1776227951049805,
+        -0.5504440665245056,
+        2.8763930797576904
+      ],
+      [
+        7.553251266479492,
+        1.1731114387512207,
+        2.6187193393707275
+      ]
+    ],
+    "edge_module_mass": [
+      1.632900357246399,
+      1.015721082687378,
+      1.299886703491211,
+      1.868465542793274,
+      1.6780295372009277,
+      1.5049970149993896
+    ],
+    "edge_count": 6,
+    "figure": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/windfarm_forward_2500_comparison/figures/native_fields/layout_0168_gen_0168_wd270_latent_organization.png"
+  }
+}

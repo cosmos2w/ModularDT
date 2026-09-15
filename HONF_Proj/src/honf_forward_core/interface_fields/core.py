@@ -104,6 +104,10 @@ class InterfaceFieldCore(nn.Module):
 
     def _coordinate_scale(self, coordinates: torch.Tensor) -> torch.Tensor:
         dimension = int(coordinates.shape[-1])
+        if dimension != int(self.config.spatial_dim):
+            raise ValueError(
+                f"coordinates have dimension {dimension}, but config.spatial_dim is {self.config.spatial_dim}."
+            )
         if self.config.coordinate_scale is not None:
             values = list(self.config.coordinate_scale)
             if len(values) != dimension:
@@ -113,12 +117,29 @@ class InterfaceFieldCore(nn.Module):
             return coordinates.new_tensor(
                 [float(self.config.domain_length_x), float(self.config.domain_length_y)]
             ).reshape(1, 1, 2)
-        return coordinates.new_ones(1, 1, dimension)
+        raise ValueError("spatial_dim=3 requires an explicit coordinate_scale.")
 
     def encode_case(self, batch: BatchData) -> EncodedInterfaceCase:
         module_centers = batch.module_centers.float()
         module_present = batch.module_present.float()
         module_features = batch.module_features.float()
+        if module_centers.ndim != 3 or module_present.shape != module_centers.shape[:2]:
+            raise ValueError("module_centers and module_present must have shapes [B,M,d] and [B,M].")
+        if module_features.ndim != 3 or module_features.shape[:2] != module_centers.shape[:2]:
+            raise ValueError("module_features must have shape [B,M,Fm] aligned with module_centers.")
+        active = module_present[..., None] > 0.5
+        if not torch.isfinite(module_centers).all():
+            if bool(torch.isfinite(module_centers).logical_or(~active).all()):
+                module_centers = torch.where(active, module_centers, torch.zeros_like(module_centers))
+            else:
+                raise ValueError("active module_centers must be finite.")
+        module_centers = torch.where(active, module_centers, torch.zeros_like(module_centers))
+        if not torch.isfinite(module_features).all():
+            if bool(torch.isfinite(module_features).logical_or(~active).all()):
+                module_features = torch.where(active, module_features, torch.zeros_like(module_features))
+            else:
+                raise ValueError("active module_features must be finite.")
+        module_features = torch.where(active, module_features, torch.zeros_like(module_features))
         global_token = self.global_encoder(batch.global_context.float())
         scale = self._coordinate_scale(module_centers)
         module_pos = self.position_fourier(module_centers / scale)
@@ -130,6 +151,12 @@ class InterfaceFieldCore(nn.Module):
         env_coords = batch.env_coords.to(device=module_centers.device, dtype=module_centers.dtype)
         if env_coords.ndim == 2:
             env_coords = env_coords.unsqueeze(0).expand(module_centers.shape[0], -1, -1)
+        if env_coords.ndim != 3 or env_coords.shape[0] != module_centers.shape[0]:
+            raise ValueError("env_coords must have shape [E,d] or [B,E,d] matching module_centers.")
+        if env_coords.shape[-1] != module_centers.shape[-1]:
+            raise ValueError("env_coords and module_centers must use the same spatial dimension.")
+        if not torch.isfinite(env_coords).all():
+            raise ValueError("env_coords must be finite.")
         env_region_ids = None
         if batch.env_region_ids is not None:
             env_region_ids = batch.env_region_ids.to(device=module_centers.device, dtype=torch.long)
@@ -145,14 +172,34 @@ class InterfaceFieldCore(nn.Module):
             env_features = batch.env_features.to(device=module_centers.device, dtype=module_centers.dtype)
             if env_features.ndim == 2:
                 env_features = env_features.unsqueeze(0).expand(module_centers.shape[0], -1, -1)
+            elif env_features.ndim != 3 or env_features.shape[0] != module_centers.shape[0]:
+                raise ValueError("env_features must have shape [E,Fe] or [B,E,Fe].")
+            if env_features.shape[1] != env_coords.shape[1]:
+                raise ValueError("env_features must align with env_coords along the environment axis.")
             env_input = torch.cat([env_input, env_features], dim=-1)
         # Deliberately no legacy env_tokens += global_token broadcast.
         env_tokens = self.env_encoder(env_input)
-        domain_volume = torch.prod(scale.reshape(-1))
-        env_weights = module_centers.new_full(
-            (module_centers.shape[0], env_coords.shape[1]),
-            1.0 / float(env_coords.shape[1]),
-        ) * domain_volume
+        if batch.env_weights is None:
+            # Preserve the historical dense-backend fallback exactly when the
+            # adapter does not provide a measure.
+            domain_volume = torch.prod(scale.reshape(-1))
+            env_weights = module_centers.new_full(
+                (module_centers.shape[0], env_coords.shape[1]),
+                1.0 / float(env_coords.shape[1]),
+            ) * domain_volume
+        else:
+            env_weights = batch.env_weights.to(device=module_centers.device, dtype=module_centers.dtype)
+            if env_weights.ndim == 1:
+                if int(env_weights.shape[0]) != int(env_coords.shape[1]):
+                    raise ValueError("env_weights must align with env_coords as [E] or [B,E].")
+                env_weights = env_weights.unsqueeze(0).expand(module_centers.shape[0], -1)
+            elif env_weights.ndim == 2:
+                if tuple(env_weights.shape) != tuple(env_coords.shape[:2]):
+                    raise ValueError("env_weights must align with env_coords as [E] or [B,E].")
+            else:
+                raise ValueError("env_weights must have shape [E] or [B,E].")
+            if not bool(torch.isfinite(env_weights).all()) or bool((env_weights <= 0.0).any()):
+                raise ValueError("env_weights must contain finite strictly positive masses.")
         env_hierarchy = (
             batch.env_hierarchy.to(module_centers.device)
             if batch.env_hierarchy is not None else None

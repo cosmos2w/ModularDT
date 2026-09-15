@@ -1,0 +1,7 @@
+endpoint,endpoint_label,model,split,checkpoint_epoch,checkpoint_role,rows,layouts,q_volume,q_band,sample_seed,equal_case_physical_rmse_mps,equal_case_standardized_mse,pooled_vector_relative_l2
+best_validation,Best validation,classic,validation,2440,best_validation_checkpoint,90,30,32768,8192,42,0.01942095796888073,0.006224511425373041,0.003261551699612031
+best_validation,Best validation,dense,validation,2475,best_validation_checkpoint,90,30,32768,8192,42,0.010772632647098766,0.00456953560286719,0.0017885073987238666
+epoch2500_validation,"Epoch 2,500 validation",classic,validation,2500,explicit_checkpoint,90,30,32768,8192,42,0.01894503195459644,0.0064364003302115535,0.003174929917618935
+epoch2500_validation,"Epoch 2,500 validation",dense,validation,2500,explicit_checkpoint,90,30,32768,8192,42,0.009788049167642992,0.004592619401713212,0.0016209666879446675
+best_test,Best checkpoint test,classic,test,2440,best_validation_checkpoint,90,30,32768,8192,42,0.01893695376606451,0.005244037734034161,0.003146908648584541
+best_test,Best checkpoint test,dense,test,2475,best_validation_checkpoint,90,30,32768,8192,42,0.010643519285238452,0.00469196451595053,0.0017908971204765602

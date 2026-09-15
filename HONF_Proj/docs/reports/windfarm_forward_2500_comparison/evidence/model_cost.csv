@@ -1,0 +1,3 @@
+model,protocol,queries_per_case,receiver_chunk_size,trainable_parameters,full_prepare_plus_decode_mean_ms,full_prepare_plus_decode_peak_allocated_mib,disposable_update_mean_ms,disposable_update_peak_allocated_mib,prepared_decode_mean_ms,source_path
+classic,WindFarm matched cost probe,8192,512,1696286,245.65629791468382,927.078125,729.4082269072533,34435.052734375,231.13608127459884,Case_WindFarm/diagnostics/generated/forward_velocity_cost_2102_2103/classic_b16_q8192_gpu0.json
+dense,WindFarm matched cost probe,8192,512,3628551,641.1195288412273,4794.19091796875,1597.4532244727015,25777.64794921875,628.4706674516201,Case_WindFarm/diagnostics/generated/forward_velocity_cost_2102_2103/dense_b16_q8192_gpu0.json

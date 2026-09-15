@@ -1,0 +1,56 @@
+{
+  "bootstrap": {
+    "replicates": 10000,
+    "scope": "descriptive for these held-out layouts; not population-generalization",
+    "seed": 42,
+    "unit": "layout-level mean of three wind-direction deltas"
+  },
+  "generated": {
+    "accuracy_overview_figure": "docs/reports/windfarm_forward_2500_comparison/figures/accuracy_overview.png",
+    "accuracy_table": "docs/reports/windfarm_forward_2500_comparison/evidence/accuracy_overview.csv",
+    "analysis_manifest": "docs/reports/windfarm_forward_2500_comparison/evidence/analysis_manifest.json",
+    "bootstrap_summary_table": "docs/reports/windfarm_forward_2500_comparison/evidence/paired_layout_bootstrap_summary.csv",
+    "bootstrap_table": "docs/reports/windfarm_forward_2500_comparison/evidence/paired_layout_bootstrap.csv",
+    "cost_figure": "docs/reports/windfarm_forward_2500_comparison/figures/model_cost.png",
+    "cost_table": "docs/reports/windfarm_forward_2500_comparison/evidence/model_cost.csv",
+    "learning_curve_figure": "docs/reports/windfarm_forward_2500_comparison/figures/learning_curves.png",
+    "learning_table": "docs/reports/windfarm_forward_2500_comparison/evidence/learning_curve_selected.csv",
+    "paired_delta_figure": "docs/reports/windfarm_forward_2500_comparison/figures/paired_physical_rmse_deltas.png",
+    "paired_rmse_figure": "docs/reports/windfarm_forward_2500_comparison/figures/paired_physical_rmse.png",
+    "paired_table": "docs/reports/windfarm_forward_2500_comparison/evidence/paired_case_rmse.csv",
+    "strata_figure": "docs/reports/windfarm_forward_2500_comparison/figures/geometry_strata_comparison.png",
+    "strata_table": "docs/reports/windfarm_forward_2500_comparison/evidence/strata_comparison.csv",
+    "validation_audit": "docs/reports/windfarm_forward_2500_comparison/evidence/validation_audit.json"
+  },
+  "inputs": {
+    "alignment": "Case_WindFarm/diagnostics/generated/forward_velocity_2500_comparison/alignment_audit.json",
+    "cost": {
+      "classic": "Case_WindFarm/diagnostics/generated/forward_velocity_cost_2102_2103/classic_b16_q8192_gpu0.json",
+      "dense": "Case_WindFarm/diagnostics/generated/forward_velocity_cost_2102_2103/dense_b16_q8192_gpu0.json"
+    },
+    "endpoint_summary": "Case_WindFarm/diagnostics/generated/forward_velocity_2500_comparison/endpoint_summary.json",
+    "histories": {
+      "classic": "Trained_Results/WindFarm/HONF_Forward_Runs/Run_2102_20260913_135849_windfarm_classic_k6_b16_q8192/metrics.csv",
+      "dense": "Trained_Results/WindFarm/HONF_Forward_Runs/Run_2103_20260913_135849_windfarm_dense_pairwise_b16_q8192/metrics.csv"
+    },
+    "metrics": {
+      "classic:best_test": "Trained_Results/WindFarm/HONF_Forward_Runs/Run_2102_20260913_135849_windfarm_classic_k6_b16_q8192/evaluations/accuracy_2500_q32768_b8192_seed42/best_field_test/metrics.json",
+      "classic:best_validation": "Trained_Results/WindFarm/HONF_Forward_Runs/Run_2102_20260913_135849_windfarm_classic_k6_b16_q8192/evaluations/accuracy_2500_q32768_b8192_seed42/best_field_validation/metrics.json",
+      "classic:epoch2500_validation": "Trained_Results/WindFarm/HONF_Forward_Runs/Run_2102_20260913_135849_windfarm_classic_k6_b16_q8192/evaluations/accuracy_2500_q32768_b8192_seed42/epoch2500_validation/metrics.json",
+      "dense:best_test": "Trained_Results/WindFarm/HONF_Forward_Runs/Run_2103_20260913_135849_windfarm_dense_pairwise_b16_q8192/evaluations/accuracy_2500_q32768_b8192_seed42/best_field_test/metrics.json",
+      "dense:best_validation": "Trained_Results/WindFarm/HONF_Forward_Runs/Run_2103_20260913_135849_windfarm_dense_pairwise_b16_q8192/evaluations/accuracy_2500_q32768_b8192_seed42/best_field_validation/metrics.json",
+      "dense:epoch2500_validation": "Trained_Results/WindFarm/HONF_Forward_Runs/Run_2103_20260913_135849_windfarm_dense_pairwise_b16_q8192/evaluations/accuracy_2500_q32768_b8192_seed42/epoch2500_validation/metrics.json"
+    },
+    "per_case": "Case_WindFarm/diagnostics/generated/forward_velocity_2500_comparison/per_case_comparison.csv",
+    "strata": "Case_WindFarm/diagnostics/generated/forward_velocity_2500_comparison/strata_comparison.csv"
+  },
+  "max_epoch": 2500,
+  "schema_version": 1,
+  "selected_epochs": [
+    500,
+    1000,
+    1500,
+    2000,
+    2500
+  ]
+}

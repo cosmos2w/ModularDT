@@ -47,7 +47,8 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
         self.query_to_hyper = nn.Linear(hidden_dim, hidden_dim)
         self.hyper_key = nn.Linear(hidden_dim, hidden_dim)
         self.hyper_value = nn.Linear(hidden_dim, hidden_dim)
-        self.hyper_geometry_bias = nn.Linear(10, 1)
+        geometry_feature_width = 10 if config.spatial_dim == 2 else 2 * int(config.spatial_dim) + 6
+        self.hyper_geometry_bias = nn.Linear(geometry_feature_width, 1)
         if config.mechanism_state_mode == "descriptor_first":
             self.mechanism_encoder = DescriptorFirstMechanismEncoder(config)
         elif config.use_hyper_mechanism_encoder:
@@ -99,7 +100,7 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
             self.background_env_value = nn.Linear(hidden_dim, hidden_dim)
             self.background_global = nn.Linear(hidden_dim, hidden_dim)
             self.background_input_norm = nn.LayerNorm(3 * hidden_dim)
-            self.edge_input_norm = nn.LayerNorm(3 * hidden_dim + 10)
+            self.edge_input_norm = nn.LayerNorm(3 * hidden_dim + geometry_feature_width)
             additive_gate_init = min(max(float(config.additive_edge_gate_init), 1.0e-4), 1.0 - 1.0e-4)
             additive_gate_logit = math.log(additive_gate_init / (1.0 - additive_gate_init))
             self.additive_edge_gate = nn.Parameter(torch.tensor(additive_gate_logit, dtype=torch.float32))
@@ -112,7 +113,7 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
                 include_zero_dropout=True,
             )
             self.edge_head = MLP(
-                3 * hidden_dim + 10,
+                3 * hidden_dim + geometry_feature_width,
                 hidden_dim,
                 field_dim,
                 num_layers=2,
@@ -140,7 +141,7 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
     ) -> Dict[str, torch.Tensor]:
         """Decode field values at query coordinates.
 
-        ``query_xy [B,Q,2]`` becomes ``query_state [B,Q,H]``. According to
+        ``query_xy [B,Q,d]`` becomes ``query_state [B,Q,H]``. According to
         ``decoder_mode``, queries attend to ``hyper_state [B,K,H]`` through
         ``alpha_qk [B,Q,K]`` and may add pairwise, global, direct-memory, or
         near-module context. The prediction head returns ``pred_field
@@ -633,17 +634,25 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
 
         region = organizer_output["hyper_region_coords"]
         region_scale = organizer_output["hyper_region_scale"]
-        scale_x, scale_y = self.config.spatial_scale()
-        minimum = query_xy.new_tensor(
-            [
-                max(scale_x * float(self.config.minimum_region_scale), EPS),
-                max(scale_y * float(self.config.minimum_region_scale), EPS),
-            ]
-        )
+        if self.config.spatial_dim == 2:
+            # Keep the historical Python-scale arithmetic for the 2-D
+            # checkpoint path.  Besides preserving its exact values, this
+            # avoids a device-to-host scalar read for every query batch.
+            scale_x, scale_y = self.config.spatial_scale()
+            scales = query_xy.new_tensor([max(scale_x, EPS), max(scale_y, EPS)])
+            minimum = query_xy.new_tensor(
+                [
+                    max(scale_x * float(self.config.minimum_region_scale), EPS),
+                    max(scale_y * float(self.config.minimum_region_scale), EPS),
+                ]
+            )
+        else:
+            scales = query_xy.new_tensor(self.config.spatial_scale()).clamp_min(EPS)
+            minimum = scales * float(self.config.minimum_region_scale)
         anisotropic_scale = torch.maximum(region_scale, minimum)
         delta = query_xy[:, :, None, :] - region[:, None, :, :]
         if self.config.periodic_dimensions():
-            lengths = query_xy.new_tensor([max(scale_x, EPS), max(scale_y, EPS)])
+            lengths = scales
             delta = _wrap_periodic_delta(delta, lengths, self.config.periodic_dimensions())
         radius_square = (delta / anisotropic_scale[:, None, :, :]).square().sum(dim=-1)
         return locality_bias(
@@ -669,10 +678,14 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
     ) -> torch.Tensor:
         """Encode normalized coordinates, time, Fourier, and boundary features."""
 
-        scale_x, scale_y = self.config.spatial_scale()
-        lx = max(scale_x, EPS)
-        ly = max(scale_y, EPS)
-        xy = torch.stack([query_xy[..., 0] / lx, query_xy[..., 1] / ly], dim=-1)
+        if self.config.spatial_dim == 2:
+            # Preserve the historical feature order for existing checkpoints.
+            scale_x, scale_y = self.config.spatial_scale()
+            lx, ly = max(scale_x, EPS), max(scale_y, EPS)
+            xy = torch.stack([query_xy[..., 0] / lx, query_xy[..., 1] / ly], dim=-1)
+        else:
+            scales = query_xy.new_tensor(self.config.spatial_scale()).clamp_min(EPS)
+            xy = query_xy / scales
         if query_time is None:
             t = torch.zeros_like(query_xy[..., :1])
         else:
@@ -691,6 +704,8 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
         query_fourier = self.query_fourier(xy)
         pieces = [base, query_fourier[..., xy.shape[-1] :]]
         if self.config.boundary_feature_mode in {"rectangular", "channel"}:
+            if self.config.spatial_dim != 2:
+                raise ValueError("rectangular boundary features are defined only for 2-D queries.")
             pieces.append(rectangular_boundary_features(query_xy, lx, ly))
         if case_query_features is not None:
             if case_query_features.shape[:2] != query_xy.shape[:2]:
@@ -733,18 +748,37 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
         region = organizer_output["hyper_region_coords"]
         source_delta, source_downstream, source_lateral = self._relative_geometry(query_xy, source)
         region_delta, region_downstream, region_lateral = self._relative_geometry(query_xy, region)
-        scale_x, scale_y = self.config.spatial_scale()
-        diag = math.sqrt(max(scale_x, EPS) ** 2 + max(scale_y, EPS) ** 2)
-        source_dist = torch.sqrt(source_delta.square().sum(dim=-1, keepdim=True) + EPS) / max(diag, EPS)
-        region_dist = torch.sqrt(region_delta.square().sum(dim=-1, keepdim=True) + EPS) / max(diag, EPS)
-        lx = max(scale_x, EPS)
-        ly = max(scale_y, EPS)
+        if self.config.spatial_dim == 2:
+            # Preserve the exact ten-feature ordering used by the historical
+            # fixed-K path.
+            scale_x, scale_y = self.config.spatial_scale()
+            diag = math.sqrt(max(scale_x, EPS) ** 2 + max(scale_y, EPS) ** 2)
+            source_dist = torch.sqrt(source_delta.square().sum(dim=-1, keepdim=True) + EPS) / max(diag, EPS)
+            region_dist = torch.sqrt(region_delta.square().sum(dim=-1, keepdim=True) + EPS) / max(diag, EPS)
+            lx, ly = max(scale_x, EPS), max(scale_y, EPS)
+            return torch.cat(
+                [
+                    source_delta[..., 0:1] / lx,
+                    source_delta[..., 1:2] / ly,
+                    region_delta[..., 0:1] / lx,
+                    region_delta[..., 1:2] / ly,
+                    source_dist,
+                    region_dist,
+                    source_downstream,
+                    region_downstream,
+                    source_lateral,
+                    region_lateral,
+                ],
+                dim=-1,
+            )
+        scales = query_xy.new_tensor(self.config.spatial_scale()).clamp_min(EPS)
+        diag = torch.sqrt(scales.square().sum()).clamp_min(EPS)
+        source_dist = torch.sqrt(source_delta.square().sum(dim=-1, keepdim=True) + EPS) / diag
+        region_dist = torch.sqrt(region_delta.square().sum(dim=-1, keepdim=True) + EPS) / diag
         return torch.cat(
             [
-                source_delta[..., 0:1] / lx,
-                source_delta[..., 1:2] / ly,
-                region_delta[..., 0:1] / lx,
-                region_delta[..., 1:2] / ly,
+                source_delta / scales,
+                region_delta / scales,
                 source_dist,
                 region_dist,
                 source_downstream,
@@ -762,13 +796,17 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return query-to-hyperedge offsets plus downstream/lateral distances."""
 
-        scale_x, scale_y = self.config.spatial_scale()
-        lx = max(scale_x, EPS)
-        ly = max(scale_y, EPS)
+        if self.config.spatial_dim == 2:
+            scale_x, scale_y = self.config.spatial_scale()
+            lx, ly = max(scale_x, EPS), max(scale_y, EPS)
+            scales = query_xy.new_tensor([lx, ly])
+        else:
+            scales = query_xy.new_tensor(self.config.spatial_scale()).clamp_min(EPS)
+            lx = float(scales[0])
         delta = query_xy[:, :, None, :] - hyper_coords[:, None, :, :]
         periodic_axes = self.config.periodic_dimensions()
         if periodic_axes:
-            lengths = torch.tensor([lx, ly], device=query_xy.device, dtype=query_xy.dtype)
+            lengths = scales
             raw_dx = delta[..., 0]
             delta = _wrap_periodic_delta(delta, lengths, periodic_axes)
             downstream = (
@@ -778,7 +816,10 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
             )
         else:
             downstream = torch.relu(delta[..., 0:1]) / lx
-        lateral = delta[..., 1:2].abs() / ly
+        if self.config.spatial_dim == 2:
+            lateral = delta[..., 1:2].abs() / ly
+        else:
+            lateral = torch.sqrt((delta[..., 1:] / scales[1:]).square().sum(dim=-1, keepdim=True) + EPS)
         return delta, downstream, lateral
 
     def _direct_context(
@@ -816,12 +857,7 @@ class HypergraphFieldDecoder(ResearchDecoderExecutionMixin, nn.Module):
         delta = query_xy[:, :, None, :] - module_centers[:, None, :, :]
         periodic_axes = self.config.periodic_dimensions()
         if periodic_axes:
-            scale_x, scale_y = self.config.spatial_scale()
-            lengths = torch.tensor(
-                [max(scale_x, EPS), max(scale_y, EPS)],
-                device=query_xy.device,
-                dtype=query_xy.dtype,
-            )
+            lengths = query_xy.new_tensor(self.config.spatial_scale()).clamp_min(EPS)
             delta = _wrap_periodic_delta(delta, lengths, periodic_axes)
         dist2 = delta.square().sum(dim=-1)
         context_scale = self.config.local_context_scale

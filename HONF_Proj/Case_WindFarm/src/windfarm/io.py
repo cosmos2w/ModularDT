@@ -241,25 +241,37 @@ class WindFarmDataset:
         for index in selected:
             yield self.run(index)
 
-    def compact_metadata(self, *, allow_npz_fallback: bool = False) -> dict[str, np.ndarray]:
+    def compact_metadata(
+        self,
+        *,
+        allow_npz_fallback: bool = False,
+        names: Iterable[str] | None = None,
+    ) -> dict[str, np.ndarray]:
         """Read compact metadata without touching large field arrays.
 
-        Individual compact ``.npy`` arrays are preferred.  The source copy
+        Individual compact ``.npy`` arrays are preferred.  The optional
+        ``names`` argument lets a forward adapter request only its declared
+        geometry keys; this keeps scalar targets and exploratory descriptors
+        out of the adapter process entirely.  The source copy
         currently provides only ``family_tensor.npz``; when
         ``allow_npz_fallback`` is true, only the small metadata keys requested
         by this method are decompressed.  Hub/vertical field keys are never
         read here.
         """
 
+        requested = tuple(COMPACT_METADATA_ARRAYS if names is None else (str(name) for name in names))
+        unknown = sorted(set(requested) - set(COMPACT_METADATA_ARRAYS))
+        if unknown:
+            raise KeyError(f"Unknown compact metadata keys: {unknown}")
         search_roots = (self.root / "family_tensor", self.volume_root.parent / "family_tensor")
         result: dict[str, np.ndarray] = {}
-        for name in COMPACT_METADATA_ARRAYS:
+        for name in requested:
             for directory in search_roots:
                 path = directory / f"{name}.npy"
                 if path.is_file():
                     result[name] = _load_npy(path)
                     break
-        missing = [name for name in COMPACT_METADATA_ARRAYS if name not in result]
+        missing = [name for name in requested if name not in result]
         if not missing and result:
             return result
         if not allow_npz_fallback:
