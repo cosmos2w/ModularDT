@@ -1,0 +1,1047 @@
+{
+  "alignment_artifact": "Case_WindFarm/diagnostics/generated/forward_velocity_2500_comparison/alignment_audit.json",
+  "alignment_artifact_checked": true,
+  "alignment_payload": {
+    "case_identity_match": {
+      "best_test": {
+        "classic_count": 90,
+        "classic_dense_equal": true,
+        "classic_dense_source_indices_equal": true,
+        "dense_count": 90
+      },
+      "best_validation": {
+        "classic_count": 90,
+        "classic_dense_equal": true,
+        "classic_dense_source_indices_equal": true,
+        "dense_count": 90
+      },
+      "epoch2500_validation": {
+        "classic_count": 90,
+        "classic_dense_equal": true,
+        "classic_dense_source_indices_equal": true,
+        "dense_count": 90
+      },
+      "validation_across_endpoints": {
+        "classic_best_vs_epoch2500_equal": true,
+        "dense_best_vs_epoch2500_equal": true
+      }
+    },
+    "endpoint_contracts": {
+      "classic:best_test": {
+        "q_band": 8192,
+        "q_volume": 32768,
+        "rows": 90,
+        "sample_seed": 42,
+        "split": "test"
+      },
+      "classic:best_validation": {
+        "q_band": 8192,
+        "q_volume": 32768,
+        "rows": 90,
+        "sample_seed": 42,
+        "split": "validation"
+      },
+      "classic:epoch2500_validation": {
+        "q_band": 8192,
+        "q_volume": 32768,
+        "rows": 90,
+        "sample_seed": 42,
+        "split": "validation"
+      },
+      "dense:best_test": {
+        "q_band": 8192,
+        "q_volume": 32768,
+        "rows": 90,
+        "sample_seed": 42,
+        "split": "test"
+      },
+      "dense:best_validation": {
+        "q_band": 8192,
+        "q_volume": 32768,
+        "rows": 90,
+        "sample_seed": 42,
+        "split": "validation"
+      },
+      "dense:epoch2500_validation": {
+        "q_band": 8192,
+        "q_volume": 32768,
+        "rows": 90,
+        "sample_seed": 42,
+        "split": "validation"
+      }
+    },
+    "expected": {
+      "band_queries_total_per_90_cases": 737280,
+      "q_band": 8192,
+      "q_volume": 32768,
+      "receiver_chunk_size": 512,
+      "sample_seed": 42,
+      "test_layouts": 30,
+      "test_rows": 90,
+      "total_queries_per_case": 40960,
+      "validation_layouts": 30,
+      "validation_rows": 90,
+      "volume_queries_total_per_90_cases": 2949120
+    },
+    "sampling_alignment_basis": "All endpoints were run through evaluate.py/evaluate_rows with fixed_sampling=True, the same seed=42, split rows, q_volume=32768 and q_band=8192. Case identity and endpoint metadata were audited from each saved metrics.json."
+  },
+  "endpoint_metadata": {
+    "classic:best_test": {
+      "checkpoint_epoch": 2440,
+      "checkpoint_role": "best_validation_checkpoint",
+      "reserved_test_used_for_selection": false,
+      "selection_split": "validation",
+      "validation_only_selection": true
+    },
+    "classic:best_validation": {
+      "checkpoint_epoch": 2440,
+      "checkpoint_role": "best_validation_checkpoint",
+      "reserved_test_used_for_selection": false,
+      "selection_split": "validation",
+      "validation_only_selection": true
+    },
+    "classic:epoch2500_validation": {
+      "checkpoint_epoch": 2500,
+      "checkpoint_role": "explicit_checkpoint",
+      "reserved_test_used_for_selection": false,
+      "selection_split": null,
+      "validation_only_selection": false
+    },
+    "dense:best_test": {
+      "checkpoint_epoch": 2475,
+      "checkpoint_role": "best_validation_checkpoint",
+      "reserved_test_used_for_selection": false,
+      "selection_split": "validation",
+      "validation_only_selection": true
+    },
+    "dense:best_validation": {
+      "checkpoint_epoch": 2475,
+      "checkpoint_role": "best_validation_checkpoint",
+      "reserved_test_used_for_selection": false,
+      "selection_split": "validation",
+      "validation_only_selection": true
+    },
+    "dense:epoch2500_validation": {
+      "checkpoint_epoch": 2500,
+      "checkpoint_role": "explicit_checkpoint",
+      "reserved_test_used_for_selection": false,
+      "selection_split": null,
+      "validation_only_selection": false
+    }
+  },
+  "endpoint_splits": {
+    "best_test": "test",
+    "best_validation": "validation",
+    "epoch2500_validation": "validation"
+  },
+  "endpoint_summary_artifact": "Case_WindFarm/diagnostics/generated/forward_velocity_2500_comparison/endpoint_summary.json",
+  "endpoint_summary_checked": true,
+  "endpoint_summary_payload": {
+    "alignment_audit": {
+      "case_identity_match": {
+        "best_test": {
+          "classic_count": 90,
+          "classic_dense_equal": true,
+          "classic_dense_source_indices_equal": true,
+          "dense_count": 90
+        },
+        "best_validation": {
+          "classic_count": 90,
+          "classic_dense_equal": true,
+          "classic_dense_source_indices_equal": true,
+          "dense_count": 90
+        },
+        "epoch2500_validation": {
+          "classic_count": 90,
+          "classic_dense_equal": true,
+          "classic_dense_source_indices_equal": true,
+          "dense_count": 90
+        },
+        "validation_across_endpoints": {
+          "classic_best_vs_epoch2500_equal": true,
+          "dense_best_vs_epoch2500_equal": true
+        }
+      },
+      "endpoint_contracts": {
+        "classic:best_test": {
+          "q_band": 8192,
+          "q_volume": 32768,
+          "rows": 90,
+          "sample_seed": 42,
+          "split": "test"
+        },
+        "classic:best_validation": {
+          "q_band": 8192,
+          "q_volume": 32768,
+          "rows": 90,
+          "sample_seed": 42,
+          "split": "validation"
+        },
+        "classic:epoch2500_validation": {
+          "q_band": 8192,
+          "q_volume": 32768,
+          "rows": 90,
+          "sample_seed": 42,
+          "split": "validation"
+        },
+        "dense:best_test": {
+          "q_band": 8192,
+          "q_volume": 32768,
+          "rows": 90,
+          "sample_seed": 42,
+          "split": "test"
+        },
+        "dense:best_validation": {
+          "q_band": 8192,
+          "q_volume": 32768,
+          "rows": 90,
+          "sample_seed": 42,
+          "split": "validation"
+        },
+        "dense:epoch2500_validation": {
+          "q_band": 8192,
+          "q_volume": 32768,
+          "rows": 90,
+          "sample_seed": 42,
+          "split": "validation"
+        }
+      },
+      "expected": {
+        "band_queries_total_per_90_cases": 737280,
+        "q_band": 8192,
+        "q_volume": 32768,
+        "receiver_chunk_size": 512,
+        "sample_seed": 42,
+        "test_layouts": 30,
+        "test_rows": 90,
+        "total_queries_per_case": 40960,
+        "validation_layouts": 30,
+        "validation_rows": 90,
+        "volume_queries_total_per_90_cases": 2949120
+      },
+      "sampling_alignment_basis": "All endpoints were run through evaluate.py/evaluate_rows with fixed_sampling=True, the same seed=42, split rows, q_volume=32768 and q_band=8192. Case identity and endpoint metadata were audited from each saved metrics.json."
+    },
+    "artifact_paths": {
+      "alignment_json": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_2500_comparison/alignment_audit.json",
+      "commands_txt": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_2500_comparison/commands.txt",
+      "endpoint_metrics": {
+        "classic:best_test": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2102_20260913_135849_windfarm_classic_k6_b16_q8192/evaluations/accuracy_2500_q32768_b8192_seed42/best_field_test/metrics.json",
+        "classic:best_validation": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2102_20260913_135849_windfarm_classic_k6_b16_q8192/evaluations/accuracy_2500_q32768_b8192_seed42/best_field_validation/metrics.json",
+        "classic:epoch2500_validation": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2102_20260913_135849_windfarm_classic_k6_b16_q8192/evaluations/accuracy_2500_q32768_b8192_seed42/epoch2500_validation/metrics.json",
+        "dense:best_test": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2103_20260913_135849_windfarm_dense_pairwise_b16_q8192/evaluations/accuracy_2500_q32768_b8192_seed42/best_field_test/metrics.json",
+        "dense:best_validation": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2103_20260913_135849_windfarm_dense_pairwise_b16_q8192/evaluations/accuracy_2500_q32768_b8192_seed42/best_field_validation/metrics.json",
+        "dense:epoch2500_validation": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2103_20260913_135849_windfarm_dense_pairwise_b16_q8192/evaluations/accuracy_2500_q32768_b8192_seed42/epoch2500_validation/metrics.json"
+      },
+      "per_case_csv": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_2500_comparison/per_case_comparison.csv",
+      "strata_csv": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_2500_comparison/strata_comparison.csv"
+    },
+    "endpoint_summaries": [
+      {
+        "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2102_20260913_135849_windfarm_classic_k6_b16_q8192/checkpoints/best_field.pt",
+        "checkpoint_epoch": 2440,
+        "checkpoint_role": "best_validation_checkpoint",
+        "checkpoint_selector": "best_field.pt",
+        "endpoint": "best_validation",
+        "equal_case": {
+          "mean_downstream_envelope_mae_mps": null,
+          "mean_downstream_envelope_rmse_mps": 0.036987841605312294,
+          "mean_downstream_envelope_standardized_mse": 0.026750642526894807,
+          "mean_hub_band_mae_mps": 0.014088715861241023,
+          "mean_hub_band_rmse_mps": 0.03027184394498666,
+          "mean_hub_band_standardized_mse": 0.01680121161043644,
+          "mean_volume_mae_mps": 0.008732472339438068,
+          "mean_volume_rmse_mps": 0.01942095796888073,
+          "mean_volume_standardized_mse": 0.006224511425373041,
+          "mean_volume_vector_relative_l2": 0.0031913334658990305,
+          "median_volume_rmse_mps": 0.017728102393448353,
+          "p95_volume_rmse_mps": 0.029186996538192025,
+          "worst_volume_rmse_mps": 0.059075284749269485
+        },
+        "layouts": 30,
+        "model": "classic",
+        "pooled": {
+          "downstream_channel_mae_mps": [
+            0.04587750303584405,
+            0.006152265549320994,
+            0.0029884889604998317
+          ],
+          "downstream_channel_rmse_mps": [
+            0.06653323581865718,
+            0.009661668211587437,
+            0.005996737604464364
+          ],
+          "downstream_count": 375339,
+          "downstream_vector_relative_l2": 0.00792717305002047,
+          "hub_band_channel_mae_mps": [
+            0.03471095169465351,
+            0.0042188399937746,
+            0.001705501320931019
+          ],
+          "hub_band_channel_rmse_mps": [
+            0.05317140004334238,
+            0.007732690326805169,
+            0.004384293078417659
+          ],
+          "hub_band_count": 737280,
+          "hub_band_vector_relative_l2": 0.006215841340615376,
+          "volume_channel_mae_mps": [
+            0.021954467883479333,
+            0.0025006703464098634,
+            0.0012301850786754858
+          ],
+          "volume_channel_rmse_mps": [
+            0.03395223542478069,
+            0.004587107215902009,
+            0.002775337652673252
+          ],
+          "volume_count": 2949120,
+          "volume_vector_relative_l2": 0.003261551699612031
+        },
+        "q_band": 8192,
+        "q_volume": 32768,
+        "reserved_test_used_for_selection": false,
+        "rows": 90,
+        "sample_seed": 42,
+        "split": "validation",
+        "strata_count": 48,
+        "strata_reference": {
+          "descriptor_definitions": {
+            "mean_nn_D": "mean per-turbine nearest-neighbor spacing in rotor diameters",
+            "min_sep_D": "minimum pairwise turbine-center spacing in rotor diameters",
+            "nn_dispersion": "standard deviation of per-turbine nearest-neighbor spacing in rotor diameters"
+          },
+          "descriptor_quartiles": {
+            "mean_nn_D": [
+              3.5487304030022147,
+              4.172149034943043,
+              4.975358940399917
+            ],
+            "min_sep_D": [
+              3.4931138879974006,
+              4.075516106133884,
+              4.973772398865651
+            ],
+            "nn_dispersion": [
+              0.003521910002832162,
+              0.040738753333316335,
+              0.183621229182296
+            ]
+          },
+          "descriptor_source_note": "Nearest-neighbor descriptors are recomputed from row-specific native turbine centers; no equivalence to a stored compact-descriptor formula is claimed.",
+          "m_bins": [
+            "6-10",
+            "11-15",
+            "16-20",
+            "21-25",
+            "26-30"
+          ],
+          "rows": 420,
+          "scope": "training rows",
+          "support_aspect_xy_quartiles": [
+            1.5997340974037082,
+            1.7614191531430912,
+            1.9821702296860901
+          ],
+          "support_volume_D3_quartiles": [
+            5026.7599548965745,
+            5987.881990877011,
+            7173.501267639626
+          ]
+        },
+        "validation_only_selection": true
+      },
+      {
+        "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2103_20260913_135849_windfarm_dense_pairwise_b16_q8192/checkpoints/best_field.pt",
+        "checkpoint_epoch": 2475,
+        "checkpoint_role": "best_validation_checkpoint",
+        "checkpoint_selector": "best_field.pt",
+        "endpoint": "best_validation",
+        "equal_case": {
+          "mean_downstream_envelope_mae_mps": null,
+          "mean_downstream_envelope_rmse_mps": 0.022652232222672965,
+          "mean_downstream_envelope_standardized_mse": 0.02622954798862338,
+          "mean_hub_band_mae_mps": 0.007792781050213509,
+          "mean_hub_band_rmse_mps": 0.019496717614432175,
+          "mean_hub_band_standardized_mse": 0.017837271459090212,
+          "mean_volume_mae_mps": 0.00427525858912203,
+          "mean_volume_rmse_mps": 0.010772632647098766,
+          "mean_volume_standardized_mse": 0.00456953560286719,
+          "mean_volume_vector_relative_l2": 0.001770217110040701,
+          "median_volume_rmse_mps": 0.010606277268379927,
+          "p95_volume_rmse_mps": 0.013494828622788191,
+          "worst_volume_rmse_mps": 0.014678164385259151
+        },
+        "layouts": 30,
+        "model": "dense",
+        "pooled": {
+          "downstream_channel_mae_mps": [
+            0.02565122825154751,
+            0.003875317861161838,
+            0.002471665252072624
+          ],
+          "downstream_channel_rmse_mps": [
+            0.0382763709920667,
+            0.008315944933279053,
+            0.007330131426216679
+          ],
+          "downstream_count": 375339,
+          "downstream_vector_relative_l2": 0.004680023926262302,
+          "hub_band_channel_mae_mps": [
+            0.019270396564238963,
+            0.0027455409688588485,
+            0.00134382198282058
+          ],
+          "hub_band_channel_rmse_mps": [
+            0.032926754310094286,
+            0.007353225825651358,
+            0.005586590906150813
+          ],
+          "hub_band_count": 737280,
+          "hub_band_vector_relative_l2": 0.003943003217286075,
+          "volume_channel_mae_mps": [
+            0.010781076178496983,
+            0.0013704042786642574,
+            0.0007333404790512666
+          ],
+          "volume_channel_rmse_mps": [
+            0.018278567371643042,
+            0.0034897603602127847,
+            0.00299861739532952
+          ],
+          "volume_count": 2949120,
+          "volume_vector_relative_l2": 0.0017885073987238666
+        },
+        "q_band": 8192,
+        "q_volume": 32768,
+        "reserved_test_used_for_selection": false,
+        "rows": 90,
+        "sample_seed": 42,
+        "split": "validation",
+        "strata_count": 48,
+        "strata_reference": {
+          "descriptor_definitions": {
+            "mean_nn_D": "mean per-turbine nearest-neighbor spacing in rotor diameters",
+            "min_sep_D": "minimum pairwise turbine-center spacing in rotor diameters",
+            "nn_dispersion": "standard deviation of per-turbine nearest-neighbor spacing in rotor diameters"
+          },
+          "descriptor_quartiles": {
+            "mean_nn_D": [
+              3.5487304030022147,
+              4.172149034943043,
+              4.975358940399917
+            ],
+            "min_sep_D": [
+              3.4931138879974006,
+              4.075516106133884,
+              4.973772398865651
+            ],
+            "nn_dispersion": [
+              0.003521910002832162,
+              0.040738753333316335,
+              0.183621229182296
+            ]
+          },
+          "descriptor_source_note": "Nearest-neighbor descriptors are recomputed from row-specific native turbine centers; no equivalence to a stored compact-descriptor formula is claimed.",
+          "m_bins": [
+            "6-10",
+            "11-15",
+            "16-20",
+            "21-25",
+            "26-30"
+          ],
+          "rows": 420,
+          "scope": "training rows",
+          "support_aspect_xy_quartiles": [
+            1.5997340974037082,
+            1.7614191531430912,
+            1.9821702296860901
+          ],
+          "support_volume_D3_quartiles": [
+            5026.7599548965745,
+            5987.881990877011,
+            7173.501267639626
+          ]
+        },
+        "validation_only_selection": true
+      },
+      {
+        "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2102_20260913_135849_windfarm_classic_k6_b16_q8192/epoch_2500_model.pt",
+        "checkpoint_epoch": 2500,
+        "checkpoint_role": "explicit_checkpoint",
+        "checkpoint_selector": "epoch_2500_model.pt",
+        "endpoint": "epoch2500_validation",
+        "equal_case": {
+          "mean_downstream_envelope_mae_mps": null,
+          "mean_downstream_envelope_rmse_mps": 0.03672369755804539,
+          "mean_downstream_envelope_standardized_mse": 0.02869251123112109,
+          "mean_hub_band_mae_mps": 0.013415118575923972,
+          "mean_hub_band_rmse_mps": 0.030141582153737544,
+          "mean_hub_band_standardized_mse": 0.018020639832442006,
+          "mean_volume_mae_mps": 0.008328951988369226,
+          "mean_volume_rmse_mps": 0.01894503195459644,
+          "mean_volume_standardized_mse": 0.0064364003302115535,
+          "mean_volume_vector_relative_l2": 0.003113028766690857,
+          "median_volume_rmse_mps": 0.01718128379434347,
+          "p95_volume_rmse_mps": 0.0284987716935575,
+          "worst_volume_rmse_mps": 0.05012260004878044
+        },
+        "layouts": 30,
+        "model": "classic",
+        "pooled": {
+          "downstream_channel_mae_mps": [
+            0.04520687062264654,
+            0.005900313442073762,
+            0.0031804205295019343
+          ],
+          "downstream_channel_rmse_mps": [
+            0.06566302409803863,
+            0.009454044821088829,
+            0.006760452757220274
+          ],
+          "downstream_count": 375339,
+          "downstream_vector_relative_l2": 0.007831538636817586,
+          "hub_band_channel_mae_mps": [
+            0.03297089246200503,
+            0.004060199923651623,
+            0.0016945189415744635
+          ],
+          "hub_band_channel_rmse_mps": [
+            0.052836772323460714,
+            0.007705743581652786,
+            0.004840164296373812
+          ],
+          "hub_band_count": 737280,
+          "hub_band_vector_relative_l2": 0.0061818653168594275,
+          "volume_channel_mae_mps": [
+            0.020878300893885388,
+            0.0024215208318950215,
+            0.0012685759188321216
+          ],
+          "volume_channel_rmse_mps": [
+            0.03302230939842438,
+            0.004449802867154171,
+            0.0030496726767010817
+          ],
+          "volume_count": 2949120,
+          "volume_vector_relative_l2": 0.003174929917618935
+        },
+        "q_band": 8192,
+        "q_volume": 32768,
+        "reserved_test_used_for_selection": false,
+        "rows": 90,
+        "sample_seed": 42,
+        "split": "validation",
+        "strata_count": 48,
+        "strata_reference": {
+          "descriptor_definitions": {
+            "mean_nn_D": "mean per-turbine nearest-neighbor spacing in rotor diameters",
+            "min_sep_D": "minimum pairwise turbine-center spacing in rotor diameters",
+            "nn_dispersion": "standard deviation of per-turbine nearest-neighbor spacing in rotor diameters"
+          },
+          "descriptor_quartiles": {
+            "mean_nn_D": [
+              3.5487304030022147,
+              4.172149034943043,
+              4.975358940399917
+            ],
+            "min_sep_D": [
+              3.4931138879974006,
+              4.075516106133884,
+              4.973772398865651
+            ],
+            "nn_dispersion": [
+              0.003521910002832162,
+              0.040738753333316335,
+              0.183621229182296
+            ]
+          },
+          "descriptor_source_note": "Nearest-neighbor descriptors are recomputed from row-specific native turbine centers; no equivalence to a stored compact-descriptor formula is claimed.",
+          "m_bins": [
+            "6-10",
+            "11-15",
+            "16-20",
+            "21-25",
+            "26-30"
+          ],
+          "rows": 420,
+          "scope": "training rows",
+          "support_aspect_xy_quartiles": [
+            1.5997340974037082,
+            1.7614191531430912,
+            1.9821702296860901
+          ],
+          "support_volume_D3_quartiles": [
+            5026.7599548965745,
+            5987.881990877011,
+            7173.501267639626
+          ]
+        },
+        "validation_only_selection": false
+      },
+      {
+        "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2103_20260913_135849_windfarm_dense_pairwise_b16_q8192/epoch_2500_model.pt",
+        "checkpoint_epoch": 2500,
+        "checkpoint_role": "explicit_checkpoint",
+        "checkpoint_selector": "epoch_2500_model.pt",
+        "endpoint": "epoch2500_validation",
+        "equal_case": {
+          "mean_downstream_envelope_mae_mps": null,
+          "mean_downstream_envelope_rmse_mps": 0.020766800848974122,
+          "mean_downstream_envelope_standardized_mse": 0.026675275438982578,
+          "mean_hub_band_mae_mps": 0.006761430498833458,
+          "mean_hub_band_rmse_mps": 0.0182782375253737,
+          "mean_hub_band_standardized_mse": 0.018935314762509533,
+          "mean_volume_mae_mps": 0.003755077877495852,
+          "mean_volume_rmse_mps": 0.009788049167642992,
+          "mean_volume_standardized_mse": 0.004592619401713212,
+          "mean_volume_vector_relative_l2": 0.0016084104983343018,
+          "median_volume_rmse_mps": 0.009610665962100029,
+          "p95_volume_rmse_mps": 0.012910129642114042,
+          "worst_volume_rmse_mps": 0.013375570997595787
+        },
+        "layouts": 30,
+        "model": "dense",
+        "pooled": {
+          "downstream_channel_mae_mps": [
+            0.02188071600791929,
+            0.0036106604910613603,
+            0.0023987870686304337
+          ],
+          "downstream_channel_rmse_mps": [
+            0.034667267296958404,
+            0.008241030111126013,
+            0.00750823266843844
+          ],
+          "downstream_count": 375339,
+          "downstream_vector_relative_l2": 0.004276778928466629,
+          "hub_band_channel_mae_mps": [
+            0.01622115968679879,
+            0.00260126259016711,
+            0.0013318795502132498
+          ],
+          "hub_band_channel_rmse_mps": [
+            0.030514896888342597,
+            0.007427551657516096,
+            0.0058787484586937805
+          ],
+          "hub_band_count": 737280,
+          "hub_band_vector_relative_l2": 0.003684045358386296,
+          "volume_channel_mae_mps": [
+            0.009320514468636418,
+            0.0012575245372836124,
+            0.0006783929268724989
+          ],
+          "volume_channel_rmse_mps": [
+            0.01645191690801065,
+            0.0034378871882026272,
+            0.003057329136570056
+          ],
+          "volume_count": 2949120,
+          "volume_vector_relative_l2": 0.0016209666879446675
+        },
+        "q_band": 8192,
+        "q_volume": 32768,
+        "reserved_test_used_for_selection": false,
+        "rows": 90,
+        "sample_seed": 42,
+        "split": "validation",
+        "strata_count": 48,
+        "strata_reference": {
+          "descriptor_definitions": {
+            "mean_nn_D": "mean per-turbine nearest-neighbor spacing in rotor diameters",
+            "min_sep_D": "minimum pairwise turbine-center spacing in rotor diameters",
+            "nn_dispersion": "standard deviation of per-turbine nearest-neighbor spacing in rotor diameters"
+          },
+          "descriptor_quartiles": {
+            "mean_nn_D": [
+              3.5487304030022147,
+              4.172149034943043,
+              4.975358940399917
+            ],
+            "min_sep_D": [
+              3.4931138879974006,
+              4.075516106133884,
+              4.973772398865651
+            ],
+            "nn_dispersion": [
+              0.003521910002832162,
+              0.040738753333316335,
+              0.183621229182296
+            ]
+          },
+          "descriptor_source_note": "Nearest-neighbor descriptors are recomputed from row-specific native turbine centers; no equivalence to a stored compact-descriptor formula is claimed.",
+          "m_bins": [
+            "6-10",
+            "11-15",
+            "16-20",
+            "21-25",
+            "26-30"
+          ],
+          "rows": 420,
+          "scope": "training rows",
+          "support_aspect_xy_quartiles": [
+            1.5997340974037082,
+            1.7614191531430912,
+            1.9821702296860901
+          ],
+          "support_volume_D3_quartiles": [
+            5026.7599548965745,
+            5987.881990877011,
+            7173.501267639626
+          ]
+        },
+        "validation_only_selection": false
+      },
+      {
+        "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2102_20260913_135849_windfarm_classic_k6_b16_q8192/checkpoints/best_field.pt",
+        "checkpoint_epoch": 2440,
+        "checkpoint_role": "best_validation_checkpoint",
+        "checkpoint_selector": "best_field.pt",
+        "endpoint": "best_test",
+        "equal_case": {
+          "mean_downstream_envelope_mae_mps": null,
+          "mean_downstream_envelope_rmse_mps": 0.03578518159273598,
+          "mean_downstream_envelope_standardized_mse": 0.02336824977149566,
+          "mean_hub_band_mae_mps": 0.01361925695091486,
+          "mean_hub_band_rmse_mps": 0.029038565440310374,
+          "mean_hub_band_standardized_mse": 0.014515621877378888,
+          "mean_volume_mae_mps": 0.008624358573514554,
+          "mean_volume_rmse_mps": 0.01893695376606451,
+          "mean_volume_standardized_mse": 0.005244037734034161,
+          "mean_volume_vector_relative_l2": 0.0031118585133097236,
+          "median_volume_rmse_mps": 0.018311641179025173,
+          "p95_volume_rmse_mps": 0.024663545098155732,
+          "worst_volume_rmse_mps": 0.03336068242788315
+        },
+        "layouts": 30,
+        "model": "classic",
+        "pooled": {
+          "downstream_channel_mae_mps": [
+            0.045225886579496194,
+            0.005971745329271614,
+            0.0030040870812156812
+          ],
+          "downstream_channel_rmse_mps": [
+            0.06222525397153019,
+            0.009126018711641587,
+            0.005961209528222171
+          ],
+          "downstream_count": 379716,
+          "downstream_vector_relative_l2": 0.007426977695831449,
+          "hub_band_channel_mae_mps": [
+            0.03460383759729094,
+            0.004146399584297483,
+            0.0017309382506297255
+          ],
+          "hub_band_channel_rmse_mps": [
+            0.05017623436120638,
+            0.007360325207315695,
+            0.004311995532338824
+          ],
+          "hub_band_count": 737280,
+          "hub_band_vector_relative_l2": 0.0058757918777759465,
+          "volume_channel_mae_mps": [
+            0.02209855324885525,
+            0.002459173805576424,
+            0.001246938674626913
+          ],
+          "volume_channel_rmse_mps": [
+            0.03277612621339511,
+            0.004304695846154188,
+            0.0027291654309119177
+          ],
+          "volume_count": 2949120,
+          "volume_vector_relative_l2": 0.003146908648584541
+        },
+        "q_band": 8192,
+        "q_volume": 32768,
+        "reserved_test_used_for_selection": false,
+        "rows": 90,
+        "sample_seed": 42,
+        "split": "test",
+        "strata_count": 47,
+        "strata_reference": {
+          "descriptor_definitions": {
+            "mean_nn_D": "mean per-turbine nearest-neighbor spacing in rotor diameters",
+            "min_sep_D": "minimum pairwise turbine-center spacing in rotor diameters",
+            "nn_dispersion": "standard deviation of per-turbine nearest-neighbor spacing in rotor diameters"
+          },
+          "descriptor_quartiles": {
+            "mean_nn_D": [
+              3.5487304030022147,
+              4.172149034943043,
+              4.975358940399917
+            ],
+            "min_sep_D": [
+              3.4931138879974006,
+              4.075516106133884,
+              4.973772398865651
+            ],
+            "nn_dispersion": [
+              0.003521910002832162,
+              0.040738753333316335,
+              0.183621229182296
+            ]
+          },
+          "descriptor_source_note": "Nearest-neighbor descriptors are recomputed from row-specific native turbine centers; no equivalence to a stored compact-descriptor formula is claimed.",
+          "m_bins": [
+            "6-10",
+            "11-15",
+            "16-20",
+            "21-25",
+            "26-30"
+          ],
+          "rows": 420,
+          "scope": "training rows",
+          "support_aspect_xy_quartiles": [
+            1.5997340974037082,
+            1.7614191531430912,
+            1.9821702296860901
+          ],
+          "support_volume_D3_quartiles": [
+            5026.7599548965745,
+            5987.881990877011,
+            7173.501267639626
+          ]
+        },
+        "validation_only_selection": true
+      },
+      {
+        "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2103_20260913_135849_windfarm_dense_pairwise_b16_q8192/checkpoints/best_field.pt",
+        "checkpoint_epoch": 2475,
+        "checkpoint_role": "best_validation_checkpoint",
+        "checkpoint_selector": "best_field.pt",
+        "endpoint": "best_test",
+        "equal_case": {
+          "mean_downstream_envelope_mae_mps": null,
+          "mean_downstream_envelope_rmse_mps": 0.02247062439305915,
+          "mean_downstream_envelope_standardized_mse": 0.027598964055586192,
+          "mean_hub_band_mae_mps": 0.007626733199382822,
+          "mean_hub_band_rmse_mps": 0.019028025803466637,
+          "mean_hub_band_standardized_mse": 0.018136839165041843,
+          "mean_volume_mae_mps": 0.004191373335197568,
+          "mean_volume_rmse_mps": 0.010643519285238452,
+          "mean_volume_standardized_mse": 0.00469196451595053,
+          "mean_volume_vector_relative_l2": 0.0017489006548809507,
+          "median_volume_rmse_mps": 0.010952034033834934,
+          "p95_volume_rmse_mps": 0.012937948713079095,
+          "worst_volume_rmse_mps": 0.01385548710823059
+        },
+        "layouts": 30,
+        "model": "dense",
+        "pooled": {
+          "downstream_channel_mae_mps": [
+            0.02538347565910537,
+            0.003978173991329981,
+            0.002551078588139718
+          ],
+          "downstream_channel_rmse_mps": [
+            0.03836581138540878,
+            0.008636656051871191,
+            0.007713973915322548
+          ],
+          "downstream_count": 379716,
+          "downstream_vector_relative_l2": 0.004711500005981001,
+          "hub_band_channel_mae_mps": [
+            0.01909781700701283,
+            0.0028141211544737044,
+            0.0013768769335026408
+          ],
+          "hub_band_channel_rmse_mps": [
+            0.03247343431084041,
+            0.0075323333949566034,
+            0.005748130526814642
+          ],
+          "hub_band_count": 737280,
+          "hub_band_vector_relative_l2": 0.0039052717981970194,
+          "volume_channel_mae_mps": [
+            0.010697989133925888,
+            0.0013906575632310998,
+            0.000755232570087657
+          ],
+          "volume_channel_rmse_mps": [
+            0.018271351982795673,
+            0.0035948720308921836,
+            0.0030944254570075924
+          ],
+          "volume_count": 2949120,
+          "volume_vector_relative_l2": 0.0017908971204765602
+        },
+        "q_band": 8192,
+        "q_volume": 32768,
+        "reserved_test_used_for_selection": false,
+        "rows": 90,
+        "sample_seed": 42,
+        "split": "test",
+        "strata_count": 47,
+        "strata_reference": {
+          "descriptor_definitions": {
+            "mean_nn_D": "mean per-turbine nearest-neighbor spacing in rotor diameters",
+            "min_sep_D": "minimum pairwise turbine-center spacing in rotor diameters",
+            "nn_dispersion": "standard deviation of per-turbine nearest-neighbor spacing in rotor diameters"
+          },
+          "descriptor_quartiles": {
+            "mean_nn_D": [
+              3.5487304030022147,
+              4.172149034943043,
+              4.975358940399917
+            ],
+            "min_sep_D": [
+              3.4931138879974006,
+              4.075516106133884,
+              4.973772398865651
+            ],
+            "nn_dispersion": [
+              0.003521910002832162,
+              0.040738753333316335,
+              0.183621229182296
+            ]
+          },
+          "descriptor_source_note": "Nearest-neighbor descriptors are recomputed from row-specific native turbine centers; no equivalence to a stored compact-descriptor formula is claimed.",
+          "m_bins": [
+            "6-10",
+            "11-15",
+            "16-20",
+            "21-25",
+            "26-30"
+          ],
+          "rows": 420,
+          "scope": "training rows",
+          "support_aspect_xy_quartiles": [
+            1.5997340974037082,
+            1.7614191531430912,
+            1.9821702296860901
+          ],
+          "support_volume_D3_quartiles": [
+            5026.7599548965745,
+            5987.881990877011,
+            7173.501267639626
+          ]
+        },
+        "validation_only_selection": true
+      }
+    ],
+    "evaluation_policy": {
+      "best_validation_and_reserved_test": "best_field.pt only; test never used for selection",
+      "checkpoint_selection": "best_field.pt selected by validation volume standardized MSE only",
+      "native_data_contract": "read-only native volume mmap, field-only [Ux, Uy, Uz], geometry-only inputs, no physical power or gradient claims",
+      "quadrature": "adapter-owned factorized native cell-centre support weights, units m3",
+      "receiver_chunk_size": 512,
+      "sampling": "fixed_sampling=True, q_volume=32768, q_band=8192, seed=42 per case",
+      "split": "layout-grouped seed-42 70/15/15 split: 420 train, 90 validation, 90 test rows; 30 layouts per held-out split",
+      "terminal_validation": "explicit epoch_2500_model.pt on validation; not used to select or alter best checkpoint",
+      "validation_reference_for_strata": "420 training rows only; geometry descriptors do not use target fields"
+    },
+    "paired_summaries": [
+      {
+        "classic_wins_volume_rmse": 0,
+        "dense_reduction_percent_equal_case_volume_mse": 26.58804377416123,
+        "dense_reduction_percent_equal_case_volume_rmse": 44.530889442424275,
+        "dense_wins_volume_rmse": 90,
+        "endpoint": "best_validation",
+        "equal_case_mean_volume_rmse_mps": {
+          "classic": 0.01942095796888073,
+          "dense": 0.010772632647098766
+        },
+        "equal_case_mean_volume_standardized_mse": {
+          "classic": 0.006224511425373041,
+          "dense": 0.00456953560286719
+        },
+        "mean_dense_minus_classic_volume_rmse_mps": -0.008648325321781966,
+        "mean_dense_minus_classic_volume_standardized_mse": -0.0016549758225058516,
+        "paired_cases": 90,
+        "pooled_volume_vector_relative_l2": {
+          "classic": 0.003261551699612031,
+          "dense": 0.0017885073987238666
+        },
+        "ties_volume_rmse": 0
+      },
+      {
+        "classic_wins_volume_rmse": 0,
+        "dense_reduction_percent_equal_case_volume_mse": 28.64615054852779,
+        "dense_reduction_percent_equal_case_volume_rmse": 48.33448055880309,
+        "dense_wins_volume_rmse": 90,
+        "endpoint": "epoch2500_validation",
+        "equal_case_mean_volume_rmse_mps": {
+          "classic": 0.01894503195459644,
+          "dense": 0.009788049167642992
+        },
+        "equal_case_mean_volume_standardized_mse": {
+          "classic": 0.0064364003302115535,
+          "dense": 0.004592619401713212
+        },
+        "mean_dense_minus_classic_volume_rmse_mps": -0.00915698278695345,
+        "mean_dense_minus_classic_volume_standardized_mse": -0.0018437809284983409,
+        "paired_cases": 90,
+        "pooled_volume_vector_relative_l2": {
+          "classic": 0.003174929917618935,
+          "dense": 0.0016209666879446675
+        },
+        "ties_volume_rmse": 0
+      },
+      {
+        "classic_wins_volume_rmse": 0,
+        "dense_reduction_percent_equal_case_volume_mse": 10.527636262047423,
+        "dense_reduction_percent_equal_case_volume_rmse": 43.79497665399648,
+        "dense_wins_volume_rmse": 90,
+        "endpoint": "best_test",
+        "equal_case_mean_volume_rmse_mps": {
+          "classic": 0.01893695376606451,
+          "dense": 0.010643519285238452
+        },
+        "equal_case_mean_volume_standardized_mse": {
+          "classic": 0.005244037734034161,
+          "dense": 0.00469196451595053
+        },
+        "mean_dense_minus_classic_volume_rmse_mps": -0.00829343448082606,
+        "mean_dense_minus_classic_volume_standardized_mse": -0.00055207321808363,
+        "paired_cases": 90,
+        "pooled_volume_vector_relative_l2": {
+          "classic": 0.003146908648584541,
+          "dense": 0.0017908971204765602
+        },
+        "ties_volume_rmse": 0
+      }
+    ],
+    "schema_version": 1,
+    "source_runs": {
+      "classic": {
+        "best_field_epoch": 2440.0,
+        "best_field_metric": 0.006291010341158619,
+        "last_completed_epoch": 2500,
+        "run_dir": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2102_20260913_135849_windfarm_classic_k6_b16_q8192",
+        "run_manifest": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2102_20260913_135849_windfarm_classic_k6_b16_q8192/run_manifest.json",
+        "status": "completed"
+      },
+      "dense": {
+        "best_field_epoch": 2475.0,
+        "best_field_metric": 0.004520878333736349,
+        "last_completed_epoch": 2500,
+        "run_dir": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2103_20260913_135849_windfarm_dense_pairwise_b16_q8192",
+        "run_manifest": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/WindFarm/HONF_Forward_Runs/Run_2103_20260913_135849_windfarm_dense_pairwise_b16_q8192/run_manifest.json",
+        "status": "completed"
+      }
+    },
+    "study": "WindFarm Run 2102 versus Run 2103 completed 2500-epoch prediction accuracy"
+  },
+  "expected_q_band": 8192,
+  "expected_q_volume": 32768,
+  "expected_sample_seed": 42,
+  "identity_basis": [
+    "case",
+    "source_index",
+    "layout_index",
+    "wind_direction_deg"
+  ],
+  "layouts_by_endpoint": {
+    "best_test": 30,
+    "best_validation": 30,
+    "epoch2500_validation": 30
+  },
+  "paired_claims_allowed": true,
+  "rows_by_endpoint": {
+    "best_test": 90,
+    "best_validation": 90,
+    "epoch2500_validation": 90
+  }
+}
