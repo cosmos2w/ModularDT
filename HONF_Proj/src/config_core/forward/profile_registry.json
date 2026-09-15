@@ -103,6 +103,26 @@
       "stage": 7
     },
     {
+      "name": "stage7_ablate_decoder_global",
+      "path": "project://src/config_core/forward/experiments/stage7_ablate_decoder_global.json",
+      "status": "candidate",
+      "base": "stage7_structured_context",
+      "mode": "Run 1401 decoder without the direct global-context addition; hyperedge, pairwise, and near-module contexts retained",
+      "checkpoint_families": ["Run 1402 decoder-context ablation"],
+      "owner": "forward-research",
+      "stage": "7-context-ablation"
+    },
+    {
+      "name": "stage7_ablate_decoder_global_near",
+      "path": "project://src/config_core/forward/experiments/stage7_ablate_decoder_global_near.json",
+      "status": "candidate",
+      "base": "stage7_structured_context",
+      "mode": "Run 1401 decoder without direct global-context or Gaussian near-module additions; hyperedge and pairwise contexts retained",
+      "checkpoint_families": ["Run 1403 decoder-context ablation"],
+      "owner": "forward-research",
+      "stage": "7-context-ablation"
+    },
+    {
       "name": "stage7_fused_query_module",
       "path": "project://src/config_core/forward/experiments/stage7_fused_query_module.json",
       "status": "promoted_execution",

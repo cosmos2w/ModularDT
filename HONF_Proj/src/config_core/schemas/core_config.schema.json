@@ -163,7 +163,7 @@
         "use_layer_norm": {"type": "boolean"},
         "geometry_mode": {"enum": ["nonperiodic", "periodic"]},
         "query_time_mode": {"enum": ["none", "phase", "physical_time"]},
-        "decoder_mode": {"enum": ["hyper_only", "hyper_plus_global", "hyper_plus_direct_residual", "hyper_plus_near_module", "hyper_plus_global_near", "hyper_plus_global_direct", "hyper_plus_near_direct", "no_hyper_global_near", "no_hyper_current_like_direct", "current_like", "enhanced_honf_pairwise", "enhanced_honf_pairwise_only"]},
+        "decoder_mode": {"enum": ["hyper_only", "hyper_plus_global", "hyper_plus_direct_residual", "hyper_plus_near_module", "hyper_plus_global_near", "hyper_plus_global_direct", "hyper_plus_near_direct", "no_hyper_global_near", "no_hyper_current_like_direct", "current_like", "enhanced_honf_pairwise", "enhanced_honf_pairwise_only", "enhanced_honf_pairwise_no_global", "enhanced_honf_pairwise_no_global_near"]},
         "use_hyper_value_context": {"type": "boolean"},
         "query_fourier_frequencies": {"type": "integer", "minimum": 0},
         "boundary_feature_mode": {"enum": ["none", "rectangular", "channel"]},

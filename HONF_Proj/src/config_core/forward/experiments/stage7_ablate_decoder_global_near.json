@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "_note": "Run 1403 ablation of Run 1401: retain hyperedge value and pairwise decoding while disabling direct global-context and Gaussian near-module decoder additions.",
+  "core": {
+    "model": {
+      "core_honf": {
+        "decoder_mode": "enhanced_honf_pairwise_no_global_near"
+      }
+    },
+    "checkpointing": {
+      "save_epoch_milestones": [10, 50, 100, 250, 500, 1000, 2500, 5000]
+    }
+  }
+}

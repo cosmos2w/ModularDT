@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import torch
 import pytest
+import torch
 
-from honf_forward_core.config import BatchData, DECODER_MODES, UnifiedForwardConfig
+from honf_forward_core.config import DECODER_MODES, BatchData, UnifiedForwardConfig
 from honf_forward_core.model import HONFNeuralField
 
 
@@ -163,6 +163,104 @@ def test_every_preserved_decoder_mode_is_finite(decoder_mode: str) -> None:
         output = HONFNeuralField(config).eval()(_batch())["pred_field"]
     assert output.shape == (2, 11, 3)
     assert torch.isfinite(output).all()
+
+
+@pytest.mark.parametrize(
+    ("decoder_mode", "uses_near"),
+    [
+        ("enhanced_honf_pairwise_no_global", 1.0),
+        ("enhanced_honf_pairwise_no_global_near", 0.0),
+    ],
+)
+def test_stage7_context_ablation_modes_keep_hyper_pairwise_and_disable_declared_terms(
+    decoder_mode: str,
+    uses_near: float,
+) -> None:
+    torch.manual_seed(19)
+    base = UnifiedForwardConfig(
+        field_dim=3,
+        domain_length_x=12.0,
+        domain_length_y=6.0,
+        num_env_tokens_x=4,
+        num_env_tokens_y=2,
+        num_hyperedges=3,
+        hidden_dim=24,
+        dropout=0.0,
+        decoder_mode="enhanced_honf_pairwise",
+        pairwise_kernel_hidden_dim=24,
+    )
+    ablated = UnifiedForwardConfig.from_dict({**base.to_dict(), "decoder_mode": decoder_mode})
+    reference = HONFNeuralField(base).eval()
+    candidate = HONFNeuralField(ablated).eval()
+    with torch.no_grad():
+        reference(_batch())
+        candidate(_batch())
+
+    assert {
+        name: tuple(value.shape) for name, value in reference.state_dict().items()
+    } == {
+        name: tuple(value.shape) for name, value in candidate.state_dict().items()
+    }
+    candidate.load_state_dict(reference.state_dict(), strict=True)
+    with torch.no_grad():
+        batch = _batch()
+        organized = candidate.encode_and_organize(batch)
+        output = candidate.decode_queries(
+            batch.query_xy,
+            batch.query_time,
+            organized,
+            organized["global_token"],
+        )
+        changed_decoder_global = candidate.decode_queries(
+            batch.query_xy,
+            batch.query_time,
+            organized,
+            organized["global_token"] + 1.0,
+        )
+
+    assert output["uses_hyper_context"].item() == 1.0
+    assert output["pairwise_kernel_enabled"].item() == 1.0
+    assert output["uses_global_context"].item() == 0.0
+    assert output["uses_near_module_context"].item() == uses_near
+    torch.testing.assert_close(
+        output["pred_field"],
+        changed_decoder_global["pred_field"],
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("decoder_mode", "near_has_gradient"),
+    [
+        ("enhanced_honf_pairwise_no_global", True),
+        ("enhanced_honf_pairwise_no_global_near", False),
+    ],
+)
+def test_stage7_context_ablation_backward_reaches_only_retained_decoder_terms(
+    decoder_mode: str,
+    near_has_gradient: bool,
+) -> None:
+    torch.manual_seed(23)
+    config = UnifiedForwardConfig(
+        field_dim=3,
+        domain_length_x=12.0,
+        domain_length_y=6.0,
+        num_env_tokens_x=4,
+        num_env_tokens_y=2,
+        num_hyperedges=3,
+        hidden_dim=24,
+        dropout=0.0,
+        decoder_mode=decoder_mode,
+        pairwise_kernel_hidden_dim=24,
+    )
+    model = HONFNeuralField(config).train()
+    model(_batch())["pred_field"].square().mean().backward()
+
+    assert model.decoder.global_proj.weight.grad is None
+    assert (model.decoder.near_proj.weight.grad is not None) is near_has_gradient
+    assert model.decoder.pairwise_kernel is not None
+    assert any(parameter.grad is not None for parameter in model.decoder.pairwise_kernel.parameters())
 
 
 def test_case_supplied_query_features_are_supported_and_shape_checked() -> None:

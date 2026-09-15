@@ -16,7 +16,7 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     profiles = registry["profiles"]
     names = [profile["name"] for profile in profiles]
-    assert len(names) == len(set(names)) == 32
+    assert len(names) == len(set(names)) == 34
     assert registry["recommended_forward_profile"] == "stage7_structured_context"
     assert {profile["status"] for profile in profiles} <= {
         "current",
@@ -30,6 +30,8 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
     }
     by_name = {profile["name"]: profile for profile in profiles}
     assert by_name["stage7_structured_context"]["status"] == "current"
+    assert by_name["stage7_ablate_decoder_global"]["base"] == "stage7_structured_context"
+    assert by_name["stage7_ablate_decoder_global_near"]["base"] == "stage7_structured_context"
     assert by_name["stage7_fused_query_module"]["status"] == "promoted_execution"
     assert by_name["stage7_factorized_gated_r96"]["status"] == "rejected"
     assert by_name["stage7_k4_fused_audit"]["status"] == "completed_research"
@@ -63,6 +65,46 @@ def test_split_config_composes_deterministically() -> None:
     assert first.effective["model"]["core_honf"]["decoder_mode"] == "enhanced_honf_pairwise"
     assert "max_num_modules" not in first.effective["model"]["core_honf"]
     assert first.effective["case"]["selection"]["dataset_id"] == "thermal_channel_global_v1"
+
+
+@pytest.mark.parametrize(
+    ("overlay", "decoder_mode"),
+    [
+        (
+            "project://src/config_core/forward/experiments/stage7_ablate_decoder_global.json",
+            "enhanced_honf_pairwise_no_global",
+        ),
+        (
+            "project://src/config_core/forward/experiments/stage7_ablate_decoder_global_near.json",
+            "enhanced_honf_pairwise_no_global_near",
+        ),
+    ],
+)
+def test_stage7_decoder_context_ablation_profiles_change_only_decoder_and_checkpoints(
+    overlay: str,
+    decoder_mode: str,
+) -> None:
+    base = load_config_bundle("project://src/config_core/forward/stage7_structured_context.json")
+    ablation = load_config_bundle(
+        "project://src/config_core/forward/stage7_structured_context.json",
+        experiment_overlay=overlay,
+    )
+
+    assert ablation.effective["model"]["core_honf"]["decoder_mode"] == decoder_mode
+    assert ablation.effective["checkpointing"]["save_epoch_milestones"] == [
+        10,
+        50,
+        100,
+        250,
+        500,
+        1000,
+        2500,
+        5000,
+    ]
+    expected = copy.deepcopy(base.effective)
+    expected["model"]["core_honf"]["decoder_mode"] = decoder_mode
+    expected["checkpointing"]["save_epoch_milestones"] = [10, 50, 100, 250, 500, 1000, 2500, 5000]
+    assert ablation.effective == expected
 
 
 def test_case_plugin_loads_without_core_case_branch() -> None:

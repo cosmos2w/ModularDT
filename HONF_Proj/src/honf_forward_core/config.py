@@ -32,6 +32,8 @@ DECODER_MODES = {
     "current_like",
     "enhanced_honf_pairwise",
     "enhanced_honf_pairwise_only",
+    "enhanced_honf_pairwise_no_global",
+    "enhanced_honf_pairwise_no_global_near",
 }
 
 DECODER_COMPONENTS = {
@@ -47,6 +49,8 @@ DECODER_COMPONENTS = {
     "current_like": {"global", "near", "direct"},
     "enhanced_honf_pairwise": {"hyper", "pairwise", "global", "near"},
     "enhanced_honf_pairwise_only": {"hyper", "pairwise", "global", "near"},
+    "enhanced_honf_pairwise_no_global": {"hyper", "pairwise", "near"},
+    "enhanced_honf_pairwise_no_global_near": {"hyper", "pairwise"},
 }
 
 # Accepted only when loading historical configs/checkpoints and never
