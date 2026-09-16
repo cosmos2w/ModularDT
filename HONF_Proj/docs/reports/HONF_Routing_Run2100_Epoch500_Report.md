@@ -74,6 +74,8 @@ Candidate-only CPU timing, with trajectory collection disabled, one warmup and t
 
 A bounded CPU replay at epoch 10 used anchors 0273 and 0298 with 32 fixed queries. Both full P0/P1/P2 position and heat gradients were finite through the three mean-shift steps. [Signed results](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2100/numerics/physical_derivatives_epoch10.json) retain physical and normalized units and the prescribed step sizes. The temperature and heat derivatives mostly agree closely, but the tiny 0298 position-to-pressure derivative is cancellation-sensitive: normalized AD is 3.59e-6 versus FD 2.65e-5/5.30e-5 at 0.01r/0.005r, giving 86–93% relative discrepancy despite small absolute errors. The helper's `ok` status means execution completed, not that every derivative met an accuracy threshold. No step sizes were tuned, and this is not an epoch-500 or physical-solver validation.
 
+The real-anchor omitted-source probes are unavailable at these receivers because every valid source is selected. The separate conditional synthetic fixture's zero omitted contribution must not be interpreted as real physical omission validation.
+
 ## Evidence limits and continuation
 
 The current ThermalChannel adapter supplies known boundary descriptors and neutral extra resistance. **Barrier benefit: Evidence Missing.** Model AD/FD is self-consistency evidence, not independent physical-gradient validation. Existing external physical-reference requests remain in place.
