@@ -1162,7 +1162,40 @@ def dense_projection_cache(model: Any) -> Iterator[dict[str, int]]:
         backend.read = original
 
 
-def _timing_variants(model: Any) -> tuple[tuple[str, Any], ...]:
+@contextlib.contextmanager
+def stage7_gathered_execution(model: Any, retained_mass_floor: float) -> Iterator[dict[str, Any]]:
+    """Temporarily select gathered fused execution for a legacy Stage-7 checkpoint."""
+
+    candidates = [model.config.core_honf, model.core.config, model.core.decoder.config]
+    kernel = getattr(model.core.decoder, "pairwise_kernel", None)
+    if kernel is not None:
+        candidates.append(kernel.config)
+    configs: list[Any] = []
+    for candidate in candidates:
+        if not any(candidate is current for current in configs):
+            configs.append(candidate)
+    settings = {
+        "pairwise_aggregation_mode": "fused_query_module",
+        "routing_execution": "gathered",
+        "query_module_limit": 0,
+        "query_module_retained_mass_floor": float(retained_mass_floor),
+    }
+    original = [{key: getattr(config, key) for key in settings} for config in configs]
+    try:
+        for config in configs:
+            for key, value in settings.items():
+                setattr(config, key, value)
+        yield {"retained_mass_floor": float(retained_mass_floor)}
+    finally:
+        for config, values in zip(configs, original):
+            for key, value in values.items():
+                setattr(config, key, value)
+
+
+def _timing_variants(
+    model: Any,
+    stage7_beta_floors: Sequence[float] = (),
+) -> tuple[tuple[str, Any], ...]:
     """Return labels for controlled default/cache execution measurements."""
 
     architecture = str(model.config.core_honf.forward_architecture)
@@ -1174,6 +1207,16 @@ def _timing_variants(model: Any) -> tuple[tuple[str, Any], ...]:
         return (("regional_native_prepared", None),)
     if architecture == "hierarchical_regional_honf":
         return (("hierarchical_native_prepared", None),)
+    if architecture == "legacy_honf" and stage7_beta_floors:
+        variants: list[tuple[str, Any]] = [("stage7_dense", None)]
+        variants.extend(
+            (
+                f"stage7_gathered_beta_{float(floor):.3f}",
+                lambda current, value=float(floor): stage7_gathered_execution(current, value),
+            )
+            for floor in stage7_beta_floors
+        )
+        return tuple(variants)
     return (("default", None),)
 
 
@@ -1418,6 +1461,17 @@ def count_backend_operations(model: Any) -> Iterator[dict[str, int]]:
                     counts[key] += int(np.prod(output.shape[:-1]))
 
                 hooks.append(module.register_forward_hook(projection_hook))
+    if architecture == "legacy_honf":
+        pairwise_kernel = getattr(getattr(model.core, "decoder", None), "pairwise_kernel", None)
+        pair_mlp = getattr(pairwise_kernel, "pair_mlp", None)
+        if pair_mlp is not None:
+            counts["pair_mlp_rows"] = 0
+
+            def pair_mlp_hook(_module: Any, inputs: tuple[Any, ...]) -> None:
+                tensor = inputs[0]
+                counts["pair_mlp_rows"] += int(np.prod(tuple(int(value) for value in tensor.shape[:-1])))
+
+            hooks.append(pair_mlp.register_forward_pre_hook(pair_mlp_hook))
     common = getattr(getattr(model, "core", None), "common", None)
     if common is not None:
         for name in ("coarse_module_attention", "coarse_group_attention", "coarse_env_attention"):
@@ -1646,7 +1700,7 @@ def run_timing_protocol(args: argparse.Namespace) -> dict[str, Any]:
                 receiver_chunk_size=128,
             )
             variant_rows: dict[str, Any] = {}
-            for variant_label, variant_factory in _timing_variants(model):
+            for variant_label, variant_factory in _timing_variants(model, args.stage7_beta_floor or ()):
                 phases: dict[str, Any] = {}
                 for phase_label, phase_function in phase_functions:
                     def measured_phase(
@@ -1781,7 +1835,7 @@ def run_timing_protocol(args: argparse.Namespace) -> dict[str, Any]:
                 "receiver_chunk_size": receiver_chunk,
                 "variants": {},
             }
-            for variant_label, variant_factory in _timing_variants(model):
+            for variant_label, variant_factory in _timing_variants(model, args.stage7_beta_floor or ()):
                 variant_row: dict[str, Any] = {"status": "ok"}
 
                 def synthetic_forward() -> Any:
@@ -4325,6 +4379,13 @@ def build_parser() -> argparse.ArgumentParser:
     timing.add_argument("--repetitions", type=int, default=5)
     timing.add_argument("--synthetic-warmup", type=int, default=1)
     timing.add_argument("--synthetic-repetitions", type=int, default=3)
+    timing.add_argument(
+        "--stage7-beta-floor",
+        action="append",
+        type=float,
+        default=None,
+        help="For legacy fused Stage-7 checkpoints, add gathered retained-beta timing variants.",
+    )
     timing.add_argument(
         "--execution-test",
         action="store_true",

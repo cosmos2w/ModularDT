@@ -207,6 +207,11 @@ def decode_case(
     predictions: list[np.ndarray] = []
     query_retention: list[np.ndarray] = []
     module_retention: list[np.ndarray] = []
+    beta_entropy: list[np.ndarray] = []
+    beta_effective_count: list[np.ndarray] = []
+    beta_maximum: list[np.ndarray] = []
+    selected_module_count: list[np.ndarray] = []
+    beta_chunks: list[np.ndarray] = []
     query_routes = 0.0
     dense_query_routes = 0.0
     module_routes = 0.0
@@ -223,6 +228,13 @@ def decode_case(
                 selected = output["query_module_selected_mask"][0].to(dtype=beta.dtype)
                 retained_module = (beta * selected).sum(dim=-1).detach().cpu().numpy()
                 module_retention.append(retained_module.reshape(-1))
+                probabilities = beta.clamp_min(0.0)
+                entropy = -(probabilities * probabilities.clamp_min(1.0e-12).log()).sum(dim=-1)
+                beta_entropy.append(entropy.detach().cpu().numpy().reshape(-1))
+                beta_effective_count.append(entropy.exp().detach().cpu().numpy().reshape(-1))
+                beta_maximum.append(probabilities.amax(dim=-1).detach().cpu().numpy().reshape(-1))
+                selected_module_count.append(selected.sum(dim=-1).detach().cpu().numpy().reshape(-1))
+                beta_chunks.append(probabilities.detach().cpu().numpy())
             else:
                 retained_module = output["retained_module_incidence_mass"][0].detach().cpu().numpy()
                 routed = output["routed_query_edge_pair_mask"][0].detach().cpu().numpy().astype(bool)
@@ -256,6 +268,15 @@ def decode_case(
         "prediction": np.concatenate(predictions).reshape(*x_grid.shape, -1),
         "query_retention": np.concatenate(query_retention),
         "module_retention": np.concatenate(module_retention) if module_retention else np.zeros((0,)),
+        "beta_entropy": np.concatenate(beta_entropy) if beta_entropy else np.zeros((0,)),
+        "beta_effective_count": np.concatenate(beta_effective_count) if beta_effective_count else np.zeros((0,)),
+        "beta_maximum": np.concatenate(beta_maximum) if beta_maximum else np.zeros((0,)),
+        "selected_module_count": (
+            np.concatenate(selected_module_count) if selected_module_count else np.zeros((0,))
+        ),
+        "beta_spatial_variation": (
+            float(np.concatenate(beta_chunks, axis=0).std(axis=0).mean()) if beta_chunks else 0.0
+        ),
         "query_routes": query_routes,
         "dense_query_routes": dense_query_routes,
         "module_routes": module_routes,
@@ -277,6 +298,20 @@ def benchmark(
         axis=-1,
     ).astype(np.float32)
     query = torch.from_numpy(queries).unsqueeze(0).to(device=device)
+    full_batch = make_batch(sample, queries, device)
+
+    def full_forward() -> Any:
+        return model(
+            full_batch["structure"],
+            full_batch["query_xy"],
+            interface_condition=full_batch.get("interface_condition"),
+            local_module_params=full_batch.get("local_module_params"),
+            teacher_port_tokens=full_batch.get("teacher_port_tokens"),
+            local_query_points=full_batch.get("module_internal_query_points"),
+            local_port_condition_mode="predicted",
+            return_routing_maps=False,
+        )
+
     result: dict[str, Any] = {}
     for label, state in states.items():
         set_routing_state(model, state)
@@ -300,11 +335,41 @@ def benchmark(
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             elapsed.append(time.perf_counter() - started)
+        prepared_peak_allocated = int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else None
+        prepared_peak_reserved = int(torch.cuda.max_memory_reserved(device)) if device.type == "cuda" else None
+        for _ in range(warmup):
+            with torch.inference_mode():
+                full_forward()
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
+        full_elapsed: list[float] = []
+        for _ in range(iterations):
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            started = time.perf_counter()
+            with torch.inference_mode():
+                full_forward()
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            full_elapsed.append(time.perf_counter() - started)
         result[label] = {
             "median_seconds": float(statistics.median(elapsed)),
             "mean_seconds": float(statistics.mean(elapsed)),
-            "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else None,
-            "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(device)) if device.type == "cuda" else None,
+            "peak_allocated_bytes": prepared_peak_allocated,
+            "peak_reserved_bytes": prepared_peak_reserved,
+            "prepared_decode_median_seconds": float(statistics.median(elapsed)),
+            "prepared_decode_mean_seconds": float(statistics.mean(elapsed)),
+            "prepared_decode_peak_allocated_bytes": prepared_peak_allocated,
+            "prepared_decode_peak_reserved_bytes": prepared_peak_reserved,
+            "full_forward_median_seconds": float(statistics.median(full_elapsed)),
+            "full_forward_mean_seconds": float(statistics.mean(full_elapsed)),
+            "full_forward_peak_allocated_bytes": (
+                int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else None
+            ),
+            "full_forward_peak_reserved_bytes": (
+                int(torch.cuda.max_memory_reserved(device)) if device.type == "cuda" else None
+            ),
         }
     return result
 
@@ -315,6 +380,8 @@ def distribution(values: np.ndarray) -> dict[str, float]:
         "min": float(np.min(arr)) if arr.size else 0.0,
         "p05": float(np.quantile(arr, 0.05)) if arr.size else 0.0,
         "mean": float(np.mean(arr)) if arr.size else 0.0,
+        "p95": float(np.quantile(arr, 0.95)) if arr.size else 0.0,
+        "max": float(np.max(arr)) if arr.size else 0.0,
     }
 
 
@@ -408,12 +475,24 @@ def evaluate_checkpoint(label: str, path: Path, args: argparse.Namespace, device
     rows: list[dict[str, Any]] = []
     query_values: dict[str, list[np.ndarray]] = {name: [] for name in pruned_states}
     module_values: dict[str, list[np.ndarray]] = {name: [] for name in pruned_states}
+    selected_count_values: dict[str, list[np.ndarray]] = {name: [] for name in pruned_states}
+    actual_pair_values: dict[str, list[float]] = {name: [] for name in pruned_states}
+    dense_beta_entropy: list[np.ndarray] = []
+    dense_beta_effective_count: list[np.ndarray] = []
+    dense_beta_maximum: list[np.ndarray] = []
+    dense_beta_spatial_variation: list[float] = []
+    dense_actual_pair_values: list[float] = []
     runtime = None
     state_keys_before = tuple(model.state_dict())
     for index in range(count):
         sample = dataset[index]
         prepared = prepare_case(model, sample, device)
         dense = decode_case(model, prepared, sample, device, args.query_batch_size, "dense", dense_state)
+        dense_beta_entropy.append(dense["beta_entropy"])
+        dense_beta_effective_count.append(dense["beta_effective_count"])
+        dense_beta_maximum.append(dense["beta_maximum"])
+        dense_beta_spatial_variation.append(float(dense["beta_spatial_variation"]))
+        dense_actual_pair_values.append(float(dense["module_routes"]))
         full = decode_case(model, prepared, sample, device, args.query_batch_size, "gathered", full_state)
         pruned_outputs = {
             policy: decode_case(
@@ -434,6 +513,8 @@ def evaluate_checkpoint(label: str, path: Path, args: argparse.Namespace, device
         for policy, pruned in pruned_outputs.items():
             query_values[policy].append(pruned["query_retention"])
             module_values[policy].append(pruned["module_retention"])
+            selected_count_values[policy].append(pruned["selected_module_count"])
+            actual_pair_values[policy].append(float(pruned["module_routes"]))
             for region, mask in masks.items():
                 channel_specs = [(index, name) for index, name in enumerate(field_names)] + [(None, "__all__")]
                 for channel_index, channel in channel_specs:
@@ -477,6 +558,8 @@ def evaluate_checkpoint(label: str, path: Path, args: argparse.Namespace, device
         policy: {
             "query_retained_mass": distribution(np.concatenate(query_values[policy])),
             "query_module_retained_beta_mass": distribution(np.concatenate(module_values[policy])),
+            "selected_module_count": distribution(np.concatenate(selected_count_values[policy])),
+            "actual_pair_mlp_evaluations_per_case": distribution(np.asarray(actual_pair_values[policy])),
         }
         for policy in pruned_states
     }
@@ -489,6 +572,15 @@ def evaluate_checkpoint(label: str, path: Path, args: argparse.Namespace, device
         "full_retention_state": full_state,
         "policy_retention": policy_stats,
         "runtime": runtime, "state_dict_key_count": len(state_keys_before),
+        "dense_beta_routing": {
+            "entropy": distribution(np.concatenate(dense_beta_entropy)),
+            "effective_module_count": distribution(np.concatenate(dense_beta_effective_count)),
+            "maximum": distribution(np.concatenate(dense_beta_maximum)),
+            "spatial_variation_mean_module_std": distribution(np.asarray(dense_beta_spatial_variation)),
+        },
+        "dense_actual_pair_mlp_evaluations_per_case": distribution(
+            np.asarray(dense_actual_pair_values)
+        ),
         "state_dict_structure_unchanged": state_keys_before == state_keys_after,
         "frozen_overrides": frozen_overrides,
     }

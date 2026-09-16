@@ -51,6 +51,14 @@ VARIANTS = {
     },
 }
 
+PAIR_INTERVENTIONS = (
+    "normal",
+    "uniform_query_to_edge",
+    "uniform_module_to_edge",
+    "base_pair_module_token",
+    "suppress_pair_context",
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -67,6 +75,12 @@ def parse_args() -> argparse.Namespace:
     gradient.add_argument("--device", default="cuda:0")
     gradient.add_argument("--case-id", required=True)
     gradient.add_argument("--query-count", type=int, default=8192)
+    interventions = subparsers.add_parser("interventions")
+    interventions.add_argument("--checkpoint", type=Path, required=True)
+    interventions.add_argument("--output-dir", type=Path, required=True)
+    interventions.add_argument("--device", default="cuda:0")
+    interventions.add_argument("--query-batch-size", type=int, default=32768)
+    interventions.add_argument("--case-id", action="append", required=True)
     return parser.parse_args()
 
 
@@ -112,6 +126,60 @@ def arithmetic_variant(model: Any, settings: dict[str, Any]) -> Iterator[None]:
         for config, values in zip(configs, originals):
             for key, value in values.items():
                 setattr(config, key, value)
+
+
+@contextmanager
+def pair_intervention(model: Any, mode: str) -> Iterator[None]:
+    """Apply one frozen Run-1404 routing or pair-value intervention."""
+
+    if mode == "normal":
+        yield
+        return
+    if mode == "base_pair_module_token":
+        with arithmetic_variant(model, {"pairwise_module_token_source": "base"}):
+            yield
+        return
+    kernel = model.core.decoder.pairwise_kernel
+    original = kernel.forward
+
+    def forward(*call_args: Any, **kwargs: Any):
+        values = list(call_args)
+        organizer_output = values[1]
+        hyper_attention = values[2]
+        if mode == "uniform_query_to_edge":
+            edge_mask = organizer_output.get("effective_edge_mask")
+            if not torch.is_tensor(edge_mask):
+                edge_mask = torch.ones_like(hyper_attention[:, 0, :])
+            edge_mask = edge_mask.to(device=hyper_attention.device, dtype=hyper_attention.dtype)
+            uniform = edge_mask[:, None, :] / edge_mask.sum(dim=-1, keepdim=True).clamp_min(1.0)[:, None, :]
+            values[2] = uniform.expand_as(hyper_attention)
+        elif mode == "uniform_module_to_edge":
+            copied = dict(organizer_output)
+            incidence = organizer_output["A_mh"]
+            module_mask = organizer_output["module_present"].to(device=incidence.device, dtype=incidence.dtype)
+            edge_mask = organizer_output.get("effective_edge_mask")
+            if not torch.is_tensor(edge_mask):
+                edge_mask = torch.ones_like(incidence[:, 0, :])
+            edge_mask = edge_mask.to(device=incidence.device, dtype=incidence.dtype)
+            copied["A_mh"] = (
+                module_mask[:, :, None]
+                * edge_mask[:, None, :]
+                / edge_mask.sum(dim=-1, keepdim=True).clamp_min(1.0)[:, None, :]
+            )
+            values[1] = copied
+        result = original(*values, **kwargs)
+        if mode == "suppress_pair_context":
+            pair_context, edge_context, diagnostics = result
+            result = (torch.zeros_like(pair_context), edge_context, diagnostics)
+        return result
+
+    if mode not in {"uniform_query_to_edge", "uniform_module_to_edge", "suppress_pair_context"}:
+        raise ValueError(f"unknown pair intervention: {mode}")
+    kernel.forward = forward
+    try:
+        yield
+    finally:
+        kernel.forward = original
 
 
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -191,6 +259,84 @@ def frozen(args: argparse.Namespace) -> None:
         },
     }
     (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    print(json.dumps(summary, indent=2))
+
+
+def interventions(args: argparse.Namespace) -> None:
+    device = torch.device(args.device)
+    model, checkpoint = load_model(args.checkpoint.expanduser().resolve(), device)
+    dataset = _checkpoint_dataset(checkpoint, "test")
+    indices = _selected_indices(dataset, args.case_id, None)
+    rows: list[dict[str, Any]] = []
+    predictions: dict[tuple[str, str], np.ndarray] = {}
+    try:
+        for mode in PAIR_INTERVENTIONS:
+            with pair_intervention(model, mode):
+                for index in indices:
+                    row = evaluate_case(
+                        mode,
+                        model,
+                        checkpoint,
+                        dataset,
+                        index,
+                        device,
+                        query_batch_size=args.query_batch_size,
+                        return_routing_maps=True,
+                        benchmark=False,
+                        stability_perturbations=False,
+                        stability_repeats=0,
+                    )
+                    rows.append(row)
+                    sample = dataset[index]
+                    prediction = predict_case(
+                        model,
+                        sample,
+                        device,
+                        query_batch_size=args.query_batch_size,
+                        local_port_condition_mode="predicted",
+                        mixed_teacher_ratio=0.5,
+                        return_routing_maps=False,
+                    )
+                    predictions[(mode, str(sample["case_id"]))] = np.asarray(
+                        prediction["pred_field_grid"], dtype=np.float64
+                    )
+    finally:
+        dataset.close()
+
+    normal_rows = {str(row["case_id"]): row for row in rows if row["checkpoint"] == "normal"}
+    for row in rows:
+        mode = str(row["checkpoint"])
+        case_id = str(row["case_id"])
+        candidate = predictions[(mode, case_id)]
+        normal = predictions[("normal", case_id)]
+        difference = candidate - normal
+        row["prediction_rms_difference_from_normal"] = float(np.sqrt(np.mean(difference * difference)))
+        row["prediction_relative_rms_difference_from_normal"] = float(
+            np.sqrt(np.mean(difference * difference)) / max(np.sqrt(np.mean(normal * normal)), 1.0e-12)
+        )
+        reference = normal_rows[case_id]
+        for key, value in list(row.items()):
+            if (key.endswith("_mse") or key.endswith("relative_l2")) and finite(value) is not None:
+                baseline = finite(reference.get(key))
+                if baseline is not None:
+                    row[f"{key}_delta_from_normal"] = float(value) - baseline
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    write_csv(args.output_dir / "per_case.csv", rows)
+    summary = {
+        "checkpoint": str(args.checkpoint.expanduser().resolve()),
+        "case_ids": [str(value) for value in args.case_id],
+        "variants": {
+            mode: summarize([row for row in rows if row["checkpoint"] == mode])
+            for mode in PAIR_INTERVENTIONS
+        },
+        "interpretation": (
+            "Frozen-checkpoint reliance diagnostics. Error deltas are intervention minus normal; "
+            "large effects show reliance, not superiority."
+        ),
+    }
+    (args.output_dir / "summary.json").write_text(
+        json.dumps(summary, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+    )
     print(json.dumps(summary, indent=2))
 
 
@@ -332,8 +478,10 @@ def main() -> None:
     args = parse_args()
     if args.command == "frozen":
         frozen(args)
-    else:
+    elif args.command == "gradient":
         gradient(args)
+    else:
+        interventions(args)
 
 
 if __name__ == "__main__":
