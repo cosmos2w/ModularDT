@@ -1,9 +1,9 @@
 # HONF Run 1404 Routing-Only Pairwise Report
 
-**Candidate:** fixed-K Stage-7 routing with contextualized fine pair responses  
-**Run:** 1404, `routing_only_pairwise`  
-**Primary checkpoint:** exact epoch 500  
-**Evaluation:** all 90 development-holdout cases, 8,192 field queries per case  
+**Candidate:** fixed-K Stage-7 routing with contextualized fine pair responses
+**Run:** 1404, `routing_only_pairwise`
+**Primary checkpoint:** exact epoch 500
+**Evaluation:** all 90 development-holdout cases, 8,192 field queries per case
 **Date:** 2026-09-16
 
 ## Decision
