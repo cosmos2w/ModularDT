@@ -1,4 +1,4 @@
-"""Reduce Run 2000 and existing exact-500 tables without re-evaluating parents."""
+"""Reduce a routed candidate and existing exact-500 tables without rerunning parents."""
 
 from __future__ import annotations
 
@@ -69,20 +69,21 @@ def distribution(values: list[float]) -> dict:
     }
 
 
-def reduce_endpoint(endpoint_table: Path, output: Path) -> dict:
+def reduce_endpoint(endpoint_table: Path, output: Path, *, run_id: str = "2000") -> dict:
+    candidate_identity = f"Run_{run_id}_"
     candidate_rows = read_csv(endpoint_table)
     groups = {}
     for row in candidate_rows:
         groups.setdefault(row["model_label"], []).append(row)
     if not groups or not any(label.startswith("exact500:") for label in groups):
-        raise ValueError("A labelled exact500 Run 2000 evaluation is required")
+        raise ValueError(f"A labelled exact500 Run {run_id} evaluation is required")
     sources = {label: str(endpoint_table.resolve()) for label in groups}
     epochs = {}
     for label, rows in groups.items():
         if not label.startswith(("exact500:", "saved_best:")):
             raise ValueError(f"Unknown candidate checkpoint policy: {label}")
         validate_population(rows)
-        if any("Run_2000_" not in row["checkpoint"] for row in rows):
+        if any(candidate_identity not in row["checkpoint"] for row in rows):
             raise ValueError(f"Unexpected candidate identity in {label}")
         checkpoints = {row["checkpoint"] for row in rows}
         if len(checkpoints) != 1:
@@ -170,7 +171,7 @@ def reduce_endpoint(endpoint_table: Path, output: Path) -> dict:
         )
 
     paired, paired_summary = [], []
-    candidate_labels = sorted(label for label in groups if "Run_2000_" in groups[label][0]["checkpoint"])
+    candidate_labels = sorted(label for label in groups if candidate_identity in groups[label][0]["checkpoint"])
     for candidate in candidate_labels:
         for parent in ("exact500:Legacy_1401", "exact500:Dense_1804", "exact500:Regional_1806"):
             parent_cases = {row["case_id"]: row for row in groups[parent]}
@@ -239,8 +240,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--endpoint-table", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--run-id", default="2000")
     args = parser.parse_args()
-    reduce_endpoint(args.endpoint_table, args.output)
+    reduce_endpoint(args.endpoint_table, args.output, run_id=args.run_id)
 
 
 if __name__ == "__main__":

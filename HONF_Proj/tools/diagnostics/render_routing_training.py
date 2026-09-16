@@ -1,4 +1,4 @@
-"""Plot recorded Run-2000 learning, router updates, and effective pair retention."""
+"""Plot recorded routed-model learning, router updates, and fine-pair retention."""
 
 from __future__ import annotations
 
@@ -23,28 +23,39 @@ def values(rows, key):
     return np.asarray([float(row.get(key, "nan")) for row in rows], dtype=float)
 
 
-def render(run_dir: Path, output: Path):
-    rows = read_rows(run_dir / "metrics.csv")
-    routing = read_rows(run_dir / "routing_metrics.csv")
+def render(run_dir: Path, output: Path, *, through_epoch: int = 500,
+           candidate_label: str = "Run 2000", routing_reference_run_dir: Path | None = None):
+    if not 1 <= through_epoch <= 500:
+        raise ValueError("through_epoch must be within the initial 1..500 assessment")
+    rows = [row for row in read_rows(run_dir / "metrics.csv") if int(row["epoch"]) <= through_epoch]
+    routing = [row for row in read_rows(run_dir / "routing_metrics.csv") if int(row["epoch"]) <= through_epoch]
     epoch = values(rows, "epoch")
-    if epoch.tolist() != list(range(1, 501)):
-        raise ValueError("The final training figure requires the completed, contiguous 1..500 history")
+    if epoch.tolist() != list(range(1, through_epoch + 1)):
+        raise ValueError(f"The training figure requires contiguous 1..{through_epoch} history")
     if values(routing, "epoch").tolist() != epoch.tolist():
         raise ValueError("Routing and ordinary histories must have the same epochs")
     output.mkdir(parents=True, exist_ok=True)
     plt.rcParams.update({"font.size": 9, "axes.spines.top": False, "axes.spines.right": False})
     fig, axes = plt.subplots(2, 2, figsize=(11, 7), constrained_layout=True)
-    models = [("Run 2000", rows, "#D2691E")]
-    sources = {"Run 2000": str((run_dir / "metrics.csv").resolve())}
+    models = [(candidate_label, rows, "#D2691E")]
+    sources = {candidate_label: str((run_dir / "metrics.csv").resolve())}
     for run, label, color in (("1401", "Legacy 1401", "#6B7280"),
                               ("1804", "Dense 1804", "#2563A6"),
                               ("1806", "Regional 1806", "#47845B")):
         matches = list(run_dir.parent.glob(f"Run_{run}_*/metrics.csv"))
         if len(matches) != 1:
             raise ValueError(f"Expected one maintained history for Run {run}, found {matches}")
-        parent = [row for row in read_rows(matches[0]) if int(row["epoch"]) <= 500]
+        parent = [row for row in read_rows(matches[0]) if int(row["epoch"]) <= through_epoch]
         models.append((label, parent, color))
         sources[label] = str(matches[0].resolve())
+    if routing_reference_run_dir is not None:
+        reference_path = routing_reference_run_dir / "metrics.csv"
+        reference = [row for row in read_rows(reference_path) if int(row["epoch"]) <= through_epoch]
+        if [int(row["epoch"]) for row in reference] != list(range(1, through_epoch + 1)):
+            raise ValueError("The routing reference must cover the same contiguous epoch window")
+        reference_label = "Run " + routing_reference_run_dir.name.split("_")[1]
+        models.append((reference_label, reference, "#7B4BA0"))
+        sources[reference_label] = str(reference_path.resolve())
     for ax, key, title in zip(axes[0], ("val_field_mse", "val_temperature_mse"),
                               ("Sampled validation field MSE", "Sampled validation temperature MSE"), strict=True):
         for label, history, color in models:
@@ -92,6 +103,7 @@ def render(run_dir: Path, output: Path):
     milestones = [
         {"epoch": step, **observed(rows[step - 1], learning_keys)}
         for step in (1, 10, 50, 100, 250, 500)
+        if step <= through_epoch
     ]
     gradient_observations = [
         {"epoch": int(epoch[index]),
@@ -100,18 +112,19 @@ def render(run_dir: Path, output: Path):
         for index in np.flatnonzero(recorded)
     ]
     summary = {
-        "status": "complete", "epochs": 500, "sources": sources,
+        "status": "complete" if through_epoch == 500 else "interim", "epochs": through_epoch, "sources": sources,
         "best_sampled_validation_field_epoch": int(epoch[np.nanargmin(field)]),
         "best_sampled_validation_field_mse": float(np.nanmin(field)),
-        "exact500_sampled_validation_field_mse": float(field[-1]),
-        "validation_field_mean_epochs301_400": float(field[300:400].mean()),
-        "validation_field_mean_epochs401_500": float(field[400:500].mean()),
+        f"exact{through_epoch}_sampled_validation_field_mse": float(field[-1]),
+        **({"validation_field_mean_epochs301_400": float(field[300:400].mean()),
+            "validation_field_mean_epochs401_500": float(field[400:500].mean())} if through_epoch == 500 else {}),
         "recorded_gradient_epochs": epoch[recorded].astype(int).tolist(),
         "recorded_first_batch_gradients": gradient_observations,
         "milestones": milestones,
         "trailing_learning_means": {
             str(window): {key: float(values(rows[-window:], key).mean()) for key in learning_keys}
             for window in (50, 100)
+            if window <= through_epoch
         },
         "training_seconds": float(values(rows, "train_wall_seconds").sum()),
         "validation_seconds": float(values(rows, "val_wall_seconds").sum()),
@@ -130,8 +143,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--through-epoch", type=int, default=500)
+    parser.add_argument("--label", default="Run 2000")
+    parser.add_argument("--routing-reference-run-dir", type=Path)
     args = parser.parse_args()
-    render(args.run_dir, args.output)
+    render(args.run_dir, args.output, through_epoch=args.through_epoch,
+           candidate_label=args.label, routing_reference_run_dir=args.routing_reference_run_dir)
 
 
 if __name__ == "__main__":

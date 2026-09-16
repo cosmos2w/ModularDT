@@ -45,15 +45,16 @@ def test_endpoint_rejects_incomplete_or_unmatched_cases(defect):
     ("saved_best", 501, "best_by_field_mse_model.pt"),
     ("saved_best", 450, "best_by_temperature_mse_model.pt"),
 ])
-def test_endpoint_rejects_wrong_budget_or_selection_policy(tmp_path, monkeypatch, policy, epoch, filename):
+@pytest.mark.parametrize("run_id", ["2000", "2100"])
+def test_endpoint_rejects_wrong_budget_or_selection_policy(tmp_path, monkeypatch, policy, epoch, filename, run_id):
     candidate = rows()
     for row in candidate:
-        row.update(model_label=f"{policy}:Run2000", checkpoint=f"/fixture/Run_2000_fixture/{filename}")
+        row.update(model_label=f"{policy}:Run{run_id}", checkpoint=f"/fixture/Run_{run_id}_fixture/{filename}")
     if policy != "exact500":
-        candidate += [dict(row, model_label="exact500:Run2000", checkpoint="/fixture/Run_2000_fixture/epoch_0500_model.pt")
+        candidate += [dict(row, model_label=f"exact500:Run{run_id}", checkpoint=f"/fixture/Run_{run_id}_fixture/epoch_0500_model.pt")
                       for row in rows()]
     source = tmp_path / "metrics.csv"
     reduction.write_csv(source, candidate)
     monkeypatch.setattr(reduction, "_load_trusted_checkpoint", lambda path: {"epoch": 500 if path.name == "epoch_0500_model.pt" else epoch})
     with pytest.raises(ValueError):
-        reduction.reduce_endpoint(source, tmp_path / "output")
+        reduction.reduce_endpoint(source, tmp_path / "output", run_id=run_id)
