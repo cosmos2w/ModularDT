@@ -1,10 +1,12 @@
 """Independent references for source-measure routing composition."""
 import torch
 
-from honf_forward_core.interface_fields.routing_index.sparse_projection import (
-    build_typed_source_incidence, masked_sparsemax, source_measure_sparsemax,
-)
 from honf_forward_core.interface_fields.routing_index.pair_join import compile_two_hop_pairs
+from honf_forward_core.interface_fields.routing_index.sparse_projection import (
+    build_typed_source_incidence,
+    masked_sparsemax,
+    source_measure_sparsemax,
+)
 
 
 def effective(membership, omega, logits):

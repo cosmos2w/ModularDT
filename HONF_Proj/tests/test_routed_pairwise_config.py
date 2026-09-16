@@ -3,11 +3,11 @@ import copy
 
 import pytest
 import torch
+from channelthermal.environment import ChannelThermalEnvironmentBuilder
+from channelthermal.routing_geometry import ChannelThermalRoutingGeometry
 
 from honf_forward_core.config import BatchData, RoutingIndexConfig, UnifiedForwardConfig
 from honf_runtime.config_loader import load_config_bundle
-from channelthermal.routing_geometry import ChannelThermalRoutingGeometry
-from channelthermal.environment import ChannelThermalEnvironmentBuilder
 
 
 def test_routing_profile_preserves_dense_scientific_settings():

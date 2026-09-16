@@ -31,14 +31,14 @@ def make_case(dimension):
         env_features=torch.randn(2, 9, 3), env_weights=torch.rand(2, 9) + .2,
         routing_geometry=BoxGeometry(dimension),
     )
-    config = UnifiedForwardConfig.from_dict(dict(
-        forward_architecture='routed_pairwise_honf', spatial_dim=dimension,
-        hidden_dim=16, field_dim=3, coordinate_scale=[8.] * dimension,
-        boundary_feature_mode='none', periodic_axes=[],
-        interface_model=dict(message_hidden_dim=12, attention_heads=2,
-            coarse_latent_count=3, receiver_chunk_size=3,
-            routing=dict(descriptor_dim=8, router_hidden_dim=12, fine_pair_chunk_size=11)),
-    ))
+    config = UnifiedForwardConfig.from_dict({
+        'forward_architecture': 'routed_pairwise_honf', 'spatial_dim': dimension,
+        'hidden_dim': 16, 'field_dim': 3, 'coordinate_scale': [8.] * dimension,
+        'boundary_feature_mode': 'none', 'periodic_axes': [],
+        'interface_model': {'message_hidden_dim': 12, 'attention_heads': 2,
+            'coarse_latent_count': 3, 'receiver_chunk_size': 3,
+            'routing': {'descriptor_dim': 8, 'router_hidden_dim': 12, 'fine_pair_chunk_size': 11}},
+    })
     return InterfaceFieldCore(config).eval(), batch
 
 
@@ -75,8 +75,26 @@ def test_generic_chunk_batch_module_permutation_and_padding(dimension):
     assert all(torch.isfinite(g).all() and g.abs().sum() > 0 for g in gradients)
 
 
+def test_empty_module_case_uses_only_neutral_environment_candidate():
+    core, batch = make_case(2)
+    batch = replace(batch, module_present=torch.tensor([[0., 0., 0., 0.], [1., 0., 0., 0.]]))
+    with torch.no_grad():
+        encoded = core.encode_case(batch)
+        prepared = core.prepare(encoded, encoded.module_tokens)
+        index = prepared.backend_state['routing_index']
+        assert index.candidates.valid.sum(-1).tolist() == [1, 1]
+        assert index.candidates.candidate_origin[0, index.candidates.valid[0]].tolist() == [-1]
+        assert torch.count_nonzero(index.module_incidence.membership[0]) == 0
+        torch.testing.assert_close(index.environment_incidence.hub_measure.sum(-1), torch.ones(2, dtype=torch.float64))
+        output = core.decode_queries(prepared, batch.query_xy)['pred_field']
+        assert torch.isfinite(output).all()
+        empty_alone = replace(batch, **{key: value[:1] for key, value in vars(batch).items() if torch.is_tensor(value)})
+        torch.testing.assert_close(predict(core, empty_alone), output[:1], atol=2e-6, rtol=2e-5)
+
+
 def test_physical_passes_refresh_live_routing_with_frozen_local_surrogate():
     from pathlib import Path
+
     from channelthermal.config import ChannelThermalHONFConfig
     from channelthermal.model import ChannelThermalHONFModel
 
@@ -84,16 +102,16 @@ def test_physical_passes_refresh_live_routing_with_frozen_local_surrogate():
     if not local_checkpoint.is_file():
         pytest.skip('The established frozen local surrogate is unavailable.')
     config = ChannelThermalHONFConfig.from_dict({
-        'core_honf': dict(forward_architecture='routed_pairwise_honf', hidden_dim=32,
-            domain_length_x=12., domain_length_y=4., coordinate_scale=[12., 6.],
-            module_radius=.45, num_env_tokens_x=4, num_env_tokens_y=3,
-            boundary_feature_mode='none', interface_model=dict(
-                message_hidden_dim=24, attention_heads=4, receiver_chunk_size=8,
-                routing=dict(descriptor_dim=8, router_hidden_dim=12, fine_pair_chunk_size=32))),
-        'channelthermal': dict(use_local_surrogate=True, freeze_local_surrogate=True,
-            local_surrogate_checkpoint_path=str(local_checkpoint),
-            internal_prediction_mode='local_surrogate', interaction_refinement_steps=1,
-            default_num_interface_points=8),
+        'core_honf': {'forward_architecture': 'routed_pairwise_honf', 'hidden_dim': 32,
+            'domain_length_x': 12., 'domain_length_y': 4., 'coordinate_scale': [12., 6.],
+            'module_radius': .45, 'num_env_tokens_x': 4, 'num_env_tokens_y': 3,
+            'boundary_feature_mode': 'none', 'interface_model': {
+                'message_hidden_dim': 24, 'attention_heads': 4, 'receiver_chunk_size': 8,
+                'routing': {'descriptor_dim': 8, 'router_hidden_dim': 12, 'fine_pair_chunk_size': 32}}},
+        'channelthermal': {'use_local_surrogate': True, 'freeze_local_surrogate': True,
+            'local_surrogate_checkpoint_path': str(local_checkpoint),
+            'internal_prediction_mode': 'local_surrogate', 'interaction_refinement_steps': 1,
+            'default_num_interface_points': 8},
     })
     model = ChannelThermalHONFModel(config).eval()
     original_prepare = model.core.backend.prepare

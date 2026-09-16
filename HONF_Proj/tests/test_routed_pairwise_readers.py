@@ -143,12 +143,9 @@ def test_uniform_module_pairs_match_dense_reader_and_input_gradients() -> None:
 
 
 def test_uniform_environment_pairs_match_dense_reader_and_input_gradients() -> None:
-    """A fully selected unit-prior route is exactly Dense's QE reader."""
+    """Uniform routing retains nonuniform quadrature exactly once in QE."""
 
     encoded = _encoded()
-    encoded = EncodedInterfaceCase(
-        **{**vars(encoded), "env_weights": torch.ones_like(encoded.env_weights)}
-    )
     backend = RoutedPairwiseField(8, 6, 2, 2, routing_config={"fine_pair_chunk_size": 2}).double().eval()
     env_tokens = encoded.env_tokens.clone().requires_grad_()
     receivers = torch.rand(1, 2, 2, dtype=torch.float64, requires_grad=True)
@@ -157,7 +154,8 @@ def test_uniform_environment_pairs_match_dense_reader_and_input_gradients() -> N
     batch_index = [0] * (receivers.shape[1] * encoded.env_coords.shape[1])
     receiver_index = [q for q in range(receivers.shape[1]) for _ in range(encoded.env_coords.shape[1])]
     source_index = list(range(encoded.env_coords.shape[1])) * receivers.shape[1]
-    pairs = _pairs(batch_index, receiver_index, source_index, [1.0] * len(source_index))
+    measure = encoded.env_weights / encoded.env_weights.sum(dim=-1, keepdim=True)
+    pairs = _pairs(batch_index, receiver_index, source_index, measure[0].tolist() * receivers.shape[1])
     routed = backend.read_environment_pairs(
         {"env_tokens": env_tokens, "env_keys": keys, "env_values": values},
         encoded,
@@ -174,6 +172,9 @@ def test_uniform_environment_pairs_match_dense_reader_and_input_gradients() -> N
     routed_env_grad = env_tokens.grad.detach().clone()
     routed_receiver_grad = receivers.grad.detach().clone()
     routed_feature_grad = receiver_features.grad.detach().clone()
+    routed_parameter_grads = {name: parameter.grad.detach().clone()
+                              for name, parameter in backend.named_parameters() if parameter.grad is not None}
+    backend.zero_grad(set_to_none=True)
     env_tokens.grad.zero_()
     receivers.grad.zero_()
     receiver_features.grad.zero_()
@@ -181,6 +182,41 @@ def test_uniform_environment_pairs_match_dense_reader_and_input_gradients() -> N
     torch.testing.assert_close(env_tokens.grad, routed_env_grad, rtol=1.0e-11, atol=1.0e-12)
     torch.testing.assert_close(receivers.grad, routed_receiver_grad, rtol=1.0e-11, atol=1.0e-12)
     torch.testing.assert_close(receiver_features.grad, routed_feature_grad, rtol=1.0e-11, atol=1.0e-12)
+    for name, parameter in backend.named_parameters():
+        if name in routed_parameter_grads:
+            torch.testing.assert_close(parameter.grad, routed_parameter_grads[name], rtol=1.0e-11, atol=1.0e-12)
+
+
+def test_environment_split_quadrature_preserves_fine_read_and_source_gradient() -> None:
+    """Duplicated identical fine sources split mass, not physical influence."""
+    from dataclasses import replace
+
+    torch.manual_seed(12)
+    encoded = _encoded()
+    backend = RoutedPairwiseField(8, 6, 2, 2).double().eval()
+    tokens = encoded.env_tokens.clone().requires_grad_()
+    receivers = torch.rand(1, 2, 2, dtype=torch.float64)
+    features = torch.randn(1, 2, 8, dtype=torch.float64)
+
+    def read(source_tokens, geometry, measure):
+        count = source_tokens.shape[1]
+        keys, values = backend.project_environment_sources(source_tokens)
+        pairs = _pairs([0] * (2 * count), [0] * count + [1] * count,
+                       list(range(count)) * 2, measure[0].tolist() * 2)
+        return backend.read_environment_pairs(
+            {"env_tokens": source_tokens, "env_keys": keys, "env_values": values},
+            geometry, receivers, features, pairs)
+
+    measure = encoded.env_weights / encoded.env_weights.sum(dim=-1, keepdim=True)
+    ordinary = read(tokens, encoded, measure)
+    duplicate_indices = torch.tensor([0, 0, 1, 2, 3, 4])
+    split_measure = measure[:, duplicate_indices] * torch.tensor([[.3, .7, 1., 1., 1., 1.]])
+    duplicated = read(tokens[:, duplicate_indices],
+                      replace(encoded, env_coords=encoded.env_coords[:, duplicate_indices]), split_measure)
+    torch.testing.assert_close(ordinary, duplicated, rtol=1e-11, atol=1e-12)
+    left = torch.autograd.grad(ordinary.square().sum(), tokens, retain_graph=True)[0]
+    right = torch.autograd.grad(duplicated.square().sum(), tokens)[0]
+    torch.testing.assert_close(left, right, rtol=1e-10, atol=1e-11)
 
 
 def test_activation_checkpointed_fine_tiles_match_eager_multitile_backward() -> None:
