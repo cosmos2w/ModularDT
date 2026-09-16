@@ -1,6 +1,6 @@
 # Run 2100: fixed-data mean-shift routing
 
-**Status: epoch-50 interim assessment complete. The original single Run 2100 continues on physical GPU 1 toward 500; final endpoint analysis is deferred under the user’s first-50 handoff option. No training beyond 500 or Goal 3 has been started.**
+**Status: epoch-50 interim assessment complete. The same Run 2100 is resumed on physical GPU 1 toward 500 after an unexpected interruption; final endpoint analysis is deferred under the user’s first-50 handoff option. No training beyond 500 or Goal 3 has been started.**
 
 ## Scope
 
@@ -62,7 +62,7 @@ Training P2 retains **99.7302% QM / 99.9949% QE** of the active-source dense ref
 
 Matched exact-50 sampled validation field/temperature MSE is: Legacy 1401 **0.259676 / 0.212371**, Dense 1804 **0.219339 / 0.125466**, Regional 1806 **0.203376 / 0.117707**, Run 2000 **0.198393 / 0.226158**, and Run 2100 **0.196162 / 0.122869**. These single-epoch values provide convergence context, not a trained full-population superiority claim; the curves show meaningful fluctuations.
 
-The recorded training plus validation compute time through 50 is **3,434.47 s (57.24 min)**, excluding plotting/checkpoint overhead. Observed wall pace is about **70.6 s/epoch**, implying roughly **9.8 hours total** to 500 and about **8.8 hours remaining at epoch 50**. Peak training allocation over the window is **38,322.73 MiB**. The existing process PID 3878073 remains on physical GPU 1; Run 2000 remains on GPU 2.
+The recorded training plus validation compute time through 50 is **3,434.47 s (57.24 min)**, excluding plotting/checkpoint overhead. Observed wall pace is about **70.6 s/epoch**, implying roughly **9.8 hours total** to 500 and about **8.8 hours remaining at epoch 50**. Peak training allocation over the window is **38,322.73 MiB**. At that handoff, process PID 3878073 was on physical GPU 1 and Run 2000 was on GPU 2.
 
 ![First-50 training comparison](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2100/figures/training_trajectory.png)
 
@@ -108,7 +108,7 @@ The current ThermalChannel adapter supplies known boundary descriptors and neutr
 
 **Interim recommendation: unresolved.** Optimization is healthy and still improving, with ordinary fluctuations; useful routing sparsity and an accuracy benefit from attraction have not been demonstrated. Finish the already authorized 500-epoch budget before deciding on a 2500/5000 extension. Added candidate cost with almost-dense fine work is currently an efficiency concern, not evidence of acceleration.
 
-The user's first-50 handoff option is used for analysis: the original process continues through its configured 500 epochs, while exact-500/saved-best full-population evaluation, final phase interventions, large-shape GPU timing/memory, and the final continuation decision remain **pending a later user request**. Training itself has not been paused or restarted. No Goal 3, extra managed trial, sweep, or automatic continuation beyond 500 was launched.
+The user's first-50 handoff option is used for analysis: the original process continues through its configured 500 epochs, while exact-500/saved-best full-population evaluation, final phase interventions, large-shape GPU timing/memory, and the final continuation decision remain **pending a later user request**. Training had not been paused or restarted at that handoff; a later interruption and recovery are documented below. No Goal 3, extra managed trial, sweep, or automatic continuation beyond 500 was launched.
 
 ## Prepared endpoint and same-run continuation commands
 
@@ -126,3 +126,13 @@ rtk proxy env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src:Case_ThermalChannel/src OMP_
 ```
 
 `--epochs` is the terminal epoch, and `--resume-checkpoint` restores the saved model, optimizer, scaler, and RNG state in the checkpoint's original run directory. The command sheet also records an unexecuted epoch-50-to-500 resume command for use only if training itself is stopped at that checkpoint; it must not be launched alongside the current training process.
+
+## Recovery from the later training interruption — 2026-09-16
+
+The first launch subsequently disappeared during epoch 105. Its log completed epoch 104 at 06:22:36 UTC and then ended mid-batch without a Python traceback; the manifest remained stale at `running`. The queried kernel journal has no matching OOM or NVIDIA fault entry. This was not an epoch-100 configuration limit: the original command explicitly requested 500. The exact termination cause is unknown; terminal/session loss is a possibility, not a confirmed diagnosis.
+
+On the user's recovery request, the newest usable full training state was found in `best_predicted_model.pt` at epoch **103**; `latest_model.pt` was only epoch 100. Model and optimizer tensors were finite, and optimizer/scaler plus Python, NumPy, Torch, and CUDA RNG state were present. Recovery uses chronological latest available state, not an accuracy-based restart. The original epoch-104 metric rows were retained in the study's `interrupted_epoch104_metrics.csv` and `interrupted_epoch104_routing_metrics.csv`, and canonical histories were trimmed to 103 before replay so each epoch appears once. No model checkpoint was removed.
+
+The same run resumed at **104 / 500** under the existing user service manager as `honf-run2100-resume.service`, PID **4108620**, on physical GPU 1. `RuntimeMaxSec=infinity` removes a service time limit; `Restart=no` avoids automatic repeated restarts. This ordinary training process is independent of the tool terminal session; no monitoring service or new managed experiment was created. The command is recorded in [executed commands](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2100/executed_commands.md), and output is in [training_resume.log](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2100/training_resume.log). The training endpoint remains 500, and final scientific analysis remains separate from this recovery.
+
+Recovery verification: the resumed epoch 104 completed with finite losses and contiguous, unique metric histories. Replayed train loss, validation field MSE, and validation temperature MSE differ from the retained original epoch-104 row by only 1.33e-6, -1.90e-6, and -2.27e-6, respectively; sampled fine module-pair count is unchanged. Small floating-point replay differences are retained rather than asserting bitwise determinism.
