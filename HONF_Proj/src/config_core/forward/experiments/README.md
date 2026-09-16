@@ -8,6 +8,7 @@ These files are strict overlays rather than complete profiles. Apply one with `-
 - `stage7_k4_fused_audit.json`: completed Run-1602 K-scaling research audit; trained to epoch 5000 and retained as a non-promoted reference because its global accuracy gain came with weaker near-interface fidelity and compressed topology.
 - `stage7_k8_fused_audit.json`: rejected Run-1603 K-scaling audit, stopped at epoch 500 after failing the continuation gates.
 - `stage7_factorized_gated_r96.json`: rejected Run-1600 factorized-kernel experiment, stopped at epoch 500 and retained only for reproducibility; it is not an active candidate.
+- `stage7_routing_only_pairwise_1404.json`: bounded routing-only pairwise candidate. It removes the direct hyperedge value, fuses the accepted fixed K=6 routing into query-module weights, and feeds the organizer-contextualized module token to the existing pair MLP. It retains dense full-mass execution for training and the Run-1401 data, loss, width, and optimizer settings.
 
 `stage7_structured_context.json` remains the historical/scientific Run-1401 architecture profile and numerical checkpoint reference. It is intentionally not rewritten to select fused or sparse execution.
 

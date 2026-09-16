@@ -59,6 +59,9 @@ def _context_config(
     module_limit: int = 0,
     retained_mass_floor: float = 1.0,
     kernel_mode: str = "legacy_mlp",
+    token_source: str = "base",
+    decoder_mode: str = "enhanced_honf_pairwise",
+    use_hyper_value_context: bool = True,
 ) -> UnifiedForwardConfig:
     return UnifiedForwardConfig(
         field_dim=3,
@@ -72,7 +75,8 @@ def _context_config(
         organizer_mode="fixed_projection",
         hidden_dim=24,
         dropout=0.0,
-        decoder_mode="enhanced_honf_pairwise",
+        decoder_mode=decoder_mode,
+        use_hyper_value_context=use_hyper_value_context,
         pairwise_kernel_hidden_dim=24,
         pairwise_kernel_num_layers=2,
         mechanism_state_mode="residual_concat",
@@ -82,6 +86,7 @@ def _context_config(
         pairwise_kernel_mode=kernel_mode,
         query_module_limit=module_limit,
         query_module_retained_mass_floor=retained_mass_floor,
+        pairwise_module_token_source=token_source,
     )
 
 
@@ -381,6 +386,146 @@ def test_fused_dense_matches_edge_explicit_dense_with_same_weights() -> None:
         rtol=2.0e-6,
         atol=2.0e-6,
     )
+
+
+def test_contextualized_pair_tokens_preserve_edge_explicit_fused_arithmetic() -> None:
+    edge_explicit = _initialized_model(
+        _context_config(
+            "dense",
+            aggregation="edge_explicit",
+            token_source="organizer_contextualized",
+        ),
+        seed=201,
+    )
+    fused = _initialized_model(
+        _context_config(
+            "dense",
+            aggregation="fused_query_module",
+            token_source="organizer_contextualized",
+        ),
+        seed=203,
+    )
+    fused.load_state_dict(copy.deepcopy(edge_explicit.state_dict()), strict=True)
+
+    with torch.no_grad():
+        batch = _batch()
+        explicit_state = edge_explicit.encode_and_organize(batch)
+        fused_state = fused.encode_and_organize(batch)
+        explicit_output = edge_explicit.decode_queries(
+            batch.query_xy,
+            None,
+            explicit_state,
+            explicit_state["global_token"],
+            return_routing_maps=True,
+        )
+        fused_output = fused.decode_queries(
+            batch.query_xy,
+            None,
+            fused_state,
+            fused_state["global_token"],
+            return_routing_maps=True,
+        )
+
+    torch.testing.assert_close(
+        explicit_output["pred_field"],
+        fused_output["pred_field"],
+        rtol=2.0e-6,
+        atol=2.0e-6,
+    )
+    torch.testing.assert_close(
+        explicit_output["c_pair_norm"],
+        fused_output["c_pair_norm"],
+        rtol=2.0e-6,
+        atol=2.0e-6,
+    )
+
+
+def test_routing_only_contextual_pair_has_zero_hyper_value_and_live_routing() -> None:
+    model = _initialized_model(
+        _context_config(
+            "dense",
+            aggregation="fused_query_module",
+            token_source="organizer_contextualized",
+            decoder_mode="enhanced_honf_pairwise_only",
+            use_hyper_value_context=False,
+        ),
+        seed=207,
+    )
+    with torch.no_grad():
+        batch = _batch()
+        state = model.encode_and_organize(batch)
+        output = model.decode_queries(
+            batch.query_xy,
+            None,
+            state,
+            state["global_token"],
+            return_routing_maps=True,
+        )
+
+    assert output["uses_hyper_context"] == 1
+    assert output["uses_hyper_value_context"] == 0
+    assert output["pairwise_kernel_enabled"] == 1
+    assert output["uses_global_context"] == 1
+    assert output["uses_near_module_context"] == 1
+    assert output["hyper_value_context_norm"] == 0
+    assert torch.count_nonzero(output["c_H_norm"]) == 0
+    assert output["pairwise_context_norm"] > 0
+    assert output["query_module_routing_beta"].shape == (2, 19, 8)
+    assert output["pairwise_module_token_source"] == "organizer_contextualized"
+
+
+def test_dense_and_gathered_pair_mlps_receive_contextualized_module_tokens() -> None:
+    batch = _batch()
+    for execution, module_limit in (("dense", 0), ("gathered", 1)):
+        model = _initialized_model(
+            _context_config(
+                execution,
+                aggregation="fused_query_module",
+                module_limit=module_limit,
+                retained_mass_floor=1.0,
+                token_source="organizer_contextualized",
+            ),
+            seed=209,
+        )
+        organized = model.encode_and_organize(batch)
+        assert not torch.equal(
+            organized["module_tokens"],
+            organized["module_tokens_for_hyper"],
+        )
+        seen: list[torch.Tensor] = []
+
+        def hook(_module: torch.nn.Module, inputs: tuple[torch.Tensor, ...]) -> None:
+            seen.append(inputs[0].detach().clone())
+
+        handle = model.decoder.pairwise_kernel.pair_mlp.register_forward_pre_hook(hook)
+        with torch.no_grad():
+            output = model.decode_queries(
+                batch.query_xy,
+                None,
+                organized,
+                organized["global_token"],
+            )
+        handle.remove()
+
+        assert seen
+        raw_width = batch.module_features.shape[-1]
+        token_slice = slice(-(raw_width + model.config.hidden_dim), -raw_width)
+        received = seen[0][..., token_slice]
+        contextual = organized["module_tokens_for_hyper"]
+        if execution == "dense":
+            expected = contextual[:, None, :, :].expand(-1, batch.query_xy.shape[1], -1, -1)
+            torch.testing.assert_close(received, expected)
+            assert int(output["pairwise_evaluated_pair_count"]) == int(
+                batch.query_xy.shape[1] * batch.module_present.numel()
+            )
+        else:
+            assert received.ndim == 2
+            assert received.shape[0] == int(output["pairwise_evaluated_pair_count"])
+            assert received.shape[0] < int(batch.query_xy.shape[1] * batch.module_present.sum())
+            # Every gathered token must be one of the active contextualized tokens.
+            active = contextual[batch.module_present > 0]
+            maximum_differences = (received[:, None] - active[None]).abs().amax(dim=-1)
+            assert torch.all(maximum_differences.amin(dim=-1) == 0)
 
 
 def test_fused_full_retention_gathered_matches_fused_dense() -> None:

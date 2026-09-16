@@ -147,6 +147,16 @@
       "stage": "7-context-ablation"
     },
     {
+      "name": "stage7_routing_only_pairwise_1404",
+      "path": "project://src/config_core/forward/experiments/stage7_routing_only_pairwise_1404.json",
+      "status": "candidate",
+      "base": "stage7_structured_context",
+      "mode": "Run 1401 fixed K=6 organizer as routing index; no direct hyperedge value; contextualized legacy fine pair response with global and near contexts",
+      "checkpoint_families": ["Run 1404 routing-only contextual pair"],
+      "owner": "forward-research",
+      "stage": "7-routing-only"
+    },
+    {
       "name": "stage7_fused_query_module",
       "path": "project://src/config_core/forward/experiments/stage7_fused_query_module.json",
       "status": "promoted_execution",

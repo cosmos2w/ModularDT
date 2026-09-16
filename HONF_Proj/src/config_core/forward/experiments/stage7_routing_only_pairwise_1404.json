@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "_note": "Run 1404 minimum-change routing-only Stage-7 experiment: retain the Run-1401 organizer, routing, global and near contexts; remove direct hyperedge values and route the contextualized fine pair response.",
+  "core": {
+    "model": {
+      "core_honf": {
+        "decoder_mode": "enhanced_honf_pairwise_only",
+        "use_hyper_value_context": false,
+        "pairwise_aggregation_mode": "fused_query_module",
+        "pairwise_module_token_source": "organizer_contextualized",
+        "routing_execution": "dense",
+        "query_module_retained_mass_floor": 1.0
+      }
+    },
+    "checkpointing": {
+      "save_epoch_milestones": [10, 50, 100, 250, 500, 1000, 2500, 5000]
+    }
+  }
+}
