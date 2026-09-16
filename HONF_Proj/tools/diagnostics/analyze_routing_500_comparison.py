@@ -108,6 +108,29 @@ def write_json(path: Path, value: Any) -> None:
         stream.write("\n")
 
 
+def generated_artifact_pointer(path: Path) -> dict[str, Any]:
+    """Describe an optional generated control artifact without recomputing it."""
+
+    pointer: dict[str, Any] = {
+        "path": str(path.resolve()),
+        "exists": path.exists(),
+    }
+    if not path.exists():
+        pointer["status"] = "missing"
+        return pointer
+    data = read_json(path)
+    pointer["schema_version"] = data.get("schema_version")
+    if "status" in data:
+        pointer["status"] = data.get("status")
+    if isinstance(data.get("runs"), dict):
+        pointer["run_status"] = {
+            str(run): value.get("validation_status", value.get("status"))
+            for run, value in data["runs"].items()
+            if isinstance(value, dict)
+        }
+    return pointer
+
+
 def number(value: Any) -> float | None:
     try:
         result = float(value)
@@ -1173,6 +1196,11 @@ def main() -> None:
             raise FileNotFoundError(f"Run {run} has no exact epoch-500 checkpoint")
 
     endpoint_paths = {"2000": args.run2000_endpoint.resolve(), "2100": args.run2100_endpoint.resolve()}
+    generated_control_paths = {
+        "intervention_sensitivity": output_dir / "routing_intervention_sensitivity.json",
+        "omitted_source_audit": output_dir / "routing_omitted_source_audit.json",
+        "map_validation": output_dir / "routing_map_validation.json",
+    }
     policies: list[dict[str, Any]] = []
     for run, path in endpoint_paths.items():
         table = endpoint_table(path)
@@ -1219,6 +1247,9 @@ def main() -> None:
             "ledgers": {run: str(path.resolve()) for run, path in {"2000": args.run2000_ledger, "2100": args.run2100_ledger}.items()},
             "mean_shift_json": str(args.mean_shift_json.resolve()),
             "parameter_inventory": str(parameter_inventory_path.resolve()),
+            "generated_control_artifacts": {
+                name: str(path.resolve()) for name, path in generated_control_paths.items()
+            },
         },
         "runs": records,
         "selection_summary": selection,
@@ -1227,6 +1258,10 @@ def main() -> None:
         "paired": paired_info,
         "routing_support": ledger_info,
         "candidate_intervention": intervention_info,
+        "routing_controls": {
+            name: generated_artifact_pointer(path)
+            for name, path in generated_control_paths.items()
+        },
         "parameter_inventory": parameter_inventory,
         "convergence_plot": plot_path,
         "definitions": {
@@ -1235,6 +1270,7 @@ def main() -> None:
             "equal_case_summary": "Per-case L2 means, medians, p95, and worst case are descriptive; pooled values use summed SSE and target SSE/count.",
             "support": "Ledger raw paths are positive two-hop paths before receiver-source deduplication; unique pairs are the actual fine pair keys after coalescing. Route weights are not physical influence.",
             "candidate_intervention": "Run2100 mean-shift and temporary module-hubs forwards use the same epoch-500 weights; this is a frozen candidate-generation intervention, not a separately trained accuracy comparison.",
+            "routing_controls": "Six common routing controls are same-weight exact-500 interventions over five anchors and 8,192 queries per anchor; the omitted-source audit is separately bounded to anchors 0273 and 0653 at 32 queries.",
             "parameter_inventory": "Counts come from strict CPU reconstruction with channelthermal.evaluation.loading.load_model; total includes the frozen local module, while trainable counts use requires_grad=True.",
         },
         "limitations": [
@@ -1243,7 +1279,8 @@ def main() -> None:
             "All four exact endpoint policies use their epoch-500 checkpoints and therefore share the requested 500-epoch assessment budget. Parent selected-through-500 weights for Run 1401 and Run 1804 are unavailable; later mature parent checkpoints are not substituted.",
             "Wall-clock fields are absent from the Run 1401 summary and architecture/evaluation overhead differs, so no cross-run efficiency ranking is inferred from them.",
             "The mean-shift intervention is bounded to five anchor cases and 32 query points per case; its query error is not a 90-case endpoint result.",
-            "The common ledger artifacts were produced without routing-map export because the existing CUDA map-to-NumPy path fails; support/count fields remain the measured ledger scope.",
+            "The first CUDA map-export attempt failed in the diagnostic-only geometry conversion; repaired reruns produced five finite maps per routed checkpoint while preserving the original no-map ledgers.",
+            "Common-control sensitivity is a frozen five-anchor intervention study, and the omitted-source audit is a two-anchor complete-support fixture; neither is a 90-case trained-accuracy or sparsity result.",
         ],
     }
     write_json(output_dir / "summary.json", summary)

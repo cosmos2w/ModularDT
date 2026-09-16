@@ -232,9 +232,73 @@ The mean-shift and module-hubs frozen interventions have identical P2 fine
 pair counts on every anchor in the candidate table, so mean shift shows no
 measured fine-support reduction or cost gain in this diagnostic.
 
-The ledger run omitted route-map export because the existing CUDA map-to-NumPy
-conversion path fails. The support/count rows remain valid for the requested
-ledger scope; no shared tool was modified to hide that failure.
+The first CUDA map-export attempt failed at the diagnostic exporter when a
+geometry metadata tensor reached NumPy without a CPU transfer. The owner,
+`_selected_routing_map_arrays` in
+[run_dynamic_sparse_routing_study.py](../../tools/diagnostics/run_dynamic_sparse_routing_study.py),
+now detaches and transfers those diagnostic values to CPU before conversion;
+the focused regression is [test_routing_map_export.py](../../tests/test_routing_map_export.py).
+The repaired five-anchor reruns are
+[Run 2000](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2000/routing/anchors8192_with_maps.json)
+and
+[Run 2100](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2100/routing/anchors8192_with_maps.json).
+Each produced five finite 68-array NPZ maps. Their non-map ledger values match
+the historical no-map ledgers; only output/CSV provenance paths differ. The
+historical no-map ledgers remain preserved.
+
+### Common routing intervention sensitivity
+
+The six control interventions were run at the exact epoch-500 checkpoint for
+both routed models, over the same five anchors and 8,192 queries per anchor.
+The pooled field metric sums `global_field_fluid_norm_sse` over 195,040 fluid
+values; the target SSE is 174,905.376510 for every mode. All controls use the
+same frozen model weights and are diagnostic interventions, not separately
+trained accuracy results. The complete source files are
+[Run 2000](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2000/interventions/exact500_all_modes.json)
+and
+[Run 2100](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2100/interventions/exact500_all_modes.json),
+with the reduced table in
+[routing_intervention_sensitivity.csv](../../diagnostics/generated/interface_operator_study/routing_500_comparison/routing_intervention_sensitivity.csv).
+
+| Run | Frozen control | Pooled fluid SSE | Pooled fluid relL2 | Change vs normal |
+|---|---|---:|---:|---:|
+| 2000 | normal | 2,527.831 | 0.120219 | — |
+| 2000 | uniform P2 | 4,578.456 | 0.161792 | +34.6% |
+| 2000 | zero QM P2 | 35,556.037 | 0.450874 | +275.0% |
+| 2000 | zero QE P2 | 89,528.691 | 0.715450 | +495.1% |
+| 2000 | uniform P0 | 2,484.570 | 0.119186 | −0.9% |
+| 2000 | uniform P1 | 2,915.525 | 0.129109 | +7.4% |
+| 2000 | zero coarse P2 | 36,657.163 | 0.457802 | +280.8% |
+| 2100 | normal | 1,323.786 | 0.086998 | — |
+| 2100 | uniform P2 | 1,985.825 | 0.106554 | +22.5% |
+| 2100 | zero QM P2 | 31,908.393 | 0.427121 | +391.0% |
+| 2100 | zero QE P2 | 81,586.973 | 0.682981 | +685.1% |
+| 2100 | uniform P0 | 1,321.747 | 0.086931 | −0.1% |
+| 2100 | uniform P1 | 1,337.677 | 0.087453 | +0.5% |
+| 2100 | zero coarse P2 | 37,514.131 | 0.463122 | +432.3% |
+
+Uniform P2 increases pooled fluid relative L2 by 34.6% for Run 2000 and
+22.5% for Run 2100, while zeroing either fine branch or the coarse P2 branch
+causes much larger degradation. This is evidence that learned P2 weighting is
+useful at these frozen checkpoints. Uniform P0 is effectively neutral and
+uniform P1 has a small effect. The controls do not demonstrate fine-support
+pruning: the corresponding ledgers retain essentially dense environment
+support.
+
+### Bounded omitted-source audit
+
+The separate `--missed-source-audit` calls used only the implementation's
+prescribed anchors 0273 and 0653, with 32 queries per anchor. All four rows
+completed with zero omitted module pairs, zero omitted environment pairs, and
+zero dense-attention mass on omitted environment pairs. This is a complete-
+support fixture for these sampled states, so the zero is vacuous for source
+importance and does not establish a successful sparsity or pruning result.
+The audit also records that uniform-P2 changes the frozen field prediction,
+with mean absolute differences of 0.0670 and 0.1059 for Run 2000 and 0.0128
+and 0.0452 for Run 2100 on 0273 and 0653 respectively. The bounded audit
+tables are [JSON](../../diagnostics/generated/interface_operator_study/routing_500_comparison/routing_omitted_source_audit.json)
+and [CSV](../../diagnostics/generated/interface_operator_study/routing_500_comparison/routing_omitted_source_audit.csv).
+No full-population omitted-source audit was run.
 
 ## Mean-shift candidate diagnostic
 
@@ -293,11 +357,15 @@ and the routing support/cost evidence.
 
 | Criterion | Evidence | Preliminary judgment |
 |---|---|---|
-| Fluid-field accuracy | Mean shift 2100 is lower than Dense 1804 at exact 500 (0.087968 vs 0.098741) and selected 467 (0.085573); module hubs 2000 is higher at exact 500 (0.123566) but lower at selected 466 (0.079194). | Accuracy is promising for 2100 across both available policies; 2000 is promising only conditional on checkpoint selection and has a large endpoint fluctuation. |
+| Fluid-field accuracy | Mean shift 2100 is lower than Dense 1804 at exact 500 (0.087968 vs 0.098741) and selected 467 (0.085573); module hubs 2000 is higher at exact 500 (0.123566) but lower at selected 466 (0.079194). | Accuracy is promising for 2100 across both available policies; 2000 has competitive late-window medians and a strong saved selected checkpoint, but a large exact-endpoint fluctuation. |
 | Convergence | Both routed runs improve from their preceding-50 to last-50 medians, while their positive last-50 slopes and 2000 exact endpoint outlier show remaining instability. | Treat 500 as an early assessment. |
 | Fine sparsity and cost | P2 unique support is close to dense, environment support is effectively dense, and routed models have 5.54M total / 4.51M trainable parameters. | Criterion is not met by the measured endpoint ledgers. |
+| Routing controls | Uniform P2 raises frozen pooled fluid relL2 by 34.6% / 22.5% for Runs 2000 / 2100; zeroing QM, QE, or coarse P2 is substantially worse, while uniform P0 is nearly neutral. | Learned P2 weighting is useful in this bounded sensitivity study, but no fine-support reduction is demonstrated. |
 | Mean-shift intervention | Same-weight mean shift changes frozen predictions but has the same measured fine support as module hubs on all five anchors. | No measured fine-support improvement or cost gain; this does not rank trained strategies. |
 | Scalar boundary physics | At exact 500, 2100 lowers fluid field L2 versus Dense, while final port environment-temperature and effective-h errors are 0.079999 / 0.044677 versus 0.068922 / 0.041631 for Dense. | Final port / h metrics regress despite the field gain. |
+
+The execution audit, matched physical optimizer benchmarks, and fresh optimized
+training checks are reported in the [execution optimization report](HONF_Routing_Execution_Optimization_Report.md).
 
 The missing parent selected-through-500 weights prevent a selected-policy
 comparison across all four runs. The endpoint tail, channel, physical,
@@ -311,10 +379,27 @@ and learned route weights/support are not physical influence maps. The
 current data and surrogate outputs provide no new solver-labelled barrier or
 CFD validation evidence.
 
+## Assessment limits
+
+Relative to the common assessment scope in the
+[UpgradePlan](../../UpgradePlan/ThemalChannel/HONF_NStage2_Model_Development_and_Validation_Plan.md), this report does
+not claim a complete large-shape cost ledger for both routed checkpoints. Run
+2000 has one corrected profile at `(M,E,Q)=(32,768,65536)`, but the matched
+two-shape `(32,768,65536)` and `(128,3072,262144)` preparation/decode and
+allocated/reserved-memory records are not present for both runs; the separate
+B=48, Q=1024 optimizer benchmark uses a different protocol. The available
+full-model coordinate derivative artifacts are bounded earlier-epoch checks
+(Run 2000 at epoch 10; Run 2100 at epochs 10 and 50), not paired exact-500
+AD/FD audits, and the routing numerical checks are operator checks. No full
+population omitted-source audit or solver-labelled barrier/independent CFD
+reference is available. These limits bound the recommendations to the
+single-seed, 500-epoch development-holdout and bounded execution/intervention
+evidence reported here.
+
 The exact CPU reducer command is recorded in
 [executed_command.txt](../../diagnostics/generated/interface_operator_study/routing_500_comparison/executed_command.txt).
-The endpoint, ledger, mean-shift, map-export failure, and CPU parameter
-inventory commands are recorded in
+The endpoint, ledger, mean-shift, original map-export failure, repaired map
+reruns, bounded controls, and CPU parameter inventory commands are recorded in
 [executed_commands.md](../../diagnostics/generated/interface_operator_study/routing_500_comparison/executed_commands.md).
 The reducer reads existing artifacts only; the parameter verification strictly
 reconstructs existing checkpoints on CPU. Neither performs training or

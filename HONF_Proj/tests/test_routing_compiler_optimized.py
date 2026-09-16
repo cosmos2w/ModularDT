@@ -21,11 +21,9 @@ from honf_forward_core.interface_fields.routed_pairwise import RoutedPairwiseFie
 from honf_forward_core.interface_fields.routing_index import (
     PackedPairs,
     build_typed_source_incidence,
+    compile_two_hop_pairs_batched,
     compile_two_hop_pairs_optimized,
     compile_two_hop_pairs_reference,
-)
-from honf_forward_core.interface_fields.routing_index.pair_join import (
-    compile_two_hop_pairs_batched,
 )
 
 Compiler = Callable[..., PackedPairs]
