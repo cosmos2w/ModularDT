@@ -79,3 +79,20 @@ A bounded CPU replay at epoch 10 used anchors 0273 and 0298 with 32 fixed querie
 The current ThermalChannel adapter supplies known boundary descriptors and neutral extra resistance. **Barrier benefit: Evidence Missing.** Model AD/FD is self-consistency evidence, not independent physical-gradient validation. Existing external physical-reference requests remain in place.
 
 The user permits an interim handoff after a healthy first 50 epochs when the full run is slow. Such a handoff will be labelled interim, with the epoch-500 analysis explicitly outstanding. No Goal 3, additional managed trial, sweep, or automatic training beyond 500 is authorized. A concrete unexecuted same-run continuation command will accompany the assessed checkpoint.
+
+## Prepared endpoint and same-run continuation commands
+
+The [endpoint command sheet](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2100/endpoint_commands.md) contains **unexecuted** exact-500 and saved-field-best full-population evaluation, reducers, common routing ledgers, omitted-source influence audit, phase interventions, physical derivatives, candidate diagnostics, timing, and convergence plotting. Existing historical endpoint tables are reused; model training is not repeated.
+
+If the completed endpoint later justifies an extension and the user requests it, the following command resumes the **same Run 2100** from epoch 500 through terminal epoch 2500. It has **not been executed** and is not the current recommendation to extend. Run it from `HONF_Proj` only after the existing process has finished and that checkpoint exists.
+
+```bash
+rtk proxy env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src:Case_ThermalChannel/src OMP_NUM_THREADS=4 \
+  /home/wanglz/miniconda3/envs/ModularDT/bin/python -u train.py \
+  --config project://src/config_core/forward/routing_mean_shift_context.json \
+  --workflow forward --device cuda:0 --epochs 2500 \
+  --resume-checkpoint Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_2100_20260916_002148_routed_mean_shift/epoch_0500_model.pt \
+  --yes
+```
+
+`--epochs` is the terminal epoch, and `--resume-checkpoint` restores the saved model, optimizer, scaler, and RNG state in the checkpoint's original run directory. The command sheet also records an unexecuted epoch-50-to-500 resume command for use only if training itself is stopped at that checkpoint; it must not be launched alongside the current training process.
