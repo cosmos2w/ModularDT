@@ -16,7 +16,7 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     profiles = registry["profiles"]
     names = [profile["name"] for profile in profiles]
-    assert len(names) == len(set(names)) == 36
+    assert len(names) == len(set(names)) == 37
     assert registry["recommended_forward_profile"] == "stage7_structured_context"
     assert {profile["status"] for profile in profiles} <= {
         "current",
@@ -305,6 +305,7 @@ def test_stage7_structured_context_profile_is_explicit_run1000_style() -> None:
     assert core["routing_execution"] == "dense"
     assert (core["query_edge_limit"], core["query_module_limit"]) == (0, 0)
     assert core["pairwise_aggregation_mode"] == "edge_explicit"
+    assert core["pairwise_module_token_source"] == "base"
     assert core["query_module_retained_mass_floor"] == 1.0
     assert core["pairwise_kernel_mode"] == "legacy_mlp"
     assert core["use_hyper_value_context"] is True
@@ -327,6 +328,37 @@ def test_stage7_structured_context_profile_is_explicit_run1000_style() -> None:
     assert bundle.effective["checkpointing"]["save_epoch_milestones"] == [
         500, 1000, 2500, 5000, 7500, 10000
     ]
+
+
+def test_stage7_routing_only_pairwise_1404_overlay_is_minimal_and_strict() -> None:
+    base_path = "project://src/config_core/forward/stage7_structured_context.json"
+    base = load_config_bundle(base_path)
+    candidate = load_config_bundle(
+        base_path,
+        experiment_overlay=(
+            "project://src/config_core/forward/experiments/"
+            "stage7_routing_only_pairwise_1404.json"
+        ),
+    )
+    expected_core = {
+        "decoder_mode": "enhanced_honf_pairwise_only",
+        "use_hyper_value_context": False,
+        "pairwise_aggregation_mode": "fused_query_module",
+        "pairwise_module_token_source": "organizer_contextualized",
+        "routing_execution": "dense",
+        "query_module_retained_mass_floor": 1.0,
+    }
+    milestones = [10, 50, 100, 250, 500, 1000, 2500, 5000]
+    assert candidate.experiment["core"] == {
+        "model": {"core_honf": expected_core},
+        "checkpointing": {"save_epoch_milestones": milestones},
+    }
+    expected_effective = copy.deepcopy(base.effective)
+    expected_effective["model"]["core_honf"].update(expected_core)
+    expected_effective["checkpointing"]["save_epoch_milestones"] = milestones
+    assert candidate.effective == expected_effective
+    assert candidate.effective["model"]["core_honf"]["num_hyperedges"] == 6
+    assert candidate.effective["training"] == base.effective["training"]
 
 
 def test_stage7_enhancement_overlays_are_minimal_and_strict() -> None:

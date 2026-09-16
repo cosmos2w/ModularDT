@@ -194,6 +194,33 @@ class HypergraphGatedPairwiseKernel(nn.Module):
         gate_logit = math.log(gate_init / (1.0 - gate_init))
         self.pairwise_kernel_logit = nn.Parameter(torch.tensor(gate_logit, dtype=torch.float32))
 
+    def _pair_module_tokens(
+        self,
+        organizer_output: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        """Resolve the single module-token source used by every pair path."""
+
+        source = self.config.pairwise_module_token_source
+        if source == "base":
+            key = "module_tokens"
+        elif source == "organizer_contextualized":
+            key = "module_tokens_for_hyper"
+        else:  # Configuration validation should make this unreachable.
+            raise RuntimeError(f"Unsupported pairwise module-token source: {source!r}")
+        tokens = organizer_output.get(key)
+        if not torch.is_tensor(tokens):
+            raise RuntimeError(
+                f"Organizer output is missing tensor {key!r} required by "
+                f"pairwise_module_token_source={source!r}."
+            )
+        base_tokens = organizer_output.get("module_tokens")
+        if torch.is_tensor(base_tokens) and tokens.shape != base_tokens.shape:
+            raise RuntimeError(
+                f"Pair module tokens {key!r} have shape {tuple(tokens.shape)}, "
+                f"expected {tuple(base_tokens.shape)}."
+            )
+        return tokens
+
     def forward(
         self,
         query_xy: torch.Tensor,
@@ -214,7 +241,7 @@ class HypergraphGatedPairwiseKernel(nn.Module):
 
         cfg = self.config
         module_centers = organizer_output["module_centers"]
-        module_tokens = organizer_output["module_tokens"]
+        module_tokens = self._pair_module_tokens(organizer_output)
         module_present = organizer_output["module_present"].to(device=query_xy.device, dtype=query_xy.dtype)
         A_mh = organizer_output["A_mh"].to(device=query_xy.device, dtype=query_xy.dtype)
         if cfg.pairwise_kernel_normalize_by_edge_mass:
@@ -304,6 +331,7 @@ class HypergraphGatedPairwiseKernel(nn.Module):
             ).to(query_xy.dtype),
             "all_candidate_module_retained_mass_mean": retained_module_mass_detached.mean(),
             **retention_diagnostics,
+            "pairwise_module_token_source": cfg.pairwise_module_token_source,
         }
         if return_routing_maps:
             # CORE HONF diagnostic: this dense [B,Q,K] tensor is only materialized
@@ -349,13 +377,7 @@ class HypergraphGatedPairwiseKernel(nn.Module):
         selected = torch.nonzero(selected_mask, as_tuple=False)
         legacy_full_support = (
             self.config.pairwise_kernel_mode == "legacy_mlp"
-            and (
-                not gathered_execution
-                or (
-                    float(self.config.query_module_retained_mass_floor) >= 1.0
-                    and int(self.config.query_module_limit) <= 0
-                )
-            )
+            and not gathered_execution
         )
         if legacy_full_support:
             dense_pair_embed = self._dense_pair_embeddings(
@@ -402,7 +424,12 @@ class HypergraphGatedPairwiseKernel(nn.Module):
         gate = torch.sigmoid(self.pairwise_kernel_logit)
         selected_mean = selected_counts.to(dtype=query_xy.dtype).mean()
         available_mean = available_counts.to(dtype=query_xy.dtype).mean()
-        evaluated_pairs = query_xy.new_tensor(float(selected.shape[0]))
+        if legacy_full_support:
+            evaluated_pairs = query_xy.new_tensor(
+                float(batch_size * num_queries * num_modules)
+            )
+        else:
+            evaluated_pairs = query_xy.new_tensor(float(selected.shape[0]))
         dense_pairs = available_counts.sum().to(dtype=query_xy.dtype)
         zero = query_xy.new_zeros(())
         diagnostics: Dict[str, torch.Tensor | str] = {
@@ -437,6 +464,7 @@ class HypergraphGatedPairwiseKernel(nn.Module):
             "pairwise_aggregation_mode": "fused_query_module",
             "pairwise_kernel_mode": self.config.pairwise_kernel_mode,
             "pairwise_execution_mode": "gathered" if gathered_execution else "dense",
+            "pairwise_module_token_source": self.config.pairwise_module_token_source,
         }
 
         if return_routing_maps:
@@ -603,7 +631,7 @@ class HypergraphGatedPairwiseKernel(nn.Module):
         cached = organizer_output.get(cache_key)
         if torch.is_tensor(cached):
             return cached
-        module_tokens = organizer_output["module_tokens"]
+        module_tokens = self._pair_module_tokens(organizer_output)
         module_present = organizer_output["module_present"] > 0
         selected = torch.nonzero(module_present, as_tuple=False)
         pieces = [module_tokens.new_ones(selected.shape[0], 1)]

@@ -79,6 +79,7 @@ _FORWARD_MODE_DEFAULTS: Dict[str, Any] = {
     "routing_execution": "dense",
     "pairwise_aggregation_mode": "edge_explicit",
     "pairwise_kernel_mode": "legacy_mlp",
+    "pairwise_module_token_source": "base",
     "query_module_retained_mass_floor": 1.0,
 }
 
@@ -117,7 +118,8 @@ LEGACY_ARCHITECTURE_KEYS = {
     "additive_edge_gate_init", "additive_output_init_std", "routing_execution",
     "gathered_execution_start_epoch", "query_edge_limit", "query_module_limit",
     "query_edge_retained_mass_floor", "module_incidence_retained_mass_floor",
-    "pairwise_aggregation_mode", "pairwise_kernel_mode", "query_module_retained_mass_floor",
+    "pairwise_aggregation_mode", "pairwise_kernel_mode", "pairwise_module_token_source",
+    "query_module_retained_mass_floor",
     "topology_signature_enabled", "decoder_mode", "use_hyper_value_context",
     "use_hyper_mechanism_encoder", "mechanism_include_geometry", "mechanism_include_masses",
     "mechanism_hidden_dim", "hyper_module_assignment_mode", "hyper_query_attention_mode",
@@ -396,6 +398,9 @@ class UnifiedForwardConfig:
     # fixed organizer and dense interface backend.  It is appended to retain
     # the positional order of every pre-existing configuration field.
     spatial_dim: int = 2
+    # Appended after all historical fields so positional construction remains
+    # compatible. The default preserves the accepted Run-1401 pair arithmetic.
+    pairwise_module_token_source: str = "base"
 
     def __post_init__(self) -> None:
         """Validate mode names and numerical routing constraints."""
@@ -443,6 +448,14 @@ class UnifiedForwardConfig:
             raise ValueError(
                 "organizer_mode must be 'fixed_projection', 'exchangeable_slots', "
                 "'case_adaptive_residual', or 'case_adaptive_tensor_residual'."
+            )
+        if self.pairwise_module_token_source not in {
+            "base",
+            "organizer_contextualized",
+        }:
+            raise ValueError(
+                "pairwise_module_token_source must be 'base' or "
+                "'organizer_contextualized'."
             )
         if self.organizer_mode == "fixed_projection" and int(self.num_hyperedges) <= 0:
             raise ValueError("fixed_projection organizer_mode requires num_hyperedges > 0.")
@@ -762,6 +775,8 @@ class UnifiedForwardConfig:
         # New 3-D checkpoints retain the explicit selector.
         if self.spatial_dim == 2:
             payload.pop("spatial_dim", None)
+        if self.pairwise_module_token_source == "base":
+            payload.pop("pairwise_module_token_source", None)
         # Historical resolved configs/checkpoints predate the architecture
         # selector. Keep their serialized shape unchanged and do not inject an
         # empty new-family block while loading or resaving them.

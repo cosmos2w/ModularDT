@@ -21,6 +21,7 @@ MODE_DEFAULTS = {
     "routing_execution": "dense",
     "pairwise_aggregation_mode": "edge_explicit",
     "pairwise_kernel_mode": "legacy_mlp",
+    "pairwise_module_token_source": "base",
     "query_module_retained_mass_floor": 1.0,
 }
 
@@ -83,6 +84,7 @@ def test_missing_mode_fields_resolve_to_existing_computation() -> None:
         ("routing_execution", "masked_dense"),
         ("pairwise_aggregation_mode", "edge_collapsed"),
         ("pairwise_kernel_mode", "bilinear"),
+        ("pairwise_module_token_source", "pooled_hyperedge"),
     ],
 )
 def test_unknown_forward_mode_is_rejected(name: str, value: str) -> None:

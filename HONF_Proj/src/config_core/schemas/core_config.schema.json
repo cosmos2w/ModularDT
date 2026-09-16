@@ -243,6 +243,7 @@
         "pairwise_kernel_include_module_token": {"type": "boolean"},
         "pairwise_kernel_include_module_features": {"type": "boolean"},
         "pairwise_kernel_normalize_by_edge_mass": {"type": "boolean"},
+        "pairwise_module_token_source": {"enum": ["base", "organizer_contextualized"]},
         "use_hyper_geometry_bias": {"type": "boolean"},
         "hyper_geometry_bias_scale": {"type": "number"},
         "direct_residual_gate_init": {"type": "number", "minimum": 0, "maximum": 1},

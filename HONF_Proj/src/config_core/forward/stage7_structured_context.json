@@ -38,6 +38,7 @@
       "query_edge_limit": 0,
       "query_module_limit": 0,
       "pairwise_aggregation_mode": "edge_explicit",
+      "pairwise_module_token_source": "base",
       "query_module_retained_mass_floor": 1.0,
       "pairwise_kernel_mode": "legacy_mlp",
 
