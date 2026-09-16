@@ -172,10 +172,11 @@ class RoutingIndexConfig:
         if not math.isfinite(float(self.mean_shift_feature_bandwidth)) or self.mean_shift_feature_bandwidth <= 0:
             raise ValueError("routing.mean_shift_feature_bandwidth must be finite and positive.")
         required = {"strategy": "module_hubs", "source_normalizer": "sparsemax",
-                    "query_normalizer": "source_measure_sparsemax", "resistance_mode": "adapter",
-                    "execution": "gathered"}
+                    "query_normalizer": "source_measure_sparsemax", "resistance_mode": "adapter"}
         if self.strategy not in {"module_hubs", "mean_shift"}:
             raise ValueError("routing.strategy currently supports 'module_hubs' or 'mean_shift'.")
+        if self.execution not in {"gathered", "optimized_exact"}:
+            raise ValueError("routing.execution currently supports 'gathered' or 'optimized_exact'.")
         for name, expected in required.items():
             if name == "strategy":
                 continue

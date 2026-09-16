@@ -31,11 +31,38 @@ def test_routing_serialization_and_invalid_settings():
     config = UnifiedForwardConfig.from_dict({'forward_architecture': 'routed_pairwise_honf', 'interface_model': {'routing': {}}})
     assert isinstance(config.interface_model.routing, RoutingIndexConfig)
     assert UnifiedForwardConfig.from_dict(config.to_dict()).to_dict() == config.to_dict()
-    for bad in ({'temperature': 0}, {'temperature': float('nan')}, {'strategy': 'dictionary'}, {'fine_pair_chunk_size': 0}, {'query_normalizer': 'sparsemax'}):
+    for bad in ({'temperature': 0}, {'temperature': float('nan')}, {'strategy': 'dictionary'}, {'fine_pair_chunk_size': 0}, {'query_normalizer': 'sparsemax'}, {'execution': 'dense'}):
         with pytest.raises(ValueError):
             RoutingIndexConfig.from_dict(bad)
+    optimized = RoutingIndexConfig.from_dict({'execution': 'optimized_exact'})
+    assert optimized.execution == 'optimized_exact'
+    roundtrip = UnifiedForwardConfig.from_dict(
+        {'forward_architecture': 'routed_pairwise_honf', 'interface_model': {'routing': vars(optimized)}}
+    )
+    assert UnifiedForwardConfig.from_dict(roundtrip.to_dict()).to_dict() == roundtrip.to_dict()
     with pytest.raises(ValueError, match='requires interface_model.routing'):
         UnifiedForwardConfig.from_dict({'forward_architecture': 'routed_pairwise_honf', 'interface_model': {}})
+
+
+def test_optimized_exact_quickcheck_profiles_are_explicit_and_matched():
+    profiles = (
+        ('routing_module_hubs_optimized_context.json', 'module_hubs', '2001', 'routed_module_hubs_quickcheck_optimized'),
+        ('routing_mean_shift_optimized_context.json', 'mean_shift', '2101', 'routed_mean_shift_quickcheck_optimized'),
+    )
+    for filename, strategy, run_id, run_name in profiles:
+        bundle = load_config_bundle(f'project://src/config_core/forward/{filename}')
+        core_honf = bundle.core['model']['core_honf']
+        routing = core_honf['interface_model']['routing']
+        assert routing['strategy'] == strategy
+        assert routing['execution'] == 'optimized_exact'
+        assert bundle.core['training']['epochs'] == 50
+        assert bundle.core['run']['id'] == run_id
+        assert bundle.core['run']['name'] == run_name
+        config = UnifiedForwardConfig.from_dict(core_honf)
+        assert config.interface_model.routing.execution == 'optimized_exact'
+
+    historical = load_config_bundle('project://src/config_core/forward/routing_module_hubs_context.json')
+    assert historical.core['model']['core_honf']['interface_model']['routing']['execution'] == 'gathered'
 
 
 def test_channel_geometry_is_known_descriptors_and_neutral_resistance():

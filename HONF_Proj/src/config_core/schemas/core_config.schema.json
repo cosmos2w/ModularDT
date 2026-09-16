@@ -138,7 +138,7 @@
                   "const": "adapter"
                 },
                 "execution": {
-                  "const": "gathered"
+                  "enum": ["gathered", "optimized_exact"]
                 },
                 "fine_pair_chunk_size": {
                   "type": "integer",

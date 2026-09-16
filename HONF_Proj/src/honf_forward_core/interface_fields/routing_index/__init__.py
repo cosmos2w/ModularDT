@@ -15,6 +15,9 @@ from .pair_join import (
     build_inverted_source_incidence,
     compile_routed_pairs,
     compile_two_hop_pairs,
+    compile_two_hop_pairs_batched,
+    compile_two_hop_pairs_optimized,
+    compile_two_hop_pairs_reference,
 )
 from .router import RoutedRoutingRouter, RoutingDescriptorMaps, fixed_data_mean_shift
 from .sparse_projection import (
@@ -48,7 +51,6 @@ __all__ = [
     "RoutedRoutingRouter",
     "RoutingCandidates",
     "RoutingDescriptorMaps",
-    "fixed_data_mean_shift",
     "RoutingGeometry",
     "RoutingGeometryProvider",
     "RoutingResistanceField",
@@ -57,7 +59,11 @@ __all__ = [
     "build_typed_source_incidence",
     "compile_routed_pairs",
     "compile_two_hop_pairs",
+    "compile_two_hop_pairs_batched",
+    "compile_two_hop_pairs_optimized",
+    "compile_two_hop_pairs_reference",
     "environment_source_measure",
+    "fixed_data_mean_shift",
     "geometry_bounds",
     "geometry_features",
     "geometry_length_scale",

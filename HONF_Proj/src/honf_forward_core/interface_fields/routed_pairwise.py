@@ -28,7 +28,10 @@ from .routing_index.geometry import (
     geometry_resistance,
     routing_affinity,
 )
-from .routing_index.pair_join import compile_two_hop_pairs
+from .routing_index.pair_join import (
+    compile_two_hop_pairs,
+    compile_two_hop_pairs_batched,
+)
 from .routing_index.router import RoutedRoutingRouter, fixed_data_mean_shift
 from .routing_index.sparse_projection import (
     build_typed_source_incidence,
@@ -134,6 +137,14 @@ class RoutedPairwiseField(DensePairwiseField):
         self.routing_geometry_scale = float(_option(routing_config, "geometry_scale", 0.25))
         self.routing_propensity_scale = float(_option(routing_config, "propensity_scale", 0.25))
         self.fine_pair_chunk_size = int(_option(routing_config, "fine_pair_chunk_size", 16384))
+        # Execution-only opt-in during the measured optimization study. The
+        # sparse union is always constructed first; this path is eligible only
+        # when every environmental pair is present, with its original prior.
+        self.routing_execution = str(_option(routing_config, "execution", "gathered"))
+        if self.routing_execution not in {"gathered", "optimized_exact"}:
+            raise ValueError("routing.execution must be 'gathered' or 'optimized_exact'.")
+        self.dense_environment_fast_path = self.routing_execution == "optimized_exact"
+        self.dense_environment_pair_tile_size = 262144
         self.mean_shift_steps = int(_option(routing_config, "mean_shift_steps", 3))
         self.mean_shift_feature_bandwidth = float(
             _option(routing_config, "mean_shift_feature_bandwidth", 1.0)
@@ -562,6 +573,47 @@ class RoutedPairwiseField(DensePairwiseField):
         # Output bias remains present even for M=0, as in Dense.
         return self.query_module_output(reduced * (count / (1.0 + count))[:, None, None])
 
+    @staticmethod
+    def _select_environment_batch(
+        values: torch.Tensor,
+        batch_index: torch.Tensor,
+        total_batch: int,
+    ) -> torch.Tensor:
+        """Select case rows while allowing geometry tensors to broadcast from one case."""
+
+        if values.ndim == 0:
+            return values
+        if int(values.shape[0]) == 1 and int(total_batch) != 1:
+            values = values.expand((int(total_batch), *values.shape[1:]))
+        return values.index_select(0, batch_index)
+
+    @staticmethod
+    def _select_environment_scale(
+        scale: torch.Tensor,
+        batch_index: torch.Tensor,
+    ) -> torch.Tensor:
+        """Select per-case scales, retaining one-dimensional broadcast scales."""
+
+        if scale.ndim <= 1 or int(scale.shape[0]) == 1:
+            return scale
+        return scale.index_select(0, batch_index)
+
+    @staticmethod
+    def _environment_scale_rows(scale: torch.Tensor, batch_size: int) -> torch.Tensor:
+        """Normalize coordinate scales to ``[B, 1, d]`` for pairwise reads."""
+
+        if scale.ndim == 1:
+            return scale.reshape(1, 1, -1).expand(int(batch_size), -1, -1)
+        if scale.ndim == 2:
+            if int(scale.shape[0]) == 1:
+                return scale[:, None, :].expand(int(batch_size), -1, -1)
+            return scale[:, None, :]
+        if scale.ndim == 3:
+            if int(scale.shape[0]) == 1:
+                return scale.expand(int(batch_size), -1, -1)
+            return scale
+        raise ValueError("coordinate_scale must have one, two, or three dimensions.")
+
     def _environment_score_tile(
         self, query, key, receivers, coordinates, scale, batch_index, receiver_index, source_index,
     ):
@@ -581,6 +633,64 @@ class RoutedPairwiseField(DensePairwiseField):
             result = value.new_zeros((group_count, self.env_attention.num_heads, self.env_attention.head_dim))
             return result.index_add(0, group, weighted)
 
+    def _read_environment_packed(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        receivers: torch.Tensor,
+        coordinates: torch.Tensor,
+        scale: torch.Tensor,
+        pairs: PackedPairs,
+    ) -> torch.Tensor:
+        """Reduce selected QE pairs into unprojected contexts.
+
+        The projections are supplied by the caller so a mixed complete/partial
+        batch read can evaluate each projected source and query exactly once.
+        This method deliberately returns before ``env_attention.output``;
+        callers combine packed and complete rows and apply that biased output
+        projection once, including rows with no selected pairs.
+        """
+
+        batch, query_count = receivers.shape[:2]
+        if pairs.unique_pair_count == 0:
+            return value.new_zeros(batch, query_count, self.hidden_dim)
+        scores = []
+        for start in range(0, pairs.unique_pair_count, self.fine_pair_chunk_size):
+            end = min(start + self.fine_pair_chunk_size, pairs.unique_pair_count)
+            scores.append(self._tile(
+                self._environment_score_tile,
+                query,
+                key,
+                receivers,
+                coordinates,
+                scale,
+                pairs.batch_index[start:end],
+                pairs.receiver_index[start:end],
+                pairs.source_index[start:end],
+            ))
+        group = pairs.batch_index * query_count + pairs.receiver_index
+        with torch.profiler.record_function("routing.qe_weighted_normalization"):
+            # Scalar FP64 log-priors avoid an FP32 1/Pi backward overflow;
+            # quadrature is already in Pi and is not applied again here.
+            weighted_scores = torch.cat(scores).double() + pairs.prior.double().log()[:, None]
+            attention = _segment_softmax(weighted_scores, group, batch * query_count)
+        reduced = value.new_zeros(
+            (batch * query_count, self.env_attention.num_heads, self.env_attention.head_dim)
+        )
+        for start in range(0, pairs.unique_pair_count, self.fine_pair_chunk_size):
+            end = min(start + self.fine_pair_chunk_size, pairs.unique_pair_count)
+            reduced = reduced + self._tile(
+                self._environment_value_tile,
+                value,
+                attention[start:end],
+                pairs.batch_index[start:end],
+                pairs.source_index[start:end],
+                group[start:end],
+                batch * query_count,
+            )
+        return reduced.reshape(batch, query_count, self.hidden_dim)
+
     def read_environment_pairs(self, state, encoded, receivers, receiver_features, pairs: PackedPairs) -> torch.Tensor:
         """Selected QE geometry/content, global receiver normalization, tiled V reads."""
         batch, query_count = receivers.shape[:2]
@@ -591,28 +701,154 @@ class RoutedPairwiseField(DensePairwiseField):
         query = self.env_attention.project_query(self.env_query(receiver_features))
         if pairs.unique_pair_count == 0:
             return self.env_attention.output(value.new_zeros(batch, query_count, self.hidden_dim))
-        scores = []
-        for start in range(0, pairs.unique_pair_count, self.fine_pair_chunk_size):
-            end = min(start + self.fine_pair_chunk_size, pairs.unique_pair_count)
-            scores.append(self._tile(
-                self._environment_score_tile, query, key, receivers, encoded.env_coords,
-                encoded.coordinate_scale, pairs.batch_index[start:end],
-                pairs.receiver_index[start:end], pairs.source_index[start:end],
-            ))
-        group = pairs.batch_index * query_count + pairs.receiver_index
-        with torch.profiler.record_function("routing.qe_weighted_normalization"):
-            # Scalar FP64 log-priors avoid an FP32 1/Pi backward overflow;
-            # quadrature is already in Pi and is not applied again here.
-            weighted_scores = torch.cat(scores).double() + pairs.prior.double().log()[:, None]
-            attention = _segment_softmax(weighted_scores, group, batch * query_count)
-        reduced = value.new_zeros((batch * query_count, self.env_attention.num_heads, self.env_attention.head_dim))
-        for start in range(0, pairs.unique_pair_count, self.fine_pair_chunk_size):
-            end = min(start + self.fine_pair_chunk_size, pairs.unique_pair_count)
-            reduced = reduced + self._tile(
-                self._environment_value_tile, value, attention[start:end], pairs.batch_index[start:end],
-                pairs.source_index[start:end], group[start:end], batch * query_count,
+        source_count = int(key.shape[-2])
+        if (
+            self.dense_environment_fast_path
+            and pairs.unique_pair_count == batch * query_count * source_count
+        ):
+            # The union is complete before any fine score is evaluated. Use
+            # pair indices rather than assuming an externally supplied packed
+            # list has canonical order. No omitted fine pair is evaluated.
+            pair_key = (pairs.batch_index * query_count + pairs.receiver_index) * source_count + pairs.source_index
+            prior = pairs.prior.new_zeros(batch * query_count * source_count).scatter(
+                0, pair_key, pairs.prior
+            ).reshape(batch, query_count, source_count)
+            query_tile = max(1, self.dense_environment_pair_tile_size // (batch * source_count))
+            chunks = []
+            for start in range(0, query_count, query_tile):
+                end = min(start + query_tile, query_count)
+                chunks.append(self._tile(
+                    self._environment_complete_tile,
+                    query[:, :, start:end], key, value, receivers[:, start:end],
+                    encoded.env_coords, encoded.coordinate_scale, prior[:, start:end],
+                ))
+            reduced = torch.cat(chunks, dim=1)
+            return self.env_attention.output(reduced)
+        if not self.dense_environment_fast_path:
+            reduced = self._read_environment_packed(
+                query,
+                key,
+                value,
+                receivers,
+                encoded.env_coords,
+                encoded.coordinate_scale,
+                pairs,
             )
-        return self.env_attention.output(reduced.reshape(batch, query_count, self.hidden_dim))
+            return self.env_attention.output(reduced)
+
+        # A complete environmental support can occur for individual batch
+        # elements even when the global packed union is sparse.  Count packed
+        # rows by batch and run the exact dense QE path only for those cases;
+        # the remaining selected pairs keep the bounded packed evaluator.
+        pair_counts = torch.bincount(pairs.batch_index, minlength=batch)
+        full_batch = pair_counts == query_count * source_count
+        full_indices = torch.nonzero(full_batch, as_tuple=False).flatten()
+        if int(full_indices.numel()) == 0:
+            reduced = self._read_environment_packed(
+                query,
+                key,
+                value,
+                receivers,
+                encoded.env_coords,
+                encoded.coordinate_scale,
+                pairs,
+            )
+            return self.env_attention.output(reduced)
+
+        full_pair_mask = full_batch.index_select(0, pairs.batch_index)
+        partial_indices = torch.nonzero(~full_batch, as_tuple=False).flatten()
+
+        full_remap = pairs.batch_index.new_full((batch,), -1)
+        full_remap[full_indices] = torch.arange(
+            int(full_indices.numel()), device=full_indices.device, dtype=full_indices.dtype
+        )
+        full_pair_batch = full_remap.index_select(0, pairs.batch_index[full_pair_mask])
+        full_prior = pairs.prior[full_pair_mask]
+        full_pair_key = (
+            full_pair_batch * query_count + pairs.receiver_index[full_pair_mask]
+        ) * source_count + pairs.source_index[full_pair_mask]
+        full_prior_dense = full_prior.new_zeros(
+            int(full_indices.numel()) * query_count * source_count
+        ).scatter(0, full_pair_key, full_prior).reshape(
+            int(full_indices.numel()), query_count, source_count
+        )
+        full_query = self._select_environment_batch(query, full_indices, batch)
+        full_key = self._select_environment_batch(key, full_indices, batch)
+        full_value = self._select_environment_batch(value, full_indices, batch)
+        full_receivers = self._select_environment_batch(receivers, full_indices, batch)
+        full_coordinates = self._select_environment_batch(encoded.env_coords, full_indices, batch)
+        full_scale = self._select_environment_scale(encoded.coordinate_scale, full_indices)
+        query_tile = max(
+            1,
+            self.dense_environment_pair_tile_size
+            // (int(full_indices.numel()) * source_count),
+        )
+        full_chunks = []
+        for start in range(0, query_count, query_tile):
+            end = min(start + query_tile, query_count)
+            full_chunks.append(self._tile(
+                self._environment_complete_tile,
+                full_query[:, :, start:end],
+                full_key,
+                full_value,
+                full_receivers[:, start:end],
+                full_coordinates,
+                full_scale,
+                full_prior_dense[:, start:end],
+            ))
+        full_reduced = torch.cat(full_chunks, dim=1)
+
+        reduced = value.new_zeros(batch, query_count, self.hidden_dim)
+        reduced = reduced.index_copy(0, full_indices, full_reduced)
+        if int(partial_indices.numel()) != 0:
+            partial_remap = pairs.batch_index.new_full((batch,), -1)
+            partial_remap[partial_indices] = torch.arange(
+                int(partial_indices.numel()),
+                device=partial_indices.device,
+                dtype=partial_indices.dtype,
+            )
+            partial_pair_mask = ~full_pair_mask
+            partial_prior = pairs.prior[partial_pair_mask]
+            partial_count = int(partial_prior.numel())
+            partial_pairs = PackedPairs(
+                partial_remap.index_select(0, pairs.batch_index[partial_pair_mask]),
+                pairs.receiver_index[partial_pair_mask],
+                pairs.source_index[partial_pair_mask],
+                partial_prior,
+                partial_count,
+                partial_count,
+            )
+            partial_reduced = self._read_environment_packed(
+                self._select_environment_batch(query, partial_indices, batch),
+                self._select_environment_batch(key, partial_indices, batch),
+                self._select_environment_batch(value, partial_indices, batch),
+                self._select_environment_batch(receivers, partial_indices, batch),
+                self._select_environment_batch(encoded.env_coords, partial_indices, batch),
+                self._select_environment_scale(encoded.coordinate_scale, partial_indices),
+                partial_pairs,
+            )
+            reduced = reduced.index_copy(0, partial_indices, partial_reduced)
+        return self.env_attention.output(reduced)
+
+    def _environment_complete_tile(self, query, key, value, receivers, coordinates, scale, prior):
+        """Exact full-support QE with batched products, bounded receiver tiles.
+
+        Geometry and prior arithmetic match the packed reader, including FP64
+        normalization and casting attention back to the value dtype. The
+        callback is checkpointed as a whole, so its pairwise geometry MLP
+        activations are not retained across all receiver chunks in training.
+        """
+        with torch.profiler.record_function("routing.qe_complete_support"):
+            scale_rows = self._environment_scale_rows(scale, receivers.shape[0])
+            relative = (
+                receivers[:, :, None, :] - coordinates[:, None, :, :]
+            ) / scale_rows[:, :, None, :]
+            bias = self.env_geometry_bias(self.relative_fourier(relative)).permute(0, 3, 1, 2)
+            scores = torch.matmul(query, key.transpose(-1, -2)) / (float(self.env_attention.head_dim) ** 0.5)
+            weighted = (scores + bias).double() + prior.double().log()[:, None, :, :]
+            attention = torch.softmax(weighted, dim=-1).to(value.dtype)
+            reduced = torch.matmul(attention, value).transpose(1, 2)
+            return reduced.reshape(receivers.shape[0], receivers.shape[1], self.hidden_dim)
 
     def read(
         self,
@@ -649,10 +885,24 @@ class RoutedPairwiseField(DensePairwiseField):
             query_descriptors=query_descriptors,
         )
         with torch.profiler.record_function("routing.pair_join_deduplicate"):
-            module_pairs = compile_positive_pairs(module_projection.density, module_incidence)
-            environment_pairs = compile_positive_pairs(
-                environment_projection.density, environment_incidence
-            )
+            if self.routing_execution == "optimized_exact":
+                module_pairs = compile_two_hop_pairs_batched(
+                    module_projection.density,
+                    module_incidence,
+                    scalar_tile_size=262144,
+                    use_checkpoint=False,
+                )
+                environment_pairs = compile_two_hop_pairs_batched(
+                    environment_projection.density,
+                    environment_incidence,
+                    scalar_tile_size=262144,
+                    use_checkpoint=False,
+                )
+            else:
+                module_pairs = compile_positive_pairs(module_projection.density, module_incidence)
+                environment_pairs = compile_positive_pairs(
+                    environment_projection.density, environment_incidence
+                )
         module_context = self.read_module_pairs(state, encoded, receivers, module_pairs)
         environment_context = self.read_environment_pairs(
             state, encoded, receivers, receiver_features, environment_pairs
