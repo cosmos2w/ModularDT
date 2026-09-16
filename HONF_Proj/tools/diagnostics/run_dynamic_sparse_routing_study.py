@@ -123,6 +123,14 @@ def _json_value(value: Any) -> Any:
     return value
 
 
+def _map_value_to_cpu_array(value: Any) -> Any:
+    """Detach tensor map values before NumPy inspection/export."""
+
+    if torch.is_tensor(value):
+        return value.detach().cpu().numpy()
+    return value
+
+
 def write_json(path: Path, payload: Mapping[str, Any]) -> None:
     """Write one compact diagnostic artifact beneath the requested path."""
 
@@ -2628,8 +2636,7 @@ def _selected_routing_map_arrays(
         maps[str(name)] = np.asarray(array)
 
     def without_single_batch(value: Any) -> Any:
-        if torch.is_tensor(value) and value.ndim > 0 and int(value.shape[0]) == 1:
-            return value[0]
+        value = _map_value_to_cpu_array(value)
         array = np.asarray(value) if isinstance(value, np.ndarray) else None
         if array is not None and array.ndim > 0 and int(array.shape[0]) == 1:
             return array[0]
