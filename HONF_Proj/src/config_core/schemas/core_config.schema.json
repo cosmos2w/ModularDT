@@ -102,7 +102,7 @@
               "additionalProperties": false,
               "properties": {
                 "strategy": {
-                  "const": "module_hubs"
+                  "enum": ["module_hubs", "mean_shift"]
                 },
                 "descriptor_dim": {
                   "type": "integer",
@@ -143,6 +143,13 @@
                 "fine_pair_chunk_size": {
                   "type": "integer",
                   "minimum": 1
+                },
+                "mean_shift_steps": {
+                  "const": 3
+                },
+                "mean_shift_feature_bandwidth": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
                 }
               }
             },

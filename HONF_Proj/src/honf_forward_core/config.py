@@ -133,7 +133,7 @@ LEGACY_ARCHITECTURE_KEYS = {
 
 @dataclass
 class RoutingIndexConfig:
-    """Lightweight module-hub routing; fine response capacity remains Dense's."""
+    """Scalar routing settings; fine response capacity remains Dense's."""
 
     strategy: str = "module_hubs"
     descriptor_dim: int = 32
@@ -147,9 +147,19 @@ class RoutingIndexConfig:
     resistance_mode: str = "adapter"
     execution: str = "gathered"
     fine_pair_chunk_size: int = 16384
+    # Run 2100 is intentionally a fixed three-step experiment.  These fields
+    # are omitted from historical module-hub profiles and materialize only
+    # when the new strategy is selected.
+    mean_shift_steps: int = 3
+    mean_shift_feature_bandwidth: float = 1.0
 
     def __post_init__(self) -> None:
-        for name in ("descriptor_dim", "router_hidden_dim", "fine_pair_chunk_size"):
+        for name in (
+            "descriptor_dim",
+            "router_hidden_dim",
+            "fine_pair_chunk_size",
+            "mean_shift_steps",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"routing.{name} must be a positive integer.")
@@ -157,12 +167,20 @@ class RoutingIndexConfig:
             value = float(getattr(self, name))
             if not math.isfinite(value) or value < 0 or (name == "temperature" and value == 0):
                 raise ValueError(f"routing.{name} must be finite and nonnegative (temperature positive).")
+        if not math.isfinite(float(self.mean_shift_feature_bandwidth)) or self.mean_shift_feature_bandwidth <= 0:
+            raise ValueError("routing.mean_shift_feature_bandwidth must be finite and positive.")
         required = {"strategy": "module_hubs", "source_normalizer": "sparsemax",
                     "query_normalizer": "source_measure_sparsemax", "resistance_mode": "adapter",
                     "execution": "gathered"}
+        if self.strategy not in {"module_hubs", "mean_shift"}:
+            raise ValueError("routing.strategy currently supports 'module_hubs' or 'mean_shift'.")
         for name, expected in required.items():
+            if name == "strategy":
+                continue
             if getattr(self, name) != expected:
                 raise ValueError(f"routing.{name} currently supports only {expected!r}.")
+        if self.strategy == "mean_shift" and self.mean_shift_steps != 3:
+            raise ValueError("routing.mean_shift_steps is fixed at exactly 3 for mean_shift.")
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "RoutingIndexConfig":
@@ -757,6 +775,13 @@ class UnifiedForwardConfig:
             if isinstance(interface_payload, dict):
                 if self.interface_model.routing is None:
                     interface_payload.pop("routing", None)
+                elif self.interface_model.routing.strategy != "mean_shift":
+                    # Keep the historical module-hub serialization shape
+                    # stable; these fields are meaningful only for Run 2100.
+                    routing_payload = interface_payload.get("routing")
+                    if isinstance(routing_payload, dict):
+                        routing_payload.pop("mean_shift_steps", None)
+                        routing_payload.pop("mean_shift_feature_bandwidth", None)
                 if self.forward_architecture != "sparse_interface_honf":
                     interface_payload.pop("support_spacing_factor", None)
                     interface_payload.pop("group_read_mode", None)

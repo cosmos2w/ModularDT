@@ -15,6 +15,18 @@
       "stage": "dynamic-sparse-routing-goal1"
     },
     {
+      "name": "routing_mean_shift_context",
+      "path": "project://src/config_core/forward/routing_mean_shift_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "three-step fixed-data mean-shift routing / delayed unique fine QM and QE pairs",
+      "checkpoint_families": [
+        "Run 2100 routing candidate"
+      ],
+      "owner": "forward-research",
+      "stage": "dynamic-sparse-routing-goal2"
+    },
+    {
       "name": "nstage2_hierarchical_regional_context",
       "path": "project://src/config_core/forward/nstage2_hierarchical_regional_context.json",
       "status": "candidate",

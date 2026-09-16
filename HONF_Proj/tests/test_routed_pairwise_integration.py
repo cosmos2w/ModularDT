@@ -92,7 +92,8 @@ def test_empty_module_case_uses_only_neutral_environment_candidate():
         torch.testing.assert_close(predict(core, empty_alone), output[:1], atol=2e-6, rtol=2e-5)
 
 
-def test_physical_passes_refresh_live_routing_with_frozen_local_surrogate():
+@pytest.mark.parametrize("strategy", ["module_hubs", "mean_shift"])
+def test_physical_passes_refresh_live_routing_with_frozen_local_surrogate(strategy):
     from pathlib import Path
 
     from channelthermal.config import ChannelThermalHONFConfig
@@ -107,7 +108,8 @@ def test_physical_passes_refresh_live_routing_with_frozen_local_surrogate():
             'module_radius': .45, 'num_env_tokens_x': 4, 'num_env_tokens_y': 3,
             'boundary_feature_mode': 'none', 'interface_model': {
                 'message_hidden_dim': 24, 'attention_heads': 4, 'receiver_chunk_size': 8,
-                'routing': {'descriptor_dim': 8, 'router_hidden_dim': 12, 'fine_pair_chunk_size': 32}}},
+                'routing': {'strategy': strategy, 'descriptor_dim': 8, 'router_hidden_dim': 12,
+                            'fine_pair_chunk_size': 32}}},
         'channelthermal': {'use_local_surrogate': True, 'freeze_local_surrogate': True,
             'local_surrogate_checkpoint_path': str(local_checkpoint),
             'internal_prediction_mode': 'local_surrogate', 'interaction_refinement_steps': 1,

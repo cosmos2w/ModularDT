@@ -16,7 +16,7 @@ from .pair_join import (
     compile_routed_pairs,
     compile_two_hop_pairs,
 )
-from .router import RoutedRoutingRouter, RoutingDescriptorMaps
+from .router import RoutedRoutingRouter, RoutingDescriptorMaps, fixed_data_mean_shift
 from .sparse_projection import (
     build_typed_source_incidence,
     environment_source_measure,
@@ -48,6 +48,7 @@ __all__ = [
     "RoutedRoutingRouter",
     "RoutingCandidates",
     "RoutingDescriptorMaps",
+    "fixed_data_mean_shift",
     "RoutingGeometry",
     "RoutingGeometryProvider",
     "RoutingResistanceField",

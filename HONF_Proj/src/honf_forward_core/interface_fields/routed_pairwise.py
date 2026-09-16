@@ -29,7 +29,7 @@ from .routing_index.geometry import (
     routing_affinity,
 )
 from .routing_index.pair_join import compile_two_hop_pairs
-from .routing_index.router import RoutedRoutingRouter
+from .routing_index.router import RoutedRoutingRouter, fixed_data_mean_shift
 from .routing_index.sparse_projection import (
     build_typed_source_incidence,
     environment_source_measure,
@@ -123,9 +123,9 @@ class RoutedPairwiseField(DensePairwiseField):
             activation_checkpointing=activation_checkpointing,
         )
         self.routing_strategy = str(_option(routing_config, "strategy", "module_hubs"))
-        if self.routing_strategy != "module_hubs":
+        if self.routing_strategy not in {"module_hubs", "mean_shift"}:
             raise ValueError(
-                "routed_pairwise_honf currently implements routing.strategy='module_hubs' only."
+                "routed_pairwise_honf supports routing.strategy='module_hubs' or 'mean_shift'."
             )
         self.routing_descriptor_dim = int(_option(routing_config, "descriptor_dim", 32))
         self.routing_hidden_dim = int(_option(routing_config, "router_hidden_dim", 64))
@@ -134,10 +134,21 @@ class RoutedPairwiseField(DensePairwiseField):
         self.routing_geometry_scale = float(_option(routing_config, "geometry_scale", 0.25))
         self.routing_propensity_scale = float(_option(routing_config, "propensity_scale", 0.25))
         self.fine_pair_chunk_size = int(_option(routing_config, "fine_pair_chunk_size", 16384))
+        self.mean_shift_steps = int(_option(routing_config, "mean_shift_steps", 3))
+        self.mean_shift_feature_bandwidth = float(
+            _option(routing_config, "mean_shift_feature_bandwidth", 1.0)
+        )
         if self.routing_temperature <= 0.0:
             raise ValueError("routing temperature must be positive.")
         if self.fine_pair_chunk_size <= 0:
             raise ValueError("routing fine_pair_chunk_size must be positive.")
+        if self.routing_strategy == "mean_shift" and not 0 <= self.mean_shift_steps <= 3:
+            # The typed configuration/profile requires exactly three steps;
+            # direct backend construction permits T=0..2 numerical fixtures
+            # that verify the fixed-data update independently.
+            raise ValueError("routing mean-shift steps must be between 0 and 3.")
+        if self.mean_shift_feature_bandwidth <= 0.0:
+            raise ValueError("routing mean-shift feature bandwidth must be positive.")
         self.router = RoutedRoutingRouter(
             hidden_dim,
             descriptor_dim=self.routing_descriptor_dim,
@@ -176,17 +187,60 @@ class RoutedPairwiseField(DensePairwiseField):
     def _descriptor_query(self, receiver_features: torch.Tensor, query_geometry: torch.Tensor, global_token: torch.Tensor) -> torch.Tensor:
         return self.router.query_map(receiver_features, query_geometry, global_token)
 
-    def _build_candidates(
+    def _mean_shift_candidates(
+        self,
+        encoded: Any,
+        module_centers: torch.Tensor,
+        module_descriptors: torch.Tensor,
+        module_valid: torch.Tensor,
+        length_scale: torch.Tensor,
+        *,
+        return_trajectory: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Generate all module-seeded candidates with three live updates."""
+
+        def resistance_fn(starts: torch.Tensor, ends: torch.Tensor) -> torch.Tensor:
+            return self._resistance(encoded, starts, ends, "source_module")
+
+        return fixed_data_mean_shift(
+            module_centers,
+            module_descriptors,
+            length_scale,
+            source_valid=_as_bool_mask(module_valid),
+            steps=self.mean_shift_steps,
+            feature_bandwidth=self.mean_shift_feature_bandwidth,
+            resistance_fn=resistance_fn,
+            return_trajectory=return_trajectory,
+        )
+
+    def _build_candidates_with_sources(
         self,
         encoded: Any,
         module_tokens: torch.Tensor,
-    ) -> tuple[RoutingCandidates, torch.Tensor, torch.Tensor]:
+        *,
+        return_trajectory: bool = False,
+    ) -> tuple[RoutingCandidates, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
         batch, module_count, spatial_dim = module_tokens.shape[0], module_tokens.shape[1], encoded.module_centers.shape[-1]
         module_geometry = self._geometry(encoded, encoded.module_centers)
         module_descriptors = self._descriptor_module(module_tokens, module_geometry, encoded.global_token)
-        candidate_coords = encoded.module_centers
-        candidate_descriptors = module_descriptors
-        candidate_geometry = module_geometry
+        candidate_trajectory = None
+        if self.routing_strategy == "mean_shift":
+            length_scale = self._length_scale(encoded, encoded.module_centers)
+            shifted, candidate_trajectory = self._mean_shift_candidates(
+                encoded,
+                encoded.module_centers,
+                module_descriptors,
+                encoded.module_present,
+                length_scale,
+                return_trajectory=return_trajectory,
+            )
+            candidate_coords = shifted[..., :spatial_dim] * length_scale.reshape(1, 1, spatial_dim)
+            candidate_descriptors = shifted[..., spatial_dim:]
+            candidate_geometry = self._geometry(encoded, candidate_coords)
+        else:
+            candidate_coords = encoded.module_centers
+            candidate_descriptors = module_descriptors
+            candidate_geometry = module_geometry
         candidate_valid = _as_bool_mask(encoded.module_present)
         candidate_origin = torch.arange(module_count, device=module_tokens.device, dtype=torch.long)[None].expand(batch, -1)
         candidate_propensity = self.router.hub_propensity(
@@ -202,6 +256,20 @@ class RoutedPairwiseField(DensePairwiseField):
             background_descriptors = encoded.module_centers.new_zeros((batch, 1, self.routing_descriptor_dim))
             background_geometry = self._geometry(encoded, background_coords)
             background_propensity = encoded.module_centers.new_zeros((batch, 1))
+            if candidate_trajectory is not None:
+                background_state = torch.cat(
+                    (
+                        background_coords / self._length_scale(encoded, encoded.module_centers).reshape(1, 1, spatial_dim),
+                        background_descriptors,
+                    ),
+                    dim=-1,
+                )
+                background_trajectory = background_state[:, None, :, :].expand(
+                    -1, candidate_trajectory.shape[1], -1, -1
+                )
+                candidate_trajectory = torch.cat(
+                    (candidate_trajectory, background_trajectory), dim=2
+                )
             candidate_coords = torch.cat([candidate_coords, background_coords], dim=1)
             candidate_descriptors = torch.cat([candidate_descriptors, background_descriptors], dim=1)
             candidate_geometry = torch.cat([candidate_geometry, background_geometry], dim=1)
@@ -217,6 +285,18 @@ class RoutedPairwiseField(DensePairwiseField):
             propensity=candidate_propensity,
             valid=candidate_valid,
             candidate_origin=candidate_origin,
+        )
+        return candidates, candidate_geometry, module_geometry, module_descriptors, candidate_trajectory
+
+    def _build_candidates(
+        self,
+        encoded: Any,
+        module_tokens: torch.Tensor,
+    ) -> tuple[RoutingCandidates, torch.Tensor, torch.Tensor]:
+        """Backward-compatible candidate builder for small numerical fixtures."""
+
+        candidates, candidate_geometry, module_geometry, _, _ = self._build_candidates_with_sources(
+            encoded, module_tokens
         )
         return candidates, candidate_geometry, module_geometry
 
@@ -270,7 +350,6 @@ class RoutedPairwiseField(DensePairwiseField):
         *,
         return_routing_maps: bool = False,
     ) -> dict[str, Any]:
-        del return_routing_maps
         fine = self.prepare_fine_messages(encoded, module_states)
         global_env = encoded.global_token[:, None, :].expand(-1, fine["env_tokens"].shape[1], -1)
         contextual_env = fine["env_tokens"] + self.env_update(
@@ -278,11 +357,18 @@ class RoutedPairwiseField(DensePairwiseField):
         )
 
         with torch.profiler.record_function("routing.candidate_generation"):
-            candidates, candidate_geometry, module_geometry = self._build_candidates(
-                encoded, fine["module_tokens"]
+            (
+                candidates,
+                candidate_geometry,
+                module_geometry,
+                module_descriptors,
+                candidate_trajectory,
+            ) = self._build_candidates_with_sources(
+                encoded,
+                fine["module_tokens"],
+                return_trajectory=bool(return_routing_maps),
             )
         with torch.profiler.record_function("routing.source_route_preparation"):
-            module_descriptors = candidates.descriptors[:, : encoded.module_centers.shape[1]]
             env_geometry = self._geometry(
                 encoded,
                 encoded.env_coords,
@@ -319,19 +405,29 @@ class RoutedPairwiseField(DensePairwiseField):
                 torch.ones_like(environment_weights, dtype=torch.bool),
                 candidates.valid,
             )
+        routing_diagnostics: dict[str, Any] = {
+            "candidate_geometry": candidate_geometry,
+            "module_geometry": module_geometry,
+            "environment_geometry": env_geometry,
+            # For mean_shift this remains the fixed source descriptor map;
+            # candidates.descriptors may have moved in joint space.
+            "module_descriptors": module_descriptors,
+            "environment_descriptors": env_descriptors,
+            "module_logits": module_logits,
+            "environment_logits": environment_logits,
+        }
+        if candidate_trajectory is not None:
+            routing_scale = self._length_scale(encoded, encoded.module_centers)
+            routing_diagnostics["candidate_trajectory"] = {
+                "coords": candidate_trajectory[..., : encoded.module_centers.shape[-1]]
+                * routing_scale.reshape(1, 1, 1, -1),
+                "descriptors": candidate_trajectory[..., encoded.module_centers.shape[-1] :],
+            }
         routing_index = PreparedRoutingIndex(
             candidates=candidates,
             module_incidence=module_incidence,
             environment_incidence=environment_incidence,
-            diagnostics={
-                "candidate_geometry": candidate_geometry,
-                "module_geometry": module_geometry,
-                "environment_geometry": env_geometry,
-                "module_descriptors": module_descriptors,
-                "environment_descriptors": env_descriptors,
-                "module_logits": module_logits,
-                "environment_logits": environment_logits,
-            },
+            diagnostics=routing_diagnostics,
         )
         module_support = (module_incidence.membership > 0.0).sum(dim=-1)
         environment_support = (environment_incidence.membership > 0.0).sum(dim=-1)
