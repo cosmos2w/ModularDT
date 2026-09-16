@@ -363,3 +363,62 @@ def test_prepare_keeps_original_module_descriptors_for_mean_shift_source_logits(
     torch.testing.assert_close(
         diagnostics["module_logits"], expected_logits, rtol=1e-11, atol=1e-12
     )
+
+
+def test_mean_shift_recomputes_3d_resistance_with_fixed_source_ends_and_gradients() -> None:
+    source_coords = torch.tensor(
+        [[[0.0, 0.0, 0.0], [0.35, 1.1, -0.4], [2.2, -1.3, 0.7]]],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    source_descriptors = torch.tensor(
+        [[[0.2, -0.1], [0.7, 0.35], [-0.45, 0.8]]], dtype=torch.float64
+    )
+    length_scale = torch.tensor([1.0, 1.4, 0.8], dtype=torch.float64)
+    resistance_calls: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    def resistance(starts: torch.Tensor, ends: torch.Tensor) -> torch.Tensor:
+        resistance_calls.append((starts.detach().clone(), ends.detach().clone()))
+        # This finite nonnegative penalty depends on both endpoint tensors, so
+        # the coordinate gradient must pass through each moving candidate.
+        return 0.05 * (starts - ends).square().sum(dim=-1)
+
+    shifted, _ = fixed_data_mean_shift(
+        source_coords,
+        source_descriptors,
+        length_scale,
+        source_valid=torch.ones(1, 3, dtype=torch.bool),
+        steps=3,
+        feature_bandwidth=0.9,
+        resistance_fn=resistance,
+    )
+    assert shifted.shape == (1, 3, 5)
+    assert len(resistance_calls) == 3
+    expected_ends = source_coords.detach()[:, None, :, :].expand(1, 3, 3, 3)
+    for starts, ends in resistance_calls:
+        torch.testing.assert_close(ends, expected_ends)
+    assert not torch.allclose(resistance_calls[0][0], resistance_calls[1][0])
+    assert torch.isfinite(shifted).all()
+    coordinate_gradient = torch.autograd.grad(shifted[..., :3].square().sum(), source_coords)[0]
+    assert torch.isfinite(coordinate_gradient).all()
+    assert torch.count_nonzero(coordinate_gradient) > 0
+
+    neutral_coords = source_coords.detach().clone()
+    without_resistance, _ = fixed_data_mean_shift(
+        neutral_coords,
+        source_descriptors,
+        length_scale,
+        source_valid=torch.ones(1, 3, dtype=torch.bool),
+        steps=3,
+        feature_bandwidth=0.9,
+    )
+    with_zero_resistance, _ = fixed_data_mean_shift(
+        neutral_coords,
+        source_descriptors,
+        length_scale,
+        source_valid=torch.ones(1, 3, dtype=torch.bool),
+        steps=3,
+        feature_bandwidth=0.9,
+        resistance_fn=lambda starts, ends: starts.new_zeros(starts.shape[:-1]),
+    )
+    torch.testing.assert_close(with_zero_resistance, without_resistance)

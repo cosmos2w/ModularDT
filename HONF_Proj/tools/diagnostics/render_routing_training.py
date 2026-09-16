@@ -12,6 +12,7 @@ import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 
 
 def read_rows(path):
@@ -37,6 +38,8 @@ def render(run_dir: Path, output: Path, *, through_epoch: int = 500,
     output.mkdir(parents=True, exist_ok=True)
     plt.rcParams.update({"font.size": 9, "axes.spines.top": False, "axes.spines.right": False})
     fig, axes = plt.subplots(2, 2, figsize=(11, 7), constrained_layout=True)
+    fig.suptitle(f"{candidate_label}: epochs 1–{through_epoch}"
+                 + (" (interim)" if through_epoch < 500 else ""), fontsize=12)
     models = [(candidate_label, rows, "#D2691E")]
     sources = {candidate_label: str((run_dir / "metrics.csv").resolve())}
     for run, label, color in (("1401", "Legacy 1401", "#6B7280"),
@@ -83,10 +86,13 @@ def render(run_dir: Path, output: Path, *, through_epoch: int = 500,
     module_retention = np.divide(module_pairs, active_m, out=np.full_like(module_pairs, np.nan), where=active_m > 0)
     env_retention = env_pairs / 192.0
     ax.plot(epoch, module_retention, lw=1.1, label="QM: mean pair count / mean active M", color="#2563A6")
-    ax.plot(epoch, env_retention, lw=1.1, label="QE: mean pair count / 192", color="#47845B")
+    ax.plot(epoch, env_retention, lw=1.1, ls="--", label="QE: mean pair count / 192", color="#47845B")
     ax.set(title="P2 effective fine-pair retention", xlabel="Epoch", ylabel="Ratio to active-source dense work", ylim=(0, 1.03))
     ax.grid(alpha=.2)
     ax.legend(frameon=False, fontsize=8)
+    for ax in axes.flat:
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.set_xlim(1, max(through_epoch, 2))
     for extension in ("png", "svg"):
         fig.savefig(output / f"training_trajectory.{extension}", dpi=180)
     plt.close(fig)
