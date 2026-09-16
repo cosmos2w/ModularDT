@@ -344,6 +344,7 @@ def named_gradient_norms(model: Any) -> dict[str, dict[str, Any]]:
     groups = {
         "organizer_module_score": ("core.organizer.module_score.",),
         "organizer_env_score": ("core.organizer.env_score.",),
+        "environment_encoder": ("core.env_encoder.",),
         "module_environment_context": (
             "core.organizer.me_query.",
             "core.organizer.me_key.",
