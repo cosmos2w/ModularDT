@@ -90,6 +90,7 @@ FORWARD_ARCHITECTURES = {
     "sparse_interface_honf",
     "regional_response_honf",
     "hierarchical_regional_honf",
+    "routed_pairwise_honf",
 }
 
 LEGACY_ARCHITECTURE_KEYS = {
@@ -131,6 +132,44 @@ LEGACY_ARCHITECTURE_KEYS = {
 
 
 @dataclass
+class RoutingIndexConfig:
+    """Lightweight module-hub routing; fine response capacity remains Dense's."""
+
+    strategy: str = "module_hubs"
+    descriptor_dim: int = 32
+    router_hidden_dim: int = 64
+    source_normalizer: str = "sparsemax"
+    query_normalizer: str = "source_measure_sparsemax"
+    temperature: float = 1.0
+    content_scale: float = 2.0
+    geometry_scale: float = 0.25
+    propensity_scale: float = 0.25
+    resistance_mode: str = "adapter"
+    execution: str = "gathered"
+    fine_pair_chunk_size: int = 16384
+
+    def __post_init__(self) -> None:
+        for name in ("descriptor_dim", "router_hidden_dim", "fine_pair_chunk_size"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"routing.{name} must be a positive integer.")
+        for name in ("temperature", "content_scale", "geometry_scale", "propensity_scale"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0 or (name == "temperature" and value == 0):
+                raise ValueError(f"routing.{name} must be finite and nonnegative (temperature positive).")
+        required = {"strategy": "module_hubs", "source_normalizer": "sparsemax",
+                    "query_normalizer": "source_measure_sparsemax", "resistance_mode": "adapter",
+                    "execution": "gathered"}
+        for name, expected in required.items():
+            if getattr(self, name) != expected:
+                raise ValueError(f"routing.{name} currently supports only {expected!r}.")
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any]) -> "RoutingIndexConfig":
+        return _dataclass_from_dict(cls, dict(payload))
+
+
+@dataclass
 class InterfaceFieldConfig:
     """Matched-family settings shared by non-legacy interface fields."""
 
@@ -154,8 +193,11 @@ class InterfaceFieldConfig:
     response_region_block_shape: list[int] = field(default_factory=lambda: [2, 2])
     response_tree_opening_interval: list[float] = field(default_factory=lambda: [1.0, 2.0])
     coarse_module_source: str = "module_states"
+    routing: Optional[RoutingIndexConfig] = None
 
     def __post_init__(self) -> None:
+        if isinstance(self.routing, dict):
+            self.routing = RoutingIndexConfig.from_dict(self.routing)
         if int(self.message_hidden_dim) <= 0:
             raise ValueError("interface_model.message_hidden_dim must be positive.")
         if int(self.attention_heads) <= 0:
@@ -362,6 +404,11 @@ class UnifiedForwardConfig:
             raise ValueError(
                 "interface_model.support_spacing_factor is only valid for sparse_interface_honf."
             )
+        if self.forward_architecture == "routed_pairwise_honf":
+            if self.interface_model.routing is None:
+                raise ValueError("routed_pairwise_honf requires interface_model.routing.")
+        elif self.interface_model is not None and self.interface_model.routing is not None:
+            raise ValueError("interface_model.routing is only valid for routed_pairwise_honf.")
         if self.interface_model is not None and int(self.hidden_dim) % int(self.interface_model.attention_heads) != 0:
             raise ValueError("hidden_dim must be divisible by interface_model.attention_heads.")
         if (self.interface_model is not None
@@ -613,9 +660,9 @@ class UnifiedForwardConfig:
         if self.spatial_dim == 3:
             if self.coordinate_scale is None:
                 raise ValueError("spatial_dim=3 requires an explicit three-value coordinate_scale.")
-            if self.forward_architecture not in {"legacy_honf", "dense_pairwise_field"}:
+            if self.forward_architecture not in {"legacy_honf", "dense_pairwise_field", "routed_pairwise_honf"}:
                 raise ValueError(
-                    "spatial_dim=3 is supported only by legacy_honf or dense_pairwise_field."
+                    "spatial_dim=3 requires legacy_honf, dense_pairwise_field, or routed_pairwise_honf."
                 )
             if self.forward_architecture == "legacy_honf" and self.organizer_mode != "fixed_projection":
                 raise ValueError("spatial_dim=3 legacy_honf requires fixed_projection organization.")
@@ -708,6 +755,8 @@ class UnifiedForwardConfig:
                 payload.pop(key, None)
             interface_payload = payload.get("interface_model")
             if isinstance(interface_payload, dict):
+                if self.interface_model.routing is None:
+                    interface_payload.pop("routing", None)
                 if self.forward_architecture != "sparse_interface_honf":
                     interface_payload.pop("support_spacing_factor", None)
                     interface_payload.pop("group_read_mode", None)
@@ -758,6 +807,8 @@ class BatchData:
     # Optional adapter-owned environmental quadrature mass.  Appended after
     # all historical fields so positional BatchData construction is stable.
     env_weights: Optional[Any] = None
+    # Runtime case geometry; never stored as an executable checkpoint callback.
+    routing_geometry: Optional[Any] = None
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "BatchData":
@@ -771,6 +822,7 @@ class BatchData:
         payload = _to_plain_dict(self)
         # Keep the historical absent-measure representation unchanged.  A
         # supplied tensor is still described explicitly for adapter diagnostics.
+        payload.pop("routing_geometry", None)
         if self.env_weights is None:
             payload.pop("env_weights", None)
         return payload

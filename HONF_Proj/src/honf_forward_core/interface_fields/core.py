@@ -55,6 +55,14 @@ class InterfaceFieldCore(nn.Module):
                 frequencies,
                 activation_checkpointing=bool(options.activation_checkpointing),
             )
+        elif config.forward_architecture == "routed_pairwise_honf":
+            from .routed_pairwise import RoutedPairwiseField
+
+            self.backend = RoutedPairwiseField(
+                hidden, int(options.message_hidden_dim), heads, frequencies,
+                routing_config=options.routing,
+                activation_checkpointing=bool(options.activation_checkpointing),
+            )
         elif config.forward_architecture == "geometry_latent_field":
             self.backend = GeometryLatentField(
                 hidden,
@@ -223,6 +231,7 @@ class InterfaceFieldCore(nn.Module):
             env_region_ids=env_region_ids,
             env_hierarchy=env_hierarchy,
             env_hierarchy_geometry=hierarchy_geometry,
+            routing_geometry=batch.routing_geometry,
         )
 
     def prepare(
@@ -271,7 +280,7 @@ class InterfaceFieldCore(nn.Module):
                 else 0
             ),
         }
-        if self.config.forward_architecture in {"sparse_interface_honf", "hierarchical_regional_honf"}:
+        if self.config.forward_architecture in {"sparse_interface_honf", "hierarchical_regional_honf", "routed_pairwise_honf"}:
             aux.update(self.backend.preparation_aux(backend_state))
         return PreparedInterfaceField(encoded, module_states, backend_state, coarse_state, aux)
 
@@ -373,6 +382,27 @@ class InterfaceFieldCore(nn.Module):
                 if not values or not all(torch.is_tensor(value) for value in values):
                     continue
                 first = values[0]
+                if key.startswith("routing_") and key.endswith(("_raw_path_count", "_unique_pair_count")):
+                    aux[key] = torch.stack(values).sum()
+                    continue
+                if key.startswith(("routing_module_pair_", "routing_environment_pair_")):
+                    if key.endswith("_receiver"):
+                        offset = 0
+                        shifted = []
+                        for chunk_aux, width in backend_aux_chunks:
+                            if key in chunk_aux:
+                                shifted.append(chunk_aux[key] + offset)
+                            offset += width
+                        aux[key] = torch.cat(shifted, dim=0)
+                    else:
+                        aux[key] = torch.cat(values, dim=0)
+                    continue
+                if key.startswith("routing_") and key.endswith("_duplicate_expansion"):
+                    prefix = key.removesuffix("_duplicate_expansion")
+                    raw = torch.stack([entry[prefix + "_raw_path_count"] for entry, _ in backend_aux_chunks]).sum()
+                    unique = torch.stack([entry[prefix + "_unique_pair_count"] for entry, _ in backend_aux_chunks]).sum()
+                    aux[key] = raw / unique.clamp_min(1)
+                    continue
                 if key in {"hierarchical_traversal_rows", "hierarchical_incidence_rows"}:
                     aux[key] = torch.stack(values).sum()
                     continue
@@ -401,6 +431,11 @@ class InterfaceFieldCore(nn.Module):
                 # [B,H,Q,S].  The chunk widths are retained explicitly so a
                 # query count equal to the number of heads cannot confuse the
                 # axis selection.
+                if key.startswith("routing_") and first.ndim >= 2 and all(
+                    value.shape[1] == width for value, width in values_and_widths
+                ):
+                    aux[key] = torch.cat(values, dim=1)
+                    continue
                 if first.ndim >= 4 and all(
                     value.shape[2] == width for value, width in values_and_widths
                 ):

@@ -31,6 +31,7 @@ class EncodedInterfaceCase:
     env_region_ids: torch.Tensor | None = None
     env_hierarchy: EnvironmentHierarchy | None = None
     env_hierarchy_geometry: HierarchyGeometry | None = None
+    routing_geometry: Any = None
 
 
 @dataclass(frozen=True)

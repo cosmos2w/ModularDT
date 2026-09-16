@@ -10,6 +10,7 @@ import torch
 
 from honf_forward_core.config import BatchData
 from honf_forward_core.interface_fields import PreparedInterfaceField
+from .routing_geometry import ChannelThermalRoutingGeometry
 from .local_coupling import (
     build_local_module_params_from_global,
     teacher_port_tokens_from_interface_condition,
@@ -87,7 +88,10 @@ def _decode_temperature(
             flat,
             query_features=model._query_features(flat),
             return_routing_maps=bool(return_routing_maps),
+            return_interaction_aux=(model.config.core_honf.forward_architecture == "routed_pairwise_honf"),
         )
+    if "_interaction_aux" in decoded:
+        decoded.update(decoded.pop("_interaction_aux"))
     temperature = model._temperature_from_field_output(decoded["pred_field"]).reshape(batch, *leading)
     return temperature, decoded
 
@@ -208,6 +212,13 @@ def forward_interface_field(
             env_features=env.env_features,
             env_region_ids=getattr(env, "env_region_ids", None),
             env_hierarchy=getattr(env, "env_hierarchy", None),
+            routing_geometry=(
+                ChannelThermalRoutingGeometry(
+                    model.config.core_honf.domain_length_x,
+                    model.config.core_honf.domain_length_y,
+                    model.config.core_honf.module_radius,
+                ) if architecture == "routed_pairwise_honf" else None
+            ),
         )
     )
     if teacher_port_tokens is None and interface_condition is not None:
@@ -387,7 +398,7 @@ def forward_interface_field(
     interaction_aux: Dict[str, Any] = dict(final_prepared.interaction_aux)
     interaction_aux.update(decoder_output.pop("_interaction_aux"))
     for key, value in initial_read_aux.items():
-        if (not key.startswith("hierarchical_incidence_")
+        if (not key.startswith(("hierarchical_incidence_", "routing_module_pair_", "routing_environment_pair_"))
                 and torch.is_tensor(value) and value.ndim >= 2
                 and value.shape[1] == physical_port_xy.shape[1] * ntheta):
             interaction_aux[f"initial_port_{key}"] = value.reshape(
@@ -395,6 +406,11 @@ def forward_interface_field(
             )
         else:
             interaction_aux[f"initial_port_{key}"] = value
+
+    if architecture == "routed_pairwise_honf":
+        for key, value in provisional_read_aux.items():
+            if key.startswith("routing_"):
+                interaction_aux[f"provisional_{key}"] = value
 
     if local_outputs is not None:
         pred_internal = local_outputs["internal_temperature"]

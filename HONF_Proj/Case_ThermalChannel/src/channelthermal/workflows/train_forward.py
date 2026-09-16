@@ -730,6 +730,10 @@ def run_from_config(
             "val_wall_seconds": val_wall_seconds,
             "peak_cuda_memory_mb": epoch_peak_memory_mb,
         }
+        routing_keys = [key for key in row if key.startswith(("routing_", "val_routing_"))]
+        if routing_keys:
+            routing_row = {"epoch": epoch, **{key: row.pop(key) for key in sorted(routing_keys)}}
+            write_metrics_row(run_dir / "routing_metrics.csv", routing_row.keys(), routing_row)
         write_metrics_row(metrics_path, fieldnames, row)
         total_metric = float(row["val_loss_total"])
         field_metric = float(row["val_field_mse"])

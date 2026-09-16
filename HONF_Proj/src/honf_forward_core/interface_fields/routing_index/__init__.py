@@ -1,0 +1,76 @@
+"""Generic sparse routing algebra for routed pairwise interface fields."""
+
+from .geometry import (
+    geometry_bounds,
+    geometry_features,
+    geometry_length_scale,
+    geometry_resistance,
+    line_resistance,
+    routing_affinity,
+    sample_segment_resistance,
+    segment_resistance,
+    stable_descriptor_norm,
+)
+from .pair_join import (
+    build_inverted_source_incidence,
+    compile_routed_pairs,
+    compile_two_hop_pairs,
+)
+from .router import RoutedRoutingRouter, RoutingDescriptorMaps
+from .sparse_projection import (
+    build_typed_source_incidence,
+    environment_source_measure,
+    induced_hub_measure,
+    masked_sparsemax,
+    module_source_measure,
+    normalized_source_measure,
+    ordinary_source_sparsemax,
+    query_source_measure_sparsemax,
+    source_measure_sparsemax,
+)
+from .types import (
+    InvertedSourceIncidence,
+    MeasureQueryProjection,
+    PackedPairs,
+    PreparedRoutingIndex,
+    RoutingCandidates,
+    RoutingGeometry,
+    RoutingGeometryProvider,
+    RoutingResistanceField,
+    TypedSourceIncidence,
+)
+
+__all__ = [
+    "InvertedSourceIncidence",
+    "MeasureQueryProjection",
+    "PackedPairs",
+    "PreparedRoutingIndex",
+    "RoutedRoutingRouter",
+    "RoutingCandidates",
+    "RoutingDescriptorMaps",
+    "RoutingGeometry",
+    "RoutingGeometryProvider",
+    "RoutingResistanceField",
+    "TypedSourceIncidence",
+    "build_inverted_source_incidence",
+    "build_typed_source_incidence",
+    "compile_routed_pairs",
+    "compile_two_hop_pairs",
+    "environment_source_measure",
+    "geometry_bounds",
+    "geometry_features",
+    "geometry_length_scale",
+    "geometry_resistance",
+    "induced_hub_measure",
+    "line_resistance",
+    "masked_sparsemax",
+    "module_source_measure",
+    "normalized_source_measure",
+    "ordinary_source_sparsemax",
+    "query_source_measure_sparsemax",
+    "routing_affinity",
+    "sample_segment_resistance",
+    "segment_resistance",
+    "source_measure_sparsemax",
+    "stable_descriptor_norm",
+]

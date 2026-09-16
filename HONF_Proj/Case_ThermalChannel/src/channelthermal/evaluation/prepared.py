@@ -52,7 +52,9 @@ def serialize_interaction_aux(aux: Dict[str, Any]) -> Dict[str, Any]:
             continue
         array = value.detach().cpu().numpy()
         tree_key = key.removeprefix("initial_port_")
-        if architecture == "hierarchical_regional_honf" and tree_key in {
+        if architecture == "routed_pairwise_honf" and tree_key.startswith(("routing_module_pair_", "routing_environment_pair_")):
+            result[key] = array
+        elif architecture == "hierarchical_regional_honf" and tree_key in {
             "hierarchical_incidence_batch", "hierarchical_incidence_query",
             "hierarchical_incidence_node", "hierarchical_incidence_eta",
             "hierarchical_incidence_attention",

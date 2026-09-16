@@ -405,6 +405,7 @@ def run_epoch(
             optimizer.zero_grad(set_to_none=True)
             clip_norm = float(gradient_clip_norm or 0.0)
             capture_update = bool(record_gradient_diagnostics and batch_idx == 1)
+            routing_model = getattr(getattr(model.config, "core_honf", None), "forward_architecture", "") == "routed_pairwise_honf"
             if scaler is not None and scaler.is_enabled():
                 scaler.scale(loss).backward()
                 if clip_norm > 0.0 or capture_update:
@@ -423,6 +424,11 @@ def run_epoch(
                 }
                 if capture_update:
                     total_grad, grouped_grad = _fp64_group_norm(named_gradients)
+                    if routing_model:
+                        router_grad, _ = _fp64_group_norm([
+                            (name, value) for name, value in named_gradients
+                            if name.startswith("core.backend.router.")
+                        ])
                 if clip_norm > 0.0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 scaler.step(optimizer)
@@ -441,6 +447,11 @@ def run_epoch(
                 }
                 if capture_update:
                     total_grad, grouped_grad = _fp64_group_norm(named_gradients)
+                    if routing_model:
+                        router_grad, _ = _fp64_group_norm([
+                            (name, value) for name, value in named_gradients
+                            if name.startswith("core.backend.router.")
+                        ])
                 if clip_norm > 0.0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
                 optimizer.step()
@@ -451,6 +462,11 @@ def run_epoch(
                     if parameter.requires_grad and name in before
                 ]
                 total_update, grouped_update = _fp64_group_norm(named_updates)
+                if routing_model:
+                    router_update, _ = _fp64_group_norm([
+                        (name, value) for name, value in named_updates
+                        if name.startswith("core.backend.router.")
+                    ])
                 one_shot_metrics = {
                     "preclip_gradient_norm": total_grad,
                     "gradient_clip_scale": min(1.0, clip_norm / max(total_grad, 1.0e-300)) if clip_norm > 0.0 else 1.0,
@@ -458,6 +474,9 @@ def run_epoch(
                     **{f"preclip_gradient_norm_{key}": value for key, value in grouped_grad.items()},
                     **{f"parameter_update_norm_{key}": value for key, value in grouped_update.items()},
                 }
+                if routing_model:
+                    one_shot_metrics.update(routing_preclip_gradient_norm=router_grad,
+                                            routing_parameter_update_norm=router_update)
         with torch.no_grad():
             pred = output["pred_field"].detach()
             mse = torch.mean((pred - target) ** 2)
@@ -495,6 +514,13 @@ def run_epoch(
             )
             interaction_aux = output.get("interaction_aux")
             if isinstance(interaction_aux, dict):
+                if getattr(getattr(model.config, "core_honf", None), "forward_architecture", "") == "routed_pairwise_honf":
+                    for key, value in interaction_aux.items():
+                        if key.startswith(("routing_", "initial_port_routing_", "provisional_routing_")) and torch.is_tensor(value):
+                            # Only compact backend summaries are present in ordinary training.
+                            metrics["routing_summary_" + key] = (
+                                float(value.detach().float().mean().cpu()) if value.numel() else math.nan
+                            )
                 mapping = {
                     "interaction_local_neighbor_count_mean": "local_neighbor_count",
                     "interaction_main_context_norm_mean": "main_context_norm",
@@ -585,4 +611,7 @@ def run_epoch(
     if training:
         averaged.update({key: math.nan for key in GRADIENT_DIAGNOSTIC_KEYS})
         averaged.update(one_shot_metrics)
+        if getattr(getattr(model.config, "core_honf", None), "forward_architecture", "") == "routed_pairwise_honf":
+            averaged.setdefault("routing_preclip_gradient_norm", math.nan)
+            averaged.setdefault("routing_parameter_update_norm", math.nan)
     return averaged

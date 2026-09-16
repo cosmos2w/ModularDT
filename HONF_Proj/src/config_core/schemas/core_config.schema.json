@@ -75,7 +75,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "forward_architecture": {"enum": ["legacy_honf", "dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf", "regional_response_honf", "hierarchical_regional_honf"]},
+        "forward_architecture": {"enum": ["legacy_honf", "dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf", "regional_response_honf", "hierarchical_regional_honf", "routed_pairwise_honf"]},
         "interface_model": {
           "type": "object",
           "additionalProperties": false,
@@ -97,6 +97,55 @@
             "relative_fourier_frequencies": {"type": "integer", "minimum": 0},
             "receiver_chunk_size": {"type": "integer", "minimum": 1},
             "activation_checkpointing": {"type": "boolean"},
+            "routing": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "strategy": {
+                  "const": "module_hubs"
+                },
+                "descriptor_dim": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "router_hidden_dim": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "source_normalizer": {
+                  "const": "sparsemax"
+                },
+                "query_normalizer": {
+                  "const": "source_measure_sparsemax"
+                },
+                "temperature": {
+                  "type": "number",
+                  "exclusiveMinimum": 0
+                },
+                "content_scale": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "geometry_scale": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "propensity_scale": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "resistance_mode": {
+                  "const": "adapter"
+                },
+                "execution": {
+                  "const": "gathered"
+                },
+                "fine_pair_chunk_size": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
             "response_region_block_shape": {
               "type": "array",
               "minItems": 2,
