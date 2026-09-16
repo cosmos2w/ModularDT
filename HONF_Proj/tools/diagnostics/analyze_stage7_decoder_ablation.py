@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Reduce the mature Stage-7 decoder-context ablation study.
 
-The reducer combines current matched evaluator passes for Runs 1401, 1402,
-1403, and 1804 with the previously validated historical trajectory tables.
+The reducer combines current matched evaluator passes for Runs 1401--1404
+and 1804 with the previously validated historical trajectory tables.
 It performs no model execution and never rewrites source run artifacts.
 """
 from __future__ import annotations
@@ -24,6 +24,7 @@ RUNS = {
     "1401": ("Legacy", "Run_1401_20260823_151126_stage7_modern_structured_context"),
     "1402": ("No global", "Run_1402_20260915_174336_stage7_ablate_decoder_global"),
     "1403": ("No global/near", "Run_1403_20260915_174336_stage7_ablate_decoder_global_near"),
+    "1404": ("Routing-only", "Run_1404_20260916_092508_routing_only_pairwise"),
     "1804": ("Dense", "Run_1804_20260905_081349_dense_pairwise_field_adaptation"),
 }
 COMPONENTS = {
@@ -95,6 +96,12 @@ def pooled(rows: list[dict[str, str]], base: str) -> dict[str, float] | None:
 
 
 def tables_for(run: str, kind: str = "exact") -> Path:
+    if run == "1404":
+        if kind in {"exact", "best"}:
+            return STUDY / "run1404_evaluation/tables"
+        if kind == "trajectory":
+            return STUDY / "run1404_trajectory_evaluation/tables"
+        raise ValueError(kind)
     if kind == "exact":
         name = "historical_evaluation" if run in {"1401", "1804"} else "evaluation"
     elif kind == "best":
@@ -189,6 +196,20 @@ def trajectory() -> list[dict[str, Any]]:
             if run in {"1401", "1804"}:
                 item = next(row for row in historical if row["run"] == run and int(row["epoch"]) == epoch)
                 value = float(item["relative_l2"])
+            elif run == "1404" and epoch == 500:
+                selected = select_run(
+                    read_csv(
+                        PROJECT
+                        / "diagnostics/generated/interface_operator_study/run1404_routing_only/compare_exact_best_90/tables/per_case_metrics.csv"
+                    ),
+                    run,
+                    epoch,
+                )
+                if len(selected) != 90:
+                    raise ValueError("Expected 90 Run 1404 cases at epoch 500")
+                result = pooled(selected, "global_field_fluid_norm")
+                assert result is not None
+                value = result["relative_l2"]
             elif epoch == 5000:
                 exact = select_run(read_csv(tables_for(run) / "per_case_metrics.csv"), run, 5000)
                 result = pooled(exact, "global_field_fluid_norm")
@@ -229,6 +250,8 @@ def best_selected() -> list[dict[str, Any]]:
             )
             continue
         rows = select_run(read_csv(tables_for(run, "best") / "per_case_metrics.csv"), run)
+        if run == "1404":
+            rows = [row for row in rows if row["checkpoint"].endswith("best_by_field_mse_model.pt")]
         if len(rows) != 90:
             raise ValueError(f"Expected 90 best-selected cases for Run {run}")
         errors = np.asarray([float(row["global_field_fluid_norm_l2"]) for row in rows])
@@ -252,15 +275,24 @@ def best_selected() -> list[dict[str, Any]]:
 
 def parse_current_history(run: str, run_name: str) -> dict[str, Any]:
     run_dir = PROJECT / "Trained_Results/ThermalChannel/HONF_Forward_Runs" / run_name
-    rows = read_csv(run_dir / "metrics.csv")
-    if len(rows) != 5000 or [int(row["epoch"]) for row in rows] != list(range(1, 5001)):
+    raw_rows = read_csv(run_dir / "metrics.csv")
+    rows_by_epoch = {int(row["epoch"]): row for row in raw_rows}
+    rows = [rows_by_epoch[epoch] for epoch in sorted(rows_by_epoch)]
+    if [int(row["epoch"]) for row in rows] != list(range(1, 5001)):
         raise ValueError(f"History is not consecutive through epoch 5000: Run {run}")
 
     def values(key: str) -> list[float]:
         return [value for row in rows if (value := finite(row.get(key))) is not None]
 
     val_field = values("val_field_mse")
-    first_below = next(int(row["epoch"]) for row in rows if float(row["val_field_mse"]) <= 0.01)
+    thresholds = (0.02, 0.01, 0.005, 0.003)
+    first_below = {
+        threshold: next(
+            (int(row["epoch"]) for row in rows if float(row["val_field_mse"]) <= threshold),
+            None,
+        )
+        for threshold in thresholds
+    }
     stable_below = next(
         (
             int(rows[index]["epoch"])
@@ -271,6 +303,9 @@ def parse_current_history(run: str, run_name: str) -> dict[str, Any]:
     )
     inventory = json.loads((run_dir / "optimizer_group_inventory.json").read_text(encoding="utf-8"))
     parameters = sum(int(group["trainable_scalar_count"]) for group in inventory["groups"])
+    train_wall = values("train_wall_seconds")
+    val_wall = values("val_wall_seconds")
+    peak_memory = values("peak_cuda_memory_mb")
     return {
         "run": run,
         "model": RUNS[run][0],
@@ -278,12 +313,18 @@ def parse_current_history(run: str, run_name: str) -> dict[str, Any]:
         "final_val_field_mse": float(rows[-1]["val_field_mse"]),
         "last100_val_field_median": float(statistics.median(val_field[-100:])),
         "best_val_field_mse": float(min(val_field)),
-        "first_epoch_val_field_le_0p01": first_below,
+        "first_epoch_val_field_le_0p02": first_below[0.02],
+        "first_epoch_val_field_le_0p01": first_below[0.01],
+        "first_epoch_val_field_le_0p005": first_below[0.005],
+        "first_epoch_val_field_le_0p003": first_below[0.003],
         "first_100_epoch_window_val_field_le_0p01": stable_below,
-        "train_wall_hours": sum(values("train_wall_seconds")) / 3600,
-        "val_wall_hours": sum(values("val_wall_seconds")) / 3600,
-        "peak_cuda_memory_mib": max(values("peak_cuda_memory_mb")),
+        "train_wall_hours": None if not train_wall else sum(train_wall) / 3600,
+        "val_wall_hours": None if not val_wall else sum(val_wall) / 3600,
+        "peak_cuda_memory_mib": None if not peak_memory else max(peak_memory),
         "trainable_parameters": parameters,
+        "raw_history_rows": len(raw_rows),
+        "canonical_history_rows": len(rows),
+        "duplicate_history_rows": len(raw_rows) - len(rows),
     }
 
 
@@ -294,17 +335,16 @@ def training_summary() -> list[dict[str, Any]]:
             / "diagnostics/generated/interface_operator_study/five_model_epoch5000/history/history_summary.json"
         ).read_text(encoding="utf-8")
     )
+    historical_thresholds = {
+        "1401": {0.02: 461, 0.01: 831, 0.005: 1431, 0.003: 2013},
+        "1804": {0.02: 357, 0.01: 651, 0.005: 1109, 0.003: 1764},
+    }
     output: list[dict[str, Any]] = []
     for run, (model, run_name) in RUNS.items():
-        if run in {"1402", "1403"}:
+        if run not in historical_thresholds:
             output.append(parse_current_history(run, run_name))
             continue
         entry = prior["runs"][run]
-        threshold = next(
-            item
-            for item in entry["threshold_hits"]
-            if item["metric"] == "val_field_mse" and float(item["threshold"]) == 0.01
-        )
         inventory = json.loads(
             (
                 PROJECT
@@ -316,6 +356,7 @@ def training_summary() -> list[dict[str, Any]]:
         parameters = sum(int(group["trainable_scalar_count"]) for group in inventory["groups"])
         timing = entry["timing_and_cost"]
         endpoint = entry["checkpoint_points"]["5000"]
+        thresholds = historical_thresholds[run]
         output.append(
             {
                 "run": run,
@@ -324,7 +365,10 @@ def training_summary() -> list[dict[str, Any]]:
                 "final_val_field_mse": endpoint["val_field_mse"],
                 "last100_val_field_median": entry["recent_window"]["medians"]["val_field_mse"],
                 "best_val_field_mse": entry["best_finite_metrics_through_5000"]["val_field_mse"]["value"],
-                "first_epoch_val_field_le_0p01": threshold["first_epoch"],
+                "first_epoch_val_field_le_0p02": thresholds[0.02],
+                "first_epoch_val_field_le_0p01": thresholds[0.01],
+                "first_epoch_val_field_le_0p005": thresholds[0.005],
+                "first_epoch_val_field_le_0p003": thresholds[0.003],
                 "first_100_epoch_window_val_field_le_0p01": None,
                 "train_wall_hours": None
                 if timing["logged_train_wall_seconds_sum"] is None
@@ -334,6 +378,9 @@ def training_summary() -> list[dict[str, Any]]:
                 else timing["logged_val_wall_seconds_sum"] / 3600,
                 "peak_cuda_memory_mib": timing["peak_cuda_memory_mb_max"],
                 "trainable_parameters": parameters,
+                "raw_history_rows": 5000,
+                "canonical_history_rows": 5000,
+                "duplicate_history_rows": 0,
             }
         )
     return output
@@ -378,43 +425,47 @@ def routing_summary() -> list[dict[str, Any]]:
 
 
 def timing_summary() -> list[dict[str, Any]]:
-    payload = json.loads((STUDY / "timing/four_model_timing.json").read_text(encoding="utf-8"))
-    labels = {"Legacy1401_at5000": "1401", "NoGlobal1402_at5000": "1402", "NoGlobalNear1403_at5000": "1403", "Dense1804_at5000": "1804"}
+    payloads = [
+        json.loads((STUDY / "timing/four_model_timing.json").read_text(encoding="utf-8")),
+        json.loads((STUDY / "timing/run1404_timing.json").read_text(encoding="utf-8")),
+    ]
+    labels = {"Legacy1401_at5000": "1401", "NoGlobal1402_at5000": "1402", "NoGlobalNear1403_at5000": "1403", "Routing1404_at5000": "1404", "Dense1804_at5000": "1804"}
     rows: list[dict[str, Any]] = []
-    for model_payload in payload["models"]:
-        run = labels[model_payload["checkpoint"]["label"]]
-        for anchor in model_payload["real_anchors"]:
-            normal = anchor["normal"]
-            for phase, phase_values in normal["phases"].items():
+    for payload in payloads:
+        for model_payload in payload["models"]:
+            run = labels[model_payload["checkpoint"]["label"]]
+            for anchor in model_payload["real_anchors"]:
+                normal = anchor["normal"]
+                for phase, phase_values in normal["phases"].items():
+                    rows.append(
+                        {
+                            "run": run,
+                            "model": RUNS[run][0],
+                            "kind": "real_anchor",
+                            "case_id": anchor["case_id"],
+                            "shape": "",
+                            "phase": phase,
+                            "median_ms": phase_values["median_ms"],
+                            "mean_ms": phase_values["mean_ms"],
+                            "incremental_peak_allocated_mib": phase_values["incremental_peak_allocated_bytes"] / 2**20,
+                        }
+                    )
+            for synthetic in model_payload["synthetic_shapes"]:
+                normal = synthetic["normal"]
+                shape = synthetic["shape"]
                 rows.append(
                     {
                         "run": run,
                         "model": RUNS[run][0],
-                        "kind": "real_anchor",
-                        "case_id": anchor["case_id"],
-                        "shape": "",
-                        "phase": phase,
-                        "median_ms": phase_values["median_ms"],
-                        "mean_ms": phase_values["mean_ms"],
-                        "incremental_peak_allocated_mib": phase_values["incremental_peak_allocated_bytes"] / 2**20,
+                        "kind": "synthetic",
+                        "case_id": "",
+                        "shape": f"M{shape['M']}_E{shape['E']}_Q{shape['Q']}",
+                        "phase": "full_forward",
+                        "median_ms": normal["median_ms"],
+                        "mean_ms": normal["mean_ms"],
+                        "incremental_peak_allocated_mib": normal["incremental_peak_allocated_bytes"] / 2**20,
                     }
                 )
-        for synthetic in model_payload["synthetic_shapes"]:
-            normal = synthetic["normal"]
-            shape = synthetic["shape"]
-            rows.append(
-                {
-                    "run": run,
-                    "model": RUNS[run][0],
-                    "kind": "synthetic",
-                    "case_id": "",
-                    "shape": f"M{shape['M']}_E{shape['E']}_Q{shape['Q']}",
-                    "phase": "full_forward",
-                    "median_ms": normal["median_ms"],
-                    "mean_ms": normal["mean_ms"],
-                    "incremental_peak_allocated_mib": normal["incremental_peak_allocated_bytes"] / 2**20,
-                }
-            )
     return rows
 
 
@@ -435,6 +486,13 @@ def topology_quality_summary() -> list[dict[str, Any]]:
     """Extract matched full-holdout final/selected organization summaries."""
     path = STUDY / "topology_quality_full90/topology_quality_summary.json"
     payload = json.loads(path.read_text(encoding="utf-8"))["summary"]
+    payload.update(
+        json.loads(
+            (STUDY / "run1404_topology_quality_full90/topology_quality_summary.json").read_text(
+                encoding="utf-8"
+            )
+        )["summary"]
+    )
     metrics = (
         "module_row_entropy_norm",
         "module_row_effective_edges",
@@ -454,7 +512,7 @@ def topology_quality_summary() -> list[dict[str, Any]]:
         "base_to_final_environment_assignment_l1",
     )
     output: list[dict[str, Any]] = []
-    for run in ("1401", "1402", "1403"):
+    for run in ("1401", "1402", "1403", "1404"):
         selected = payload[f"{run}_5000/final/selected"]
         for metric in metrics:
             item = selected[metric]
@@ -473,6 +531,59 @@ def topology_quality_summary() -> list[dict[str, Any]]:
     return output
 
 
+def run1404_usefulness_summary() -> list[dict[str, Any]]:
+    payload = json.loads((STUDY / "run1404_interventions/summary.json").read_text(encoding="utf-8"))
+    return [
+        {
+            "variant": name,
+            "fluid_mse_mean": values["fluid_mse_mean"],
+            "fluid_mse_delta_from_normal_mean": values["fluid_mse_delta_from_normal_mean"],
+            "prediction_rms_difference_from_normal_mean": values[
+                "prediction_rms_difference_from_normal_mean"
+            ],
+            "field_relative_l2_mean": values["field_relative_l2_mean"],
+            "field_relative_l2_delta_from_normal_mean": values[
+                "field_relative_l2_delta_from_normal_mean"
+            ],
+        }
+        for name, values in payload["variants"].items()
+    ]
+
+
+def run1404_gradient_summary() -> list[dict[str, Any]]:
+    payload = json.loads((STUDY / "run1404_endpoint_gradient.json").read_text(encoding="utf-8"))
+    return [
+        {
+            "group": name,
+            "gradient_tensor_count": values["gradient_tensor_count"],
+            "grad_norm": values["grad_norm"],
+            "finite": values["finite"],
+        }
+        for name, values in payload["gradient_groups"].items()
+    ]
+
+
+def run1404_retained_mass_summary() -> list[dict[str, Any]]:
+    payload = json.loads(
+        (
+            STUDY
+            / "run1404_retained_mass/diagnostics/retained_mass_pruning_summary.json"
+        ).read_text(encoding="utf-8")
+    )["checkpoints"]["exact5000"]
+    return [
+        {
+            "policy": policy,
+            "selected_module_count_mean": values["selected_module_count"]["mean"],
+            "selected_module_count_min": values["selected_module_count"]["min"],
+            "selected_module_count_max": values["selected_module_count"]["max"],
+            "retained_beta_mass_mean": values["query_module_retained_beta_mass"]["mean"],
+            "pair_mlp_rows_mean": values["actual_pair_mlp_evaluations_per_case"]["mean"],
+            "dense_pair_mlp_rows": payload["dense_actual_pair_mlp_evaluations_per_case"]["mean"],
+        }
+        for policy, values in sorted(payload["policy_retention"].items())
+    ]
+
+
 def main() -> None:
     output = STUDY / "reduction"
     output.mkdir(parents=True, exist_ok=True)
@@ -488,12 +599,15 @@ def main() -> None:
         "topology_quality": topology_quality_summary(),
         "timing": timing_summary(),
         "anchors": anchor_summary(by_run),
+        "run1404_usefulness": run1404_usefulness_summary(),
+        "run1404_gradients": run1404_gradient_summary(),
+        "run1404_retained_mass": run1404_retained_mass_summary(),
     }
     for name, rows in artifacts.items():
         write_csv(output / f"{name}.csv", rows)
     summary = {
         "schema_version": 1,
-        "scope": "Runs 1401, 1402, 1403, and 1804 at exact epoch 5000, with matched trajectory and selection sensitivity",
+        "scope": "Runs 1401, 1402, 1403, 1404, and 1804 at exact epoch 5000, with matched trajectory and selection sensitivity",
         "case_count": 90,
         "query_count_per_case": 8192,
         "checkpoint_policy_primary": "exact_epoch_5000",
@@ -504,6 +618,7 @@ def main() -> None:
             "Historical training wall times were not collected under controlled identical conditions; controlled inference is reported separately.",
             "Dense has no learned hyperedge partition, so Stage-7 clustering metrics are structurally not applicable.",
             "Routing entropy and target-fit metrics are descriptive; reconstruction error determines usefulness.",
+            "Run 1404 history rows 851--854 were duplicated by an interrupted resume; the reducer uses the final row for each epoch without rewriting the source history.",
         ],
     }
     (output / "summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n", encoding="utf-8")
