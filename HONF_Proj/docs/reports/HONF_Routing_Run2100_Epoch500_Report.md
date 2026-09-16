@@ -1,6 +1,6 @@
 # Run 2100: fixed-data mean-shift routing
 
-**Status: implementation validated; the single fresh Run 2100 is training through 500. Epoch-500 results are pending.**
+**Status: epoch-50 interim assessment complete. The original single Run 2100 continues on physical GPU 1 toward 500; final endpoint analysis is deferred under the user’s first-50 handoff option. No training beyond 500 or Goal 3 has been started.**
 
 ## Scope
 
@@ -43,32 +43,54 @@ Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_2100_20260916_002148_routed
 
 It uses physical GPU 1, logical `cuda:0`, from scratch with no Run-2000 weights or optimizer state. The configured endpoint is 500. The ordinary allocator, trusted loading, existing checkpoint integrity behavior, and all historical results remain intact.
 
+## First-50 learning and optimizer health
+
+Both metric files cover contiguous epochs 1–50. All core train/validation loss, field, and temperature measurements are finite; the log contains no OOM, traceback, or CUDA error. The trajectory improves overall with visible thermal/field fluctuations, including a transient late thermal spike; it is not monotonic convergence.
+
+| Epoch | Train loss | Validation loss | Validation field MSE | Validation temperature MSE |
+|---|---:|---:|---:|---:|
+| 1 | 7.294524 | 4.748454 | 1.924386 | 1.178038 |
+| 10 | 1.836387 | 1.693550 | 0.651141 | 0.780901 |
+| 25 | 0.903264 | 0.820428 | 0.300287 | 0.360553 |
+| 50 | 0.393885 | 0.368727 | 0.196162 | 0.122869 |
+
+From epochs 31–40 to 41–50, mean train/validation loss falls from 0.6433/0.6191 to 0.4961/0.5062. Validation field/temperature means fall from 0.2679/0.2545 to 0.2249/0.2185. Learning is still developing. The minimum sampled validation field MSE through 50 is 0.177908 at epoch 49; it is distinct from the exact-50 value and is not a full-grid selected-checkpoint evaluation.
+
+At epoch 50, the recorded first-batch full preclip gradient norm is **1.36217**, clip scale **0.734121**, and parameter-update norm **0.149589**. Router gradient/update norms are **0.0211523 / 0.0373288**. These are useful finite updates. Measurements exist at epochs 1, 2, 5, 10, 20, and 50; other CSV norm entries are unsampled placeholders. The large initial full norm 529.307 was clipped with scale 0.001889 and did not persist.
+
+Training P2 retains **99.7302% QM / 99.9949% QE** of the active-source dense reference at epoch 50; validation retains **99.3498% / 100%**. These ratios use recorded batch-averaged counts. Source-membership sparsity is therefore not producing material fine-execution reduction.
+
+Matched exact-50 sampled validation field/temperature MSE is: Legacy 1401 **0.259676 / 0.212371**, Dense 1804 **0.219339 / 0.125466**, Regional 1806 **0.203376 / 0.117707**, Run 2000 **0.198393 / 0.226158**, and Run 2100 **0.196162 / 0.122869**. These single-epoch values provide convergence context, not a trained full-population superiority claim; the curves show meaningful fluctuations.
+
+The recorded training plus validation compute time through 50 is **3,434.47 s (57.24 min)**, excluding plotting/checkpoint overhead. Observed wall pace is about **70.6 s/epoch**, implying roughly **9.8 hours total** to 500 and about **8.8 hours remaining at epoch 50**. Peak training allocation over the window is **38,322.73 MiB**. The existing process PID 3878073 remains on physical GPU 1; Run 2000 remains on GPU 2.
+
+![First-50 training comparison](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2100/figures/training_trajectory.png)
+
 ## Accuracy, support, and attraction
 
 Pending. The final assessment will distinguish exact epoch 500 from separately saved best-by-validation-field through 500, using all 90 development cases and the existing complete-grid metrics. Historical exact-500 baselines will be reused in place. The repeatedly used `test` split is a development holdout.
 
 Attractor drift, iteration movement, separation, descriptor concentration, diagnostic approximate modes, and candidate-generation time will be reported alongside actual deduplicated fine support, omitted-source evidence, accuracy, and end-to-end cost. Clustering alone does not establish useful physical routing or acceleration.
 
-## Interim attraction evidence at epoch 10
+## Interim attraction evidence at epoch 50
 
-The two-anchor, 32-query CPU replay uses the saved epoch-10 model, the complete P0/P1/P2 forward, and the adapter's `ell=(1.8,1.8)`. The following P2 measurements concern active candidates; storage remains padded to 12, with every active candidate retained.
+The saved epoch-50 checkpoint was replayed on CPU over all five prescribed anchors, using 32 fixed field queries per case and the complete P0/P1/P2 forward. The adapter routing length is `ell=(1.8,1.8)`. Every active module retains its candidate; storage is padded to 12. Approximate counts below are connected components at dimensionless joint-space tolerance 0.05, never an execution K.
 
-| Anchor | Active candidates | Mean physical drift | Minimum separation, seed → final | Diagnostic physical modes, tolerance 0.05 | Fine QM / QE per query |
-|---|---:|---:|---:|---:|---:|
-| 0273 | 3 | 1.2240 | 1.6668 → 0.0386 | 3 → 2 | 3 / 192 |
-| 0298 | 7 | 1.2930 | 1.1166 → 0.0454 | 7 → 6 | 7 / 192 |
+| Anchor | Active candidates | Mean physical drift | Minimum physical separation, seed → final | Joint diagnostic modes, seed → final | P2 fine QM / QE per query | Field relative L2: mean shift / same-weight hubs |
+|---|---:|---:|---:|---:|---:|---:|
+| 0273 | 3 | 0.7251 | 1.6668 → 0.4573 | 3 → 3 | 3 / 192 | 0.236294 / 0.236785 |
+| 0653 | 5 | 0.8343 | 1.2214 → 0.0231 | 5 → 3 | 5 / 192 | 0.290681 / 0.291561 |
+| 0283 | 5 | 0.7245 | 1.1308 → 0.0031 | 5 → 4 | 5 / 192 | 0.286773 / 0.282861 |
+| 0298 | 7 | 1.0690 | 1.1166 → 0.1539 | 7 → 7 | 7 / 192 | 0.342933 / 0.335710 |
+| 0302 | 7 | 1.0783 | 1.5882 → 0.3289 | 7 → 7 | 7 / 192 | 0.287344 / 0.292727 |
 
-The dimensionless joint-space diagnostic at tolerance 0.05 also counts 2 and 6 components after three updates; these are approximate connected components, not an exact unique K. Mean joint drifts are 0.6806 and 0.7185. Per-iteration movement decreases, but three finite iterations are not a claim of converged modes.
+All fine field pairs execute on these five probes. The normalized fluid-only pooled relative L2 across their 775 scalar targets is **0.295857 for mean shift versus 0.294192 for the same-weight module-hub intervention**. Three anchors improve slightly and two worsen. This is a frozen candidate-generation intervention with the full physical loop recomputed, not a separately trained Run-2000 comparison or the 90-case endpoint. Attraction has not demonstrated improved effective support or pooled accuracy in this bounded sample.
 
-All active fine QM/QE pairs still execute in **every physical phase**. For 0298, mean-shift produces 1,184 module paths and 36,544 environment paths for the 32 field queries, versus 1,056 and 29,472 with a frozen module-hub candidate intervention. Deduplication yields the same 224 QM and 6,144 QE pairs in both. Attraction therefore increases path multiplicity in this probe without reducing actual fine work.
+Candidate-only CPU timing, with trajectory collection disabled, one warmup and three repeats, is **1.16–1.29 ms** for mean shift versus **0.288–0.313 ms** for module hubs across phases/cases. This measures added candidate-generation cost, not GPU or end-to-end latency. The [diagnostic JSON](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2100/routing/mean_shift_epoch50.json) retains physical/scaled/joint drift, per-step movement, separation, descriptor concentration, tolerance-labelled modes, phase ledgers, prediction errors, and repeated costs.
 
-A same-weight candidate intervention gives normalized fluid-only field relative L2 0.597204 versus module hubs 0.597144 for 0273, and 0.635880 versus 0.636463 for 0298. Each comparison uses the same 31 fluid points × five fields and the same target norm. This small, mixed effect is not a trained Run-2000 comparison and does not establish accuracy benefit over the full population.
+The [earlier epoch-10 probes](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2100/routing/mean_shift_epoch10.json) are retained as a comparison: 0273 and 0298 had physical mean drift 1.2240/1.2930 and final minimum separation 0.0386/0.0454. At epoch 50, those centres are less collapsed while their fine field work remains dense. Centre clustering therefore cannot substitute for actual support and accuracy measurements.
 
-Candidate-only CPU timing, with trajectory collection disabled, one warmup and three repeats, is approximately 1.38–1.83 ms for mean-shift versus 0.34–0.41 ms for module hubs per phase/case. These bounded CPU measurements establish added candidate work; they do not establish GPU latency or end-to-end speedup.
-
-[Candidate diagnostic JSON](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2100/routing/mean_shift_epoch10.json) contains phase ledgers, masked target errors, physical/scaled/joint drift and separation, descriptor concentration, tolerance-labelled mode counts, and repeated timings.
-
-![Epoch-10 attraction versus fine work](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2100/figures/candidate_attraction.png)
+![Epoch-50 attraction versus fine work](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2100/figures/candidate_attraction.png)
 
 ## Interim physical derivatives
 
@@ -76,11 +98,17 @@ A bounded CPU replay at epoch 10 used anchors 0273 and 0298 with 32 fixed querie
 
 The real-anchor omitted-source probes are unavailable at these receivers because every valid source is selected. The separate conditional synthetic fixture's zero omitted contribution must not be interpreted as real physical omission validation.
 
+The same prescribed [physical derivative replay at epoch 50](../../diagnostics/generated/interface_operator_study/dynamic_sparse_routing/run2100/numerics/physical_derivatives_epoch50.json) again completed with finite full-loop gradients. Position AD/FD relative differences are at most 1.21%; heat differences are at most 0.328% across the two anchors and prescribed steps. The epoch-10 tiny-pressure discrepancy is retained above as historical evidence, not silently overwritten.
+
+Direct selected-source FP32 probes are less decisive: selected module response discrepancies reach 20.4%, and environment JVP norms near 4e-10 are compared with FD norms around 8e-5–4e-4, yielding approximately unit relative error. Those probes are unresolved at the prescribed precision/steps; finite execution is not a derivative-accuracy certificate. No steps were tuned. Omitted real sources remain unavailable at the probed receivers because their supports are full.
+
 ## Evidence limits and continuation
 
 The current ThermalChannel adapter supplies known boundary descriptors and neutral extra resistance. **Barrier benefit: Evidence Missing.** Model AD/FD is self-consistency evidence, not independent physical-gradient validation. Existing external physical-reference requests remain in place.
 
-The user permits an interim handoff after a healthy first 50 epochs when the full run is slow. Such a handoff will be labelled interim, with the epoch-500 analysis explicitly outstanding. No Goal 3, additional managed trial, sweep, or automatic training beyond 500 is authorized. A concrete unexecuted same-run continuation command will accompany the assessed checkpoint.
+**Interim recommendation: unresolved.** Optimization is healthy and still improving, with ordinary fluctuations; useful routing sparsity and an accuracy benefit from attraction have not been demonstrated. Finish the already authorized 500-epoch budget before deciding on a 2500/5000 extension. Added candidate cost with almost-dense fine work is currently an efficiency concern, not evidence of acceleration.
+
+The user's first-50 handoff option is used for analysis: the original process continues through its configured 500 epochs, while exact-500/saved-best full-population evaluation, final phase interventions, large-shape GPU timing/memory, and the final continuation decision remain **pending a later user request**. Training itself has not been paused or restarted. No Goal 3, extra managed trial, sweep, or automatic continuation beyond 500 was launched.
 
 ## Prepared endpoint and same-run continuation commands
 
