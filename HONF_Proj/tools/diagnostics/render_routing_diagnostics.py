@@ -39,6 +39,41 @@ import numpy as np
 DEFAULT_ANCHOR_CASE_IDS = ("0273", "0653", "0283", "0298", "0302")
 ROUTING_WEIGHT_SEMANTICS = "learned routing weights; not physical influence or field-value substitutes"
 
+
+def _strategy_label(value: Any = None) -> str:
+    """Return a stable human-readable strategy label with legacy fallback."""
+
+    if isinstance(value, Mapping):
+        value = value.get("strategy")
+    token = str(value or "module_hubs").strip().lower().replace("-", "_")
+    labels = {
+        "module_hubs": "Module-hub",
+        "mean_shift": "Mean-shift",
+    }
+    if token in labels:
+        return labels[token]
+    cleaned = token.replace("_", " ").strip()
+    return cleaned.title() if cleaned else "Module-hub"
+
+
+def _payload_strategy(payload: Mapping[str, Any]) -> tuple[str, str]:
+    """Read ledger strategy metadata, retaining the historical fallback."""
+
+    value = payload.get("routing_strategy")
+    if value is None:
+        metadata = payload.get("routing_strategy_metadata")
+        if isinstance(metadata, Mapping):
+            value = metadata.get("strategy")
+    if value is None:
+        rows = payload.get("rows")
+        if isinstance(rows, Sequence) and not isinstance(rows, (str, bytes)):
+            for row in rows:
+                if isinstance(row, Mapping) and row.get("routing_strategy") is not None:
+                    value = row.get("routing_strategy")
+                    break
+    raw = str(value or "module_hubs")
+    return raw, _strategy_label(raw)
+
 # These are the canonical names written by the ledger exporter.  The reader
 # also accepts the aliases below so old/current selected maps can be rendered
 # while the exporter is being migrated to the explicit contract.
@@ -600,11 +635,12 @@ def _infer_metadata(data: Mapping[str, Any], payload: Mapping[str, Any], case_id
     if "case_id" not in data:
         inferred["case_id"] = case_id
     architecture = _text(payload.get("architecture"))
+    payload_strategy, _strategy_display = _payload_strategy(payload)
     phase_keys = tuple(str(key) for key in data)
     if "routing_strategy" not in data and architecture == "routed_pairwise_honf" and any(
         key.startswith(("p0_port__", "p2_field__", "p0_port_", "p2_far_")) for key in phase_keys
     ):
-        inferred["routing_strategy"] = "module_hubs"
+        inferred["routing_strategy"] = payload_strategy
     if "source_kind" not in data and arrays["module_coords"] is not None and arrays["env_coords"] is not None:
         inferred["source_kind"] = "module_and_environment"
     if "coordinate_dim" not in data:
@@ -949,7 +985,14 @@ def _set_spatial_axis(axis: Any, points: Sequence[np.ndarray | None]) -> None:
     axis.grid(alpha=0.18)
 
 
-def _render_geometry(path: Path, case_id: str, arrays: Mapping[str, Any], views: Mapping[str, dict[str, Any]]) -> None:
+def _render_geometry(
+    path: Path,
+    case_id: str,
+    arrays: Mapping[str, Any],
+    views: Mapping[str, dict[str, Any]],
+    *,
+    strategy_label: str = "Module-hub",
+) -> None:
     _matplotlib, plt = _mpl()
     figure, axis = plt.subplots(figsize=(8.8, 6.0), constrained_layout=True)
     _plot_points(axis, arrays.get("env_coords"), label="environment samples (E)", color="#9aa0a6", marker=".", size=20)
@@ -965,13 +1008,19 @@ def _render_geometry(path: Path, case_id: str, arrays: Mapping[str, Any], views:
         if len(indices):
             axis.scatter(hubs[indices, 0], hubs[indices, 1], facecolors="none", edgecolors="#e53e3e", linewidths=1.4, s=150, label="active selected hubs")
     _set_spatial_axis(axis, [arrays.get("module_coords"), arrays.get("env_coords"), arrays.get("hub_coords")])
-    axis.set_title(f"Module-hub routing geometry · case {case_id}\nHub coordinates are descriptors, not field values")
+    axis.set_title(f"{strategy_label} routing geometry · case {case_id}\nHub coordinates are descriptors, not field values")
     axis.legend(loc="best", frameon=True, fontsize=8)
     figure.savefig(path, dpi=165, bbox_inches="tight")
     plt.close(figure)
 
 
-def _render_incidence(path: Path, case_id: str, arrays: Mapping[str, Any]) -> None:
+def _render_incidence(
+    path: Path,
+    case_id: str,
+    arrays: Mapping[str, Any],
+    *,
+    strategy_label: str = "Module-hub",
+) -> None:
     _matplotlib, plt = _mpl()
     figure, axes = plt.subplots(1, 2, figsize=(12.2, 5.2), constrained_layout=True)
     for axis, key, source_label, validity_key in zip(
@@ -1010,7 +1059,7 @@ def _render_incidence(path: Path, case_id: str, arrays: Mapping[str, Any]) -> No
         axis.set_xticks(np.linspace(0, len(cols) - 1, min(len(cols), 10), dtype=int))
         axis.set_yticks(np.linspace(0, len(rows) - 1, min(len(rows), 10), dtype=int))
         figure.colorbar(image, ax=axis, pad=0.02, label="ordinary source membership")
-    figure.suptitle(f"M/E source incidences after ordinary source sparsemax · case {case_id}")
+    figure.suptitle(f"M/E source incidences after {strategy_label} source routing · case {case_id}")
     figure.savefig(path, dpi=165, bbox_inches="tight")
     plt.close(figure)
 
@@ -1062,7 +1111,14 @@ def _pair_rows(view: Mapping[str, Any], receiver_index: int, source_count: int) 
     return np.full(len(unique_source), receiver_index, dtype=int), unique_source, unique_prior
 
 
-def _render_selected(path: Path, case_id: str, arrays: Mapping[str, Any], phase_views: Mapping[str, Mapping[str, dict[str, Any]]]) -> None:
+def _render_selected(
+    path: Path,
+    case_id: str,
+    arrays: Mapping[str, Any],
+    phase_views: Mapping[str, Mapping[str, dict[str, Any]]],
+    *,
+    strategy_label: str = "Module-hub",
+) -> None:
     _matplotlib, plt = _mpl()
     figure, axes = plt.subplots(1, 2, figsize=(13.0, 5.9), constrained_layout=True)
     hubs = arrays.get("hub_coords")
@@ -1132,12 +1188,12 @@ def _render_selected(path: Path, case_id: str, arrays: Mapping[str, Any], phase_
             _plot_points(axis, arrays.get("module_coords"), label="physical modules", color="#315f7c", marker="s", size=40)
             _plot_points(axis, hubs, label="candidate hubs", color="#bf6b3c", marker="D", size=56)
         _set_spatial_axis(axis, [arrays.get("module_coords"), arrays.get("env_coords"), hubs])
-        axis.set_title(f"Selected {kind} receiver · {phase.upper()} active hubs and unique fine pairs")
+        axis.set_title(f"Selected {kind} receiver · {phase.upper()} {strategy_label} active hubs and unique fine pairs")
         if labels:
             handles, handle_labels = axis.get_legend_handles_labels()
             if handles:
                 axis.legend(handles, handle_labels, fontsize=7, frameon=True, loc="best")
-    figure.suptitle(f"Selected receiver routing paths · case {case_id}\nLeft: P0 port · right: P2 far query · lines show deduplicated receiver–source pairs")
+    figure.suptitle(f"Selected receiver {strategy_label.lower()} routing paths · case {case_id}\nLeft: P0 port · right: P2 far query · lines show deduplicated receiver–source pairs")
     figure.savefig(path, dpi=165, bbox_inches="tight")
     plt.close(figure)
 
@@ -1183,7 +1239,14 @@ def _probability_image(
     axis.figure.colorbar(image, ax=axis, pad=0.02, label="route weight")
 
 
-def _render_probabilities(path: Path, case_id: str, arrays: Mapping[str, Any], phase_views: Mapping[str, Mapping[str, dict[str, Any]]]) -> None:
+def _render_probabilities(
+    path: Path,
+    case_id: str,
+    arrays: Mapping[str, Any],
+    phase_views: Mapping[str, Mapping[str, dict[str, Any]]],
+    *,
+    strategy_label: str = "Module-hub",
+) -> None:
     _matplotlib, plt = _mpl()
     figure, axes = plt.subplots(2, 4, figsize=(17.0, 8.4), constrained_layout=True, squeeze=False)
     for row_index, phase in enumerate(("p0", "p2")):
@@ -1212,12 +1275,20 @@ def _render_probabilities(path: Path, case_id: str, arrays: Mapping[str, Any], p
                 valid_columns=arrays.get("module_valid" if source == "module" else "env_valid"),
                 valid_column_label=source,
             )
-    figure.suptitle(f"Query–hub probabilities and final query–source priors · case {case_id}\nRoute weights are learned routing quantities; quadrature is already included in the final prior")
+    figure.suptitle(f"{strategy_label} query–hub probabilities and final query–source priors · case {case_id}\nRoute weights are learned routing quantities; quadrature is already included in the final prior")
     figure.savefig(path, dpi=165, bbox_inches="tight")
     plt.close(figure)
 
 
-def _render_occupancy(path: Path, case_id: str, arrays: Mapping[str, Any], phase_views: Mapping[str, Mapping[str, dict[str, Any]]], data: Mapping[str, Any]) -> None:
+def _render_occupancy(
+    path: Path,
+    case_id: str,
+    arrays: Mapping[str, Any],
+    phase_views: Mapping[str, Mapping[str, dict[str, Any]]],
+    data: Mapping[str, Any],
+    *,
+    strategy_label: str = "Module-hub",
+) -> None:
     _matplotlib, plt = _mpl()
     figure, axes = plt.subplots(2, 2, figsize=(13.0, 8.0), constrained_layout=True, squeeze=False)
     from matplotlib.patches import Patch
@@ -1290,7 +1361,7 @@ def _render_occupancy(path: Path, case_id: str, arrays: Mapping[str, Any], phase
         axis.set_ylabel("count")
         axis.grid(axis="y", alpha=0.22)
         axis.legend(fontsize=8, frameon=True)
-    figure.suptitle(f"Source occupancy and two-hop deduplication · case {case_id}\nDₖ counts positive source rows per valid candidate hub; invalid padded slots are masked")
+    figure.suptitle(f"{strategy_label} source occupancy and two-hop deduplication · case {case_id}\nDₖ counts positive source rows per valid candidate hub; invalid padded slots are masked")
     figure.savefig(path, dpi=165, bbox_inches="tight")
     plt.close(figure)
 
@@ -1601,6 +1672,7 @@ def _endpoint_links(
 
 def _write_index(path: Path, manifest: Mapping[str, Any]) -> None:
     links = manifest.get("endpoint_links", {})
+    strategy_label = _text(manifest.get("routing_strategy_label"), "Module-hub")
     cards: list[str] = []
     figure_names = ("geometry", "incidence", "selected_pairs", "probabilities", "occupancy", "support_turnover")
     for anchor in manifest.get("anchors", ()):
@@ -1630,7 +1702,7 @@ def _write_index(path: Path, manifest: Mapping[str, Any]) -> None:
     support_block = f'<section class="card"><h2>Support transition</h2><img src="{html.escape(str(support), quote=True)}" alt="support transition trace"></section>' if support else ""
     text = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>HONF module-hub routing diagnostics</title>
+<title>HONF {html.escape(strategy_label)} routing diagnostics</title>
 <style>
 :root {{ color-scheme: light; --ink:#23313d; --muted:#60717e; --line:#dce4e9; --page:#f4f7f9; --panel:#fff; }}
 * {{ box-sizing:border-box; }} body {{ margin:0; background:var(--page); color:var(--ink); font-family:Inter,Arial,sans-serif; line-height:1.4; }}
@@ -1640,7 +1712,7 @@ p {{ color:var(--muted); }} .notice {{ border-left:4px solid #315f7c; background
 .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(420px,1fr)); gap:14px; }} figure {{ margin:0; }} img {{ display:block; width:100%; height:auto; border:1px solid var(--line); background:white; }} figcaption {{ color:var(--muted); font-size:12px; padding:4px 2px; text-transform:capitalize; }}
 .muted {{ color:var(--muted); }} .warning {{ color:#8b4513; background:#fff7ed; border-left:3px solid #bf6b3c; padding:7px 10px; }} ul {{ margin:6px 0 8px 20px; }} code,pre {{ font-size:12px; }}
 </style></head><body><main>
-<header><h1>Module-hub routing diagnostics</h1>
+<header><h1>{html.escape(strategy_label)} routing diagnostics</h1>
 <p>Shared selected-anchor figures for ordinary source memberships, source-measure query probabilities, deduplicated two-hop priors, and sparse work occupancy.</p>
 <div class="notice"><strong>Interpretation.</strong> Hub coordinates are routing descriptors. Route weights describe learned routing and are not physical influence or field values. Reference/prediction/error field plots remain endpoint-owned and are linked below without copying their arrays.</div>
 <p>Status: <strong>{html.escape(str(manifest.get("status", "unknown")))}</strong> · anchors rendered: {html.escape(str(manifest.get("rendered_anchor_count", 0)))}</p></header>
@@ -1673,6 +1745,7 @@ def render_routing_diagnostics(
     """
 
     payload, ledger_path = _load_ledger(ledger)
+    routing_strategy, strategy_label = _payload_strategy(payload)
     output = Path(output_dir).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     expected = tuple(str(case) for case in expected_case_ids)
@@ -1749,6 +1822,20 @@ def render_routing_diagnostics(
         details = {"missing_cases": missing_cases, "incomplete": incomplete}
         raise RoutingFigureError(f"routing figure contract is incomplete: {json.dumps(_jsonable(details), sort_keys=True)}")
 
+    # Older ledgers did not copy strategy metadata into the JSON envelope,
+    # while their selected NPZ maps already carried ``routing_strategy``.
+    # Prefer that explicit map metadata before applying the historical
+    # module-hub fallback so mean-shift figures cannot be mislabeled.
+    if payload.get("routing_strategy") is None and payload.get("routing_strategy_metadata") is None:
+        map_strategies = {
+            str(data.get("routing_strategy"))
+            for data in loaded.values()
+            if data.get("routing_strategy") is not None
+        }
+        if len(map_strategies) == 1:
+            routing_strategy = next(iter(map_strategies))
+            strategy_label = _strategy_label(routing_strategy)
+
     anchors: list[dict[str, Any]] = []
     support_traces: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for case_id in expected:
@@ -1768,13 +1855,19 @@ def render_routing_diagnostics(
             "occupancy": output / f"routing__{case_id}__occupancy.png",
         }
         if arrays["module_coords"] is not None and arrays["env_coords"] is not None and arrays["hub_coords"] is not None:
-            _render_geometry(figure_paths["geometry"], case_id, arrays, {f"{phase}_{source}": view for phase, source_views in phase_views.items() for source, view in source_views.items()})
+            _render_geometry(
+                figure_paths["geometry"],
+                case_id,
+                arrays,
+                {f"{phase}_{source}": view for phase, source_views in phase_views.items() for source, view in source_views.items()},
+                strategy_label=strategy_label,
+            )
         else:
-            _placeholder(figure_paths["geometry"], f"Module-hub routing geometry · case {case_id}", validation[case_id].get("missing", []))
-        _render_incidence(figure_paths["incidence"], case_id, arrays)
-        _render_selected(figure_paths["selected_pairs"], case_id, arrays, phase_views)
-        _render_probabilities(figure_paths["probabilities"], case_id, arrays, phase_views)
-        _render_occupancy(figure_paths["occupancy"], case_id, arrays, phase_views, data)
+            _placeholder(figure_paths["geometry"], f"{strategy_label} routing geometry · case {case_id}", validation[case_id].get("missing", []))
+        _render_incidence(figure_paths["incidence"], case_id, arrays, strategy_label=strategy_label)
+        _render_selected(figure_paths["selected_pairs"], case_id, arrays, phase_views, strategy_label=strategy_label)
+        _render_probabilities(figure_paths["probabilities"], case_id, arrays, phase_views, strategy_label=strategy_label)
+        _render_occupancy(figure_paths["occupancy"], case_id, arrays, phase_views, data, strategy_label=strategy_label)
         turnover_path = output / f"routing__{case_id}__support_turnover.png"
         turnover_record = turnover_records.get(case_id)
         if turnover_record is None:
@@ -1823,6 +1916,8 @@ def render_routing_diagnostics(
         "task": "render_routing_diagnostics",
         "status": status,
         "strict": bool(strict),
+        "routing_strategy": routing_strategy,
+        "routing_strategy_label": strategy_label,
         "expected_case_ids": list(expected),
         "rendered_anchor_count": len(anchors),
         "missing_case_ids": missing_cases,

@@ -1940,6 +1940,131 @@ def _query_receiver_count(value: torch.Tensor) -> int | None:
     return int(count)
 
 
+def _complete_qe_metrics(
+    fine_pair_count: Any,
+    source_count: int | None,
+    dense_fast_path_enabled: bool | None = None,
+) -> dict[str, Any]:
+    """Count complete-QE eligibility and, when enabled, actual-use rows.
+
+    ``routing_*_fine_pair_count`` is emitted by the routed backend after
+    duplicate ``(batch, receiver, source)`` keys have been coalesced.  For an
+    environmental read, a receiver is on the complete-QE path exactly when
+    its unique pair count equals the number of environmental source rows.
+    Keeping this calculation on the post-coalescing count avoids mistaking
+    raw two-hop paths or hub support for complete support.  The resulting
+    ``R_completeQE`` is an eligibility ratio unless the backend's dense-QE
+    fast-path flag is known to be enabled.  The current backend dispatches
+    the dense reader per whole case/batch item, so the companion ``*_actual``
+    receiver fields count all receivers in complete cases rather than
+    individually eligible receivers.
+
+    The receiver-row fields are the primary definition used by the dynamic
+    ledger.  Case-row fields are included as a companion: a case is complete
+    only when every receiver row in that batch item is complete.  This is
+    diagnostic-only and deliberately returns ``status=unavailable`` when the
+    backend did not provide a count or source cardinality.
+    """
+
+    result: dict[str, Any] = {
+        "complete_qe_receiver_rows": None,
+        "all_qe_receiver_rows": None,
+        "R_completeQE": None,
+        "complete_qe_case_rows": None,
+        "all_qe_case_rows": None,
+        "R_completeQE_case": None,
+        "complete_qe_actual_receiver_rows": None,
+        "R_completeQE_actual": None,
+        "complete_qe_actual_case_rows": None,
+        "R_completeQE_case_actual": None,
+        "complete_qe_fast_path_enabled": dense_fast_path_enabled,
+        "complete_qe_source_count": None,
+        "complete_qe_status": "unavailable",
+    }
+    if not torch.is_tensor(fine_pair_count):
+        result["complete_qe_status"] = "missing_fine_pair_count"
+        return result
+    if source_count is None or int(source_count) <= 0:
+        result["complete_qe_status"] = "missing_source_count"
+        return result
+    counts = fine_pair_count.detach()
+    if counts.numel() == 0:
+        result.update(
+            {
+                "complete_qe_receiver_rows": 0,
+                "all_qe_receiver_rows": 0,
+                "R_completeQE": None,
+                "complete_qe_case_rows": 0,
+                "all_qe_case_rows": 0,
+                "R_completeQE_case": None,
+                "complete_qe_actual_receiver_rows": 0 if dense_fast_path_enabled is False else None,
+                "R_completeQE_actual": None,
+                "complete_qe_actual_case_rows": 0 if dense_fast_path_enabled is False else None,
+                "R_completeQE_case_actual": None,
+                "complete_qe_source_count": int(source_count),
+                "complete_qe_status": "ok",
+            }
+        )
+        return result
+
+    finite = torch.isfinite(counts)
+    complete = finite & counts.eq(int(source_count))
+    receiver_rows = int(counts.numel())
+    complete_receiver_rows = int(complete.sum().cpu())
+    result.update(
+        {
+            "complete_qe_receiver_rows": complete_receiver_rows,
+            "all_qe_receiver_rows": receiver_rows,
+            "R_completeQE": float(complete_receiver_rows / receiver_rows),
+            "complete_qe_source_count": int(source_count),
+            "complete_qe_status": "ok",
+        }
+    )
+
+    # The first tensor axis is the batch/case axis for all routed read
+    # phases.  Flatten any physical receiver axes (including P0 M x theta)
+    # only after preserving that case boundary.
+    if counts.ndim == 0:
+        complete_cases = complete.reshape(1)
+    else:
+        complete_cases = complete.reshape(int(counts.shape[0]), -1).all(dim=1)
+    case_rows = int(complete_cases.numel())
+    complete_case_rows = int(complete_cases.sum().cpu())
+    receiver_width = receiver_rows // case_rows if case_rows else 0
+    actual_receiver_rows = (
+        complete_case_rows * receiver_width
+        if dense_fast_path_enabled is True
+        else 0
+        if dense_fast_path_enabled is False
+        else None
+    )
+    actual_case_rows = (
+        complete_case_rows
+        if dense_fast_path_enabled is True
+        else 0
+        if dense_fast_path_enabled is False
+        else None
+    )
+    result.update(
+        {
+            "complete_qe_case_rows": complete_case_rows,
+            "all_qe_case_rows": case_rows,
+            "R_completeQE_case": float(complete_case_rows / case_rows)
+            if case_rows
+            else None,
+            "complete_qe_actual_receiver_rows": actual_receiver_rows,
+            "R_completeQE_actual": float(actual_receiver_rows / receiver_rows)
+            if actual_receiver_rows is not None and receiver_rows
+            else None,
+            "complete_qe_actual_case_rows": actual_case_rows,
+            "R_completeQE_case_actual": float(actual_case_rows / case_rows)
+            if actual_case_rows is not None and case_rows
+            else None,
+        }
+    )
+    return result
+
+
 def _scalar_number(value: Any) -> float | None:
     """Convert a scalar tensor/number to a finite float when available."""
 
@@ -2370,6 +2495,8 @@ def _ledger_row(
     sample: Mapping[str, Any],
     case_id: str,
     query_count: int,
+    *,
+    dense_environment_fast_path: bool | None = None,
 ) -> dict[str, Any]:
     prepared = outputs.get("prepared_state")
     inner = getattr(prepared, "prepared", prepared)
@@ -2463,6 +2590,18 @@ def _ledger_row(
                     )
         else:
             metrics["executed_receiver_count"] = None
+        # ``fine_pair_count`` is post-coalescing and therefore the right
+        # quantity for the complete-QE fraction.  Raw paths, query support,
+        # and source occupancy can all look dense without proving that the
+        # dense QE reader was eligible for every receiver.
+        if "environment" in prefix:
+            metrics.update(
+                _complete_qe_metrics(
+                    _route_value(outputs, f"{prefix}_fine_pair_count"),
+                    env_count,
+                    dense_environment_fast_path,
+                )
+            )
         return metrics
 
     final_module = phase_metrics("p2", "routing_module")
@@ -2554,7 +2693,21 @@ def _ledger_row(
     for phase_name, metrics in row["phase_metrics"].items():
         if not isinstance(metrics, Mapping):
             continue
-        for metric_name in ("raw_path_count", "unique_pair_count", "duplicate_expansion"):
+        for metric_name in (
+            "raw_path_count",
+            "unique_pair_count",
+            "duplicate_expansion",
+            "complete_qe_receiver_rows",
+            "all_qe_receiver_rows",
+            "R_completeQE",
+            "complete_qe_case_rows",
+            "all_qe_case_rows",
+            "R_completeQE_case",
+            "complete_qe_actual_receiver_rows",
+            "R_completeQE_actual",
+            "complete_qe_actual_case_rows",
+            "R_completeQE_case_actual",
+        ):
             metric_value = metrics.get(metric_name)
             if isinstance(metric_value, (int, float, np.integer, np.floating)):
                 row[f"{phase_name}_{metric_name}"] = float(metric_value)
@@ -2867,6 +3020,37 @@ def _selected_routing_map_arrays(
     return maps, selection
 
 
+def _routing_strategy_metadata(model: Any) -> dict[str, Any]:
+    """Read the active routed strategy from the loaded model configuration."""
+
+    backend = getattr(getattr(model, "core", None), "backend", None)
+    interface_config = getattr(getattr(model, "config", None), "core_honf", None)
+    interface_config = getattr(interface_config, "interface_model", None)
+    routing_config = getattr(interface_config, "routing", None)
+    strategy = getattr(routing_config, "strategy", None)
+    source = "model.config.core_honf.interface_model.routing.strategy"
+    if strategy is None:
+        strategy = getattr(getattr(getattr(model, "core", None), "backend", None), "routing_strategy", None)
+        source = "model.core.backend.routing_strategy"
+    if strategy is None:
+        source = "unavailable"
+    metadata: dict[str, Any] = {
+        "strategy": None if strategy is None else str(strategy),
+        "source": source,
+    }
+    for name in ("mean_shift_steps", "mean_shift_feature_bandwidth", "source_normalizer"):
+        value = getattr(routing_config, name, None)
+        if value is not None:
+            metadata[name] = _json_value(value)
+    fast_path = getattr(backend, "dense_environment_fast_path", None)
+    if fast_path is not None:
+        metadata["dense_environment_fast_path"] = bool(fast_path)
+    execution = getattr(backend, "routing_execution", None)
+    if execution is not None:
+        metadata["routing_execution"] = str(execution)
+    return metadata
+
+
 def run_ledger(args: argparse.Namespace) -> dict[str, Any]:
     """Collect source/occupancy/path counts and bounded omitted-source metadata."""
 
@@ -2878,6 +3062,8 @@ def run_ledger(args: argparse.Namespace) -> dict[str, Any]:
     model, checkpoint = _load_model_spec(spec, device)
     if str(model.config.core_honf.forward_architecture) != "routed_pairwise_honf":
         raise ValueError("ledger requires routed_pairwise_honf")
+    strategy_metadata = _routing_strategy_metadata(model)
+    routing_strategy = strategy_metadata.get("strategy")
     dataset, dataset_path = _load_dataset(checkpoint, _profile_args(args))
     case_ids = [str(value) for value in (args.case_id or ANCHOR_CASE_IDS)]
     rows: list[dict[str, Any]] = []
@@ -2902,7 +3088,17 @@ def run_ledger(args: argparse.Namespace) -> dict[str, Any]:
                     return_routing_maps=True,
                     return_organizer_passes=True,
                 )
-            row = _ledger_row(outputs, sample, case_id, len(query_np))
+            row = _ledger_row(
+                outputs,
+                sample,
+                case_id,
+                len(query_np),
+                dense_environment_fast_path=strategy_metadata.get("dense_environment_fast_path")
+                if isinstance(strategy_metadata.get("dense_environment_fast_path"), bool)
+                else None,
+            )
+            row["routing_strategy"] = routing_strategy
+            row["routing_strategy_metadata"] = strategy_metadata
             row["routing_observation"] = summarize_routing_output(outputs)
             # Private map tensors are exported to the selected-anchor NPZ and
             # omitted from the JSON summary so the ledger stays compact.
@@ -2984,6 +3180,9 @@ def run_ledger(args: argparse.Namespace) -> dict[str, Any]:
         "task": "dynamic_sparse_routing_ledger",
         "checkpoint": {"label": spec.label, "path": str(spec.path), "epoch": int(checkpoint.get("epoch", -1))},
         "architecture": str(model.config.core_honf.forward_architecture),
+        "routing_strategy": routing_strategy,
+        "routing_strategy_metadata": strategy_metadata,
+        "route_weight_semantics": ROUTING_WEIGHT_SEMANTICS,
         "dataset": str(dataset_path),
         "case_ids": case_ids,
         "query_count": int(args.query_count),
@@ -3015,6 +3214,16 @@ def run_ledger(args: argparse.Namespace) -> dict[str, Any]:
             "M_active": "number of physical present module source rows",
             "Mpack": "padded module source width used by the encoded dense reference",
             "route_weights": "learned routing priors, not physical influence or field-value substitutes",
+            "routing_strategy": "strategy selected by model.config.core_honf.interface_model.routing.strategy (or backend fallback)",
+            "complete_qe_receiver_rows": "number of receiver rows whose post-coalescing unique QE pair count equals E",
+            "all_qe_receiver_rows": "all receiver rows represented by the phase fine_pair_count tensor",
+            "R_completeQE": "complete_qe_receiver_rows / all_qe_receiver_rows; receiver-row definition",
+            "complete_qe_actual_receiver_rows": "receiver rows belonging to complete cases dispatched through the dense path when dense_environment_fast_path=true; otherwise null/zero as reported",
+            "R_completeQE_actual": "actual complete-QE receiver rows / all receiver rows, with whole-case dispatch semantics, when dense_environment_fast_path is known",
+            "complete_qe_case_rows": "batch/case rows for which every receiver row is complete QE",
+            "all_qe_case_rows": "batch/case rows represented by the phase fine_pair_count tensor",
+            "R_completeQE_case": "complete_qe_case_rows / all_qe_case_rows; companion case-row definition",
+            "R_completeQE_case_actual": "actual complete-QE case rows / all case rows when dense_environment_fast_path is known",
         },
     }
 

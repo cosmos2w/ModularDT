@@ -113,3 +113,15 @@ Complete the draft report and comparison with exact versus selected epochs, full
 Recheck whether trustworthy responses to the existing 16 independent reference requests have arrived. Do not start solver development. Formal `barrier benefit: Evidence Missing` remains unless appropriate solver-labelled layouts actually exist. No route map or model-versus-itself derivative is a physical validation certificate.
 
 Treat 500 as an early assessment. Give an evidence-based recommendation and an exact **unexecuted** same-run continuation command only if warranted. Do not launch continuation, sweeps, another managed run, Goal 2, or Goal 3. Preserve the user's pre-existing staged documentation moves when committing only this task's files.
+
+
+## Recovery on 2026-09-16
+
+The user requested verification and continuation to epoch 500 after observing the epoch-100 milestone. Inspection found original PID 3684940 and tool session absent, GPU 2 idle, metrics through epoch 123, and the log ending during epoch 124. The old running manifest was stale. No traceback or kernel OOM evidence was found around the stop; cause is unconfirmed.
+
+Resumed the same managed directory from best_model.pt at epoch 123, the newest complete saved state, restoring model, optimizer and RNG through the existing workflow. latest_model.pt was only epoch 120. No new run was allocated. Physical GPU 2, terminal epoch 500. Launch used subprocess.Popen(start_new_session=True, stdin=DEVNULL), with stdout/stderr appended to resume_epoch123_to500.log in this study directory, independent of the interactive command session. Launch PID: 4107994. Startup log confirms epoch 124 / 500. Final analysis remains deferred.
+
+Executed from HONF_Proj with CUDA_VISIBLE_DEVICES=2, PYTHONPATH=src:Case_ThermalChannel/src, OMP_NUM_THREADS=4:
+```bash
+/home/wanglz/miniconda3/envs/ModularDT/bin/python -u train.py --config project://src/config_core/forward/routing_module_hubs_context.json --workflow forward --device cuda:0 --epochs 500 --resume-checkpoint Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_2000_20260915_225542_routed_module_hubs/best_model.pt --yes
+```

@@ -26,6 +26,44 @@ def test_map_tensor_conversion_detaches_and_returns_finite_cpu_array() -> None:
     assert np.isfinite(converted).all()
 
 
+def test_complete_qe_metrics_count_receiver_and_case_rows() -> None:
+    # Two batch/case rows, each with three receiver rows.  Five of the six
+    # receiver rows contain all three environmental sources; only the first
+    # case has every receiver complete.
+    fine_pair_count = torch.tensor([[3.0, 3.0, 3.0], [3.0, 2.0, 3.0]])
+
+    metrics = study._complete_qe_metrics(fine_pair_count, source_count=3)
+
+    assert metrics["complete_qe_receiver_rows"] == 5
+    assert metrics["all_qe_receiver_rows"] == 6
+    assert metrics["R_completeQE"] == 5 / 6
+    assert metrics["complete_qe_case_rows"] == 1
+    assert metrics["all_qe_case_rows"] == 2
+    assert metrics["R_completeQE_case"] == 0.5
+    assert metrics["complete_qe_status"] == "ok"
+
+
+def test_complete_qe_metrics_handles_missing_backend_values() -> None:
+    metrics = study._complete_qe_metrics(None, source_count=3)
+
+    assert metrics["complete_qe_status"] == "missing_fine_pair_count"
+    assert metrics["R_completeQE"] is None
+
+
+def test_complete_qe_metrics_distinguishes_eligibility_from_fast_path_use() -> None:
+    fine_pair_count = torch.tensor([[3.0, 3.0], [3.0, 2.0]])
+
+    enabled = study._complete_qe_metrics(fine_pair_count, source_count=3, dense_fast_path_enabled=True)
+    disabled = study._complete_qe_metrics(fine_pair_count, source_count=3, dense_fast_path_enabled=False)
+
+    assert enabled["R_completeQE"] == 3 / 4
+    # The backend's complete-QE dispatch is whole-case: only the first
+    # two-receiver case takes the dense path, so actual receiver use is 2/4.
+    assert enabled["R_completeQE_actual"] == 2 / 4
+    assert disabled["R_completeQE"] == 3 / 4
+    assert disabled["R_completeQE_actual"] == 0.0
+
+
 def test_selected_map_export_keeps_cpu_geometry_arrays_finite() -> None:
     class _PortHead:
         @staticmethod
