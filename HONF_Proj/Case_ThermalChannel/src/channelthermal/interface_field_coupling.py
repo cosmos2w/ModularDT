@@ -113,6 +113,46 @@ def _read_port_context(
     return read.context.reshape(batch, modules, ports, -1), read.interaction_aux
 
 
+def _mask_port_paircost_components(
+    diagnostics: dict[str, torch.Tensor],
+    module_present: torch.Tensor,
+    ports: int,
+) -> dict[str, torch.Tensor]:
+    """Exclude padded module-port receivers from live Eq. (18) components.
+
+    Routed reads retain one pair-cost numerator and denominator per receiver,
+    including padded module slots in mixed-module batches.  P0, P1, and the
+    P2 port-global probe are physical port reads, so their receiver axis has
+    the repeated ``module_present`` mask.  Scalar components from historical
+    backends are left untouched for compatibility.
+    """
+
+    if not diagnostics or int(ports) <= 0:
+        return diagnostics
+    if module_present.ndim != 2:
+        raise ValueError("module_present must have shape [B,M] for port pair-cost masking.")
+    batch, modules = (int(module_present.shape[0]), int(module_present.shape[1]))
+    receiver_mask = module_present.unsqueeze(-1).expand(batch, modules, int(ports)).reshape(
+        batch, modules * int(ports)
+    )
+    masked = dict(diagnostics)
+    for key, value in diagnostics.items():
+        if (
+            not torch.is_tensor(value)
+            or not str(key).endswith(("routing_paircost_numerator", "routing_paircost_denominator"))
+            or value.ndim < 2
+            or int(value.shape[0]) != batch
+        ):
+            continue
+        if int(value.shape[1]) == int(receiver_mask.shape[1]):
+            mask = receiver_mask.to(device=value.device, dtype=value.dtype)
+            masked[key] = value * mask.reshape(batch, int(value.shape[1]), *([1] * (value.ndim - 2)))
+        elif int(value.shape[1]) == modules:
+            mask = module_present.to(device=value.device, dtype=value.dtype)
+            masked[key] = value * mask.reshape(batch, modules, *([1] * (value.ndim - 2)))
+    return masked
+
+
 def forward_interface_field(
     model: Any,
     *,
@@ -243,6 +283,11 @@ def forward_interface_field(
         physical_port_xy,
         return_routing_maps=bool(return_routing_maps),
     )
+    initial_read_aux = _mask_port_paircost_components(
+        initial_read_aux,
+        adapter.module_present,
+        ntheta,
+    )
     pred_port_tokens = model.local_coupling.port_head(
         base_module_state,
         initial_port_context,
@@ -321,6 +366,11 @@ def forward_interface_field(
                 for key, value in provisional_decode.items()
                 if key != "pred_field" and torch.is_tensor(value)
             }
+            provisional_read_aux = _mask_port_paircost_components(
+                provisional_read_aux,
+                adapter.module_present,
+                int(local_ports_used.shape[-2]),
+            )
             refined_ports = model.local_coupling.port_refinement_head(
                 module_state,
                 local_ports_used,
@@ -418,7 +468,9 @@ def forward_interface_field(
         interface_source = "local_surrogate"
     else:
         pred_internal = model.fallback_heads.predict_internal(module_state, local_query_points, adapter.module_present)
-        pred_interface = model.fallback_heads.predict_interface(module_state, ntheta=ntheta, module_present=adapter.module_present)
+        pred_interface = model.fallback_heads.predict_interface(
+            module_state, ntheta=ntheta, module_present=adapter.module_present
+        )
         module_response_latent = module_state
         interface_source = "global_head"
 
@@ -432,6 +484,23 @@ def forward_interface_field(
             read_role="p2_port_global_consistency",
             return_routing_maps=bool(return_routing_maps),
         )
+        consistency_diag = _mask_port_paircost_components(
+            consistency_diag,
+            adapter.module_present,
+            int(indices.numel()),
+        )
+        # The p2 port-global consistency probe is an actual routed QE read.
+        # Preserve its live Eq. (18) components separately from the final
+        # field read so the case loss counts every physical read exactly once.
+        # When pair-cost is disabled the backend emits no such components, so
+        # historical outputs and their auxiliary schemas remain unchanged.
+        if architecture == "routed_pairwise_honf":
+            for key, value in consistency_diag.items():
+                if (
+                    key.endswith(("routing_paircost_numerator", "routing_paircost_denominator"))
+                    and torch.is_tensor(value)
+                ):
+                    interaction_aux["port_global_" + key] = value
         target_temperature = selected[..., 3]
         consistency_mask = adapter.module_present[:, :, None].expand_as(temperature)
         port_global_temperature = temperature * consistency_mask

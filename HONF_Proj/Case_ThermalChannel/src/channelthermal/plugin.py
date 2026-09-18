@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from honf_runtime.case_protocol import WorkflowRequest
 from honf_runtime.config_loader import ConfigBundle
@@ -18,7 +20,6 @@ from .config import ChannelThermalSpecificConfig
 from .local_surrogate.model import LocalModuleConfig
 from .local_surrogate.spec import THERMAL_DISK_SPEC
 from .resources import DatasetRegistry, DatasetResource
-
 
 DATASET_KEYS = {
     "manifest", "locations", "train_split", "val_split", "points_per_case",
@@ -182,8 +183,14 @@ class ThermalChannelPlugin:
             "dataset sha256": resource.fingerprint,
         }
         if request.workflow == "forward":
-            if request.initialize_checkpoint:
-                initialization_checkpoint = resolve_path(request.initialize_checkpoint)
+            configured_initialization = (
+                bundle.effective.get("training", {}).get("init_checkpoint_path")
+                if request.resume_checkpoint is None
+                else None
+            )
+            initialization_reference = request.initialize_checkpoint or configured_initialization
+            if initialization_reference:
+                initialization_checkpoint = resolve_path(initialization_reference)
                 if not initialization_checkpoint.is_file():
                     raise FileNotFoundError(
                         f"Forward initialization checkpoint not found: {initialization_checkpoint}"
@@ -301,7 +308,22 @@ class ThermalChannelPlugin:
             from .workflows.train_forward import run_from_config
 
             config = self._forward_config(bundle, request, run_dir)
-            return run_from_config(config, self._workflow_args(request), run_dir_override=run_dir)
+            configured_initialization = config["training"].get("init_checkpoint_path")
+            effective_request = request
+            if (
+                not request.initialize_checkpoint
+                and not request.resume_checkpoint
+                and configured_initialization
+            ):
+                effective_request = replace(
+                    request,
+                    initialize_checkpoint=str(configured_initialization),
+                )
+            return run_from_config(
+                config,
+                self._workflow_args(effective_request),
+                run_dir_override=run_dir,
+            )
         if request.workflow == "local_module":
             from .workflows.train_local import run_from_config
 

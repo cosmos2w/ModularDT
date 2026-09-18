@@ -10,14 +10,17 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from channelthermal.model import ChannelThermalHONFModel
-from channelthermal.training_tools.losses import channelthermal_field_mse
+from channelthermal.training_tools.losses import (
+    channelthermal_field_mse,
+    induced_pair_cost_loss,
+)
+from honf_forward_core.config import ROUTING_TYPED_TEMPERATURE_NAMES
 from honf_forward_core.training.diagnostics import (
     HONF_DIAGNOSTIC_KEYS,
     compute_honf_diagnostics,
     organizer_regularization_loss,
 )
 from honf_runtime.compat import autocast_context, recursive_to_device
-
 
 INTERFACE_DIAGNOSTIC_KEYS = (
     "interaction_local_neighbor_count_mean",
@@ -316,6 +319,124 @@ def make_model_inputs(
     }
 
 
+def _routing_sparsification_settings(model: ChannelThermalHONFModel) -> Any:
+    """Return the optional routed science settings without widening legacy APIs."""
+
+    core_config = getattr(getattr(model, "config", None), "core_honf", None)
+    interface_config = getattr(core_config, "interface_model", None)
+    routing_config = getattr(interface_config, "routing", None)
+    return getattr(routing_config, "sparsification", None)
+
+
+def assemble_channelthermal_loss_terms(
+    output: dict[str, Any],
+    batch: dict[str, Any],
+    model: ChannelThermalHONFModel,
+    loss_cfg: dict[str, Any],
+    *,
+    local_port_condition_mode: str,
+    mixed_teacher_ratio: float,
+    effective_internal_temperature_weight: float,
+    effective_interface_weight: float,
+    predicted_consistency_weight: float,
+) -> dict[str, torch.Tensor]:
+    """Assemble the physical objective and the optional induced-pair term.
+
+    Keeping this calculation separate from :func:`run_epoch` gives the
+    calibration/replay tools one authoritative loss assembly point.  The
+    returned ``loss_physical`` is the unchanged supervised objective,
+    ``loss_paircost`` is the dimensionless Eq. (18) surrogate, and ``loss`` is
+    their sum with one configured fixed coefficient.
+    """
+
+    target = batch["field_targets"].float()
+    point_weights = batch.get("point_weights")
+    loss_field = channelthermal_field_mse(
+        output["pred_field"],
+        target,
+        loss_cfg,
+        field_names=model.config.channelthermal.field_names,
+        point_weights=point_weights,
+    )
+    zero = output["pred_field"].new_zeros(())
+    loss_internal = internal_loss(output, batch) if effective_internal_temperature_weight != 0.0 else zero
+    loss_interface = interface_loss(output, batch, loss_cfg) if effective_interface_weight != 0.0 else zero
+    port_global_weight = effective_port_global_weight(
+        loss_cfg, local_port_condition_mode, mixed_teacher_ratio
+    )
+    port_supervised_weight = float(
+        loss_cfg.get("port_supervised_weight", loss_cfg.get("port_condition_weight", 0.0))
+    )
+    port_smoothness_weight = float(loss_cfg.get("port_smoothness_weight", 0.0))
+    loss_port = port_condition_loss(output, batch, loss_cfg) if port_supervised_weight != 0.0 else zero
+    loss_port_smoothness = (
+        port_cyclic_smoothness_loss(output, batch) if port_smoothness_weight != 0.0 else zero
+    )
+    loss_port_global = port_global_consistency_loss(output) if port_global_weight != 0.0 else zero
+    if "predicted_port_internal_temperature" in output and "predicted_port_interface" in output:
+        pred_cons_internal = internal_loss(
+            {
+                "pred_internal_temperature": output["predicted_port_internal_temperature"],
+                "pred_field": output["pred_field"],
+            },
+            batch,
+        )
+        pred_cons_interface = interface_loss(
+            {"pred_interface": output["predicted_port_interface"], "pred_field": output["pred_field"]},
+            batch,
+            loss_cfg,
+        )
+        loss_predicted_consistency = pred_cons_internal + pred_cons_interface
+    else:
+        pred_cons_internal = zero
+        pred_cons_interface = zero
+        loss_predicted_consistency = zero
+    loss_org = organizer_regularization(output, loss_cfg)
+
+    sparsification = _routing_sparsification_settings(model)
+    paircost_enabled = bool(getattr(sparsification, "enabled", False))
+    paircost_weight = float(getattr(sparsification, "cost_weight", 0.0))
+    if paircost_weight != 0.0 and not paircost_enabled:
+        raise ValueError("A nonzero induced pair-cost coefficient requires routing.sparsification.enabled.")
+    loss_paircost = induced_pair_cost_loss(
+        output,
+        enabled=paircost_enabled,
+        # The zero-weight pre-calibration profile still needs the canonical
+        # live components so the parent can measure their router gradients;
+        # silently accepting a detached reporting scalar would invalidate that
+        # calibration.
+        require_components=paircost_enabled,
+    )
+    loss_physical = (
+        float(loss_cfg.get("field_mse_weight", 1.0)) * loss_field
+        + float(effective_internal_temperature_weight) * loss_internal
+        + float(effective_interface_weight) * loss_interface
+        + port_supervised_weight * loss_port
+        + port_smoothness_weight * loss_port_smoothness
+        + float(port_global_weight) * loss_port_global
+        + float(predicted_consistency_weight) * loss_predicted_consistency
+        + loss_org
+    )
+    loss = loss_physical + paircost_weight * loss_paircost
+    return {
+        "loss": loss,
+        "loss_physical": loss_physical,
+        "loss_field": loss_field,
+        "loss_internal_temperature": loss_internal,
+        "loss_interface": loss_interface,
+        "loss_port_condition": loss_port,
+        "loss_port_smoothness": loss_port_smoothness,
+        "loss_port_global_consistency": loss_port_global,
+        "loss_predicted_consistency": loss_predicted_consistency,
+        "loss_predicted_consistency_internal": pred_cons_internal,
+        "loss_predicted_consistency_interface": pred_cons_interface,
+        "loss_organizer": loss_org,
+        "loss_paircost": loss_paircost,
+        "paircost_weight": output["pred_field"].new_tensor(paircost_weight),
+        "port_global_weight": output["pred_field"].new_tensor(port_global_weight),
+    }
+
+
 def run_epoch(
     model: ChannelThermalHONFModel,
     loader: DataLoader,
@@ -341,16 +462,19 @@ def run_epoch(
     sums: Dict[str, float] = {}
     one_shot_metrics: Dict[str, float] = {}
     count = 0
+    sparsification = _routing_sparsification_settings(model)
+    paircost_enabled = bool(getattr(sparsification, "enabled", False))
     iterator = tqdm(loader, leave=False, desc="train" if training else "val")
     for batch_idx, batch in enumerate(iterator, start=1):
         if max_batches is not None and batch_idx > int(max_batches):
             break
         batch = recursive_to_device(batch, device)
         target = batch["field_targets"].float()
-        point_weights = batch.get("point_weights")
         with torch.set_grad_enabled(training):
             with autocast_context(device, amp):
-                port_global_weight = effective_port_global_weight(loss_cfg, local_port_condition_mode, mixed_teacher_ratio)
+                port_global_weight = effective_port_global_weight(
+                    loss_cfg, local_port_condition_mode, mixed_teacher_ratio
+                )
                 output = model(
                     **make_model_inputs(
                         batch,
@@ -360,47 +484,29 @@ def run_epoch(
                         return_port_global_consistency=bool(port_global_weight != 0.0),
                     )
                 )
-                loss_field = channelthermal_field_mse(
-                    output["pred_field"],
-                    target,
+                loss_terms = assemble_channelthermal_loss_terms(
+                    output,
+                    batch,
+                    model,
                     loss_cfg,
-                    field_names=model.config.channelthermal.field_names,
-                    point_weights=point_weights,
+                    local_port_condition_mode=local_port_condition_mode,
+                    mixed_teacher_ratio=mixed_teacher_ratio,
+                    effective_internal_temperature_weight=effective_internal_temperature_weight,
+                    effective_interface_weight=effective_interface_weight,
+                    predicted_consistency_weight=predicted_consistency_weight,
                 )
-                zero = output["pred_field"].new_zeros(())
-                loss_internal = internal_loss(output, batch) if effective_internal_temperature_weight != 0.0 else zero
-                loss_interface = interface_loss(output, batch, loss_cfg) if effective_interface_weight != 0.0 else zero
-                port_supervised_weight = float(loss_cfg.get("port_supervised_weight", loss_cfg.get("port_condition_weight", 0.0)))
-                port_smoothness_weight = float(loss_cfg.get("port_smoothness_weight", 0.0))
-                loss_port = port_condition_loss(output, batch, loss_cfg) if port_supervised_weight != 0.0 else zero
-                loss_port_smoothness = port_cyclic_smoothness_loss(output, batch) if port_smoothness_weight != 0.0 else zero
-                loss_port_global = port_global_consistency_loss(output) if port_global_weight != 0.0 else zero
-                if "predicted_port_internal_temperature" in output and "predicted_port_interface" in output:
-                    pred_cons_internal = internal_loss(
-                        {"pred_internal_temperature": output["predicted_port_internal_temperature"], "pred_field": output["pred_field"]},
-                        batch,
-                    )
-                    pred_cons_interface = interface_loss(
-                        {"pred_interface": output["predicted_port_interface"], "pred_field": output["pred_field"]},
-                        batch,
-                        loss_cfg,
-                    )
-                    loss_predicted_consistency = pred_cons_internal + pred_cons_interface
-                else:
-                    pred_cons_internal = output["pred_field"].new_zeros(())
-                    pred_cons_interface = output["pred_field"].new_zeros(())
-                    loss_predicted_consistency = output["pred_field"].new_zeros(())
-                loss_org = organizer_regularization(output, loss_cfg)
-                loss = (
-                    float(loss_cfg.get("field_mse_weight", 1.0)) * loss_field
-                    + float(effective_internal_temperature_weight) * loss_internal
-                    + float(effective_interface_weight) * loss_interface
-                    + port_supervised_weight * loss_port
-                    + port_smoothness_weight * loss_port_smoothness
-                    + float(port_global_weight) * loss_port_global
-                    + float(predicted_consistency_weight) * loss_predicted_consistency
-                    + loss_org
-                )
+                loss = loss_terms["loss"]
+                loss_field = loss_terms["loss_field"]
+                loss_internal = loss_terms["loss_internal_temperature"]
+                loss_interface = loss_terms["loss_interface"]
+                loss_port = loss_terms["loss_port_condition"]
+                loss_port_smoothness = loss_terms["loss_port_smoothness"]
+                loss_port_global = loss_terms["loss_port_global_consistency"]
+                loss_predicted_consistency = loss_terms["loss_predicted_consistency"]
+                pred_cons_internal = loss_terms["loss_predicted_consistency_internal"]
+                pred_cons_interface = loss_terms["loss_predicted_consistency_interface"]
+                loss_org = loss_terms["loss_organizer"]
+                loss_paircost = loss_terms["loss_paircost"]
         if training:
             optimizer.zero_grad(set_to_none=True)
             clip_norm = float(gradient_clip_norm or 0.0)
@@ -487,23 +593,40 @@ def run_epoch(
                 edge_strength_threshold=float(reg_cfg.get("edge_strength_threshold", 0.05)),
                 edge_strength_temperature=float(reg_cfg.get("edge_strength_temperature", 0.05)),
             )
-            metrics = pack_scalar_metrics(
-                {
-                    "loss_total": loss,
-                    "loss_field": loss_field,
-                    "loss_internal_temperature": loss_internal,
-                    "loss_interface": loss_interface,
-                    "loss_port_condition": loss_port,
-                    "loss_port_smoothness": loss_port_smoothness,
-                    "loss_port_global_consistency": loss_port_global,
-                    "loss_predicted_consistency": loss_predicted_consistency,
-                    "loss_predicted_consistency_internal": pred_cons_internal,
-                    "loss_predicted_consistency_interface": pred_cons_interface,
-                    "loss_organizer": loss_org,
-                    "field_mse": mse,
-                    "temperature_mse": temp_mse,
-                }
-            )
+            interaction_aux = output.get("interaction_aux")
+            metric_tensors = {
+                "loss_total": loss,
+                "loss_field": loss_field,
+                "loss_internal_temperature": loss_internal,
+                "loss_interface": loss_interface,
+                "loss_port_condition": loss_port,
+                "loss_port_smoothness": loss_port_smoothness,
+                "loss_port_global_consistency": loss_port_global,
+                "loss_predicted_consistency": loss_predicted_consistency,
+                "loss_predicted_consistency_internal": pred_cons_internal,
+                "loss_predicted_consistency_interface": pred_cons_interface,
+                "loss_organizer": loss_org,
+                "field_mse": mse,
+                "temperature_mse": temp_mse,
+            }
+            if paircost_enabled:
+                metric_tensors["loss_physical"] = loss_terms["loss_physical"]
+                metric_tensors["loss_paircost"] = loss_paircost
+                # Keep the four learned temperatures in the ordinary metrics
+                # row for the opt-in science profile.  The names deliberately
+                # avoid the routing_* prefix so the existing routing-summary
+                # sidecar continues to receive only backend diagnostics.
+                for parameter_name in ROUTING_TYPED_TEMPERATURE_NAMES:
+                    relation = parameter_name.removeprefix("log_temperature_")
+                    value = (
+                        interaction_aux.get("routing_temperature_" + relation)
+                        if isinstance(interaction_aux, dict)
+                        else None
+                    )
+                    metric_tensors["temperature_" + relation] = (
+                        value if torch.is_tensor(value) else pred.new_full((), math.nan)
+                    )
+            metrics = pack_scalar_metrics(metric_tensors)
             metrics.update(
                 {
                     "effective_port_global_consistency_weight": float(port_global_weight),
@@ -512,7 +635,6 @@ def run_epoch(
                     "effective_interface_weight": float(effective_interface_weight),
                 }
             )
-            interaction_aux = output.get("interaction_aux")
             if isinstance(interaction_aux, dict):
                 if getattr(getattr(model.config, "core_honf", None), "forward_architecture", "") == "routed_pairwise_honf":
                     for key, value in interaction_aux.items():
@@ -584,7 +706,7 @@ def run_epoch(
         count += 1
         iterator.set_postfix(loss=f"{metrics['loss_total']:.3e}", field=f"{metrics['field_mse']:.3e}")
     if count == 0:
-        return {
+        empty_metrics = {
             key: math.nan
             for key in (
                 "loss_total",
@@ -607,6 +729,16 @@ def run_epoch(
                 *HONF_DIAGNOSTIC_KEYS,
             )
         }
+        if paircost_enabled:
+            empty_metrics["loss_physical"] = math.nan
+            empty_metrics["loss_paircost"] = math.nan
+            empty_metrics.update(
+                {
+                    "temperature_" + name.removeprefix("log_temperature_"): math.nan
+                    for name in ROUTING_TYPED_TEMPERATURE_NAMES
+                }
+            )
+        return empty_metrics
     averaged = {key: value / count for key, value in sums.items()}
     if training:
         averaged.update({key: math.nan for key in GRADIENT_DIAGNOSTIC_KEYS})

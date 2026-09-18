@@ -16,8 +16,11 @@ from .pair_join import (
     compile_routed_pairs,
     compile_two_hop_pairs,
     compile_two_hop_pairs_batched,
+    compile_two_hop_pairs_compiled,
+    compile_two_hop_pairs_exact,
     compile_two_hop_pairs_optimized,
     compile_two_hop_pairs_reference,
+    compile_two_hop_pairs_union_csr,
 )
 from .router import RoutedRoutingRouter, RoutingDescriptorMaps, fixed_data_mean_shift
 from .sparse_projection import (
@@ -32,6 +35,7 @@ from .sparse_projection import (
     source_measure_sparsemax,
 )
 from .types import (
+    CompiledPairs,
     InvertedSourceIncidence,
     MeasureQueryProjection,
     PackedPairs,
@@ -44,6 +48,7 @@ from .types import (
 )
 
 __all__ = [
+    "CompiledPairs",
     "InvertedSourceIncidence",
     "MeasureQueryProjection",
     "PackedPairs",
@@ -60,8 +65,11 @@ __all__ = [
     "compile_routed_pairs",
     "compile_two_hop_pairs",
     "compile_two_hop_pairs_batched",
+    "compile_two_hop_pairs_compiled",
+    "compile_two_hop_pairs_exact",
     "compile_two_hop_pairs_optimized",
     "compile_two_hop_pairs_reference",
+    "compile_two_hop_pairs_union_csr",
     "environment_source_measure",
     "fixed_data_mean_shift",
     "geometry_bounds",

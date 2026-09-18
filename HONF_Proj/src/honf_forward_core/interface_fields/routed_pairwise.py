@@ -19,9 +19,20 @@ from collections.abc import Mapping
 from typing import Any
 
 import torch
+from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 from .dense_pairwise import DensePairwiseField
+
+try:
+    from .kernels import fused_qe_reader, is_triton_qe_available
+except (ImportError, ModuleNotFoundError):  # pragma: no cover - package fallback
+    fused_qe_reader = None
+
+    def is_triton_qe_available(device: torch.device | str | None = None) -> bool:
+        del device
+        return False
+
 from .routing_index.geometry import (
     geometry_features,
     geometry_length_scale,
@@ -31,6 +42,7 @@ from .routing_index.geometry import (
 from .routing_index.pair_join import (
     compile_two_hop_pairs,
     compile_two_hop_pairs_batched,
+    compile_two_hop_pairs_compiled,
 )
 from .routing_index.router import RoutedRoutingRouter, fixed_data_mean_shift
 from .routing_index.sparse_projection import (
@@ -41,6 +53,7 @@ from .routing_index.sparse_projection import (
     source_measure_sparsemax,
 )
 from .routing_index.types import (
+    CompiledPairs,
     PackedPairs,
     PreparedRoutingIndex,
     RoutingCandidates,
@@ -117,6 +130,7 @@ class RoutedPairwiseField(DensePairwiseField):
         *,
         routing_config: Any = None,
         activation_checkpointing: bool = False,
+        typed_log_temperatures: Any = None,
     ) -> None:
         super().__init__(
             hidden_dim,
@@ -125,6 +139,13 @@ class RoutedPairwiseField(DensePairwiseField):
             fourier_frequencies,
             activation_checkpointing=activation_checkpointing,
         )
+        # Ownership stays on InterfaceFieldCore: avoid registering the same
+        # four parameters again under backend state-dict keys.
+        object.__setattr__(self, "_typed_log_temperatures", typed_log_temperatures)
+        self.sparsification = _option(routing_config, "sparsification", None)
+        self.paircost_enabled = bool(_option(self.sparsification, "enabled", False))
+        if bool(_option(self.sparsification, "learn_typed_temperatures", False)) and typed_log_temperatures is None:
+            raise ValueError("Typed temperatures require the four core-owned log-temperature parameters.")
         self.routing_strategy = str(_option(routing_config, "strategy", "module_hubs"))
         if self.routing_strategy not in {"module_hubs", "mean_shift"}:
             raise ValueError(
@@ -141,8 +162,21 @@ class RoutedPairwiseField(DensePairwiseField):
         # sparse union is always constructed first; this path is eligible only
         # when every environmental pair is present, with its original prior.
         self.routing_execution = str(_option(routing_config, "execution", "gathered"))
-        if self.routing_execution not in {"gathered", "optimized_exact"}:
-            raise ValueError("routing.execution must be 'gathered' or 'optimized_exact'.")
+        if self.routing_execution not in {"gathered", "optimized_exact", "compiled_exact"}:
+            raise ValueError(
+                "routing.execution must be 'gathered', 'optimized_exact', or 'compiled_exact'."
+            )
+        self.qe_backend = str(_option(routing_config, "qe_backend", "torch"))
+        if self.qe_backend not in {"torch", "triton"}:
+            raise ValueError("routing.qe_backend must be 'torch' or 'triton'.")
+        # The requested backend is mutable for isolated benchmark runs.  Keep
+        # the actual backend and fallback reason observable after every read so
+        # a requested Triton run can never be reported as a measured Triton
+        # execution when the optional kernel fell back to Torch.
+        self.last_qe_backend = "torch"
+        self.last_qe_backend_reason = "not_run"
+        self._qe_backend_seen: set[str] = set()
+        self._qe_backend_reasons: list[str] = []
         self.dense_environment_fast_path = self.routing_execution == "optimized_exact"
         self.dense_environment_pair_tile_size = 262144
         self.mean_shift_steps = int(_option(routing_config, "mean_shift_steps", 3))
@@ -165,6 +199,48 @@ class RoutedPairwiseField(DensePairwiseField):
             descriptor_dim=self.routing_descriptor_dim,
             hidden_dim=self.routing_hidden_dim,
         )
+
+    def _temperature(self, relation: str) -> float | torch.Tensor:
+        if self._typed_log_temperatures is None:
+            return self.routing_temperature
+        # Exponentiation uses scalar route precision; no floor or schedule.
+        return self._typed_log_temperatures["log_temperature_" + relation].double().exp()
+
+    def _paircost_components(self, density, incidence):
+        """Live, tiled Eq. (18) components; every positive route is retained."""
+        membership = incidence.membership
+        support = torch.zeros_like(membership, dtype=torch.bool)
+        edges = incidence.inverted
+        support[edges.batch_index, edges.source_index, edges.hub_index] = True
+        valid = support.any(dim=-1) & (incidence.source_weights > 0)
+        a = torch.where(support, membership, torch.zeros_like(membership)).double()
+        d = torch.where(density > 0, density, torch.zeros_like(density)).double()
+        batch, queries, hubs = d.shape
+        sources = a.shape[1]
+        epsilon = float(_option(self.sparsification, "relative_density_epsilon", .05))
+        batch_numerators = []
+        budget = 262144
+        batch_tile = max(1, min(batch, budget // max(hubs, 1)))
+        for b0 in range(0, batch, batch_tile):
+            b1 = min(batch, b0 + batch_tile)
+            source_tile = max(1, min(sources, budget // (b1-b0)))
+            query_tile = max(1, budget // ((b1-b0) * max(source_tile, hubs, 1)))
+            query_numerators = []
+            for q0 in range(0, queries, query_tile):
+                numerator = d[b0:b1, q0:q0+query_tile].sum(dim=-1) * 0.0
+                for n0 in range(0, sources, source_tile):
+                    relative_density = torch.bmm(
+                        d[b0:b1, q0:q0+query_tile], a[b0:b1, n0:n0+source_tile].transpose(1, 2),
+                    )
+                    numerator = numerator + ((relative_density / (relative_density + epsilon))
+                        * valid[b0:b1, None, n0:n0+source_tile]).sum(dim=-1)
+                query_numerators.append(numerator)
+            batch_numerators.append(torch.cat(query_numerators, dim=1))
+        # Preserve receiver ownership until case coupling excludes padded
+        # port slots. The case loss sums these live components only once.
+        numerator = torch.cat(batch_numerators, dim=0)
+        denominator = valid.sum(dim=-1).to(dtype=d.dtype)[:, None].expand(batch, queries)
+        return numerator, denominator
 
     def _geometry(self, encoded: Any, points: torch.Tensor, *, fallback_features: torch.Tensor | None = None) -> torch.Tensor:
         provider = getattr(encoded, "routing_geometry", None)
@@ -342,10 +418,11 @@ class RoutedPairwiseField(DensePairwiseField):
         source_weights: torch.Tensor,
         source_valid: torch.Tensor,
         candidate_valid: torch.Tensor,
+        source_type: str = "source_module",
     ) -> TypedSourceIncidence:
         valid = _as_bool_mask(source_valid)[..., None] & candidate_valid[:, None, :]
         membership = ordinary_source_sparsemax(
-            logits / self.routing_temperature,
+            logits / self._temperature(source_type),
             valid,
         )
         return build_typed_source_incidence(
@@ -409,12 +486,14 @@ class RoutedPairwiseField(DensePairwiseField):
                 module_weights,
                 encoded.module_present,
                 candidates.valid,
+                "source_module",
             )
             environment_incidence = self._make_source_incidence(
                 environment_logits,
                 environment_weights,
                 torch.ones_like(environment_weights, dtype=torch.bool),
                 candidates.valid,
+                "source_environment",
             )
         routing_diagnostics: dict[str, Any] = {
             "candidate_geometry": candidate_geometry,
@@ -529,7 +608,7 @@ class RoutedPairwiseField(DensePairwiseField):
                 candidates.valid[:, None, :] & (incidence.hub_measure[:, None, :] > 0.0)
             ).expand_as(logits)
             projection = source_measure_sparsemax(
-                logits / self.routing_temperature,
+                logits / self._temperature(source_type),
                 incidence.hub_measure,
                 valid,
             )
@@ -558,8 +637,514 @@ class RoutedPairwiseField(DensePairwiseField):
             result.index_add_(0, batch_index * query_count + receiver_index, messages * weights[:, None])
         return result.reshape(batch, query_count, -1)
 
-    def read_module_pairs(self, state, encoded, receivers, pairs: PackedPairs) -> torch.Tensor:
+    @staticmethod
+    def _is_uninitialized_lazy(module: nn.Module) -> bool:
+        """Return whether a lazy layer still needs its input width inferred."""
+
+        return bool(
+            isinstance(module, nn.LazyLinear)
+            and module.has_uninitialized_params()
+        )
+
+    def _ensure_qm_initialized(
+        self,
+        sources: torch.Tensor,
+        global_token: torch.Tensor,
+        spatial_dim: int,
+    ) -> None:
+        """Infer the historical QM first-layer width before affine reuse.
+
+        ``query_module_message`` is a LazyMLP because adapter feature widths
+        are runtime-defined.  Compiled complete rows should still take the
+        factored path on their first read, so initialize the lazy layer from
+        its shape with a detached one-row probe.  Parameter initialization is
+        exactly the same LazyLinear initialization used by the ordinary
+        reader; the probe contributes no graph or field value.
+        """
+
+        network = self.query_module_message.net
+        if not network or not self._is_uninitialized_lazy(network[0]):
+            return
+        if sources.ndim != 3 or global_token.ndim != 2:
+            raise ValueError("QM source/global tensors must have shapes [B,N,H] and [B,H].")
+        probe_relative = sources.new_zeros((1, spatial_dim))
+        relative_width = int(self.relative_fourier(probe_relative).shape[-1])
+        input_width = int(sources.shape[-1]) + relative_width + int(global_token.shape[-1])
+        probe = sources.new_zeros((1, input_width))
+        # LazyLinear infers shape and initializes parameters from the probe;
+        # no numerical result is used and no autograd edge is retained.  Call
+        # only the lazy layer so a future nonzero-dropout configuration does
+        # not consume an extra RNG draw during shape inference.
+        with torch.no_grad():
+            network[0](probe)
+
+    def _qm_affine_terms(
+        self,
+        sources: torch.Tensor,
+        global_token: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, int] | None:
+        """Prepare ``W_z z`` and ``W_g g+b`` for exact pairwise QM reuse."""
+
+        network = self.query_module_message.net
+        if not network or not isinstance(network[0], nn.Linear):
+            return None
+        first = network[0]
+        source_width = int(sources.shape[-1])
+        global_width = int(global_token.shape[-1])
+        relative_width = int(first.weight.shape[1]) - source_width - global_width
+        if relative_width < 0:
+            return None
+        source_term = torch.nn.functional.linear(
+            sources,
+            first.weight[:, :source_width],
+            None,
+        )
+        global_term = torch.nn.functional.linear(
+            global_token,
+            first.weight[:, source_width + relative_width :],
+            first.bias,
+        )
+        return source_term, global_term, relative_width
+
+    def _read_module_complete_direct(
+        self,
+        state: dict[str, torch.Tensor],
+        encoded: Any,
+        receivers: torch.Tensor,
+        pairs: CompiledPairs,
+        reduced: torch.Tensor,
+    ) -> torch.Tensor:
+        """Evaluate complete rows through the original QM network.
+
+        This defensive path handles a custom or incompletely materialized
+        first layer.  It retains the compiled representation's implicit
+        complete dispatch and only forms rectangular ``[row, source]`` tiles
+        over authoritative valid sources; it never expands complete rows to a
+        global ``(batch, receiver, source)`` pair list.
+        """
+
+        batch, query_count = receivers.shape[:2]
+        complete_count = int(pairs.complete_row_index.numel())
+        if complete_count == 0:
+            return reduced
+        complete_batches = torch.div(
+            pairs.complete_row_index,
+            query_count,
+            rounding_mode="floor",
+        )
+        scale = encoded.coordinate_scale.reshape(-1)
+        for batch_index in range(batch):
+            case_positions = torch.nonzero(
+                complete_batches == batch_index,
+                as_tuple=False,
+            ).flatten()
+            valid_sources = torch.nonzero(
+                pairs.source_valid[batch_index],
+                as_tuple=False,
+            ).flatten()
+            if int(case_positions.numel()) == 0 or int(valid_sources.numel()) == 0:
+                continue
+            source_tile = max(1, min(int(valid_sources.numel()), self.fine_pair_chunk_size))
+            row_tile = max(1, self.fine_pair_chunk_size // source_tile)
+            for row_start in range(0, int(case_positions.numel()), row_tile):
+                row_positions = case_positions[row_start : row_start + row_tile]
+                row_ids = pairs.complete_row_index.index_select(0, row_positions)
+                row_receiver = torch.remainder(row_ids, query_count)
+                for source_start in range(0, int(valid_sources.numel()), source_tile):
+                    source_ids = valid_sources[source_start : source_start + source_tile]
+                    prior = pairs.complete_prior.index_select(0, row_positions)
+                    prior = prior[:, source_ids]
+                    weighted = self._tile(
+                        self._qm_complete_direct_tile,
+                        state["module_tokens"][batch_index, source_ids],
+                        encoded.module_centers[batch_index, source_ids],
+                        receivers[batch_index, row_receiver],
+                        encoded.global_token[batch_index],
+                        scale,
+                        prior,
+                    )
+                    reduced.index_add_(
+                        0,
+                        row_ids,
+                        weighted,
+                    )
+        return reduced
+
+    def _qm_reused_tile(
+        self,
+        sources: torch.Tensor,
+        centers: torch.Tensor,
+        receivers: torch.Tensor,
+        source_affine: torch.Tensor,
+        global_affine: torch.Tensor,
+        coordinate_scale: torch.Tensor,
+        relative_width: int,
+        batch_index: torch.Tensor,
+        receiver_index: torch.Tensor,
+        source_index: torch.Tensor,
+        prior: torch.Tensor,
+    ) -> torch.Tensor:
+        """Evaluate a compact QM tile after exact first-affine reuse."""
+
+        batch, query_count = receivers.shape[:2]
+        first = self.query_module_message.net[0]
+        source_width = int(sources.shape[-1])
+        relative = (
+            receivers[batch_index, receiver_index]
+            - centers[batch_index, source_index]
+        ) / coordinate_scale.reshape(-1)
+        relative_features = self.relative_fourier(relative)
+        relative_term = torch.nn.functional.linear(
+            relative_features,
+            first.weight[:, source_width : source_width + int(relative_width)],
+            None,
+        )
+        preactivation = (
+            source_affine[batch_index, source_index]
+            + global_affine[batch_index]
+            + relative_term
+        )
+        messages = self.query_module_message.net[1](preactivation)
+        for layer in self.query_module_message.net[2:]:
+            messages = layer(messages)
+        result = sources.new_zeros((batch * query_count, sources.shape[-1]))
+        result.index_add_(
+            0,
+            batch_index * query_count + receiver_index,
+            messages * prior.to(messages.dtype)[:, None],
+        )
+        return result.reshape(batch, query_count, -1)
+
+    def _qm_complete_affine_tile(
+        self,
+        source_affine: torch.Tensor,
+        global_affine: torch.Tensor,
+        centers: torch.Tensor,
+        receivers: torch.Tensor,
+        relative_weights: torch.Tensor,
+        coordinate_scale: torch.Tensor,
+        prior: torch.Tensor,
+    ) -> torch.Tensor:
+        """Reduce one complete QM rectangle after first-layer reuse.
+
+        The rectangle is the natural checkpoint boundary: source and global
+        affine terms stay factored while only the nonlinear activation for the
+        current ``[receiver, source]`` tile is recomputed in backward.
+        """
+
+        with torch.profiler.record_function("routing.qm_complete_affine_tile"):
+            relative = (
+                receivers[:, None, :] - centers[None, :, :]
+            ) / coordinate_scale.reshape(-1)
+            relative_term = torch.nn.functional.linear(
+                self.relative_fourier(relative),
+                relative_weights,
+                None,
+            )
+            preactivation = (
+                source_affine[None, :, :]
+                + global_affine[None, None, :]
+                + relative_term
+            )
+            messages = self.query_module_message.net[1](preactivation)
+            for layer in self.query_module_message.net[2:]:
+                messages = layer(messages)
+            return (
+                messages * prior.to(messages.dtype)[..., None]
+            ).sum(dim=1)
+
+    def _qm_pair_affine_tile(
+        self,
+        source_affine: torch.Tensor,
+        global_affine: torch.Tensor,
+        centers: torch.Tensor,
+        receivers: torch.Tensor,
+        relative_weights: torch.Tensor,
+        coordinate_scale: torch.Tensor,
+        prior: torch.Tensor,
+        valid: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Evaluate and weight one CSR QM tile after first-layer reuse."""
+
+        with torch.profiler.record_function("routing.qm_pair_affine_tile"):
+            if valid is not None:
+                safe_centers = torch.where(
+                    valid[..., None], centers, torch.zeros_like(centers)
+                )
+                safe_affine = torch.where(
+                    valid[..., None], source_affine, torch.zeros_like(source_affine)
+                )
+            else:
+                safe_centers = centers
+                safe_affine = source_affine
+            relative = (receivers - safe_centers) / coordinate_scale.reshape(-1)
+            relative_term = torch.nn.functional.linear(
+                self.relative_fourier(relative),
+                relative_weights,
+                None,
+            )
+            messages = self.query_module_message.net[1](
+                safe_affine + global_affine + relative_term
+            )
+            for layer in self.query_module_message.net[2:]:
+                messages = layer(messages)
+            if valid is not None:
+                messages = torch.where(valid[..., None], messages, torch.zeros_like(messages))
+            return messages * prior.to(messages.dtype)[:, None]
+
+    def _qm_complete_direct_tile(
+        self,
+        sources: torch.Tensor,
+        centers: torch.Tensor,
+        receivers: torch.Tensor,
+        global_token: torch.Tensor,
+        coordinate_scale: torch.Tensor,
+        prior: torch.Tensor,
+    ) -> torch.Tensor:
+        """Reduce one direct complete QM rectangle for fallback readers."""
+
+        relative = (
+            receivers[:, None, :] - centers[None, :, :]
+        ) / coordinate_scale.reshape(-1)
+        relative_features = self.relative_fourier(relative)
+        source_values = sources[None, :, :].expand(
+            int(receivers.shape[0]), -1, -1
+        )
+        global_values = global_token[None, None, :].expand(
+            int(receivers.shape[0]), int(sources.shape[0]), -1
+        )
+        messages = self.query_module_message(
+            torch.cat((source_values, relative_features, global_values), dim=-1)
+            .reshape(-1, source_values.shape[-1] + relative_features.shape[-1] + global_values.shape[-1])
+        ).reshape(
+            int(receivers.shape[0]), int(sources.shape[0]), self.hidden_dim
+        )
+        return (messages * prior.to(messages.dtype)[..., None]).sum(dim=1)
+
+    def _qm_complete_batch_affine_tile(
+        self, source_affine, global_affine, centers, receivers, scale, prior,
+        relative_width: int, source_width: int,
+    ):
+        """Rectangular exact QM with shared source/global affine terms."""
+        relative = (receivers[:, :, None, :] - centers[:, None, :, :]) / scale.reshape(-1)
+        first = self.query_module_message.net[0]
+        relative_term = torch.nn.functional.linear(
+            self.relative_fourier(relative),
+            first.weight[:, source_width:source_width + relative_width],
+        )
+        messages = source_affine[:, None, :, :] + global_affine[:, None, None, :] + relative_term
+        for layer in self.query_module_message.net[1:]:
+            messages = layer(messages)
+        return (messages * prior.to(messages.dtype)[..., None]).sum(dim=2)
+
+    def _qm_complete_rows_affine_tile(
+        self, source_affine, global_affine, centers, receivers, scale, prior,
+        row_ids, relative_width: int, source_width: int,
+    ):
+        batch_ids = torch.div(row_ids, receivers.shape[1], rounding_mode="floor")
+        query_ids = torch.remainder(row_ids, receivers.shape[1])
+        return self._qm_complete_batch_affine_tile(
+            source_affine[batch_ids], global_affine[batch_ids], centers[batch_ids],
+            receivers[batch_ids, query_ids, None], scale, prior[:, None],
+            relative_width, source_width,
+        )[:, 0]
+
+    def _read_module_compiled(self, state, encoded, receivers, pairs: CompiledPairs) -> torch.Tensor:
+        """Read complete rows implicitly and partial rows from CSR."""
+
+        batch, query_count = receivers.shape[:2]
+        source_count = int(state["module_tokens"].shape[1])
+        if source_count != pairs.source_count:
+            raise ValueError("Compiled module source count does not match module state.")
+        # Keep this cache on the physical prepared state.  It remains live for
+        # gradients and is naturally discarded when P0/P1/P2 prepare a new
+        # state.  The coordinate scale is read by the compact tile helper and
+        # set only for this call, avoiding an extra public state key.
+        self._ensure_qm_initialized(
+            state["module_tokens"],
+            encoded.global_token,
+            int(receivers.shape[-1]),
+        )
+        affine = state.get("_qm_first_affine")
+        if affine is None:
+            affine = self._qm_affine_terms(state["module_tokens"], encoded.global_token)
+            if affine is not None:
+                state["_qm_first_affine"] = affine
+        if (affine is not None and int(pairs.complete_row_index.numel()) == batch * query_count
+                and bool(pairs.source_valid.all())):
+            source_affine, global_affine, relative_width = affine
+            # Physical source banks are shared over queries, not gathered
+            # once per pair. Checkpoint only compact inputs to each tile.
+            q_tile = max(1, self.fine_pair_chunk_size // max(batch * source_count, 1))
+            prior = pairs.complete_prior.reshape(batch, query_count, source_count)
+            chunks = []
+            for q0 in range(0, query_count, q_tile):
+                q1 = min(query_count, q0 + q_tile)
+                chunks.append(self._tile(
+                    self._qm_complete_batch_affine_tile, source_affine, global_affine,
+                    encoded.module_centers, receivers[:, q0:q1], encoded.coordinate_scale,
+                    prior[:, q0:q1], relative_width, int(state["module_tokens"].shape[-1]),
+                ))
+            context = torch.cat(chunks, dim=1)
+            count = encoded.module_present.sum(dim=1)
+            return self.query_module_output(context * (count / (1.0 + count))[:, None, None])
+        reduced = state["module_tokens"].new_zeros(batch * query_count, self.hidden_dim)
+        if affine is None:
+            # A custom reader can lack a splittable first Linear.  Preserve
+            # exact complete support through rectangular direct tiles rather
+            # than silently returning zero for those rows.
+            reduced = self._read_module_complete_direct(
+                state,
+                encoded,
+                receivers,
+                pairs,
+                reduced,
+            )
+        else:
+            source_affine, global_affine, relative_width = affine
+            valid_source = pairs.source_valid
+            # Complete source ranges are evaluated in bounded rectangular
+            # tiles over the authoritative valid source list.  This avoids
+            # evaluating padded module slots and never emits complete-row
+            # pair-index triplets.
+            complete_batches = torch.div(
+                pairs.complete_row_index,
+                query_count,
+                rounding_mode="floor",
+            )
+            first = self.query_module_message.net[0]
+            source_width = int(state["module_tokens"].shape[-1])
+            relative_weights = first.weight[:, source_width : source_width + int(relative_width)]
+            scale = encoded.coordinate_scale.reshape(-1)
+            whole_case = pairs.complete_rows.all(dim=1) & pairs.source_valid.all(dim=1)
+            whole_indices = torch.nonzero(whole_case, as_tuple=False).flatten()
+            if int(whole_indices.numel()):
+                group_count = int(whole_indices.numel())
+                position_map = (pairs.complete_rows.reshape(-1).long().cumsum(0) - 1).reshape(batch, query_count)
+                positions = position_map.index_select(0, whole_indices)
+                group_prior = pairs.complete_prior.index_select(0, positions.reshape(-1)).reshape(group_count, query_count, source_count)
+                group_source = source_affine.index_select(0, whole_indices)
+                group_global = global_affine.index_select(0, whole_indices)
+                group_centers = encoded.module_centers.index_select(0, whole_indices)
+                group_receivers = receivers.index_select(0, whole_indices)
+                group_tile = max(1, self.fine_pair_chunk_size // max(group_count * source_count, 1))
+                group_results = []
+                for q0 in range(0, query_count, group_tile):
+                    q1 = min(query_count, q0 + group_tile)
+                    group_results.append(self._tile(
+                        self._qm_complete_batch_affine_tile, group_source, group_global,
+                        group_centers, group_receivers[:, q0:q1], encoded.coordinate_scale,
+                        group_prior[:, q0:q1], relative_width, source_width,
+                    ))
+                group_rows = whole_indices[:, None] * query_count + torch.arange(query_count, device=receivers.device)[None]
+                reduced = reduced.index_copy(0, group_rows.reshape(-1), torch.cat(group_results, dim=1).reshape(-1, self.hidden_dim))
+            # Irregular receiver sets can still share an implicit complete
+            # source range. Pack only row IDs, and gather reused affine terms
+            # inside checkpointed fine tiles; no (q,k,i) paths or pair triples.
+            row_pack_cases = (~whole_case) & pairs.source_valid.all(dim=1)
+            row_positions = torch.nonzero(row_pack_cases.index_select(0, complete_batches), as_tuple=False).flatten()
+            row_tile = max(1, self.fine_pair_chunk_size // max(source_count, 1))
+            for r0 in range(0, int(row_positions.numel()), row_tile):
+                positions = row_positions[r0:r0+row_tile]
+                rows = pairs.complete_row_index.index_select(0, positions)
+                context = self._tile(
+                    self._qm_complete_rows_affine_tile, source_affine, global_affine,
+                    encoded.module_centers, receivers, encoded.coordinate_scale,
+                    pairs.complete_prior.index_select(0, positions), rows,
+                    relative_width, source_width,
+                )
+                reduced = reduced.index_copy(0, rows, context)
+            handled_cases = whole_case | row_pack_cases
+            remaining = torch.unique(complete_batches[~handled_cases.index_select(0, complete_batches)]).tolist()
+            for batch_index in remaining:
+                case_positions = torch.nonzero(
+                    complete_batches == batch_index,
+                    as_tuple=False,
+                ).flatten()
+                valid_sources = torch.nonzero(
+                    valid_source[batch_index],
+                    as_tuple=False,
+                ).flatten()
+                if int(case_positions.numel()) == 0 or int(valid_sources.numel()) == 0:
+                    continue
+                source_tile = max(1, min(int(valid_sources.numel()), self.fine_pair_chunk_size))
+                row_tile = max(1, self.fine_pair_chunk_size // source_tile)
+                for row_start in range(0, int(case_positions.numel()), row_tile):
+                    row_positions = case_positions[row_start : row_start + row_tile]
+                    row_ids = pairs.complete_row_index.index_select(0, row_positions)
+                    row_receiver = torch.remainder(row_ids, query_count)
+                    for source_start in range(0, int(valid_sources.numel()), source_tile):
+                        source_ids = valid_sources[source_start : source_start + source_tile]
+                        prior = pairs.complete_prior.index_select(0, row_positions)
+                        weighted = self._tile(
+                            self._qm_complete_affine_tile,
+                            source_affine[batch_index, source_ids],
+                            global_affine[batch_index],
+                            encoded.module_centers[batch_index, source_ids],
+                            receivers[batch_index, row_receiver],
+                            relative_weights,
+                            scale,
+                            prior[:, source_ids],
+                        )
+                        reduced.index_add_(0, row_ids, weighted)
+
+        partial_counts = pairs.partial_row_ptr[1:] - pairs.partial_row_ptr[:-1]
+        partial_count = int(pairs.partial_pair_count)
+        if partial_count:
+            row_ids = torch.repeat_interleave(
+                torch.arange(batch * query_count, device=receivers.device, dtype=torch.long),
+                partial_counts,
+            )
+            batch_index = torch.div(row_ids, query_count, rounding_mode="floor")
+            receiver_index = torch.remainder(row_ids, query_count)
+            if affine is None:
+                partial_pairs = PackedPairs(
+                    batch_index,
+                    receiver_index,
+                    pairs.partial_source_index,
+                    pairs.partial_prior,
+                    partial_count,
+                    partial_count,
+                )
+                partial_result = self.read_module_pairs(state, encoded, receivers, partial_pairs)
+                reduced = reduced + partial_result.reshape(batch * query_count, -1)
+            else:
+                source_affine, global_affine, relative_width = affine
+                for start in range(0, partial_count, self.fine_pair_chunk_size):
+                    end = min(start + self.fine_pair_chunk_size, partial_count)
+                    tile_rows = row_ids[start:end]
+                    tile_batch = batch_index[start:end]
+                    tile_receiver = receiver_index[start:end]
+                    tile_source = pairs.partial_source_index[start:end]
+                    valid = pairs.source_valid[tile_batch, tile_source]
+                    weighted = self._tile(
+                        self._qm_pair_affine_tile,
+                        source_affine[tile_batch, tile_source],
+                        global_affine[tile_batch],
+                        encoded.module_centers[tile_batch, tile_source],
+                        receivers[tile_batch, tile_receiver],
+                        relative_weights,
+                        scale,
+                        pairs.partial_prior[start:end],
+                        valid,
+                    )
+                    reduced.index_add_(0, tile_rows, weighted)
+        count = encoded.module_present.sum(dim=1)
+        return self.query_module_output(
+            reduced.reshape(batch, query_count, -1)
+            * (count / (1.0 + count))[:, None, None]
+        )
+
+    def read_module_pairs(
+        self,
+        state,
+        encoded,
+        receivers,
+        pairs: PackedPairs | CompiledPairs,
+    ) -> torch.Tensor:
         """Evaluate each selected QM pair once, in bounded neural tiles."""
+        if isinstance(pairs, CompiledPairs):
+            return self._read_module_compiled(state, encoded, receivers, pairs)
         batch, query_count = receivers.shape[:2]
         reduced = state["module_tokens"].new_zeros(batch, query_count, self.hidden_dim)
         for start in range(0, pairs.unique_pair_count, self.fine_pair_chunk_size):
@@ -614,6 +1199,155 @@ class RoutedPairwiseField(DensePairwiseField):
             return scale
         raise ValueError("coordinate_scale must have one, two, or three dimensions.")
 
+    def _begin_qe_backend_observation(self) -> None:
+        """Reset per-read QE backend accounting without touching model state."""
+
+        self._qe_backend_seen = set()
+        self._qe_backend_reasons = []
+        self.last_qe_backend = "torch"
+        self.last_qe_backend_reason = "not_run"
+        if self.qe_backend == "torch":
+            self._note_qe_backend("torch", "configured_torch")
+
+    def _note_qe_backend(self, backend: str, reason: str) -> None:
+        """Record the backend actually used by the latest QE read."""
+
+        seen = getattr(self, "_qe_backend_seen", set())
+        reasons = getattr(self, "_qe_backend_reasons", [])
+        seen.add(str(backend))
+        if reason not in reasons:
+            reasons.append(str(reason))
+        self._qe_backend_seen = seen
+        self._qe_backend_reasons = reasons
+        self.last_qe_backend = next(iter(seen)) if len(seen) == 1 else "mixed"
+        self.last_qe_backend_reason = ";".join(reasons)
+
+    def _qe_triton_eligible(self, device: torch.device) -> bool:
+        """Check the explicit opt-in and optional runtime without changing defaults."""
+
+        if self.qe_backend != "triton":
+            self._note_qe_backend("torch", "configured_torch")
+            return False
+        if fused_qe_reader is None or not is_triton_qe_available(device):
+            self._note_qe_backend("torch", "triton_unavailable")
+            return False
+        return True
+
+    def _environment_pair_geometry_bias(
+        self,
+        receivers: torch.Tensor,
+        coordinates: torch.Tensor,
+        scale: torch.Tensor,
+        batch_index: torch.Tensor,
+        receiver_index: torch.Tensor,
+        source_index: torch.Tensor,
+    ) -> torch.Tensor:
+        """Evaluate the existing geometry MLP for CSR scalar pairs only."""
+
+        batch = int(receivers.shape[0])
+        if coordinates.ndim == 2:
+            source_coordinates = coordinates[source_index]
+        elif coordinates.ndim == 3:
+            source_coordinates = coordinates[batch_index, source_index]
+        else:
+            raise ValueError("environment coordinates must have shape [N,d] or [B,N,d].")
+        scale_rows = self._environment_scale_rows(scale, batch)
+        if int(scale_rows.shape[1]) != 1:
+            raise ValueError("coordinate_scale must provide one vector per case for CSR QE.")
+        relative = (
+            receivers[batch_index, receiver_index] - source_coordinates
+        ) / scale_rows[batch_index, 0, :]
+        return self.env_geometry_bias(self.relative_fourier(relative))
+
+    def _read_environment_csr_triton(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        receivers: torch.Tensor,
+        coordinates: torch.Tensor,
+        scale: torch.Tensor,
+        row_offsets: torch.Tensor,
+        source_index: torch.Tensor,
+        prior: torch.Tensor,
+        row_batch: torch.Tensor,
+        row_receiver: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Run Triton for exact CSR rows after Torch geometry-bias evaluation."""
+
+        if not self._qe_triton_eligible(query.device):
+            return None
+        if int(source_index.numel()) == 0:
+            self._note_qe_backend("torch", "empty_csr_support")
+            return value.new_zeros((int(receivers.shape[0]), int(receivers.shape[1]), self.hidden_dim))
+        bias = self._environment_pair_geometry_bias(
+            receivers,
+            coordinates,
+            scale,
+            row_batch,
+            row_receiver,
+            source_index,
+        )
+        try:
+            context = fused_qe_reader(
+                query,
+                key,
+                value,
+                bias,
+                prior,
+                mode="csr",
+                row_offsets=row_offsets,
+                source_indices=source_index,
+            )
+        except RuntimeError as exc:
+            # A missing/unsupported Triton runtime must leave the explicit
+            # Torch path usable.  Record the concrete exception class so
+            # measurements cannot call the fallback a Triton execution.
+            self._note_qe_backend(
+                "torch",
+                f"triton_runtime_error:{type(exc).__name__}",
+            )
+            return None
+        self._note_qe_backend("triton", "fused_csr")
+        return context.transpose(1, 2).reshape(
+            int(receivers.shape[0]), int(receivers.shape[1]), self.hidden_dim
+        )
+
+    def _read_environment_complete_triton(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        receivers: torch.Tensor,
+        prior: torch.Tensor,
+        source_mask: torch.Tensor | None,
+        bias: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Run Triton for a complete rectangular QE tile when explicitly enabled."""
+
+        if not self._qe_triton_eligible(query.device):
+            return None
+        try:
+            context = fused_qe_reader(
+                query,
+                key,
+                value,
+                bias,
+                prior,
+                mode="complete",
+                source_mask=source_mask,
+            )
+        except RuntimeError as exc:
+            self._note_qe_backend(
+                "torch",
+                f"triton_runtime_error:{type(exc).__name__}",
+            )
+            return None
+        self._note_qe_backend("triton", "fused_complete")
+        return context.transpose(1, 2).reshape(
+            int(receivers.shape[0]), int(receivers.shape[1]), self.hidden_dim
+        )
+
     def _environment_score_tile(
         self, query, key, receivers, coordinates, scale, batch_index, receiver_index, source_index,
     ):
@@ -653,6 +1387,11 @@ class RoutedPairwiseField(DensePairwiseField):
         """
 
         batch, query_count = receivers.shape[:2]
+        if self.qe_backend == "triton":
+            # Legacy PackedPairs do not carry authoritative CSR row pointers;
+            # retain their readable Torch reducer rather than rebuilding and
+            # sorting an index list solely to force the optional backend.
+            self._note_qe_backend("torch", "packed_rows_torch_only")
         if pairs.unique_pair_count == 0:
             return value.new_zeros(batch, query_count, self.hidden_dim)
         scores = []
@@ -691,15 +1430,202 @@ class RoutedPairwiseField(DensePairwiseField):
             )
         return reduced.reshape(batch, query_count, self.hidden_dim)
 
-    def read_environment_pairs(self, state, encoded, receivers, receiver_features, pairs: PackedPairs) -> torch.Tensor:
+    def _read_environment_compiled(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        receivers: torch.Tensor,
+        coordinates: torch.Tensor,
+        scale: torch.Tensor,
+        pairs: CompiledPairs,
+    ) -> torch.Tensor:
+        """Read mixed complete/partial QE rows without complete pair indices."""
+
+        batch, query_count = receivers.shape[:2]
+        reduced = value.new_zeros(batch * query_count, self.hidden_dim)
+        complete_count = int(pairs.complete_row_index.numel())
+        if complete_count == batch * query_count:
+            # Whole rectangular support retains the original batched K/V
+            # sharing and reader tile budget; never copy a bank per receiver.
+            source_count = int(pairs.source_count)
+            query_tile = max(1, self.dense_environment_pair_tile_size // max(batch * source_count, 1))
+            prior = pairs.complete_prior.reshape(batch, query_count, source_count)
+            source_mask = None if bool(pairs.source_valid.all()) else pairs.source_valid
+            chunks = []
+            for start in range(0, query_count, query_tile):
+                end = min(query_count, start + query_tile)
+                chunks.append(self._tile(
+                    self._environment_complete_tile,
+                    query[:, :, start:end], key, value, receivers[:, start:end],
+                    coordinates, scale, prior[:, start:end], source_mask,
+                ))
+            return torch.cat(chunks, dim=1)
+        if complete_count:
+            # A complete row carries an implicit source range.  Group complete
+            # receivers by physical case so each prepared K/V bank is kept
+            # rectangular and loaded once per receiver tile; gathering a full
+            # source bank separately for every row would erase the benefit of
+            # the implicit dispatch.
+            source_count = int(pairs.source_count)
+            row_tile = max(1, self.dense_environment_pair_tile_size // max(source_count, 1))
+            complete_batches = torch.div(
+                pairs.complete_row_index,
+                query_count,
+                rounding_mode="floor",
+            )
+            # Most mixed batches have whole complete cases and only a few
+            # cases with irregular receiver support. Batch the rectangular
+            # cases together before handling the genuinely irregular rows.
+            whole_case = pairs.complete_rows.all(dim=1)
+            whole_indices = torch.nonzero(whole_case, as_tuple=False).flatten()
+            if int(whole_indices.numel()):
+                group_count = int(whole_indices.numel())
+                position_map = (pairs.complete_rows.reshape(-1).long().cumsum(0) - 1).reshape(batch, query_count)
+                positions = position_map.index_select(0, whole_indices)
+                group_prior = pairs.complete_prior.index_select(0, positions.reshape(-1)).reshape(
+                    group_count, query_count, source_count,
+                )
+                group_query = query.index_select(0, whole_indices)
+                group_key = key.index_select(0, whole_indices)
+                group_value = value.index_select(0, whole_indices)
+                group_receivers = receivers.index_select(0, whole_indices)
+                group_coordinates = self._select_environment_batch(coordinates, whole_indices, batch)
+                group_scale = self._select_environment_scale(scale, whole_indices)
+                group_mask = pairs.source_valid.index_select(0, whole_indices)
+                if bool(group_mask.all()):
+                    group_mask = None
+                group_tile = max(1, self.dense_environment_pair_tile_size // (group_count * source_count))
+                group_results = []
+                for q0 in range(0, query_count, group_tile):
+                    q1 = min(query_count, q0 + group_tile)
+                    group_results.append(self._tile(
+                        self._environment_complete_tile, group_query[:, :, q0:q1],
+                        group_key, group_value, group_receivers[:, q0:q1],
+                        group_coordinates, group_scale, group_prior[:, q0:q1], group_mask,
+                    ))
+                group_rows = whole_indices[:, None] * query_count + torch.arange(query_count, device=query.device)[None]
+                reduced = reduced.index_copy(0, group_rows.reshape(-1), torch.cat(group_results, dim=1).reshape(-1, self.hidden_dim))
+            remaining = torch.unique(complete_batches[~whole_case.index_select(0, complete_batches)]).tolist()
+            for batch_index in remaining:
+                case_mask = complete_batches == batch_index
+                case_positions = torch.nonzero(case_mask, as_tuple=False).flatten()
+                if int(case_positions.numel()) == 0:
+                    continue
+                row_ids = pairs.complete_row_index.index_select(0, case_positions)
+                row_receiver = torch.remainder(row_ids, query_count)
+                case_index = torch.tensor(
+                    [batch_index],
+                    device=receivers.device,
+                    dtype=torch.long,
+                )
+                case_key = self._select_environment_batch(key, case_index, batch)
+                case_value = self._select_environment_batch(value, case_index, batch)
+                case_coordinates = self._select_environment_batch(
+                    coordinates,
+                    case_index,
+                    batch,
+                )
+                case_scale = self._select_environment_scale(
+                    scale,
+                    case_index,
+                )
+                case_mask_sources = pairs.source_valid[batch_index : batch_index + 1]
+                for start in range(0, int(case_positions.numel()), row_tile):
+                    end = min(start + row_tile, int(case_positions.numel()))
+                    positions = case_positions[start:end]
+                    local_rows = pairs.complete_row_index.index_select(0, positions)
+                    local_receiver = torch.remainder(local_rows, query_count)
+                    row_query = query[batch_index : batch_index + 1, :, local_receiver]
+                    row_receivers = receivers[batch_index : batch_index + 1, local_receiver]
+                    row_prior = pairs.complete_prior.index_select(0, positions).unsqueeze(0)
+                    complete_result = self._tile(
+                        self._environment_complete_tile,
+                        row_query,
+                        case_key,
+                        case_value,
+                        row_receivers,
+                        case_coordinates,
+                        case_scale,
+                        row_prior,
+                        case_mask_sources,
+                    )
+                    reduced.index_copy_(0, local_rows, complete_result.reshape(-1, self.hidden_dim))
+
+        partial_count = int(pairs.partial_pair_count)
+        if partial_count:
+            partial_counts = pairs.partial_row_ptr[1:] - pairs.partial_row_ptr[:-1]
+            row_ids = torch.repeat_interleave(
+                torch.arange(batch * query_count, device=receivers.device, dtype=torch.long),
+                partial_counts,
+            )
+            row_batch = torch.div(row_ids, query_count, rounding_mode="floor")
+            row_receiver = torch.remainder(row_ids, query_count)
+            partial_result = self._read_environment_csr_triton(
+                query,
+                key,
+                value,
+                receivers,
+                coordinates,
+                scale,
+                pairs.partial_row_ptr,
+                pairs.partial_source_index,
+                pairs.partial_prior,
+                row_batch,
+                row_receiver,
+            )
+            if partial_result is None:
+                partial_pairs = PackedPairs(
+                    row_batch,
+                    row_receiver,
+                    pairs.partial_source_index,
+                    pairs.partial_prior,
+                    partial_count,
+                    partial_count,
+                )
+                partial_result = self._read_environment_packed(
+                    query,
+                    key,
+                    value,
+                    receivers,
+                    coordinates,
+                    scale,
+                    partial_pairs,
+                )
+            reduced = reduced + partial_result.reshape(batch * query_count, -1)
+        return reduced.reshape(batch, query_count, self.hidden_dim)
+
+    def read_environment_pairs(
+        self,
+        state,
+        encoded,
+        receivers,
+        receiver_features,
+        pairs: PackedPairs | CompiledPairs,
+    ) -> torch.Tensor:
         """Selected QE geometry/content, global receiver normalization, tiled V reads."""
+        self._begin_qe_backend_observation()
         batch, query_count = receivers.shape[:2]
         if "env_keys" in state and "env_values" in state:
             key, value = state["env_keys"], state["env_values"]
         else:
             key, value = self.project_environment_sources(state["env_tokens"])
         query = self.env_attention.project_query(self.env_query(receiver_features))
+        if isinstance(pairs, CompiledPairs):
+            if pairs.unique_pair_count == 0:
+                self._note_qe_backend("torch", "empty_support")
+            reduced = self._read_environment_compiled(
+                query,
+                key,
+                value,
+                receivers,
+                encoded.env_coords,
+                encoded.coordinate_scale,
+                pairs,
+            )
+            return self.env_attention.output(reduced)
         if pairs.unique_pair_count == 0:
+            self._note_qe_backend("torch", "empty_support")
             return self.env_attention.output(value.new_zeros(batch, query_count, self.hidden_dim))
         source_count = int(key.shape[-2])
         if (
@@ -830,7 +1756,7 @@ class RoutedPairwiseField(DensePairwiseField):
             reduced = reduced.index_copy(0, partial_indices, partial_reduced)
         return self.env_attention.output(reduced)
 
-    def _environment_complete_tile(self, query, key, value, receivers, coordinates, scale, prior):
+    def _environment_complete_tile(self, query, key, value, receivers, coordinates, scale, prior, source_mask=None):
         """Exact full-support QE with batched products, bounded receiver tiles.
 
         Geometry and prior arithmetic match the packed reader, including FP64
@@ -844,11 +1770,139 @@ class RoutedPairwiseField(DensePairwiseField):
                 receivers[:, :, None, :] - coordinates[:, None, :, :]
             ) / scale_rows[:, :, None, :]
             bias = self.env_geometry_bias(self.relative_fourier(relative)).permute(0, 3, 1, 2)
+            fused = self._read_environment_complete_triton(
+                query,
+                key,
+                value,
+                receivers,
+                prior,
+                source_mask,
+                bias,
+            )
+            if fused is not None:
+                return fused
             scores = torch.matmul(query, key.transpose(-1, -2)) / (float(self.env_attention.head_dim) ** 0.5)
-            weighted = (scores + bias).double() + prior.double().log()[:, None, :, :]
-            attention = torch.softmax(weighted, dim=-1).to(value.dtype)
+            safe_prior = torch.where(prior > 0.0, prior, torch.ones_like(prior))
+            weighted = (scores + bias).double() + safe_prior.double().log()[:, None, :, :]
+            if source_mask is not None:
+                valid = source_mask[:, None, None, :].to(dtype=torch.bool)
+                weighted = weighted.masked_fill(~valid, torch.finfo(weighted.dtype).min)
+            attention = torch.softmax(weighted, dim=-1)
+            if source_mask is not None:
+                valid_float = valid.to(attention.dtype)
+                attention = attention * valid_float
+                attention = attention / attention.sum(dim=-1, keepdim=True).clamp_min(
+                    torch.finfo(attention.dtype).tiny
+                )
+            attention = attention.to(value.dtype)
             reduced = torch.matmul(attention, value).transpose(1, 2)
             return reduced.reshape(receivers.shape[0], receivers.shape[1], self.hidden_dim)
+
+    @staticmethod
+    def _single_candidate_pairs(
+        projection: Any,
+        incidence: TypedSourceIncidence,
+    ) -> CompiledPairs | None:
+        """Build the constant one-candidate route without a general join.
+
+        With one candidate there is no hub-level duplicate to join.  The
+        shortcut still evaluates the exact live scalar
+        ``Pi=omega * A * d`` in FP64, including finite source weights and
+        query density.  Production singleton projections often reduce this
+        algebra to ``Pi=omega`` after normalization, but retaining every live
+        factor preserves gradients for loaded or hand-authored incidences.
+        """
+
+        if incidence.inverted.hub_count != 1:
+            return None
+        weights = incidence.source_weights
+        membership = incidence.membership[..., 0]
+        source_valid = (weights > 0.0) & (membership > 0.0)
+        selected_weights = weights.masked_select(source_valid)
+        if selected_weights.numel() and bool(
+            (~torch.isfinite(selected_weights)).any()
+        ):
+            raise FloatingPointError(
+                "single-candidate route has a nonfinite positive source measure"
+            )
+        selected_membership = membership.masked_select(source_valid)
+        if selected_membership.numel() and bool(
+            (~torch.isfinite(selected_membership)).any()
+        ):
+            raise FloatingPointError(
+                "single-candidate route has a nonfinite positive membership"
+            )
+        density = projection.density
+        if density.ndim != 3 or int(density.shape[-1]) != 1:
+            return None
+        batch, receiver_count, _ = (int(v) for v in density.shape)
+        query_valid = density[..., 0] > 0.0
+        complete_rows = query_valid & source_valid.any(dim=-1)[:, None]
+        complete_row_index = torch.nonzero(
+            complete_rows.reshape(-1),
+            as_tuple=False,
+        ).flatten()
+        source_count = int(weights.shape[1])
+        # Keep the exact live two-hop scalar, including finite precision
+        # source mass and query density.  The masks are applied before the
+        # product so inactive source/query entries do not acquire gradients.
+        source_route = torch.where(
+            source_valid,
+            weights.to(dtype=torch.float64) * membership.to(dtype=torch.float64),
+            torch.zeros_like(weights, dtype=torch.float64),
+        )
+        query_route = torch.where(
+            query_valid,
+            density[..., 0].to(dtype=torch.float64),
+            torch.zeros_like(density[..., 0], dtype=torch.float64),
+        )
+        prior_matrix = (query_route[..., None] * source_route[:, None, :]).reshape(
+            batch * receiver_count,
+            source_count,
+        )
+        complete_prior = prior_matrix.index_select(0, complete_row_index)
+        complete_batch = torch.div(
+            complete_row_index,
+            receiver_count,
+            rounding_mode="floor",
+        ) if int(complete_row_index.numel()) else complete_row_index
+        if int(complete_row_index.numel()):
+            selected_prior = prior_matrix.index_select(0, complete_row_index).masked_select(
+                source_valid.index_select(0, complete_batch)
+            )
+            if selected_prior.numel() and bool(
+                (~torch.isfinite(selected_prior) | (selected_prior <= 0.0)).any()
+            ):
+                raise FloatingPointError(
+                    "single-candidate route produced a nonpositive or nonfinite prior"
+                )
+        complete_pair_count = int(source_valid.index_select(0, complete_batch).sum()) if int(complete_row_index.numel()) else 0
+        raw_path_count = int(
+            (query_valid.sum(dim=1) * source_valid.sum(dim=1)).sum()
+        )
+        empty_index = torch.empty(
+            (0,),
+            device=density.device,
+            dtype=torch.long,
+        )
+        return CompiledPairs(
+            complete_rows=complete_rows,
+            complete_row_index=complete_row_index,
+            complete_prior=complete_prior,
+            partial_row_ptr=torch.zeros(
+                (batch * receiver_count + 1,),
+                device=density.device,
+                dtype=torch.long,
+            ),
+            partial_source_index=empty_index,
+            partial_prior=density.new_empty((0,), dtype=torch.float64),
+            source_valid=source_valid,
+            raw_path_count=raw_path_count,
+            unique_pair_count=complete_pair_count,
+            support_exam_count=0,
+            scalar_exam_count=complete_pair_count,
+            complete_pair_count_hint=complete_pair_count,
+        )
 
     def read(
         self,
@@ -885,7 +1939,33 @@ class RoutedPairwiseField(DensePairwiseField):
             query_descriptors=query_descriptors,
         )
         with torch.profiler.record_function("routing.pair_join_deduplicate"):
-            if self.routing_execution == "optimized_exact":
+            if self.routing_execution == "compiled_exact":
+                module_pairs = None
+                environment_pairs = None
+                if not return_routing_maps:
+                    module_pairs = self._single_candidate_pairs(
+                        module_projection,
+                        module_incidence,
+                    )
+                    environment_pairs = self._single_candidate_pairs(
+                        environment_projection,
+                        environment_incidence,
+                    )
+                if module_pairs is None:
+                    module_pairs = compile_two_hop_pairs_compiled(
+                        module_projection.density,
+                        module_incidence,
+                        scalar_tile_size=262144,
+                        support_tile_size=262144,
+                    )
+                if environment_pairs is None:
+                    environment_pairs = compile_two_hop_pairs_compiled(
+                        environment_projection.density,
+                        environment_incidence,
+                        scalar_tile_size=262144,
+                        support_tile_size=262144,
+                    )
+            elif self.routing_execution == "optimized_exact":
                 module_pairs = compile_two_hop_pairs_batched(
                     module_projection.density,
                     module_incidence,
@@ -908,7 +1988,9 @@ class RoutedPairwiseField(DensePairwiseField):
             state, encoded, receivers, receiver_features, environment_pairs
         )
 
-        def receiver_counts(pairs: PackedPairs) -> torch.Tensor:
+        def receiver_counts(pairs: PackedPairs | CompiledPairs) -> torch.Tensor:
+            if isinstance(pairs, CompiledPairs):
+                return pairs.row_counts.to(device=receivers.device).detach()
             values = receivers.new_zeros((int(receivers.shape[0]) * int(receivers.shape[1]),))
             if pairs.unique_pair_count:
                 keys = pairs.batch_index * int(receivers.shape[1]) + pairs.receiver_index
@@ -916,6 +1998,9 @@ class RoutedPairwiseField(DensePairwiseField):
             return values.reshape(receivers.shape[0], receivers.shape[1]).detach()
 
         def scalar(value: float) -> torch.Tensor:
+            if isinstance(module_pairs, CompiledPairs) and isinstance(value, int):
+                # Exact route counts can exceed the FP32 integer range.
+                return torch.tensor(value, device=receivers.device, dtype=torch.int64)
             return receivers.new_tensor(float(value)).detach()
 
         aux: dict[str, torch.Tensor] = {
@@ -930,7 +2015,45 @@ class RoutedPairwiseField(DensePairwiseField):
             "routing_module_duplicate_expansion": scalar(module_pairs.duplicate_expansion),
             "routing_environment_duplicate_expansion": scalar(environment_pairs.duplicate_expansion),
         }
+        if self.paircost_enabled:
+            module_num, module_den = self._paircost_components(module_projection.density, module_incidence)
+            env_num, env_den = self._paircost_components(environment_projection.density, environment_incidence)
+            module_cost = float(_option(self.sparsification, "module_pair_cost", 1.0))
+            environment_cost = float(_option(self.sparsification, "environment_pair_cost", 1.0))
+            aux["routing_paircost_numerator"] = module_cost * module_num + environment_cost * env_num
+            aux["routing_paircost_denominator"] = module_cost * module_den + environment_cost * env_den
+        if self._typed_log_temperatures is not None:
+            for relation in ("source_module", "source_environment", "query_module", "query_environment"):
+                aux["routing_temperature_" + relation] = self._temperature(relation).detach()
         if return_routing_maps:
+            if isinstance(module_pairs, CompiledPairs):
+                aux.update(
+                    {
+                        # Keep the query-side maps available under both
+                        # executor representations.  The compiled path has
+                        # implicit complete rows, but its source-measure
+                        # projections remain the authoritative diagnostics.
+                        "routing_module_query_logits": module_logits,
+                        "routing_module_query_density": module_projection.density,
+                        "routing_module_query_probability": module_projection.probability,
+                        "routing_environment_query_logits": environment_logits,
+                        "routing_environment_query_density": environment_projection.density,
+                        "routing_environment_query_probability": environment_projection.probability,
+                        "routing_module_complete_rows": module_pairs.complete_rows,
+                        "routing_module_complete_row_index": module_pairs.complete_row_index,
+                        "routing_module_complete_prior": module_pairs.complete_prior,
+                        "routing_module_partial_row_ptr": module_pairs.partial_row_ptr,
+                        "routing_module_partial_source": module_pairs.partial_source_index,
+                        "routing_module_partial_prior": module_pairs.partial_prior,
+                        "routing_environment_complete_rows": environment_pairs.complete_rows,
+                        "routing_environment_complete_row_index": environment_pairs.complete_row_index,
+                        "routing_environment_complete_prior": environment_pairs.complete_prior,
+                        "routing_environment_partial_row_ptr": environment_pairs.partial_row_ptr,
+                        "routing_environment_partial_source": environment_pairs.partial_source_index,
+                        "routing_environment_partial_prior": environment_pairs.partial_prior,
+                    }
+                )
+                return module_context + environment_context, aux
             aux.update(
                 {
                     "routing_module_query_logits": module_logits,

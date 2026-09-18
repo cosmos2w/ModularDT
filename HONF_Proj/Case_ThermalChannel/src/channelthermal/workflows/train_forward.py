@@ -44,6 +44,7 @@ from honf_runtime.compat import (
     write_json,
 )
 from honf_runtime.checkpoints import validate_checkpoint_identity
+from honf_forward_core.config import ROUTING_TYPED_TEMPERATURE_NAMES
 from honf_forward_core.training.diagnostics import HONF_DIAGNOSTIC_KEYS, compute_honf_diagnostics, organizer_regularization_loss
 from channelthermal.config import ChannelThermalHONFConfig
 from channelthermal.model import ChannelThermalHONFModel
@@ -529,6 +530,29 @@ def run_from_config(
         "val_predicted_field_mse",
         "val_predicted_temperature_mse",
     ]
+    interface_settings = getattr(model_config.core_honf, "interface_model", None)
+    routing_settings = getattr(interface_settings, "routing", None)
+    paircost_enabled = bool(
+        routing_settings is not None
+        and getattr(getattr(routing_settings, "sparsification", None), "enabled", False)
+    )
+    if paircost_enabled:
+        # Keep historical metrics.csv schemas unchanged.  The science profile
+        # opts into the two additional physical-objective columns explicitly.
+        fieldnames.insert(fieldnames.index("loss_field"), "loss_paircost")
+        fieldnames.insert(fieldnames.index("loss_field"), "loss_physical")
+        fieldnames.insert(fieldnames.index("val_loss_field"), "val_loss_paircost")
+        fieldnames.insert(fieldnames.index("val_loss_field"), "val_loss_physical")
+        fieldnames.extend(
+            [
+                "temperature_" + name.removeprefix("log_temperature_")
+                for name in ROUTING_TYPED_TEMPERATURE_NAMES
+            ]
+            + [
+                "val_temperature_" + name.removeprefix("log_temperature_")
+                for name in ROUTING_TYPED_TEMPERATURE_NAMES
+            ]
+        )
 
     print(f"[setup] device={device}, train_cases={len(train_dataset)}, val_cases={len(val_dataset)}, params={count_parameters(model):,}")
     best_total = math.inf
@@ -593,10 +617,11 @@ def run_from_config(
         write_json(run_dir / "config_resolved.json", cfg)
         print(
             f"[initialize] loaded {len(initialization_inventory['loaded'])} parameters from "
-            f"{initialize_checkpoint}; skipped={len(initialization_inventory['skipped'])}, "
-            f"missing={len(initialization_inventory['missing'])}, "
-            f"unexpected={len(initialization_inventory['unexpected'])}"
-        )
+                f"{initialize_checkpoint}; skipped={len(initialization_inventory['skipped'])}, "
+                f"missing={len(initialization_inventory['missing'])}, "
+                f"unexpected={len(initialization_inventory['unexpected'])}, "
+                f"initialized_zero={len(initialization_inventory.get('initialized', []))}"
+            )
     if resume_checkpoint is not None:
         repair_metrics_csv_for_append(metrics_path)
         checkpoint = load_trusted_checkpoint(resume_checkpoint, map_location=device)

@@ -14,6 +14,7 @@ import torch
 from channelthermal.config import ChannelThermalHONFConfig
 from channelthermal.data.datasets import GlobalChannelThermalDataset
 from channelthermal.model import ChannelThermalHONFModel
+from honf_forward_core.config import ROUTING_TYPED_TEMPERATURE_NAMES
 from honf_runtime.checkpoints import validate_checkpoint_identity
 from honf_runtime.compat import strip_module_prefix
 
@@ -296,11 +297,77 @@ def _partial_initialize_model(
     *,
     source_config: ChannelThermalHONFConfig,
 ) -> Dict[str, Any]:
-    """Load only compatible parameters and return a complete key inventory."""
+    """Load compatible state and return a complete key inventory.
+
+    The typed-temperature science transition is intentionally a strict full
+    state load with four explicit zero injections; historical architecture
+    transitions retain the parameter-only partial behavior below.
+    """
 
     source_state = strip_module_prefix(checkpoint["model_state_dict"])
     target_parameters = dict(model.named_parameters())
     target_state = model.state_dict()
+
+    def typed_temperature_enabled(config: ChannelThermalHONFConfig) -> bool:
+        core_config = getattr(config, "core_honf", None)
+        interface_config = getattr(core_config, "interface_model", None)
+        routing_config = getattr(interface_config, "routing", None)
+        sparsification = getattr(routing_config, "sparsification", None)
+        return bool(getattr(sparsification, "learn_typed_temperatures", False))
+
+    target_typed_enabled = typed_temperature_enabled(model.config)
+    source_typed_enabled = typed_temperature_enabled(source_config)
+    typed_parameter_names_ordered = tuple(
+        f"core.routing_log_temperatures.{name}"
+        for name in ROUTING_TYPED_TEMPERATURE_NAMES
+    ) if target_typed_enabled else ()
+    typed_parameter_names = set(typed_parameter_names_ordered)
+
+    # The opt-in science run changes the state schema by exactly four scalar
+    # parameters.  Handle this one transition as a complete state load so
+    # normalization/runtime buffers cannot be silently skipped by the legacy
+    # parameter-only partial initializer.  Other partial-initialization cases
+    # below intentionally retain their historical inventory semantics.
+    if target_typed_enabled and not source_typed_enabled:
+        if not typed_parameter_names.issubset(target_parameters):
+            absent = sorted(typed_parameter_names - set(target_parameters))
+            raise RuntimeError(
+                "Typed-temperature configuration requested, but the model is missing "
+                f"the four registered parameters: {absent}."
+            )
+        source_keys = set(source_state)
+        target_keys = set(target_state)
+        added_keys = target_keys - source_keys
+        removed_keys = source_keys - target_keys
+        shape_mismatches = sorted(
+            key for key in source_keys & target_keys
+            if tuple(source_state[key].shape) != tuple(target_state[key].shape)
+        )
+        if added_keys != typed_parameter_names or removed_keys or shape_mismatches:
+            raise ValueError(
+                "Typed-temperature warm-start requires the full source/target state "
+                "schemas to differ only by the four new log temperatures; "
+                f"added={sorted(added_keys)}, removed={sorted(removed_keys)}, "
+                f"shape_mismatches={shape_mismatches}"
+            )
+        injected_state = dict(source_state)
+        with torch.no_grad():
+            for name in typed_parameter_names_ordered:
+                injected_state[name] = target_state[name].detach().clone().zero_()
+        model.load_state_dict(injected_state, strict=True)
+        loaded = sorted(name for name in target_parameters if name in source_state)
+        return {
+            "loaded": loaded,
+            "skipped": [],
+            "missing": [],
+            "initialized": list(typed_parameter_names_ordered),
+            "unexpected": [],
+            "source_parameter_or_state_count": len(source_state),
+            "target_parameter_count": len(target_parameters),
+            "target_state_count": len(target_state),
+            "source_organizer_mode": source_config.core_honf.organizer_mode,
+            "target_organizer_mode": model.config.core_honf.organizer_mode,
+        }
     cross_assembly = (
         source_config.core_honf.field_assembly_mode == "context_fusion"
         and model.config.core_honf.field_assembly_mode == "edge_additive"
@@ -366,6 +433,7 @@ def _partial_initialize_model(
 
     model.load_state_dict(loadable, strict=False)
     missing = sorted(name for name in target_parameters if name not in loadable)
+
     return {
         "loaded": sorted(loaded),
         "skipped": sorted(skipped, key=lambda item: str(item["key"])),
@@ -376,4 +444,3 @@ def _partial_initialize_model(
         "source_organizer_mode": source_config.core_honf.organizer_mode,
         "target_organizer_mode": model.config.core_honf.organizer_mode,
     }
-

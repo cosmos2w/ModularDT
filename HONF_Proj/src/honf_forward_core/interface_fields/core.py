@@ -5,10 +5,15 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 import torch
-import torch.nn as nn
+from torch import nn
 
-from honf_forward_core.config import BatchData, UnifiedForwardConfig
+from honf_forward_core.config import (
+    ROUTING_TYPED_TEMPERATURE_NAMES,
+    BatchData,
+    UnifiedForwardConfig,
+)
 from honf_forward_core.nn import FourierFeatures, LazyMLP
+
 from .common import SharedInterfaceContext
 from .dense_pairwise import DensePairwiseField
 from .group_operator import SparseInterfaceHONF, SparseLayoutCache, packed_coarse_group_sources
@@ -17,6 +22,43 @@ from .latent_attention import GeometryLatentField
 from .regional_response import RegionalResponseField
 from .response_hierarchy import prepare_hierarchy_geometry
 from .types import EncodedInterfaceCase, InterfaceRead, PreparedInterfaceField
+
+
+def _merge_compiled_routing_maps(chunks):
+    """Merge opt-in CSR diagnostics in global batch/receiver order."""
+    merged = {}
+    total_width = sum(width for _, width in chunks)
+    for prefix in ("routing_module", "routing_environment"):
+        if not all(prefix + "_partial_row_ptr" in entry for entry, _ in chunks):
+            continue
+        complete_indices, complete_priors = [], []
+        partial_rows, partial_sources, partial_priors, count_chunks = [], [], [], []
+        offset = 0
+        for entry, width in chunks:
+            local_complete = entry[prefix + "_complete_row_index"]
+            complete_indices.append(torch.div(local_complete, width, rounding_mode="floor") * total_width
+                                    + local_complete.remainder(width) + offset)
+            complete_priors.append(entry[prefix + "_complete_prior"])
+            ptr = entry[prefix + "_partial_row_ptr"]
+            counts = ptr[1:] - ptr[:-1]
+            count_chunks.append(counts.reshape(-1, width))
+            local_rows = torch.repeat_interleave(torch.arange(counts.numel(), device=ptr.device), counts)
+            partial_rows.append(torch.div(local_rows, width, rounding_mode="floor") * total_width
+                                + local_rows.remainder(width) + offset)
+            partial_sources.append(entry[prefix + "_partial_source"])
+            partial_priors.append(entry[prefix + "_partial_prior"])
+            offset += width
+        complete = torch.cat(complete_indices)
+        order = torch.argsort(complete, stable=True)
+        merged[prefix + "_complete_row_index"] = complete[order]
+        merged[prefix + "_complete_prior"] = torch.cat(complete_priors)[order]
+        # This optional diagnostic ordering sorts unique rows, never hub paths.
+        order = torch.argsort(torch.cat(partial_rows), stable=True)
+        merged[prefix + "_partial_source"] = torch.cat(partial_sources)[order]
+        merged[prefix + "_partial_prior"] = torch.cat(partial_priors)[order]
+        counts = torch.cat(count_chunks, dim=1).reshape(-1)
+        merged[prefix + "_partial_row_ptr"] = torch.cat((counts.new_zeros(1), counts.cumsum(0)))
+    return merged
 
 
 class InterfaceFieldCore(nn.Module):
@@ -47,6 +89,26 @@ class InterfaceFieldCore(nn.Module):
             fourier_frequencies=frequencies,
             coarse_module_source=str(options.coarse_module_source),
         )
+        # The science profile owns exactly four scalar route temperatures at
+        # the reusable core boundary.  Historical profiles keep this
+        # ParameterDict empty, so their state-dict structure and optimizer
+        # inventory remain unchanged.  The routed backend receives the same
+        # ParameterDict by reference and applies the values to source/query
+        # projections without creating a second set of parameters.
+        self.routing_log_temperatures = nn.ParameterDict()
+        if (
+            config.forward_architecture == "routed_pairwise_honf"
+            and options.routing is not None
+            and bool(options.routing.sparsification.learn_typed_temperatures)
+        ):
+            # ParameterDict.update sorts ordinary mappings in some supported
+            # PyTorch versions.  Assign one key at a time so checkpoint and
+            # optimizer inventories retain the plan's source-M, source-E,
+            # query-M, query-E order as well as the exact four-key schema.
+            for name in ROUTING_TYPED_TEMPERATURE_NAMES:
+                self.routing_log_temperatures[name] = nn.Parameter(
+                    torch.zeros((), dtype=torch.get_default_dtype())
+                )
         if config.forward_architecture == "dense_pairwise_field":
             self.backend = DensePairwiseField(
                 hidden,
@@ -58,10 +120,24 @@ class InterfaceFieldCore(nn.Module):
         elif config.forward_architecture == "routed_pairwise_honf":
             from .routed_pairwise import RoutedPairwiseField
 
+            routed_kwargs = {
+                "routing_config": options.routing,
+                "activation_checkpointing": bool(options.activation_checkpointing),
+            }
+            # Keep the historical backend constructor path untouched until a
+            # science profile actually asks for the new parameters.  The
+            # exact executor accepts this optional object for the opt-in
+            # profile; old checkpoints therefore remain loadable during the
+            # transition and under older backend implementations.
+            if len(self.routing_log_temperatures) > 0:
+                # Pass a plain mapping of the already-registered Parameter
+                # objects.  Registering the ParameterDict a second time under
+                # the backend would duplicate state-dict paths and defeat the
+                # strict four-key warm-start contract.
+                routed_kwargs["typed_log_temperatures"] = dict(self.routing_log_temperatures)
             self.backend = RoutedPairwiseField(
                 hidden, int(options.message_hidden_dim), heads, frequencies,
-                routing_config=options.routing,
-                activation_checkpointing=bool(options.activation_checkpointing),
+                **routed_kwargs,
             )
         elif config.forward_architecture == "geometry_latent_field":
             self.backend = GeometryLatentField(
@@ -103,6 +179,12 @@ class InterfaceFieldCore(nn.Module):
         else:
             raise ValueError(f"Unsupported interface architecture: {config.forward_architecture!r}")
         self.receiver_chunk_size = int(options.receiver_chunk_size)
+
+    @property
+    def typed_routing_temperatures_enabled(self) -> bool:
+        """Whether this core carries the four learnable route temperatures."""
+
+        return len(self.routing_log_temperatures) == len(ROUTING_TYPED_TEMPERATURE_NAMES)
 
     def set_training_progress(self, *, epoch: int, total_epochs: Optional[int] = None) -> None:
         del epoch, total_epochs
@@ -371,7 +453,9 @@ class InterfaceFieldCore(nn.Module):
             "local_context_fraction": local_values / branch_total,
         }
         if backend_aux_chunks:
-            keys = {key for chunk_aux, _ in backend_aux_chunks for key in chunk_aux}
+            compiled_maps = _merge_compiled_routing_maps(backend_aux_chunks)
+            aux.update(compiled_maps)
+            keys = {key for chunk_aux, _ in backend_aux_chunks for key in chunk_aux} - set(compiled_maps)
             for key in keys:
                 values_and_widths = [
                     (chunk_aux[key], width)
@@ -384,6 +468,17 @@ class InterfaceFieldCore(nn.Module):
                 first = values[0]
                 if key.startswith("routing_") and key.endswith(("_raw_path_count", "_unique_pair_count")):
                     aux[key] = torch.stack(values).sum()
+                    continue
+                # Pair-cost components are live numerator/denominator
+                # scalars.  Receiver chunking must combine them across the
+                # full read before the case loss forms their ratio; retaining
+                # only the first chunk would bias the objective toward the
+                # first receiver tile.
+                if key.endswith(("routing_paircost_numerator", "routing_paircost_denominator")):
+                    if first.ndim == 2 and all(value.shape[1] == width for value, width in values_and_widths):
+                        aux[key] = torch.cat(values, dim=1)
+                    else:
+                        aux[key] = torch.stack(values).sum()
                     continue
                 if key.startswith(("routing_module_pair_", "routing_environment_pair_")):
                     if key.endswith("_receiver"):

@@ -9,8 +9,8 @@ wall, inlet, outlet, or material assumptions.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, fields, is_dataclass
 import math
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from typing import Any, Dict, Optional
 
 try:
@@ -133,6 +133,57 @@ LEGACY_ARCHITECTURE_KEYS = {
 }
 
 
+ROUTING_TYPED_TEMPERATURE_NAMES = (
+    "log_temperature_source_module",
+    "log_temperature_source_environment",
+    "log_temperature_query_module",
+    "log_temperature_query_environment",
+)
+
+
+@dataclass
+class RoutingSparsificationConfig:
+    """Opt-in science settings for the routed sparse-execution trial.
+
+    The historical routed profiles leave this block absent when serialized.
+    When enabled, the only trainable additions are the four typed log
+    temperatures named in :data:`ROUTING_TYPED_TEMPERATURE_NAMES`; the only
+    auxiliary objective is the induced fine-pair cost term.
+    """
+
+    enabled: bool = False
+    learn_typed_temperatures: bool = False
+    relative_density_epsilon: float = 0.05
+    cost_weight: float = 0.0
+    module_pair_cost: float = 1.0
+    environment_pair_cost: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise TypeError("routing.sparsification.enabled must be boolean.")
+        if not isinstance(self.learn_typed_temperatures, bool):
+            raise TypeError("routing.sparsification.learn_typed_temperatures must be boolean.")
+        epsilon = float(self.relative_density_epsilon)
+        if not math.isfinite(epsilon) or epsilon <= 0.0:
+            raise ValueError("routing.sparsification.relative_density_epsilon must be finite and positive.")
+        cost_weight = float(self.cost_weight)
+        if not math.isfinite(cost_weight) or cost_weight < 0.0:
+            raise ValueError("routing.sparsification.cost_weight must be finite and nonnegative.")
+        for name in ("module_pair_cost", "environment_pair_cost"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"routing.sparsification.{name} must be finite and positive.")
+        if not self.enabled and (self.learn_typed_temperatures or cost_weight != 0.0):
+            raise ValueError(
+                "routing.sparsification.enabled must be true when typed temperatures or "
+                "the induced pair-cost objective is configured."
+            )
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> RoutingSparsificationConfig:
+        return _dataclass_from_dict(cls, dict(payload or {}))
+
+
 @dataclass
 class RoutingIndexConfig:
     """Scalar routing settings; fine response capacity remains Dense's."""
@@ -154,8 +205,14 @@ class RoutingIndexConfig:
     # when the new strategy is selected.
     mean_shift_steps: int = 3
     mean_shift_feature_bandwidth: float = 1.0
+    # Appended after all historical fields so positional construction and
+    # serialized historical routing blocks remain compatible.
+    qe_backend: str = "torch"
+    sparsification: RoutingSparsificationConfig = field(default_factory=RoutingSparsificationConfig)
 
     def __post_init__(self) -> None:
+        if isinstance(self.sparsification, dict):
+            self.sparsification = RoutingSparsificationConfig.from_dict(self.sparsification)
         for name in (
             "descriptor_dim",
             "router_hidden_dim",
@@ -175,8 +232,12 @@ class RoutingIndexConfig:
                     "query_normalizer": "source_measure_sparsemax", "resistance_mode": "adapter"}
         if self.strategy not in {"module_hubs", "mean_shift"}:
             raise ValueError("routing.strategy currently supports 'module_hubs' or 'mean_shift'.")
-        if self.execution not in {"gathered", "optimized_exact"}:
-            raise ValueError("routing.execution currently supports 'gathered' or 'optimized_exact'.")
+        if self.execution not in {"gathered", "optimized_exact", "compiled_exact"}:
+            raise ValueError(
+                "routing.execution currently supports 'gathered', 'optimized_exact', or 'compiled_exact'."
+            )
+        if self.qe_backend not in {"torch", "triton"}:
+            raise ValueError("routing.qe_backend must be 'torch' or 'triton'.")
         for name, expected in required.items():
             if name == "strategy":
                 continue
@@ -798,6 +859,29 @@ class UnifiedForwardConfig:
                     if isinstance(routing_payload, dict):
                         routing_payload.pop("mean_shift_steps", None)
                         routing_payload.pop("mean_shift_feature_bandwidth", None)
+                routing_payload = interface_payload.get("routing")
+                if isinstance(routing_payload, dict):
+                    # A disabled, zero-weight sparsification block is an
+                    # additive historical default.  Omit it, and the default
+                    # Torch QE selector alongside it, so old checkpoints and
+                    # profiles retain their established routing shape.  Keep
+                    # an explicit QE selector on the enabled science profile
+                    # even when it requests the default Torch implementation;
+                    # the requested backend is part of that experiment's
+                    # reproducible configuration.
+                    sparse_payload = routing_payload.get("sparsification")
+                    default_sparse = isinstance(sparse_payload, dict) and sparse_payload == {
+                        "enabled": False,
+                        "learn_typed_temperatures": False,
+                        "relative_density_epsilon": 0.05,
+                        "cost_weight": 0.0,
+                        "module_pair_cost": 1.0,
+                        "environment_pair_cost": 1.0,
+                    }
+                    if default_sparse:
+                        routing_payload.pop("sparsification", None)
+                        if routing_payload.get("qe_backend") == "torch":
+                            routing_payload.pop("qe_backend", None)
                 if self.forward_architecture != "sparse_interface_honf":
                     interface_payload.pop("support_spacing_factor", None)
                     interface_payload.pop("group_read_mode", None)

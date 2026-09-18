@@ -8,7 +8,7 @@ from functools import partial
 import torch
 from torch.utils.checkpoint import checkpoint
 
-from .types import InvertedSourceIncidence, PackedPairs, TypedSourceIncidence
+from .types import CompiledPairs, InvertedSourceIncidence, PackedPairs, TypedSourceIncidence
 
 
 def _empty_pairs(
@@ -714,6 +714,696 @@ def compile_two_hop_pairs_batched(
         raw_path_count=raw_path_count,
         unique_pair_count=unique_count,
     )
+
+
+def _resolve_compiled_source(
+    query_density: torch.Tensor,
+    source: TypedSourceIncidence | InvertedSourceIncidence,
+    source_weights: torch.Tensor | None,
+) -> tuple[InvertedSourceIncidence, torch.Tensor]:
+    """Validate and normalize source arguments for the union compiler."""
+
+    if isinstance(source, TypedSourceIncidence):
+        incidence = source.inverted
+        weights = source.source_weights if source_weights is None else source_weights
+    elif isinstance(source, InvertedSourceIncidence):
+        incidence = source
+        if source_weights is None:
+            raise ValueError("source_weights is required with an inverted incidence alone.")
+        weights = source_weights
+    else:
+        raise TypeError("source must be TypedSourceIncidence or InvertedSourceIncidence.")
+    batch, _, hub_count = (int(v) for v in query_density.shape)
+    if tuple(weights.shape) != (batch, incidence.source_count):
+        raise ValueError("source_weights must align with query batch and source count.")
+    if incidence.hub_count != hub_count:
+        raise ValueError("Source incidence hub count must match query_density.")
+    if incidence.values.device != query_density.device or weights.device != query_density.device:
+        raise ValueError("Query, source incidence, and source weights must share a device.")
+    return incidence, weights
+
+
+def _compiled_union_tile_sizes(
+    batch: int,
+    receiver_count: int,
+    source_count: int,
+    hub_count: int,
+    budget: int,
+) -> tuple[int, int, int]:
+    """Choose bounded ``(Q,N,K)`` Boolean-union tiles.
+
+    The bound is on the largest temporary Boolean block, including the batch
+    dimension.  Hub tiling is required when K is wider than the budget; this
+    keeps the implementation valid for unusually large candidate banks.
+    """
+
+    if isinstance(budget, bool) or int(budget) <= 0:
+        raise ValueError("support_tile_size must be a positive integer.")
+    if batch <= 0 or receiver_count <= 0 or source_count <= 0 or hub_count <= 0:
+        return 1, 1, 1
+    budget = int(budget)
+    if budget < batch:
+        raise ValueError("support_tile_size must be at least the query batch size.")
+    per_batch = max(1, budget // batch)
+    # A compact cube is a useful starting point, but all final dimensions are
+    # reduced explicitly below so rounding can never exceed the budget.
+    hub_tile = min(hub_count, max(1, int(per_batch ** (1.0 / 3.0))))
+    receiver_tile = min(
+        receiver_count,
+        max(1, int((per_batch / float(max(hub_tile, 1))) ** 0.5)),
+    )
+    source_tile = min(
+        source_count,
+        max(1, per_batch // max(receiver_tile * hub_tile, 1)),
+    )
+    while receiver_tile * source_tile * hub_tile > per_batch:
+        if source_tile > 1:
+            source_tile -= 1
+        elif receiver_tile > 1:
+            receiver_tile -= 1
+        elif hub_tile > 1:
+            hub_tile -= 1
+        else:
+            break
+    return receiver_tile, source_tile, hub_tile
+
+
+def _compiled_complete_prior(
+    query_density: torch.Tensor,
+    source_membership: torch.Tensor,
+    source_support: torch.Tensor,
+    source_weights: torch.Tensor,
+    complete_row_index: torch.Tensor,
+    *,
+    scalar_tile_size: int,
+) -> torch.Tensor:
+    """Evaluate Eq. (1) for complete rows without pair-index materialization."""
+
+    batch, receiver_count, hub_count = (int(v) for v in query_density.shape)
+    source_count = int(source_membership.shape[1])
+    complete_count = int(complete_row_index.numel())
+    scalar_dtype = torch.float64
+    if complete_count == 0:
+        return source_membership.new_empty((0, source_count), dtype=scalar_dtype)
+    if isinstance(scalar_tile_size, bool) or int(scalar_tile_size) <= 0:
+        raise ValueError("scalar_tile_size must be a positive integer.")
+    scalar_tile_size = int(scalar_tile_size)
+    if hub_count == 0:
+        return source_membership.new_zeros((complete_count, source_count), dtype=scalar_dtype)
+
+    query_values = torch.where(
+        query_density > 0.0,
+        query_density,
+        torch.zeros_like(query_density),
+    ).to(dtype=scalar_dtype)
+    source_values = torch.where(
+        source_support,
+        source_membership,
+        torch.zeros_like(source_membership),
+    ).to(dtype=scalar_dtype)
+    weights = source_weights.to(dtype=scalar_dtype)
+    if complete_count == batch * receiver_count:
+        # Common complete-support workload: reuse each case's source bank
+        # across all its queries rather than launching one mm per case.
+        # Tile the batch as well when a source bank alone exceeds the budget.
+        n_tile = max(1, min(source_count, scalar_tile_size // max(hub_count, 1)))
+        b_tile = max(1, min(batch, scalar_tile_size // max(n_tile * hub_count, n_tile, 1)))
+        batch_outputs = []
+        for b0 in range(0, batch, b_tile):
+            b1 = min(batch, b0 + b_tile)
+            q_tile = max(1, scalar_tile_size // ((b1-b0) * max(n_tile, hub_count, 1)))
+            query_outputs = []
+            for q0 in range(0, receiver_count, q_tile):
+                q1 = min(receiver_count, q0 + q_tile)
+                source_outputs = []
+                for n0 in range(0, source_count, n_tile):
+                    n1 = min(source_count, n0 + n_tile)
+                    source_outputs.append(torch.bmm(
+                        query_values[b0:b1, q0:q1],
+                        source_values[b0:b1, n0:n1].transpose(1, 2),
+                    ) * weights[b0:b1, None, n0:n1])
+                query_outputs.append(torch.cat(source_outputs, dim=-1))
+            batch_outputs.append(torch.cat(query_outputs, dim=1))
+        return torch.cat(batch_outputs, dim=0).reshape(complete_count, source_count)
+
+    # Keep the largest bmm within the scalar workspace budget.  The returned
+    # complete prior is compact in rows but can still be wide in source count;
+    # callers use it as scalar metadata, never as a fine feature tile.
+    source_tile = max(1, min(source_count, scalar_tile_size // max(hub_count, 1)))
+    # Source [N,K] is reused by rectangular mm; no [Q,N,K] product exists.
+    # Bound each source, query and output scalar workspace independently.
+    complete_batches = torch.div(complete_row_index, receiver_count, rounding_mode="floor")
+    counts = torch.bincount(complete_batches, minlength=batch)
+    full_indices = torch.nonzero(counts == receiver_count, as_tuple=False).flatten()
+    output = source_values.new_zeros((complete_count, source_count))
+    full_case_mask = torch.zeros(batch, device=query_values.device, dtype=torch.bool)
+    if int(full_indices.numel()):
+        group_count = int(full_indices.numel())
+        rectangular = _compiled_complete_prior(
+            query_values.index_select(0, full_indices),
+            source_values.index_select(0, full_indices),
+            source_support.index_select(0, full_indices),
+            weights.index_select(0, full_indices),
+            torch.arange(group_count * receiver_count, device=query_values.device),
+            scalar_tile_size=scalar_tile_size,
+        )
+        full_case_mask[full_indices] = True
+        full_positions = torch.nonzero(full_case_mask[complete_batches], as_tuple=False).flatten()
+        output = output.index_copy(0, full_positions, rectangular)
+    remaining_positions = torch.nonzero(~full_case_mask[complete_batches], as_tuple=False).flatten()
+    # Irregular complete rows still have implicit source banks. Gather only
+    # bounded scalar incidence blocks, never hidden states or duplicate paths.
+    # Packing across physical cases removes a Python/mm launch per case.
+    packed_row_tile = max(1, scalar_tile_size // max(source_tile * hub_count, 1))
+    for r0 in range(0, int(remaining_positions.numel()), packed_row_tile):
+        positions = remaining_positions[r0:r0 + packed_row_tile]
+        flat_rows = complete_row_index.index_select(0, positions)
+        batch_ids = torch.div(flat_rows, receiver_count, rounding_mode="floor")
+        query_ids = torch.remainder(flat_rows, receiver_count)
+        query_block = query_values[batch_ids, query_ids].unsqueeze(1)
+        source_outputs = []
+        for n0 in range(0, source_count, source_tile):
+            n1 = min(source_count, n0 + source_tile)
+            source_block = source_values[batch_ids, n0:n1]
+            product = torch.bmm(query_block, source_block.transpose(1, 2)).squeeze(1)
+            source_outputs.append(product * weights[batch_ids, n0:n1])
+        output = output.index_copy(0, positions, torch.cat(source_outputs, dim=1))
+    return output
+
+
+def _compiled_partial_union(
+    query_density: torch.Tensor,
+    source_support: torch.Tensor,
+    occupied_hubs: torch.Tensor,
+    complete_rows: torch.Tensor,
+    *,
+    support_tile_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Build the exact partial-row CSR union with bounded Boolean tiles."""
+
+    batch, receiver_count, hub_count = (int(v) for v in query_density.shape)
+    source_count = int(source_support.shape[1])
+    receiver_tile, source_tile, hub_tile = _compiled_union_tile_sizes(
+        batch,
+        receiver_count,
+        source_count,
+        hub_count,
+        support_tile_size,
+    )
+    query_support = (query_density > 0.0) & occupied_hubs[:, None, :]
+    # Complete rows are certified before entering the union.  Clearing them
+    # here keeps their work out of the emitted CSR even if a future tile shape
+    # visits their batch row.
+    query_support = query_support & (~complete_rows[..., None])
+    partial_mask = ~complete_rows
+    if not bool(partial_mask.any()):
+        empty_ptr = torch.zeros(
+            (batch * receiver_count + 1,),
+            device=query_density.device,
+            dtype=torch.long,
+        )
+        empty_source = torch.empty((0,), device=query_density.device, dtype=torch.long)
+        # No Boolean candidate scan is needed when the pre-join certificate
+        # covers every row.
+        return empty_ptr, empty_source, empty_source, 0
+
+    # Pack each 63-hub word into one int64.  The highest bit is deliberately
+    # left unused so every packed word is a nonnegative signed int64 on both
+    # CPU and CUDA.  A word intersection is an exact support test; it does not
+    # threshold or otherwise approximate the live floating route values.
+    word_bits = 63
+    word_count = (hub_count + word_bits - 1) // word_bits
+
+    def pack_support(mask: torch.Tensor) -> torch.Tensor:
+        packed = torch.zeros(
+            (*mask.shape[:-1], word_count),
+            device=mask.device,
+            dtype=torch.int64,
+        )
+        # Convert only a few words at a time.  A single ``mask.to(int64)``
+        # over a very wide candidate bank would create an avoidable
+        # ``[B,N,K]`` 64-bit temporary and defeat the bounded support reader.
+        words_per_chunk = 4
+        expand_prefix = (1,) * (mask.ndim - 1)
+        for word_start in range(0, word_count, words_per_chunk):
+            hub_start = word_start * word_bits
+            hub_end = min(hub_count, (word_start + words_per_chunk) * word_bits)
+            width = hub_end - hub_start
+            indices = torch.arange(
+                hub_start,
+                hub_end,
+                device=mask.device,
+                dtype=torch.long,
+            )
+            local_words = torch.div(indices, word_bits, rounding_mode="floor")
+            local_bits = torch.remainder(indices, word_bits)
+            bit_value = torch.bitwise_left_shift(
+                torch.ones_like(local_bits, dtype=torch.int64),
+                local_bits,
+            )
+            packed.scatter_add_(
+                -1,
+                local_words.reshape(*expand_prefix, width).expand(
+                    *mask.shape[:-1], width
+                ),
+                mask[..., hub_start:hub_end].to(dtype=torch.int64)
+                * bit_value.reshape(*expand_prefix, width),
+            )
+        return packed
+
+    # Word packing removes the repeated per-hub Boolean launches for the
+    # current candidate banks.  Pathological K larger than the scalar support
+    # budget keeps the tiled Boolean implementation below, where a single
+    # source/query block can still be formed without exceeding the budget.
+    use_bitset = word_count <= int(support_tile_size)
+    partial_row_ids = torch.nonzero(partial_mask.reshape(-1), as_tuple=False).flatten()
+
+    if use_bitset:
+        query_support_flat = query_support.reshape(batch * receiver_count, hub_count)
+        row_count = int(partial_row_ids.numel())
+        word_budget = max(1, int(support_tile_size) // max(word_count, 1))
+        if source_count <= word_budget:
+            bitset_source_tile = source_count
+            bitset_row_tile = max(1, min(row_count, word_budget // max(bitset_source_tile, 1)))
+        else:
+            bitset_source_tile = max(1, min(source_count, int(math.sqrt(word_budget))))
+            bitset_row_tile = max(1, min(row_count, word_budget // bitset_source_tile))
+        while (
+            bitset_row_tile * bitset_source_tile * word_count
+            > int(support_tile_size)
+        ):
+            if bitset_source_tile > 1:
+                bitset_source_tile -= 1
+            elif bitset_row_tile > 1:
+                bitset_row_tile -= 1
+            else:
+                break
+
+        def scan_bitset_blocks():
+            for row_start in range(0, row_count, bitset_row_tile):
+                row_end = min(row_start + bitset_row_tile, row_count)
+                row_ids = partial_row_ids[row_start:row_end]
+                row_batch = torch.div(row_ids, receiver_count, rounding_mode="floor")
+                # Pack only this receiver tile so a very large Q does not
+                # create an unbounded [B*Q, words] support workspace.
+                query_block = pack_support(query_support_flat.index_select(0, row_ids))
+                for source_start in range(0, source_count, bitset_source_tile):
+                    source_end = min(source_start + bitset_source_tile, source_count)
+                    # Gather only the current source tile.  In particular, a
+                    # large source bank must not be copied for every row tile
+                    # before its source axis is sliced.
+                    source_block = pack_support(
+                        source_support[:, source_start:source_end].index_select(0, row_batch)
+                    )
+                    support_block = torch.bitwise_and(
+                        query_block[:, None, :], source_block
+                    ).ne(0).any(dim=-1)
+                    hits = torch.nonzero(support_block, as_tuple=False)
+                    if hits.numel() == 0:
+                        continue
+                    yield (
+                        row_ids.index_select(0, hits[:, 0]),
+                        hits[:, 1] + source_start,
+                    )
+
+        scan_blocks = scan_bitset_blocks
+    else:
+        scan_blocks = None
+
+    def scan_tiled_blocks():
+        """Yield unique ``(row, source)`` entries in bounded tiles."""
+
+        for query_start in range(0, receiver_count, receiver_tile):
+            query_end = min(query_start + receiver_tile, receiver_count)
+            query_width = query_end - query_start
+            for source_start in range(0, source_count, source_tile):
+                source_end = min(source_start + source_tile, source_count)
+                source_width = source_end - source_start
+                support_block = torch.zeros(
+                    (batch, query_width, source_width),
+                    device=query_density.device,
+                    dtype=torch.bool,
+                )
+                for hub_start in range(0, hub_count, hub_tile):
+                    hub_end = min(hub_start + hub_tile, hub_count)
+                    query_block = query_support[:, query_start:query_end, hub_start:hub_end]
+                    source_block = source_support[:, source_start:source_end, hub_start:hub_end]
+                    support_block = support_block | (
+                        query_block[:, :, None, :] & source_block[:, None, :, :]
+                    ).any(dim=-1)
+                support_block = support_block & partial_mask[:, query_start:query_end, None]
+                rows = torch.nonzero(support_block, as_tuple=False)
+                if rows.numel() == 0:
+                    continue
+                yield (
+                    rows[:, 0] * receiver_count + rows[:, 1] + query_start,
+                    rows[:, 2] + source_start,
+                )
+
+    if scan_blocks is None:
+        scan_blocks = scan_tiled_blocks
+
+    row_counts = torch.zeros(
+        (batch * receiver_count,),
+        device=query_density.device,
+        dtype=torch.long,
+    )
+    # First pass determines row lengths.  The second pass below writes each
+    # source directly at its row-owned CSR offset, so no global sort is needed.
+    for flat_rows, _ in scan_blocks():
+        row_counts.index_add_(
+            0,
+            flat_rows,
+            torch.ones_like(flat_rows, dtype=torch.long),
+        )
+    row_ptr = torch.cat(
+        (
+            torch.zeros((1,), device=query_density.device, dtype=torch.long),
+            row_counts.cumsum(dim=0),
+        ),
+        dim=0,
+    )
+    total = int(row_counts.sum())
+    if total == 0:
+        sources = torch.empty((0,), device=query_density.device, dtype=torch.long)
+        rows = torch.empty((0,), device=query_density.device, dtype=torch.long)
+    else:
+        sources = torch.empty((total,), device=query_density.device, dtype=torch.long)
+        write_offsets = row_ptr[:-1].clone()
+        for flat_rows, flat_sources in scan_blocks():
+            # ``flat_rows`` can contain several source entries for one row in
+            # a source tile.  Add each entry's within-tile rank so writes are
+            # row-owned and collision-free; a plain row offset would leave
+            # uninitialized CSR slots when a tile contains multiple sources.
+            _, local_counts = torch.unique_consecutive(flat_rows, return_counts=True)
+            local_starts = local_counts.cumsum(dim=0) - local_counts
+            local_rank = torch.arange(
+                int(flat_rows.numel()),
+                device=flat_rows.device,
+                dtype=torch.long,
+            ) - torch.repeat_interleave(local_starts, local_counts)
+            destination = write_offsets.index_select(0, flat_rows) + local_rank
+            sources.index_copy_(0, destination, flat_sources)
+            write_offsets.index_add_(
+                0,
+                flat_rows,
+                torch.ones_like(flat_rows, dtype=torch.long),
+            )
+        rows = torch.repeat_interleave(
+            torch.arange(batch * receiver_count, device=query_density.device, dtype=torch.long),
+            row_counts,
+        )
+    # Count the candidate Boolean examinations for rows that actually need a
+    # union.  Complete rows were dispatched by the certificate above.
+    examined = int(partial_mask.sum()) * source_count * hub_count
+    return row_ptr, sources, rows, examined
+
+
+def _compiled_partial_prior(
+    query_density: torch.Tensor,
+    source_membership: torch.Tensor,
+    source_support: torch.Tensor,
+    source_weights: torch.Tensor,
+    row_ids: torch.Tensor,
+    source_ids: torch.Tensor,
+    *,
+    scalar_tile_size: int,
+) -> torch.Tensor:
+    """Evaluate live priors for CSR-selected pairs in bounded scalar tiles."""
+
+    count = int(source_ids.numel())
+    if count == 0:
+        return source_membership.new_empty((0,), dtype=torch.float64)
+    _, receiver_count, _ = (int(v) for v in query_density.shape)
+    scalar_tile_size = int(scalar_tile_size)
+    hub_count = int(query_density.shape[-1])
+    pair_tile = max(1, min(count, scalar_tile_size // max(hub_count, 1)))
+    outputs: list[torch.Tensor] = []
+    for start in range(0, count, pair_tile):
+        end = min(start + pair_tile, count)
+        row_block = row_ids[start:end]
+        source_block = source_ids[start:end]
+        batch_index = torch.div(row_block, receiver_count, rounding_mode="floor")
+        receiver_index = torch.remainder(row_block, receiver_count)
+        # Cast only this bounded pair tile.  In particular, avoid a full
+        # FP64 [B,N,K] source copy when a source bank exceeds the scalar
+        # workspace budget.
+        query_values = query_density[batch_index, receiver_index]
+        query_values = torch.where(
+            query_values > 0.0,
+            query_values,
+            torch.zeros_like(query_values),
+        ).to(dtype=torch.float64)
+        source_values = source_membership[batch_index, source_block]
+        source_values = torch.where(
+            source_support[batch_index, source_block],
+            source_values,
+            torch.zeros_like(source_values),
+        ).to(dtype=torch.float64)
+        product = (query_values * source_values).sum(dim=-1)
+        outputs.append(
+            product * source_weights[batch_index, source_block].to(dtype=torch.float64)
+        )
+    return torch.cat(outputs, dim=0)
+
+
+def _validate_compiled_priors(
+    prior: torch.Tensor,
+    valid: torch.Tensor | None,
+    *,
+    label: str,
+) -> None:
+    """Reject selected route products that are nonpositive or nonfinite.
+
+    Boolean support is a topology decision, so a positive path must still
+    carry a positive scalar prior when the selected route is evaluated.  A
+    product that underflows to zero would otherwise be silently passed to
+    ``log`` by the QE reader (or to a zero-weight QM reduction), changing the
+    mathematical route while hiding the numerical failure.  Invalid padded
+    complete slots are excluded through ``valid``.
+    """
+
+    selected = prior if valid is None else prior[valid]
+    if selected.numel() == 0:
+        return
+    bad = (~torch.isfinite(selected)) | (selected <= 0.0)
+    if bool(bad.any()):
+        bad_count = int(bad.sum())
+        raise FloatingPointError(
+            f"compiled {label} prior contains {bad_count} selected values "
+            "that are nonpositive or nonfinite; increase scalar precision "
+            "or remove the underflowing route support"
+        )
+
+
+def compile_two_hop_pairs_compiled(
+    query_density: torch.Tensor,
+    source: TypedSourceIncidence | InvertedSourceIncidence,
+    source_weights: torch.Tensor | None = None,
+    *,
+    query_count: int | None = None,
+    support_tile_size: int = 262144,
+    scalar_tile_size: int = 262144,
+) -> CompiledPairs:
+    """Compile an exact two-hop union into complete rows plus partial CSR.
+
+    The completeness certificate is evaluated before any join.  A row that
+    activates every occupied source hub gets an implicit valid source range;
+    its live priors are evaluated by bounded scalar products.  Other rows use
+    a tiled Boolean union over authoritative positive incidence, so no
+    ``[B,Q,K,N]`` tensor and no duplicated ``(q,k,i)`` path list is formed.
+    """
+
+    if query_density.ndim != 3:
+        raise ValueError("query_density must have shape [B,Q,K].")
+    batch, receiver_count, hub_count = (int(v) for v in query_density.shape)
+    if query_count is not None and int(query_count) != receiver_count:
+        raise ValueError("query_count does not match query_density.")
+    incidence, weights = _resolve_compiled_source(query_density, source, source_weights)
+    source_count = int(incidence.source_count)
+    if isinstance(scalar_tile_size, bool) or int(scalar_tile_size) <= 0:
+        raise ValueError("scalar_tile_size must be a positive integer.")
+    if int(scalar_tile_size) < max(1, hub_count):
+        raise ValueError("scalar_tile_size must be at least the hub count.")
+    if isinstance(support_tile_size, bool) or int(support_tile_size) <= 0:
+        raise ValueError("support_tile_size must be a positive integer.")
+    complete_rows = torch.zeros(
+        (batch, receiver_count),
+        device=query_density.device,
+        dtype=torch.bool,
+    )
+    empty_row_ptr = torch.zeros(
+        (batch * receiver_count + 1,),
+        device=query_density.device,
+        dtype=torch.long,
+    )
+    empty_index = torch.empty((0,), device=query_density.device, dtype=torch.long)
+    source_valid = torch.zeros(
+        (batch, source_count),
+        device=query_density.device,
+        dtype=torch.bool,
+    )
+    empty_prior = query_density.new_empty((0, source_count), dtype=torch.float64)
+    if receiver_count == 0 or source_count == 0 or hub_count == 0:
+        return CompiledPairs(
+            complete_rows=complete_rows,
+            complete_row_index=empty_index,
+            complete_prior=empty_prior,
+            partial_row_ptr=empty_row_ptr,
+            partial_source_index=empty_index,
+            partial_prior=query_density.new_empty((0,), dtype=torch.float64),
+            source_valid=source_valid,
+            raw_path_count=0,
+            unique_pair_count=0,
+            support_exam_count=0,
+            scalar_exam_count=0,
+        )
+
+    # The incidence index is authoritative for support.  Rebuilding its live
+    # rectangular view also handles filtered source rows and hand-authored
+    # duplicate incidence entries without changing their gradient path.
+    source_membership, source_support = _materialize_live_source_incidence(
+        incidence,
+        batch,
+    )
+    source_support = source_support & (weights > 0.0)[..., None]
+    source_membership = torch.where(
+        source_support,
+        source_membership,
+        torch.zeros_like(source_membership),
+    )
+    source_valid = source_support.any(dim=-1)
+    occupied_hubs = source_valid.new_zeros((batch, hub_count))
+    occupied_hubs = source_support.any(dim=1)
+    query_support = (query_density > 0.0) & occupied_hubs[:, None, :]
+    complete_rows = occupied_hubs.any(dim=-1, keepdim=True) & (
+        (~occupied_hubs[:, None, :]) | query_support
+    ).all(dim=-1)
+    certificate_complete_rows = complete_rows
+
+    # Logical raw paths are counted directly from hub edge cardinalities.  No
+    # path tensor is allocated, and complete rows contribute to the audit even
+    # though they take the implicit dispatch.
+    query_hub_counts = query_support.sum(dim=1)
+    source_hub_counts = source_support.sum(dim=1)
+    raw_path_count = int((query_hub_counts * source_hub_counts).sum())
+
+    # When the pre-join certificate covers every row, skip the CSR scan and
+    # its row-count/promotion bookkeeping entirely.  The complete prior still
+    # uses the same bounded scalar products below.
+    all_certificate_complete = bool(certificate_complete_rows.all())
+    if all_certificate_complete:
+        partial_row_ptr = empty_row_ptr
+        partial_source_index = empty_index
+        partial_row_ids = empty_index
+        support_exam_count = 0
+        partial_complete_flat = torch.zeros(
+            (batch * receiver_count,),
+            device=query_density.device,
+            dtype=torch.bool,
+        )
+        complete_rows = certificate_complete_rows
+    else:
+        partial_row_ptr, partial_source_index, partial_row_ids, support_exam_count = _compiled_partial_union(
+            query_density,
+            source_support,
+            occupied_hubs,
+            certificate_complete_rows,
+            support_tile_size=int(support_tile_size),
+        )
+        # Some rows can be complete even when the sufficient pre-join
+        # certificate is false (for example, an inactive hub has no source
+        # incidence). Promote those rows after the exact Boolean union so the
+        # reader still gets implicit complete dispatch wherever valid.
+        partial_counts = partial_row_ptr[1:] - partial_row_ptr[:-1]
+        source_count_by_row = source_valid.sum(dim=-1).repeat_interleave(receiver_count)
+        partial_complete_flat = (
+            (~certificate_complete_rows).reshape(-1)
+            & (partial_counts > 0)
+            & (partial_counts == source_count_by_row)
+        )
+        complete_rows = certificate_complete_rows | partial_complete_flat.reshape(batch, receiver_count)
+    complete_row_index = torch.nonzero(
+        complete_rows.reshape(-1),
+        as_tuple=False,
+    ).flatten()
+    if bool(partial_complete_flat.any()):
+        partial_keep = ~partial_complete_flat.index_select(0, partial_row_ids)
+        partial_row_ids = partial_row_ids[partial_keep]
+        partial_source_index = partial_source_index[partial_keep]
+        partial_counts = torch.zeros_like(partial_counts)
+        partial_counts.index_add_(
+            0,
+            partial_row_ids,
+            torch.ones_like(partial_row_ids, dtype=torch.long),
+        )
+        partial_row_ptr = torch.cat(
+            (
+                torch.zeros((1,), device=query_density.device, dtype=torch.long),
+                partial_counts.cumsum(dim=0),
+            ),
+            dim=0,
+        )
+    # The Boolean union returns row IDs only to keep its output order explicit;
+    # priors use those IDs while the public representation retains row pointers
+    # and source indices only.
+    partial_prior = _compiled_partial_prior(
+        query_density,
+        source_membership,
+        source_support,
+        weights,
+        partial_row_ids,
+        partial_source_index,
+        scalar_tile_size=int(scalar_tile_size),
+    )
+    complete_prior = _compiled_complete_prior(
+        query_density,
+        source_membership,
+        source_support,
+        weights,
+        complete_row_index,
+        scalar_tile_size=int(scalar_tile_size),
+    )
+    _validate_compiled_priors(
+        partial_prior,
+        None,
+        label="partial",
+    )
+    complete_batch = torch.div(
+        complete_row_index,
+        receiver_count,
+        rounding_mode="floor",
+    )
+    complete_pair_count = int(source_valid.index_select(0, complete_batch).sum())
+    complete_valid = source_valid.index_select(0, complete_batch) if complete_pair_count else None
+    _validate_compiled_priors(
+        complete_prior,
+        complete_valid,
+        label="complete",
+    )
+    unique_pair_count = complete_pair_count + int(partial_source_index.numel())
+    scalar_exam_count = complete_pair_count * hub_count + int(partial_source_index.numel()) * hub_count
+    return CompiledPairs(
+        complete_rows=complete_rows,
+        complete_row_index=complete_row_index,
+        complete_prior=complete_prior,
+        partial_row_ptr=partial_row_ptr,
+        partial_source_index=partial_source_index,
+        partial_prior=partial_prior,
+        source_valid=source_valid,
+        raw_path_count=raw_path_count,
+        unique_pair_count=unique_pair_count,
+        support_exam_count=support_exam_count,
+        scalar_exam_count=scalar_exam_count,
+        complete_pair_count_hint=complete_pair_count,
+    )
+
+
+# Explicit aliases keep the operation discoverable for callers that use the
+# plan's ``exact`` or ``CSR`` terminology without changing the historical
+# ``compile_two_hop_pairs`` default/reference function.
+compile_two_hop_pairs_exact = compile_two_hop_pairs_compiled
+compile_two_hop_pairs_union_csr = compile_two_hop_pairs_compiled
 
 
 # Keep the historical public default/reference compiler unchanged while the

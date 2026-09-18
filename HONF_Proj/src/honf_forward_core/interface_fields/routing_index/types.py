@@ -228,6 +228,165 @@ class PackedPairs:
 
 
 @dataclass(frozen=True)
+class CompiledPairs:
+    """Exact mixed complete/partial receiver rows produced by the new compiler.
+
+    Complete rows use the implicit valid source range and therefore do not
+    carry one batch/receiver/source index triplet per source.  Their live
+    source priors are stored as ``[complete_row, source]`` scalar values.  The
+    remaining rows use a conventional receiver CSR: ``partial_row_ptr`` is
+    indexed by flattened ``batch * receiver + receiver`` rows and
+    ``partial_source_index``/``partial_prior`` contain only unique retained
+    sources.  Empty rows have no entries in either representation.
+
+    The route values are deliberately live tensors.  Integer support and row
+    metadata are compiler decisions and may be detached, but callers can
+    still backpropagate through all prior values to source measures,
+    memberships, and query densities.
+    """
+
+    complete_rows: torch.Tensor
+    complete_row_index: torch.Tensor
+    complete_prior: torch.Tensor
+    partial_row_ptr: torch.Tensor
+    partial_source_index: torch.Tensor
+    partial_prior: torch.Tensor
+    source_valid: torch.Tensor
+    raw_path_count: int
+    unique_pair_count: int
+    support_exam_count: int = 0
+    scalar_exam_count: int = 0
+    # The compiler already knows this count while it is constructing the
+    # representation.  Carrying the scalar avoids a second device reduction
+    # whenever a reader asks for execution metadata.  Hand-authored fixtures
+    # may leave it unset; construction computes and caches it once below.
+    complete_pair_count_hint: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.complete_rows.ndim != 2 or self.complete_rows.dtype != torch.bool:
+            raise ValueError("CompiledPairs.complete_rows must be a bool [B,Q] tensor.")
+        batch, receiver_count = (int(v) for v in self.complete_rows.shape)
+        if self.complete_row_index.ndim != 1:
+            raise ValueError("CompiledPairs.complete_row_index must be one-dimensional.")
+        complete_count = int(self.complete_row_index.numel())
+        if self.complete_prior.ndim != 2 or tuple(self.complete_prior.shape[:1]) != (complete_count,):
+            raise ValueError("CompiledPairs.complete_prior must align with complete rows [C,N].")
+        if self.partial_row_ptr.ndim != 1 or int(self.partial_row_ptr.numel()) != batch * receiver_count + 1:
+            raise ValueError("CompiledPairs.partial_row_ptr must have shape [B*Q+1].")
+        if self.partial_source_index.ndim != 1 or self.partial_prior.ndim != 1:
+            raise ValueError("CompiledPairs partial source/prior arrays must be one-dimensional.")
+        partial_count = int(self.partial_source_index.numel())
+        if int(self.partial_prior.numel()) != partial_count:
+            raise ValueError("CompiledPairs partial source/prior arrays must align.")
+        if self.source_valid.ndim != 2:
+            raise ValueError("CompiledPairs.source_valid must have shape [B,N].")
+        if int(self.source_valid.shape[0]) != batch:
+            raise ValueError("CompiledPairs.source_valid must align with complete rows on batch.")
+        if self.complete_prior.shape[1] != self.source_valid.shape[1]:
+            raise ValueError("CompiledPairs complete prior source width must match source_valid.")
+        if self.partial_row_ptr.dtype != torch.long or self.partial_source_index.dtype != torch.long:
+            raise ValueError("CompiledPairs CSR indices must use torch.long.")
+        if self.complete_row_index.dtype != torch.long:
+            raise ValueError("CompiledPairs complete row indices must use torch.long.")
+        if (
+            self.partial_row_ptr.numel()
+            and self.partial_row_ptr.device.type == "cpu"
+            and (int(self.partial_row_ptr[0]) != 0 or int(self.partial_row_ptr[-1]) != partial_count)
+        ):
+            raise ValueError("CompiledPairs.partial_row_ptr must start at zero and end at partial count.")
+        if self.raw_path_count < 0 or self.unique_pair_count < 0:
+            raise ValueError("Compiled pair counts must be nonnegative.")
+        if self.complete_pair_count_hint is None:
+            complete_batch = torch.div(
+                self.complete_row_index,
+                receiver_count,
+                rounding_mode="floor",
+            ) if receiver_count else self.complete_row_index
+            complete_pairs = int(self.source_valid.index_select(0, complete_batch).sum()) if complete_count else 0
+            object.__setattr__(self, "complete_pair_count_hint", complete_pairs)
+        else:
+            if isinstance(self.complete_pair_count_hint, bool) or int(self.complete_pair_count_hint) < 0:
+                raise ValueError("CompiledPairs.complete_pair_count_hint must be nonnegative.")
+            complete_pairs = int(self.complete_pair_count_hint)
+        if self.unique_pair_count != complete_pairs + partial_count:
+            raise ValueError("CompiledPairs.unique_pair_count must include complete and partial rows.")
+        if self.raw_path_count < self.unique_pair_count:
+            raise ValueError("Raw path count cannot be below unique pair count.")
+        for name, value in (
+            ("complete_row_index", self.complete_row_index),
+            ("partial_row_ptr", self.partial_row_ptr),
+            ("partial_source_index", self.partial_source_index),
+            ("source_valid", self.source_valid),
+        ):
+            if value.device != self.complete_rows.device:
+                raise ValueError(f"CompiledPairs.{name} must share the complete-row device.")
+
+    @property
+    def batch_count(self) -> int:
+        return int(self.complete_rows.shape[0])
+
+    @property
+    def receiver_count(self) -> int:
+        return int(self.complete_rows.shape[1])
+
+    @property
+    def source_count(self) -> int:
+        return int(self.source_valid.shape[1])
+
+    @property
+    def complete_pair_count(self) -> int:
+        return int(self.complete_pair_count_hint or 0)
+
+    @property
+    def partial_pair_count(self) -> int:
+        return int(self.partial_source_index.numel())
+
+    @property
+    def empty_rows(self) -> torch.Tensor:
+        """Rows with neither implicit complete support nor partial entries."""
+
+        row_counts = self.partial_row_ptr[1:] - self.partial_row_ptr[:-1]
+        return (~self.complete_rows).reshape(-1) & (row_counts == 0)
+
+    @property
+    def row_counts(self) -> torch.Tensor:
+        """Number of physically selected sources for each ``[B,Q]`` row."""
+
+        partial_counts = self.partial_row_ptr[1:] - self.partial_row_ptr[:-1]
+        complete_counts = self.source_valid.sum(dim=-1).repeat_interleave(self.receiver_count)
+        complete_flat = self.complete_rows.reshape(-1)
+        return torch.where(complete_flat, complete_counts, partial_counts).reshape(
+            self.batch_count, self.receiver_count
+        )
+
+    @property
+    def duplicate_expansion(self) -> float:
+        """Logical raw-path expansion; actual path workspace is compiler-owned."""
+
+        if self.unique_pair_count == 0:
+            return 0.0
+        return float(self.raw_path_count) / float(self.unique_pair_count)
+
+    # Short aliases make the CSR representation easy to consume in generic
+    # readers while keeping the explicit names above self-documenting.
+    @property
+    def row_ptr(self) -> torch.Tensor:
+        return self.partial_row_ptr
+
+    @property
+    def source_index(self) -> torch.Tensor:
+        return self.partial_source_index
+
+    @property
+    def prior(self) -> torch.Tensor:
+        return self.partial_prior
+
+    @property
+    def complete(self) -> torch.Tensor:
+        return self.complete_rows
+
+
+@dataclass(frozen=True)
 class PreparedRoutingIndex:
     """Shared candidate and typed source state for one physical preparation."""
 
