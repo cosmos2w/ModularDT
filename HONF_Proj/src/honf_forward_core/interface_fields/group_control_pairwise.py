@@ -290,6 +290,20 @@ class GroupControlPairwiseField(DensePairwiseField):
             contextual_env,
             controls,
         )
+        # The module control moment is a contraction over the fixed K group
+        # axis.  Materialize the source/group/control product once in a
+        # GEMM-friendly [B,K,M*D] bank; each receiver chunk then performs one
+        # batched alpha @ bank operation instead of a generic four-index
+        # einsum.  This is runtime preparation state only and introduces no
+        # trainable parameters or state-dict entries.
+        module_control_bank = (
+            controls.module_membership.transpose(1, 2).unsqueeze(-1)
+            * controls.group_control.unsqueeze(2)
+        ).reshape(
+            int(module_states.shape[0]),
+            self.group_count,
+            int(module_states.shape[1]) * self.group_control_dim,
+        )
         preparation_aux = {
             "group_control_module_mass": controls.module_mass.detach(),
             "group_control_environment_mass": controls.environment_mass.detach(),
@@ -358,6 +372,12 @@ class GroupControlPairwiseField(DensePairwiseField):
             "env_tokens": contextual_env,
             "group_control_state": controls,
             "module_first_affine": module_affine,
+            "module_control_bank": module_control_bank,
+            # Keep tensor identities so focused tests/evidence callers that
+            # replace the immutable PreparedGroupControl can request a safe
+            # fallback rebuild without affecting the normal hot path.
+            "module_control_bank_membership": controls.module_membership,
+            "module_control_bank_group_control": controls.group_control,
             "environment_keys": environment_key,
             "environment_values": environment_value,
             "environment_source_group_control": source_group_control,
@@ -407,6 +427,32 @@ class GroupControlPairwiseField(DensePairwiseField):
     def _overlap(alpha: torch.Tensor, membership: torch.Tensor) -> torch.Tensor:
         return torch.bmm(alpha, membership.transpose(1, 2))
 
+    def _module_control_bank(self, state: dict[str, Any]) -> torch.Tensor:
+        """Return the prepared ``[B,K,M*D]`` module-control bank.
+
+        ``PreparedGroupControl`` is immutable, but a few evidence/unit-test
+        paths intentionally replace it in a copied runtime state.  Rebuild in
+        that exceptional case; the ordinary prepared state takes the cached
+        bank with no extra contraction.
+        """
+
+        controls: PreparedGroupControl = state["group_control_state"]
+        bank = state.get("module_control_bank")
+        if (
+            torch.is_tensor(bank)
+            and state.get("module_control_bank_membership") is controls.module_membership
+            and state.get("module_control_bank_group_control") is controls.group_control
+        ):
+            return bank
+        return (
+            controls.module_membership.transpose(1, 2).unsqueeze(-1)
+            * controls.group_control.unsqueeze(2)
+        ).reshape(
+            int(controls.module_membership.shape[0]),
+            self.group_count,
+            int(controls.module_membership.shape[1]) * self.group_control_dim,
+        )
+
     @staticmethod
     def _logical_paths(alpha: torch.Tensor, membership: torch.Tensor) -> torch.Tensor:
         return torch.bmm(
@@ -440,6 +486,7 @@ class GroupControlPairwiseField(DensePairwiseField):
         query_index: torch.Tensor,
         source_index: torch.Tensor,
         *,
+        overlap: torch.Tensor | None = None,
         chunk_size: int = 131_072,
     ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
         """Yield ``(rho,n)`` chunks for unique physical pair indices."""
@@ -453,7 +500,10 @@ class GroupControlPairwiseField(DensePairwiseField):
             alpha_pair = alpha[batches, queries]
             membership_pair = membership[batches, sources]
             controls = group_control[batches]
-            rho = (alpha_pair * membership_pair).sum(dim=-1)
+            if overlap is None:
+                rho = (alpha_pair * membership_pair).sum(dim=-1)
+            else:
+                rho = overlap[batches, queries, sources]
             moment = torch.einsum(
                 "pk,pk,pkd->pd",
                 alpha_pair,
@@ -461,27 +511,6 @@ class GroupControlPairwiseField(DensePairwiseField):
                 controls,
             )
             yield rho, moment
-
-    def _module_control_tile(
-        self,
-        alpha: torch.Tensor,
-        membership: torch.Tensor,
-        group_control: torch.Tensor,
-        query_start: int,
-        query_stop: int,
-        source_start: int,
-        source_stop: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        alpha_tile = alpha[:, query_start:query_stop]
-        membership_tile = membership[:, source_start:source_stop]
-        rho = torch.bmm(alpha_tile, membership_tile.transpose(1, 2))
-        moment = torch.einsum(
-            "bqk,bsk,bkd->bqsd",
-            alpha_tile,
-            membership_tile,
-            group_control,
-        )
-        return rho, moment
 
     def _environment_control_tile(
         self,
@@ -491,6 +520,8 @@ class GroupControlPairwiseField(DensePairwiseField):
         query_stop: int,
         source_start: int,
         source_stop: int,
+        *,
+        overlap: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return scalar overlap and per-head QE control for one tile.
 
@@ -503,7 +534,10 @@ class GroupControlPairwiseField(DensePairwiseField):
         controls: PreparedGroupControl = state["group_control_state"]
         alpha_tile = route.assignment[:, query_start:query_stop]
         membership_tile = controls.environment_membership[:, source_start:source_stop]
-        rho = torch.bmm(alpha_tile, membership_tile.transpose(1, 2))
+        if overlap is None:
+            rho = torch.bmm(alpha_tile, membership_tile.transpose(1, 2))
+        else:
+            rho = overlap[:, query_start:query_stop, source_start:source_stop]
         source_control = state["environment_head_source_control"][
             :, :, source_start:source_stop, :
         ]
@@ -514,6 +548,21 @@ class GroupControlPairwiseField(DensePairwiseField):
         ).reshape(batch, query_stop - query_start, sources, heads)
         return rho, zeta.permute(0, 3, 1, 2)
 
+    def _environment_control_full(
+        self,
+        state: dict[str, Any],
+        route: GroupQueryRoute,
+    ) -> torch.Tensor:
+        """Contract all query/source controls for one receiver chunk."""
+
+        source_control = state["environment_head_source_control"]
+        batch, groups, sources, heads = source_control.shape
+        zeta = torch.bmm(
+            route.assignment,
+            source_control.reshape(batch, groups, sources * heads),
+        ).reshape(batch, route.assignment.shape[1], sources, heads)
+        return zeta.permute(0, 3, 1, 2)
+
     @staticmethod
     def _pair_head_controls(
         alpha: torch.Tensor,
@@ -523,6 +572,7 @@ class GroupControlPairwiseField(DensePairwiseField):
         query_index: torch.Tensor,
         source_index: torch.Tensor,
         *,
+        overlap: torch.Tensor | None = None,
         chunk_size: int = 131_072,
     ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
         """Yield exact ``(rho,zeta)`` chunks with zeta already in head space."""
@@ -536,7 +586,10 @@ class GroupControlPairwiseField(DensePairwiseField):
             alpha_pair = alpha[batches, queries]
             membership_pair = membership[batches, sources]
             heads = head_control[batches]
-            rho = (alpha_pair * membership_pair).sum(dim=-1)
+            if overlap is None:
+                rho = (alpha_pair * membership_pair).sum(dim=-1)
+            else:
+                rho = overlap[batches, queries, sources]
             zeta = torch.einsum(
                 "pk,pk,pkh->ph",
                 alpha_pair,
@@ -584,34 +637,29 @@ class GroupControlPairwiseField(DensePairwiseField):
         active_module_count: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch, query_count, _ = receivers.shape
-        weighted_sum = receivers.new_zeros(batch, query_count, self.hidden_dim)
-        overlap_mass = receivers.new_zeros(batch, query_count)
         scales = self._dense_coordinate_scale(encoded, batch)
-        for query_start in range(0, query_count, self.query_tile_size):
-            query_stop = min(query_start + self.query_tile_size, query_count)
-            rho, moment = self._module_control_tile(
-                route.assignment,
-                state["group_control_state"].module_membership,
-                state["group_control_state"].group_control,
-                query_start,
-                query_stop,
-                0,
-                int(encoded.module_centers.shape[1]),
-            )
-            relative = (
-                receivers[:, query_start:query_stop, None, :]
-                - encoded.module_centers[:, None, :, :]
-            ) / scales
-            psi = self._module_psi(
-                state["module_first_affine"][:, None, :, :],
-                self.relative_fourier(relative),
-                moment,
-            )
-            weighted = psi * source_measure[:, None, :, None] * rho[..., None]
-            weighted_sum[:, query_start:query_stop] = weighted.sum(dim=2)
-            overlap_mass[:, query_start:query_stop] = (
-                source_measure[:, None, :] * rho
-            ).sum(dim=2)
+        # The core owns the receiver memory bound.  Consume this complete
+        # chunk in one rectangular pass; ``query_tile_size`` remains relevant
+        # only to the opt-in gathered/evidence reference path.
+        rho = overlap
+        control_bank = self._module_control_bank(state)
+        moment = torch.bmm(route.assignment, control_bank).reshape(
+            batch,
+            query_count,
+            int(encoded.module_centers.shape[1]),
+            self.group_control_dim,
+        )
+        relative = (
+            receivers[:, :, None, :] - encoded.module_centers[:, None, :, :]
+        ) / scales
+        psi = self._module_psi(
+            state["module_first_affine"][:, None, :, :],
+            self.relative_fourier(relative),
+            moment,
+        )
+        weighted = psi * source_measure[:, None, :, None] * rho[..., None]
+        weighted_sum = weighted.sum(dim=2)
+        overlap_mass = (source_measure[:, None, :] * rho).sum(dim=2)
         return self._module_finalize(weighted_sum, overlap_mass, active_module_count), overlap_mass
 
     def _read_module_partial(
@@ -653,6 +701,7 @@ class GroupControlPairwiseField(DensePairwiseField):
                     batches,
                     queries,
                     sources,
+                    overlap=overlap,
                     chunk_size=stop - start,
                 )
             )
@@ -681,14 +730,22 @@ class GroupControlPairwiseField(DensePairwiseField):
         encoded: EncodedInterfaceCase,
         receivers: torch.Tensor,
         route: GroupQueryRoute,
+        *,
+        include_diagnostics: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         controls: PreparedGroupControl = state["group_control_state"]
         overlap = self._overlap(route.assignment, controls.module_membership)
-        logical = self._logical_paths(route.assignment, controls.module_membership)
-        complete = self._complete_support(
-            overlap,
-            controls.module_measure,
-            require_all_sources=True,
+        # Normal Run-1406 execution is deliberately rectangular.  The
+        # support test and gathered fallback remain available to an explicit
+        # evidence/map request, where their bookkeeping is untimed.
+        complete = (
+            self._complete_support(
+                overlap,
+                controls.module_measure,
+                require_all_sources=True,
+            )
+            if include_diagnostics
+            else True
         )
         active_count = (encoded.module_present > 0.5).sum(dim=-1).to(receivers.dtype)
         if complete:
@@ -711,7 +768,16 @@ class GroupControlPairwiseField(DensePairwiseField):
                 source_measure=controls.module_measure,
                 active_module_count=active_count,
             )
+        if not include_diagnostics:
+            # The context is the only prediction output; retain the overlap
+            # mass because it is a lightweight maintained diagnostic, while
+            # keeping logical paths, per-query work ledgers, and provenance
+            # out of the timed/training path.
+            return context, {
+                "group_control_module_overlap_mass_per_query": overlap_mass,
+            }
         support = (overlap > 0.0) & (controls.module_measure[:, None, :] > 0.0)
+        logical = self._logical_paths(route.assignment, controls.module_membership)
         valid_denominator = (
             (controls.module_measure > 0.0).sum(dim=-1).to(receivers.dtype)
             * float(receivers.shape[1])
@@ -757,9 +823,8 @@ class GroupControlPairwiseField(DensePairwiseField):
         *,
         route: GroupQueryRoute | None = None,
     ) -> torch.Tensor:
-        del receiver_features
         if route is None:
-            route = self._route(state, encoded, receivers)
+            route = self._route(state, encoded, receivers, receiver_features)
         context, _ = self._read_module(state, encoded, receivers, route)
         return context
 
@@ -800,45 +865,45 @@ class GroupControlPairwiseField(DensePairwiseField):
         query = self.env_attention.project_query(self.env_query(receiver_features))
         keys = state["environment_keys"]
         values = state["environment_values"]
-        context = receivers.new_zeros(batch, query_count, self.hidden_dim)
-        overlap_mass = receivers.new_zeros(batch, query_count)
-        for query_start in range(0, query_count, self.query_tile_size):
-            query_stop = min(query_start + self.query_tile_size, query_count)
-            rho, score_control = self._environment_control_tile(
-                state,
-                route,
-                query_start,
-                query_stop,
-                0,
-                int(encoded.env_coords.shape[1]),
-            )
-            scores = torch.matmul(
-                query[:, :, query_start:query_stop, :],
-                keys.transpose(-1, -2),
-            ) / (float(self.head_dim) ** 0.5)
-            geometry = self._environment_geometry_bias(
-                receivers[:, query_start:query_stop],
-                encoded.env_coords,
-                encoded,
-            ).permute(0, 3, 1, 2)
-            scores = scores * (1.0 + torch.tanh(score_control)) + geometry
-            scores = scores + torch.log(source_measure)[:, None, None, :]
-            scores = scores + torch.log(rho)[:, None, :, :]
-            weights = torch.softmax(scores, dim=-1)
-            response = torch.matmul(weights, values).transpose(1, 2).reshape(
-                batch,
-                query_stop - query_start,
-                self.hidden_dim,
-            )
-            response = self.env_attention.output(response)
-            overlap_mass[:, query_start:query_stop] = (
-                source_measure[:, None, :] * rho
-            ).sum(dim=-1)
-            context[:, query_start:query_stop] = (
-                float(self.group_count)
-                * overlap_mass[:, query_start:query_stop, None]
-                * response
-            )
+        # ``overlap`` is computed once by ``_read_environment`` and is reused
+        # for both the control contraction and the value normalization.
+        rho = overlap
+        score_control = self._environment_control_full(state, route)
+        scores = torch.matmul(query, keys.transpose(-1, -2)) / (float(self.head_dim) ** 0.5)
+        geometry = self._environment_geometry_bias(
+            receivers,
+            encoded.env_coords,
+            encoded,
+        ).permute(0, 3, 1, 2)
+        scores = scores * (1.0 + torch.tanh(score_control)) + geometry
+        tiny = torch.finfo(scores.dtype).tiny
+        safe_measure = source_measure.clamp_min(tiny)
+        safe_rho = rho.clamp_min(tiny)
+        scores = scores + torch.log(safe_measure)[:, None, None, :]
+        scores = scores + torch.log(safe_rho)[:, None, :, :]
+        valid = (rho > 0.0) & (source_measure[:, None, :] > 0.0)
+        valid_heads = valid[:, None, :, :]
+        # Set unsupported entries to -inf before softmax.  A separate tensor
+        # row-support guard avoids the all--inf softmax NaN while retaining an
+        # exactly zero response for receivers with no environment support.
+        masked_scores = torch.where(
+            valid_heads,
+            scores,
+            torch.full_like(scores, -torch.inf),
+        )
+        row_has_support = valid_heads.any(dim=-1, keepdim=True)
+        safe_scores = torch.where(row_has_support, masked_scores, torch.zeros_like(masked_scores))
+        weights = torch.softmax(safe_scores, dim=-1)
+        weights = weights * valid_heads.to(dtype=weights.dtype)
+        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(tiny)
+        response = torch.matmul(weights, values).transpose(1, 2).reshape(
+            batch,
+            query_count,
+            self.hidden_dim,
+        )
+        response = self.env_attention.output(response)
+        overlap_mass = (source_measure[:, None, :] * rho).sum(dim=-1)
+        context = float(self.group_count) * overlap_mass[..., None] * response
         return context, overlap_mass
 
     def _read_environment_partial(
@@ -868,6 +933,7 @@ class GroupControlPairwiseField(DensePairwiseField):
                 query_stop,
                 0,
                 int(encoded.env_coords.shape[1]),
+                overlap=overlap,
             )
             overlap_mass[:, query_start:query_stop] = (
                 source_measure[:, None, :] * rho
@@ -887,6 +953,7 @@ class GroupControlPairwiseField(DensePairwiseField):
                     pair_batch,
                     pair_query + query_start,
                     pair_source,
+                    overlap=overlap,
                     chunk_size=int(pair.shape[0]),
                 )
             )
@@ -961,11 +1028,16 @@ class GroupControlPairwiseField(DensePairwiseField):
         receivers: torch.Tensor,
         receiver_features: torch.Tensor,
         route: GroupQueryRoute,
+        *,
+        include_diagnostics: bool = True,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         controls: PreparedGroupControl = state["group_control_state"]
         overlap = self._overlap(route.assignment, controls.environment_membership)
-        logical = self._logical_paths(route.assignment, controls.environment_membership)
-        complete = self._complete_support(overlap, controls.environment_measure)
+        complete = (
+            self._complete_support(overlap, controls.environment_measure)
+            if include_diagnostics
+            else True
+        )
         if complete:
             context, overlap_mass = self._read_environment_complete(
                 state,
@@ -986,7 +1058,12 @@ class GroupControlPairwiseField(DensePairwiseField):
                 overlap,
                 source_measure=controls.environment_measure,
             )
+        if not include_diagnostics:
+            return context, {
+                "group_control_environment_overlap_mass_per_query": overlap_mass,
+            }
         support = (overlap > 0.0) & (controls.environment_measure[:, None, :] > 0.0)
+        logical = self._logical_paths(route.assignment, controls.environment_membership)
         valid_denominator = (
             (controls.environment_measure > 0.0).sum(dim=-1).to(receivers.dtype)
             * float(receivers.shape[1])
@@ -1044,9 +1121,15 @@ class GroupControlPairwiseField(DensePairwiseField):
         """
 
         if route is None:
-            route = self._route(state, encoded, receivers)
-        context, _ = self._read_environment(state, encoded, receivers, receiver_features, route)
-        del return_routing_maps
+            route = self._route(state, encoded, receivers, receiver_features)
+        context, _ = self._read_environment(
+            state,
+            encoded,
+            receivers,
+            receiver_features,
+            route,
+            include_diagnostics=bool(return_routing_maps),
+        )
         return context, None
 
     # ------------------------------------------------------------------
@@ -1057,11 +1140,13 @@ class GroupControlPairwiseField(DensePairwiseField):
         state: dict[str, Any],
         encoded: EncodedInterfaceCase,
         receivers: torch.Tensor,
+        receiver_features: torch.Tensor | None = None,
     ) -> GroupQueryRoute:
         return self.router.route_queries(
             encoded,
             state["group_control_state"],
             receivers,
+            receiver_features,
         )
 
     @staticmethod
@@ -1092,14 +1177,22 @@ class GroupControlPairwiseField(DensePairwiseField):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Return exactly ``C_M + C_E`` plus small execution diagnostics."""
 
-        route = self._route(state, encoded, receivers)
-        module_context, module_aux = self._read_module(state, encoded, receivers, route)
+        debug = bool(return_routing_maps)
+        route = self._route(state, encoded, receivers, receiver_features)
+        module_context, module_aux = self._read_module(
+            state,
+            encoded,
+            receivers,
+            route,
+            include_diagnostics=debug,
+        )
         environment_context, environment_aux = self._read_environment(
             state,
             encoded,
             receivers,
             receiver_features,
             route,
+            include_diagnostics=debug,
         )
         aux: dict[str, torch.Tensor] = {
             **module_aux,

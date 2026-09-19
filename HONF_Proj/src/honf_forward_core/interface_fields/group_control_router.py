@@ -335,13 +335,35 @@ class LowDimensionalGroupRouter(nn.Module):
     ) -> GroupQueryRoute:
         """Compute one D-wide query route shared by module and environment reads."""
 
-        del receiver_features
         if receivers.ndim != 3 or int(receivers.shape[0]) != int(state.group_control.shape[0]):
             raise ValueError("receivers must have shape [B,Q,d] aligned with prepared controls.")
         if int(receivers.shape[-1]) != self.spatial_dim:
             raise ValueError("Receiver coordinate dimension does not match the router.")
-        scale = self._scale(encoded)
-        query_features = self.query_fourier(receivers / scale)
+        if receiver_features is None:
+            scale = self._scale(encoded)
+            query_features = self.query_fourier(receivers / scale)
+        else:
+            if receiver_features.ndim != 3:
+                raise ValueError("receiver_features must have shape [B,Q,F].")
+            if tuple(receiver_features.shape[:2]) != tuple(receivers.shape[:2]):
+                raise ValueError("receiver_features must align with receivers along [B,Q].")
+            # The core and this router share the same Fourier convention.  A
+            # width check prevents unrelated decoder features from silently
+            # entering the query projection; standalone callers can omit the
+            # tensor and retain the internal Fourier fallback above.
+            expected_width = int(
+                (self.spatial_dim if self.query_fourier.include_input else 0)
+                + 2 * self.spatial_dim * self.query_fourier.num_frequencies
+            )
+            if int(receiver_features.shape[-1]) == expected_width:
+                query_features = receiver_features
+            else:
+                # Preserve the historical standalone API, where callers
+                # sometimes pass arbitrary feature tensors intended only for
+                # the environment reader.  Such tensors are not compatible
+                # with this router and therefore use the coordinate fallback.
+                scale = self._scale(encoded)
+                query_features = self.query_fourier(receivers / scale)
         query_input = torch.cat(
             [
                 query_features,

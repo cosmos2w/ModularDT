@@ -2,21 +2,38 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime as DateTime
+from datetime import timedelta, timezone
 
 import pytest
 
+import honf_runtime.run_store as run_store_module
 from honf_runtime.config_loader import load_config_bundle
 from honf_runtime.run_store import RunStore
 
 
-def test_run_store_writes_provenance_and_rejects_duplicate_id(tmp_path) -> None:
+def _freeze_run_store_clock(monkeypatch, current: DateTime) -> dict[str, DateTime]:
+    clock = {"value": current}
+
+    class FixedDateTime:
+        @staticmethod
+        def now(tz=None) -> DateTime:
+            value = clock["value"]
+            return value if tz is None else value.astimezone(tz)
+
+    monkeypatch.setattr(run_store_module, "datetime", FixedDateTime)
+    return clock
+
+
+def test_run_store_writes_provenance_and_allows_timestamped_same_id(tmp_path, monkeypatch) -> None:
     bundle = load_config_bundle("project://src/config_core/forward/hyper_plus_global_near.json")
     store = RunStore(tmp_path)
+    clock = _freeze_run_store_clock(monkeypatch, DateTime(2026, 1, 1, tzinfo=timezone.utc))
     proposal = store.propose(
         case_id="ThermalChannel",
         workflow="forward",
         model_family="honf_forward",
-        run_id="0042",
+        run_id="1406",
         run_name="test",
     )
     run_dir = store.create(proposal, bundle, launch_facts={"dataset ID": "fixture_v1"})
@@ -43,14 +60,38 @@ def test_run_store_writes_provenance_and_rejects_duplicate_id(tmp_path) -> None:
     assert completed["ended_at"] is not None
     assert completed["updated_at"] == completed["ended_at"]
     assert (run_dir / "configs" / "resolved_config.json").is_file()
-    with pytest.raises(FileExistsError):
-        store.propose(
-            case_id="ThermalChannel",
-            workflow="forward",
-            model_family="honf_forward",
-            run_id="0042",
-            run_name="duplicate",
-        )
+
+    clock["value"] += timedelta(seconds=1)
+    second_proposal = store.propose(
+        case_id="ThermalChannel",
+        workflow="forward",
+        model_family="honf_forward",
+        run_id="1406",
+        run_name="test",
+    )
+    second_run_dir = store.create(second_proposal, bundle)
+    assert second_run_dir != run_dir
+    expected_stamp = clock["value"].astimezone().strftime("%Y%m%d_%H%M%S")
+    assert second_run_dir.name == f"Run_1406_{expected_stamp}_test"
+    assert run_dir.is_dir() and second_run_dir.is_dir()
+    assert json.loads((second_run_dir / "run_manifest.json").read_text())["run_id"] == "1406"
+
+
+def test_run_store_rejects_exact_timestamped_path_collision(tmp_path, monkeypatch) -> None:
+    store = RunStore(tmp_path)
+    _freeze_run_store_clock(monkeypatch, DateTime(2026, 1, 1, tzinfo=timezone.utc))
+    kwargs = {
+        "case_id": "ThermalChannel",
+        "workflow": "forward",
+        "model_family": "honf_forward",
+        "run_id": "1406",
+        "run_name": "collision",
+    }
+    proposal = store.propose(**kwargs)
+    proposal.path.mkdir(parents=True)
+
+    with pytest.raises(FileExistsError, match="Refusing to overwrite existing run directory"):
+        store.propose(**kwargs)
 
 
 def test_finalize_artifacts_populates_canonical_tree(tmp_path) -> None:

@@ -37,6 +37,25 @@ def test_evaluation_root_is_owned_by_run_for_legacy_and_canonical_checkpoints(tm
     assert default_evaluation_root(canonical_checkpoint) == expected
 
 
+def test_explicit_checkpoint_lookup_remains_run_specific_for_same_id(tmp_path) -> None:
+    run_a = tmp_path / "Run_1406_20260101_000000_a"
+    run_b = tmp_path / "Run_1406_20260101_000001_b"
+    checkpoints = []
+    for run_dir in (run_a, run_b):
+        run_dir.mkdir()
+        (run_dir / "run_manifest.json").write_text(
+            json.dumps({"schema_version": 1, "run_id": "1406", "evaluations": []}) + "\n",
+            encoding="utf-8",
+        )
+        checkpoint = run_dir / "checkpoints" / "latest.pt"
+        checkpoint.parent.mkdir()
+        checkpoint.write_bytes(run_dir.name.encode())
+        checkpoints.append(checkpoint)
+
+    assert find_managed_run_dir(checkpoints[0]) == run_a
+    assert find_managed_run_dir(checkpoints[1]) == run_b
+
+
 def test_evaluation_layout_is_categorized_and_manifested_without_aliases(tmp_path) -> None:
     run_dir = _managed_run(tmp_path)
     checkpoint = run_dir / "best_model.pt"

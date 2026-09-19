@@ -117,6 +117,30 @@ def test_router_entmax_support_empty_modules_and_bounded_controls() -> None:
     assert torch.isfinite(prepared.group_control).all()
 
 
+def test_router_reuses_compatible_receiver_features() -> None:
+    torch.manual_seed(14060011)
+    encoded = _encoded(batch=1, all_active=True)
+    router = LowDimensionalGroupRouter(
+        HIDDEN,
+        group_count=GROUPS,
+        control_dim=CONTROL,
+        fourier_frequencies=FOURIER,
+    )
+    prepared = router.prepare(encoded, encoded.module_tokens, encoded.env_tokens)
+    receivers = torch.randn(1, 7, 2)
+    fallback = router.route_queries(encoded, prepared, receivers)
+    explicit_features = router.query_fourier(receivers / router._scale(encoded))
+    supplied = router.route_queries(
+        encoded,
+        prepared,
+        receivers,
+        receiver_features=explicit_features,
+    )
+    torch.testing.assert_close(supplied.query_control, fallback.query_control, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(supplied.logits, fallback.logits, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(supplied.assignment, fallback.assignment, rtol=0.0, atol=0.0)
+
+
 def test_collapsed_moments_match_explicit_group_sum_and_have_finite_gradients() -> None:
     torch.manual_seed(1406002)
     encoded = _encoded(all_active=True)
@@ -150,6 +174,28 @@ def test_collapsed_moments_match_explicit_group_sum_and_have_finite_gradients() 
     gradients = [parameter.grad for parameter in router.parameters() if parameter.grad is not None]
     assert gradients
     assert all(torch.isfinite(gradient).all() for gradient in gradients)
+
+
+def test_prepared_module_control_bank_matches_explicit_moment() -> None:
+    torch.manual_seed(14060012)
+    encoded = _encoded(batch=1, all_active=True)
+    field = _field().eval()
+    state = field.prepare(encoded, encoded.module_tokens)
+    receivers = torch.randn(1, 9, 2)
+    route = field._route(state, encoded, receivers)
+    bank_moment = torch.bmm(route.assignment, state["module_control_bank"]).reshape(
+        1,
+        receivers.shape[1],
+        encoded.module_centers.shape[1],
+        CONTROL,
+    )
+    explicit_moment = torch.einsum(
+        "bqk,bmk,bkd->bqmd",
+        route.assignment,
+        state["group_control_state"].module_membership,
+        state["group_control_state"].group_control,
+    )
+    torch.testing.assert_close(bank_moment, explicit_moment, rtol=1.0e-6, atol=1.0e-7)
 
 
 def test_environment_head_contraction_and_partial_multi_tile_parity() -> None:

@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-import json
-import hashlib
 import csv
+import hashlib
+import json
 import os
 import re
 import shutil
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from .config_loader import ConfigBundle
 from .paths import PROJECT_ROOT, resolve_path
@@ -108,12 +109,9 @@ class RunStore:
             model_family=model_family,
             local_module_id=local_module_id,
         )
-        existing = sorted(path for path in root.glob(f"Run_{run_id}_*") if path.is_dir()) if root.exists() else []
-        if existing:
-            formatted = "\n  ".join(str(path) for path in existing)
-            raise FileExistsError(
-                f"Run_ID={run_id} is already used in {root}. Choose another Run ID or resume explicitly:\n  {formatted}"
-            )
+        # Run IDs identify the logical experiment; the timestamped directory
+        # identifies one launch.  Keep the exact-path guard below so a repeated
+        # timestamp/name cannot silently reuse or overwrite an existing run.
         path = root / f"Run_{run_id}_{stamp}_{_safe_name(run_name)}"
         if path.exists():
             raise FileExistsError(f"Refusing to overwrite existing run directory: {path}")

@@ -944,7 +944,7 @@ def _markdown_report(payload: Mapping[str, Any]) -> str:
             "- Empty group centres are unavailable (NaN), never silently placed at an origin.",
             "- The debug map pass is untimed and is not a replacement for measured decode time.",
             "- Unique-pair support can remain dense; lower R is not itself an acceleration result.",
-            "- No training, GPU benchmark, profiler, quickcheck, or continuation was launched while creating this initial artifact.",
+            "- This artifact executed the declared GPU benchmark; it did not launch managed training, a profiler, quickcheck, or continuation.",
             "",
         ]
     )
