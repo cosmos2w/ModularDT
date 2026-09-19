@@ -5,6 +5,22 @@ Repository/branch: `cosmos2w/ModularDT`, `agent/honf-core-next`
 Implementation baseline: `3da43e607efb83c844eac1da5a692dd05a6e60f3`  
 Run-1407 training source revision: `cbd8f3cd52ab70c0b2a688c83d8c3ad4b6292860`
 
+## Continuation addendum: user-authorized epoch 500 test
+
+After the original epoch-50 assessment below, the user explicitly requested
+that the same Run 1407 be extended to epoch 500 because its convergence curve
+may differ from the parent models. On that subsequent instruction, the exact
+epoch-50 checkpoint was resumed on physical GPU 1 from clean source revision
+`4239af4e0e75a1bf246cd2f2a4d7a8e337504dfc`.
+
+The maintained resume path restored model, optimizer, scaler, and RNG state
+and reported `continuing at epoch 51 / 500`. Epoch 51 completed with finite
+training loss `1.8927`, validation loss `2.0469`, validation field MSE
+`1.3735`, and validation temperature MSE `0.2823`; the same managed process
+then continued normally. No monitoring was requested, so it was left
+unattended after startup verification. This addendum changes the execution
+status, not the measured epoch-50 comparison or its original budget judgment.
+
 ## Executive decision
 
 The requested opt-in `phase_shared_group_control_honf` was implemented and one
@@ -37,11 +53,12 @@ slower. Prototype anchoring makes query routing genuinely more selective on
 the two cost anchors, but environmental support still covers about `94%` of
 valid pairs, so it does not create a useful QE reduction.
 
-Following the plan's research-budget rule, Run 1407 completed its authorized
-50 epochs and was **not** continued to epoch 500. No corrective loss, alternate
-candidate, sweep, or Run 1408 was created. The 90-case epoch-500 comparison is
-therefore not applicable. Commands for a user-authorized same-run continuation
-are recorded but were not executed.
+Under the plan's research-budget rule, the original epoch-50 assessment did
+not recommend continuation. The user subsequently authorized the same run to
+continue to epoch 500 to test the different-convergence hypothesis, and that
+continuation is now running. No corrective loss, alternate candidate, sweep,
+or Run 1408 was created. The 90-case epoch-500 comparison remains deferred
+until epoch 500 and a later user command.
 
 ## Scope and comparison policy
 
@@ -270,12 +287,14 @@ Exactly one fresh run was launched, without a warm start or quickcheck run:
 
 `/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1407_20260919_174751_phase_shared_prototype_group_control`
 
-The manifest records `status=completed`, `last_completed_epoch=50`, exit code
-0, source revision `cbd8f3cd52ab70c0b2a688c83d8c3ad4b6292860`, and completion at
+The initial manifest recorded `status=completed`, `last_completed_epoch=50`,
+exit code 0, source revision
+`cbd8f3cd52ab70c0b2a688c83d8c3ad4b6292860`, and completion at
 `2026-09-19T21:55:24.894680+00:00`. `epoch_0050_model.pt` contains epoch 50,
-the optimizer state, scaler state, and RNG state needed for a same-run resume.
-The pre-existing Run 1406 process was not signalled, restarted, modified, or
-used as a benchmark process.
+the optimizer state, scaler state, and RNG state used by the later same-run
+resume. After the explicit continuation request, the manifest returned to
+`status=running`. The pre-existing Run 1406 process was not signalled,
+restarted, modified, or used as a benchmark process.
 
 ### Learning trajectory
 
@@ -412,15 +431,16 @@ verified to execute, and the trajectory is finite.
 
 The learning band fails materially. The last-ten field median is `249.7%`
 higher than Run 1406, far outside the approximate 25% review band. P2 is also
-`19.9%` slower. Continuing to 500 would consume the authorized research budget
-on a candidate that is stable but plainly not reasonably competitive at the
-specified checkpoint. Therefore:
+`19.9%` slower. The original budget judgment was therefore to stop at 50.
+The user subsequently chose to test the alternative hypothesis that Run 1407
+has different convergence characteristics, explicitly authorizing the same
+run through epoch 500. Accordingly:
 
-- the same Run 1407 was **not** resumed to epoch 500;
-- no 90-case endpoint, compact intervention study, or route-turnover study was
-  run, because those were conditional on reaching epoch 500;
+- the same Run 1407 resumed from its exact epoch-50 optimizer/RNG state;
+- no 90-case endpoint, compact intervention study, or route-turnover study has
+  been run; those remain deferred until epoch 500 and a later user command;
 - no loss, occupancy constraint, temperature change, second seed, or alternate
-  controller was introduced to force a pass.
+  controller was introduced to accelerate or force a pass.
 
 The negative result does not prove that all phase-shared or prototype routing
 is unsuitable. This candidate combines two scientific changes, so the present
@@ -469,6 +489,17 @@ rtk env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src:Case_ThermalChannel/src \
   conda run --no-capture-output -n ModularDT python -u train.py \
   --config src/config_core/forward/phase_shared_group_control_honf_context.json \
   --workflow forward --device cuda:0 --epochs 50 --yes
+```
+
+### User-authorized same-run continuation to epoch 500
+
+```bash
+rtk env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src:Case_ThermalChannel/src \
+  conda run --no-capture-output -n ModularDT python -u train.py \
+  --config src/config_core/forward/phase_shared_group_control_honf_context.json \
+  --workflow forward --device cuda:0 --epochs 500 \
+  --resume-checkpoint /home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1407_20260919_174751_phase_shared_prototype_group_control/epoch_0050_model.pt \
+  --yes
 ```
 
 ### Matched cost benchmark
@@ -528,11 +559,10 @@ rtk env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src:Case_ThermalChannel/src \
 - Four-case epoch-50 fidelity:
   `/home/wanglz/Desktop/src/ModularDT/HONF_Proj/diagnostics/generated/run1407_epoch50_anchors_20260919/anchor_metrics.json`
 
-## Unexecuted same-run continuation commands
+## Same-run continuation commands and status
 
-These commands are supplied for reproducibility and were **not executed**.
-`--epochs` is the terminal epoch. The epoch-500 command is withheld by the
-measured decision and requires explicit user direction:
+`--epochs` is the terminal epoch. The following epoch-500 command was executed
+after the user's explicit continuation instruction:
 
 ```bash
 run=/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1407_20260919_174751_phase_shared_prototype_group_control
@@ -544,9 +574,9 @@ rtk env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src:Case_ThermalChannel/src \
   --resume-checkpoint "$run/epoch_0050_model.pt" --yes
 ```
 
-The following requested long-run commands are contingent on an authorized
-epoch-500 continuation completing and creating `epoch_0500_model.pt`; that file
-does not currently exist:
+The following requested long-run commands remain **unexecuted**. They are
+contingent on the current epoch-500 continuation completing and creating
+`epoch_0500_model.pt`:
 
 ```bash
 run=/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1407_20260919_174751_phase_shared_prototype_group_control
@@ -581,10 +611,12 @@ Run 1407 answers the intended executor/data-management questions cleanly:
 6. Most importantly, this combined model learns much more slowly through epoch
    50 than Run 1406 and Dense 1804.
 
-There is no evidence-based justification to spend the epoch-500 budget or to
-launch a corrective architecture automatically. If future work is authorized,
-the single bottleneck to isolate is **whether phase-static P0 control itself
-impairs early optimization, independently of prototype-anchored query keys**.
-That requires a deliberately scoped scientific ablation, not an executor cache
-claim and not another loss term. Until then, Run 1406 remains the better
-scientific parent despite Run 1407's cleaner routing semantics.
+The epoch-50 review bands did not independently justify the epoch-500 budget,
+but the user explicitly authorized that longitudinal convergence test and it
+is now running. This does not justify a corrective architecture automatically.
+If later work is authorized, the single bottleneck to isolate remains
+**whether phase-static P0 control itself impairs early optimization,
+independently of prototype-anchored query keys**. That requires a deliberately
+scoped scientific ablation, not an executor cache claim and not another loss
+term. Until the epoch-500 evidence is available, Run 1406 remains the stronger
+demonstrated scientific parent despite Run 1407's cleaner routing semantics.
