@@ -445,6 +445,64 @@ class SixBitSupportIndex:
         )
 
 
+@dataclass(frozen=True)
+class SixBitSourceSupport:
+    """P0-built source support table reusable by every phase and read."""
+
+    source_masks: torch.Tensor
+    source_valid: torch.Tensor
+    support_table: torch.Tensor
+    support_count_table: torch.Tensor
+    logical_path_count_table: torch.Tensor
+
+    def __post_init__(self) -> None:
+        if self.source_masks.ndim != 2 or self.source_masks.dtype != torch.long:
+            raise ValueError("source_masks must be a [B,S] torch.long tensor.")
+        batch, source_count = (int(value) for value in self.source_masks.shape)
+        if self.source_valid.shape != self.source_masks.shape or self.source_valid.dtype != torch.bool:
+            raise ValueError("source_valid must be a boolean tensor aligned with source_masks.")
+        if self.support_table.shape != (batch, QUERY_MASK_COUNT, source_count):
+            raise ValueError("support_table must have shape [B,64,S].")
+        if self.support_table.dtype != torch.bool:
+            raise ValueError("support_table must be boolean metadata.")
+        if self.support_count_table.shape != (batch, QUERY_MASK_COUNT):
+            raise ValueError("support_count_table must have shape [B,64].")
+        if self.logical_path_count_table.shape != (batch, QUERY_MASK_COUNT):
+            raise ValueError("logical_path_count_table must have shape [B,64].")
+        tensors = (
+            self.source_valid,
+            self.support_table,
+            self.support_count_table,
+            self.logical_path_count_table,
+        )
+        if any(value.device != self.source_masks.device for value in tensors):
+            raise ValueError("All source-support metadata tensors must share one device.")
+
+    def bind_queries(self, query_assignment: torch.Tensor) -> SixBitSupportIndex:
+        """Attach current query signatures without rebuilding source support."""
+
+        query_batch, _, _ = _validate_incidence(query_assignment, "query_assignment")
+        if query_batch != int(self.source_masks.shape[0]):
+            raise ValueError("query_assignment batch must match the source support table.")
+        if query_assignment.device != self.source_masks.device:
+            raise ValueError("query_assignment must share the source-support device.")
+        query_masks = six_bit_mask(query_assignment)
+        signature_query_index, signature_query_ptr, signature_query_count = _query_signature_metadata(
+            query_masks
+        )
+        return SixBitSupportIndex(
+            source_masks=self.source_masks,
+            query_masks=query_masks,
+            source_valid=self.source_valid,
+            support_table=self.support_table,
+            support_count_table=self.support_count_table,
+            logical_path_count_table=self.logical_path_count_table,
+            signature_query_index=signature_query_index,
+            signature_query_ptr=signature_query_ptr,
+            signature_query_count=signature_query_count,
+        )
+
+
 def _query_signature_metadata(query_masks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Build stable [B,Q] query order and [B,65] mask pointers."""
 
@@ -470,28 +528,20 @@ def _query_signature_metadata(query_masks: torch.Tensor) -> tuple[torch.Tensor, 
     return order, pointers, counts
 
 
-def build_six_bit_support_index(
+def build_six_bit_source_support(
     source_membership: torch.Tensor,
-    query_assignment: torch.Tensor,
     *,
     source_valid: torch.Tensor | None = None,
     source_measure: torch.Tensor | None = None,
-) -> SixBitSupportIndex:
-    """Build exact K=6 source support and query-signature metadata.
+) -> SixBitSourceSupport:
+    """Build the exact reusable 64-entry source table from the P0 index.
 
-    Parameters are live tensors, but only positive-incidence comparisons enter
-    the returned integer metadata.  ``source_valid`` and positive
-    ``source_measure`` mask padded/inactive source slots.  The original live
-    tensors are deliberately not stored in the result, so the index cannot
-    accidentally become a detached replacement for ``rho`` or moments.
+    Only positive-incidence comparisons enter the returned integer metadata.
+    The live memberships are deliberately not stored, so this table cannot
+    accidentally replace differentiable ``rho`` or control moments.
     """
 
     source_batch, source_count, _ = _validate_incidence(source_membership, "source_membership")
-    query_batch, _, _ = _validate_incidence(query_assignment, "query_assignment")
-    if source_batch != query_batch:
-        raise ValueError("source_membership and query_assignment must share their batch dimension.")
-    if source_membership.device != query_assignment.device:
-        raise ValueError("source_membership and query_assignment must share one device.")
     valid = _as_valid_source_mask(
         source_valid,
         source_measure=source_measure,
@@ -503,7 +553,6 @@ def build_six_bit_support_index(
     # a separate mask and applied only when constructing executable support;
     # this keeps logical-incidence metadata faithful to positive A entries.
     source_masks = six_bit_mask(source_membership)
-    query_masks = six_bit_mask(query_assignment)
     all_masks = torch.arange(
         QUERY_MASK_COUNT,
         device=source_membership.device,
@@ -521,23 +570,42 @@ def build_six_bit_support_index(
         dim=1, dtype=torch.long
     )
     query_group_incidence = all_masks[:, None].bitwise_and(powers[None, :]) != 0
-    logical_path_count_table = torch.einsum(
-        "mk,bk->bm",
-        query_group_incidence.to(torch.long),
-        source_group_incidence,
-    )
-    signature_query_index, signature_query_ptr, signature_query_count = _query_signature_metadata(query_masks)
-    return SixBitSupportIndex(
+    # CUDA does not implement integer einsum/batched matmul. These counts are
+    # bounded by K*S (6*192 in the formal profile), so float32 multiplication
+    # is exact before converting the metadata back to integers.
+    logical_path_count_table = torch.matmul(
+        source_group_incidence.to(torch.float32),
+        query_group_incidence.to(torch.float32).transpose(0, 1),
+    ).to(torch.long)
+    return SixBitSourceSupport(
         source_masks=source_masks,
-        query_masks=query_masks,
         source_valid=valid,
         support_table=support_table,
         support_count_table=support_count_table,
         logical_path_count_table=logical_path_count_table,
-        signature_query_index=signature_query_index,
-        signature_query_ptr=signature_query_ptr,
-        signature_query_count=signature_query_count,
     )
+
+
+def build_six_bit_support_index(
+    source_membership: torch.Tensor,
+    query_assignment: torch.Tensor,
+    *,
+    source_valid: torch.Tensor | None = None,
+    source_measure: torch.Tensor | None = None,
+) -> SixBitSupportIndex:
+    """Build exact K=6 source support and current query-signature metadata."""
+
+    query_batch, _, _ = _validate_incidence(query_assignment, "query_assignment")
+    source_support = build_six_bit_source_support(
+        source_membership,
+        source_valid=source_valid,
+        source_measure=source_measure,
+    )
+    if query_batch != int(source_support.source_masks.shape[0]):
+        raise ValueError("source_membership and query_assignment must share their batch dimension.")
+    if query_assignment.device != source_support.source_masks.device:
+        raise ValueError("source_membership and query_assignment must share one device.")
+    return source_support.bind_queries(query_assignment)
 
 
 def live_pair_values(
@@ -609,8 +677,10 @@ __all__ = [
     "GROUP_COUNT",
     "QUERY_MASK_COUNT",
     "QuerySignatureSelection",
+    "SixBitSourceSupport",
     "SixBitSupportIndex",
     "SupportExecutionCounts",
+    "build_six_bit_source_support",
     "build_six_bit_support_index",
     "live_pair_values",
     "pack_six_bit_mask",

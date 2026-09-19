@@ -17,6 +17,7 @@ from torch import nn
 from honf_forward_core.nn import MLP, FourierFeatures
 from honf_forward_core.routing import entmax15
 
+from .group_control_support import SixBitSourceSupport
 from .types import EncodedInterfaceCase
 
 
@@ -85,6 +86,10 @@ class PhaseSharedGroupControl:
     # The P0 environmental value gain is part of the shared controller state.
     # P1/P2 refresh raw projected values but retain this phase-shared gain.
     environment_value_gain: torch.Tensor
+    # Integer/Boolean P0 source supports. Query signatures bind to these small
+    # 64-entry tables at read time without reconstructing source incidence.
+    module_source_support: SixBitSourceSupport
+    environment_source_support: SixBitSourceSupport
 
     @property
     def query_keys(self) -> torch.Tensor:

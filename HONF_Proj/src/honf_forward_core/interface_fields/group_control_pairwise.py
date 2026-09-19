@@ -860,9 +860,14 @@ class GroupControlPairwiseField(DensePairwiseField):
         *,
         source_measure: torch.Tensor,
         active_module_count: torch.Tensor,
+        pair_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         batch, query_count, _ = receivers.shape
-        pair = self._support_indices(overlap, source_measure)
+        pair = (
+            self._support_indices(overlap, source_measure)
+            if pair_indices is None
+            else pair_indices
+        )
         weighted_sum = receivers.new_zeros(batch * query_count, self.hidden_dim)
         overlap_mass = receivers.new_zeros(batch * query_count)
         if int(pair.shape[0]) == 0:
@@ -912,6 +917,28 @@ class GroupControlPairwiseField(DensePairwiseField):
             active_module_count,
         ), overlap_mass
 
+    def _module_execution_plan(
+        self,
+        state: dict[str, Any],
+        route: GroupQueryRoute,
+        overlap: torch.Tensor,
+        *,
+        source_measure: torch.Tensor,
+        include_diagnostics: bool,
+    ) -> tuple[bool, torch.Tensor | None, Any]:
+        """Return rectangular/selected choice while preserving Run-1406 policy."""
+
+        del state, route
+        controls_complete = self._complete_support(
+            overlap,
+            source_measure,
+            require_all_sources=True,
+        )
+        if self.executor_policy == "rectangular_reference" or self.diagnostic_executor_independent:
+            return True, None, None
+        complete = controls_complete if include_diagnostics else True
+        return complete, None, None
+
     def _read_module(
         self,
         state: dict[str, Any],
@@ -926,21 +953,13 @@ class GroupControlPairwiseField(DensePairwiseField):
         # Normal Run-1406 execution is deliberately rectangular.  The
         # support test and gathered fallback remain available to an explicit
         # evidence/map request, where their bookkeeping is untimed.
-        if (
-            self.executor_policy == "rectangular_reference"
-            or self.diagnostic_executor_independent
-        ):
-            complete = True
-        else:
-            complete = (
-                self._complete_support(
-                    overlap,
-                    controls.module_measure,
-                    require_all_sources=True,
-                )
-                if include_diagnostics
-                else True
-            )
+        complete, selected_pairs, support_index = self._module_execution_plan(
+            state,
+            route,
+            overlap,
+            source_measure=controls.module_measure,
+            include_diagnostics=include_diagnostics,
+        )
         active_count = (encoded.module_present > 0.5).sum(dim=-1).to(receivers.dtype)
         if complete:
             context, overlap_mass = self._read_module_rectangular(
@@ -961,6 +980,7 @@ class GroupControlPairwiseField(DensePairwiseField):
                 overlap,
                 source_measure=controls.module_measure,
                 active_module_count=active_count,
+                pair_indices=selected_pairs,
             )
         if not include_diagnostics:
             # The context is the only prediction output; retain the overlap
@@ -1017,6 +1037,10 @@ class GroupControlPairwiseField(DensePairwiseField):
             ),
             "group_control_module_complete_support": receivers.new_tensor(float(complete)),
             "group_control_module_partial_support": receivers.new_tensor(float(not complete)),
+            "group_control_module_executor_selected": receivers.new_tensor(float(not complete)),
+            "group_control_module_support_index_bound": receivers.new_tensor(
+                float(support_index is not None)
+            ),
         }
         return context, aux
 

@@ -398,7 +398,7 @@
     },
     {
       "name": "phase_shared_group_control_honf",
-      "path": "project://src/config_core/forward/phase_shared_group_control_honf.json",
+      "path": "project://src/config_core/forward/phase_shared_group_control_honf_context.json",
       "status": "candidate",
       "base": null,
       "mode": "Run 1407 phase-shared K=6/D=16 controller / prototype-plus-case-control query keys / three-term reader",

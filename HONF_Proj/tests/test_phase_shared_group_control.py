@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -64,7 +65,7 @@ def _batch(*, seed: int = 1407, query_count: int = 7) -> BatchData:
 
 def test_run1407_profile_and_fixed_controller_contract() -> None:
     payload = json.loads(
-        (PROJECT_ROOT / "src/config_core/forward/phase_shared_group_control_honf.json").read_text(
+        (PROJECT_ROOT / "src/config_core/forward/phase_shared_group_control_honf_context.json").read_text(
             encoding="utf-8"
         )
     )
@@ -106,6 +107,8 @@ def test_phase_shared_controller_reuses_p0_banks_and_refreshes_fine_values() -> 
     assert p1.backend_state["environment_head_source_control"] is shared.environment_head_source_control
     assert p0.backend_state["environment_value_gain"] is shared.environment_value_gain
     assert p1.backend_state["environment_value_gain"] is shared.environment_value_gain
+    assert p0.phase_shared_state.module_source_support is shared.module_source_support
+    assert p1.phase_shared_state.module_source_support is shared.module_source_support
     route0 = core.backend._route(p0.backend_state, encoded, batch.query_xy)
     route1 = core.backend._route(p1.backend_state, encoded, batch.query_xy)
     assert route0.query_keys is shared.normalized_query_keys
@@ -168,18 +171,75 @@ def test_prototype_key_rms_scaling_is_finite_for_zero_and_near_zero_rows() -> No
     torch.testing.assert_close(near_scaled, expected, rtol=0.0, atol=0.0)
 
 
-def test_phase_shared_rectangular_executor_is_independent_of_diagnostic_flag() -> None:
+def test_phase_shared_hybrid_executor_is_independent_of_diagnostic_flag() -> None:
     torch.manual_seed(1407003)
     config = UnifiedForwardConfig.from_dict(_payload())
     core = InterfaceFieldCore(config).eval()
+    core.backend.module_selected_max_fraction = 1.0
     batch = _batch(query_count=6)
     encoded = core.encode_case(batch)
     prepared = core.prepare(encoded, encoded.module_tokens)
     eager = core.read(prepared, batch.query_xy, receiver_chunk_size=6, return_routing_maps=False)
     mapped = core.read(prepared, batch.query_xy, receiver_chunk_size=6, return_routing_maps=True)
     torch.testing.assert_close(mapped.context, eager.context, rtol=3.0e-5, atol=3.0e-6)
-    assert mapped.interaction_aux["group_control_module_complete_support"].eq(1).all()
+    assert mapped.interaction_aux["group_control_module_executor_selected"].eq(1).all()
+    assert mapped.interaction_aux["group_control_module_support_index_bound"].eq(1).all()
     assert mapped.interaction_aux["group_control_environment_complete_support"].eq(1).all()
+
+
+def test_selected_module_executor_matches_rectangular_outputs_and_first_derivatives() -> None:
+    torch.manual_seed(1407005)
+    config = UnifiedForwardConfig.from_dict(_payload())
+    batch = _batch(query_count=6)
+    selected = InterfaceFieldCore(config).eval()
+    warm_encoded = selected.encode_case(batch)
+    warm_prepared = selected.prepare(warm_encoded, warm_encoded.module_tokens)
+    selected.read(warm_prepared, batch.query_xy, receiver_chunk_size=6)
+    reference = copy.deepcopy(selected).eval()
+    selected.backend.module_selected_max_fraction = 1.0
+    reference.backend.executor_policy = "rectangular_reference"
+    selected_query = batch.query_xy.clone().requires_grad_(True)
+    reference_query = batch.query_xy.clone().requires_grad_(True)
+
+    def evaluate(core: InterfaceFieldCore, query: torch.Tensor):
+        encoded = core.encode_case(batch)
+        prepared = core.prepare(encoded, encoded.module_tokens)
+        read = core.read(
+            prepared,
+            query,
+            receiver_chunk_size=6,
+            return_routing_maps=True,
+        )
+        loss = read.context.square().mean()
+        parameters = (
+            core.backend.router.group_codes,
+            core.backend.router.query_group_projection.weight,
+            core.backend.query_module_output.weight,
+        )
+        gradients = torch.autograd.grad(loss, (query, *parameters))
+        return read, gradients
+
+    selected_read, selected_gradients = evaluate(selected, selected_query)
+    reference_read, reference_gradients = evaluate(reference, reference_query)
+    assert selected_read.interaction_aux["group_control_module_executor_selected"].eq(1).all()
+    assert reference_read.interaction_aux["group_control_module_executor_selected"].eq(0).all()
+    torch.testing.assert_close(
+        selected_read.context,
+        reference_read.context,
+        rtol=3.0e-5,
+        atol=3.0e-6,
+    )
+    for selected_gradient, reference_gradient in zip(
+        selected_gradients,
+        reference_gradients,
+        strict=True,
+    ):
+        torch.testing.assert_close(
+            selected_gradient,
+            reference_gradient,
+            rtol=5.0e-5,
+            atol=5.0e-6,
+        )
 
 
 def test_phase_shared_controller_remains_live_for_backward() -> None:

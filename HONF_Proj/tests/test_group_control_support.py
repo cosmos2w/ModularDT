@@ -7,6 +7,7 @@ import torch
 
 from honf_forward_core.interface_fields.group_control_support import (
     QUERY_MASK_COUNT,
+    build_six_bit_source_support,
     build_six_bit_support_index,
     live_pair_values,
     six_bit_mask,
@@ -119,6 +120,24 @@ def test_query_signatures_preserve_order_and_return_unique_source_blocks() -> No
     assert int(torch.unique(pairs, dim=0).shape[0]) == int(pairs.shape[0])
     # There is no source entry for the empty query signature.
     assert not bool(((pairs[:, 0] == 0) & (pairs[:, 1] == 3)).any())
+
+
+def test_p0_source_table_binds_new_query_signatures_without_rebuilding_support() -> None:
+    source_membership, _, source_valid, source_measure = _fixture()
+    source_support = build_six_bit_source_support(
+        source_membership,
+        source_valid=source_valid,
+        source_measure=source_measure,
+    )
+    first_masks = torch.tensor([[1, 3, 7], [4, 8, 16]], dtype=torch.long)
+    second_masks = torch.tensor([[63, 0], [5, 10]], dtype=torch.long)
+    first = source_support.bind_queries(_mask_incidence(first_masks))
+    second = source_support.bind_queries(_mask_incidence(second_masks))
+    assert first.support_table is source_support.support_table
+    assert second.support_table is source_support.support_table
+    assert first.source_masks is second.source_masks
+    torch.testing.assert_close(first.query_masks, first_masks)
+    torch.testing.assert_close(second.query_masks, second_masks)
 
 
 def test_live_pair_values_keep_rho_and_moments_differentiable() -> None:

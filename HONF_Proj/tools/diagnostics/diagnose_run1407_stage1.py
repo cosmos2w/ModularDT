@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: I001
 """Bounded Run-1407 Stage-I diagnosis on the Run-1406 epoch-500 model.
 
 This tool is deliberately an evaluation-only instrument.  It does not edit a
@@ -22,9 +23,10 @@ import math
 import sys
 import time
 import types
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 import torch
@@ -44,13 +46,13 @@ def _bootstrap_imports() -> None:
 
 _bootstrap_imports()
 
-from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer  # noqa: E402
-from channelthermal.evaluation.loading import load_model, make_batch  # noqa: E402
-from channelthermal.evaluation.prepared import predict_case, select_sample  # noqa: E402
-from channelthermal.evaluation.results import denormalize_predictions  # noqa: E402
-from channelthermal.evaluation_tools.plots import module_and_fluid_masks  # noqa: E402
-from channelthermal.workflows.compare_models import reconstruction_metrics  # noqa: E402
-from honf_forward_core.interface_fields.types import PreparedInterfaceField  # noqa: E402
+from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer
+from channelthermal.evaluation.loading import load_model, make_batch
+from channelthermal.evaluation.prepared import predict_case, select_sample
+from channelthermal.evaluation.results import denormalize_predictions
+from channelthermal.evaluation_tools.plots import module_and_fluid_masks
+from channelthermal.workflows.compare_models import reconstruction_metrics
+from honf_forward_core.interface_fields.types import PreparedInterfaceField
 
 
 def _json_value(value: Any) -> Any:
@@ -520,11 +522,7 @@ def _metric_attribution(
     fluid_parts = components(fluid_mask)
     per_channel: dict[str, Any] = {}
     for index, name in enumerate(dataset.channel_order[: pred.shape[-1]]):
-        per_channel[str(name)] = {
-            "all": components(None) if pred.shape[-1] == 1 else components(None),
-            "module": components(module_mask) if pred.shape[-1] == 1 else None,
-            "fluid": components(fluid_mask) if pred.shape[-1] == 1 else None,
-        }
+        per_channel[str(name)] = {}
         # Use scalar channel arrays to match compare_models' field_<channel>_all
         # and field_<channel>_fluid definitions.
         for label, mask in (("all", None), ("module", module_mask), ("fluid", fluid_mask)):

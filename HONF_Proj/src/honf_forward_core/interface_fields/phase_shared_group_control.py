@@ -20,6 +20,7 @@ from .group_control_router import (
     PreparedGroupControl,
     PrototypeAnchoredGroupRouter,
 )
+from .group_control_support import SixBitSupportIndex, build_six_bit_source_support
 from .types import EncodedInterfaceCase
 
 
@@ -27,12 +28,16 @@ class PhaseSharedGroupControlPairwiseField(GroupControlPairwiseField):
     """Run-1407 group-control field with one live P0 controller."""
 
     router_class = PrototypeAnchoredGroupRouter
-    # The reference executor is rectangular in every mode.  In particular,
-    # requesting routing maps cannot silently select the untimed gathered
-    # fallback inherited by the Run-1406 evidence path.
+    # The selected policy is independent of map/diagnostic requests. The
+    # rectangular executor remains an explicitly named exact reference.
     diagnostic_executor_independent = True
-    executor_policy = "rectangular_reference"
+    executor_policy = "hybrid_support"
     ledger_rectangular_rows = True
+    # Calibrated on the formal M=12/Q=128-2048 shapes. Selected pair execution
+    # becomes beneficial only after removing at least half the padded module
+    # rectangle; the environment reader remains on its faster rectangular QE
+    # path. The exact rectangular reference is selectable for parity/benchmark.
+    module_selected_max_fraction = 0.5
     phase_diagnostic_prefix = "group_control_"
 
     def _build_phase_shared_state(
@@ -50,6 +55,14 @@ class PhaseSharedGroupControlPairwiseField(GroupControlPairwiseField):
             environment_head_source_control=state["environment_head_source_control"],
             normalized_query_keys=self.router.normalized_query_key_bank(controls),
             environment_value_gain=state["environment_value_gain"],
+            module_source_support=build_six_bit_source_support(
+                controls.module_membership,
+                source_measure=controls.module_measure,
+            ),
+            environment_source_support=build_six_bit_source_support(
+                controls.environment_membership,
+                source_measure=controls.environment_measure,
+            ),
         )
 
     @staticmethod
@@ -72,6 +85,10 @@ class PhaseSharedGroupControlPairwiseField(GroupControlPairwiseField):
             raise ValueError("phase_shared query key width does not match the controller.")
         if int(phase_shared_state.environment_value_gain.shape[0]) != batch:
             raise ValueError("phase_shared environment value gain batch does not match the phase.")
+        if int(phase_shared_state.module_source_support.source_masks.shape[0]) != batch:
+            raise ValueError("phase_shared module support batch does not match the phase.")
+        if int(phase_shared_state.environment_source_support.source_masks.shape[0]) != batch:
+            raise ValueError("phase_shared environment support batch does not match the phase.")
         if tuple(encoded.global_token.shape[:1]) != (batch,):
             raise ValueError("phase_shared state batch does not match encoded case.")
 
@@ -150,6 +167,34 @@ class PhaseSharedGroupControlPairwiseField(GroupControlPairwiseField):
             }
         )
         return state
+
+    def _module_execution_plan(
+        self,
+        state: dict[str, Any],
+        route: Any,
+        overlap: torch.Tensor,
+        *,
+        source_measure: torch.Tensor,
+        include_diagnostics: bool,
+    ) -> tuple[bool, torch.Tensor | None, SixBitSupportIndex | None]:
+        """Choose the calibrated module executor independently of diagnostics."""
+
+        del include_diagnostics, source_measure
+        if self.executor_policy == "rectangular_reference":
+            return True, None, None
+        if self.executor_policy != "hybrid_support":
+            raise ValueError(f"Unsupported phase-shared executor policy: {self.executor_policy!r}.")
+        shared = state.get("phase_shared_group_control")
+        if not isinstance(shared, PhaseSharedGroupControl):
+            raise TypeError("phase-shared module execution requires its live P0 index.")
+        support = shared.module_source_support.bind_queries(route.assignment)
+        rectangular_rows = int(overlap.numel())
+        support_rows = int(support.support_pair_count)
+        selected = (
+            rectangular_rows > 0
+            and support_rows <= int(float(self.module_selected_max_fraction) * rectangular_rows)
+        )
+        return (not selected), (support.selected_pair_indices() if selected else None), support
 
 
 def self_control_dim(controls: PreparedGroupControl) -> int:
