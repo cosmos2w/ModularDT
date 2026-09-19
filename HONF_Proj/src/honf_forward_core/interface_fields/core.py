@@ -239,6 +239,7 @@ class InterfaceFieldCore(nn.Module):
         if config.forward_architecture in {
             "fixed_group_pairwise_honf",
             "group_control_pairwise_honf",
+            "phase_shared_group_control_honf",
         }:
             # Run 1405/1406 deliberately replace the historical coarse/local
             # context object with the three-term reader. Keep construction
@@ -369,6 +370,22 @@ class InterfaceFieldCore(nn.Module):
             from .group_control_pairwise import GroupControlPairwiseField
 
             self.backend = GroupControlPairwiseField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                group_count=int(options.group_count),
+                group_control_dim=int(options.group_control_dim),
+                spatial_dim=int(config.spatial_dim),
+                module_temperature=float(options.module_temperature),
+                environment_temperature=float(options.environment_temperature),
+                query_temperature=float(options.query_temperature),
+                activation_checkpointing=bool(options.activation_checkpointing),
+            )
+        elif config.forward_architecture == "phase_shared_group_control_honf":
+            from .phase_shared_group_control import PhaseSharedGroupControlPairwiseField
+
+            self.backend = PhaseSharedGroupControlPairwiseField(
                 hidden,
                 int(options.message_hidden_dim),
                 heads,
@@ -528,6 +545,7 @@ class InterfaceFieldCore(nn.Module):
         layout_cache: Any = None,
         *,
         return_routing_maps: bool = False,
+        phase_shared_state: Any = None,
     ) -> PreparedInterfaceField:
         if self.config.forward_architecture == "sparse_interface_honf":
             if not isinstance(layout_cache, SparseLayoutCache):
@@ -538,6 +556,13 @@ class InterfaceFieldCore(nn.Module):
                 encoded,
                 module_states,
                 region_ids=encoded.env_region_ids,
+                return_routing_maps=bool(return_routing_maps),
+            )
+        elif self.config.forward_architecture == "phase_shared_group_control_honf":
+            backend_state = self.backend.prepare(
+                encoded,
+                module_states,
+                phase_shared_state=phase_shared_state,
                 return_routing_maps=bool(return_routing_maps),
             )
         else:
@@ -565,6 +590,7 @@ class InterfaceFieldCore(nn.Module):
                 if self.config.forward_architecture in {
                     "fixed_group_pairwise_honf",
                     "group_control_pairwise_honf",
+                    "phase_shared_group_control_honf",
                 }
                 else int(self.config.interface_model.coarse_latent_count)
             ),
@@ -577,6 +603,7 @@ class InterfaceFieldCore(nn.Module):
         if self.config.forward_architecture in {
             "fixed_group_pairwise_honf",
             "group_control_pairwise_honf",
+            "phase_shared_group_control_honf",
         }:
             aux.update(
                 self.backend.preparation_aux(
@@ -590,7 +617,14 @@ class InterfaceFieldCore(nn.Module):
             "routed_pairwise_honf",
         }:
             aux.update(self.backend.preparation_aux(backend_state))
-        return PreparedInterfaceField(encoded, module_states, backend_state, coarse_state, aux)
+        return PreparedInterfaceField(
+            encoded,
+            module_states,
+            backend_state,
+            coarse_state,
+            aux,
+            backend_state.get("phase_shared_group_control") if isinstance(backend_state, dict) else None,
+        )
 
     def build_layout(
         self,

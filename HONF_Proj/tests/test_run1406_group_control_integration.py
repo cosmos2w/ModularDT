@@ -82,7 +82,7 @@ def test_run1406_profile_is_registered_and_compact() -> None:
         "output_root": "project://Trained_Results",
     }
     assert payload["training"]["epochs"] == 50
-    assert payload["checkpointing"]["save_epoch_milestones"] == [10, 50, 100, 250, 500, 2500, 5000]
+    assert payload["checkpointing"]["save_epoch_milestones"] == [10, 50, 100, 250, 500, 1000, 2500, 5000]
     assert core_payload["forward_architecture"] == "group_control_pairwise_honf"
     assert interface == {
         "message_hidden_dim": 128,

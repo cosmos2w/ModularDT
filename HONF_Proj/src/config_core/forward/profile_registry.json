@@ -395,6 +395,16 @@
       "checkpoint_families": ["Run 1406 low-dimensional group-control"],
       "owner": "forward-research",
       "stage": "group-control-pairwise"
+    },
+    {
+      "name": "phase_shared_group_control_honf",
+      "path": "project://src/config_core/forward/phase_shared_group_control_honf.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "Run 1407 phase-shared K=6/D=16 controller / prototype-plus-case-control query keys / three-term reader",
+      "checkpoint_families": ["Run 1407 phase-shared group control"],
+      "owner": "forward-research",
+      "stage": "phase-shared-group-control"
     }
   ]
 }

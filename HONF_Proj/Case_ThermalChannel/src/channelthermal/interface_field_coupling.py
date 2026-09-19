@@ -23,6 +23,8 @@ class PreparedInterfaceChannelThermalCase:
 
     architecture: str
     prepared: PreparedInterfaceField
+    # Runtime-only P0 controller carried explicitly for Run 1407.
+    phase_shared_state: Any = None
 
 
 @contextmanager
@@ -246,6 +248,7 @@ def forward_interface_field(
         "dtype": dtype,
     }
     architecture = str(model.config.core_honf.forward_architecture)
+    phase_shared_architecture = architecture == "phase_shared_group_control_honf"
     if architecture in {"regional_response_honf", "hierarchical_regional_honf"}:
         environment_kwargs["response_region_block_shape"] = tuple(
             model.config.core_honf.interface_model.response_region_block_shape
@@ -367,12 +370,21 @@ def forward_interface_field(
             str(local_port_condition_mode).lower() != "teacher" or teacher_port_tokens is None
         ):
             with _interface_read_role(model, "p1_refinement"):
-                prepared1 = model.core.prepare(
-                    encoded,
-                    module_state,
-                    layout_cache=layout_cache,
-                    return_routing_maps=bool(return_routing_maps),
-                )
+                if phase_shared_architecture:
+                    prepared1 = model.core.prepare(
+                        encoded,
+                        module_state,
+                        layout_cache=layout_cache,
+                        return_routing_maps=bool(return_routing_maps),
+                        phase_shared_state=prepared0.phase_shared_state,
+                    )
+                else:
+                    prepared1 = model.core.prepare(
+                        encoded,
+                        module_state,
+                        layout_cache=layout_cache,
+                        return_routing_maps=bool(return_routing_maps),
+                    )
             outside_temperature, provisional_decode = _decode_temperature(
                 model,
                 prepared1,
@@ -449,11 +461,21 @@ def forward_interface_field(
         final_prepared = (
             prepared0
             if local_outputs is None
-            else model.core.prepare(
-                encoded,
-                module_state,
-                layout_cache=layout_cache,
-                return_routing_maps=bool(return_routing_maps),
+            else (
+                model.core.prepare(
+                    encoded,
+                    module_state,
+                    layout_cache=layout_cache,
+                    return_routing_maps=bool(return_routing_maps),
+                    phase_shared_state=prepared0.phase_shared_state,
+                )
+                if phase_shared_architecture
+                else model.core.prepare(
+                    encoded,
+                    module_state,
+                    layout_cache=layout_cache,
+                    return_routing_maps=bool(return_routing_maps),
+                )
             )
         )
     with _interface_read_role(model, "p2_field"):
@@ -574,5 +596,6 @@ def forward_interface_field(
         result["prepared_state"] = PreparedInterfaceChannelThermalCase(
             architecture=str(model.config.core_honf.forward_architecture),
             prepared=final_prepared,
+            phase_shared_state=final_prepared.phase_shared_state,
         )
     return result

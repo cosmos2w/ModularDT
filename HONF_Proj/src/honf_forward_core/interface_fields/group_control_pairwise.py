@@ -22,7 +22,9 @@ from .dense_pairwise import DensePairwiseField
 from .group_control_router import (
     GroupQueryRoute,
     LowDimensionalGroupRouter,
+    PhaseSharedGroupControl,
     PreparedGroupControl,
+    PrototypeAnchoredGroupRouter,
 )
 from .types import EncodedInterfaceCase
 
@@ -32,6 +34,13 @@ class GroupControlPairwiseField(DensePairwiseField):
 
     phase_interaction_diagnostics = True
     phase_diagnostic_prefix = "group_control_"
+    router_class = LowDimensionalGroupRouter
+    diagnostic_executor_independent = False
+    # ``diagnostic_support`` retains Run-1406's evidence fallback.  The
+    # phase-shared subclass selects ``rectangular_reference`` explicitly so
+    # diagnostics never choose a different executor.
+    executor_policy = "diagnostic_support"
+    ledger_rectangular_rows = False
 
     def __init__(
         self,
@@ -70,7 +79,7 @@ class GroupControlPairwiseField(DensePairwiseField):
         self.spatial_dim = int(spatial_dim)
         self.query_tile_size = int(query_tile_size)
         self.source_tile_size = int(source_tile_size)
-        self.router = LowDimensionalGroupRouter(
+        self.router = self.router_class(
             hidden_dim,
             group_count=group_count,
             control_dim=group_control_dim,
@@ -207,11 +216,18 @@ class GroupControlPairwiseField(DensePairwiseField):
             return checkpoint(self._module_tail, hidden, use_reentrant=False)
         return self._module_tail(hidden)
 
-    def _prepare_environment_bank(
+    def _prepare_environment_bank_with_gain(
         self,
         contextual_env: torch.Tensor,
         controls: PreparedGroupControl,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         """Prepare one inherited K/V bank and source-local value controls."""
 
         key, value = self.env_attention.project_source(contextual_env)
@@ -220,8 +236,10 @@ class GroupControlPairwiseField(DensePairwiseField):
             controls.environment_membership,
             controls.group_control,
         )
-        gain = 1.0 + torch.tanh(self.environment_value_control(source_group_control))
-        gain = gain.reshape(
+        value_gain = 1.0 + torch.tanh(
+            self.environment_value_control(source_group_control)
+        )
+        gain = value_gain.reshape(
             contextual_env.shape[0],
             contextual_env.shape[1],
             self.num_heads,
@@ -235,7 +253,27 @@ class GroupControlPairwiseField(DensePairwiseField):
             controls.environment_membership.transpose(1, 2).unsqueeze(-1)
             * head_control.unsqueeze(2)
         )
-        return key, value * gain, source_group_control, head_control, head_source_control
+        return (
+            key,
+            value * gain,
+            source_group_control,
+            head_control,
+            head_source_control,
+            value_gain,
+        )
+
+    def _prepare_environment_bank(
+        self,
+        contextual_env: torch.Tensor,
+        controls: PreparedGroupControl,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Historical five-tensor environment-bank API.
+
+        The Run-1407 backend uses the gain-aware helper below, while this
+        wrapper keeps Run-1406 tests and evidence callers source-compatible.
+        """
+
+        return self._prepare_environment_bank_with_gain(contextual_env, controls)[:5]
 
     @staticmethod
     def _group_centres(
@@ -279,31 +317,81 @@ class GroupControlPairwiseField(DensePairwiseField):
             torch.cat([fine["env_tokens"], fine["environment_messages"], global_env], dim=-1)
         )
         controls = self.router.prepare(encoded, fine["module_tokens"], contextual_env)
-        module_affine = self._prepare_module_affine(encoded, fine["module_tokens"])
-        (
-            environment_key,
-            environment_value,
-            source_group_control,
-            head_control,
-            head_source_control,
-        ) = self._prepare_environment_bank(
+        return self._prepare_from_fine(
+            encoded,
+            module_states,
+            fine,
             contextual_env,
             controls,
+            return_routing_maps=bool(return_routing_maps),
         )
+
+    def _prepare_from_fine(
+        self,
+        encoded: EncodedInterfaceCase,
+        module_states: torch.Tensor,
+        fine: dict[str, torch.Tensor],
+        contextual_env: torch.Tensor,
+        controls: PreparedGroupControl,
+        *,
+        phase_shared: PhaseSharedGroupControl | None = None,
+        return_routing_maps: bool = False,
+    ) -> dict[str, Any]:
+        """Materialize fine physical values around supplied controller state.
+
+        ``phase_shared`` is deliberately a runtime-only object.  When it is
+        present, memberships and every small control bank come from P0, while
+        module QM source affines and environmental K/V/value rows are rebuilt
+        from the current phase's contextualized fine sources.
+        """
+
+        module_affine = self._prepare_module_affine(encoded, fine["module_tokens"])
+        if phase_shared is None:
+            (
+                environment_key,
+                environment_value,
+                source_group_control,
+                head_control,
+                head_source_control,
+                environment_value_gain,
+            ) = self._prepare_environment_bank_with_gain(contextual_env, controls)
+        else:
+            if controls is not phase_shared.controls:
+                raise ValueError("phase_shared controls must be reused by identity.")
+            (
+                environment_key,
+                environment_value,
+            ) = self._refresh_environment_values(
+                contextual_env,
+                phase_shared,
+            )
+            source_group_control = phase_shared.environment_source_group_control
+            head_control = phase_shared.environment_head_control
+            head_source_control = phase_shared.environment_head_source_control
+            environment_value_gain = phase_shared.environment_value_gain
         # The module control moment is a contraction over the fixed K group
         # axis.  Materialize the source/group/control product once in a
         # GEMM-friendly [B,K,M*D] bank; each receiver chunk then performs one
         # batched alpha @ bank operation instead of a generic four-index
         # einsum.  This is runtime preparation state only and introduces no
         # trainable parameters or state-dict entries.
-        module_control_bank = (
-            controls.module_membership.transpose(1, 2).unsqueeze(-1)
-            * controls.group_control.unsqueeze(2)
-        ).reshape(
-            int(module_states.shape[0]),
-            self.group_count,
-            int(module_states.shape[1]) * self.group_control_dim,
-        )
+        if phase_shared is None:
+            module_control_bank = (
+                controls.module_membership.transpose(1, 2).unsqueeze(-1)
+                * controls.group_control.unsqueeze(2)
+            ).reshape(
+                int(module_states.shape[0]),
+                self.group_count,
+                int(module_states.shape[1]) * self.group_control_dim,
+            )
+        else:
+            module_control_bank = phase_shared.module_control_bank
+            if int(module_control_bank.shape[0]) != int(module_states.shape[0]):
+                raise ValueError("phase_shared module-control bank batch does not match the phase.")
+            if int(module_control_bank.shape[1]) != self.group_count:
+                raise ValueError("phase_shared module-control bank group width does not match the router.")
+            if int(module_control_bank.shape[2]) != int(module_states.shape[1]) * self.group_control_dim:
+                raise ValueError("phase_shared module-control bank source width does not match the phase.")
         preparation_aux = {
             "group_control_module_mass": controls.module_mass.detach(),
             "group_control_environment_mass": controls.environment_mass.detach(),
@@ -403,7 +491,7 @@ class GroupControlPairwiseField(DensePairwiseField):
                     ).detach(),
                 }
             )
-        return {
+        state = {
             "module_tokens": fine["module_tokens"],
             "env_tokens": contextual_env,
             "group_control_state": controls,
@@ -419,8 +507,49 @@ class GroupControlPairwiseField(DensePairwiseField):
             "environment_source_group_control": source_group_control,
             "environment_head_control": head_control,
             "environment_head_source_control": head_source_control,
+            "environment_value_gain": environment_value_gain,
             "group_control_preparation_aux": preparation_aux,
         }
+        if phase_shared is not None:
+            state["phase_shared_group_control"] = phase_shared
+            state["phase_shared_controller_reused"] = torch.ones(
+                (), device=module_states.device, dtype=module_states.dtype
+            )
+            preparation_aux.update(
+                {
+                    "group_control_phase_shared_controller_reused": torch.ones(
+                        (int(module_states.shape[0]),),
+                        device=module_states.device,
+                        dtype=module_states.dtype,
+                    ).detach(),
+                    "group_control_phase_shared_fine_source_refresh": torch.ones(
+                        (int(module_states.shape[0]),),
+                        device=module_states.device,
+                        dtype=module_states.dtype,
+                    ).detach(),
+                }
+            )
+        return state
+
+    def _refresh_environment_values(
+        self,
+        contextual_env: torch.Tensor,
+        phase_shared: PhaseSharedGroupControl,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Refresh physical environment K/V while retaining P0 controls."""
+
+        key, raw_value = self.env_attention.project_source(contextual_env)
+        # The P0 gain is part of the shared controller.  Only the physical
+        # source values are refreshed in P1/P2; recomputing this projection
+        # here would make the environmental value control phase-local.
+        gain = phase_shared.environment_value_gain
+        value = raw_value * gain.reshape(
+            contextual_env.shape[0],
+            contextual_env.shape[1],
+            self.num_heads,
+            self.head_dim,
+        ).permute(0, 2, 1, 3)
+        return key, value
 
     def preparation_aux(
         self,
@@ -698,6 +827,29 @@ class GroupControlPairwiseField(DensePairwiseField):
         overlap_mass = (source_measure[:, None, :] * rho).sum(dim=2)
         return self._module_finalize(weighted_sum, overlap_mass, active_module_count), overlap_mass
 
+    def _read_module_rectangular(
+        self,
+        state: dict[str, Any],
+        encoded: EncodedInterfaceCase,
+        receivers: torch.Tensor,
+        route: GroupQueryRoute,
+        overlap: torch.Tensor,
+        *,
+        source_measure: torch.Tensor,
+        active_module_count: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Named exact rectangular reference for the module reader."""
+
+        return self._read_module_complete(
+            state,
+            encoded,
+            receivers,
+            route,
+            overlap,
+            source_measure=source_measure,
+            active_module_count=active_module_count,
+        )
+
     def _read_module_partial(
         self,
         state: dict[str, Any],
@@ -774,18 +926,24 @@ class GroupControlPairwiseField(DensePairwiseField):
         # Normal Run-1406 execution is deliberately rectangular.  The
         # support test and gathered fallback remain available to an explicit
         # evidence/map request, where their bookkeeping is untimed.
-        complete = (
-            self._complete_support(
-                overlap,
-                controls.module_measure,
-                require_all_sources=True,
+        if (
+            self.executor_policy == "rectangular_reference"
+            or self.diagnostic_executor_independent
+        ):
+            complete = True
+        else:
+            complete = (
+                self._complete_support(
+                    overlap,
+                    controls.module_measure,
+                    require_all_sources=True,
+                )
+                if include_diagnostics
+                else True
             )
-            if include_diagnostics
-            else True
-        )
         active_count = (encoded.module_present > 0.5).sum(dim=-1).to(receivers.dtype)
         if complete:
-            context, overlap_mass = self._read_module_complete(
+            context, overlap_mass = self._read_module_rectangular(
                 state,
                 encoded,
                 receivers,
@@ -819,26 +977,38 @@ class GroupControlPairwiseField(DensePairwiseField):
             * float(receivers.shape[1])
         ).sum()
         padded_denominator = receivers.new_tensor(float(overlap.numel())) - valid_denominator
+        support_rows = support.sum().to(receivers.dtype)
+        actual_rows = (
+            receivers.new_tensor(float(overlap.numel()))
+            if self.ledger_rectangular_rows and complete
+            else support_rows
+        )
+        padded_rows = (
+            padded_denominator
+            if self.ledger_rectangular_rows and complete
+            else receivers.new_zeros(())
+        )
         aux = {
             "group_control_module_unique_pairs_per_query": support.sum(dim=-1).to(receivers.dtype),
             "group_control_module_logical_paths_per_query": logical.sum(dim=-1),
             "group_control_module_overlap_mass_per_query": overlap_mass,
             "group_control_module_unique_pairs": support.sum().to(receivers.dtype),
             "group_control_module_logical_paths": logical.sum(),
-            "group_control_module_fine_rows": support.sum().to(receivers.dtype),
-            "group_control_module_fine_rows_forward": support.sum().to(receivers.dtype),
-            "group_control_module_fine_rows_padded": receivers.new_zeros(()),
-            "group_control_module_fine_forward_rows": support.sum().to(receivers.dtype),
-            "group_control_module_padded_rows": receivers.new_zeros(()),
+            "group_control_module_support_rows": support_rows,
+            "group_control_module_fine_rows": actual_rows,
+            "group_control_module_fine_rows_forward": actual_rows,
+            "group_control_module_fine_rows_padded": padded_rows,
+            "group_control_module_fine_forward_rows": actual_rows,
+            "group_control_module_padded_rows": padded_rows,
             "group_control_module_valid_pair_denominator": valid_denominator,
             "group_control_module_padded_pair_denominator": padded_denominator,
             "group_control_module_checkpoint_recomputations": (
-                support.sum().to(receivers.dtype)
+                actual_rows
                 if self._checkpoint_active()
                 else receivers.new_zeros(())
             ),
             "group_control_module_fine_rows_recompute": (
-                support.sum().to(receivers.dtype)
+                actual_rows
                 if self._checkpoint_active()
                 else receivers.new_zeros(())
             ),
@@ -941,6 +1111,29 @@ class GroupControlPairwiseField(DensePairwiseField):
         overlap_mass = (source_measure[:, None, :] * rho).sum(dim=-1)
         context = float(self.group_count) * overlap_mass[..., None] * response
         return context, overlap_mass
+
+    def _read_environment_rectangular(
+        self,
+        state: dict[str, Any],
+        encoded: EncodedInterfaceCase,
+        receivers: torch.Tensor,
+        receiver_features: torch.Tensor,
+        route: GroupQueryRoute,
+        overlap: torch.Tensor,
+        *,
+        source_measure: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Named exact rectangular reference for the environment reader."""
+
+        return self._read_environment_complete(
+            state,
+            encoded,
+            receivers,
+            receiver_features,
+            route,
+            overlap,
+            source_measure=source_measure,
+        )
 
     def _read_environment_partial(
         self,
@@ -1069,11 +1262,17 @@ class GroupControlPairwiseField(DensePairwiseField):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         controls: PreparedGroupControl = state["group_control_state"]
         overlap = self._overlap(route.assignment, controls.environment_membership)
-        complete = (
-            self._complete_support(overlap, controls.environment_measure)
-            if include_diagnostics
-            else True
-        )
+        if (
+            self.executor_policy == "rectangular_reference"
+            or self.diagnostic_executor_independent
+        ):
+            complete = True
+        else:
+            complete = (
+                self._complete_support(overlap, controls.environment_measure)
+                if include_diagnostics
+                else True
+            )
         if complete:
             if self._checkpoint_active():
                 # The complete QE calculation materializes the score-control,
@@ -1086,7 +1285,7 @@ class GroupControlPairwiseField(DensePairwiseField):
                     read_receivers: torch.Tensor,
                     read_features: torch.Tensor,
                 ) -> tuple[torch.Tensor, torch.Tensor]:
-                    return self._read_environment_complete(
+                    return self._read_environment_rectangular(
                         state,
                         encoded,
                         read_receivers,
@@ -1103,7 +1302,7 @@ class GroupControlPairwiseField(DensePairwiseField):
                     use_reentrant=False,
                 )
             else:
-                context, overlap_mass = self._read_environment_complete(
+                context, overlap_mass = self._read_environment_rectangular(
                     state,
                     encoded,
                     receivers,
@@ -1133,33 +1332,45 @@ class GroupControlPairwiseField(DensePairwiseField):
             * float(receivers.shape[1])
         ).sum()
         padded_denominator = receivers.new_tensor(float(overlap.numel())) - valid_denominator
+        support_rows = support.sum().to(receivers.dtype)
+        actual_rows = (
+            receivers.new_tensor(float(overlap.numel()))
+            if self.ledger_rectangular_rows and complete
+            else support_rows
+        )
+        padded_rows = (
+            padded_denominator
+            if self.ledger_rectangular_rows and complete
+            else receivers.new_zeros(())
+        )
         aux = {
             "group_control_environment_unique_pairs_per_query": support.sum(dim=-1).to(receivers.dtype),
             "group_control_environment_logical_paths_per_query": logical.sum(dim=-1),
             "group_control_environment_overlap_mass_per_query": overlap_mass,
             "group_control_environment_unique_pairs": support.sum().to(receivers.dtype),
             "group_control_environment_logical_paths": logical.sum(),
-            "group_control_environment_fine_rows": support.sum().to(receivers.dtype),
-            "group_control_environment_fine_rows_forward": support.sum().to(receivers.dtype),
-            "group_control_environment_fine_rows_padded": receivers.new_zeros(()),
-            "group_control_environment_fine_forward_rows": support.sum().to(receivers.dtype),
-            "group_control_environment_padded_rows": receivers.new_zeros(()),
+            "group_control_environment_support_rows": support_rows,
+            "group_control_environment_fine_rows": actual_rows,
+            "group_control_environment_fine_rows_forward": actual_rows,
+            "group_control_environment_fine_rows_padded": padded_rows,
+            "group_control_environment_fine_forward_rows": actual_rows,
+            "group_control_environment_padded_rows": padded_rows,
             "group_control_environment_valid_pair_denominator": valid_denominator,
             "group_control_environment_padded_pair_denominator": padded_denominator,
             "group_control_environment_geometry_rows_forward": support.sum().to(receivers.dtype),
             "group_control_environment_content_dot_rows_forward": (
-                support.sum().to(receivers.dtype) * float(self.num_heads)
+                actual_rows * float(self.num_heads)
             ),
             "group_control_environment_scalar_control_rows": receivers.new_tensor(
                 float(overlap.numel())
             ),
             "group_control_environment_checkpoint_recomputations": (
-                support.sum().to(receivers.dtype)
+                actual_rows
                 if self._checkpoint_active()
                 else receivers.new_zeros(())
             ),
             "group_control_environment_fine_rows_recompute": (
-                support.sum().to(receivers.dtype)
+                actual_rows
                 if self._checkpoint_active()
                 else receivers.new_zeros(())
             ),
@@ -1206,6 +1417,17 @@ class GroupControlPairwiseField(DensePairwiseField):
         receivers: torch.Tensor,
         receiver_features: torch.Tensor | None = None,
     ) -> GroupQueryRoute:
+        phase_shared = state.get("phase_shared_group_control")
+        if isinstance(phase_shared, PhaseSharedGroupControl) and isinstance(
+            self.router, PrototypeAnchoredGroupRouter
+        ):
+            return self.router.route_queries(
+                encoded,
+                state["group_control_state"],
+                receivers,
+                receiver_features,
+                normalized_query_keys=phase_shared.normalized_query_keys,
+            )
         return self.router.route_queries(
             encoded,
             state["group_control_state"],
@@ -1293,6 +1515,8 @@ class GroupControlPairwiseField(DensePairwiseField):
                     ),
                 }
             )
+            if route.query_keys is not None:
+                aux["group_control_query_keys"] = route.query_keys
             aux.update(
                 self._pair_map(
                     aux["group_control_module_overlap"],
