@@ -17,6 +17,7 @@ from torch import nn
 from honf_forward_core.nn import MLP, FourierFeatures
 from honf_forward_core.routing import entmax15
 
+from .group_control_support import SixBitSourceSupport
 from .types import EncodedInterfaceCase
 
 
@@ -64,12 +65,66 @@ class PreparedGroupControl:
 
 
 @dataclass(frozen=True)
+class PhaseSharedGroupControl:
+    """Live P0 controller state shared by the Run-1407 physical phases.
+
+    The tensors retain their autograd graph.  Memberships, group controls,
+    and all small control banks are constructed from the contextualized P0
+    sources exactly once.  P1/P2 preparation may replace fine source values
+    and projected K/V tensors while retaining this object by identity.
+    """
+
+    controls: PreparedGroupControl
+    module_control_bank: torch.Tensor
+    environment_source_group_control: torch.Tensor
+    environment_head_control: torch.Tensor
+    environment_head_source_control: torch.Tensor
+    # Normalized once from the live P0 controller.  The routing backend must
+    # consume this exact tensor at P0/P1/P2 rather than rebuilding keys from
+    # phase-local source values or controls.
+    normalized_query_keys: torch.Tensor
+    # The P0 environmental value gain is part of the shared controller state.
+    # P1/P2 refresh raw projected values but retain this phase-shared gain.
+    environment_value_gain: torch.Tensor
+    # Integer/Boolean P0 source supports. Query signatures bind to these small
+    # 64-entry tables at read time without reconstructing source incidence.
+    module_source_support: SixBitSourceSupport
+    environment_source_support: SixBitSourceSupport
+
+    @property
+    def query_keys(self) -> torch.Tensor:
+        """Compatibility alias for callers that used the early field name."""
+
+        return self.normalized_query_keys
+
+    @property
+    def module_membership(self) -> torch.Tensor:
+        return self.controls.module_membership
+
+    @property
+    def environment_membership(self) -> torch.Tensor:
+        return self.controls.environment_membership
+
+    @property
+    def group_control(self) -> torch.Tensor:
+        return self.controls.group_control
+
+    @property
+    def global_control(self) -> torch.Tensor:
+        return self.controls.global_control
+
+
+@dataclass(frozen=True)
 class GroupQueryRoute:
     """One shared query-to-group route used by both fine source types."""
 
     query_control: torch.Tensor
     assignment: torch.Tensor
     logits: torch.Tensor
+    # Phase-shared routing optionally exposes the case-conditioned keys used
+    # for the query assignment.  Keeping this field optional preserves the
+    # historical three-tensor standalone API and its positional callers.
+    query_keys: torch.Tensor | None = None
 
     @property
     def v_q(self) -> torch.Tensor:
@@ -392,4 +447,118 @@ class LowDimensionalGroupRouter(nn.Module):
         return self.prepare(encoded, module_states, environment_states)
 
 
-__all__ = ["GroupQueryRoute", "LowDimensionalGroupRouter", "PreparedGroupControl"]
+class PrototypeAnchoredGroupRouter(LowDimensionalGroupRouter):
+    """Run-1407 query router with fixed-width prototype-plus-case keys.
+
+    Source assignments intentionally inherit :class:`LowDimensionalGroupRouter`
+    unchanged.  Only the query-to-group key construction changes: each learned
+    prototype is combined with the live group control through ``W_h``, and the
+    resulting key rows receive parameter-free RMS normalization before the
+    existing ``1/sqrt(D)`` dot product and 1.5-entmax.  The controller itself
+    is still prepared from contextualized P0 source states; later physical
+    phases reuse its returned state.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)
+
+    @staticmethod
+    def _rms_scale(values: torch.Tensor) -> torch.Tensor:
+        """Parameter-free row RMS normalization from the Run-1407 plan."""
+
+        return values / torch.sqrt(values.square().mean(dim=-1, keepdim=True) + 1.0e-6)
+
+    def query_key_bank(self, state: PreparedGroupControl) -> torch.Tensor:
+        """Return ``c_k + W_h h_k`` for every case and group."""
+
+        prototypes = self.group_codes.to(
+            device=state.group_control.device,
+            dtype=state.group_control.dtype,
+        )
+        case_control = self.query_group_projection(state.group_control)
+        return prototypes[None, :, :] + case_control
+
+    def normalized_query_key_bank(self, state: PreparedGroupControl) -> torch.Tensor:
+        """Return the parameter-free RMS-scaled prototype-plus-case keys."""
+
+        return self._rms_scale(self.query_key_bank(state))
+
+    def route_queries(
+        self,
+        encoded: EncodedInterfaceCase,
+        state: PreparedGroupControl,
+        receivers: torch.Tensor,
+        receiver_features: torch.Tensor | None = None,
+        *,
+        normalized_query_keys: torch.Tensor | None = None,
+    ) -> GroupQueryRoute:
+        """Route queries against RMS-scaled prototype-plus-case-control keys."""
+
+        if receivers.ndim != 3 or int(receivers.shape[0]) != int(state.group_control.shape[0]):
+            raise ValueError("receivers must have shape [B,Q,d] aligned with prepared controls.")
+        if int(receivers.shape[-1]) != self.spatial_dim:
+            raise ValueError("Receiver coordinate dimension does not match the router.")
+        if receiver_features is None:
+            scale = self._scale(encoded)
+            query_features = self.query_fourier(receivers / scale)
+        else:
+            if receiver_features.ndim != 3:
+                raise ValueError("receiver_features must have shape [B,Q,F].")
+            if tuple(receiver_features.shape[:2]) != tuple(receivers.shape[:2]):
+                raise ValueError("receiver_features must align with receivers along [B,Q].")
+            expected_width = int(
+                (self.spatial_dim if self.query_fourier.include_input else 0)
+                + 2 * self.spatial_dim * self.query_fourier.num_frequencies
+            )
+            if int(receiver_features.shape[-1]) == expected_width:
+                query_features = receiver_features
+            else:
+                scale = self._scale(encoded)
+                query_features = self.query_fourier(receivers / scale)
+
+        query_input = torch.cat(
+            [
+                query_features,
+                state.global_control[:, None, :].expand(-1, receivers.shape[1], -1),
+            ],
+            dim=-1,
+        )
+        query_control = self.query_projection(query_input)
+        if normalized_query_keys is None:
+            scaled_keys = self.normalized_query_key_bank(state)
+        else:
+            expected_shape = (
+                int(state.group_control.shape[0]),
+                self.group_count,
+                self.control_dim,
+            )
+            if tuple(normalized_query_keys.shape) != expected_shape:
+                raise ValueError(
+                    "normalized_query_keys must have shape "
+                    f"{expected_shape}, got {tuple(normalized_query_keys.shape)}."
+                )
+            if normalized_query_keys.device != state.group_control.device:
+                raise ValueError("normalized_query_keys must be on the controller device.")
+            if normalized_query_keys.dtype != state.group_control.dtype:
+                raise ValueError("normalized_query_keys must match the controller dtype.")
+            scaled_keys = normalized_query_keys
+        scaled_query = self._rms_scale(query_control)
+        logits = torch.einsum("bqd,bkd->bqk", scaled_query, scaled_keys)
+        logits = logits / (float(self.control_dim) ** 0.5)
+        logits = logits / float(self.query_temperature)
+        assignment = entmax15(logits, dim=-1)
+        return GroupQueryRoute(
+            query_control=query_control,
+            assignment=assignment,
+            logits=logits,
+            query_keys=scaled_keys,
+        )
+
+
+__all__ = [
+    "GroupQueryRoute",
+    "LowDimensionalGroupRouter",
+    "PhaseSharedGroupControl",
+    "PreparedGroupControl",
+    "PrototypeAnchoredGroupRouter",
+]

@@ -43,6 +43,9 @@ class PreparedInterfaceField:
     backend_state: Any
     coarse_state: torch.Tensor
     interaction_aux: Dict[str, Any]
+    # Runtime-only P0 controller object for phase-shared architectures.  The
+    # default keeps historical five-field positional construction compatible.
+    phase_shared_state: Any = None
 
 
 @dataclass(frozen=True)

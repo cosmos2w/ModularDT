@@ -94,6 +94,7 @@ FORWARD_ARCHITECTURES = {
     "routed_pairwise_honf",
     "fixed_group_pairwise_honf",
     "group_control_pairwise_honf",
+    "phase_shared_group_control_honf",
 }
 
 LEGACY_ARCHITECTURE_KEYS = {
@@ -522,7 +523,10 @@ class UnifiedForwardConfig:
                 raise ValueError(
                     "sparse_interface_honf requires interface_model.support_spacing_factor."
                 )
-        elif self.forward_architecture == "group_control_pairwise_honf":
+        elif self.forward_architecture in {
+            "group_control_pairwise_honf",
+            "phase_shared_group_control_honf",
+        }:
             controlled = self.interface_model
             if controlled.support_spacing_factor is not None:
                 raise ValueError(
@@ -530,16 +534,25 @@ class UnifiedForwardConfig:
                 )
             if controlled.source_normalizer != "entmax15":
                 raise ValueError(
-                    "group_control_pairwise_honf requires interface_model.source_normalizer='entmax15'."
+                        f"{self.forward_architecture} requires interface_model.source_normalizer='entmax15'."
                 )
             if controlled.query_normalizer != "entmax15":
                 raise ValueError(
-                    "group_control_pairwise_honf requires interface_model.query_normalizer='entmax15'."
+                        f"{self.forward_architecture} requires interface_model.query_normalizer='entmax15'."
                 )
             for name in ("module_temperature", "environment_temperature", "query_temperature"):
                 if float(getattr(controlled, name)) != 1.0:
                     raise ValueError(
-                        f"group_control_pairwise_honf requires interface_model.{name}=1.0."
+                        f"{self.forward_architecture} requires interface_model.{name}=1.0."
+                    )
+            if self.forward_architecture == "phase_shared_group_control_honf":
+                if int(controlled.group_count) != 6:
+                    raise ValueError(
+                        "phase_shared_group_control_honf requires interface_model.group_count exactly 6."
+                    )
+                if int(controlled.group_control_dim) != 16:
+                    raise ValueError(
+                        "phase_shared_group_control_honf requires interface_model.group_control_dim exactly 16."
                     )
         elif self.forward_architecture == "fixed_group_pairwise_honf":
             fixed = self.interface_model
@@ -978,8 +991,9 @@ class UnifiedForwardConfig:
                 if self.interface_model.coarse_module_source == "module_states":
                     interface_payload.pop("coarse_module_source", None)
                 if self.forward_architecture not in {
-                    "fixed_group_pairwise_honf",
-                    "group_control_pairwise_honf",
+                "fixed_group_pairwise_honf",
+                "group_control_pairwise_honf",
+                "phase_shared_group_control_honf",
                 }:
                     for key in (
                         "group_count",
