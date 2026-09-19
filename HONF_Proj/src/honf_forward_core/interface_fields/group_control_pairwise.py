@@ -712,6 +712,11 @@ class GroupControlPairwiseField(DensePairwiseField):
                 active_module_count=active_count,
             )
         support = (overlap > 0.0) & (controls.module_measure[:, None, :] > 0.0)
+        valid_denominator = (
+            (controls.module_measure > 0.0).sum(dim=-1).to(receivers.dtype)
+            * float(receivers.shape[1])
+        ).sum()
+        padded_denominator = receivers.new_tensor(float(overlap.numel())) - valid_denominator
         aux = {
             "group_control_module_unique_pairs_per_query": support.sum(dim=-1).to(receivers.dtype),
             "group_control_module_logical_paths_per_query": logical.sum(dim=-1),
@@ -723,6 +728,8 @@ class GroupControlPairwiseField(DensePairwiseField):
             "group_control_module_fine_rows_padded": receivers.new_zeros(()),
             "group_control_module_fine_forward_rows": support.sum().to(receivers.dtype),
             "group_control_module_padded_rows": receivers.new_zeros(()),
+            "group_control_module_valid_pair_denominator": valid_denominator,
+            "group_control_module_padded_pair_denominator": padded_denominator,
             "group_control_module_checkpoint_recomputations": (
                 support.sum().to(receivers.dtype)
                 if self._checkpoint_active()
@@ -980,6 +987,11 @@ class GroupControlPairwiseField(DensePairwiseField):
                 source_measure=controls.environment_measure,
             )
         support = (overlap > 0.0) & (controls.environment_measure[:, None, :] > 0.0)
+        valid_denominator = (
+            (controls.environment_measure > 0.0).sum(dim=-1).to(receivers.dtype)
+            * float(receivers.shape[1])
+        ).sum()
+        padded_denominator = receivers.new_tensor(float(overlap.numel())) - valid_denominator
         aux = {
             "group_control_environment_unique_pairs_per_query": support.sum(dim=-1).to(receivers.dtype),
             "group_control_environment_logical_paths_per_query": logical.sum(dim=-1),
@@ -991,6 +1003,8 @@ class GroupControlPairwiseField(DensePairwiseField):
             "group_control_environment_fine_rows_padded": receivers.new_zeros(()),
             "group_control_environment_fine_forward_rows": support.sum().to(receivers.dtype),
             "group_control_environment_padded_rows": receivers.new_zeros(()),
+            "group_control_environment_valid_pair_denominator": valid_denominator,
+            "group_control_environment_padded_pair_denominator": padded_denominator,
             "group_control_environment_geometry_rows_forward": support.sum().to(receivers.dtype),
             "group_control_environment_content_dot_rows_forward": (
                 support.sum().to(receivers.dtype) * float(self.num_heads)

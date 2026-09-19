@@ -275,6 +275,19 @@ def test_group_control_core_uses_three_terms_and_chunked_predicted_queries() -> 
                 rtol=0.0,
                 atol=0.0,
             )
+    expected_module_valid = batch.module_present.sum() * batch.query_xy.shape[1]
+    expected_module_padded = batch.module_present.numel() * batch.query_xy.shape[1] - expected_module_valid
+    torch.testing.assert_close(
+        read.interaction_aux["group_control_module_valid_pair_denominator"],
+        expected_module_valid,
+    )
+    torch.testing.assert_close(
+        read.interaction_aux["group_control_module_padded_pair_denominator"],
+        expected_module_padded,
+    )
+    expected_environment_valid = batch.env_weights.numel() * batch.query_xy.shape[1]
+    assert read.interaction_aux["group_control_environment_valid_pair_denominator"].item() == expected_environment_valid
+    assert read.interaction_aux["group_control_environment_padded_pair_denominator"].item() == 0.0
 
     zeros = torch.zeros(2, batch.query_xy.shape[1], 3)
     first = core.decode_queries(

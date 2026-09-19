@@ -407,11 +407,15 @@ def _inference_case(
     debug_error: str | None = None
     try:
         with torch.inference_mode(), dynamic._runtime_receiver_chunk_size(model, receiver_chunk):
+            debug_forward_kwargs = {
+                **forward_kwargs,
+                "return_port_global_consistency": True,
+            }
             debug_output = _forward(
                 model,
                 batch["structure"],
                 query,
-                forward_kwargs,
+                debug_forward_kwargs,
                 return_prepared_state=True,
                 maps=True,
             )
