@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import csv
 import math
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any
 
 from honf_forward_core.training.diagnostics import HONF_DIAGNOSTIC_KEYS
 from honf_runtime.compat import read_json
 
 
-def write_metrics_row(path: Path, fieldnames: Iterable[str], row: Dict[str, Any]) -> None:
+def write_metrics_row(path: Path, fieldnames: Iterable[str], row: dict[str, Any]) -> None:
     """Write metrics row."""
 
     exists = path.exists()
@@ -35,7 +36,7 @@ def repair_metrics_csv_for_append(path: Path) -> None:
         path.write_bytes(repaired)
 
 
-def best_metrics_payload(row: Dict[str, Any], best_total: float, best_field: float, best_temperature: float, best_predicted: float) -> Dict[str, float]:
+def best_metrics_payload(row: dict[str, Any], best_total: float, best_field: float, best_temperature: float, best_predicted: float) -> dict[str, float]:
     """Perform the best metrics payload operation used by this module."""
 
     payload = {
@@ -51,21 +52,27 @@ def best_metrics_payload(row: Dict[str, Any], best_total: float, best_field: flo
     return payload
 
 
-def _read_metric_history(metrics_path: Path) -> Dict[str, list[float]]:
+def _read_metric_history(metrics_path: Path) -> dict[str, list[float]]:
     """Read numeric metric columns from `metrics.csv` for compact plotting."""
 
     if not metrics_path.exists():
         return {}
-    columns: Dict[str, list[float]] = {}
+    columns: dict[str, list[float]] = {}
     with metrics_path.open("r", newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            for key, value in row.items():
+        reader = csv.DictReader(f)
+        fieldnames = tuple(reader.fieldnames or ())
+        for row in reader:
+            for key in fieldnames:
+                value = row.get(key)
                 try:
                     parsed = float(value)
                 except (TypeError, ValueError):
-                    continue
-                if math.isfinite(parsed):
-                    columns.setdefault(key, []).append(parsed)
+                    parsed = math.nan
+                # Preserve row alignment.  In particular, a resumed run may
+                # begin recording a newly supported diagnostic after earlier
+                # epochs stored NaN; dropping those NaNs would shift the new
+                # values back to epoch 1 in the plot.
+                columns.setdefault(key, []).append(parsed)
     # Read-only aliases keep plots usable for historical metrics.csv files.
     aliases = {
         "selected_edge_count": "active_edge_count",
@@ -76,14 +83,18 @@ def _read_metric_history(metrics_path: Path) -> Dict[str, list[float]]:
         for prefix in ("", "val_"):
             new_key = prefix + new_name
             old_key = prefix + old_name
-            if new_key not in columns and old_key in columns:
+            new_values = columns.get(new_key, ())
+            old_values = columns.get(old_key, ())
+            if not any(math.isfinite(value) for value in new_values) and any(
+                math.isfinite(value) for value in old_values
+            ):
                 columns[new_key] = list(columns[old_key])
     return columns
 
 
 def _plot_metric_group(
     ax: Any,
-    history: Dict[str, list[float]],
+    history: dict[str, list[float]],
     keys: tuple[str, ...],
     *,
     title: str,
@@ -97,11 +108,14 @@ def _plot_metric_group(
     epochs = history.get("epoch", [])
     for key in keys:
         values = history.get(key)
-        if not values:
+        if not values or not any(math.isfinite(value) for value in values):
             continue
-        label = key
-        for prefix in ("val_", "loss_"):
-            label = label.removeprefix(prefix)
+        base_key = key.removeprefix("val_")
+        label = {
+            "interaction_module_group_incidence_count": "module->group incidences",
+            "interaction_environment_group_incidence_count": "environment->group incidences",
+            "interaction_group_read_degree_mean": "query->group degree",
+        }.get(base_key, base_key.removeprefix("loss_"))
         if key.startswith("val_"):
             label = f"val {label}"
         ax.plot(epochs[: len(values)], values, label=label)
@@ -151,7 +165,24 @@ def _resolved_active_edge_references(run_dir: Path) -> tuple[tuple[float, str], 
         return ()
 
 
-def _save_organizer_health_plot(history: Dict[str, list[float]], diagnostics_dir: Path) -> None:
+def _resolved_forward_architecture(run_dir: Path) -> str:
+    """Return the managed run's architecture for plot-panel selection."""
+
+    config_path = run_dir / "config_resolved.json"
+    if not config_path.exists():
+        return ""
+    try:
+        payload = read_json(config_path)
+    except (OSError, TypeError, ValueError):
+        return ""
+    return str(
+        payload.get("model", {})
+        .get("core_honf", {})
+        .get("forward_architecture", "")
+    )
+
+
+def _save_organizer_health_plot(history: dict[str, list[float]], diagnostics_dir: Path) -> None:
     """Write one compact case-adaptive residual-organizer health figure.
 
     The figure is intentionally separate from the loss overview: its panels
@@ -265,6 +296,37 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
         if stale_path.exists():
             stale_path.unlink()
 
+    architecture = _resolved_forward_architecture(run_dir)
+    if architecture == "group_control_pairwise_honf":
+        activity_panel = (
+            "Learned Group-Control Activity",
+            (
+                "interaction_module_group_incidence_count",
+                "val_interaction_module_group_incidence_count",
+                "interaction_environment_group_incidence_count",
+                "val_interaction_environment_group_incidence_count",
+                "interaction_group_read_degree_mean",
+                "val_interaction_group_read_degree_mean",
+            ),
+            "active learned assignments",
+            True,
+            False,
+        )
+    else:
+        activity_panel = (
+            "Selected and Functional H-Edge Activity",
+            (
+                "selected_edge_count",
+                "val_selected_edge_count",
+                "functional_edge_count",
+                "val_functional_edge_count",
+                "soft_functional_edge_count",
+                "val_soft_functional_edge_count",
+            ),
+            "edges",
+            False,
+            True,
+        )
     panels = [
         ("Total", ("loss_total", "val_loss_total", "val_predicted_loss_total"), "loss", True, False),
         ("Global Field", ("loss_field", "val_loss_field", "field_mse", "val_field_mse"), "loss / mse", True, False),
@@ -283,7 +345,7 @@ def save_global_loss_plots(metrics_path: Path, run_dir: Path) -> None:
             False,
         ),
         ("Temperature", ("temperature_mse", "val_temperature_mse"), "mse", True, False),
-        ("Selected and Functional H-Edge Activity", ("selected_edge_count", "val_selected_edge_count", "functional_edge_count", "val_functional_edge_count", "soft_functional_edge_count", "val_soft_functional_edge_count"), "edges", False, True),
+        activity_panel,
     ]
     fig, axes = plt.subplots(2, 3, figsize=(15.5, 7.4), constrained_layout=True)
     for ax, (title, keys, ylabel, log_scale, y_min_zero) in zip(axes.reshape(-1), panels):

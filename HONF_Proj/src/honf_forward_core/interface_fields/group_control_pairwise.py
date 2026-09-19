@@ -313,6 +313,42 @@ class GroupControlPairwiseField(DensePairwiseField):
             ).detach(),
         }
         batch = int(module_states.shape[0])
+        module_incidence = (
+            (controls.module_membership > 0.0)
+            & (controls.module_measure[..., None] > 0.0)
+        )
+        environment_incidence = (
+            (controls.environment_membership > 0.0)
+            & (controls.environment_measure[..., None] > 0.0)
+        )
+        active_groups = (controls.module_mass > 0.0) | (
+            controls.environment_mass > 0.0
+        )
+        preparation_aux.update(
+            {
+                # These compact learned-routing summaries are the
+                # group-control analogue of active-edge monitoring.  They
+                # reuse memberships already required by the predictor and do
+                # not enable full maps, support gathers, or work ledgers.
+                "group_count_per_case": active_groups.sum(dim=-1).to(
+                    module_states.dtype
+                ).detach(),
+                "module_group_incidence_count_per_case": module_incidence.sum(
+                    dim=(1, 2)
+                ).to(module_states.dtype).detach(),
+                "environment_group_incidence_count_per_case": (
+                    environment_incidence.sum(dim=(1, 2))
+                    .to(module_states.dtype)
+                    .detach()
+                ),
+                "group_module_degree": module_incidence.sum(dim=1).to(
+                    module_states.dtype
+                ).detach(),
+                "group_environment_degree": environment_incidence.sum(dim=1).to(
+                    module_states.dtype
+                ).detach(),
+            }
+        )
         module_rows = module_states.new_full((batch,), float(module_states.shape[1]))
         module_valid_rows = (controls.module_measure > 0.0).sum(dim=-1).to(module_states.dtype)
         environment_rows = module_states.new_full(
@@ -1200,6 +1236,11 @@ class GroupControlPairwiseField(DensePairwiseField):
             "group_control_query_control_norm": torch.linalg.vector_norm(
                 route.query_control,
                 dim=-1,
+            ),
+            # Entmax produces exact zeros, so this is a direct learned
+            # query-to-group activity count rather than a thresholded proxy.
+            "group_read_degree": (route.assignment > 0.0).sum(dim=-1).to(
+                receivers.dtype
             ),
         }
         if return_routing_maps:

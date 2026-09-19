@@ -234,6 +234,9 @@ def test_group_control_core_uses_three_terms_and_chunked_predicted_queries() -> 
     assert prepared.backend_state["group_control_state"].group_control.shape[-1] == 16
     assert prepared.coarse_state.shape == (2, 0, 16)
     assert prepared.interaction_aux["coarse_latent_count"] == 0
+    assert prepared.interaction_aux["group_count_per_case"].shape == (2,)
+    assert prepared.interaction_aux["module_group_incidence_count_per_case"].shape == (2,)
+    assert prepared.interaction_aux["environment_group_incidence_count_per_case"].shape == (2,)
 
     read = core.read(
         prepared,
@@ -256,6 +259,10 @@ def test_group_control_core_uses_three_terms_and_chunked_predicted_queries() -> 
         torch.ones_like(assignment[..., 0]),
         rtol=0.0,
         atol=1.0e-5,
+    )
+    torch.testing.assert_close(
+        read.interaction_aux["group_read_degree"],
+        (assignment > 0.0).sum(dim=-1).to(assignment.dtype),
     )
     full_read = core.read(
         prepared,

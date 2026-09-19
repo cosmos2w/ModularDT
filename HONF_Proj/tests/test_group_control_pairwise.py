@@ -198,6 +198,53 @@ def test_prepared_module_control_bank_matches_explicit_moment() -> None:
     torch.testing.assert_close(bank_moment, explicit_moment, rtol=1.0e-6, atol=1.0e-7)
 
 
+def test_ordinary_group_activity_summaries_match_entmax_support() -> None:
+    torch.manual_seed(14060013)
+    encoded = _encoded(batch=2)
+    field = _field().eval()
+    state = field.prepare(encoded, encoded.module_tokens)
+    controls = state["group_control_state"]
+    summary = field.preparation_aux(state)
+
+    expected_module = (
+        (controls.module_membership > 0.0)
+        & (controls.module_measure[..., None] > 0.0)
+    ).sum(dim=(1, 2)).to(encoded.module_tokens.dtype)
+    expected_environment = (
+        (controls.environment_membership > 0.0)
+        & (controls.environment_measure[..., None] > 0.0)
+    ).sum(dim=(1, 2)).to(encoded.module_tokens.dtype)
+    expected_groups = (
+        (controls.module_mass > 0.0) | (controls.environment_mass > 0.0)
+    ).sum(dim=-1).to(encoded.module_tokens.dtype)
+    torch.testing.assert_close(
+        summary["module_group_incidence_count_per_case"], expected_module
+    )
+    torch.testing.assert_close(
+        summary["environment_group_incidence_count_per_case"],
+        expected_environment,
+    )
+    torch.testing.assert_close(summary["group_count_per_case"], expected_groups)
+
+    receivers = torch.randn(2, 9, 2)
+    receiver_features = field.router.query_fourier(
+        receivers / field.router._scale(encoded)
+    )
+    route = field._route(state, encoded, receivers, receiver_features)
+    _, aux = field.read(
+        state,
+        encoded,
+        receivers,
+        receiver_features,
+        return_routing_maps=False,
+    )
+    expected_query_degree = (route.assignment > 0.0).sum(dim=-1).to(
+        receivers.dtype
+    )
+    torch.testing.assert_close(aux["group_read_degree"], expected_query_degree)
+    assert "group_control_query_routing" not in aux
+
+
 def test_environment_head_contraction_and_partial_multi_tile_parity() -> None:
     torch.manual_seed(1406003)
     encoded = _encoded()
