@@ -140,6 +140,84 @@ def _merge_fixed_group_maps(chunks):
     return merged
 
 
+def _merge_group_control_maps(chunks):
+    """Merge Run-1406 diagnostics without averaging per-chunk work ratios."""
+
+    merged = {}
+    keys = {
+        key
+        for entry, _ in chunks
+        for key in entry
+        if key.startswith("group_control_")
+    }
+    for key in keys:
+        values_and_widths = [
+            (entry[key], width)
+            for entry, width in chunks
+            if key in entry
+        ]
+        if not values_and_widths:
+            continue
+        values = [value for value, _ in values_and_widths]
+        first = values[0]
+        if key.endswith(
+            (
+                "_incidence",
+                "_membership",
+                "_measure",
+                "_mass",
+                "_control",
+                "_h",
+                "_global",
+                "_norm",
+            )
+        ) and not key.endswith("_per_query") and not key.startswith("group_control_query_"):
+            # Source/group controls are repeated for every receiver chunk;
+            # identify them by name before shape heuristics so M or E equal to
+            # a chunk width cannot turn a source map into a query map.
+            merged[key] = first
+        elif first.ndim == 1 and key.endswith(
+            ("_query", "_query_index", "_receiver", "_pair_query", "_pair_query_index")
+        ):
+            offset = 0
+            shifted = []
+            for entry, width in chunks:
+                if key in entry:
+                    shifted.append(entry[key] + offset)
+                offset += width
+            merged[key] = torch.cat(shifted, dim=0)
+        elif first.ndim == 1 and key.endswith(("_pair_batch", "_pair_batch_index", "_pair_source", "_pair_source_index")):
+            # Pair provenance is already global in batch/source coordinates;
+            # only the query column above needs the receiver-chunk offset.
+            merged[key] = torch.cat(values, dim=0)
+        elif first.ndim >= 2 and all(
+            value.ndim >= 2 and value.shape[1] == width
+            for value, width in values_and_widths
+        ):
+            # Query-local maps and per-query numerators/denominators retain
+            # full receiver indexing rather than combining unequal chunks.
+            merged[key] = torch.cat(values, dim=1)
+        elif (
+            (key.endswith(("_numerator", "_denominator")) or "_pair_count" in key)
+            and all(value.shape == first.shape for value in values)
+        ):
+            # Work/count numerators and denominators are additive across
+            # receiver chunks; a ratio is formed only after this merge.
+            merged[key] = torch.stack(values).sum(dim=0)
+        elif first.ndim == 0 and key.endswith(
+            ("_unique_pairs", "_logical_paths", "_rows", "_recomputations", "_pairs", "_paths")
+        ):
+            # The backend reports these execution counts once per receiver
+            # chunk.  Preserve full-read totals instead of silently retaining
+            # the first tile.
+            merged[key] = torch.stack(values).sum()
+        else:
+            # Source-only memberships, controls, masses, and summaries are
+            # repeated for each receiver chunk and are retained once.
+            merged[key] = first
+    return merged
+
+
 class InterfaceFieldCore(nn.Module):
     """Small architecture factory with a common continuous-field interface."""
 
@@ -158,9 +236,12 @@ class InterfaceFieldCore(nn.Module):
         self.env_encoder = LazyMLP(hidden, num_layers=2, include_zero_dropout=True)
         self.position_fourier = FourierFeatures(None, int(config.position_fourier_frequencies))
         self.receiver_fourier = FourierFeatures(None, int(config.query_fourier_frequencies))
-        if config.forward_architecture == "fixed_group_pairwise_honf":
-            # Run 1405 deliberately replaces the historical coarse/local
-            # context object with the three-term reader.  Keep construction
+        if config.forward_architecture in {
+            "fixed_group_pairwise_honf",
+            "group_control_pairwise_honf",
+        }:
+            # Run 1405/1406 deliberately replace the historical coarse/local
+            # context object with the three-term reader. Keep construction
             # conditional so every historical architecture retains the same
             # module tree and serialized parameter names.
             from .three_term_context import ThreeTermInterfaceContext
@@ -278,6 +359,22 @@ class InterfaceFieldCore(nn.Module):
                 frequencies,
                 group_count=int(options.group_count),
                 group_code_dim=int(options.group_code_dim),
+                spatial_dim=int(config.spatial_dim),
+                module_temperature=float(options.module_temperature),
+                environment_temperature=float(options.environment_temperature),
+                query_temperature=float(options.query_temperature),
+                activation_checkpointing=bool(options.activation_checkpointing),
+            )
+        elif config.forward_architecture == "group_control_pairwise_honf":
+            from .group_control_pairwise import GroupControlPairwiseField
+
+            self.backend = GroupControlPairwiseField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                group_count=int(options.group_count),
+                group_control_dim=int(options.group_control_dim),
                 spatial_dim=int(config.spatial_dim),
                 module_temperature=float(options.module_temperature),
                 environment_temperature=float(options.environment_temperature),
@@ -465,7 +562,10 @@ class InterfaceFieldCore(nn.Module):
             "forward_architecture": self.config.forward_architecture,
             "coarse_latent_count": (
                 0
-                if self.config.forward_architecture == "fixed_group_pairwise_honf"
+                if self.config.forward_architecture in {
+                    "fixed_group_pairwise_honf",
+                    "group_control_pairwise_honf",
+                }
                 else int(self.config.interface_model.coarse_latent_count)
             ),
             "main_latent_count": (
@@ -474,7 +574,10 @@ class InterfaceFieldCore(nn.Module):
                 else 0
             ),
         }
-        if self.config.forward_architecture == "fixed_group_pairwise_honf":
+        if self.config.forward_architecture in {
+            "fixed_group_pairwise_honf",
+            "group_control_pairwise_honf",
+        }:
             aux.update(
                 self.backend.preparation_aux(
                     backend_state,
@@ -580,10 +683,13 @@ class InterfaceFieldCore(nn.Module):
             aux.update(compiled_maps)
             fixed_group_maps = _merge_fixed_group_maps(backend_aux_chunks)
             aux.update(fixed_group_maps)
+            group_control_maps = _merge_group_control_maps(backend_aux_chunks)
+            aux.update(group_control_maps)
             keys = (
                 {key for chunk_aux, _ in backend_aux_chunks for key in chunk_aux}
                 - set(compiled_maps)
                 - set(fixed_group_maps)
+                - set(group_control_maps)
             )
             for key in keys:
                 values_and_widths = [

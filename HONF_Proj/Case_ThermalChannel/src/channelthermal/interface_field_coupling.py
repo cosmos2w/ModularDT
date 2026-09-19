@@ -88,7 +88,10 @@ def _decode_temperature(
             flat,
             query_features=model._query_features(flat),
             return_routing_maps=bool(return_routing_maps),
-            return_interaction_aux=(model.config.core_honf.forward_architecture == "routed_pairwise_honf"),
+            return_interaction_aux=(
+                model.config.core_honf.forward_architecture == "routed_pairwise_honf"
+                or bool(getattr(model.core.backend, "phase_interaction_diagnostics", False))
+            ),
         )
     if "_interaction_aux" in decoded:
         decoded.update(decoded.pop("_interaction_aux"))
@@ -151,6 +154,22 @@ def _mask_port_paircost_components(
             mask = module_present.to(device=value.device, dtype=value.dtype)
             masked[key] = value * mask.reshape(batch, modules, *([1] * (value.ndim - 2)))
     return masked
+
+
+def _phase_preparation_diagnostics(
+    model: Any,
+    prepared: PreparedInterfaceField | None,
+) -> dict[str, torch.Tensor]:
+    """Return opt-in backend preparation counters for one physical phase."""
+
+    phase_prefix = getattr(model.core.backend, "phase_diagnostic_prefix", None)
+    if prepared is None or not phase_prefix:
+        return {}
+    return {
+        key: value
+        for key, value in prepared.interaction_aux.items()
+        if key.startswith(str(phase_prefix)) and torch.is_tensor(value)
+    }
 
 
 def forward_interface_field(
@@ -447,6 +466,8 @@ def forward_interface_field(
         )
     interaction_aux: Dict[str, Any] = dict(final_prepared.interaction_aux)
     interaction_aux.update(decoder_output.pop("_interaction_aux"))
+    for key, value in _phase_preparation_diagnostics(model, prepared0).items():
+        interaction_aux[f"initial_port_{key}"] = value
     for key, value in initial_read_aux.items():
         if (not key.startswith(("hierarchical_incidence_", "routing_module_pair_", "routing_environment_pair_"))
                 and torch.is_tensor(value) and value.ndim >= 2
@@ -460,6 +481,13 @@ def forward_interface_field(
     if architecture == "routed_pairwise_honf":
         for key, value in provisional_read_aux.items():
             if key.startswith("routing_"):
+                interaction_aux[f"provisional_{key}"] = value
+    else:
+        phase_prefix = getattr(model.core.backend, "phase_diagnostic_prefix", None)
+        for key, value in _phase_preparation_diagnostics(model, prepared1).items():
+            interaction_aux[f"provisional_{key}"] = value
+        for key, value in provisional_read_aux.items():
+            if phase_prefix and key.startswith(str(phase_prefix)):
                 interaction_aux[f"provisional_{key}"] = value
 
     if local_outputs is not None:
@@ -500,6 +528,11 @@ def forward_interface_field(
                     key.endswith(("routing_paircost_numerator", "routing_paircost_denominator"))
                     and torch.is_tensor(value)
                 ):
+                    interaction_aux["port_global_" + key] = value
+        else:
+            phase_prefix = getattr(model.core.backend, "phase_diagnostic_prefix", None)
+            for key, value in consistency_diag.items():
+                if phase_prefix and key.startswith(str(phase_prefix)) and torch.is_tensor(value):
                     interaction_aux["port_global_" + key] = value
         target_temperature = selected[..., 3]
         consistency_mask = adapter.module_present[:, :, None].expand_as(temperature)

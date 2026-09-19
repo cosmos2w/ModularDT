@@ -2362,6 +2362,81 @@ def _smoke_case_ids(dataset: Any, *, count: int, large: bool) -> list[str]:
     return [case_id for _, case_id in selected]
 
 
+_GROUP_CONTROL_COMPONENT_PREFIXES: dict[str, tuple[str, ...]] = {
+    "control_router": ("core.backend.router.",),
+    "control_modulation": (
+        "core.backend.module_control_gain.",
+        "core.backend.environment_value_control.",
+        "core.backend.environment_score_control.",
+    ),
+    "fine_preparation": tuple(
+        f"core.backend.{name}."
+        for name in ("mm_message", "me_message", "em_message", "module_update", "env_update")
+    ),
+    "fine_qm": (
+        "core.backend.query_module_message.",
+        "core.backend.query_module_output.",
+    ),
+    "fine_qe": (
+        "core.backend.env_query.",
+        "core.backend.env_attention.",
+        "core.backend.env_geometry_bias.",
+    ),
+    "global_background": ("core.common.global_background.",),
+    "field_head": (
+        "core.common.context_norm.",
+        "core.common.field_head.",
+    ),
+    "local_coupling": ("local_coupling.",),
+}
+
+
+def _group_control_component_norms(
+    model: Any,
+    before: Mapping[str, torch.Tensor],
+) -> dict[str, dict[str, float | int]]:
+    """Summarize disposable Run-1406 gradients and updates without trainer changes."""
+
+    totals = {
+        component: {
+            "gradient_squared": 0.0,
+            "update_squared": 0.0,
+            "parameter_count": 0,
+            "gradient_parameter_count": 0,
+            "update_parameter_count": 0,
+        }
+        for component in _GROUP_CONTROL_COMPONENT_PREFIXES
+    }
+    for name, parameter in model.named_parameters():
+        component = next(
+            (
+                key
+                for key, prefixes in _GROUP_CONTROL_COMPONENT_PREFIXES.items()
+                if name.startswith(prefixes)
+            ),
+            None,
+        )
+        if component is None:
+            continue
+        row = totals[component]
+        row["parameter_count"] += int(parameter.numel())
+        if parameter.grad is not None:
+            row["gradient_squared"] += float(parameter.grad.detach().double().square().sum().cpu())
+            row["gradient_parameter_count"] += int(parameter.numel())
+        if name in before:
+            delta = parameter.detach() - before[name]
+            row["update_squared"] += float(delta.double().square().sum().cpu())
+            row["update_parameter_count"] += int(parameter.numel())
+    return {
+        component: {
+            "gradient_norm": math.sqrt(float(row.pop("gradient_squared"))),
+            "update_norm": math.sqrt(float(row.pop("update_squared"))),
+            **{key: int(value) for key, value in row.items()},
+        }
+        for component, row in totals.items()
+    }
+
+
 def _run_optimizer_step(
     model: Any,
     checkpoint: Mapping[str, Any],
@@ -2438,6 +2513,12 @@ def _run_optimizer_step(
         if name in before:
             max_delta = max(max_delta, float((value.detach() - before[name]).abs().max().cpu()))
         finite = finite and bool(torch.isfinite(value.detach()).all())
+    architecture = str(getattr(getattr(model.config, "core_honf", None), "forward_architecture", ""))
+    component_norms = (
+        _group_control_component_norms(model, before)
+        if architecture == "group_control_pairwise_honf"
+        else None
+    )
     return {
         "case_ids": [str(case_id) for case_id in case_ids],
         "module_counts": [
@@ -2455,6 +2536,7 @@ def _run_optimizer_step(
         "max_parameter_delta": float(max_delta),
         "parameters_finite": bool(finite),
         "optimizer_update_applied": bool(max_delta > 0.0),
+        "group_control_component_norms": component_norms,
     }
 
 

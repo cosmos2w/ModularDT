@@ -93,6 +93,7 @@ FORWARD_ARCHITECTURES = {
     "hierarchical_regional_honf",
     "routed_pairwise_honf",
     "fixed_group_pairwise_honf",
+    "group_control_pairwise_honf",
 }
 
 LEGACY_ARCHITECTURE_KEYS = {
@@ -279,7 +280,7 @@ class InterfaceFieldConfig:
     routing: Optional[RoutingIndexConfig] = None
     # Run 1405's fixed-group reader is deliberately appended so historical
     # positional construction remains stable.  These values are validated as
-    # an exact compact contract only for fixed_group_pairwise_honf below.
+    # compact contracts for the opt-in fixed/group-control readers below.
     group_count: int = 6
     source_normalizer: str = "entmax15"
     query_normalizer: str = "entmax15"
@@ -287,6 +288,9 @@ class InterfaceFieldConfig:
     environment_temperature: float = 1.0
     query_temperature: float = 1.0
     group_code_dim: int = 32
+    # Run 1406's low-dimensional control width.  Appended so historical
+    # positional InterfaceFieldConfig construction remains unchanged.
+    group_control_dim: int = 16
 
     def __post_init__(self) -> None:
         if isinstance(self.routing, dict):
@@ -343,8 +347,18 @@ class InterfaceFieldConfig:
             value = float(getattr(self, name))
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f"interface_model.{name} must be finite and positive.")
-        if isinstance(self.group_code_dim, bool) or not isinstance(self.group_code_dim, int) or int(self.group_code_dim) <= 0:
+        if (
+            isinstance(self.group_code_dim, bool)
+            or not isinstance(self.group_code_dim, int)
+            or int(self.group_code_dim) <= 0
+        ):
             raise ValueError("interface_model.group_code_dim must be a positive integer.")
+        if (
+            isinstance(self.group_control_dim, bool)
+            or not isinstance(self.group_control_dim, int)
+            or int(self.group_control_dim) <= 0
+        ):
+            raise ValueError("interface_model.group_control_dim must be a positive integer.")
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any] | None) -> "InterfaceFieldConfig":
@@ -508,6 +522,25 @@ class UnifiedForwardConfig:
                 raise ValueError(
                     "sparse_interface_honf requires interface_model.support_spacing_factor."
                 )
+        elif self.forward_architecture == "group_control_pairwise_honf":
+            controlled = self.interface_model
+            if controlled.support_spacing_factor is not None:
+                raise ValueError(
+                    "interface_model.support_spacing_factor is only valid for sparse_interface_honf."
+                )
+            if controlled.source_normalizer != "entmax15":
+                raise ValueError(
+                    "group_control_pairwise_honf requires interface_model.source_normalizer='entmax15'."
+                )
+            if controlled.query_normalizer != "entmax15":
+                raise ValueError(
+                    "group_control_pairwise_honf requires interface_model.query_normalizer='entmax15'."
+                )
+            for name in ("module_temperature", "environment_temperature", "query_temperature"):
+                if float(getattr(controlled, name)) != 1.0:
+                    raise ValueError(
+                        f"group_control_pairwise_honf requires interface_model.{name}=1.0."
+                    )
         elif self.forward_architecture == "fixed_group_pairwise_honf":
             fixed = self.interface_model
             if fixed.support_spacing_factor is not None:
@@ -944,7 +977,10 @@ class UnifiedForwardConfig:
                     interface_payload.pop("response_tree_opening_interval", None)
                 if self.interface_model.coarse_module_source == "module_states":
                     interface_payload.pop("coarse_module_source", None)
-                if self.forward_architecture != "fixed_group_pairwise_honf":
+                if self.forward_architecture not in {
+                    "fixed_group_pairwise_honf",
+                    "group_control_pairwise_honf",
+                }:
                     for key in (
                         "group_count",
                         "source_normalizer",
@@ -953,9 +989,10 @@ class UnifiedForwardConfig:
                         "environment_temperature",
                         "query_temperature",
                         "group_code_dim",
+                        "group_control_dim",
                     ):
                         interface_payload.pop(key, None)
-                else:
+                elif self.forward_architecture == "fixed_group_pairwise_honf":
                     # The fixed-group reader has no common coarse bank or
                     # local-neighbour branch.  Keep the serialized profile
                     # compact while defaults remain available to old callers.
@@ -969,8 +1006,27 @@ class UnifiedForwardConfig:
                         "response_region_block_shape",
                         "response_tree_opening_interval",
                         "coarse_module_source",
+                        "group_control_dim",
                     ):
                         interface_payload.pop(key, None)
+                else:
+                    # Run 1406 uses one low-dimensional control/code width;
+                    # do not serialize the fixed-group reader's redundant
+                    # H-wide code selector under the new architecture.  The
+                    # three-term reader also has no coarse/local bank.
+                    for key in (
+                        "coarse_latent_count",
+                        "coarse_blocks",
+                        "main_latent_count",
+                        "main_latent_blocks",
+                        "local_radius_factor",
+                        "group_read_mode",
+                        "response_region_block_shape",
+                        "response_tree_opening_interval",
+                        "coarse_module_source",
+                    ):
+                        interface_payload.pop(key, None)
+                    interface_payload.pop("group_code_dim", None)
         return payload
 
     def decoder_uses(self, component: str) -> bool:

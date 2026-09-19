@@ -75,7 +75,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "forward_architecture": {"enum": ["legacy_honf", "dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf", "regional_response_honf", "hierarchical_regional_honf", "routed_pairwise_honf", "fixed_group_pairwise_honf"]},
+        "forward_architecture": {"enum": ["legacy_honf", "dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf", "regional_response_honf", "hierarchical_regional_honf", "routed_pairwise_honf", "fixed_group_pairwise_honf", "group_control_pairwise_honf"]},
         "interface_model": {
           "type": "object",
           "additionalProperties": false,
@@ -165,7 +165,8 @@
             "module_temperature": {"type": "number", "exclusiveMinimum": 0},
             "environment_temperature": {"type": "number", "exclusiveMinimum": 0},
             "query_temperature": {"type": "number", "exclusiveMinimum": 0},
-            "group_code_dim": {"type": "integer", "minimum": 1}
+            "group_code_dim": {"type": "integer", "minimum": 1},
+            "group_control_dim": {"type": "integer", "minimum": 1}
           }
         },
         "field_dim": {"$ref": "#/$defs/integer_or_auto"},

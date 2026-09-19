@@ -385,6 +385,16 @@
       "checkpoint_families": ["Run 1405 fixed-group conditioned interaction"],
       "owner": "forward-research",
       "stage": "fixed-group-pairwise"
+    },
+    {
+      "name": "group_control_pairwise_honf_context",
+      "path": "project://src/config_core/forward/group_control_pairwise_honf_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "Run 1406 low-dimensional group-control pairwise interaction / three-term reader",
+      "checkpoint_families": ["Run 1406 low-dimensional group-control"],
+      "owner": "forward-research",
+      "stage": "group-control-pairwise"
     }
   ]
 }
