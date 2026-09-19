@@ -440,6 +440,7 @@ def test_empty_support_is_exact_zero_and_read_gradients_are_finite() -> None:
     torch.manual_seed(1406007)
     encoded = _encoded()
     field = _field().train()
+    field.activation_checkpointing = True
     module_states = torch.randn_like(encoded.module_tokens, requires_grad=True)
     state = field.prepare(encoded, module_states)
     receivers = torch.randn(2, 8, 2, requires_grad=True)
@@ -461,6 +462,113 @@ def test_empty_support_is_exact_zero_and_read_gradients_are_finite() -> None:
     assert module_states.grad is not None and torch.isfinite(module_states.grad).all()
     assert receivers.grad is not None and torch.isfinite(receivers.grad).all()
     assert receiver_features.grad is not None and torch.isfinite(receiver_features.grad).all()
+
+
+def test_complete_environment_checkpoint_matches_train_forward_and_first_gradients() -> None:
+    """The complete QE boundary preserves values, derivatives, and normal aux."""
+
+    torch.manual_seed(1406011)
+    encoded = _encoded(batch=1, modules=4, environments=5, all_active=True)
+    field = _field(query_tile_size=5).train()
+    base_states = torch.randn_like(encoded.module_tokens)
+    base_receivers = torch.randn(1, 7, 2)
+    base_features = torch.randn(1, 7, HIDDEN)
+    base_assignment = torch.full((1, 7, GROUPS), 1.0 / GROUPS)
+
+    # Materialize every lazy reader before comparing the two execution modes.
+    with torch.no_grad():
+        warm_state = _uniform_control_state(
+            field,
+            field.prepare(encoded, base_states),
+        )
+        field._route(warm_state, encoded, base_receivers, base_features)
+        warm_route = GroupQueryRoute(
+            torch.zeros(1, 7, CONTROL),
+            base_assignment,
+            torch.zeros(1, 7, GROUPS),
+        )
+        field._read_environment(
+            warm_state,
+            encoded,
+            base_receivers,
+            base_features,
+            warm_route,
+        )
+
+    def run(checkpointing: bool):
+        # Keep preparation identical; this test isolates the complete QE
+        # reader boundary from the pre-existing preparation checkpoints.
+        field.activation_checkpointing = False
+        states = base_states.detach().clone().requires_grad_()
+        receivers = base_receivers.detach().clone().requires_grad_()
+        features = base_features.detach().clone().requires_grad_()
+        assignment = base_assignment.detach().clone().requires_grad_()
+        state = _uniform_control_state(field, field.prepare(encoded, states))
+        field.activation_checkpointing = checkpointing
+        route = GroupQueryRoute(
+            torch.zeros(1, 7, CONTROL),
+            assignment,
+            torch.zeros(1, 7, GROUPS),
+        )
+        context, aux = field._read_environment(
+            state,
+            encoded,
+            receivers,
+            features,
+            route,
+        )
+        targets = [states, receivers, features, assignment, *field.parameters()]
+        gradients = torch.autograd.grad(
+            context.square().mean(),
+            targets,
+            allow_unused=True,
+        )
+        return (
+            context.detach(),
+            aux,
+            tuple(None if value is None else value.detach() for value in gradients),
+        )
+
+    eager, eager_aux, eager_gradients = run(False)
+    checkpointed, checkpointed_aux, checkpointed_gradients = run(True)
+    assert eager_aux.keys() == checkpointed_aux.keys()
+    assert eager_aux["group_control_environment_complete_support"].item() == 1.0
+    assert checkpointed_aux["group_control_environment_complete_support"].item() == 1.0
+    for key, eager_value in eager_aux.items():
+        if key in {
+            "group_control_environment_checkpoint_recomputations",
+            "group_control_environment_fine_rows_recompute",
+        }:
+            assert eager_value.item() == 0.0
+            torch.testing.assert_close(
+                checkpointed_aux[key],
+                checkpointed_aux["group_control_environment_unique_pairs"],
+                rtol=0.0,
+                atol=0.0,
+            )
+        else:
+            torch.testing.assert_close(
+                checkpointed_aux[key],
+                eager_value,
+                rtol=2.0e-5,
+                atol=2.0e-6,
+            )
+    torch.testing.assert_close(checkpointed, eager, rtol=2.0e-5, atol=2.0e-6)
+    assert len(eager_gradients) == len(checkpointed_gradients)
+    for eager_gradient, checkpointed_gradient in zip(
+        eager_gradients,
+        checkpointed_gradients,
+        strict=True,
+    ):
+        if eager_gradient is None or checkpointed_gradient is None:
+            assert eager_gradient is None and checkpointed_gradient is None
+        else:
+            torch.testing.assert_close(
+                checkpointed_gradient,
+                eager_gradient,
+                rtol=5.0e-4,
+                atol=5.0e-5,
+            )
 
 
 def test_module_environment_permutations_and_receiver_chunking_preserve_read() -> None:

@@ -322,6 +322,53 @@ def test_group_control_core_uses_three_terms_and_chunked_predicted_queries() -> 
     )
 
 
+def test_group_control_normal_interaction_aux_contract_is_tensor_only() -> None:
+    """Normal ``return_interaction_aux`` keeps the public summary surface.
+
+    The optimized executor elides detailed maps and pair ledgers whenever the
+    caller does not request routing maps.  ``decode_queries`` still exposes
+    ``_interaction_aux`` for the ChannelThermal coupling path, so guard the
+    lightweight tensor keys and their receiver shape explicitly.
+    """
+
+    torch.manual_seed(140607)
+    core = InterfaceFieldCore(UnifiedForwardConfig.from_dict(_payload())).eval()
+    batch = _batch(query_count=5)
+    encoded = core.encode_case(batch)
+    prepared = core.prepare(encoded, encoded.module_tokens, return_routing_maps=False)
+
+    output = core.decode_queries(
+        prepared,
+        batch.query_xy,
+        return_routing_maps=False,
+        return_interaction_aux=True,
+    )
+    assert set(output) == {"pred_field", "_interaction_aux"}
+    aux = output["_interaction_aux"]
+    expected = {
+        "local_neighbor_count",
+        "main_context_norm",
+        "coarse_context_norm",
+        "local_context_norm",
+        "main_context_fraction",
+        "coarse_context_fraction",
+        "local_context_fraction",
+        "group_control_module_overlap_mass_per_query",
+        "group_control_environment_overlap_mass_per_query",
+        "group_control_query_control_norm",
+        "group_read_degree",
+    }
+    assert expected <= set(aux)
+    assert all(torch.is_tensor(value) for value in aux.values())
+    assert all(tuple(value.shape) == (2, batch.query_xy.shape[1]) for value in aux.values())
+
+    # Large route maps and execution ledgers are opt-in.  In particular, the
+    # normal path must not accidentally reintroduce the O(Q*K*S) surfaces that
+    # the exact executor is intended to elide.
+    assert "group_control_query_routing" not in aux
+    assert "group_control_module_logical_paths" not in aux
+    assert "group_control_environment_fine_rows" not in aux
+
 def test_group_control_uses_ordinary_thermalchannel_interface_path() -> None:
     coupling = PROJECT_ROOT / "Case_ThermalChannel/src/channelthermal/interface_field_coupling.py"
     assert "group_control_pairwise_honf" not in coupling.read_text(encoding="utf-8")
