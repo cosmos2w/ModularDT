@@ -80,12 +80,12 @@ def test_aggregate_uses_pooled_sse_and_keeps_equal_case_summary() -> None:
     for label, scale in (("1407", 1.0), ("1406", 2.0), ("1804", 3.0)):
         for case_id, factor in (("0273", 1.0), ("0653", 2.0), ("0680", 1.0), ("0298", 2.0)):
             row = {"label": label, "case_id": case_id}
-            for name, base, suffix in (
-                ("global_field_all_norm_l2", "global_field_all_norm", "norm_l2"),
-                ("internal_temperature_physical_relative_l2", "internal_temperature_physical", "relative_l2"),
+            for name, base in (
+                ("global_field_all_norm_l2", "global_field_all_norm"),
+                ("internal_temperature_physical_relative_l2", "internal_temperature_physical"),
             ):
                 value = scale * factor
-                row[f"{base}_{suffix}"] = value
+                row[name] = value
                 row[f"{base}_sse"] = value * value
                 row[f"{base}_target_sse"] = 1.0
                 row[f"{base}_num_values"] = 2

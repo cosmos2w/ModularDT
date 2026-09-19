@@ -43,15 +43,15 @@ COMPARISON_LABELS = ("1407", "1406", "1804")
 # first six entries are normalized relative L2 metrics; the last three are
 # dataset-native physical relative L2 metrics.
 METRIC_SPECS = (
-    ("global_field_all_norm_l2", "global_field_all_norm", "norm_l2"),
-    ("global_field_fluid_norm_l2", "global_field_fluid_norm", "norm_l2"),
-    ("global_field_near_interface_norm_l2", "global_field_near_interface_norm", "norm_l2"),
-    ("global_field_far_fluid_norm_l2", "global_field_far_fluid_norm", "norm_l2"),
-    ("field_p_fluid_norm_l2", "field_p_fluid_norm", "norm_l2"),
-    ("field_omega_fluid_norm_l2", "field_omega_fluid_norm", "norm_l2"),
-    ("internal_temperature_physical_relative_l2", "internal_temperature_physical", "relative_l2"),
-    ("interface_t_surface_physical_relative_l2", "interface_t_surface_physical", "relative_l2"),
-    ("interface_q_normal_physical_relative_l2", "interface_q_normal_physical", "relative_l2"),
+    ("global_field_all_norm_l2", "global_field_all_norm"),
+    ("global_field_fluid_norm_l2", "global_field_fluid_norm"),
+    ("global_field_near_interface_norm_l2", "global_field_near_interface_norm"),
+    ("global_field_far_fluid_norm_l2", "global_field_far_fluid_norm"),
+    ("field_p_fluid_norm_l2", "field_p_fluid_norm"),
+    ("field_omega_fluid_norm_l2", "field_omega_fluid_norm"),
+    ("internal_temperature_physical_relative_l2", "internal_temperature_physical"),
+    ("interface_t_surface_physical_relative_l2", "interface_t_surface_physical"),
+    ("interface_q_normal_physical_relative_l2", "interface_q_normal_physical"),
 )
 
 
@@ -170,7 +170,7 @@ def build_plan(args: argparse.Namespace) -> dict[str, Any]:
             "per_case": "maintained compare_models.reconstruction_metrics values",
             "aggregate": "pooled relative L2 from summed per-case SSE and target SSE",
             "equal_case_summary": "mean and median of the per-case relative L2 values are also reported",
-            "metrics": [name for name, _, _ in METRIC_SPECS],
+            "metrics": [name for name, _ in METRIC_SPECS],
         },
         "limitations": [
             "Plan-only mode does not load checkpoints, datasets, models, CUDA, or optimizers.",
@@ -199,8 +199,8 @@ def _require_epoch(checkpoint: Mapping[str, Any], label: str) -> None:
         )
 
 
-def _metric_record(row: Mapping[str, Any], base: str, suffix: str) -> dict[str, Any]:
-    value = _finite(row.get(f"{base}_{suffix}"))
+def _metric_record(row: Mapping[str, Any], name: str, base: str) -> dict[str, Any]:
+    value = _finite(row.get(name))
     sse = _finite(row.get(f"{base}_sse"))
     target_sse = _finite(row.get(f"{base}_target_sse"))
     num_values = _finite(row.get(f"{base}_num_values"))
@@ -220,8 +220,8 @@ def _aggregate_metric_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, 
     for label in COMPARISON_LABELS:
         label_rows = by_label[label]
         metrics: dict[str, Any] = {}
-        for name, base, suffix in METRIC_SPECS:
-            observations = [_metric_record(row, base, suffix) for row in label_rows]
+        for name, base in METRIC_SPECS:
+            observations = [_metric_record(row, name, base) for row in label_rows]
             values = [item["relative_l2"] for item in observations if item["relative_l2"] is not None]
             sse_values = [item["sse"] for item in observations if item["sse"] is not None]
             target_values = [item["target_sse"] for item in observations if item["target_sse"] is not None]
@@ -253,8 +253,8 @@ def _selected_case_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any
                 "label": str(row.get("label", row.get("model_label"))),
                 "case_id": str(row["case_id"]),
                 "metrics": {
-                    name: _metric_record(row, base, suffix)
-                    for name, base, suffix in METRIC_SPECS
+                    name: _metric_record(row, name, base)
+                    for name, base in METRIC_SPECS
                 },
             }
         )
@@ -413,7 +413,7 @@ def _format(value: Any) -> str:
 
 
 def _markdown_report(payload: Mapping[str, Any]) -> str:
-    metric_names = [name for name, _, _ in METRIC_SPECS]
+    metric_names = [name for name, _ in METRIC_SPECS]
     lines = [
         "# Run 1407 Epoch-50 Four-Case Anchor Evaluation",
         "",
