@@ -1025,7 +1025,7 @@ def run_measurement(args: argparse.Namespace) -> dict[str, Any]:
         "reverse_order_repeat": reverse_repeat,
         "training": training_rows,
         "evidence_maps": evidence_maps,
-        "reverse_evidence_maps": reverse_maps,
+        "reverse_evidence_maps": reverse_repeat["evidence_maps"],
         "fidelity_metrics": {
             "1406": _read_epoch_metric(args.metrics_1406),
             "1804": _read_epoch_metric(args.metrics_1804),
