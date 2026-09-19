@@ -18,8 +18,29 @@ and reported `continuing at epoch 51 / 500`. Epoch 51 completed with finite
 training loss `1.8927`, validation loss `2.0469`, validation field MSE
 `1.3735`, and validation temperature MSE `0.2823`; the same managed process
 then continued normally. No monitoring was requested, so it was left
-unattended after startup verification. This addendum changes the execution
-status, not the measured epoch-50 comparison or its original budget judgment.
+unattended after startup verification. That Codex-owned process subsequently
+disappeared after writing epoch 137, without a reported training failure and
+with physical GPU 1 free again. This addendum changes the execution status,
+not the measured epoch-50 comparison or its original budget judgment.
+
+### Tmux recovery after the unattended process exit
+
+The same Run 1407 was recovered in `Wang-4`, window 0, pane 0. Its highest
+durable checkpoint containing model, optimizer, scaler, and RNG state was
+`best_by_field_mse_model.pt` at epoch 136; the periodic `latest_model.pt` was
+only at epoch 130. The recovery therefore resumed epoch 137 from the epoch-136
+best-by-field checkpoint and retained the original terminal target of epoch
+500. Startup was verified through completed epochs 137--139 on physical GPU 1.
+Run 1406 remained active on physical GPU 0 and was not signalled or modified.
+
+Because the first process had already appended its epoch-137 metrics before
+exiting, replaying that epoch appended a second epoch-137 row. The scientific
+loss and validation fields in those two rows are identical; only wall-clock
+times and peak-memory bookkeeping differ. The live metrics file was not
+edited. Any later endpoint analysis must collapse epoch 137 by epoch, keeping
+the later replay row (or otherwise documenting the equivalent scientific
+values). Per the user's instruction, the recovered tmux process is left
+unattended after this startup verification.
 
 ## Executive decision
 
@@ -502,6 +523,21 @@ rtk env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src:Case_ThermalChannel/src \
   --yes
 ```
 
+### Tmux recovery from the highest durable checkpoint
+
+The first unattended continuation exited after writing epoch 137. The
+following same-run command was sent to `Wang-4:0.0` and verified to resume at
+epoch 137 from the complete epoch-136 state:
+
+```bash
+rtk env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src:Case_ThermalChannel/src \
+  conda run --no-capture-output -n ModularDT python -u train.py \
+  --config src/config_core/forward/phase_shared_group_control_honf_context.json \
+  --workflow forward --device cuda:0 --epochs 500 \
+  --resume-checkpoint /home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1407_20260919_174751_phase_shared_prototype_group_control/best_by_field_mse_model.pt \
+  --yes
+```
+
 ### Matched cost benchmark
 
 ```bash
@@ -562,7 +598,10 @@ rtk env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src:Case_ThermalChannel/src \
 ## Same-run continuation commands and status
 
 `--epochs` is the terminal epoch. The following epoch-500 command was executed
-after the user's explicit continuation instruction:
+after the user's explicit continuation instruction. After that process later
+exited, the same command shape was reissued in `Wang-4:0.0` with
+`best_by_field_mse_model.pt` (epoch 136) as the resume checkpoint, as recorded
+above:
 
 ```bash
 run=/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1407_20260919_174751_phase_shared_prototype_group_control
