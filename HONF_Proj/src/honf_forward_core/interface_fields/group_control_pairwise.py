@@ -1075,15 +1075,43 @@ class GroupControlPairwiseField(DensePairwiseField):
             else True
         )
         if complete:
-            context, overlap_mass = self._read_environment_complete(
-                state,
-                encoded,
-                receivers,
-                receiver_features,
-                route,
-                overlap,
-                source_measure=controls.environment_measure,
-            )
+            if self._checkpoint_active():
+                # The complete QE calculation materializes the score-control,
+                # score, geometry, support-mask, softmax, and renormalization
+                # tensors for the whole receiver/source rectangle.  Keep the
+                # boundary around the complete calculation so those tensors
+                # are recomputed during backward; overlap mass remains an
+                # explicit output for the normal auxiliary path.
+                def recompute_complete(
+                    read_receivers: torch.Tensor,
+                    read_features: torch.Tensor,
+                ) -> tuple[torch.Tensor, torch.Tensor]:
+                    return self._read_environment_complete(
+                        state,
+                        encoded,
+                        read_receivers,
+                        read_features,
+                        route,
+                        overlap,
+                        source_measure=controls.environment_measure,
+                    )
+
+                context, overlap_mass = checkpoint(
+                    recompute_complete,
+                    receivers,
+                    receiver_features,
+                    use_reentrant=False,
+                )
+            else:
+                context, overlap_mass = self._read_environment_complete(
+                    state,
+                    encoded,
+                    receivers,
+                    receiver_features,
+                    route,
+                    overlap,
+                    source_measure=controls.environment_measure,
+                )
         else:
             context, overlap_mass = self._read_environment_partial(
                 state,
