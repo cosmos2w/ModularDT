@@ -74,7 +74,7 @@
     "save_best_predicted": true,
     "save_latest": true,
     "save_latest_every_epochs": 10,
-    "save_epoch_milestones": [10, 50, 100, 250, 500, 2500, 5000]
+    "save_epoch_milestones": [10, 50, 100, 250, 500, 1000, 2500, 5000]
   },
   "run": {
     "id": "1406",
