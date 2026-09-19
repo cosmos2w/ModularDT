@@ -205,6 +205,7 @@ def test_plan_requires_explicit_1401_and_records_policy(tmp_path: Path) -> None:
     assert "no matched epoch_50 assumption" in plan["checkpoint_policy"]["1401"]["epoch_role"]
     assert plan["protocol"]["query_count"] == 8192
     assert plan["protocol"]["receiver_chunk_size"] == 2048
+    assert plan["protocol"]["training_labels"] == ["1405", "1804", "1401"]
     assert plan["protocol"]["training_buckets"] == ["M1", "M12"]
     assert plan["training_health"]["metrics_csv"] == str(metrics_path.resolve())
     assert "last-10 val_field_mse median < first-10 median" in plan["training_health"]["required_checks"]

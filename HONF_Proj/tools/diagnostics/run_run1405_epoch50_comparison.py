@@ -11,7 +11,8 @@ the Run-1405 plan:
 * two untimed warmups and five synchronized repetitions for full physical
   forward and prepared P2 decode;
 * fresh-optimizer one-batch steps at ``B=48``, ``Q=1024`` for exact M1/M12
-  buckets, with one warmup and three measured updates for 1405 and 1804;
+  buckets, with one warmup and three measured updates for 1405, 1804, and
+  the explicitly supplied 1401 context checkpoint;
 * allocated/reserved CUDA memory and exact fixed-group semantic ``P_M/P_E``,
   ``R_M/R_E``, ``sQ/sM/sE`` when the Run-1405 debug API is available.
 * an explicit Run-1405 ``metrics.csv`` health gate covering epochs 1--50,
@@ -81,7 +82,7 @@ DEFAULT_TRAIN_QUERY_COUNT = 1024
 DEFAULT_TRAIN_WARMUPS = 1
 DEFAULT_TRAIN_REPETITIONS = 3
 COMPARISON_LABELS = ("1405", "1804", "1401")
-TRAINING_LABELS = ("1405", "1804")
+TRAINING_LABELS = COMPARISON_LABELS
 TRAIN_HEALTH_CORE_COLUMNS = (
     "loss_total",
     "loss_field",
@@ -1197,8 +1198,9 @@ def run_measurement(args: argparse.Namespace) -> dict[str, Any]:
                     torch.cuda.empty_cache()
                 gc.collect()
 
-        # Exact M1/M12 training buckets use only the two matched epoch-50
-        # models. Run 1401 remains a context-only checkpoint by design.
+        # Exact M1/M12 training buckets cover every explicitly requested
+        # comparison model. Run 1401 remains context-only for fidelity and
+        # continuation decisions because its supplied checkpoint is not epoch 50.
         train_datasets: dict[str, Any] = {}
         try:
             for label in TRAINING_LABELS:
@@ -1272,7 +1274,7 @@ def run_measurement(args: argparse.Namespace) -> dict[str, Any]:
         "training_health": training_health,
         "debug_api_contract": _debug_api_contract(),
         "limitations": [
-            "Run 1401 is measured only as the explicit context checkpoint and is not a matched epoch-50 fidelity competitor.",
+            "Run 1401 inference and optimizer steps are explicit non-gating context; it is not a matched epoch-50 fidelity competitor.",
             "Semantic P/R/s statistics are available only when the fixed-group debug API returns all canonical tensors.",
             "Peak memory is reported for CUDA only; CPU/planning records use null.",
             "This bounded evidence benchmark does not create a managed training run, save model weights, or perform a quickcheck run.",
