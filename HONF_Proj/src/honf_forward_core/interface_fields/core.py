@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any
 
 import torch
 from torch import nn
@@ -61,6 +61,85 @@ def _merge_compiled_routing_maps(chunks):
     return merged
 
 
+def _merge_fixed_group_maps(chunks):
+    """Merge Run-1405 query maps and ragged semantic triples by receiver order.
+
+    Fixed-group diagnostics are deliberately explicit here because they do not
+    all follow the historical dense-routing tensor layout.  In particular,
+    dense environment attention is ``[B,K,H,Q,E]`` (the receiver axis is 3),
+    while semantic triples are packed one-dimensional arrays whose query
+    indices are local to each receiver chunk.
+    """
+
+    merged = {}
+    keys = {
+        key
+        for entry, _ in chunks
+        for key in entry
+        if key.startswith("fixed_group_")
+    }
+    for key in keys:
+        values_and_widths = [
+            (entry[key], width)
+            for entry, width in chunks
+            if key in entry
+        ]
+        if not values_and_widths:
+            continue
+        values = [value for value, _ in values_and_widths]
+        first = values[0]
+        if key.endswith("_triple_query"):
+            offset = 0
+            shifted = []
+            for entry, width in chunks:
+                if key in entry:
+                    shifted.append(entry[key] + offset)
+                offset += width
+            merged[key] = torch.cat(shifted, dim=0)
+        elif key.endswith(("_triple_batch", "_triple_group", "_triple_source")):
+            merged[key] = torch.cat(values, dim=0)
+        elif key.startswith("fixed_group_environment_attention_"):
+            # Packed attention can optionally carry explicit provenance
+            # columns alongside [triples, heads].  Query indices are local to
+            # each receiver chunk; batch/group/source indices are not.
+            suffix = key.removeprefix("fixed_group_environment_attention_")
+            if suffix in {"query", "query_index"}:
+                offset = 0
+                shifted = []
+                for entry, width in chunks:
+                    if key in entry:
+                        shifted.append(entry[key] + offset)
+                    offset += width
+                merged[key] = torch.cat(shifted, dim=0)
+            elif suffix in {"batch", "batch_index", "group", "group_index", "source", "source_index"}:
+                merged[key] = torch.cat(values, dim=0)
+            else:
+                merged[key] = first
+        elif key == "fixed_group_environment_attention":
+            if first.ndim >= 5 and all(
+                value.ndim >= 5 and value.shape[3] == width
+                for value, width in values_and_widths
+            ):
+                merged[key] = torch.cat(values, dim=3)
+            elif first.ndim >= 2:
+                # The backend may use a packed [triples, heads] diagnostic;
+                # preserve every packed row across receiver chunks too.
+                merged[key] = torch.cat(values, dim=0)
+            else:  # pragma: no cover - diagnostics are tensor-valued.
+                merged[key] = first
+        elif first.ndim >= 2 and all(
+            value.ndim >= 2 and value.shape[1] == width
+            for value, width in values_and_widths
+        ):
+            # Query-local fixed-group maps: [B,Q,...].
+            merged[key] = torch.cat(values, dim=1)
+        else:
+            # Incidence, centres, and batch-level summaries are repeated for
+            # every receiver chunk; retain one copy.
+            merged[key] = first
+    return merged
+
+
 class InterfaceFieldCore(nn.Module):
     """Small architecture factory with a common continuous-field interface."""
 
@@ -79,16 +158,29 @@ class InterfaceFieldCore(nn.Module):
         self.env_encoder = LazyMLP(hidden, num_layers=2, include_zero_dropout=True)
         self.position_fourier = FourierFeatures(None, int(config.position_fourier_frequencies))
         self.receiver_fourier = FourierFeatures(None, int(config.query_fourier_frequencies))
-        self.common = SharedInterfaceContext(
-            hidden_dim=hidden,
-            field_dim=int(config.field_dim),
-            num_heads=heads,
-            coarse_latent_count=int(options.coarse_latent_count),
-            coarse_blocks=int(options.coarse_blocks),
-            local_radius_factor=float(options.local_radius_factor),
-            fourier_frequencies=frequencies,
-            coarse_module_source=str(options.coarse_module_source),
-        )
+        if config.forward_architecture == "fixed_group_pairwise_honf":
+            # Run 1405 deliberately replaces the historical coarse/local
+            # context object with the three-term reader.  Keep construction
+            # conditional so every historical architecture retains the same
+            # module tree and serialized parameter names.
+            from .three_term_context import ThreeTermInterfaceContext
+
+            self.common = ThreeTermInterfaceContext(
+                hidden_dim=hidden,
+                field_dim=int(config.field_dim),
+                query_fourier_frequencies=int(config.query_fourier_frequencies),
+            )
+        else:
+            self.common = SharedInterfaceContext(
+                hidden_dim=hidden,
+                field_dim=int(config.field_dim),
+                num_heads=heads,
+                coarse_latent_count=int(options.coarse_latent_count),
+                coarse_blocks=int(options.coarse_blocks),
+                local_radius_factor=float(options.local_radius_factor),
+                fourier_frequencies=frequencies,
+                coarse_module_source=str(options.coarse_module_source),
+            )
         # The science profile owns exactly four scalar route temperatures at
         # the reusable core boundary.  Historical profiles keep this
         # ParameterDict empty, so their state-dict structure and optimizer
@@ -176,6 +268,22 @@ class InterfaceFieldCore(nn.Module):
                 response_tree_opening_interval=tuple(options.response_tree_opening_interval),
                 activation_checkpointing=bool(options.activation_checkpointing),
             )
+        elif config.forward_architecture == "fixed_group_pairwise_honf":
+            from .fixed_group_pairwise import FixedGroupPairwiseField
+
+            self.backend = FixedGroupPairwiseField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                group_count=int(options.group_count),
+                group_code_dim=int(options.group_code_dim),
+                spatial_dim=int(config.spatial_dim),
+                module_temperature=float(options.module_temperature),
+                environment_temperature=float(options.environment_temperature),
+                query_temperature=float(options.query_temperature),
+                activation_checkpointing=bool(options.activation_checkpointing),
+            )
         else:
             raise ValueError(f"Unsupported interface architecture: {config.forward_architecture!r}")
         self.receiver_chunk_size = int(options.receiver_chunk_size)
@@ -186,10 +294,10 @@ class InterfaceFieldCore(nn.Module):
 
         return len(self.routing_log_temperatures) == len(ROUTING_TYPED_TEMPERATURE_NAMES)
 
-    def set_training_progress(self, *, epoch: int, total_epochs: Optional[int] = None) -> None:
+    def set_training_progress(self, *, epoch: int, total_epochs: int | None = None) -> None:
         del epoch, total_epochs
 
-    def selection_state(self) -> Dict[str, Optional[int]]:
+    def selection_state(self) -> dict[str, int | None]:
         return {"epoch": None, "total_epochs": None}
 
     def _coordinate_scale(self, coordinates: torch.Tensor) -> torch.Tensor:
@@ -353,16 +461,31 @@ class InterfaceFieldCore(nn.Module):
             module_states, encoded.env_tokens, encoded.module_present, encoded.env_weights,
             **coarse_kwargs,
         )
-        aux: Dict[str, Any] = {
+        aux: dict[str, Any] = {
             "forward_architecture": self.config.forward_architecture,
-            "coarse_latent_count": int(self.config.interface_model.coarse_latent_count),
+            "coarse_latent_count": (
+                0
+                if self.config.forward_architecture == "fixed_group_pairwise_honf"
+                else int(self.config.interface_model.coarse_latent_count)
+            ),
             "main_latent_count": (
                 int(self.config.interface_model.main_latent_count)
                 if self.config.forward_architecture == "geometry_latent_field"
                 else 0
             ),
         }
-        if self.config.forward_architecture in {"sparse_interface_honf", "hierarchical_regional_honf", "routed_pairwise_honf"}:
+        if self.config.forward_architecture == "fixed_group_pairwise_honf":
+            aux.update(
+                self.backend.preparation_aux(
+                    backend_state,
+                    include_diagnostics=bool(return_routing_maps),
+                )
+            )
+        elif self.config.forward_architecture in {
+            "sparse_interface_honf",
+            "hierarchical_regional_honf",
+            "routed_pairwise_honf",
+        }:
             aux.update(self.backend.preparation_aux(backend_state))
         return PreparedInterfaceField(encoded, module_states, backend_state, coarse_state, aux)
 
@@ -392,7 +515,7 @@ class InterfaceFieldCore(nn.Module):
         prepared: PreparedInterfaceField,
         receiver_coordinates: torch.Tensor,
         *,
-        receiver_chunk_size: Optional[int] = None,
+        receiver_chunk_size: int | None = None,
         return_routing_maps: bool = False,
     ) -> InterfaceRead:
         """Read receivers with an optional evaluation-only chunk override.
@@ -410,7 +533,7 @@ class InterfaceFieldCore(nn.Module):
         main_norms = []
         coarse_norms = []
         local_norms = []
-        backend_aux_chunks: list[tuple[Dict[str, torch.Tensor], int]] = []
+        backend_aux_chunks: list[tuple[dict[str, torch.Tensor], int]] = []
         for start in range(0, int(receivers.shape[1]), chunk_size):
             chunk = receivers[:, start : start + chunk_size]
             receiver_features = self._receiver_features(prepared, chunk)
@@ -443,7 +566,7 @@ class InterfaceFieldCore(nn.Module):
         coarse_values = torch.cat(coarse_norms, dim=1)
         local_values = torch.cat(local_norms, dim=1)
         branch_total = (main_values + coarse_values + local_values).clamp_min(1.0e-12)
-        aux: Dict[str, torch.Tensor] = {
+        aux: dict[str, torch.Tensor] = {
             "local_neighbor_count": torch.cat(neighbour_counts, dim=1),
             "main_context_norm": main_values,
             "coarse_context_norm": coarse_values,
@@ -455,7 +578,13 @@ class InterfaceFieldCore(nn.Module):
         if backend_aux_chunks:
             compiled_maps = _merge_compiled_routing_maps(backend_aux_chunks)
             aux.update(compiled_maps)
-            keys = {key for chunk_aux, _ in backend_aux_chunks for key in chunk_aux} - set(compiled_maps)
+            fixed_group_maps = _merge_fixed_group_maps(backend_aux_chunks)
+            aux.update(fixed_group_maps)
+            keys = (
+                {key for chunk_aux, _ in backend_aux_chunks for key in chunk_aux}
+                - set(compiled_maps)
+                - set(fixed_group_maps)
+            )
             for key in keys:
                 values_and_widths = [
                     (chunk_aux[key], width)
@@ -548,13 +677,13 @@ class InterfaceFieldCore(nn.Module):
         self,
         prepared: PreparedInterfaceField,
         query_xy: torch.Tensor,
-        query_features: Optional[torch.Tensor] = None,
+        query_features: torch.Tensor | None = None,
         *,
         return_routing_maps: bool = False,
         return_edge_fields: bool = False,
         return_interaction_aux: bool = False,
-        receiver_chunk_size: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        receiver_chunk_size: int | None = None,
+    ) -> dict[str, Any]:
         if return_edge_fields:
             raise ValueError("Per-edge fields are not defined for interface-field baselines.")
         read = self.read(
@@ -571,7 +700,7 @@ class InterfaceFieldCore(nn.Module):
             prepared.encoded.global_token,
             query_features,
         )
-        result: Dict[str, torch.Tensor] = {"pred_field": pred_field}
+        result: dict[str, torch.Tensor] = {"pred_field": pred_field}
         if return_routing_maps:
             result.update(read.interaction_aux)
         if return_interaction_aux:

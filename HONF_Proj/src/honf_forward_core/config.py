@@ -92,6 +92,7 @@ FORWARD_ARCHITECTURES = {
     "regional_response_honf",
     "hierarchical_regional_honf",
     "routed_pairwise_honf",
+    "fixed_group_pairwise_honf",
 }
 
 LEGACY_ARCHITECTURE_KEYS = {
@@ -276,6 +277,16 @@ class InterfaceFieldConfig:
     response_tree_opening_interval: list[float] = field(default_factory=lambda: [1.0, 2.0])
     coarse_module_source: str = "module_states"
     routing: Optional[RoutingIndexConfig] = None
+    # Run 1405's fixed-group reader is deliberately appended so historical
+    # positional construction remains stable.  These values are validated as
+    # an exact compact contract only for fixed_group_pairwise_honf below.
+    group_count: int = 6
+    source_normalizer: str = "entmax15"
+    query_normalizer: str = "entmax15"
+    module_temperature: float = 1.0
+    environment_temperature: float = 1.0
+    query_temperature: float = 1.0
+    group_code_dim: int = 32
 
     def __post_init__(self) -> None:
         if isinstance(self.routing, dict):
@@ -322,6 +333,18 @@ class InterfaceFieldConfig:
         self.response_tree_opening_interval = [float(value) for value in interval]
         if self.coarse_module_source not in {"module_states", "group_states"}:
             raise ValueError("interface_model.coarse_module_source must be 'module_states' or 'group_states'.")
+        if isinstance(self.group_count, bool) or not isinstance(self.group_count, int) or int(self.group_count) <= 0:
+            raise ValueError("interface_model.group_count must be a positive integer.")
+        if self.source_normalizer not in {"softmax", "entmax15"}:
+            raise ValueError("interface_model.source_normalizer must be 'softmax' or 'entmax15'.")
+        if self.query_normalizer not in {"softmax", "entmax15"}:
+            raise ValueError("interface_model.query_normalizer must be 'softmax' or 'entmax15'.")
+        for name in ("module_temperature", "environment_temperature", "query_temperature"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"interface_model.{name} must be finite and positive.")
+        if isinstance(self.group_code_dim, bool) or not isinstance(self.group_code_dim, int) or int(self.group_code_dim) <= 0:
+            raise ValueError("interface_model.group_code_dim must be a positive integer.")
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any] | None) -> "InterfaceFieldConfig":
@@ -485,6 +508,25 @@ class UnifiedForwardConfig:
                 raise ValueError(
                     "sparse_interface_honf requires interface_model.support_spacing_factor."
                 )
+        elif self.forward_architecture == "fixed_group_pairwise_honf":
+            fixed = self.interface_model
+            if fixed.support_spacing_factor is not None:
+                raise ValueError(
+                    "interface_model.support_spacing_factor is only valid for sparse_interface_honf."
+                )
+            if int(fixed.group_count) != 6:
+                raise ValueError("fixed_group_pairwise_honf requires interface_model.group_count exactly 6.")
+            if fixed.source_normalizer != "entmax15":
+                raise ValueError("fixed_group_pairwise_honf requires interface_model.source_normalizer='entmax15'.")
+            if fixed.query_normalizer != "entmax15":
+                raise ValueError("fixed_group_pairwise_honf requires interface_model.query_normalizer='entmax15'.")
+            for name in ("module_temperature", "environment_temperature", "query_temperature"):
+                if float(getattr(fixed, name)) != 1.0:
+                    raise ValueError(
+                        f"fixed_group_pairwise_honf requires interface_model.{name}=1.0."
+                    )
+            if int(fixed.group_code_dim) != 32:
+                raise ValueError("fixed_group_pairwise_honf requires interface_model.group_code_dim exactly 32.")
         elif self.interface_model.support_spacing_factor is not None:
             raise ValueError(
                 "interface_model.support_spacing_factor is only valid for sparse_interface_honf."
@@ -753,9 +795,15 @@ class UnifiedForwardConfig:
         if self.spatial_dim == 3:
             if self.coordinate_scale is None:
                 raise ValueError("spatial_dim=3 requires an explicit three-value coordinate_scale.")
-            if self.forward_architecture not in {"legacy_honf", "dense_pairwise_field", "routed_pairwise_honf"}:
+            if self.forward_architecture not in {
+                "legacy_honf",
+                "dense_pairwise_field",
+                "routed_pairwise_honf",
+                "fixed_group_pairwise_honf",
+            }:
                 raise ValueError(
-                    "spatial_dim=3 requires legacy_honf, dense_pairwise_field, or routed_pairwise_honf."
+                    "spatial_dim=3 requires legacy_honf, dense_pairwise_field, routed_pairwise_honf, "
+                    "or fixed_group_pairwise_honf."
                 )
             if self.forward_architecture == "legacy_honf" and self.organizer_mode != "fixed_projection":
                 raise ValueError("spatial_dim=3 legacy_honf requires fixed_projection organization.")
@@ -896,6 +944,33 @@ class UnifiedForwardConfig:
                     interface_payload.pop("response_tree_opening_interval", None)
                 if self.interface_model.coarse_module_source == "module_states":
                     interface_payload.pop("coarse_module_source", None)
+                if self.forward_architecture != "fixed_group_pairwise_honf":
+                    for key in (
+                        "group_count",
+                        "source_normalizer",
+                        "query_normalizer",
+                        "module_temperature",
+                        "environment_temperature",
+                        "query_temperature",
+                        "group_code_dim",
+                    ):
+                        interface_payload.pop(key, None)
+                else:
+                    # The fixed-group reader has no common coarse bank or
+                    # local-neighbour branch.  Keep the serialized profile
+                    # compact while defaults remain available to old callers.
+                    for key in (
+                        "coarse_latent_count",
+                        "coarse_blocks",
+                        "main_latent_count",
+                        "main_latent_blocks",
+                        "local_radius_factor",
+                        "group_read_mode",
+                        "response_region_block_shape",
+                        "response_tree_opening_interval",
+                        "coarse_module_source",
+                    ):
+                        interface_payload.pop(key, None)
         return payload
 
     def decoder_uses(self, component: str) -> bool:
