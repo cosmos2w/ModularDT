@@ -249,6 +249,23 @@ There are also important negative limits:
 
 The defensible conclusion is therefore **functional, case-responsive organization with partial collapse, not a discovered six-part physical decomposition**. Run 1407 improves query selectivity and phase consistency, but the environment remains the central sparsity bottleneck.
 
+### 4.4 Matched anchor hypergraphs: Cases 0273 and 0653
+
+The matched anchor visualization uses the actual 8,192-query P2 maps from the validation-selected checkpoints. Each spatial map shows the dominant learned group at every query, with color intensity increasing with the maximum routing weight and dashed contours marking changes in positive support degree. The adjacent hypergraph preserves every active module edge and encodes the summed source-to-group and group-to-query masses; the 192 environment sources are aggregated into one `E` node only to keep the diagram readable.
+
+| Case | Model | Mean query support / 6 | Effective query groups | Environment logical support | Occupied module groups |
+|---|---|---:|---:|---:|---:|
+| 0273 (3 modules) | Run 1406 | 6.00 | 4.52 | 100.0% | 2 |
+| 0273 (3 modules) | Run 1407 | **3.65** | **2.76** | **86.8%** | 2 |
+| 0653 (5 modules) | Run 1406 | 6.00 | 4.19 | 100.0% | 2 |
+| 0653 (5 modules) | Run 1407 | **3.49** | **2.43** | **75.5%** | 2 |
+
+![Matched Case 0273 and 0653 learned hypergraphs](../../diagnostics/generated/run1406_run1407_best5000_routing_organization_20260920/figures/anchor_hypergraph_1406_1407_cases0273_0653.png)
+
+The two examples make the population result tangible. Run 1406 has visible dominant spatial regions, but every query still carries positive mass on all six groups and the environmental logical pair set is complete. Run 1407 resolves both cases into two dominant spatial query regions with lower confidence-weighted group count, while weaker third/fourth supports form the dashed transition zones; selectivity is stronger in the five-module Case 0653, where environment logical support falls to 75.5%. Both runs still place the active modules into only two groups and retain 100% valid module pair support, so the sharper Run-1407 picture is query/environment organization rather than module-side execution sparsity.
+
+`H1`--`H6` are panel-local display labels, ordered with module-bearing groups first and then by query mass. They intentionally do not align raw group indices across cases or runs: the learned group codes are exchangeable, and matching colors across panels compare structural roles only, not physical identity.
+
 ## 5. Why recorded memory changes only occasionally
 
 ### 5.1 What the training CSV records
@@ -319,7 +336,7 @@ If a future scientific run is authorized, it should isolate one architectural bo
 - Accuracy and raw 90-case tables: `diagnostics/generated/run1404_1406_1407_1804_best5000_accuracy_20260920/`
 - Consolidated checkpoint, convergence, and accuracy reduction: `diagnostics/generated/run1406_run1407_best5000_comparison_20260920/`
 - Cost, semantic phase, and 64-step memory profile: `diagnostics/generated/run1404_1406_1407_1804_best5000_performance_20260920/` (the corrected workload-tagged trace is under `m12_trace/`)
-- 90-case routing, phase, correlations, and frozen interventions: `diagnostics/generated/run1406_run1407_best5000_routing_organization_20260920/`
+- 90-case routing, phase, correlations, frozen interventions, and matched-anchor hypergraphs: `diagnostics/generated/run1406_run1407_best5000_routing_organization_20260920/` (the new figure is under `figures/`; its group-level values are in `anchor_hypergraph_group_summary.csv` and `anchor_hypergraph_summary.json`)
 
 The run directories and checkpoints were read in place. No managed training run was launched by this evaluation.
 
@@ -398,6 +415,14 @@ conda run --no-capture-output -n ModularDT python \
   --output-dir diagnostics/generated/run1406_run1407_best5000_routing_organization_20260920
 ```
 
+Matched-anchor hypergraph rendering, CPU-only from the saved maps:
+
+```bash
+PYTHONPATH=src:Case_ThermalChannel/src \
+conda run --no-capture-output -n ModularDT python \
+  tools/diagnostics/render_run1406_run1407_anchor_hypergraphs.py
+```
+
 Focused validation:
 
 ```bash
@@ -405,7 +430,8 @@ PYTHONPATH=src:Case_ThermalChannel/src \
 conda run --no-capture-output -n ModularDT pytest -q \
   tests/test_reduce_run1404_run1407_accuracy.py \
   tests/test_analyze_run1406_run1407_best5000_comparison.py \
-  tests/test_run1406_run1407_routing_organization.py
+  tests/test_run1406_run1407_routing_organization.py \
+  tests/test_render_run1406_run1407_anchor_hypergraphs.py
 ```
 
 ## 8. Limitations
@@ -416,3 +442,4 @@ conda run --no-capture-output -n ModularDT pytest -q \
 - The fixed 64-step trace repeats a canonical workload. It diagnoses allocator stability but cannot reproduce every case ordering seen during 5000 epochs.
 - Frozen routing interventions test model dependence, not retrained accuracy or physical causal validity.
 - Group labels are exchangeable, so cross-case claims concern support and distributions rather than group identity.
+- The anchor hypergraph diagrams aggregate 192 environment nodes for legibility; their edge widths preserve summed membership mass, but node layout is explanatory rather than a physical coordinate system.
