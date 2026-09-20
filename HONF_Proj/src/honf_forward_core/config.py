@@ -95,6 +95,7 @@ FORWARD_ARCHITECTURES = {
     "fixed_group_pairwise_honf",
     "group_control_pairwise_honf",
     "phase_shared_group_control_honf",
+    "hypergraph_quadrature_honf",
 }
 
 LEGACY_ARCHITECTURE_KEYS = {
@@ -292,6 +293,10 @@ class InterfaceFieldConfig:
     # Run 1406's low-dimensional control width.  Appended so historical
     # positional InterfaceFieldConfig construction remains unchanged.
     group_control_dim: int = 16
+    # Run 1408's fixed environmental quadrature budget. Appended so
+    # historical positional InterfaceFieldConfig construction remains
+    # unchanged and omitted from historical serialized profiles.
+    samples_per_group: int = 4
 
     def __post_init__(self) -> None:
         if isinstance(self.routing, dict):
@@ -360,6 +365,12 @@ class InterfaceFieldConfig:
             or int(self.group_control_dim) <= 0
         ):
             raise ValueError("interface_model.group_control_dim must be a positive integer.")
+        if (
+            isinstance(self.samples_per_group, bool)
+            or not isinstance(self.samples_per_group, int)
+            or int(self.samples_per_group) <= 0
+        ):
+            raise ValueError("interface_model.samples_per_group must be a positive integer.")
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any] | None) -> "InterfaceFieldConfig":
@@ -526,6 +537,7 @@ class UnifiedForwardConfig:
         elif self.forward_architecture in {
             "group_control_pairwise_honf",
             "phase_shared_group_control_honf",
+            "hypergraph_quadrature_honf",
         }:
             controlled = self.interface_model
             if controlled.support_spacing_factor is not None:
@@ -545,15 +557,22 @@ class UnifiedForwardConfig:
                     raise ValueError(
                         f"{self.forward_architecture} requires interface_model.{name}=1.0."
                     )
-            if self.forward_architecture == "phase_shared_group_control_honf":
+            if self.forward_architecture in {
+                "phase_shared_group_control_honf",
+                "hypergraph_quadrature_honf",
+            }:
                 if int(controlled.group_count) != 6:
                     raise ValueError(
-                        "phase_shared_group_control_honf requires interface_model.group_count exactly 6."
+                        f"{self.forward_architecture} requires interface_model.group_count exactly 6."
                     )
                 if int(controlled.group_control_dim) != 16:
                     raise ValueError(
-                        "phase_shared_group_control_honf requires interface_model.group_control_dim exactly 16."
+                        f"{self.forward_architecture} requires interface_model.group_control_dim exactly 16."
                     )
+            if self.forward_architecture == "hypergraph_quadrature_honf" and int(controlled.samples_per_group) != 4:
+                raise ValueError(
+                    "hypergraph_quadrature_honf requires interface_model.samples_per_group exactly 4."
+                )
         elif self.forward_architecture == "fixed_group_pairwise_honf":
             fixed = self.interface_model
             if fixed.support_spacing_factor is not None:
@@ -994,6 +1013,7 @@ class UnifiedForwardConfig:
                 "fixed_group_pairwise_honf",
                 "group_control_pairwise_honf",
                 "phase_shared_group_control_honf",
+                "hypergraph_quadrature_honf",
                 }:
                     for key in (
                         "group_count",
@@ -1004,6 +1024,7 @@ class UnifiedForwardConfig:
                         "query_temperature",
                         "group_code_dim",
                         "group_control_dim",
+                        "samples_per_group",
                     ):
                         interface_payload.pop(key, None)
                 elif self.forward_architecture == "fixed_group_pairwise_honf":
@@ -1021,6 +1042,7 @@ class UnifiedForwardConfig:
                         "response_tree_opening_interval",
                         "coarse_module_source",
                         "group_control_dim",
+                        "samples_per_group",
                     ):
                         interface_payload.pop(key, None)
                 else:
@@ -1041,6 +1063,8 @@ class UnifiedForwardConfig:
                     ):
                         interface_payload.pop(key, None)
                     interface_payload.pop("group_code_dim", None)
+                    if self.forward_architecture != "hypergraph_quadrature_honf":
+                        interface_payload.pop("samples_per_group", None)
         return payload
 
     def decoder_uses(self, component: str) -> bool:
@@ -1079,6 +1103,9 @@ class BatchData:
     env_weights: Optional[Any] = None
     # Runtime case geometry; never stored as an executable checkpoint callback.
     routing_geometry: Optional[Any] = None
+    # Optional adapter-owned regular-grid metadata for the sampled
+    # environmental reader. Appended to preserve positional compatibility.
+    sampler_layout: Optional[Any] = None
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "BatchData":
@@ -1093,6 +1120,8 @@ class BatchData:
         # Keep the historical absent-measure representation unchanged.  A
         # supplied tensor is still described explicitly for adapter diagnostics.
         payload.pop("routing_geometry", None)
+        if self.sampler_layout is None:
+            payload.pop("sampler_layout", None)
         if self.env_weights is None:
             payload.pop("env_weights", None)
         return payload

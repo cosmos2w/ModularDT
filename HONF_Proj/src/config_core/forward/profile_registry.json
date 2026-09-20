@@ -405,6 +405,16 @@
       "checkpoint_families": ["Run 1407 phase-shared group control"],
       "owner": "forward-research",
       "stage": "phase-shared-group-control"
+    },
+    {
+      "name": "hypergraph_quadrature_honf_context",
+      "path": "project://src/config_core/forward/hypergraph_quadrature_honf_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "Run 1408 phase-shared K=6/D=16 four-sample-per-group environmental quadrature / three-term reader",
+      "checkpoint_families": ["Run 1408 hypergraph quadrature"],
+      "owner": "forward-research",
+      "stage": "hypergraph-quadrature"
     }
   ]
 }

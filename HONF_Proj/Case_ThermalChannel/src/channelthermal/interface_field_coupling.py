@@ -248,7 +248,10 @@ def forward_interface_field(
         "dtype": dtype,
     }
     architecture = str(model.config.core_honf.forward_architecture)
-    phase_shared_architecture = architecture == "phase_shared_group_control_honf"
+    phase_shared_architecture = architecture in {
+        "phase_shared_group_control_honf",
+        "hypergraph_quadrature_honf",
+    }
     if architecture in {"regional_response_honf", "hierarchical_regional_honf"}:
         environment_kwargs["response_region_block_shape"] = tuple(
             model.config.core_honf.interface_model.response_region_block_shape
@@ -259,6 +262,16 @@ def forward_interface_field(
         )
     # Only regional families request geometric metadata from the adapter.
     env = model.environment_builder(**environment_kwargs)
+    batch_kwargs: dict[str, Any] = {}
+    if architecture == "hypergraph_quadrature_honf":
+        # The regular-grid measure/layout are opt-in metadata. Historical
+        # readers intentionally retain their existing dense fallback path and
+        # checkpoint-facing behavior even though the adapter can provide the
+        # mathematically equivalent cell masses.
+        batch_kwargs.update(
+            env_weights=getattr(env, "env_weights", None),
+            sampler_layout=getattr(env, "sampler_layout", None),
+        )
     encoded = model.core.encode_case(
         BatchData(
             module_centers=adapter.module_centers,
@@ -274,6 +287,7 @@ def forward_interface_field(
             env_features=env.env_features,
             env_region_ids=getattr(env, "env_region_ids", None),
             env_hierarchy=getattr(env, "env_hierarchy", None),
+            **batch_kwargs,
             routing_geometry=(
                 ChannelThermalRoutingGeometry(
                     model.config.core_honf.domain_length_x,

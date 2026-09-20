@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from honf_forward_core.interface_fields.environment_sampling import RegularGridLayout
+
 if TYPE_CHECKING:
     from honf_forward_core.interface_fields.response_hierarchy import EnvironmentHierarchy
 
@@ -37,6 +39,12 @@ class ChannelThermalEnvironment:
     # existing families leave them unset and keep their original route.
     env_region_ids: torch.Tensor | None = None
     env_hierarchy: EnvironmentHierarchy | None = None
+    # Adapter-owned positive cell masses aligned with env_coords. Appended so
+    # historical positional ChannelThermalEnvironment construction remains
+    # unchanged.
+    env_weights: torch.Tensor | None = None
+    # Optional regular-grid layout consumed only by the sampled reader.
+    sampler_layout: RegularGridLayout | None = None
 
 
 class ChannelThermalEnvironmentBuilder:
@@ -145,6 +153,14 @@ class ChannelThermalEnvironmentBuilder:
         ys = (torch.arange(ny, device=device, dtype=dtype) + 0.5) / float(ny) * ly
         grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
         coords = torch.stack([grid_x.reshape(-1), grid_y.reshape(-1)], dim=-1)
+        token_to_grid = torch.stack(
+            torch.meshgrid(
+                torch.arange(ny, device=device, dtype=torch.long),
+                torch.arange(nx, device=device, dtype=torch.long),
+                indexing="ij",
+            ),
+            dim=-1,
+        ).reshape(-1, 2)
         x = coords[:, 0:1]
         y = coords[:, 1:2]
         centerline = 1.0 - (y - 0.5 * ly).abs() / max(0.5 * ly, 1.0e-6)
@@ -181,9 +197,18 @@ class ChannelThermalEnvironmentBuilder:
                 block_shape=response_tree_block_shape,
                 bounds=((0.0, lx), (0.0, ly)),
             )
+        cell_weights = coords.new_full((coords.shape[0],), (lx / float(nx)) * (ly / float(ny)))
+        sampler_layout = RegularGridLayout.from_axis_bounds(
+            axis_bounds=((0.0, lx), (0.0, ly)),
+            centre_axes=(xs, ys),
+            token_to_grid=token_to_grid,
+            weights=cell_weights,
+        )
         return ChannelThermalEnvironment(
             env_coords=coords.unsqueeze(0).expand(batch_size, -1, -1),
             env_features=features.unsqueeze(0).expand(batch_size, -1, -1),
+            env_weights=cell_weights.unsqueeze(0).expand(batch_size, -1),
+            sampler_layout=sampler_layout,
             env_region_ids=env_region_ids,
             env_hierarchy=env_hierarchy,
         )

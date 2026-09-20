@@ -205,7 +205,34 @@ def _merge_group_control_maps(chunks):
             # receiver chunks; a ratio is formed only after this merge.
             merged[key] = torch.stack(values).sum(dim=0)
         elif first.ndim == 0 and key.endswith(
-            ("_unique_pairs", "_logical_paths", "_rows", "_recomputations", "_pairs", "_paths")
+            (
+                "_sampled_bank_bytes",
+                "_sampled_bank_elements",
+                "_sampled_bank_key_value_elements",
+            )
+        ):
+            # Sampled-bank storage is a per-tile live tensor footprint.  The
+            # last receiver tile may be shorter, so retain the largest actual
+            # allocation rather than summing mutually exclusive tile storage.
+            merged[key] = torch.stack(values).max()
+        elif first.ndim == 0 and key.endswith(
+            (
+                "_unique_pairs",
+                "_logical_paths",
+                "_rows",
+                "_recomputations",
+                "_pairs",
+                "_paths",
+                "_sample_slots",
+                "_nonzero_sample_masses",
+                "_fine_rows_forward",
+                "_geometry_rows_forward",
+                "_content_dot_rows_forward",
+                "_interpolation_corner_loads",
+                "_unique_cells_touched",
+                "_lower_cells_touched",
+                "_fine_rows_recompute",
+            )
         ):
             # The backend reports these execution counts once per receiver
             # chunk.  Preserve full-read totals instead of silently retaining
@@ -240,6 +267,7 @@ class InterfaceFieldCore(nn.Module):
             "fixed_group_pairwise_honf",
             "group_control_pairwise_honf",
             "phase_shared_group_control_honf",
+            "hypergraph_quadrature_honf",
         }:
             # Run 1405/1406 deliberately replace the historical coarse/local
             # context object with the three-term reader. Keep construction
@@ -398,6 +426,25 @@ class InterfaceFieldCore(nn.Module):
                 query_temperature=float(options.query_temperature),
                 activation_checkpointing=bool(options.activation_checkpointing),
             )
+        elif config.forward_architecture == "hypergraph_quadrature_honf":
+            # Keep the opt-in import narrow so historical models do not
+            # materialize or depend on the sampled-reader implementation.
+            from .hypergraph_quadrature import HypergraphQuadratureField
+
+            self.backend = HypergraphQuadratureField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                group_count=int(options.group_count),
+                group_control_dim=int(options.group_control_dim),
+                samples_per_group=int(options.samples_per_group),
+                spatial_dim=int(config.spatial_dim),
+                module_temperature=float(options.module_temperature),
+                environment_temperature=float(options.environment_temperature),
+                query_temperature=float(options.query_temperature),
+                activation_checkpointing=bool(options.activation_checkpointing),
+            )
         else:
             raise ValueError(f"Unsupported interface architecture: {config.forward_architecture!r}")
         self.receiver_chunk_size = int(options.receiver_chunk_size)
@@ -536,6 +583,7 @@ class InterfaceFieldCore(nn.Module):
             env_hierarchy=env_hierarchy,
             env_hierarchy_geometry=hierarchy_geometry,
             routing_geometry=batch.routing_geometry,
+            sampler_layout=batch.sampler_layout,
         )
 
     def prepare(
@@ -558,7 +606,10 @@ class InterfaceFieldCore(nn.Module):
                 region_ids=encoded.env_region_ids,
                 return_routing_maps=bool(return_routing_maps),
             )
-        elif self.config.forward_architecture == "phase_shared_group_control_honf":
+        elif self.config.forward_architecture in {
+            "phase_shared_group_control_honf",
+            "hypergraph_quadrature_honf",
+        }:
             backend_state = self.backend.prepare(
                 encoded,
                 module_states,
@@ -591,6 +642,7 @@ class InterfaceFieldCore(nn.Module):
                     "fixed_group_pairwise_honf",
                     "group_control_pairwise_honf",
                     "phase_shared_group_control_honf",
+                    "hypergraph_quadrature_honf",
                 }
                 else int(self.config.interface_model.coarse_latent_count)
             ),
@@ -604,6 +656,7 @@ class InterfaceFieldCore(nn.Module):
             "fixed_group_pairwise_honf",
             "group_control_pairwise_honf",
             "phase_shared_group_control_honf",
+            "hypergraph_quadrature_honf",
         }:
             aux.update(
                 self.backend.preparation_aux(

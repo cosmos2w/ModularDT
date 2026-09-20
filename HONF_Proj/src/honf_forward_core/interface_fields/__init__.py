@@ -29,6 +29,21 @@ from .regional_response import RegionalResponseField
 from .three_term_context import ThreeTermInterfaceContext
 from .types import EncodedInterfaceCase, InterfaceRead, PreparedInterfaceField
 
+
+def __getattr__(name: str):
+    """Lazily expose the opt-in Run-1408 backend.
+
+    Historical imports should not require the sampled-reader module (or its
+    optional implementation dependencies) to be importable.  The factory
+    performs the same narrow import only when the new architecture is chosen.
+    """
+
+    if name == "HypergraphQuadratureField":
+        from .hypergraph_quadrature import HypergraphQuadratureField
+
+        return HypergraphQuadratureField
+    raise AttributeError(name)
+
 __all__ = [
     "EncodedInterfaceCase",
     "FixedGroupPairwiseField",
@@ -36,6 +51,7 @@ __all__ = [
     "FixedGroupRouter",
     "FixedGroupState",
     "GroupControlPairwiseField",
+    "HypergraphQuadratureField",
     "GroupQueryRoute",
     "GROUP_COUNT",
     "InterfaceFieldCore",

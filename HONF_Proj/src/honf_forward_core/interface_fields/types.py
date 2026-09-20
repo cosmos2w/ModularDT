@@ -32,6 +32,22 @@ class EncodedInterfaceCase:
     env_hierarchy: EnvironmentHierarchy | None = None
     env_hierarchy_geometry: HierarchyGeometry | None = None
     routing_geometry: Any = None
+    # Optional adapter-owned regular-grid metadata for the opt-in sampled
+    # environmental reader. Appended to preserve historical positional
+    # construction and checkpoint-facing fields.
+    sampler_layout: Any = None
+
+    @property
+    def sampling_layout(self) -> Any:
+        """Compatibility alias used by the Run-1408 sampled reader."""
+
+        return self.sampler_layout
+
+    @property
+    def environment_sampling_layout(self) -> Any:
+        """Historical alias retained for adapter/backend transition code."""
+
+        return self.sampler_layout
 
 
 @dataclass(frozen=True)
