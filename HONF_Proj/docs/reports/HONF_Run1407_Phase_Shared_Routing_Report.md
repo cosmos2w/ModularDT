@@ -42,6 +42,24 @@ the later replay row (or otherwise documenting the equivalent scientific
 values). Per the user's instruction, the recovered tmux process is left
 unattended after this startup verification.
 
+### User-authorized continuation from epoch 500 to epoch 5000
+
+The recovered process completed epoch 500 normally. The managed manifest
+recorded `status=completed`, `last_completed_epoch=500`, and exit code 0, and
+`epoch_0500_model.pt` retained model, optimizer, scaler, RNG, configuration,
+and checkpoint-selection state. Epoch-500 validation total loss was
+`0.0444231`, validation field MSE was `0.0186075`, and validation temperature
+MSE was `0.0118314`.
+
+On the user's subsequent instruction, the same run was resumed in
+`Wang-4:0.0` from `epoch_0500_model.pt` with a terminal epoch of 5000. Startup
+was verified through completed epoch 501 with finite metrics on physical GPU
+1; Run 1406 remained untouched on physical GPU 0. The unchanged checkpoint
+policy retains explicit `epoch_1000_model.pt`, `epoch_2500_model.pt`, and
+`epoch_5000_model.pt` milestones, refreshes `latest_model.pt` every 10 epochs,
+and preserves the validation-best total, field, temperature, and predicted
+checkpoints. This is a continuation of Run 1407, not a new run or model.
+
 ## Executive decision
 
 The requested opt-in `phase_shared_group_control_honf` was implemented and one
@@ -76,10 +94,11 @@ valid pairs, so it does not create a useful QE reduction.
 
 Under the plan's research-budget rule, the original epoch-50 assessment did
 not recommend continuation. The user subsequently authorized the same run to
-continue to epoch 500 to test the different-convergence hypothesis, and that
-continuation is now running. No corrective loss, alternate candidate, sweep,
-or Run 1408 was created. The 90-case epoch-500 comparison remains deferred
-until epoch 500 and a later user command.
+continue first to epoch 500 and then to epoch 5000 to test the
+different-convergence hypothesis. The epoch-500 endpoint completed normally,
+and the same run is now continuing toward epoch 5000. No corrective loss,
+alternate candidate, sweep, or Run 1408 was created. The planned 90-case
+comparison remains deferred until a later user command.
 
 ## Scope and comparison policy
 
@@ -613,9 +632,9 @@ rtk env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src:Case_ThermalChannel/src \
   --resume-checkpoint "$run/epoch_0050_model.pt" --yes
 ```
 
-The following requested long-run commands remain **unexecuted**. They are
-contingent on the current epoch-500 continuation completing and creating
-`epoch_0500_model.pt`:
+Epoch 500 completed normally. The user then authorized a direct continuation
+of the same run to epoch 5000, and the following command was executed in
+`Wang-4:0.0`:
 
 ```bash
 run=/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1407_20260919_174751_phase_shared_prototype_group_control
@@ -623,15 +642,14 @@ run=/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/
 rtk env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src:Case_ThermalChannel/src \
   conda run --no-capture-output -n ModularDT python -u train.py \
   --config src/config_core/forward/phase_shared_group_control_honf_context.json \
-  --workflow forward --device cuda:0 --epochs 2500 \
-  --resume-checkpoint "$run/epoch_0500_model.pt" --yes
-
-rtk env CUDA_VISIBLE_DEVICES=1 PYTHONPATH=src:Case_ThermalChannel/src \
-  conda run --no-capture-output -n ModularDT python -u train.py \
-  --config src/config_core/forward/phase_shared_group_control_honf_context.json \
   --workflow forward --device cuda:0 --epochs 5000 \
-  --resume-checkpoint "$run/epoch_2500_model.pt" --yes
+  --resume-checkpoint "$run/epoch_0500_model.pt" --yes
 ```
+
+The configured milestone list automatically preserves epochs 1000, 2500, and
+5000, so a separate stop/relaunch at epoch 2500 is unnecessary. The latest
+full-state checkpoint is also refreshed every 10 epochs, and validation-best
+aliases continue to update throughout the run.
 
 ## Scientific conclusion and next action
 
@@ -651,11 +669,14 @@ Run 1407 answers the intended executor/data-management questions cleanly:
    50 than Run 1406 and Dense 1804.
 
 The epoch-50 review bands did not independently justify the epoch-500 budget,
-but the user explicitly authorized that longitudinal convergence test and it
-is now running. This does not justify a corrective architecture automatically.
-If later work is authorized, the single bottleneck to isolate remains
-**whether phase-static P0 control itself impairs early optimization,
+but the user explicitly authorized that longitudinal convergence test and its
+training endpoint has now completed. Formal matched epoch-500 evaluation is
+still deferred; the same run is continuing to epoch 5000 on the user's later
+instruction. This does not justify a corrective architecture automatically.
+If later diagnostic work is authorized, the single bottleneck to isolate
+remains **whether phase-static P0 control itself impairs early optimization,
 independently of prototype-anchored query keys**. That requires a deliberately
 scoped scientific ablation, not an executor cache claim and not another loss
-term. Until the epoch-500 evidence is available, Run 1406 remains the stronger
-demonstrated scientific parent despite Run 1407's cleaner routing semantics.
+term. Until matched population evaluation is performed, Run 1406 remains the
+stronger demonstrated scientific parent despite Run 1407's cleaner routing
+semantics and substantially improved epoch-500 training metrics.
