@@ -918,16 +918,22 @@ def _sampler_intervention(model: Any, mode: str) -> Iterator[None]:
 
     def replacement(*args: Any, **kwargs: Any) -> Any:
         result = original(*args, **kwargs)
-        if not isinstance(result, tuple) or len(result) < 4:
+        if not isinstance(result, tuple) or len(result) != 2:
             raise TypeError("backend sampler returned an unsupported program tuple")
-        coordinates, beta, raw, query_center = result[:4]
+        coordinates, beta = result
         if mode == "fixed_reference_coordinates":
-            coordinates = query_center[:, :, None, None, :].expand_as(coordinates)
+            layout = args[3] if len(args) > 3 else kwargs.get("layout")
+            if layout is None:
+                raise TypeError("backend sampler intervention requires its regular-grid layout")
+            hull = layout.center_hull.to(device=coordinates.device, dtype=coordinates.dtype)
+            anchor_fraction = backend.reference_anchor_logits.to(coordinates).sigmoid()
+            anchors = hull[0] + (hull[1] - hull[0]) * anchor_fraction
+            coordinates = anchors[None, None].expand_as(coordinates)
         elif mode == "neutral_beta":
             beta = torch_full_like(beta, 1.0 / float(beta.shape[-1]))
         else:
             raise TypeError(f"unknown sampler intervention mode={mode!r}")
-        return coordinates, beta, raw, query_center, *result[4:]
+        return coordinates, beta
 
     backend._sample_program = replacement
     try:

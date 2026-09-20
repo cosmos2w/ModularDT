@@ -17,11 +17,33 @@ from run_run1408_evidence import (
     DEFAULT_CASE_IDS,
     _compact_optimizer_inventory,
     _measure_phase,
+    _sampler_intervention,
     build_parser,
     build_plan,
     execution_ledger,
     render_sampled_cells,
 )
+
+
+class _FakeSamplerBackend:
+    def __init__(self) -> None:
+        self.reference_anchor_logits = torch.zeros((6, 4, 2))
+
+    def _sample_program(self, route, controls, receivers, layout):
+        del route, controls, layout
+        coordinates = torch.zeros((receivers.shape[0], receivers.shape[1], 6, 4, 2))
+        beta = torch.linspace(1.0, 4.0, 4).expand(receivers.shape[0], receivers.shape[1], 6, 4)
+        beta = beta / beta.sum(dim=-1, keepdim=True)
+        return coordinates, beta
+
+
+class _FakeLayout:
+    center_hull = torch.tensor([[1.0, 2.0], [5.0, 8.0]])
+
+
+class _FakeSamplerModel:
+    def __init__(self) -> None:
+        self.core = type("Core", (), {"backend": _FakeSamplerBackend()})()
 
 
 def _args(tmp_path: Path, *extra: str):
@@ -174,6 +196,22 @@ def test_run1408_optimizer_evidence_keeps_counts_without_metadata_or_name_dump()
             }
         ],
     }
+
+
+def test_run1408_sampler_interventions_match_two_tensor_backend_contract() -> None:
+    model = _FakeSamplerModel()
+    receivers = torch.zeros((2, 3, 2))
+    layout = _FakeLayout()
+    with _sampler_intervention(model, "fixed_reference_coordinates"):
+        coordinates, beta = model.core.backend._sample_program(None, None, receivers, layout)
+    expected = torch.tensor([3.0, 5.0]).expand_as(coordinates)
+    torch.testing.assert_close(coordinates, expected)
+    assert not torch.allclose(beta, torch.full_like(beta, 0.25))
+
+    with _sampler_intervention(model, "neutral_beta"):
+        coordinates, beta = model.core.backend._sample_program(None, None, receivers, layout)
+    assert torch.equal(coordinates, torch.zeros_like(coordinates))
+    torch.testing.assert_close(beta, torch.full_like(beta, 0.25))
 
 
 def test_run1408_accessed_cell_plot_consumes_actual_map_arrays(tmp_path: Path) -> None:
