@@ -254,6 +254,26 @@ def test_predicted_read_uses_24_sites_and_updates_sampler() -> None:
     assert not torch.equal(before, core.backend.sample_mlp[-1].weight.detach())
 
 
+def test_out_of_domain_receiver_reference_keeps_sample_sites_inside_grid() -> None:
+    batch, layout = _batch(query_count=3)
+    batch.query_xy = torch.tensor(
+        [
+            [[-0.2, 2.0], [8.2, 2.0], [4.0, -0.1]],
+            [[4.0, 4.1], [-1.0, -1.0], [9.0, 5.0]],
+        ],
+        dtype=torch.float32,
+    )
+    core = InterfaceFieldCore(UnifiedForwardConfig.from_dict(_payload())).train()
+    encoded = core.encode_case(batch)
+    prepared = core.prepare(encoded, encoded.module_tokens)
+    read = core.read(prepared, batch.query_xy, return_routing_maps=True)
+    coordinates = read.interaction_aux["group_control_environment_sample_coordinates"]
+    hull = layout.center_hull.to(coordinates)
+    assert torch.isfinite(read.context).all()
+    assert bool((coordinates >= hull[0]).all())
+    assert bool((coordinates <= hull[1]).all())
+
+
 def test_chunked_read_adds_work_counts_and_keeps_peak_sampled_bank() -> None:
     torch.manual_seed(1408003)
     batch, _ = _batch(query_count=13)

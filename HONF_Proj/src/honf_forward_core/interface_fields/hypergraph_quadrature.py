@@ -227,7 +227,18 @@ class HypergraphQuadratureField(PhaseSharedGroupControlPairwiseField):
             self.spatial_dim + 2,
         )
         center_hull = layout.center_hull.to(device=raw.device, dtype=raw.dtype)
-        query_center = layout.physical_to_centre_points(receivers).to(
+        # Predicted module-port receivers may sit just outside the fluid
+        # rectangle while still being valid coupling locations. Quadrature
+        # sites themselves must remain in Omega, so project only the receiver
+        # reference point to the adapter-owned physical bounds before the
+        # convex centre-hull construction. Keep the generic layout transform
+        # strict: this clamping is a reader policy, not interpolation padding.
+        physical_bounds = layout.physical_bounds.to(device=receivers.device, dtype=receivers.dtype)
+        receiver_reference = torch.minimum(
+            torch.maximum(receivers, physical_bounds[0]),
+            physical_bounds[1],
+        )
+        query_center = layout.physical_to_centre_points(receiver_reference).to(
             device=raw.device,
             dtype=raw.dtype,
         )
