@@ -269,6 +269,7 @@ class InterfaceFieldCore(nn.Module):
             "phase_shared_group_control_honf",
             "hypergraph_quadrature_honf",
             "budgeted_group_control_honf",
+            "occupancy_adaptive_group_control_honf",
         }:
             # Run 1405/1406 deliberately replace the historical coarse/local
             # context object with the three-term reader. Keep construction
@@ -480,6 +481,22 @@ class InterfaceFieldCore(nn.Module):
                 compression_start_epoch=int(budget.compression_start_epoch),
                 hardening_epoch=int(budget.hardening_epoch),
             )
+        elif config.forward_architecture == "occupancy_adaptive_group_control_honf":
+            from .occupancy_group_control import OccupancyAdaptiveGroupControlPairwiseField
+
+            self.backend = OccupancyAdaptiveGroupControlPairwiseField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                group_count=int(options.group_count),
+                group_control_dim=int(options.group_control_dim),
+                spatial_dim=int(config.spatial_dim),
+                module_temperature=float(options.module_temperature),
+                environment_temperature=float(options.environment_temperature),
+                query_temperature=float(options.query_temperature),
+                activation_checkpointing=bool(options.activation_checkpointing),
+            )
         else:
             raise ValueError(f"Unsupported interface architecture: {config.forward_architecture!r}")
         self.receiver_chunk_size = int(options.receiver_chunk_size)
@@ -652,6 +669,7 @@ class InterfaceFieldCore(nn.Module):
             "phase_shared_group_control_honf",
             "hypergraph_quadrature_honf",
             "budgeted_group_control_honf",
+            "occupancy_adaptive_group_control_honf",
         }:
             backend_state = self.backend.prepare(
                 encoded,
@@ -687,6 +705,7 @@ class InterfaceFieldCore(nn.Module):
                     "phase_shared_group_control_honf",
                     "hypergraph_quadrature_honf",
                     "budgeted_group_control_honf",
+                    "occupancy_adaptive_group_control_honf",
                 }
                 else int(self.config.interface_model.coarse_latent_count)
             ),
@@ -702,6 +721,7 @@ class InterfaceFieldCore(nn.Module):
             "phase_shared_group_control_honf",
             "hypergraph_quadrature_honf",
             "budgeted_group_control_honf",
+            "occupancy_adaptive_group_control_honf",
         }:
             aux.update(
                 self.backend.preparation_aux(

@@ -231,6 +231,17 @@ def predict_case(
                     "group_read_group_index": "group_read_group_index",
                     "group_read_geometric_weight": "group_read_geometric_weight",
                     "group_read_normalized_weight": "group_read_normalized_weight",
+                    # Run-1409 occupancy maps are query-local.  Preserve them
+                    # across decoder chunks so an explicit population pass
+                    # can audit all Q receivers instead of only the first
+                    # chunk retained in interaction_aux.
+                    "occupancy_group_query_routing": "occupancy_group_query_routing",
+                    "occupancy_group_query_mask": "occupancy_group_query_mask",
+                    "occupancy_group_module_source_mask": "occupancy_group_module_source_mask",
+                    "occupancy_group_environment_source_mask": "occupancy_group_environment_source_mask",
+                    "occupancy_group_module_mask_support": "occupancy_group_module_mask_support",
+                    "occupancy_group_environment_mask_support": "occupancy_group_environment_mask_support",
+                    "group_control_query_routing": "group_control_query_routing",
                 }
                 for source_key, target_key in key_map.items():
                     value = routing_aux.get(source_key)

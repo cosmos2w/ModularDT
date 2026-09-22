@@ -306,6 +306,7 @@ def forward_interface_field(
         # The backend must rebuild memberships, collective controls, and fine
         # values for each later physical phase.
         "budgeted_group_control_honf",
+        "occupancy_adaptive_group_control_honf",
     }
     if architecture in {"regional_response_honf", "hierarchical_regional_honf"}:
         environment_kwargs["response_region_block_shape"] = tuple(

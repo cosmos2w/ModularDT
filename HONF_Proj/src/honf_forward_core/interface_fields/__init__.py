@@ -33,6 +33,22 @@ from .group_control_support import (
     six_bit_mask,
 )
 from .phase_shared_group_control import PhaseSharedGroupControlPairwiseField
+from .occupancy_group_control import (
+    OccupancyAdaptiveGroupControlPairwiseField,
+    OccupancyGroupControlPairwiseField,
+)
+from .occupancy_group_router import (
+    OCCUPANCY_CONTROL_DIM,
+    OCCUPANCY_KMAX,
+    OccupancyAdaptiveGroupRouter,
+    OccupancyGroupPlan,
+    OccupancyGroupRouter,
+    OccupancyPreparedGroupControl,
+    direct_mask_intersection,
+    occupancy_mask,
+    occupancy_support,
+    pack_16bit_mask,
+)
 from .regional_response import RegionalResponseField
 from .three_term_context import ThreeTermInterfaceContext
 from .types import EncodedInterfaceCase, InterfaceRead, PreparedInterfaceField
@@ -72,6 +88,18 @@ __all__ = [
     "QUERY_MASK_COUNT",
     "PhaseSharedGroupControl",
     "PhaseSharedGroupControlPairwiseField",
+    "OccupancyAdaptiveGroupControlPairwiseField",
+    "OccupancyGroupControlPairwiseField",
+    "OccupancyAdaptiveGroupRouter",
+    "OccupancyGroupPlan",
+    "OccupancyGroupRouter",
+    "OccupancyPreparedGroupControl",
+    "OCCUPANCY_KMAX",
+    "OCCUPANCY_CONTROL_DIM",
+    "direct_mask_intersection",
+    "occupancy_mask",
+    "occupancy_support",
+    "pack_16bit_mask",
     "PreparedGroupControl",
     "PreparedInterfaceField",
     "PrototypeAnchoredGroupRouter",

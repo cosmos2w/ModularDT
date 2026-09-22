@@ -425,6 +425,16 @@
       "checkpoint_families": ["Run 1409 case-budgeted group control"],
       "owner": "forward-research",
       "stage": "case-budgeted-group-control"
+    },
+    {
+      "name": "occupancy_adaptive_group_control_honf_context",
+      "path": "project://src/config_core/forward/occupancy_adaptive_group_control_honf_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "Run 1409 Kmax=12/D=16 exact-zero source occupancy / one geometry refinement / exact rectangular three-term reader",
+      "checkpoint_families": ["Run 1409 occupancy-adaptive geometric group control"],
+      "owner": "forward-research",
+      "stage": "occupancy-adaptive-group-control"
     }
   ]
 }
