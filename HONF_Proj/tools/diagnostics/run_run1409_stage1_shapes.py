@@ -1,4 +1,4 @@
-"""Bounded pre-training checks for the Run-1409 budgeted reader.
+"""Historical v1 pre-training checks for the Run-1409 budgeted reader.
 
 This diagnostic deliberately performs no optimizer step and writes no model
 state.  It builds one fresh profile model, materializes it with the ordinary
@@ -474,6 +474,12 @@ def run_stage1(args: argparse.Namespace) -> dict[str, Any]:
     group_count = int(model.config.core_honf.interface_model.group_count)
     if group_count != 12:
         raise ValueError(f"expected Run-1409 Kmax=12, got {group_count}")
+    if str(getattr(model, "budgeted_schedule_mode", "static")) == "dense_to_sparse_v2":
+        raise ValueError(
+            "run_run1409_stage1_shapes.py encodes the historical v1 ordinary-group contract; "
+            "use run_run1409_v2_prelaunch_audit.py and run_run1409_budgeted_evidence.py "
+            "for the symmetric rescue schedule"
+        )
     rows = []
     try:
         for index, (case_id, query_count) in enumerate(shapes):

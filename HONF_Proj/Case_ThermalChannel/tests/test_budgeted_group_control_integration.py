@@ -16,6 +16,13 @@ from channelthermal.data.datasets import (
 from channelthermal.local_surrogate.model import LocalModuleConfig, LocalModuleSurrogate
 from channelthermal.model import ChannelThermalHONFModel
 from channelthermal.training_tools.losses import case_group_budget_loss
+from honf_forward_core.interface_fields.case_group_budget import (
+    routing_logit_scale,
+    sparsification_continuation,
+)
+
+
+RUN1409_FINAL_GROUP_BUDGET_WEIGHT = 0.005783974924700852
 
 
 def test_expected_group_count_is_live_and_reduced_once_per_case() -> None:
@@ -57,6 +64,60 @@ def test_disabled_budget_objective_preserves_zero_for_legacy_outputs() -> None:
     assert value.item() == pytest.approx(0.0)
 
 
+def test_dense_to_sparse_schedule_has_exact_rescue_boundaries() -> None:
+    assert routing_logit_scale(1) == pytest.approx(0.1)
+    assert routing_logit_scale(25) == pytest.approx(1.0)
+    assert sparsification_continuation(25) == pytest.approx(0.0)
+    assert sparsification_continuation(26) == pytest.approx(1.0 / 125.0)
+    assert sparsification_continuation(150) == pytest.approx(1.0)
+    assert sparsification_continuation(500) == pytest.approx(1.0)
+
+
+def test_dense_to_sparse_loss_coefficient_is_ramped_once() -> None:
+    from channelthermal.training.epoch import assemble_channelthermal_loss_terms
+
+    pred = torch.zeros((2, 1, 5), requires_grad=True)
+    batch = {"field_targets": torch.zeros_like(pred)}
+    model = SimpleNamespace(
+        budgeted_schedule_mode="dense_to_sparse_v2",
+        config=SimpleNamespace(
+            core_honf=SimpleNamespace(
+                forward_architecture="budgeted_group_control_honf",
+                interface_model=SimpleNamespace(routing=None),
+            ),
+            channelthermal=SimpleNamespace(field_names=["u", "v", "p", "omega", "temperature"]),
+        ),
+    )
+    for epoch, continuation in ((25, 0.0), (26, 1.0 / 125.0), (150, 1.0)):
+        output = {
+            "pred_field": pred,
+            "case_group_budget_expected_optional_count": torch.tensor([2.0, 4.0]),
+            "case_group_budget_continuation": torch.full((2,), continuation),
+            "case_group_budget_routing_strength": torch.full((2,), routing_logit_scale(epoch)),
+        }
+        terms = assemble_channelthermal_loss_terms(
+            output,
+            batch,
+            model,
+            {
+                "field_mse_weight": 1.0,
+                "case_group_budget_weight": RUN1409_FINAL_GROUP_BUDGET_WEIGHT,
+            },
+            local_port_condition_mode="predicted",
+            mixed_teacher_ratio=0.0,
+            effective_internal_temperature_weight=0.0,
+            effective_interface_weight=0.0,
+            predicted_consistency_weight=0.0,
+        )
+        assert terms["loss_group_budget"].item() == pytest.approx(3.0)
+        assert terms["case_group_budget_weight"].item() == pytest.approx(
+            continuation * RUN1409_FINAL_GROUP_BUDGET_WEIGHT
+        )
+        assert terms["loss"].item() == pytest.approx(
+            continuation * RUN1409_FINAL_GROUP_BUDGET_WEIGHT * 3.0
+        )
+
+
 def test_case_budget_settings_accepts_numeric_case_weight() -> None:
     # Keep this small config fixture independent of the new core dataclass;
     # the trainer's resolver is intentionally tolerant while checkpoints are
@@ -76,7 +137,28 @@ def test_case_budget_settings_accepts_numeric_case_weight() -> None:
     assert weight == pytest.approx(0.125)
 
 
-def _budgeted_model() -> ChannelThermalHONFModel:
+def _budgeted_model(*, rescue_mode: bool = True) -> ChannelThermalHONFModel:
+    case_group_budget = {
+        "enabled": True,
+        "gate_hidden_dim": 32,
+        "hard_concrete_temperature": 2.0 / 3.0,
+        "stretch_lower": -0.1,
+        "stretch_upper": 1.1,
+        "initial_optional_open_probability": 0.95,
+        "always_available_group": 0,
+        "normalization": "gate_reference_overlap",
+    }
+    if rescue_mode:
+        case_group_budget.update(
+            {
+                "rescue_mode": True,
+                "schedule": "dense_to_sparse_v2",
+                "routing_initial_scale": 0.1,
+                "routing_full_epoch": 25,
+                "compression_start_epoch": 25,
+                "hardening_epoch": 150,
+            }
+        )
     config = ChannelThermalHONFConfig.from_dict(
         {
             "core_honf": {
@@ -101,16 +183,7 @@ def _budgeted_model() -> ChannelThermalHONFModel:
                     "environment_temperature": 1.0,
                     "query_temperature": 1.0,
                     "group_control_dim": 16,
-                    "case_group_budget": {
-                        "enabled": True,
-                        "gate_hidden_dim": 32,
-                        "hard_concrete_temperature": 2.0 / 3.0,
-                        "stretch_lower": -0.1,
-                        "stretch_upper": 1.1,
-                        "initial_optional_open_probability": 0.95,
-                        "always_available_group": 0,
-                        "normalization": "gate_reference_overlap",
-                    },
+                    "case_group_budget": case_group_budget,
                 },
             },
             "channelthermal": {
@@ -141,6 +214,12 @@ def _budgeted_model() -> ChannelThermalHONFModel:
         normalization_stats={},
     )
     return model
+
+
+def test_historical_budget_config_defaults_to_static_v1_semantics() -> None:
+    model = _budgeted_model(rescue_mode=False)
+    assert model.budgeted_schedule_mode == "static"
+    assert getattr(model.core.backend.router, "rescue_mode", False) is False
 
 
 def test_budgeted_coupling_reuses_only_one_gate_plan_across_phases() -> None:
@@ -174,6 +253,8 @@ def test_budgeted_coupling_reuses_only_one_gate_plan_across_phases() -> None:
     expected = output["case_group_budget_expected_optional_count"]
     assert expected.shape == (1,)
     assert torch.isfinite(expected).all()
+    assert output["case_group_budget_continuation"].shape == (1,)
+    assert output["case_group_budget_routing_strength"].shape == (1,)
     assert torch.isfinite(output["pred_field"]).all()
     aux = output["interaction_aux"]
     # Both the case-gate summaries and the inherited Run-1406 control
@@ -256,6 +337,7 @@ def test_budgeted_checkpoint_resume_restores_architecture_and_state(tmp_path) ->
         # Materialize lazy core modules before constructing the optimizer, as
         # the maintained training workflow does for checkpoint operations.
         source(**forward_kwargs)
+    source.set_training_progress(epoch=26, total_epochs=500)
     optimizer = torch.optim.AdamW(source.parameters(), lr=1.0e-3)
     source.train()
     optimizer.zero_grad(set_to_none=True)
@@ -287,14 +369,16 @@ def test_budgeted_checkpoint_resume_restores_architecture_and_state(tmp_path) ->
         },
         "loss": {"case_group_budget_weight": 0.0},
     }
-    path = tmp_path / "epoch_0007_model.pt"
+    train_config["loss"]["case_group_budget_weight"] = RUN1409_FINAL_GROUP_BUDGET_WEIGHT
+    train_config["training"] = {"epochs": 500}
+    path = tmp_path / "epoch_0026_model.pt"
     save_checkpoint(
         path,
         model=source,
         model_config=source.config,
         train_config=train_config,
         dataset=dataset,
-        epoch=7,
+        epoch=26,
         best_metric=0.25,
         optimizer=optimizer,
     )
@@ -319,12 +403,19 @@ def test_budgeted_checkpoint_resume_restores_architecture_and_state(tmp_path) ->
     assert saved_optimizer_state and saved_optimizer_state.get("state")
     resumed_optimizer.load_state_dict(saved_optimizer_state)
     assert resumed_optimizer.state_dict()["state"]
-    assert checkpoint["epoch"] == 7
+    assert checkpoint["epoch"] == 26
+    assert checkpoint["selection_state"] == {"epoch": 26, "total_epochs": 500}
     assert checkpoint["model_config"]["core_honf"]["forward_architecture"] == (
         "budgeted_group_control_honf"
     )
     for left, right in zip(source.parameters(), resumed.parameters()):
         torch.testing.assert_close(left, right)
+    selection_state = checkpoint["selection_state"]
+    resumed.set_training_progress(
+        epoch=int(selection_state["epoch"]),
+        total_epochs=int(selection_state["total_epochs"]),
+    )
+    assert resumed.budgeted_schedule_mode == "dense_to_sparse_v2"
 
     # Resume must restore the stochastic gate stream as well as parameters and
     # optimizer slots.  Rewind to the checkpoint RNG state before each model

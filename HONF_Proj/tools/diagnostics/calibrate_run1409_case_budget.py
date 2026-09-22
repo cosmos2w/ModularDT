@@ -1,4 +1,4 @@
-"""One-time Run-1409 case-budget coefficient calibration.
+"""Historical v1 Run-1409 case-budget coefficient calibration.
 
 This command uses exactly two real training batches from the selected profile.
 It samples one fixed hard-concrete noise tensor per batch, computes
@@ -205,6 +205,11 @@ def run_calibration(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("calibration profile must use budgeted_group_control_honf")
     if int(model.config.core_honf.interface_model.group_count) != GROUP_COUNT:
         raise ValueError("calibration profile must use Kmax=12")
+    if str(getattr(model, "budgeted_schedule_mode", "static")) == "dense_to_sparse_v2":
+        raise ValueError(
+            "this calibration records the historical privileged-group v1 protocol; "
+            "the rescue rerun reuses its fixed coefficient and must not recalibrate"
+        )
     # The fresh-model helper intentionally builds a stable read-only dataset.
     # Match the formal profile's real train sampling policy before taking the
     # two batches, including the first formal epoch stream.

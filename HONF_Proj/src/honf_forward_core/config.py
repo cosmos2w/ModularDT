@@ -269,10 +269,20 @@ class CaseGroupBudgetConfig:
     always_available_group: int = 0
     normalization: str = "gate_reference_overlap"
     execution_mode: str = "full_width"
+    # New rescue semantics are opt-in.  Old model_config payloads omit these
+    # fields and therefore reconstruct the historical privileged-group path.
+    rescue_mode: bool = False
+    schedule: str = "static"
+    routing_initial_scale: float = 0.1
+    routing_full_epoch: int = 25
+    compression_start_epoch: int = 25
+    hardening_epoch: int = 150
 
     def __post_init__(self) -> None:
         if not isinstance(self.enabled, bool):
             raise TypeError("interface_model.case_group_budget.enabled must be boolean.")
+        if not isinstance(self.rescue_mode, bool):
+            raise TypeError("interface_model.case_group_budget.rescue_mode must be boolean.")
         if isinstance(self.gate_hidden_dim, bool) or int(self.gate_hidden_dim) <= 0:
             raise ValueError("interface_model.case_group_budget.gate_hidden_dim must be positive.")
         for name in ("hard_concrete_temperature", "stretch_lower", "stretch_upper"):
@@ -288,8 +298,39 @@ class CaseGroupBudgetConfig:
             raise ValueError(
                 "interface_model.case_group_budget.initial_optional_open_probability must be in (0,1)."
             )
-        if isinstance(self.always_available_group, bool) or int(self.always_available_group) != 0:
-            raise ValueError("interface_model.case_group_budget.always_available_group must be 0.")
+        if (
+            isinstance(self.always_available_group, bool)
+            or int(self.always_available_group) < 0
+            or int(self.always_available_group) >= 12
+        ):
+            raise ValueError(
+                "interface_model.case_group_budget.always_available_group must be an index in [0, 12)."
+            )
+        if not self.rescue_mode and int(self.always_available_group) != 0:
+            raise ValueError("the historical budget path requires always_available_group=0.")
+        if self.schedule not in {"static", "dense_to_sparse_v2"}:
+            raise ValueError(
+                "interface_model.case_group_budget.schedule must be 'static' or 'dense_to_sparse_v2'."
+            )
+        if self.schedule == "dense_to_sparse_v2" and not self.rescue_mode:
+            raise ValueError(
+                "dense_to_sparse_v2 requires interface_model.case_group_budget.rescue_mode=true."
+            )
+        routing_initial_scale = float(self.routing_initial_scale)
+        if not math.isfinite(routing_initial_scale) or not 0.0 < routing_initial_scale <= 1.0:
+            raise ValueError(
+                "interface_model.case_group_budget.routing_initial_scale must be finite and in (0,1]."
+            )
+        for name in ("routing_full_epoch", "compression_start_epoch", "hardening_epoch"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or int(value) <= 0:
+                raise ValueError(
+                    f"interface_model.case_group_budget.{name} must be a positive integer."
+                )
+        if int(self.compression_start_epoch) > int(self.hardening_epoch):
+            raise ValueError(
+                "interface_model.case_group_budget.compression_start_epoch must not exceed hardening_epoch."
+            )
         if self.normalization != "gate_reference_overlap":
             raise ValueError(
                 "interface_model.case_group_budget.normalization must be 'gate_reference_overlap'."
@@ -1032,6 +1073,23 @@ class UnifiedForwardConfig:
                 payload.pop(key, None)
             interface_payload = payload.get("interface_model")
             if isinstance(interface_payload, dict):
+                budget_payload = interface_payload.get("case_group_budget")
+                if (
+                    self.forward_architecture == "budgeted_group_control_honf"
+                    and isinstance(budget_payload, dict)
+                    and not bool(budget_payload.get("rescue_mode", False))
+                ):
+                    # Appended rescue fields must not be injected into old
+                    # v1 model_config payloads when they are resaved.
+                    for key in (
+                        "rescue_mode",
+                        "schedule",
+                        "routing_initial_scale",
+                        "routing_full_epoch",
+                        "compression_start_epoch",
+                        "hardening_epoch",
+                    ):
+                        budget_payload.pop(key, None)
                 if self.interface_model.routing is None:
                     interface_payload.pop("routing", None)
                 elif self.interface_model.routing.strategy != "mean_shift":

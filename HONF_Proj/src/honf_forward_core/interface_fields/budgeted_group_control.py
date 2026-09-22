@@ -17,7 +17,12 @@ from typing import Any
 import torch
 from honf_forward_core.routing import entmax15
 
-from .case_group_budget import CaseGroupBudget, CaseGroupGate
+from .case_group_budget import (
+    CaseGroupBudget,
+    CaseGroupGate,
+    routing_logit_scale,
+    sparsification_continuation,
+)
 from .group_control_pairwise import GroupControlPairwiseField
 from .group_control_router import GroupQueryRoute, PreparedGroupControl
 from .types import EncodedInterfaceCase
@@ -45,6 +50,12 @@ class BudgetedGroupRouter(LowDimensionalGroupRouter):
         stretch_upper: float = 1.1,
         initial_optional_open_probability: float = 0.95,
         always_available_group: int = 0,
+        rescue_mode: bool = False,
+        schedule: str = "static",
+        routing_initial_scale: float = 0.1,
+        routing_full_epoch: int = 25,
+        compression_start_epoch: int = 25,
+        hardening_epoch: int = 150,
     ) -> None:
         super().__init__(
             hidden_dim,
@@ -65,6 +76,59 @@ class BudgetedGroupRouter(LowDimensionalGroupRouter):
             stretch_upper=stretch_upper,
             initial_optional_open_probability=initial_optional_open_probability,
             always_available_group=always_available_group,
+            rescue_mode=rescue_mode,
+        )
+        if schedule not in {"static", "dense_to_sparse_v2"}:
+            raise ValueError("schedule must be 'static' or 'dense_to_sparse_v2'.")
+        if bool(rescue_mode) and schedule == "dense_to_sparse_v2":
+            routing_logit_scale(
+                1,
+                initial_scale=routing_initial_scale,
+                full_epoch=routing_full_epoch,
+            )
+            sparsification_continuation(
+                1,
+                compression_start_epoch=compression_start_epoch,
+                hardening_epoch=hardening_epoch,
+            )
+        self.rescue_mode = bool(rescue_mode)
+        self.schedule = str(schedule)
+        self.routing_initial_scale = float(routing_initial_scale)
+        self.routing_full_epoch = int(routing_full_epoch)
+        self.compression_start_epoch = int(compression_start_epoch)
+        self.hardening_epoch = int(hardening_epoch)
+        self._training_epoch: int | None = None
+        self._training_total_epochs: int | None = None
+
+    def set_training_progress(self, *, epoch: int, total_epochs: int | None = None) -> None:
+        """Set absolute epoch metadata used by the opt-in rescue schedule."""
+
+        if isinstance(epoch, bool) or int(epoch) < 0:
+            raise ValueError("epoch must be a nonnegative integer.")
+        if total_epochs is not None and (
+            isinstance(total_epochs, bool) or int(total_epochs) <= 0
+        ):
+            raise ValueError("total_epochs must be a positive integer when provided.")
+        self._training_epoch = int(epoch)
+        self._training_total_epochs = None if total_epochs is None else int(total_epochs)
+
+    def selection_state(self) -> dict[str, int | None]:
+        return {"epoch": self._training_epoch, "total_epochs": self._training_total_epochs}
+
+    def _schedule_scalars(self) -> tuple[float, float]:
+        if not self.rescue_mode or self.schedule != "dense_to_sparse_v2":
+            return 1.0, 1.0
+        return (
+            routing_logit_scale(
+                self._training_epoch,
+                initial_scale=self.routing_initial_scale,
+                full_epoch=self.routing_full_epoch,
+            ),
+            sparsification_continuation(
+                self._training_epoch,
+                compression_start_epoch=self.compression_start_epoch,
+                hardening_epoch=self.hardening_epoch,
+            ),
         )
 
     def _source_controls(
@@ -193,10 +257,13 @@ class BudgetedGroupRouter(LowDimensionalGroupRouter):
         if budget is None:
             prototypes = self.group_codes.to(device=module_states.device, dtype=module_states.dtype)
             optional_logits = self.case_gate.logits(gate_context, prototypes)
+            route_scale, continuation = self._schedule_scalars()
             budget = self.case_gate.build_budget(
                 optional_logits,
                 noise=gate_noise,
                 deterministic=bool(deterministic_gates),
+                continuation=continuation,
+                route_logit_scale=route_scale,
             )
         else:
             if not isinstance(budget, CaseGroupBudget):
@@ -226,6 +293,7 @@ class BudgetedGroupRouter(LowDimensionalGroupRouter):
         module_logits = torch.einsum("bmd,bkd->bmk", module_control, codes)
         module_logits = module_logits / (float(self.control_dim) ** 0.5)
         module_logits = module_logits / float(self.module_temperature)
+        module_logits = module_logits * float(budget.route_logit_scale)
         module_membership = self._available_assign(
             module_logits,
             budget,
@@ -237,6 +305,7 @@ class BudgetedGroupRouter(LowDimensionalGroupRouter):
         environment_logits = torch.einsum("bed,bkd->bek", environment_control, codes)
         environment_logits = environment_logits / (float(self.control_dim) ** 0.5)
         environment_logits = environment_logits / float(self.environment_temperature)
+        environment_logits = environment_logits * float(budget.route_logit_scale)
         environment_membership = self._available_assign(
             environment_logits,
             budget,
@@ -352,6 +421,7 @@ class BudgetedGroupRouter(LowDimensionalGroupRouter):
         logits = torch.einsum("bqd,bkd->bqk", query_control, transformed_group)
         logits = logits / (float(self.control_dim) ** 0.5)
         logits = logits / float(self.query_temperature)
+        logits = logits * float(budget.route_logit_scale)
         logits = logits + prior[:, None, :]
         assignment = entmax15(logits, dim=-1, mask=available[:, None, :])
         return GroupQueryRoute(
@@ -395,6 +465,12 @@ class BudgetedGroupControlPairwiseField(GroupControlPairwiseField):
         initial_optional_open_probability: float = 0.95,
         always_available_group: int = 0,
         execution_mode: str = "full_width",
+        rescue_mode: bool = False,
+        schedule: str = "static",
+        routing_initial_scale: float = 0.1,
+        routing_full_epoch: int = 25,
+        compression_start_epoch: int = 25,
+        hardening_epoch: int = 150,
     ) -> None:
         super().__init__(
             hidden_dim,
@@ -426,16 +502,30 @@ class BudgetedGroupControlPairwiseField(GroupControlPairwiseField):
             stretch_upper=stretch_upper,
             initial_optional_open_probability=initial_optional_open_probability,
             always_available_group=always_available_group,
+            rescue_mode=rescue_mode,
+            schedule=schedule,
+            routing_initial_scale=routing_initial_scale,
+            routing_full_epoch=routing_full_epoch,
+            compression_start_epoch=compression_start_epoch,
+            hardening_epoch=hardening_epoch,
         )
         self.execution_mode = str(execution_mode)
         if self.execution_mode not in {"full_width", "compact"}:
             raise ValueError("execution_mode must be 'full_width' or 'compact'.")
+        self.rescue_mode = self.router.rescue_mode
+        self.schedule = self.router.schedule
 
     def set_execution_mode(self, mode: str) -> None:
         mode = str(mode)
         if mode not in {"full_width", "compact"}:
             raise ValueError("execution_mode must be 'full_width' or 'compact'.")
         self.execution_mode = mode
+
+    def set_training_progress(self, *, epoch: int, total_epochs: int | None = None) -> None:
+        self.router.set_training_progress(epoch=epoch, total_epochs=total_epochs)
+
+    def selection_state(self) -> dict[str, int | None]:
+        return self.router.selection_state()
 
     def _budget_scale(self, state: dict[str, Any], value: torch.Tensor) -> torch.Tensor:
         budget: CaseGroupBudget = state["case_group_budget"]
@@ -594,13 +684,32 @@ class BudgetedGroupControlPairwiseField(GroupControlPairwiseField):
         budget: CaseGroupBudget = state["case_group_budget"]
         executed_width = int(state["group_control_state"].group_control.shape[1])
         live_count = budget.live_count.to(dtype=state["module_tokens"].dtype)
+        raw_live_count = budget.raw_live_count.to(dtype=state["module_tokens"].dtype)
         summary.update(
             {
                 "case_group_budget_sampled_live_count": live_count.detach(),
+                "case_group_budget_live_count": live_count.detach(),
+                "case_group_budget_raw_live_count": raw_live_count.detach(),
+                "case_group_budget_executed_live_count": live_count.detach(),
                 "case_group_budget_kappa": budget.kappa.to(
                     dtype=state["module_tokens"].dtype
                 ).detach(),
                 "case_group_budget_expected_optional_count_detached": budget.expected_optional_count.detach(),
+                "case_group_budget_expected_group_count_detached": budget.expected_group_count.detach(),
+                "case_group_budget_expected_count": budget.expected_group_count.detach(),
+                "case_group_budget_expected_excess_group_count_detached": budget.expected_excess_group_count.detach(),
+                "case_group_budget_continuation": state["module_tokens"].new_full(
+                    (budget.batch_size,), float(budget.continuation)
+                ).detach(),
+                "case_group_budget_routing_logit_scale": state["module_tokens"].new_full(
+                    (budget.batch_size,), float(budget.route_logit_scale)
+                ).detach(),
+                "case_group_budget_routing_strength": state["module_tokens"].new_full(
+                    (budget.batch_size,), float(budget.route_logit_scale)
+                ).detach(),
+                "case_group_budget_fallback_used": budget.fallback_used.to(
+                    dtype=state["module_tokens"].dtype
+                ).detach(),
                 "case_group_budget_packed_width": state["module_tokens"].new_full(
                     (budget.batch_size,), float(budget.packed_width)
                 ).detach(),
@@ -627,11 +736,24 @@ class BudgetedGroupControlPairwiseField(GroupControlPairwiseField):
             summary.update(
                 {
                     "case_group_budget_gate_values": budget.z.detach(),
+                    "case_group_budget_gate_values_raw": budget.raw_z.detach(),
+                    "case_group_budget_raw_z": budget.raw_z.detach(),
+                    "case_group_budget_effective_z": budget.z.detach(),
+                    "case_group_budget_z": budget.z.detach(),
                     "case_group_budget_gate_support": budget.support.detach(),
+                    "case_group_budget_gate_support_raw": budget.raw_support.detach(),
+                    "case_group_budget_raw_support": budget.raw_support.detach(),
+                    "case_group_budget_executed_support": budget.support.detach(),
+                    "case_group_budget_support": budget.support.detach(),
                     "case_group_budget_packed_prototype_ids": budget.packed_ids.detach(),
                     "case_group_budget_packed_valid": budget.packed_valid.detach(),
                     "case_group_budget_gate_positive_probability": budget.positive_probability.detach(),
+                    "case_group_budget_positive_probability": budget.positive_probability.detach(),
                     "case_group_budget_gate_reference_eta": budget.eta.detach(),
+                    "case_group_budget_eta": budget.eta.detach(),
+                    "case_group_budget_gate_fallback_used": budget.fallback_used.detach(),
+                    "case_group_budget_fallback_used": budget.fallback_used.detach(),
+                    "case_group_budget_fallback": budget.fallback_used.detach(),
                 }
             )
         return summary

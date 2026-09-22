@@ -353,6 +353,29 @@ def _case_group_budget_settings(
     return budget_enabled, weight
 
 
+def _case_group_budget_schedule(
+    model: ChannelThermalHONFModel,
+    loss_cfg: Dict[str, Any],
+) -> str:
+    """Return the schedule encoded in the model config.
+
+    The schedule is part of the model architecture contract so checkpoint
+    evaluation and resume reconstruct the same objective.  ``loss_cfg`` is
+    intentionally not a fallback: historical budgeted checkpoints have the
+    static default, while rescue checkpoints carry the explicit v2 block in
+    ``CaseGroupBudgetConfig``.
+    """
+
+    del loss_cfg
+    configured = getattr(model, "budgeted_schedule_mode", "static")
+    value = str(configured).strip().lower()
+    if value not in {"static", "dense_to_sparse_v2"}:
+        raise ValueError(
+            "case_group_budget.schedule must be 'static' or 'dense_to_sparse_v2'."
+        )
+    return value
+
+
 def assemble_channelthermal_loss_terms(
     output: dict[str, Any],
     batch: dict[str, Any],
@@ -419,6 +442,21 @@ def assemble_channelthermal_loss_terms(
     loss_org = organizer_regularization(output, loss_cfg)
 
     budget_enabled, budget_weight = _case_group_budget_settings(model, loss_cfg)
+    budget_schedule = _case_group_budget_schedule(model, loss_cfg)
+    # Keep the live per-case excess scalar raw.  The ThermalChannel objective
+    # applies the calibrated coefficient and its deterministic c(t) ramp once.
+    effective_budget_weight = output["pred_field"].new_tensor(budget_weight)
+    continuation = output.get("case_group_budget_continuation")
+    routing_strength = output.get("case_group_budget_routing_strength")
+    if budget_schedule == "dense_to_sparse_v2":
+        if not torch.is_tensor(continuation) or continuation.numel() == 0:
+            raise RuntimeError(
+                "dense_to_sparse_v2 requires the live P0 continuation scalar in model output."
+            )
+        effective_budget_weight = effective_budget_weight * continuation.mean().to(
+            device=effective_budget_weight.device,
+            dtype=effective_budget_weight.dtype,
+        )
     loss_group_budget = case_group_budget_loss(
         output,
         enabled=budget_enabled,
@@ -451,12 +489,24 @@ def assemble_channelthermal_loss_terms(
         + float(predicted_consistency_weight) * loss_predicted_consistency
         + loss_org
     )
-    loss = loss_physical + paircost_weight * loss_paircost + budget_weight * loss_group_budget
+    loss = loss_physical + paircost_weight * loss_paircost + effective_budget_weight * loss_group_budget
     return {
         "loss": loss,
         "loss_physical": loss_physical,
         "loss_group_budget": loss_group_budget,
-        "case_group_budget_weight": output["pred_field"].new_tensor(budget_weight),
+        "case_group_budget_weight": effective_budget_weight,
+        "case_group_budget_final_weight": output["pred_field"].new_tensor(budget_weight),
+        "case_group_budget_schedule": budget_schedule,
+        "case_group_budget_routing_strength": (
+            routing_strength.mean()
+            if torch.is_tensor(routing_strength) and routing_strength.numel()
+            else output["pred_field"].new_ones(())
+        ),
+        "case_group_budget_continuation": (
+            continuation.mean()
+            if torch.is_tensor(continuation) and continuation.numel()
+            else output["pred_field"].new_ones(())
+        ),
         "loss_field": loss_field,
         "loss_internal_temperature": loss_internal,
         "loss_interface": loss_interface,
@@ -652,6 +702,15 @@ def run_epoch(
             if budget_enabled:
                 metric_tensors["loss_group_budget"] = loss_group_budget
                 metric_tensors["case_group_budget_weight"] = loss_terms["case_group_budget_weight"]
+                metric_tensors["case_group_budget_final_weight"] = loss_terms[
+                    "case_group_budget_final_weight"
+                ]
+                metric_tensors["case_group_budget_routing_strength"] = loss_terms[
+                    "case_group_budget_routing_strength"
+                ]
+                metric_tensors["case_group_budget_continuation"] = loss_terms[
+                    "case_group_budget_continuation"
+                ]
                 expected_count = output.get("case_group_budget_expected_optional_count")
                 metric_tensors["case_group_budget_expected_optional_count"] = (
                     expected_count.mean()
@@ -792,6 +851,9 @@ def run_epoch(
                     "loss_physical": math.nan,
                     "loss_group_budget": math.nan,
                     "case_group_budget_weight": math.nan,
+                    "case_group_budget_final_weight": math.nan,
+                    "case_group_budget_routing_strength": math.nan,
+                    "case_group_budget_continuation": math.nan,
                     "case_group_budget_expected_optional_count": math.nan,
                 }
             )

@@ -550,8 +550,14 @@ def run_from_config(
         fieldnames.extend(
             [
                 "case_group_budget_weight",
+                "case_group_budget_final_weight",
+                "case_group_budget_routing_strength",
+                "case_group_budget_continuation",
                 "case_group_budget_expected_optional_count",
                 "val_case_group_budget_weight",
+                "val_case_group_budget_final_weight",
+                "val_case_group_budget_routing_strength",
+                "val_case_group_budget_continuation",
                 "val_case_group_budget_expected_optional_count",
             ]
         )
@@ -677,6 +683,17 @@ def run_from_config(
         best_predicted = float(best_payload.get("best_val_predicted_loss_total", math.inf))
         start_epoch = checkpoint_epoch + 1
         _restore_rng_state(checkpoint)
+        saved_selection = checkpoint.get("selection_state")
+        if isinstance(saved_selection, dict) and saved_selection.get("epoch") is not None:
+            selection_epoch = int(saved_selection["epoch"])
+            selection_total = saved_selection.get("total_epochs", epochs)
+        else:
+            selection_epoch = checkpoint_epoch
+            selection_total = epochs
+        model.set_training_progress(
+            epoch=selection_epoch,
+            total_epochs=None if selection_total is None else int(selection_total),
+        )
         print(f"[resume] loaded {resume_checkpoint}; continuing at epoch {start_epoch} / {epochs}")
 
     total_train_seconds = 0.0

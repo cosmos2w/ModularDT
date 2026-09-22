@@ -11,12 +11,55 @@ reader at every physical phase.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from honf_forward_core.nn import MLP
 from honf_forward_core.routing import entmax15
+
+
+def routing_logit_scale(
+    epoch: int | None,
+    *,
+    initial_scale: float = 0.1,
+    full_epoch: int = 25,
+) -> float:
+    """Return the near-uniform-to-learned routing scale for one epoch."""
+
+    initial = float(initial_scale)
+    end = int(full_epoch)
+    if not math.isfinite(initial) or not 0.0 < initial <= 1.0:
+        raise ValueError("initial routing scale must be finite and in (0, 1].")
+    if end <= 0:
+        raise ValueError("routing full epoch must be positive.")
+    if epoch is None:
+        return 1.0
+    fraction = 1.0 if end == 1 else min(max((int(epoch) - 1) / float(end - 1), 0.0), 1.0)
+    return initial + (1.0 - initial) * fraction
+
+
+def sparsification_continuation(
+    epoch: int | None,
+    *,
+    compression_start_epoch: int = 25,
+    hardening_epoch: int = 150,
+) -> float:
+    """Return the dense-to-sparse gate continuation coefficient ``c(t)``."""
+
+    start = int(compression_start_epoch)
+    hardening = int(hardening_epoch)
+    if start < 1 or hardening < start:
+        raise ValueError("compression start/hardening epochs must satisfy 1 <= start <= hardening.")
+    if epoch is None:
+        return 1.0
+    if int(epoch) <= start:
+        return 0.0
+    if hardening == start or int(epoch) >= hardening:
+        return 1.0
+    return min(max((int(epoch) - start) / float(hardening - start), 0.0), 1.0)
 
 
 def _safe_log_gate(z: torch.Tensor, support: torch.Tensor) -> torch.Tensor:
@@ -36,9 +79,10 @@ def _pack_positive_columns(support: torch.Tensor) -> tuple[torch.Tensor, torch.T
         raise ValueError("support must have shape [B,K].")
     batch, capacity = support.shape
     counts = support.sum(dim=-1)
-    # A group-0 slot is always live, so Kpack is nonzero.  This one scalar
-    # shape decision is made once per forward; no receiver/source decisions
-    # use host synchronization.
+    # Effective support is guaranteed nonempty by either the legacy ordinary
+    # group or the rescue-mode argmax fallback, so Kpack is nonzero.  This one
+    # scalar shape decision is made once per forward; no receiver/source
+    # decisions use host synchronization.
     packed_width = int(counts.max().detach().cpu())
     original = torch.arange(capacity, device=support.device, dtype=torch.long)
     original = original.unsqueeze(0).expand(batch, -1)
@@ -94,9 +138,14 @@ def gate_reference_eta_kappa(
 class CaseGroupBudget:
     """Immutable case-level availability plan shared by all physical phases."""
 
-    # Full registered capacity tensors.
+    # Full registered capacity tensors.  ``z``/``support`` are the effective
+    # continuation values consumed by the operator.  The raw hard-concrete
+    # realization remains available for audit and is never confused with the
+    # executed support during dense continuation.
     z: torch.Tensor
+    raw_z: torch.Tensor
     support: torch.Tensor
+    raw_support: torch.Tensor
     positive_probability: torch.Tensor
     eta: torch.Tensor
     kappa: torch.Tensor
@@ -106,7 +155,11 @@ class CaseGroupBudget:
     # distinguishes batch padding from a real registered prototype.
     packed_ids: torch.Tensor
     packed_valid: torch.Tensor
+    fallback_used: torch.Tensor
+    symmetric: bool = False
     deterministic: bool = False
+    continuation: float = 1.0
+    route_logit_scale: float = 1.0
 
     @property
     def batch_size(self) -> int:
@@ -122,16 +175,47 @@ class CaseGroupBudget:
 
     @property
     def live_count(self) -> torch.Tensor:
+        """Executed positive effective columns for this forward."""
+
         return self.support.sum(dim=-1)
 
     @property
-    def expected_optional_count(self) -> torch.Tensor:
-        """Expected optional count, returned live for the single loss term."""
+    def raw_live_count(self) -> torch.Tensor:
+        """Raw hard-concrete positive columns before continuation/fallback."""
 
-        return self.positive_probability[:, 1:].sum(dim=-1)
+        return self.raw_support.sum(dim=-1)
+
+    @property
+    def executed_live_count(self) -> torch.Tensor:
+        return self.live_count
+
+    @property
+    def expected_group_count(self) -> torch.Tensor:
+        """Expected positive group count from all gate probabilities."""
+
+        return self.positive_probability.sum(dim=-1)
+
+    @property
+    def expected_excess_group_count(self) -> torch.Tensor:
+        """Expected capacity above the one-group baseline."""
+
+        return torch.relu(self.expected_group_count - 1.0)
+
+    @property
+    def expected_optional_count(self) -> torch.Tensor:
+        """Expected excess count for the single case-level objective.
+
+        The calibrated coefficient is scheduled by the loss assembly as
+        ``c(t) * lambda_star``.  Keeping this tensor unscaled lets detached
+        metrics report the raw expected capacity during continuation.
+        """
+
+        return self.expected_excess_group_count
 
     @property
     def optional_open_probability(self) -> torch.Tensor:
+        if self.symmetric:
+            return self.positive_probability
         return self.positive_probability[:, 1:]
 
     def log_prior(self) -> torch.Tensor:
@@ -173,6 +257,7 @@ class CaseGroupGate(nn.Module):
         stretch_upper: float = 1.1,
         initial_optional_open_probability: float = 0.95,
         always_available_group: int = 0,
+        rescue_mode: bool = False,
     ) -> None:
         super().__init__()
         if int(control_dim) <= 0 or int(group_count) <= 0:
@@ -186,8 +271,8 @@ class CaseGroupGate(nn.Module):
         probability = float(initial_optional_open_probability)
         if not 0.0 < probability < 1.0:
             raise ValueError("initial_optional_open_probability must be in (0,1).")
-        if int(always_available_group) != 0:
-            raise ValueError("the ordinary always-available group must have index 0.")
+        if isinstance(always_available_group, bool) or not 0 <= int(always_available_group) < int(group_count):
+            raise ValueError("always_available_group must be a valid group index when retained for compatibility.")
 
         self.control_dim = int(control_dim)
         self.group_count = int(group_count)
@@ -196,9 +281,13 @@ class CaseGroupGate(nn.Module):
         self.stretch_lower = float(stretch_lower)
         self.stretch_upper = float(stretch_upper)
         self.always_available_group = int(always_available_group)
+        self.rescue_mode = bool(rescue_mode)
         self.network = MLP(
             4 * self.control_dim + 1,
             self.hidden_dim,
+            # The same scalar head is applied independently to each
+            # prototype-conditioned row.  This is permutation equivariant in
+            # rescue mode and preserves the historical v1 state shape.
             1,
             num_layers=2,
         )
@@ -212,7 +301,7 @@ class CaseGroupGate(nn.Module):
         nn.init.constant_(final.bias, float(initial_logit))
 
     def logits(self, gate_context: torch.Tensor, prototypes: torch.Tensor) -> torch.Tensor:
-        """Predict one scalar optional logit per case/prototype."""
+        """Predict one scalar logit per case/prototype."""
 
         if gate_context.ndim != 2 or prototypes.ndim != 2:
             raise ValueError("gate_context and prototypes must have shape [B,F] and [K,D].")
@@ -222,10 +311,12 @@ class CaseGroupGate(nn.Module):
             raise ValueError("prototypes have an invalid shape.")
         batch = int(gate_context.shape[0])
         codes = prototypes.to(device=gate_context.device, dtype=gate_context.dtype)
+        prototype_codes = codes if self.rescue_mode else codes[1:]
+        width = int(prototype_codes.shape[0])
         inputs = torch.cat(
             [
-                gate_context[:, None, :].expand(-1, self.group_count - 1, -1),
-                codes[None, 1:, :].expand(batch, -1, -1),
+                gate_context[:, None, :].expand(-1, width, -1),
+                prototype_codes[None, :, :].expand(batch, -1, -1),
             ],
             dim=-1,
         )
@@ -237,18 +328,28 @@ class CaseGroupGate(nn.Module):
         *,
         noise: torch.Tensor | None = None,
         deterministic: bool = False,
+        continuation: float = 1.0,
+        route_logit_scale: float = 1.0,
     ) -> CaseGroupBudget:
-        """Build one stochastic or deterministic budget from optional logits."""
+        """Build one stochastic or deterministic effective gate budget."""
 
         if optional_logits.ndim != 2:
-            raise ValueError("optional_logits must have shape [B,K-1].")
-        expected = self.group_count - 1
+            raise ValueError(
+                "optional_logits must have shape [B,K] in rescue mode or [B,K-1] for v1."
+            )
+        expected = self.group_count if self.rescue_mode else self.group_count - 1
         if int(optional_logits.shape[1]) != expected:
-            raise ValueError(f"optional_logits must have width {expected}.")
+            raise ValueError(f"gate logits must have width {expected}.")
         dtype = optional_logits.dtype
         device = optional_logits.device
         if not optional_logits.is_floating_point():
             raise TypeError("optional_logits must be floating point.")
+        continuation = float(continuation)
+        route_logit_scale = float(route_logit_scale)
+        if not math.isfinite(continuation) or not 0.0 <= continuation <= 1.0:
+            raise ValueError("continuation must be finite and in [0,1].")
+        if not math.isfinite(route_logit_scale) or route_logit_scale <= 0.0:
+            raise ValueError("route_logit_scale must be finite and positive.")
         log_ratio = optional_logits.new_tensor(
             float(torch.log(torch.tensor(-self.stretch_lower / self.stretch_upper)))
         )
@@ -271,15 +372,42 @@ class CaseGroupGate(nn.Module):
             z_optional = stretched * (self.stretch_upper - self.stretch_lower) + self.stretch_lower
             z_optional = z_optional.clamp(0.0, 1.0)
 
-        ones = optional_logits.new_ones((int(optional_logits.shape[0]), 1))
-        z = torch.cat([ones, z_optional], dim=-1)
+        if self.rescue_mode:
+            raw_z = z_optional
+            p = probability
+        else:
+            ones = optional_logits.new_ones((int(optional_logits.shape[0]), 1))
+            raw_z = torch.cat([ones, z_optional], dim=-1)
+            p = torch.cat([ones, probability], dim=-1)
+        raw_support = raw_z > 0.0
+        if not self.rescue_mode:
+            # Historical v1 ignores any accidentally supplied rescue schedule
+            # arguments so old predictions remain unchanged.
+            continuation = 1.0
+            route_logit_scale = 1.0
+            z = raw_z
+            fallback_used = torch.zeros(
+                int(optional_logits.shape[0]), device=device, dtype=torch.bool
+            )
+        elif continuation < 1.0:
+            z = (1.0 - continuation) + continuation * raw_z
+            fallback_used = torch.zeros(
+                int(optional_logits.shape[0]), device=device, dtype=torch.bool
+            )
+        else:
+            z = raw_z
+            fallback_used = ~raw_support.any(dim=-1)
+            winners = optional_logits.argmax(dim=-1)
+            fallback_z = F.one_hot(winners, num_classes=self.group_count).to(dtype=dtype)
+            z = torch.where(fallback_used[:, None], fallback_z, z)
         support = z > 0.0
-        p = torch.cat([ones, probability], dim=-1)
         eta, kappa = gate_reference_eta_kappa(z, support)
         packed_ids, packed_valid = _pack_positive_columns(support)
         return CaseGroupBudget(
             z=z,
+            raw_z=raw_z,
             support=support,
+            raw_support=raw_support,
             positive_probability=p,
             eta=eta,
             kappa=kappa,
@@ -287,7 +415,11 @@ class CaseGroupGate(nn.Module):
             noise=used_noise,
             packed_ids=packed_ids,
             packed_valid=packed_valid,
+            fallback_used=fallback_used,
+            symmetric=bool(self.rescue_mode),
             deterministic=bool(deterministic),
+            continuation=continuation,
+            route_logit_scale=route_logit_scale,
         )
 
 
@@ -295,4 +427,6 @@ __all__ = [
     "CaseGroupBudget",
     "CaseGroupGate",
     "gate_reference_eta_kappa",
+    "routing_logit_scale",
+    "sparsification_continuation",
 ]

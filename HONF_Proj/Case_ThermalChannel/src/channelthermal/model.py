@@ -122,6 +122,15 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
 
         self.core.set_training_progress(epoch=epoch, total_epochs=total_epochs)
 
+    @property
+    def budgeted_schedule_mode(self) -> str:
+        """Return the explicit schedule mode used by this model."""
+
+        if self.config.core_honf.forward_architecture != "budgeted_group_control_honf":
+            return "static"
+        budget = self.config.core_honf.interface_model.case_group_budget
+        return str(getattr(budget, "schedule", "static"))
+
     def selection_state(self) -> Dict[str, Optional[int]]:
         """Return explicit selection progress for checkpoint metadata."""
 

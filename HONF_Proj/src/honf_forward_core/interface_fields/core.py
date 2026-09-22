@@ -473,6 +473,12 @@ class InterfaceFieldCore(nn.Module):
                 initial_optional_open_probability=float(budget.initial_optional_open_probability),
                 always_available_group=int(budget.always_available_group),
                 execution_mode=str(budget.execution_mode),
+                rescue_mode=bool(budget.rescue_mode),
+                schedule=str(budget.schedule),
+                routing_initial_scale=float(budget.routing_initial_scale),
+                routing_full_epoch=int(budget.routing_full_epoch),
+                compression_start_epoch=int(budget.compression_start_epoch),
+                hardening_epoch=int(budget.hardening_epoch),
             )
         else:
             raise ValueError(f"Unsupported interface architecture: {config.forward_architecture!r}")
@@ -485,9 +491,16 @@ class InterfaceFieldCore(nn.Module):
         return len(self.routing_log_temperatures) == len(ROUTING_TYPED_TEMPERATURE_NAMES)
 
     def set_training_progress(self, *, epoch: int, total_epochs: int | None = None) -> None:
-        del epoch, total_epochs
+        if self.config.forward_architecture == "budgeted_group_control_honf":
+            setter = getattr(self.backend, "set_training_progress", None)
+            if callable(setter):
+                setter(epoch=epoch, total_epochs=total_epochs)
 
     def selection_state(self) -> dict[str, int | None]:
+        if self.config.forward_architecture == "budgeted_group_control_honf":
+            getter = getattr(self.backend, "selection_state", None)
+            if callable(getter):
+                return dict(getter())
         return {"epoch": None, "total_epochs": None}
 
     def _coordinate_scale(self, coordinates: torch.Tensor) -> torch.Tensor:

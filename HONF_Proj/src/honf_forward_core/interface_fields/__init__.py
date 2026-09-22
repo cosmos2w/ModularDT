@@ -1,7 +1,13 @@
 """Matched non-legacy interface-field architectures."""
 
 from .core import InterfaceFieldCore
-from .case_group_budget import CaseGroupBudget, CaseGroupGate, gate_reference_eta_kappa
+from .case_group_budget import (
+    CaseGroupBudget,
+    CaseGroupGate,
+    gate_reference_eta_kappa,
+    routing_logit_scale,
+    sparsification_continuation,
+)
 from .budgeted_group_control import BudgetedGroupControlPairwiseField, BudgetedGroupRouter
 from .fixed_group_pairwise import FixedGroupPairwiseField
 from .fixed_group_router import FixedGroupQueryRoute, FixedGroupRouter, FixedGroupState
@@ -76,6 +82,8 @@ __all__ = [
     "SupportExecutionCounts",
     "ThreeTermInterfaceContext",
     "gate_reference_eta_kappa",
+    "routing_logit_scale",
+    "sparsification_continuation",
     "build_six_bit_source_support",
     "build_six_bit_support_index",
     "live_pair_values",

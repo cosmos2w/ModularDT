@@ -31,8 +31,14 @@
           "stretch_lower": -0.1,
           "stretch_upper": 1.1,
           "initial_optional_open_probability": 0.95,
-          "always_available_group": 0,
-          "normalization": "gate_reference_overlap"
+          "normalization": "gate_reference_overlap",
+          "execution_mode": "full_width",
+          "rescue_mode": true,
+          "schedule": "dense_to_sparse_v2",
+          "routing_initial_scale": 0.1,
+          "routing_full_epoch": 25,
+          "compression_start_epoch": 25,
+          "hardening_epoch": 150
         }
       },
       "field_dim": "auto",
@@ -88,8 +94,8 @@
   },
   "run": {
     "id": "1409",
-    "name": "case_budgeted_group_control",
+    "name": "case_budgeted_group_control_dense_to_sparse_rerun",
     "output_root": "project://Trained_Results"
   },
-  "_note": "Proposed Run 1409: Kmax=12/D=16 case-level hard-concrete availability over the Run-1406 Dense preparation and Cg+CM+CE reader. The case loss coefficient is a numeric case_group_budget_weight calibrated once on training data before the managed run."
+  "_note": "Fresh Run 1409 dense-to-sparse rescue: symmetric Kmax=12/D=16 case gates, near-uniform routing through epoch 25, and gradual hard-concrete compression through epoch 150 over the unchanged Run-1406 Dense preparation and Cg+CM+CE reader."
 }

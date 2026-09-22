@@ -1,6 +1,7 @@
 """Bounded evidence driver for the opt-in Run-1409 budgeted reader.
 
-The driver measures one explicitly supplied candidate checkpoint.  It keeps
+The driver measures one explicitly supplied candidate checkpoint at exact
+review epoch 50, 150, or 500.  It keeps
 the following quantities in separate fields:
 
 * registered capacity (``Kmax``), packed width, sampled live groups, and
@@ -48,6 +49,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ARCHITECTURE = "budgeted_group_control_honf"
 GROUP_COUNT = 12
 CONTROL_DIM = 16
+REVIEW_EPOCHS = (50, 150, 500)
 DEFAULT_CASE_IDS = ("0273", "0653")
 DEFAULT_QUERY_COUNT = 8192
 DEFAULT_RECEIVER_CHUNK_SIZE = 2048
@@ -633,8 +635,70 @@ def _budget_summary(output: Any, aux: Mapping[str, Any]) -> dict[str, Any]:
             "expected_optional_count",
             "expected_optional_group_count",
         ),
-        "z": ("case_group_budget_z", "z"),
-        "support": ("case_group_budget_support", "support"),
+        "expected_count": (
+            "case_group_budget_expected_count",
+            "expected_count",
+            "expected_live_count",
+            "expected_group_count",
+        ),
+        "raw_z": (
+            "case_group_budget_raw_z",
+            "raw_z",
+            "z_raw",
+            "sampled_z",
+        ),
+        "effective_z": (
+            "case_group_budget_effective_z",
+            "effective_z",
+            "z_eff",
+            "z",
+        ),
+        "raw_support": (
+            "case_group_budget_raw_support",
+            "raw_support",
+            "support_raw",
+        ),
+        "executed_support": (
+            "case_group_budget_executed_support",
+            "effective_support",
+            "case_group_budget_support",
+            "support",
+        ),
+        "positive_probability": (
+            "case_group_budget_positive_probability",
+            "case_group_budget_gate_positive_probability",
+            "positive_probability",
+            "gate_probability",
+        ),
+        "fallback_used": (
+            "case_group_budget_fallback_used",
+            "case_group_budget_fallback",
+            "fallback_used",
+            "fallback",
+        ),
+        "prototype_ids": (
+            "case_group_budget_packed_prototype_ids",
+            "case_group_budget_prototype_ids",
+            "packed_ids",
+            "prototype_ids",
+        ),
+        "continuation_c": (
+            "case_group_budget_continuation",
+            "continuation_c",
+            "sparsification_c",
+        ),
+        "routing_strength": (
+            "case_group_budget_routing_strength",
+            "routing_strength",
+            "route_strength",
+        ),
+        "z": ("case_group_budget_z", "effective_z", "z_eff", "z"),
+        "support": (
+            "case_group_budget_support",
+            "executed_support",
+            "effective_support",
+            "support",
+        ),
         "eta": ("case_group_budget_eta", "eta"),
     }
     result: dict[str, Any] = {"capacity": GROUP_COUNT}
@@ -651,6 +715,44 @@ def _budget_summary(output: Any, aux: Mapping[str, Any]) -> dict[str, Any]:
     support = _array(support_value)
     if support is not None:
         result["support_positive_counts"] = np.sum(support > 0, axis=-1).astype(int).tolist()
+    for label, aliases in (
+        ("K_raw", names["raw_support"]),
+        ("K_executed", names["executed_support"]),
+    ):
+        value = _lookup(output, aliases)
+        if value is None:
+            value = _find_aux(aux, aliases)
+        array = _array(value)
+        if array is not None:
+            if array.ndim == 1:
+                array = array[None, ...]
+            result[label] = np.sum(array > 0, axis=-1).astype(int).tolist()
+    live_value = _lookup(output, names["sampled_live_count"])
+    if live_value is None:
+        live_value = _find_aux(aux, names["sampled_live_count"])
+    live_summary = _tensor_summary(live_value)
+    if live_summary is not None:
+        result["Klive"] = live_summary
+    expected_value = _lookup(output, names["expected_count"])
+    if expected_value is None:
+        expected_value = _find_aux(aux, names["expected_count"])
+    if expected_value is None:
+        optional_value = _lookup(output, names["expected_optional_count"])
+        if optional_value is None:
+            optional_value = _find_aux(aux, names["expected_optional_count"])
+        optional_scalar = _scalar(optional_value)
+        if optional_scalar is not None:
+            result["K_expected"] = 1.0 + optional_scalar
+    else:
+        expected_summary = _tensor_summary(expected_value)
+        if expected_summary is not None:
+            result["K_expected"] = expected_summary
+    ids_value = _lookup(output, names["prototype_ids"])
+    if ids_value is None:
+        ids_value = _find_aux(aux, names["prototype_ids"])
+    ids_array = _array(ids_value)
+    if ids_array is not None and ids_array.size <= 256:
+        result["prototype_ids"] = ids_array.tolist()
     # Source nonempty counts describe logical group support, not physical rank.
     for label, aliases in (
         ("module_nonempty_group_count", ("group_control_module_incidence",)),
@@ -1324,6 +1426,12 @@ def run_measurement(args: argparse.Namespace) -> dict[str, Any]:
         torch.cuda.set_device(device)
     spec = stage3.CheckpointSpec(label="1409", path=checkpoint_path)
     model, checkpoint = stage3._load_model_spec(spec, device)
+    checkpoint_epoch = int(checkpoint.get("epoch", checkpoint.get("current_epoch", -1)))
+    if checkpoint_epoch not in REVIEW_EPOCHS:
+        raise ValueError(
+            f"Run-1409 v2 evidence accepts exact review checkpoints {REVIEW_EPOCHS}; "
+            f"got epoch={checkpoint_epoch}"
+        )
     architecture = str(model.config.core_honf.forward_architecture)
     if architecture != ARCHITECTURE:
         raise ValueError(f"checkpoint architecture is {architecture!r}; expected {ARCHITECTURE!r}")
@@ -1421,7 +1529,7 @@ def run_measurement(args: argparse.Namespace) -> dict[str, Any]:
         "candidate": {
             "architecture": architecture,
             "checkpoint": str(checkpoint_path),
-            "checkpoint_epoch": int(checkpoint.get("epoch", checkpoint.get("current_epoch", -1))),
+            "checkpoint_epoch": checkpoint_epoch,
             "dataset": str(dataset_path),
             "group_capacity": GROUP_COUNT,
             "control_dimension": CONTROL_DIM,

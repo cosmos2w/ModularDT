@@ -39,6 +39,7 @@ DEFAULT_RECEIVER_CHUNK_SIZE = 2048
 ARCHITECTURE = "budgeted_group_control_honf"
 GROUP_COUNT = 12
 CONTROL_DIM = 16
+REVIEW_EPOCHS = (50, 150, 500)
 
 
 def _runtime_imports() -> tuple[Any, ...]:
@@ -141,6 +142,16 @@ def _query_reached(evidence: Any, aux: Mapping[str, Any]) -> int | None:
     return int(np.count_nonzero(np.any(array[0] > 0.0, axis=0)))
 
 
+def _budget_attr(budget: Any, names: Sequence[str]) -> Any:
+    if budget is None:
+        return None
+    for name in names:
+        value = getattr(budget, name, None)
+        if value is not None:
+            return value
+    return None
+
+
 def _phase_scalars(ledger: Mapping[str, Any]) -> dict[str, Any]:
     metrics = (
         "logical_path_count",
@@ -173,44 +184,157 @@ def _phase_scalars(ledger: Mapping[str, Any]) -> dict[str, Any]:
 
 def _capacity_scalars(evidence: Any, output: Any) -> dict[str, Any]:
     budget = evidence._lookup(output, ("case_group_budget",))
-    z = getattr(budget, "z", None)
-    support = getattr(budget, "support", None)
-    expected_optional = getattr(budget, "expected_optional_count", None)
-    packed_width = getattr(budget, "packed_width", None)
-    if z is None:
-        z = evidence._lookup(output, ("case_group_budget_z", "z"))
-    if support is None:
-        support = evidence._lookup(output, ("case_group_budget_support", "support"))
-    if expected_optional is None:
-        expected_optional = evidence._lookup(
-            output,
-            (
-                "case_group_budget_expected_optional_count",
-                "case_group_budget_expected_optional_count_detached",
-                "expected_optional_count",
-            ),
-        )
-    if packed_width is None:
-        packed_width = evidence._lookup(output, ("case_group_budget_packed_width", "packed_width"))
-    z_array = _array(evidence, z)
-    support_array = _array(evidence, support)
-    if support_array is not None:
-        support_array = np.asarray(support_array, dtype=bool)
-        if support_array.ndim == 1:
-            support_array = support_array[None, ...]
-    if z_array is not None and z_array.ndim == 1:
-        z_array = z_array[None, ...]
-    k_det = None if support_array is None else int(np.count_nonzero(support_array[0]))
-    k_expected_optional = _scalar(evidence, expected_optional)
+    raw_z = _budget_attr(budget, ("raw_z", "z_raw", "sampled_z", "gate_z_raw"))
+    effective_z = _budget_attr(budget, ("effective_z", "z_eff", "z"))
+    raw_support = _budget_attr(budget, ("raw_support", "support_raw", "gate_support_raw"))
+    executed_support = _budget_attr(
+        budget,
+        ("executed_support", "effective_support", "support", "gate_support"),
+    )
+    expected_count = _budget_attr(
+        budget,
+        ("expected_count", "expected_live_count", "expected_group_count"),
+    )
+    expected_optional = _budget_attr(budget, ("expected_optional_count",))
+    probability = _budget_attr(
+        budget,
+        ("positive_probability", "probability", "gate_probability", "p"),
+    )
+    packed_width = _budget_attr(budget, ("packed_width", "compact_width"))
+    packed_ids = _budget_attr(budget, ("packed_ids", "prototype_ids", "compact_ids"))
+    live_count = _budget_attr(budget, ("live_count", "Klive", "k_live"))
+    fallback_used = _budget_attr(
+        budget,
+        ("fallback_used", "fallback", "fallback_active", "used_fallback"),
+    )
+    continuation = _budget_attr(budget, ("continuation", "continuation_c", "sparsification_c"))
+    routing_strength = _budget_attr(budget, ("routing_strength", "route_strength", "r"))
+    aliases = {
+        "raw_z": ("case_group_budget_raw_z", "raw_z", "z_raw"),
+        "effective_z": ("case_group_budget_effective_z", "effective_z", "z_eff", "z"),
+        "raw_support": ("case_group_budget_raw_support", "raw_support", "support_raw"),
+        "executed_support": (
+            "case_group_budget_executed_support",
+            "effective_support",
+            "case_group_budget_support",
+            "support",
+        ),
+        "expected_count": (
+            "case_group_budget_expected_count",
+            "expected_live_count",
+            "expected_group_count",
+        ),
+        "expected_optional": (
+            "case_group_budget_expected_optional_count",
+            "case_group_budget_expected_optional_count_detached",
+            "expected_optional_count",
+        ),
+        "probability": (
+            "case_group_budget_positive_probability",
+            "case_group_budget_gate_positive_probability",
+            "positive_probability",
+            "gate_probability",
+        ),
+        "packed_width": ("case_group_budget_packed_width", "packed_width", "compact_width"),
+        "packed_ids": (
+            "case_group_budget_packed_prototype_ids",
+            "case_group_budget_prototype_ids",
+            "packed_ids",
+            "prototype_ids",
+        ),
+        "live_count": ("case_group_budget_live_count", "case_group_budget_sampled_live_count", "live_count"),
+        "fallback": (
+            "case_group_budget_fallback_used",
+            "case_group_budget_fallback",
+            "fallback_used",
+            "fallback",
+        ),
+        "continuation": ("case_group_budget_continuation", "continuation_c", "sparsification_c"),
+        "routing_strength": ("case_group_budget_routing_strength", "routing_strength", "route_strength"),
+    }
+    values = {
+        "raw_z": raw_z,
+        "effective_z": effective_z,
+        "raw_support": raw_support,
+        "executed_support": executed_support,
+        "expected_count": expected_count,
+        "expected_optional": expected_optional,
+        "probability": probability,
+        "packed_width": packed_width,
+        "packed_ids": packed_ids,
+        "live_count": live_count,
+        "fallback": fallback_used,
+        "continuation": continuation,
+        "routing_strength": routing_strength,
+    }
+    for name, aliases_for_name in aliases.items():
+        if values[name] is None:
+            values[name] = evidence._lookup(output, aliases_for_name)
+    raw_z_array = _array(evidence, values["raw_z"])
+    effective_z_array = _array(evidence, values["effective_z"])
+    raw_support_array = _array(evidence, values["raw_support"])
+    executed_support_array = _array(evidence, values["executed_support"])
+    if raw_z_array is not None and raw_z_array.ndim == 1:
+        raw_z_array = raw_z_array[None, ...]
+    if effective_z_array is not None and effective_z_array.ndim == 1:
+        effective_z_array = effective_z_array[None, ...]
+    if raw_support_array is None and raw_z_array is not None:
+        raw_support_array = raw_z_array > 0.0
+    if executed_support_array is None and effective_z_array is not None:
+        executed_support_array = effective_z_array > 0.0
+    if raw_support_array is not None and raw_support_array.ndim == 1:
+        raw_support_array = raw_support_array[None, ...]
+    if executed_support_array is not None and executed_support_array.ndim == 1:
+        executed_support_array = executed_support_array[None, ...]
+    k_raw = None if raw_support_array is None else int(np.count_nonzero(raw_support_array[0]))
+    k_executed = (
+        None
+        if executed_support_array is None
+        else int(np.count_nonzero(executed_support_array[0]))
+    )
+    expected_value = _scalar(evidence, values["expected_count"])
+    optional_value = _scalar(evidence, values["expected_optional"])
+    if expected_value is None and optional_value is not None:
+        expected_value = 1.0 + optional_value
+    if expected_value is None:
+        probability_array = _array(evidence, values["probability"])
+        if probability_array is not None:
+            probability_array = np.asarray(probability_array, dtype=np.float64)
+            if probability_array.ndim == 1:
+                probability_array = probability_array[None, ...]
+            expected_value = float(np.sum(probability_array[0]))
+    live_value = _scalar(evidence, values["live_count"])
+    if live_value is None:
+        live_value = k_executed
+    packed_width_value = _scalar(evidence, values["packed_width"])
+    packed_ids_array = _array(evidence, values["packed_ids"])
+    if packed_width_value is None and packed_ids_array is not None and packed_ids_array.ndim >= 2:
+        packed_width_value = float(packed_ids_array.shape[1])
+    fallback_value = _scalar(evidence, values["fallback"])
+    if fallback_value is not None:
+        fallback_value = bool(fallback_value)
+    prototype_ids = None
+    if packed_ids_array is not None:
+        packed_ids_array = np.asarray(packed_ids_array)
+        if packed_ids_array.ndim == 1:
+            prototype_ids = packed_ids_array.astype(int).tolist()
+        elif packed_ids_array.ndim >= 2:
+            prototype_ids = packed_ids_array[0].astype(int).tolist()
     return {
         "Kmax": GROUP_COUNT,
-        "K_expected": None if k_expected_optional is None else 1.0 + k_expected_optional,
-        "K_expected_optional": k_expected_optional,
-        "K_det": k_det,
-        "Kpack": None if packed_width is None else int(round(float(_scalar(evidence, packed_width) or 0.0))),
+        "K_raw": k_raw,
+        "K_executed": k_executed,
+        "K_expected": expected_value,
+        "K_expected_optional": optional_value,
+        "Klive": None if live_value is None else int(round(live_value)),
+        "Kpack": None if packed_width_value is None else int(round(packed_width_value)),
+        "fallback_used": fallback_value,
+        "prototype_ids": prototype_ids,
+        "continuation_c": _scalar(evidence, values["continuation"]),
+        "routing_strength": _scalar(evidence, values["routing_strength"]),
         "deterministic_gate_positive_fraction": None
-        if z_array is None
-        else float(np.mean(z_array[0] > 0.0)),
+        if effective_z_array is None
+        else float(np.mean(effective_z_array[0] > 0.0)),
     }
 
 
@@ -286,6 +410,12 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         raise FileNotFoundError(f"checkpoint does not exist: {checkpoint_path}")
     spec = stage3.CheckpointSpec(label="run1409", path=checkpoint_path)
     model, checkpoint = stage3._load_model_spec(spec, device)
+    checkpoint_epoch = int(checkpoint.get("epoch", checkpoint.get("current_epoch", -1)))
+    if checkpoint_epoch not in REVIEW_EPOCHS:
+        raise ValueError(
+            f"population capacity audit accepts exact review checkpoints {REVIEW_EPOCHS}; "
+            f"got epoch={checkpoint_epoch}"
+        )
     architecture = str(model.config.core_honf.forward_architecture)
     if architecture != ARCHITECTURE:
         raise ValueError(f"expected {ARCHITECTURE}, got {architecture!r}")
@@ -337,7 +467,7 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         "candidate": {
             "architecture": architecture,
             "checkpoint": str(checkpoint_path),
-            "checkpoint_epoch": int(checkpoint.get("epoch", checkpoint.get("current_epoch", -1))),
+            "checkpoint_epoch": checkpoint_epoch,
             "dataset": str(dataset_path),
             "split": str(args.split),
             "case_count": len(rows),
@@ -355,9 +485,13 @@ def run_audit(args: argparse.Namespace) -> dict[str, Any]:
         },
         "rows": rows,
         "definitions": {
-            "K_expected": "1 + sum optional positive gate probabilities p_k",
-            "K_det": "count of deterministic gate values z_k > 0, including ordinary group 0",
+            "K_raw": "count of raw hard-concrete values z_tilde_k > 0 before continuation",
+            "K_executed": "count of effective continuation gates z_eff_k > 0",
+            "K_expected": "sum of positive gate probabilities, or 1 + optional count on the legacy gate object",
+            "Klive": "runtime live-count field when exposed, otherwise K_executed",
             "Kpack": "packed positive-column width for this B=1 evaluation",
+            "fallback_used": "symmetric all-closed numerical fallback flag; null if the backend does not expose it",
+            "prototype_ids": "original packed prototype IDs, retained without relabeling",
             "source_nonempty_groups": "groups with positive source incidence, separate for M and E",
             "routing_rank": "weighted learned q-to-source routing rank from thin-QR core; not physical operator rank",
             "fine_rows": "backend-reported logical/unique/actual/padded rows when exposed by the phase ledger",

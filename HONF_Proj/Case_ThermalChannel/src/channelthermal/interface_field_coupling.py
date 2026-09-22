@@ -45,6 +45,22 @@ def _budget_expected_optional_count(prepared: PreparedInterfaceField) -> torch.T
     return value if torch.is_tensor(value) else None
 
 
+def _budget_plan_scalar(
+    prepared: PreparedInterfaceField,
+    name: str,
+    reference: torch.Tensor,
+) -> torch.Tensor | None:
+    """Expose one deterministic P0 schedule scalar for loss and metrics."""
+
+    plan = getattr(prepared, "phase_shared_state", None)
+    if plan is None or not hasattr(plan, name):
+        return None
+    value = getattr(plan, name)
+    if torch.is_tensor(value):
+        return value.to(device=reference.device, dtype=reference.dtype)
+    return reference.new_full((int(reference.shape[0]),), float(value))
+
+
 @contextmanager
 def _interface_read_role(model: Any, role: str):
     """Annotate one physical preparation or read for diagnostic hooks.
@@ -663,6 +679,20 @@ def forward_interface_field(
         # the ChannelThermal loss assembly.  It is deliberately separate from
         # detached interaction diagnostics used for logging.
         result["case_group_budget_expected_optional_count"] = expected_optional_count
+        continuation = _budget_plan_scalar(
+            prepared0,
+            "continuation",
+            expected_optional_count,
+        )
+        routing_strength = _budget_plan_scalar(
+            prepared0,
+            "route_logit_scale",
+            expected_optional_count,
+        )
+        if continuation is not None:
+            result["case_group_budget_continuation"] = continuation
+        if routing_strength is not None:
+            result["case_group_budget_routing_strength"] = routing_strength
     if return_organizer_passes:
         result["provisional_organizer_aux"] = {}
         result["provisional_interaction_aux"] = {} if prepared1 is None else prepared1.interaction_aux

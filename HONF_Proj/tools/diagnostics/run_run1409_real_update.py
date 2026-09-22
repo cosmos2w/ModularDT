@@ -1,4 +1,4 @@
-"""Run one real Run-1409 GPU update without allocating a managed run.
+"""Run the historical v1 Run-1409 update without a managed run.
 
 The script follows the maintained ThermalChannel forward workflow for config
 composition, dataset construction, batch sampling, optimizer construction,
@@ -189,6 +189,11 @@ def run_update(args: argparse.Namespace) -> dict[str, Any]:
     dataset.set_epoch(1)
     model_config = build_model_config(cfg, dataset)
     model = ChannelThermalHONFModel(model_config).to(device)
+    if str(getattr(model, "budgeted_schedule_mode", "static")) == "dense_to_sparse_v2":
+        raise ValueError(
+            "run_run1409_real_update.py is the historical v1 gate-update check; "
+            "use run_run1409_v2_prelaunch_audit.py for the rescue schedule"
+        )
     model.set_global_target_normalization(
         dataset.normalizer.stats,
         normalize_targets=bool(dataset_cfg.get("normalize_targets", False)),
