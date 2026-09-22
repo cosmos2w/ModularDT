@@ -72,6 +72,7 @@ from channelthermal.training.epoch import (
     port_cyclic_smoothness_loss,
     port_global_consistency_loss,
     predicted_consistency_weight_for_epoch,
+    _case_group_budget_settings,
     run_epoch,
 )
 from channelthermal.training.optimizer import (
@@ -536,13 +537,33 @@ def run_from_config(
         routing_settings is not None
         and getattr(getattr(routing_settings, "sparsification", None), "enabled", False)
     )
+    budget_enabled, _budget_weight = _case_group_budget_settings(model, loss_cfg)
+    if budget_enabled:
+        # The budget term is a live expected optional-group count. Keep it in
+        # the ordinary CSV so it is visible beside the physical objective;
+        # validation rows receive the same fields below.
+        fieldnames.insert(fieldnames.index("loss_field"), "loss_group_budget")
+        fieldnames.insert(fieldnames.index("loss_field"), "loss_physical")
+        fieldnames.insert(fieldnames.index("val_loss_field"), "val_loss_group_budget")
+        if "val_loss_physical" not in fieldnames:
+            fieldnames.insert(fieldnames.index("val_loss_field"), "val_loss_physical")
+        fieldnames.extend(
+            [
+                "case_group_budget_weight",
+                "case_group_budget_expected_optional_count",
+                "val_case_group_budget_weight",
+                "val_case_group_budget_expected_optional_count",
+            ]
+        )
     if paircost_enabled:
         # Keep historical metrics.csv schemas unchanged.  The science profile
         # opts into the two additional physical-objective columns explicitly.
         fieldnames.insert(fieldnames.index("loss_field"), "loss_paircost")
-        fieldnames.insert(fieldnames.index("loss_field"), "loss_physical")
+        if "loss_physical" not in fieldnames:
+            fieldnames.insert(fieldnames.index("loss_field"), "loss_physical")
         fieldnames.insert(fieldnames.index("val_loss_field"), "val_loss_paircost")
-        fieldnames.insert(fieldnames.index("val_loss_field"), "val_loss_physical")
+        if "val_loss_physical" not in fieldnames:
+            fieldnames.insert(fieldnames.index("val_loss_field"), "val_loss_physical")
         fieldnames.extend(
             [
                 "temperature_" + name.removeprefix("log_temperature_")

@@ -96,6 +96,7 @@ FORWARD_ARCHITECTURES = {
     "group_control_pairwise_honf",
     "phase_shared_group_control_honf",
     "hypergraph_quadrature_honf",
+    "budgeted_group_control_honf",
 }
 
 LEGACY_ARCHITECTURE_KEYS = {
@@ -256,6 +257,54 @@ class RoutingIndexConfig:
 
 
 @dataclass
+class CaseGroupBudgetConfig:
+    """Opt-in hard-concrete availability settings for Run 1409."""
+
+    enabled: bool = False
+    gate_hidden_dim: int = 32
+    hard_concrete_temperature: float = 2.0 / 3.0
+    stretch_lower: float = -0.1
+    stretch_upper: float = 1.1
+    initial_optional_open_probability: float = 0.95
+    always_available_group: int = 0
+    normalization: str = "gate_reference_overlap"
+    execution_mode: str = "full_width"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise TypeError("interface_model.case_group_budget.enabled must be boolean.")
+        if isinstance(self.gate_hidden_dim, bool) or int(self.gate_hidden_dim) <= 0:
+            raise ValueError("interface_model.case_group_budget.gate_hidden_dim must be positive.")
+        for name in ("hard_concrete_temperature", "stretch_lower", "stretch_upper"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value):
+                raise ValueError(f"interface_model.case_group_budget.{name} must be finite.")
+        if float(self.hard_concrete_temperature) <= 0.0:
+            raise ValueError("interface_model.case_group_budget.hard_concrete_temperature must be positive.")
+        if not float(self.stretch_lower) < 0.0 < float(self.stretch_upper):
+            raise ValueError("interface_model.case_group_budget stretch must straddle zero.")
+        probability = float(self.initial_optional_open_probability)
+        if not math.isfinite(probability) or not 0.0 < probability < 1.0:
+            raise ValueError(
+                "interface_model.case_group_budget.initial_optional_open_probability must be in (0,1)."
+            )
+        if isinstance(self.always_available_group, bool) or int(self.always_available_group) != 0:
+            raise ValueError("interface_model.case_group_budget.always_available_group must be 0.")
+        if self.normalization != "gate_reference_overlap":
+            raise ValueError(
+                "interface_model.case_group_budget.normalization must be 'gate_reference_overlap'."
+            )
+        if self.execution_mode not in {"full_width", "compact"}:
+            raise ValueError(
+                "interface_model.case_group_budget.execution_mode must be 'full_width' or 'compact'."
+            )
+
+    @classmethod
+    def from_dict(cls, payload: Dict[str, Any] | None) -> "CaseGroupBudgetConfig":
+        return _dataclass_from_dict(cls, dict(payload or {}))
+
+
+@dataclass
 class InterfaceFieldConfig:
     """Matched-family settings shared by non-legacy interface fields."""
 
@@ -297,10 +346,15 @@ class InterfaceFieldConfig:
     # historical positional InterfaceFieldConfig construction remains
     # unchanged and omitted from historical serialized profiles.
     samples_per_group: int = 4
+    # Run 1409's case-level availability plan.  Appended to preserve every
+    # historical positional constructor and omitted from old architectures.
+    case_group_budget: Optional[CaseGroupBudgetConfig] = None
 
     def __post_init__(self) -> None:
         if isinstance(self.routing, dict):
             self.routing = RoutingIndexConfig.from_dict(self.routing)
+        if isinstance(self.case_group_budget, dict):
+            self.case_group_budget = CaseGroupBudgetConfig.from_dict(self.case_group_budget)
         if int(self.message_hidden_dim) <= 0:
             raise ValueError("interface_model.message_hidden_dim must be positive.")
         if int(self.attention_heads) <= 0:
@@ -538,6 +592,7 @@ class UnifiedForwardConfig:
             "group_control_pairwise_honf",
             "phase_shared_group_control_honf",
             "hypergraph_quadrature_honf",
+            "budgeted_group_control_honf",
         }:
             controlled = self.interface_model
             if controlled.support_spacing_factor is not None:
@@ -568,6 +623,20 @@ class UnifiedForwardConfig:
                 if int(controlled.group_control_dim) != 16:
                     raise ValueError(
                         f"{self.forward_architecture} requires interface_model.group_control_dim exactly 16."
+                    )
+            if self.forward_architecture == "budgeted_group_control_honf":
+                budget = controlled.case_group_budget
+                if budget is None or not budget.enabled:
+                    raise ValueError(
+                        "budgeted_group_control_honf requires an enabled interface_model.case_group_budget block."
+                    )
+                if int(controlled.group_count) != 12:
+                    raise ValueError(
+                        "budgeted_group_control_honf requires interface_model.group_count exactly 12."
+                    )
+                if int(controlled.group_control_dim) != 16:
+                    raise ValueError(
+                        "budgeted_group_control_honf requires interface_model.group_control_dim exactly 16."
                     )
             if self.forward_architecture == "hypergraph_quadrature_honf" and int(controlled.samples_per_group) != 4:
                 raise ValueError(
@@ -1014,6 +1083,7 @@ class UnifiedForwardConfig:
                 "group_control_pairwise_honf",
                 "phase_shared_group_control_honf",
                 "hypergraph_quadrature_honf",
+                "budgeted_group_control_honf",
                 }:
                     for key in (
                         "group_count",
@@ -1025,6 +1095,7 @@ class UnifiedForwardConfig:
                         "group_code_dim",
                         "group_control_dim",
                         "samples_per_group",
+                        "case_group_budget",
                     ):
                         interface_payload.pop(key, None)
                 elif self.forward_architecture == "fixed_group_pairwise_honf":
@@ -1065,6 +1136,8 @@ class UnifiedForwardConfig:
                     interface_payload.pop("group_code_dim", None)
                     if self.forward_architecture != "hypergraph_quadrature_honf":
                         interface_payload.pop("samples_per_group", None)
+                    if self.forward_architecture != "budgeted_group_control_honf":
+                        interface_payload.pop("case_group_budget", None)
         return payload
 
     def decoder_uses(self, component: str) -> bool:

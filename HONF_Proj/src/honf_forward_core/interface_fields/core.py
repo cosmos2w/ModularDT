@@ -268,6 +268,7 @@ class InterfaceFieldCore(nn.Module):
             "group_control_pairwise_honf",
             "phase_shared_group_control_honf",
             "hypergraph_quadrature_honf",
+            "budgeted_group_control_honf",
         }:
             # Run 1405/1406 deliberately replace the historical coarse/local
             # context object with the three-term reader. Keep construction
@@ -445,6 +446,34 @@ class InterfaceFieldCore(nn.Module):
                 query_temperature=float(options.query_temperature),
                 activation_checkpointing=bool(options.activation_checkpointing),
             )
+        elif config.forward_architecture == "budgeted_group_control_honf":
+            from .budgeted_group_control import BudgetedGroupControlPairwiseField
+
+            budget = options.case_group_budget
+            if budget is None or not budget.enabled:
+                raise ValueError(
+                    "budgeted_group_control_honf requires an enabled case_group_budget block."
+                )
+            self.backend = BudgetedGroupControlPairwiseField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                group_count=int(options.group_count),
+                group_control_dim=int(options.group_control_dim),
+                spatial_dim=int(config.spatial_dim),
+                module_temperature=float(options.module_temperature),
+                environment_temperature=float(options.environment_temperature),
+                query_temperature=float(options.query_temperature),
+                activation_checkpointing=bool(options.activation_checkpointing),
+                gate_hidden_dim=int(budget.gate_hidden_dim),
+                hard_concrete_temperature=float(budget.hard_concrete_temperature),
+                stretch_lower=float(budget.stretch_lower),
+                stretch_upper=float(budget.stretch_upper),
+                initial_optional_open_probability=float(budget.initial_optional_open_probability),
+                always_available_group=int(budget.always_available_group),
+                execution_mode=str(budget.execution_mode),
+            )
         else:
             raise ValueError(f"Unsupported interface architecture: {config.forward_architecture!r}")
         self.receiver_chunk_size = int(options.receiver_chunk_size)
@@ -609,6 +638,7 @@ class InterfaceFieldCore(nn.Module):
         elif self.config.forward_architecture in {
             "phase_shared_group_control_honf",
             "hypergraph_quadrature_honf",
+            "budgeted_group_control_honf",
         }:
             backend_state = self.backend.prepare(
                 encoded,
@@ -643,6 +673,7 @@ class InterfaceFieldCore(nn.Module):
                     "group_control_pairwise_honf",
                     "phase_shared_group_control_honf",
                     "hypergraph_quadrature_honf",
+                    "budgeted_group_control_honf",
                 }
                 else int(self.config.interface_model.coarse_latent_count)
             ),
@@ -657,6 +688,7 @@ class InterfaceFieldCore(nn.Module):
             "group_control_pairwise_honf",
             "phase_shared_group_control_honf",
             "hypergraph_quadrature_honf",
+            "budgeted_group_control_honf",
         }:
             aux.update(
                 self.backend.preparation_aux(
@@ -676,7 +708,13 @@ class InterfaceFieldCore(nn.Module):
             backend_state,
             coarse_state,
             aux,
-            backend_state.get("phase_shared_group_control") if isinstance(backend_state, dict) else None,
+            (
+                backend_state.get("phase_shared_group_control")
+                if isinstance(backend_state, dict)
+                else None
+            )
+            if self.config.forward_architecture != "budgeted_group_control_honf"
+            else backend_state.get("case_group_budget"),
         )
 
     def build_layout(

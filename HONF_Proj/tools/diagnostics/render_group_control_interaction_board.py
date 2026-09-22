@@ -1,4 +1,4 @@
-"""Render a CPU-only Run-1406 group-control interaction board.
+"""Render a CPU-only group-control interaction board.
 
 The board makes the Run-1406 work distinction visible.  Dashed paths are
 logical ``q -> group -> source`` support used by cheap control contractions;
@@ -273,6 +273,21 @@ def _draw_metrics(ax: Any, metrics: group_control.GroupControlMetrics, metadata:
     values = metrics.values
     module_moment_norm = "NA" if metrics.selected_module_moments is None or not len(metrics.selected_module_moments) else f"{float(np.linalg.norm(metrics.selected_module_moments, axis=-1).mean()):.4g}"
     environment_moment_norm = "NA" if metrics.selected_environment_moments is None or not len(metrics.selected_environment_moments) else f"{float(np.linalg.norm(metrics.selected_environment_moments, axis=-1).mean()):.4g}"
+    gate_values = metadata.get("gate_values")
+    gate_support = metadata.get("gate_support")
+    gate_ids = metadata.get("gate_original_ids")
+    if isinstance(gate_values, list):
+        values_flat = np.asarray(gate_values).reshape(-1)
+        support_flat = None if not isinstance(gate_support, list) else np.asarray(gate_support).reshape(-1)
+        ids_flat = list(range(len(values_flat))) if not isinstance(gate_ids, list) else list(gate_ids)
+        gate_parts = []
+        for index, value in enumerate(values_flat):
+            identifier = ids_flat[index] if index < len(ids_flat) else index
+            open_text = "open" if support_flat is None or (index < len(support_flat) and bool(support_flat[index])) else "closed"
+            gate_parts.append(f"{identifier}:{float(value):.3g}({open_text})")
+        gate_text = " ".join(gate_parts)
+    else:
+        gate_text = "NA (legacy map or gate values unavailable)"
     lines = [
         f"F  Metrics and cost · {label} / {case_id}",
         f"K={values.get('K')}  D={values.get('D')}  Q={values.get('Q')}",
@@ -283,6 +298,7 @@ def _draw_metrics(ax: Any, metrics: group_control.GroupControlMetrics, metadata:
         f"multiplicity D M/E={values.get('module_multiplicity'):.3g}/{values.get('environment_multiplicity'):.3g}",
         f"unique/dense valid M/E={values.get('module_unique_over_dense_valid')}/{values.get('environment_unique_over_dense_valid')}",
         f"selected moment ||n|| mean M/E={module_moment_norm}/{environment_moment_norm}",
+        f"gate z[original id]={gate_text}",
         f"prepared P2 median={values.get('prepared_decode_median_ms', 'NA')} ms",
         "",
         "A logical path is not a fine call.",
@@ -331,7 +347,7 @@ def render_board(evidence_maps: Mapping[str, Mapping[str, str | Path]], output_d
             _draw_metrics(axes[5], metrics, metadata, label=label, case_id=case_id)
             manifest_rows.append({"label": label, "case_id": case_id, "path": str(path), "metrics": metrics.values, "ledger": ledger, "metadata": metadata})
             row_index += 1
-    figure.suptitle("Run-1406 group-control interaction board\nincidence · centres · query routing · logical paths versus unique q→source candidates (learned interactions, not physical causality)", fontsize=14)
+    figure.suptitle("Group-control interaction board\nincidence · centres · query routing · logical paths versus unique q→source candidates (learned interactions, not physical causality)", fontsize=14)
     png_path = output / "group_control_interaction_board.png"
     pdf_path = output / "group_control_interaction_board.pdf"
     provenance = output / "group_control_interaction_board.json"
@@ -340,7 +356,7 @@ def render_board(evidence_maps: Mapping[str, Mapping[str, str | Path]], output_d
     plt.close(figure)
     manifest: dict[str, Any] = {
         "schema_version": 1,
-        "task": "run1406_group_control_interaction_board",
+        "task": "group_control_interaction_board",
         "status": "ok",
         "case_ids": list(cases),
         "rows": manifest_rows,

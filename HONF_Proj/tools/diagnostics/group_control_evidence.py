@@ -296,7 +296,11 @@ def _orient_moment(value: Any, *, query_count: int, source_count: int, name: str
 def _orient_group_control(value: Any, *, group_count: int, name: str) -> np.ndarray | None:
     if value is None:
         return None
-    array = _without_batch(value, name=name)
+    raw = _as_array(value, name=name)
+    if raw.ndim == 2 and raw.shape in ((group_count, CONTROL_DIM), (CONTROL_DIM, group_count)):
+        array = raw
+    else:
+        array = _without_batch(raw, name=name)
     if array.ndim != 2:
         raise GroupControlEvidenceError(f"{name} must be rank-2 [K,D]; got {array.shape}")
     if array.shape[0] == group_count:
@@ -324,7 +328,8 @@ def _centres(mapping: Mapping[str, Any], name: str, *, fallback: np.ndarray) -> 
     value = _find(mapping, name, required=False)
     if value is None:
         return fallback
-    array = _without_batch(value, name=name)
+    raw = _as_array(value, name=name)
+    array = raw if raw.shape == fallback.shape else _without_batch(raw, name=name)
     if array.ndim != 2 or array.shape != fallback.shape:
         raise GroupControlEvidenceError(f"{name} must have shape {fallback.shape}; got {array.shape}")
     result = np.asarray(array, dtype=np.float64)
@@ -999,7 +1004,10 @@ def load_group_control_npz(path: str | Path) -> tuple[GroupControlArrays, GroupC
     source = Path(path).expanduser().resolve()
     with np.load(source, allow_pickle=False) as archive:
         payload = {key: archive[key] for key in archive.files}
-    arrays, _ = canonicalize_group_control_arrays(payload)
+    # Historical maps retain the six-group contract. Budgeted maps carry an
+    # explicit gate plan and may store either full or compact group columns.
+    expected_group_count = 0 if "case_group_budget_gate_values" in payload else GROUP_COUNT
+    arrays, _ = canonicalize_group_control_arrays(payload, expected_group_count=expected_group_count)
     values = json.loads(str(np.asarray(payload["metrics_json"]).reshape(-1)[0]))
     selected = int(values.get("selected_query_index", 0))
     metrics = semantic_metrics(arrays, selected_query_index=selected, prepared_decode_median_ms=values.get("prepared_decode_median_ms"))

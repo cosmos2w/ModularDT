@@ -47,6 +47,7 @@ LOSS_KEYS = {
     "port_temperature_scale", "port_smoothness_weight",
     "port_global_consistency_weight", "port_global_consistency_teacher_weight",
     "predicted_consistency_weight", "predicted_consistency_warmup_epochs",
+    "case_group_budget_weight",
     "organizer_regularization",
 }
 ORGANIZER_LOSS_KEYS = {

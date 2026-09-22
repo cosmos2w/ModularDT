@@ -376,19 +376,20 @@ class GroupControlPairwiseField(DensePairwiseField):
         # einsum.  This is runtime preparation state only and introduces no
         # trainable parameters or state-dict entries.
         if phase_shared is None:
+            group_width = int(controls.group_control.shape[1])
             module_control_bank = (
                 controls.module_membership.transpose(1, 2).unsqueeze(-1)
                 * controls.group_control.unsqueeze(2)
             ).reshape(
                 int(module_states.shape[0]),
-                self.group_count,
+                group_width,
                 int(module_states.shape[1]) * self.group_control_dim,
             )
         else:
             module_control_bank = phase_shared.module_control_bank
             if int(module_control_bank.shape[0]) != int(module_states.shape[0]):
                 raise ValueError("phase_shared module-control bank batch does not match the phase.")
-            if int(module_control_bank.shape[1]) != self.group_count:
+            if int(module_control_bank.shape[1]) != int(controls.group_control.shape[1]):
                 raise ValueError("phase_shared module-control bank group width does not match the router.")
             if int(module_control_bank.shape[2]) != int(module_states.shape[1]) * self.group_control_dim:
                 raise ValueError("phase_shared module-control bank source width does not match the phase.")
@@ -472,7 +473,7 @@ class GroupControlPairwiseField(DensePairwiseField):
                 ).detach(),
                 "group_control_environment_value_control_rows": environment_rows.detach(),
                 "group_control_environment_head_control_projection_rows": module_states.new_full(
-                    (batch,), float(self.group_count)
+                    (batch,), float(controls.group_control.shape[1])
                 ).detach(),
             }
         )
@@ -609,12 +610,13 @@ class GroupControlPairwiseField(DensePairwiseField):
             and state.get("module_control_bank_group_control") is controls.group_control
         ):
             return bank
+        group_width = int(controls.group_control.shape[1])
         return (
             controls.module_membership.transpose(1, 2).unsqueeze(-1)
             * controls.group_control.unsqueeze(2)
         ).reshape(
             int(controls.module_membership.shape[0]),
-            self.group_count,
+            group_width,
             int(controls.module_membership.shape[1]) * self.group_control_dim,
         )
 

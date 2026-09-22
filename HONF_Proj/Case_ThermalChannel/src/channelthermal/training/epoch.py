@@ -11,6 +11,7 @@ from tqdm.auto import tqdm
 
 from channelthermal.model import ChannelThermalHONFModel
 from channelthermal.training_tools.losses import (
+    case_group_budget_loss,
     channelthermal_field_mse,
     induced_pair_cost_loss,
 )
@@ -328,6 +329,30 @@ def _routing_sparsification_settings(model: ChannelThermalHONFModel) -> Any:
     return getattr(routing_config, "sparsification", None)
 
 
+def _case_group_budget_settings(
+    model: ChannelThermalHONFModel,
+    loss_cfg: Dict[str, Any],
+) -> tuple[bool, float]:
+    """Resolve the one opt-in expected optional-group objective."""
+
+    core_config = getattr(getattr(model, "config", None), "core_honf", None)
+    architecture = str(getattr(core_config, "forward_architecture", ""))
+    budget_enabled = architecture == "budgeted_group_control_honf"
+    if budget_enabled and "case_group_budget_weight" not in loss_cfg:
+        raise ValueError(
+            "budgeted_group_control_honf requires numeric loss.case_group_budget_weight; "
+            "calibration may use an explicit zero value."
+        )
+    weight = float(loss_cfg.get("case_group_budget_weight", 0.0))
+    if not math.isfinite(weight) or weight < 0.0:
+        raise ValueError("case_group_budget_weight must be finite and nonnegative.")
+    if weight != 0.0 and not budget_enabled:
+        raise ValueError(
+            "case_group_budget_weight is only valid for budgeted_group_control_honf."
+        )
+    return budget_enabled, weight
+
+
 def assemble_channelthermal_loss_terms(
     output: dict[str, Any],
     batch: dict[str, Any],
@@ -393,6 +418,15 @@ def assemble_channelthermal_loss_terms(
         loss_predicted_consistency = zero
     loss_org = organizer_regularization(output, loss_cfg)
 
+    budget_enabled, budget_weight = _case_group_budget_settings(model, loss_cfg)
+    loss_group_budget = case_group_budget_loss(
+        output,
+        enabled=budget_enabled,
+        # Keep the live path present during the one-time zero-weight gradient
+        # calibration. A missing scalar must never silently disable the mode.
+        require_live=budget_enabled,
+    )
+
     sparsification = _routing_sparsification_settings(model)
     paircost_enabled = bool(getattr(sparsification, "enabled", False))
     paircost_weight = float(getattr(sparsification, "cost_weight", 0.0))
@@ -417,10 +451,12 @@ def assemble_channelthermal_loss_terms(
         + float(predicted_consistency_weight) * loss_predicted_consistency
         + loss_org
     )
-    loss = loss_physical + paircost_weight * loss_paircost
+    loss = loss_physical + paircost_weight * loss_paircost + budget_weight * loss_group_budget
     return {
         "loss": loss,
         "loss_physical": loss_physical,
+        "loss_group_budget": loss_group_budget,
+        "case_group_budget_weight": output["pred_field"].new_tensor(budget_weight),
         "loss_field": loss_field,
         "loss_internal_temperature": loss_internal,
         "loss_interface": loss_interface,
@@ -464,6 +500,7 @@ def run_epoch(
     count = 0
     sparsification = _routing_sparsification_settings(model)
     paircost_enabled = bool(getattr(sparsification, "enabled", False))
+    budget_enabled, _budget_weight = _case_group_budget_settings(model, loss_cfg)
     iterator = tqdm(loader, leave=False, desc="train" if training else "val")
     for batch_idx, batch in enumerate(iterator, start=1):
         if max_batches is not None and batch_idx > int(max_batches):
@@ -507,6 +544,7 @@ def run_epoch(
                 pred_cons_interface = loss_terms["loss_predicted_consistency_interface"]
                 loss_org = loss_terms["loss_organizer"]
                 loss_paircost = loss_terms["loss_paircost"]
+                loss_group_budget = loss_terms["loss_group_budget"]
         if training:
             optimizer.zero_grad(set_to_none=True)
             clip_norm = float(gradient_clip_norm or 0.0)
@@ -609,8 +647,18 @@ def run_epoch(
                 "field_mse": mse,
                 "temperature_mse": temp_mse,
             }
-            if paircost_enabled:
+            if paircost_enabled or budget_enabled:
                 metric_tensors["loss_physical"] = loss_terms["loss_physical"]
+            if budget_enabled:
+                metric_tensors["loss_group_budget"] = loss_group_budget
+                metric_tensors["case_group_budget_weight"] = loss_terms["case_group_budget_weight"]
+                expected_count = output.get("case_group_budget_expected_optional_count")
+                metric_tensors["case_group_budget_expected_optional_count"] = (
+                    expected_count.mean()
+                    if torch.is_tensor(expected_count) and expected_count.numel()
+                    else pred.new_full((), math.nan)
+                )
+            if paircost_enabled:
                 metric_tensors["loss_paircost"] = loss_paircost
                 # Keep the four learned temperatures in the ordinary metrics
                 # row for the opt-in science profile.  The names deliberately
@@ -736,6 +784,15 @@ def run_epoch(
                 {
                     "temperature_" + name.removeprefix("log_temperature_"): math.nan
                     for name in ROUTING_TYPED_TEMPERATURE_NAMES
+                }
+            )
+        if budget_enabled:
+            empty_metrics.update(
+                {
+                    "loss_physical": math.nan,
+                    "loss_group_budget": math.nan,
+                    "case_group_budget_weight": math.nan,
+                    "case_group_budget_expected_optional_count": math.nan,
                 }
             )
         return empty_metrics

@@ -133,6 +133,7 @@
         "port_global_consistency_teacher_weight": {"type": "number", "minimum": 0},
         "predicted_consistency_weight": {"type": "number", "minimum": 0},
         "predicted_consistency_warmup_epochs": {"type": "integer", "minimum": 0},
+        "case_group_budget_weight": {"type": "number", "minimum": 0},
         "organizer_regularization": {"$ref": "#/$defs/organizer_regularization"}
       }
     },

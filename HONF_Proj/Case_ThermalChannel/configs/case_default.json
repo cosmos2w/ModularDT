@@ -75,6 +75,7 @@
     "port_global_consistency_teacher_weight": 0.0,
     "predicted_consistency_weight": 0.05,
     "predicted_consistency_warmup_epochs": 100,
+    "case_group_budget_weight": 0.0,
 
     "organizer_regularization": {
       "enabled": false,

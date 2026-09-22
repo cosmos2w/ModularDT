@@ -144,8 +144,45 @@ def induced_pair_cost_loss(
     return pred.new_zeros(())
 
 
+def case_group_budget_loss(
+    output: Mapping[str, Any],
+    *,
+    enabled: bool,
+    require_live: bool = False,
+) -> torch.Tensor:
+    """Return the live per-case expected optional-group count.
+
+    The budget backend exposes this tensor at the physical-forward top level
+    so the trainer can add its coefficient exactly once per case/forward.  It
+    must not be reconstructed from ``interaction_aux``: that mapping is a
+    detached diagnostic channel in the maintained interface core.
+    """
+
+    pred = output.get("pred_field")
+    if not torch.is_tensor(pred):
+        raise ValueError("Case-group budget loss requires output['pred_field'] tensor metadata.")
+    if not enabled:
+        return pred.new_zeros(())
+    value = output.get("case_group_budget_expected_optional_count")
+    if not torch.is_tensor(value):
+        if require_live:
+            raise RuntimeError(
+                "Enabled case-group budget objective requires the live top-level "
+                "case_group_budget_expected_optional_count tensor."
+            )
+        return pred.new_zeros(())
+    if value.numel() == 0:
+        if require_live:
+            raise RuntimeError("Case-group budget objective received an empty expected-count tensor.")
+        return pred.new_zeros(())
+    # The backend returns one value per case.  A mean is the single objective
+    # reduction; query chunks and physical phases never enter this reduction.
+    return value.mean()
+
+
 __all__ = [
     "channelthermal_field_channel_weights",
     "channelthermal_field_mse",
     "induced_pair_cost_loss",
+    "case_group_budget_loss",
 ]

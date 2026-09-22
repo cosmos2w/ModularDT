@@ -27,6 +27,24 @@ class PreparedInterfaceChannelThermalCase:
     phase_shared_state: Any = None
 
 
+def _budget_expected_optional_count(prepared: PreparedInterfaceField) -> torch.Tensor | None:
+    """Return the live expected optional-group count from the P0 plan.
+
+    ``PreparedInterfaceField.interaction_aux`` is intentionally a detached
+    diagnostic channel.  The budget objective must therefore be recovered
+    from the runtime gate-plan object carried in ``phase_shared_state``.  The
+    core backend exposes the plan as ``CaseGroupBudget``; keeping this lookup
+    narrow makes an omitted live objective fail loudly at the new-mode
+    boundary instead of falling back to detached statistics.
+    """
+
+    plan = getattr(prepared, "phase_shared_state", None)
+    if plan is None:
+        return None
+    value = getattr(plan, "expected_optional_count", None)
+    return value if torch.is_tensor(value) else None
+
+
 @contextmanager
 def _interface_read_role(model: Any, role: str):
     """Annotate one physical preparation or read for diagnostic hooks.
@@ -164,13 +182,30 @@ def _phase_preparation_diagnostics(
 ) -> dict[str, torch.Tensor]:
     """Return opt-in backend preparation counters for one physical phase."""
 
-    phase_prefix = getattr(model.core.backend, "phase_diagnostic_prefix", None)
-    if prepared is None or not phase_prefix:
+    if prepared is None:
         return {}
+    phase_prefix = getattr(model.core.backend, "phase_diagnostic_prefix", None)
+    if not phase_prefix:
+        return {}
+    if isinstance(phase_prefix, str):
+        prefixes = (phase_prefix,)
+    else:
+        prefixes = tuple(str(prefix) for prefix in phase_prefix)
+    # Run 1409 retains the Run-1406 group-control preparation summaries while
+    # adding case-gate diagnostics.  Keep both families available in the
+    # existing opt-in interaction channel so phase-refresh audits can compare
+    # memberships/controls with the gate plan.  ``preparation_aux`` only
+    # includes full maps when routing maps were explicitly requested, so this
+    # does not add large tensors to ordinary training forwards.
+    architecture = str(
+        getattr(getattr(getattr(model, "config", None), "core_honf", None), "forward_architecture", "")
+    )
+    if architecture == "budgeted_group_control_honf":
+        prefixes = tuple(dict.fromkeys((*prefixes, "group_control_")))
     return {
         key: value
         for key, value in prepared.interaction_aux.items()
-        if key.startswith(str(phase_prefix)) and torch.is_tensor(value)
+        if any(key.startswith(prefix) for prefix in prefixes) and torch.is_tensor(value)
     }
 
 
@@ -251,6 +286,10 @@ def forward_interface_field(
     phase_shared_architecture = architecture in {
         "phase_shared_group_control_honf",
         "hypergraph_quadrature_honf",
+        # Run 1409 shares only the sampled case-level availability plan.
+        # The backend must rebuild memberships, collective controls, and fine
+        # values for each later physical phase.
+        "budgeted_group_control_honf",
     }
     if architecture in {"regional_response_honf", "hierarchical_regional_honf"}:
         environment_kwargs["response_region_block_shape"] = tuple(
@@ -502,6 +541,15 @@ def forward_interface_field(
         )
     interaction_aux: Dict[str, Any] = dict(final_prepared.interaction_aux)
     interaction_aux.update(decoder_output.pop("_interaction_aux"))
+    if architecture == "budgeted_group_control_honf":
+        expected_optional_count = _budget_expected_optional_count(prepared0)
+        if expected_optional_count is None:
+            raise RuntimeError(
+                "budgeted_group_control_honf did not expose a live expected optional-group "
+                "count on its P0 gate plan. The case objective cannot use detached diagnostics."
+            )
+    else:
+        expected_optional_count = None
     for key, value in _phase_preparation_diagnostics(model, prepared0).items():
         interaction_aux[f"initial_port_{key}"] = value
     for key, value in initial_read_aux.items():
@@ -520,10 +568,16 @@ def forward_interface_field(
                 interaction_aux[f"provisional_{key}"] = value
     else:
         phase_prefix = getattr(model.core.backend, "phase_diagnostic_prefix", None)
+        if isinstance(phase_prefix, str):
+            phase_prefixes = (phase_prefix,)
+        else:
+            phase_prefixes = tuple(str(prefix) for prefix in phase_prefix or ())
+        if architecture == "budgeted_group_control_honf":
+            phase_prefixes = tuple(dict.fromkeys((*phase_prefixes, "group_control_")))
         for key, value in _phase_preparation_diagnostics(model, prepared1).items():
             interaction_aux[f"provisional_{key}"] = value
         for key, value in provisional_read_aux.items():
-            if phase_prefix and key.startswith(str(phase_prefix)):
+            if any(key.startswith(prefix) for prefix in phase_prefixes):
                 interaction_aux[f"provisional_{key}"] = value
 
     if local_outputs is not None:
@@ -567,8 +621,14 @@ def forward_interface_field(
                     interaction_aux["port_global_" + key] = value
         else:
             phase_prefix = getattr(model.core.backend, "phase_diagnostic_prefix", None)
+            if isinstance(phase_prefix, str):
+                phase_prefixes = (phase_prefix,)
+            else:
+                phase_prefixes = tuple(str(prefix) for prefix in phase_prefix or ())
+            if architecture == "budgeted_group_control_honf":
+                phase_prefixes = tuple(dict.fromkeys((*phase_prefixes, "group_control_")))
             for key, value in consistency_diag.items():
-                if phase_prefix and key.startswith(str(phase_prefix)) and torch.is_tensor(value):
+                if any(key.startswith(prefix) for prefix in phase_prefixes) and torch.is_tensor(value):
                     interaction_aux["port_global_" + key] = value
         target_temperature = selected[..., 3]
         consistency_mask = adapter.module_present[:, :, None].expand_as(temperature)
@@ -598,6 +658,11 @@ def forward_interface_field(
         "routing_aux": {key: value for key, value in decoder_output.items() if key != "pred_field"},
         "interaction_aux": interaction_aux,
     }
+    if expected_optional_count is not None:
+        # This remains attached to the P0 gate graph and is consumed once by
+        # the ChannelThermal loss assembly.  It is deliberately separate from
+        # detached interaction diagnostics used for logging.
+        result["case_group_budget_expected_optional_count"] = expected_optional_count
     if return_organizer_passes:
         result["provisional_organizer_aux"] = {}
         result["provisional_interaction_aux"] = {} if prepared1 is None else prepared1.interaction_aux

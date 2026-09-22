@@ -1,6 +1,8 @@
 """Matched non-legacy interface-field architectures."""
 
 from .core import InterfaceFieldCore
+from .case_group_budget import CaseGroupBudget, CaseGroupGate, gate_reference_eta_kappa
+from .budgeted_group_control import BudgetedGroupControlPairwiseField, BudgetedGroupRouter
 from .fixed_group_pairwise import FixedGroupPairwiseField
 from .fixed_group_router import FixedGroupQueryRoute, FixedGroupRouter, FixedGroupState
 from .group_control_pairwise import GroupControlPairwiseField
@@ -46,6 +48,10 @@ def __getattr__(name: str):
 
 __all__ = [
     "EncodedInterfaceCase",
+    "CaseGroupBudget",
+    "CaseGroupGate",
+    "BudgetedGroupControlPairwiseField",
+    "BudgetedGroupRouter",
     "FixedGroupPairwiseField",
     "FixedGroupQueryRoute",
     "FixedGroupRouter",
@@ -69,6 +75,7 @@ __all__ = [
     "SixBitSupportIndex",
     "SupportExecutionCounts",
     "ThreeTermInterfaceContext",
+    "gate_reference_eta_kappa",
     "build_six_bit_source_support",
     "build_six_bit_support_index",
     "live_pair_values",
