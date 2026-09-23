@@ -70,4 +70,3 @@ def test_predict_case_aggregates_group_control_ledgers_over_outer_query_chunks(m
     assert float(np.asarray(aux["group_control_environment_geometry_rows_forward"])) == 8.0
     assert float(np.asarray(aux["group_control_environment_content_dot_rows_forward"])) == 16.0
     assert result["pred_field_grid"].shape == (2, 2, 1)
-

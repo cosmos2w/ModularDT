@@ -451,17 +451,19 @@ def render_case_board(record: Mapping[str, Any], path: Path) -> None:
     environment_rows = row.get("p2_environment_actual_rows")
     row_text = "n/a/n/a" if module_rows is None or environment_rows is None else f"{float(module_rows):.0f}/{float(environment_rows):.0f}"
     figure.suptitle(
-        "Run 1501 phase-local sparse incidence · "
+        "Run 1501 phase-local sparse incidence\n"
         f"Q={query.shape[0]} · M={int(module_xy.shape[0])}/{int(row.get('M_padded', module_xy.shape[0]))} · E={environment.shape[0]} · "
         f"registered K=12 · occupied={row['occupied_source_groups']} · "
         f"mean Kq={row['query_degree_mean']:.2f} · κ={row['kappa']:.2f} · "
         f"RM/RE={row['module_RM_support']:.3f}/{row['environment_RE_support']:.3f} · "
         f"P2 actual rows M/E={row_text}\n"
         "Learned organization, not physical causality; logical support is distinct from rectangular execution",
-        fontsize=11.5,
+        fontsize=10.5,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=170)
+    if path.suffix.lower() == ".png":
+        figure.savefig(path.with_suffix(".pdf"), format="pdf", facecolor="white")
     plt.close(figure)
 
 
@@ -772,9 +774,10 @@ def render_representative_hypergraph_overview(
             linewidths=1.3, label="joint centres",
         )
         source_axis.set_title(
-            f"Case {case_id}: source geometry\n"
-            f"M={module.shape[0]}/{int(row.get('M_padded', module.shape[0]))} (IDs {module_ids_text}), E={environment.shape[0]} · "
-            f"RM/RE={float(row['module_RM_support']):.3f}/{float(row['environment_RE_support']):.3f}"
+            f"Case {case_id} · source geometry\n"
+            f"active M={module.shape[0]}/{int(row.get('M_padded', module.shape[0]))}; IDs {module_ids_text}\n"
+            f"E={environment.shape[0]}; RM/RE={float(row['module_RM_support']):.3f}/{float(row['environment_RE_support']):.3f}",
+            fontsize=9,
         )
         source_axis.legend(frameon=False, fontsize=7, loc="best")
         source_axis.set_aspect("equal", adjustable="datalim")
@@ -831,6 +834,8 @@ def render_representative_hypergraph_overview(
         axis.spines["right"].set_visible(False)
     path.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(path, dpi=180, facecolor="white")
+    if path.suffix.lower() == ".png":
+        figure.savefig(path.with_suffix(".pdf"), format="pdf", facecolor="white")
     plt.close(figure)
 
 

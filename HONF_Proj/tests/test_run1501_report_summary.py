@@ -53,4 +53,3 @@ def test_report_leaves_module_fraction_unavailable_without_m_padded(tmp_path: Pa
     )
     records = _population_records(eval_dir)
     assert records[0]["module_rectangular_fraction"] is None
-
