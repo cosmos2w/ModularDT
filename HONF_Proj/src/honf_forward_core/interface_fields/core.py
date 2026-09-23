@@ -819,7 +819,17 @@ class InterfaceFieldCore(nn.Module):
         )
 
     def _receiver_features(self, prepared: PreparedInterfaceField, receivers: torch.Tensor) -> torch.Tensor:
-        return self.receiver_fourier(receivers / prepared.encoded.coordinate_scale)
+        scale = prepared.encoded.coordinate_scale
+        if scale.ndim == 1:
+            scale = scale[None, None, :]
+        elif scale.ndim == 2:
+            scale = scale[:, None, :]
+        elif scale.ndim == 3:
+            if int(scale.shape[1]) != 1:
+                raise ValueError("coordinate_scale must have shape [d], [B,d], or [B,1,d].")
+        else:
+            raise ValueError("coordinate_scale must have shape [d], [B,d], or [B,1,d].")
+        return self.receiver_fourier(receivers / scale)
 
     def read(
         self,

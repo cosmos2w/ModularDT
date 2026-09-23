@@ -26,6 +26,7 @@ from .group_control_router import (
     PreparedGroupControl,
     PrototypeAnchoredGroupRouter,
 )
+from .support_block_reader import observed_support_blocks
 from .types import EncodedInterfaceCase
 
 
@@ -859,6 +860,70 @@ class GroupControlPairwiseField(DensePairwiseField):
             active_module_count=active_module_count,
         )
 
+    def _read_module_support_blocks(
+        self,
+        state: dict[str, Any],
+        encoded: EncodedInterfaceCase,
+        receivers: torch.Tensor,
+        route: GroupQueryRoute,
+        *,
+        source_measure: torch.Tensor,
+        active_module_count: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Read QM over exact observed query-signature source unions.
+
+        Support masks are used only for integer dispatch.  The block's
+        overlap and control moment are contracted from the original live
+        ``alpha``, ``A`` and ``h`` tensors, so routing and first derivatives
+        remain part of the differentiable predictor.
+        """
+
+        batch, query_count, _ = receivers.shape
+        context = receivers.new_zeros(batch, query_count, self.hidden_dim)
+        overlap_mass = receivers.new_zeros(batch, query_count)
+        controls: PreparedGroupControl = state["group_control_state"]
+        scales = self._dense_coordinate_scale(encoded, batch)
+        blocks = observed_support_blocks(
+            route.assignment,
+            controls.module_membership,
+            source_measure=source_measure,
+        )
+        for block in blocks:
+            q_index = block.query_index
+            if block.source_count == 0:
+                continue
+            b = block.batch_index
+            s_index = block.source_index
+            query_rows = receivers[b : b + 1].index_select(1, q_index)
+            source_rows = encoded.module_centers[b : b + 1].index_select(1, s_index)
+            scale_rows = scales if int(scales.shape[0]) == 1 else scales[b : b + 1]
+            relative = (query_rows[:, :, None, :] - source_rows[:, None, :, :]) / scale_rows
+            alpha = route.assignment[b : b + 1].index_select(1, q_index)
+            membership = controls.module_membership[b : b + 1].index_select(1, s_index)
+            rho = torch.bmm(alpha, membership.transpose(1, 2))
+            moment = torch.einsum(
+                "bqk,bsk,bkd->bqsd",
+                alpha,
+                membership,
+                controls.group_control[b : b + 1],
+            )
+            psi = self._module_psi(
+                state["module_first_affine"][b : b + 1].index_select(1, s_index)[:, None, :, :],
+                self.relative_fourier(relative),
+                moment,
+            )
+            weights = source_measure[b : b + 1].index_select(1, s_index)[:, None, :] * rho
+            block_weighted_sum = (psi * weights[..., None]).sum(dim=2)
+            block_overlap_mass = weights.sum(dim=2)
+            block_context = self._module_finalize(
+                block_weighted_sum,
+                block_overlap_mass,
+                active_module_count[b : b + 1],
+            )
+            context[b : b + 1, q_index] = block_context
+            overlap_mass[b : b + 1, q_index] = block_overlap_mass
+        return context, overlap_mass
+
     def _read_module_partial(
         self,
         state: dict[str, Any],
@@ -959,38 +1024,53 @@ class GroupControlPairwiseField(DensePairwiseField):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         controls: PreparedGroupControl = state["group_control_state"]
         overlap = self._overlap(route.assignment, controls.module_membership)
-        # Normal Run-1406 execution is deliberately rectangular.  The
-        # support test and gathered fallback remain available to an explicit
-        # evidence/map request, where their bookkeeping is untimed.
-        complete, selected_pairs, support_index = self._module_execution_plan(
-            state,
-            route,
-            overlap,
-            source_measure=controls.module_measure,
-            include_diagnostics=include_diagnostics,
-        )
-        active_count = (encoded.module_present > 0.5).sum(dim=-1).to(receivers.dtype)
-        if complete:
-            context, overlap_mass = self._read_module_rectangular(
+        if self.executor_policy == "support_blocks":
+            active_count = (encoded.module_present > 0.5).sum(dim=-1).to(receivers.dtype)
+            context, overlap_mass = self._read_module_support_blocks(
                 state,
                 encoded,
                 receivers,
                 route,
-                overlap,
                 source_measure=controls.module_measure,
                 active_module_count=active_count,
             )
+            complete = False
+            selected_pairs = None
+            support_index = None
         else:
-            context, overlap_mass = self._read_module_partial(
+            # Normal Run-1406 execution is deliberately rectangular.  The
+            # support test and gathered fallback remain available to an
+            # explicit evidence/map request, where their bookkeeping is
+            # untimed.
+            complete, selected_pairs, support_index = self._module_execution_plan(
                 state,
-                encoded,
-                receivers,
                 route,
                 overlap,
                 source_measure=controls.module_measure,
-                active_module_count=active_count,
-                pair_indices=selected_pairs,
+                include_diagnostics=include_diagnostics,
             )
+            active_count = (encoded.module_present > 0.5).sum(dim=-1).to(receivers.dtype)
+            if complete:
+                context, overlap_mass = self._read_module_rectangular(
+                    state,
+                    encoded,
+                    receivers,
+                    route,
+                    overlap,
+                    source_measure=controls.module_measure,
+                    active_module_count=active_count,
+                )
+            else:
+                context, overlap_mass = self._read_module_partial(
+                    state,
+                    encoded,
+                    receivers,
+                    route,
+                    overlap,
+                    source_measure=controls.module_measure,
+                    active_module_count=active_count,
+                    pair_indices=selected_pairs,
+                )
         if not include_diagnostics:
             # The context is the only prediction output; retain the overlap
             # mass because it is a lightweight maintained diagnostic, while
@@ -1168,6 +1248,123 @@ class GroupControlPairwiseField(DensePairwiseField):
             source_measure=source_measure,
         )
 
+    def _read_environment_support_blocks(
+        self,
+        state: dict[str, Any],
+        encoded: EncodedInterfaceCase,
+        receivers: torch.Tensor,
+        receiver_features: torch.Tensor,
+        route: GroupQueryRoute,
+        *,
+        source_measure: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Read QE over exact observed query-signature source unions.
+
+        Each block performs one ordinary rectangular attention calculation
+        over its unique environmental source bank.  The softmax is over the
+        complete union, while rho, score control, geometry and source values
+        stay live and query/source specific.
+        """
+
+        batch, query_count, _ = receivers.shape
+        query = self.env_attention.project_query(self.env_query(receiver_features))
+        keys = state["environment_keys"]
+        values = state["environment_values"]
+        controls: PreparedGroupControl = state["group_control_state"]
+        context = receivers.new_zeros(batch, query_count, self.hidden_dim)
+        overlap_mass = receivers.new_zeros(batch, query_count)
+        tiny = torch.finfo(query.dtype).tiny
+        source_control_bank = state["environment_head_source_control"]
+
+        def block_geometry(
+            block_receivers: torch.Tensor,
+            block_sources: torch.Tensor,
+            batch_index: int,
+        ) -> torch.Tensor:
+            scale = encoded.coordinate_scale
+            if scale.ndim == 1:
+                scale = scale[None, None, None, :]
+            elif scale.ndim == 2:
+                scale_batch = batch_index if int(scale.shape[0]) > 1 else 0
+                scale = scale[scale_batch : scale_batch + 1, None, None, :]
+            elif scale.ndim == 3:
+                scale_batch = batch_index if int(scale.shape[0]) > 1 else 0
+                scale = scale[scale_batch : scale_batch + 1, :, None, :]
+            else:
+                raise ValueError("coordinate_scale must have shape [d], [B,d], or [B,1,d].")
+            relative = (
+                block_receivers[:, :, None, :] - block_sources[:, None, :, :]
+            ) / scale
+            return self._mlp(
+                self.env_geometry_bias,
+                self.relative_fourier(relative),
+            ).permute(0, 3, 1, 2)
+
+        for block in observed_support_blocks(
+            route.assignment,
+            controls.environment_membership,
+            source_measure=source_measure,
+        ):
+            q_index = block.query_index
+            if block.source_count == 0:
+                continue
+            b = block.batch_index
+            s_index = block.source_index
+            alpha = route.assignment[b : b + 1].index_select(1, q_index)
+            membership = controls.environment_membership[b : b + 1].index_select(1, s_index)
+            rho = torch.bmm(alpha, membership.transpose(1, 2))
+            zeta = torch.einsum(
+                "bqk,bksh->bqsh",
+                alpha,
+                source_control_bank[b : b + 1].index_select(2, s_index),
+            ).permute(0, 3, 1, 2)
+            query_block = query[b : b + 1].index_select(2, q_index)
+            key_block = keys[b : b + 1].index_select(2, s_index)
+            value_block = values[b : b + 1].index_select(2, s_index)
+            scores = torch.matmul(
+                query_block,
+                key_block.transpose(-1, -2),
+            ) / (float(self.head_dim) ** 0.5)
+            receiver_block = receivers[b : b + 1].index_select(1, q_index)
+            source_block = encoded.env_coords[b : b + 1].index_select(1, s_index)
+            scores = scores * (1.0 + torch.tanh(zeta)) + block_geometry(
+                receiver_block,
+                source_block,
+                b,
+            )
+            measure = source_measure[b : b + 1].index_select(1, s_index)
+            scores = scores + torch.log(measure.clamp_min(tiny))[:, None, None, :]
+            scores = scores + torch.log(rho.clamp_min(tiny))[:, None, :, :]
+            valid = (rho > 0.0) & (measure[:, None, :] > 0.0)
+            valid_heads = valid[:, None, :, :]
+            masked_scores = torch.where(
+                valid_heads,
+                scores,
+                torch.full_like(scores, -torch.inf),
+            )
+            row_has_support = valid_heads.any(dim=-1, keepdim=True)
+            safe_scores = torch.where(
+                row_has_support,
+                masked_scores,
+                torch.zeros_like(masked_scores),
+            )
+            weights = torch.softmax(safe_scores, dim=-1)
+            weights = weights * valid_heads.to(dtype=weights.dtype)
+            weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(tiny)
+            response = torch.matmul(weights, value_block).transpose(1, 2).reshape(
+                1,
+                block.query_count,
+                self.hidden_dim,
+            )
+            response = self.env_attention.output(response)
+            block_overlap_mass = (measure[:, None, :] * rho).sum(dim=-1)
+            block_context = (
+                float(self.group_count) * block_overlap_mass[..., None] * response
+            )
+            context[b : b + 1, q_index] = block_context
+            overlap_mass[b : b + 1, q_index] = block_overlap_mass
+        return context, overlap_mass
+
     def _read_environment_partial(
         self,
         state: dict[str, Any],
@@ -1295,7 +1492,17 @@ class GroupControlPairwiseField(DensePairwiseField):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         controls: PreparedGroupControl = state["group_control_state"]
         overlap = self._overlap(route.assignment, controls.environment_membership)
-        if (
+        if self.executor_policy == "support_blocks":
+            context, overlap_mass = self._read_environment_support_blocks(
+                state,
+                encoded,
+                receivers,
+                receiver_features,
+                route,
+                source_measure=controls.environment_measure,
+            )
+            complete = False
+        elif (
             self.executor_policy == "rectangular_reference"
             or self.diagnostic_executor_independent
         ):
@@ -1419,6 +1626,9 @@ class GroupControlPairwiseField(DensePairwiseField):
             ),
             "group_control_environment_complete_support": receivers.new_tensor(float(complete)),
             "group_control_environment_partial_support": receivers.new_tensor(float(not complete)),
+            "group_control_environment_executor_selected": receivers.new_tensor(
+                float(self.executor_policy == "support_blocks" or not complete)
+            ),
         }
         return context, aux
 

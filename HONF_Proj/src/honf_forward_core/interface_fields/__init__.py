@@ -62,6 +62,7 @@ from .sparse_incidence_router import (
     SparseIncidenceGroupRouter,
     SparseIncidencePreparedGroupControl,
 )
+from .support_block_reader import SupportBlock, observed_support_blocks, pack_positive_support
 from .regional_response import RegionalResponseField
 from .three_term_context import ThreeTermInterfaceContext
 from .types import EncodedInterfaceCase, InterfaceRead, PreparedInterfaceField
@@ -114,6 +115,9 @@ __all__ = [
     "SparseIncidenceGroupControlPairwiseField",
     "SparseIncidenceGroupRouter",
     "SparseIncidencePreparedGroupControl",
+    "SupportBlock",
+    "observed_support_blocks",
+    "pack_positive_support",
     "MASS_COMPETITIVE_EPSILON",
     "mass_competition",
     "OCCUPANCY_KMAX",
