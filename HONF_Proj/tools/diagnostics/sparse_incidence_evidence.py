@@ -330,7 +330,10 @@ def _set_equal_domain(
         lower = points.min(axis=0)
         upper = points.max(axis=0)
     span = np.maximum(upper - lower, np.finfo(np.float64).eps)
-    margin = 0.03 * span
+    # A one-dimensional synthetic/fixed panel can have a zero physical span
+    # in one coordinate.  A finite pixel-scale margin keeps Matplotlib's
+    # transform nonsingular while preserving the measured domain.
+    margin = np.maximum(0.03 * span, 1.0e-6)
     axis.set_xlim(float(lower[0] - margin[0]), float(upper[0] + margin[0]))
     axis.set_ylim(float(lower[1] - margin[1]), float(upper[1] + margin[1]))
     axis.set_aspect("equal", adjustable="box")
@@ -467,8 +470,15 @@ def render_case_board(record: Mapping[str, Any], path: Path) -> None:
     plt.close(figure)
 
 
-def render_kplan_histogram(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
-    """Compatibility entry point that renders pooled Kq, never Kplan."""
+def render_kplan_histogram(
+    rows: Sequence[Mapping[str, Any]], path: Path, *, run_label: str = "Run 1501"
+) -> None:
+    """Compatibility entry point that renders pooled Kq, never Kplan.
+
+    ``run_label`` keeps the historical entry point reusable by later
+    sparse-incidence-compatible candidates without changing its default
+    Run-1501 presentation.
+    """
 
     try:
         import matplotlib.pyplot as plt
@@ -484,7 +494,7 @@ def render_kplan_histogram(rows: Sequence[Mapping[str, Any]], path: Path) -> Non
     bars = axis.bar(x, y, color="#6A51A3")
     axis.set_xlabel("query sparse support Kq")
     axis.set_ylabel("queries across explicit population")
-    axis.set_title("Run 1501 query support; registered capacity K=12")
+    axis.set_title(f"{run_label} query support; registered capacity K=12")
     for bar, count in zip(bars, y, strict=True):
         axis.text(bar.get_x() + bar.get_width() / 2.0, count, f"{int(count):,}", ha="center", va="bottom", fontsize=8)
     path.parent.mkdir(parents=True, exist_ok=True)
