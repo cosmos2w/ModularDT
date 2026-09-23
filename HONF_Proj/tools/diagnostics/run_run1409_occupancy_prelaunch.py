@@ -156,7 +156,7 @@ def _preview_batch(loader: Any, dataset: Any) -> tuple[list[dict[str, Any]], dic
 
 def run_prelaunch(args: argparse.Namespace) -> dict[str, Any]:
     if str(args.device) != "cpu":
-        raise ValueError("occupancy prelaunch is CPU-only; pass --device cpu")
+        raise ValueError("group-control prelaunch is CPU-only; pass --device cpu")
     for path in (PROJECT_ROOT / "src", PROJECT_ROOT / "Case_ThermalChannel" / "src"):
         if str(path) not in sys.path:
             sys.path.insert(0, str(path))
@@ -189,8 +189,13 @@ def run_prelaunch(args: argparse.Namespace) -> dict[str, Any]:
     request = WorkflowRequest(workflow="forward", device="cpu", epochs=50)
     cfg = plugin._forward_config(bundle, request, Path(args.output).expanduser().resolve().parent)
     architecture = str(cfg["model"]["core_honf"].get("forward_architecture", ""))
-    if architecture != "occupancy_adaptive_group_control_honf":
-        raise RuntimeError(f"resolved profile architecture is {architecture!r}, expected occupancy mode")
+    expected_architecture = str(
+        getattr(args, "expected_architecture", "occupancy_adaptive_group_control_honf")
+    )
+    if architecture != expected_architecture:
+        raise RuntimeError(
+            f"resolved profile architecture is {architecture!r}, expected {expected_architecture!r}"
+        )
     dataset_cfg = cfg["dataset"]
     training_cfg = cfg["training"]
     loss_cfg = dict(cfg["loss"])
@@ -271,10 +276,10 @@ def run_prelaunch(args: argparse.Namespace) -> dict[str, Any]:
     )
     stats = _router_update_stats(model, before)
     if not stats["finite_gradient"] or not stats["finite_update"]:
-        raise RuntimeError(f"non-finite occupancy-router gradient/update: {stats}")
+        raise RuntimeError(f"non-finite group-router gradient/update: {stats}")
     payload = {
         "schema_version": 1,
-        "task": "run1409_occupancy_adaptive_prelaunch",
+        "task": str(getattr(args, "task_name", "run1409_occupancy_adaptive_prelaunch")),
         "status": "complete",
         "profile": str(profile),
         "experiment_overlay": None if overlay is None else str(overlay),
@@ -295,7 +300,7 @@ def run_prelaunch(args: argparse.Namespace) -> dict[str, Any]:
         },
         "two_batch_read_metrics": _scalar_metrics(eval_metrics),
         "one_update_metrics": _scalar_metrics(update_metrics),
-        "occupancy_router_gradient_update": stats,
+        str(getattr(args, "router_stats_key", "occupancy_router_gradient_update")): stats,
         "checkpoint_written": False,
         "managed_run_allocated": False,
         "cuda_used": False,

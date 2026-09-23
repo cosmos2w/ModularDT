@@ -49,6 +49,14 @@ from .occupancy_group_router import (
     occupancy_support,
     pack_16bit_mask,
 )
+from .mass_competitive_group_control import MassCompetitiveGroupControlPairwiseField
+from .mass_competitive_router import (
+    MASS_COMPETITIVE_EPSILON,
+    MassCompetitiveGroupPlan,
+    MassCompetitiveGroupRouter,
+    MassCompetitivePreparedGroupControl,
+    mass_competition,
+)
 from .regional_response import RegionalResponseField
 from .three_term_context import ThreeTermInterfaceContext
 from .types import EncodedInterfaceCase, InterfaceRead, PreparedInterfaceField
@@ -94,6 +102,12 @@ __all__ = [
     "OccupancyGroupPlan",
     "OccupancyGroupRouter",
     "OccupancyPreparedGroupControl",
+    "MassCompetitiveGroupControlPairwiseField",
+    "MassCompetitiveGroupPlan",
+    "MassCompetitiveGroupRouter",
+    "MassCompetitivePreparedGroupControl",
+    "MASS_COMPETITIVE_EPSILON",
+    "mass_competition",
     "OCCUPANCY_KMAX",
     "OCCUPANCY_CONTROL_DIM",
     "direct_mask_intersection",

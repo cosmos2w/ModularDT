@@ -98,6 +98,7 @@ FORWARD_ARCHITECTURES = {
     "hypergraph_quadrature_honf",
     "budgeted_group_control_honf",
     "occupancy_adaptive_group_control_honf",
+    "mass_competitive_group_control_honf",
 }
 
 LEGACY_ARCHITECTURE_KEYS = {
@@ -636,6 +637,7 @@ class UnifiedForwardConfig:
             "hypergraph_quadrature_honf",
             "budgeted_group_control_honf",
             "occupancy_adaptive_group_control_honf",
+            "mass_competitive_group_control_honf",
         }:
             controlled = self.interface_model
             if controlled.support_spacing_factor is not None:
@@ -681,18 +683,21 @@ class UnifiedForwardConfig:
                     raise ValueError(
                         "budgeted_group_control_honf requires interface_model.group_control_dim exactly 16."
                     )
-            if self.forward_architecture == "occupancy_adaptive_group_control_honf":
+            if self.forward_architecture in {
+                "occupancy_adaptive_group_control_honf",
+                "mass_competitive_group_control_honf",
+            }:
                 if controlled.case_group_budget is not None:
                     raise ValueError(
-                        "occupancy_adaptive_group_control_honf does not accept case_group_budget."
+                        f"{self.forward_architecture} does not accept case_group_budget."
                     )
                 if int(controlled.group_count) != 12:
                     raise ValueError(
-                        "occupancy_adaptive_group_control_honf requires interface_model.group_count exactly 12."
+                        f"{self.forward_architecture} requires interface_model.group_count exactly 12."
                     )
                 if int(controlled.group_control_dim) != 16:
                     raise ValueError(
-                        "occupancy_adaptive_group_control_honf requires interface_model.group_control_dim exactly 16."
+                        f"{self.forward_architecture} requires interface_model.group_control_dim exactly 16."
                     )
             if self.forward_architecture == "hypergraph_quadrature_honf" and int(controlled.samples_per_group) != 4:
                 raise ValueError(
@@ -1158,6 +1163,7 @@ class UnifiedForwardConfig:
                 "hypergraph_quadrature_honf",
                 "budgeted_group_control_honf",
                 "occupancy_adaptive_group_control_honf",
+                "mass_competitive_group_control_honf",
                 }:
                     for key in (
                         "group_count",

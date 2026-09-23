@@ -68,7 +68,7 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(_jsonable(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _runtime_imports() -> tuple[Any, ...]:
+def _runtime_imports(evidence_module: str = "occupancy_adaptive_evidence") -> tuple[Any, ...]:
     for path in (
         PROJECT_ROOT / "src",
         PROJECT_ROOT / "Case_ThermalChannel" / "src",
@@ -76,7 +76,9 @@ def _runtime_imports() -> tuple[Any, ...]:
     ):
         if str(path) not in sys.path:
             sys.path.insert(0, str(path))
-    import occupancy_adaptive_evidence as evidence
+    import importlib
+
+    evidence = importlib.import_module(str(evidence_module))
     import torch
     from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer
     from channelthermal.evaluation.loading import load_model
@@ -290,18 +292,25 @@ def _write_rows_csv(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
 
 def run_population(args: argparse.Namespace) -> dict[str, Any]:
     if str(args.device) != "cpu":
-        raise ValueError("occupancy population traversal is CPU-only; pass --device cpu")
+        raise ValueError("group-control population traversal is CPU-only; pass --device cpu")
     checkpoint_path = Path(args.checkpoint).expanduser().resolve()
     if not checkpoint_path.is_file():
         raise FileNotFoundError(checkpoint_path)
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    torch, GlobalChannelThermalDataset, H5Normalizer, load_model, predict_case, evidence = _runtime_imports()
+    torch, GlobalChannelThermalDataset, H5Normalizer, load_model, predict_case, evidence = _runtime_imports(
+        str(getattr(args, "evidence_module", "occupancy_adaptive_evidence"))
+    )
     device = torch.device("cpu")
     model, checkpoint = load_model(checkpoint_path, device)
     architecture = str(model.config.core_honf.forward_architecture)
-    if architecture != "occupancy_adaptive_group_control_honf":
-        raise RuntimeError(f"checkpoint architecture is {architecture!r}, expected occupancy adaptive mode")
+    expected_architecture = str(
+        getattr(args, "expected_architecture", "occupancy_adaptive_group_control_honf")
+    )
+    if architecture != expected_architecture:
+        raise RuntimeError(
+            f"checkpoint architecture is {architecture!r}, expected {expected_architecture!r}"
+        )
     dataset, resolved_dataset, dataset_config = _dataset_for_checkpoint(
         checkpoint,
         dataset_path=args.dataset,
@@ -354,7 +363,8 @@ def run_population(args: argparse.Namespace) -> dict[str, Any]:
         array_path = array_dir / f"{case_id}.npz"
         evidence.save_case_arrays(array_path, record["maps"])
         array_paths[case_id] = str(array_path)
-        board_path = figure_dir / f"occupancy_board__{case_id}.png"
+        board_prefix = str(getattr(args, "board_prefix", "occupancy_board"))
+        board_path = figure_dir / f"{board_prefix}__{case_id}.png"
         evidence.render_case_board(record, board_path)
         board_paths.append(str(board_path))
         _write_json(
@@ -367,12 +377,19 @@ def run_population(args: argparse.Namespace) -> dict[str, Any]:
                 "checkpoint": str(checkpoint_path),
             },
         )
-        print(f"[occupancy-population] {order + 1}/{len(case_ids)} case={case_id}", flush=True)
+        progress_label = str(getattr(args, "progress_label", "occupancy-population"))
+        print(f"[{progress_label}] {order + 1}/{len(case_ids)} case={case_id}", flush=True)
         del prediction, payload, record, selected_sample, sample
 
     summary = evidence.summarize_population(rows, expected_cases=int(args.expected_cases))
     histogram_path = figure_dir / "kplan_histogram.png"
     evidence.render_kplan_histogram(rows, histogram_path)
+    extra_figure_renderer = getattr(evidence, "render_population_figures", None)
+    extra_figures = (
+        extra_figure_renderer(rows, figure_dir)
+        if callable(extra_figure_renderer)
+        else {}
+    )
     protocol = {
         "split": str(args.split),
         "case_ids": case_ids,
@@ -384,7 +401,9 @@ def run_population(args: argparse.Namespace) -> dict[str, Any]:
     }
     output = {
         "schema_version": 1,
-        "task": "run1409_occupancy_adaptive_population_evidence",
+        "task": str(
+            getattr(args, "task_name", "run1409_occupancy_adaptive_population_evidence")
+        ),
         "status": "complete",
         "output_dir": str(output_dir),
         "candidate": {
@@ -401,7 +420,11 @@ def run_population(args: argparse.Namespace) -> dict[str, Any]:
         "population": summary,
         "cases": rows,
         "arrays": array_paths,
-        "figures": {"kplan_histogram": str(histogram_path), "case_boards": board_paths},
+        "figures": {
+            "kplan_histogram": str(histogram_path),
+            "case_boards": board_paths,
+            **extra_figures,
+        },
         "missing_evidence": [
             "Learned group labels are permutation ambiguous and are not physical causality claims.",
             "This population artifact does not embed matched Run-1404/1406/1804 accuracy and cost tables; those require a separate explicit checkpoint evaluation.",

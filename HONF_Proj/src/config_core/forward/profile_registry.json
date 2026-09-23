@@ -435,6 +435,16 @@
       "checkpoint_families": ["Run 1409 occupancy-adaptive geometric group control"],
       "owner": "forward-research",
       "stage": "occupancy-adaptive-group-control"
+    },
+    {
+      "name": "mass_competitive_group_control_honf_context",
+      "path": "project://src/config_core/forward/mass_competitive_group_control_honf_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "Run 1500 Kmax=12/D=16 source-mass sparsemax competition / P0 gamma reuse / exact rectangular three-term reader",
+      "checkpoint_families": ["Run 1500 mass-competitive adaptive hypergraph"],
+      "owner": "forward-research",
+      "stage": "mass-competitive-group-control"
     }
   ]
 }
