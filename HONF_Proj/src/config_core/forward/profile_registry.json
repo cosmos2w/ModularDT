@@ -445,6 +445,16 @@
       "checkpoint_families": ["Run 1500 mass-competitive adaptive hypergraph"],
       "owner": "forward-research",
       "stage": "mass-competitive-group-control"
+    },
+    {
+      "name": "sparse_incidence_group_control_honf_context",
+      "path": "project://src/config_core/forward/sparse_incidence_group_control_honf_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "Run 1501 K=12 phase-local source entmax organization / prototype-anchored masked query sparsemax / exact rectangular three-term reader",
+      "checkpoint_families": ["Run 1501 sparse-incidence adaptive HONF"],
+      "owner": "forward-research",
+      "stage": "sparse-incidence-group-control"
     }
   ]
 }

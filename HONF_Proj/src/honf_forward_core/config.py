@@ -99,6 +99,7 @@ FORWARD_ARCHITECTURES = {
     "budgeted_group_control_honf",
     "occupancy_adaptive_group_control_honf",
     "mass_competitive_group_control_honf",
+    "sparse_incidence_group_control_honf",
 }
 
 LEGACY_ARCHITECTURE_KEYS = {
@@ -444,8 +445,10 @@ class InterfaceFieldConfig:
             raise ValueError("interface_model.group_count must be a positive integer.")
         if self.source_normalizer not in {"softmax", "entmax15"}:
             raise ValueError("interface_model.source_normalizer must be 'softmax' or 'entmax15'.")
-        if self.query_normalizer not in {"softmax", "entmax15"}:
-            raise ValueError("interface_model.query_normalizer must be 'softmax' or 'entmax15'.")
+        if self.query_normalizer not in {"softmax", "entmax15", "sparsemax"}:
+            raise ValueError(
+                "interface_model.query_normalizer must be 'softmax', 'entmax15', or 'sparsemax'."
+            )
         for name in ("module_temperature", "environment_temperature", "query_temperature"):
             value = float(getattr(self, name))
             if not math.isfinite(value) or value <= 0.0:
@@ -638,6 +641,7 @@ class UnifiedForwardConfig:
             "budgeted_group_control_honf",
             "occupancy_adaptive_group_control_honf",
             "mass_competitive_group_control_honf",
+            "sparse_incidence_group_control_honf",
         }:
             controlled = self.interface_model
             if controlled.support_spacing_factor is not None:
@@ -648,9 +652,15 @@ class UnifiedForwardConfig:
                 raise ValueError(
                         f"{self.forward_architecture} requires interface_model.source_normalizer='entmax15'."
                 )
-            if controlled.query_normalizer != "entmax15":
+            expected_query_normalizer = (
+                "sparsemax"
+                if self.forward_architecture == "sparse_incidence_group_control_honf"
+                else "entmax15"
+            )
+            if controlled.query_normalizer != expected_query_normalizer:
                 raise ValueError(
-                        f"{self.forward_architecture} requires interface_model.query_normalizer='entmax15'."
+                    f"{self.forward_architecture} requires interface_model.query_normalizer="
+                    f"'{expected_query_normalizer}'."
                 )
             for name in ("module_temperature", "environment_temperature", "query_temperature"):
                 if float(getattr(controlled, name)) != 1.0:
@@ -686,6 +696,7 @@ class UnifiedForwardConfig:
             if self.forward_architecture in {
                 "occupancy_adaptive_group_control_honf",
                 "mass_competitive_group_control_honf",
+                "sparse_incidence_group_control_honf",
             }:
                 if controlled.case_group_budget is not None:
                     raise ValueError(
@@ -1164,6 +1175,7 @@ class UnifiedForwardConfig:
                 "budgeted_group_control_honf",
                 "occupancy_adaptive_group_control_honf",
                 "mass_competitive_group_control_honf",
+                "sparse_incidence_group_control_honf",
                 }:
                     for key in (
                         "group_count",

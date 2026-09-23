@@ -75,7 +75,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "forward_architecture": {"enum": ["legacy_honf", "dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf", "regional_response_honf", "hierarchical_regional_honf", "routed_pairwise_honf", "fixed_group_pairwise_honf", "group_control_pairwise_honf", "phase_shared_group_control_honf", "hypergraph_quadrature_honf", "budgeted_group_control_honf", "occupancy_adaptive_group_control_honf", "mass_competitive_group_control_honf"]},
+        "forward_architecture": {"enum": ["legacy_honf", "dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf", "regional_response_honf", "hierarchical_regional_honf", "routed_pairwise_honf", "fixed_group_pairwise_honf", "group_control_pairwise_honf", "phase_shared_group_control_honf", "hypergraph_quadrature_honf", "budgeted_group_control_honf", "occupancy_adaptive_group_control_honf", "mass_competitive_group_control_honf", "sparse_incidence_group_control_honf"]},
         "interface_model": {
           "type": "object",
           "additionalProperties": false,
@@ -161,7 +161,7 @@
             },
             "group_count": {"type": "integer", "minimum": 1},
             "source_normalizer": {"enum": ["softmax", "entmax15"]},
-            "query_normalizer": {"enum": ["softmax", "entmax15"]},
+            "query_normalizer": {"enum": ["softmax", "entmax15", "sparsemax"]},
             "module_temperature": {"type": "number", "exclusiveMinimum": 0},
             "environment_temperature": {"type": "number", "exclusiveMinimum": 0},
             "query_temperature": {"type": "number", "exclusiveMinimum": 0},

@@ -143,6 +143,9 @@ def _prediction_payload(
         "occupancy_group_environment_centres",
         "group_control_environment_centres",
         "occupancy_group_joint_centres",
+        "sparse_incidence_module_centres",
+        "sparse_incidence_environment_centres",
+        "sparse_incidence_joint_centres",
     }
     vector_keys = {
         "occupancy_group_module_measure",
@@ -160,6 +163,11 @@ def _prediction_payload(
         "group_control_module_mass",
         "occupancy_group_environment_mass",
         "group_control_environment_mass",
+        "sparse_incidence_active_mask",
+        "sparse_incidence_phase_occupied",
+        "sparse_incidence_pi",
+        "sparse_incidence_module_mass",
+        "sparse_incidence_environment_mass",
     }
     for key in matrix_keys:
         if key in payload and np.asarray(payload[key]).ndim == 2:
@@ -382,7 +390,10 @@ def run_population(args: argparse.Namespace) -> dict[str, Any]:
         del prediction, payload, record, selected_sample, sample
 
     summary = evidence.summarize_population(rows, expected_cases=int(args.expected_cases))
-    histogram_path = figure_dir / "kplan_histogram.png"
+    histogram_filename = str(getattr(evidence, "HISTOGRAM_FILENAME", "kplan_histogram.png"))
+    histogram_figure_key = str(getattr(evidence, "HISTOGRAM_FIGURE_KEY", "kplan_histogram"))
+    histogram_summary_key = str(getattr(evidence, "HISTOGRAM_SUMMARY_KEY", "kplan_histogram"))
+    histogram_path = figure_dir / histogram_filename
     evidence.render_kplan_histogram(rows, histogram_path)
     extra_figure_renderer = getattr(evidence, "render_population_figures", None)
     extra_figures = (
@@ -421,7 +432,7 @@ def run_population(args: argparse.Namespace) -> dict[str, Any]:
         "cases": rows,
         "arrays": array_paths,
         "figures": {
-            "kplan_histogram": str(histogram_path),
+            histogram_figure_key: str(histogram_path),
             "case_boards": board_paths,
             **extra_figures,
         },
@@ -467,7 +478,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "status": output["status"],
                 "output_dir": output["output_dir"],
                 "case_count": output["population"]["case_count"],
-                "kplan_histogram": output["population"]["kplan_histogram"],
+                histogram_summary_key: output["population"][histogram_summary_key],
             },
             indent=2,
             sort_keys=True,

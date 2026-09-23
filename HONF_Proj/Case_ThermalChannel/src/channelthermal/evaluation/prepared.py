@@ -242,6 +242,14 @@ def predict_case(
                     "occupancy_group_module_mask_support": "occupancy_group_module_mask_support",
                     "occupancy_group_environment_mask_support": "occupancy_group_environment_mask_support",
                     "group_control_query_routing": "group_control_query_routing",
+                    # Run-1501 emits explicit sparse-incidence aliases in
+                    # addition to the ordinary group-control route.  Preserve
+                    # every receiver chunk so Kq/support evidence covers the
+                    # requested Q rather than the first decoder tile only.
+                    "sparse_incidence_query_routing": "sparse_incidence_query_routing",
+                    "sparse_incidence_query_mask": "sparse_incidence_query_mask",
+                    "sparse_incidence_module_mask_support": "sparse_incidence_module_mask_support",
+                    "sparse_incidence_environment_mask_support": "sparse_incidence_environment_mask_support",
                 }
                 for source_key, target_key in key_map.items():
                     value = routing_aux.get(source_key)

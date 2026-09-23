@@ -16,7 +16,7 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     profiles = registry["profiles"]
     names = [profile["name"] for profile in profiles]
-    assert len(names) == len(set(names)) == 44
+    assert len(names) == len(set(names)) == 45
     assert registry["recommended_forward_profile"] == "stage7_structured_context"
     assert {profile["status"] for profile in profiles} <= {
         "current",
@@ -50,6 +50,8 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
     assert by_name["occupancy_adaptive_group_control_honf_context"]["base"] is None
     assert by_name["mass_competitive_group_control_honf_context"]["status"] == "candidate"
     assert by_name["mass_competitive_group_control_honf_context"]["base"] is None
+    assert by_name["sparse_incidence_group_control_honf_context"]["status"] == "candidate"
+    assert by_name["sparse_incidence_group_control_honf_context"]["base"] is None
     assert registry["recommended_forward_profile"] != "case_adaptive_residual_context"
     assert registry["recommended_forward_profile"] != "case_adaptive_tensor_residual_context"
 

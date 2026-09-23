@@ -57,6 +57,11 @@ from .mass_competitive_router import (
     MassCompetitivePreparedGroupControl,
     mass_competition,
 )
+from .sparse_incidence_group_control import SparseIncidenceGroupControlPairwiseField
+from .sparse_incidence_router import (
+    SparseIncidenceGroupRouter,
+    SparseIncidencePreparedGroupControl,
+)
 from .regional_response import RegionalResponseField
 from .three_term_context import ThreeTermInterfaceContext
 from .types import EncodedInterfaceCase, InterfaceRead, PreparedInterfaceField
@@ -106,6 +111,9 @@ __all__ = [
     "MassCompetitiveGroupPlan",
     "MassCompetitiveGroupRouter",
     "MassCompetitivePreparedGroupControl",
+    "SparseIncidenceGroupControlPairwiseField",
+    "SparseIncidenceGroupRouter",
+    "SparseIncidencePreparedGroupControl",
     "MASS_COMPETITIVE_EPSILON",
     "mass_competition",
     "OCCUPANCY_KMAX",
