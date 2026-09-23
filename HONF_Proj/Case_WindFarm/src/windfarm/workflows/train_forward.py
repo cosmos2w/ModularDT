@@ -14,7 +14,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from honf_forward_core.config import UnifiedForwardConfig
 from honf_runtime.checkpoints import validate_checkpoint_identity
 from honf_runtime.compat import load_trusted_checkpoint, select_device, set_seed
 from honf_runtime.paths import resolve_path
@@ -29,7 +28,7 @@ from ..data import (
 )
 from ..geometry import ENV_TOKEN_SHAPE
 from ..loss_plot import render_loss_history
-from ..model import WindFarmForwardModel
+from ..model import WindFarmForwardModel, build_windfarm_forward_config
 from ..normalization import (
     VelocityNormalizer,
     VerticalProfileBaseline,
@@ -444,10 +443,10 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
         if not isinstance(checkpoint_cfg, Mapping):
             raise ValueError("WindFarm resume checkpoint lacks its resolved train_config.")
         cfg = copy.deepcopy(dict(checkpoint_cfg))
-        requested_core = UnifiedForwardConfig.from_dict(
+        requested_core = build_windfarm_forward_config(
             dict(requested_cfg.get("model", {}).get("core_honf", {}))
         )
-        checkpoint_core = UnifiedForwardConfig.from_dict(dict(resume_payload.get("model_config") or {}))
+        checkpoint_core = build_windfarm_forward_config(dict(resume_payload.get("model_config") or {}))
         if requested_core.to_dict() != checkpoint_core.to_dict():
             raise ValueError("WindFarm resume model configuration does not match the requested launch profile.")
         cfg.setdefault("model", {})["core_honf"] = checkpoint_core.to_dict()
@@ -513,7 +512,7 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
     val_loader = DataLoader(val_dataset, batch_size=int(dataset_cfg.get("val_batch_size", 8)), shuffle=False, **loader_kwargs)
 
     core_payload = dict(cfg.get("model", {}).get("core_honf", {}))
-    model_config = UnifiedForwardConfig.from_dict(core_payload)
+    model_config = build_windfarm_forward_config(core_payload)
     model = WindFarmForwardModel(model_config, velocity_transform=normalizer).to(device)
     train_generator = torch.Generator(device="cpu")
     train_generator.manual_seed(int(seed) + 104729)

@@ -161,8 +161,33 @@ class WindFarmPlugin:
         if str(core_payload.get("geometry_mode", "nonperiodic")) != "nonperiodic":
             raise ValueError("WindFarm forward profiles require nonperiodic geometry.")
         architecture = str(core_payload.get("forward_architecture", "legacy_honf"))
-        if architecture not in {"legacy_honf", "dense_pairwise_field"}:
+        if architecture not in {
+            "legacy_honf",
+            "dense_pairwise_field",
+            "sparse_incidence_group_control_honf",
+        }:
             raise ValueError(f"Unsupported WindFarm architecture {architecture!r}.")
+        if architecture == "sparse_incidence_group_control_honf":
+            interface = dict(core_payload.get("interface_model") or {})
+            expected = {
+                "group_count": 12,
+                "group_control_dim": 16,
+                "source_normalizer": "entmax15",
+                "query_normalizer": "sparsemax",
+                "module_temperature": 1.0,
+                "environment_temperature": 1.0,
+                "query_temperature": 1.0,
+            }
+            mismatches = {
+                name: (interface.get(name), value)
+                for name, value in expected.items()
+                if interface.get(name) != value
+            }
+            refinement = interface.get("environment_refinement_normalizer", "entmax15")
+            if refinement != "entmax15":
+                mismatches["environment_refinement_normalizer"] = (refinement, "entmax15")
+            if mismatches:
+                raise ValueError(f"WindFarm Run-1501 backbone settings differ: {mismatches}")
 
     def inspect_launch(self, bundle: ConfigBundle, request: WorkflowRequest) -> Mapping[str, Any]:
         del request

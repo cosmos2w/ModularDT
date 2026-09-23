@@ -11,7 +11,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from honf_forward_core.config import UnifiedForwardConfig
 from honf_runtime.checkpoints import validate_checkpoint_identity
 from honf_runtime.compat import load_trusted_checkpoint, select_device
 from honf_runtime.paths import resolve_path
@@ -19,7 +18,7 @@ from torch.utils.data import DataLoader
 
 from ..data import COMPACT_GEOMETRY_KEYS, WindFarmNativeDataset, WindFarmNativeView, case_batch, collate_windfarm
 from ..geometry import ENV_TOKEN_SHAPE
-from ..model import WindFarmForwardModel
+from ..model import WindFarmForwardModel, build_windfarm_forward_config
 from ..normalization import VelocityNormalizer, VerticalProfileBaseline
 from ..splits import GroupSplit, make_group_split
 from ..study_spatial import downstream_envelope
@@ -77,7 +76,7 @@ def load_checkpoint(
     model_payload = checkpoint.get("model_config")
     if not isinstance(model_payload, Mapping):
         raise TypeError("WindFarm checkpoint lacks its resolved model_config.")
-    model_config = UnifiedForwardConfig.from_dict(dict(model_payload))
+    model_config = build_windfarm_forward_config(dict(model_payload))
     normalization_payload = checkpoint.get("normalization")
     if not isinstance(normalization_payload, Mapping):
         raise TypeError("WindFarm checkpoint lacks training-owned velocity normalization.")

@@ -17,14 +17,13 @@ from typing import Any
 
 import numpy as np
 import torch
-from honf_forward_core.config import UnifiedForwardConfig
 from honf_runtime.compat import select_device, set_seed
 from honf_runtime.config_loader import load_config_bundle
 from honf_runtime.registry import load_case_plugin
 from torch.utils.data import DataLoader
 
 from windfarm.data import WindFarmNativeDataset, WindFarmNativeView, collate_windfarm
-from windfarm.model import WindFarmForwardModel
+from windfarm.model import WindFarmForwardModel, build_windfarm_forward_config
 from windfarm.normalization import read_normalization_json
 from windfarm.splits import make_group_split
 from windfarm.workflows.evaluate_forward import _compact_metadata
@@ -99,7 +98,7 @@ def _prediction_summary(model: WindFarmForwardModel, raw: dict[str, Any], device
 
 def _fresh_model(config: Mapping[str, Any], normalizer: Any, device: torch.device) -> WindFarmForwardModel:
     core_payload = dict(config["model"]["core_honf"])
-    return WindFarmForwardModel(UnifiedForwardConfig.from_dict(core_payload), velocity_transform=normalizer).to(device)
+    return WindFarmForwardModel(build_windfarm_forward_config(core_payload), velocity_transform=normalizer).to(device)
 
 
 def _run_architecture(

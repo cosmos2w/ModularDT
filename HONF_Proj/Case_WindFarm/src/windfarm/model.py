@@ -3,12 +3,13 @@
 The case package owns the input adapter and target transform, while the
 reusable cores own all learned interaction layers.  This module deliberately
 does not contain turbine physics or a second model implementation: it only
-keeps the two supported core call sequences and their prepared state in one
-small, checkpoint-friendly object.
+keeps the legacy and interface-field call sequences and their prepared state
+in one small, checkpoint-friendly object.
 """
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -20,6 +21,44 @@ from honf_forward_core.model import HONFNeuralField
 from torch import nn
 
 from .normalization import VelocityNormalizer
+
+INTERFACE_FIELD_ARCHITECTURES = frozenset(
+    {
+        "dense_pairwise_field",
+        "sparse_incidence_group_control_honf",
+    }
+)
+
+
+def build_windfarm_forward_config(payload: Mapping[str, Any]) -> UnifiedForwardConfig:
+    """Build a core config while keeping the WindFarm 3-D exception case-owned.
+
+    The Run-1501 sparse-incidence implementation is dimension-generic, but the
+    reusable core's historical validation allowlist predates this WindFarm
+    adapter. Validate the complete sparse backbone through the ordinary 2-D
+    constructor, then restore the already-validated WindFarm 3-D geometry.
+    """
+
+    resolved = copy.deepcopy(dict(payload))
+    if str(resolved.get("forward_architecture", "legacy_honf")) != "sparse_incidence_group_control_honf":
+        return UnifiedForwardConfig.from_dict(resolved)
+    spatial_dim = int(resolved.get("spatial_dim", 0))
+    coordinate_scale = [float(value) for value in resolved.get("coordinate_scale", [])]
+    if spatial_dim != 3 or len(coordinate_scale) != 3 or any(value <= 0.0 for value in coordinate_scale):
+        raise ValueError("WindFarm sparse incidence requires spatial_dim=3 and three positive coordinate scales.")
+    if str(resolved.get("geometry_mode", "nonperiodic")) != "nonperiodic":
+        raise ValueError("WindFarm sparse incidence requires nonperiodic geometry.")
+    if resolved.get("periodic_axes") not in (None, []):
+        raise ValueError("WindFarm sparse incidence does not accept periodic axes.")
+    if str(resolved.get("boundary_feature_mode", "none")) != "none":
+        raise ValueError("WindFarm sparse incidence requires boundary_feature_mode='none'.")
+    constructor_payload = copy.deepcopy(resolved)
+    constructor_payload["spatial_dim"] = 2
+    constructor_payload["coordinate_scale"] = coordinate_scale[:2]
+    config = UnifiedForwardConfig.from_dict(constructor_payload)
+    config.spatial_dim = spatial_dim
+    config.coordinate_scale = coordinate_scale
+    return config
 
 
 def _as_batch(value: BatchData | Mapping[str, Any]) -> BatchData:
@@ -78,7 +117,7 @@ class PreparedWindFarmCase:
 
 
 class WindFarmForwardModel(nn.Module):
-    """Shared field-only wrapper for classic K=6 and dense pairwise models."""
+    """Field-only wrapper for legacy and reusable interface-field cores."""
 
     def __init__(self, config: UnifiedForwardConfig, *, velocity_transform: VelocityNormalizer | None = None):
         super().__init__()
@@ -87,11 +126,12 @@ class WindFarmForwardModel(nn.Module):
         architecture = str(config.forward_architecture)
         if architecture == "legacy_honf":
             self.core: nn.Module = HONFNeuralField(config)
-        elif architecture == "dense_pairwise_field":
+        elif architecture in INTERFACE_FIELD_ARCHITECTURES:
             self.core = InterfaceFieldCore(config)
         else:
             raise ValueError(
-                "WindFarm supports only legacy_honf and dense_pairwise_field; "
+                "Unsupported WindFarm forward architecture; expected legacy_honf or one of "
+                f"{sorted(INTERFACE_FIELD_ARCHITECTURES)}, "
                 f"got {architecture!r}."
             )
 
@@ -118,8 +158,8 @@ class WindFarmForwardModel(nn.Module):
             encoded = self.core.encode_and_organize(batch)  # type: ignore[attr-defined]
             return PreparedWindFarmCase(self.architecture, encoded)
         encoded = self.core.encode_case(batch)  # type: ignore[attr-defined]
-        # DensePairwiseField uses the encoded module tokens as its module state;
-        # no thermal local module or fabricated port state belongs here.
+        # Interface-field cores use the encoded module tokens as their module
+        # state; no thermal local module or fabricated port state belongs here.
         dense_prepared = self.core.prepare(encoded, encoded.module_tokens)  # type: ignore[attr-defined]
         return PreparedWindFarmCase(self.architecture, encoded, dense_prepared)
 
@@ -288,4 +328,4 @@ class WindFarmForwardModel(nn.Module):
         return prepared
 
 
-__all__ = ["PreparedWindFarmCase", "WindFarmForwardModel"]
+__all__ = ["PreparedWindFarmCase", "WindFarmForwardModel", "build_windfarm_forward_config"]
