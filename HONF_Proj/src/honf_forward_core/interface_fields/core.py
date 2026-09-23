@@ -160,6 +160,33 @@ def _merge_group_control_maps(chunks):
             continue
         values = [value for value, _ in values_and_widths]
         first = values[0]
+        if key in {
+            "group_control_adaptive_environment_mass",
+            "group_control_adaptive_environment_centroids",
+            "group_control_adaptive_environment_radius_sq",
+            "group_control_adaptive_environment_group_states",
+            "group_control_adaptive_environment_source_mass",
+            "group_control_adaptive_environment_keys",
+            "group_control_adaptive_source_count_per_group",
+        }:
+            # These are preparation/group-axis maps repeated for every
+            # receiver chunk.  Explicit names avoid mistaking K=12 for a
+            # query chunk width in the generic shape heuristics below.
+            merged[key] = first
+            continue
+        if key in {
+            "group_control_adaptive_query_count_per_group",
+            "group_control_adaptive_fine_group_rows",
+            "group_control_adaptive_fine_group_rows_logical",
+            "group_control_adaptive_fine_group_rows_forward",
+            "group_control_adaptive_fine_group_rows_padded",
+        }:
+            # Query/group execution maps are produced once per receiver tile.
+            # Add the tiles rather than retaining the first one; their group
+            # axis is not a source/preparation axis even when K equals a tile
+            # width.
+            merged[key] = torch.stack(values).sum(dim=0)
+            continue
         if key.endswith(
             (
                 "_incidence",
@@ -228,6 +255,8 @@ def _merge_group_control_maps(chunks):
                 "_sample_slots",
                 "_nonzero_sample_masses",
                 "_fine_rows_forward",
+                "_fine_rows_padded",
+                "_rows_logical",
                 "_rows_padded",
                 "_padded_rows",
                 "_geometry_rows_forward",
@@ -246,6 +275,16 @@ def _merge_group_control_maps(chunks):
             # Source-only memberships, controls, masses, and summaries are
             # repeated for each receiver chunk and are retained once.
             merged[key] = first
+    if {
+        "group_control_adaptive_fine_rows",
+        "group_control_adaptive_full_rectangle_rows",
+    }.issubset(merged):
+        # Ratios are derived only after all receiver tiles have been summed;
+        # the last non-divisible tile must not be underweighted.
+        merged["group_control_adaptive_fine_work_ratio"] = (
+            merged["group_control_adaptive_fine_rows"]
+            / merged["group_control_adaptive_full_rectangle_rows"].clamp_min(1.0)
+        )
     return merged
 
 
@@ -276,6 +315,7 @@ class InterfaceFieldCore(nn.Module):
             "occupancy_adaptive_group_control_honf",
             "mass_competitive_group_control_honf",
             "sparse_incidence_group_control_honf",
+            "adaptive_hyperedge_opening_honf",
         }:
             # Run 1405/1406 deliberately replace the historical coarse/local
             # context object with the three-term reader. Keep construction
@@ -542,6 +582,25 @@ class InterfaceFieldCore(nn.Module):
                     options.environment_refinement_normalizer
                 ),
             )
+        elif config.forward_architecture == "adaptive_hyperedge_opening_honf":
+            from .adaptive_hyperedge_opening import AdaptiveHyperedgeOpeningPairwiseField
+
+            self.backend = AdaptiveHyperedgeOpeningPairwiseField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                group_count=int(options.group_count),
+                group_control_dim=int(options.group_control_dim),
+                spatial_dim=int(config.spatial_dim),
+                module_temperature=float(options.module_temperature),
+                environment_temperature=float(options.environment_temperature),
+                query_temperature=float(options.query_temperature),
+                activation_checkpointing=bool(options.activation_checkpointing),
+                environment_refinement_normalizer=str(
+                    options.environment_refinement_normalizer
+                ),
+            )
         else:
             raise ValueError(f"Unsupported interface architecture: {config.forward_architecture!r}")
         self.receiver_chunk_size = int(options.receiver_chunk_size)
@@ -754,6 +813,7 @@ class InterfaceFieldCore(nn.Module):
                     "occupancy_adaptive_group_control_honf",
                     "mass_competitive_group_control_honf",
                     "sparse_incidence_group_control_honf",
+                    "adaptive_hyperedge_opening_honf",
                 }
                 else int(self.config.interface_model.coarse_latent_count)
             ),
@@ -772,6 +832,7 @@ class InterfaceFieldCore(nn.Module):
             "occupancy_adaptive_group_control_honf",
             "mass_competitive_group_control_honf",
             "sparse_incidence_group_control_honf",
+            "adaptive_hyperedge_opening_honf",
         }:
             aux.update(
                 self.backend.preparation_aux(

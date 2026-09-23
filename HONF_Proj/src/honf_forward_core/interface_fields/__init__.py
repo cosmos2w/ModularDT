@@ -58,6 +58,18 @@ from .mass_competitive_router import (
     mass_competition,
 )
 from .sparse_incidence_group_control import SparseIncidenceGroupControlPairwiseField
+from .adaptive_hyperedge_opening import (
+    ADAPTIVE_HYPEREDGE_EPSILON,
+    AdaptiveEnvironmentAggregation,
+    AdaptiveHyperedgeOpeningField,
+    AdaptiveHyperedgeOpeningHONF,
+    AdaptiveHyperedgeOpeningPairwiseField,
+    combine_opened_group_responses,
+    compute_environment_group_aggregates,
+    mass_weighted_environment_aggregates,
+    masked_mass_softmax,
+    opening_blend,
+)
 from .sparse_incidence_router import (
     SparseIncidenceGroupRouter,
     SparseIncidencePreparedGroupControl,
@@ -115,6 +127,16 @@ __all__ = [
     "SparseIncidenceGroupControlPairwiseField",
     "SparseIncidenceGroupRouter",
     "SparseIncidencePreparedGroupControl",
+    "ADAPTIVE_HYPEREDGE_EPSILON",
+    "AdaptiveEnvironmentAggregation",
+    "AdaptiveHyperedgeOpeningField",
+    "AdaptiveHyperedgeOpeningHONF",
+    "AdaptiveHyperedgeOpeningPairwiseField",
+    "combine_opened_group_responses",
+    "compute_environment_group_aggregates",
+    "mass_weighted_environment_aggregates",
+    "masked_mass_softmax",
+    "opening_blend",
     "SupportBlock",
     "observed_support_blocks",
     "pack_positive_support",

@@ -100,6 +100,7 @@ FORWARD_ARCHITECTURES = {
     "occupancy_adaptive_group_control_honf",
     "mass_competitive_group_control_honf",
     "sparse_incidence_group_control_honf",
+    "adaptive_hyperedge_opening_honf",
 }
 
 LEGACY_ARCHITECTURE_KEYS = {
@@ -651,6 +652,7 @@ class UnifiedForwardConfig:
             "occupancy_adaptive_group_control_honf",
             "mass_competitive_group_control_honf",
             "sparse_incidence_group_control_honf",
+            "adaptive_hyperedge_opening_honf",
         }:
             controlled = self.interface_model
             if controlled.support_spacing_factor is not None:
@@ -663,7 +665,10 @@ class UnifiedForwardConfig:
                 )
             expected_query_normalizer = (
                 "sparsemax"
-                if self.forward_architecture == "sparse_incidence_group_control_honf"
+                if self.forward_architecture in {
+                    "sparse_incidence_group_control_honf",
+                    "adaptive_hyperedge_opening_honf",
+                }
                 else "entmax15"
             )
             if controlled.query_normalizer != expected_query_normalizer:
@@ -706,6 +711,7 @@ class UnifiedForwardConfig:
                 "occupancy_adaptive_group_control_honf",
                 "mass_competitive_group_control_honf",
                 "sparse_incidence_group_control_honf",
+                "adaptive_hyperedge_opening_honf",
             }:
                 if controlled.case_group_budget is not None:
                     raise ValueError(
@@ -719,7 +725,13 @@ class UnifiedForwardConfig:
                     raise ValueError(
                         f"{self.forward_architecture} requires interface_model.group_control_dim exactly 16."
                     )
-            if (
+            if self.forward_architecture == "adaptive_hyperedge_opening_honf":
+                if controlled.environment_refinement_normalizer != "sparsemax":
+                    raise ValueError(
+                        "adaptive_hyperedge_opening_honf requires "
+                        "interface_model.environment_refinement_normalizer='sparsemax'."
+                    )
+            elif (
                 self.forward_architecture != "sparse_incidence_group_control_honf"
                 and controlled.environment_refinement_normalizer != "entmax15"
             ):
@@ -756,7 +768,10 @@ class UnifiedForwardConfig:
             )
         if (
             self.interface_model is not None
-            and self.forward_architecture != "sparse_incidence_group_control_honf"
+            and self.forward_architecture not in {
+                "sparse_incidence_group_control_honf",
+                "adaptive_hyperedge_opening_honf",
+            }
             and self.interface_model.environment_refinement_normalizer != "entmax15"
         ):
             raise ValueError(
@@ -1130,7 +1145,10 @@ class UnifiedForwardConfig:
                 payload.pop(key, None)
             interface_payload = payload.get("interface_model")
             if isinstance(interface_payload, dict):
-                if self.forward_architecture != "sparse_incidence_group_control_honf":
+                if self.forward_architecture not in {
+                    "sparse_incidence_group_control_honf",
+                    "adaptive_hyperedge_opening_honf",
+                }:
                     # The Run-1502 hook is not part of any historical
                     # architecture's serialized contract.
                     interface_payload.pop("environment_refinement_normalizer", None)
@@ -1210,6 +1228,7 @@ class UnifiedForwardConfig:
                 "occupancy_adaptive_group_control_honf",
                 "mass_competitive_group_control_honf",
                 "sparse_incidence_group_control_honf",
+                "adaptive_hyperedge_opening_honf",
                 }:
                     for key in (
                         "group_count",
