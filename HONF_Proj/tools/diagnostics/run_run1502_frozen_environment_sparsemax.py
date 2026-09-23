@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 import os
 import sys
 from collections.abc import Mapping, Sequence
@@ -21,7 +20,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
