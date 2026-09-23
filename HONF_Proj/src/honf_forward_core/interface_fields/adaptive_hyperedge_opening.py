@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+from torch.utils.checkpoint import checkpoint
 
 from .sparse_incidence_group_control import (
     SparseIncidenceGroupControlPairwiseField,
@@ -402,6 +403,100 @@ class AdaptiveHyperedgeOpeningPairwiseField(SparseIncidenceGroupControlPairwiseF
             )
         )
 
+    def _fine_group_response_block(
+        self,
+        query: torch.Tensor,
+        environment_keys: torch.Tensor,
+        environment_raw_values: torch.Tensor,
+        environment_coordinates: torch.Tensor,
+        coordinate_scale: torch.Tensor,
+        receivers: torch.Tensor,
+        query_indices: torch.Tensor,
+        query_valid: torch.Tensor,
+        source_indices: torch.Tensor,
+        source_valid: torch.Tensor,
+        source_mass: torch.Tensor,
+        group_control: torch.Tensor,
+        route_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """Evaluate one padded fine rectangle.
+
+        The complete group calculation is the activation-checkpoint boundary.
+        In particular, the score, geometry, masked-softmax, and value
+        contraction tensors are recomputed in backward instead of remaining
+        live for every group in a receiver tile.  Only the compact scattered
+        ``[B,Q,H]`` group response is kept by the forward graph.
+        """
+
+        batch = int(receivers.shape[0])
+        padded_queries = int(query_indices.shape[1])
+        padded_sources = int(source_indices.shape[1])
+        query_gather = query_indices[:, None, :, None].expand(
+            batch, self.num_heads, padded_queries, self.head_dim
+        )
+        source_gather = source_indices[:, None, :, None].expand(
+            batch, self.num_heads, padded_sources, self.head_dim
+        )
+        query_block = torch.gather(query, 2, query_gather)
+        key_block = torch.gather(environment_keys, 2, source_gather)
+        value_block = torch.gather(environment_raw_values, 2, source_gather)
+        group_gain = 1.0 + torch.tanh(self.environment_value_control(group_control))
+        group_gain = group_gain.reshape(batch, self.num_heads, self.head_dim)
+        value_block = value_block * group_gain[:, :, None, :]
+
+        query_coordinates = torch.gather(
+            receivers,
+            1,
+            query_indices[..., None].expand(batch, padded_queries, self.spatial_dim),
+        )
+        source_coordinates = torch.gather(
+            environment_coordinates,
+            1,
+            source_indices[..., None].expand(batch, padded_sources, self.spatial_dim),
+        )
+        scale = coordinate_scale
+        if scale.ndim == 1:
+            scale = scale[None, None, None, :]
+        elif scale.ndim == 2:
+            scale = scale[:, None, None, :]
+        elif scale.ndim == 3:
+            scale = scale[:, :, None, :]
+        relative = (query_coordinates[:, :, None, :] - source_coordinates[:, None, :, :]) / scale
+        geometry = self._mlp(
+            self.env_geometry_bias,
+            self.relative_fourier(relative),
+        ).permute(0, 3, 1, 2)
+        scores = torch.matmul(query_block, key_block.transpose(-1, -2)) / (float(self.head_dim) ** 0.5)
+        score_control = self.environment_score_control(group_control).reshape(
+            batch, self.num_heads, 1, 1
+        )
+        scores = scores * (1.0 + torch.tanh(score_control)) + geometry
+        selected_mass = torch.gather(source_mass, 1, source_indices)
+        selected_mass = torch.where(source_valid, selected_mass, torch.ones_like(selected_mass))
+        scores = scores + torch.log(selected_mass.clamp_min(self.adaptive_epsilon))[:, None, None, :]
+        valid = query_valid[:, None, :, None] & source_valid[:, None, None, :]
+        masked_scores = scores.masked_fill(~valid, torch.finfo(scores.dtype).min)
+        row_has_support = valid.any(dim=-1, keepdim=True)
+        safe_scores = torch.where(row_has_support, masked_scores, torch.zeros_like(masked_scores))
+        weights = torch.softmax(safe_scores, dim=-1)
+        weights = weights * valid.to(dtype=weights.dtype)
+        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(
+            torch.finfo(weights.dtype).tiny
+        )
+        response = torch.matmul(weights, value_block).transpose(1, 2).reshape(
+            batch, padded_queries, self.hidden_dim
+        )
+        group_gate = 1.0 + torch.tanh(route_logits) / (float(self.head_dim) ** 0.5)
+        response = response * group_gate[..., None]
+        response = self.env_attention.output(response)
+        fine = receivers.new_zeros((batch, int(receivers.shape[1]), self.hidden_dim))
+        fine.scatter_add_(
+            1,
+            query_indices[..., None].expand(batch, padded_queries, self.hidden_dim),
+            response * query_valid[..., None].to(dtype=response.dtype),
+        )
+        return fine
+
     def _fine_group_response(
         self,
         state: dict[str, Any],
@@ -429,69 +524,29 @@ class AdaptiveHyperedgeOpeningPairwiseField(SparseIncidenceGroupControlPairwiseF
                 source_valid,
             )
 
-        padded_queries = int(query_indices.shape[1])
-        padded_sources = int(source_indices.shape[1])
-        query_gather = query_indices[:, None, :, None].expand(
-            batch, self.num_heads, padded_queries, self.head_dim
-        )
-        source_gather = source_indices[:, None, :, None].expand(
-            batch, self.num_heads, padded_sources, self.head_dim
-        )
-        query_block = torch.gather(query, 2, query_gather)
-        key_block = torch.gather(state["adaptive_environment_keys"], 2, source_gather)
-        value_block = torch.gather(state["adaptive_environment_raw_values"], 2, source_gather)
-        group_gain = 1.0 + torch.tanh(
-            self.environment_value_control(controls.group_control[:, group_index, :])
-        )
-        group_gain = group_gain.reshape(batch, self.num_heads, self.head_dim)
-        value_block = value_block * group_gain[:, :, None, :]
-
-        query_coordinates = torch.gather(
-            receivers,
-            1,
-            query_indices[..., None].expand(batch, padded_queries, self.spatial_dim),
-        )
-        source_coordinates = torch.gather(
+        block_args = (
+            query,
+            state["adaptive_environment_keys"],
+            state["adaptive_environment_raw_values"],
             encoded.env_coords,
-            1,
-            source_indices[..., None].expand(batch, padded_sources, self.spatial_dim),
+            encoded.coordinate_scale,
+            receivers,
+            query_indices,
+            query_valid,
+            source_indices,
+            source_valid,
+            source_mass,
+            controls.group_control[:, group_index, :],
+            torch.gather(route_logits[..., group_index], 1, query_indices),
         )
-        geometry = self._environment_geometry_bias(
-            query_coordinates,
-            source_coordinates,
-            encoded,
-        ).permute(0, 3, 1, 2)
-        scores = torch.matmul(query_block, key_block.transpose(-1, -2)) / (float(self.head_dim) ** 0.5)
-        score_control = self.environment_score_control(
-            controls.group_control[:, group_index, :]
-        ).reshape(batch, self.num_heads, 1, 1)
-        scores = scores * (1.0 + torch.tanh(score_control)) + geometry
-        selected_mass = torch.gather(source_mass, 1, source_indices)
-        selected_mass = torch.where(source_valid, selected_mass, torch.ones_like(selected_mass))
-        scores = scores + torch.log(selected_mass.clamp_min(self.adaptive_epsilon))[:, None, None, :]
-        valid = query_valid[:, None, :, None] & source_valid[:, None, None, :]
-        masked_scores = scores.masked_fill(~valid, torch.finfo(scores.dtype).min)
-        row_has_support = valid.any(dim=-1, keepdim=True)
-        safe_scores = torch.where(row_has_support, masked_scores, torch.zeros_like(masked_scores))
-        weights = torch.softmax(safe_scores, dim=-1)
-        weights = weights * valid.to(dtype=weights.dtype)
-        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(
-            torch.finfo(weights.dtype).tiny
-        )
-        response = torch.matmul(weights, value_block).transpose(1, 2).reshape(
-            batch, padded_queries, self.hidden_dim
-        )
-        group_gate = 1.0 + torch.tanh(
-            torch.gather(route_logits[..., group_index], 1, query_indices)
-        ) / (float(self.head_dim) ** 0.5)
-        response = response * group_gate[..., None]
-        response = self.env_attention.output(response)
-        fine = receivers.new_zeros((batch, query_count, self.hidden_dim))
-        fine.scatter_add_(
-            1,
-            query_indices[..., None].expand(batch, padded_queries, self.hidden_dim),
-            response * query_valid[..., None].to(dtype=response.dtype),
-        )
+        if self._checkpoint_active():
+            fine = checkpoint(
+                lambda *values_: self._fine_group_response_block(*values_),
+                *block_args,
+                use_reentrant=False,
+            )
+        else:
+            fine = self._fine_group_response_block(*block_args)
         return (
             fine,
             query_valid.sum(dim=1).to(receivers.dtype),

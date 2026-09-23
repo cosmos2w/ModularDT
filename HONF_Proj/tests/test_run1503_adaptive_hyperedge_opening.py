@@ -9,6 +9,7 @@ from honf_forward_core.interface_fields import (
     AdaptiveHyperedgeOpeningPairwiseField,
     InterfaceFieldCore,
     SparseIncidenceGroupControlPairwiseField,
+    adaptive_hyperedge_opening,
     combine_opened_group_responses,
     masked_mass_softmax,
     mass_weighted_environment_aggregates,
@@ -331,6 +332,92 @@ def test_alpha_support_transition_has_finite_design_and_output_gradients() -> No
         assert torch.isfinite(design.grad)
         assert torch.isfinite(coarse.grad).all()
         assert torch.isfinite(fine.grad).all()
+
+
+def test_fine_group_checkpoint_matches_forward_and_gradient_and_is_used(monkeypatch) -> None:
+    encoded, source_states = _encoded_case(seed=1512)
+    model = AdaptiveHyperedgeOpeningPairwiseField(
+        hidden_dim=16,
+        message_hidden_dim=8,
+        num_heads=2,
+        fourier_frequencies=2,
+        activation_checkpointing=False,
+    )
+    model.train()
+    baseline_states = source_states.detach().clone().requires_grad_()
+    baseline_state = model.prepare(encoded, baseline_states)
+    receivers = torch.rand(2, 6, 2) * torch.tensor([12.0, 6.0])
+    baseline_features = torch.randn(2, 6, 6, requires_grad=True)
+    baseline_route = model._route(baseline_state, encoded, receivers, baseline_features)
+    baseline_context, _ = model._read_environment(
+        baseline_state,
+        encoded,
+        receivers,
+        baseline_features,
+        baseline_route,
+        include_diagnostics=False,
+    )
+    baseline_context.square().mean().backward()
+    baseline_state_gradient = baseline_states.grad.detach().clone()
+    baseline_feature_gradient = baseline_features.grad.detach().clone()
+    baseline_parameter_gradients = {
+        name: parameter.grad.detach().clone()
+        for name, parameter in model.named_parameters()
+        if parameter.grad is not None
+    }
+    model.zero_grad(set_to_none=True)
+    checkpointed_states = source_states.detach().clone().requires_grad_()
+    checkpointed_state = model.prepare(encoded, checkpointed_states)
+    checkpointed_features = baseline_features.detach().clone().requires_grad_()
+    checkpointed_route = model._route(
+        checkpointed_state, encoded, receivers, checkpointed_features
+    )
+    model.activation_checkpointing = True
+    checkpoint_calls = []
+    original_checkpoint = adaptive_hyperedge_opening.checkpoint
+
+    def record_checkpoint(function, *args, **kwargs):
+        checkpoint_calls.append(True)
+        return original_checkpoint(function, *args, **kwargs)
+
+    monkeypatch.setattr(adaptive_hyperedge_opening, "checkpoint", record_checkpoint)
+    checkpointed_context, _ = model._read_environment(
+        checkpointed_state,
+        encoded,
+        receivers,
+        checkpointed_features,
+        checkpointed_route,
+        include_diagnostics=False,
+    )
+    torch.testing.assert_close(
+        checkpointed_context,
+        baseline_context,
+        rtol=1.0e-5,
+        atol=1.0e-6,
+    )
+    assert checkpoint_calls
+    checkpointed_context.square().mean().backward()
+    torch.testing.assert_close(
+        checkpointed_states.grad,
+        baseline_state_gradient,
+        rtol=1.0e-5,
+        atol=1.0e-6,
+    )
+    torch.testing.assert_close(
+        checkpointed_features.grad,
+        baseline_feature_gradient,
+        rtol=1.0e-5,
+        atol=1.0e-6,
+    )
+    for name, gradient in baseline_parameter_gradients.items():
+        checkpointed_gradient = dict(model.named_parameters())[name].grad
+        assert checkpointed_gradient is not None
+        torch.testing.assert_close(
+            checkpointed_gradient,
+            gradient,
+            rtol=1.0e-5,
+            atol=1.0e-6,
+        )
 
 
 def _encoded_case(seed: int = 1503) -> tuple[EncodedInterfaceCase, torch.Tensor]:
