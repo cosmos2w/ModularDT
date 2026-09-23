@@ -509,7 +509,9 @@ def _query_degree_samples(row: Mapping[str, Any]) -> np.ndarray:
     return np.asarray(values, dtype=np.float64)
 
 
-def render_kq_case_spread(rows: Sequence[Mapping[str, Any]], path: Path) -> None:
+def render_kq_case_spread(
+    rows: Sequence[Mapping[str, Any]], path: Path, *, run_label: str = "Run 1501"
+) -> None:
     """Render exact per-case Kq intervals and histograms across the population.
 
     Case IDs are sorted by their measured mean Kq.  The figure is deliberately
@@ -547,7 +549,7 @@ def render_kq_case_spread(rows: Sequence[Mapping[str, Any]], path: Path) -> None
         constrained_layout=True,
     )
     figure.suptitle(
-        "Run 1501 query support Kq across explicit cases\n"
+        f"{run_label} query support Kq across explicit cases\n"
         "Intervals are per-case query distributions; case IDs are sorted by mean Kq",
         fontsize=14,
         fontweight="bold",
@@ -671,6 +673,7 @@ def render_representative_hypergraph_overview(
     path: Path,
     *,
     case_ids: Sequence[str] = ("0273", "0653"),
+    run_label: str = "Run 1501",
 ) -> None:
     """Render compact source/query organization boards for representative cases.
 
@@ -706,7 +709,7 @@ def render_representative_hypergraph_overview(
         constrained_layout=True,
     )
     figure.suptitle(
-        "Run 1501 representative hypergraph organizations\n"
+        f"{run_label} representative hypergraph organizations\n"
         "Learned group labels are permutation-ambiguous; support maps do not imply physical causality",
         fontsize=14,
         fontweight="bold",
@@ -840,7 +843,7 @@ def render_representative_hypergraph_overview(
 
 
 def render_population_figures(
-    rows: Sequence[Mapping[str, Any]], figure_dir: Path
+    rows: Sequence[Mapping[str, Any]], figure_dir: Path, *, run_label: str = "Run 1501"
 ) -> dict[str, str]:
     try:
         import matplotlib.pyplot as plt
@@ -903,7 +906,7 @@ def render_population_figures(
         paths["kq_vs_query_location"] = str(location_path)
 
     case_spread_path = figure_dir / "kq_case_spread.png"
-    render_kq_case_spread(rows, case_spread_path)
+    render_kq_case_spread(rows, case_spread_path, run_label=run_label)
     if case_spread_path.is_file():
         paths["kq_case_spread"] = str(case_spread_path)
 
@@ -913,7 +916,9 @@ def render_population_figures(
         paths["kq_case_coordinate_regions"] = str(coordinate_path)
 
     representative_path = figure_dir / "representative_hypergraph_organization__0273__0653.png"
-    render_representative_hypergraph_overview(rows, array_dir, representative_path)
+    render_representative_hypergraph_overview(
+        rows, array_dir, representative_path, run_label=run_label
+    )
     if representative_path.is_file():
         paths["representative_hypergraph_organization"] = str(representative_path)
 
