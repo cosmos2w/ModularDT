@@ -455,6 +455,16 @@
       "checkpoint_families": ["Run 1501 sparse-incidence adaptive HONF"],
       "owner": "forward-research",
       "stage": "sparse-incidence-group-control"
+    },
+    {
+      "name": "run1502_environment_refinement_sparsemax",
+      "path": "project://src/config_core/forward/experiments/run1502_environment_refinement_sparsemax.json",
+      "status": "candidate",
+      "base": "sparse_incidence_group_control_honf_context",
+      "mode": "Run 1502 final environmental refinement sparsemax / Run 1501 proposal-module entmax15 and query sparsemax retained",
+      "checkpoint_families": ["Run 1502 environment refinement sparsemax"],
+      "owner": "forward-research",
+      "stage": "run1502-environment-refinement"
     }
   ]
 }

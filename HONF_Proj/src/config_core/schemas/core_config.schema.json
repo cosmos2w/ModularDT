@@ -165,6 +165,7 @@
             "module_temperature": {"type": "number", "exclusiveMinimum": 0},
             "environment_temperature": {"type": "number", "exclusiveMinimum": 0},
             "query_temperature": {"type": "number", "exclusiveMinimum": 0},
+            "environment_refinement_normalizer": {"enum": ["entmax15", "sparsemax"]},
             "group_code_dim": {"type": "integer", "minimum": 1},
             "group_control_dim": {"type": "integer", "minimum": 1},
             "samples_per_group": {"type": "integer", "minimum": 1}

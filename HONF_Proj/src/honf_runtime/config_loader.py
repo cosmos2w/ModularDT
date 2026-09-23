@@ -258,6 +258,30 @@ def load_config_bundle(
         case_patch = _mapping(experiment.get("case", {}), label="experiment.case")
         _reject_unknown(core_patch, {"model", "training", "checkpointing"}, label="experiment.core")
         _reject_unknown(case_patch, {"dataset", "model", "loss", "evaluation", "local_modules"}, label="experiment.case")
+        # Run1502 is the first profile to add a reusable final-environment
+        # normalizer selector.  Keep historical core profile JSON and its
+        # resolved shape unchanged when the selector is omitted, while
+        # allowing the one explicit sparse-incidence overlay to declare it.
+        overlay_model = core_patch.get("model", {})
+        overlay_core_honf = (
+            overlay_model.get("core_honf", {})
+            if isinstance(overlay_model, Mapping)
+            else {}
+        )
+        overlay_interface = (
+            overlay_core_honf.get("interface_model", {})
+            if isinstance(overlay_core_honf, Mapping)
+            else {}
+        )
+        if (
+            isinstance(overlay_interface, Mapping)
+            and "environment_refinement_normalizer" in overlay_interface
+            and str(core_resolved.get("model", {}).get("core_honf", {}).get("forward_architecture", ""))
+            == "sparse_incidence_group_control_honf"
+        ):
+            core_resolved.setdefault("model", {}).setdefault("core_honf", {}).setdefault(
+                "interface_model", {}
+            ).setdefault("environment_refinement_normalizer", "entmax15")
         _merge_existing(core_resolved, core_patch, label="core")
         _merge_existing(case_resolved, case_patch, label="case")
         _validate_core_sections(core_resolved)

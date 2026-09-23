@@ -42,7 +42,15 @@ class SparseIncidencePreparedGroupControl(PreparedGroupControl):
 
 
 class SparseIncidenceGroupRouter(OccupancyGroupRouter):
-    """K=12 source entmax organization with query-local sparsemax routes."""
+    """K=12 source organization with query-local sparsemax routes.
+
+    The optional environmental refinement hook applies only after the
+    entmax-1.5 environmental proposal and the entmax-1.5 module refinement.
+    Historical callers default to entmax15; Run1502 opts into sparsemax for
+    this final E assignment only.
+    """
+
+    _ENVIRONMENT_REFINEMENT_NORMALIZERS = frozenset({"entmax15", "sparsemax"})
 
     def __init__(
         self,
@@ -56,10 +64,17 @@ class SparseIncidenceGroupRouter(OccupancyGroupRouter):
         environment_temperature: float = 1.0,
         query_temperature: float = 1.0,
         geometry_fraction: float = 0.25,
+        environment_refinement_normalizer: str = "entmax15",
     ) -> None:
         if abs(float(query_temperature) - 1.0) > 1.0e-12:
             raise ValueError(
                 "sparse-incidence query sparsemax has fixed unit temperature."
+            )
+        if environment_refinement_normalizer not in self._ENVIRONMENT_REFINEMENT_NORMALIZERS:
+            allowed = ", ".join(sorted(self._ENVIRONMENT_REFINEMENT_NORMALIZERS))
+            raise ValueError(
+                "sparse-incidence environment_refinement_normalizer must be one of "
+                f"{allowed}; got {environment_refinement_normalizer!r}."
             )
         super().__init__(
             hidden_dim,
@@ -72,6 +87,22 @@ class SparseIncidenceGroupRouter(OccupancyGroupRouter):
             query_temperature=query_temperature,
             geometry_fraction=geometry_fraction,
         )
+        self.environment_refinement_normalizer = str(
+            environment_refinement_normalizer
+        )
+
+    def _final_environment_assignment(
+        self,
+        logits: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.environment_refinement_normalizer == "sparsemax":
+            # The occupancy builder intentionally supplies the prototype
+            # validity mask as [B, 1, K] for the [B, E, K] environment rows;
+            # entmax15 historically broadcasts this mask.  Materialize the
+            # same broadcast before calling the stricter sparsemax helper.
+            return masked_sparsemax(logits, torch.broadcast_to(mask, logits.shape))
+        return super()._final_environment_assignment(logits, mask)
 
     @staticmethod
     def _rms_scale(values: torch.Tensor) -> torch.Tensor:

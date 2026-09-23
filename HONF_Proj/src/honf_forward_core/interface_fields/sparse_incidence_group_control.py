@@ -43,6 +43,7 @@ class SparseIncidenceGroupControlPairwiseField(GroupControlPairwiseField):
         activation_checkpointing: bool = False,
         query_tile_size: int = 128,
         source_tile_size: int = 128,
+        environment_refinement_normalizer: str = "entmax15",
     ) -> None:
         if int(group_count) != 12:
             raise ValueError(
@@ -66,6 +67,7 @@ class SparseIncidenceGroupControlPairwiseField(GroupControlPairwiseField):
             activation_checkpointing=activation_checkpointing,
             query_tile_size=query_tile_size,
             source_tile_size=source_tile_size,
+            environment_refinement_normalizer=environment_refinement_normalizer,
         )
 
     def prepare(

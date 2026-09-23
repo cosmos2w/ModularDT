@@ -534,6 +534,9 @@ class InterfaceFieldCore(nn.Module):
                 environment_temperature=float(options.environment_temperature),
                 query_temperature=float(options.query_temperature),
                 activation_checkpointing=bool(options.activation_checkpointing),
+                environment_refinement_normalizer=str(
+                    options.environment_refinement_normalizer
+                ),
             )
         else:
             raise ValueError(f"Unsupported interface architecture: {config.forward_architecture!r}")

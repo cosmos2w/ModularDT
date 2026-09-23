@@ -41,6 +41,36 @@ def test_sparse_incidence_router_rejects_nonunit_query_temperature() -> None:
         SparseIncidenceGroupRouter(hidden_dim=16, query_temperature=0.5)
 
 
+def test_run1502_environment_refinement_normalizer_is_narrow_and_validated() -> None:
+    historical = SparseIncidenceGroupRouter(hidden_dim=16)
+    candidate = SparseIncidenceGroupRouter(
+        hidden_dim=16, environment_refinement_normalizer="sparsemax"
+    )
+    assert historical.environment_refinement_normalizer == "entmax15"
+    assert candidate.environment_refinement_normalizer == "sparsemax"
+    with pytest.raises(ValueError, match="environment_refinement_normalizer"):
+        SparseIncidenceGroupRouter(
+            hidden_dim=16, environment_refinement_normalizer="softmax"
+        )
+
+
+def test_run1502_final_environment_hook_broadcasts_occupancy_mask() -> None:
+    router = SparseIncidenceGroupRouter(
+        hidden_dim=16, environment_refinement_normalizer="sparsemax"
+    )
+    logits = torch.tensor(
+        [[[3.0, 1.0, 0.0, -2.0], [0.0, -1.0, 2.0, -3.0]]]
+    )
+    # The occupancy builder supplies [B, 1, K] while environmental rows are
+    # [B, E, K]; the hook must preserve that historical broadcast contract.
+    mask = torch.tensor([[[True, True, True, False]]])
+    assignment = router._final_environment_assignment(logits, mask)
+    assert assignment.shape == logits.shape
+    assert torch.allclose(assignment.sum(dim=-1), torch.ones((1, 2)))
+    assert torch.equal(assignment[..., 3], torch.zeros((1, 2)))
+    assert torch.any(assignment[..., :3] == 0.0)
+
+
 def _small_payload() -> dict[str, object]:
     payload = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))["model"][
         "core_honf"
@@ -376,6 +406,7 @@ def test_run1501_profile_identity_and_historical_strict_round_trip() -> None:
     assert interface["group_count"] == 12
     assert interface["group_control_dim"] == 16
     assert interface["source_normalizer"] == "entmax15"
+    assert "environment_refinement_normalizer" not in interface
     assert interface["query_normalizer"] == "sparsemax"
     assert profile["loss"]["case_group_budget_weight"] == 0.0
     assert profile["loss"]["organizer_regularization"]["enabled"] is False
@@ -396,3 +427,38 @@ def test_run1501_profile_identity_and_historical_strict_round_trip() -> None:
     state = copy.deepcopy(source.state_dict())
     restored = InterfaceFieldCore(config).eval()
     restored.load_state_dict(state, strict=True)
+
+
+def test_run1502_overlay_changes_only_final_environment_normalizer() -> None:
+    base = load_config_bundle(
+        "project://src/config_core/forward/sparse_incidence_group_control_honf_context.json"
+    )
+    candidate = load_config_bundle(
+        "project://src/config_core/forward/sparse_incidence_group_control_honf_context.json",
+        experiment_overlay=(
+            "project://src/config_core/forward/experiments/"
+            "run1502_environment_refinement_sparsemax.json"
+        ),
+    )
+    base_core = base.effective["model"]["core_honf"]
+    candidate_core = candidate.effective["model"]["core_honf"]
+    assert candidate_core["interface_model"]["environment_refinement_normalizer"] == "sparsemax"
+    expected = copy.deepcopy(base.effective)
+    expected["model"]["core_honf"]["interface_model"][
+        "environment_refinement_normalizer"
+    ] = "sparsemax"
+    assert candidate.effective == expected
+    assert candidate_core["forward_architecture"] == base_core["forward_architecture"]
+    assert candidate.effective["training"] == base.effective["training"]
+    assert candidate.effective["dataset"] == base.effective["dataset"]
+    assert candidate.effective["loss"] == base.effective["loss"]
+    assert candidate.effective["checkpointing"] == base.effective["checkpointing"]
+
+    base_config = UnifiedForwardConfig.from_dict(base_core)
+    candidate_config = UnifiedForwardConfig.from_dict(candidate_core)
+    assert base_config.interface_model.environment_refinement_normalizer == "entmax15"
+    assert candidate_config.interface_model.environment_refinement_normalizer == "sparsemax"
+    assert "environment_refinement_normalizer" not in base_config.to_dict()["interface_model"]
+    assert candidate_config.to_dict()["interface_model"][
+        "environment_refinement_normalizer"
+    ] == "sparsemax"

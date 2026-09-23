@@ -393,6 +393,10 @@ class InterfaceFieldConfig:
     # Run 1409's case-level availability plan.  Appended to preserve every
     # historical positional constructor and omitted from old architectures.
     case_group_budget: Optional[CaseGroupBudgetConfig] = None
+    # Run 1502's sole candidate hook.  The sparse-incidence backend applies
+    # this only to the final environmental refinement; all proposal/module
+    # assignments and query routing keep their historical normalizers.
+    environment_refinement_normalizer: str = "entmax15"
 
     def __post_init__(self) -> None:
         if isinstance(self.routing, dict):
@@ -471,6 +475,11 @@ class InterfaceFieldConfig:
             or int(self.samples_per_group) <= 0
         ):
             raise ValueError("interface_model.samples_per_group must be a positive integer.")
+        if self.environment_refinement_normalizer not in {"entmax15", "sparsemax"}:
+            raise ValueError(
+                "interface_model.environment_refinement_normalizer must be "
+                "'entmax15' or 'sparsemax'."
+            )
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any] | None) -> "InterfaceFieldConfig":
@@ -710,6 +719,14 @@ class UnifiedForwardConfig:
                     raise ValueError(
                         f"{self.forward_architecture} requires interface_model.group_control_dim exactly 16."
                     )
+            if (
+                self.forward_architecture != "sparse_incidence_group_control_honf"
+                and controlled.environment_refinement_normalizer != "entmax15"
+            ):
+                raise ValueError(
+                    f"{self.forward_architecture} requires "
+                    "interface_model.environment_refinement_normalizer='entmax15'."
+                )
             if self.forward_architecture == "hypergraph_quadrature_honf" and int(controlled.samples_per_group) != 4:
                 raise ValueError(
                     "hypergraph_quadrature_honf requires interface_model.samples_per_group exactly 4."
@@ -736,6 +753,15 @@ class UnifiedForwardConfig:
         elif self.interface_model.support_spacing_factor is not None:
             raise ValueError(
                 "interface_model.support_spacing_factor is only valid for sparse_interface_honf."
+            )
+        if (
+            self.interface_model is not None
+            and self.forward_architecture != "sparse_incidence_group_control_honf"
+            and self.interface_model.environment_refinement_normalizer != "entmax15"
+        ):
+            raise ValueError(
+                f"{self.forward_architecture} requires "
+                "interface_model.environment_refinement_normalizer='entmax15'."
             )
         if self.forward_architecture == "routed_pairwise_honf":
             if self.interface_model.routing is None:
@@ -1104,6 +1130,14 @@ class UnifiedForwardConfig:
                 payload.pop(key, None)
             interface_payload = payload.get("interface_model")
             if isinstance(interface_payload, dict):
+                if self.forward_architecture != "sparse_incidence_group_control_honf":
+                    # The Run-1502 hook is not part of any historical
+                    # architecture's serialized contract.
+                    interface_payload.pop("environment_refinement_normalizer", None)
+                elif self.interface_model.environment_refinement_normalizer == "entmax15":
+                    # Preserve the historical Run-1501/checkpoint shape when
+                    # the new hook is at its default value.
+                    interface_payload.pop("environment_refinement_normalizer", None)
                 budget_payload = interface_payload.get("case_group_budget")
                 if (
                     self.forward_architecture == "budgeted_group_control_honf"

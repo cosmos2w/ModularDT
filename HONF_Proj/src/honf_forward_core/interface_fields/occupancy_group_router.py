@@ -635,10 +635,9 @@ class OccupancyGroupRouter(LowDimensionalGroupRouter):
             mask=module_mask & final_valid[:, None, :],
         )
         module_membership = module_membership * active_modules[..., None].to(module_membership.dtype)
-        environment_membership = entmax15(
+        environment_membership = self._final_environment_assignment(
             environment_logits / float(self.environment_temperature) + environment_bias,
-            dim=-1,
-            mask=environment_mask & final_valid[:, None, :],
+            environment_mask & final_valid[:, None, :],
         )
         return (
             module_membership,
@@ -648,6 +647,21 @@ class OccupancyGroupRouter(LowDimensionalGroupRouter):
             proposal_joint_centres,
             final_valid,
         )
+
+    def _final_environment_assignment(
+        self,
+        logits: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Normalize the final environmental refinement.
+
+        The occupancy builder owns the proposal and module assignment
+        arithmetic.  A narrow override point keeps those historical
+        entmax-1.5 stages intact while allowing the sparse-incidence
+        candidate to change only the final environmental normalizer.
+        """
+
+        return entmax15(logits, dim=-1, mask=mask)
 
     def _controls_from_assignments(
         self,

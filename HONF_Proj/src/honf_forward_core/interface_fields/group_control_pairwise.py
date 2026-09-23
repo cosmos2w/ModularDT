@@ -58,6 +58,7 @@ class GroupControlPairwiseField(DensePairwiseField):
         activation_checkpointing: bool = False,
         query_tile_size: int = 128,
         source_tile_size: int = 128,
+        environment_refinement_normalizer: str | None = None,
     ) -> None:
         super().__init__(
             hidden_dim,
@@ -79,16 +80,22 @@ class GroupControlPairwiseField(DensePairwiseField):
         self.spatial_dim = int(spatial_dim)
         self.query_tile_size = int(query_tile_size)
         self.source_tile_size = int(source_tile_size)
-        self.router = self.router_class(
-            hidden_dim,
-            group_count=group_count,
-            control_dim=group_control_dim,
-            fourier_frequencies=fourier_frequencies,
-            spatial_dim=spatial_dim,
-            module_temperature=module_temperature,
-            environment_temperature=environment_temperature,
-            query_temperature=query_temperature,
-        )
+        router_kwargs = {
+            "group_count": group_count,
+            "control_dim": group_control_dim,
+            "fourier_frequencies": fourier_frequencies,
+            "spatial_dim": spatial_dim,
+            "module_temperature": module_temperature,
+            "environment_temperature": environment_temperature,
+            "query_temperature": query_temperature,
+        }
+        if environment_refinement_normalizer is not None:
+            # Only the sparse-incidence subclass supplies this opt-in hook;
+            # historical router classes retain their constructor contract.
+            router_kwargs["environment_refinement_normalizer"] = str(
+                environment_refinement_normalizer
+            )
+        self.router = self.router_class(hidden_dim, **router_kwargs)
 
         # These are the only new pair-control maps.  They are bias-free so a
         # zero moment is an identity modulation, not a learned additive route.
