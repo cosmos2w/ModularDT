@@ -15,7 +15,7 @@
         "message_hidden_dim": 128,
         "attention_heads": 4,
         "relative_fourier_frequencies": 4,
-        "receiver_chunk_size": 64,
+        "receiver_chunk_size": 32,
         "activation_checkpointing": true,
         "group_count": 12,
         "source_normalizer": "entmax15",
@@ -82,5 +82,5 @@
     "name": "Run_1503_adaptive_hyperedge_opening",
     "output_root": "project://Trained_Results"
   },
-  "_note": "Run 1503: retain Run 1502 K=12/D=16 source organization and module reader; provide every environmental group through a mass-weighted aggregate and open only positive sparse-query groups to group-major fine source rectangles. The training receiver chunk is mechanically reduced from 128 to 64 after the sole pre-epoch formal launch exhausted GPU-1 memory at 128. One query-logit bank, no second router, top-k, sparsity loss, dynamic K, or custom kernel."
+  "_note": "Run 1503: retain Run 1502 K=12/D=16 source organization and module reader; provide every environmental group through a mass-weighted aggregate and open only positive sparse-query groups to group-major fine source rectangles. The training receiver chunk is mechanically reduced from 128 to 32 after the 128- and 64-query attempts exhausted GPU-1 memory before completing epoch 1. One query-logit bank, no second router, top-k, sparsity loss, dynamic K, or custom kernel."
 }
