@@ -180,6 +180,7 @@ def _merge_group_control_maps(chunks):
             "group_control_adaptive_fine_group_rows_logical",
             "group_control_adaptive_fine_group_rows_forward",
             "group_control_adaptive_fine_group_rows_padded",
+            "group_control_adaptive_batched_fine_group_rows_forward",
         }:
             # Query/group execution maps are produced once per receiver tile.
             # Add the tiles rather than retaining the first one; their group
@@ -265,11 +266,25 @@ def _merge_group_control_maps(chunks):
                 "_unique_cells_touched",
                 "_lower_cells_touched",
                 "_fine_rows_recompute",
+                "_block_calls",
+                "_gemm_launches",
             )
         ):
             # The backend reports these execution counts once per receiver
             # chunk.  Preserve full-read totals instead of silently retaining
             # the first tile.
+            merged[key] = torch.stack(values).sum()
+        elif first.ndim == 0 and key in {
+            "group_control_adaptive_fine_block_call_reduction",
+            "group_control_adaptive_fine_gemm_launch_reduction",
+            "group_control_adaptive_fine_batched_checkpoint_calls",
+            "group_control_adaptive_batched_fine_rows_padded",
+            "group_control_adaptive_batched_fine_rows_recompute",
+        }:
+            # Run-1503's batched executor emits explicit scalar-vs-batched
+            # launch reductions and its common-padding tradeoff once per
+            # receiver tile.  These are additive full-read ledgers, just like
+            # the historical fine-row counters above.
             merged[key] = torch.stack(values).sum()
         else:
             # Source-only memberships, controls, masses, and summaries are

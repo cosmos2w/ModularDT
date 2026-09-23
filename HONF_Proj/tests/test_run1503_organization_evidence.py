@@ -151,6 +151,55 @@ def test_prepared_payload_adapts_live_run1503_control_aliases() -> None:
     assert "phase_ledger" not in payload
 
 
+def test_batched_padded_module_measure_wins_over_unbatched_alias() -> None:
+    raw = _payload()
+    module_assignment = np.pad(np.asarray(raw["module_assignment"]), ((0, 7), (0, 0)))
+    module_measure = np.pad(np.asarray(raw["module_measure"]), (0, 7))[None, ...]
+    module_present = np.r_[np.ones(5, dtype=bool), np.zeros(7, dtype=bool)]
+    module_coords = np.pad(np.asarray(raw["module_coords"]), ((0, 7), (0, 0)))
+    controls = SimpleNamespace(
+        module_membership=module_assignment[None, ...],
+        environment_membership=np.asarray(raw["environment_assignment"])[None, ...],
+        module_measure=module_measure,
+        environment_measure=np.asarray(raw["environment_measure"])[None, ...],
+        module_mass=module_assignment[None, ...].sum(axis=1),
+        environment_mass=np.asarray(raw["environment_assignment"])[None, ...].sum(axis=1),
+        phase_occupied=np.asarray(raw["active_mask"])[None, ...],
+        pi=np.asarray(raw["pi"])[None, ...],
+        kappa=np.asarray([raw["kappa"]]),
+        module_centres=np.zeros((1, 12, 2)),
+        environment_centres=np.zeros((1, 12, 2)),
+        joint_centres=np.zeros((1, 12, 2)),
+    )
+    encoded = SimpleNamespace(
+        env_coords=np.asarray(raw["environment_coords"])[None, ...],
+        env_weights=np.asarray(raw["environment_measure"])[None, ...],
+    )
+    prepared = SimpleNamespace(encoded=encoded, backend_state={"group_control_state": controls})
+    prediction = {
+        "interaction_aux": {
+            # This is the live stale alias shape that previously won lookup.
+            "group_control_module_measure": np.asarray([0.25]),
+            "group_control_adaptive_environment_p": np.asarray(raw["coarse_assignment"]),
+            "group_control_adaptive_environment_alpha": np.asarray(raw["query_assignment"]),
+            "group_control_adaptive_opening_blend": np.asarray(raw["opening_blend"]),
+        },
+        "_prepared_state": SimpleNamespace(prepared=prepared),
+    }
+    sample = {
+        "structure": {"module_centers": module_coords, "module_present": module_present},
+        "query_source_count": 4,
+        "query_selection": "full_original_grid",
+    }
+    payload = _prepared_payload(sample, prediction, np.asarray(raw["query_xy"]))
+    assert payload["module_measure"].shape == (1, 12)
+    assert payload["group_control_module_measure"].shape == (1, 12)
+
+    record = canonicalize_candidate_case(payload, case_id="0273", module_count=5, query_count=4)
+    assert record["maps"]["module_measure"].shape == (12,)
+    assert record["case"]["empty_module_source_count"] == 7
+
+
 def test_fixed_panel_summary_and_required_pngs(tmp_path: Path) -> None:
     records = []
     for case_id in DEFAULT_CASE_IDS:

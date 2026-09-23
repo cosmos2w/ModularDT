@@ -420,6 +420,224 @@ def test_fine_group_checkpoint_matches_forward_and_gradient_and_is_used(monkeypa
         )
 
 
+def test_batched_fine_executor_matches_scalar_reference_forward_and_gradients() -> None:
+    """The K-batched path must preserve the old reader and route contract."""
+
+    encoded, source_states = _encoded_case(seed=1513)
+    model = AdaptiveHyperedgeOpeningPairwiseField(
+        hidden_dim=16,
+        message_hidden_dim=8,
+        num_heads=2,
+        fourier_frequencies=2,
+        activation_checkpointing=False,
+    )
+    model.train()
+    receivers = torch.rand(2, 7, 2) * torch.tensor([12.0, 6.0])
+    receiver_features = torch.randn(2, 7, 6)
+
+    def run_reader(reader):
+        model.zero_grad(set_to_none=True)
+        states = source_states.detach().clone().requires_grad_()
+        features = receiver_features.detach().clone().requires_grad_()
+        state = model.prepare(encoded, states)
+        route = model._route(state, encoded, receivers, features)
+        context, aux = reader(
+            state,
+            encoded,
+            receivers,
+            features,
+            route,
+            include_diagnostics=True,
+        )
+        context.square().mean().backward()
+        parameter_gradients = {
+            name: parameter.grad.detach().clone()
+            for name, parameter in model.named_parameters()
+            if parameter.grad is not None
+        }
+        return context.detach(), aux, states.grad.detach().clone(), features.grad.detach().clone(), parameter_gradients
+
+    scalar = run_reader(model._read_environment_scalar_reference)
+    batched = run_reader(model._read_environment)
+    torch.testing.assert_close(batched[0], scalar[0], rtol=2.0e-5, atol=2.0e-6)
+    torch.testing.assert_close(batched[2], scalar[2], rtol=2.0e-5, atol=2.0e-6)
+    torch.testing.assert_close(batched[3], scalar[3], rtol=2.0e-5, atol=2.0e-6)
+    assert batched[4].keys() == scalar[4].keys()
+    for name in scalar[4]:
+        torch.testing.assert_close(batched[4][name], scalar[4][name], rtol=2.0e-5, atol=2.0e-6)
+
+    for key in (
+        "group_control_adaptive_environment_p",
+        "group_control_adaptive_environment_alpha",
+        "group_control_adaptive_opening_blend",
+        "group_control_adaptive_query_count_per_group",
+        "group_control_adaptive_source_count_per_group",
+        "group_control_adaptive_fine_group_rows",
+        "group_control_adaptive_fine_group_rows_logical",
+        "group_control_adaptive_fine_group_rows_forward",
+        "group_control_adaptive_fine_group_rows_padded",
+    ):
+        torch.testing.assert_close(batched[1][key], scalar[1][key], rtol=0.0, atol=0.0)
+    assert batched[1]["group_control_adaptive_fine_batched_block_calls"].item() == 1.0
+    assert batched[1]["group_control_adaptive_fine_scalar_block_calls"].item() > 1.0
+    torch.testing.assert_close(
+        batched[1]["group_control_adaptive_fine_gemm_launch_reduction"],
+        batched[1]["group_control_adaptive_fine_scalar_gemm_launches"]
+        - batched[1]["group_control_adaptive_fine_batched_gemm_launches"],
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_batched_fine_executor_reduces_scalar_block_calls_to_one(monkeypatch) -> None:
+    encoded, module_states = _encoded_case(seed=1514)
+    model = AdaptiveHyperedgeOpeningPairwiseField(
+        hidden_dim=16,
+        message_hidden_dim=8,
+        num_heads=2,
+        fourier_frequencies=2,
+    )
+    model.eval()
+    state = model.prepare(encoded, module_states)
+    receivers = torch.rand(2, 8, 2) * torch.tensor([12.0, 6.0])
+    receiver_features = torch.randn(2, 8, 6)
+    route = model._route(state, encoded, receivers, receiver_features)
+
+    scalar_calls: list[bool] = []
+    scalar_block = model._fine_group_response_block
+
+    def record_scalar(*args):
+        scalar_calls.append(True)
+        return scalar_block(*args)
+
+    monkeypatch.setattr(model, "_fine_group_response_block", record_scalar)
+    _, scalar_aux = model._read_environment_scalar_reference(
+        state,
+        encoded,
+        receivers,
+        receiver_features,
+        route,
+        include_diagnostics=True,
+    )
+
+    batched_calls: list[bool] = []
+    batched_block = model._fine_group_response_batched_block
+
+    def record_batched(*args):
+        batched_calls.append(True)
+        return batched_block(*args)
+
+    monkeypatch.setattr(model, "_fine_group_response_batched_block", record_batched)
+    _, batched_aux = model._read_environment(
+        state,
+        encoded,
+        receivers,
+        receiver_features,
+        route,
+        include_diagnostics=True,
+    )
+    assert len(scalar_calls) == int(scalar_aux["group_control_adaptive_fine_scalar_block_calls"])
+    assert len(scalar_calls) > 1
+    assert len(batched_calls) == 1
+    assert batched_aux["group_control_adaptive_fine_batched_block_calls"].item() == 1.0
+    assert batched_aux["group_control_adaptive_fine_batched_gemm_launches"].item() == 1.0
+    assert batched_aux["group_control_adaptive_fine_gemm_launch_reduction"].item() == len(scalar_calls) - 1
+
+
+def test_hybrid_executor_boundary_selects_batched_at_128_and_scalar_above(
+    monkeypatch,
+) -> None:
+    encoded, module_states = _encoded_case(seed=1515)
+    model = AdaptiveHyperedgeOpeningPairwiseField(
+        hidden_dim=16,
+        message_hidden_dim=8,
+        num_heads=2,
+        fourier_frequencies=2,
+    )
+    model.eval()
+    state = model.prepare(encoded, module_states)
+
+    batched_calls: list[bool] = []
+    batched_block = model._fine_group_response_batched_block
+
+    def record_batched(*args):
+        batched_calls.append(True)
+        return batched_block(*args)
+
+    scalar_calls: list[bool] = []
+    scalar_block = model._fine_group_response_block
+
+    def record_scalar(*args):
+        scalar_calls.append(True)
+        return scalar_block(*args)
+
+    monkeypatch.setattr(model, "_fine_group_response_batched_block", record_batched)
+    monkeypatch.setattr(model, "_fine_group_response_block", record_scalar)
+
+    def read(query_count: int):
+        receivers = torch.rand(2, query_count, 2) * torch.tensor([12.0, 6.0])
+        features = torch.randn(2, query_count, 6)
+        route = model._route(state, encoded, receivers, features)
+        return model._read_environment(
+            state,
+            encoded,
+            receivers,
+            features,
+            route,
+            include_diagnostics=True,
+        )
+
+    _, at_boundary = read(128)
+    assert len(batched_calls) == 1
+    assert not scalar_calls
+    assert bool((at_boundary["group_control_adaptive_fine_executor_selected"] == 1.0).all())
+    assert at_boundary["group_control_adaptive_fine_executor_batch_limit"].item() == 128.0
+    torch.testing.assert_close(
+        at_boundary["group_control_adaptive_batched_fine_rows_padded"],
+        at_boundary["group_control_adaptive_batched_fine_rows"]
+        - at_boundary["group_control_adaptive_fine_rows_logical"],
+        rtol=0.0,
+        atol=0.0,
+    )
+
+    batched_calls.clear()
+    scalar_calls.clear()
+    receivers_above = torch.rand(2, 129, 2) * torch.tensor([12.0, 6.0])
+    features_above = torch.randn(2, 129, 6)
+    route_above = model._route(state, encoded, receivers_above, features_above)
+    selected, selected_aux = model._read_environment(
+        state,
+        encoded,
+        receivers_above,
+        features_above,
+        route_above,
+        include_diagnostics=True,
+    )
+    assert not batched_calls
+    assert len(scalar_calls) > 0
+    assert bool((selected_aux["group_control_adaptive_fine_executor_selected"] == 0.0).all())
+    assert selected_aux["group_control_adaptive_fine_batched_block_calls"].item() == 0.0
+    assert selected_aux["group_control_adaptive_batched_fine_rows"].item() == 0.0
+    assert selected_aux["group_control_adaptive_batched_fine_rows_padded"].item() == 0.0
+
+    reference, reference_aux = model._read_environment_scalar_reference(
+        state,
+        encoded,
+        receivers_above,
+        features_above,
+        route_above,
+        include_diagnostics=True,
+    )
+    torch.testing.assert_close(selected, reference, rtol=2.0e-5, atol=2.0e-6)
+    for key in (
+        "group_control_adaptive_environment_p",
+        "group_control_adaptive_environment_alpha",
+        "group_control_adaptive_opening_blend",
+        "group_control_adaptive_fine_group_rows_forward",
+    ):
+        torch.testing.assert_close(selected_aux[key], reference_aux[key], rtol=0.0, atol=0.0)
+
+
 def _encoded_case(seed: int = 1503) -> tuple[EncodedInterfaceCase, torch.Tensor]:
     generator = torch.Generator().manual_seed(seed)
     batch, modules, environments, hidden = 2, 4, 9, 16
@@ -586,6 +804,22 @@ def test_core_maps_off_and_maps_on_chunk_merge_keep_adaptive_shapes() -> None:
         rtol=0.0,
         atol=0.0,
     )
+    # Logical support is chunk-invariant; the batched executor's common
+    # padding and launch counts intentionally follow the receiver tiles.
+    for key in (
+        "group_control_adaptive_fine_scalar_block_calls",
+        "group_control_adaptive_fine_batched_block_calls",
+        "group_control_adaptive_fine_scalar_gemm_launches",
+        "group_control_adaptive_fine_batched_gemm_launches",
+        "group_control_adaptive_fine_gemm_launch_reduction",
+        "group_control_adaptive_batched_fine_rows",
+        "group_control_adaptive_batched_fine_rows_padded",
+    ):
+        assert key in maps_on.interaction_aux
+        assert key in whole.interaction_aux
+    assert maps_on.interaction_aux["group_control_adaptive_fine_batched_gemm_launches"].item() == 3.0
+    assert whole.interaction_aux["group_control_adaptive_fine_batched_gemm_launches"].item() == 1.0
+    assert maps_on.interaction_aux["group_control_adaptive_fine_scalar_gemm_launches"].item() >= whole.interaction_aux["group_control_adaptive_fine_scalar_gemm_launches"].item()
     for aux in (maps_on.interaction_aux, whole.interaction_aux):
         torch.testing.assert_close(
             aux["group_control_adaptive_fine_group_rows_forward"]
@@ -607,3 +841,25 @@ def test_core_maps_off_and_maps_on_chunk_merge_keep_adaptive_shapes() -> None:
             rtol=0.0,
             atol=0.0,
         )
+
+
+def test_core_merge_preserves_mixed_hybrid_executor_selection() -> None:
+    encoded, module_states = _encoded_case(seed=1516)
+    core = InterfaceFieldCore(_small_config())
+    prepared = core.prepare(encoded, module_states)
+    receivers = torch.rand(2, 300, 2) * torch.tensor([12.0, 6.0])
+    read = core.read(
+        prepared,
+        receivers,
+        receiver_chunk_size=256,
+        return_routing_maps=True,
+    )
+    selected = read.interaction_aux["group_control_adaptive_fine_executor_selected"]
+    assert selected.shape == (2, 300)
+    assert bool((selected[:, :256] == 0.0).all())
+    assert bool((selected[:, 256:] == 1.0).all())
+    assert read.interaction_aux["group_control_adaptive_fine_executor_batch_limit"].item() == 128.0
+    # The merge must sum actual per-tile executor counters, while retaining
+    # the per-query selection vector for mixed tile sizes.
+    assert read.interaction_aux["group_control_adaptive_fine_batched_block_calls"].item() == 1.0
+    assert read.interaction_aux["group_control_adaptive_fine_batched_gemm_launches"].item() == 1.0

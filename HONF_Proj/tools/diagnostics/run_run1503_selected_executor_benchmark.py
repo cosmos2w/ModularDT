@@ -435,6 +435,47 @@ def _adaptive_ledger(output: Mapping[str, Any], *, receiver_chunk_size: int) -> 
         ),
         "coarse_rows": _ledger_value(coarse_total),
         "source_rows_per_group": _ledger_value(source_rows_per_group),
+        "executor": {
+            "selected_batched": _ledger_value(
+                _first_aux(aux, "group_control_adaptive_fine_executor_selected")
+            ),
+            "batch_limit": _ledger_value(
+                _first_aux(aux, "group_control_adaptive_fine_executor_batch_limit")
+            ),
+            "scalar_block_calls": _ledger_value(
+                _first_aux(aux, "group_control_adaptive_fine_scalar_block_calls")
+            ),
+            "batched_block_calls": _ledger_value(
+                _first_aux(aux, "group_control_adaptive_fine_batched_block_calls")
+            ),
+            "block_call_reduction": _ledger_value(
+                _first_aux(aux, "group_control_adaptive_fine_block_call_reduction")
+            ),
+            "scalar_gemm_launches": _ledger_value(
+                _first_aux(aux, "group_control_adaptive_fine_scalar_gemm_launches")
+            ),
+            "batched_gemm_launches": _ledger_value(
+                _first_aux(aux, "group_control_adaptive_fine_batched_gemm_launches")
+            ),
+            "gemm_launch_reduction": _ledger_value(
+                _first_aux(aux, "group_control_adaptive_fine_gemm_launch_reduction")
+            ),
+            "batched_checkpoint_calls": _ledger_value(
+                _first_aux(aux, "group_control_adaptive_fine_batched_checkpoint_calls")
+            ),
+            "batched_group_rows_forward": _ledger_value(
+                _first_aux(aux, "group_control_adaptive_batched_fine_group_rows_forward")
+            ),
+            "batched_rows": _ledger_value(
+                _first_aux(aux, "group_control_adaptive_batched_fine_rows")
+            ),
+            "batched_rows_padded": _ledger_value(
+                _first_aux(aux, "group_control_adaptive_batched_fine_rows_padded")
+            ),
+            "batched_rows_recompute": _ledger_value(
+                _first_aux(aux, "group_control_adaptive_batched_fine_rows_recompute")
+            ),
+        },
         "fine": {
             "group_rows_forward": _ledger_value(fine_group_forward),
             "group_rows_logical": _ledger_value(fine_group_logical),

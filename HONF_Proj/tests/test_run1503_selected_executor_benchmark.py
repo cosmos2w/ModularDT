@@ -69,6 +69,21 @@ def test_adaptive_ledger_keeps_fine_coarse_and_source_rows_distinct() -> None:
             "group_control_adaptive_fine_rows_forward": torch.tensor(19.0),
             "group_control_adaptive_fine_rows_padded": torch.tensor(3.0),
             "group_control_adaptive_fine_work_ratio": torch.tensor(0.95),
+            "group_control_adaptive_fine_executor_selected": torch.ones((1, 5)),
+            "group_control_adaptive_fine_executor_batch_limit": torch.tensor(128.0),
+            "group_control_adaptive_fine_scalar_block_calls": torch.tensor(12.0),
+            "group_control_adaptive_fine_batched_block_calls": torch.tensor(1.0),
+            "group_control_adaptive_fine_block_call_reduction": torch.tensor(11.0),
+            "group_control_adaptive_fine_scalar_gemm_launches": torch.tensor(12.0),
+            "group_control_adaptive_fine_batched_gemm_launches": torch.tensor(1.0),
+            "group_control_adaptive_fine_gemm_launch_reduction": torch.tensor(11.0),
+            "group_control_adaptive_fine_batched_checkpoint_calls": torch.tensor(0.0),
+            "group_control_adaptive_batched_fine_group_rows_forward": torch.tensor(
+                [[12.0, 12.0, 12.0]]
+            ),
+            "group_control_adaptive_batched_fine_rows": torch.tensor(36.0),
+            "group_control_adaptive_batched_fine_rows_padded": torch.tensor(20.0),
+            "group_control_adaptive_batched_fine_rows_recompute": torch.tensor(0.0),
             "group_control_adaptive_coarse_rows": torch.tensor(15.0),
             "group_control_adaptive_full_rectangle_rows": torch.tensor(20.0),
             "group_control_adaptive_environment_source_mass": torch.tensor(
@@ -94,6 +109,21 @@ def test_adaptive_ledger_keeps_fine_coarse_and_source_rows_distinct() -> None:
     assert ledger["coarse"]["rows"] == 15.0
     assert ledger["source"]["rows_per_group"] == [2, 2, 2]
     assert ledger["support"]["unique_pairs"] == 11.0
+    assert ledger["executor"] == {
+        "selected_batched": [1.0, 1.0, 1.0, 1.0, 1.0],
+        "batch_limit": 128.0,
+        "scalar_block_calls": 12.0,
+        "batched_block_calls": 1.0,
+        "block_call_reduction": 11.0,
+        "scalar_gemm_launches": 12.0,
+        "batched_gemm_launches": 1.0,
+        "gemm_launch_reduction": 11.0,
+        "batched_checkpoint_calls": 0.0,
+        "batched_group_rows_forward": [12.0, 12.0, 12.0],
+        "batched_rows": 36.0,
+        "batched_rows_padded": 20.0,
+        "batched_rows_recompute": 0.0,
+    }
     assert ledger["maps_probe_timed"] is False
 
 

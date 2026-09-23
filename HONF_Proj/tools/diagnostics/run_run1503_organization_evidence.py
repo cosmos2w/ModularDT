@@ -98,6 +98,34 @@ def _to_numpy(value: Any, *, dtype: Any | None = None) -> np.ndarray:
     return np.asarray(value, dtype=dtype)
 
 
+def _batched_measure(value: Any, *, name: str) -> np.ndarray:
+    """Keep a prepared source measure on an explicit ``[B, M]`` axis.
+
+    The shared evidence canonicalizer treats a one-dimensional vector as a
+    batched value and therefore selects its first scalar when ``M > 1``.
+    Prepared Run1503 controls are already ``[B, M]``; the only accepted
+    compatibility conversion is an unbatched ``[M]`` vector to ``[1, M]``.
+    """
+
+    array = _to_numpy(value)
+    if array.ndim == 1:
+        array = array[None, ...]
+    if array.ndim != 2:
+        raise Run1503OrganizationEvidenceError(
+            f"{name} must have shape [B,M] (or unbatched [M]), got {array.shape}"
+        )
+    return array
+
+
+def _case_measure(value: Any, *, name: str, length: int) -> np.ndarray:
+    array = _batched_measure(value, name=name)
+    if int(array.shape[1]) != int(length):
+        raise Run1503OrganizationEvidenceError(
+            f"{name} padded source axis {array.shape[1]} does not match {length}"
+        )
+    return np.asarray(array[0], dtype=np.float64)
+
+
 def _member(value: Any, key: str, default: Any = None) -> Any:
     if value is None:
         return default
@@ -229,11 +257,46 @@ def _prepared_payload(
     for source, target in control_aliases.items():
         value = _member(controls, source)
         if value is not None:
+            if source in ("module_measure", "environment_measure"):
+                value = _batched_measure(value, name=source)
             payload[target] = value
             if source == "module_membership":
                 payload["module_membership"] = value
             elif source == "environment_membership":
                 payload["environment_membership"] = value
+            elif source == "module_measure":
+                # ``occupancy_adaptive_evidence`` checks this maintained alias
+                # before ``module_measure``.  Keep it on the same explicit
+                # batch/padded-source axis as the authoritative control.
+                payload["group_control_module_measure"] = value
+            elif source == "environment_measure":
+                payload["group_control_environment_measure"] = value
+            elif source == "phase_occupied":
+                # sparse-incidence compatibility data may expose an
+                # unbatched ``sparse_incidence_phase_occupied`` vector.  The
+                # prepared active mask has the registered ``[B,K]`` axis and
+                # must win the shared alias lookup.
+                payload["occupancy_group_active_mask"] = value
+            elif source in ("module_centres", "environment_centres", "joint_centres"):
+                centre_aliases = {
+                    "module_centres": (
+                        "occupancy_group_module_centres",
+                        "occupancy_adaptive_module_centres",
+                        "group_control_module_centres",
+                    ),
+                    "environment_centres": (
+                        "occupancy_group_environment_centres",
+                        "occupancy_adaptive_environment_centres",
+                        "group_control_environment_centres",
+                    ),
+                    "joint_centres": (
+                        "occupancy_group_joint_centres",
+                        "occupancy_adaptive_joint_centres",
+                        "group_control_joint_centres",
+                    ),
+                }
+                for alias in centre_aliases[source]:
+                    payload[alias] = value
 
     if payload.get("environment_measure") is None:
         payload["environment_measure"] = _member(encoded, "env_weights")
@@ -416,6 +479,41 @@ def canonicalize_candidate_case(
         "module_present",
     ):
         ensure_case_axis(key, 1)
+    # Prepared controls are authoritative for source measures.  The live
+    # interaction payload also carries maintained aliases such as
+    # ``group_control_module_measure``; those can be unbatched ``[M]`` while
+    # the prepared control is ``[B,M]``.  Synchronize all accepted measure
+    # aliases after selecting the explicit batch/padded representation so the
+    # shared canonicalizer cannot mistake the padded source axis for a batch.
+    for canonical, aliases in (
+        (
+            "module_measure",
+            (
+                "occupancy_group_module_measure",
+                "occupancy_adaptive_module_measure",
+                "group_control_module_measure",
+            ),
+        ),
+        (
+            "environment_measure",
+            (
+                "occupancy_group_environment_measure",
+                "occupancy_adaptive_environment_measure",
+                "group_control_environment_measure",
+            ),
+        ),
+    ):
+        value = payload.get(canonical)
+        if value is None:
+            for alias in aliases:
+                value = payload.get(alias)
+                if value is not None:
+                    break
+        if value is not None:
+            value = _batched_measure(value, name=canonical)
+            payload[canonical] = value
+            for alias in aliases:
+                payload[alias] = value
     query_array = _to_numpy(payload.get("query_xy"), dtype=np.float64)
     while query_array.ndim > 2 and query_array.shape[0] == 1:
         query_array = query_array[0]
@@ -478,12 +576,20 @@ def canonicalize_candidate_case(
     module_assignment = np.asarray(maps["module_assignment"], dtype=np.float64)
     environment_assignment = np.asarray(maps["environment_assignment"], dtype=np.float64)
     module_present = np.asarray(maps.get("module_present", np.ones(module_assignment.shape[0])), dtype=bool)
-    environment_measure = _to_numpy(payload.get("environment_measure"), dtype=np.float64).reshape(-1)
+    environment_measure = _case_measure(
+        payload.get("environment_measure"),
+        name="environment_measure",
+        length=environment_assignment.shape[0],
+    )
     module_measure_value = payload.get("module_measure")
     module_measure = (
         np.ones(module_assignment.shape[0], dtype=np.float64)
         if module_measure_value is None
-        else _to_numpy(module_measure_value, dtype=np.float64).reshape(-1)
+        else _case_measure(
+            module_measure_value,
+            name="module_measure",
+            length=module_assignment.shape[0],
+        )
     )
     if environment_measure.size != environment_assignment.shape[0]:
         raise Run1503OrganizationEvidenceError("environment_measure does not align with environment sources")
@@ -636,6 +742,19 @@ def _figure_setup(path: Path) -> Any | None:
     return plt
 
 
+def _case_ticks(labels: Sequence[str], *, max_ticks: int = 12) -> tuple[np.ndarray, list[str]]:
+    """Thin population case labels while retaining the first and last case."""
+
+    if len(labels) <= max_ticks:
+        positions = np.arange(len(labels), dtype=np.int64)
+    else:
+        step = max(1, math.ceil((len(labels) - 1) / (max_ticks - 1)))
+        positions = np.arange(0, len(labels), step, dtype=np.int64)
+        if int(positions[-1]) != len(labels) - 1:
+            positions = np.r_[positions, len(labels) - 1]
+    return positions, [str(labels[index]) for index in positions]
+
+
 def render_source_degree_figure(rows: Sequence[Mapping[str, Any]], array_dir: Path, path: Path) -> None:
     plt = _figure_setup(path)
     if plt is None:
@@ -681,7 +800,8 @@ def render_source_degree_figure(rows: Sequence[Mapping[str, Any]], array_dir: Pa
     x = np.arange(len(labels))
     axes[1].plot(x, means_m, "s-", label="module", color="#0072B2")
     axes[1].plot(x, means_e, "o-", label="environment", color="#009E73")
-    axes[1].set_xticks(x, labels, rotation=55)
+    tick_positions, tick_labels = _case_ticks(labels)
+    axes[1].set_xticks(tick_positions, tick_labels, rotation=55)
     axes[1].set_xlabel("case ID")
     axes[1].set_ylabel("mean positive degree")
     axes[1].set_title("Per-case source degree")
@@ -703,12 +823,13 @@ def render_active_mass_figure(rows: Sequence[Mapping[str, Any]], path: Path) -> 
     figure, axes = plt.subplots(1, 2, figsize=(11.5, 4.8), constrained_layout=True)
     image = axes[0].imshow(masses, aspect="auto", interpolation="nearest", cmap="viridis")
     figure.colorbar(image, ax=axes[0], label="active group mass")
-    axes[0].set_yticks(np.arange(len(labels)), labels)
+    tick_positions, tick_labels = _case_ticks(labels)
+    axes[0].set_yticks(tick_positions, tick_labels)
     axes[0].set_xlabel("learned group ID")
     axes[0].set_ylabel("case ID")
     axes[0].set_title("Run 1503 active group mass")
     axes[1].bar(np.arange(len(labels)), active, color="#E69F00")
-    axes[1].set_xticks(np.arange(len(labels)), labels, rotation=55)
+    axes[1].set_xticks(tick_positions, tick_labels, rotation=55)
     axes[1].set_xlabel("case ID")
     axes[1].set_ylabel("groups with mass > 1e-12")
     axes[1].set_title("Active group count")
@@ -768,7 +889,8 @@ def render_fine_work_ratio_figure(rows: Sequence[Mapping[str, Any]], path: Path)
     colors = ["#56B4E9" if np.isfinite(value) else "#BDBDBD" for value in values]
     axis.bar(np.arange(len(labels)), np.nan_to_num(values, nan=0.0), color=colors)
     axis.axhline(1.0, linestyle="--", color="#555555", linewidth=1.0, label="dense rectangle = 1")
-    axis.set_xticks(np.arange(len(labels)), labels, rotation=55)
+    tick_positions, tick_labels = _case_ticks(labels)
+    axis.set_xticks(tick_positions, tick_labels, rotation=55)
     axis.set_ylim(bottom=0.0)
     axis.set_xlabel("case ID")
     axis.set_ylabel("explicit fine rows / full rectangle rows")
@@ -794,7 +916,8 @@ def render_empty_counts_figure(rows: Sequence[Mapping[str, Any]], path: Path) ->
         (width, "empty_source_count", "environment sources", "#009E73"),
     ):
         axis.bar(x + offset, [int(row.get(key, 0)) for row in rows], width, label=label, color=color)
-    axis.set_xticks(x, labels, rotation=55)
+    tick_positions, tick_labels = _case_ticks(labels)
+    axis.set_xticks(tick_positions, tick_labels, rotation=55)
     axis.set_xlabel("case ID")
     axis.set_ylabel("explicit empty count")
     axis.set_title("Run 1503 empty groups / queries / sources")

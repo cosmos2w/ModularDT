@@ -930,6 +930,13 @@ def expected_aux_contract() -> dict[str, Any]:
             "group_control_adaptive_coarse_rows": "[B] explicit coarse QxK rows",
             "group_control_adaptive_full_rectangle_rows": "[B] explicit dense QE denominator",
             "group_control_adaptive_fine_work_ratio": "[B] explicit fine rows/full rectangle rows",
+            "group_control_adaptive_fine_scalar_block_calls": "[] scalar-K block-call count for this receiver tile",
+            "group_control_adaptive_fine_batched_block_calls": "[] K-batched block-call count for this receiver tile",
+            "group_control_adaptive_fine_gemm_launch_reduction": "[] scalar-K minus K-batched theoretical GEMM launches",
+            "group_control_adaptive_fine_batched_checkpoint_calls": "[] K-batched activation-checkpoint call count",
+            "group_control_adaptive_fine_executor_selected": "[B,Q] 1 for K-batched and 0 for scalar executor on each receiver tile",
+            "group_control_adaptive_fine_executor_batch_limit": "[] runtime K-batched query-tile limit (128)",
+            "group_control_adaptive_batched_fine_rows_forward": "[B,K] common-padding rows actually traversed by the K-batched executor",
         },
         "semantics": {
             "group_mass": "sum_j nu_j A^E_jk; diagnostic may derive it",

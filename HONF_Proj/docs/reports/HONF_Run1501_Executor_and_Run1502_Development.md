@@ -1,12 +1,14 @@
-# HONF Run 1501 executor and Run 1502 development
+# HONF Run 1501 executor, Run 1502 development, and Run 1503 epoch-50 gate
 
 ## Decision summary
 
 This task used only the fixed Run-1501 saved-best-total epoch-444 and exact epoch-500 checkpoints. Run 1501 maturation continued independently; this Goal-mode task did not wait for or monitor epoch 5000.
 
-The Run-1501 accounting path is corrected from the backend through evaluator reduction. The exact support-union block executor preserves the learned operator and tested first derivatives, but its measured benefit is decided by latency and memory rather than logical row counts; the historical rectangular reader remains the default. The sole Run-1502 change is final environmental source refinement from entmax-1.5 to masked sparsemax. Its frozen eight-case gate materially reduced environmental overlap without empty-support pathology, so exactly one matched Run 1502 was launched to the epoch-50 review stop. The epoch-50 learning/evaluation gate initially rejected continuation. A subsequent explicit user instruction authorized the same run to resume from its exact epoch-50 optimizer state. A strict identity audit passed, and the single run completed normally at exactly epoch 500; it was not extended further.
+The Run-1501 accounting path is corrected from the backend through evaluator reduction. The exact support-union block executor preserves the learned operator and tested first derivatives, but its measured benefit is decided by latency and memory rather than logical row counts; the historical rectangular reader remains the default. The sole Run-1502 change is final environmental source refinement from entmax-1.5 to masked sparsemax. Its frozen eight-case gate materially reduced environmental overlap without empty-support pathology, so exactly one matched Run 1502 was launched to the epoch-50 review stop. The epoch-50 learning/evaluation gate initially rejected continuation. Subsequent explicit user instructions authorized the same run first to epoch 500 and later to epoch 5000 from its exact optimizer state. The epoch-500 milestone completed normally and was evaluated; the later continuation was startup-verified once in `Wang-3:0` and then deliberately left unattended, so this report does not claim its current epoch or completion.
 
 At exact epoch 500, Run 1502 is a targeted tradeoff, not a new dominant baseline. Against Run 1501 it improves pooled and near-interface field error and several temperature/port metrics while regressing far-field, heat-flux, and outlet-temperature metrics, with effectively unchanged latency. Dense Run 1804 remains better in overall field accuracy and latency, although Run 1502 is better on internal and interface-surface temperature MAE.
+
+Run 1503 is rejected at its exact epoch-50 gate. The formal implementation was 6.80x slower per training epoch and 3.15x slower per validation pass than Run 1502 over epochs 1--50. A bounded hybrid executor removes much of the scalar-loop overhead on small receiver tiles without changing checkpoint or operator semantics, but the corrected 90-case application path remains 6.19x slower and uses 2.17x the incremental peak allocation of Run 1502. Its principal field and temperature errors also regress substantially. No epoch-150 or epoch-500 continuation is launched.
 
 The 90-case split remains a development holdout, not an untouched final benchmark. Learned incidence is surrogate-model organization, not physical causality, and group labels are permutation-ambiguous.
 
@@ -168,15 +170,118 @@ The intended environmental sparsemax refinement therefore persists after 500 epo
 
 ### Epoch-500 decision
 
-Run 1502 demonstrates a real targeted structural and near-interface/thermal tradeoff over Run 1501, but it does not dominate Run 1501 across physical KPIs and does not surpass dense Run 1804 in overall field accuracy or latency. The authorized run is therefore complete at epoch 500. No extension, second seed, or follow-on sweep is launched.
+Run 1502 demonstrates a real targeted structural and near-interface/thermal tradeoff over Run 1501, but it does not dominate Run 1501 across physical KPIs and does not surpass dense Run 1804 in overall field accuracy or latency. Epoch 500 was therefore the evidence milestone rather than evidence for autonomous extension. A later explicit instruction independently authorized this same run to continue to epoch 5000 with key checkpoints; it was startup-verified once in `Wang-3:0` and left unattended, with no second seed or sweep.
 
-## 6. Deferred work
+## 6. Run 1503 design and bounded epoch-50 gate
+
+Run 1503 tested adaptive hyperedge opening on top of the retained grouped organization. For registered capacity `K=12`, the masked coarse allocation and opening fraction are
+
+`p_qk = softmax_masked(l_qk + log(m_k + eps))`, `b_qk = clamp(alpha_qk / (p_qk + eps), 0, 1)`, and `y_q = sum_k p_qk [(1 - b_qk) C_qk + b_qk F_qk]`.
+
+Here `C_qk` is the coarse group response and `F_qk` is a fine source-attention response over the learned union of module and environment sources assigned to group `k`. The learned query support degree `Kq` controls how many groups can contribute, but it does not make the fine path free: every open group still performs source projection, attention-score/value work, activation storage or recomputation, and scatter accumulation. The design therefore adds a coarse `Q x K` path plus fine work, rather than selecting one cheap block from a fixed bank.
+
+The exact formal run is `Run_1503_20260923_120333_Run_1503_adaptive_hyperedge_opening`. Earlier receiver chunks of 128 and 64 exhausted memory; chunk 32 plus full fine-block activation checkpointing enabled training, but the original executor still invoked a scalar fine block for every active group in every receiver tile. With 8192 application queries this meant 256 receiver tiles and approximately one thousand scalar block calls per representative case, so launch and checkpoint-recomputation overhead compounded the architectural fine work.
+
+The run completed normally at exact epoch 50 with train total loss 1.24602, validation total loss 1.26299, train/validation field MSE 0.75062/0.82900, gradient norm 4.86501, update norm 0.13152, and maximum recorded CUDA memory 29,137.61 MiB. The exact checkpoint SHA256 is `b002aec83c81bda9ec04fe163259f97dce468177188fd091e9cedafb2073f78a`.
+
+### Formal training-time diagnosis
+
+| Mean over epochs 1--50 | Run 1502 | Run 1503 formal | Run-1503 / Run-1502 |
+|---|---:|---:|---:|
+| Training wall seconds / epoch | 8.3975 | 57.0575 | 6.80x |
+| Validation wall seconds / pass | 1.0213 | 3.2152 | 3.15x |
+| Recorded peak CUDA MiB / epoch | 24,168.62 | 28,759.34 | 1.19x |
+
+These traces establish that the slowdown is not measurement noise. The asymmetric 6.80x training and 3.15x validation ratios are also consistent with activation-checkpoint recomputation amplifying the scalar fine-block launch structure during backpropagation.
+
+### Exact epoch-50 accuracy and application cost
+
+The matched 90-case comparison used each exact epoch-50 checkpoint, all 8192 original grid queries, predicted port conditions, and physical `cuda:1`. The final Run-1503 row uses the hybrid executor described below; output parity checks show that this is an implementation substitution, not a different trained model.
+
+| Exact e50 model | Fluid relative L2 | Near-interface relative L2 | Far-fluid relative L2 | Fluid-temperature MAE | Internal-temperature MAE | Surface-temperature MAE | Heat-flux MAE | Port-temperature MAE | Effective-h MAE |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Run 1502 sparsemax | **0.49269** | **0.40684** | **0.51670** | **2.28332** | **2.02401** | **2.29696** | 5.85766 | **2.28302** | 1.75156 |
+| Run 1503 adaptive opening | 0.85589 | 0.54037 | 1.01422 | 3.71321 | 2.71873 | 3.05145 | **5.46597** | 3.15974 | **1.14319** |
+
+| Exact e50 maps-off application cost | Mean s/case | Median s/case | P95 s/case | Incremental peak allocated MiB |
+|---|---:|---:|---:|---:|
+| Run 1502 sparsemax | **0.26287** | -- | -- | **42.90** |
+| Run 1503 hybrid | 1.62696 | 1.60388 | 1.74089 | 93.16 |
+| Run-1503 / Run-1502 | 6.19x | -- | -- | 2.17x |
+
+As a contextual Run-1501 reference, the earlier exact-e500 90-case maps-off application mean was 0.27989 s/case, making the final Run-1503 hybrid 5.81x slower. This comparison is appropriate for the observed application-cost envelope but is not presented as a matched learning-stage accuracy comparison; the Run-1501 training process was not inspected.
+
+![Run-1503 exact epoch-50 accuracy and cost](figures/honf_run1503_epoch50/run1503_epoch50_accuracy_cost.png)
+
+**Figure 4.** Exact epoch-50 evidence. Run 1503 regresses all three pooled field measures and the principal temperature measures; only interface heat-flux and effective-h MAE improve. The right panel uses the final maps-off hybrid timing and shows that the implementation correction does not make the architecture competitive.
+
+The accuracy gate fails independently of the speed gate: relative to Run 1502, Run 1503 increases pooled fluid error by 73.7%, near-interface error by 32.8%, far-fluid error by 96.3%, fluid-temperature MAE by 62.6%, internal-temperature MAE by 34.3%, and surface-temperature MAE by 32.8%. The isolated improvements in heat flux and effective h do not offset the broad field/temperature collapse.
+
+## 7. Run 1503 executor correction and remaining architectural cost
+
+The bounded correction keeps checkpoint parameters, optimizer state, losses, routing probabilities, opening rule, and output equation unchanged. Receiver tiles with `Q_tile <= 128` use one padded K-batched score/value computation, one query projection, phase-prepared source projections, and a flattened scatter. Larger tiles retain the original scalar per-group executor because an always-batched Q2048 path raised incremental memory from roughly 130--146 MiB to 2.1--2.5 GiB without a stable latency benefit. The scalar path remains the reference, mixed tail tiles are supported, and no custom kernel or new configuration surface was added.
+
+| Matched GPU-1 diagnostic | Scalar reference | Final hybrid | Hybrid / scalar |
+|---|---:|---:|---:|
+| Q8192, chunk 32, full forward mean over cases 0273/0653 | 3,101.64 ms | 1,428.38 ms | 0.46x |
+| Q8192, chunk 32, prepared P2 mean | 2,643.85 ms | 1,167.38 ms | 0.44x |
+| Q8192, chunk 32, application evaluator mean | 3,320.46 ms | 1,794.19 ms | 0.54x |
+| One matched training step, wall time | 3,533.81 ms | 2,640.55 ms | 0.75x |
+| One matched training step, incremental allocated | 7.052 GiB | 10.631 GiB | 1.51x |
+| Q8192, chunk 2048, full forward mean | 104.36 ms | 111.95 ms | 1.07x |
+| Q8192, chunk 2048, incremental allocated mean | 138.71 MiB | 138.77 MiB | 1.00x |
+
+![Run-1503 executor diagnostics](figures/honf_run1503_epoch50/run1503_executor_diagnostics.png)
+
+**Figure 5.** The formal trace identifies the original performance failure; the Q8192 anchors isolate the scalar-loop correction; and the training-step panel exposes its time/memory tradeoff. Small-tile batching reduces wall time by 46--56%, but checkpointed padded batches increase training allocation by 51%, while large tiles correctly stay on the scalar path.
+
+Forward differences are small and inside the focused regression-test tolerances: the Q8192 prepared/full microbenchmarks have zero prepared-versus-full difference, and the matched training-step comparison has field relative L2 `3.46e-7` with maximum absolute difference `2.74e-6`. The interface tensor has relative L2 `2.31e-6` and maximum absolute difference `6.38e-6`; its stricter per-element diagnostic `allclose` flag at `atol=2e-6` is false, so that exception is reported explicitly rather than described as bitwise or strict elementwise parity.
+
+The correction is accepted as a narrow implementation improvement, but it cannot rescue Run 1503. The full 90-case path remains 6.19x slower than Run 1502 because mean fine work is 52.3% of the dense `Q x E` logical rectangle and is executed in addition to the coarse path; the architecture also introduces batched padding, group-wise control, and scatter work. This is the central design flaw for the current problem size: adaptive opening changes how work is organized but does not reduce enough source-attention work to compensate for its control and execution overhead.
+
+## 8. Run 1503 learned organization
+
+The full-population structural pass used the same 90 cases and a deterministic Q1024 subset per case on CPU. It records learned support and executor work without substituting those Q1024 values for the Q8192 accuracy or timing evidence.
+
+| Q1024 population statistic | Mean or total | Across-case range |
+|---|---:|---:|
+| Mean query support Kq | 2.8529 | 2.5615--3.2129 |
+| Module support RM | 0.8206 | 0.6025--1.0000 |
+| Environment support RE | 0.4401 | 0.3904--0.4933 |
+| Active groups | 10.58 | 9--12 |
+| Active modules / padded modules | 5.83 / 12 | 3--10 / 12 |
+| Opening fraction | 0.2153 | 0.1956--0.2380 |
+| Fine-work ratio | 0.5229 | 0.4447--0.6006 |
+| Empty groups | 128 total | 0--3 per case |
+| Empty query supports | 0 total | 0 for every case |
+| Empty environment sources | 0 total | 0 for every case |
+
+Across all 92,160 sampled queries, the exact Kq histogram is `{1: 254, 2: 36,142, 3: 37,109, 4: 14,531, 5: 3,811, 6: 310, 7: 3}`. Thus Kq is concentrated at two and three even though 9--12 groups remain active per case; this distinction between registered capacity, case-active groups, and query-occupied support is essential to interpreting the organization.
+
+![Run-1503 Kq spread across the 90 cases](figures/honf_run1503_epoch50/run1503_kq_case_spread.png)
+
+**Figure 6.** Per-case Kq means and query-level spread for the complete 90-case population. All queries retain support, but the observed Kq variation does not imply proportional compute reduction because each opened group can attend a different learned source union and batched execution introduces padding.
+
+| Representative case | Mean Kq | Active groups | RM | RE | Fine-work ratio | Empty groups |
+|---|---:|---:|---:|---:|---:|---:|
+| 0273 | 2.9766 | 10 | 0.9847 | 0.4730 | 0.5472 | 2 |
+| 0653 | 2.8008 | 12 | 0.7289 | 0.4204 | 0.4979 | 0 |
+
+![Representative Run-1503 hypergraph organizations](figures/honf_run1503_epoch50/run1503_representative_hypergraph__0273__0653.png)
+
+**Figure 7.** Representative learned organizations for cases 0273 and 0653. Each row shows source geometry and dominant group, spatial Kq, sorted query-to-group allocation/opening, and module/environment incidence. The contrast exposes real case-dependent organization, but group IDs are permutation-ambiguous and learned support is not a physical-causality claim.
+
+### Epoch-50 decision
+
+Run 1503 fails both required gates. Its exact e50 accuracy is broadly worse than Run 1502, and the best bounded executor correction still leaves whole-application latency and memory far outside the established Run-1501/1502 envelope. The formal candidate remains stopped at epoch 50; no resume to epoch 150 or 500, second seed, sweep, custom kernel, or altered loss is justified.
+
+## 9. Deferred work
 
 Mature Run-1501 epoch-5000 evaluation is explicitly out of scope. When that training eventually finishes, no automatic evaluation, checkpoint selection, executor benchmark, restart, or process action should occur. A later 90-case mature comparison requires a new explicit user request.
 
-No Run-1502 continuation beyond epoch 500 is authorized or running. No custom kernel, monitoring infrastructure, new provenance/security contract, second normalizer, temperature sweep, top-k rule, sparsity loss, or historical architecture change was added.
+Run 1502 has a separately authorized continuation target of epoch 5000. Its startup and checkpoint policy were verified once, after which it was intentionally left unattended; no status or completion claim is made here. No custom kernel, monitoring infrastructure, new provenance/security contract, second normalizer, temperature sweep, top-k rule, sparsity loss, or historical architecture change was added.
 
-## 7. Reproducible artifacts
+## 10. Reproducible artifacts
 
 - Accounting Q1024: `diagnostics/generated/run1501_executor_run1502_development/accounting_e500_q1024`
 - Accounting Q8192 and full-grid figures: `diagnostics/generated/run1501_executor_run1502_development/accounting_e500_q8192`
@@ -189,5 +294,12 @@ No Run-1502 continuation beyond epoch 500 is authorized or running. No custom ke
 - Validated reduction tables: `Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1502_20260923_004751_sparse_incidence_environment_sparsemax/evaluations/matched_epoch0500_reduction`
 - Reproducible report-figure renderer: `tools/diagnostics/render_run1502_epoch500_report_figures.py`
 - Report figures and vector companions: `docs/reports/figures/honf_run1502_epoch500`
+- Run-1503 exact epoch-50 checkpoint: `Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1503_20260923_120333_Run_1503_adaptive_hyperedge_opening/epoch_0050_model.pt`
+- Run-1503 exact 90-case hybrid evaluation: `Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1503_20260923_120333_Run_1503_adaptive_hyperedge_opening/evaluations/epoch0050_gate/hybrid_accuracy`
+- Run-1503 scalar, always-batched, and final-hybrid Q8192 executor anchors: `Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1503_20260923_120333_Run_1503_adaptive_hyperedge_opening/evaluations/epoch0050_gate`
+- Run-1503 Q1024 full-population organization evidence: `Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1503_20260923_120333_Run_1503_adaptive_hyperedge_opening/evaluations/epoch0050_gate/organization_population_q1024/evidence.json`
+- Run-1503 diagnostic tools: `tools/diagnostics/run_run1503_diagnostics.py`, `tools/diagnostics/run_run1503_selected_executor_benchmark.py`, and `tools/diagnostics/run_run1503_organization_evidence.py`
+- Run-1503 report-figure renderer: `tools/diagnostics/render_run1503_epoch50_report_figures.py`
+- Run-1503 report figures and vector companions: `docs/reports/figures/honf_run1503_epoch50`
 
-Throughout this continuation, Run 1501 training was neither monitored nor modified, restarted, interrupted, or awaited. Only its already-existing exact epoch-500 checkpoint and retained static evidence were read for the requested comparison.
+Throughout this work, Run 1501 training was neither monitored nor modified, restarted, interrupted, or awaited. Only its already-existing exact epoch-500 checkpoint and retained static evidence were read for the requested comparison. Run 1502 was likewise not monitored after its separately authorized epoch-5000 continuation was startup-verified.

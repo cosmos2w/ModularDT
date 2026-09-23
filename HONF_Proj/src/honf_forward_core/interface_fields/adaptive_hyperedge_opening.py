@@ -28,6 +28,12 @@ from .sparse_incidence_router import SparseIncidencePreparedGroupControl
 from .types import EncodedInterfaceCase
 
 ADAPTIVE_HYPEREDGE_EPSILON = 1.0e-8
+# The K-batched executor trades common-padding memory for much lower launch
+# overhead.  Measurements show that tradeoff is favorable for the training
+# tile (32) and standard small-chunk inference (128), but not for larger
+# receiver tiles.  Keep this as a runtime policy constant: it is not a model
+# or checkpoint configuration field.
+ADAPTIVE_HYPEREDGE_BATCHED_QUERY_LIMIT = 128
 
 
 @dataclass(frozen=True)
@@ -204,6 +210,27 @@ def _pack_positive_rows(mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]
     indices[support[:, 0], ranks[support[:, 0], support[:, 1]]] = support[:, 1]
     valid = torch.arange(width, device=mask.device)[None, :] < counts[:, None]
     return indices, valid
+
+
+def _pack_positive_group_rows(mask: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pack ``[B, S, K]`` support rows into one K-batched rectangle.
+
+    The scalar Run-1503 reader packs one ``[B, S]`` mask at a time.  The
+    batched executor uses the same stable row order, but packs all groups in
+    one pass.  A common padded width is intentional: it lets the fine score
+    and value contractions run as one ordinary PyTorch batched GEMM over
+    ``[batch, group, head]`` without introducing a custom kernel.
+    """
+
+    if mask.ndim != 3 or mask.dtype != torch.bool:
+        raise ValueError("group support mask must have shape [B,S,K] and boolean dtype.")
+    batch, rows, groups = (int(value) for value in mask.shape)
+    packed, valid = _pack_positive_rows(mask.permute(0, 2, 1).reshape(batch * groups, rows))
+    width = int(packed.shape[1])
+    return (
+        packed.reshape(batch, groups, width),
+        valid.reshape(batch, groups, width),
+    )
 
 
 class AdaptiveHyperedgeOpeningPairwiseField(SparseIncidenceGroupControlPairwiseField):
@@ -555,6 +582,261 @@ class AdaptiveHyperedgeOpeningPairwiseField(SparseIncidenceGroupControlPairwiseF
             source_valid,
         )
 
+    def _fine_group_response_batched_block(
+        self,
+        query: torch.Tensor,
+        environment_keys: torch.Tensor,
+        environment_raw_values: torch.Tensor,
+        environment_coordinates: torch.Tensor,
+        coordinate_scale: torch.Tensor,
+        receivers: torch.Tensor,
+        query_indices: torch.Tensor,
+        query_valid: torch.Tensor,
+        source_indices: torch.Tensor,
+        source_valid: torch.Tensor,
+        source_mass: torch.Tensor,
+        group_control: torch.Tensor,
+        route_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """Evaluate every positive-support group in one padded batched read.
+
+        The leading dimensions are ``[B,K,H]`` for the attention tensors and
+        ``[B,K]`` for the packed row maps.  The source and query projections
+        are therefore shared across the group axis; only the group-local
+        score/value controls are expanded.  A single flattened scatter puts
+        the ``K`` responses back into ``[B,Q,K,H]``.  This is the hot path for
+        Run-1503; :meth:`_fine_group_response` remains the scalar reference
+        used by CPU parity tests.
+        """
+
+        batch = int(receivers.shape[0])
+        groups = int(query_indices.shape[1])
+        padded_queries = int(query_indices.shape[2])
+        padded_sources = int(source_indices.shape[2])
+        if padded_queries == 0 or padded_sources == 0:
+            return receivers.new_zeros(
+                (batch, int(receivers.shape[1]), groups, self.hidden_dim)
+            )
+
+        # Gather the already projected source/query banks without repeating
+        # either affine projection across K.  The [B,K,H] layout is chosen so
+        # torch.matmul sees one ordinary batched GEMM for all groups/heads.
+        query_bank = query[:, None, :, :, :].expand(
+            batch, groups, self.num_heads, int(query.shape[2]), self.head_dim
+        )
+        query_gather = query_indices[:, :, None, :, None].expand(
+            batch, groups, self.num_heads, padded_queries, self.head_dim
+        )
+        query_block = torch.gather(query_bank, 3, query_gather)
+
+        key_bank = environment_keys[:, None, :, :, :].expand(
+            batch, groups, self.num_heads, int(environment_keys.shape[2]), self.head_dim
+        )
+        value_bank = environment_raw_values[:, None, :, :, :].expand(
+            batch, groups, self.num_heads, int(environment_raw_values.shape[2]), self.head_dim
+        )
+        source_gather = source_indices[:, :, None, :, None].expand(
+            batch, groups, self.num_heads, padded_sources, self.head_dim
+        )
+        key_block = torch.gather(key_bank, 3, source_gather)
+        value_block = torch.gather(value_bank, 3, source_gather)
+
+        group_gain = 1.0 + torch.tanh(
+            self.environment_value_control(group_control.reshape(batch * groups, -1))
+        )
+        group_gain = group_gain.reshape(batch, groups, self.num_heads, self.head_dim)
+        value_block = value_block * group_gain[:, :, :, None, :]
+
+        receiver_bank = receivers[:, None, :, :].expand(
+            batch, groups, int(receivers.shape[1]), self.spatial_dim
+        )
+        query_coordinates = torch.gather(
+            receiver_bank,
+            2,
+            query_indices[..., None].expand(batch, groups, padded_queries, self.spatial_dim),
+        )
+        source_bank = environment_coordinates[:, None, :, :].expand(
+            batch, groups, int(environment_coordinates.shape[1]), self.spatial_dim
+        )
+        source_coordinates = torch.gather(
+            source_bank,
+            2,
+            source_indices[..., None].expand(batch, groups, padded_sources, self.spatial_dim),
+        )
+        scale = coordinate_scale
+        if scale.ndim == 1:
+            scale = scale[None, None, None, None, :]
+        elif scale.ndim == 2:
+            scale = scale[:, None, None, None, :]
+        elif scale.ndim == 3:
+            scale = scale[:, :, None, None, :]
+        else:
+            raise ValueError("coordinate_scale must have shape [d], [B,d], or [B,1,d].")
+        relative = (
+            query_coordinates[:, :, :, None, :] - source_coordinates[:, :, None, :, :]
+        ) / scale
+        geometry = self._mlp(
+            self.env_geometry_bias,
+            self.relative_fourier(relative),
+        ).permute(0, 1, 4, 2, 3)
+
+        scores = torch.matmul(
+            query_block,
+            key_block.transpose(-1, -2),
+        ) / (float(self.head_dim) ** 0.5)
+        score_control = self.environment_score_control(
+            group_control.reshape(batch * groups, -1)
+        ).reshape(batch, groups, self.num_heads, 1, 1)
+        scores = scores * (1.0 + torch.tanh(score_control)) + geometry
+
+        source_mass_by_group = source_mass.permute(0, 2, 1)
+        selected_mass = torch.gather(source_mass_by_group, 2, source_indices)
+        selected_mass = torch.where(
+            source_valid,
+            selected_mass,
+            torch.ones_like(selected_mass),
+        )
+        scores = scores + torch.log(
+            selected_mass.clamp_min(self.adaptive_epsilon)
+        )[:, :, None, None, :]
+        valid = query_valid[:, :, :, None] & source_valid[:, :, None, :]
+        masked_scores = scores.masked_fill(~valid[:, :, None, :, :], torch.finfo(scores.dtype).min)
+        row_has_support = valid.any(dim=-1, keepdim=True)
+        safe_scores = torch.where(
+            row_has_support[:, :, None, :, :],
+            masked_scores,
+            torch.zeros_like(masked_scores),
+        )
+        weights = torch.softmax(safe_scores, dim=-1)
+        weights = weights * valid[:, :, None, :, :].to(dtype=weights.dtype)
+        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(
+            torch.finfo(weights.dtype).tiny
+        )
+        response = torch.matmul(weights, value_block).permute(0, 1, 3, 2, 4)
+        response = response.reshape(batch, groups, padded_queries, self.hidden_dim)
+        group_gate = 1.0 + torch.tanh(route_logits) / (float(self.head_dim) ** 0.5)
+        response = response * group_gate[..., None]
+
+        # ``output`` is one shared affine.  Flattening B*K keeps it as one
+        # call while retaining the exact per-group output transformation.
+        response = self.env_attention.output(
+            response.reshape(batch * groups, padded_queries, self.hidden_dim)
+        ).reshape(batch, groups, padded_queries, self.hidden_dim)
+
+        # Scatter all groups in one reduction.  Invalid padded rows carry zero
+        # response, so their harmless index 0 never changes a valid result.
+        group_offsets = torch.arange(groups, device=receivers.device)[None, :, None]
+        target = (query_indices * groups + group_offsets).reshape(batch, groups * padded_queries)
+        values = (
+            response * query_valid[..., None].to(dtype=response.dtype)
+        ).reshape(batch, groups * padded_queries, self.hidden_dim)
+        fine = receivers.new_zeros(
+            (batch, int(receivers.shape[1]) * groups, self.hidden_dim)
+        )
+        fine.scatter_add_(
+            1,
+            target[..., None].expand(batch, groups * padded_queries, self.hidden_dim),
+            values,
+        )
+        return fine.reshape(batch, int(receivers.shape[1]), groups, self.hidden_dim)
+
+    def _fine_group_responses_batched(
+        self,
+        state: dict[str, Any],
+        encoded: EncodedInterfaceCase,
+        receivers: torch.Tensor,
+        query: torch.Tensor,
+        controls: SparseIncidencePreparedGroupControl,
+        alpha: torch.Tensor,
+        route_logits: torch.Tensor,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        dict[str, torch.Tensor],
+    ]:
+        """Prepare one K-batched fine rectangle and its accounting maps."""
+
+        source_mass = state["adaptive_environment_source_mass"]
+        query_indices, query_valid = _pack_positive_group_rows(alpha > 0.0)
+        source_indices, source_valid = _pack_positive_group_rows(source_mass > 0.0)
+        query_counts = query_valid.sum(dim=-1).to(receivers.dtype)
+        source_counts = source_valid.sum(dim=-1).to(receivers.dtype)
+        active_groups = (query_counts > 0.0) & (source_counts > 0.0)
+        active_count = active_groups.any()
+        if bool(active_count):
+            block_args = (
+                query,
+                state["adaptive_environment_keys"],
+                state["adaptive_environment_raw_values"],
+                encoded.env_coords,
+                encoded.coordinate_scale,
+                receivers,
+                query_indices,
+                query_valid,
+                source_indices,
+                source_valid,
+                source_mass,
+                controls.group_control,
+                torch.gather(route_logits.transpose(1, 2), 2, query_indices),
+            )
+            if self._checkpoint_active():
+                fine = checkpoint(
+                    lambda *values_: self._fine_group_response_batched_block(*values_),
+                    *block_args,
+                    use_reentrant=False,
+                )
+            else:
+                fine = self._fine_group_response_batched_block(*block_args)
+        else:
+            fine = receivers.new_zeros(
+                (int(receivers.shape[0]), int(receivers.shape[1]), self.group_count, self.hidden_dim)
+            )
+
+        # Keep the historical per-group scalar-K row ledger unchanged.  The
+        # new batched executor also emits its true common-padding area so a
+        # report can show the memory/work tradeoff explicitly.
+        query_width = query_counts.max(dim=0).values
+        source_width = source_counts.max(dim=0).values
+        scalar_rows = query_width[None, :] * source_width[None, :]
+        scalar_rows = scalar_rows.expand(int(receivers.shape[0]), -1)
+        batched_rows = receivers.new_full(
+            (int(receivers.shape[0]), self.group_count),
+            float(query_indices.shape[-1] * source_indices.shape[-1]),
+        )
+        if not bool(active_count):
+            batched_rows.zero_()
+        scalar_calls = active_groups.any(dim=0).sum().to(receivers.dtype)
+        batched_calls = active_count.to(receivers.dtype)
+        diagnostics = {
+            "scalar_block_calls": scalar_calls,
+            "batched_block_calls": batched_calls,
+            "block_call_reduction": scalar_calls - batched_calls,
+            "scalar_gemm_launches": scalar_calls,
+            "batched_gemm_launches": batched_calls,
+            "gemm_launch_reduction": scalar_calls - batched_calls,
+            "scalar_rows": scalar_rows,
+            "batched_rows": batched_rows,
+            "batched_checkpoint_calls": (
+                batched_calls if self._checkpoint_active() else receivers.new_zeros(())
+            ),
+            "batched_rows_recompute": (
+                batched_rows.sum()
+                if self._checkpoint_active()
+                else receivers.new_zeros(())
+            ),
+        }
+        return (
+            fine,
+            query_counts,
+            source_counts,
+            query_valid,
+            source_valid,
+            diagnostics,
+        )
+
     def _read_environment(
         self,
         state: dict[str, Any],
@@ -564,6 +846,56 @@ class AdaptiveHyperedgeOpeningPairwiseField(SparseIncidenceGroupControlPairwiseF
         route: Any,
         *,
         include_diagnostics: bool = True,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        return self._read_environment_impl(
+            state,
+            encoded,
+            receivers,
+            receiver_features,
+            route,
+            include_diagnostics=include_diagnostics,
+            use_batched_executor=(
+                int(receivers.shape[1]) <= ADAPTIVE_HYPEREDGE_BATCHED_QUERY_LIMIT
+            ),
+        )
+
+    def _read_environment_scalar_reference(
+        self,
+        state: dict[str, Any],
+        encoded: EncodedInterfaceCase,
+        receivers: torch.Tensor,
+        receiver_features: torch.Tensor,
+        route: Any,
+        *,
+        include_diagnostics: bool = True,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Reference reader retaining the pre-optimization scalar-K loop.
+
+        This is intentionally private and is not selected by any config.  It
+        gives the CPU parity tests a direct old/new comparison without
+        changing the Run-1503 checkpoint or experiment identity.
+        """
+
+        return self._read_environment_impl(
+            state,
+            encoded,
+            receivers,
+            receiver_features,
+            route,
+            include_diagnostics=include_diagnostics,
+            use_batched_executor=False,
+        )
+
+    def _read_environment_impl(
+        self,
+        state: dict[str, Any],
+        encoded: EncodedInterfaceCase,
+        receivers: torch.Tensor,
+        receiver_features: torch.Tensor,
+        route: Any,
+        *,
+        include_diagnostics: bool,
+        use_batched_executor: bool,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         controls = state["group_control_state"]
         if not isinstance(controls, SparseIncidencePreparedGroupControl):
@@ -585,13 +917,15 @@ class AdaptiveHyperedgeOpeningPairwiseField(SparseIncidenceGroupControlPairwiseF
             route.logits,
         )
 
-        fine_groups: list[torch.Tensor] = []
-        query_counts: list[torch.Tensor] = []
-        source_counts: list[torch.Tensor] = []
-        query_valid_maps: list[torch.Tensor] = []
-        source_valid_maps: list[torch.Tensor] = []
-        for group_index in range(self.group_count):
-            fine, q_count, e_count, query_valid, source_valid = self._fine_group_response(
+        if use_batched_executor:
+            (
+                fine,
+                query_count_per_group,
+                source_count_per_group,
+                query_valid,
+                source_valid,
+                fine_executor_diagnostics,
+            ) = self._fine_group_responses_batched(
                 state,
                 encoded,
                 receivers,
@@ -599,14 +933,61 @@ class AdaptiveHyperedgeOpeningPairwiseField(SparseIncidenceGroupControlPairwiseF
                 controls,
                 alpha,
                 route.logits,
-                group_index,
             )
-            fine_groups.append(fine)
-            query_counts.append(q_count)
-            source_counts.append(e_count)
-            query_valid_maps.append(query_valid)
-            source_valid_maps.append(source_valid)
-        fine = torch.stack(fine_groups, dim=2)
+            query_valid_maps = [query_valid[:, group_index] for group_index in range(self.group_count)]
+            source_valid_maps = [source_valid[:, group_index] for group_index in range(self.group_count)]
+        else:
+            fine_groups: list[torch.Tensor] = []
+            query_counts: list[torch.Tensor] = []
+            source_counts: list[torch.Tensor] = []
+            query_valid_maps = []
+            source_valid_maps = []
+            for group_index in range(self.group_count):
+                fine, q_count, e_count, query_valid, source_valid = self._fine_group_response(
+                    state,
+                    encoded,
+                    receivers,
+                    query,
+                    controls,
+                    alpha,
+                    route.logits,
+                    group_index,
+                )
+                fine_groups.append(fine)
+                query_counts.append(q_count)
+                source_counts.append(e_count)
+                query_valid_maps.append(query_valid)
+                source_valid_maps.append(source_valid)
+            fine = torch.stack(fine_groups, dim=2)
+            query_count_per_group = torch.stack(query_counts, dim=1)
+            source_count_per_group = torch.stack(source_counts, dim=1)
+            active_groups = (query_count_per_group > 0.0) & (source_count_per_group > 0.0)
+            scalar_calls = active_groups.any(dim=0).sum().to(receivers.dtype)
+            fine_executor_diagnostics = {
+                "scalar_block_calls": scalar_calls,
+                "batched_block_calls": receivers.new_zeros(()),
+                "block_call_reduction": receivers.new_zeros(()),
+                "scalar_gemm_launches": scalar_calls,
+                "batched_gemm_launches": receivers.new_zeros(()),
+                "gemm_launch_reduction": receivers.new_zeros(()),
+                "scalar_rows": torch.stack(
+                    [
+                        receivers.new_full(
+                            (int(receivers.shape[0]),),
+                            float(query_valid.shape[1] * source_valid.shape[1]),
+                        )
+                        for query_valid, source_valid in zip(
+                            query_valid_maps, source_valid_maps, strict=True
+                        )
+                    ],
+                    dim=1,
+                ),
+                "batched_rows": receivers.new_zeros(
+                    (int(receivers.shape[0]), self.group_count)
+                ),
+                "batched_checkpoint_calls": receivers.new_zeros(()),
+                "batched_rows_recompute": receivers.new_zeros(()),
+            }
         total, coarse_contribution, fine_contribution, opening = combine_opened_group_responses(
             coarse,
             fine,
@@ -614,25 +995,12 @@ class AdaptiveHyperedgeOpeningPairwiseField(SparseIncidenceGroupControlPairwiseF
             alpha,
             epsilon=self.adaptive_epsilon,
         )
-        query_count_per_group = torch.stack(query_counts, dim=1)
-        source_count_per_group = torch.stack(source_counts, dim=1)
         # Keep the logical per-case support area Q_k E_k distinct from the
         # packed group GEMM area.  The latter uses maximum positive widths in
         # the batch, so its actual forward area is Q_pad,k E_pad,k for every
         # batch item.
         fine_group_rows_logical = query_count_per_group * source_count_per_group
-        fine_group_rows_forward = torch.stack(
-            [
-                receivers.new_full(
-                    (int(receivers.shape[0]),),
-                    float(query_valid.shape[1] * source_valid.shape[1]),
-                )
-                for query_valid, source_valid in zip(
-                    query_valid_maps, source_valid_maps, strict=True
-                )
-            ],
-            dim=1,
-        )
+        fine_group_rows_forward = fine_executor_diagnostics["scalar_rows"]
         fine_group_rows_padded = fine_group_rows_forward - fine_group_rows_logical
         opened = (alpha > 0.0).to(dtype=receivers.dtype)
         fine_rows_per_query = torch.einsum(
@@ -702,6 +1070,51 @@ class AdaptiveHyperedgeOpeningPairwiseField(SparseIncidenceGroupControlPairwiseF
             "group_control_adaptive_full_rectangle_rows": full_rows.sum(),
             "group_control_adaptive_fine_work_ratio": fine_rows_forward.sum()
             / full_rows.sum().clamp_min(1.0),
+            "group_control_adaptive_fine_scalar_block_calls": fine_executor_diagnostics[
+                "scalar_block_calls"
+            ],
+            "group_control_adaptive_fine_batched_block_calls": fine_executor_diagnostics[
+                "batched_block_calls"
+            ],
+            "group_control_adaptive_fine_block_call_reduction": fine_executor_diagnostics[
+                "block_call_reduction"
+            ],
+            "group_control_adaptive_fine_scalar_gemm_launches": fine_executor_diagnostics[
+                "scalar_gemm_launches"
+            ],
+            "group_control_adaptive_fine_batched_gemm_launches": fine_executor_diagnostics[
+                "batched_gemm_launches"
+            ],
+            "group_control_adaptive_fine_gemm_launch_reduction": fine_executor_diagnostics[
+                "gemm_launch_reduction"
+            ],
+            "group_control_adaptive_fine_batched_checkpoint_calls": fine_executor_diagnostics[
+                "batched_checkpoint_calls"
+            ],
+            # One value per receiver makes mixed-size outer reads explicit:
+            # the last short tile may use the batched executor even when an
+            # earlier large tile uses the scalar executor.
+            "group_control_adaptive_fine_executor_selected": receivers.new_full(
+                (int(receivers.shape[0]), int(receivers.shape[1])),
+                float(use_batched_executor),
+            ),
+            "group_control_adaptive_fine_executor_batch_limit": receivers.new_tensor(
+                float(ADAPTIVE_HYPEREDGE_BATCHED_QUERY_LIMIT)
+            ),
+            "group_control_adaptive_batched_fine_group_rows_forward": fine_executor_diagnostics[
+                "batched_rows"
+            ],
+            "group_control_adaptive_batched_fine_rows": fine_executor_diagnostics[
+                "batched_rows"
+            ].sum(),
+            "group_control_adaptive_batched_fine_rows_padded": (
+                fine_executor_diagnostics["batched_rows"] - fine_group_rows_logical
+            ).sum()
+            if use_batched_executor
+            else receivers.new_zeros(()),
+            "group_control_adaptive_batched_fine_rows_recompute": fine_executor_diagnostics[
+                "batched_rows_recompute"
+            ],
             "group_control_adaptive_coarse_contribution": coarse_contribution,
             "group_control_adaptive_fine_contribution": fine_contribution,
         }
@@ -750,6 +1163,7 @@ AdaptiveHyperedgeOpeningHONF = AdaptiveHyperedgeOpeningPairwiseField
 
 
 __all__ = [
+    "ADAPTIVE_HYPEREDGE_BATCHED_QUERY_LIMIT",
     "ADAPTIVE_HYPEREDGE_EPSILON",
     "AdaptiveEnvironmentAggregation",
     "AdaptiveHyperedgeOpeningField",
