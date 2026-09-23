@@ -361,6 +361,7 @@ def _population_records(eval_dir: Path) -> list[dict[str, Any]]:
         q_values = summary.get("query_count_per_case", [])
         q_per_case = _number(q_values[0]) if q_values else None
         capacity = _number(summary.get("registered_capacity"))
+        module_padded = _mean_summary(summary, "M_padded")
         module_dense = _mean_summary(summary, "module_dense_valid_pairs")
         environment_dense = _mean_summary(summary, "environment_dense_valid_pairs")
         module_actual = _mean_summary(summary, "p2_module_actual_rows")
@@ -386,7 +387,12 @@ def _population_records(eval_dir: Path) -> list[dict[str, Any]]:
                 "environment_actual": environment_actual,
                 "module_unique_fraction": (module_unique / module_dense if module_unique is not None and module_dense else None),
                 "environment_unique_fraction": (environment_unique / environment_dense if environment_unique is not None and environment_dense else None),
-                "module_rectangular_fraction": (module_actual / (q_per_case * capacity) if module_actual is not None and q_per_case and capacity else None),
+                # Run 1501's registered K is the group-bank width, not the
+                # number of module source rows.  The rectangular module
+                # denominator is Q*M_pad; leave it unavailable when the
+                # maintained population artifact did not record M_pad.
+                "module_padded": module_padded,
+                "module_rectangular_fraction": (module_actual / (q_per_case * module_padded) if module_actual is not None and q_per_case and module_padded else None),
                 "environment_rectangular_fraction": (environment_actual / environment_dense if environment_actual is not None and environment_dense else None),
             }
         )
@@ -405,7 +411,7 @@ def _plot_support(run_dir: Path, output: Path) -> dict[str, Any]:
     for key, label, color in (
         ("module_unique_fraction", "module unique / dense valid pairs", "#2563A6"),
         ("environment_unique_fraction", "environment unique / dense valid pairs", "#59A14F"),
-        ("module_rectangular_fraction", "module rectangular rows / Q·K", "#D2691E"),
+        ("module_rectangular_fraction", "module rectangular rows / Q·M_pad", "#D2691E"),
         ("environment_rectangular_fraction", "environment rectangular rows / dense rectangle", "#E45756"),
     ):
         values = np.asarray([record.get(key, np.nan) for record in records], dtype=float)

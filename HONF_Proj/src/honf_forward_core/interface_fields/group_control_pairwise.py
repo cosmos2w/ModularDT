@@ -1376,6 +1376,16 @@ class GroupControlPairwiseField(DensePairwiseField):
             if self.ledger_rectangular_rows and complete
             else receivers.new_zeros(())
         )
+        # Geometry is evaluated for the complete Q×E rectangle whenever the
+        # complete reader runs, independently of whether the selected-support
+        # diagnostic ledger is enabled.  Report executed work rather than the
+        # logical support mask; content-dot rows then use the same geometry
+        # denominator with one row per attention head.
+        geometry_rows = (
+            receivers.new_tensor(float(overlap.numel()))
+            if complete
+            else support_rows
+        )
         aux = {
             "group_control_environment_unique_pairs_per_query": support.sum(dim=-1).to(receivers.dtype),
             "group_control_environment_logical_paths_per_query": logical.sum(dim=-1),
@@ -1390,9 +1400,9 @@ class GroupControlPairwiseField(DensePairwiseField):
             "group_control_environment_padded_rows": padded_rows,
             "group_control_environment_valid_pair_denominator": valid_denominator,
             "group_control_environment_padded_pair_denominator": padded_denominator,
-            "group_control_environment_geometry_rows_forward": support.sum().to(receivers.dtype),
+            "group_control_environment_geometry_rows_forward": geometry_rows,
             "group_control_environment_content_dot_rows_forward": (
-                actual_rows * float(self.num_heads)
+                geometry_rows * float(self.num_heads)
             ),
             "group_control_environment_scalar_control_rows": receivers.new_tensor(
                 float(overlap.numel())

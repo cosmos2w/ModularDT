@@ -118,6 +118,16 @@ def _query_sample(sample: Mapping[str, Any], requested: int | None) -> tuple[dic
     selected = dict(sample)
     selected["x_grid"] = x_grid[indices]
     selected["y_grid"] = y_grid[indices]
+    selected["query_grid_indices"] = indices
+    selected["query_source_count"] = int(x_grid.size)
+    selected["query_domain_bounds"] = np.asarray(
+        [x_grid.min(), x_grid.max(), y_grid.min(), y_grid.max()], dtype=np.float32
+    )
+    selected["query_selection"] = (
+        "full_original_grid"
+        if int(indices.size) == int(x_grid.size)
+        else "deterministic_linspace_subset"
+    )
     query_xy = np.stack([x_grid[indices], y_grid[indices]], axis=-1).astype(np.float32)
     return selected, query_xy
 
@@ -180,12 +190,18 @@ def _prediction_payload(
         prefix = f"group_control_{source}_"
         actual = payload.get(prefix + "fine_rows_forward", payload.get(prefix + "fine_rows"))
         padded = payload.get(prefix + "fine_rows_padded", payload.get(prefix + "padded_rows"))
+        geometry = payload.get(prefix + "geometry_rows_forward", payload.get(prefix + "geometry_rows"))
+        content = payload.get(
+            prefix + "content_dot_rows_forward", payload.get(prefix + "content_rows")
+        )
         logical = payload.get(prefix + "logical_paths")
         unique = payload.get(prefix + "unique_pairs")
-        if any(value is not None for value in (actual, padded, logical, unique)):
+        if any(value is not None for value in (actual, padded, geometry, content, logical, unique)):
             phase_sources[source] = {
                 "actual_rows": actual,
                 "padded_rows": padded,
+                "geometry_rows": geometry,
+                "content_rows": content,
                 "logical_paths": logical,
                 "unique_pairs": unique,
             }
@@ -195,6 +211,14 @@ def _prediction_payload(
     # singleton case axis for geometry and explicit measures too; otherwise an
     # unbatched source axis can be mistaken for a multi-case batch.
     payload["query_xy"] = query_xy[None, ...]
+    if "query_grid_indices" in sample:
+        payload["query_grid_indices"] = np.asarray(sample["query_grid_indices"], dtype=np.int64)
+    if "query_source_count" in sample:
+        payload["query_source_count"] = int(sample["query_source_count"])
+    if "query_domain_bounds" in sample:
+        payload["query_domain_bounds"] = np.asarray(sample["query_domain_bounds"], dtype=np.float32)
+    if "query_selection" in sample:
+        payload["query_selection"] = str(sample["query_selection"])
     payload["module_coords"] = np.asarray(
         sample["structure"]["module_centers"], dtype=np.float32
     )[None, ...]
@@ -367,6 +391,8 @@ def run_population(args: argparse.Namespace) -> dict[str, Any]:
             kmax=kmax,
         )
         row = {"case_id": case_id, **record["case"]}
+        row["query_source_count"] = int(selected_sample.get("query_source_count", query_xy.shape[0]))
+        row["query_selection"] = str(selected_sample.get("query_selection", "recorded_query_grid"))
         rows.append(row)
         array_path = array_dir / f"{case_id}.npz"
         evidence.save_case_arrays(array_path, record["maps"])

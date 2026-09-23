@@ -222,6 +222,29 @@ def test_group_control_chunk_reducer_sums_work_counts_and_preserves_query_maps()
     )
 
 
+def test_group_control_chunk_reducer_keeps_equal_width_query_numerators_and_sums_scalars() -> None:
+    first = {
+        "group_control_module_pair_count_numerator": torch.tensor(12.0),
+        "group_control_module_fine_rows_padded": torch.tensor(2.0),
+        "group_control_module_pair_count_numerator_per_query": torch.tensor([[1.0, 2.0]]),
+        "group_control_query_routing": torch.zeros(1, 2, 4),
+    }
+    second = {
+        "group_control_module_pair_count_numerator": torch.tensor(18.0),
+        "group_control_module_fine_rows_padded": torch.tensor(3.0),
+        "group_control_module_pair_count_numerator_per_query": torch.tensor([[3.0, 4.0]]),
+        "group_control_query_routing": torch.ones(1, 2, 4),
+    }
+    merged = _merge_group_control_maps([(first, 2), (second, 2)])
+    assert merged["group_control_module_pair_count_numerator"].item() == 30.0
+    assert merged["group_control_module_fine_rows_padded"].item() == 5.0
+    torch.testing.assert_close(
+        merged["group_control_module_pair_count_numerator_per_query"],
+        torch.tensor([[1.0, 2.0, 3.0, 4.0]]),
+    )
+    assert merged["group_control_query_routing"].shape == (1, 4, 4)
+
+
 def test_group_control_core_uses_three_terms_and_chunked_predicted_queries() -> None:
     torch.manual_seed(1406)
     core = InterfaceFieldCore(UnifiedForwardConfig.from_dict(_payload())).eval()

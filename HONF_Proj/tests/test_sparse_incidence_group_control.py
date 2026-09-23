@@ -361,6 +361,52 @@ def test_core_is_rectangular_phase_local_and_backward_trainable() -> None:
     assert torch.count_nonzero(gradient) > 0
 
 
+def test_run1501_rectangular_accounting_uses_mpad_and_sums_unequal_receiver_chunks() -> None:
+    """M_pad/K and Q×source ledgers survive [3,3,3,2] receiver tiling."""
+
+    torch.manual_seed(1501010)
+    core = InterfaceFieldCore(UnifiedForwardConfig.from_dict(_small_payload())).eval()
+    batch = _batch(seed=1501010, queries=11)
+    encoded = core.encode_case(batch)
+    prepared = core.prepare(encoded, encoded.module_tokens, return_routing_maps=True)
+    with torch.no_grad():
+        chunked = core.read(
+            prepared,
+            batch.query_xy,
+            receiver_chunk_size=3,
+            return_routing_maps=True,
+        )
+        unchunked = core.read(
+            prepared,
+            batch.query_xy,
+            receiver_chunk_size=11,
+            return_routing_maps=True,
+        )
+
+    torch.testing.assert_close(chunked.context, unchunked.context, atol=5.0e-5, rtol=5.0e-5)
+    chunked_aux = chunked.interaction_aux
+    unchunked_aux = unchunked.interaction_aux
+    # This fixture has M_pad=5 while the registered group bank is K=12.
+    assert batch.module_centers.shape[1] == 5
+    assert core.backend.group_count == 12
+    expected_module_rows = batch.module_centers.shape[0] * 11 * 5
+    expected_environment_rows = batch.env_coords.shape[0] * 11 * 13
+    expected_module_valid = (batch.module_present > 0.0).sum().item() * 11
+    assert chunked_aux["group_control_module_fine_rows_forward"].item() == expected_module_rows
+    assert chunked_aux["group_control_module_fine_rows_padded"].item() == expected_module_rows - expected_module_valid
+    assert chunked_aux["group_control_module_valid_pair_denominator"].item() == expected_module_valid
+    assert chunked_aux["group_control_environment_geometry_rows_forward"].item() == expected_environment_rows
+    assert chunked_aux["group_control_environment_content_dot_rows_forward"].item() == expected_environment_rows * 2
+    for key in (
+        "group_control_module_fine_rows_forward",
+        "group_control_module_fine_rows_padded",
+        "group_control_module_valid_pair_denominator",
+        "group_control_environment_geometry_rows_forward",
+        "group_control_environment_content_dot_rows_forward",
+    ):
+        torch.testing.assert_close(chunked_aux[key], unchunked_aux[key])
+
+
 def test_selected_executor_runs_each_supported_pair_once_and_matches_reference() -> None:
     torch.manual_seed(1501006)
     core = InterfaceFieldCore(UnifiedForwardConfig.from_dict(_small_payload())).eval()

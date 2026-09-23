@@ -2,8 +2,10 @@
 
 The trained operator remains configured for rectangular execution.  This
 read-only diagnostic temporarily enables the maintained gathered support path
-for matched full forwards with routing diagnostics enabled, then restores the
-backend flags.  No checkpoint or optimizer state is written.
+for matched full forwards.  The untimed parity reads request routing ledgers;
+the measured reads keep maps and detailed ledgers off so their timings cover
+the physical forward scope.  Backend flags are restored and no checkpoint or
+optimizer state is written.
 """
 
 from __future__ import annotations
@@ -83,12 +85,18 @@ def _configure(backend: Any, mode: str) -> None:
         raise ValueError(mode)
 
 
-def _forward(model: Any, batch: Mapping[str, Any], kwargs: Mapping[str, Any]) -> Any:
+def _forward(
+    model: Any,
+    batch: Mapping[str, Any],
+    kwargs: Mapping[str, Any],
+    *,
+    return_routing_maps: bool = False,
+) -> Any:
     return model(
         batch["structure"],
         batch["query_xy"],
         return_prepared_state=False,
-        return_routing_maps=True,
+        return_routing_maps=bool(return_routing_maps),
         **kwargs,
     )
 
@@ -149,6 +157,8 @@ def _ledger(output: Mapping[str, Any]) -> dict[str, Any]:
         "environment_unique_pairs": aux.get("group_control_environment_unique_pairs"),
         "environment_actual_rows": aux.get("group_control_environment_fine_rows_forward"),
         "environment_padded_rows": aux.get("group_control_environment_fine_rows_padded"),
+        "environment_geometry_rows": aux.get("group_control_environment_geometry_rows_forward"),
+        "environment_content_rows": aux.get("group_control_environment_content_dot_rows_forward"),
         "environment_executor_selected": aux.get("group_control_environment_partial_support"),
     }
 
@@ -189,16 +199,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             for mode in ("rectangular", "selected"):
                 _configure(backend, mode)
                 with torch.inference_mode():
-                    outputs[mode] = _forward(model, batch, kwargs)
+                    outputs[mode] = _forward(
+                        model, batch, kwargs, return_routing_maps=True
+                    )
                 timings[mode] = _measure(
                     torch,
                     device,
                     lambda current_batch=batch, current_kwargs=kwargs: _forward(
-                        model, current_batch, current_kwargs
+                        model,
+                        current_batch,
+                        current_kwargs,
+                        return_routing_maps=False,
                     ),
                     int(args.warmups),
                     int(args.repetitions),
                 )
+                timings[mode]["scope"] = {
+                    "return_routing_maps": False,
+                    "detailed_ledgers": False,
+                    "prepared_decode": False,
+                    "output_device_resident": True,
+                }
             delta = (
                 outputs["rectangular"]["pred_field"].detach().float()
                 - outputs["selected"]["pred_field"].detach().float()

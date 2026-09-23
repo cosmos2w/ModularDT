@@ -202,7 +202,9 @@ def _merge_group_control_maps(chunks):
             and all(value.shape == first.shape for value in values)
         ):
             # Work/count numerators and denominators are additive across
-            # receiver chunks; a ratio is formed only after this merge.
+            # receiver chunks; a ratio is formed only after this merge.  Keep
+            # per-query arrays above this branch so equal-width chunks cannot
+            # be mistaken for scalar ledgers.
             merged[key] = torch.stack(values).sum(dim=0)
         elif first.ndim == 0 and key.endswith(
             (
@@ -226,6 +228,8 @@ def _merge_group_control_maps(chunks):
                 "_sample_slots",
                 "_nonzero_sample_masses",
                 "_fine_rows_forward",
+                "_rows_padded",
+                "_padded_rows",
                 "_geometry_rows_forward",
                 "_content_dot_rows_forward",
                 "_interpolation_corner_loads",

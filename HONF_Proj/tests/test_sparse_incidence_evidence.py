@@ -34,6 +34,9 @@ def _payload() -> dict[str, np.ndarray | dict[str, object]]:
         "module_coords": np.asarray([[[0, 0], [1, 0], [2, 0]]], dtype=np.float32),
         "environment_coords": np.asarray([[[0, 1], [1, 1], [2, 1], [3, 1]]], dtype=np.float32),
         "query_xy": np.asarray([[[0, 0], [1, 0], [2, 0], [3, 0], [4, 0]]], dtype=np.float32),
+        "query_grid_indices": np.asarray([0, 2, 4, 6, 8], dtype=np.int64),
+        "query_source_count": 9,
+        "query_selection": "deterministic_linspace_subset",
         "module_present": np.ones((1, 3), dtype=np.float32),
         "group_control_module_incidence": module[None, ...],
         "group_control_environment_incidence": environment[None, ...],
@@ -59,8 +62,38 @@ def test_canonical_record_separates_capacity_occupancy_and_kq() -> None:
     assert case["occupied_source_groups"] == 4
     assert case["query_degree_histogram"] == {"2": 5}
     assert case["query_degree_mean"] == 2.0
+    assert case["M_active"] == 3
+    assert case["M_padded"] == 3
+    assert case["query_source_count"] == 9
+    assert case["query_selection"] == "deterministic_linspace_subset"
     assert case["kappa_formula_max_abs"] < 1.0e-5
     assert "kplan" not in case
+
+
+def test_phase_ledger_sums_unequal_receiver_chunks_and_keeps_qe_rows() -> None:
+    payload = _payload()
+    payload["occupancy_group_phase_ledger"] = {
+        "P2": {
+            "module": {
+                "chunks": [
+                    {"actual_rows": 7, "padded_rows": 2},
+                    {"actual_rows": 5, "padded_rows": 1},
+                ]
+            },
+            "environment": {
+                "receiver_chunks": [
+                    {"geometry_rows_forward": 11, "content_dot_rows_forward": 22},
+                    {"geometry_rows_forward": 9, "content_dot_rows_forward": 18},
+                ]
+            },
+        }
+    }
+    case = canonicalize_case(payload, query_count=5, kmax=12)["case"]
+    assert case["p2_module_actual_rows"] == 12
+    assert case["p2_module_padded_rows"] == 3
+    assert case["p2_environment_geometry_rows"] == 20
+    assert case["p2_environment_content_rows"] == 40
+    assert case["phase_ledger"]["P2"]["environment"]["geometry_rows"] == 20
 
 
 def test_population_summary_never_introduces_kplan() -> None:
@@ -68,6 +101,9 @@ def test_population_summary_never_introduces_kplan() -> None:
     summary = summarize_population([{"case_id": "synthetic", **case}], expected_cases=1)
     assert summary["registered_capacity"] == 12
     assert summary["kq_histogram"] == {"2": 5}
+    assert summary["query_count_per_case"] == [5]
+    assert summary["query_source_count_per_case"] == [9]
+    assert summary["query_selection_counts"] == {"deterministic_linspace_subset": 1}
     assert summary["continuation_gate"]["query_support_nontrivial"]
     assert "kplan_histogram" not in summary
 

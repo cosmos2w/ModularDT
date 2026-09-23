@@ -194,6 +194,8 @@ def summarize_population(
             pooled_kq[int(key)] += int(count)
     fields = (
         "occupied_source_groups",
+        "M_active",
+        "M_padded",
         "kappa",
         "pi_sum",
         "kappa_formula_max_abs",
@@ -234,11 +236,21 @@ def summarize_population(
         "p2_environment_actual_rows",
         "p2_module_padded_rows",
         "p2_environment_padded_rows",
+        "p2_module_geometry_rows",
+        "p2_environment_geometry_rows",
+        "p2_module_content_rows",
+        "p2_environment_content_rows",
     )
     summary: dict[str, Any] = {
         "case_count": len(rows),
         "registered_capacity": DEFAULT_KMAX,
         "query_count_per_case": sorted({int(row["query_count"]) for row in rows}),
+        "query_source_count_per_case": sorted(
+            {int(row["query_source_count"]) for row in rows if row.get("query_source_count") is not None}
+        ),
+        "query_selection_counts": dict(
+            Counter(str(row.get("query_selection") or "recorded_query_grid") for row in rows)
+        ),
         "total_queries": total_queries,
         "kq_histogram": {str(key): int(pooled_kq[key]) for key in sorted(pooled_kq)},
         "all_queries_have_support": bool(all(row["no_empty_query_support"] for row in rows)),
@@ -295,6 +307,35 @@ def _dominant(values: np.ndarray) -> np.ndarray:
     )
 
 
+def _set_equal_domain(
+    axis: Any, *coordinates: np.ndarray, bounds: Sequence[float] | None = None
+) -> None:
+    """Use one physical coordinate frame for source/query geometry panels."""
+
+    if bounds is not None:
+        values = np.asarray(bounds, dtype=np.float64).reshape(-1)
+        if values.size == 4 and np.isfinite(values).all() and values[1] >= values[0] and values[3] >= values[2]:
+            lower = values[[0, 2]]
+            upper = values[[1, 3]]
+        else:
+            lower = upper = None
+    else:
+        lower = upper = None
+    if lower is None or upper is None:
+        blocks = [np.asarray(value, dtype=np.float64).reshape(-1, 2) for value in coordinates]
+        finite_blocks = [block[np.isfinite(block).all(axis=1)] for block in blocks if block.size]
+        if not finite_blocks:
+            return
+        points = np.concatenate(finite_blocks, axis=0)
+        lower = points.min(axis=0)
+        upper = points.max(axis=0)
+    span = np.maximum(upper - lower, np.finfo(np.float64).eps)
+    margin = 0.03 * span
+    axis.set_xlim(float(lower[0] - margin[0]), float(upper[0] + margin[0]))
+    axis.set_ylim(float(lower[1] - margin[1]), float(upper[1] + margin[1]))
+    axis.set_aspect("equal", adjustable="box")
+
+
 def render_case_board(record: Mapping[str, Any], path: Path) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -310,6 +351,25 @@ def render_case_board(record: Mapping[str, Any], path: Path) -> None:
     query = np.asarray(maps["query_assignment"])
     centres = np.asarray(maps["joint_centres"])
     active = np.asarray(row["active_mask"], dtype=bool)
+    domain_bounds = row.get("query_domain_bounds")
+    module_present = np.asarray(
+        maps.get("module_present", np.any(module > 0.0, axis=1)), dtype=bool
+    ).reshape(-1)
+    if module_present.size != module_xy.shape[0]:
+        raise SparseIncidenceEvidenceError(
+            "module_present does not align with rendered module sources"
+        )
+    module_xy = module_xy[module_present]
+    module = module[module_present]
+    module_source_ids = np.asarray(
+        maps.get("module_source_ids", np.arange(module_present.size)), dtype=np.int64
+    ).reshape(-1)
+    if module_source_ids.size != module_present.size:
+        raise SparseIncidenceEvidenceError(
+            "module_source_ids does not align with module sources"
+        )
+    module_source_ids = module_source_ids[module_present]
+    module_ids_text = ",".join(str(int(value)) for value in module_source_ids)
     kq = np.asarray(maps["query_degree"])
     cmap = plt.get_cmap("tab20", DEFAULT_KMAX)
     figure, axes = plt.subplots(2, 3, figsize=(14.5, 8.2), constrained_layout=True)
@@ -322,7 +382,8 @@ def render_case_board(record: Mapping[str, Any], path: Path) -> None:
         centres[active, 0], centres[active, 1], c=np.flatnonzero(active), cmap=cmap,
         vmin=0, vmax=DEFAULT_KMAX - 1, marker="+", s=90,
     )
-    axes[0, 0].set_title("Module sources + live centres")
+    axes[0, 0].set_title(f"Module sources + live centres (IDs {module_ids_text})")
+    _set_equal_domain(axes[0, 0], module_xy, centres, query_xy, bounds=domain_bounds)
 
     axes[0, 1].scatter(
         environment_xy[:, 0], environment_xy[:, 1], c=_dominant(environment),
@@ -333,6 +394,7 @@ def render_case_board(record: Mapping[str, Any], path: Path) -> None:
         vmin=0, vmax=DEFAULT_KMAX - 1, marker="+", s=90,
     )
     axes[0, 1].set_title("Environment sources + live centres")
+    _set_equal_domain(axes[0, 1], environment_xy, centres, query_xy, bounds=domain_bounds)
 
     incidence = np.concatenate((module, environment), axis=0).T
     image = axes[0, 2].imshow(incidence, aspect="auto", interpolation="nearest", cmap="viridis")
@@ -340,13 +402,14 @@ def render_case_board(record: Mapping[str, Any], path: Path) -> None:
     axes[0, 2].axvline(module.shape[0] - 0.5, color="white", linewidth=1.0)
     axes[0, 2].set_xlabel("module sources | environment sources")
     axes[0, 2].set_ylabel("registered prototype ID")
-    axes[0, 2].set_title("Phase-local Aᴹ / Aᴱ")
+    axes[0, 2].set_title("Phase-local Aᴹ / Aᴱ (M active | E)")
 
     axes[1, 0].scatter(
         query_xy[:, 0], query_xy[:, 1], c=_dominant(query), cmap=cmap,
         vmin=0, vmax=DEFAULT_KMAX - 1, s=5, alpha=0.7,
     )
-    axes[1, 0].set_title("Dominant query prototype")
+    axes[1, 0].set_title("Dominant query prototype (not Kq/confidence)")
+    _set_equal_domain(axes[1, 0], query_xy, centres, bounds=domain_bounds)
 
     degree_image = axes[1, 1].scatter(
         query_xy[:, 0], query_xy[:, 1], c=kq, cmap="magma", vmin=1,
@@ -354,6 +417,7 @@ def render_case_board(record: Mapping[str, Any], path: Path) -> None:
     )
     figure.colorbar(degree_image, ax=axes[1, 1], label="Kq")
     axes[1, 1].set_title("Exact sparsemax support degree Kq")
+    _set_equal_domain(axes[1, 1], query_xy, centres, bounds=domain_bounds)
 
     selected = int(np.argmax(kq))
     query_point = query_xy[selected]
@@ -382,11 +446,13 @@ def render_case_board(record: Mapping[str, Any], path: Path) -> None:
         if axis is not axes[0, 2]:
             axis.set_xlabel("x")
             axis.set_ylabel("y")
+    _set_equal_domain(axes[1, 2], query_xy, centres, module_xy, environment_xy, bounds=domain_bounds)
     module_rows = row.get("p2_module_actual_rows")
     environment_rows = row.get("p2_environment_actual_rows")
     row_text = "n/a/n/a" if module_rows is None or environment_rows is None else f"{float(module_rows):.0f}/{float(environment_rows):.0f}"
     figure.suptitle(
         "Run 1501 phase-local sparse incidence · "
+        f"Q={query.shape[0]} · M={int(module_xy.shape[0])}/{int(row.get('M_padded', module_xy.shape[0]))} · E={environment.shape[0]} · "
         f"registered K=12 · occupied={row['occupied_source_groups']} · "
         f"mean Kq={row['query_degree_mean']:.2f} · κ={row['kappa']:.2f} · "
         f"RM/RE={row['module_RM_support']:.3f}/{row['environment_RE_support']:.3f} · "
@@ -652,6 +718,34 @@ def render_representative_hypergraph_overview(
         query = np.asarray(maps["query_assignment"], dtype=np.float64)
         centres = np.asarray(maps["joint_centres"], dtype=np.float64)
         kq = np.asarray(maps["query_degree"], dtype=np.float64)
+        module_present = np.asarray(
+            maps.get("module_present", np.any(module > 0.0, axis=1)), dtype=bool
+        ).reshape(-1)
+        if module_present.size != module_xy.shape[0]:
+            raise SparseIncidenceEvidenceError(
+                "module_present does not align with representative module sources"
+            )
+        module_xy = module_xy[module_present]
+        module = module[module_present]
+        module_source_ids = np.asarray(
+            maps.get("module_source_ids", np.arange(module_present.size)), dtype=np.int64
+        ).reshape(-1)
+        if module_source_ids.size != module_present.size:
+            raise SparseIncidenceEvidenceError(
+                "module_source_ids does not align with representative module sources"
+            )
+        module_source_ids = module_source_ids[module_present]
+        module_ids_text = ",".join(str(int(value)) for value in module_source_ids)
+        query_count = int(query.shape[0])
+        source_query_count = row.get("query_source_count")
+        selection = str(row.get("query_selection") or "recorded_query_grid")
+        domain_bounds = row.get("query_domain_bounds")
+        if source_query_count is None:
+            query_scope = f"recorded Q={query_count}; original-grid provenance unavailable"
+        elif query_count == int(source_query_count) and selection == "full_original_grid":
+            query_scope = f"full original Q={query_count} grid"
+        else:
+            query_scope = f"Q={query_count} subset of original Q={int(source_query_count)} grid"
         source_axis, query_axis, routing_axis, incidence_axis = axes[row_index]
         module_groups = _dominant(module)
         environment_groups = _dominant(environment)
@@ -679,10 +773,12 @@ def render_representative_hypergraph_overview(
         )
         source_axis.set_title(
             f"Case {case_id}: source geometry\n"
+            f"M={module.shape[0]}/{int(row.get('M_padded', module.shape[0]))} (IDs {module_ids_text}), E={environment.shape[0]} · "
             f"RM/RE={float(row['module_RM_support']):.3f}/{float(row['environment_RE_support']):.3f}"
         )
         source_axis.legend(frameon=False, fontsize=7, loc="best")
         source_axis.set_aspect("equal", adjustable="datalim")
+        _set_equal_domain(source_axis, module_xy, environment_xy, centres, query_xy, bounds=domain_bounds)
 
         query_image = query_axis.scatter(
             query_xy[:, 0], query_xy[:, 1], c=kq, cmap="magma", vmin=1, vmax=max(max_kq, 1), s=5,
@@ -690,9 +786,10 @@ def render_representative_hypergraph_overview(
         query_axis.scatter(centres[:, 0], centres[:, 1], marker="+", c="white", s=55, linewidths=0.8)
         query_axis.set_title(
             f"Query support Kq\nmean={float(row['query_degree_mean']):.2f}, "
-            f"q10–q90={np.percentile(kq, 10):.1f}–{np.percentile(kq, 90):.1f}"
+            f"q10–q90={np.percentile(kq, 10):.1f}–{np.percentile(kq, 90):.1f}\n{query_scope}"
         )
         query_axis.set_aspect("equal", adjustable="datalim")
+        _set_equal_domain(query_axis, query_xy, centres, bounds=domain_bounds)
         figure.colorbar(query_image, ax=query_axis, label="Kq", fraction=0.046, pad=0.03)
 
         dominant = _dominant(query)
@@ -723,7 +820,7 @@ def render_representative_hypergraph_overview(
             cmap="viridis",
         )
         incidence_axis.axvline(module.shape[0] - 0.5, color="white", linewidth=1.0)
-        incidence_axis.set_title("Source incidence Aᴹ | Aᴱ (K×sources)")
+        incidence_axis.set_title("Source incidence Aᴹ | Aᴱ (K×sources; M active | E)")
         incidence_axis.set_xlabel("module sources | environment sources")
         incidence_axis.set_ylabel("learned group ID")
         incidence_axis.set_yticks(np.arange(DEFAULT_KMAX))

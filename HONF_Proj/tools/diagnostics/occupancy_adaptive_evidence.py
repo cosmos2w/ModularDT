@@ -107,6 +107,10 @@ _ALIASES: dict[str, tuple[str, ...]] = {
     "module_coords": ("module_coords", "module_centers", "module_centres"),
     "environment_coords": ("env_coords", "environment_coords", "environment_centers", "environment_centres"),
     "query_coords": ("query_xy", "query_coords", "receiver_coords", "receivers"),
+    "query_grid_indices": ("query_grid_indices", "original_query_indices"),
+    "query_source_count": ("query_source_count", "original_query_count", "source_query_count"),
+    "query_selection": ("query_selection", "query_grid_scope"),
+    "query_domain_bounds": ("query_domain_bounds", "original_query_domain_bounds"),
     "module_present": ("module_present", "active_modules", "module_valid"),
     "prototype_ids": (
         "occupancy_group_prototype_ids",
@@ -527,7 +531,49 @@ def _phase_ledger(payload: Any) -> dict[str, Any]:
         "unique_pairs": ("unique_pair_count", "unique_pairs", "support_pairs"),
         "actual_rows": ("actual_rows", "actual_fine_call_count", "fine_rows", "fine_rows_forward", "executed_rows"),
         "padded_rows": ("padded_rows", "padded_fine_rows", "fine_rows_padded"),
+        "geometry_rows": (
+            "geometry_rows",
+            "geometry_rows_forward",
+            "environment_geometry_network_rows",
+            "environment_geometry_network_rows_forward",
+        ),
+        "content_rows": (
+            "content_rows",
+            "content_dot_rows",
+            "content_dot_rows_forward",
+            "environment_content_rows",
+            "environment_content_dot_rows_forward",
+        ),
     }
+
+    def phase_value(container: Mapping[str, Any], names: Sequence[str]) -> Any:
+        """Read a value, summing explicit receiver-chunk records when present."""
+
+        def direct(mapping: Mapping[str, Any]) -> Any:
+            for name in names:
+                if name in mapping:
+                    return mapping[name]
+            return None
+
+        chunk_values: list[float] = []
+        for chunk_key in ("chunks", "receiver_chunks", "chunk_records", "records"):
+            chunks = container.get(chunk_key)
+            if not isinstance(chunks, Sequence) or isinstance(chunks, (str, bytes)):
+                continue
+            for chunk in chunks:
+                if not isinstance(chunk, Mapping):
+                    continue
+                value = direct(chunk)
+                try:
+                    numeric = float(np.asarray(value).reshape(-1)[0])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if math.isfinite(numeric):
+                    chunk_values.append(numeric)
+            if chunk_values:
+                return sum(chunk_values)
+        return direct(container)
+
     phases = {}
     containers = _containers(payload)
     explicit = _lookup(payload, "occupancy_group_phase_ledger")
@@ -552,19 +598,24 @@ def _phase_ledger(payload: Any) -> dict[str, Any]:
                 continue
             source_row: dict[str, Any] = {}
             for metric, names in aliases.items():
-                value = next((nested[name] for name in names if name in nested), None)
+                value = phase_value(nested, names)
                 source_row[metric] = None if value is None else _jsonable(value)
             row[source] = source_row
         for metric, names in aliases.items():
-            value = None
-            for name in names:
-                if name in found:
-                    value = found[name]
-                    break
+            value = phase_value(found, names)
+            if value is None:
+                source_values = []
                 for source in ("module", "environment", "M", "E"):
                     nested = found.get(source)
-                    if isinstance(nested, Mapping) and name in nested:
-                        value = nested[name] if value is None else float(value) + float(nested[name])
+                    if isinstance(nested, Mapping):
+                        source_value = phase_value(nested, names)
+                        if source_value is not None:
+                            try:
+                                source_values.append(float(np.asarray(source_value).reshape(-1)[0]))
+                            except (TypeError, ValueError, IndexError):
+                                pass
+                if source_values:
+                    value = sum(source_values)
             row[metric] = None if value is None else _jsonable(value)
         phases[phase] = row
     return phases
@@ -582,6 +633,34 @@ def canonicalize_case(payload: Any, *, case_index: int = 0, query_count: int | N
     query_array = np.asarray(query_array, dtype=np.float64)
     if query_count is not None and int(query_array.shape[0]) != int(query_count):
         raise OccupancyEvidenceError(f"query count {query_array.shape[0]} does not match requested {query_count}")
+    source_count_value = _lookup(payload, "query_source_count")
+    query_source_count = None
+    if source_count_value is not None:
+        try:
+            query_source_count = int(np.asarray(source_count_value).reshape(-1)[0])
+        except (TypeError, ValueError, IndexError) as exc:
+            raise OccupancyEvidenceError("query_source_count must be an integer") from exc
+        if query_source_count < int(query_array.shape[0]):
+            raise OccupancyEvidenceError("query_source_count cannot be smaller than recorded query count")
+    selection_value = _lookup(payload, "query_selection")
+    query_selection = None if selection_value is None else str(selection_value)
+    domain_value = _lookup(payload, "query_domain_bounds")
+    query_domain_bounds = None
+    if domain_value is not None:
+        try:
+            query_domain_bounds = np.asarray(domain_value, dtype=np.float64).reshape(-1)
+        except (TypeError, ValueError) as exc:
+            raise OccupancyEvidenceError("query_domain_bounds must be numeric") from exc
+        if query_domain_bounds.size != 4 or not np.isfinite(query_domain_bounds).all():
+            raise OccupancyEvidenceError("query_domain_bounds must contain four finite values")
+        if query_domain_bounds[1] < query_domain_bounds[0] or query_domain_bounds[3] < query_domain_bounds[2]:
+            raise OccupancyEvidenceError("query_domain_bounds must be ordered xmin,xmax,ymin,ymax")
+    query_indices_value = _lookup(payload, "query_grid_indices")
+    query_indices = None
+    if query_indices_value is not None:
+        query_indices = np.asarray(query_indices_value).reshape(-1).astype(np.int64)
+        if query_indices.size != int(query_array.shape[0]):
+            raise OccupancyEvidenceError("query_grid_indices does not align with recorded query count")
     module = _ensure_source_assignment(
         _lookup(payload, "module_assignment", required=True),
         name="module_assignment",
@@ -705,12 +784,22 @@ def canonicalize_case(payload: Any, *, case_index: int = 0, query_count: int | N
     p2 = phase_ledger.get("P2", {})
     source_rows = {}
     for source, prefix in (("module", "module"), ("environment", "environment")):
-        source_rows[f"p2_{source}_actual_rows"] = p2.get(source, {}).get("actual_rows") if isinstance(p2.get(source), Mapping) else p2.get(f"{source}_actual_rows")
-        source_rows[f"p2_{source}_padded_rows"] = p2.get(source, {}).get("padded_rows") if isinstance(p2.get(source), Mapping) else p2.get(f"{source}_padded_rows")
+        phase_source = p2.get(source, {}) if isinstance(p2.get(source), Mapping) else p2
+        for metric in ("actual_rows", "padded_rows", "geometry_rows", "content_rows"):
+            value = phase_source.get(metric) if isinstance(phase_source, Mapping) else None
+            if value is None and isinstance(p2, Mapping):
+                value = p2.get(f"{prefix}_{metric}")
+            source_rows[f"p2_{source}_{metric}"] = value
     row = {
         "kmax": kmax,
         "kplan": kplan,
         "active_module_count": int(present.sum()),
+        "M_active": int(present.sum()),
+        "M_padded": int(len(module_coords)),
+        "active_module_source_ids": np.flatnonzero(present).astype(np.int64).tolist(),
+        "query_source_count": query_source_count,
+        "query_selection": query_selection,
+        "query_domain_bounds": None if query_domain_bounds is None else query_domain_bounds.tolist(),
         "kplan_minus_active_module_count": int(kplan - int(present.sum())),
         "kplan_equals_active_module_count": bool(kplan == int(present.sum())),
         "prototype_ids": ids.tolist(),
@@ -780,8 +869,28 @@ def canonicalize_case(payload: Any, *, case_index: int = 0, query_count: int | N
         "case": row,
         "maps": {
             "module_coords": module_coords,
+            "module_present": present,
+            "module_source_ids": np.arange(len(module_coords), dtype=np.int64),
             "environment_coords": environment_coords,
             "query_coords": query_array,
+            "query_grid_indices": query_indices if query_indices is not None else np.arange(len(query_array), dtype=np.int64),
+            "query_source_count": np.asarray(
+                int(query_source_count) if query_source_count is not None else len(query_array),
+                dtype=np.int64,
+            ),
+            "query_domain_bounds": (
+                np.asarray(query_domain_bounds, dtype=np.float64)
+                if query_domain_bounds is not None
+                else np.asarray(
+                    [
+                        query_array[:, 0].min(),
+                        query_array[:, 0].max(),
+                        query_array[:, 1].min(),
+                        query_array[:, 1].max(),
+                    ],
+                    dtype=np.float64,
+                )
+            ),
             "module_assignment": module,
             "environment_assignment": environment,
             "query_assignment": query,
@@ -802,7 +911,7 @@ def summarize_population(rows: Sequence[Mapping[str, Any]], *, expected_cases: i
     if not rows:
         raise OccupancyEvidenceError("population is empty")
     numeric_fields = (
-        "kplan", "active_module_count", "kplan_minus_active_module_count", "kappa", "module_source_degree_mean", "environment_source_degree_mean", "query_degree_mean",
+        "kplan", "active_module_count", "M_active", "M_padded", "kplan_minus_active_module_count", "kappa", "module_source_degree_mean", "environment_source_degree_mean", "query_degree_mean",
         "module_effective_groups_mean", "environment_effective_groups_mean", "query_effective_groups_mean",
         "module_assignment_numerical_rank", "environment_assignment_numerical_rank",
         "query_assignment_numerical_rank", "joint_source_assignment_numerical_rank",
@@ -811,6 +920,7 @@ def summarize_population(rows: Sequence[Mapping[str, Any]], *, expected_cases: i
         "environment_RE_support", "module_multiplicity", "environment_multiplicity", "module_logical_paths",
         "environment_logical_paths", "module_unique_pairs", "environment_unique_pairs", "p2_module_actual_rows",
         "p2_environment_actual_rows", "p2_module_padded_rows", "p2_environment_padded_rows",
+        "p2_module_geometry_rows", "p2_environment_geometry_rows", "p2_module_content_rows", "p2_environment_content_rows",
     )
     summary: dict[str, Any] = {"case_count": len(rows), "kplan_histogram": {}}
     kplans = [int(row["kplan"]) for row in rows]
@@ -887,6 +997,13 @@ def render_case_board(record: Mapping[str, Any], path: Path) -> None:
     query = np.asarray(maps["query_assignment"])
     joint_centres = np.asarray(maps["joint_centres"])
     active = np.asarray(row["active_mask"], dtype=bool)
+    module_present = np.asarray(
+        maps.get("module_present", np.any(module > 0.0, axis=1)), dtype=bool
+    ).reshape(-1)
+    if module_present.size != module_coords.shape[0]:
+        raise OccupancyEvidenceError("module_present does not align with rendered module sources")
+    module_coords = module_coords[module_present]
+    module = module[module_present]
     kmax = int(row["kmax"])
     cmap = plt.get_cmap("tab20", max(kmax, 1))
     module_group = _dominant_group(module)
@@ -898,12 +1015,14 @@ def render_case_board(record: Mapping[str, Any], path: Path) -> None:
     axis.scatter(module_coords[:, 0], module_coords[:, 1], c=[cmap(int(index)) if index >= 0 else "#bdbdbd" for index in module_group], marker="s", s=32, edgecolors="black", linewidths=0.3)
     axis.scatter(joint_centres[active, 0], joint_centres[active, 1], marker="+", c=np.flatnonzero(active), cmap=cmap, s=80)
     axis.set_title("Module sources and joint centres")
+    axis.set_aspect("equal", adjustable="box")
     axis.set_xlabel("x")
     axis.set_ylabel("y")
     axis = axes[0, 1]
     axis.scatter(environment_coords[:, 0], environment_coords[:, 1], c=[cmap(int(index)) if index >= 0 else "#bdbdbd" for index in environment_group], s=8, alpha=0.72)
     axis.scatter(joint_centres[active, 0], joint_centres[active, 1], marker="+", c=np.flatnonzero(active), cmap=cmap, s=80)
     axis.set_title("Environment sources and joint centres")
+    axis.set_aspect("equal", adjustable="box")
     axis.set_xlabel("x")
     axis.set_ylabel("y")
     axis = axes[0, 2]
@@ -911,6 +1030,7 @@ def render_case_board(record: Mapping[str, Any], path: Path) -> None:
     axis.set_title("Query dominant group")
     axis.set_xlabel("x")
     axis.set_ylabel("y")
+    axis.set_aspect("equal", adjustable="box")
     axis = axes[1, 0]
     x = np.arange(kmax)
     width = 0.38
@@ -926,6 +1046,7 @@ def render_case_board(record: Mapping[str, Any], path: Path) -> None:
     axis.set_title("Query support degree")
     axis.set_xlabel("x")
     axis.set_ylabel("y")
+    axis.set_aspect("equal", adjustable="box")
     axis = axes[1, 2]
     if len(query_coords):
         selected = int(np.argmax(query_degree))
@@ -943,6 +1064,7 @@ def render_case_board(record: Mapping[str, Any], path: Path) -> None:
     axis.set_title("Query → group → source support")
     axis.set_xlabel("x")
     axis.set_ylabel("y")
+    axis.set_aspect("equal", adjustable="box")
     module_rows = row.get("p2_module_actual_rows")
     environment_rows = row.get("p2_environment_actual_rows")
     module_rows_text = "n/a" if module_rows is None else str(int(float(module_rows)))

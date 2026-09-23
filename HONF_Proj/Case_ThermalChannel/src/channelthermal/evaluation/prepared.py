@@ -11,6 +11,7 @@ import torch
 from channelthermal.data.datasets import GlobalChannelThermalDataset
 from channelthermal.evaluation.loading import make_batch
 from channelthermal.model import ChannelThermalHONFModel
+from honf_forward_core.interface_fields.core import _merge_group_control_maps
 
 
 # Sparse-interface layouts are flattened across a case batch rather than
@@ -155,13 +156,15 @@ def predict_case(
     pred_chunks = []
     routing_chunks: Dict[str, list[np.ndarray]] = {}
     routed_module_retention_chunks: list[np.ndarray] = []
+    interaction_aux_chunks: list[tuple[dict[str, Any], int]] = []
     first_outputs = None
     prepared_state = None
     need_routing = bool(return_routing_maps or return_topology_signature)
     with torch.no_grad():
         for start in range(0, query_xy.shape[0], int(query_batch_size)):
             chunk = query_xy[start : start + int(query_batch_size)]
-            if prepared_state is None:
+            first_chunk = prepared_state is None
+            if first_chunk:
                 batch = make_batch(sample, chunk, device)
                 outputs = model(
                     batch["structure"],
@@ -182,6 +185,9 @@ def predict_case(
                 )
                 prepared_state = outputs.pop("prepared_state")
                 first_outputs = outputs
+                first_aux = outputs.get("interaction_aux", {})
+                if isinstance(first_aux, dict):
+                    interaction_aux_chunks.append((first_aux, int(chunk.shape[0])))
             else:
                 chunk_tensor = torch.from_numpy(chunk).unsqueeze(0).to(device=device)
                 decoder_output = model.decode_prepared(
@@ -196,6 +202,12 @@ def predict_case(
                 }
             pred_chunks.append(outputs["pred_field"].detach().cpu().numpy()[0])
             routing_aux = outputs.get("routing_aux", {})
+            if not first_chunk and need_routing:
+                # Decoder chunks expose the read diagnostics under
+                # ``routing_aux``.  The first chunk uses the full model
+                # output's ``interaction_aux`` instead; do not count it twice.
+                if isinstance(routing_aux, dict):
+                    interaction_aux_chunks.append((routing_aux, int(chunk.shape[0])))
             retained_module_mass = routing_aux.get("retained_module_incidence_mass")
             routed_pair_mask = routing_aux.get("routed_query_edge_pair_mask")
             if torch.is_tensor(retained_module_mass) and torch.is_tensor(routed_pair_mask):
@@ -278,6 +290,20 @@ def predict_case(
     if first_outputs is None:
         raise RuntimeError("No prediction chunks were produced.")
     pred_field = np.concatenate(pred_chunks, axis=0).reshape(*x_grid.shape, model.config.field_dim)
+    interaction_payload = {
+        key: value
+        for key, value in first_outputs.get("interaction_aux", {}).items()
+        if key not in {
+            "dense_environment_attention",
+            "regional_environment_attention",
+            "latent_query_attention",
+        }
+    }
+    if need_routing and interaction_aux_chunks:
+        # Merge scalar work/count fields across all outer query tiles before
+        # serialisation.  Query-local maps remain in ``routing_maps`` below;
+        # this reducer is only for the case-level accounting ledger.
+        interaction_payload.update(_merge_group_control_maps(interaction_aux_chunks))
     result = {
         "pred_field_grid": pred_field.astype(np.float32),
         "pred_internal_temperature": first_outputs["pred_internal_temperature"].detach().cpu().numpy()[0],
@@ -295,17 +321,7 @@ def predict_case(
             key: value.detach().cpu().numpy()[0] if torch.is_tensor(value) and value.ndim > 0 else value
             for key, value in first_outputs.get("base_organizer_aux", {}).items()
         },
-        "interaction_aux": serialize_interaction_aux(
-            {
-                key: value
-                for key, value in first_outputs.get("interaction_aux", {}).items()
-                if key not in {
-                    "dense_environment_attention",
-                    "regional_environment_attention",
-                    "latent_query_attention",
-                }
-            }
-        ),
+        "interaction_aux": serialize_interaction_aux(interaction_payload),
     }
     result["routing_aux"] = aggregate_routed_module_retention(
         routed_module_retention_chunks
