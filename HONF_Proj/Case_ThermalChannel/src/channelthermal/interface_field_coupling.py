@@ -107,6 +107,103 @@ def _outside_coordinates(model: Any, port_tokens: torch.Tensor, module_centers: 
     )
 
 
+def _outside_coordinates_from_normals(
+    model: Any, normals: torch.Tensor, module_centers: torch.Tensor
+) -> torch.Tensor:
+    """Build geometry-only outside probes without reading port predictions."""
+
+    radius = float(model.config.core_honf.module_radius) + float(
+        model.config.channelthermal.port_global_consistency_radius_offset
+    )
+    outside = module_centers[:, :, None, :] + radius * normals[None, None, :, :]
+    return torch.stack(
+        [
+            outside[..., 0].clamp(0.0, float(model.config.core_honf.domain_length_x)),
+            outside[..., 1].clamp(0.0, float(model.config.core_honf.domain_length_y)),
+        ],
+        dim=-1,
+    )
+
+
+def _functional_probe_family(coordinates: torch.Tensor, module_present: torch.Tensor):
+    """Flatten an active-module port family with normalized angular weights."""
+
+    from honf_forward_core.organization.functional_fusion_tree import FunctionalProbeFamily
+
+    if coordinates.ndim != 4 or coordinates.shape[-1] != 2:
+        raise ValueError("Functional port probe coordinates must have shape [B,M,P,2].")
+    if tuple(module_present.shape) != tuple(coordinates.shape[:2]):
+        raise ValueError("Functional port probes and module_present must align on [B,M].")
+    valid = (module_present > 0.5)[:, :, None].expand(
+        coordinates.shape[0], coordinates.shape[1], coordinates.shape[2]
+    )
+    flat_valid = valid.reshape(coordinates.shape[0], -1)
+    weights = flat_valid.to(dtype=coordinates.dtype)
+    weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1.0)
+    return FunctionalProbeFamily(
+        coordinates=coordinates.reshape(coordinates.shape[0], -1, 2),
+        valid_mask=flat_valid,
+        weights=weights,
+    )
+
+
+def _phase_functional_probe_kwargs(
+    model: Any,
+    phase: str,
+    *,
+    physical_port_xy: torch.Tensor,
+    current_port_tokens: torch.Tensor | None,
+    module_centers: torch.Tensor,
+    module_present: torch.Tensor,
+    ntheta: int,
+) -> dict[str, Any]:
+    """Build only the coordinates observable at a v4 preparation phase."""
+
+    if str(model.config.core_honf.forward_architecture) != "continuous_functional_coalescence_honf":
+        return {}
+    selection = model.core.backend.selection_state()
+    epoch = selection.get("epoch") if isinstance(selection, dict) else None
+    if epoch is not None and int(epoch) <= 50:
+        # The prescribed e1-e50 parent fast path performs no functional probe
+        # construction, matching the backend's exact parent preparation.
+        return {}
+    from honf_forward_core.organization.functional_fusion_tree import FunctionalProbeCatalogue
+
+    if phase == "P0":
+        # P0 precedes port prediction, so both probe families come only from
+        # fixed theta/module geometry and cannot inspect future port outputs.
+        theta = model.local_coupling.port_head.fixed_theta_tokens(
+            ntheta, module_centers.device, module_centers.dtype
+        )
+        normals = theta[:, 1:3]
+        port_xy = physical_port_xy
+    elif phase in {"P1", "P2"}:
+        if current_port_tokens is None:
+            raise ValueError(f"{phase} functional probes require current phase port tokens.")
+        normals = current_port_tokens[..., 1:3]
+        # The physical surface locations are geometry-defined for every
+        # phase. Current tokens affect only the phase's outside-temperature
+        # coordinates through their available normals.
+        port_xy = physical_port_xy
+    else:
+        raise ValueError(f"Unsupported functional probe phase {phase!r}.")
+
+    outside_xy = (
+        _outside_coordinates_from_normals(model, normals, module_centers)
+        if phase == "P0"
+        else _outside_coordinates(model, current_port_tokens, module_centers)
+    )
+    return {
+        "functional_probes": FunctionalProbeCatalogue(
+            phase=phase,
+            physical_ports=_functional_probe_family(port_xy, module_present),
+            outside_temperature=_functional_probe_family(outside_xy, module_present),
+            # Environment coordinates and measures remain in EncodedInterfaceCase.
+            environment=None,
+        )
+    }
+
+
 def _decode_temperature(
     model: Any,
     prepared: PreparedInterfaceField,
@@ -369,6 +466,15 @@ def forward_interface_field(
             base_module_state,
             layout_cache=layout_cache,
             return_routing_maps=bool(return_routing_maps),
+            **_phase_functional_probe_kwargs(
+                model,
+                "P0",
+                physical_port_xy=physical_port_xy,
+                current_port_tokens=None,
+                module_centers=adapter.module_centers,
+                module_present=adapter.module_present,
+                ntheta=ntheta,
+            ),
         )
     initial_port_context, initial_read_aux = _read_port_context(
         model,
@@ -448,6 +554,15 @@ def forward_interface_field(
                         layout_cache=layout_cache,
                         return_routing_maps=bool(return_routing_maps),
                         phase_shared_state=prepared0.phase_shared_state,
+                        **_phase_functional_probe_kwargs(
+                            model,
+                            "P1",
+                            physical_port_xy=physical_port_xy,
+                            current_port_tokens=local_ports_used,
+                            module_centers=adapter.module_centers,
+                            module_present=adapter.module_present,
+                            ntheta=ntheta,
+                        ),
                     )
                 else:
                     prepared1 = model.core.prepare(
@@ -455,6 +570,15 @@ def forward_interface_field(
                         module_state,
                         layout_cache=layout_cache,
                         return_routing_maps=bool(return_routing_maps),
+                        **_phase_functional_probe_kwargs(
+                            model,
+                            "P1",
+                            physical_port_xy=physical_port_xy,
+                            current_port_tokens=local_ports_used,
+                            module_centers=adapter.module_centers,
+                            module_present=adapter.module_present,
+                            ntheta=ntheta,
+                        ),
                     )
             outside_temperature, provisional_decode = _decode_temperature(
                 model,
@@ -539,6 +663,15 @@ def forward_interface_field(
                     layout_cache=layout_cache,
                     return_routing_maps=bool(return_routing_maps),
                     phase_shared_state=prepared0.phase_shared_state,
+                    **_phase_functional_probe_kwargs(
+                        model,
+                        "P2",
+                        physical_port_xy=physical_port_xy,
+                        current_port_tokens=local_ports_used,
+                        module_centers=adapter.module_centers,
+                        module_present=adapter.module_present,
+                        ntheta=ntheta,
+                    ),
                 )
                 if phase_shared_architecture
                 else model.core.prepare(
@@ -546,6 +679,15 @@ def forward_interface_field(
                     module_state,
                     layout_cache=layout_cache,
                     return_routing_maps=bool(return_routing_maps),
+                    **_phase_functional_probe_kwargs(
+                        model,
+                        "P2",
+                        physical_port_xy=physical_port_xy,
+                        current_port_tokens=local_ports_used,
+                        module_centers=adapter.module_centers,
+                        module_present=adapter.module_present,
+                        ntheta=ntheta,
+                    ),
                 )
             )
         )

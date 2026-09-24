@@ -628,6 +628,7 @@ class ConvergedCoalescedPreparedGroupControl(
     environment_source_moment: torch.Tensor
     parent_controls: SparseIncidencePreparedGroupControl | None = None
     parent_identity_rows: torch.Tensor | None = None
+    identity_free_quotient: bool = False
 
 
 class ConvergedIdentityPreservingCoalescencePairwiseField(
@@ -840,6 +841,8 @@ class ConvergedIdentityPreservingCoalescencePairwiseField(
             head_source_control,
             value_gain,
         )
+        if controls.identity_free_quotient:
+            return compact
         rows = controls.parent_identity_rows
         if rows is None or not bool(rows.any()):
             return compact
@@ -893,7 +896,9 @@ class ConvergedIdentityPreservingCoalescencePairwiseField(
         source_moment = state.get("module_control_bank_source_moment")
         if not torch.is_tensor(source_moment):
             raise RuntimeError("v3 coalesced QM requires its source-resolved B bank.")
-        if controls.parent_controls is None or controls.parent_identity_rows is None:
+        if not controls.identity_free_quotient and (
+            controls.parent_controls is None or controls.parent_identity_rows is None
+        ):
             raise RuntimeError("v3 coalesced QM is missing parent identity controls.")
         total = int(batch_index.shape[0])
         for start in range(0, total, int(chunk_size)):
@@ -905,18 +910,19 @@ class ConvergedIdentityPreservingCoalescencePairwiseField(
             moment_pair = source_moment[batches, sources]
             rho = overlap[batches, queries, sources]
             moment = torch.einsum("pk,pkd->pd", alpha_pair, moment_pair)
-            identity_pair = controls.parent_identity_rows[batches]
-            if bool(identity_pair.any()):
-                parent = controls.parent_controls
-                membership_pair = parent.module_membership[batches, sources]
-                group_control = parent.group_control[batches]
-                parent_moment = torch.einsum(
-                    "pk,pk,pkd->pd",
-                    alpha_pair,
-                    membership_pair,
-                    group_control,
-                )
-                moment = torch.where(identity_pair[:, None], parent_moment, moment)
+            if not controls.identity_free_quotient:
+                identity_pair = controls.parent_identity_rows[batches]
+                if bool(identity_pair.any()):
+                    parent = controls.parent_controls
+                    membership_pair = parent.module_membership[batches, sources]
+                    group_control = parent.group_control[batches]
+                    parent_moment = torch.einsum(
+                        "pk,pk,pkd->pd",
+                        alpha_pair,
+                        membership_pair,
+                        group_control,
+                    )
+                    moment = torch.where(identity_pair[:, None], parent_moment, moment)
             yield rho, moment
 
     def _pair_environment_head_moment(
@@ -947,7 +953,9 @@ class ConvergedIdentityPreservingCoalescencePairwiseField(
         source_control = state.get("environment_head_source_control")
         if not torch.is_tensor(source_control):
             raise RuntimeError("v3 coalesced QE requires its source-resolved head bank.")
-        if controls.parent_controls is None or controls.parent_identity_rows is None:
+        if not controls.identity_free_quotient and (
+            controls.parent_controls is None or controls.parent_identity_rows is None
+        ):
             raise RuntimeError("v3 coalesced QE is missing parent identity controls.")
         groups = int(source_control.shape[1])
         group_index = torch.arange(groups, device=alpha.device)
@@ -963,18 +971,19 @@ class ConvergedIdentityPreservingCoalescencePairwiseField(
             ]
             rho = overlap[batches, queries, sources]
             zeta = torch.einsum("pk,pkh->ph", alpha_pair, head_pair)
-            identity_pair = controls.parent_identity_rows[batches]
-            if bool(identity_pair.any()):
-                parent = controls.parent_controls
-                membership_pair = parent.environment_membership[batches, sources]
-                head_control = state["environment_head_control"][batches]
-                parent_zeta = torch.einsum(
-                    "pk,pk,pkh->ph",
-                    alpha_pair,
-                    membership_pair,
-                    head_control,
-                )
-                zeta = torch.where(identity_pair[:, None], parent_zeta, zeta)
+            if not controls.identity_free_quotient:
+                identity_pair = controls.parent_identity_rows[batches]
+                if bool(identity_pair.any()):
+                    parent = controls.parent_controls
+                    membership_pair = parent.environment_membership[batches, sources]
+                    head_control = state["environment_head_control"][batches]
+                    parent_zeta = torch.einsum(
+                        "pk,pk,pkh->ph",
+                        alpha_pair,
+                        membership_pair,
+                        head_control,
+                    )
+                    zeta = torch.where(identity_pair[:, None], parent_zeta, zeta)
             yield rho, zeta
 
     def _require_moment_safe_executor(self) -> None:

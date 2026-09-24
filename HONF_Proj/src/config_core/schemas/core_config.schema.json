@@ -75,7 +75,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "forward_architecture": {"enum": ["legacy_honf", "dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf", "regional_response_honf", "hierarchical_regional_honf", "routed_pairwise_honf", "fixed_group_pairwise_honf", "group_control_pairwise_honf", "phase_shared_group_control_honf", "hypergraph_quadrature_honf", "budgeted_group_control_honf", "occupancy_adaptive_group_control_honf", "mass_competitive_group_control_honf", "sparse_incidence_group_control_honf", "coalesced_sparse_incidence_honf", "converged_identity_preserving_coalescence_honf", "adaptive_hyperedge_opening_honf"]},
+        "forward_architecture": {"enum": ["legacy_honf", "dense_pairwise_field", "geometry_latent_field", "sparse_interface_honf", "regional_response_honf", "hierarchical_regional_honf", "routed_pairwise_honf", "fixed_group_pairwise_honf", "group_control_pairwise_honf", "phase_shared_group_control_honf", "hypergraph_quadrature_honf", "budgeted_group_control_honf", "occupancy_adaptive_group_control_honf", "mass_competitive_group_control_honf", "sparse_incidence_group_control_honf", "coalesced_sparse_incidence_honf", "converged_identity_preserving_coalescence_honf", "continuous_functional_coalescence_honf", "adaptive_hyperedge_opening_honf"]},
         "interface_model": {
           "type": "object",
           "additionalProperties": false,
@@ -173,6 +173,14 @@
             "fusion_ramp_epochs": {"const": 150},
             "fusion_eps_abs": {"const": 1e-9},
             "fusion_eps_rel": {"const": 1e-8},
+            "functional_tree_subsets": {
+              "type": "array",
+              "minItems": 11,
+              "maxItems": 11,
+              "items": {"type": "array", "minItems": 2, "items": {"type": "integer", "minimum": 0, "maximum": 11}}
+            },
+            "read_input_close_rms": {"const": 0.02},
+            "read_input_keep_rms": {"const": 0.06},
             "samples_per_group": {"type": "integer", "minimum": 1}
           }
         },

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
@@ -22,6 +22,9 @@ from .latent_attention import GeometryLatentField
 from .regional_response import RegionalResponseField
 from .response_hierarchy import prepare_hierarchy_geometry
 from .types import EncodedInterfaceCase, InterfaceRead, PreparedInterfaceField
+
+if TYPE_CHECKING:
+    from honf_forward_core.organization.functional_fusion_tree import FunctionalProbeCatalogue
 
 
 def _merge_compiled_routing_maps(chunks):
@@ -350,6 +353,7 @@ class InterfaceFieldCore(nn.Module):
             "sparse_incidence_group_control_honf",
             "coalesced_sparse_incidence_honf",
             "converged_identity_preserving_coalescence_honf",
+            "continuous_functional_coalescence_honf",
             "adaptive_hyperedge_opening_honf",
         }:
             # Run 1405/1406 deliberately replace the historical coarse/local
@@ -665,6 +669,30 @@ class InterfaceFieldCore(nn.Module):
                 fusion_eps_abs=float(options.fusion_eps_abs),
                 fusion_eps_rel=float(options.fusion_eps_rel),
             )
+        elif config.forward_architecture == "continuous_functional_coalescence_honf":
+            from .continuous_functional_coalescence import (
+                ContinuousFunctionalCoalescencePairwiseField,
+            )
+
+            self.backend = ContinuousFunctionalCoalescencePairwiseField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                group_count=int(options.group_count),
+                group_control_dim=int(options.group_control_dim),
+                spatial_dim=int(config.spatial_dim),
+                module_temperature=float(options.module_temperature),
+                environment_temperature=float(options.environment_temperature),
+                query_temperature=float(options.query_temperature),
+                activation_checkpointing=bool(options.activation_checkpointing),
+                environment_refinement_normalizer=str(
+                    options.environment_refinement_normalizer
+                ),
+                functional_tree_subsets=options.functional_tree_subsets,
+                read_input_close_rms=float(options.read_input_close_rms),
+                read_input_keep_rms=float(options.read_input_keep_rms),
+            )
         elif config.forward_architecture == "adaptive_hyperedge_opening_honf":
             from .adaptive_hyperedge_opening import AdaptiveHyperedgeOpeningPairwiseField
 
@@ -699,6 +727,7 @@ class InterfaceFieldCore(nn.Module):
             "budgeted_group_control_honf",
             "coalesced_sparse_incidence_honf",
             "converged_identity_preserving_coalescence_honf",
+            "continuous_functional_coalescence_honf",
         }:
             setter = getattr(self.backend, "set_training_progress", None)
             if callable(setter):
@@ -709,6 +738,7 @@ class InterfaceFieldCore(nn.Module):
             "budgeted_group_control_honf",
             "coalesced_sparse_incidence_honf",
             "converged_identity_preserving_coalescence_honf",
+            "continuous_functional_coalescence_honf",
         }:
             getter = getattr(self.backend, "selection_state", None)
             if callable(getter):
@@ -848,7 +878,15 @@ class InterfaceFieldCore(nn.Module):
         *,
         return_routing_maps: bool = False,
         phase_shared_state: Any = None,
+        functional_probes: FunctionalProbeCatalogue | None = None,
     ) -> PreparedInterfaceField:
+        functional_architecture = (
+            self.config.forward_architecture == "continuous_functional_coalescence_honf"
+        )
+        if functional_probes is not None and not functional_architecture:
+            raise ValueError(
+                "functional_probes are only supported by continuous_functional_coalescence_honf."
+            )
         if self.config.forward_architecture == "sparse_interface_honf":
             if not isinstance(layout_cache, SparseLayoutCache):
                 raise ValueError("sparse_interface_honf requires a SparseLayoutCache built from module ports.")
@@ -858,6 +896,13 @@ class InterfaceFieldCore(nn.Module):
                 encoded,
                 module_states,
                 region_ids=encoded.env_region_ids,
+                return_routing_maps=bool(return_routing_maps),
+            )
+        elif functional_architecture:
+            backend_state = self.backend.prepare(
+                encoded,
+                module_states,
+                functional_probes=functional_probes,
                 return_routing_maps=bool(return_routing_maps),
             )
         elif self.config.forward_architecture in {
@@ -906,6 +951,7 @@ class InterfaceFieldCore(nn.Module):
                     "sparse_incidence_group_control_honf",
                     "coalesced_sparse_incidence_honf",
                     "converged_identity_preserving_coalescence_honf",
+                    "continuous_functional_coalescence_honf",
                     "adaptive_hyperedge_opening_honf",
                 }
                 else int(self.config.interface_model.coarse_latent_count)
@@ -927,6 +973,7 @@ class InterfaceFieldCore(nn.Module):
             "sparse_incidence_group_control_honf",
             "coalesced_sparse_incidence_honf",
             "converged_identity_preserving_coalescence_honf",
+            "continuous_functional_coalescence_honf",
             "adaptive_hyperedge_opening_honf",
         }:
             aux.update(

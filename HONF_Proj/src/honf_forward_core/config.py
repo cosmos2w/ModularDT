@@ -102,6 +102,7 @@ FORWARD_ARCHITECTURES = {
     "sparse_incidence_group_control_honf",
     "coalesced_sparse_incidence_honf",
     "converged_identity_preserving_coalescence_honf",
+    "continuous_functional_coalescence_honf",
     "adaptive_hyperedge_opening_honf",
 }
 
@@ -407,6 +408,11 @@ class InterfaceFieldConfig:
     fusion_ramp_epochs: int = 150
     fusion_eps_abs: float = 1.0e-9
     fusion_eps_rel: float = 1.0e-8
+    # Run 1503-v4 uses one train-input-only, fixed binary tree. These fields
+    # are serialized only for that opt-in architecture.
+    functional_tree_subsets: list[list[int]] = field(default_factory=list)
+    read_input_close_rms: float = 0.02
+    read_input_keep_rms: float = 0.06
 
     def __post_init__(self) -> None:
         if isinstance(self.routing, dict):
@@ -510,6 +516,12 @@ class InterfaceFieldConfig:
                 raise ValueError(
                     f"interface_model.{name} must be finite and nonnegative."
                 )
+        for name in ("read_input_close_rms", "read_input_keep_rms"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"interface_model.{name} must be finite and positive.")
+        if float(self.read_input_close_rms) >= float(self.read_input_keep_rms):
+            raise ValueError("read_input_close_rms must be below read_input_keep_rms.")
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any] | None) -> "InterfaceFieldConfig":
@@ -683,6 +695,7 @@ class UnifiedForwardConfig:
             "sparse_incidence_group_control_honf",
             "coalesced_sparse_incidence_honf",
             "converged_identity_preserving_coalescence_honf",
+            "continuous_functional_coalescence_honf",
             "adaptive_hyperedge_opening_honf",
         }:
             controlled = self.interface_model
@@ -700,6 +713,7 @@ class UnifiedForwardConfig:
                     "sparse_incidence_group_control_honf",
                     "coalesced_sparse_incidence_honf",
                     "converged_identity_preserving_coalescence_honf",
+                    "continuous_functional_coalescence_honf",
                     "adaptive_hyperedge_opening_honf",
                 }
                 else "entmax15"
@@ -746,6 +760,7 @@ class UnifiedForwardConfig:
                 "sparse_incidence_group_control_honf",
                 "coalesced_sparse_incidence_honf",
                 "converged_identity_preserving_coalescence_honf",
+                "continuous_functional_coalescence_honf",
                 "adaptive_hyperedge_opening_honf",
             }:
                 if controlled.case_group_budget is not None:
@@ -764,6 +779,7 @@ class UnifiedForwardConfig:
                 "adaptive_hyperedge_opening_honf",
                 "coalesced_sparse_incidence_honf",
                 "converged_identity_preserving_coalescence_honf",
+                "continuous_functional_coalescence_honf",
             }:
                 if controlled.environment_refinement_normalizer != "sparsemax":
                     raise ValueError(
@@ -804,11 +820,49 @@ class UnifiedForwardConfig:
                         "fusion settings: max_iterations=512, eps_abs=1e-9, "
                         "eps_rel=1e-8, eta_final=0.5, ramp_epochs=150."
                     )
+            elif self.forward_architecture == "continuous_functional_coalescence_honf":
+                if len(controlled.functional_tree_subsets) != 11:
+                    raise ValueError("continuous functional coalescence requires eleven tree subsets.")
+                nodes: list[frozenset[int]] = []
+                for subset in controlled.functional_tree_subsets:
+                    if not isinstance(subset, (list, tuple)) or len(subset) < 2:
+                        raise ValueError("each functional tree subset must have at least two leaves.")
+                    if any(
+                        isinstance(leaf, bool)
+                        or not isinstance(leaf, int)
+                        or leaf not in range(12)
+                        for leaf in subset
+                    ):
+                        raise ValueError("functional tree leaves must be integer IDs in [0, 11].")
+                    node = frozenset(subset)
+                    if len(node) != len(subset) or node in nodes:
+                        raise ValueError("functional tree subsets must have unique leaves and nodes.")
+                    nodes.append(node)
+                if nodes[-1] != frozenset(range(12)):
+                    raise ValueError("the final functional tree node must contain all twelve leaves.")
+                leaves = [frozenset((index,)) for index in range(12)]
+                for index, node in enumerate(nodes):
+                    for previous in nodes[:index]:
+                        if previous & node and not previous < node:
+                            raise ValueError("functional tree nodes must be disjoint or bottom-up nested.")
+                    candidates = [child for child in [*leaves, *nodes[:index]] if child < node]
+                    children = [
+                        child for child in candidates
+                        if not any(child < ancestor < node for ancestor in nodes[:index])
+                    ]
+                    if len(children) != 2 or children[0] | children[1] != node:
+                        raise ValueError("each functional tree node must have exactly two children.")
+                if (
+                    float(controlled.read_input_close_rms),
+                    float(controlled.read_input_keep_rms),
+                ) != (0.02, 0.06):
+                    raise ValueError("this candidate requires fixed read-input RMS scales 0.02 and 0.06.")
             elif (
                 self.forward_architecture not in {
                     "sparse_incidence_group_control_honf",
                     "coalesced_sparse_incidence_honf",
                     "converged_identity_preserving_coalescence_honf",
+                    "continuous_functional_coalescence_honf",
                 }
                 and controlled.environment_refinement_normalizer != "entmax15"
             ):
@@ -849,6 +903,7 @@ class UnifiedForwardConfig:
                 "sparse_incidence_group_control_honf",
                 "coalesced_sparse_incidence_honf",
                 "converged_identity_preserving_coalescence_honf",
+                "continuous_functional_coalescence_honf",
                 "adaptive_hyperedge_opening_honf",
             }
             and self.interface_model.environment_refinement_normalizer != "entmax15"
@@ -1228,6 +1283,7 @@ class UnifiedForwardConfig:
                     "sparse_incidence_group_control_honf",
                     "coalesced_sparse_incidence_honf",
                     "converged_identity_preserving_coalescence_honf",
+                    "continuous_functional_coalescence_honf",
                     "adaptive_hyperedge_opening_honf",
                 }:
                     # The Run-1502 hook is not part of any historical
@@ -1250,6 +1306,10 @@ class UnifiedForwardConfig:
                 ):
                     interface_payload.pop("fusion_eps_abs", None)
                     interface_payload.pop("fusion_eps_rel", None)
+                if self.forward_architecture != "continuous_functional_coalescence_honf":
+                    interface_payload.pop("functional_tree_subsets", None)
+                    interface_payload.pop("read_input_close_rms", None)
+                    interface_payload.pop("read_input_keep_rms", None)
                 budget_payload = interface_payload.get("case_group_budget")
                 if (
                     self.forward_architecture == "budgeted_group_control_honf"
@@ -1314,16 +1374,17 @@ class UnifiedForwardConfig:
                 if self.interface_model.coarse_module_source == "module_states":
                     interface_payload.pop("coarse_module_source", None)
                 if self.forward_architecture not in {
-                "fixed_group_pairwise_honf",
-                "group_control_pairwise_honf",
-                "phase_shared_group_control_honf",
-                "hypergraph_quadrature_honf",
-                "budgeted_group_control_honf",
-                "occupancy_adaptive_group_control_honf",
-                "mass_competitive_group_control_honf",
+                    "fixed_group_pairwise_honf",
+                    "group_control_pairwise_honf",
+                    "phase_shared_group_control_honf",
+                    "hypergraph_quadrature_honf",
+                    "budgeted_group_control_honf",
+                    "occupancy_adaptive_group_control_honf",
+                    "mass_competitive_group_control_honf",
                     "sparse_incidence_group_control_honf",
                     "coalesced_sparse_incidence_honf",
                     "converged_identity_preserving_coalescence_honf",
+                    "continuous_functional_coalescence_honf",
                     "adaptive_hyperedge_opening_honf",
                 }:
                     for key in (

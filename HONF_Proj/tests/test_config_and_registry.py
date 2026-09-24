@@ -59,6 +59,8 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
     )
     assert by_name["converged_identity_preserving_coalescence_honf_context"]["status"] == "candidate"
     assert by_name["converged_identity_preserving_coalescence_honf_context"]["base"] is None
+    assert by_name["continuous_functional_coalescence_honf_context"]["status"] == "candidate"
+    assert by_name["continuous_functional_coalescence_honf_context"]["base"] is None
     assert by_name["adaptive_hyperedge_opening_honf_context"]["status"] == "candidate"
     assert by_name["adaptive_hyperedge_opening_honf_context"]["base"] is None
     assert registry["recommended_forward_profile"] != "case_adaptive_residual_context"
@@ -118,6 +120,36 @@ def test_run1503_v3_profile_round_trips_converged_architecture_settings() -> Non
     invalid["interface_model"] = dict(invalid["interface_model"])
     invalid["interface_model"]["fusion_max_iterations"] = 64
     with pytest.raises(ValueError, match="requires fusion settings"):
+        UnifiedForwardConfig.from_dict(invalid)
+
+
+def test_run1503_v4_profile_has_fixed_train_only_tree_and_no_solver_settings() -> None:
+    from honf_forward_core.config import UnifiedForwardConfig
+
+    base = load_config_bundle(
+        "project://src/config_core/forward/converged_identity_preserving_coalescence_honf_context.json"
+    )
+    bundle = load_config_bundle(
+        "project://src/config_core/forward/continuous_functional_coalescence_honf_context.json"
+    )
+    config = UnifiedForwardConfig.from_dict(bundle.effective["model"]["core_honf"])
+    interface = config.interface_model
+    assert config.forward_architecture == "continuous_functional_coalescence_honf"
+    assert len(interface.functional_tree_subsets) == 11
+    assert set(interface.functional_tree_subsets[-1]) == set(range(12))
+    assert interface.read_input_close_rms == pytest.approx(0.02)
+    assert interface.read_input_keep_rms == pytest.approx(0.06)
+    assert not any(key.startswith("fusion_") for key in config.to_dict()["interface_model"])
+    assert bundle.case == base.case
+    for section in ("dataset", "loss"):
+        assert bundle.effective[section] == base.effective[section]
+    for key in ("seed", "learning_rate", "weight_decay", "amp", "gradient_clip_norm"):
+        assert bundle.effective["training"][key] == base.effective["training"][key]
+    assert bundle.effective["training"]["port_curriculum"] == base.effective["training"]["port_curriculum"]
+
+    invalid = copy.deepcopy(bundle.effective["model"]["core_honf"])
+    invalid["interface_model"]["functional_tree_subsets"][-1] = [0, 1]
+    with pytest.raises(ValueError, match="final functional tree node"):
         UnifiedForwardConfig.from_dict(invalid)
 
 

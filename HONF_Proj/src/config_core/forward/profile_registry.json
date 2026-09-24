@@ -487,6 +487,16 @@
       "stage": "run1503-v3-converged-identity-preserving-coalescence"
     },
     {
+      "name": "continuous_functional_coalescence_honf_context",
+      "path": "project://src/config_core/forward/continuous_functional_coalescence_honf_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "Run 1503-v4 continuous query-access function contraction / train-only fixed tree / exact multiplicity and source moments / 0.02 to 0.06 source-action taper / rectangular reference reader",
+      "checkpoint_families": ["Run 1503-v4 continuous functional coalescence"],
+      "owner": "forward-research",
+      "stage": "run1503-v4-continuous-functional-coalescence"
+    },
+    {
       "name": "adaptive_hyperedge_opening_honf_context",
       "path": "project://src/config_core/forward/adaptive_hyperedge_opening_honf_context.json",
       "status": "candidate",
