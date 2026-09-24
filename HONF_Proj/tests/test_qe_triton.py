@@ -124,6 +124,31 @@ def test_reference_csr_coordinate_bias_has_live_coordinate_gradient() -> None:
     assert coordinates.grad.abs().sum() > 0
 
 
+def test_reference_csr_score_multiplier_has_live_gradient() -> None:
+    torch.manual_seed(219)
+    query, key, value, _, _ = _complete_fixture()
+    row_offsets = torch.tensor([0, 2, 2, 5, 6, 8, 8], dtype=torch.long)
+    source_indices = torch.tensor([0, 4, 1, 2, 4, 3, 0, 2], dtype=torch.long)
+    pair_bias = torch.randn(8, query.shape[1], requires_grad=True)
+    pair_multiplier = (torch.rand(8, query.shape[1]) + 0.5).requires_grad_()
+    pair_prior = (torch.rand(8) + 0.2).requires_grad_()
+    output = qe_reader_reference(
+        query,
+        key,
+        value,
+        pair_bias,
+        pair_prior,
+        score_multiplier=pair_multiplier,
+        mode="csr",
+        row_offsets=row_offsets,
+        source_indices=source_indices,
+    )
+    output.square().sum().backward()
+    assert pair_multiplier.grad is not None
+    assert torch.isfinite(pair_multiplier.grad).all()
+    assert pair_multiplier.grad.abs().sum() > 0
+
+
 cuda_qe = pytest.mark.skipif(
     not is_triton_qe_available("cuda"),
     reason="Triton QE requires an available CUDA device",
@@ -210,6 +235,51 @@ def test_triton_csr_backward_reaches_prior_value_bias_and_coordinates() -> None:
     for gradient in fused_gradients:
         assert torch.isfinite(gradient).all()
         assert gradient.abs().sum() > 0
+
+
+@cuda_qe
+def test_triton_csr_score_multiplier_matches_fp32_reader_and_six_gradients() -> None:
+    torch.manual_seed(220)
+    device = "cuda"
+    batch, heads, queries, sources, head_dim = 1, 2, 3, 5, 4
+    query = torch.randn(batch, heads, queries, head_dim, device=device, requires_grad=True)
+    key = torch.randn(batch, heads, sources, head_dim, device=device, requires_grad=True)
+    value = torch.randn(batch, heads, sources, head_dim, device=device, requires_grad=True)
+    row_offsets = torch.tensor([0, 2, 2, 5], device=device, dtype=torch.long)
+    source_indices = torch.tensor([0, 4, 1, 2, 4], device=device, dtype=torch.long)
+    pair_bias = torch.randn(5, heads, device=device, requires_grad=True)
+    pair_multiplier = (torch.rand(5, heads, device=device) + 0.5).requires_grad_()
+    pair_prior = (torch.rand(5, device=device) + 0.2).requires_grad_()
+    fused = fused_qe_reader(
+        query,
+        key,
+        value,
+        pair_bias,
+        pair_prior,
+        score_multiplier=pair_multiplier,
+        mode="csr",
+        row_offsets=row_offsets,
+        source_indices=source_indices,
+    )
+    reference = qe_reader_reference(
+        query,
+        key,
+        value,
+        pair_bias,
+        pair_prior,
+        score_multiplier=pair_multiplier,
+        mode="csr",
+        row_offsets=row_offsets,
+        source_indices=source_indices,
+    )
+    torch.testing.assert_close(fused, reference, rtol=4e-5, atol=4e-5)
+    probe = torch.randn_like(fused)
+    inputs = (query, key, value, pair_bias, pair_prior, pair_multiplier)
+    fused_gradients = torch.autograd.grad((fused * probe).sum(), inputs, retain_graph=True)
+    reference_gradients = torch.autograd.grad((reference * probe).sum(), inputs)
+    for fused_gradient, reference_gradient in zip(fused_gradients, reference_gradients, strict=True):
+        torch.testing.assert_close(fused_gradient, reference_gradient, rtol=6e-4, atol=6e-4)
+        assert torch.isfinite(fused_gradient).all()
 
 
 @cuda_qe

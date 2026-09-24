@@ -687,6 +687,103 @@ class GroupControlPairwiseField(DensePairwiseField):
             )
             yield rho, moment
 
+    def _pair_module_moment(
+        self,
+        state: dict[str, Any],
+        alpha: torch.Tensor,
+        batch_index: torch.Tensor,
+        query_index: torch.Tensor,
+        source_index: torch.Tensor,
+        *,
+        overlap: torch.Tensor,
+        chunk_size: int = 131_072,
+    ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+        """Yield exact QM ``(rho, zeta)`` using an explicit source bank when present.
+
+        The coalesced backend stores ``B[j,k,d] = sum_r A0[j,r] h[r,d]``.
+        Contracting query density with B preserves the virtual constituent
+        moment; reconstructing it from quotient membership and mean controls
+        would not.
+        """
+
+        source_moment = state.get("module_control_bank_source_moment")
+        if state.get("coalescence_plan") is not None:
+            if not torch.is_tensor(source_moment):
+                raise RuntimeError("coalesced QM requires its source-resolved B bank.")
+            total = int(batch_index.shape[0])
+            for start in range(0, total, int(chunk_size)):
+                stop = min(start + int(chunk_size), total)
+                batches = batch_index[start:stop]
+                queries = query_index[start:stop]
+                sources = source_index[start:stop]
+                alpha_pair = alpha[batches, queries]
+                moment_pair = source_moment[batches, sources]
+                rho = overlap[batches, queries, sources]
+                moment = torch.einsum("pk,pkd->pd", alpha_pair, moment_pair)
+                yield rho, moment
+            return
+
+        controls: PreparedGroupControl = state["group_control_state"]
+        yield from self._pair_controls(
+            alpha,
+            controls.module_membership,
+            controls.group_control,
+            batch_index,
+            query_index,
+            source_index,
+            overlap=overlap,
+            chunk_size=chunk_size,
+        )
+
+    def _pair_environment_head_moment(
+        self,
+        state: dict[str, Any],
+        alpha: torch.Tensor,
+        batch_index: torch.Tensor,
+        query_index: torch.Tensor,
+        source_index: torch.Tensor,
+        *,
+        overlap: torch.Tensor,
+        chunk_size: int = 131_072,
+    ) -> Iterator[tuple[torch.Tensor, torch.Tensor]]:
+        """Yield exact QE ``(rho, zeta)`` from the source-resolved head bank."""
+
+        if state.get("coalescence_plan") is not None:
+            source_control = state.get("environment_head_source_control")
+            if not torch.is_tensor(source_control):
+                raise RuntimeError("coalesced QE requires its source-resolved head bank.")
+            groups = int(source_control.shape[1])
+            group_index = torch.arange(groups, device=alpha.device)
+            total = int(batch_index.shape[0])
+            for start in range(0, total, int(chunk_size)):
+                stop = min(start + int(chunk_size), total)
+                batches = batch_index[start:stop]
+                queries = query_index[start:stop]
+                sources = source_index[start:stop]
+                alpha_pair = alpha[batches, queries]
+                head_pair = source_control[
+                    batches[:, None],
+                    group_index[None, :],
+                    sources[:, None],
+                    :,
+                ]
+                rho = overlap[batches, queries, sources]
+                zeta = torch.einsum("pk,pkh->ph", alpha_pair, head_pair)
+                yield rho, zeta
+            return
+
+        controls: PreparedGroupControl = state["group_control_state"]
+        yield from self._pair_head_controls(
+            alpha,
+            controls.environment_membership,
+            state["environment_head_control"],
+            batch_index,
+            query_index,
+            source_index,
+            overlap=overlap,
+            chunk_size=chunk_size,
+        )
+
     def _environment_control_tile(
         self,
         state: dict[str, Any],
@@ -961,10 +1058,9 @@ class GroupControlPairwiseField(DensePairwiseField):
             stop = min(start + self.source_tile_size * self.query_tile_size, int(pair.shape[0]))
             batches, queries, sources = pair[start:stop].unbind(dim=1)
             pair_rho, pair_moment = next(
-                self._pair_controls(
+                self._pair_module_moment(
+                    state,
                     route.assignment,
-                    state["group_control_state"].module_membership,
-                    state["group_control_state"].group_control,
                     batches,
                     queries,
                     sources,
@@ -1002,14 +1098,22 @@ class GroupControlPairwiseField(DensePairwiseField):
     ) -> tuple[bool, torch.Tensor | None, Any]:
         """Return rectangular/selected choice while preserving Run-1406 policy."""
 
-        del state, route
+        del route
+        if self.executor_policy == "fused_unique_pairs":
+            # The parent benchmark isolates QE with its established
+            # rectangular QM path.  Coalesced candidates select QM only when
+            # the explicit source-resolved B bank is present.
+            return state.get("coalescence_plan") is None, None, None
+        if self.executor_policy in {
+            "rectangular_reference",
+            "unique_pairs",
+        } or self.diagnostic_executor_independent:
+            return True, None, None
         controls_complete = self._complete_support(
             overlap,
             source_measure,
             require_all_sources=True,
         )
-        if self.executor_policy == "rectangular_reference" or self.diagnostic_executor_independent:
-            return True, None, None
         complete = controls_complete if include_diagnostics else True
         return complete, None, None
 
@@ -1380,7 +1484,6 @@ class GroupControlPairwiseField(DensePairwiseField):
         query = self.env_attention.project_query(self.env_query(receiver_features))
         keys = state["environment_keys"]
         values = state["environment_values"]
-        controls: PreparedGroupControl = state["group_control_state"]
         context = receivers.new_zeros(batch, query_count, self.hidden_dim)
         overlap_mass = receivers.new_zeros(batch, query_count)
         for query_start in range(0, query_count, self.query_tile_size):
@@ -1405,10 +1508,9 @@ class GroupControlPairwiseField(DensePairwiseField):
                 continue
             pair_batch, pair_query, pair_source = pair.unbind(dim=1)
             pair_rho, pair_zeta = next(
-                self._pair_head_controls(
+                self._pair_environment_head_moment(
+                    state,
                     route.assignment,
-                    controls.environment_membership,
-                    state["environment_head_control"],
                     pair_batch,
                     pair_query + query_start,
                     pair_source,
@@ -1480,6 +1582,96 @@ class GroupControlPairwiseField(DensePairwiseField):
             )
         return context, overlap_mass
 
+    def _read_environment_fused_unique_pairs(
+        self,
+        state: dict[str, Any],
+        encoded: EncodedInterfaceCase,
+        receivers: torch.Tensor,
+        receiver_features: torch.Tensor,
+        route: GroupQueryRoute,
+        overlap: torch.Tensor,
+        *,
+        source_measure: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fused CSR QE read over each supported physical pair exactly once.
+
+        This optional reader keeps query-key projections as source/query banks,
+        evaluates geometry only on the unique support list, and passes the
+        source-resolved head moment bank directly to the CSR primitive.  It
+        never reconstructs the moment from a merged membership and a pooled
+        group control.
+        """
+
+        from .kernels.qe_triton import fused_qe_reader
+
+        batch, query_count, _ = receivers.shape
+        query = self.env_attention.project_query(self.env_query(receiver_features))
+        pair = torch.nonzero(
+            (overlap > 0.0) & (source_measure[:, None, :] > 0.0),
+            as_tuple=False,
+        )
+        pair_batch, pair_query, pair_source = pair.unbind(dim=1)
+        pair_rho = overlap[pair_batch, pair_query, pair_source]
+        pair_prior = source_measure[pair_batch, pair_source] * pair_rho
+
+        head_source_control = state["environment_head_source_control"]
+        alpha_pair = route.assignment[pair_batch, pair_query]
+        source_moment_pair = head_source_control[
+            pair_batch[:, None],
+            torch.arange(
+                int(head_source_control.shape[1]),
+                device=receivers.device,
+            )[None, :],
+            pair_source[:, None],
+            :,
+        ]
+        pair_zeta = torch.einsum("ik,ikh->ih", alpha_pair, source_moment_pair)
+        score_multiplier = 1.0 + torch.tanh(pair_zeta)
+
+        scale = encoded.coordinate_scale
+        if scale.ndim == 1:
+            scale = scale[None, :]
+        elif scale.ndim == 3:
+            scale = scale[:, 0, :]
+        if int(scale.shape[0]) == 1 and batch != 1:
+            scale = scale.expand(batch, -1)
+        relative = (
+            receivers[pair_batch, pair_query] - encoded.env_coords[pair_batch, pair_source]
+        ) / scale[pair_batch]
+        geometry_bias = self._mlp(
+            self.env_geometry_bias,
+            self.relative_fourier(relative),
+        )
+
+        flat_query = pair_batch * query_count + pair_query
+        row_counts = torch.bincount(flat_query, minlength=batch * query_count)
+        row_offsets = torch.cat(
+            (
+                torch.zeros(1, device=receivers.device, dtype=torch.long),
+                row_counts.cumsum(dim=0),
+            )
+        )
+        head_response = fused_qe_reader(
+            query,
+            state["environment_keys"],
+            state["environment_values"],
+            geometry_bias,
+            pair_prior,
+            score_multiplier=score_multiplier,
+            mode="csr",
+            row_offsets=row_offsets,
+            source_indices=pair_source,
+        )
+        response = head_response.transpose(1, 2).reshape(
+            batch,
+            query_count,
+            self.hidden_dim,
+        )
+        response = self.env_attention.output(response)
+        overlap_mass = (source_measure[:, None, :] * overlap).sum(dim=-1)
+        context = float(self.group_count) * overlap_mass[..., None] * response
+        return context, overlap_mass
+
     def _read_environment(
         self,
         state: dict[str, Any],
@@ -1493,15 +1685,20 @@ class GroupControlPairwiseField(DensePairwiseField):
         controls: PreparedGroupControl = state["group_control_state"]
         overlap = self._overlap(route.assignment, controls.environment_membership)
         if self.executor_policy == "support_blocks":
-            context, overlap_mass = self._read_environment_support_blocks(
-                state,
-                encoded,
-                receivers,
-                receiver_features,
-                route,
-                source_measure=controls.environment_measure,
-            )
             complete = False
+        elif self.executor_policy == "unique_pairs":
+            # Explicit evaluation-only mode: execute the existing unique
+            # (query, source) Torch reader even when maps are disabled.  The
+            # default diagnostic-support policy keeps its historical maps-on
+            # selection behavior below.
+            complete = False
+        elif self.executor_policy == "fused_unique_pairs":
+            from .kernels.qe_triton import is_triton_qe_available
+
+            # Unsupported hosts retain the maintained exact rectangular
+            # operator. The selected path is opt-in and never silently changes
+            # numerical precision or falls back to the gathered Torch reader.
+            complete = not is_triton_qe_available(receivers.device)
         elif (
             self.executor_policy == "rectangular_reference"
             or self.diagnostic_executor_independent
@@ -1513,7 +1710,27 @@ class GroupControlPairwiseField(DensePairwiseField):
                 if include_diagnostics
                 else True
             )
-        if complete:
+
+        if self.executor_policy == "support_blocks":
+            context, overlap_mass = self._read_environment_support_blocks(
+                state,
+                encoded,
+                receivers,
+                receiver_features,
+                route,
+                source_measure=controls.environment_measure,
+            )
+        elif self.executor_policy == "fused_unique_pairs" and not complete:
+            context, overlap_mass = self._read_environment_fused_unique_pairs(
+                state,
+                encoded,
+                receivers,
+                receiver_features,
+                route,
+                overlap,
+                source_measure=controls.environment_measure,
+            )
+        elif complete:
             if self._checkpoint_active():
                 # The complete QE calculation materializes the score-control,
                 # score, geometry, support-mask, softmax, and renormalization

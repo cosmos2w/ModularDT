@@ -25,6 +25,13 @@ HONF_Proj/HONF_Forward_Upgrade_Codex_Goal_Plan.md
 /HONF_Proj/diagnostics/
 /HONF_Proj/UpgradePlan/
 /HONF_Proj/Trained_Results/
+/HONF_Proj/docs/reports/run1503_v3_organizer_diagnostics/
+/HONF_Proj/tools/diagnostics/render_run1505_*.py
+/HONF_Proj/tools/diagnostics/run_dense1804_shared_chunk_benchmark.py
+/HONF_Proj/tools/diagnostics/run_run1502_executor_benchmark.py
+/HONF_Proj/tools/diagnostics/run_run1503_v2_*.py
+/HONF_Proj/tools/diagnostics/run_run1503_v3_*.py
+/HONF_Proj/tools/diagnostics/run_run1505_v3_*.py
 /HONF_Proj/ModelCompare.md
 /HONF_Proj/CHANGELOG.md
 /HONF_Proj/VALIDATION.md

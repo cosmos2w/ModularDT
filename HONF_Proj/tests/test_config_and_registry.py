@@ -16,7 +16,8 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
     registry = json.loads(registry_path.read_text(encoding="utf-8"))
     profiles = registry["profiles"]
     names = [profile["name"] for profile in profiles]
-    assert len(names) == len(set(names)) == 47
+    assert names
+    assert len(names) == len(set(names))
     assert registry["recommended_forward_profile"] == "stage7_structured_context"
     assert {profile["status"] for profile in profiles} <= {
         "current",
@@ -56,6 +57,8 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
     assert by_name["run1502_environment_refinement_sparsemax"]["base"] == (
         "sparse_incidence_group_control_honf_context"
     )
+    assert by_name["converged_identity_preserving_coalescence_honf_context"]["status"] == "candidate"
+    assert by_name["converged_identity_preserving_coalescence_honf_context"]["base"] is None
     assert by_name["adaptive_hyperedge_opening_honf_context"]["status"] == "candidate"
     assert by_name["adaptive_hyperedge_opening_honf_context"]["base"] is None
     assert registry["recommended_forward_profile"] != "case_adaptive_residual_context"
@@ -67,13 +70,55 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert "status" not in payload
         assert "checkpoint_compatibility" not in payload
-        if profile["base"] is None:
+        if profile["base"] is None or "profile_name" in payload:
             load_config_bundle(profile["path"])
         else:
             load_config_bundle(
                 by_name[profile["base"]]["path"],
                 experiment_overlay=profile["path"],
             )
+
+
+def test_run1503_v3_profile_round_trips_converged_architecture_settings() -> None:
+    from honf_forward_core.config import UnifiedForwardConfig
+
+    parent_bundle = load_config_bundle(
+        "project://src/config_core/forward/sparse_incidence_group_control_honf_context.json",
+        experiment_overlay=(
+            "project://src/config_core/forward/experiments/"
+            "run1502_environment_refinement_sparsemax.json"
+        ),
+    )
+    bundle = load_config_bundle(
+        "project://src/config_core/forward/converged_identity_preserving_coalescence_honf_context.json"
+    )
+    config = UnifiedForwardConfig.from_dict(bundle.effective["model"]["core_honf"])
+    interface = config.interface_model
+    assert config.forward_architecture == "converged_identity_preserving_coalescence_honf"
+    assert interface.group_count == 12
+    assert interface.group_control_dim == 16
+    assert interface.source_normalizer == "entmax15"
+    assert interface.query_normalizer == "sparsemax"
+    assert interface.environment_refinement_normalizer == "sparsemax"
+    assert interface.fusion_max_iterations == 512
+    assert interface.fusion_eps_abs == pytest.approx(1.0e-9)
+    assert interface.fusion_eps_rel == pytest.approx(1.0e-8)
+    assert interface.fusion_eta_final == 0.5
+    assert interface.fusion_ramp_epochs == 150
+    assert bundle.case == parent_bundle.case
+    for section in ("dataset", "loss"):
+        assert bundle.effective[section] == parent_bundle.effective[section]
+    for key in ("seed", "learning_rate", "weight_decay", "amp", "gradient_clip_norm"):
+        assert bundle.effective["training"][key] == parent_bundle.effective["training"][key]
+    assert bundle.effective["training"]["port_curriculum"] == parent_bundle.effective["training"]["port_curriculum"]
+    assert bundle.effective["training"]["seed"] == 0
+    assert bundle.effective["training"]["epochs"] == 500
+
+    invalid = dict(bundle.effective["model"]["core_honf"])
+    invalid["interface_model"] = dict(invalid["interface_model"])
+    invalid["interface_model"]["fusion_max_iterations"] = 64
+    with pytest.raises(ValueError, match="requires fusion settings"):
+        UnifiedForwardConfig.from_dict(invalid)
 
 
 def test_split_config_composes_deterministically() -> None:

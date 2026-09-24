@@ -467,6 +467,26 @@
       "stage": "run1502-environment-refinement"
     },
     {
+      "name": "coalesced_sparse_incidence_honf_context",
+      "path": "project://src/config_core/forward/coalesced_sparse_incidence_honf_context.json",
+      "status": "candidate",
+      "base": "run1502_environment_refinement_sparsemax",
+      "mode": "1503-v2 reversible case-conditioned query-access coalescence / multiplicity-correct sparsemax quotient / source-resolved control moments",
+      "checkpoint_families": ["Run 1503-v2 reversible edge coalescence"],
+      "owner": "forward-research",
+      "stage": "run1503-v2-reversible-edge-coalescence"
+    },
+    {
+      "name": "converged_identity_preserving_coalescence_honf_context",
+      "path": "project://src/config_core/forward/converged_identity_preserving_coalescence_honf_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "Run 1503-v3 converged reversible coalescence / exact singleton parent path / incidence-derived merged coordinates / K=12 and D=16 / eps_abs=1e-9 eps_rel=1e-8 / eta=0.5 ramp=150 / rectangular training reader",
+      "checkpoint_families": ["Run 1503-v3 converged identity-preserving coalescence"],
+      "owner": "forward-research",
+      "stage": "run1503-v3-converged-identity-preserving-coalescence"
+    },
+    {
       "name": "adaptive_hyperedge_opening_honf_context",
       "path": "project://src/config_core/forward/adaptive_hyperedge_opening_honf_context.json",
       "status": "candidate",

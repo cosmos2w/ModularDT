@@ -148,7 +148,7 @@ def _merge_group_control_maps(chunks):
         key
         for entry, _ in chunks
         for key in entry
-        if key.startswith("group_control_")
+        if key.startswith(("group_control_", "coalescence_"))
     }
     for key in keys:
         values_and_widths = [
@@ -160,6 +160,24 @@ def _merge_group_control_maps(chunks):
             continue
         values = [value for value, _ in values_and_widths]
         first = values[0]
+        if key.startswith("coalescence_"):
+            if key in {
+                "coalescence_query_mass",
+                "coalescence_query_density",
+                "coalescence_query_logits",
+                "coalescence_query_kq",
+                "coalescence_virtual_constituent_support",
+            }:
+                merged[key] = torch.cat(values, dim=1)
+            elif first.ndim == 0 and key.endswith(
+                ("_pairs", "_rows", "_calls", "_work", "_forward", "_recompute")
+            ):
+                merged[key] = torch.stack(values).sum()
+            else:
+                # Prepared topology, multiplicity, banks, solver diagnostics,
+                # and case summaries repeat for every receiver tile.
+                merged[key] = first
+            continue
         if key in {
             "group_control_adaptive_environment_mass",
             "group_control_adaptive_environment_centroids",
@@ -330,6 +348,8 @@ class InterfaceFieldCore(nn.Module):
             "occupancy_adaptive_group_control_honf",
             "mass_competitive_group_control_honf",
             "sparse_incidence_group_control_honf",
+            "coalesced_sparse_incidence_honf",
+            "converged_identity_preserving_coalescence_honf",
             "adaptive_hyperedge_opening_honf",
         }:
             # Run 1405/1406 deliberately replace the historical coarse/local
@@ -597,6 +617,54 @@ class InterfaceFieldCore(nn.Module):
                     options.environment_refinement_normalizer
                 ),
             )
+        elif config.forward_architecture == "coalesced_sparse_incidence_honf":
+            from .coalesced_sparse_incidence import CoalescedSparseIncidencePairwiseField
+
+            self.backend = CoalescedSparseIncidencePairwiseField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                group_count=int(options.group_count),
+                group_control_dim=int(options.group_control_dim),
+                spatial_dim=int(config.spatial_dim),
+                module_temperature=float(options.module_temperature),
+                environment_temperature=float(options.environment_temperature),
+                query_temperature=float(options.query_temperature),
+                activation_checkpointing=bool(options.activation_checkpointing),
+                environment_refinement_normalizer=str(
+                    options.environment_refinement_normalizer
+                ),
+                fusion_max_iterations=int(options.fusion_max_iterations),
+                fusion_eta_final=float(options.fusion_eta_final),
+                fusion_ramp_epochs=int(options.fusion_ramp_epochs),
+            )
+        elif config.forward_architecture == "converged_identity_preserving_coalescence_honf":
+            from .coalesced_sparse_incidence import (
+                ConvergedIdentityPreservingCoalescencePairwiseField,
+            )
+
+            self.backend = ConvergedIdentityPreservingCoalescencePairwiseField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                group_count=int(options.group_count),
+                group_control_dim=int(options.group_control_dim),
+                spatial_dim=int(config.spatial_dim),
+                module_temperature=float(options.module_temperature),
+                environment_temperature=float(options.environment_temperature),
+                query_temperature=float(options.query_temperature),
+                activation_checkpointing=bool(options.activation_checkpointing),
+                environment_refinement_normalizer=str(
+                    options.environment_refinement_normalizer
+                ),
+                fusion_max_iterations=int(options.fusion_max_iterations),
+                fusion_eta_final=float(options.fusion_eta_final),
+                fusion_ramp_epochs=int(options.fusion_ramp_epochs),
+                fusion_eps_abs=float(options.fusion_eps_abs),
+                fusion_eps_rel=float(options.fusion_eps_rel),
+            )
         elif config.forward_architecture == "adaptive_hyperedge_opening_honf":
             from .adaptive_hyperedge_opening import AdaptiveHyperedgeOpeningPairwiseField
 
@@ -627,13 +695,21 @@ class InterfaceFieldCore(nn.Module):
         return len(self.routing_log_temperatures) == len(ROUTING_TYPED_TEMPERATURE_NAMES)
 
     def set_training_progress(self, *, epoch: int, total_epochs: int | None = None) -> None:
-        if self.config.forward_architecture == "budgeted_group_control_honf":
+        if self.config.forward_architecture in {
+            "budgeted_group_control_honf",
+            "coalesced_sparse_incidence_honf",
+            "converged_identity_preserving_coalescence_honf",
+        }:
             setter = getattr(self.backend, "set_training_progress", None)
             if callable(setter):
                 setter(epoch=epoch, total_epochs=total_epochs)
 
     def selection_state(self) -> dict[str, int | None]:
-        if self.config.forward_architecture == "budgeted_group_control_honf":
+        if self.config.forward_architecture in {
+            "budgeted_group_control_honf",
+            "coalesced_sparse_incidence_honf",
+            "converged_identity_preserving_coalescence_honf",
+        }:
             getter = getattr(self.backend, "selection_state", None)
             if callable(getter):
                 return dict(getter())
@@ -828,6 +904,8 @@ class InterfaceFieldCore(nn.Module):
                     "occupancy_adaptive_group_control_honf",
                     "mass_competitive_group_control_honf",
                     "sparse_incidence_group_control_honf",
+                    "coalesced_sparse_incidence_honf",
+                    "converged_identity_preserving_coalescence_honf",
                     "adaptive_hyperedge_opening_honf",
                 }
                 else int(self.config.interface_model.coarse_latent_count)
@@ -847,6 +925,8 @@ class InterfaceFieldCore(nn.Module):
             "occupancy_adaptive_group_control_honf",
             "mass_competitive_group_control_honf",
             "sparse_incidence_group_control_honf",
+            "coalesced_sparse_incidence_honf",
+            "converged_identity_preserving_coalescence_honf",
             "adaptive_hyperedge_opening_honf",
         }:
             aux.update(

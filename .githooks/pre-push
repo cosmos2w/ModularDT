@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Reject local-only diagnostics and generated artifacts in outgoing history."""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import sys
+from pathlib import PurePosixPath
+
+
+ZERO = "0" * 40
+GENERATED_SUFFIXES = {
+    ".csv",
+    ".feather",
+    ".h5",
+    ".hdf5",
+    ".log",
+    ".npy",
+    ".npz",
+    ".parquet",
+    ".pdf",
+    ".png",
+    ".pt",
+    ".pth",
+    ".svg",
+}
+RUN_DIAGNOSTIC = re.compile(
+    r"^HONF_Proj/tools/diagnostics/(?:run_run\d|render_run\d|run_dense\d)[^/]*\.py$"
+)
+
+
+def forbidden(path: str) -> bool:
+    if path.startswith("HONF_Proj/diagnostics/generated/"):
+        return True
+    if path.startswith("HONF_Proj/docs/reports/run1503_v3_organizer_diagnostics/"):
+        return True
+    if "/generated/" in path or "/figures/" in path:
+        return True
+    if path.startswith("HONF_Proj/docs/reports/") and path.endswith(".json"):
+        return True
+    return bool(RUN_DIAGNOSTIC.fullmatch(path)) or PurePosixPath(path).suffix.lower() in GENERATED_SUFFIXES
+
+
+def outgoing_paths(local_oid: str, remote_oid: str) -> list[str]:
+    if remote_oid == ZERO:
+        args = ["git", "rev-list", "--objects", local_oid, "--not", "--remotes"]
+    else:
+        args = ["git", "rev-list", "--objects", f"{remote_oid}..{local_oid}"]
+    result = subprocess.run(args, check=True, capture_output=True, text=True)
+    return [line.partition(" ")[2] for line in result.stdout.splitlines() if " " in line]
+
+
+def main() -> int:
+    rejected: set[str] = set()
+    for line in sys.stdin:
+        fields = line.split()
+        if len(fields) != 4:
+            print(f"pre-push: unexpected ref update: {line.rstrip()}", file=sys.stderr)
+            return 1
+        _, local_oid, _, remote_oid = fields
+        if local_oid == ZERO:
+            continue
+        try:
+            rejected.update(path for path in outgoing_paths(local_oid, remote_oid) if forbidden(path))
+        except subprocess.CalledProcessError as exc:
+            print(f"pre-push: cannot audit outgoing objects: {exc}", file=sys.stderr)
+            return 1
+    if rejected:
+        print("pre-push: local-only or generated paths occur in outgoing commits:", file=sys.stderr)
+        for path in sorted(rejected):
+            print(f"  {path}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

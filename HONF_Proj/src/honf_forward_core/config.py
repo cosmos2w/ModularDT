@@ -100,6 +100,8 @@ FORWARD_ARCHITECTURES = {
     "occupancy_adaptive_group_control_honf",
     "mass_competitive_group_control_honf",
     "sparse_incidence_group_control_honf",
+    "coalesced_sparse_incidence_honf",
+    "converged_identity_preserving_coalescence_honf",
     "adaptive_hyperedge_opening_honf",
 }
 
@@ -398,6 +400,13 @@ class InterfaceFieldConfig:
     # this only to the final environmental refinement; all proposal/module
     # assignments and query routing keep their historical normalizers.
     environment_refinement_normalizer: str = "entmax15"
+    # Run 1503 reversible fusion settings are serialized only by the
+    # coalescence architectures that consume them.
+    fusion_max_iterations: int = 64
+    fusion_eta_final: float = 0.5
+    fusion_ramp_epochs: int = 150
+    fusion_eps_abs: float = 1.0e-9
+    fusion_eps_rel: float = 1.0e-8
 
     def __post_init__(self) -> None:
         if isinstance(self.routing, dict):
@@ -481,6 +490,26 @@ class InterfaceFieldConfig:
                 "interface_model.environment_refinement_normalizer must be "
                 "'entmax15' or 'sparsemax'."
             )
+        if (
+            isinstance(self.fusion_max_iterations, bool)
+            or not isinstance(self.fusion_max_iterations, int)
+            or self.fusion_max_iterations <= 0
+        ):
+            raise ValueError("interface_model.fusion_max_iterations must be a positive integer.")
+        if not math.isfinite(float(self.fusion_eta_final)) or float(self.fusion_eta_final) <= 0.0:
+            raise ValueError("interface_model.fusion_eta_final must be finite and positive.")
+        if (
+            isinstance(self.fusion_ramp_epochs, bool)
+            or not isinstance(self.fusion_ramp_epochs, int)
+            or self.fusion_ramp_epochs <= 0
+        ):
+            raise ValueError("interface_model.fusion_ramp_epochs must be a positive integer.")
+        for name in ("fusion_eps_abs", "fusion_eps_rel"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(
+                    f"interface_model.{name} must be finite and nonnegative."
+                )
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any] | None) -> "InterfaceFieldConfig":
@@ -652,6 +681,8 @@ class UnifiedForwardConfig:
             "occupancy_adaptive_group_control_honf",
             "mass_competitive_group_control_honf",
             "sparse_incidence_group_control_honf",
+            "coalesced_sparse_incidence_honf",
+            "converged_identity_preserving_coalescence_honf",
             "adaptive_hyperedge_opening_honf",
         }:
             controlled = self.interface_model
@@ -667,6 +698,8 @@ class UnifiedForwardConfig:
                 "sparsemax"
                 if self.forward_architecture in {
                     "sparse_incidence_group_control_honf",
+                    "coalesced_sparse_incidence_honf",
+                    "converged_identity_preserving_coalescence_honf",
                     "adaptive_hyperedge_opening_honf",
                 }
                 else "entmax15"
@@ -711,6 +744,8 @@ class UnifiedForwardConfig:
                 "occupancy_adaptive_group_control_honf",
                 "mass_competitive_group_control_honf",
                 "sparse_incidence_group_control_honf",
+                "coalesced_sparse_incidence_honf",
+                "converged_identity_preserving_coalescence_honf",
                 "adaptive_hyperedge_opening_honf",
             }:
                 if controlled.case_group_budget is not None:
@@ -725,14 +760,56 @@ class UnifiedForwardConfig:
                     raise ValueError(
                         f"{self.forward_architecture} requires interface_model.group_control_dim exactly 16."
                     )
-            if self.forward_architecture == "adaptive_hyperedge_opening_honf":
+            if self.forward_architecture in {
+                "adaptive_hyperedge_opening_honf",
+                "coalesced_sparse_incidence_honf",
+                "converged_identity_preserving_coalescence_honf",
+            }:
                 if controlled.environment_refinement_normalizer != "sparsemax":
                     raise ValueError(
-                        "adaptive_hyperedge_opening_honf requires "
+                        f"{self.forward_architecture} requires "
                         "interface_model.environment_refinement_normalizer='sparsemax'."
                     )
+            if self.forward_architecture == "coalesced_sparse_incidence_honf":
+                expected_fusion_settings = {
+                    "fusion_max_iterations": 64,
+                    "fusion_eta_final": 0.5,
+                    "fusion_ramp_epochs": 150,
+                }
+                actual_fusion_settings = {
+                    name: getattr(controlled, name)
+                    for name in expected_fusion_settings
+                }
+                if actual_fusion_settings != expected_fusion_settings:
+                    raise ValueError(
+                        "coalesced_sparse_incidence_honf requires the prescribed "
+                        "fusion settings: max_iterations=64, eta_final=0.5, "
+                        "ramp_epochs=150."
+                    )
+            elif self.forward_architecture == "converged_identity_preserving_coalescence_honf":
+                expected_fusion_settings = {
+                    "fusion_max_iterations": 512,
+                    "fusion_eta_final": 0.5,
+                    "fusion_ramp_epochs": 150,
+                    "fusion_eps_abs": 1.0e-9,
+                    "fusion_eps_rel": 1.0e-8,
+                }
+                actual_fusion_settings = {
+                    name: getattr(controlled, name)
+                    for name in expected_fusion_settings
+                }
+                if actual_fusion_settings != expected_fusion_settings:
+                    raise ValueError(
+                        "converged_identity_preserving_coalescence_honf requires "
+                        "fusion settings: max_iterations=512, eps_abs=1e-9, "
+                        "eps_rel=1e-8, eta_final=0.5, ramp_epochs=150."
+                    )
             elif (
-                self.forward_architecture != "sparse_incidence_group_control_honf"
+                self.forward_architecture not in {
+                    "sparse_incidence_group_control_honf",
+                    "coalesced_sparse_incidence_honf",
+                    "converged_identity_preserving_coalescence_honf",
+                }
                 and controlled.environment_refinement_normalizer != "entmax15"
             ):
                 raise ValueError(
@@ -770,6 +847,8 @@ class UnifiedForwardConfig:
             self.interface_model is not None
             and self.forward_architecture not in {
                 "sparse_incidence_group_control_honf",
+                "coalesced_sparse_incidence_honf",
+                "converged_identity_preserving_coalescence_honf",
                 "adaptive_hyperedge_opening_honf",
             }
             and self.interface_model.environment_refinement_normalizer != "entmax15"
@@ -1147,6 +1226,8 @@ class UnifiedForwardConfig:
             if isinstance(interface_payload, dict):
                 if self.forward_architecture not in {
                     "sparse_incidence_group_control_honf",
+                    "coalesced_sparse_incidence_honf",
+                    "converged_identity_preserving_coalescence_honf",
                     "adaptive_hyperedge_opening_honf",
                 }:
                     # The Run-1502 hook is not part of any historical
@@ -1156,6 +1237,19 @@ class UnifiedForwardConfig:
                     # Preserve the historical Run-1501/checkpoint shape when
                     # the new hook is at its default value.
                     interface_payload.pop("environment_refinement_normalizer", None)
+                if self.forward_architecture not in {
+                    "coalesced_sparse_incidence_honf",
+                    "converged_identity_preserving_coalescence_honf",
+                }:
+                    interface_payload.pop("fusion_max_iterations", None)
+                    interface_payload.pop("fusion_eta_final", None)
+                    interface_payload.pop("fusion_ramp_epochs", None)
+                if (
+                    self.forward_architecture
+                    != "converged_identity_preserving_coalescence_honf"
+                ):
+                    interface_payload.pop("fusion_eps_abs", None)
+                    interface_payload.pop("fusion_eps_rel", None)
                 budget_payload = interface_payload.get("case_group_budget")
                 if (
                     self.forward_architecture == "budgeted_group_control_honf"
@@ -1227,8 +1321,10 @@ class UnifiedForwardConfig:
                 "budgeted_group_control_honf",
                 "occupancy_adaptive_group_control_honf",
                 "mass_competitive_group_control_honf",
-                "sparse_incidence_group_control_honf",
-                "adaptive_hyperedge_opening_honf",
+                    "sparse_incidence_group_control_honf",
+                    "coalesced_sparse_incidence_honf",
+                    "converged_identity_preserving_coalescence_honf",
+                    "adaptive_hyperedge_opening_honf",
                 }:
                     for key in (
                         "group_count",

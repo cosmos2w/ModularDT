@@ -6,10 +6,12 @@ import copy
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 import torch
 
 from honf_forward_core.config import UnifiedForwardConfig
 from honf_forward_core.interface_fields import InterfaceFieldCore
+from honf_forward_core.interface_fields.kernels.qe_triton import is_triton_qe_available
 from honf_forward_core.interface_fields.support_block_reader import (
     observed_support_blocks,
     pack_positive_support,
@@ -153,6 +155,176 @@ def test_support_blocks_match_rectangular_forward_on_mixed_batch() -> None:
     assert actual.interaction_aux["group_control_module_fine_rows"].item() < expected.interaction_aux[
         "group_control_module_fine_rows"
     ].item()
+
+
+def test_environment_executor_dispatch_executes_one_real_reader(monkeypatch) -> None:
+    batch, _reference, _prepared, selected, prepared = _prepared_pair(
+        seed=1501015,
+        queries=7,
+    )
+    state = prepared.backend_state
+    encoded = prepared.encoded
+    receivers = batch.query_xy
+    receiver_features = selected._receiver_features(prepared, receivers)
+    route = selected.backend._route(
+        state,
+        encoded,
+        receivers,
+        receiver_features,
+    )
+
+    calls = {"support_blocks": 0, "rectangular": 0, "partial": 0}
+    methods = {
+        "support_blocks": "_read_environment_support_blocks",
+        "rectangular": "_read_environment_rectangular",
+        "partial": "_read_environment_partial",
+    }
+    for label, method_name in methods.items():
+        original = getattr(selected.backend, method_name)
+
+        def counted(*args, _label=label, _original=original, **kwargs):
+            calls[_label] += 1
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(selected.backend, method_name, counted)
+
+    backend = selected.backend
+    backend.executor_policy = "support_blocks"
+    backend.diagnostic_executor_independent = False
+    with torch.no_grad():
+        block_context, block_aux = backend._read_environment(
+            state,
+            encoded,
+            receivers,
+            receiver_features,
+            route,
+            include_diagnostics=False,
+        )
+    assert calls == {"support_blocks": 1, "rectangular": 0, "partial": 0}
+
+    backend.executor_policy = "unique_pairs"
+    with torch.no_grad():
+        selected_context, selected_aux = backend._read_environment(
+            state,
+            encoded,
+            receivers,
+            receiver_features,
+            route,
+            include_diagnostics=False,
+        )
+    assert calls == {"support_blocks": 1, "rectangular": 0, "partial": 1}
+
+    backend.executor_policy = "rectangular_reference"
+    with torch.no_grad():
+        rectangular_context, rectangular_aux = backend._read_environment(
+            state,
+            encoded,
+            receivers,
+            receiver_features,
+            route,
+            include_diagnostics=False,
+        )
+    assert calls == {"support_blocks": 1, "rectangular": 1, "partial": 1}
+
+    torch.testing.assert_close(block_context, rectangular_context, rtol=5.0e-5, atol=5.0e-6)
+    torch.testing.assert_close(selected_context, rectangular_context, rtol=5.0e-5, atol=5.0e-6)
+    torch.testing.assert_close(block_aux["group_control_environment_overlap_mass_per_query"],
+                               rectangular_aux["group_control_environment_overlap_mass_per_query"],
+                               rtol=1.0e-6, atol=1.0e-7)
+    torch.testing.assert_close(selected_aux["group_control_environment_overlap_mass_per_query"],
+                               rectangular_aux["group_control_environment_overlap_mass_per_query"],
+                               rtol=1.0e-6, atol=1.0e-7)
+
+
+def test_rectangular_module_policy_skips_complete_support_test(monkeypatch) -> None:
+    batch, reference, prepared, _selected, _selected_prepared = _prepared_pair(
+        seed=1501016,
+        queries=5,
+    )
+    state = prepared.backend_state
+    encoded = prepared.encoded
+    receivers = batch.query_xy
+    receiver_features = reference._receiver_features(prepared, receivers)
+    route = reference.backend._route(state, encoded, receivers, receiver_features)
+    controls = state["group_control_state"]
+    overlap = reference.backend._overlap(route.assignment, controls.module_membership)
+    reference.backend.executor_policy = "rectangular_reference"
+
+    def unexpected_support_test(*_args, **_kwargs):
+        raise AssertionError("rectangular policy should not inspect complete support")
+
+    monkeypatch.setattr(reference.backend, "_complete_support", unexpected_support_test)
+    for policy in ("rectangular_reference", "unique_pairs", "fused_unique_pairs"):
+        reference.backend.executor_policy = policy
+        assert reference.backend._module_execution_plan(
+            state,
+            route,
+            overlap,
+            source_measure=controls.module_measure,
+            include_diagnostics=True,
+        ) == (True, None, None)
+
+
+@pytest.mark.skipif(
+    not is_triton_qe_available("cuda"),
+    reason="fused unique-pair QE requires CUDA and Triton",
+)
+def test_fused_unique_pair_reader_matches_rectangular_model_and_gradients() -> None:
+    torch.manual_seed(1501017)
+    device = torch.device("cuda")
+    config = UnifiedForwardConfig.from_dict(_small_payload())
+    batch = _batch(seed=1501017, queries=7).to(device)
+    reference = InterfaceFieldCore(config).to(device).eval()
+    encoded = reference.encode_case(batch)
+    prepared = reference.prepare(encoded, encoded.module_tokens)
+    reference.read(prepared, batch.query_xy[:, :1], receiver_chunk_size=1)
+    fused = copy.deepcopy(reference)
+    fused_encoded = fused.encode_case(batch)
+    fused_prepared = fused.prepare(fused_encoded, fused_encoded.module_tokens)
+    fused.backend.executor_policy = "fused_unique_pairs"
+
+    reference_query = batch.query_xy.detach().clone().requires_grad_(True)
+    fused_query = batch.query_xy.detach().clone().requires_grad_(True)
+    reference_context = reference.read(
+        prepared,
+        reference_query,
+        receiver_chunk_size=4,
+    ).context
+    fused_context = fused.read(
+        fused_prepared,
+        fused_query,
+        receiver_chunk_size=4,
+    ).context
+    torch.testing.assert_close(fused_context, reference_context, rtol=6e-5, atol=6e-6)
+
+    def targets(model, query):
+        named = dict(model.named_parameters())
+        names = [
+            name
+            for name in named
+            if "environment_score_control.weight" in name
+            or "env_geometry_bias" in name
+            or "env_attention" in name
+        ]
+        params = [named[name] for name in names]
+        return (query, *params)
+
+    reference_targets = targets(reference, reference_query)
+    fused_targets = targets(fused, fused_query)
+    reference_gradients = torch.autograd.grad(
+        reference_context.square().mean(),
+        reference_targets,
+        allow_unused=False,
+    )
+    fused_gradients = torch.autograd.grad(
+        fused_context.square().mean(),
+        fused_targets,
+        allow_unused=False,
+    )
+    assert len(reference_gradients) == len(fused_gradients)
+    for expected, actual in zip(reference_gradients, fused_gradients, strict=True):
+        torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-4)
+        assert torch.isfinite(actual).all()
 
 
 def test_support_blocks_preserve_connected_first_gradients() -> None:
