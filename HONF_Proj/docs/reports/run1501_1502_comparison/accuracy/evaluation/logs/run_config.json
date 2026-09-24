@@ -1,0 +1,38 @@
+{
+  "output_root": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/accuracy/evaluation",
+  "dataset_path": "/data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5",
+  "split": "test",
+  "case_ratio": 1.0,
+  "case_list": null,
+  "seed": 0,
+  "checkpoint_selector": "best",
+  "local_port_condition_mode": "predicted",
+  "mixed_teacher_ratio": 0.5,
+  "return_routing_maps": true,
+  "save_debug_npz": true,
+  "debug_case_ids": [
+    "0273",
+    "0653"
+  ],
+  "skip_figures": true,
+  "anchor_case_ids": [
+    "0273",
+    "0653"
+  ],
+  "evaluation_cost_scope": "one synchronized predict_case call per matched case; excludes dataset I/O, checkpoint loading, metrics, and plotting",
+  "evaluation_cost_warmups_per_case": 0,
+  "physical_error_space": "dataset-native units per field/interface/port quantity; no mixed-unit cross-channel physical aggregate",
+  "fixed_physical_probe_definitions": {
+    "pressure_drop": "mean pressure on the 64 fixed fluid-grid coordinates at x=min(x_grid) minus the mean on the 64 fixed fluid-grid coordinates at x=max(x_grid); the difference is pressure-gauge invariant",
+    "mean_outlet_temperature": "mean temperature on the same 64 fixed fluid-grid coordinates at x=max(x_grid)",
+    "module_temperature_kpi": "mean predicted internal temperature over every sampled internal cell of every active module; stable within a fixed case, not an identity-matched KPI across different module counts"
+  },
+  "physical_stratum_definitions": {
+    "module_count": "exact active count in {3,5,7,10}",
+    "spacing": "minimum module-surface gap divided by radius: <1, 1-2.5, >=2.5",
+    "wall_proximity": "minimum module-surface wall clearance divided by radius: <1.5, 1.5-2.5, >=2.5",
+    "heating_heterogeneity": "active-module heat-power coefficient of variation: <0.25, 0.25-0.35, >=0.35"
+  },
+  "num_models": 3,
+  "num_cases": 90
+}

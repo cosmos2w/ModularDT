@@ -1,0 +1,97 @@
+{
+  "schema_version": 2,
+  "artifact_layout_version": 2,
+  "status": "completed",
+  "kind": "forward_single_case",
+  "created_at": "2026-09-24T03:21:05.359082+00:00",
+  "source_run": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1404_20260916_092508_routing_only_pairwise",
+  "requested_checkpoint": "Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1404_20260916_092508_routing_only_pairwise/best_by_field_mse_model.pt",
+  "resolved_checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1404_20260916_092508_routing_only_pairwise/best_by_field_mse_model.pt",
+  "artifacts": [
+    {
+      "path": "arrays/evaluation_outputs_predicted.npz",
+      "category": "arrays",
+      "size_bytes": 355260
+    },
+    {
+      "path": "diagnostics/hypergraph_diagnostics.json",
+      "category": "diagnostics",
+      "size_bytes": 1598
+    },
+    {
+      "path": "fields/global_field_quicklook_predicted.png",
+      "category": "fields",
+      "size_bytes": 455535
+    },
+    {
+      "path": "fields/interface_curves_predicted.png",
+      "category": "fields",
+      "size_bytes": 290441
+    },
+    {
+      "path": "fields/module_internal_temperature_predicted.png",
+      "category": "fields",
+      "size_bytes": 179543
+    },
+    {
+      "path": "metrics/metrics_predicted.csv",
+      "category": "metrics",
+      "size_bytes": 417
+    },
+    {
+      "path": "organization/organization_overview.png",
+      "category": "organization",
+      "size_bytes": 314779
+    },
+    {
+      "path": "organization/organization_schematic.png",
+      "category": "organization",
+      "size_bytes": 195874
+    },
+    {
+      "path": "organization/organization_summary_matrices.png",
+      "category": "organization",
+      "size_bytes": 315161
+    },
+    {
+      "path": "organization/organization_summary_matrices_sorted_by_dominant_edge.png",
+      "category": "organization",
+      "size_bytes": 312290
+    },
+    {
+      "path": "plans/hypergraph_plan.npz",
+      "category": "plans",
+      "size_bytes": 8407
+    },
+    {
+      "path": "plans/hypergraph_plan_summary.json",
+      "category": "plans",
+      "size_bytes": 1441
+    },
+    {
+      "path": "routing/routing_context_norms.png",
+      "category": "routing",
+      "size_bytes": 155574
+    },
+    {
+      "path": "routing/routing_dominant_edge.png",
+      "category": "routing",
+      "size_bytes": 99459
+    },
+    {
+      "path": "routing/routing_maps.npz",
+      "category": "routing",
+      "size_bytes": 412750
+    },
+    {
+      "path": "routing/routing_summary.json",
+      "category": "routing",
+      "size_bytes": 1064
+    },
+    {
+      "path": "summary.json",
+      "category": "job",
+      "size_bytes": 6318
+    }
+  ]
+}

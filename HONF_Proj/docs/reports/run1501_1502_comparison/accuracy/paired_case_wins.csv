@@ -1,0 +1,7 @@
+candidate,baseline,metric,num_cases,candidate_wins_lower,baseline_wins_lower,ties,mean_case_delta_candidate_minus_baseline,median_case_delta_candidate_minus_baseline
+Run1404,Run1804,global_field_fluid_norm_l2,90,10,80,0,0.006823090641882635,0.00763146167185451
+Run1404,Run1501,global_field_fluid_norm_l2,90,15,75,0,0.0034704583667673756,0.005537635174944582
+Run1404,Run1502,global_field_fluid_norm_l2,90,17,73,0,0.004485714616098686,0.005578582865876485
+Run1804,Run1501,global_field_fluid_norm_l2,90,69,21,0,-0.00335263227511526,-0.001623039767330912
+Run1804,Run1502,global_field_fluid_norm_l2,90,69,21,0,-0.00233737602578395,-0.0017286780128720923
+Run1501,Run1502,global_field_fluid_norm_l2,90,41,49,0,0.0010152562493313106,0.00023358137905639918

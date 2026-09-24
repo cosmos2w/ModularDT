@@ -1,0 +1,81 @@
+{
+  "schema_version": 2,
+  "keys": [
+    "A_eh",
+    "A_mh",
+    "active_hyperedge_mask",
+    "domain_length_x",
+    "domain_length_y",
+    "edge_permutation",
+    "env_coords",
+    "hyper_env_mass",
+    "hyper_module_mass",
+    "hyper_region_coords",
+    "hyper_source_coords",
+    "hyper_strength",
+    "module_count",
+    "module_present",
+    "num_env_tokens",
+    "num_hyperedges",
+    "schema_version"
+  ],
+  "shapes": {
+    "A_mh": [
+      12,
+      6
+    ],
+    "A_eh": [
+      192,
+      6
+    ],
+    "hyper_source_coords": [
+      6,
+      2
+    ],
+    "hyper_region_coords": [
+      6,
+      2
+    ],
+    "hyper_module_mass": [
+      6
+    ],
+    "hyper_env_mass": [
+      6
+    ],
+    "hyper_strength": [
+      6
+    ],
+    "active_hyperedge_mask": [
+      6
+    ],
+    "env_coords": [
+      192,
+      2
+    ],
+    "module_present": [
+      12
+    ],
+    "schema_version": [],
+    "domain_length_x": [],
+    "domain_length_y": [],
+    "num_hyperedges": [],
+    "num_env_tokens": [],
+    "module_count": [],
+    "edge_permutation": [
+      6
+    ]
+  },
+  "num_hyperedges": 6,
+  "num_env_tokens": 192,
+  "module_count": 12,
+  "active_hyperedge_count": 6,
+  "edge_permutation": [
+    0,
+    3,
+    4,
+    1,
+    2,
+    5
+  ],
+  "note": "Static canonical organizer plan. Query-dependent alpha_qk is recomputed by the HONF decoder; module tokens are recomputed from generated physical designs. A_mh preserves module slot indexing."
+}

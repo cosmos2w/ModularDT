@@ -1,0 +1,40 @@
+{
+  "num_hyperedges": 6,
+  "active_hyperedges": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "active_hyperedge_mask": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "alpha_mean_by_hyperedge": [
+    0.18871597945690155,
+    0.1782023310661316,
+    0.1643802970647812,
+    0.1740901917219162,
+    0.12479749321937561,
+    0.1698128581047058
+  ],
+  "pairwise_contribution_mean_by_hyperedge": [
+    2.777859687805176,
+    2.296933174133301,
+    2.5361580848693848,
+    2.2270989418029785,
+    2.0384440422058105,
+    2.947153091430664
+  ],
+  "c_H_norm_mean": 0.0,
+  "c_pair_norm_mean": 14.796380043029785,
+  "entropy_mean": 1.4713528156280518,
+  "note": "alpha_qk is query-dependent and is recomputed by the HONF decoder for each query grid.",
+  "pairwise_edge_contribution_meaning": "Each H panel shows ||g_pair * alpha_qk * edge_pair_context_qk||. Bright regions are query locations where that hyperedge contributes strong routed module-detail information to c_pair(q); the value is a diagnostic magnitude, not temperature/flux and not signed."
+}

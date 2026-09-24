@@ -1,0 +1,39 @@
+{
+  "static_organization": {
+    "active_edge_count": 6.0,
+    "A_mh_entropy": 0.7268307922269526,
+    "A_eh_entropy": 1.2963251066215897,
+    "module_mass_entropy_norm": 0.9881303130649413,
+    "env_mass_entropy_norm": 0.92878853499792,
+    "module_mass_max": 0.22082901000976562,
+    "env_mass_max": 0.3590770661830902,
+    "hyper_strength_mean": 0.16366576527555785,
+    "hyper_strength_max": 0.28159478306770325,
+    "pre_fallback_zero_support_module_rows": 0.0,
+    "post_fallback_zero_support_module_rows": 0.0,
+    "pre_fallback_zero_support_environment_rows": 0.0,
+    "post_fallback_zero_support_environment_rows": 0.0
+  },
+  "routing": {
+    "routed_module_retained_mass_mean": 0.0,
+    "routed_module_retained_mass_p05": 0.0,
+    "routed_module_retained_mass_min": 0.0,
+    "routed_query_edge_pair_count": 0.0,
+    "query_attention_entropy": 1.4713528394483344,
+    "query_attention_effective_edges": 4.449816066941976,
+    "query_attention_max": 0.4050118864670367,
+    "pairwise_edge_contribution_mean": 2.4706090274085,
+    "c_H_norm_mean": 0.0,
+    "c_pair_norm_mean": 14.79638104751939
+  },
+  "base_vs_final": {
+    "A_mh_change_norm": 0.07048566693355585,
+    "A_eh_change_norm": 0.09666110788950719,
+    "source_coordinate_shift": 0.2068425020426558,
+    "region_coordinate_shift": 0.13729828022849258,
+    "module_mass_shift": 0.015173046419533813,
+    "env_mass_shift": 0.0016616168603497115,
+    "strength_shift": 0.006874389763964234
+  },
+  "note": "Organization/routing/plan diagnostics are computed from predicted mode when both teacher and predicted modes are evaluated."
+}

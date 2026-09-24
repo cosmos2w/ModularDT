@@ -1,0 +1,110 @@
+{
+  "checkpoint": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1404_20260916_092508_routing_only_pairwise/best_by_field_mse_model.pt",
+  "case_id": "0653",
+  "phase": "prompt3_physical_coupling",
+  "field_metrics": {
+    "l2_norm": 87.81905285104406,
+    "mse": 0.188285792081408,
+    "rmse": 0.43391910776250453,
+    "nrmse": 0.01346731019720382,
+    "mae": 0.07708962928911986,
+    "relative_l2": 0.1315959225790943,
+    "normalizer": 32.220176219940186,
+    "num_values": 40960.0
+  },
+  "field_metrics_fluid": {
+    "l2_norm": 17.02031038221731,
+    "mse": 0.0073985689058106065,
+    "rmse": 0.08601493420221053,
+    "nrmse": 0.002770583966770055,
+    "mae": 0.032429986849196346,
+    "relative_l2": 0.027531015921518832,
+    "normalizer": 31.045777797698975,
+    "num_values": 39155.0
+  },
+  "temperature_metrics_fluid": {
+    "l2_norm": 16.924700716984933,
+    "mse": 0.0365784056135245,
+    "rmse": 0.19125481853674825,
+    "nrmse": 0.007305160032247263,
+    "mae": 0.14048370574018304,
+    "relative_l2": 0.02768652894822276,
+    "normalizer": 26.180784225463867,
+    "num_values": 7831.0
+  },
+  "field_channel_metrics_fluid": {
+    "u": {
+      "l2_norm": 0.850517797133341,
+      "mse": 9.237396542466498e-05,
+      "rmse": 0.009611137571831182,
+      "nrmse": 0.006422791744740216,
+      "mae": 0.007481379779029551,
+      "relative_l2": 0.012233507964604429,
+      "normalizer": 1.4964112108573318,
+      "num_values": 7831.0
+    },
+    "v": {
+      "l2_norm": 0.03447209142886421,
+      "mse": 1.5174627601583116e-07,
+      "rmse": 0.00038954624374499,
+      "nrmse": 0.0015408710406811723,
+      "mae": 0.0002702498877344055,
+      "relative_l2": 0.01492536184747132,
+      "normalizer": 0.2528091147542,
+      "num_values": 7831.0
+    },
+    "p": {
+      "l2_norm": 0.24001494180898483,
+      "mse": 7.356298338854603e-06,
+      "rmse": 0.002712249682248042,
+      "nrmse": 0.0033541087069880187,
+      "mae": 0.0022026156239272053,
+      "relative_l2": 0.028529776897612175,
+      "normalizer": 0.8086349964141846,
+      "num_values": 7831.0
+    },
+    "omega": {
+      "l2_norm": 1.569488810691035,
+      "mse": 0.00031455690548900015,
+      "rmse": 0.017735752182780413,
+      "nrmse": 0.0016677106996853893,
+      "mae": 0.011711983215107516,
+      "relative_l2": 0.02613720463274709,
+      "normalizer": 10.63478946685791,
+      "num_values": 7831.0
+    },
+    "temperature": {
+      "l2_norm": 16.924700716984933,
+      "mse": 0.0365784056135245,
+      "rmse": 0.19125481853674825,
+      "nrmse": 0.007305160032247263,
+      "mae": 0.14048370574018304,
+      "relative_l2": 0.02768652894822276,
+      "normalizer": 26.180784225463867,
+      "num_values": 7831.0
+    }
+  },
+  "internal_interface_note": "Skipped only when internal/interface tensors are empty.",
+  "interface_flux_mode": "local_surrogate",
+  "outputs": {
+    "global_field_quicklook": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/fields/global_field_quicklook_predicted.png",
+    "npz": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/arrays/evaluation_outputs_predicted.npz",
+    "metrics_csv": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/metrics/metrics_predicted.csv",
+    "module_internal_temperature": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/fields/module_internal_temperature_predicted.png",
+    "interface_curves": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/fields/interface_curves_predicted.png",
+    "organization_overview": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/organization/organization_overview.png",
+    "organization_summary_matrices": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/organization/organization_summary_matrices.png",
+    "organization_summary_matrices_sorted_by_dominant_edge": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/organization/organization_summary_matrices_sorted_by_dominant_edge.png",
+    "organization_schematic": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/organization/organization_schematic.png",
+    "routing_maps_npz": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/routing/routing_maps.npz",
+    "routing_summary": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/routing/routing_summary.json",
+    "routing_dominant_edge": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/routing/routing_dominant_edge.png",
+    "routing_context_norms": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/routing/routing_context_norms.png",
+    "hypergraph_plan_npz": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/plans/hypergraph_plan.npz",
+    "hypergraph_plan_summary": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/plans/hypergraph_plan_summary.json",
+    "hypergraph_diagnostics": "/home/wanglz/Desktop/src/ModularDT/HONF_Proj/docs/reports/run1501_1502_comparison/routing/run1404_best_field_0653/0653_20260923_232059/diagnostics/hypergraph_diagnostics.json"
+  },
+  "temperature_display_mode": "composite_internal",
+  "artifact_layout_version": 2,
+  "primary_export_mode": "predicted"
+}

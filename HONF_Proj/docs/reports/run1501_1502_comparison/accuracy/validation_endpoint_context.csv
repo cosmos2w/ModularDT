@@ -1,0 +1,5 @@
+run,epoch,source,val_loss_total,val_field_mse,val_temperature_mse,val_predicted_loss_total,status
+Run1404,5000,Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1404_20260916_092508_routing_only_pairwise/metrics.csv,0.026196207851171494,0.00200285529717803,0.0023406867403537035,0.026196207851171494,context only; not headline
+Run1804,5000,Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1804_20260905_081349_dense_pairwise_field_adaptation/logs/resume_to_5000_20260908T141550Z.log,,1.7143e-03,1.6814e-03,1.0210e-02,context only; not headline
+Run1501,5000,Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1501_20260922_211056_sparse_incidence_adaptive_honf/metrics.csv,0.012009509140625596,0.0025083449436351657,0.001878506620414555,0.012009509140625596,context only; not headline
+Run1502,5000,Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1502_20260923_004751_sparse_incidence_environment_sparsemax/metrics.csv,0.011719525791704655,0.0023988097673282027,0.0020627674530260265,0.011719525791704655,context only; not headline
