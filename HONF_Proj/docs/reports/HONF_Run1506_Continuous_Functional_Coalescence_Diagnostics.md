@@ -14,6 +14,8 @@ Each packed class stores its proposal multiplicity. Query sparsemax preserves vi
 
 The tree was formed once from the exact Run 1505 e500 checkpoint's **raw pre-coalescence** access functions on the 600 training IDs only. Three prepared phases per ID yielded 1,800 records; every pair had 1,790–1,800 eligible observations. The pair score used the same four-block source-action metric as the live model. Deterministic complete linkage produced the eleven nested subsets stored in the Run 1506 profile and checkpoint. Pair-score minimum/10th percentile/median/90th percentile/maximum were 0.203206/0.492515/0.728923/1.219890/1.319433. They all exceed the live 0.06 keep scale; formation after fresh training was therefore uncertain. No development-case routing image selected the tree, and no Run 1505 neural or optimizer weights initialized Run 1506. The local extraction evidence is under `diagnostics/generated/run1503_v4_tree_train_only/`; its one-off builder and raw case data are excluded from GitHub.
 
+A retrospective check of Run 1505's exact e500 **development** formation CSV found 429 accepted non-singleton classes across 270 case-phase records: proposal pairs `[0,10]` occurred 209 times, `[1,8]` 187 times, and `[6,7]` 33 times. All three are nodes of the previously fixed train-built tree. This checks coverage of those old recurring pair *types*; it neither selected the tree from development cases nor says fresh Run 1506 weights make those functions redundant. The old v3 solver's accepted mergers and the v4 read-input score use different criteria.
+
 ## Read-only diagnosis of retained Run 1505
 
 The five-case same-weight P0/P1/P2 parent-access interventions were performed on Run 1505's distinct e500 and e473 checkpoints. Forcing parent access only at P2 changed the full field but left raw and final ports, P1 outside temperature, and interface/internal outputs bitwise unchanged in these cases; the separately requested P2 port-global consistency read can change. P0/P1 interventions changed downstream fields and ports, but the five-case effects were small and mixed. These are dependencies within a fixed trained model, not an explanation of the difference between independently trained Run 1502 and Run 1505. The local record is `diagnostics/generated/run1503_v4_port_audit/panel/`.
@@ -78,4 +80,69 @@ The e150 endpoint has no merger and broad field/port/flux deficits, so it does n
 
 ## Epoch-500 review and decision
 
-Pending the bounded stop and exact evaluation. No 5,000-epoch continuation has been launched.
+The single Run 1506 candidate stopped normally at **exact epoch 500**. Its manifest records `completed`, exit code zero, the original UUID, and last completed epoch 500; the training window exited. All 500 sequential rows of tracked train/validation total loss, field MSE, and temperature MSE are finite. The exact checkpoint contains finite values in all 280 floating model and 453 floating optimizer tensors and retains its optimizer state. Sampled validation field/temperature MSE at e500 was 0.033112/0.014508; these are not full-grid physical errors. Median logged e151–500 training epoch time was 11.16 s versus 8.59 s for corresponding historical Run 1502 epochs, an unmatched run-log comparison.
+
+The saved total-loss and predicted selections have identical model weights at **e459**; field selection is distinct **e474** and temperature selection is distinct **e461**. None is the exact e500 model. The Q1024 all-90 P0/P1/P2 surveys for **each of these four distinct checkpoints** found all twelve proposals occupied, R=12, zero transition nodes, and zero closed nodes in every one of 270 case-phase records per checkpoint. Minimum node RMS scores were 0.188 (e500), 0.199 (e459), 0.230 (e474), and 0.208 (e461), all above the 0.06 keep scale. The exact e500 combined post-transform discrepancy is zero because every T remains identity. This fixed criterion did not form a single functional merger by the diagnostic stop.
+
+At exact e500, Q1024 P0/P1/P2 mean compact support was 2.698/2.715/3.104 and mean compact Keff was 2.066/2.081/2.243; virtual values were identical. On the Q8192 P2 full grid, the 90-case mean per-case compact support was 3.1105 (range 2.7366–3.6293) and mean Keff was 2.2474 (range 2.0041–2.5854), again identical to virtual support/Keff because every multiplicity is one. Registered K, occupied K, compact R, and executed padded width were all **12**. These statistics describe sparse query participation within twelve access functions; they are **not** dynamic-K function removal or a reduction in rectangular physical work. Mean Q8192 unique module/environment query-source pairs were 36,799/589,218, while the fine reader still executed 98,304/1,572,864 rows per case; mean module padding was 50,517 rows and environment padding zero. Fewer unique logical pairs did not translate into fewer executed fine geometry rows.
+
+The maintained Q8192 evaluator paired exact Run 1506 e500 with exact Run 1502 e500 on the same ordered 90 development cases and normalization. Values below are **equal-case means**, with the final column counting cases in which v4 error is higher. Positive paired change means worse error. This table does not mix selected checkpoints with the endpoint.
+
+| Physical metric | Run 1502 e500 | Run 1506 e500 | V4 worse cases |
+| --- | ---: | ---: | ---: |
+| Fluid-field normalized relative L2 | 0.10568 | 0.12839 | 69/90 |
+| Near-interface normalized relative L2 | 0.09875 | 0.12244 | 81/90 |
+| Far-fluid normalized relative L2 | 0.11626 | 0.12961 | 60/90 |
+| Physical u relative L2 | 0.04039 | 0.03333 | 15/90 |
+| Physical v relative L2 | 0.08455 | 0.11336 | 84/90 |
+| Physical pressure relative L2 | 0.09910 | 0.16891 | 80/90 |
+| Physical vorticity relative L2 | 0.12874 | 0.14652 | 70/90 |
+| Physical fluid-temperature RMSE | 0.83272 | 0.76577 | 36/90 |
+| Physical interface heat-flux RMSE | 15.68070 | 15.49852 | 33/90 |
+| Physical final port-temperature RMSE | 0.90591 | 0.85983 | 35/90 |
+
+The global-field mean deficit is +0.02271 and is driven especially by vorticity, v, pressure, and near-interface errors; physical temperature, surface temperature, interface flux, and final-port means improve. The field deficit increases by module count and the M=10 final port mean reverses the overall port improvement:
+
+| Active modules M (cases) | V4 field L2 (Δ vs parent) | V4 flux RMSE (Δ) | V4 final port T RMSE (Δ) |
+| --- | ---: | ---: | ---: |
+| 3 (25) | 0.09105 (−0.00006) | 14.7675 (−0.0274) | 0.7478 (−0.0916) |
+| 5 (25) | 0.11860 (+0.01352) | 15.6647 (−0.1716) | 0.8344 (−0.0998) |
+| 7 (25) | 0.14490 (+0.03265) | 16.0253 (−0.3221) | 0.8644 (−0.0589) |
+| 10 (15) | 0.17940 (+0.05943) | 15.5619 (−0.2246) | 1.0813 (+0.1408) |
+
+Each distinct selected checkpoint had its **own** Q1024 formation and Q8192 physical evaluation over all 90 cases. The table shows equal-case physical means. Run 1502 e500 is displayed only as fixed context: comparisons from e459/e461/e474 to parent e500 are **cross-epoch**, not matched-stage wins.
+
+| Checkpoint | Field fluid L2 | Flux RMSE | Final port T RMSE | Minimum node RMS |
+| --- | ---: | ---: | ---: | ---: |
+| Run 1502 exact e500 | 0.10568 | 15.68070 | 0.90591 | — |
+| Run 1506 exact e500 | 0.12839 | 15.49852 | 0.85983 | 0.188 |
+| Run 1506 total/predicted e459 | 0.09870 | 15.44680 | 0.83151 | 0.199 |
+| Run 1506 field e474 | 0.09891 | 15.04375 | 1.10432 | 0.230 |
+| Run 1506 temperature e461 | 0.10260 | 15.38028 | 0.79221 | 0.208 |
+
+Relative to the candidate's own exact e500 weights, e459 reduces field error in 82/90 cases, flux error in 58/90, and final-port error in 55/90. E474 reduces field and flux error in 83/90 and 82/90 cases but **raises** final-port error in 79/90; its port mean is worse in every M=3/5/7/10 stratum. E461 has the lowest final-port mean but a higher field mean than e459/e474. Selection sensitivity remains material. None of these independently saved weights produced dynamic R, so no selected-output combination is presented as one model.
+
+Local ignored `diagnostics/generated/run1503_v4_checkpoint_review/e500_all90_20260925T0137/` contains exact and selected per-case/phase tables, paired deltas, a manifest, and `readout_e500.md`. Its 90-case Q8192 population figures show compact Keff, virtual Keff, R, and Kq distributions for each checkpoint. Full-grid spatial boards for cases 0273/0641/0653/0673/0678/0686 show active support, effective K, dominant access class, maximum class mass, and routing entropy for v4 and exact Run 1502. The layouts cover M=3/5/7/10 and include the earlier case-0653 routing comparison. Color regions mark dominant **learned routing mass**, not merged functional classes or physical causal regions. No figures or raw arrays were committed.
+
+Key local images in that directory are `figures/q8192_population_metrics_e500_n90.png` and the matched `figures/routing_support_e500_0653.png` / `figures/routing_support_run1502_e500_0653.png` pair; analogous filenames cover the other listed cases and selected checkpoints.
+
+### Exact execution and bounded physical geometry at e500
+
+The synchronized, maps-off GPU 2 benchmark used RTX 6000 Ada, PyTorch 2.6.0+cu124, Q8192, native inner/outer chunk 128 and matched 2048. The five-case M=3/3/5/7/10 panel used two warmups, three repetitions, and reversed model/case/scope order; all 60 rows completed. A separate all-90 application-only pass used one warmup and two repetitions; all 540 rows completed. Numbers are medians of row wall-time medians in milliseconds, and the final column is the median paired v4/parent ratio by case (and pass for the five-case panel).
+
+| Scope / panel / chunk | Run 1502 e500 | Run 1505 e500 | Run 1506 e500 | V4 / parent |
+| --- | ---: | ---: | ---: | ---: |
+| Complete application / five / native 128 | 316.73 | 612.52 | 412.94 | 1.32× |
+| Complete application / five / matched 2048 | 59.73 | 313.29 | 118.03 | 1.99× |
+| Phase preparation / five / matched 2048 | 51.24 | 301.84 | 118.13 | 2.33× |
+| Prepared P2 decode / five / matched 2048 | 16.30 | 19.38 | 18.76 | 1.16× |
+| Complete application / all 90 / native 128 | 304.07 | 613.79 | 404.44 | 1.329× |
+| Complete application / all 90 / matched 2048 | 60.23 | 306.55 | 120.48 | 1.990× |
+
+The all-90 paired v4/parent application ratio ranges from 1.319–1.354 across M strata at native 128 and 1.980–2.020 at matched 2048. V4 removes much of the v3 planner penalty (all-90 v3/parent ratios 1.990× native and 5.059× matched), but its probe/Gram and transform preparation remains slower than the parent and rectangular physical rows do not shrink. Benchmark JSON remains local under `diagnostics/generated/run1506_exact_execution_benchmark/`.
+
+The exact e500 read-only physical-GPU geometry sweep covered 70 feasible module-slot-0 positions in bounded ±0.02 intervals for cases 0641/0653/0673/0686 (M=3/5/7/10), fixed 16-query sets, predicted ports, and full P0/P1/P2 forwards. All outputs were finite. There was **no native taper or packing signature change**; every phase kept R=12 and zero transitions. Minimum node RMS scores over these four scans were 0.326/0.459/0.774/0.644. At the old v3 case-0641 bracket of width 9.155e-5, the v4 predicted field difference was 1.63e-5 relative L2 with identical phase signatures on both sides, versus the old v3 forced hard-partition difference of about 3.05e-2 at a fixed coordinate. The v4 points were **not** near a v4 closure, so this does not establish continuity at a learned merger or CFD sensitivity fidelity. The local record is `diagnostics/generated/run1503_v4_boundary_cost/run1506_e500_physical_boundary_four_strata.json`.
+
+### Research decision
+
+Do **not** continue this candidate to 5,000 epochs. The 500-epoch diagnostic shows no case-dependent functional reduction at the endpoint or any selected checkpoint, a broad exact-endpoint fluid-field deficit that worsens with M, and application latency 1.33–1.99× the parent despite a large improvement over v3 planning. Selected e459/e461/e474 weights show useful physical tradeoffs, but these do not establish the intended organizer mechanism, and the scanned geometries never approached a native closure. More epochs of the same flat-above-threshold taper are not supported by the measured criterion scale; shared-parameter training could still move scores, so this is a research judgment rather than proof that closure is impossible. A separate future candidate should revisit the source-action score/threshold calibration and how contraction receives a learning signal, using training-only evidence and a fresh bounded physical-boundary review. The current run, historical runs, security behavior, and raw diagnostic outputs remain preserved locally. No 5,000-epoch continuation was launched.
