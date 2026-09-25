@@ -511,15 +511,15 @@ class TaskTrainedFunctionalCoalescencePairwiseField(
             ramp=self._ramp(module_states.device, module_states.dtype),
         )
 
-        if self.training or self.functional_detail_inference_mode == "virtual":
+        if self.training:
             compact = False
         elif self.functional_detail_inference_mode == "compact":
             compact = True
         else:
-            # Avoid singleton quotient overhead when the exact deterministic
-            # plan has no closed node.  The explicit compact mode remains
-            # available for virtual/compact parity and timing comparisons.
-            compact = bool(detail.closed_nodes.any().item())
+            # The bounded Q8192 timing comparison favored the virtual policy
+            # on both measured receiver chunks. Keep exact compact inference
+            # available as an explicit option.
+            compact = False
         if compact:
             packed = self.functional_detail_controller.pack(
                 detail, provisional.phase_occupied

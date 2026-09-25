@@ -502,3 +502,29 @@ def test_mixed_compaction_preserves_live_node_logit_gradients(monkeypatch) -> No
     torch.testing.assert_close(
         compact_gradient, virtual_gradient, atol=3.0e-5, rtol=3.0e-5
     )
+
+
+def test_auto_inference_uses_virtual_width_for_exact_closure() -> None:
+    torch.manual_seed(15037007)
+    core = _core(V5_ARCHITECTURE)
+    core.set_training_progress(epoch=150, total_epochs=500)
+    _force_uniform_source_routes(core)
+    _set_controller_bias(core, -8.0)
+    encoded = core.encode_case(_batch(15037008))
+    core.backend.eval()
+    assert core.backend.functional_detail_inference_mode == "auto"
+
+    automatic = _prepare(core, encoded)
+    automatic_plan = automatic.backend_state["functional_detail_plan"]
+    assert automatic_plan.detail.actual_R.tolist() == [1]
+    assert int(automatic_plan.detail.closed_nodes.sum()) == 11
+    assert not automatic_plan.compact
+    assert automatic.backend_state["functional_detail_execution_width"].tolist() == [
+        12.0
+    ]
+    assert int(automatic_plan.membership.shape[-1]) == 12
+    assert "coalescence_plan" not in automatic.backend_state
+
+    virtual = _prepare(core, encoded, mode="virtual")
+    virtual_plan = virtual.backend_state["functional_detail_plan"]
+    torch.testing.assert_close(automatic_plan.membership, virtual_plan.membership)
