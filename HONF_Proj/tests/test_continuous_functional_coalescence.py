@@ -190,6 +190,76 @@ def test_epoch_fifty_uses_bitwise_parent_path_and_first_gradients() -> None:
         torch.testing.assert_close(left, right, atol=0.0, rtol=0.0)
 
 
+def test_active_identity_tree_retains_parent_reader_and_first_gradients(monkeypatch) -> None:
+    """An active, uncontracted tree must preserve the actual parent reader."""
+
+    torch.manual_seed(15035004)
+    parent = InterfaceFieldCore(UnifiedForwardConfig.from_dict(_payload(PARENT_ARCHITECTURE))).cpu().eval()
+    candidate = InterfaceFieldCore(UnifiedForwardConfig.from_dict(_payload(V4_ARCHITECTURE))).cpu().eval()
+    candidate.set_training_progress(epoch=50, total_epochs=500)
+    warmup = _batch(15035005, queries=3)
+    with torch.no_grad():
+        for core in (parent, candidate):
+            encoded = core.encode_case(warmup)
+            prepared = core.prepare(encoded, encoded.module_tokens)
+            core.decode_queries(prepared, warmup.query_xy)
+    incompatible = candidate.load_state_dict(parent.state_dict(), strict=False)
+    assert incompatible.unexpected_keys == []
+    assert set(incompatible.missing_keys) == {"backend.functional_tree_membership"}
+    candidate.set_training_progress(epoch=150, total_epochs=500)
+
+    backend_module = importlib.import_module(
+        "honf_forward_core.interface_fields.continuous_functional_coalescence"
+    )
+    original_scores = backend_module.node_source_action_scores
+
+    def keep_distinct(*args, **kwargs):
+        scores = original_scores(*args, **kwargs)
+        return replace(scores, score2=torch.ones_like(scores.score2))
+
+    monkeypatch.setattr(backend_module, "node_source_action_scores", keep_distinct)
+    batch = _batch(15035006, queries=7)
+    batch = replace(
+        batch,
+        query_xy=batch.query_xy.clone().requires_grad_(),
+        module_centers=batch.module_centers.clone().requires_grad_(),
+        env_coords=batch.env_coords.clone().requires_grad_(),
+    )
+    parent_encoded = parent.encode_case(batch)
+    candidate_encoded = candidate.encode_case(batch)
+    parent_prepared = parent.prepare(parent_encoded, parent_encoded.module_tokens)
+    candidate_prepared = candidate.prepare(
+        candidate_encoded,
+        candidate_encoded.module_tokens,
+        functional_probes=_port_probe_catalogue(batch),
+    )
+    plan = candidate_prepared.backend_state["functional_tree_plan"]
+    assert not bool(plan.closed_nodes.any())
+    assert not bool((plan.node_gamma > 0.0).any())
+    torch.testing.assert_close(
+        plan.valid.sum(dim=-1), plan.parent_controls.phase_occupied.sum(dim=-1)
+    )
+
+    parent_field = parent.decode_queries(parent_prepared, batch.query_xy)["pred_field"]
+    candidate_field = candidate.decode_queries(candidate_prepared, batch.query_xy)["pred_field"]
+    torch.testing.assert_close(candidate_field, parent_field, atol=1.0e-6, rtol=1.0e-6)
+    parent_parameter = dict(parent.named_parameters())["backend.router.query_projection.0.weight"]
+    candidate_parameter = dict(candidate.named_parameters())["backend.router.query_projection.0.weight"]
+    weights = torch.linspace(0.7, 1.3, parent_field.numel()).reshape_as(parent_field)
+    parent_gradients = torch.autograd.grad(
+        (parent_field * weights).sum(),
+        (batch.query_xy, batch.module_centers, batch.env_coords, parent_parameter),
+        retain_graph=True,
+    )
+    candidate_gradients = torch.autograd.grad(
+        (candidate_field * weights).sum(),
+        (batch.query_xy, batch.module_centers, batch.env_coords, candidate_parameter),
+        retain_graph=True,
+    )
+    for parent_gradient, candidate_gradient in zip(parent_gradients, candidate_gradients, strict=True):
+        torch.testing.assert_close(candidate_gradient, parent_gradient, atol=1.0e-5, rtol=1.0e-5)
+
+
 def test_active_packed_physical_reads_match_virtual_tree_and_gradients() -> None:
     torch.manual_seed(717)
     core = InterfaceFieldCore(UnifiedForwardConfig.from_dict(_payload(V4_ARCHITECTURE))).cpu().eval()
