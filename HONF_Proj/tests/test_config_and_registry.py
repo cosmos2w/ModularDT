@@ -63,6 +63,8 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
     assert by_name["continuous_functional_coalescence_honf_context"]["base"] is None
     assert by_name["adaptive_hyperedge_opening_honf_context"]["status"] == "candidate"
     assert by_name["adaptive_hyperedge_opening_honf_context"]["base"] is None
+    assert by_name["source_conditioned_pairwise_honf_context"]["status"] == "candidate"
+    assert by_name["source_conditioned_pairwise_honf_context"]["base"] is None
     assert registry["recommended_forward_profile"] != "case_adaptive_residual_context"
     assert registry["recommended_forward_profile"] != "case_adaptive_tensor_residual_context"
 

@@ -104,6 +104,7 @@ FORWARD_ARCHITECTURES = {
     "converged_identity_preserving_coalescence_honf",
     "continuous_functional_coalescence_honf",
     "task_trained_functional_coalescence_honf",
+    "source_conditioned_pairwise_honf",
     "adaptive_hyperedge_opening_honf",
 }
 
@@ -714,6 +715,7 @@ class UnifiedForwardConfig:
             "converged_identity_preserving_coalescence_honf",
             "continuous_functional_coalescence_honf",
             "task_trained_functional_coalescence_honf",
+            "source_conditioned_pairwise_honf",
             "adaptive_hyperedge_opening_honf",
         }:
             controlled = self.interface_model
@@ -725,19 +727,24 @@ class UnifiedForwardConfig:
                 raise ValueError(
                         f"{self.forward_architecture} requires interface_model.source_normalizer='entmax15'."
                 )
-            expected_query_normalizer = (
-                "sparsemax"
-                if self.forward_architecture in {
-                    "sparse_incidence_group_control_honf",
-                    "coalesced_sparse_incidence_honf",
-                    "converged_identity_preserving_coalescence_honf",
-                    "continuous_functional_coalescence_honf",
-                    "task_trained_functional_coalescence_honf",
-                    "adaptive_hyperedge_opening_honf",
-                }
-                else "entmax15"
-            )
-            if controlled.query_normalizer != expected_query_normalizer:
+            expected_query_normalizer = None
+            if self.forward_architecture != "source_conditioned_pairwise_honf":
+                expected_query_normalizer = (
+                    "sparsemax"
+                    if self.forward_architecture in {
+                        "sparse_incidence_group_control_honf",
+                        "coalesced_sparse_incidence_honf",
+                        "converged_identity_preserving_coalescence_honf",
+                        "continuous_functional_coalescence_honf",
+                        "task_trained_functional_coalescence_honf",
+                        "adaptive_hyperedge_opening_honf",
+                    }
+                    else "entmax15"
+                )
+            if (
+                expected_query_normalizer is not None
+                and controlled.query_normalizer != expected_query_normalizer
+            ):
                 raise ValueError(
                     f"{self.forward_architecture} requires interface_model.query_normalizer="
                     f"'{expected_query_normalizer}'."
@@ -781,6 +788,7 @@ class UnifiedForwardConfig:
                 "converged_identity_preserving_coalescence_honf",
                 "continuous_functional_coalescence_honf",
                 "task_trained_functional_coalescence_honf",
+                "source_conditioned_pairwise_honf",
                 "adaptive_hyperedge_opening_honf",
             }:
                 if controlled.case_group_budget is not None:
@@ -801,6 +809,7 @@ class UnifiedForwardConfig:
                 "converged_identity_preserving_coalescence_honf",
                 "continuous_functional_coalescence_honf",
                 "task_trained_functional_coalescence_honf",
+                "source_conditioned_pairwise_honf",
             }:
                 if controlled.environment_refinement_normalizer != "sparsemax":
                     raise ValueError(
@@ -891,6 +900,7 @@ class UnifiedForwardConfig:
                     "converged_identity_preserving_coalescence_honf",
                     "continuous_functional_coalescence_honf",
                     "task_trained_functional_coalescence_honf",
+                    "source_conditioned_pairwise_honf",
                 }
                 and controlled.environment_refinement_normalizer != "entmax15"
             ):
@@ -933,6 +943,7 @@ class UnifiedForwardConfig:
                 "converged_identity_preserving_coalescence_honf",
                 "continuous_functional_coalescence_honf",
                 "task_trained_functional_coalescence_honf",
+                "source_conditioned_pairwise_honf",
                 "adaptive_hyperedge_opening_honf",
             }
             and self.interface_model.environment_refinement_normalizer != "entmax15"
@@ -1314,6 +1325,7 @@ class UnifiedForwardConfig:
                     "converged_identity_preserving_coalescence_honf",
                     "continuous_functional_coalescence_honf",
                     "task_trained_functional_coalescence_honf",
+                    "source_conditioned_pairwise_honf",
                     "adaptive_hyperedge_opening_honf",
                 }:
                     # The Run-1502 hook is not part of any historical
@@ -1424,6 +1436,7 @@ class UnifiedForwardConfig:
                     "converged_identity_preserving_coalescence_honf",
                     "continuous_functional_coalescence_honf",
                     "task_trained_functional_coalescence_honf",
+                    "source_conditioned_pairwise_honf",
                     "adaptive_hyperedge_opening_honf",
                 }:
                     for key in (
@@ -1475,6 +1488,12 @@ class UnifiedForwardConfig:
                     ):
                         interface_payload.pop(key, None)
                     interface_payload.pop("group_code_dim", None)
+                    if self.forward_architecture == "source_conditioned_pairwise_honf":
+                        # The static source-conditioned reader has no query
+                        # router, so query normalization/temperature are not
+                        # part of its serialized architecture contract.
+                        interface_payload.pop("query_normalizer", None)
+                        interface_payload.pop("query_temperature", None)
                     if self.forward_architecture != "hypergraph_quadrature_honf":
                         interface_payload.pop("samples_per_group", None)
                     if self.forward_architecture != "budgeted_group_control_honf":

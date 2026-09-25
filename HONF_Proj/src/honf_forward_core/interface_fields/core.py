@@ -355,6 +355,7 @@ class InterfaceFieldCore(nn.Module):
             "converged_identity_preserving_coalescence_honf",
             "continuous_functional_coalescence_honf",
             "task_trained_functional_coalescence_honf",
+            "source_conditioned_pairwise_honf",
             "adaptive_hyperedge_opening_honf",
         }:
             # Run 1405/1406 deliberately replace the historical coarse/local
@@ -607,6 +608,25 @@ class InterfaceFieldCore(nn.Module):
             )
 
             self.backend = SparseIncidenceGroupControlPairwiseField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                group_count=int(options.group_count),
+                group_control_dim=int(options.group_control_dim),
+                spatial_dim=int(config.spatial_dim),
+                module_temperature=float(options.module_temperature),
+                environment_temperature=float(options.environment_temperature),
+                query_temperature=float(options.query_temperature),
+                activation_checkpointing=bool(options.activation_checkpointing),
+                environment_refinement_normalizer=str(
+                    options.environment_refinement_normalizer
+                ),
+            )
+        elif config.forward_architecture == "source_conditioned_pairwise_honf":
+            from .source_conditioned_pairwise import SourceConditionedPairwiseField
+
+            self.backend = SourceConditionedPairwiseField(
                 hidden,
                 int(options.message_hidden_dim),
                 heads,
@@ -1001,6 +1021,7 @@ class InterfaceFieldCore(nn.Module):
                     "converged_identity_preserving_coalescence_honf",
                     "continuous_functional_coalescence_honf",
                     "task_trained_functional_coalescence_honf",
+                    "source_conditioned_pairwise_honf",
                     "adaptive_hyperedge_opening_honf",
                 }
                 else int(self.config.interface_model.coarse_latent_count)
@@ -1024,6 +1045,7 @@ class InterfaceFieldCore(nn.Module):
             "converged_identity_preserving_coalescence_honf",
             "continuous_functional_coalescence_honf",
             "task_trained_functional_coalescence_honf",
+            "source_conditioned_pairwise_honf",
             "adaptive_hyperedge_opening_honf",
         }:
             aux.update(

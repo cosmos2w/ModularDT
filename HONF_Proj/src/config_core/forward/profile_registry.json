@@ -507,6 +507,16 @@
       "stage": "run1503-v5-task-trained-functional-coalescence"
     },
     {
+      "name": "source_conditioned_pairwise_honf_context",
+      "path": "project://src/config_core/forward/source_conditioned_pairwise_honf_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "Run 1507 all-closed source-conditioned specialization / fixed K=12 source-control capacity / D=16 / no query-to-group router / source-local fine QM and QE reads",
+      "checkpoint_families": ["Run 1507 frozen exact-e500 specialization", "fresh static source-conditioned core candidate"],
+      "owner": "forward-research",
+      "stage": "source-conditioned-core"
+    },
+    {
       "name": "adaptive_hyperedge_opening_honf_context",
       "path": "project://src/config_core/forward/adaptive_hyperedge_opening_honf_context.json",
       "status": "candidate",

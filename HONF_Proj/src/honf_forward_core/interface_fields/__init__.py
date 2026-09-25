@@ -58,6 +58,7 @@ from .mass_competitive_router import (
     mass_competition,
 )
 from .sparse_incidence_group_control import SparseIncidenceGroupControlPairwiseField
+from .source_conditioned_pairwise import SourceConditionedPairwiseField
 from .adaptive_hyperedge_opening import (
     ADAPTIVE_HYPEREDGE_EPSILON,
     AdaptiveEnvironmentAggregation,
@@ -125,6 +126,7 @@ __all__ = [
     "MassCompetitiveGroupRouter",
     "MassCompetitivePreparedGroupControl",
     "SparseIncidenceGroupControlPairwiseField",
+    "SourceConditionedPairwiseField",
     "SparseIncidenceGroupRouter",
     "SparseIncidencePreparedGroupControl",
     "ADAPTIVE_HYPEREDGE_EPSILON",
