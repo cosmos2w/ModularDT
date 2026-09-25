@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "profile_name": "task_trained_functional_coalescence_honf_context",
+  "workflow": "forward",
+  "model_family": "honf_forward",
+  "case": {
+    "id": "ThermalChannel",
+    "config": "project://Case_ThermalChannel/configs/case_default.json",
+    "dataset_id": "thermal_channel_global_v1"
+  },
+  "model": {
+    "core_honf": {
+      "forward_architecture": "task_trained_functional_coalescence_honf",
+      "interface_model": {
+        "message_hidden_dim": 128,
+        "attention_heads": 4,
+        "relative_fourier_frequencies": 4,
+        "receiver_chunk_size": 128,
+        "activation_checkpointing": true,
+        "group_count": 12,
+        "source_normalizer": "entmax15",
+        "query_normalizer": "sparsemax",
+        "module_temperature": 1.0,
+        "environment_temperature": 1.0,
+        "query_temperature": 1.0,
+        "group_control_dim": 16,
+        "environment_refinement_normalizer": "sparsemax",
+        "functional_detail_hidden_dim": 32,
+        "functional_detail_initial_logit": 1.6,
+        "functional_detail_inference_mode": "auto",
+        "functional_tree_subsets": [
+          [
+            0,
+            10
+          ],
+          [
+            1,
+            8
+          ],
+          [
+            6,
+            7
+          ],
+          [
+            0,
+            2,
+            10
+          ],
+          [
+            1,
+            4,
+            8
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            0,
+            2,
+            9,
+            10
+          ],
+          [
+            6,
+            7,
+            11
+          ],
+          [
+            0,
+            1,
+            2,
+            4,
+            8,
+            9,
+            10
+          ],
+          [
+            3,
+            5,
+            6,
+            7,
+            11
+          ],
+          [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11
+          ]
+        ]
+      },
+      "field_dim": "auto",
+      "domain_length_x": "auto",
+      "domain_length_y": "auto",
+      "module_radius": "auto",
+      "coordinate_scale": [
+        12.0,
+        6.0
+      ],
+      "periodic_axes": [],
+      "num_env_tokens_x": 24,
+      "num_env_tokens_y": 8,
+      "hidden_dim": 256,
+      "dropout": 0.0,
+      "use_layer_norm": true,
+      "geometry_mode": "nonperiodic",
+      "query_time_mode": "none",
+      "query_fourier_frequencies": 4,
+      "boundary_feature_mode": "none",
+      "position_fourier_frequencies": 4,
+      "use_position_fourier_for_modules": true,
+      "use_position_fourier_for_env": true
+    }
+  },
+  "training": {
+    "seed": 0,
+    "device": "cuda:2",
+    "epochs": 500,
+    "learning_rate": 0.0003,
+    "organizer_learning_rate": null,
+    "functional_detail_controller_learning_rate": 0.001,
+    "functional_detail_complexity_weight": 0.8382773256398686,
+    "weight_decay": 1e-05,
+    "amp": false,
+    "gradient_clip_norm": 1.0,
+    "plot_every_epochs": 50,
+    "port_curriculum": {
+      "schedule": "none",
+      "mode": "predicted",
+      "mixed_teacher_ratio": 0.0,
+      "teacher_epochs": 0,
+      "predicted_after_epoch": 0,
+      "mixed_teacher_ratio_start": 0.0,
+      "mixed_teacher_ratio_end": 0.0
+    },
+    "max_train_batches_per_epoch": null,
+    "max_val_batches": null
+  },
+  "checkpointing": {
+    "save_best": true,
+    "save_best_field_mse": true,
+    "save_best_temperature_mse": true,
+    "save_best_predicted": true,
+    "save_latest": true,
+    "save_latest_every_epochs": 10,
+    "save_epoch_milestones": [
+      10,
+      50,
+      150,
+      500
+    ]
+  },
+  "run": {
+    "id": "1507",
+    "name": "1503_v5_task_trained_functional_coalescence",
+    "output_root": "project://Trained_Results"
+  },
+  "_note": "Run 1503-v5 fresh candidate: Run 1502 parent seed/settings and fixed train-derived tree; task-trained stochastic/deterministic detail control; parent exact through e50 and quintic retention/complexity ramp e51-150; controller learning rate 1e-3. Selected lambda 0.8382773256398686 for pilot recipe 3 equals sqrt(3) times the pilot-script median calibration 0.48397963961373774. A separate actual-batch backward-only preflight estimated lambda 0.45957875436767265; that estimate did not set the selected coefficient. Pilot recipe 3 was a Run 1502 e50 warm-started risky hypothesis: deterministic R varied across four pilot cases/phases at update 150, then reached R1 throughout by update 200; mean field relative L2 was 0.484 at update 150 and 0.457 at update 200, versus 0.292/0.296 for the all-open recipe 1. Formal launch must start fresh from the original seed; pilot weights are excluded. ID 1507 was selected after checking the run root for an existing Run_1507 directory."
+}

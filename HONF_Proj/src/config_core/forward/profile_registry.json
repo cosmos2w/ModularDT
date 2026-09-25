@@ -497,6 +497,16 @@
       "stage": "run1503-v4-continuous-functional-coalescence"
     },
     {
+      "name": "task_trained_functional_coalescence_honf_context",
+      "path": "project://src/config_core/forward/task_trained_functional_coalescence_honf_context.json",
+      "status": "candidate",
+      "base": "sparse_incidence_group_control_honf_context",
+      "mode": "Run 1503-v5 task-trained conditional function detail retention / fixed tree / exact function and source-moment compaction / virtual width-12 training reader",
+      "checkpoint_families": ["Run 1503-v5 task-trained functional coalescence"],
+      "owner": "forward-research",
+      "stage": "run1503-v5-task-trained-functional-coalescence"
+    },
+    {
       "name": "adaptive_hyperedge_opening_honf_context",
       "path": "project://src/config_core/forward/adaptive_hyperedge_opening_honf_context.json",
       "status": "candidate",

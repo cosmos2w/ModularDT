@@ -23,6 +23,9 @@ from honf_forward_core.training.diagnostics import (
 )
 from honf_runtime.compat import autocast_context, recursive_to_device
 
+
+TASK_TRAINED_FUNCTIONAL_COALESCENCE = "task_trained_functional_coalescence_honf"
+
 INTERFACE_DIAGNOSTIC_KEYS = (
     "interaction_local_neighbor_count_mean",
     "interaction_main_context_norm_mean",
@@ -490,6 +493,53 @@ def assemble_channelthermal_loss_terms(
         + loss_org
     )
     loss = loss_physical + paircost_weight * loss_paircost + effective_budget_weight * loss_group_budget
+    detail_terms: dict[str, torch.Tensor] = {}
+    architecture = str(model.config.core_honf.forward_architecture)
+    if architecture == TASK_TRAINED_FUNCTIONAL_COALESCENCE:
+        detail_complexity = output.get("functional_detail_expected_complexity")
+        detail_expected_r = output.get("functional_detail_expected_R")
+        detail_ramp = output.get("functional_detail_ramp_weight")
+        if not torch.is_tensor(detail_complexity) or not torch.is_tensor(detail_expected_r):
+            raise RuntimeError(
+                "task_trained_functional_coalescence_honf must expose live expected complexity and R."
+            )
+        if not torch.is_tensor(detail_ramp) or detail_ramp.numel() != 1:
+            raise RuntimeError(
+                "task_trained_functional_coalescence_honf must expose one scalar ramp weight."
+            )
+        configured_detail_weight = float(loss_cfg.get("functional_detail_complexity_weight", 0.0))
+        if not math.isfinite(configured_detail_weight) or configured_detail_weight < 0.0:
+            raise ValueError("functional_detail_complexity_weight must be finite and nonnegative.")
+        raw_detail_weight = output["pred_field"].new_tensor(configured_detail_weight)
+        effective_detail_weight = raw_detail_weight * detail_ramp.to(
+            device=raw_detail_weight.device,
+            dtype=raw_detail_weight.dtype,
+        )
+        detail_complexity = detail_complexity.mean()
+        detail_expected_r = detail_expected_r.mean()
+        # Structural pressure is a training objective. Validation loss remains
+        # the existing physical task objective used for checkpoint selection.
+        if model.training:
+            loss = loss + effective_detail_weight * detail_complexity
+        detail_terms = {
+            "loss_functional_detail_complexity": detail_complexity,
+            "functional_detail_complexity_weight": effective_detail_weight,
+            "functional_detail_configured_complexity_weight": raw_detail_weight,
+            "functional_detail_ramp_weight": detail_ramp.reshape(()),
+            "functional_detail_expected_R": detail_expected_r,
+            "functional_detail_stochastic_fraction": output.get(
+                "functional_detail_stochastic_fraction",
+                output["pred_field"].new_zeros(()),
+            ),
+        }
+        for phase_name in ("p0", "p1", "p2"):
+            for suffix in ("expected_complexity", "expected_R", "actual_R"):
+                metric_key = f"functional_detail_{phase_name}_{suffix}"
+                value = output.get(metric_key)
+                if torch.is_tensor(value):
+                    detail_terms[metric_key] = value.float().mean()
+                else:
+                    detail_terms[metric_key] = output["pred_field"].new_full((), math.nan)
     return {
         "loss": loss,
         "loss_physical": loss_physical,
@@ -520,6 +570,7 @@ def assemble_channelthermal_loss_terms(
         "loss_paircost": loss_paircost,
         "paircost_weight": output["pred_field"].new_tensor(paircost_weight),
         "port_global_weight": output["pred_field"].new_tensor(port_global_weight),
+        **detail_terms,
     }
 
 
@@ -733,6 +784,22 @@ def run_epoch(
                     metric_tensors["temperature_" + relation] = (
                         value if torch.is_tensor(value) else pred.new_full((), math.nan)
                     )
+            if "loss_functional_detail_complexity" in loss_terms:
+                detail_metric_keys = (
+                    "loss_functional_detail_complexity",
+                    "functional_detail_complexity_weight",
+                    "functional_detail_configured_complexity_weight",
+                    "functional_detail_ramp_weight",
+                    "functional_detail_expected_R",
+                    "functional_detail_stochastic_fraction",
+                    *(
+                        f"functional_detail_{phase}_{suffix}"
+                        for phase in ("p0", "p1", "p2")
+                        for suffix in ("expected_complexity", "expected_R", "actual_R")
+                    ),
+                )
+                for key in detail_metric_keys:
+                    metric_tensors[key] = loss_terms[key]
             metrics = pack_scalar_metrics(metric_tensors)
             metrics.update(
                 {

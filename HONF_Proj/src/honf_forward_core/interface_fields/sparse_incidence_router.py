@@ -251,6 +251,32 @@ class SparseIncidenceGroupRouter(OccupancyGroupRouter):
     ) -> GroupQueryRoute:
         """Route queries using RMS keys, live centres and masked sparsemax."""
 
+        query_control, logits, scaled_keys = self.query_logits(
+            encoded, state, receivers, receiver_features
+        )
+        valid = state.phase_occupied[:, None, :].expand_as(logits)
+        assignment = masked_sparsemax(logits, valid)
+        return GroupQueryRoute(
+            query_control=query_control,
+            assignment=assignment,
+            logits=logits,
+            query_keys=scaled_keys,
+        )
+
+    def query_logits(
+        self,
+        encoded: EncodedInterfaceCase,
+        state: SparseIncidencePreparedGroupControl,
+        receivers: torch.Tensor,
+        receiver_features: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return parent query control, finite logits, and keys before sparsemax.
+
+        The Run-1503-v5 transform acts on these original finite access logits.
+        Factoring this shared calculation avoids paying for a discarded parent
+        sparsemax while preserving the Run-1502 logit operation order.
+        """
+
         if not isinstance(state, SparseIncidencePreparedGroupControl):
             raise TypeError(
                 "sparse-incidence router requires its phase-local control state."
@@ -324,14 +350,7 @@ class SparseIncidenceGroupRouter(OccupancyGroupRouter):
             )
         ) / geometry_scale[:, None, None]
         logits = logits + geometry
-        valid = state.phase_occupied[:, None, :].expand_as(logits)
-        assignment = masked_sparsemax(logits, valid)
-        return GroupQueryRoute(
-            query_control=query_control,
-            assignment=assignment,
-            logits=logits,
-            query_keys=scaled_keys,
-        )
+        return query_control, logits, scaled_keys
 
 
 __all__ = [

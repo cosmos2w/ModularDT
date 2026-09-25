@@ -682,3 +682,21 @@ def test_organizer_learning_rate_must_be_null_or_positive(tmp_path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="organizer_learning_rate"):
         load_config_bundle(path)
+
+
+@pytest.mark.parametrize("learning_rate", [0.0, float("nan"), float("inf")])
+def test_functional_detail_controller_learning_rate_must_be_finite_positive(
+    tmp_path,
+    learning_rate: float,
+) -> None:
+    source = load_config_bundle(
+        "project://src/config_core/forward/task_trained_functional_coalescence_honf_context.json"
+    )
+    payload = copy.deepcopy(source.core)
+    payload["case"]["config"] = str(source.case_source)
+    payload["training"]["functional_detail_controller_learning_rate"] = learning_rate
+    path = tmp_path / "invalid_functional_detail_learning_rate.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="functional_detail_controller_learning_rate"):
+        load_config_bundle(path)

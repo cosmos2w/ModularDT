@@ -103,6 +103,7 @@ FORWARD_ARCHITECTURES = {
     "coalesced_sparse_incidence_honf",
     "converged_identity_preserving_coalescence_honf",
     "continuous_functional_coalescence_honf",
+    "task_trained_functional_coalescence_honf",
     "adaptive_hyperedge_opening_honf",
 }
 
@@ -413,6 +414,10 @@ class InterfaceFieldConfig:
     functional_tree_subsets: list[list[int]] = field(default_factory=list)
     read_input_close_rms: float = 0.02
     read_input_keep_rms: float = 0.06
+    # Run 1503-v5 conditional residual-function retention controller.
+    functional_detail_hidden_dim: int = 32
+    functional_detail_initial_logit: float = 1.6
+    functional_detail_inference_mode: str = "auto"
 
     def __post_init__(self) -> None:
         if isinstance(self.routing, dict):
@@ -522,6 +527,18 @@ class InterfaceFieldConfig:
                 raise ValueError(f"interface_model.{name} must be finite and positive.")
         if float(self.read_input_close_rms) >= float(self.read_input_keep_rms):
             raise ValueError("read_input_close_rms must be below read_input_keep_rms.")
+        if (
+            isinstance(self.functional_detail_hidden_dim, bool)
+            or not isinstance(self.functional_detail_hidden_dim, int)
+            or self.functional_detail_hidden_dim <= 0
+        ):
+            raise ValueError("interface_model.functional_detail_hidden_dim must be positive.")
+        if not math.isfinite(float(self.functional_detail_initial_logit)):
+            raise ValueError("interface_model.functional_detail_initial_logit must be finite.")
+        if self.functional_detail_inference_mode not in {"auto", "compact", "virtual"}:
+            raise ValueError(
+                "interface_model.functional_detail_inference_mode must be auto, compact, or virtual."
+            )
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any] | None) -> "InterfaceFieldConfig":
@@ -696,6 +713,7 @@ class UnifiedForwardConfig:
             "coalesced_sparse_incidence_honf",
             "converged_identity_preserving_coalescence_honf",
             "continuous_functional_coalescence_honf",
+            "task_trained_functional_coalescence_honf",
             "adaptive_hyperedge_opening_honf",
         }:
             controlled = self.interface_model
@@ -714,6 +732,7 @@ class UnifiedForwardConfig:
                     "coalesced_sparse_incidence_honf",
                     "converged_identity_preserving_coalescence_honf",
                     "continuous_functional_coalescence_honf",
+                    "task_trained_functional_coalescence_honf",
                     "adaptive_hyperedge_opening_honf",
                 }
                 else "entmax15"
@@ -761,6 +780,7 @@ class UnifiedForwardConfig:
                 "coalesced_sparse_incidence_honf",
                 "converged_identity_preserving_coalescence_honf",
                 "continuous_functional_coalescence_honf",
+                "task_trained_functional_coalescence_honf",
                 "adaptive_hyperedge_opening_honf",
             }:
                 if controlled.case_group_budget is not None:
@@ -780,6 +800,7 @@ class UnifiedForwardConfig:
                 "coalesced_sparse_incidence_honf",
                 "converged_identity_preserving_coalescence_honf",
                 "continuous_functional_coalescence_honf",
+                "task_trained_functional_coalescence_honf",
             }:
                 if controlled.environment_refinement_normalizer != "sparsemax":
                     raise ValueError(
@@ -820,9 +841,12 @@ class UnifiedForwardConfig:
                         "fusion settings: max_iterations=512, eps_abs=1e-9, "
                         "eps_rel=1e-8, eta_final=0.5, ramp_epochs=150."
                     )
-            elif self.forward_architecture == "continuous_functional_coalescence_honf":
+            elif self.forward_architecture in {
+                "continuous_functional_coalescence_honf",
+                "task_trained_functional_coalescence_honf",
+            }:
                 if len(controlled.functional_tree_subsets) != 11:
-                    raise ValueError("continuous functional coalescence requires eleven tree subsets.")
+                    raise ValueError("functional coalescence requires eleven tree subsets.")
                 nodes: list[frozenset[int]] = []
                 for subset in controlled.functional_tree_subsets:
                     if not isinstance(subset, (list, tuple)) or len(subset) < 2:
@@ -853,9 +877,12 @@ class UnifiedForwardConfig:
                     if len(children) != 2 or children[0] | children[1] != node:
                         raise ValueError("each functional tree node must have exactly two children.")
                 if (
-                    float(controlled.read_input_close_rms),
-                    float(controlled.read_input_keep_rms),
-                ) != (0.02, 0.06):
+                    self.forward_architecture == "continuous_functional_coalescence_honf"
+                    and (
+                        float(controlled.read_input_close_rms),
+                        float(controlled.read_input_keep_rms),
+                    ) != (0.02, 0.06)
+                ):
                     raise ValueError("this candidate requires fixed read-input RMS scales 0.02 and 0.06.")
             elif (
                 self.forward_architecture not in {
@@ -863,6 +890,7 @@ class UnifiedForwardConfig:
                     "coalesced_sparse_incidence_honf",
                     "converged_identity_preserving_coalescence_honf",
                     "continuous_functional_coalescence_honf",
+                    "task_trained_functional_coalescence_honf",
                 }
                 and controlled.environment_refinement_normalizer != "entmax15"
             ):
@@ -904,6 +932,7 @@ class UnifiedForwardConfig:
                 "coalesced_sparse_incidence_honf",
                 "converged_identity_preserving_coalescence_honf",
                 "continuous_functional_coalescence_honf",
+                "task_trained_functional_coalescence_honf",
                 "adaptive_hyperedge_opening_honf",
             }
             and self.interface_model.environment_refinement_normalizer != "entmax15"
@@ -1284,6 +1313,7 @@ class UnifiedForwardConfig:
                     "coalesced_sparse_incidence_honf",
                     "converged_identity_preserving_coalescence_honf",
                     "continuous_functional_coalescence_honf",
+                    "task_trained_functional_coalescence_honf",
                     "adaptive_hyperedge_opening_honf",
                 }:
                     # The Run-1502 hook is not part of any historical
@@ -1306,10 +1336,18 @@ class UnifiedForwardConfig:
                 ):
                     interface_payload.pop("fusion_eps_abs", None)
                     interface_payload.pop("fusion_eps_rel", None)
-                if self.forward_architecture != "continuous_functional_coalescence_honf":
+                if self.forward_architecture not in {
+                    "continuous_functional_coalescence_honf",
+                    "task_trained_functional_coalescence_honf",
+                }:
                     interface_payload.pop("functional_tree_subsets", None)
+                if self.forward_architecture != "continuous_functional_coalescence_honf":
                     interface_payload.pop("read_input_close_rms", None)
                     interface_payload.pop("read_input_keep_rms", None)
+                if self.forward_architecture != "task_trained_functional_coalescence_honf":
+                    interface_payload.pop("functional_detail_hidden_dim", None)
+                    interface_payload.pop("functional_detail_initial_logit", None)
+                    interface_payload.pop("functional_detail_inference_mode", None)
                 budget_payload = interface_payload.get("case_group_budget")
                 if (
                     self.forward_architecture == "budgeted_group_control_honf"
@@ -1385,6 +1423,7 @@ class UnifiedForwardConfig:
                     "coalesced_sparse_incidence_honf",
                     "converged_identity_preserving_coalescence_honf",
                     "continuous_functional_coalescence_honf",
+                    "task_trained_functional_coalescence_honf",
                     "adaptive_hyperedge_opening_honf",
                 }:
                     for key in (

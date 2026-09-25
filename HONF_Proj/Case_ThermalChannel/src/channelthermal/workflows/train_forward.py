@@ -335,6 +335,20 @@ def resolve_auto_internal_mode(model_config: ChannelThermalHONFConfig, model: Ch
     )
 
 
+def _resolve_training_loss_config(
+    loss_config: Dict[str, Any],
+    training_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Apply training-profile objective overrides to the physical loss config."""
+
+    resolved = dict(loss_config)
+    if "functional_detail_complexity_weight" in training_config:
+        resolved["functional_detail_complexity_weight"] = float(
+            training_config["functional_detail_complexity_weight"]
+        )
+    return resolved
+
+
 def run_from_config(
     config: Dict[str, Any],
     args: argparse.Namespace,
@@ -352,7 +366,7 @@ def run_from_config(
     cfg = copy.deepcopy(config)
     dataset_cfg = cfg.get("dataset", {})
     training_cfg = cfg.get("training", {})
-    loss_cfg = cfg.get("loss", {})
+    loss_cfg = _resolve_training_loss_config(cfg.get("loss", {}), training_cfg)
     checkpoint_cfg = cfg.get("checkpointing", {})
     ignored_organizer_keys = [
         key
@@ -400,6 +414,14 @@ def run_from_config(
             )
     model_config = build_model_config(cfg, train_dataset)
     model = ChannelThermalHONFModel(model_config).to(device)
+    if model_config.core_honf.forward_architecture == "task_trained_functional_coalescence_honf":
+        initial_epochs = getattr(args, "epochs", None)
+        if initial_epochs is None:
+            initial_epochs = training_cfg.get("epochs", 200)
+        # v5 requires explicit schedule state even for its no-grad materialize
+        # pass used by --initialize-checkpoint. Epoch zero takes the exact
+        # parent path and consumes no controller or gate RNG.
+        model.set_training_progress(epoch=0, total_epochs=int(initial_epochs))
     model.set_global_target_normalization(train_dataset.normalizer.stats, normalize_targets=bool(dataset_cfg.get("normalize_targets", False)))
     resolve_auto_internal_mode(model_config, model)
     cfg = resolved_config_payload(
@@ -531,6 +553,22 @@ def run_from_config(
         "val_predicted_field_mse",
         "val_predicted_temperature_mse",
     ]
+    if model_config.core_honf.forward_architecture == "task_trained_functional_coalescence_honf":
+        detail_metric_keys = (
+            "loss_functional_detail_complexity",
+            "functional_detail_complexity_weight",
+            "functional_detail_configured_complexity_weight",
+            "functional_detail_ramp_weight",
+            "functional_detail_expected_R",
+            "functional_detail_stochastic_fraction",
+            *(
+                f"functional_detail_{phase}_{suffix}"
+                for phase in ("p0", "p1", "p2")
+                for suffix in ("expected_complexity", "expected_R", "actual_R")
+            ),
+        )
+        fieldnames.extend(detail_metric_keys)
+        fieldnames.extend(f"val_{key}" for key in detail_metric_keys)
     interface_settings = getattr(model_config.core_honf, "interface_model", None)
     routing_settings = getattr(interface_settings, "routing", None)
     paircost_enabled = bool(

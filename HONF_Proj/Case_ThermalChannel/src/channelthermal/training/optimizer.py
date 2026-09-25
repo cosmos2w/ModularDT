@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import math
 from typing import Any, Dict
 
 import torch
@@ -53,17 +54,20 @@ def build_forward_optimizer(
     model: ChannelThermalHONFModel,
     training_config: Dict[str, Any],
 ) -> tuple[torch.optim.AdamW, Dict[str, Any]]:
-    """Build the legacy one-group AdamW or the optional organizer split."""
+    """Build AdamW with the historical groups or an explicit v5 controller group."""
 
     learning_rate = float(training_config.get("learning_rate", 2.0e-4))
     weight_decay = float(training_config.get("weight_decay", 1.0e-5))
     organizer_learning_rate = training_config.get("organizer_learning_rate")
+    detail_controller_learning_rate = training_config.get(
+        "functional_detail_controller_learning_rate"
+    )
     trainable = [
         (name, parameter)
         for name, parameter in model.named_parameters()
         if parameter.requires_grad
     ]
-    if organizer_learning_rate is None:
+    if organizer_learning_rate is None and detail_controller_learning_rate is None:
         # This is intentionally the literal historical construction path.
         optimizer = torch.optim.AdamW(
             [param for param in model.parameters() if param.requires_grad],
@@ -72,7 +76,7 @@ def build_forward_optimizer(
         )
         groups = [_optimizer_group_record("all", learning_rate, trainable)]
         mode = "single"
-    else:
+    elif detail_controller_learning_rate is None:
         organizer_lr = float(organizer_learning_rate)
         if organizer_lr <= 0.0:
             raise ValueError("organizer_learning_rate must be null or positive.")
@@ -107,6 +111,65 @@ def build_forward_optimizer(
             _optimizer_group_record("organizer", organizer_lr, organizer_parameters),
             _optimizer_group_record("prediction", learning_rate, prediction_parameters),
         ]
+        mode = "split"
+    else:
+        detail_lr = float(detail_controller_learning_rate)
+        if not math.isfinite(detail_lr) or detail_lr <= 0.0:
+            raise ValueError(
+                "functional_detail_controller_learning_rate must be null or positive."
+            )
+        detail_parameters = [
+            item for item in trainable
+            if item[0].startswith("core.backend.functional_detail_controller.")
+        ]
+        if not detail_parameters:
+            raise ValueError(
+                "A functional detail controller optimizer group requires trainable "
+                "core.backend.functional_detail_controller.* parameters."
+            )
+        remaining_parameters = [
+            item for item in trainable
+            if not item[0].startswith("core.backend.functional_detail_controller.")
+        ]
+        groups = []
+        parameter_groups = []
+        if organizer_learning_rate is not None:
+            organizer_lr = float(organizer_learning_rate)
+            if organizer_lr <= 0.0:
+                raise ValueError("organizer_learning_rate must be null or positive.")
+            organizer_parameters = [
+                item for item in remaining_parameters if item[0].startswith("core.organizer.")
+            ]
+            remaining_parameters = [
+                item for item in remaining_parameters if not item[0].startswith("core.organizer.")
+            ]
+            if not organizer_parameters or not remaining_parameters:
+                raise ValueError(
+                    "A split optimizer requires nonempty organizer and prediction groups."
+                )
+            groups.append(_optimizer_group_record("organizer", organizer_lr, organizer_parameters))
+            parameter_groups.append(
+                {"params": [parameter for _, parameter in organizer_parameters], "lr": organizer_lr}
+            )
+        if not remaining_parameters:
+            raise ValueError("A functional detail split requires parent prediction parameters.")
+        groups.extend(
+            [
+                _optimizer_group_record(
+                    "functional_detail_controller",
+                    detail_lr,
+                    detail_parameters,
+                ),
+                _optimizer_group_record("prediction", learning_rate, remaining_parameters),
+            ]
+        )
+        parameter_groups.extend(
+            [
+                {"params": [parameter for _, parameter in detail_parameters], "lr": detail_lr},
+                {"params": [parameter for _, parameter in remaining_parameters], "lr": learning_rate},
+            ]
+        )
+        optimizer = torch.optim.AdamW(parameter_groups, lr=learning_rate, weight_decay=weight_decay)
         mode = "split"
     inventory = {
         "mode": mode,
@@ -181,4 +244,3 @@ def _validate_optimizer_resume_compatibility(
                 "Resume split-optimizer membership or learning rates do not match this launch. "
                 "Use --initialize-checkpoint instead."
             )
-

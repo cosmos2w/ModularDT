@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
@@ -15,6 +16,9 @@ from .local_coupling import (
     build_local_module_params_from_global,
     teacher_port_tokens_from_interface_condition,
 )
+
+
+TASK_TRAINED_FUNCTIONAL_COALESCENCE = "task_trained_functional_coalescence_honf"
 
 
 @dataclass(frozen=True)
@@ -202,6 +206,137 @@ def _phase_functional_probe_kwargs(
             environment=None,
         )
     }
+
+
+def _functional_detail_stochastic_mask(
+    model: Any,
+    batch_size: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    """Choose one deterministic/stochastic mode per case for this forward.
+
+    The resulting mask is passed unchanged to every physical preparation in
+    the current P0/P1/P2 call.  Through e50 this helper returns without
+    sampling, preserving the parent's random-number stream.
+    """
+
+    if str(model.config.core_honf.forward_architecture) != TASK_TRAINED_FUNCTIONAL_COALESCENCE:
+        return None
+    backend = model.core.backend
+    selection = backend.selection_state() if callable(getattr(backend, "selection_state", None)) else {}
+    epoch = selection.get("epoch") if isinstance(selection, dict) else None
+    if epoch is None:
+        return None
+    if int(epoch) <= 50:
+        return None
+    if not bool(model.training):
+        return torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+    mask = torch.zeros(batch_size, dtype=torch.bool, device=device)
+    step = int(getattr(model, "_functional_detail_assignment_step", 0))
+    setattr(model, "_functional_detail_assignment_step", step + 1)
+    if batch_size <= 3:
+        if batch_size == 1:
+            mask[0] = bool(step % 2)
+            return mask
+        stochastic_count = batch_size // 2 if step % 2 == 0 else (batch_size + 1) // 2
+        start = (step // 2) % batch_size
+        case_order = torch.roll(
+            torch.arange(batch_size, device=device),
+            shifts=-start,
+        )
+        mask[case_order[:stochastic_count]] = True
+        return mask
+
+    stochastic_count = batch_size // 2
+    selected = torch.randperm(batch_size, device=device)[:stochastic_count]
+    mask[selected] = True
+    return mask
+
+
+def _functional_detail_state_value(prepared: PreparedInterfaceField, name: str) -> torch.Tensor | None:
+    """Find a live v5 value on prepared/backend state, never detached aux."""
+
+    containers: list[Any] = [
+        getattr(prepared, "phase_shared_state", None),
+        getattr(prepared, "backend_state", None),
+    ]
+    for container in containers:
+        if container is None:
+            continue
+        value = container.get(name) if isinstance(container, dict) else getattr(container, name, None)
+        if torch.is_tensor(value):
+            return value
+        plan = (
+            container.get("functional_detail_plan")
+            if isinstance(container, dict)
+            else getattr(container, "functional_detail_plan", None)
+        )
+        if plan is not None:
+            value = plan.get(name.removeprefix("functional_detail_")) if isinstance(plan, dict) else getattr(
+                plan, name.removeprefix("functional_detail_"), None
+            )
+            if torch.is_tensor(value):
+                return value
+    return None
+
+
+def _functional_detail_ramp_weight(model: Any, reference: torch.Tensor) -> torch.Tensor:
+    """Match the v5 controller's quintic e50-e150 warm introduction."""
+
+    backend = model.core.backend
+    selection = backend.selection_state() if callable(getattr(backend, "selection_state", None)) else {}
+    epoch = selection.get("epoch") if isinstance(selection, dict) else None
+    if epoch is None or int(epoch) <= 50:
+        return reference.new_zeros(())
+    x = reference.new_tensor((int(epoch) - 50) / 100.0).clamp(0.0, 1.0)
+    return x.pow(3) * (10.0 - 15.0 * x + 6.0 * x.square())
+
+
+def _functional_detail_prepare_kwargs(
+    architecture: str,
+    stochastic_mask: torch.Tensor | None,
+) -> dict[str, torch.Tensor]:
+    if architecture != TASK_TRAINED_FUNCTIONAL_COALESCENCE or stochastic_mask is None:
+        return {}
+    return {"functional_detail_stochastic_mask": stochastic_mask}
+
+
+def _functional_detail_phase_value(
+    prepared_values: tuple[PreparedInterfaceField | None, ...],
+    *,
+    name: str,
+    batch_size: int,
+    reference: torch.Tensor,
+    required: bool = False,
+) -> torch.Tensor:
+    """Average one live per-case quantity over distinct physical preparations."""
+
+    values: list[torch.Tensor] = []
+    seen: set[int] = set()
+    missing: list[str] = []
+    for prepared in prepared_values:
+        if prepared is None or id(prepared) in seen:
+            continue
+        seen.add(id(prepared))
+        value = _functional_detail_state_value(prepared, name)
+        if value is not None:
+            if tuple(value.shape) != (batch_size,):
+                raise RuntimeError(
+                    f"{name} must have shape [B]={batch_size}, got {tuple(value.shape)}."
+                )
+            values.append(value.to(device=reference.device, dtype=reference.dtype))
+        else:
+            missing.append(str(getattr(prepared, "architecture", "prepared phase")))
+    if not values:
+        if required:
+            raise RuntimeError(f"v5 preparation did not expose its live {name}.")
+        return reference.new_zeros(batch_size)
+    if required and missing:
+        raise RuntimeError(
+            f"Some v5 physical preparations did not expose their live {name}: {missing}."
+        )
+    return torch.stack(values, dim=0).mean(dim=0)
 
 
 def _decode_temperature(
@@ -459,6 +594,11 @@ def forward_interface_field(
     # footprint once.  The same case-local cache (including environment work)
     # is reused while group states refresh after each local response.
     layout_cache = model.core.build_layout(encoded, physical_port_xy)
+    detail_stochastic_mask = _functional_detail_stochastic_mask(model, batch, device)
+    detail_prepare_kwargs = _functional_detail_prepare_kwargs(
+        architecture,
+        detail_stochastic_mask,
+    )
     base_module_state = encoded.module_tokens
     with _interface_read_role(model, "p0_port"):
         prepared0 = model.core.prepare(
@@ -466,6 +606,7 @@ def forward_interface_field(
             base_module_state,
             layout_cache=layout_cache,
             return_routing_maps=bool(return_routing_maps),
+            **detail_prepare_kwargs,
             **_phase_functional_probe_kwargs(
                 model,
                 "P0",
@@ -554,6 +695,7 @@ def forward_interface_field(
                         layout_cache=layout_cache,
                         return_routing_maps=bool(return_routing_maps),
                         phase_shared_state=prepared0.phase_shared_state,
+                        **detail_prepare_kwargs,
                         **_phase_functional_probe_kwargs(
                             model,
                             "P1",
@@ -570,6 +712,7 @@ def forward_interface_field(
                         module_state,
                         layout_cache=layout_cache,
                         return_routing_maps=bool(return_routing_maps),
+                        **detail_prepare_kwargs,
                         **_phase_functional_probe_kwargs(
                             model,
                             "P1",
@@ -663,6 +806,7 @@ def forward_interface_field(
                     layout_cache=layout_cache,
                     return_routing_maps=bool(return_routing_maps),
                     phase_shared_state=prepared0.phase_shared_state,
+                    **detail_prepare_kwargs,
                     **_phase_functional_probe_kwargs(
                         model,
                         "P2",
@@ -679,6 +823,7 @@ def forward_interface_field(
                     module_state,
                     layout_cache=layout_cache,
                     return_routing_maps=bool(return_routing_maps),
+                    **detail_prepare_kwargs,
                     **_phase_functional_probe_kwargs(
                         model,
                         "P2",
@@ -818,6 +963,55 @@ def forward_interface_field(
         "routing_aux": {key: value for key, value in decoder_output.items() if key != "pred_field"},
         "interaction_aux": interaction_aux,
     }
+    if architecture == TASK_TRAINED_FUNCTIONAL_COALESCENCE:
+        selection = model.core.backend.selection_state()
+        epoch = selection.get("epoch") if isinstance(selection, dict) else None
+        detail_is_active = epoch is not None and int(epoch) > 50
+        detail_preparations = (prepared0, prepared1, final_prepared)
+        result["functional_detail_expected_complexity"] = _functional_detail_phase_value(
+            detail_preparations,
+            name="functional_detail_expected_complexity",
+            batch_size=batch,
+            reference=decoder_output["pred_field"],
+            required=detail_is_active,
+        )
+        result["functional_detail_expected_R"] = _functional_detail_phase_value(
+            detail_preparations,
+            name="functional_detail_expected_R",
+            batch_size=batch,
+            reference=decoder_output["pred_field"],
+            required=detail_is_active,
+        )
+        for phase_name, phase_prepared in zip(
+            ("p0", "p1", "p2"),
+            detail_preparations,
+            strict=True,
+        ):
+            for suffix, state_name in (
+                ("expected_complexity", "functional_detail_expected_complexity"),
+                ("expected_R", "functional_detail_expected_R"),
+                ("actual_R", "functional_detail_actual_R"),
+            ):
+                result[f"functional_detail_{phase_name}_{suffix}"] = (
+                    _functional_detail_phase_value(
+                        (phase_prepared,),
+                        name=state_name,
+                        batch_size=batch,
+                        reference=decoder_output["pred_field"],
+                        required=detail_is_active and phase_prepared is not None,
+                    )
+                    if phase_prepared is not None
+                    else decoder_output["pred_field"].new_full((batch,), math.nan)
+                )
+        result["functional_detail_ramp_weight"] = _functional_detail_ramp_weight(
+            model,
+            decoder_output["pred_field"],
+        )
+        result["functional_detail_stochastic_fraction"] = (
+            decoder_output["pred_field"].new_zeros(())
+            if detail_stochastic_mask is None
+            else detail_stochastic_mask.to(dtype=decoder_output["pred_field"].dtype).mean()
+        )
     if expected_optional_count is not None:
         # This remains attached to the P0 gate graph and is consumed once by
         # the ChannelThermal loss assembly.  It is deliberately separate from

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -45,6 +46,8 @@ CORE_TRAINING_KEYS = {
     "epochs",
     "learning_rate",
     "organizer_learning_rate",
+    "functional_detail_controller_learning_rate",
+    "functional_detail_complexity_weight",
     "weight_decay",
     "amp",
     "gradient_clip_norm",
@@ -151,6 +154,19 @@ def _validate_core_sections(core: Mapping[str, Any]) -> None:
     organizer_learning_rate = training.get("organizer_learning_rate")
     if organizer_learning_rate is not None and float(organizer_learning_rate) <= 0.0:
         raise ValueError("core.training.organizer_learning_rate must be null or positive.")
+    functional_detail_learning_rate = training.get("functional_detail_controller_learning_rate")
+    if functional_detail_learning_rate is not None and (
+        not math.isfinite(float(functional_detail_learning_rate))
+        or float(functional_detail_learning_rate) <= 0.0
+    ):
+        raise ValueError(
+            "core.training.functional_detail_controller_learning_rate must be null or positive."
+        )
+    complexity_weight = float(training.get("functional_detail_complexity_weight", 0.0))
+    if not math.isfinite(complexity_weight) or complexity_weight < 0.0:
+        raise ValueError(
+            "core.training.functional_detail_complexity_weight must be finite and nonnegative."
+        )
     save_latest_every_epochs = checkpointing.get("save_latest_every_epochs", 1)
     if (
         isinstance(save_latest_every_epochs, bool)

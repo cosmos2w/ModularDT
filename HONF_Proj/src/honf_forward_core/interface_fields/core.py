@@ -354,6 +354,7 @@ class InterfaceFieldCore(nn.Module):
             "coalesced_sparse_incidence_honf",
             "converged_identity_preserving_coalescence_honf",
             "continuous_functional_coalescence_honf",
+            "task_trained_functional_coalescence_honf",
             "adaptive_hyperedge_opening_honf",
         }:
             # Run 1405/1406 deliberately replace the historical coarse/local
@@ -693,6 +694,35 @@ class InterfaceFieldCore(nn.Module):
                 read_input_close_rms=float(options.read_input_close_rms),
                 read_input_keep_rms=float(options.read_input_keep_rms),
             )
+        elif config.forward_architecture == "task_trained_functional_coalescence_honf":
+            from .task_trained_functional_coalescence import (
+                TaskTrainedFunctionalCoalescencePairwiseField,
+            )
+
+            self.backend = TaskTrainedFunctionalCoalescencePairwiseField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                group_count=int(options.group_count),
+                group_control_dim=int(options.group_control_dim),
+                spatial_dim=int(config.spatial_dim),
+                module_temperature=float(options.module_temperature),
+                environment_temperature=float(options.environment_temperature),
+                query_temperature=float(options.query_temperature),
+                activation_checkpointing=bool(options.activation_checkpointing),
+                environment_refinement_normalizer=str(
+                    options.environment_refinement_normalizer
+                ),
+                functional_tree_subsets=options.functional_tree_subsets,
+                functional_detail_hidden_dim=int(options.functional_detail_hidden_dim),
+                functional_detail_initial_logit=float(
+                    options.functional_detail_initial_logit
+                ),
+                functional_detail_inference_mode=str(
+                    options.functional_detail_inference_mode
+                ),
+            )
         elif config.forward_architecture == "adaptive_hyperedge_opening_honf":
             from .adaptive_hyperedge_opening import AdaptiveHyperedgeOpeningPairwiseField
 
@@ -728,6 +758,7 @@ class InterfaceFieldCore(nn.Module):
             "coalesced_sparse_incidence_honf",
             "converged_identity_preserving_coalescence_honf",
             "continuous_functional_coalescence_honf",
+            "task_trained_functional_coalescence_honf",
         }:
             setter = getattr(self.backend, "set_training_progress", None)
             if callable(setter):
@@ -739,6 +770,7 @@ class InterfaceFieldCore(nn.Module):
             "coalesced_sparse_incidence_honf",
             "converged_identity_preserving_coalescence_honf",
             "continuous_functional_coalescence_honf",
+            "task_trained_functional_coalescence_honf",
         }:
             getter = getattr(self.backend, "selection_state", None)
             if callable(getter):
@@ -879,13 +911,22 @@ class InterfaceFieldCore(nn.Module):
         return_routing_maps: bool = False,
         phase_shared_state: Any = None,
         functional_probes: FunctionalProbeCatalogue | None = None,
+        functional_detail_stochastic_mask: torch.Tensor | None = None,
     ) -> PreparedInterfaceField:
         functional_architecture = (
             self.config.forward_architecture == "continuous_functional_coalescence_honf"
         )
+        task_trained_functional_architecture = (
+            self.config.forward_architecture == "task_trained_functional_coalescence_honf"
+        )
         if functional_probes is not None and not functional_architecture:
             raise ValueError(
                 "functional_probes are only supported by continuous_functional_coalescence_honf."
+            )
+        if functional_detail_stochastic_mask is not None and not task_trained_functional_architecture:
+            raise ValueError(
+                "functional_detail_stochastic_mask is only supported by "
+                "task_trained_functional_coalescence_honf."
             )
         if self.config.forward_architecture == "sparse_interface_honf":
             if not isinstance(layout_cache, SparseLayoutCache):
@@ -904,6 +945,13 @@ class InterfaceFieldCore(nn.Module):
                 module_states,
                 functional_probes=functional_probes,
                 return_routing_maps=bool(return_routing_maps),
+            )
+        elif task_trained_functional_architecture:
+            backend_state = self.backend.prepare(
+                encoded,
+                module_states,
+                return_routing_maps=bool(return_routing_maps),
+                functional_detail_stochastic_mask=functional_detail_stochastic_mask,
             )
         elif self.config.forward_architecture in {
             "phase_shared_group_control_honf",
@@ -952,6 +1000,7 @@ class InterfaceFieldCore(nn.Module):
                     "coalesced_sparse_incidence_honf",
                     "converged_identity_preserving_coalescence_honf",
                     "continuous_functional_coalescence_honf",
+                    "task_trained_functional_coalescence_honf",
                     "adaptive_hyperedge_opening_honf",
                 }
                 else int(self.config.interface_model.coarse_latent_count)
@@ -974,6 +1023,7 @@ class InterfaceFieldCore(nn.Module):
             "coalesced_sparse_incidence_honf",
             "converged_identity_preserving_coalescence_honf",
             "continuous_functional_coalescence_honf",
+            "task_trained_functional_coalescence_honf",
             "adaptive_hyperedge_opening_honf",
         }:
             aux.update(
