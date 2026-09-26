@@ -17,6 +17,7 @@ import torch
 from honf_runtime.checkpoints import validate_checkpoint_identity
 from honf_runtime.compat import load_trusted_checkpoint, select_device, set_seed
 from honf_runtime.paths import resolve_path
+from honf_forward_core.interface_fields.checkpoint_warm_start import warm_start_three_term_full_access
 from torch.utils.data import DataLoader
 
 from ..data import (
@@ -131,6 +132,7 @@ def _as_device_batch(raw: Mapping[str, Any], device: torch.device):
     for name in (
         "module_centers", "module_present", "module_features", "global_context", "query_xy",
         "target_field", "env_coords", "env_features", "env_weights", "query_features",
+        "receiver_anchor_coords", "receiver_anchor_weights", "receiver_anchor_roles",
     ):
         value = payload.get(name)
         if value is not None and not torch.is_tensor(value):
@@ -423,14 +425,165 @@ def _read_history(path: Path) -> list[dict[str, Any]]:
         return [dict(row) for row in csv.DictReader(stream)]
 
 
+def _validate_dense_refit_source(
+    payload: Mapping[str, Any],
+    *,
+    target_config: Any,
+    dataset_cfg: Mapping[str, Any],
+    checkpoint_path: Path,
+) -> tuple[Any, str]:
+    """Validate a WindFarm dense checkpoint as a three-term refit source."""
+
+    validate_checkpoint_identity(
+        payload,
+        case_id="WindFarm",
+        model_family="honf_forward",
+        workflow="forward",
+    )
+    if str(payload.get("dataset_id")) != str(dataset_cfg.get("dataset_id", "wind_farm_volume_v1")):
+        raise ValueError("WindFarm warm-start source and target must use the same volume dataset ID.")
+    target_schema = dataset_cfg.get("dataset_schema")
+    source_schema = payload.get("dataset_schema")
+    if target_schema is not None and source_schema != target_schema:
+        raise ValueError(
+            f"WindFarm warm-start dataset schema differs: source={source_schema!r}, target={target_schema!r}."
+        )
+    if list(payload.get("channel_order", [])) != ["Ux", "Uy", "Uz"] or int(payload.get("field_dim", 0)) != 3:
+        raise ValueError("WindFarm warm-start source must use native [Ux, Uy, Uz] velocity outputs.")
+    source_model = payload.get("model_config")
+    if not isinstance(source_model, Mapping):
+        raise TypeError("WindFarm warm-start checkpoint lacks its model_config.")
+    source_config = build_windfarm_forward_config(dict(source_model))
+    if source_config.forward_architecture != "dense_pairwise_field":
+        raise ValueError(
+            "WindFarm three-term refit accepts a compatible dense_pairwise_field checkpoint; "
+            f"got {source_config.forward_architecture!r}."
+        )
+    if target_config.forward_architecture != "three_term_full_access_honf":
+        raise ValueError(
+            "WindFarm dense initialization is reserved for the three_term_full_access_honf refit; "
+            f"got {target_config.forward_architecture!r}."
+        )
+    source_values = source_config.to_dict()
+    target_values = target_config.to_dict()
+    compatible_fields = (
+        "hidden_dim",
+        "field_dim",
+        "spatial_dim",
+        "coordinate_scale",
+        "geometry_mode",
+        "boundary_feature_mode",
+        "module_radius",
+        "num_env_tokens_x",
+        "num_env_tokens_y",
+        "position_fourier_frequencies",
+        "query_fourier_frequencies",
+        "use_position_fourier_for_env",
+        "use_position_fourier_for_modules",
+    )
+    mismatches = {
+        name: (source_values.get(name), target_values.get(name))
+        for name in compatible_fields
+        if source_values.get(name) != target_values.get(name)
+    }
+    source_interface = dict(source_values.get("interface_model") or {})
+    target_interface = dict(target_values.get("interface_model") or {})
+    for name in ("attention_heads", "message_hidden_dim", "relative_fourier_frequencies"):
+        if source_interface.get(name) != target_interface.get(name):
+            mismatches[f"interface_model.{name}"] = (source_interface.get(name), target_interface.get(name))
+    if mismatches:
+        raise ValueError(f"WindFarm dense-to-three-term tensor contract differs: {mismatches}")
+
+    manifest_path = (
+        checkpoint_path.parent.parent / "run_manifest.json"
+        if checkpoint_path.parent.name == "checkpoints"
+        else checkpoint_path.parent / "run_manifest.json"
+    )
+    source_manifest_uuid = ""
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        source_manifest_uuid = str(manifest.get("run_uuid", ""))
+        checkpoint_records = manifest.get("checkpoints", {})
+        recorded = checkpoint_records.get("best_field") if isinstance(checkpoint_records, Mapping) else None
+        if recorded:
+            recorded_path = Path(str(recorded)).expanduser()
+            if not recorded_path.is_absolute():
+                recorded_path = manifest_path.parent / recorded_path
+            if not recorded_path.is_file():
+                fallback = manifest_path.parent / "checkpoints" / Path(str(recorded)).name
+                if not fallback.is_file():
+                    raise FileNotFoundError(
+                        "WindFarm run manifest selects a missing field checkpoint: "
+                        f"{recorded_path}"
+                    )
+                recorded_path = fallback
+            recorded_path = recorded_path.resolve()
+            if checkpoint_path.resolve() != recorded_path:
+                raise ValueError(
+                    "WindFarm refit initialization must use the exact manifest-selected field checkpoint: "
+                    f"{recorded_path}."
+                )
+            best_metrics = manifest.get("best_metrics", {})
+            expected_epoch = best_metrics.get("best_epoch") if isinstance(best_metrics, Mapping) else None
+            if expected_epoch is not None:
+                actual_epoch = payload.get("epoch", payload.get("current_epoch"))
+                actual_best_epoch = payload.get("best_epoch")
+                if (
+                    actual_epoch is None
+                    or actual_best_epoch is None
+                    or int(actual_epoch) != int(expected_epoch)
+                    or int(actual_best_epoch) != int(expected_epoch)
+                ):
+                    raise ValueError(
+                        "WindFarm selected field checkpoint epoch disagrees with its run manifest: "
+                        f"manifest={expected_epoch}, checkpoint_epoch={actual_epoch}, "
+                        f"checkpoint_best_epoch={actual_best_epoch}."
+                    )
+            expected_metric = (
+                best_metrics.get("best_val_volume_mse")
+                if isinstance(best_metrics, Mapping)
+                else None
+            )
+            actual_metric = payload.get("best_metric")
+            if expected_metric is not None and actual_metric is not None:
+                tolerance = max(1.0e-10, 1.0e-7 * abs(float(expected_metric)))
+                if abs(float(actual_metric) - float(expected_metric)) > tolerance:
+                    raise ValueError(
+                        "WindFarm selected field checkpoint metric disagrees with its run manifest: "
+                        f"manifest={expected_metric}, checkpoint={actual_metric}."
+                    )
+    return source_config, source_manifest_uuid
+
+
 def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override: Path | None = None) -> int:
     """Execute one normal run-store-owned WindFarm training workflow."""
 
     requested_cfg = copy.deepcopy(dict(config))
     resume_path_value = getattr(request, "resume_checkpoint", None)
-    if getattr(request, "initialize_checkpoint", None):
-        raise ValueError("WindFarm forward models always start from scratch; initialization checkpoints are not supported.")
+    explicit_initialize_path = getattr(request, "initialize_checkpoint", None)
+    if resume_path_value and explicit_initialize_path:
+        raise ValueError("WindFarm training cannot resume and initialize from separate checkpoints in one launch.")
+    configured_initialize_path = requested_cfg.get("training", {}).get("init_checkpoint_path")
+    initialize_path_value = explicit_initialize_path or (
+        None if resume_path_value else configured_initialize_path
+    )
     resume_payload: dict[str, Any] | None = None
+    initialize_payload: dict[str, Any] | None = None
+    initialize_path: Path | None = None
+    initialize_source_config: Any = None
+    initialize_source_run_uuid = ""
+    if initialize_path_value:
+        initialize_path = _resolved_path(initialize_path_value)
+        initialize_payload = load_trusted_checkpoint(initialize_path, map_location="cpu")
+        target_core_config = build_windfarm_forward_config(
+            dict(requested_cfg.get("model", {}).get("core_honf", {}))
+        )
+        initialize_source_config, initialize_source_run_uuid = _validate_dense_refit_source(
+            initialize_payload,
+            target_config=target_core_config,
+            dataset_cfg=dict(requested_cfg.get("dataset", {})),
+            checkpoint_path=initialize_path,
+        )
     if resume_path_value:
         resume_payload = load_trusted_checkpoint(_resolved_path(resume_path_value), map_location="cpu")
         validate_checkpoint_identity(
@@ -459,19 +612,23 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
     device = select_device(getattr(request, "device", None) or training_cfg.get("device"))
     volume_path = _resolved_path(dataset_cfg["volume_path"])
     compact_path = _resolved_path(dataset_cfg["compact_path"])
+    core_payload = dict(cfg.get("model", {}).get("core_honf", {}))
+    model_config = build_windfarm_forward_config(core_payload)
     view = WindFarmNativeView(
         volume_path,
         compact_metadata=_compact_metadata(compact_path),
         token_shape=tuple(dataset_cfg.get("env_token_shape", ENV_TOKEN_SHAPE)),
+        include_receiver_anchors=(model_config.forward_architecture == "adaptive_interaction_cover_honf"),
     )
     split = _load_or_make_split(view, dataset_cfg)
-    if resume_payload is not None:
-        split = _split_from_checkpoint(view, resume_payload)
-        normalization_payload = resume_payload.get("normalization")
+    source_payload = resume_payload if resume_payload is not None else initialize_payload
+    if source_payload is not None:
+        split = _split_from_checkpoint(view, source_payload)
+        normalization_payload = source_payload.get("normalization")
         if not isinstance(normalization_payload, Mapping):
-            raise ValueError("WindFarm resume checkpoint lacks its training-owned normalization.")
+            raise ValueError("WindFarm source checkpoint lacks its training-owned normalization.")
         normalizer = VelocityNormalizer.from_dict(dict(normalization_payload))
-        profile_payload = resume_payload.get("vertical_profile_baseline")
+        profile_payload = source_payload.get("vertical_profile_baseline")
         profile = (
             None
             if not isinstance(profile_payload, Mapping)
@@ -511,8 +668,6 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
     train_loader = DataLoader(train_dataset, batch_size=int(dataset_cfg.get("batch_size", 8)), shuffle=True, **loader_kwargs)
     val_loader = DataLoader(val_dataset, batch_size=int(dataset_cfg.get("val_batch_size", 8)), shuffle=False, **loader_kwargs)
 
-    core_payload = dict(cfg.get("model", {}).get("core_honf", {}))
-    model_config = build_windfarm_forward_config(core_payload)
     model = WindFarmForwardModel(model_config, velocity_transform=normalizer).to(device)
     train_generator = torch.Generator(device="cpu")
     train_generator.manual_seed(int(seed) + 104729)
@@ -529,13 +684,54 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
     first_raw = next(iter(train_loader))
     first_batch = _as_device_batch(first_raw, device)
     model.materialize(first_batch)
+    run_dir = Path(run_dir_override or cfg.get("paths", {}).get("saved_model_dir", "Trained_Results")).expanduser().resolve()
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if initialize_payload is not None:
+        source_wrapper_state = initialize_payload.get("model_state_dict")
+        if not isinstance(source_wrapper_state, Mapping) or not source_wrapper_state:
+            raise TypeError("WindFarm warm-start checkpoint lacks a nonempty model_state_dict.")
+        if any(not str(name).startswith("core.") for name in source_wrapper_state):
+            raise ValueError("WindFarm warm-start checkpoint contains unexpected wrapper state outside core.*.")
+        source_core_state = {str(name)[len("core."):]: value for name, value in source_wrapper_state.items()}
+        transferred_state, transfer_inventory = warm_start_three_term_full_access(
+            source_core_state,
+            model.core.state_dict(),
+            source_architecture=str(initialize_source_config.forward_architecture),
+        )
+        model.core.load_state_dict(transferred_state, strict=True)
+        initialization_inventory = {
+            **transfer_inventory,
+            "source_checkpoint": str(initialize_path),
+            "source_run_uuid": initialize_source_run_uuid or None,
+            "source_run_id": initialize_payload.get("train_config", {}).get("run", {}).get("id")
+            if isinstance(initialize_payload.get("train_config"), Mapping)
+            else None,
+            "source_epoch": initialize_payload.get("epoch", initialize_payload.get("current_epoch")),
+            "source_update_count": initialize_payload.get("update_count"),
+            "source_best_epoch": initialize_payload.get("best_epoch"),
+            "source_best_metric": initialize_payload.get("best_metric"),
+            "source_dataset_id": initialize_payload.get("dataset_id"),
+            "source_dataset_schema": initialize_payload.get("dataset_schema"),
+            "target_architecture": model.architecture,
+            "target_common_head": "fresh initialization; requires WindFarm refit",
+        }
+        _json_write(run_dir / "initialization_inventory.json", initialization_inventory)
+        cfg["initialization"] = {
+            "checkpoint_path": str(initialize_path),
+            "run_uuid": initialize_source_run_uuid or None,
+            "checkpoint_epoch": initialization_inventory["source_epoch"],
+            "checkpoint_update_count": initialization_inventory["source_update_count"],
+            "checkpoint_best_epoch": initialization_inventory["source_best_epoch"],
+            "checkpoint_best_metric": initialization_inventory["source_best_metric"],
+            "target_architecture": model.architecture,
+            "inventory_file": "initialization_inventory.json",
+            "prediction_identity_claim": False,
+        }
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(training_cfg.get("learning_rate", 3.0e-4)),
         weight_decay=float(training_cfg.get("weight_decay", 1.0e-5)),
     )
-    run_dir = Path(run_dir_override or cfg.get("paths", {}).get("saved_model_dir", "Trained_Results")).expanduser().resolve()
-    run_dir.mkdir(parents=True, exist_ok=True)
     epochs = int(getattr(request, "epochs", None) or training_cfg.get("epochs", 500))
     cfg.setdefault("training", {})["epochs"] = epochs
     _json_write(run_dir / "config_resolved.json", cfg)
@@ -544,7 +740,19 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
         normalization_sidecar["vertical_profile_baseline"] = profile.to_dict()
     _json_write(run_dir / "normalization.json", normalization_sidecar)
     max_train_batches = getattr(request, "max_train_batches", None)
+    if max_train_batches is None:
+        max_train_batches = training_cfg.get("max_train_batches_per_epoch")
     max_val_batches = getattr(request, "max_val_batches", None)
+    if max_val_batches is None:
+        max_val_batches = training_cfg.get("max_val_batches")
+    for name, value in (
+        ("max_train_batches", max_train_batches),
+        ("max_val_batches", max_val_batches),
+    ):
+        if value is not None and int(value) <= 0:
+            raise ValueError(f"WindFarm {name} must be a positive integer when set.")
+    max_train_batches = None if max_train_batches is None else int(max_train_batches)
+    max_val_batches = None if max_val_batches is None else int(max_val_batches)
     start_epoch = 1
     best_metric = math.inf
     best_epoch: int | None = None
@@ -582,7 +790,7 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
             optimizer=optimizer,
             channel_weights=channel_weights,
             receiver_chunk_size=receiver_chunk_size,
-            max_batches=None if max_train_batches is None else int(max_train_batches),
+            max_batches=max_train_batches,
             gradient_clip_norm=gradient_clip_norm,
             volume_queries=train_dataset.volume_queries,
         )
@@ -600,7 +808,7 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
                     optimizer=None,
                     channel_weights=channel_weights,
                     receiver_chunk_size=receiver_chunk_size,
-                    max_batches=None if max_val_batches is None else int(max_val_batches),
+                    max_batches=max_val_batches,
                     gradient_clip_norm=0.0,
                     volume_queries=val_dataset.volume_queries,
                 )
@@ -711,6 +919,11 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
             "best_epoch": best_epoch,
             "last_epoch": epochs,
             "update_count": update_count,
+            "max_train_batches_per_epoch": max_train_batches,
+            "configured_epoch_limit": epochs,
+            "optimizer_update_ceiling": (
+                None if max_train_batches is None else int(max_train_batches) * int(epochs)
+            ),
         },
     )
     return 0

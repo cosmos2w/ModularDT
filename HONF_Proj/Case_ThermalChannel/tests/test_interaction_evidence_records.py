@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 
+import channelthermal.interaction_evidence.reference_adapter as reference_adapter_module
 import numpy as np
 import pytest
 from channelthermal.interaction_evidence import (
@@ -22,11 +25,66 @@ from channelthermal.interaction_evidence import (
     validate_family_splits,
 )
 from channelthermal.interaction_evidence.reference_adapter import (
+    AnalyticWakeReferenceAdapter,
     design_state_to_physical_design,
     load_stored_reference_case,
     operating_context_from_config,
     read_embedded_case_config,
 )
+
+
+def test_reference_attempt_distinguishes_configuration_solver_and_adapter_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    record = _record("fixture")
+    adapter = object.__new__(AnalyticWakeReferenceAdapter)
+    adapter.case_template = {}
+    adapter.output_root = tmp_path
+    adapter.solver_path = tmp_path / "solver.py"
+    adapter.common_path = tmp_path / "common.py"
+    raw_path = tmp_path / "raw_solver_case"
+    calls: list[str] = []
+
+    class FakeConfig:
+        def finalize(self):
+            return self
+
+    def run_case(_config):
+        calls.append("solver")
+        return raw_path
+
+    adapter._solver = SimpleNamespace(
+        config_from_dict=lambda _raw: FakeConfig(),
+        materialize_layout=lambda config: config,
+        run_case=run_case,
+        build_uniform_grid=lambda _config: None,
+    )
+
+    def fail_adapter(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("raw output adapter failed")
+
+    monkeypatch.setattr(reference_adapter_module, "_read_solver_output", fail_adapter)
+    failed_after_solve = adapter.solve(record.design, record.context, record_id="adapter-failure")
+    assert calls == ["solver"]
+    assert failed_after_solve.status is SolveStatus.FAILED
+    assert failed_after_solve.provenance["failure_stage"] == "output_adapter"
+    assert failed_after_solve.provenance["solver_invoked"] is True
+    assert failed_after_solve.provenance["raw_solver_completed"] is True
+    assert failed_after_solve.provenance["physical_wall_time_available"] is True
+    assert failed_after_solve.provenance["case_dir"] == str(raw_path)
+
+    def fail_configuration(_raw):
+        raise RuntimeError("configuration failed")
+
+    adapter._solver.config_from_dict = fail_configuration
+    failed_before_solve = adapter.solve(record.design, record.context, record_id="config-failure")
+    assert calls == ["solver"]
+    assert failed_before_solve.status is SolveStatus.FAILED
+    assert failed_before_solve.provenance["failure_stage"] == "configuration"
+    assert failed_before_solve.provenance["solver_invoked"] is False
+    assert failed_before_solve.provenance["raw_solver_completed"] is False
+    assert failed_before_solve.provenance["physical_wall_time_available"] is False
 
 
 def _role(

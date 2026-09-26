@@ -551,6 +551,10 @@ def forward_interface_field(
         )
     # Only regional families request geometric metadata from the adapter.
     env = model.environment_builder(**environment_kwargs)
+    if teacher_port_tokens is None and interface_condition is not None:
+        teacher_port_tokens = teacher_port_tokens_from_interface_condition(interface_condition.float())
+    ntheta = model._infer_ntheta(interface_condition, teacher_port_tokens)
+    physical_port_xy = _port_coordinates(model, adapter.module_centers, ntheta)
     batch_kwargs: dict[str, Any] = {}
     if architecture == "hypergraph_quadrature_honf":
         # The regular-grid measure/layout are opt-in metadata. Historical
@@ -560,6 +564,52 @@ def forward_interface_field(
         batch_kwargs.update(
             env_weights=getattr(env, "env_weights", None),
             sampler_layout=getattr(env, "sampler_layout", None),
+        )
+    if architecture == "adaptive_interaction_cover_honf":
+        # A fixed case receiver universe is assembled from input geometry,
+        # independently of the current decoder query chunk. Each role has
+        # unit total measure; padded module anchors have zero weight and are
+        # filtered before the case-local tree is built.
+        env_mass = getattr(env, "env_weights", None)
+        if env_mass is None:
+            env_mass = env.env_coords.new_ones(env.env_coords.shape[:2])
+        env_mass = env_mass / env_mass.sum(dim=1, keepdim=True)
+        active_count = adapter.module_present.sum(dim=1, keepdim=True).clamp_min(1.0)
+        port_mass = adapter.module_present[:, :, None].expand(-1, -1, ntheta)
+        port_mass = port_mass / (active_count[:, :, None] * ntheta)
+        center_mass = adapter.module_present / active_count
+        length_x = float(model.config.core_honf.domain_length_x)
+        length_y = float(model.config.core_honf.domain_length_y)
+        pressure_y = torch.linspace(0.0, length_y, 32, device=device, dtype=dtype)
+        inlet = torch.stack((torch.full_like(pressure_y, 0.04 * length_x), pressure_y), dim=-1)
+        outlet = torch.stack((torch.full_like(pressure_y, 0.96 * length_x), pressure_y), dim=-1)
+        pressure = torch.cat((inlet, outlet), dim=0)[None].expand(batch, -1, -1)
+        pressure_mass = env_mass.new_full((batch, 64), 1.0 / 32.0)
+        anchor_coordinates = torch.cat((
+            env.env_coords,
+            physical_port_xy.reshape(batch, -1, 2),
+            pressure,
+            adapter.module_centers,
+        ), dim=1)
+        anchor_weights = torch.cat((
+            env_mass,
+            port_mass.reshape(batch, -1),
+            pressure_mass,
+            center_mass,
+        ), dim=1)
+        anchor_roles = torch.cat((
+            torch.zeros(env.env_coords.shape[:2], dtype=torch.long, device=device),
+            torch.ones((batch, int(port_mass.shape[1] * ntheta)), dtype=torch.long, device=device),
+            torch.cat((
+                torch.full((batch, 32), 2, dtype=torch.long, device=device),
+                torch.full((batch, 32), 3, dtype=torch.long, device=device),
+            ), dim=1),
+            torch.full(adapter.module_present.shape, 4, dtype=torch.long, device=device),
+        ), dim=1)
+        batch_kwargs.update(
+            receiver_anchor_coords=anchor_coordinates,
+            receiver_anchor_weights=anchor_weights,
+            receiver_anchor_roles=anchor_roles,
         )
     encoded = model.core.encode_case(
         BatchData(
@@ -586,10 +636,6 @@ def forward_interface_field(
             ),
         )
     )
-    if teacher_port_tokens is None and interface_condition is not None:
-        teacher_port_tokens = teacher_port_tokens_from_interface_condition(interface_condition.float())
-    ntheta = model._infer_ntheta(interface_condition, teacher_port_tokens)
-    physical_port_xy = _port_coordinates(model, adapter.module_centers, ntheta)
     # Sparse HONF constructs the occupied support table from the actual port
     # footprint once.  The same case-local cache (including environment work)
     # is reused while group states refresh after each local response.

@@ -394,6 +394,11 @@ class AnalyticWakeReferenceAdapter:
         raw_config["execution"]["gpu_id"] = 2  # metadata only; this solver executes NumPy on CPU.
         start = time.perf_counter()
         case_dir: Path | None = None
+        failure_stage = "configuration"
+        solver_invoked = False
+        raw_solver_completed = False
+        solver_started: float | None = None
+        solver_elapsed: float | None = None
         try:
             cfg = module.config_from_dict(raw_config)
             cfg = module.materialize_layout(cfg.finalize())
@@ -401,19 +406,32 @@ class AnalyticWakeReferenceAdapter:
             try:
                 # The legacy entry point changes this variable even though its kernels are CPU NumPy.
                 # Restore it immediately after the call so a caller's GPU-2 process state is retained.
+                failure_stage = "solver_execution"
+                solver_started = time.perf_counter()
+                solver_invoked = True
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     case_dir = Path(module.run_case(cfg))
+                solver_elapsed = time.perf_counter() - solver_started
+                raw_solver_completed = True
             finally:
+                if solver_started is not None and solver_elapsed is None:
+                    solver_elapsed = time.perf_counter() - solver_started
                 if previous_visibility is None:
                     os.environ.pop("CUDA_VISIBLE_DEVICES", None)
                 else:
                     os.environ["CUDA_VISIBLE_DEVICES"] = previous_visibility
-            elapsed = time.perf_counter() - start
+            failure_stage = "output_adapter"
             output, converged, runtime = _read_solver_output(
                 case_dir, design, cfg, grid_builder=module.build_uniform_grid
             )
+            failure_stage = "record_assembly"
             status = SolveStatus.CONVERGED if converged else SolveStatus.UNCONVERGED
             provenance = self._provenance(design, context, raw_config, case_dir, runtime)
+            provenance.update({
+                "solver_invoked": True,
+                "raw_solver_completed": True,
+                "physical_wall_time_available": True,
+            })
             deltas = _design_delta(baseline_design, design) if baseline_design is not None else {}
             return SolveRecord(
                 record_id=record_id,
@@ -421,7 +439,7 @@ class AnalyticWakeReferenceAdapter:
                 context=context,
                 source=EvidenceSource.REFERENCE_SOLVER,
                 status=status,
-                elapsed_seconds=elapsed,
+                elapsed_seconds=solver_elapsed,
                 provenance=provenance,
                 output=output,
                 perturbation_by_module=deltas,
@@ -432,6 +450,12 @@ class AnalyticWakeReferenceAdapter:
         except Exception as exc:  # noqa: BLE001 - preserve unexpected solver/runtime failures as typed records.
             elapsed = time.perf_counter() - start
             provenance = self._provenance(design, context, raw_config, case_dir, {})
+            provenance.update({
+                "failure_stage": failure_stage,
+                "solver_invoked": solver_invoked,
+                "raw_solver_completed": raw_solver_completed,
+                "physical_wall_time_available": solver_elapsed is not None,
+            })
             provenance["failure_type"] = type(exc).__name__
             provenance["failure_reason"] = str(exc)
             return SolveRecord(
@@ -440,7 +464,7 @@ class AnalyticWakeReferenceAdapter:
                 context=context,
                 source=EvidenceSource.REFERENCE_SOLVER,
                 status=SolveStatus.FAILED,
-                elapsed_seconds=elapsed,
+                elapsed_seconds=solver_elapsed if solver_elapsed is not None else elapsed,
                 provenance=provenance,
                 output=None,
                 perturbation_by_module=_design_delta(baseline_design, design) if baseline_design is not None else {},

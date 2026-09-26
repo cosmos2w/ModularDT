@@ -5,6 +5,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
+import subprocess
+import time
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -305,7 +308,16 @@ def evaluate_rows(
     )
     loader = DataLoader(dataset, batch_size=int(batch_size), shuffle=False, collate_fn=collate_windfarm)
     case_rows: list[dict[str, Any]] = []
+    device = next(model.parameters()).device
+    batch_prediction_walls: list[float] = []
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.synchronize(device)
+    evaluation_started = time.perf_counter()
     for raw_batch in loader:
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+            batch_started = time.perf_counter()
         batch = _as_device_batch(raw_batch, next(model.parameters()).device)
         with torch.no_grad():
             prepared = model.prepare_case(batch)
@@ -320,6 +332,9 @@ def evaluate_rows(
                 raise ValueError("WindFarm evaluation model lacks its target transform.")
             prediction_phys_array = prediction_phys.denormalize(prediction_std.detach().cpu().numpy())
             prediction_std_array = prediction_std.detach().cpu().numpy()
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+            batch_prediction_walls.append(float(time.perf_counter() - batch_started))
         for index, metadata in enumerate(raw_batch["metadata"]):
             single_raw = {
                 "target_field": np.asarray(raw_batch["target_field"])[index],
@@ -355,6 +370,25 @@ def evaluate_rows(
         "rows": len(case_rows),
         "cases": case_rows,
         "equal_case": {},
+    }
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    summary["execution"] = {
+        "logical_device": str(device),
+        "evaluated_rows": len(case_rows),
+        "volume_queries_per_row": int(q_volume),
+        "hub_band_queries_per_row": int(q_band),
+        "total_query_points": int(len(case_rows) * total),
+        "receiver_chunk_size": int(receiver_chunk_size),
+        "synchronized_model_prediction_wall_seconds": float(sum(batch_prediction_walls)),
+        "synchronized_evaluation_loop_wall_seconds": float(time.perf_counter() - evaluation_started),
+        "peak_cuda_allocated_bytes": (
+            int(torch.cuda.max_memory_allocated(device)) if device.type == "cuda" else None
+        ),
+        "peak_cuda_reserved_bytes": (
+            int(torch.cuda.max_memory_reserved(device)) if device.type == "cuda" else None
+        ),
+        "environment_token_count": int(np.prod(view.token_shape)),
     }
     metric_keys = (
         "volume_standardized_mse", "hub_band_standardized_mse", "volume_rmse_mps", "hub_band_rmse_mps",
@@ -553,10 +587,30 @@ def _parse_extra(argv: Iterable[str]) -> argparse.Namespace:
     parser.add_argument("--band-queries", type=int, default=None)
     parser.add_argument("--case-batch-size", type=int, default=1)
     parser.add_argument("--receiver-chunk-size", type=int, default=None)
+    parser.add_argument("--env-token-shape", type=int, nargs=3, default=None)
+    parser.add_argument("--row-indices", type=int, nargs="+", default=None)
     parser.add_argument("--study-mode", choices=("native", "diagnostics", "timing"), default=None)
+    parser.add_argument("--w2-cohort-manifest-only", action="store_true")
+    parser.add_argument("--w2-library-select", action="store_true")
     parser.add_argument("--Run_ID", action="append", default=[])
     parser.add_argument("--checkpoint", default=None)
     return parser.parse_known_args(list(argv))[0]
+
+
+def _select_evaluation_rows(split_rows: Iterable[int], requested_rows: Iterable[int] | None) -> np.ndarray:
+    rows = np.asarray(tuple(int(value) for value in split_rows), dtype=np.int64)
+    if requested_rows is None:
+        return rows
+    requested = np.asarray(tuple(int(value) for value in requested_rows), dtype=np.int64)
+    if requested.size == 0 or np.unique(requested).size != requested.size:
+        raise ValueError("--row-indices must contain a nonempty set of unique row indices.")
+    unavailable = np.setdiff1d(requested, rows)
+    if unavailable.size:
+        raise ValueError(
+            "--row-indices must be members of the selected split; "
+            f"invalid rows={unavailable.tolist()}"
+        )
+    return requested
 
 
 def evaluate_cli(
@@ -574,6 +628,54 @@ def evaluate_cli(
     """Entry point called by :class:`WindFarmPlugin` after root resolution."""
 
     args = _parse_extra(argv)
+    if args.w2_cohort_manifest_only and args.w2_library_select:
+        raise ValueError("Choose either --w2-cohort-manifest-only or --w2-library-select.")
+    if args.w2_cohort_manifest_only:
+        from ..decision_library import build_input_only_w2_cohorts
+
+        dataset_cfg = dict(config.get("dataset", {}))
+        compact_metadata = None if compact_path is None else _compact_metadata(compact_path)
+        token_shape = tuple(int(value) for value in dataset_cfg.get("env_token_shape", ENV_TOKEN_SHAPE))
+        view = WindFarmNativeView(
+            volume_path,
+            compact_metadata=compact_metadata,
+            token_shape=token_shape,
+        )
+        split = _load_split(view, resolve_path(str(derived_view)))
+        manifest = build_input_only_w2_cohorts(view.metadata, split)
+        target = (
+            Path(output_dir).expanduser().resolve()
+            if output_dir
+            else resolve_path(str(derived_view)) / "w2_cohort_feasibility"
+        )
+        target.mkdir(parents=True, exist_ok=True)
+        manifest_path = target / "cohort_manifest.json"
+        serialized = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        if manifest_path.exists():
+            if manifest_path.read_text(encoding="utf-8") != serialized:
+                raise FileExistsError(f"Refusing to overwrite a different frozen W2 cohort manifest: {manifest_path}")
+        else:
+            manifest_path.write_text(serialized, encoding="utf-8")
+        print(f"[windfarm-w2] cohorts={len(manifest['cohorts'])} output={manifest_path}")
+        return 0
+    if args.w2_library_select:
+        if checkpoint is None:
+            raise ValueError("WindFarm W2 library selection requires an exact manifest-selected field checkpoint.")
+        from .w2_library import run_w2_library_selection
+
+        return int(
+            run_w2_library_selection(
+                checkpoint=checkpoint,
+                volume_path=volume_path,
+                compact_path=compact_path,
+                derived_view=resolve_path(str(derived_view)),
+                device=device,
+                output_dir=(
+                    output_dir
+                    or Path(checkpoint).expanduser().resolve().parent / "evaluations" / "w2_library"
+                ),
+            )
+        )
     if checkpoint is None:
         raise ValueError("WindFarm evaluation requires a selected checkpoint path.")
     checkpoint_path = Path(checkpoint).expanduser().resolve()
@@ -599,6 +701,14 @@ def evaluate_cli(
     if args.study_mode is not None:
         from .study_evidence import run_study
 
+        token_shape = (
+            tuple(int(value) for value in args.env_token_shape)
+            if args.env_token_shape is not None
+            else tuple(int(value) for value in dataset_cfg.get("env_token_shape", ENV_TOKEN_SHAPE))
+        )
+        if len(token_shape) != 3 or any(value <= 0 for value in token_shape):
+            raise ValueError("--env-token-shape requires three positive dimensions.")
+
         return int(
             run_study(
                 checkpoint=checkpoint_path,
@@ -608,13 +718,27 @@ def evaluate_cli(
                 output_dir=output_dir or checkpoint_path.parent / "evaluations" / args.study_mode,
                 mode=args.study_mode,
                 compact_path=compact_path,
+                env_token_shape=token_shape,
             )
         )
     compact_metadata = None if compact_path is None else _compact_metadata(compact_path)
+    token_shape = (
+        tuple(int(value) for value in args.env_token_shape)
+        if args.env_token_shape is not None
+        else tuple(int(value) for value in dataset_cfg.get("env_token_shape", ENV_TOKEN_SHAPE))
+    )
+    if len(token_shape) != 3 or any(value <= 0 for value in token_shape):
+        raise ValueError("--env-token-shape requires three positive dimensions.")
+    model_config_payload = payload.get("model_config", {})
+    include_receiver_anchors = (
+        isinstance(model_config_payload, Mapping)
+        and str(model_config_payload.get("forward_architecture", "")) == "adaptive_interaction_cover_honf"
+    )
     view = WindFarmNativeView(
         volume_path,
         compact_metadata=compact_metadata,
-        token_shape=tuple(dataset_cfg.get("env_token_shape", ENV_TOKEN_SHAPE)),
+        token_shape=token_shape,
+        include_receiver_anchors=include_receiver_anchors,
     )
     split = (
         _split_from_checkpoint(view, payload)
@@ -624,7 +748,7 @@ def evaluate_cli(
     selected_split = str(args.split or evaluation_cfg.get("split", "validation"))
     if selected_split not in {"train", "validation", "test"}:
         raise ValueError(f"Unknown WindFarm evaluation split {selected_split!r}.")
-    rows = getattr(split, selected_split)
+    rows = _select_evaluation_rows(getattr(split, selected_split), args.row_indices)
     prefix = "validation" if selected_split == "validation" else selected_split
     q_volume = int(args.volume_queries or evaluation_cfg.get(f"{prefix}_volume_queries", dataset_cfg.get("q_volume", 768)))
     q_band = int(args.band_queries or evaluation_cfg.get(f"{prefix}_band_queries", dataset_cfg.get("q_band", 256)))
@@ -640,6 +764,25 @@ def evaluate_cli(
         device=target_device,
         materialization_batch=materialization_batch,
     )
+    device_provenance: dict[str, Any] = {"visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")}
+    if target_device.type == "cuda":
+        if os.environ.get("CUDA_VISIBLE_DEVICES") != "2":
+            raise RuntimeError(
+                "WindFarm native GPU evaluation must use physical GPU 2 via CUDA_VISIBLE_DEVICES=2."
+            )
+        physical = subprocess.run(
+            ["nvidia-smi", "-i", "2", "--query-gpu=uuid", "--format=csv,noheader"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        device_provenance.update(
+            {
+                "physical_gpu_index": 2,
+                "physical_gpu_uuid": physical.stdout.strip(),
+                "device_name": torch.cuda.get_device_name(target_device),
+            }
+        )
     profile_payload = payload.get("vertical_profile_baseline")
     baseline = None if not isinstance(profile_payload, Mapping) else VerticalProfileBaseline.from_dict(dict(profile_payload))
     if workflow == "compare":
@@ -704,6 +847,10 @@ def evaluate_cli(
             "workflow": workflow,
             "q_volume": q_volume,
             "q_band": q_band,
+            "env_token_shape": list(token_shape),
+            "environment_token_count": int(np.prod(token_shape)),
+            "row_indices": [int(value) for value in rows],
+            "device_provenance": device_provenance,
             "sample_seed": int(dataset_cfg.get("sample_seed", 42)),
             "layout_counts": {
                 "evaluated_rows": int(result["rows"]),

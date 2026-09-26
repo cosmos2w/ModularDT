@@ -23,6 +23,7 @@ from .geometry import (
     module_geometry,
     support_features,
     support_geometry,
+    windfarm_receiver_anchors,
 )
 from .io import WindFarmDataset
 from .normalization import VelocityNormalizer
@@ -72,6 +73,9 @@ class NativeCase:
     global_context: np.ndarray
     diameter_m: float = D_M
     hub_height_m: float = HUB_HEIGHT_M
+    receiver_anchor_coords: np.ndarray | None = None
+    receiver_anchor_weights: np.ndarray | None = None
+    receiver_anchor_roles: np.ndarray | None = None
 
     @property
     def shape_nxyz(self) -> tuple[int, int, int]:
@@ -153,6 +157,7 @@ class WindFarmNativeView:
         hub_height_m: float = HUB_HEIGHT_M,
         reference_speed_mps: float = U_REF_MPS,
         token_shape: tuple[int, int, int] = ENV_TOKEN_SHAPE,
+        include_receiver_anchors: bool = False,
     ) -> None:
         self.volume = root if isinstance(root, WindFarmDataset) else WindFarmDataset(root)
         metadata = (
@@ -174,6 +179,7 @@ class WindFarmNativeView:
         self.hub_height_m = float(hub_height_m)
         self.reference_speed_mps = float(reference_speed_mps)
         self.token_shape = tuple(int(value) for value in token_shape)
+        self.include_receiver_anchors = bool(include_receiver_anchors)
         for name, expected in (
             ("D_m", self.diameter_m),
             ("hub_height_m", self.hub_height_m),
@@ -241,6 +247,14 @@ class WindFarmNativeView:
             n_turbines,
             reference_speed_mps=self.reference_speed_mps,
         )
+        anchor_coords = anchor_weights = anchor_roles = None
+        if self.include_receiver_anchors:
+            active_centers = centers[present > 0.5]
+            anchor_coords, anchor_weights, anchor_roles = windfarm_receiver_anchors(
+                environment,
+                active_centers,
+                rotor_radius_D=float(features[0, 0]),
+            )
         return NativeCase(
             index=row,
             case=str(np.asarray(self.metadata["case"])[row]),
@@ -257,6 +271,9 @@ class WindFarmNativeView:
             global_context=global_context,
             diameter_m=self.diameter_m,
             hub_height_m=self.hub_height_m,
+            receiver_anchor_coords=anchor_coords,
+            receiver_anchor_weights=anchor_weights,
+            receiver_anchor_roles=anchor_roles,
         )
 
 
@@ -373,6 +390,10 @@ class WindFarmNativeDataset:
             "case_name": case.case,
             "metadata": metadata,
         }
+        if case.receiver_anchor_coords is not None:
+            sample["receiver_anchor_coords"] = case.receiver_anchor_coords.copy()
+            sample["receiver_anchor_weights"] = case.receiver_anchor_weights.copy()
+            sample["receiver_anchor_roles"] = case.receiver_anchor_roles.copy()
         if self.include_query_weights:
             sample["query_loss_weight"] = loss_weights
             sample["query_measure_m3"] = measure_weights
@@ -410,6 +431,39 @@ def collate_windfarm(samples: list[Mapping[str, Any]]) -> dict[str, Any]:
         "case_name": [str(sample["case_name"]) for sample in samples],
         "metadata": [sample["metadata"] for sample in samples],
     }
+    anchor_fields = (
+        "receiver_anchor_coords",
+        "receiver_anchor_weights",
+        "receiver_anchor_roles",
+    )
+    anchor_presence = [tuple(name in sample for name in anchor_fields) for sample in samples]
+    if any(any(present) and not all(present) for present in anchor_presence):
+        raise ValueError("WindFarm receiver anchor coordinates, weights, and roles must be supplied together")
+    supplied = [all(present) for present in anchor_presence]
+    if any(supplied) and not all(supplied):
+        raise ValueError("all WindFarm samples in a batch must supply receiver anchors together")
+    if all(supplied):
+        anchor_width = max(int(np.asarray(sample[anchor_fields[0]]).shape[0]) for sample in samples)
+        anchor_coords = np.zeros((batch_size, anchor_width, 3), dtype=np.float32)
+        anchor_weights = np.zeros((batch_size, anchor_width), dtype=np.float32)
+        anchor_roles = np.zeros((batch_size, anchor_width), dtype=np.int64)
+        for batch_index, sample in enumerate(samples):
+            coords = np.asarray(sample[anchor_fields[0]], dtype=np.float32)
+            weights = np.asarray(sample[anchor_fields[1]], dtype=np.float32)
+            roles = np.asarray(sample[anchor_fields[2]], dtype=np.int64)
+            count = int(coords.shape[0])
+            if coords.ndim != 2 or coords.shape[1] != 3 or weights.shape != (count,) or roles.shape != (count,):
+                raise ValueError("WindFarm receiver anchors must align as [A,3], [A], and [A]")
+            anchor_coords[batch_index, :count] = coords
+            anchor_weights[batch_index, :count] = weights
+            anchor_roles[batch_index, :count] = roles
+        result.update(
+            {
+                "receiver_anchor_coords": anchor_coords,
+                "receiver_anchor_weights": anchor_weights,
+                "receiver_anchor_roles": anchor_roles,
+            }
+        )
     for key in ("query_loss_weight", "query_measure_m3"):
         if key in first:
             result[key] = np.stack([np.asarray(sample[key], dtype=np.float32) for sample in samples])
@@ -441,10 +495,17 @@ def batch_to_batch_data(batch: Mapping[str, Any]) -> Any:
             "env_features",
             "query_features",
         )
-        if name in fields
+        if name in fields and name in batch
     }
     if "env_weights" in fields and batch.get("env_weights") is not None:
         payload["env_weights"] = batch["env_weights"]
+    for name in (
+        "receiver_anchor_coords",
+        "receiver_anchor_weights",
+        "receiver_anchor_roles",
+    ):
+        if name in fields and batch.get(name) is not None:
+            payload[name] = batch[name]
     return BatchData(**payload)
 
 
@@ -454,6 +515,7 @@ def case_batch(
     *,
     normalizer: VelocityNormalizer | None = None,
     velocity_mps: Any | None = None,
+    include_receiver_anchors: bool | None = None,
 ) -> Any:
     """Build a tensor ``BatchData`` for one case and arbitrary geometry-only queries.
 
@@ -491,7 +553,7 @@ def case_batch(
         target = normalizer.normalize(physical) if normalizer is not None else physical.copy()
     from honf_forward_core.config import BatchData
 
-    return BatchData(
+    batch_payload: dict[str, Any] = dict(
         module_centers=torch.from_numpy(case.module_centers[None].copy()),
         module_present=torch.from_numpy(case.module_present[None].copy()),
         module_features=torch.from_numpy(case.module_features[None].copy()),
@@ -514,6 +576,32 @@ def case_batch(
         query_features=torch.from_numpy(geometry["query_features"][None].copy()),
         env_weights=torch.from_numpy(case.env_weights[None].copy()),
     )
+    include_anchors = (
+        case.receiver_anchor_coords is not None
+        if include_receiver_anchors is None
+        else bool(include_receiver_anchors)
+    )
+    if include_anchors:
+        if case.receiver_anchor_coords is None:
+            active_centers = case.module_centers[case.module_present > 0.5]
+            anchor_coords, anchor_weights, anchor_roles = windfarm_receiver_anchors(
+                case.environment,
+                active_centers,
+                rotor_radius_D=float(case.module_features[0, 0]),
+            )
+        else:
+            assert case.receiver_anchor_weights is not None and case.receiver_anchor_roles is not None
+            anchor_coords = case.receiver_anchor_coords
+            anchor_weights = case.receiver_anchor_weights
+            anchor_roles = case.receiver_anchor_roles
+        batch_payload.update(
+            {
+                "receiver_anchor_coords": torch.from_numpy(anchor_coords[None].copy()),
+                "receiver_anchor_weights": torch.from_numpy(anchor_weights[None].copy()),
+                "receiver_anchor_roles": torch.from_numpy(anchor_roles[None].copy()),
+            }
+        )
+    return BatchData(**batch_payload)
 
 
 __all__ = [

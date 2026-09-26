@@ -57,6 +57,35 @@ def _validate_managed_resume(run_dir: Path, bundle, workflow: str) -> dict | Non
     return manifest
 
 
+def _resolve_resume_run_dir(checkpoint_path: Path) -> Path:
+    """Resolve a managed checkpoint path to its run root.
+
+    RunStore checkpoints live in ``<run>/checkpoints`` while their manifest
+    lives in ``<run>``. Treating the checkpoint directory as the run root
+    would create a second, incomplete run inside the checkpoint tree.
+    """
+
+    checkpoint_dir = checkpoint_path.expanduser().resolve().parent
+    if checkpoint_dir.name != "checkpoints":
+        return checkpoint_dir
+
+    parent_run_dir = checkpoint_dir.parent
+    parent_manifest = parent_run_dir / "run_manifest.json"
+    checkpoint_manifest = checkpoint_dir / "run_manifest.json"
+    if parent_manifest.exists() and checkpoint_manifest.exists():
+        raise ValueError(
+            "Ambiguous managed resume: both the checkpoint directory and its parent contain run manifests."
+        )
+    if parent_manifest.exists():
+        return parent_run_dir
+    if checkpoint_manifest.exists():
+        return checkpoint_dir
+    raise FileNotFoundError(
+        f"Checkpoint is under {checkpoint_dir}, but neither it nor its parent has a run manifest; "
+        "refusing to treat a managed checkpoints directory as a new run root."
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a registered HONF case/model workflow.")
     parser.add_argument("--config", default=DEFAULT_CONFIG, help="Core launch profile.")
@@ -128,7 +157,7 @@ def main() -> int:
     case_facts = plugin.inspect_launch(bundle, request)
 
     if args.resume_checkpoint:
-        run_dir = resolve_path(args.resume_checkpoint).parent
+        run_dir = _resolve_resume_run_dir(resolve_path(args.resume_checkpoint))
         resume_manifest = _validate_managed_resume(run_dir, bundle, workflow)
         managed_resume = resume_manifest is not None
         if resume_manifest is not None:

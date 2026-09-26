@@ -343,6 +343,8 @@ class InterfaceFieldCore(nn.Module):
         self.position_fourier = FourierFeatures(None, int(config.position_fourier_frequencies))
         self.receiver_fourier = FourierFeatures(None, int(config.query_fourier_frequencies))
         if config.forward_architecture in {
+            "three_term_full_access_honf",
+            "adaptive_interaction_cover_honf",
             "fixed_group_pairwise_honf",
             "group_control_pairwise_honf",
             "phase_shared_group_control_honf",
@@ -400,8 +402,21 @@ class InterfaceFieldCore(nn.Module):
                 self.routing_log_temperatures[name] = nn.Parameter(
                     torch.zeros((), dtype=torch.get_default_dtype())
                 )
-        if config.forward_architecture == "dense_pairwise_field":
+        if config.forward_architecture in {
+            "dense_pairwise_field",
+            "three_term_full_access_honf",
+        }:
             self.backend = DensePairwiseField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                activation_checkpointing=bool(options.activation_checkpointing),
+            )
+        elif config.forward_architecture == "adaptive_interaction_cover_honf":
+            from .adaptive_cover_field import AdaptiveCoverPairwiseField
+
+            self.backend = AdaptiveCoverPairwiseField(
                 hidden,
                 int(options.message_hidden_dim),
                 heads,
@@ -904,6 +919,32 @@ class InterfaceFieldCore(nn.Module):
             if env_hierarchy is None:
                 raise ValueError("hierarchical_regional_honf requires adapter-supplied env_hierarchy.")
             hierarchy_geometry = prepare_hierarchy_geometry(env_hierarchy, env_weights, env_coords)
+        anchors = (batch.receiver_anchor_coords, batch.receiver_anchor_weights, batch.receiver_anchor_roles)
+        if any(value is not None for value in anchors) and not all(value is not None for value in anchors):
+            raise ValueError("receiver anchor coordinates, weights, and roles must be supplied together")
+        anchor_coords = anchor_weights = anchor_roles = None
+        if all(value is not None for value in anchors):
+            anchor_coords = anchors[0].to(device=module_centers.device, dtype=module_centers.dtype)
+            anchor_weights = anchors[1].to(device=module_centers.device, dtype=module_centers.dtype)
+            anchor_roles = anchors[2].to(device=module_centers.device, dtype=torch.long)
+            if anchor_coords.ndim == 2:
+                anchor_coords = anchor_coords[None].expand(int(module_centers.shape[0]), -1, -1)
+            if anchor_weights.ndim == 1:
+                anchor_weights = anchor_weights[None].expand(int(module_centers.shape[0]), -1)
+            if anchor_roles.ndim == 1:
+                anchor_roles = anchor_roles[None].expand(int(module_centers.shape[0]), -1)
+            if (
+                anchor_coords.ndim != 3
+                or anchor_coords.shape[0] != module_centers.shape[0]
+                or anchor_coords.shape[-1] != module_centers.shape[-1]
+                or anchor_weights.shape != anchor_coords.shape[:2]
+                or anchor_roles.shape != anchor_coords.shape[:2]
+            ):
+                raise ValueError("receiver anchors must align as [B,A,d], [B,A], [B,A]")
+            if not bool(torch.isfinite(anchor_coords).all()) or not bool(torch.isfinite(anchor_weights).all()):
+                raise ValueError("receiver anchor coordinates and weights must be finite")
+            if bool((anchor_weights < 0).any()) or bool((anchor_weights > 0).sum(dim=1).eq(0).any()):
+                raise ValueError("receiver anchor weights must be nonnegative with positive case mass")
         return EncodedInterfaceCase(
             module_tokens=module_tokens,
             env_tokens=env_tokens,
@@ -920,6 +961,9 @@ class InterfaceFieldCore(nn.Module):
             env_hierarchy_geometry=hierarchy_geometry,
             routing_geometry=batch.routing_geometry,
             sampler_layout=batch.sampler_layout,
+            receiver_anchor_coords=anchor_coords,
+            receiver_anchor_weights=anchor_weights,
+            receiver_anchor_roles=anchor_roles,
         )
 
     def prepare(
@@ -1009,6 +1053,8 @@ class InterfaceFieldCore(nn.Module):
             "coarse_latent_count": (
                 0
                 if self.config.forward_architecture in {
+                    "three_term_full_access_honf",
+                    "adaptive_interaction_cover_honf",
                     "fixed_group_pairwise_honf",
                     "group_control_pairwise_honf",
                     "phase_shared_group_control_honf",
@@ -1033,6 +1079,7 @@ class InterfaceFieldCore(nn.Module):
             ),
         }
         if self.config.forward_architecture in {
+            "adaptive_interaction_cover_honf",
             "fixed_group_pairwise_honf",
             "group_control_pairwise_honf",
             "phase_shared_group_control_honf",
@@ -1194,6 +1241,21 @@ class InterfaceFieldCore(nn.Module):
                 if not values or not all(torch.is_tensor(value) for value in values):
                     continue
                 first = values[0]
+                if key.startswith("cover_") and key.endswith((
+                    "_unique_rows", "_executed_rows", "_padded_rows", "_raw_paths",
+                    "_rectangular_rows", "_fallback_queries", "_query_degree_sum",
+                    "_query_count",
+                )):
+                    # A cover is chosen once per case, but physically read
+                    # pairs and fallback work accrue in every query chunk.
+                    aux[key] = torch.stack(values).sum()
+                    continue
+                if key == "cover_query_degree_max":
+                    aux[key] = torch.stack(values).max()
+                    continue
+                if key == "cover_executor_dense_fallback":
+                    aux[key] = torch.stack(values).sum()
+                    continue
                 if key.startswith("routing_") and key.endswith(("_raw_path_count", "_unique_pair_count")):
                     aux[key] = torch.stack(values).sum()
                     continue

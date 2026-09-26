@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 from honf_runtime.case_protocol import WorkflowRequest
 from honf_runtime.checkpoints import checkpoint_filename
+from honf_runtime.compat import load_trusted_checkpoint
 from honf_runtime.config_loader import ConfigBundle
 from honf_runtime.paths import resolve_path
 from honf_runtime.run_store import RunStore
@@ -116,6 +117,72 @@ def _single_run_dir(saved_root: Path, run_id: str) -> Path:
     return candidates[0]
 
 
+_MANIFEST_CHECKPOINT_KEYS = {
+    "best": "best_total",
+    "best_total": "best_total",
+    "best_field": "best_field",
+    "best_by_field_mse": "best_field",
+    "best_temperature": "best_temperature",
+    "best_by_temperature_mse": "best_temperature",
+    "best_autonomous": "best_predicted",
+    "best_predicted": "best_predicted",
+    "latest": "latest",
+}
+
+
+def _checkpoint_for_run(run_dir: Path, selector: str) -> Path:
+    """Resolve named selectors through the run manifest when available.
+
+    Some historical runs have a top-level convenience alias that no longer
+    matches the checkpoint named by their manifest. The manifest path is the
+    checkpoint selection record; for a field-best selector, verify its saved
+    epoch against the recorded best epoch before returning it.
+    """
+
+    key = str(selector).strip().lower()
+    manifest_path = run_dir / "run_manifest.json"
+    manifest_key = _MANIFEST_CHECKPOINT_KEYS.get(key)
+    if manifest_key is not None and manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        checkpoint_records = manifest.get("checkpoints", {})
+        recorded = checkpoint_records.get(manifest_key) if isinstance(checkpoint_records, Mapping) else None
+        if recorded:
+            candidate = Path(str(recorded)).expanduser()
+            if not candidate.is_absolute():
+                candidate = run_dir / candidate
+            if not candidate.is_file():
+                in_run = run_dir / "checkpoints" / Path(str(recorded)).name
+                if in_run.is_file():
+                    candidate = in_run
+                else:
+                    raise FileNotFoundError(
+                        f"Run manifest selects {manifest_key} at {recorded}, but that checkpoint is missing."
+                    )
+            candidate = candidate.resolve()
+            if manifest_key == "best_field":
+                expected = manifest.get("best_metrics", {}).get("best_epoch")
+                if expected is not None:
+                    payload = load_trusted_checkpoint(candidate, map_location="cpu")
+                    actual = payload.get("best_epoch")
+                    epoch = payload.get("epoch", payload.get("current_epoch"))
+                    if actual is None or int(actual) != int(expected) or int(epoch) != int(expected):
+                        raise ValueError(
+                            "Run manifest and selected WindFarm field checkpoint disagree on best epoch: "
+                            f"manifest={expected}, checkpoint_epoch={epoch}, checkpoint_best_epoch={actual}."
+                        )
+                    expected_metric = manifest.get("best_metrics", {}).get("best_val_volume_mse")
+                    actual_metric = payload.get("best_metric")
+                    if expected_metric is not None and actual_metric is not None:
+                        tolerance = max(1.0e-10, 1.0e-7 * abs(float(expected_metric)))
+                        if abs(float(actual_metric) - float(expected_metric)) > tolerance:
+                            raise ValueError(
+                                "Run manifest and selected WindFarm field checkpoint disagree on best metric: "
+                                f"manifest={expected_metric}, checkpoint={actual_metric}."
+                            )
+            return candidate
+    return run_dir / checkpoint_filename(key)
+
+
 class WindFarmPlugin:
     """Connect WindFarm resources and field-only workflows to HONF runtime."""
 
@@ -164,6 +231,8 @@ class WindFarmPlugin:
         if architecture not in {
             "legacy_honf",
             "dense_pairwise_field",
+            "three_term_full_access_honf",
+            "adaptive_interaction_cover_honf",
             "sparse_incidence_group_control_honf",
         }:
             raise ValueError(f"Unsupported WindFarm architecture {architecture!r}.")
@@ -281,7 +350,7 @@ class WindFarmPlugin:
                     forwarded_args.append(str(value))
             for run_id in run_ids:
                 run_dir = _single_run_dir(saved_root, run_id)
-                checkpoint_path = run_dir / checkpoint_filename(str(selector))
+                checkpoint_path = _checkpoint_for_run(run_dir, str(selector))
                 if not checkpoint_path.is_file():
                     raise FileNotFoundError(f"WindFarm comparison checkpoint not found: {checkpoint_path}")
                 output = comparison_root / f"Run_{int(run_id):04d}"
@@ -299,22 +368,43 @@ class WindFarmPlugin:
                 records[f"{int(run_id):04d}"] = {
                     "checkpoint": str(checkpoint_path),
                     "metrics": str(output / "metrics.json"),
+                    "run_uuid": json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8")).get("run_uuid")
+                    if (run_dir / "run_manifest.json").is_file()
+                    else None,
                 }
             (comparison_root / "comparison.json").write_text(
                 json.dumps({"selector": str(selector), "runs": records}, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
             return 0
+        if "--w2-cohort-manifest-only" in request.extra_args:
+            dataset_config = dict(bundle.case.get("dataset") or {})
+            compact, volume, derived = _material_paths(dataset_config)
+            return int(
+                evaluate_cli(
+                    config=bundle.effective,
+                    checkpoint=None,
+                    volume_path=volume,
+                    compact_path=compact,
+                    derived_view=derived,
+                    device="cpu",
+                    output_dir=request.output_dir,
+                    argv=request.extra_args,
+                    workflow="forward",
+                )
+            )
         checkpoint = request.checkpoint
         run_dir = None
         if request.run_id and checkpoint and Path(str(checkpoint)).suffix != ".pt":
             run_dir = _single_run_dir(saved_root, request.run_id)
-            checkpoint = str(run_dir / checkpoint_filename(str(checkpoint)))
+            checkpoint = str(_checkpoint_for_run(run_dir, str(checkpoint)))
         elif request.run_id and not checkpoint:
             run_dir = _single_run_dir(saved_root, request.run_id)
-            checkpoint = str(run_dir / checkpoint_filename("best_field"))
+            checkpoint = str(_checkpoint_for_run(run_dir, "best_field"))
         elif checkpoint and Path(str(checkpoint)).suffix == ".pt":
-            run_dir = Path(checkpoint).expanduser().resolve().parent
+            checkpoint_path = Path(checkpoint).expanduser().resolve()
+            run_dir = checkpoint_path.parent.parent if checkpoint_path.parent.name == "checkpoints" else checkpoint_path.parent
+            checkpoint = str(checkpoint_path)
         elif checkpoint:
             raise ValueError("A named WindFarm checkpoint requires --run-id.")
         elif request.workflow == "forward":

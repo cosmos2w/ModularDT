@@ -23,6 +23,10 @@ ENV_TOKEN_SHAPE = (16, 8, 4)
 ENV_TOKEN_COUNT = int(np.prod(ENV_TOKEN_SHAPE))
 TARGET_COMPONENTS = ("Ux", "Uy", "Uz")
 WIND_DIRECTIONS_DEG = (270.0, 285.0, 300.0)
+ANCHOR_ROLE_ENVIRONMENT = 0
+ANCHOR_ROLE_ROTOR_HUB = 1
+ANCHOR_ROLE_ROTOR_INTERIOR = 2
+ANCHOR_ROLE_ROTOR_EDGE = 3
 
 
 class GeometryError(ValueError):
@@ -220,6 +224,84 @@ def environment_representation(
     )
 
 
+def windfarm_receiver_anchors(
+    environment: EnvironmentRepresentation,
+    module_centers_D: Any,
+    *,
+    rotor_radius_D: float = 0.5,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build input-only environmental and turbine rotor-neighborhood anchors.
+
+    Environmental centre-box quadrature masses are normalized to one. Each
+    turbine contributes 17 fixed Y-Z plane samples at its hub, half rotor
+    radius, and rotor edge, with positive dimensionless quadrature mass
+    summing to one per turbine. The documented wind-farm frame labels Y as
+    crosswind and Z as vertical, so turbine coordinates are not rotated.
+    These anchors do not depend on velocity targets, output queries, or query
+    chunk sizes.
+    """
+
+    centers = np.asarray(module_centers_D, dtype=np.float64)
+    radius = float(rotor_radius_D)
+    if centers.ndim != 2 or centers.shape[1] != 3 or centers.shape[0] < 1:
+        raise GeometryError("module_centers_D must have shape [M,3] for receiver-anchor construction")
+    if np.any(~np.isfinite(centers)):
+        raise GeometryError("module_centers_D contains non-finite coordinates")
+    if not np.isfinite(radius) or radius <= 0.0:
+        raise GeometryError("rotor_radius_D must be finite and positive")
+    env_coords = np.asarray(environment.coords_D, dtype=np.float64)
+    env_weights = np.asarray(environment.weights_D3, dtype=np.float64)
+    if (
+        env_coords.ndim != 2
+        or env_coords.shape[1] != 3
+        or env_weights.shape != (env_coords.shape[0],)
+        or env_coords.shape[0] < 1
+        or np.any(~np.isfinite(env_coords))
+        or np.any(~np.isfinite(env_weights))
+        or np.any(env_weights <= 0.0)
+    ):
+        raise GeometryError("environment quadrature must have finite [E,3] coordinates and positive [E] masses")
+
+    angles = np.arange(8, dtype=np.float64) * (2.0 * np.pi / 8.0)
+    unit_circle_yz = np.column_stack((np.zeros(8), np.cos(angles), np.sin(angles)))
+    rotor_coords: list[np.ndarray] = []
+    rotor_weights: list[np.ndarray] = []
+    rotor_roles: list[np.ndarray] = []
+    for center in centers:
+        rotor_coords.extend(
+            (
+                center[None, :],
+                center[None, :] + unit_circle_yz * (0.5 * radius),
+                center[None, :] + unit_circle_yz * radius,
+            )
+        )
+        rotor_weights.extend(
+            (
+                np.asarray([0.25], dtype=np.float64),
+                np.full(8, 0.25 / 8.0, dtype=np.float64),
+                np.full(8, 0.5 / 8.0, dtype=np.float64),
+            )
+        )
+        rotor_roles.extend(
+            (
+                np.asarray([ANCHOR_ROLE_ROTOR_HUB], dtype=np.int64),
+                np.full(8, ANCHOR_ROLE_ROTOR_INTERIOR, dtype=np.int64),
+                np.full(8, ANCHOR_ROLE_ROTOR_EDGE, dtype=np.int64),
+            )
+        )
+
+    environment_weights = env_weights / float(env_weights.sum())
+    coordinates = np.concatenate((env_coords, *rotor_coords), axis=0).astype(np.float32)
+    weights = np.concatenate((environment_weights, *rotor_weights), axis=0).astype(np.float32)
+    roles = np.concatenate(
+        (
+            np.full(env_coords.shape[0], ANCHOR_ROLE_ENVIRONMENT, dtype=np.int64),
+            *rotor_roles,
+        )
+    )
+    return coordinates, weights, roles
+
+
 def _categorical_sample(weights: np.ndarray, count: int, rng: np.random.Generator) -> np.ndarray:
     if count < 0:
         raise ValueError("count must be non-negative")
@@ -373,6 +455,10 @@ def global_geometry_features(
 
 
 __all__ = [
+    "ANCHOR_ROLE_ENVIRONMENT",
+    "ANCHOR_ROLE_ROTOR_EDGE",
+    "ANCHOR_ROLE_ROTOR_HUB",
+    "ANCHOR_ROLE_ROTOR_INTERIOR",
     "D_M",
     "ENV_TOKEN_COUNT",
     "ENV_TOKEN_SHAPE",
@@ -395,4 +481,5 @@ __all__ = [
     "support_features",
     "support_geometry",
     "support_weights",
+    "windfarm_receiver_anchors",
 ]

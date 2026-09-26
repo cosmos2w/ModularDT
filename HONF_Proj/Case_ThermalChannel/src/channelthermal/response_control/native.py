@@ -1,0 +1,380 @@
+"""Autograd-preserving native ThermalChannel adapter for response fitting.
+
+The adapter keeps only module-slot capacity and static material properties
+from a packed case. Re, inlet speed, and domain geometry come from each typed
+operating context; module centers and heat come from ``DesignInput``. It never
+reads field targets, solved boundary values, or evidence masks.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.nn.parameter import UninitializedParameter
+
+from channelthermal.model import ChannelThermalHONFModel
+
+from .contracts import AbsolutePrediction, DesignInput, RoleQuery, role_receiver_world_xy
+
+
+def _array_tensor(value: Any, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    return torch.as_tensor(np.array(value, dtype=np.float32, copy=True), device=device, dtype=dtype)
+
+
+def _stats_vector(
+    stats: Mapping[str, Any],
+    mean_key: str,
+    std_key: str,
+    width: int,
+    *,
+    like: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if mean_key not in stats or std_key not in stats:
+        raise KeyError(f"Checkpoint normalization is missing {mean_key!r}/{std_key!r}.")
+    mean = _array_tensor(stats[mean_key], device=like.device, dtype=like.dtype).reshape(-1)
+    std = _array_tensor(stats[std_key], device=like.device, dtype=like.dtype).reshape(-1)
+    if mean.numel() < width or std.numel() < width:
+        raise ValueError(f"Checkpoint normalization {mean_key!r} has fewer than {width} features.")
+    return mean[:width], std[:width].clamp_min(1.0e-8)
+
+
+def _physical_output(
+    values: torch.Tensor,
+    stats: Mapping[str, Any],
+    mean_key: str,
+    std_key: str,
+    *,
+    normalize_targets: bool,
+) -> torch.Tensor:
+    if not normalize_targets:
+        return values
+    mean, std = _stats_vector(stats, mean_key, std_key, values.shape[-1], like=values)
+    return values * std + mean
+
+
+class DifferentiableThermalOperator:
+    """Run one prepared native model call and decode typed physical roles.
+
+    ``input_template`` is a packed dataset sample, but the adapter reads only
+    its module-slot capacity and static ``material_params`` vector. It does
+    not retain or read the
+    template's outputs, interface targets, internal targets, or masks.
+    """
+
+    def __init__(
+        self,
+        model: ChannelThermalHONFModel,
+        input_template: Mapping[str, Any],
+        *,
+        dataset_config: Mapping[str, Any],
+        normalization_stats: Mapping[str, Any],
+        query_batch_size: int = 2048,
+    ) -> None:
+        if query_batch_size <= 0:
+            raise ValueError("query_batch_size must be positive.")
+        self.model = model
+        self.dataset_config = dict(dataset_config)
+        self.normalization_stats = dict(normalization_stats)
+        self.query_batch_size = int(query_batch_size)
+        self.normalize_inputs = bool(self.dataset_config.get("normalize_inputs", False))
+        self.normalize_targets = bool(self.dataset_config.get("normalize_targets", False))
+        parameter = next(
+            (
+                item
+                for item in model.parameters()
+                if not isinstance(item, UninitializedParameter)
+            ),
+            None,
+        )
+        if parameter is None:
+            raise ValueError("A native ThermalChannel model must contain parameters.")
+        self.device = parameter.device
+        self.dtype = parameter.dtype
+        raw_structure = input_template.get("structure")
+        if not isinstance(raw_structure, Mapping):
+            raise TypeError("input_template must contain a structure mapping.")
+        required = {"module_centers", "material_params"}
+        missing = required - set(raw_structure)
+        if missing:
+            raise KeyError(f"Packed input structure is missing static keys: {sorted(missing)}.")
+        self.max_modules = int(np.asarray(raw_structure["module_centers"]).shape[0])
+        if self.max_modules <= 0:
+            raise ValueError("Packed case has no module slots.")
+        # Baseline heat and every target array in input_template are ignored.
+        self.static_material_params = _array_tensor(
+            raw_structure["material_params"], device=self.device, dtype=self.dtype
+        ).reshape(1, -1)
+        self.field_names = tuple(model.config.channelthermal.field_names)
+        if "p" not in self.field_names or "temperature" not in self.field_names:
+            raise ValueError("Checkpoint field schema must contain pressure and temperature.")
+        if model.config.core_honf.forward_architecture != "three_term_full_access_honf":
+            raise ValueError(
+                "Response fitting requires the explicit three_term_full_access_honf refit target."
+            )
+        if not model.local_coupling.has_local_surrogate:
+            raise RuntimeError("The e496 local surrogate must remain attached for native response fitting.")
+        if not model._should_use_local_outputs(str(model.config.channelthermal.internal_prediction_mode)):
+            raise RuntimeError("Native response fitting requires checkpoint-native local predictions.")
+        if not bool(model.config.channelthermal.local_module_params_from_used_ports):
+            raise RuntimeError(
+                "Native response fitting requires predicted-port T_env/h summaries in local-module inputs."
+            )
+
+    def _normalize_heat(self, heat: torch.Tensor) -> torch.Tensor:
+        if not self.normalize_inputs:
+            return heat
+        mean, std = _stats_vector(
+            self.normalization_stats, "heat_power_mean", "heat_power_std", 1, like=heat
+        )
+        return (heat - mean[0]) / std[0]
+
+    def _context_structure(self, context: Mapping[str, Any]) -> dict[str, torch.Tensor]:
+        required = (
+            "re",
+            "u_in",
+            "domain_length_x",
+            "domain_length_y",
+            "nu",
+            "solid_alpha",
+            "fluid_alpha",
+            "solid_k",
+            "fluid_k",
+            "module_radius",
+        )
+        missing = [key for key in required if key not in context]
+        if missing:
+            raise KeyError(f"Operating context is missing native inputs: {missing}.")
+        values = {key: float(context[key]) for key in required}
+        if not np.isfinite(list(values.values())).all():
+            raise ValueError("Native physical context values must be finite.")
+        for key, expected in (
+            ("domain_length_x", float(self.model.config.core_honf.domain_length_x)),
+            ("domain_length_y", float(self.model.config.core_honf.domain_length_y)),
+            ("module_radius", float(self.model.config.core_honf.module_radius)),
+        ):
+            if not np.isclose(values[key], expected, atol=1.0e-6, rtol=1.0e-6):
+                raise ValueError(
+                    f"Operating {key}={values[key]} differs from checkpoint value {expected}."
+                )
+        material_names = (
+            "nu",
+            "solid_alpha",
+            "fluid_alpha",
+            "solid_k",
+            "fluid_k",
+            "module_radius",
+        )
+        material_values = [float(context[name]) for name in material_names]
+        if not np.isfinite(material_values).all() or any(value <= 0.0 for value in material_values):
+            raise ValueError("All six typed material parameters must be positive and finite.")
+        material = _array_tensor(material_values, device=self.device, dtype=self.dtype).reshape(1, -1)
+        if not np.isclose(material_values[-1], values["module_radius"], atol=1.0e-6, rtol=1.0e-6):
+            raise ValueError("Typed material radius differs from the declared operating radius.")
+        # The packed sample supplies the fallback material schema and static
+        # local-surrogate seed, but per-family context owns the actual values.
+        if self.static_material_params.shape[-1] != len(material_names):
+            raise ValueError("Packed static material vector does not match the six-value schema.")
+        return {
+            "re": _array_tensor([values["re"]], device=self.device, dtype=self.dtype).reshape(1, 1),
+            "u_in": _array_tensor([values["u_in"]], device=self.device, dtype=self.dtype).reshape(1, 1),
+            "material_params": material,
+            "domain_length_x": _array_tensor([values["domain_length_x"]], device=self.device, dtype=self.dtype).reshape(1, 1),
+            "domain_length_y": _array_tensor([values["domain_length_y"]], device=self.device, dtype=self.dtype).reshape(1, 1),
+        }
+
+    def _module_inputs(
+        self, design: DesignInput, context: Mapping[str, Any]
+    ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        count = int(design.module_positions.shape[0])
+        if count > self.max_modules:
+            raise ValueError(f"Design has {count} modules, packed input allows {self.max_modules}.")
+        live_centers = design.module_positions.to(device=self.device, dtype=self.dtype)
+        live_heat = design.module_heating.to(device=self.device, dtype=self.dtype)
+        pad = self.max_modules - count
+        centers = F.pad(live_centers, (0, 0, 0, pad)).unsqueeze(0)
+        physical_heat = F.pad(live_heat, (0, pad)).unsqueeze(0)
+        present = F.pad(
+            design.module_present.to(device=self.device, dtype=self.dtype), (0, pad)
+        ).unsqueeze(0)
+        structure = self._context_structure(context)
+        structure.update(
+            {
+                "module_centers": centers,
+                "heat_powers": self._normalize_heat(physical_heat),
+                "module_present": present,
+            }
+        )
+        material = structure["material_params"]
+        local_params = physical_heat.new_zeros((1, self.max_modules, 7))
+        local_params[..., 0] = physical_heat
+        if material.shape[-1] > 3:
+            local_params[..., 1] = material[:, None, 3]
+        if material.shape[-1] > 1:
+            local_params[..., 2] = material[:, None, 1]
+        local_params = local_params * present.unsqueeze(-1)
+        return structure, local_params
+
+    @staticmethod
+    def _rows_by_slot(query: RoleQuery, module_count: int) -> tuple[torch.Tensor, ...]:
+        if query.receiver_slots is None:
+            raise ValueError(f"Material role {query.role!r} needs receiver module slots.")
+        slots = torch.as_tensor(query.receiver_slots, device=query.query_features.device, dtype=torch.long)
+        rows = tuple(torch.nonzero(slots == index, as_tuple=False).reshape(-1) for index in range(module_count))
+        if any(row.numel() == 0 for row in rows):
+            raise ValueError(f"Every active module needs {query.role!r} receiver rows.")
+        return rows
+
+    def _interface_inputs(self, query: RoleQuery, module_count: int) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, ...]]:
+        rows = self._rows_by_slot(query, module_count)
+        counts = {int(row.numel()) for row in rows}
+        if len(counts) != 1:
+            raise ValueError("Interface receivers need the same port count for each active module.")
+        ports = counts.pop()
+        if query.query_features.shape[1] < 3:
+            raise ValueError("Interface role needs [theta, normal_x, normal_y] geometry features.")
+        geometry = query.query_features[:, :3].to(device=self.device, dtype=self.dtype)
+        condition = torch.zeros(
+            (1, self.max_modules, ports, 8), device=self.device, dtype=self.dtype
+        )
+        for slot, indices in enumerate(rows):
+            condition[0, slot, :, :3] = geometry.index_select(0, indices)
+        if self.normalize_inputs:
+            mean, std = _stats_vector(
+                self.normalization_stats,
+                "interface_condition_mean",
+                "interface_condition_std",
+                3,
+                like=condition,
+            )
+            condition[..., :3] = (condition[..., :3] - mean) / std
+        # Match the maintained dataset's token mapping while withholding all
+        # observed temperature, heat-transfer, and flux channels.
+        ports_only = torch.cat([condition[..., :4], condition[..., 7:8]], dim=-1)
+        return condition, ports_only, rows
+
+    def _solid_inputs(self, query: RoleQuery, module_count: int) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        rows = self._rows_by_slot(query, module_count)
+        counts = {int(row.numel()) for row in rows}
+        if len(counts) != 1:
+            raise ValueError("Solid material queries need an equal point count per active module.")
+        points = query.query_features[:, :2].to(device=self.device, dtype=self.dtype)
+        first = points.index_select(0, rows[0])
+        for indices in rows[1:]:
+            candidate = points.index_select(0, indices)
+            if candidate.shape != first.shape or not torch.allclose(candidate, first, atol=1.0e-7, rtol=0.0):
+                raise ValueError("Native local solid heads require a shared material-local point order.")
+        return first.unsqueeze(0), rows
+
+    def __call__(
+        self,
+        design: DesignInput,
+        context: Mapping[str, Any],
+        role_queries: Mapping[str, RoleQuery],
+    ) -> AbsolutePrediction:
+        expected_roles = {"fluid_fields", "interface", "solid_temperature"}
+        if set(role_queries) != expected_roles:
+            raise ValueError(f"Native callback expects exactly {sorted(expected_roles)} roles.")
+        fluid = role_queries["fluid_fields"]
+        interface = role_queries["interface"]
+        solid = role_queries["solid_temperature"]
+        if fluid.coordinate_kind != "eulerian" or fluid.query_features.shape[1] < 2:
+            raise ValueError("Fluid fields must use fixed Eulerian xy coordinates.")
+        if tuple(fluid.channel_names) != self.field_names:
+            raise ValueError("Checkpoint field channels and typed evidence channels do not align.")
+        if len(solid.channel_names) != 1 or interface.query_features.shape[1] < 3:
+            raise ValueError("Native internal/interface role schemas are unsupported.")
+
+        module_count = int(design.module_positions.shape[0])
+        structure, local_params = self._module_inputs(design, context)
+        interface_condition, teacher_ports, interface_rows = self._interface_inputs(interface, module_count)
+        local_query, solid_rows = self._solid_inputs(solid, module_count)
+        field_coordinates = fluid.query_features[:, :2].to(device=self.device, dtype=self.dtype)
+        if field_coordinates.shape[0] == 0:
+            raise ValueError("Fluid query set must be nonempty.")
+
+        output_chunks: list[torch.Tensor] = []
+        prepared = None
+        first_output: Mapping[str, Any] | None = None
+        for start in range(0, int(field_coordinates.shape[0]), self.query_batch_size):
+            query_chunk = field_coordinates[start : start + self.query_batch_size].unsqueeze(0)
+            if prepared is None:
+                output = self.model(
+                    structure,
+                    query_chunk,
+                    interface_condition=interface_condition,
+                    local_module_params=local_params,
+                    teacher_port_tokens=teacher_ports,
+                    local_query_points=local_query,
+                    local_port_condition_mode="predicted",
+                    mixed_teacher_ratio=0.0,
+                    return_prepared_state=True,
+                )
+                prepared = output["prepared_state"]
+                first_output = output
+            else:
+                output = self.model.decode_prepared(prepared, query_chunk)
+            output_chunks.append(output["pred_field"].squeeze(0))
+
+        field = _physical_output(
+            torch.cat(output_chunks, dim=0),
+            self.normalization_stats,
+            "field_mean_by_channel",
+            "field_std_by_channel",
+            normalize_targets=self.normalize_targets,
+        )
+        if first_output is None:
+            raise RuntimeError("The native field preparation pass did not execute.")
+        internal = _physical_output(
+            first_output["pred_internal_temperature"].squeeze(0),
+            self.normalization_stats,
+            "internal_temperature_mean",
+            "internal_temperature_std",
+            normalize_targets=self.normalize_targets,
+        )
+        interface_values = _physical_output(
+            first_output["pred_interface"].squeeze(0),
+            self.normalization_stats,
+            "interface_targets_mean" if "interface_targets_mean" in self.normalization_stats else "interface_target_mean",
+            "interface_targets_std" if "interface_targets_std" in self.normalization_stats else "interface_target_std",
+            normalize_targets=self.normalize_targets,
+        )
+
+        solid_rows_flat: list[torch.Tensor | None] = [None] * int(solid.query_features.shape[0])
+        interface_rows_flat: list[torch.Tensor | None] = [None] * int(interface.query_features.shape[0])
+        for slot, indices in enumerate(solid_rows):
+            for offset, row_index in enumerate(indices.tolist()):
+                solid_rows_flat[int(row_index)] = internal[slot, offset, :]
+        for slot, indices in enumerate(interface_rows):
+            for offset, row_index in enumerate(indices.tolist()):
+                interface_rows_flat[int(row_index)] = interface_values[slot, offset, :]
+        if any(value is None for value in solid_rows_flat + interface_rows_flat):
+            raise ValueError("A material role contains rows without an active receiver slot.")
+        solid_values = torch.stack([value for value in solid_rows_flat if value is not None], dim=0)
+        interface_values_aligned = torch.stack(
+            [value for value in interface_rows_flat if value is not None], dim=0
+        )
+        if solid_values.shape != (solid.query_features.shape[0], len(solid.channel_names)):
+            raise ValueError("Native internal outputs do not align with typed solid receiver rows.")
+        if interface_values_aligned.shape != (interface.query_features.shape[0], len(interface.channel_names)):
+            raise ValueError("Native interface outputs do not align with typed port receiver rows.")
+
+        radius = float(self.model.config.core_honf.module_radius)
+        world_xy = {
+            name: role_receiver_world_xy(query, design, module_radius=radius)
+            for name, query in role_queries.items()
+        }
+        return AbsolutePrediction(
+            role_values={
+                "fluid_fields": field,
+                "interface": interface_values_aligned,
+                "solid_temperature": solid_values,
+            },
+            receiver_world_xy=world_xy,
+        )
+
+
+__all__ = ["DifferentiableThermalOperator"]

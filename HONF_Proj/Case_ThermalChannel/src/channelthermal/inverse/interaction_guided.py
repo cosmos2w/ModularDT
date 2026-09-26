@@ -461,6 +461,8 @@ class TrialRecord:
     predicted_improvement: float | None = None
     actual_improvement: float | None = None
     improvement_ratio: float | None = None
+    attempt_id: str | None = None
+    failure_stage: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1448,7 +1450,16 @@ def run_matched_inverse_design_study(
             )
             for item in to_evaluate:
                 evaluator_calls += 1  # failed calls consume the budget too
+                attempt_id = f"{policy}:update{update_index}:call{evaluator_calls}:{item.record.candidate_id}"
+                if evaluator_source == "reference_solver":
+                    physical_calls += 1
+                elif evaluator_source == "surrogate_teacher":
+                    teacher_calls += 1
+                elif evaluator_source == "analytic_synthetic":
+                    synthetic_calls += 1
                 started = time.perf_counter()
+                actual: DecisionObservation | None = None
+                solver_time_accounted = False
                 try:
                     policy_aware_evaluator = getattr(evaluator, "evaluate_for_policy", None)
                     if callable(policy_aware_evaluator):
@@ -1465,7 +1476,6 @@ def run_matched_inverse_design_study(
                     if set(actual.module_temperature_by_id) != set(active_ids):
                         raise ValueError("Evaluator must preserve active physical module IDs at every trial.")
                     if evaluator_source == "reference_solver":
-                        physical_calls += 1
                         solver_time_available = bool(
                             actual.provenance.get("physical_wall_time_available", True)
                         )
@@ -1475,10 +1485,7 @@ def run_matched_inverse_design_study(
                             unknown_solver_time_calls += 1
                             if actual.provenance.get("raw_recovered_after_adapter_error", False):
                                 recovered_reference_calls += 1
-                    elif evaluator_source == "surrogate_teacher":
-                        teacher_calls += 1
-                    elif evaluator_source == "analytic_synthetic":
-                        synthetic_calls += 1
+                        solver_time_accounted = True
                     actual_j = smooth_peak_temperature(
                         list(actual.module_temperature_by_id.values()), tau=config.tau_temperature
                     )
@@ -1540,6 +1547,7 @@ def run_matched_inverse_design_study(
                         predicted_improvement=predicted_improvement,
                         actual_improvement=actual_improvement,
                         improvement_ratio=ratio,
+                        attempt_id=attempt_id,
                     )
                     observed_by_candidate[item.record.candidate_id] = actual
                     if feasible and (
@@ -1556,15 +1564,28 @@ def run_matched_inverse_design_study(
                             best_physical_observation = actual
                     trials_seen.append(record)
                     trial_by_candidate[item.record.candidate_id] = record
-                except Exception as error:  # A failed solver call is still charged.
+                except Exception as error:  # noqa: BLE001 - one charged attempt includes post-return failures.
                     elapsed = time.perf_counter() - started
-                    if evaluator_source == "reference_solver":
-                        physical_calls += 1
-                        physical_solver_seconds += elapsed
-                    elif evaluator_source == "surrogate_teacher":
-                        teacher_calls += 1
-                    elif evaluator_source == "analytic_synthetic":
-                        synthetic_calls += 1
+                    solver_elapsed: float | None = None
+                    returned_reference = (
+                        isinstance(actual, DecisionObservation)
+                        and actual.evidence_source == "reference_solver"
+                    )
+                    raw_recovered = bool(
+                        returned_reference
+                        and actual.provenance.get("raw_recovered_after_adapter_error", False)
+                    )
+                    if returned_reference and bool(actual.provenance.get("physical_wall_time_available", True)):
+                        solver_elapsed = actual.elapsed_seconds
+                    if evaluator_source == "reference_solver" and not solver_time_accounted:
+                        if solver_elapsed is not None:
+                            physical_solver_seconds += solver_elapsed
+                        else:
+                            # An evaluator exception supplies no trustworthy
+                            # solver-process time. Keep the attempt charged
+                            # and the missing time explicitly missing.
+                            unknown_solver_time_calls += 1
+                        recovered_reference_calls += int(raw_recovered)
                     failure = TrialRecord(
                         policy=policy,
                         candidate_id=item.record.candidate_id,
@@ -1572,8 +1593,14 @@ def run_matched_inverse_design_study(
                         call_index=evaluator_calls,
                         status="failed",
                         elapsed_seconds=elapsed,
-                        solver_elapsed_seconds=0.0,
+                        solver_elapsed_seconds=solver_elapsed,
+                        solver_elapsed_available=solver_elapsed is not None,
+                        raw_recovered_after_adapter_error=raw_recovered,
                         exception=f"{type(error).__name__}: {error}",
+                        attempt_id=attempt_id,
+                        failure_stage=(
+                            "after_evaluator_return" if actual is not None else "evaluator_call"
+                        ),
                     )
                     trials_seen.append(failure)
                     trial_by_candidate[item.record.candidate_id] = failure

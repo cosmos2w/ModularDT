@@ -36,6 +36,9 @@ class EncodedInterfaceCase:
     # environmental reader. Appended to preserve historical positional
     # construction and checkpoint-facing fields.
     sampler_layout: Any = None
+    receiver_anchor_coords: torch.Tensor | None = None
+    receiver_anchor_weights: torch.Tensor | None = None
+    receiver_anchor_roles: torch.Tensor | None = None
 
     @property
     def sampling_layout(self) -> Any:

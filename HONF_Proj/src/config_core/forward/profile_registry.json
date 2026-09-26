@@ -507,6 +507,26 @@
       "stage": "run1503-v5-task-trained-functional-coalescence"
     },
     {
+      "name": "three_term_full_access_honf_context",
+      "path": "project://src/config_core/forward/three_term_full_access_honf_context.json",
+      "status": "candidate",
+      "base": null,
+      "mode": "full-access three-term response and constraint refit control, without a fixed organizer",
+      "checkpoint_families": ["decision-aware full-access control"],
+      "owner": "forward-research",
+      "stage": "decision-aware-full-access"
+    },
+    {
+      "name": "windfarm_three_term_full_access",
+      "path": "project://src/config_core/forward/windfarm_three_term_full_access.json",
+      "status": "candidate",
+      "base": "windfarm_dense_pairwise",
+      "mode": "native 3-D full-access three-term refit from the exact Run 2103 e2475 wind checkpoint, capped at 20,000 optimizer updates",
+      "checkpoint_families": ["WindFarm W1 three-term refit control"],
+      "owner": "WindFarm",
+      "stage": "decision-aware-W1"
+    },
+    {
       "name": "source_conditioned_pairwise_honf_context",
       "path": "project://src/config_core/forward/source_conditioned_pairwise_honf_context.json",
       "status": "candidate",

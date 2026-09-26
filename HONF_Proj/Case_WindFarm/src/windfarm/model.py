@@ -25,6 +25,8 @@ from .normalization import VelocityNormalizer
 INTERFACE_FIELD_ARCHITECTURES = frozenset(
     {
         "dense_pairwise_field",
+        "three_term_full_access_honf",
+        "adaptive_interaction_cover_honf",
         "sparse_incidence_group_control_honf",
     }
 )
@@ -33,10 +35,9 @@ INTERFACE_FIELD_ARCHITECTURES = frozenset(
 def build_windfarm_forward_config(payload: Mapping[str, Any]) -> UnifiedForwardConfig:
     """Build a core config while keeping the WindFarm 3-D exception case-owned.
 
-    The Run-1501 sparse-incidence implementation is dimension-generic, but the
-    reusable core's historical validation allowlist predates this WindFarm
-    adapter. Validate the complete sparse backbone through the ordinary 2-D
-    constructor, then restore the already-validated WindFarm 3-D geometry.
+    The three-term full-access architecture is registered as a native 3-D
+    interface-field core. Run-1501 sparse incidence retains its historical
+    2-D validation workaround; do not extend that exception to the new core.
     """
 
     resolved = copy.deepcopy(dict(payload))
@@ -87,6 +88,9 @@ def _as_batch(value: BatchData | Mapping[str, Any]) -> BatchData:
         "env_features",
         "query_features",
         "env_weights",
+        "receiver_anchor_coords",
+        "receiver_anchor_weights",
+        "receiver_anchor_roles",
     }
     for name in tensor_fields:
         item = payload.get(name)

@@ -87,6 +87,8 @@ _FORWARD_MODE_DEFAULTS: Dict[str, Any] = {
 FORWARD_ARCHITECTURES = {
     "legacy_honf",
     "dense_pairwise_field",
+    "three_term_full_access_honf",
+    "adaptive_interaction_cover_honf",
     "geometry_latent_field",
     "sparse_interface_honf",
     "regional_response_honf",
@@ -1219,11 +1221,13 @@ class UnifiedForwardConfig:
             if self.forward_architecture not in {
                 "legacy_honf",
                 "dense_pairwise_field",
+                "three_term_full_access_honf",
+                "adaptive_interaction_cover_honf",
                 "routed_pairwise_honf",
                 "fixed_group_pairwise_honf",
             }:
                 raise ValueError(
-                    "spatial_dim=3 requires legacy_honf, dense_pairwise_field, routed_pairwise_honf, "
+                    "spatial_dim=3 requires legacy_honf, dense_pairwise_field, three_term_full_access_honf, adaptive_interaction_cover_honf, routed_pairwise_honf, "
                     "or fixed_group_pairwise_honf."
                 )
             if self.forward_architecture == "legacy_honf" and self.organizer_mode != "fixed_projection":
@@ -1539,6 +1543,11 @@ class BatchData:
     # Optional adapter-owned regular-grid metadata for the sampled
     # environmental reader. Appended to preserve positional compatibility.
     sampler_layout: Optional[Any] = None
+    # Opt-in, case-owned physical receiver universe for the adaptive cover.
+    # These are geometry/input metadata, never solved response labels.
+    receiver_anchor_coords: Optional[Any] = None
+    receiver_anchor_weights: Optional[Any] = None
+    receiver_anchor_roles: Optional[Any] = None
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "BatchData":
@@ -1557,6 +1566,10 @@ class BatchData:
             payload.pop("sampler_layout", None)
         if self.env_weights is None:
             payload.pop("env_weights", None)
+        if self.receiver_anchor_coords is None:
+            payload.pop("receiver_anchor_coords", None)
+            payload.pop("receiver_anchor_weights", None)
+            payload.pop("receiver_anchor_roles", None)
         return payload
 
     def to(self, device: Any) -> "BatchData":

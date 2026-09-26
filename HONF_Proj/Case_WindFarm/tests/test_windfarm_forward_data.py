@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from windfarm.data import case_batch, collate_windfarm
 from windfarm.geometry import (
@@ -108,6 +109,10 @@ def test_collation_pads_only_to_batch_maximum() -> None:
     assert batch["module_centers"].shape == (2, 9, 3)
     assert np.all(batch["module_present"][0, 6:] == 0.0)
     assert np.all(np.isfinite(batch["module_centers"]))
+    partial_anchor = dict(samples[0])
+    partial_anchor["receiver_anchor_coords"] = np.zeros((1, 3), dtype=np.float32)
+    with pytest.raises(ValueError, match="coordinates, weights, and roles"):
+        collate_windfarm([partial_anchor])
 
 
 def test_case_batch_has_geometry_only_inference_inputs() -> None:
@@ -137,3 +142,98 @@ def test_case_batch_has_geometry_only_inference_inputs() -> None:
     assert tuple(batch.env_coords.shape) == (1, 512, 3)
     assert tuple(batch.env_weights.shape) == (1, 512)
     assert batch.target_field is None
+
+
+def test_receiver_anchors_follow_active_mask_with_thirty_slot_padding(
+    tmp_path, monkeypatch
+) -> None:
+    from dataclasses import replace
+
+    from windfarm import data as windfarm_data
+    from windfarm.geometry import (
+        ANCHOR_ROLE_ENVIRONMENT,
+        ANCHOR_ROLE_ROTOR_EDGE,
+        ANCHOR_ROLE_ROTOR_HUB,
+        ANCHOR_ROLE_ROTOR_INTERIOR,
+        module_geometry as base_module_geometry,
+    )
+    from windfarm.data import WindFarmNativeView
+
+    root = tmp_path / "wind_farm"
+    volume_root = root / "family_volume"
+    volume_root.mkdir(parents=True)
+    cell_count = 27
+    volume_arrays = {
+        "U": np.zeros((cell_count, 3), dtype=np.float32),
+        "p": np.zeros(cell_count, dtype=np.float32),
+        "k": np.zeros(cell_count, dtype=np.float32),
+        "epsilon": np.zeros(cell_count, dtype=np.float32),
+        "run_cell_offsets": np.asarray([0, cell_count], dtype=np.int64),
+        "run_shape": np.asarray([[3, 3, 3]], dtype=np.int32),
+        "run_x_offsets": np.asarray([0, 3], dtype=np.int64),
+        "run_y_offsets": np.asarray([0, 3], dtype=np.int64),
+        "run_z_offsets": np.asarray([0, 3], dtype=np.int64),
+        "x_cell_m": np.asarray([-100.0, 0.0, 100.0], dtype=np.float32),
+        "y_cell_m": np.asarray([-100.0, 0.0, 100.0], dtype=np.float32),
+        "z_cell_m": np.asarray([20.0, 70.0, 120.0], dtype=np.float32),
+        "case": np.asarray(["padded-case"]),
+        "layout_index": np.asarray([0], dtype=np.int16),
+        "wd_deg": np.asarray([270.0], dtype=np.float32),
+        "source_time": np.asarray([0.0], dtype=np.float32),
+        "completed": np.asarray([1], dtype=np.uint8),
+    }
+    for name, value in volume_arrays.items():
+        np.save(volume_root / f"{name}.npy", value)
+
+    active_xy = np.asarray(
+        [[-0.8, 0.0], [-0.48, 0.0], [-0.16, 0.0], [0.16, 0.0], [0.48, 0.0], [0.8, 0.0]],
+        dtype=np.float32,
+    )
+    turbine_xy = np.zeros((1, 30, 2), dtype=np.float32)
+    turbine_xy[0, :6] = active_xy
+    compact = {
+        "case": np.asarray(["padded-case"]),
+        "layout": np.asarray(["layout-0"]),
+        "layout_index": np.asarray([0], dtype=np.int16),
+        "wd_deg": np.asarray([270.0], dtype=np.float32),
+        "n_turbines": np.asarray([6], dtype=np.int16),
+        "turbine_xy_D": turbine_xy,
+        "U_ref": np.asarray(9.0, dtype=np.float32),
+        "D_m": np.asarray(80.0, dtype=np.float32),
+        "hub_height_m": np.asarray(70.0, dtype=np.float32),
+    }
+
+    def padded_module_geometry(xy, n_turbines, **kwargs):
+        centers, present, features = base_module_geometry(xy, n_turbines, **kwargs)
+        padding = 30 - int(n_turbines)
+        return (
+            np.pad(centers, ((0, padding), (0, 0))),
+            np.pad(present, (0, padding)),
+            np.pad(features, ((0, padding), (0, 0))),
+        )
+
+    monkeypatch.setattr(windfarm_data, "module_geometry", padded_module_geometry)
+    view = WindFarmNativeView(root, compact_metadata=compact, include_receiver_anchors=True)
+    case = view.run(0)
+    assert case.module_centers.shape == (30, 3)
+    assert case.receiver_anchor_coords.shape == (512 + 6 * 17, 3)
+
+    # Also exercise the case_batch fallback used when a caller has not cached
+    # anchors on NativeCase. Padded module slots must not create rotor queries.
+    fallback_case = replace(
+        case,
+        receiver_anchor_coords=None,
+        receiver_anchor_weights=None,
+        receiver_anchor_roles=None,
+    )
+    batch = case_batch(
+        fallback_case,
+        np.asarray([[0.0, 0.0, 0.875]], dtype=np.float32),
+        include_receiver_anchors=True,
+    )
+    roles = batch.receiver_anchor_roles[0].numpy()
+    assert tuple(batch.receiver_anchor_coords.shape) == (1, 512 + 6 * 17, 3)
+    assert np.count_nonzero(roles == ANCHOR_ROLE_ENVIRONMENT) == 512
+    assert np.count_nonzero(roles == ANCHOR_ROLE_ROTOR_HUB) == 6
+    assert np.count_nonzero(roles == ANCHOR_ROLE_ROTOR_INTERIOR) == 6 * 8
+    assert np.count_nonzero(roles == ANCHOR_ROLE_ROTOR_EDGE) == 6 * 8

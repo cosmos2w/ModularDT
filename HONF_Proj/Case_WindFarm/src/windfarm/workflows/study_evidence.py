@@ -14,7 +14,7 @@ import torch
 from honf_runtime.run_store import atomic_write_json
 
 from ..data import WindFarmNativeDataset, WindFarmNativeView, case_batch, collate_windfarm
-from ..geometry import support_weights
+from ..geometry import ENV_TOKEN_SHAPE, support_weights
 from ..normalization import VerticalProfileBaseline
 from ..study_cost import disposable_update, measure, synchronize
 from ..study_diagnostics import geometry_diagnostics
@@ -238,12 +238,17 @@ def _timing(model: Any, view: Any, rows: list[int], normalizer: Any,
                     return case_batch(sampled_case, sample.coords_D)
                 record[f"cpu_sampling_{count}"] = measure(sample_batch, torch.device("cpu"))
                 cpu_batch = sample_batch()
-                record[f"transfer_{count}"] = measure(lambda: cpu_batch.to(device), device)
+                record[f"transfer_{count}"] = measure(
+                    lambda current_batch=cpu_batch: current_batch.to(device), device
+                )
                 batch = cpu_batch.to(device)
                 record[f"prepare_{count}"] = measure(lambda: model.prepare_case(batch), device)
                 prepared = model.prepare_case(batch)
                 record[f"prepared_read_{count}"] = measure(
-                    lambda: model.decode(prepared, batch.query_xy, batch.query_features, receiver_chunk_size=1024),
+                    lambda current_prepared=prepared, current_batch=batch: model.decode(
+                        current_prepared, current_batch.query_xy, current_batch.query_features,
+                        receiver_chunk_size=1024,
+                    ),
                     device, warmups=3 if count == 8192 else 1, repeats=10 if count == 8192 else 3)
                 del prepared, batch, cpu_batch
             if row in (rows[0], rows[2]):
@@ -272,12 +277,15 @@ def _timing(model: Any, view: Any, rows: list[int], normalizer: Any,
 
 def run_study(*, checkpoint: str | Path, volume_path: str | Path, derived_view: str | Path,
               device: str | torch.device, output_dir: str | Path, mode: str,
-              compact_path: str | Path | None = None) -> int:
+              compact_path: str | Path | None = None,
+              env_token_shape: tuple[int, int, int] | None = None) -> int:
     """Execute one requested evidence stage using an existing checkpoint."""
     device = torch.device(device)
     view = WindFarmNativeView(
         volume_path,
         compact_metadata=None if compact_path is None else _compact_metadata(compact_path),
+        token_shape=ENV_TOKEN_SHAPE if env_token_shape is None else env_token_shape,
+        include_receiver_anchors=True,
     )
     split = _load_split(view, Path(derived_view))
     rows = select_geometry_rows(view, split.validation)
@@ -310,6 +318,8 @@ def run_study(*, checkpoint: str | Path, volume_path: str | Path, derived_view: 
         raise ValueError(f"Unknown WindFarm evidence mode: {mode}")
     result.update({"checkpoint": str(Path(checkpoint).resolve()), "epoch": int(payload["epoch"]),
                    "mode": mode, "selected_validation_rows": rows, "device": str(device),
+                   "env_token_shape": list(view.token_shape),
+                   "environment_token_count": int(np.prod(view.token_shape)),
                    "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
                    "device_name": torch.cuda.get_device_name(device) if device.type == "cuda" else "CPU",
                    "torch_version": str(torch.__version__)})

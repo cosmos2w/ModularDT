@@ -1,20 +1,17 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from collections.abc import Mapping, Sequence
 from typing import Any
 
+import channelthermal.inverse.interaction_guided as interaction_guided_module
 import numpy as np
 import pytest
-import channelthermal.inverse.interaction_guided as interaction_guided_module
-
-from honf_inverse_core.contracts import NamedContext, PhysicalDesign
-from honf_inverse_core.request_schema import GeometryConstraints
 from channelthermal.inverse.interaction_guided import (
+    PRESSURE_DROP_DEFINITION,
     DecisionObservation,
     InverseStudyConfig,
-    PRESSURE_DROP_DEFINITION,
     PreparedResponseBaseline,
     _build_candidate_pool_with_feasibility_redraw,
     _matched_size_schedule,
@@ -24,6 +21,8 @@ from channelthermal.inverse.interaction_guided import (
     smooth_peak_temperature,
 )
 
+from honf_inverse_core.contracts import NamedContext, PhysicalDesign
+from honf_inverse_core.request_schema import GeometryConstraints
 
 MODULE_IDS = ("layout-0001:module:0", "layout-0001:module:1", "layout-0001:module:2")
 
@@ -545,7 +544,62 @@ def test_failed_reference_trials_consume_the_declared_budget() -> None:
         assert outcome.evaluator_calls == outcome.reference_calls == outcome.physical_solver_calls == 2
         assert len(outcome.trials) == 2
         assert all(trial.status == "failed" for trial in outcome.trials)
+        assert outcome.physical_solver_seconds == 0.0
+        assert outcome.unknown_solver_time_calls == 2
+        assert all(trial.solver_elapsed_seconds is None for trial in outcome.trials)
+        assert all(trial.failure_stage == "evaluator_call" for trial in outcome.trials)
+        assert len({trial.attempt_id for trial in outcome.trials}) == 2
         assert outcome.accepted_updates == 0
+
+
+@pytest.mark.parametrize("solver_time_available", [True, False])
+def test_post_evaluator_failure_charges_one_attempt_without_inventing_solver_time(
+    monkeypatch: pytest.MonkeyPatch, solver_time_available: bool
+) -> None:
+    baseline = _baseline_observation()
+
+    def reference_evaluator(*args, **kwargs):
+        del args, kwargs
+        return DecisionObservation(
+            module_temperature_by_id=dict(baseline.module_temperature_by_id),
+            pressure_drop=10.0,
+            pressure_drop_units="Pa",
+            evidence_source="reference_solver",
+            elapsed_seconds=0.25,
+            provenance={"physical_wall_time_available": solver_time_available},
+        )
+
+    def fail_after_reference(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("post-evaluator decision failure")
+
+    monkeypatch.setattr(interaction_guided_module, "_should_accept", fail_after_reference)
+    result = run_matched_inverse_design_study(
+        initial_design=_design(),
+        initial_observation=baseline,
+        context=_context(),
+        module_ids_by_slot=MODULE_IDS,
+        geometry_constraints=_geometry_constraints(),
+        config=_config(
+            candidate_budget=1,
+            max_reference_trials_per_policy=1,
+            max_updates_per_policy=1,
+            validation_mode="selected_only",
+        ),
+        response_oracle=_ToyFactorOracle(),
+        evaluator=reference_evaluator,
+        evaluator_source="reference_solver",
+    )
+    for outcome in result.policies.values():
+        assert outcome.reference_calls == outcome.physical_solver_calls == 1
+        assert outcome.physical_solver_seconds == (0.25 if solver_time_available else 0.0)
+        assert outcome.unknown_solver_time_calls == (0 if solver_time_available else 1)
+        assert len(outcome.trials) == 1
+        trial = outcome.trials[0]
+        assert trial.status == "failed"
+        assert trial.failure_stage == "after_evaluator_return"
+        assert trial.solver_elapsed_seconds == (0.25 if solver_time_available else None)
+        assert trial.solver_elapsed_available is solver_time_available
 
 
 def test_policy_aware_evaluator_receives_identity_without_call_count_guessing() -> None:
