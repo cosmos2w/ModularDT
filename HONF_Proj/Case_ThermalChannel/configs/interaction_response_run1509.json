@@ -1,0 +1,68 @@
+{
+  "schema_name": "thermalchannel_anchored_interaction_response_study",
+  "schema_version": 1,
+  "run_id": "1509",
+  "branch": "agent/honf-core-next",
+  "physical_source": "reference_solver",
+  "reference_scope": "original local analytic_wake plus NumPy shared-grid thermal generator; no CFD claim",
+  "family_split": {
+    "train": 8,
+    "calibration": 4,
+    "final_review_new_layout": 4,
+    "historical_test_is_development": true
+  },
+  "pilot": {
+    "seed": 1509,
+    "maximum_recipes": 3,
+    "maximum_updates_per_recipe": 300,
+    "first_recipe_maximum_updates": 100,
+    "maximum_total_gpu_hours": 3.0,
+    "device": "cuda:2",
+    "model": {
+      "module_feature_dim": 2,
+      "design_dim": 3,
+      "context_dim": 10,
+      "delta_dim": 3,
+      "hidden_dim": 64,
+      "heat_scale_dataset_units": 1.2390577793121338,
+      "heat_scale_basis": "median active heat over historical HDF5 train cases only",
+      "query_feature_dims": {
+        "fluid_fields": 2,
+        "interface": 3,
+        "solid_temperature": 2
+      },
+      "receiver_support": "all_receivers_until_localization_is_qualified"
+    },
+    "optimizer": {
+      "name": "AdamW",
+      "learning_rate": 0.001,
+      "weight_decay": 0.0001
+    },
+    "targets": "observed finite reference responses on stencil-wide common masks; numerical resolution assessed separately for sign and support labels",
+    "loss": "role-balanced masked finite-response MSE with per-channel train-only scales",
+    "derivative_labels": "excluded_until_h_and_h_over_2_are_numerically_consistent"
+  },
+  "formal_ceiling": {
+    "maximum_selected_arms": 2,
+    "maximum_epochs_per_arm": 500,
+    "maximum_additional_gpu_hours": 12.0,
+    "automatic_continuation_to_5000_epochs": false
+  },
+  "reference_budget": {
+    "maximum_new_solves": 320,
+    "initial_physical_pilot_maximum_solves": 48,
+    "maximum_aggregate_solver_process_hours": 24.0,
+    "reserved_inverse_trials": 72
+  },
+  "inverse_study": {
+    "objective_tau_dataset_temperature_units": 2.0,
+    "tau_basis": "historical HDF5 train only: 510 cases with at least two modules had top-two peak-temperature gap median 3.3688316; tau 2.0 resolves near ties while smoothing the maximum, fixed before final-review outputs",
+    "pressure_limit": "1.05 times each physical baseline drop, benchmark-relative",
+    "position_normalization": "dx/domain_length_x, dy/domain_length_y",
+    "trust_radius_normalized": 0.01,
+    "candidates_per_policy_per_start": 6,
+    "reference_trials_per_policy_per_start": 6,
+    "starts": 4,
+    "policies": ["graph_guided", "size_matched_random", "ungrouped_local"]
+  }
+}
