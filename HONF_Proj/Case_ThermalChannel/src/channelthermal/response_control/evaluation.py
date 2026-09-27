@@ -10,13 +10,15 @@ import numpy as np
 import torch
 
 from channelthermal.interaction_evidence.response_dataset import ResponseBlock, ResponseStencil
+from channelthermal.interaction_evidence.types import SolveRecord
 
 from .algebra import MixedResponseSpec, predict_stencil
-from .contracts import AbsoluteOperator
+from .contracts import AbsoluteOperator, AbsolutePrediction, DesignInput, context_inputs, role_queries_from_record
 from .losses import _design_like, _pressure_prediction
 from .thermal import (
     NEAR_INTERFACE_DISTANCE,
     module_peak_temperatures_from_role,
+    reduce_native_thermal_quantities,
     smooth_module_peak,
 )
 
@@ -374,11 +376,136 @@ def evaluate_stencil(
     return rows
 
 
+def evaluate_absolute_record(
+    operator: AbsoluteOperator,
+    record: SolveRecord,
+    *,
+    pressure_limit: float,
+    device: torch.device | str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Evaluate one broad historical value case through target-free role inputs."""
+
+    if record.output is None:
+        raise ValueError("Historical value replay requires a stored physical record with outputs.")
+    if not np.isfinite(pressure_limit):
+        raise ValueError("The frozen original pressure limit must be finite.")
+    queries = role_queries_from_record(record, device=device)
+    design = DesignInput.from_state(record.design, device=device)
+    prediction = operator(design, context_inputs(record.context), queries)
+    if not isinstance(prediction, AbsolutePrediction):
+        raise TypeError("Absolute operator callbacks must return AbsolutePrediction.")
+    if set(prediction.role_values) != set(queries):
+        raise ValueError("Historical replay predictions must match their role queries exactly.")
+    family = record.design.physical_family_id
+    source = record.source.value
+    rows: dict[str, list[dict[str, Any]]] = {
+        "absolute_roles": [],
+        "near_interface_fluid": [],
+        "pressure": [],
+        "solid_peaks": [],
+        "solid_peak_summary": [],
+    }
+    for role_name, target_role in record.output.roles.items():
+        absolute_values = prediction.role_values[role_name]
+        expected = (target_role.values.shape[0], len(target_role.channel_names))
+        if tuple(absolute_values.shape) != expected:
+            raise ValueError(
+                f"Historical role {role_name!r} has prediction shape {tuple(absolute_values.shape)}, "
+                f"expected {expected}."
+            )
+        metrics = _metric_rows(
+            absolute_values,
+            family_id=family,
+            evidence_source=source,
+            kind="absolute",
+            role=role_name,
+            label="historical_value",
+            channel_names=target_role.channel_names,
+            channel_units=target_role.channel_units,
+            reference=target_role.values,
+            observed_mask=target_role.valid_mask,
+            weights=target_role.quadrature_weights,
+            noise_floor=target_role.noise_floor,
+        )
+        rows["absolute_roles"].extend(asdict(metric) for metric in metrics)
+        if role_name == "fluid_fields":
+            near = _near_interface_mask(queries[role_name], record.design, record.context.values)
+            observed = np.asarray(target_role.valid_mask, dtype=bool)
+            near_observed = observed & (near[:, None] if observed.ndim == 2 else near)
+            near_metrics = _metric_rows(
+                absolute_values,
+                family_id=family,
+                evidence_source=source,
+                kind="absolute",
+                role="fluid_fields_near_interface",
+                label="historical_value",
+                channel_names=target_role.channel_names,
+                channel_units=target_role.channel_units,
+                reference=target_role.values,
+                observed_mask=near_observed,
+                weights=target_role.quadrature_weights,
+                noise_floor=target_role.noise_floor,
+            )
+            rows["near_interface_fluid"].extend(asdict(metric) for metric in near_metrics)
+
+    native_quantities = reduce_native_thermal_quantities(
+        prediction,
+        design,
+        queries,
+        record.context.values,
+        module_ids=tuple(module.module_id for module in record.design.modules),
+        solid_valid_mask=record.output.roles["solid_temperature"].valid_mask,
+    )
+    slot_by_id = {module.module_id: index for index, module in enumerate(record.design.modules)}
+    target_peaks = {
+        slot_by_id[module_id]: float(value)
+        for module_id, value in record.output.module_peak_temperature.items()
+    }
+    solid_role = record.output.roles["solid_temperature"]
+    temperature_channel = (
+        solid_role.channel_names.index("temperature")
+        if "temperature" in solid_role.channel_names else 0
+    )
+    peak_units = solid_role.channel_units[temperature_channel]
+    reference_peak = max(target_peaks.values())
+    predicted_peak = max(
+        float(value.detach().cpu())
+        for value in native_quantities.module_peak_temperature.values()
+    )
+    rows["solid_peak_summary"].append(asdict(SolidPeakSummaryMetric(
+        family, source, "historical_value", "true_module_max", peak_units,
+        len(target_peaks), reference_peak, predicted_peak, abs(predicted_peak - reference_peak), None,
+    )))
+    for module_id, reference_value in record.output.module_peak_temperature.items():
+        slot = slot_by_id[module_id]
+        predicted_value = float(
+            native_quantities.module_peak_temperature[module_id].detach().cpu()
+        )
+        rows["solid_peaks"].append(asdict(SolidPeakMetric(
+            family, source, "historical_value", slot, peak_units,
+            float(reference_value), predicted_value, abs(predicted_value - float(reference_value)),
+        )))
+
+    pressure_quantity = record.output.quantities["pressure_drop"]
+    if pressure_quantity.resolved:
+        predicted_pressure = float(native_quantities.pressure_drop.detach().cpu())
+        reference_pressure = float(pressure_quantity.value)
+        rows["pressure"].append(asdict(PressureMetric(
+            family, source, "absolute", "historical_value", pressure_quantity.units,
+            reference_pressure, predicted_pressure, abs(predicted_pressure - reference_pressure),
+            float(pressure_limit), reference_pressure <= pressure_limit,
+            predicted_pressure <= pressure_limit,
+            bool(predicted_pressure <= pressure_limit and reference_pressure > pressure_limit),
+        )))
+    return rows
+
+
 __all__ = [
     "NEAR_INTERFACE_DISTANCE",
     "ChannelMetric",
     "PressureMetric",
     "SolidPeakMetric",
     "SolidPeakSummaryMetric",
+    "evaluate_absolute_record",
     "evaluate_stencil",
 ]

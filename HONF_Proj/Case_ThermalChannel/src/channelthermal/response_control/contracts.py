@@ -16,7 +16,7 @@ import numpy as np
 import torch
 
 from channelthermal.interaction_evidence.response_dataset import ResponseStencil
-from channelthermal.interaction_evidence.types import DesignState, OperatingContext, RoleOutput
+from channelthermal.interaction_evidence.types import DesignState, OperatingContext, RoleOutput, SolveRecord
 
 
 def _tensor_array(value: Any, *, dtype: torch.dtype, device: torch.device | str | None) -> torch.Tensor:
@@ -175,20 +175,35 @@ def role_queries_from_stencil(
 ) -> Mapping[str, RoleQuery]:
     """Build model inputs from the baseline role geometry, never its labels."""
 
-    output = stencil.baseline.output
-    if output is None:  # guarded by ResponseStencil, retained as a clear API error
-        raise ValueError("A response stencil baseline must contain physical output.")
-    queries = {
+    return role_queries_from_record(
+        stencil.baseline,
+        dtype=dtype,
+        device=device,
+        query_requires_grad=query_requires_grad,
+    )
+
+
+def role_queries_from_record(
+    record: SolveRecord,
+    *,
+    dtype: torch.dtype = torch.float32,
+    device: torch.device | str | None = None,
+    query_requires_grad: bool = False,
+) -> Mapping[str, RoleQuery]:
+    """Expose only target-free role geometry from one stored physical record."""
+
+    if record.output is None:
+        raise ValueError("A stored record must contain physical outputs to declare receiver roles.")
+    return MappingProxyType({
         name: _role_query(
             role,
-            stencil.baseline.design,
+            record.design,
             dtype=dtype,
             device=device,
             query_requires_grad=query_requires_grad,
         )
-        for name, role in output.roles.items()
-    }
-    return MappingProxyType(queries)
+        for name, role in record.output.roles.items()
+    })
 
 
 def context_inputs(context: OperatingContext) -> Mapping[str, Any]:
@@ -243,6 +258,7 @@ __all__ = [
     "DesignInput",
     "RoleQuery",
     "context_inputs",
+    "role_queries_from_record",
     "role_queries_from_stencil",
     "role_receiver_world_xy",
 ]

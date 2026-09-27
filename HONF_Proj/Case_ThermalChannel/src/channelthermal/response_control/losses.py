@@ -14,7 +14,7 @@ from channelthermal.interaction_evidence.response_dataset import ResponseStencil
 from channelthermal.interaction_evidence.types import SolveRecord
 
 from .algebra import MixedResponseSpec, StencilPredictions
-from .contracts import DesignInput
+from .contracts import AbsoluteOperator, DesignInput, context_inputs, role_queries_from_record
 from .thermal import module_peak_temperatures_from_role, pressure_drop_from_field
 
 
@@ -85,6 +85,37 @@ def weighted_masked_mse(
     by_channel = (residual.square() * weighted_mask).sum(dim=0) / denominator.clamp_min(torch.finfo(prediction.dtype).tiny)
     supported = denominator > 0
     return by_channel[supported].mean()
+
+
+def historical_absolute_value_loss(
+    operator: AbsoluteOperator,
+    record: SolveRecord,
+    *,
+    scales: ThermalLossScales,
+    device: torch.device | str | None = None,
+) -> torch.Tensor:
+    """Supervise one broad train case through target-free native role queries."""
+
+    if record.output is None or record.design.split.value != "train":
+        raise ValueError("Historical value loss requires a solved train record.")
+    design = DesignInput.from_state(record.design, device=device)
+    queries = role_queries_from_record(record, device=device)
+    prediction = operator(design, context_inputs(record.context), queries)
+    role_losses: list[torch.Tensor] = []
+    for name, target in record.output.roles.items():
+        predicted = prediction.role_values[name]
+        role_loss = weighted_masked_mse(
+            predicted,
+            target.values,
+            valid_mask=target.valid_mask,
+            quadrature_weights=target.quadrature_weights,
+            scales=_scale_vector(scales.value, name, len(target.channel_names), like=predicted),
+        )
+        if role_loss is not None:
+            role_losses.append(role_loss)
+    if not role_losses:
+        raise ValueError("Historical train record has no observed value support.")
+    return torch.stack(role_losses).mean()
 
 
 def _mean_or_zero(values: list[torch.Tensor], like: torch.Tensor) -> torch.Tensor:

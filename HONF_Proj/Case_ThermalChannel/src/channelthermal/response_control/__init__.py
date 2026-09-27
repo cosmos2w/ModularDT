@@ -1,9 +1,16 @@
 """Response-aware fitting utilities for the ThermalChannel absolute operator."""
 
 from .algebra import MixedResponseSpec, StencilPredictions, predict_stencil
-from .contracts import AbsoluteOperator, AbsolutePrediction, DesignInput, RoleQuery
+from .contracts import AbsoluteOperator, AbsolutePrediction, DesignInput, RoleQuery, role_queries_from_record
 from .derivative_check import check_pressure_peak_ad_fd
-from .evaluation import ChannelMetric, PressureMetric, SolidPeakMetric, SolidPeakSummaryMetric, evaluate_stencil
+from .evaluation import (
+    ChannelMetric,
+    PressureMetric,
+    SolidPeakMetric,
+    SolidPeakSummaryMetric,
+    evaluate_absolute_record,
+    evaluate_stencil,
+)
 from .losses import (
     StencilLossTerms,
     ThermalLossScales,
@@ -20,9 +27,11 @@ from .sampling import (
     sample_training_stencil,
 )
 from .thermal import (
+    NativeThermalQuantities,
     module_peak_temperatures_from_role,
     pressure_drop_from_field,
     pressure_section_masks,
+    reduce_native_thermal_quantities,
     smooth_module_peak,
     target_module_peak_slots,
 )
@@ -46,6 +55,7 @@ __all__ = [
     "DesignInput",
     "DifferentiableThermalOperator",
     "MixedResponseSpec",
+    "NativeThermalQuantities",
     "PairedFitResult",
     "PressureMetric",
     "ReceiverSamplingConfig",
@@ -66,13 +76,16 @@ __all__ = [
     "check_pressure_peak_ad_fd",
     "checkpoint_payload",
     "compute_stencil_loss_terms",
+    "evaluate_absolute_record",
     "evaluate_stencil",
     "load_staged_training_config",
     "module_peak_temperatures_from_role",
     "predict_stencil",
     "pressure_drop_from_field",
     "pressure_section_masks",
+    "reduce_native_thermal_quantities",
     "restore_checkpoint_payload",
+    "role_queries_from_record",
     "run_paired_staged_fits",
     "run_staged_fit",
     "sample_training_panel",

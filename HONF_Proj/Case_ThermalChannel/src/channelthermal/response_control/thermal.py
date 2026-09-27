@@ -2,17 +2,141 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from types import MappingProxyType
 
+import numpy as np
 import torch
 
 from channelthermal.interaction_evidence.types import SolveRecord
 
-from .contracts import DesignInput, RoleQuery
+from .contracts import AbsolutePrediction, DesignInput, RoleQuery
 
 PRESSURE_INLET_BAND_FRACTION = 0.08
 PRESSURE_OUTLET_BAND_FRACTION = 0.08
 NEAR_INTERFACE_DISTANCE = 0.25
+
+
+@dataclass(frozen=True)
+class NativeThermalQuantities:
+    """Differentiable physical scalars reduced from one absolute prediction."""
+
+    pressure_drop: torch.Tensor
+    pressure_drop_units: str
+    module_peak_temperature: Mapping[str, torch.Tensor]
+    temperature_units: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.pressure_drop, torch.Tensor) or self.pressure_drop.numel() != 1:
+            raise TypeError("Native pressure drop must be a scalar torch tensor.")
+        peaks = dict(self.module_peak_temperature)
+        if not peaks or any(
+            not isinstance(value, torch.Tensor) or value.numel() != 1
+            for value in peaks.values()
+        ):
+            raise TypeError("Native module peaks must be a nonempty mapping of scalar tensors.")
+        if not self.pressure_drop_units or not self.temperature_units:
+            raise ValueError("Native scalar units must be declared by their role schemas.")
+        object.__setattr__(self, "module_peak_temperature", MappingProxyType(peaks))
+
+
+def reduce_native_thermal_quantities(
+    prediction: AbsolutePrediction,
+    design: DesignInput,
+    role_queries: Mapping[str, RoleQuery],
+    context: Mapping[str, object],
+    *,
+    module_ids: Sequence[str],
+    solid_valid_mask: np.ndarray | torch.Tensor | None = None,
+) -> NativeThermalQuantities:
+    """Reduce maintained pressure and material-temperature quantities.
+
+    ``module_ids`` names the design slots in their existing order. The
+    optional solid mask is output-side receiver validity metadata; it is used
+    only for the peak reduction and is never passed into the model. When the
+    selected material query universe is already valid, leave it unset. All
+    reductions remain in the prediction's physical units and retain autograd.
+    """
+
+    required_roles = {"fluid_fields", "solid_temperature"}
+    if not required_roles.issubset(role_queries) or not required_roles.issubset(prediction.role_values):
+        raise ValueError("Native quantity reduction requires fluid_fields and solid_temperature roles.")
+    fluid_query = role_queries["fluid_fields"]
+    solid_query = role_queries["solid_temperature"]
+    fluid_values = prediction.role_values["fluid_fields"]
+    solid_values = prediction.role_values["solid_temperature"]
+    if fluid_values.device != fluid_query.query_features.device:
+        raise ValueError("Fluid prediction and query coordinates must share a device.")
+    if solid_values.device != solid_query.query_features.device:
+        raise ValueError("Solid prediction and material coordinates must share a device.")
+
+    pressure_drop = pressure_drop_from_field(fluid_values, fluid_query, design, context)
+    pressure_channel = _channel_index(fluid_query, "p")
+    pressure_units = fluid_query.channel_units[pressure_channel]
+
+    if solid_query.role != "solid_temperature" or solid_query.receiver_slots is None:
+        raise ValueError("Material peaks require module-indexed solid_temperature queries.")
+    if tuple(solid_values.shape) != (
+        solid_query.query_features.shape[0], len(solid_query.channel_names)
+    ):
+        raise ValueError("Solid predictions and material receiver queries do not align.")
+    temperature_channel = (
+        solid_query.channel_names.index("temperature")
+        if "temperature" in solid_query.channel_names
+        else 0 if len(solid_query.channel_names) == 1
+        else -1
+    )
+    if temperature_channel < 0:
+        raise ValueError("Solid-temperature role must identify its temperature channel.")
+    temperature_units = solid_query.channel_units[temperature_channel]
+
+    if len(module_ids) != int(design.module_positions.shape[0]):
+        raise ValueError("module_ids must name every design slot in its existing order.")
+    names = tuple(str(value) for value in module_ids)
+    active = design.module_present.detach().bool().cpu().tolist()
+    active_names = [names[index] for index, enabled in enumerate(active) if enabled]
+    if any(not name for name in active_names) or len(active_names) != len(set(active_names)):
+        raise ValueError("Every active design slot needs a unique nonempty physical module ID.")
+
+    slots = torch.as_tensor(
+        solid_query.receiver_slots, dtype=torch.long, device=solid_values.device
+    )
+    if slots.numel() and (int(slots.min()) < 0 or int(slots.max()) >= len(names)):
+        raise ValueError("Solid receiver slots must index the supplied physical module IDs.")
+    if solid_valid_mask is None:
+        valid = torch.ones_like(solid_values, dtype=torch.bool)
+    elif isinstance(solid_valid_mask, torch.Tensor):
+        valid = solid_valid_mask.to(device=solid_values.device, dtype=torch.bool)
+    else:
+        valid = torch.as_tensor(
+            np.array(solid_valid_mask, copy=True), device=solid_values.device, dtype=torch.bool
+        )
+    if valid.ndim == 1:
+        valid = valid[:, None].expand_as(solid_values)
+    if tuple(valid.shape) != tuple(solid_values.shape):
+        raise ValueError("Solid output validity mask must align with [N,C] material predictions.")
+
+    material_temperature = solid_values[:, temperature_channel]
+    temperature_valid = valid[:, temperature_channel]
+    peaks: dict[str, torch.Tensor] = {}
+    for slot, (module_id, enabled) in enumerate(zip(names, active, strict=True)):
+        if not enabled:
+            continue
+        selected = (slots == slot) & temperature_valid
+        if not bool(selected.any()):
+            raise ValueError(f"Active module {module_id!r} has no valid material-temperature queries.")
+        values = material_temperature[selected]
+        if not bool(torch.isfinite(values).all()):
+            raise ValueError(f"Predicted material temperature is non-finite for module {module_id!r}.")
+        peaks[module_id] = values.max()
+
+    return NativeThermalQuantities(
+        pressure_drop=pressure_drop,
+        pressure_drop_units=pressure_units,
+        module_peak_temperature=peaks,
+        temperature_units=temperature_units,
+    )
 
 
 def _channel_index(query: RoleQuery, name: str) -> int:
@@ -145,9 +269,11 @@ def target_module_peak_slots(record: SolveRecord) -> dict[int, float]:
 __all__ = [
     "PRESSURE_INLET_BAND_FRACTION",
     "PRESSURE_OUTLET_BAND_FRACTION",
+    "NativeThermalQuantities",
     "module_peak_temperatures_from_role",
     "pressure_drop_from_field",
     "pressure_section_masks",
+    "reduce_native_thermal_quantities",
     "smooth_module_peak",
     "target_module_peak_slots",
 ]

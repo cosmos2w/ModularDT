@@ -18,7 +18,8 @@ from channelthermal.interaction_evidence.types import EvidenceSplit
 
 from .algebra import MixedResponseSpec, predict_stencil
 from .contracts import AbsoluteOperator
-from .losses import ThermalLossScales, compute_stencil_loss_terms
+from .historical import HistoricalValueSource
+from .losses import ThermalLossScales, compute_stencil_loss_terms, historical_absolute_value_loss
 
 RESPONSE_TERMS = ("value", "finite", "mixed", "decision", "constraint")
 
@@ -232,10 +233,11 @@ def calibrate_operator_weights(
     *,
     scales: ThermalLossScales,
     mixed_specs: Sequence[MixedResponseSpec] = (),
+    historical_value_source: HistoricalValueSource | None = None,
     parameters: Iterable[torch.nn.Parameter],
     device: torch.device | str | None = None,
 ) -> Mapping[str, float]:
-    """Run loss-gradient calibration over declared training stencils only."""
+    """Calibrate against the same value objective used by each fit update."""
 
     if not training_stencils:
         raise ValueError("At least one training stencil is required for calibration.")
@@ -244,6 +246,11 @@ def calibrate_operator_weights(
     params = tuple(parameter for parameter in parameters if parameter.requires_grad)
     if not params:
         raise ValueError("Gradient calibration needs trainable parameters.")
+    historical_record = None
+    if historical_value_source is not None:
+        if not historical_value_source.case_ids:
+            raise ValueError("Historical gradient calibration needs a train case.")
+        historical_record = historical_value_source.load(historical_value_source.case_ids[0])
     squared_norms: dict[str, list[float]] = {}
     saw_reference = False
     for stencil in training_stencils:
@@ -251,8 +258,15 @@ def calibrate_operator_weights(
         terms = compute_stencil_loss_terms(
             predictions, stencil, scales=scales, mixed_specs=mixed_specs
         )
-        saw_reference = saw_reference or "value" in terms.terms
-        for name, norm_squared in _gradient_squared_norms(terms.terms, params).items():
+        calibrated_terms = dict(terms.terms)
+        if historical_record is not None:
+            if "value" not in calibrated_terms:
+                raise ValueError("Historical calibration requires a stencil value loss.")
+            calibrated_terms["value"] = calibrated_terms["value"] + historical_absolute_value_loss(
+                operator, historical_record, scales=scales, device=device
+            )
+        saw_reference = saw_reference or "value" in calibrated_terms
+        for name, norm_squared in _gradient_squared_norms(calibrated_terms, params).items():
             squared_norms.setdefault(name, []).append(norm_squared)
         del predictions, terms
     return _weights_from_squared_norms(squared_norms, "value", saw_reference)
@@ -267,6 +281,7 @@ class TrainingStep:
     active_terms: tuple[str, ...]
     total_loss: float
     term_losses: Mapping[str, float]
+    historical_case_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -305,6 +320,8 @@ def checkpoint_payload(
     sampler_rng_state: object | None = None,
     remaining_order: Sequence[int] = (),
     attempted_optimizer_steps: int = 0,
+    historical_case_order: Sequence[str] = (),
+    historical_next_index: int = 0,
 ) -> dict[str, Any]:
     """Construct resumable model/optimizer/RNG state for atomic caller storage."""
 
@@ -331,6 +348,8 @@ def checkpoint_payload(
         "cuda_rng_state_by_model_device": cuda_rng,
         "sampler_rng_state": copy.deepcopy(sampler_rng_state),
         "sampler_remaining_order": [int(index) for index in remaining_order],
+        "historical_case_order": [str(case_id) for case_id in historical_case_order],
+        "historical_next_index": int(historical_next_index),
         "calibrated_loss_weights": dict(calibrated_weights),
         "training_config": {
             "arm": config.arm,
@@ -419,6 +438,7 @@ def run_staged_fit(
     scales: ThermalLossScales,
     loss_weights: Mapping[str, float] | None = None,
     mixed_specs: Sequence[MixedResponseSpec] = (),
+    historical_value_source: HistoricalValueSource | None = None,
     config: StagedTrainingConfig | None = None,
     initial_update: int = 0,
     resume_payload: Mapping[str, Any] | None = None,
@@ -429,9 +449,8 @@ def run_staged_fit(
 ) -> StagedFitResult:
     """Fit a fixed training panel and count each successful optimizer step.
 
-    ``operator`` is normally an adapter around the registered
-    ``three_term_full_access_honf`` model. The same callback, training order,
-    value examples, and update cap can be used for B_value and B_response.
+    ``operator`` is an absolute native or historical adapter. Both arms can
+    consume the same fixed historical case order and role-aware value batch.
     Checkpoint serialization is delegated to ``on_checkpoint``; its zero-update
     invocation runs before any training step, so a schema/write failure cannot
     consume optimizer work.
@@ -442,6 +461,9 @@ def run_staged_fit(
         raise ValueError("run_staged_fit accepts a nonempty training-split stencil panel only.")
     if initial_update < 0 or initial_update > config.max_optimizer_updates:
         raise ValueError("initial_update must be within the configured update range.")
+    historical_order = tuple(historical_value_source.case_ids) if historical_value_source is not None else ()
+    if historical_value_source is not None and (not historical_order or len(set(historical_order)) != len(historical_order)):
+        raise ValueError("Historical replay needs a nonempty, unique train case order.")
 
     total_cap = min(
         config.max_optimizer_updates,
@@ -479,6 +501,13 @@ def run_staged_fit(
         if loss_weights is not None and dict(loss_weights) != dict(saved_weights):
             raise ValueError("Explicit loss weights differ from the calibrated resume weights.")
         weights = dict(saved_weights)
+        if historical_value_source is not None:
+            if tuple(resume_payload.get("historical_case_order", ())) != historical_order:
+                raise ValueError("Resume checkpoint historical train cohort/order differs.")
+            if int(resume_payload.get("historical_next_index", -1)) != initial_update % len(historical_order):
+                raise ValueError("Resume checkpoint historical case cursor differs.")
+        elif resume_payload.get("historical_case_order"):
+            raise ValueError("Resume checkpoint requires its historical value source.")
     if initial_update > total_cap:
         raise ValueError("Resume update exceeds the effective update cap for this panel.")
     if stop_at_update is not None and (
@@ -507,6 +536,8 @@ def run_staged_fit(
                     sampler_rng_state=sampler.getstate(),
                     remaining_order=order,
                     attempted_optimizer_steps=attempted_total,
+                    historical_case_order=historical_order,
+                    historical_next_index=initial_update % len(historical_order) if historical_order else 0,
                 ),
                 "resume_preflight" if resume_payload is not None else "zero_update_preflight",
             )
@@ -554,6 +585,17 @@ def run_staged_fit(
                 raise ValueError("The absolute-value loss multiplier must be positive.")
             active_weights = {"value": weights["value"]}
         total = losses.total(active_weights)
+        historical_case_id = None
+        historical_loss = None
+        if historical_value_source is not None:
+            historical_case_id = historical_order[completed % len(historical_order)]
+            historical_loss = historical_absolute_value_loss(
+                operator,
+                historical_value_source.load(historical_case_id),
+                scales=scales,
+                device=device,
+            )
+            total = total + weights["value"] * historical_loss
         if not bool(torch.isfinite(total)):
             raise FloatingPointError(f"Non-finite total loss before optimizer update {completed + 1}.")
         optimizer.zero_grad(set_to_none=True)
@@ -565,6 +607,9 @@ def run_staged_fit(
         attempted_total += 1
         optimizer.step()
         completed += 1
+        term_losses = {name: float(value.detach().cpu()) for name, value in losses.terms.items()}
+        if historical_loss is not None:
+            term_losses["historical_value"] = float(historical_loss.detach().cpu())
         step = TrainingStep(
             completed_update=completed,
             attempted_optimizer_step=attempted,
@@ -572,7 +617,8 @@ def run_staged_fit(
             stage=_stage_name(config, completed - 1),
             active_terms=tuple(active_weights),
             total_loss=float(total.detach().cpu()),
-            term_losses={name: float(value.detach().cpu()) for name, value in losses.terms.items()},
+            term_losses=term_losses,
+            historical_case_id=historical_case_id,
         )
         history.append(step)
         review_decision = None
@@ -601,6 +647,8 @@ def run_staged_fit(
                         sampler_rng_state=sampler.getstate(),
                         remaining_order=order,
                         attempted_optimizer_steps=attempted_total,
+                        historical_case_order=historical_order,
+                        historical_next_index=completed % len(historical_order) if historical_order else 0,
                     ),
                     "training_checkpoint",
                 )
@@ -629,6 +677,8 @@ def run_staged_fit(
                             sampler_rng_state=sampler.getstate(),
                             remaining_order=order,
                             attempted_optimizer_steps=attempted_total,
+                            historical_case_order=historical_order,
+                            historical_next_index=completed % len(historical_order) if historical_order else 0,
                         ),
                         "wall_time_checkpoint",
                     )

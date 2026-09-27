@@ -1,9 +1,9 @@
-"""Argumentized ThermalChannel full-access response-control fitting runner.
+"""Argumentized ThermalChannel response-control fitting runner.
 
-The runner converts a selected native checkpoint into the explicit
-``three_term_full_access_honf`` refit target, samples typed train stencils,
-and supports a one-update correctness preflight or paired staged fits. All
-one-time state and reports are written to a caller-supplied ignored directory.
+The runner supports intact incumbent checkpoints and the historical explicit
+``three_term_full_access_honf`` conversion path. It samples typed train
+stencils and supports a one-update correctness preflight or paired staged
+fits. All one-time state and reports go to an ignored output directory.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from typing import Any
 
 import numpy as np
 import torch
+from torch import nn
 from torch.nn.parameter import UninitializedParameter
 
 from channelthermal.data.datasets import GlobalChannelThermalDataset
@@ -41,6 +42,7 @@ from .algebra import MixedResponseSpec
 from .contracts import DesignInput, RoleQuery, context_inputs, role_queries_from_stencil
 from .derivative_check import check_pressure_peak_ad_fd
 from .evaluation import evaluate_stencil
+from .historical import HistoricalValueSource
 from .losses import ThermalLossScales
 from .native import DifferentiableThermalOperator
 from .paired import run_paired_staged_fits, write_paired_training_curves
@@ -206,6 +208,111 @@ def _materialize_and_warm_start(
     }
 
 
+def _native_checkpoint_initialization(
+    source_model: ChannelThermalHONFModel,
+) -> tuple[ChannelThermalHONFModel, dict[str, Any]]:
+    """Keep the selected, intact architecture and every checkpoint tensor."""
+
+    architecture = str(source_model.config.core_honf.forward_architecture)
+    if architecture not in {
+        "dense_pairwise_field",
+        "sparse_incidence_group_control_honf",
+    }:
+        raise ValueError(
+            "native_checkpoint initialization requires an incumbent native architecture; "
+            f"got {architecture!r}."
+        )
+    return source_model, {
+        "initialization_mode": "native_checkpoint",
+        "forward_architecture": architecture,
+        "native_checkpoint_tensor_count": len(source_model.state_dict()),
+        "prediction_identity_claim": True,
+        "warm_start_or_conversion_invoked": False,
+    }
+
+
+def _final_linear(module: nn.Module, *, label: str) -> tuple[nn.Linear, str]:
+    linears = [
+        (name, child)
+        for name, child in module.named_modules()
+        if isinstance(child, nn.Linear)
+    ]
+    if not linears:
+        raise TypeError(f"Native trainable head {label!r} has no materialized Linear output layer.")
+    relative_name, layer = linears[-1]
+    return layer, relative_name
+
+
+def _configure_native_output_head_scope(
+    model: ChannelThermalHONFModel,
+) -> dict[str, Any]:
+    """Freeze the intact model except its existing field and port output layers."""
+
+    if not model.local_coupling.has_local_surrogate:
+        raise RuntimeError("Native output-head fitting requires the checkpoint's attached local surrogate.")
+    heads = {
+        "field_head_output": model.core.common.field_head,
+        "port_head_output": model.local_coupling.port_head,
+        "port_refinement_output": model.local_coupling.port_refinement_head,
+    }
+    selected: dict[str, nn.Parameter] = {}
+    selected_modules: dict[str, str] = {}
+    for label, head in heads.items():
+        layer, relative_name = _final_linear(head, label=label)
+        module_name = {
+            "field_head_output": "core.common.field_head",
+            "port_head_output": "local_coupling.port_head",
+            "port_refinement_output": "local_coupling.port_refinement_head",
+        }[label]
+        selected_modules[label] = f"{module_name}.{relative_name}".rstrip(".")
+        for parameter_name, parameter in layer.named_parameters(recurse=False):
+            selected[f"{selected_modules[label]}.{parameter_name}"] = parameter
+    if not selected:
+        raise RuntimeError("Native output-head scope selected no parameters.")
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    for parameter in selected.values():
+        parameter.requires_grad_(True)
+    trainable_names = [
+        name for name, parameter in model.named_parameters() if parameter.requires_grad
+    ]
+    expected_names = set(selected)
+    if set(trainable_names) != expected_names:
+        raise RuntimeError(
+            "Native output-head scope mismatch: "
+            f"expected {sorted(expected_names)}, got {sorted(trainable_names)}."
+        )
+    return {
+        "name": "native_output_heads",
+        "trainable_module_names": selected_modules,
+        "trainable_parameter_names": trainable_names,
+        "trainable_parameter_count": sum(parameter.numel() for parameter in selected.values()),
+        "frozen_parameter_count": sum(
+            parameter.numel() for parameter in model.parameters() if not parameter.requires_grad
+        ),
+    }
+
+
+def _optimizer_hyperparameter_inventory(
+    optimizer: torch.optim.Optimizer,
+    *,
+    learning_rate: float,
+    weight_decay: float,
+) -> dict[str, Any]:
+    actual_lrs = [float(group["lr"]) for group in optimizer.param_groups]
+    actual_decays = [float(group.get("weight_decay", 0.0)) for group in optimizer.param_groups]
+    if not actual_lrs or any(not np.isclose(value, learning_rate, rtol=0.0, atol=1.0e-15) for value in actual_lrs):
+        raise RuntimeError(f"Optimizer learning rate differs from resolved {learning_rate}: {actual_lrs}.")
+    if any(not np.isclose(value, weight_decay, rtol=0.0, atol=1.0e-15) for value in actual_decays):
+        raise RuntimeError(f"Optimizer weight decay differs from resolved {weight_decay}: {actual_decays}.")
+    return {
+        "learning_rate": float(learning_rate),
+        "weight_decay": float(weight_decay),
+        "optimizer_group_learning_rates": actual_lrs,
+        "optimizer_group_weight_decays": actual_decays,
+    }
+
+
 def _parameter_inventory(model: torch.nn.Module) -> dict[str, Any]:
     uninitialized = [
         name for name, parameter in model.named_parameters()
@@ -224,6 +331,7 @@ def _parameter_inventory(model: torch.nn.Module) -> dict[str, Any]:
         "total_parameter_count": sum(parameter.numel() for parameter in model.parameters()),
         "trainable_parameter_count": sum(parameter.numel() for _, parameter in trainable),
         "trainable_parameter_names": [name for name, _ in trainable],
+        "trainable_parameter_shapes": {name: list(parameter.shape) for name, parameter in trainable},
         "core_trainable_parameter_count": sum(
             parameter.numel() for name, parameter in trainable if name.startswith("core.")
         ),
@@ -757,6 +865,7 @@ def run_one_update_preflight(
     device: torch.device,
     sampling: ReceiverSamplingConfig,
     max_wall_seconds: float,
+    initialization_mode: str = "three_term_conversion",
     learning_rate: float | None = None,
     weight_decay: float | None = None,
     smooth_peak_beta: float = 1.0,
@@ -787,7 +896,14 @@ def run_one_update_preflight(
         include_structure_targets=False,
     )
     template = _make_input_template(raw_dataset)
-    target_model, refit_config = _make_refit_model(source_model, checkpoint, device=device)
+    native_scope = None
+    if initialization_mode == "native_checkpoint":
+        target_model, refit_config = _native_checkpoint_initialization(source_model)
+        native_scope = _configure_native_output_head_scope(target_model)
+    elif initialization_mode == "three_term_conversion":
+        target_model, refit_config = _make_refit_model(source_model, checkpoint, device=device)
+    else:
+        raise ValueError(f"Unsupported initialization_mode {initialization_mode!r}.")
     operator = DifferentiableThermalOperator(
         target_model,
         template,
@@ -795,9 +911,19 @@ def run_one_update_preflight(
         normalization_stats=checkpoint.get("global_normalization_stats", {}),
         query_batch_size=query_batch_size,
     )
-    transfer = _materialize_and_warm_start(
-        source_model, target_model, operator, sampled_stencil, device=device
-    )
+    if initialization_mode == "native_checkpoint":
+        # One target-free call verifies the complete native checkpoint and
+        # materializes any lazy output shape without replacing or adapting it.
+        native_queries = role_queries_from_stencil(sampled_stencil, device=device)
+        native_design = DesignInput.from_state(sampled_stencil.baseline.design, device=device)
+        with torch.no_grad():
+            operator(native_design, context_inputs(sampled_stencil.baseline.context), native_queries)
+        transfer = dict(refit_config)
+        transfer["native_output_scope"] = native_scope
+    else:
+        transfer = _materialize_and_warm_start(
+            source_model, target_model, operator, sampled_stencil, device=device
+        )
     target_model.eval()
 
     regression_started = time.perf_counter()
@@ -935,12 +1061,29 @@ def run_one_update_preflight(
 
     target_model.train()
     model_config = checkpoint.get("train_config", {}).get("training", {})
+    resolved_lr = float(
+        learning_rate
+        if learning_rate is not None
+        else 1.0e-5
+        if initialization_mode == "native_checkpoint"
+        else model_config.get("learning_rate", 3.0e-4)
+    )
+    resolved_decay = float(
+        weight_decay
+        if weight_decay is not None
+        else model_config.get("weight_decay", 1.0e-5)
+    )
     optimizer = torch.optim.AdamW(
         (parameter for parameter in target_model.parameters() if parameter.requires_grad),
-        lr=float(learning_rate if learning_rate is not None else model_config.get("learning_rate", 3.0e-4)),
-        weight_decay=float(weight_decay if weight_decay is not None else model_config.get("weight_decay", 1.0e-5)),
+        lr=resolved_lr,
+        weight_decay=resolved_decay,
     )
     optimizer_inventory = _verify_optimizer_inventory(target_model, optimizer)
+    optimizer_inventory.update(
+        _optimizer_hyperparameter_inventory(
+            optimizer, learning_rate=resolved_lr, weight_decay=resolved_decay
+        )
+    )
     config = _config_for_one_update(max_wall_seconds)
     checkpoint_paths: list[str] = []
 
@@ -984,7 +1127,8 @@ def run_one_update_preflight(
         "mode": "one_update_preflight",
         "checkpoint": str(checkpoint_path.resolve()),
         "checkpoint_sha256": _checkpoint_digest(checkpoint_path),
-        "selected_epoch": checkpoint.get("selection_state", {}).get("epoch", checkpoint.get("epoch")),
+        "selected_epoch": checkpoint.get("epoch", checkpoint.get("current_epoch")),
+        "initialization_mode": initialization_mode,
         "atlas_npz": str(stencil_path.resolve()),
         "atlas_family_id": stencil.physical_family_id,
         "atlas_split": stencil.split.value,
@@ -993,6 +1137,7 @@ def run_one_update_preflight(
         "refit_config": refit_config,
         "warm_start": transfer,
         "parameter_inventory": parameter_inventory,
+        "native_trainable_scope": native_scope,
         "optimizer_inventory": optimizer_inventory,
         "sampling": _sampling_summary_mapping(sampled.summary),
         "role_query_counts": {
@@ -1037,6 +1182,9 @@ def run_paired_fit(
     device: torch.device,
     sampling: ReceiverSamplingConfig,
     max_wall_seconds: float,
+    initialization_mode: str = "three_term_conversion",
+    learning_rate: float | None = None,
+    weight_decay: float | None = None,
     review_cap: int,
     review_continuations: Sequence[int],
     smooth_peak_beta: float,
@@ -1076,8 +1224,13 @@ def run_paired_fit(
     raw_stencils = [stencil for stencil, _ in loaded_stencils]
     if any(stencil.split is not EvidenceSplit.TRAIN for stencil in raw_stencils):
         raise ValueError("Paired fitting accepts EvidenceSplit.TRAIN stencils only.")
+    native_recipe = (
+        Path(__file__).resolve().parents[3] / "configs" / "response_control_native_staged.json"
+        if initialization_mode == "native_checkpoint"
+        else None
+    )
     config = replace(
-        load_staged_training_config(arm="B_response"),
+        load_staged_training_config(path=None if native_recipe is None else str(native_recipe), arm="B_response"),
         max_wall_seconds=max_wall_seconds,
     )
     effective_update_cap = _validate_review_gate(
@@ -1114,6 +1267,29 @@ def run_paired_fit(
         "near_limit_multiplier": scales.near_limit_multiplier,
         "pressure_limit_by_family": dict(scales.pressure_limit_by_family or {}),
     }
+    if frozen_loss_scales_path is None and initialization_mode == "native_checkpoint":
+        # A fresh native u100 gate must leave the exact train-derived scale
+        # source needed by the strict u300 resume check. Keep it beside the
+        # ignored run outputs, before any optimizer update, and never replace
+        # a different prior calibration in the same directory.
+        derived_scale_path = output_dir / "native_train_loss_scales.json"
+        derived_payload = {
+            "frozen_scales": loss_scales_snapshot,
+            "train_family_ids": [stencil.physical_family_id for stencil in raw_stencils],
+            "source": "derived_from_train_stencils_before_native_fit",
+        }
+        comparable_payload = json.loads(json.dumps(derived_payload, default=_json_default))
+        if derived_scale_path.exists():
+            if json.loads(derived_scale_path.read_text(encoding="utf-8")) != comparable_payload:
+                raise FileExistsError("The native fit output directory contains a different train-scale calibration.")
+        else:
+            _atomic_json(derived_scale_path, derived_payload)
+        scales_provenance = {
+            "path": str(derived_scale_path.resolve()),
+            "sha256": _checkpoint_digest(derived_scale_path),
+            "scope": "derived_train_only_before_native_fit",
+            "family_ids": sorted(stencil.physical_family_id for stencil in raw_stencils),
+        }
     resume_payloads = None
     if resuming:
         resume_payloads = {
@@ -1134,7 +1310,23 @@ def run_paired_fit(
         include_structure_targets=False,
     )
     template = _make_input_template(raw_dataset)
-    target_model, refit_config = _make_refit_model(source_model, checkpoint, device=device)
+    # Pressure sections alone occupy 1,280 rows on the stored 64x128 grid.
+    # Keep interior fluid support in the broad historical replay even when a
+    # small stencil-only pilot requests fewer ordinary fluid queries.
+    historical_sampling = replace(sampling, max_fluid_queries=max(3072, sampling.max_fluid_queries))
+    historical_value_source = (
+        HistoricalValueSource.from_dataset(raw_dataset, sampling=historical_sampling)
+        if initialization_mode == "native_checkpoint"
+        else None
+    )
+    native_scope = None
+    if initialization_mode == "native_checkpoint":
+        target_model, refit_config = _native_checkpoint_initialization(source_model)
+        native_scope = _configure_native_output_head_scope(target_model)
+    elif initialization_mode == "three_term_conversion":
+        target_model, refit_config = _make_refit_model(source_model, checkpoint, device=device)
+    else:
+        raise ValueError(f"Unsupported initialization_mode {initialization_mode!r}.")
     resume_provenance = None
     if resuming:
         resume_provenance = validate_paired_resume_provenance(
@@ -1148,16 +1340,20 @@ def run_paired_fit(
             frozen_scales_path=frozen_loss_scales_path,  # type: ignore[arg-type]
             loss_scales=loss_scales_snapshot,
             refit_config=refit_config,
+            native_trainable_scope=native_scope,
+            native_parameter_inventory=_parameter_inventory(target_model) if native_scope is not None else None,
+            historical_case_order=(historical_value_source.case_ids if historical_value_source is not None else ()),
+            historical_dataset_path=(historical_value_source.dataset_path if historical_value_source is not None else None),
             resume_checkpoint_paths={
                 "B_value": resume_value_path,  # type: ignore[dict-item]
                 "B_response": resume_response_path,  # type: ignore[dict-item]
             },
             resume_payloads=resume_payloads,  # type: ignore[arg-type]
             training_config=config,
-            required_update=100,
+            required_update=int(resume_payloads["B_value"]["actual_optimizer_updates"]),
         )
         response_weight_provenance = {
-            "source": "verified_B_response_u100_checkpoint",
+            "source": f"verified_B_response_u{int(resume_payloads['B_value']['actual_optimizer_updates'])}_checkpoint",
             "fit_manifest_sha256": resume_provenance["fit_manifest"]["sha256"],
         }
     operator = DifferentiableThermalOperator(
@@ -1167,9 +1363,21 @@ def run_paired_fit(
         normalization_stats=checkpoint.get("global_normalization_stats", {}),
         query_batch_size=query_batch_size,
     )
-    transfer = _materialize_and_warm_start(
-        source_model, target_model, operator, training_stencils[0], device=device
-    )
+    if initialization_mode == "native_checkpoint":
+        initial_queries = role_queries_from_stencil(training_stencils[0], device=device)
+        initial_design = DesignInput.from_state(training_stencils[0].baseline.design, device=device)
+        with torch.no_grad():
+            operator(
+                initial_design,
+                context_inputs(training_stencils[0].baseline.context),
+                initial_queries,
+            )
+        transfer = dict(refit_config)
+        transfer["native_output_scope"] = native_scope
+    else:
+        transfer = _materialize_and_warm_start(
+            source_model, target_model, operator, training_stencils[0], device=device
+        )
     parameter_inventory = _parameter_inventory(target_model)
     target_model.eval()
     derivative_started = time.perf_counter()
@@ -1188,8 +1396,18 @@ def run_paired_fit(
     derivative_wall_seconds = time.perf_counter() - derivative_started
 
     optimizer_config = checkpoint.get("train_config", {}).get("training", {})
-    lr = float(optimizer_config.get("learning_rate", 3.0e-4))
-    decay = float(optimizer_config.get("weight_decay", 1.0e-5))
+    lr = float(
+        learning_rate
+        if learning_rate is not None
+        else 1.0e-5
+        if initialization_mode == "native_checkpoint"
+        else optimizer_config.get("learning_rate", 3.0e-4)
+    )
+    decay = float(
+        weight_decay
+        if weight_decay is not None
+        else optimizer_config.get("weight_decay", 1.0e-5)
+    )
 
     def optimizer_factory(model: torch.nn.Module) -> torch.optim.Optimizer:
         return torch.optim.AdamW(
@@ -1224,6 +1442,9 @@ def run_paired_fit(
     def optimizer_factory_tracked(model: torch.nn.Module) -> torch.optim.Optimizer:
         optimizer = optimizer_factory(model)
         _verify_optimizer_inventory(model, optimizer)
+        _optimizer_hyperparameter_inventory(
+            optimizer, learning_rate=lr, weight_decay=decay
+        )
         arm = "B_value" if len(active_optimizers) == 0 else "B_response"
         active_optimizers[arm] = optimizer
         return optimizer
@@ -1252,6 +1473,7 @@ def run_paired_fit(
         ),
         optimizer_factory_tracked,
         training_stencils,
+        historical_value_source=historical_value_source,
         scales=scales,
         mixed_specs=tuple(all_mixed_specs),
         config=config,
@@ -1325,14 +1547,36 @@ def run_paired_fit(
         "mode": "paired_staged_fit",
         "checkpoint": str(checkpoint_path.resolve()),
         "checkpoint_sha256": _checkpoint_digest(checkpoint_path),
+        "selected_epoch": checkpoint.get("epoch", checkpoint.get("current_epoch")),
+        "initialization_mode": initialization_mode,
+        "staged_recipe": str(native_recipe) if native_recipe is not None else "historical_default",
         "train_atlas_paths": [str(path.resolve()) for path in stencil_paths],
         "train_family_ids": [stencil.physical_family_id for stencil in training_stencils],
         "train_contexts": [dict(stencil.baseline.context.values) for stencil in training_stencils],
         "train_sampling": [_sampling_summary_mapping(item.summary) for item in sampled_panel],
+        "historical_value_replay": (
+            None if historical_value_source is None else {
+                "dataset": str(historical_value_source.dataset_path),
+                "dataset_size_bytes": historical_value_source.dataset_path.stat().st_size,
+                "dataset_mtime_ns": historical_value_source.dataset_path.stat().st_mtime_ns,
+                "train_case_count": len(historical_value_source.case_ids),
+                "train_case_order": list(historical_value_source.case_ids),
+                "sampling": asdict(historical_sampling),
+                "one_case_per_response_update": True,
+                "realized_case_coverage": historical_value_source.realized_coverage,
+            }
+        ),
         "development_paths": [str(path.resolve()) for path in development_paths],
         "refit_config": refit_config,
         "warm_start": transfer,
         "parameter_inventory": parameter_inventory,
+        "native_trainable_scope": native_scope,
+        "resolved_optimizer": {
+            "name": "AdamW",
+            "learning_rate": lr,
+            "weight_decay": decay,
+            "scope": "native_output_heads" if initialization_mode == "native_checkpoint" else "all_trainable_parameters",
+        },
         "whole_wrapper_ad_fd": derivative,
         "whole_wrapper_ad_fd_wall_seconds": derivative_wall_seconds,
         "gradient_calibration": {
@@ -1341,10 +1585,18 @@ def run_paired_fit(
                 if resume_payloads is not None
                 else "frozen_recipe_calibration"
                 if fixed_response_weights is not None
+                else "first_fixed_train_stencil_plus_first_historical_train_case"
+                if historical_value_source is not None
                 else "first_fixed_train_stencil_only"
             ),
             "physical_family_id": training_stencils[0].physical_family_id,
             "split": training_stencils[0].split.value,
+            "historical_train_case_id": (
+                historical_value_source.case_ids[0]
+                if historical_value_source is not None and resume_payloads is None
+                and fixed_response_weights is None
+                else None
+            ),
             "weights_source": response_weight_provenance,
             "weights": dict(paired.calibrated_response_weights),
         },
@@ -1419,6 +1671,12 @@ def _cuda_evidence(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("preflight", "paired"), default="preflight")
+    parser.add_argument(
+        "--initialization-mode",
+        choices=("native_checkpoint", "three_term_conversion"),
+        default="three_term_conversion",
+        help="Use the intact selected checkpoint or the preserved historical full-access conversion.",
+    )
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--train-stencil", required=True, type=Path, action="append")
     parser.add_argument("--dataset", type=Path, default=None)
@@ -1460,6 +1718,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest: dict[str, Any] = {
         "status": "running",
         "mode": args.mode,
+        "initialization_mode": args.initialization_mode,
         "checkpoint": str(args.checkpoint.expanduser().resolve()),
         "train_stencils": [str(path.expanduser().resolve()) for path in args.train_stencil],
         "dataset": None if args.dataset is None else str(args.dataset.expanduser().resolve()),
@@ -1534,6 +1793,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 device=device,
                 sampling=sampling,
                 max_wall_seconds=args.max_wall_seconds,
+                initialization_mode=args.initialization_mode,
                 learning_rate=args.learning_rate,
                 weight_decay=args.weight_decay,
                 smooth_peak_beta=args.smooth_peak_beta,
@@ -1576,6 +1836,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 device=device,
                 sampling=sampling,
                 max_wall_seconds=args.max_wall_seconds,
+                initialization_mode=args.initialization_mode,
+                learning_rate=args.learning_rate,
+                weight_decay=args.weight_decay,
                 review_cap=args.review_cap,
                 review_continuations=args.continue_after,
                 smooth_peak_beta=args.smooth_peak_beta,

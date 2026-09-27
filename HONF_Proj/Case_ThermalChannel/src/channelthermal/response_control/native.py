@@ -20,6 +20,15 @@ from channelthermal.model import ChannelThermalHONFModel
 
 from .contracts import AbsolutePrediction, DesignInput, RoleQuery, role_receiver_world_xy
 
+NATIVE_RESPONSE_ARCHITECTURES = frozenset(
+    {
+        "dense_pairwise_field",
+        "sparse_incidence_group_control_honf",
+        # Preserve the established conversion/refit path for historical runs.
+        "three_term_full_access_honf",
+    }
+)
+
 
 def _array_tensor(value: Any, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     return torch.as_tensor(np.array(value, dtype=np.float32, copy=True), device=device, dtype=dtype)
@@ -111,12 +120,16 @@ class DifferentiableThermalOperator:
         self.field_names = tuple(model.config.channelthermal.field_names)
         if "p" not in self.field_names or "temperature" not in self.field_names:
             raise ValueError("Checkpoint field schema must contain pressure and temperature.")
-        if model.config.core_honf.forward_architecture != "three_term_full_access_honf":
+        architecture = str(model.config.core_honf.forward_architecture)
+        if architecture not in NATIVE_RESPONSE_ARCHITECTURES:
             raise ValueError(
-                "Response fitting requires the explicit three_term_full_access_honf refit target."
+                "Response fitting supports intact dense_pairwise_field and "
+                "sparse_incidence_group_control_honf checkpoints, plus the "
+                "historical three_term_full_access_honf conversion target; "
+                f"got {architecture!r}."
             )
         if not model.local_coupling.has_local_surrogate:
-            raise RuntimeError("The e496 local surrogate must remain attached for native response fitting.")
+            raise RuntimeError("The local surrogate embedded or referenced by this checkpoint must remain attached.")
         if not model._should_use_local_outputs(str(model.config.channelthermal.internal_prediction_mode)):
             raise RuntimeError("Native response fitting requires checkpoint-native local predictions.")
         if not bool(model.config.channelthermal.local_module_params_from_used_ports):
@@ -219,18 +232,34 @@ class DifferentiableThermalOperator:
         return structure, local_params
 
     @staticmethod
-    def _rows_by_slot(query: RoleQuery, module_count: int) -> tuple[torch.Tensor, ...]:
+    def _rows_by_slot(
+        query: RoleQuery,
+        module_count: int,
+        active_slots: tuple[bool, ...] | None = None,
+    ) -> tuple[torch.Tensor, ...]:
         if query.receiver_slots is None:
             raise ValueError(f"Material role {query.role!r} needs receiver module slots.")
+        active = active_slots or tuple(True for _ in range(module_count))
+        if len(active) != module_count:
+            raise ValueError("Active-slot mask must cover every design module slot.")
         slots = torch.as_tensor(query.receiver_slots, device=query.query_features.device, dtype=torch.long)
         rows = tuple(torch.nonzero(slots == index, as_tuple=False).reshape(-1) for index in range(module_count))
-        if any(row.numel() == 0 for row in rows):
+        if any(row.numel() == 0 for index, row in enumerate(rows) if active[index]):
             raise ValueError(f"Every active module needs {query.role!r} receiver rows.")
+        if any(row.numel() > 0 for index, row in enumerate(rows) if not active[index]):
+            raise ValueError(f"Inactive module slots cannot receive {query.role!r} rows.")
         return rows
 
-    def _interface_inputs(self, query: RoleQuery, module_count: int) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, ...]]:
-        rows = self._rows_by_slot(query, module_count)
-        counts = {int(row.numel()) for row in rows}
+    def _interface_inputs(
+        self,
+        query: RoleQuery,
+        module_count: int,
+        active_slots: tuple[bool, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, ...]]:
+        rows = self._rows_by_slot(query, module_count, active_slots)
+        counts = {int(row.numel()) for index, row in enumerate(rows) if active_slots[index]}
+        if not counts:
+            raise ValueError("Native interface inputs require at least one active module.")
         if len(counts) != 1:
             raise ValueError("Interface receivers need the same port count for each active module.")
         ports = counts.pop()
@@ -241,7 +270,8 @@ class DifferentiableThermalOperator:
             (1, self.max_modules, ports, 8), device=self.device, dtype=self.dtype
         )
         for slot, indices in enumerate(rows):
-            condition[0, slot, :, :3] = geometry.index_select(0, indices)
+            if active_slots[slot]:
+                condition[0, slot, :, :3] = geometry.index_select(0, indices)
         if self.normalize_inputs:
             mean, std = _stats_vector(
                 self.normalization_stats,
@@ -256,14 +286,24 @@ class DifferentiableThermalOperator:
         ports_only = torch.cat([condition[..., :4], condition[..., 7:8]], dim=-1)
         return condition, ports_only, rows
 
-    def _solid_inputs(self, query: RoleQuery, module_count: int) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
-        rows = self._rows_by_slot(query, module_count)
-        counts = {int(row.numel()) for row in rows}
+    def _solid_inputs(
+        self,
+        query: RoleQuery,
+        module_count: int,
+        active_slots: tuple[bool, ...],
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        rows = self._rows_by_slot(query, module_count, active_slots)
+        counts = {int(row.numel()) for index, row in enumerate(rows) if active_slots[index]}
+        if not counts:
+            raise ValueError("Native solid inputs require at least one active module.")
         if len(counts) != 1:
             raise ValueError("Solid material queries need an equal point count per active module.")
         points = query.query_features[:, :2].to(device=self.device, dtype=self.dtype)
-        first = points.index_select(0, rows[0])
-        for indices in rows[1:]:
+        first_active = next(index for index, is_active in enumerate(active_slots) if is_active)
+        first = points.index_select(0, rows[first_active])
+        for slot, indices in enumerate(rows):
+            if not active_slots[slot] or slot == first_active:
+                continue
             candidate = points.index_select(0, indices)
             if candidate.shape != first.shape or not torch.allclose(candidate, first, atol=1.0e-7, rtol=0.0):
                 raise ValueError("Native local solid heads require a shared material-local point order.")
@@ -290,8 +330,11 @@ class DifferentiableThermalOperator:
 
         module_count = int(design.module_positions.shape[0])
         structure, local_params = self._module_inputs(design, context)
-        interface_condition, teacher_ports, interface_rows = self._interface_inputs(interface, module_count)
-        local_query, solid_rows = self._solid_inputs(solid, module_count)
+        active_slots = tuple(bool(value) for value in design.module_present.detach().bool().cpu().tolist())
+        interface_condition, teacher_ports, interface_rows = self._interface_inputs(
+            interface, module_count, active_slots
+        )
+        local_query, solid_rows = self._solid_inputs(solid, module_count, active_slots)
         field_coordinates = fluid.query_features[:, :2].to(device=self.device, dtype=self.dtype)
         if field_coordinates.shape[0] == 0:
             raise ValueError("Fluid query set must be nonempty.")

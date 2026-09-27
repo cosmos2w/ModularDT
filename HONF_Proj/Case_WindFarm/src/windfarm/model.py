@@ -148,6 +148,13 @@ class WindFarmForwardModel(nn.Module):
         if callable(setter):
             setter(epoch=int(epoch), total_epochs=None if total_epochs is None else int(total_epochs))
 
+    def set_native_interaction_policy(self, policy: nn.Module | None) -> None:
+        """Attach an input-only policy to an intact Dense native checkpoint."""
+
+        if not isinstance(self.core, InterfaceFieldCore):
+            raise TypeError("native interaction policies require an interface-field WindFarm model")
+        self.core.set_native_interaction_policy(policy)
+
     def selection_state(self) -> dict[str, int | None]:
         getter = getattr(self.core, "selection_state", None)
         if callable(getter):

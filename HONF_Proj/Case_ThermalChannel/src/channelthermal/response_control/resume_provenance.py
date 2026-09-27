@@ -117,6 +117,10 @@ def validate_paired_resume_provenance(
     frozen_scales_path: str | Path,
     loss_scales: Mapping[str, Any],
     refit_config: Mapping[str, Any],
+    native_trainable_scope: Mapping[str, Any] | None = None,
+    native_parameter_inventory: Mapping[str, Any] | None = None,
+    historical_case_order: Sequence[str] = (),
+    historical_dataset_path: str | Path | None = None,
     resume_checkpoint_paths: Mapping[str, str | Path],
     resume_payloads: Mapping[str, Mapping[str, Any]],
     training_config: Any,
@@ -173,6 +177,32 @@ def validate_paired_resume_provenance(
     if saved_scales.get("sha256") != scales_digest:
         raise ValueError("Resume provenance mismatch: frozen scale source SHA-256 differs.")
     _require_equal(fit.get("loss_scales"), loss_scales, "frozen loss-scale snapshot changed")
+    if fit.get("initialization_mode") == "native_checkpoint":
+        if native_trainable_scope is None or native_parameter_inventory is None:
+            raise ValueError("Resume provenance mismatch: native scope inventory is required.")
+        _require_equal(fit.get("native_trainable_scope"), native_trainable_scope, "native trainable scope changed")
+        saved_inventory = fit.get("parameter_inventory") or {}
+        for key in ("trainable_parameter_names", "trainable_parameter_shapes"):
+            _require_equal(
+                saved_inventory.get(key), native_parameter_inventory.get(key),
+                f"native {key} changed",
+            )
+        saved_replay = fit.get("historical_value_replay") or {}
+        if historical_dataset_path is None:
+            raise ValueError("Resume provenance mismatch: historical train dataset is required.")
+        current_dataset = Path(historical_dataset_path).expanduser().resolve()
+        if Path(saved_replay.get("dataset", "")).expanduser().resolve() != current_dataset:
+            raise ValueError("Resume provenance mismatch: historical train dataset path changed.")
+        current_stat = current_dataset.stat()
+        for key, value in (
+            ("dataset_size_bytes", current_stat.st_size),
+            ("dataset_mtime_ns", current_stat.st_mtime_ns),
+        ):
+            _require_equal(saved_replay.get(key), value, f"historical train dataset {key} changed")
+        _require_equal(
+            saved_replay.get("train_case_order"), list(historical_case_order),
+            "historical train cohort/order changed",
+        )
 
     replay_atlases = replay.get("train_stencils")
     if not isinstance(replay_atlases, list):
@@ -190,7 +220,7 @@ def validate_paired_resume_provenance(
         atlas_digest = file_sha256(atlas_path)
         metadata_digest = file_sha256(metadata_path)
         if entry.get("sha256") != atlas_digest or entry.get("json_sha256") != metadata_digest:
-            raise ValueError("Resume provenance mismatch: train atlas bytes changed since u100.")
+            raise ValueError(f"Resume provenance mismatch: train atlas bytes changed since u{required_update}.")
         atlas_hashes.append(
             {"path": current_path, "sha256": atlas_digest, "json_sha256": metadata_digest}
         )
@@ -268,6 +298,7 @@ def validate_paired_resume_provenance(
             "torch_rng_state",
             "sampler_rng_state",
             "sampler_remaining_order",
+            *(("historical_case_order", "historical_next_index") if fit.get("initialization_mode") == "native_checkpoint" else ()),
         ):
             if key not in payload or payload[key] is None:
                 raise ValueError(f"Resume provenance mismatch: {arm} checkpoint lacks {key}.")
@@ -275,7 +306,10 @@ def validate_paired_resume_provenance(
 
     value_payload = resume_payloads["B_value"]
     response_payload = resume_payloads["B_response"]
-    for key in ("sampler_rng_state", "sampler_remaining_order"):
+    matched_sampler_fields = ["sampler_rng_state", "sampler_remaining_order"]
+    if fit.get("initialization_mode") == "native_checkpoint":
+        matched_sampler_fields.extend(("historical_case_order", "historical_next_index"))
+    for key in matched_sampler_fields:
         if not _same(value_payload.get(key), response_payload.get(key)):
             raise ValueError(f"Resume provenance mismatch: paired RNG/sampler field {key} differs.")
     expected_weights = fit.get("calibrated_response_weights")
@@ -284,7 +318,7 @@ def validate_paired_resume_provenance(
     _require_equal(
         response_payload.get("calibrated_loss_weights"),
         expected_weights,
-        "B_response checkpoint weights differ from the frozen u100 snapshot",
+        f"B_response checkpoint weights differ from the frozen u{required_update} snapshot",
     )
 
     return {

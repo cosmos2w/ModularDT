@@ -332,6 +332,9 @@ class InterfaceFieldCore(nn.Module):
         if config.interface_model is None:
             raise ValueError("InterfaceFieldCore requires interface_model settings.")
         self.config = config
+        # An organizer is attached only after loading the trusted native
+        # checkpoint, so historical checkpoint keys stay unchanged.
+        self.native_interaction_policy: nn.Module | None = None
         options = config.interface_model
         hidden = int(config.hidden_dim)
         heads = int(options.attention_heads)
@@ -402,10 +405,20 @@ class InterfaceFieldCore(nn.Module):
                 self.routing_log_temperatures[name] = nn.Parameter(
                     torch.zeros((), dtype=torch.get_default_dtype())
                 )
-        if config.forward_architecture in {
-            "dense_pairwise_field",
-            "three_term_full_access_honf",
-        }:
+        if config.forward_architecture == "dense_pairwise_field":
+            # This backend has the original Dense parameter tree and calls
+            # Dense directly until a native policy is explicitly attached.
+            from .adaptive_cover_field import AdaptiveCoverPairwiseField
+
+            self.backend = AdaptiveCoverPairwiseField(
+                hidden,
+                int(options.message_hidden_dim),
+                heads,
+                frequencies,
+                activation_checkpointing=bool(options.activation_checkpointing),
+                optional_native_policy=True,
+            )
+        elif config.forward_architecture == "three_term_full_access_honf":
             self.backend = DensePairwiseField(
                 hidden,
                 int(options.message_hidden_dim),
@@ -781,6 +794,46 @@ class InterfaceFieldCore(nn.Module):
             raise ValueError(f"Unsupported interface architecture: {config.forward_architecture!r}")
         self.receiver_chunk_size = int(options.receiver_chunk_size)
 
+    def set_native_interaction_policy(self, policy: nn.Module | None) -> None:
+        """Attach an input-only organizer to an intact Dense native model.
+
+        The policy implements ``plan_cases(encoded, prepared_state, trees)``
+        and returns one deterministic cover plan per case. ``None`` preserves
+        the direct Dense prepare/read calls and constructs no receiver trees.
+        """
+
+        if policy is None:
+            self.native_interaction_policy = None
+            return
+        if self.config.forward_architecture != "dense_pairwise_field":
+            raise ValueError("native interaction policies are supported only by dense_pairwise_field")
+        if not bool(getattr(self.backend, "optional_native_policy", False)):
+            raise TypeError("the configured backend does not support native interaction policies")
+        if not callable(getattr(policy, "plan_cases", None)):
+            raise TypeError("native interaction policy must implement plan_cases(encoded, prepared_state, trees)")
+        if not isinstance(policy, nn.Module):
+            raise TypeError("native interaction policy must be an nn.Module so its parameters are trainable")
+        reference_parameter = next(self.parameters(), None)
+        if reference_parameter is not None:
+            policy = policy.to(device=reference_parameter.device)
+        self.native_interaction_policy = policy
+
+    def clear_native_interaction_tree_cache(self) -> None:
+        """Clear session geometry indexes without changing policy state."""
+
+        clear = getattr(self.backend, "clear_case_tree_cache", None)
+        if not callable(clear):
+            raise TypeError("the configured backend does not own a native interaction tree cache")
+        clear()
+
+    def native_interaction_tree_cache_info(self) -> dict[str, int]:
+        """Return bounded geometry-tree cache counters for execution audits."""
+
+        info = getattr(self.backend, "case_tree_cache_info", None)
+        if not callable(info):
+            raise TypeError("the configured backend does not own a native interaction tree cache")
+        return dict(info())
+
     @property
     def typed_routing_temperatures_enabled(self) -> bool:
         """Whether this core carries the four learnable route temperatures."""
@@ -992,7 +1045,30 @@ class InterfaceFieldCore(nn.Module):
                 "functional_detail_stochastic_mask is only supported by "
                 "task_trained_functional_coalescence_honf."
             )
-        if self.config.forward_architecture == "sparse_interface_honf":
+        native_policy = self.native_interaction_policy
+        if native_policy is not None:
+            if not bool(getattr(self.backend, "optional_native_policy", False)):
+                raise TypeError("native interaction policy is attached to an incompatible backend")
+            trees = self.backend.build_case_trees(encoded)
+            tree_cache_hits = self.backend.last_case_tree_cache_hits
+            # Only current model-side input states and the encoded input
+            # record reach the organizer. BatchData and all targets remain
+            # outside this execution boundary.
+            prepared_policy_inputs = {
+                "module_states": module_states,
+                "environment_states": encoded.env_tokens,
+                "global_state": encoded.global_token,
+            }
+            plans = tuple(native_policy.plan_cases(encoded, prepared_policy_inputs, trees))
+            backend_state = self.backend.prepare(
+                encoded,
+                module_states,
+                cover_trees=trees,
+                cover_plans=plans,
+                cover_tree_cache_hits=tree_cache_hits,
+                return_routing_maps=bool(return_routing_maps),
+            )
+        elif self.config.forward_architecture == "sparse_interface_honf":
             if not isinstance(layout_cache, SparseLayoutCache):
                 raise ValueError("sparse_interface_honf requires a SparseLayoutCache built from module ports.")
             backend_state = self.backend.prepare(encoded, module_states, layout_cache)
@@ -1078,7 +1154,35 @@ class InterfaceFieldCore(nn.Module):
                 else 0
             ),
         }
-        if self.config.forward_architecture in {
+        if native_policy is not None:
+            aux.update(
+                self.backend.preparation_aux(
+                    backend_state,
+                    include_diagnostics=bool(return_routing_maps),
+                )
+            )
+            batch_count, padded_modules = encoded.module_present.shape
+            environment_count = int(encoded.env_coords.shape[1])
+            coarse_latents = int(coarse_state.shape[1])
+            aux.update({
+                "cover_coarse_path_bypass_active": torch.ones(
+                    (), device=module_states.device, dtype=torch.long
+                ),
+                "cover_local_path_bypass_active": torch.ones(
+                    (), device=module_states.device, dtype=torch.long
+                ),
+                "cover_coarse_module_source_rows": torch.tensor(
+                    int(batch_count) * coarse_latents * int(padded_modules),
+                    device=module_states.device,
+                    dtype=torch.long,
+                ),
+                "cover_coarse_environment_source_rows": torch.tensor(
+                    int(batch_count) * coarse_latents * environment_count,
+                    device=module_states.device,
+                    dtype=torch.long,
+                ),
+            })
+        elif self.config.forward_architecture in {
             "adaptive_interaction_cover_honf",
             "fixed_group_pairwise_honf",
             "group_control_pairwise_honf",
@@ -1332,6 +1436,19 @@ class InterfaceFieldCore(nn.Module):
                     aux[key] = torch.cat(values, dim=1)
                     continue
                 aux[key] = first
+        if "cover_coarse_path_bypass_active" in prepared.interaction_aux:
+            aux["cover_coarse_path_bypass_active"] = prepared.interaction_aux["cover_coarse_path_bypass_active"]
+            aux["cover_local_path_bypass_active"] = prepared.interaction_aux["cover_local_path_bypass_active"]
+            aux["cover_coarse_module_source_rows"] = prepared.interaction_aux["cover_coarse_module_source_rows"]
+            aux["cover_coarse_environment_source_rows"] = prepared.interaction_aux[
+                "cover_coarse_environment_source_rows"
+            ]
+            aux["cover_coarse_query_latent_rows"] = torch.tensor(
+                int(receivers.shape[0]) * int(prepared.coarse_state.shape[1]) * int(receivers.shape[1]),
+                device=receivers.device,
+                dtype=torch.long,
+            )
+            aux["cover_local_bypass_neighbor_rows"] = aux["local_neighbor_count"].sum().to(torch.long)
         return InterfaceRead(torch.cat(contexts, dim=1), aux)
 
     def decode_queries(

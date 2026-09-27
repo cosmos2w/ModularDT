@@ -267,6 +267,7 @@ class CoverPairLedger:
     query_degree_sum: int
     query_degree_max: int
     query_count: int
+    path_diagnostics_included: bool = True
 
 
 def compile_cover_pairs(
@@ -276,6 +277,7 @@ def compile_cover_pairs(
     module_present: torch.Tensor,
     environment_weights: torch.Tensor,
     empty_environment: str = "fallback_full",
+    include_path_diagnostics: bool = True,
 ) -> tuple[PackedPairs, PackedPairs, CoverPairLedger]:
     """Compile one case's positive union once, with live QM/QE priors.
 
@@ -324,9 +326,28 @@ def compile_cover_pairs(
             unique_pair_count=int(receiver.numel()),
         )
 
-    active_paths = access.receiver_group > 0
-    qm_paths = int(((active_paths[:, :, None]) & (plan.module_membership[None] > 0) & module_valid[None, None]).sum())
-    qe_paths = int(((active_paths[:, :, None]) & (plan.environment_membership[None] > 0)).sum())
+    qm_paths = qe_paths = 0
+    if include_path_diagnostics:
+        # Contract node/source support in bounded source tiles. The former
+        # Q x N x E Boolean product is much larger than the pair union. Each
+        # contracted cell is an integer count <= tree capacity, so converting
+        # the cells back to integers before summation is exact.
+        active_paths = (access.receiver_group > 0).to(torch.float32)
+
+        def count_paths(membership: torch.Tensor, source_valid: torch.Tensor | None = None) -> int:
+            support = membership > 0
+            if source_valid is not None:
+                support = support & source_valid[None, :]
+            support = support.to(torch.float32)
+            total = torch.zeros((), device=active_paths.device, dtype=torch.int64)
+            tile_size = 64
+            for start in range(0, int(support.shape[1]), tile_size):
+                counts = active_paths @ support[:, start : start + tile_size]
+                total = total + counts.to(torch.int64).sum()
+            return int(total.item())
+
+        qm_paths = count_paths(plan.module_membership, module_valid)
+        qe_paths = count_paths(plan.environment_membership)
     qm = pack(module_prior, qm_paths)
     qe = pack(environment_prior, qe_paths)
     source_nonempty = (plan.module_membership > 0).any(dim=1) | (
@@ -346,8 +367,60 @@ def compile_cover_pairs(
         int(query_degree.sum()),
         int(query_degree.max()) if query_degree.numel() else 0,
         int(query_degree.numel()),
+        bool(include_path_diagnostics),
     )
     return qm, qe, ledger
+
+
+def compile_cover_transport_pairs(
+    plan: AdaptiveCoverPlan,
+    receivers: torch.Tensor,
+    *,
+    source_role: str,
+    module_present: torch.Tensor,
+    environment_weights: torch.Tensor,
+    receiver_valid: torch.Tensor | None = None,
+    exclude_self: bool = False,
+) -> PackedPairs:
+    """Compile one typed preparation transport into unique live pair rows.
+
+    Unlike the query reader, this helper does not add an empty-support
+    fallback: an empty preparation message is the zero message Dense would
+    produce after its source mask. Source measure remains in each prior so
+    the caller can preserve Dense's original denominator.
+    """
+
+    if source_role not in {"module", "environment"}:
+        raise ValueError("source_role must be module or environment")
+    access = plan.access(receivers)
+    if source_role == "module":
+        if module_present.shape != (access.module_source.shape[1],):
+            raise ValueError("module validity must have shape [M]")
+        prior = access.module_source * (module_present > 0.5).to(access.module_source.dtype)
+    else:
+        if environment_weights.shape != (access.environment_source.shape[1],):
+            raise ValueError("environment weights must have shape [E]")
+        if not bool(torch.isfinite(environment_weights).all()) or bool((environment_weights < 0).any()):
+            raise ValueError("environment weights must be finite and nonnegative")
+        prior = access.environment_source * environment_weights[None, :]
+    if receiver_valid is not None:
+        if receiver_valid.shape != (receivers.shape[0],):
+            raise ValueError("receiver validity must have shape [Q]")
+        prior = prior * (receiver_valid > 0.5).to(prior.dtype)[:, None]
+    if exclude_self:
+        if prior.shape[0] != prior.shape[1]:
+            raise ValueError("self exclusion requires aligned receiver and source indices")
+        prior = prior.masked_fill(torch.eye(prior.shape[0], device=prior.device, dtype=torch.bool), 0.0)
+    receiver_index, source_index = torch.nonzero(prior > 0.0, as_tuple=True)
+    unique = int(receiver_index.numel())
+    return PackedPairs(
+        batch_index=torch.zeros_like(receiver_index),
+        receiver_index=receiver_index,
+        source_index=source_index,
+        prior=prior[receiver_index, source_index],
+        raw_path_count=unique,
+        unique_pair_count=unique,
+    )
 
 
 __all__ = [
@@ -358,5 +431,6 @@ __all__ = [
     "CoverPairLedger",
     "ReceiverAnchorUniverse",
     "compile_cover_pairs",
+    "compile_cover_transport_pairs",
     "endpoint_smoothstep",
 ]

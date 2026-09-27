@@ -19,6 +19,7 @@ from channelthermal.interaction_evidence.response_dataset import ResponseStencil
 
 from .algebra import MixedResponseSpec
 from .contracts import AbsoluteOperator
+from .historical import HistoricalValueSource
 from .losses import ThermalLossScales
 from .training import (
     StagedFitResult,
@@ -104,6 +105,7 @@ def run_paired_staged_fits(
     optimizer_factory: Callable[[torch.nn.Module], torch.optim.Optimizer],
     training_stencils: Sequence[ResponseStencil],
     *,
+    historical_value_source: HistoricalValueSource | None = None,
     scales: ThermalLossScales,
     mixed_specs: Sequence[MixedResponseSpec],
     config: StagedTrainingConfig,
@@ -145,6 +147,9 @@ def run_paired_staged_fits(
             raise ValueError("Paired resume checkpoints have different panel sampler RNG states.")
         if value_payload.get("sampler_remaining_order") != response_payload.get("sampler_remaining_order"):
             raise ValueError("Paired resume checkpoints have different remaining panel orders.")
+        for field in ("historical_case_order", "historical_next_index"):
+            if value_payload.get(field) != response_payload.get(field):
+                raise ValueError(f"Paired resume checkpoints have different {field}.")
     if resumed and fixed_response_weights is not None:
         raise ValueError("A paired resume already carries its frozen response weights.")
     initial_state = _materialized_state(model)
@@ -176,6 +181,7 @@ def run_paired_staged_fits(
                 training_stencils[:1],
                 scales=scales,
                 mixed_specs=mixed_specs,
+                historical_value_source=historical_value_source,
                 parameters=model.parameters(),
                 device=device,
             )
@@ -227,6 +233,7 @@ def run_paired_staged_fits(
             model,
             optimizer,
             training_stencils,
+            historical_value_source=historical_value_source,
             scales=scales,
             loss_weights=response_weights if arm == "B_response" else None,
             mixed_specs=mixed_specs,
@@ -276,6 +283,7 @@ def write_paired_training_curves(path: str | Path, result: PairedFitResult) -> P
         "completed_update",
         "attempted_optimizer_step",
         "training_stencil_index",
+        "historical_case_id",
         "stage",
         "active_terms",
         "total_loss",
@@ -313,6 +321,7 @@ def _step_row(arm: str, step: TrainingStep, term_names: Sequence[str]) -> dict[s
         "completed_update": step.completed_update,
         "attempted_optimizer_step": step.attempted_optimizer_step,
         "training_stencil_index": step.training_stencil_index,
+        "historical_case_id": step.historical_case_id or "",
         "stage": step.stage,
         "active_terms": ";".join(step.active_terms),
         "total_loss": step.total_loss,

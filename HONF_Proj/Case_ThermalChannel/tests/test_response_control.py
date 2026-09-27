@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from itertools import pairwise
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -25,20 +27,28 @@ from channelthermal.interaction_evidence import (
 )
 from channelthermal.response_control import (
     AbsolutePrediction,
+    DesignInput,
+    DifferentiableThermalOperator,
     MixedResponseSpec,
     RoleQuery,
     StagedTrainingConfig,
     ThermalLossScales,
     TrainingStage,
+    calibrate_operator_weights,
     check_pressure_peak_ad_fd,
+    evaluate_absolute_record,
     evaluate_stencil,
     load_staged_training_config,
     predict_stencil,
+    pressure_drop_from_field,
+    reduce_native_thermal_quantities,
     restore_checkpoint_payload,
+    role_queries_from_record,
     run_paired_staged_fits,
     run_staged_fit,
 )
 from channelthermal.response_control import paired as paired_module
+from channelthermal.response_control.historical import _sample_value_record
 from channelthermal.response_control.losses import compute_stencil_loss_terms
 from channelthermal.response_control.resume_provenance import (
     file_sha256,
@@ -46,6 +56,7 @@ from channelthermal.response_control.resume_provenance import (
     validate_paired_resume_provenance,
 )
 from channelthermal.response_control.runner import (
+    _configure_native_output_head_scope,
     _json_default,
     _load_frozen_loss_scales,
     _load_frozen_response_weights,
@@ -59,6 +70,7 @@ from channelthermal.response_control.sampling import (
     SamplingSummary,
     sample_training_stencil,
 )
+from torch import nn
 
 
 def _record(
@@ -194,6 +206,193 @@ def test_callback_is_target_free_and_response_algebra_uses_absolute_states() -> 
     spec = MixedResponseSpec("interface", "both", "heat", "shift")
     mixed = predicted.mixed(spec)
     torch.testing.assert_close(mixed, torch.ones_like(mixed) * (0.5 * 0.2 * model.gain))
+
+
+def test_native_quantity_reduction_preserves_pressure_and_material_peak_semantics() -> None:
+    x = torch.arange(0.0, 12.0001, 0.25)
+    fluid_xy = torch.stack((x, torch.full_like(x, 3.0)), dim=1)
+    fluid_query = RoleQuery(
+        role="fluid_fields",
+        query_features=fluid_xy,
+        channel_names=("u", "v", "p", "omega", "temperature"),
+        channel_units=("m/s", "m/s", "Pa", "1/s", "K"),
+        receiver_slots=None,
+        coordinate_kind="eulerian",
+    )
+    solid_query = RoleQuery(
+        role="solid_temperature",
+        query_features=torch.tensor(
+            [[-0.5, 0.0], [0.0, 0.0], [-0.5, 0.0], [0.0, 0.0]], dtype=torch.float32
+        ),
+        channel_names=("temperature",),
+        channel_units=("K",),
+        receiver_slots=(0, 0, 1, 1),
+        coordinate_kind="solid_material_normalized_xy",
+    )
+    design = DesignInput(
+        module_positions=torch.tensor([[6.0, 3.0], [9.5, 3.0]], dtype=torch.float32),
+        module_heating=torch.tensor([1.0, 2.0], dtype=torch.float32),
+        module_present=torch.tensor([True, True]),
+    )
+    pressure_slope = torch.tensor(2.0, requires_grad=True)
+    pressure = pressure_slope * x
+    fluid_values = torch.stack(
+        (torch.zeros_like(x), torch.zeros_like(x), pressure, torch.zeros_like(x), torch.zeros_like(x)),
+        dim=1,
+    )
+    solid_values = torch.tensor([[301.0], [999.0], [305.0], [304.0]], requires_grad=True)
+    prediction = AbsolutePrediction(
+        role_values={"fluid_fields": fluid_values, "solid_temperature": solid_values}
+    )
+
+    quantities = reduce_native_thermal_quantities(
+        prediction,
+        design,
+        {"fluid_fields": fluid_query, "solid_temperature": solid_query},
+        {"domain_length_x": 12.0, "module_radius": 0.45},
+        module_ids=("physical-A", "physical-B"),
+        solid_valid_mask=torch.tensor([[True], [False], [True], [True]]),
+    )
+
+    # The pressure scalar uses the existing geometric fluid exclusion and
+    # maintained 8% inlet/outlet bands; its gradient remains connected.
+    expected = pressure_drop_from_field(
+        fluid_values,
+        fluid_query,
+        design,
+        {"domain_length_x": 12.0, "module_radius": 0.45},
+    )
+    torch.testing.assert_close(quantities.pressure_drop, expected)
+    assert quantities.pressure_drop_units == "Pa"
+    assert quantities.temperature_units == "K"
+    assert set(quantities.module_peak_temperature) == {"physical-A", "physical-B"}
+    torch.testing.assert_close(quantities.module_peak_temperature["physical-A"], torch.tensor(301.0))
+    torch.testing.assert_close(quantities.module_peak_temperature["physical-B"], torch.tensor(305.0))
+
+    (quantities.pressure_drop + sum(quantities.module_peak_temperature.values())).backward()
+    assert pressure_slope.grad is not None and pressure_slope.grad < 0.0
+    torch.testing.assert_close(
+        solid_values.grad,
+        torch.tensor([[1.0], [0.0], [1.0], [0.0]]),
+    )
+
+
+def test_historical_absolute_replay_is_target_free_and_uses_reference_peak_mask() -> None:
+    original = _record("historical")
+    solid = original.output.roles["solid_temperature"]
+    masked_solid = replace(
+        solid,
+        values=np.asarray([[305.0], [999.0]], dtype=np.float64),
+        valid_mask=np.asarray([[True], [False]]),
+    )
+    roles = dict(original.output.roles)
+    roles["solid_temperature"] = masked_solid
+    output = replace(
+        original.output,
+        roles=roles,
+        module_peak_temperature={"m0": 305.0},
+    )
+    record = replace(original, output=output)
+
+    queries = role_queries_from_record(record)
+    assert set(queries) == set(record.output.roles)
+    assert not hasattr(queries["solid_temperature"], "valid_mask")
+    assert not hasattr(queries["fluid_fields"], "values")
+    np.testing.assert_array_equal(
+        queries["solid_temperature"].query_features.cpu().numpy(),
+        masked_solid.query_features,
+    )
+
+    metrics = evaluate_absolute_record(_AbsoluteField(), record, pressure_limit=2.1)
+    peak = metrics["solid_peaks"][0]
+    assert peak["reference_peak"] == pytest.approx(305.0)
+    # The invalid 999 K receiver does not enter either reference or predicted peaks.
+    assert peak["predicted_peak"] == pytest.approx(302.5)
+    assert metrics["solid_peak_summary"][0]["reference_value"] == pytest.approx(305.0)
+    assert len(metrics["pressure"]) == 1
+    assert metrics["pressure"][0]["units"] == "Pa"
+
+
+def test_native_adapter_maps_material_rows_around_inactive_padded_slots() -> None:
+    active_slots = (True, False, True, False)
+    interface = RoleQuery(
+        role="interface",
+        query_features=torch.tensor([[0.0, 1.0, 0.0], [torch.pi, -1.0, 0.0]]),
+        channel_names=("temperature", "normal_flux"),
+        channel_units=("K", "W/m2"),
+        receiver_slots=(0, 2),
+        coordinate_kind="interface_material_angle",
+    )
+    solid = RoleQuery(
+        role="solid_temperature",
+        query_features=torch.tensor([[0.0, 0.0], [0.5, 0.0], [0.0, 0.0], [0.5, 0.0]]),
+        channel_names=("temperature",),
+        channel_units=("K",),
+        receiver_slots=(0, 0, 2, 2),
+        coordinate_kind="solid_material_normalized_xy",
+    )
+    interface_rows = DifferentiableThermalOperator._rows_by_slot(interface, 4, active_slots)
+    assert [row.tolist() for row in interface_rows] == [[0], [], [1], []]
+
+    adapter = object.__new__(DifferentiableThermalOperator)
+    adapter.max_modules = 4
+    adapter.device = torch.device("cpu")
+    adapter.dtype = torch.float32
+    adapter.normalize_inputs = False
+    condition, teacher_ports, rows = adapter._interface_inputs(interface, 4, active_slots)
+    assert condition.shape == (1, 4, 1, 8)
+    assert torch.count_nonzero(condition[:, 1]) == 0
+    assert torch.count_nonzero(condition[:, 3]) == 0
+    assert teacher_ports.shape == (1, 4, 1, 5)
+    assert [row.tolist() for row in rows] == [[0], [], [1], []]
+
+    local_query, solid_rows = adapter._solid_inputs(solid, 4, active_slots)
+    assert local_query.shape == (1, 2, 2)
+    assert [row.tolist() for row in solid_rows] == [[0, 1], [], [2, 3], []]
+
+    misplaced = replace(
+        interface,
+        query_features=torch.cat((interface.query_features, interface.query_features[:1]), dim=0),
+        receiver_slots=(0, 1, 2),
+    )
+    with pytest.raises(ValueError, match="Inactive module slots"):
+        DifferentiableThermalOperator._rows_by_slot(misplaced, 4, active_slots)
+
+
+def test_native_output_scope_selects_only_existing_final_layers() -> None:
+    class _Head(nn.Module):
+        def __init__(self, widths: tuple[int, ...]) -> None:
+            super().__init__()
+            layers: list[nn.Module] = []
+            for input_width, output_width in pairwise(widths):
+                layers.extend((nn.Linear(input_width, output_width), nn.Tanh()))
+            self.net = nn.Sequential(*layers[:-1])
+
+    class _ScopeModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.core = nn.Module()
+            self.core.common = nn.Module()
+            self.core.common.field_head = _Head((3, 5, 2))
+            self.local_coupling = nn.Module()
+            self.local_coupling.has_local_surrogate = True
+            self.local_coupling.port_head = _Head((4, 6, 2))
+            self.local_coupling.port_refinement_head = _Head((5, 7, 2))
+            self.backbone = nn.Linear(2, 2)
+
+    model = _ScopeModel()
+    scope = _configure_native_output_head_scope(model)  # type: ignore[arg-type]
+    trainable = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
+    assert scope["name"] == "native_output_heads"
+    assert trainable == {
+        "core.common.field_head.net.2.weight",
+        "core.common.field_head.net.2.bias",
+        "local_coupling.port_head.net.2.weight",
+        "local_coupling.port_head.net.2.bias",
+        "local_coupling.port_refinement_head.net.2.weight",
+        "local_coupling.port_refinement_head.net.2.bias",
+    }
+    assert all(not parameter.requires_grad for parameter in model.backbone.parameters())
 
 
 def test_staged_config_exposes_bounded_review_gates_and_runs_actual_updates() -> None:
@@ -634,6 +833,91 @@ def test_scale_only_resume_rejects_changed_frozen_scale_source(tmp_path: Path) -
         validate_paired_resume_provenance(**kwargs)
 
 
+def test_native_resume_rejects_changed_output_scope_and_shape(tmp_path: Path) -> None:
+    kwargs, fit_path, _replay_path, _checkpoints = _resume_provenance_fixture(tmp_path)
+    historical_dataset = tmp_path / "packed_train.h5"
+    historical_dataset.write_bytes(b"train cases")
+    historical_order = ["train0001", "train0002"]
+    native_scope = {"mode": "final_output_heads", "names": ["field_head.weight"]}
+    inventory = {
+        "trainable_parameter_names": ["field_head.weight"],
+        "trainable_parameter_shapes": {"field_head.weight": [2, 3]},
+    }
+    fit = json.loads(fit_path.read_text(encoding="utf-8"))
+    fit["initialization_mode"] = "native_checkpoint"
+    fit["native_trainable_scope"] = native_scope
+    fit["parameter_inventory"] = inventory
+    fit["historical_value_replay"] = {
+        "dataset": str(historical_dataset.resolve()),
+        "dataset_size_bytes": historical_dataset.stat().st_size,
+        "dataset_mtime_ns": historical_dataset.stat().st_mtime_ns,
+        "train_case_order": historical_order,
+    }
+    fit_path.write_text(json.dumps(fit), encoding="utf-8")
+    payloads = {
+        arm: {
+            **payload,
+            "historical_case_order": historical_order,
+            "historical_next_index": 100 % len(historical_order),
+        }
+        for arm, payload in kwargs["resume_payloads"].items()
+    }
+    native_kwargs = {
+        **kwargs,
+        "native_trainable_scope": native_scope,
+        "native_parameter_inventory": inventory,
+        "historical_case_order": historical_order,
+        "historical_dataset_path": historical_dataset,
+        "resume_payloads": payloads,
+    }
+    assert validate_paired_resume_provenance(**native_kwargs)["resume_gate_update"] == 100
+    with pytest.raises(ValueError, match="native trainable scope changed"):
+        validate_paired_resume_provenance(
+            **{**native_kwargs, "native_trainable_scope": {**native_scope, "names": ["other.weight"]}}
+        )
+    with pytest.raises(ValueError, match="native trainable_parameter_shapes changed"):
+        validate_paired_resume_provenance(
+            **{
+                **native_kwargs,
+                "native_parameter_inventory": {
+                    **inventory,
+                    "trainable_parameter_shapes": {"field_head.weight": [3, 3]},
+                },
+            }
+        )
+
+
+def test_gradient_calibration_includes_historical_value_objective() -> None:
+    scales = ThermalLossScales(
+        value={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
+        finite={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
+        mixed={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
+        pressure_value=1.0,
+        pressure_response=1.0,
+        pressure_limit=3.0,
+        pressure_boundary=0.5,
+        solid_temperature=1.0,
+        smooth_peak_beta=1.0,
+        near_limit_band=0.5,
+    )
+    model = _AbsoluteField()
+    stencil = _stencil()
+    stencil_only = calibrate_operator_weights(
+        model, (stencil,), scales=scales, parameters=model.parameters()
+    )
+    historical_record = _record("historical-train", heating=2.0)
+    source = SimpleNamespace(
+        case_ids=(historical_record.record_id,),
+        load=lambda case_id: historical_record,
+    )
+    combined = calibrate_operator_weights(
+        model, (stencil,), scales=scales, historical_value_source=source,
+        parameters=model.parameters(),
+    )
+    assert combined["value"] == pytest.approx(1.0)
+    assert combined["finite"] != pytest.approx(stencil_only["finite"])
+
+
 def test_paired_fit_uses_frozen_response_weights_without_recalibration(monkeypatch) -> None:
     config = StagedTrainingConfig(
         arm="B_response",
@@ -950,3 +1234,106 @@ def test_solve_record_storage_round_trips_raw_path_and_arrays(tmp_path: Path) ->
         record.output.roles["fluid_fields"].values,
     )
     assert (raw_case / "raw.dat").is_file()
+
+
+def test_paired_historical_value_replay_matches_arms_and_exact_resume() -> None:
+    class TwoCaseSource:
+        case_ids = ("historical-A", "historical-B")
+
+        def load(self, case_id: str) -> SolveRecord:
+            return {
+                "historical-A": _record("historical-A", heating=0.8),
+                "historical-B": _record("historical-B", heating=1.3),
+            }[case_id]
+
+    source = TwoCaseSource()
+    config = StagedTrainingConfig(
+        arm="B_response",
+        max_optimizer_updates=2,
+        max_epochs=2,
+        total_optimizer_update_ceiling=2,
+        checkpoint_every_updates=1,
+        review_updates=(1, 2),
+        stages=(TrainingStage("value", 0, 2, ("value",)),),
+    )
+    scales = ThermalLossScales(
+        value={name: 1.0 for name in ("fluid_fields", "interface", "solid_temperature")},
+        finite={name: 1.0 for name in ("fluid_fields", "interface", "solid_temperature")},
+        mixed={name: 1.0 for name in ("fluid_fields", "interface", "solid_temperature")},
+        pressure_value=1.0,
+        pressure_response=1.0,
+        pressure_limit=3.0,
+        pressure_boundary=0.5,
+        solid_temperature=1.0,
+        smooth_peak_beta=1.0,
+        near_limit_band=0.5,
+    )
+    snapshots: dict[tuple[str, int], dict[str, Any]] = {}
+
+    def checkpoint(arm: str, payload: dict[str, Any], _label: str) -> None:
+        snapshots[(arm, payload["actual_optimizer_updates"])] = payload
+
+    def fit(model: _AbsoluteField, *, replay_source: Any = source, **kwargs: Any):
+        return run_paired_staged_fits(
+            model,
+            lambda current: current,
+            lambda current: torch.optim.SGD(current.parameters(), lr=1e-4),
+            [_stencil()],
+            historical_value_source=replay_source,
+            scales=scales,
+            mixed_specs=(),
+            config=config,
+            stop_at_update=2,
+            review_continuations=(1,),
+            on_checkpoint=checkpoint,
+            **kwargs,
+        )
+
+    result = fit(_AbsoluteField(), fixed_response_weights={
+        "value": 1.0, "finite": 1.0, "decision": 1.0, "constraint": 1.0,
+    })
+    for arm in ("B_value", "B_response"):
+        steps = result.arms[arm].history
+        assert [step.historical_case_id for step in steps] == list(source.case_ids)
+        assert all(np.isfinite(step.term_losses["historical_value"]) for step in steps)
+        assert snapshots[(arm, 1)]["historical_case_order"] == list(source.case_ids)
+        assert snapshots[(arm, 1)]["historical_next_index"] == 1
+    assert result.arms["B_value"].history[0].term_losses["historical_value"] == result.arms["B_response"].history[0].term_losses["historical_value"]
+
+    first_gate = {arm: snapshots[(arm, 1)] for arm in ("B_value", "B_response")}
+    original_final = {
+        arm: {name: tensor.clone() for name, tensor in snapshots[(arm, 2)]["model"].items()}
+        for arm in first_gate
+    }
+    resumed = fit(_AbsoluteField(), resume_payloads=first_gate)
+    assert all(result.arms[arm].history[1].historical_case_id == resumed.arms[arm].history[0].historical_case_id for arm in first_gate)
+    for arm in first_gate:
+        for name, tensor in original_final[arm].items():
+            torch.testing.assert_close(tensor, snapshots[(arm, 2)]["model"][name], rtol=0, atol=0)
+
+    class ReorderedSource(TwoCaseSource):
+        case_ids = ("historical-B", "historical-A")
+
+    with pytest.raises(ValueError, match="historical train cohort/order differs"):
+        fit(_AbsoluteField(), replay_source=ReorderedSource(), resume_payloads=first_gate)
+
+
+def test_historical_sampler_preserves_pressure_ports_and_each_exact_peak() -> None:
+    original = _record("historical-coverage")
+    sampled = _sample_value_record(
+        original,
+        ReceiverSamplingConfig(max_fluid_queries=2, solid_queries_per_module=1, hot_solid_points_per_module=1),
+    )
+    assert sampled.output is not None and original.output is not None
+    original_fluid = original.output.roles["fluid_fields"]
+    fluid = sampled.output.roles["fluid_fields"]
+    required = {
+        original_fluid.query_ids[index]
+        for index, x in enumerate(original_fluid.query_features[:, 0])
+        if x <= 0.08 * 12.0 or x >= 0.92 * 12.0
+    }
+    assert required.issubset(fluid.query_ids)
+    assert fluid.values.shape[0] >= len(required)
+    assert sampled.output.roles["interface"].query_ids == original.output.roles["interface"].query_ids
+    solid = sampled.output.roles["solid_temperature"]
+    assert "m0:solid:1" in solid.query_ids
