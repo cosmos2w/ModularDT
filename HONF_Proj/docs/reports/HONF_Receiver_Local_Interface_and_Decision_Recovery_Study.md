@@ -37,6 +37,13 @@ flowchart LR
 
 The numerical maps and charts below are **local evidence figures** rendered from saved artifacts into ignored `HONF_Proj/diagnostics/generated/receiver_local_study_visuals_20260927/`. They are intentionally absent from Git upload under the repository artifact rule; their relative image links display in this workspace. The Mermaid diagrams, captions, and numeric tables remain in the committed report. Figure scripts and source hashes are retained beside the local images. None of these plots launched a model, optimizer, GPU evaluation, or new physical solve.
 
+| To understand | See | Reading cue |
+| --- | --- | --- |
+| Which gains transferred and which gates failed | Figures 1–2 | Training and fixed-heat response gains did not transfer cleanly to Re90; a teacher-preserving Wind plan failed every complete-grid reference-role guard. |
+| What a local physical interaction actually looks like | Figure 3 | Stored reference temperature maps show the two separate moves and their anchored mixed field; the hottest fixed spectator response remains unresolved. |
+| What the graph can and cannot remove | Figures 4–5 | Typed direct reads sit alongside unmasked native paths; fewer logical pairs and lower peak allocation did not give a faster complete call. |
+| Where the designs went and why selection remains unsafe | Figures 6–8 | Exact saved module moves, observed feasibility, and a false-feasible pressure recommendation are shown, with unequal historical policy pools disclosed. |
+
 ## 2. Native nonlinear response pair
 
 R1 starts from the intact Run 1804 epoch-4738 checkpoint. Measured scope is 547,081 trainable parameters and 4,883,467 frozen parameters: every layer of core.common.field_head, local_coupling.port_head, and local_coupling.port_refinement_head is trainable; encoders, fine transport kernels, coarse and local context builders, the local surrogate, and all other tensors and buffers are frozen.
