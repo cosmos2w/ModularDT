@@ -16,6 +16,27 @@ The evidence supports a narrower result than a learned physical interface:
 
 Three evidence scopes are kept distinct throughout. “Reference” means stored outputs from the local NumPy analytic-wake flow and numerically advanced shared-grid thermal solver; it is not CFD. “Teacher” means prediction from an intact learned checkpoint, especially Run 2103 for WindFarm support labels; teacher preservation does not establish physical fidelity. “Synthetic/control” means a deliberately specified software or generator control, such as deterministic parity or the analytic-wake fixed-geometry heat null; it tests that control only.
 
+### Visual reading guide
+
+The gate sequence matters more than any single successful score. Green boxes below are measured progress within the named scope; red boxes are failed or withheld promotion gates. A teacher result and a local physical-reference result are separate observations.
+
+```mermaid
+flowchart LR
+  R0["Thermal R1: matched 200-update pair"] --> R1["Train and fixed-heat finite errors improved"]
+  R1 --> R2["Re90 response transfer tied or worse; broad guards regressed"]
+  R2 --> R3["R1 not promoted for inverse use"]
+  G0["Wind G2: 24 train-row teacher-preserving plans"] --> G1["G5/G6: 12/12 dev Q1024 teacher passes; 53.5% fewer pairs"]
+  G1 --> G2["Two full native grids: all five reference roles fail"]
+  G2 --> G3["No physical-prediction promotion or matched inverse pilot"]
+  X0["Fixed K=1 execution review"] --> X1["Packed uses less peak memory but takes 79.4x Dense time"]
+  classDef progress fill:#e3f2ef,stroke:#007f78,color:#153a37;
+  classDef limit fill:#fae8e3,stroke:#b84e36,color:#5d251c;
+  class R0,R1,G0,G1,X0 progress;
+  class R2,R3,G2,G3,X1 limit;
+```
+
+The numerical maps and charts below are **local evidence figures** rendered from saved artifacts into ignored `HONF_Proj/diagnostics/generated/receiver_local_study_visuals_20260927/`. They are intentionally absent from Git upload under the repository artifact rule; their relative image links display in this workspace. The Mermaid diagrams, captions, and numeric tables remain in the committed report. Figure scripts and source hashes are retained beside the local images. None of these plots launched a model, optimizer, GPU evaluation, or new physical solve.
+
 ## 2. Native nonlinear response pair
 
 R1 starts from the intact Run 1804 epoch-4738 checkpoint. Measured scope is 547,081 trainable parameters and 4,883,467 frozen parameters: every layer of core.common.field_head, local_coupling.port_head, and local_coupling.port_refinement_head is trainable; encoders, fine transport kernels, coarse and local context builders, the local surrogate, and all other tensors and buffers are frozen.
@@ -39,6 +60,10 @@ The next table averages each metric within a stencil and then equally across the
 | Fixed heat 4 / incumbent | 0.120327 | 0.184033 | 0.108386 | 0.0006882 | 0.062777 | 0.0009155 |
 | Fixed heat 4 / R_value | 0.108261 | 0.172926 | 0.090313 | 0.0006254 | 0.051533 | 0.0003745 |
 | Fixed heat 4 / R_response | 0.082855 | 0.141606 | 0.060449 | 0.0000667 | 0.004818 | 0.0000134 |
+
+![R1 error ratios across training, Re90 development, and fixed-heat controls](../../diagnostics/generated/receiver_local_study_visuals_20260927/summary/r1_response_transfer.png)
+
+**Figure 1 — Where the response fit helped, and where it did not.** Each cell is `R_response / R_value` for an error metric, computed first within each stored family and then averaged equally across families; below 1 means lower error. The blue fixed-heat row is generator-specific. Re90 pressure increments and baseline pressure turn red, while finite-field gains nearly vanish. The plot does not replace the 30-case broad guard, whose pressure MAE also worsened. Source: the R1 u200 checkpoint-only review identified in Section 8; the ignored `summary/render_summary.py` and `summary/plot_manifest.json` record extraction and SHA256.
 
 Against R_value, R_response improved train per-ID peak-change MAE by 9.1% and pressure-increment MAE by 72.2%; finite solid T RMSE improved 6.8%. On Re90, the same response errors were essentially tied or worse: peak-change MAE rose 0.5%, pressure-increment MAE rose 3.3%, and baseline pressure MAE rose 53.2%. Re90 finite solid T RMSE improved only 0.08%, well below the preregistered approximate 5% development target. Family behavior was uneven: Re90/0310 finite solid T RMSE increased from 0.182208 to 0.186253; Re90/0325 peak-change MAE increased from 0.277906 to 0.281546 and pressure-increment MAE from 0.000135 to 0.000205. Re90/0340 improved peak-change MAE from 0.094189 to 0.089628, but its physical peak-sign screen is mesh-sensitive. The fixed-heat gain is generator-specific and cannot stand in for moving-layout transfer.
 
@@ -167,6 +192,12 @@ The predeclared conditional complete native-grid review selected first-direction
 | Held-out 103 / near turbine | 0.027455 | 0.033121 | 1.21 |
 | Held-out 103 / volume | 0.007516 | 0.014890 | 1.98 |
 
+![Full-grid learned-to-all-access physical-reference error ratios on two layouts](../../diagnostics/generated/receiver_local_study_visuals_20260927/summary/g6_fullgrid_guard.png)
+
+**Figure 2 — The teacher-preserving partial plan misses the physical-reference guard.** Bars are learned/all-access complete-grid vector RMSE ratios, with the dashed line at the approximate 1.10 relative-error boundary; the exact role guard also adds 1e-5 m/s. All ten bars fail. The 12/12 sampled teacher pass and 53.5% exact-pair reduction refer to Q1024 development probes, whereas these bars use two complete native grids against the stored local analytic-wake reference. No CFD or new physical solve is represented. Source: the G6 conditional full-grid review identified in Section 8; extraction and source SHA256 are in the ignored summary figure manifest.
+
+The G6 review retained per-role complete-grid metrics, not per-cell reference and candidate field arrays. A spatial WindFarm reference-minus-learned residual map cannot be reconstructed from those aggregates; Figure 2 shows the measured role errors rather than an invented wake image.
+
 Every listed role fails the guard on both layouts. The stored analytic-wake streamwise-velocity residual relative L2 rose from 0.03565 to 0.05723 on training layout 24 and from 0.03910 to 0.06806 on held-out layout 103. These are complete native-cell comparisons with the local generator, not CFD and not finite design-response evidence. The development row was predeclared by same-M layout and first direction, not selected by its reference errors. This failure blocks physical-prediction promotion and the conditional matched physical inverse pilot. The ignored full-grid report is Case_WindFarm/diagnostics/generated/native_cover_organizer/run2103_e2475/typed_g6_fullgrid_dev103_train24_650_review01/typed_checkpoint_full_grid_evaluation_report.json (SHA256 a231ada717bfad90297063b69e294c93947b95918db20b7f4cecac728c5b2373).
 
 ## 5. Physical interpretation
@@ -177,6 +208,12 @@ The local physical-reference generator is a NumPy analytic-wake flow coupled to 
 
 The prior train-exposed M3/0001 four-corner panel resolved a mixed temperature response at two moved material receivers at both grid scales. Interface T_surface mixed RMS was 0.018565 on the coarse grid and 0.016300 on the fine grid, against a 0.003220 cross-grid discrepancy. Solid-temperature mixed RMS was 0.015874 and 0.013578, against a 0.002692 discrepancy. Temperature values are in dataset units, not kelvin. The hottest spectator retained the global maximum and its mixed response was unresolved. This supports a receiver-local response question for this family; it does not label learned edges or show improvement in the peak objective.
 
+![Stored M3/0001 reference temperature field, four-corner moves, and anchored mixed field](../../diagnostics/generated/receiver_local_study_visuals_20260927/field/m3_0001_reference_temperature_and_mixed_field_128x64.png)
+
+![M3/0001 moved and spectator receiver mixed temperature RMS](../../diagnostics/generated/receiver_local_study_visuals_20260927/field/m3_0001_material_receiver_mixed_temperature_rms.png)
+
+**Figure 3 — What the local physical response looks like.** The first image shows the stored M3/0001 coarse-grid reference temperature, the `+0.15 x` move of module 0 and `+0.15 y` move of module 1, their separate field changes, and the anchored mixed field `I_ij = T_11 − T_10 − T_01 + T_00` on the 7,919-cell common-fluid mask. The second image compares mixed RMS at the moved receivers with the unchanged hottest spectator, whose response is below the pooled float32 output-quantization indicator and remains unresolved. The spatial maps use the 128×64 grid; the 256×128 check above is an aggregate material-response comparison, not a second spatial map. These are saved outputs of the local analytic-wake-plus-thermal reference generator, not CFD or learned-edge evidence. Source: the ignored `physical_response_atlas_20260926/families/train_0001_responses.npz` (SHA256 `c34bc219daff2a1ebb02174b8c5e1498c96286460582e445286cceaff5499432`); the ignored `field/manifest.json` records state paths, data extraction, and image hashes.
+
 The distinct M3/0304 pilot failed its cross-grid mixed-signal and peak-stability gates. M7/0340 showed finite-move peak-sign reversals after grid doubling despite a similar anchored mixed peak. These are family-specific resolution limits, not a pooled tolerance. The train-0318 joint inverse move is a negative control: the nominated pressure-improving and peak-improving coordinates work together, while anchored mixed pressure is approximately zero and mixed peak is about -0.000710 dataset temperature units. Its group was stencil-nominated, not learned. Useful decision coordination therefore does not by itself establish a non-additive physical interaction.
 
 The analytic-wake fixed-geometry heat control has exact pressure, velocity, and vorticity nulls with nonzero thermal response. That is a generator-supported control for this input change; it is not a universal multiphysics law. It is kept separate from both Run 2103 teacher fidelity and the completed R1 learned-response metrics.
@@ -186,6 +223,25 @@ The analytic-wake fixed-geometry heat control has exact pressure, velocity, and 
 The five direct routes are module-to-module (MM), environment-to-module (ME), module-to-environment (EM), query-to-module (QM), and query-to-environment (QE). A missing typed key compiles to recorded full access. Thermal execution supplies separate P0, P1, or P2 context at each native prepare/read; a fixed-plan read with a mismatched phase is rejected.
 
 The cover is a partial transport organization. Module positions and heat also enter the encoder and port/local-surrogate paths. core.common.prepare_coarse and core.common.read_coarse retain coarse/global access outside the cover, as do active local-surrogate and downstream port, refinement, and field heads. Multihop paths can carry source effects after a direct edge is removed. Thus an omitted message is evidence about that direct transport route, not complete independence of that source from the receiver or objective.
+
+```mermaid
+flowchart LR
+  S["Current design and physical inputs"] --> E["Encoder and global state"]
+  S --> C["Thermal only: phase-matched P0 / P1 / P2 context"]
+  S --> D["Typed direct reads: MM, ME, EM, QM, QE"]
+  C --> D
+  E --> B["Coarse/global path"]
+  E --> L["Local surrogate, ports, refinement"]
+  D --> Y["Native field and decision outputs"]
+  B --> Y
+  L --> Y
+  classDef direct fill:#e3f2ef,stroke:#007f78,color:#153a37;
+  classDef other fill:#f1f2f5,stroke:#657384,color:#26313f;
+  class D direct;
+  class E,B,L other;
+```
+
+**Figure 4 — Scope of a direct-transport omission.** A typed mask changes the named direct read while current inputs still enter the other native paths. P0/P1/P2 phase matching applies to Thermal execution. This is why a teacher-preserving missing QE message cannot be read as a complete physical dependency or causal hyperedge.
 
 WindFarm's fixed-plan replay now rejects a changed receiver-tree topology, anchor geometry/measure, module count, or environment source coordinate order before binding a saved plan to a query batch. The current search, disjoint probe and full-grid reviews use the same case catalogue; this guard prevents accidental cross-layout reuse. Thermal inverse trial replay uses the separate core fixed-topology contract: combinatorial source IDs stay frozen inside an anchor trust region while encoded numerical states, receiver coordinates and physical quantities are recomputed live at each trial. This does not turn the graph into a complete physical dependency map.
 
@@ -209,6 +265,10 @@ The 32-of-512 environment-source omission is 6.25% of QE pairs. It is a logical-
 | 1,024 | 9.33 | 116.69 | 243.30 | 250.98 | 495.07 |
 | 40,960 | 189.49 | 1,721.81 | 4,637.02 | 4,735.68 | 15,040.32 |
 
+![Complete-call latency versus peak allocation for the fixed K1 execution control](../../diagnostics/generated/receiver_local_study_visuals_20260927/summary/fixed_plan_execution_tradeoff.png)
+
+**Figure 5 — Logical sparsity, memory, and time are different measurements.** Lower left is better. At Q40,960, packed execution lowered median peak allocation to 311 MB while its complete-call median rose to 15.04 seconds, versus 0.189 seconds for policy-free Dense. Points are synchronized five-repeat medians for the *saved K=1, E=480 control*, not deployment measurements of the learned K=2 organizer; plan formation and backward cost were not timed. Source: the packed-control benchmark summary and its linked calls JSONL; both hashes are listed in Section 8, and exact extraction is in the ignored summary figure script and manifest.
+
 At Q40960, packed was 79.4 times slower than policy-free Dense and 3.18 times slower than rectangular subset, even though both partial methods executed 19,660,800 QE rows versus 20,971,520 for dense-masked or Dense. At Q1024, the respective QE row counts were 491,520 and 524,288. Dense-masked actually evaluated the full rectangle and masked its permissions; subset and packed omitted those rows in the measured execution counter. The Q40960 median peak allocation was 384.7 MB Dense, 405.3 MB partial dense-masked, 385.0 MB partial subset and 311.0 MB partial packed; at Q1024 it was 335.8, 346.1, 322.2 and 112.2 MB respectively. Memory reduction is separate from the adverse time result. The partial executors' first-repetition prediction checksums agreed within approximately 2.2e-4 at Q40960; separate contract tests check field parity for identical masks.
 
 At Q1024, one cold same-geometry call took 9.22 ms Dense, 146.90 ms explicit full, 266.08 ms masked and 279.59 ms subset. One fresh-geometry row-72 call took 9.72, 145.52, 270.35 and 299.25 ms in that order. With diagnostics on, the two-repeat medians were 9.54, 457.03, 484.47 and 521.30 ms. Packed was timed only in the two main matrices; diagnostics-on Q40960, fresh-geometry Q40960, a small inverse objective/backward call, and learned-organizer scoring were not run under this 80-call cap. The measured benchmark replays fixed plans and excludes the learned K=2 organizer's formation and complete-call cost. Neither benchmark measured deployed learned-plan speed. GPU-before/after snapshots and interleaving limit but do not prove absence of contention during every repetition. The ignored final benchmark summary is diagnostics/x1_x4_native_cover_benchmark/run_20260927_packed_control_final/summary.json (SHA256 e6a19c66a8a0ff6a594045b37c46c028f3477c92a4aca035aaba5266571ec15c).
@@ -228,9 +288,23 @@ The four baseline decision quantities matched between typed all-access and intac
 
 Temperature values above are dataset values, not kelvin; no conversion is available in this replay artifact. Pressure errors retain the artifact’s stored output scale. Errors are means of absolute errors over nine rows, not independent-layout confidence intervals. Correcting each module against its own reference anchor reduces absolute peak bias, especially at M10, but does not correct the finite slope: the M10 model predicted a -0.0557 temperature-unit peak change while the stored reference warmed by +0.1150. M5’s 0.0031-unit nominal-grid improvement has no new-grid resolution check. M3 and M7 selected moves improved their nominal-grid peaks, but other observed candidates in the historical union did better. All four selected trials met their original fixed reference-pressure limits.
 
+![Stored M5 baseline physical fields with exact positions of evaluated first-step designs](../../diagnostics/generated/receiver_local_study_visuals_20260927/design/fig1_m5_reference_field_and_u00_positions.png)
+
+![Four-family first-step module displacement trails from saved physical trial geometries](../../diagnostics/generated/receiver_local_study_visuals_20260927/design/fig2_u00_design_trails.png)
+
+**Figure 6 — The physical setting and actual first-step design trails.** The first image shows the *baseline* M5 local-reference pressure and fluid-temperature fields, with markers at evaluated trial module centers; it does not show trial-specific field solutions. The second image shows exact per-module center displacements recomputed from the saved trial `case_config.json` files. Rows are M3/M5/M7/M10 and columns are the independently generated graph-guided, size-matched-random and ungrouped-local pools. `c00/c01/c02` identify candidates only within one policy pool; they do not mark matched designs across columns. Stars identify the Dense-corrected retrospective selected row, and diamonds the best feasible observed row in each finite union. These are stored local-generator trials, not CFD or new solves. Source: the stored inverse replay, historical final-inverse result and M5 response atlas listed in Section 8; the ignored `design/visual_manifest.json` records case-level geometry checks and image hashes.
+
+![Saved inverse trial reference outcomes and paired baseline-corrected Dense predictions](../../diagnostics/generated/receiver_local_study_visuals_20260927/design/fig3_inverse_pool_predictions_and_feasibility.png)
+
+**Figure 7 — Why lower value bias did not recover the decision slope.** Each filled circle is a stored reference trial; an open triangle is its paired baseline-corrected Dense prediction. Pressure is normalized by that family’s reference anchor, and the dashed line is its original 1.05-times-anchor feasibility limit. The star is the model-ranked retrospective union choice; the diamond is the lowest-peak feasible observed union row. M10 illustrates the sign error: the selected trial was predicted to cool but actually warmed. Nine recorded rows per family include duplicate designs; the historical policy-generated pools differ, so the plotted regret is finite-pool retrospective evidence, not a matched policy comparison or a confidence interval. Source: the stored inverse replay and historical final-inverse result in Section 8; extraction and output hashes are in the ignored design manifest.
+
 The P2 mask changed no per-module peak increment in any of 36 rows. Its largest pressure-increment change was 3.0831e-5 in the stored output scale; the opposite-child control reached 5.4061e-5. Dense, partial, and opposite-child controls chose the same row in every family and had identical retrospective regret. These results show a small live pressure-transport intervention with no decision effect in this pool. They do not show graph-guided inverse advantage, physical hyperedge causality, or grid-resolved design improvement. The conditional 16-call physical pilot remains withheld because the useful response/organization gate has not passed.
 
 A separate train-exposed M5/0318 stored-output decision control held the two-coordinate radius (0.1), four signed joint model candidates per policy, reference baseline correction and original pressure limit (0.09518744 dataset pressure units) fixed. The receiver-response additive selector suggested the `-1/-1` joint move and predicted pressure 0.094766, but its stored reference pressure was 0.096265: a false-feasible choice under the original limit. The historically selected graph move `+1/-1` had reference pressure 0.086780 and peak 24.1873 dataset temperature units. Size-matched random and ungrouped controls each had one historically selected reference outcome, with pressures 0.091939 and 0.091867 and peaks 24.5449 and 24.5538, respectively. All three model-side candidate pools had four signed combinations, but the random and ungrouped physical pools were not fully observed. Therefore these numbers are a train-exposed negative control, not matched common-pool physical regret or held-out graph advantage. The selector's finite-coordinate inputs were reconstructed from saved joint predictions, not independent single-coordinate native trials, and the saved predictions were full-native rather than fixed-topology scores. The ignored replay is diagnostics/generated/native_recovery_20260927/train0318_decision_replay.json.
+
+![M5/0318 two-coordinate candidate signs and false-feasible pressure prediction](../../diagnostics/generated/receiver_local_study_visuals_20260927/design/fig4_m5_0318_false_feasible_control.png)
+
+**Figure 8 — A concrete false-feasible design recommendation.** The left panel locates the four sign combinations for the two nominated coordinates. In the right panel the additive selector’s saved full-native `−1/−1` pressure prediction lies below the original limit, but the stored physical-reference pressure lies above it. Other markers pair baseline-corrected Dense predictions with one historically selected reference outcome per policy. The coordinate modules and physically observed candidate pools differ across policies; this train-exposed control cannot rank graph-guided design against matched alternatives. Source: the M5/0318 stored-output replay in Section 8 and the ignored design figure manifest. No new model or physical calls were made.
 
 ## 8. Resource and provenance
 
@@ -278,6 +352,10 @@ An ignored machine-readable outcome record with independently named response, or
 | R0 recovered u80 scope manifest | 6a9ce2e4cc9cdfd4aceb108ee22d864f0bf3bd323c6382531a5099b5c6f2fd9a |
 | R0 recovered u80 read-only record | 5c1e7834cc5b772c7544d968d8be4525d7b4fee6709c65f726ad010154761cd8 |
 | Stored inverse replay results | 6e921d7f8159e5752a094cd08861ccaa8a01cedd29ca715cc302a0cf1c76208d |
+| Historical final-inverse selected results | 9de1bd1c8e6b05b70b760ec23529d8999300b6994993e9aa2662a6890d7050b0 |
+| M5/0318 stored decision replay | 7c16446ae6850b20fd2a28f7f6a132ac41a6b23f75355dbb4d46b764d8c314a9 |
+| M3/0001 reference response atlas NPZ | c34bc219daff2a1ebb02174b8c5e1498c96286460582e445286cceaff5499432 |
+| M5 generated-family reference response atlas NPZ | 773d7941fdd8e97d12bdef21465ee061d3d91f3e4bfeab5271924ea3ec81abbd |
 | Native executor benchmark summary | 6a5ce2057088dad16129da3548776ec9b47da1f37fb6927c93dd9e36e7cc5ca3 |
 | R1 paired-run manifest | 3b6641a9eb33a727a84ae4500e51a356689be759cdaedf67b9f847e3e0549eb7 |
 | R1 nonlinear-interface recipe config | d6a4c4b2e81aceb2b45101e9c92b834bfc1bfba081ab2fcff9eb1974b7dc04f5 |
@@ -290,6 +368,7 @@ An ignored machine-readable outcome record with independently named response, or
 | G6 longer Q1024 review | 4015a48ab445e2b13bb706bc2abe68d80eb89e379e40ec9a329323ce49496173 |
 | G6 conditional full-grid review | a231ada717bfad90297063b69e294c93947b95918db20b7f4cecac728c5b2373 |
 | Packed-control benchmark summary | e6a19c66a8a0ff6a594045b37c46c028f3477c92a4aca035aaba5266571ec15c |
+| Packed-control benchmark calls JSONL | c0155acd975ff57e2c7bdab961fdabb5dcaefc0a004e95004eb97d330de4f79f |
 | R1 train-scale artifact | e1c4253958bbb9ba68849dc4f132bdbecfc32a3b9d7b3f73587e870a3c7571bc |
 | Standing reconciled physical ledger | 9337683d9e7fd947890155e84dc094d22d8246273f020ebf0abc4c065021ff51 |
 | Separate M0 reconciled physical ledger | d795d074aeca484b44f763db2132e7ee7a19507216f4926564a47c39b287afdc |
