@@ -106,6 +106,21 @@ There were zero false-feasible pressure decisions on each of the four reviewed p
 
 The ignored local manifest and all checkpoints are under `diagnostics/generated/native_recovery_20260927/expanded_native_response_pair_Run1804_e4738_train8_re90_four_u600_review200_500_600_20260927/stage_u200/`. Its `review_evaluation` embeds the 8 train, 4 Re90 development, 4 fixed-heat control, and 30 broad historical cases; `status=passed`, `review_decisions={"200":"stop"}`, and both arm checkpoints are at update 200. The broad panel is historical **training** replay, not a held-out test.
 
+## Fixed-version inverse-readiness boundary
+
+The stored-reference inverse replay in `HONF_Receiver_Local_Interface_and_Decision_Recovery_Study.md` kept Run 1804 epoch 4738 fixed and compared four previously opened anchor families with their original first-step trials. It used zero new reference solves. Per-module baseline correction reduced the nine-row mean true-peak absolute error in every family, but it did not correct finite move slopes or make a learned packet interface decision-ready:
+
+| Family | Corrected true-peak MAE, dataset temperature units | Selected trial's stored-reference peak change | Regret within the fully observed historical union |
+|---|---:|---:|---:|
+| M3 | 0.2902 | −0.2025 | 0.6213 |
+| M5 | 0.1577 | −0.0031 | 0.1497 |
+| M7 | 0.3798 | −0.3204 | 0.7723 |
+| M10 | 0.1860 | +0.1150 | 0.2764 |
+
+The M10 selected move was predicted to cool by 0.0557 temperature units and instead warmed by 0.1150 on the stored physical reference. The M5 nominal-grid improvement of 0.0031 units lacks a new-grid resolution check. A separate train-exposed M5/0318 two-coordinate selector predicted pressure 0.094766 below its original 0.09518744 limit, while the stored reference was 0.096265: one concrete false-feasible recommendation. Historical candidate pools were policy-specific, so their shared observed union supports retrospective regret only, not a matched graph-guided policy advantage. A hand-declared P2 packet intervention changed pressure slightly, left all 36 module-peak increments unchanged, and did not change any selected row. The retained use is **bounded proposal generation with per-module baseline correction and reference pressure checking**; autonomous inverse selection or a learned graph-guided design-utility claim is unsupported. The new Thermal u200 response arm does not clear that boundary because its Re90 signs and broad values remain mixed. No new physical inverse pilot is authorized in this round.
+
+For WindFarm, stored local analytic-wake velocity fields can support documented velocity-derived checks. They do not support power, AEP, CFD, or continuous-layout design-gain claims without an independent reference contract. The active W-packet fit must first pass same-checkpoint physical-reference and support/work reviews before any forward version could be proposed for such bounded inverse use.
+
 ## Final prelaunch guards and matched one-update check
 
 The Wind work-pressure safeguard now uses sampled **training** rows, grouped by the five physical roles, rather than development or validation rows. Two consecutive hard-reference budget failures suspend its work term; two consecutive clears restore it. A separate soft-QE saturation guard can also suppress that term. Both arms see the same sampled review rows. The separate predeclared budget early-stop trend uses the mixed review population; its scope is recorded separately and it cannot fire before this profile's update-1500 endpoint. The resource ledger counts every attempted physical and organizer optimizer call against the per-arm 6,000-call cap. These are algorithmic guards; their one-update execution does not establish trained fidelity.
