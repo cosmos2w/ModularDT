@@ -1344,6 +1344,36 @@ def _validate_review_gate(
     return effective_cap
 
 
+def _review_stage_cap_record(
+    *,
+    review_cap: int,
+    resume_payloads: Mapping[str, Mapping[str, Any]] | None,
+    review_continuations: Sequence[int],
+) -> dict[str, Any]:
+    """Serialize the cumulative update range and stop behavior for one fit segment."""
+
+    start_updates = (
+        {int(payload.get("actual_optimizer_updates", -1)) for payload in resume_payloads.values()}
+        if resume_payloads is not None
+        else {0}
+    )
+    if len(start_updates) != 1 or min(start_updates) < 0:
+        raise ValueError("A paired review stage requires both arms at one valid resume update.")
+    start_update = start_updates.pop()
+    if review_cap <= start_update:
+        raise ValueError("The paired review stage cap must be ahead of its resume update.")
+    continuations = sorted({int(update) for update in review_continuations})
+    if any(update >= review_cap for update in continuations):
+        raise ValueError("A review continuation cannot reach or pass the selected stage cap.")
+    return {
+        "start_update": start_update,
+        "stop_update": int(review_cap),
+        "new_update_budget_per_arm": int(review_cap - start_update),
+        "review_continuations": continuations,
+        "stop_at_cap": True,
+    }
+
+
 def _mixed_specs(stencil: ResponseStencil) -> tuple[MixedResponseSpec, ...]:
     variants = set(stencil.variants)
     corners = (("mm", "i_minus", "j_minus"), ("mp", "i_minus", "j_plus"),
@@ -3699,6 +3729,9 @@ def run_read_only_full_grid_train_replay(
         )
         if any(payload.get(name) is None for name in required_rng):
             raise ValueError(f"Passed {arm} checkpoint is missing resumable RNG/sampler state.")
+        cuda_rng = payload.get("cuda_rng_state_by_model_device")
+        if not isinstance(cuda_rng, Mapping) or not cuda_rng:
+            raise ValueError(f"Passed {arm} checkpoint is missing device-specific CUDA RNG state.")
         arm_payloads[arm] = payload
         arm_checkpoint_evidence[arm] = {"path": str(path), "sha256": digest}
     if not _same(
@@ -4774,6 +4807,11 @@ def run_paired_fit(
         "review_cap": review_cap,
         "effective_update_cap": effective_update_cap,
         "review_continuations": list(review_continuations),
+        "review_stage_cap": _review_stage_cap_record(
+            review_cap=review_cap,
+            resume_payloads=resume_payloads,
+            review_continuations=review_continuations,
+        ),
         "arms": {
             arm: {
                 "initial_update": result.initial_update,

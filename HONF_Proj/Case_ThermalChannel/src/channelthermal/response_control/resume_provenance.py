@@ -177,8 +177,19 @@ def validate_paired_resume_provenance(
         fit.get("refit_config"),
         "read-only replay refit configuration differs from the paired fit",
     )
-    if int(replay.get("optimizer_updates", -1)) != 0 or int(replay.get("reference_solves", -1)) != 0:
-        raise ValueError("Resume provenance mismatch: source replay must make zero updates and solves.")
+    replay_activity_counters = (
+        "optimizer_instances_created",
+        "optimizer_calls",
+        "optimizer_updates",
+        "reference_solver_calls",
+        "reference_solves",
+    )
+    for counter in replay_activity_counters:
+        if int(replay.get(counter, -1)) != 0:
+            raise ValueError(
+                "Resume provenance mismatch: source replay must be strictly read-only; "
+                f"{counter} must be zero."
+            )
 
     source_checkpoint = Path(source_checkpoint_path).expanduser().resolve()
     source_digest = file_sha256(source_checkpoint)
@@ -339,6 +350,8 @@ def validate_paired_resume_provenance(
         optimizer = payload.get("optimizer")
         if not isinstance(optimizer, Mapping):
             raise TypeError(f"Resume checkpoint optimizer state for {arm} must be an object.")
+        if not isinstance(optimizer.get("state"), Mapping):
+            raise TypeError(f"Resume checkpoint optimizer state entries for {arm} must be an object.")
         if not isinstance(optimizer.get("param_groups"), list):
             raise TypeError(f"Resume checkpoint optimizer param_groups for {arm} must be a list.")
         for key in (
@@ -351,6 +364,12 @@ def validate_paired_resume_provenance(
         ):
             if key not in payload or payload[key] is None:
                 raise ValueError(f"Resume provenance mismatch: {arm} checkpoint lacks {key}.")
+        if fit.get("initialization_mode") == "native_checkpoint" and arm.startswith("R_"):
+            cuda_rng = payload.get("cuda_rng_state_by_model_device")
+            if not isinstance(cuda_rng, Mapping) or not cuda_rng:
+                raise ValueError(
+                    f"Resume provenance mismatch: {arm} checkpoint lacks device-specific CUDA RNG state."
+                )
         checkpoint_evidence[arm] = {"path": str(path), "sha256": digest}
 
     value_payload = resume_payloads[value_arm]
@@ -375,7 +394,10 @@ def validate_paired_resume_provenance(
         "read_only_replay_manifest": {
             "path": str(replay_path),
             "sha256": file_sha256(replay_path),
+            "optimizer_instances_created": int(replay["optimizer_instances_created"]),
+            "optimizer_calls": int(replay["optimizer_calls"]),
             "optimizer_updates": int(replay["optimizer_updates"]),
+            "reference_solver_calls": int(replay["reference_solver_calls"]),
             "reference_solves": int(replay["reference_solves"]),
         },
         "source_checkpoint": {"path": str(source_checkpoint), "sha256": source_digest},
@@ -388,6 +410,12 @@ def validate_paired_resume_provenance(
             "snapshot": dict(loss_scales),
         },
         "calibrated_response_weights": dict(expected_weights),
+        "source_code_identity_attested": False,
+        "source_code_identity_caveat": (
+            "The source fit manifest has no launch-time Git, worktree, or source-file identity; "
+            "checkpoint, recipe, data, scales, and replay checks do not retroactively attest "
+            "the exact source revision used for that fit."
+        ),
         "per_arm_rng_state_fields": {
             arm: {
                 "python_rng_state": True,

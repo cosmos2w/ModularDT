@@ -84,6 +84,7 @@ from channelthermal.response_control.runner import (
     _prediction_difference_summary,
     _r0_gradient_loss_terms,
     _restore_review_arm_state,
+    _review_stage_cap_record,
     _sampling_summary_mapping,
     _select_geometry_x_probe,
     _validate_rehydrated_raw_baseline,
@@ -1624,7 +1625,10 @@ def _resume_provenance_fixture(tmp_path: Path):
     replay = {
         "status": "passed",
         "mode": "read_only_full_grid_train_replay",
+        "optimizer_instances_created": 0,
+        "optimizer_calls": 0,
         "optimizer_updates": 0,
+        "reference_solver_calls": 0,
         "reference_solves": 0,
         "source_checkpoint": str(source.resolve()),
         "source_checkpoint_sha256": file_sha256(source),
@@ -1732,6 +1736,8 @@ def test_scale_only_resume_provenance_binds_pair_scales_and_rng(tmp_path: Path) 
         "training schedule, per-arm RNG state, and shared sampler continuity"
         in provenance["validated_contracts"]
     )
+    assert provenance["source_code_identity_attested"] is False
+    assert "do not retroactively attest" in provenance["source_code_identity_caveat"]
 
 
 def test_scale_only_resume_rejects_recipe_source_or_checkpoint_mismatch(tmp_path: Path) -> None:
@@ -1828,6 +1834,299 @@ def test_native_resume_rejects_changed_output_scope_and_shape(tmp_path: Path) ->
         )
 
 
+def _expanded_r200_resume_provenance_fixture(tmp_path: Path):
+    kwargs, fit_path, replay_path, _old_checkpoints = _resume_provenance_fixture(tmp_path)
+    fit = json.loads(fit_path.read_text(encoding="utf-8"))
+    replay = json.loads(replay_path.read_text(encoding="utf-8"))
+    recipe = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "response_control_native_expanded_interface_review500.json"
+    )
+    config = replace(
+        load_staged_training_config(str(recipe), arm="R_response"),
+        max_wall_seconds=900.0,
+    )
+    train_paths = []
+    train_families = []
+    train_sampling = []
+    replay_train_stencils = []
+    for index in range(8):
+        atlas = tmp_path / f"expanded_train_{index:02d}.npz"
+        atlas.write_bytes(f"train-atlas-{index}".encode())
+        metadata = atlas.with_suffix(".json")
+        metadata.write_text(json.dumps({"family_id": f"train-family-{index:02d}"}), encoding="utf-8")
+        train_paths.append(atlas)
+        train_families.append(f"train-family-{index:02d}")
+        train_sampling.append({
+            "physical_family_id": f"train-family-{index:02d}",
+            "sampled_counts": {"fluid_fields": 3},
+        })
+        replay_train_stencils.append({
+            "path": str(atlas.resolve()),
+            "sha256": file_sha256(atlas),
+            "json_sha256": file_sha256(metadata),
+        })
+    development_paths = []
+    for index in range(4):
+        atlas = tmp_path / f"expanded_re90_{index:02d}.npz"
+        atlas.write_bytes(f"re90-atlas-{index}".encode())
+        development_paths.append(atlas)
+
+    historical_dataset = tmp_path / "packed_train.h5"
+    historical_dataset.write_bytes(b"the exact stored 600-case training cohort")
+    historical_order = [f"case-{index:03d}" for index in range(600)]
+    native_scope = {
+        "name": "native_expanded_response_interface",
+        "trainable_parameter_names": ["field_head.weight"],
+    }
+    inventory = {
+        "trainable_parameter_names": ["field_head.weight"],
+        "trainable_parameter_shapes": {"field_head.weight": [2, 3]},
+    }
+    response_weights = {
+        "value": 1.0,
+        "finite": 0.8,
+        "finite_peak": 0.9,
+        "pressure_value": 1.1,
+        "pressure_response": 1.2,
+        "fixed_heat_null": 1.3,
+        "fixed_heat_thermal": 1.4,
+    }
+    checkpoints = {}
+    checkpoint_entries = {}
+    payloads = {}
+    for old_arm, arm in (("B_value", "R_value"), ("B_response", "R_response")):
+        checkpoint = tmp_path / f"{arm}_u200.pt"
+        checkpoints[arm] = checkpoint
+        old_payload = kwargs["resume_payloads"][old_arm]
+        serialized_payload = {
+            **old_payload,
+            "arm": arm,
+            "actual_optimizer_updates": 200,
+            "attempted_optimizer_steps": 200,
+            "model": {"weight": torch.tensor([1.0, 2.0])},
+            "optimizer": {"state": {0: {"step": torch.tensor(200)}}, "param_groups": [{"lr": 1.0e-5}]},
+            "training_config": training_config_mapping(config, arm=arm),
+            "cuda_rng_state_by_model_device": {
+                "cuda:0": torch.tensor([1, 2, 3], dtype=torch.uint8),
+            },
+            "historical_case_order": historical_order,
+            "historical_next_index": 200,
+            "calibrated_loss_weights": response_weights if arm == "R_response" else {},
+        }
+        torch.save(serialized_payload, checkpoint)
+        payloads[arm] = _load_safe_response_checkpoint(checkpoint)
+        checkpoint_entries[arm] = {
+            "path": str(checkpoint.resolve()),
+            "sha256": file_sha256(checkpoint),
+        }
+
+    fit.update({
+        "status": "passed",
+        "mode": "paired_staged_fit",
+        "initialization_mode": "native_checkpoint",
+        "train_atlas_paths": [str(path.resolve()) for path in train_paths],
+        "train_family_ids": train_families,
+        "train_sampling": train_sampling,
+        "development_paths": [str(path.resolve()) for path in development_paths],
+        "native_trainable_scope": native_scope,
+        "parameter_inventory": inventory,
+        "historical_value_replay": {
+            "dataset": str(historical_dataset.resolve()),
+            "dataset_size_bytes": historical_dataset.stat().st_size,
+            "dataset_mtime_ns": historical_dataset.stat().st_mtime_ns,
+            "train_case_count": len(historical_order),
+            "train_case_order": historical_order,
+        },
+        "review_cap": 200,
+        "review_decisions": {"200": "stop"},
+        "arms": {
+            arm: {
+                "initial_update": 0,
+                "actual_optimizer_updates": 200,
+                "attempted_optimizer_steps": 200,
+                "total_attempted_optimizer_steps": 200,
+                "final_update": 200,
+            }
+            for arm in ("R_value", "R_response")
+        },
+        "checkpoint_paths": {
+            arm: [str(checkpoints[arm].resolve())]
+            for arm in ("R_value", "R_response")
+        },
+        "calibrated_response_weights": response_weights,
+    })
+    replay.update({
+        "optimizer_instances_created": 0,
+        "optimizer_calls": 0,
+        "optimizer_updates": 0,
+        "reference_solver_calls": 0,
+        "reference_solves": 0,
+        "train_stencils": replay_train_stencils,
+        "arm_checkpoints": checkpoint_entries,
+    })
+    fit_path.write_text(json.dumps(fit), encoding="utf-8")
+    replay_path.write_text(json.dumps(replay), encoding="utf-8")
+    return {
+        **kwargs,
+        "train_atlas_paths": train_paths,
+        "development_atlas_paths": development_paths,
+        "train_family_ids": train_families,
+        "train_sampling": train_sampling,
+        "native_trainable_scope": native_scope,
+        "native_parameter_inventory": inventory,
+        "historical_case_order": historical_order,
+        "historical_dataset_path": historical_dataset,
+        "resume_checkpoint_paths": checkpoints,
+        "resume_payloads": payloads,
+        "training_config": config,
+        "required_update": 200,
+    }, fit_path, replay_path
+
+
+def test_expanded_r200_resume_gate_binds_checkpoint_optimizer_and_sampler_identity(tmp_path: Path) -> None:
+    kwargs, _fit_path, _replay_path = _expanded_r200_resume_provenance_fixture(tmp_path)
+    provenance = validate_paired_resume_provenance(**kwargs)
+    assert provenance["resume_gate_update"] == 200
+    assert {
+        counter: provenance["read_only_replay_manifest"][counter]
+        for counter in (
+            "optimizer_instances_created",
+            "optimizer_calls",
+            "optimizer_updates",
+            "reference_solver_calls",
+            "reference_solves",
+        )
+    } == {
+        "optimizer_instances_created": 0,
+        "optimizer_calls": 0,
+        "optimizer_updates": 0,
+        "reference_solver_calls": 0,
+        "reference_solves": 0,
+    }
+    assert provenance["read_only_replay_manifest"]["optimizer_updates"] == 0
+    assert provenance["read_only_replay_manifest"]["reference_solves"] == 0
+    assert provenance["source_code_identity_attested"] is False
+    assert set(provenance["resume_checkpoints"]) == {"R_value", "R_response"}
+    assert all(len(item["sha256"]) == 64 for item in provenance["resume_checkpoints"].values())
+    assert all(
+        fields["cuda_rng_state_by_model_device"]
+        for fields in provenance["per_arm_rng_state_fields"].values()
+    )
+    assert provenance["calibrated_response_weights"]["fixed_heat_null"] == 1.3
+
+
+@pytest.mark.parametrize(
+    "counter",
+    (
+        "optimizer_instances_created",
+        "optimizer_calls",
+        "optimizer_updates",
+        "reference_solver_calls",
+        "reference_solves",
+    ),
+)
+def test_expanded_r200_resume_rejects_any_read_only_replay_activity(
+    tmp_path: Path,
+    counter: str,
+) -> None:
+    kwargs, _fit_path, replay_path = _expanded_r200_resume_provenance_fixture(tmp_path)
+    replay = json.loads(replay_path.read_text(encoding="utf-8"))
+    replay[counter] = 1
+    replay_path.write_text(json.dumps(replay), encoding="utf-8")
+    with pytest.raises(ValueError, match=f"strictly read-only; {counter} must be zero"):
+        validate_paired_resume_provenance(**kwargs)
+
+
+def test_expanded_r200_resume_rejects_missing_optimizer_or_cuda_rng_state(tmp_path: Path) -> None:
+    kwargs, _fit_path, replay_path = _expanded_r200_resume_provenance_fixture(tmp_path)
+    response_path = Path(kwargs["resume_checkpoint_paths"]["R_response"])
+    replay = json.loads(replay_path.read_text(encoding="utf-8"))
+    original_response_payload = dict(kwargs["resume_payloads"]["R_response"])
+    response_payload = dict(original_response_payload)
+    response_payload["optimizer"] = {"param_groups": []}
+    torch.save(response_payload, response_path)
+    kwargs["resume_payloads"]["R_response"] = _load_safe_response_checkpoint(response_path)
+    replay["arm_checkpoints"]["R_response"]["sha256"] = file_sha256(response_path)
+    replay_path.write_text(json.dumps(replay), encoding="utf-8")
+    with pytest.raises(TypeError, match="optimizer state entries for R_response"):
+        validate_paired_resume_provenance(**kwargs)
+
+    response_payload = dict(original_response_payload)
+    response_payload["cuda_rng_state_by_model_device"] = None
+    torch.save(response_payload, response_path)
+    kwargs["resume_payloads"]["R_response"] = _load_safe_response_checkpoint(response_path)
+    replay["arm_checkpoints"]["R_response"]["sha256"] = file_sha256(response_path)
+    replay_path.write_text(json.dumps(replay), encoding="utf-8")
+    with pytest.raises(ValueError, match="R_response checkpoint lacks device-specific CUDA RNG state"):
+        validate_paired_resume_provenance(**kwargs)
+
+
+def test_expanded_r200_resume_rejects_sampler_mismatch_and_checkpoint_byte_change(tmp_path: Path) -> None:
+    kwargs, _fit_path, replay_path = _expanded_r200_resume_provenance_fixture(tmp_path)
+    response_path = Path(kwargs["resume_checkpoint_paths"]["R_response"])
+    original_bytes = response_path.read_bytes()
+    response_path.write_bytes(original_bytes + b"changed")
+    with pytest.raises(ValueError, match="R_response checkpoint SHA-256 differs"):
+        validate_paired_resume_provenance(**kwargs)
+
+    response_path.write_bytes(original_bytes)
+    response_payload = dict(kwargs["resume_payloads"]["R_response"])
+    response_payload["sampler_rng_state"] = (91, (13, 14), None)
+    torch.save(response_payload, response_path)
+    kwargs["resume_payloads"]["R_response"] = _load_safe_response_checkpoint(response_path)
+    replay = json.loads(replay_path.read_text(encoding="utf-8"))
+    replay["arm_checkpoints"]["R_response"]["sha256"] = file_sha256(response_path)
+    replay_path.write_text(json.dumps(replay), encoding="utf-8")
+    with pytest.raises(ValueError, match="paired RNG/sampler field sampler_rng_state differs"):
+        validate_paired_resume_provenance(**kwargs)
+
+
+def test_expanded_review500_resume_serializes_hard_u200_to_u500_stage_cap() -> None:
+    recipe = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "response_control_native_expanded_interface_review500.json"
+    )
+    config = load_staged_training_config(str(recipe), arm="R_response")
+    parsed = build_parser().parse_args([
+        "--mode", "paired",
+        "--initialization-mode", "native_checkpoint",
+        "--checkpoint", "Run1804_e4738.pt",
+        "--train-stencil", "train.npz",
+        "--output-dir", "diagnostics/generated/native_recovery/continuation_u500",
+        "--recipe-config", str(recipe),
+        "--review-cap", "500",
+    ])
+    assert config.review_updates == (200, 500, 600)
+    assert config.max_optimizer_updates == config.total_optimizer_update_ceiling == 600
+    assert parsed.review_cap == 500
+    assert parsed.continue_after == []
+    record = _review_stage_cap_record(
+        review_cap=parsed.review_cap,
+        resume_payloads={
+            "R_value": {"actual_optimizer_updates": 200},
+            "R_response": {"actual_optimizer_updates": 200},
+        },
+        review_continuations=parsed.continue_after,
+    )
+    assert record == {
+        "start_update": 200,
+        "stop_update": 500,
+        "new_update_budget_per_arm": 300,
+        "review_continuations": [],
+        "stop_at_cap": True,
+    }
+    with pytest.raises(ValueError, match="cannot reach or pass"):
+        _review_stage_cap_record(
+            review_cap=500,
+            resume_payloads={
+                "R_value": {"actual_optimizer_updates": 200},
+                "R_response": {"actual_optimizer_updates": 200},
+            },
+            review_continuations=(500,),
+        )
 def test_gradient_calibration_includes_historical_value_objective() -> None:
     scales = ThermalLossScales(
         value={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
