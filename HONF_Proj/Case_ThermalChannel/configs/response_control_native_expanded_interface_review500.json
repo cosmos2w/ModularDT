@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "name": "native_expanded_response_interface",
+  "architecture": "Run1804_dense_pairwise_field_native_checkpoint",
+  "initialization_mode": "native_checkpoint",
+  "source_checkpoint_contract": "Run1804_epoch_4738_intact_native_checkpoint",
+  "expected_source_checkpoint_sha256": "71ed480ff0396813491c650dd11d887195174019b373fbd9a1fb25505142c066",
+  "read_only_comparator": {
+    "checkpoint_contract": "Run1502_epoch_4794_intact_native_checkpoint",
+    "checkpoint_relative_path": "Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_1502_20260923_004751_sparse_incidence_environment_sparsemax/checkpoints/best_field.pt",
+    "checkpoint_sha256": "08d86a573c7f7d86463bde231eb9f84a745602fca2b8f97142f39540d33a85bb"
+  },
+  "native_trainable_scope": "native_expanded_response_interface",
+  "trainable_blocks": {
+    "field_head": ["core.common.field_head"],
+    "port_head": ["local_coupling.port_head"],
+    "port_refinement_head": ["local_coupling.port_refinement_head"],
+    "native_module_environment_updates": [
+      "core.backend.mm_message",
+      "core.backend.me_message",
+      "core.backend.em_message",
+      "core.backend.module_update",
+      "core.backend.env_update"
+    ],
+    "native_fine_receiver_reads": [
+      "core.backend.query_module_message",
+      "core.backend.query_module_output",
+      "core.backend.env_query",
+      "core.backend.env_attention",
+      "core.backend.env_geometry_bias"
+    ]
+  },
+  "frozen_modules": [
+    "global_encoder",
+    "module_feature_encoder",
+    "module_position_encoder",
+    "env_encoder",
+    "core.common.context_builders_except_field_head",
+    "local_coupling.local_latent_fusion",
+    "local_coupling.local_response_summary_proj",
+    "local_coupling.flux_correction_head",
+    "local_coupling.local_surrogate",
+    "all_other_parameters_and_buffers"
+  ],
+  "deterministic_model_mode": "eval_for_both_absolute_states_and_all_updates",
+  "deterministic_algorithms": true,
+  "historical_train_case_count": 600,
+  "historical_value_replay": "one deterministic count-interleaved packed train case per update; identical case order in paired arms; retain all pressure bands, measured near-interface rows, full interface ports and exact per-module peak rows",
+  "broad_historical_review_case_count": 30,
+  "fixed_heat_control_panel": "diagnostics/generated/native_recovery_20260926/fixed_heat_train0001",
+  "fixed_heat_control_family_id": "duplicate_family:0001+0273",
+  "fixed_heat_control_policy": "exact train-only heat-allocation null for u/v/p and maintained pressure drop; preserve measured thermal role and per-module peak changes",
+  "max_optimizer_updates": 600,
+  "max_epochs": 75,
+  "formal_arm_update_ceiling": 600,
+  "checkpoint_every_updates": 50,
+  "review_updates": [200, 500, 600],
+  "random_seed": 2317,
+  "learning_rate": 0.00001,
+  "weight_decay": 0.00001,
+  "deterministic_eval_mode": true,
+  "project_response_gradient_blockwise": false,
+  "response_ramp_start_update": 10,
+  "response_ramp_end_update": 50,
+  "response_ramp_terms": [
+    "finite",
+    "finite_peak",
+    "pressure_value",
+    "pressure_response",
+    "fixed_heat_null",
+    "fixed_heat_thermal"
+  ],
+  "required_response_terms": ["finite", "finite_peak", "pressure_value", "pressure_response"],
+  "required_control_terms": ["fixed_heat_null", "fixed_heat_thermal"],
+  "include_feasibility_bce": false,
+  "mixed_response_policy": "unresolved mixed-response floor; no mixed-response loss in this bounded fit",
+  "probe_optimizer_updates": 80,
+  "probe_checkpoint_every_updates": 20,
+  "probe_max_value_regression_fraction": 0.02,
+  "shared_remedy_optimizer_call_ceiling": 600,
+  "probe_policy": "one response-only fit-capability probe on the eight train families; no development stencils, no Re90 calibration fitting, no new physical solves; require exact update-zero output identity, nonzero train gradients, unchanged frozen state, reduced train response objective and at most 2 percent weighted train value regression before a matched trial",
+  "stages": [
+    {
+      "name": "value_warmup",
+      "start_update": 0,
+      "stop_update": 10,
+      "active_terms": ["value"]
+    },
+    {
+      "name": "balanced_response_ramp",
+      "start_update": 10,
+      "stop_update": 50,
+      "active_terms": [
+        "value",
+        "finite",
+        "finite_peak",
+        "pressure_value",
+        "pressure_response",
+        "fixed_heat_null",
+        "fixed_heat_thermal"
+      ]
+    },
+    {
+      "name": "expanded_response_fit",
+      "start_update": 50,
+      "stop_update": 600,
+      "active_terms": [
+        "value",
+        "finite",
+        "finite_peak",
+        "pressure_value",
+        "pressure_response",
+        "fixed_heat_null",
+        "fixed_heat_thermal"
+      ]
+    }
+  ]
+}

@@ -14,10 +14,10 @@ from typing import Any
 
 import numpy as np
 import torch
+from honf_forward_core.interface_fields.checkpoint_warm_start import warm_start_three_term_full_access
 from honf_runtime.checkpoints import validate_checkpoint_identity
 from honf_runtime.compat import load_trusted_checkpoint, select_device, set_seed
 from honf_runtime.paths import resolve_path
-from honf_forward_core.interface_fields.checkpoint_warm_start import warm_start_three_term_full_access
 from torch.utils.data import DataLoader
 
 from ..data import (
@@ -559,6 +559,15 @@ def run_from_config(config: Mapping[str, Any], request: Any, *, run_dir_override
     """Execute one normal run-store-owned WindFarm training workflow."""
 
     requested_cfg = copy.deepcopy(dict(config))
+    joint_forward = requested_cfg.get("training", {}).get("joint_forward")
+    if joint_forward is not None:
+        from .joint_forward import run_joint_forward_from_config
+
+        return run_joint_forward_from_config(
+            requested_cfg,
+            request,
+            run_dir_override=run_dir_override,
+        )
     resume_path_value = getattr(request, "resume_checkpoint", None)
     explicit_initialize_path = getattr(request, "initialize_checkpoint", None)
     if resume_path_value and explicit_initialize_path:

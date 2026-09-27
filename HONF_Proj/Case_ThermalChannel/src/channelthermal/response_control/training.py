@@ -1072,6 +1072,67 @@ def _family_visit_counts(
     return counts
 
 
+def historical_replay_sequence(
+    case_order: Sequence[str], *, start_update: int, update_count: int
+) -> tuple[str, ...]:
+    """Return the exact cyclic historical case IDs assigned to an update span."""
+
+    order = tuple(str(case_id) for case_id in case_order)
+    if not order or len(set(order)) != len(order):
+        raise ValueError("Historical replay needs a nonempty unique train-case order.")
+    if start_update < 0 or update_count < 0:
+        raise ValueError("Historical replay update offsets must be nonnegative.")
+    return tuple(order[index % len(order)] for index in range(start_update, start_update + update_count))
+
+
+def historical_replay_coverage(
+    case_order: Sequence[str],
+    *,
+    initial_update: int,
+    segment_case_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Audit fit history and first-pass coverage through a review gate.
+
+    Fit history contains only updates from the current invocation, which may
+    resume from a reviewed checkpoint. This verifies the current segment
+    against the deterministic source order and reconstructs the earlier prefix
+    from ``initial_update``. Resume provenance separately binds that checkpoint
+    to the same ordered source and next-case cursor.
+    """
+
+    order = tuple(str(case_id) for case_id in case_order)
+    observed = tuple(str(case_id) for case_id in segment_case_ids)
+    expected_segment = historical_replay_sequence(
+        order, start_update=initial_update, update_count=len(observed)
+    )
+    if observed != expected_segment:
+        raise ValueError(
+            "Historical fit history does not match the fixed train-case sequence: "
+            f"expected {expected_segment}, got {observed}."
+        )
+    through_update = initial_update + len(observed)
+    visited_prefix = historical_replay_sequence(
+        order, start_update=0, update_count=through_update
+    )
+    unique_prefix = tuple(dict.fromkeys(visited_prefix))
+    first_pass_count = min(through_update, len(order))
+    first_pass_ids = order[:first_pass_count]
+    if unique_prefix[:first_pass_count] != first_pass_ids:
+        raise RuntimeError("Historical replay prefix did not preserve the source cohort order.")
+    return {
+        "available_train_case_count": len(order),
+        "initial_update": int(initial_update),
+        "fit_updates_in_segment": len(observed),
+        "updates_through_gate": through_update,
+        "segment_case_ids": list(observed),
+        "unique_train_cases_visited": len(unique_prefix),
+        "first_pass_train_cases_visited": first_pass_count,
+        "first_pass_complete": first_pass_count == len(order),
+        "first_pass_case_ids": list(first_pass_ids),
+        "replay_wraps": through_update > len(order),
+    }
+
+
 __all__ = [
     "RESPONSE_TERMS",
     "StagedFitResult",
@@ -1082,6 +1143,8 @@ __all__ = [
     "calibrate_gradient_weights",
     "calibrate_operator_weights",
     "checkpoint_payload",
+    "historical_replay_coverage",
+    "historical_replay_sequence",
     "load_staged_training_config",
     "restore_checkpoint_payload",
     "run_staged_fit",

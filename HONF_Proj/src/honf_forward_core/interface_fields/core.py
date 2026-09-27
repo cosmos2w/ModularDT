@@ -14,7 +14,12 @@ from honf_forward_core.config import (
 )
 from honf_forward_core.nn import FourierFeatures, LazyMLP
 
-from .adaptive_interaction_cover import AdaptiveCoverPlan, InteractionContext, MechanismPlan
+from .adaptive_interaction_cover import (
+    AdaptiveCoverPlan,
+    InteractionContext,
+    MechanismPlan,
+    compile_mechanism_execution_view,
+)
 from .common import SharedInterfaceContext
 from .dense_pairwise import DensePairwiseField
 from .group_operator import SparseInterfaceHONF, SparseLayoutCache, packed_coarse_group_sources
@@ -1232,6 +1237,37 @@ class InterfaceFieldCore(nn.Module):
             "routed_pairwise_honf",
         }:
             aux.update(self.backend.preparation_aux(backend_state))
+        if isinstance(backend_state, dict):
+            cover_plans = backend_state.get("cover_plans")
+            if cover_plans is not None:
+                prepared_context = backend_state.get("cover_interaction_context")
+                prepared_phase = (
+                    prepared_context.phase
+                    if isinstance(prepared_context, InteractionContext)
+                    else None
+                )
+                environment_count = int(encoded.env_coords.shape[1])
+                # A plan subclass may define direct per-receiver access that
+                # cannot be represented by static tree membership matrices.
+                # Keep its native reference executor instead of compiling the
+                # base-class view and silently changing the physical mask.
+                compiled_views = (
+                    tuple(
+                        compile_mechanism_execution_view(
+                            plan,
+                            module_present=encoded.module_present[case],
+                            environment_count=environment_count,
+                            phase=prepared_phase,
+                        )
+                        for case, plan in enumerate(cover_plans)
+                    )
+                    if all(type(plan) in {AdaptiveCoverPlan, MechanismPlan} for plan in cover_plans)
+                    else None
+                )
+                backend_state = {
+                    **backend_state,
+                    "cover_execution_views": compiled_views,
+                }
         return PreparedInterfaceField(
             encoded,
             module_states,
@@ -1404,12 +1440,17 @@ class InterfaceFieldCore(nn.Module):
                     aux[key] = torch.stack(values).max()
                     continue
                 if key.startswith("cover_") and key.endswith((
-                    "_unique_rows", "_executed_rows", "_padded_rows", "_raw_paths",
+                    "_unique_rows", "_actual_rows", "_executed_rows", "_padded_rows", "_raw_paths",
                     "_rectangular_rows", "_fallback_queries", "_query_degree_sum",
                     "_query_count", "_unique_source_receiver_pairs",
+                    "_gradient_bridge_native_rows", "_gradient_bridge_surrogate_rows",
+                    "_gradient_bridge_duplicate_rows", "_gradient_bridge_extra_rows",
                 )):
                     # A cover is chosen once per case, but physically read
                     # pairs and fallback work accrue in every query chunk.
+                    # Actual and gradient-bridge source rows follow the same
+                    # additive rule as executed rows; retaining one chunk
+                    # undercounts a tiled receiver call.
                     aux[key] = torch.stack(values).sum()
                     continue
                 if key == "cover_query_degree_max":

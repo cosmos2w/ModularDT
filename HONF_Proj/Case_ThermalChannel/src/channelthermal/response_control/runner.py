@@ -60,12 +60,16 @@ from .losses import (
     FixedHeatNullControl,
     ThermalLossScales,
     compute_stencil_loss_terms,
+    fixed_heat_control_loss_terms,
     fixed_heat_material_peak_coverage,
     historical_absolute_value_loss,
 )
 from .native import DifferentiableThermalOperator
 from .paired import run_paired_staged_fits, write_paired_training_curves
 from .resume_provenance import (
+    _same,
+    _validate_fit_arm_gate_accounting,
+    training_config_mapping,
     validate_checkpoint_only_review_provenance,
     validate_paired_resume_provenance,
 )
@@ -76,6 +80,7 @@ from .training import (
     StagedTrainingConfig,
     TrainingStage,
     calibrate_operator_weights,
+    historical_replay_coverage,
     load_staged_training_config,
     restore_checkpoint_payload,
     run_staged_fit,
@@ -761,6 +766,116 @@ def _configure_native_nonlinear_interface_scope(
             parameter.numel() for parameter in model.parameters() if not parameter.requires_grad
         ),
         "frozen_buffer_names": [name for name, _ in model.named_buffers()],
+        "model_mode": "eval_for_all_updates_and_absolute_stencil_states",
+        "dropout_modules_disabled_by_eval": stochastic_modules,
+        "non_eval_modules": training_modules,
+    }
+
+
+def _configure_native_expanded_response_interface_scope(
+    model: ChannelThermalHONFModel,
+) -> dict[str, Any]:
+    """Train the native message/update/read path that feeds Thermal P0/P1.
+
+    This is a separately named expansion of the older nonlinear-head scope.
+    Encoders, common context builders, local surrogate and response assembly
+    remain frozen so the fit isolates the native interaction path plus the
+    established field and port heads.
+    """
+
+    if not model.local_coupling.has_local_surrogate:
+        raise RuntimeError("Expanded native response fitting requires the attached local surrogate.")
+    if not isinstance(getattr(model.core, "backend", None), nn.Module):
+        raise RuntimeError("Expanded native response fitting requires a materialized native backend.")  # noqa: TRY004
+    blocks: dict[str, tuple[str, ...]] = {
+        "field_head": ("core.common.field_head",),
+        "port_head": ("local_coupling.port_head",),
+        "port_refinement_head": ("local_coupling.port_refinement_head",),
+        "native_module_environment_updates": (
+            "core.backend.mm_message",
+            "core.backend.me_message",
+            "core.backend.em_message",
+            "core.backend.module_update",
+            "core.backend.env_update",
+        ),
+        "native_fine_receiver_reads": (
+            "core.backend.query_module_message",
+            "core.backend.query_module_output",
+            "core.backend.env_query",
+            "core.backend.env_attention",
+            "core.backend.env_geometry_bias",
+        ),
+    }
+    named_modules = dict(model.named_modules())
+    missing_modules = sorted({name for names in blocks.values() for name in names} - set(named_modules))
+    if missing_modules:
+        raise RuntimeError(f"Expanded native response scope is missing required modules: {missing_modules}.")
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    selected: dict[str, nn.Parameter] = {}
+    parameter_counts: dict[str, int] = {}
+    selected_modules: dict[str, list[str]] = {}
+    selected_parameter_ids: set[int] = set()
+    for label, module_names in blocks.items():
+        selected_modules[label] = list(module_names)
+        block_parameters: dict[str, nn.Parameter] = {}
+        for module_name in module_names:
+            module = named_modules[module_name]
+            if not isinstance(module, nn.Module):
+                raise TypeError(f"Expanded native block {module_name!r} is not a module.")
+            parameters = dict(module.named_parameters(recurse=True))
+            if not parameters:
+                raise TypeError(f"Expanded native block {module_name!r} has no materialized parameters.")
+            for relative_name, parameter in parameters.items():
+                if isinstance(parameter, UninitializedParameter):
+                    raise RuntimeError(f"Expanded native block {module_name!r} is still lazy.")  # noqa: TRY004
+                full_name = f"{module_name}.{relative_name}" if relative_name else module_name
+                if id(parameter) in selected_parameter_ids:
+                    raise RuntimeError(f"Expanded native parameter is selected by multiple blocks: {full_name}.")
+                selected_parameter_ids.add(id(parameter))
+                block_parameters[full_name] = parameter
+                selected[full_name] = parameter
+                parameter.requires_grad_(True)
+        parameter_counts[label] = sum(parameter.numel() for parameter in block_parameters.values())
+    if not selected:
+        raise RuntimeError("Expanded native response scope selected no parameters.")
+    trainable_names = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+    if set(trainable_names) != set(selected):
+        raise RuntimeError(
+            "Expanded native response scope mismatch: "
+            f"expected {sorted(selected)}, got {sorted(trainable_names)}."
+        )
+    model.eval()
+    stochastic_modules = [
+        name for name, module in model.named_modules()
+        if isinstance(module, nn.modules.dropout._DropoutNd) and module.p > 0.0
+    ]
+    training_modules = [name for name, module in model.named_modules() if module.training]
+    if training_modules:
+        raise RuntimeError(f"Deterministic expanded response mode left modules in training mode: {training_modules}.")
+    return {
+        "name": "native_expanded_response_interface",
+        "trainable_module_names_by_block": selected_modules,
+        "trainable_module_names": [name for names in selected_modules.values() for name in names],
+        "trainable_parameter_names": trainable_names,
+        "trainable_parameter_count_by_block": parameter_counts,
+        "trainable_parameter_count": sum(parameter.numel() for parameter in selected.values()),
+        "frozen_parameter_count": sum(
+            parameter.numel() for parameter in model.parameters() if not parameter.requires_grad
+        ),
+        "frozen_buffer_names": [name for name, _ in model.named_buffers()],
+        "frozen_modules": [
+            "global_encoder",
+            "module_feature_encoder",
+            "module_position_encoder",
+            "env_encoder",
+            "core.common.context_builders_except_field_head",
+            "local_coupling.local_latent_fusion",
+            "local_coupling.local_response_summary_proj",
+            "local_coupling.flux_correction_head",
+            "local_coupling.local_surrogate",
+            "all_other_parameters_and_buffers",
+        ],
         "model_mode": "eval_for_all_updates_and_absolute_stencil_states",
         "dropout_modules_disabled_by_eval": stochastic_modules,
         "non_eval_modules": training_modules,
@@ -2712,6 +2827,1019 @@ def run_train_only_scope_diagnostic(
     return result
 
 
+def _evaluate_expanded_train_objective(
+    operator: DifferentiableThermalOperator,
+    stencils: Sequence[ResponseStencil],
+    historical_source: HistoricalValueSource,
+    historical_case_by_family: Mapping[str, str],
+    scales: ThermalLossScales,
+    weights: Mapping[str, float],
+    fixed_heat_controls: Sequence[FixedHeatNullControl],
+    *,
+    device: torch.device,
+) -> dict[str, Any]:
+    """Measure the expanded recipe's train-only value and response objectives."""
+
+    response_terms = (
+        "finite", "finite_peak", "pressure_value", "pressure_response",
+        "fixed_heat_null", "fixed_heat_thermal",
+    )
+    controls_by_family: dict[str, list[FixedHeatNullControl]] = {}
+    for control in fixed_heat_controls:
+        controls_by_family.setdefault(control.family_id, []).append(control)
+    rows: list[dict[str, Any]] = []
+    with torch.no_grad():
+        for stencil in stencils:
+            family_id = stencil.physical_family_id
+            if family_id not in historical_case_by_family:
+                raise ValueError(f"No balanced historical train case is assigned to {family_id!r}.")
+            predictions = predict_stencil(operator, stencil, device=device)
+            terms = compute_stencil_loss_terms(
+                predictions,
+                stencil,
+                scales=scales,
+                enabled_terms=("value", "finite", "finite_peak", "pressure_value", "pressure_response"),
+                include_feasibility_bce=False,
+            )
+            historical_loss = historical_absolute_value_loss(
+                operator,
+                historical_source.load(historical_case_by_family[family_id]),
+                scales=scales,
+                device=device,
+            )
+            control_terms_by_name: dict[str, list[float]] = {}
+            for control in controls_by_family.get(family_id, ()):
+                control_terms, _diagnostics = fixed_heat_control_loss_terms(
+                    operator, control, scales=scales, device=device
+                )
+                for name in ("fixed_heat_null", "fixed_heat_thermal"):
+                    if name in control_terms:
+                        control_terms_by_name.setdefault(name, []).append(
+                            float(control_terms[name].detach().cpu())
+                        )
+            term_values = {
+                name: float(value.detach().cpu())
+                for name, value in terms.terms.items()
+            }
+            term_values["historical_value"] = float(historical_loss.detach().cpu())
+            for name, values in control_terms_by_name.items():
+                term_values[name] = float(np.mean(values))
+            continuous_response_terms = (
+                "finite", "finite_peak", "pressure_value", "pressure_response"
+            )
+            missing = set(continuous_response_terms) - set(term_values)
+            if missing:
+                raise ValueError(
+                    f"Train family {family_id!r} has no measured probe objective for {sorted(missing)}."
+                )
+            for name in ("fixed_heat_null", "fixed_heat_thermal"):
+                term_values.setdefault(name, 0.0)
+            value_objective = float(weights["value"]) * (
+                term_values.get("value", 0.0) + term_values["historical_value"]
+            )
+            response_objective = sum(
+                float(weights[name]) * term_values[name] for name in response_terms
+            )
+            if not np.isfinite(value_objective) or not np.isfinite(response_objective):
+                raise FloatingPointError(f"Expanded train objective is non-finite for {family_id!r}.")
+            rows.append({
+                "family_id": family_id,
+                "module_count": len(stencil.baseline.design.active_modules),
+                "historical_case_id": historical_case_by_family[family_id],
+                "term_losses": term_values,
+                "weighted_value_objective": value_objective,
+                "weighted_response_objective": response_objective,
+                "weighted_total_objective": value_objective + response_objective,
+            })
+    return {
+        "families": rows,
+        "equal_family_mean": {
+            name: float(np.mean([row[name] for row in rows]))
+            for name in (
+                "weighted_value_objective",
+                "weighted_response_objective",
+                "weighted_total_objective",
+            )
+        },
+        "equal_family_mean_term_losses": {
+            name: float(np.mean([row["term_losses"].get(name, 0.0) for row in rows]))
+            for name in (*response_terms, "value", "historical_value")
+        },
+    }
+
+
+def run_expanded_response_fit_capability_probe(
+    *,
+    checkpoint_path: Path,
+    stencil_paths: Sequence[Path],
+    dataset_path: Path | None,
+    recipe_config_path: Path,
+    output_dir: Path,
+    device: torch.device,
+    sampling: ReceiverSamplingConfig,
+    query_batch_size: int,
+    max_wall_seconds: float,
+    smooth_peak_beta: float,
+) -> dict[str, Any]:
+    """Run an 80-update CUDA-only train cohort probe for the expanded scope."""
+
+    started = time.monotonic()
+    deadline = started + max_wall_seconds
+    if device.type != "cuda" or os.environ.get("CUDA_VISIBLE_DEVICES") != "2":
+        raise RuntimeError(
+            "The expanded fit-capability probe requires CUDA_VISIBLE_DEVICES=2 and logical --device cuda:0."
+        )
+    if device.index not in {None, 0} or not torch.cuda.is_available():
+        raise RuntimeError("The expanded fit-capability probe requires the allocated logical CUDA device 0.")
+    cublas_workspace = _enable_deterministic_algorithms(device)
+    if max_wall_seconds <= 0.0:
+        raise ValueError("Expanded fit-capability probe max_wall_seconds must be positive.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report_path = output_dir / "expanded_response_fit_capability_probe.json"
+    recipe_path = recipe_config_path.expanduser().resolve()
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    if recipe.get("name") != "native_expanded_response_interface":
+        raise ValueError("Expanded probe requires the native_expanded_response_interface recipe.")
+    if int(recipe.get("probe_optimizer_updates", -1)) != 80:
+        raise ValueError("Expanded fit-capability probe is bounded to exactly 80 optimizer updates.")
+    if int(recipe.get("shared_remedy_optimizer_call_ceiling", -1)) != 600:
+        raise ValueError("Expanded probe must use the shared 600-attempt short-remedy ledger.")
+    if len(stencil_paths) != 8:
+        raise ValueError("Expanded fit-capability probe requires exactly eight train response stencils.")
+    source_digest = _checkpoint_digest(checkpoint_path)
+    expected_digest = str(recipe.get("expected_source_checkpoint_sha256", ""))
+    if source_digest != expected_digest:
+        raise ValueError(
+            "Expanded probe source checkpoint does not match the frozen Run1804 e4738 identity: "
+            f"expected {expected_digest}, got {source_digest}."
+        )
+    comparator = recipe.get("read_only_comparator", {})
+    comparator_path = (
+        Path(__file__).resolve().parents[4] / str(comparator.get("checkpoint_relative_path", ""))
+    ).resolve()
+    if not comparator_path.is_file() or _checkpoint_digest(comparator_path) != comparator.get("checkpoint_sha256"):
+        raise ValueError("Read-only Run1502 e4794 comparator is missing or no longer matches its pinned identity.")
+    report: dict[str, Any] = {
+        "status": "running",
+        "mode": "expanded_response_fit_capability_probe",
+        "checkpoint": str(checkpoint_path.expanduser().resolve()),
+        "checkpoint_sha256": source_digest,
+        "read_only_comparator": {
+            "checkpoint": str(comparator_path),
+            "checkpoint_sha256": _checkpoint_digest(comparator_path),
+            "loaded_or_modified": False,
+        },
+        "recipe": str(recipe_path),
+        "recipe_sha256": _checkpoint_digest(recipe_path),
+        "train_atlas_paths": [str(path.expanduser().resolve()) for path in stencil_paths],
+        "train_atlas_hashes": [],
+        "planned_optimizer_updates": 80,
+        "optimizer_updates_attempted": 0,
+        "optimizer_updates_completed": 0,
+        "optimizer_calls_charged_to_shared_remedy_ledger": 0,
+        "shared_remedy_optimizer_call_ceiling": 600,
+        "reference_solver_calls": 0,
+        "development_stencil_count": 0,
+        "current_phase": "input_validation",
+        "started_unix_seconds": time.time(),
+    }
+    _atomic_json(report_path, report)
+
+    def save_progress() -> None:
+        report["total_wall_seconds"] = float(time.monotonic() - started)
+        _atomic_json(report_path, report)
+
+    def ensure_time_remaining(phase: str) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            report["current_phase"] = phase
+            report["status"] = "timed_out_or_partial"
+            report["error"] = f"Expanded probe total wall cap of {max_wall_seconds:.1f} seconds expired."
+            save_progress()
+            raise TimeoutError(report["error"])
+        return remaining
+
+    if any(not path.is_file() for path in stencil_paths):
+        raise FileNotFoundError("An expanded train response atlas is missing.")
+    loaded = [load_response_atlas_stencil(path) for path in stencil_paths]
+    raw_stencils = tuple(stencil for stencil, _metadata in loaded)
+    if any(stencil.split is not EvidenceSplit.TRAIN for stencil in raw_stencils):
+        raise ValueError("Expanded fit-capability probe accepts train-split response stencils only.")
+    family_ids = tuple(sorted({stencil.physical_family_id for stencil in raw_stencils}))
+    if len(family_ids) != 8:
+        raise ValueError("Expanded fit-capability probe requires eight distinct train response families.")
+    report["train_family_ids"] = list(family_ids)
+    report["train_atlas_hashes"] = [
+        {
+            "path": str(path.expanduser().resolve()),
+            "sha256": _checkpoint_digest(path),
+            "metadata_sha256": _checkpoint_digest(path.with_suffix(".json")),
+        }
+        for path in stencil_paths
+    ]
+    report["module_counts"] = [len(stencil.baseline.design.active_modules) for stencil in raw_stencils]
+    source_model, checkpoint = load_model(checkpoint_path, device)
+    if int(checkpoint.get("epoch", checkpoint.get("current_epoch", -1))) != 4738:
+        raise ValueError("Expanded fit-capability probe requires the intact Run1804 e4738 checkpoint.")
+    if str(source_model.config.core_honf.forward_architecture) != "dense_pairwise_field":
+        raise ValueError("Expanded fit-capability probe requires the Run1804 dense native architecture.")
+    source_model.eval()
+    dataset_root = _resolve_dataset_path(checkpoint, str(dataset_path) if dataset_path else None)
+    train_config = checkpoint.get("train_config", {})
+    dataset_config = train_config.get("dataset", {})
+    raw_dataset = GlobalChannelThermalDataset(
+        dataset_root,
+        split="train",
+        points_per_case=1,
+        normalize_inputs=False,
+        normalize_targets=False,
+        random_point_sampling=False,
+        include_grid=False,
+        include_structure_targets=False,
+    )
+    historical_sampling = replace(sampling, max_fluid_queries=max(3072, sampling.max_fluid_queries))
+    historical_source = HistoricalValueSource.from_dataset(raw_dataset, sampling=historical_sampling)
+    required_historical_count = int(recipe.get("historical_train_case_count", -1))
+    if len(historical_source.case_ids) != required_historical_count:
+        raise ValueError(
+            "Expanded probe requires the fully reconciled packed train cohort: "
+            f"expected {required_historical_count} converged cases, got {len(historical_source.case_ids)}."
+        )
+    sampled_panel = sample_training_panel(raw_stencils, config=sampling)
+    training_stencils = tuple(item.stencil for item in sampled_panel)
+    fixed_heat_controls, fixed_heat_provenance, _review_controls = _load_fixed_heat_null_controls(
+        recipe,
+        raw_stencils,
+        sampled_panel,
+        stencil_paths=stencil_paths,
+    )
+    historical_case_by_family = _historical_calibration_case_map(family_ids, historical_source)
+    scales = derive_training_scales(
+        training_stencils,
+        smooth_peak_beta=smooth_peak_beta,
+        historical_value_source=historical_source,
+    )
+    template = _make_input_template(raw_dataset)
+    normalization_stats = checkpoint.get("global_normalization_stats", {})
+    source_operator = DifferentiableThermalOperator(
+        source_model,
+        template,
+        dataset_config=dataset_config,
+        normalization_stats=normalization_stats,
+        query_batch_size=query_batch_size,
+    )
+    target_model, _refit_config = _native_checkpoint_initialization(source_model)
+    target_operator = DifferentiableThermalOperator(
+        target_model,
+        template,
+        dataset_config=dataset_config,
+        normalization_stats=normalization_stats,
+        query_batch_size=query_batch_size,
+    )
+    report["current_phase"] = "native_update_zero_parity"
+    parity_rows: dict[str, float] = {}
+    with torch.no_grad():
+        for stencil in training_stencils:
+            queries = role_queries_from_stencil(stencil, device=device)
+            for label, record in (("baseline", stencil.baseline), *stencil.variants.items()):
+                design = DesignInput.from_state(record.design, device=device)
+                context = context_inputs(record.context)
+                reference = source_operator(design, context, queries)
+                target = target_operator(design, context, queries)
+                for role_name in target.role_values:
+                    difference = float((reference.role_values[role_name] - target.role_values[role_name]).abs().max().cpu())
+                    parity_rows[f"{stencil.physical_family_id}/{label}/{role_name}"] = difference
+    if any(value != 0.0 for value in parity_rows.values()):
+        raise AssertionError(f"Expanded native scope changed Run1804 update-zero outputs: {parity_rows}.")
+    native_scope = _configure_native_expanded_response_interface_scope(target_model)
+    initial_parameters = {
+        name: parameter.detach().clone()
+        for name, parameter in target_model.named_parameters()
+    }
+    enabled_terms = (
+        "value", "finite", "finite_peak", "pressure_value", "pressure_response",
+        "fixed_heat_null", "fixed_heat_thermal",
+    )
+    calibration_diagnostics: dict[str, Any] = {}
+    weights = dict(calibrate_operator_weights(
+        target_operator,
+        training_stencils,
+        scales=scales,
+        historical_value_source=historical_source,
+        parameters=target_model.parameters(),
+        device=device,
+        enabled_terms=enabled_terms,
+        include_feasibility_bce=False,
+        diagnostic_sink=calibration_diagnostics,
+        fixed_heat_controls=fixed_heat_controls,
+    ))
+    required_terms = tuple(recipe.get("required_response_terms", ()))
+    required_controls = tuple(recipe.get("required_control_terms", ()))
+    missing_weights = sorted((set(required_terms) | set(required_controls)) - set(weights))
+    if missing_weights:
+        raise ValueError(f"Expanded response path has no finite nonzero train gradient for {missing_weights}.")
+    initial_metrics = _evaluate_expanded_train_objective(
+        target_operator,
+        training_stencils,
+        historical_source,
+        historical_case_by_family,
+        scales,
+        weights,
+        fixed_heat_controls,
+        device=device,
+    )
+    current_parameters = dict(target_model.named_parameters())
+    changed_during_calibration = [
+        name for name, value in initial_parameters.items()
+        if not torch.equal(value, current_parameters[name].detach())
+    ]
+    if changed_during_calibration:
+        raise AssertionError(
+            f"Expanded response calibration changed model parameters before update one: {changed_during_calibration}."
+        )
+    # Lazy buffer materialization is complete only after the calibration and
+    # baseline objective have exercised stencils, historical cases and controls.
+    frozen_buffers = {
+        name: value.detach().clone()
+        for name, value in target_model.named_buffers()
+    }
+    initial_model_state = {
+        name: value.detach().clone()
+        for name, value in target_model.state_dict().items()
+    }
+    report.update({
+        "current_phase": "bounded_optimizer_probe",
+        "native_trainable_scope": native_scope,
+        "native_parameter_inventory": _parameter_inventory(target_model),
+        "update_zero_max_abs_output_difference_by_family_state_role": parity_rows,
+        "loss_scale_calibration": {
+            "scope": "eight_train_families_plus_one_historical_train_case_per_family",
+            "historical_train_examples_by_family": historical_case_by_family,
+            "loss_scales": _dataclass_record(scales),
+        },
+        "fixed_heat_control_provenance": fixed_heat_provenance,
+        "gradient_calibration": {
+            "weights": weights,
+            "diagnostics": calibration_diagnostics,
+            "training_families_only": True,
+            "development_families_loaded": False,
+        },
+        "initial_train_objective": initial_metrics,
+        "reference_solver_calls": 0,
+    })
+    save_progress()
+    optimizer_updates = int(recipe["probe_optimizer_updates"])
+    stages = tuple(
+        TrainingStage(
+            name=stage.name,
+            start_update=stage.start_update,
+            stop_update=min(stage.stop_update, optimizer_updates),
+            active_terms=stage.active_terms,
+        )
+        for stage in load_staged_training_config(str(recipe_path), arm="R_response").stages
+        if stage.start_update < optimizer_updates
+    )
+    pair_config = load_staged_training_config(str(recipe_path), arm="R_response")
+    probe_config = StagedTrainingConfig(
+        arm="R_response",
+        max_optimizer_updates=optimizer_updates,
+        max_epochs=(optimizer_updates + len(training_stencils) - 1) // len(training_stencils),
+        total_optimizer_update_ceiling=int(recipe["shared_remedy_optimizer_call_ceiling"]),
+        checkpoint_every_updates=int(recipe.get("probe_checkpoint_every_updates", 20)),
+        max_wall_seconds=ensure_time_remaining("probe_training_start"),
+        review_updates=(optimizer_updates,),
+        random_seed=pair_config.random_seed,
+        deterministic_eval_mode=True,
+        deterministic_algorithms=True,
+        project_response_gradient_blockwise=False,
+        response_ramp_start_update=pair_config.response_ramp_start_update,
+        response_ramp_end_update=pair_config.response_ramp_end_update,
+        response_ramp_terms=pair_config.response_ramp_terms,
+        required_response_terms=pair_config.required_response_terms,
+        required_control_terms=pair_config.required_control_terms,
+        include_feasibility_bce=False,
+        stages=stages,
+    )
+    learning_rate = float(recipe.get("learning_rate", 1.0e-5))
+    weight_decay = float(recipe.get("weight_decay", 1.0e-5))
+    optimizer = torch.optim.AdamW(
+        (parameter for parameter in target_model.parameters() if parameter.requires_grad),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+    )
+    probe_checkpoint_paths: list[str] = []
+    for name, value in initial_model_state.items():
+        if not torch.equal(target_model.state_dict()[name], value):
+            raise AssertionError(f"Expanded probe changed native starting tensor before update one: {name}.")
+
+    def save_probe_checkpoint(payload: Mapping[str, Any], label: str) -> None:
+        update = int(payload["actual_optimizer_updates"])
+        persisted = dict(payload)
+        persisted["response_control_run_provenance"] = {
+            "source_checkpoint": str(checkpoint_path.expanduser().resolve()),
+            "source_checkpoint_sha256": source_digest,
+            "training_recipe": str(recipe_path),
+            "training_recipe_sha256": _checkpoint_digest(recipe_path),
+            "active_scope_name": native_scope["name"],
+            "active_scope_inventory": native_scope,
+            "training_atlas_paths": [str(path.expanduser().resolve()) for path in stencil_paths],
+            "training_atlas_hashes": report["train_atlas_hashes"],
+            "training_family_ids": list(family_ids),
+            "reference_solver_calls": 0,
+        }
+        path = output_dir / f"expanded_response_probe_{label}_u{update:05d}.pt"
+        _atomic_torch_save(path, persisted)
+        probe_checkpoint_paths.append(str(path.resolve()))
+        report["probe_checkpoint_paths"] = list(probe_checkpoint_paths)
+        save_progress()
+
+    def record_attempt(completed: int, attempted: int) -> None:
+        report["optimizer_updates_completed"] = int(completed)
+        report["optimizer_updates_attempted"] = int(attempted)
+        report["optimizer_calls_charged_to_shared_remedy_ledger"] = int(attempted)
+        save_progress()
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+        torch.cuda.reset_peak_memory_stats(device)
+    fit_started = time.perf_counter()
+    fit = run_staged_fit(
+        target_operator,
+        target_model,
+        optimizer,
+        training_stencils,
+        scales=scales,
+        loss_weights=weights,
+        historical_value_source=historical_source,
+        fixed_heat_controls=fixed_heat_controls,
+        config=probe_config,
+        device=device,
+        on_checkpoint=save_probe_checkpoint,
+        on_optimizer_attempt=record_attempt,
+    )
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+    fit_wall_seconds = time.perf_counter() - fit_started
+    final_metrics = _evaluate_expanded_train_objective(
+        target_operator,
+        training_stencils,
+        historical_source,
+        historical_case_by_family,
+        scales,
+        weights,
+        fixed_heat_controls,
+        device=device,
+    )
+    changed_by_block: dict[str, dict[str, int]] = {}
+    for label, module_names in native_scope["trainable_module_names_by_block"].items():
+        prefix_tuple = tuple(f"{name}." for name in module_names)
+        parameter_names = [name for name in initial_parameters if name.startswith(prefix_tuple)]
+        changed_names = [
+            name for name in parameter_names
+            if not torch.equal(initial_parameters[name], dict(target_model.named_parameters())[name].detach())
+        ]
+        changed_by_block[label] = {
+            "parameter_count": len(parameter_names),
+            "changed_parameter_count": len(changed_names),
+            "changed_numel": sum(
+                int((initial_parameters[name] != dict(target_model.named_parameters())[name].detach()).sum().item())
+                for name in changed_names
+            ),
+        }
+    changed_frozen_parameters = [
+        name for name, parameter in target_model.named_parameters()
+        if not parameter.requires_grad
+        and (name not in initial_parameters or not torch.equal(initial_parameters[name], parameter.detach()))
+    ]
+    changed_buffers = [
+        name for name, value in target_model.named_buffers()
+        if name not in frozen_buffers or not torch.equal(frozen_buffers[name], value.detach())
+    ]
+    if changed_frozen_parameters or changed_buffers:
+        raise AssertionError(
+            "Expanded deterministic probe changed frozen model state: "
+            f"parameters={changed_frozen_parameters}, buffers={changed_buffers}."
+        )
+    value_initial = float(initial_metrics["equal_family_mean"]["weighted_value_objective"])
+    value_final = float(final_metrics["equal_family_mean"]["weighted_value_objective"])
+    response_initial = float(initial_metrics["equal_family_mean"]["weighted_response_objective"])
+    response_final = float(final_metrics["equal_family_mean"]["weighted_response_objective"])
+    response_reduction = 1.0 - response_final / max(response_initial, 1.0e-12)
+    value_regression = value_final / max(value_initial, 1.0e-12) - 1.0
+    value_guard = float(recipe.get("probe_max_value_regression_fraction", 0.02))
+    expanded_path_changed = any(
+        changed_by_block[label]["changed_numel"] > 0
+        for label in ("native_module_environment_updates", "native_fine_receiver_reads")
+    )
+    updates_complete = fit.final_update == optimizer_updates and fit.actual_optimizer_updates == optimizer_updates
+    capability_gate = {
+        "response_objective_reduced": bool(response_reduction > 0.0),
+        "response_objective_reduction_fraction": response_reduction,
+        "value_guard_fraction": value_guard,
+        "value_guard_passed": bool(value_regression <= value_guard),
+        "value_objective_regression_fraction": value_regression,
+        "expanded_native_interaction_parameters_changed": expanded_path_changed,
+        "updates_complete": updates_complete,
+        "supports_matched_trial": bool(
+            updates_complete and response_reduction > 0.0
+            and value_regression <= value_guard and expanded_path_changed
+        ),
+    }
+    replay_segment = tuple(step.historical_case_id for step in fit.history)
+    if any(case_id is None for case_id in replay_segment):
+        raise RuntimeError("Expanded probe fit history omitted a historical case ID.")
+    replay_coverage = historical_replay_coverage(
+        historical_source.case_ids,
+        initial_update=fit.initial_update,
+        segment_case_ids=tuple(str(case_id) for case_id in replay_segment),
+    )
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+        cuda_record = {
+            "logical_device": str(device),
+            "physical_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(device)),
+            "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(device)),
+        }
+    else:
+        raise RuntimeError("The expanded probe cannot report or use CPU fallback.")
+    report.update({
+        "status": "passed" if updates_complete else "timed_out_or_partial",
+        "current_phase": "complete" if updates_complete else "partial_fit_saved",
+        "optimizer_updates_completed": fit.actual_optimizer_updates,
+        "optimizer_updates_attempted": fit.attempted_optimizer_steps,
+        "optimizer_calls_charged_to_shared_remedy_ledger": fit.attempted_optimizer_steps,
+        "optimizer_updates_through_gate": fit.final_update,
+        "attempted_optimizer_steps_cumulative": fit.total_attempted_optimizer_steps,
+        "fit_wall_seconds": fit_wall_seconds,
+        "total_wall_seconds": float(time.monotonic() - started),
+        "learning_rate": learning_rate,
+        "weight_decay": weight_decay,
+        "actual_update_history": [_dataclass_record(step) for step in fit.history],
+        "historical_training_replay_coverage": replay_coverage,
+        "final_train_objective": final_metrics,
+        "response_objective_reduction_fraction": response_reduction,
+        "value_objective_regression_fraction": value_regression,
+        "trainable_parameter_change_by_block": changed_by_block,
+        "frozen_parameter_values_unchanged": True,
+        "frozen_buffer_values_unchanged": True,
+        "capability_gate": capability_gate,
+        "reference_solver_calls": 0,
+        "cuda": cuda_record,
+        "cublas_workspace_config": cublas_workspace,
+        "finished_unix_seconds": time.time(),
+    })
+    save_progress()
+    return report
+
+
+def _load_expanded_probe_evidence(
+    path: Path,
+    *,
+    checkpoint_path: Path,
+    recipe_path: Path,
+    train_atlas_paths: Sequence[Path],
+    expected_family_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Require passed train-only evidence and allow only a review-schedule delta."""
+
+    resolved = path.expanduser().resolve()
+    payload = json.loads(resolved.read_text(encoding="utf-8"))
+    if payload.get("status") != "passed" or payload.get("mode") != "expanded_response_fit_capability_probe":
+        raise ValueError("Expanded matched fitting requires a completed expanded train-only capability probe.")
+    if payload.get("checkpoint_sha256") != _checkpoint_digest(checkpoint_path):
+        raise ValueError("Expanded fit-capability probe belongs to a different source checkpoint.")
+    paired_recipe_path = recipe_path.expanduser().resolve()
+    probe_recipe_path = (paired_recipe_path.parent / "response_control_native_expanded_interface.json").resolve()
+    if Path(str(payload.get("recipe", ""))).expanduser().resolve() != probe_recipe_path:
+        raise ValueError("Expanded probe evidence does not name the pinned base recipe in this config directory.")
+    if not probe_recipe_path.is_file() or payload.get("recipe_sha256") != _checkpoint_digest(probe_recipe_path):
+        raise ValueError("The probe-pinned expanded response recipe is missing or no longer matches its SHA256.")
+    if not paired_recipe_path.is_file():
+        raise FileNotFoundError(f"The matched expanded response recipe is missing: {paired_recipe_path}")
+    probe_recipe = json.loads(probe_recipe_path.read_text(encoding="utf-8"))
+    paired_recipe = json.loads(paired_recipe_path.read_text(encoding="utf-8"))
+    probe_review_updates = probe_recipe.get("review_updates")
+    paired_review_updates = paired_recipe.get("review_updates")
+    if probe_review_updates != [200, 600] or paired_review_updates != [200, 500, 600]:
+        raise ValueError(
+            "Expanded matched fitting requires the probe's [200, 600] recipe and the paired [200, 500, 600] review schedule."
+        )
+    probe_recipe_without_reviews = dict(probe_recipe)
+    paired_recipe_without_reviews = dict(paired_recipe)
+    probe_recipe_without_reviews.pop("review_updates", None)
+    paired_recipe_without_reviews.pop("review_updates", None)
+    if probe_recipe_without_reviews != paired_recipe_without_reviews:
+        raise ValueError(
+            "The paired expanded recipe may differ from the probe-pinned recipe only in review_updates."
+        )
+    paired_recipe_digest = _checkpoint_digest(paired_recipe_path)
+    if payload.get("native_trainable_scope", {}).get("name") != "native_expanded_response_interface":
+        raise ValueError("Expanded fit-capability probe did not exercise the requested native scope.")
+    if int(payload.get("optimizer_updates_completed", -1)) != 80:
+        raise ValueError("Expanded matched fitting requires all 80 bounded probe updates.")
+    if int(payload.get("optimizer_updates_attempted", -1)) != 80:
+        raise ValueError("Expanded probe attempted-update ledger does not equal the 80-update cap.")
+    ledger_calls = int(payload.get("optimizer_calls_charged_to_shared_remedy_ledger", -1))
+    if ledger_calls != 80:
+        raise ValueError("Expanded probe shared-remedy ledger charge must equal its 80 completed attempts.")
+    if ledger_calls > 600:
+        raise ValueError("Expanded probe exceeds the shared short-remedy optimizer-call ceiling.")
+    if int(payload.get("reference_solver_calls", -1)) != 0:
+        raise ValueError("Expanded fit-capability probe must use stored physical evidence only.")
+    if payload.get("development_stencil_count") != 0:
+        raise ValueError("Expanded fit-capability probe must not use development stencils.")
+    gate = payload.get("capability_gate")
+    if not isinstance(gate, Mapping) or gate.get("supports_matched_trial") is not True:
+        raise ValueError("Train-only expanded fit-capability evidence does not justify a matched trial.")
+    report_atlas_hashes = payload.get("train_atlas_hashes", ())
+    expected_hashes = {
+        (str(row["sha256"]), str(row["metadata_sha256"]))
+        for row in report_atlas_hashes
+        if isinstance(row, Mapping) and "sha256" in row and "metadata_sha256" in row
+    }
+    supplied_hashes = {
+        (_checkpoint_digest(item), _checkpoint_digest(item.with_suffix(".json")))
+        for item in train_atlas_paths
+    }
+    if len(expected_hashes) != 8 or expected_hashes != supplied_hashes:
+        raise ValueError("Expanded fit-capability probe does not cover these exact eight train response atlases.")
+    if set(payload.get("train_family_ids", ())) != set(expected_family_ids):
+        raise ValueError("Expanded fit-capability probe train family IDs differ from the matched panel.")
+    return {
+        "path": str(resolved),
+        "sha256": _checkpoint_digest(resolved),
+        "probe_recipe_path": str(probe_recipe_path),
+        "probe_recipe_sha256": str(payload["recipe_sha256"]),
+        "paired_recipe_path": str(paired_recipe_path),
+        "paired_recipe_sha256": paired_recipe_digest,
+        "recipe_schedule_difference": {
+            "field": "review_updates",
+            "probe": probe_review_updates,
+            "paired": paired_review_updates,
+        },
+        "supports_matched_trial": True,
+        "optimizer_updates_completed": 80,
+        "optimizer_updates_attempted": 80,
+        "optimizer_calls_charged_to_shared_remedy_ledger": ledger_calls,
+        "capability_gate": dict(gate),
+    }
+
+
+def run_read_only_full_grid_train_replay(
+    *,
+    checkpoint_path: Path,
+    stencil_paths: Sequence[Path],
+    dataset_path: Path | None,
+    recipe_config_path: Path,
+    fit_manifest_path: Path,
+    value_checkpoint_path: Path,
+    response_checkpoint_path: Path,
+    output_dir: Path,
+    device: torch.device,
+    query_batch_size: int,
+    max_wall_seconds: float,
+) -> dict[str, Any]:
+    """Replay a passed native expanded-response gate without optimizer or solver calls."""
+
+    started = time.monotonic()
+    if device.type != "cuda" or not torch.cuda.is_available():
+        raise RuntimeError("Read-only full-grid train replay requires the allocated CUDA device.")
+    if os.environ.get("CUDA_VISIBLE_DEVICES") != "2":
+        raise RuntimeError("Read-only full-grid train replay requires CUDA_VISIBLE_DEVICES=2.")
+    if len(stencil_paths) != 8:
+        raise ValueError("Expanded native resume replay requires exactly eight train atlases.")
+    if max_wall_seconds <= 0.0:
+        raise ValueError("max_wall_seconds must be positive for read-only train replay.")
+    recipe_path = recipe_config_path.expanduser().resolve()
+    fit_path = fit_manifest_path.expanduser().resolve()
+    source_path = checkpoint_path.expanduser().resolve()
+    value_path = value_checkpoint_path.expanduser().resolve()
+    response_path = response_checkpoint_path.expanduser().resolve()
+    output_dir = output_dir.expanduser().resolve()
+    manifest_path = output_dir / "read_only_full_grid_train_replay_manifest.json"
+    if manifest_path == fit_path:
+        raise ValueError("Replay output must not overwrite its source paired-fit manifest.")
+
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    if (
+        recipe.get("name") != "native_expanded_response_interface"
+        or recipe.get("initialization_mode") != "native_checkpoint"
+        or recipe.get("review_updates") != [200, 500, 600]
+    ):
+        raise ValueError("Read-only expanded replay requires the paired [200, 500, 600] recipe.")
+    cublas_workspace = (
+        _enable_deterministic_algorithms(device)
+        if bool(recipe.get("deterministic_algorithms", False))
+        else None
+    )
+    fit = json.loads(fit_path.read_text(encoding="utf-8"))
+    if fit.get("status") != "passed" or fit.get("mode") != "paired_staged_fit":
+        raise ValueError("Read-only replay requires a passed paired staged-fit manifest.")
+    gate = int(fit.get("review_cap", -1))
+    if gate not in recipe["review_updates"] or fit.get("review_decisions", {}).get(str(gate)) != "stop":
+        raise ValueError("Read-only replay requires a passed fit stopped at a configured review gate.")
+    if (
+        Path(str(fit.get("checkpoint", ""))).expanduser().resolve() != source_path
+        or fit.get("checkpoint_sha256") != _checkpoint_digest(source_path)
+    ):
+        raise ValueError("Read-only replay source checkpoint differs from the passed fit.")
+    if (
+        Path(str(fit.get("staged_recipe", ""))).expanduser().resolve() != recipe_path
+        or fit.get("staged_recipe_name") != recipe["name"]
+        or fit.get("read_only_comparator") != recipe.get("read_only_comparator")
+    ):
+        raise ValueError("Read-only replay recipe or pinned comparator differs from the passed fit.")
+
+    resolved_stencils = [path.expanduser().resolve() for path in stencil_paths]
+    loaded = [load_response_atlas_stencil(path) for path in resolved_stencils]
+    stencils = tuple(item[0] for item in loaded)
+    if any(stencil.split is not EvidenceSplit.TRAIN for stencil in stencils):
+        raise ValueError("Read-only full-grid train replay rejects non-train atlases.")
+    family_ids = [stencil.physical_family_id for stencil in stencils]
+    if len(set(family_ids)) != 8:
+        raise ValueError("Read-only expanded replay requires eight distinct train families.")
+    expected_paths = [str(path) for path in resolved_stencils]
+    if fit.get("train_atlas_paths") != expected_paths:
+        raise ValueError("Read-only replay train atlas path/order differs from the passed fit.")
+    if set(fit.get("train_family_ids", ())) != set(family_ids):
+        raise ValueError("Read-only replay train family IDs differ from the passed fit.")
+    probe_evidence = fit.get("expanded_fit_capability_probe")
+    if not isinstance(probe_evidence, Mapping):
+        raise ValueError("Passed expanded fit has no probe-pinned capability evidence.")  # noqa: TRY004
+    verified_probe = _load_expanded_probe_evidence(
+        Path(str(probe_evidence.get("path", ""))),
+        checkpoint_path=source_path,
+        recipe_path=recipe_path,
+        train_atlas_paths=resolved_stencils,
+        expected_family_ids=family_ids,
+    )
+    for key in ("sha256", "probe_recipe_sha256", "paired_recipe_sha256"):
+        if probe_evidence.get(key) != verified_probe.get(key):
+            raise ValueError(f"Passed fit capability evidence changed at {key}.")
+
+    source_model, checkpoint = load_model(source_path, device)
+    if int(checkpoint.get("epoch", checkpoint.get("current_epoch", -1))) != 4738:
+        raise ValueError("Read-only expanded replay requires intact Run1804 e4738.")
+    if str(source_model.config.core_honf.forward_architecture) != "dense_pairwise_field":
+        raise ValueError("Read-only expanded replay requires the Run1804 dense native architecture.")
+    source_model.eval()
+    target_model, refit_config = _native_checkpoint_initialization(source_model)
+    native_scope = _configure_native_expanded_response_interface_scope(target_model)
+    if fit.get("initialization_mode") != "native_checkpoint" or fit.get("refit_config") != refit_config:
+        raise ValueError("Read-only replay initialization differs from the passed native fit.")
+
+    historical_replay = fit.get("historical_value_replay")
+    if not isinstance(historical_replay, Mapping):
+        raise ValueError("Passed native fit is missing its historical train dataset identity.")  # noqa: TRY004
+    dataset_root = _resolve_dataset_path(checkpoint, str(dataset_path) if dataset_path else None)
+    if Path(str(historical_replay.get("dataset", ""))).expanduser().resolve() != dataset_root.resolve():
+        raise ValueError("Read-only replay historical train dataset differs from the passed fit.")
+    dataset_stat = dataset_root.stat()
+    if (
+        int(historical_replay.get("dataset_size_bytes", -1)) != dataset_stat.st_size
+        or int(historical_replay.get("dataset_mtime_ns", -1)) != dataset_stat.st_mtime_ns
+    ):
+        raise ValueError("Read-only replay historical train dataset bytes changed since the fit.")
+    raw_dataset = GlobalChannelThermalDataset(
+        dataset_root,
+        split="train",
+        points_per_case=1,
+        normalize_inputs=False,
+        normalize_targets=False,
+        random_point_sampling=False,
+        include_grid=False,
+        include_structure_targets=False,
+    )
+    template = _make_input_template(raw_dataset)
+    operator = DifferentiableThermalOperator(
+        target_model,
+        template,
+        dataset_config=checkpoint.get("train_config", {}).get("dataset", {}),
+        normalization_stats=checkpoint.get("global_normalization_stats", {}),
+        query_batch_size=query_batch_size,
+    )
+    initial_queries = role_queries_from_stencil(stencils[0], device=device)
+    initial_design = DesignInput.from_state(stencils[0].baseline.design, device=device)
+    with torch.no_grad():
+        operator(initial_design, context_inputs(stencils[0].baseline.context), initial_queries)
+    materialized_buffer_names = sorted(name for name, _value in target_model.named_buffers())
+    scope_buffer_names = set(native_scope.get("frozen_buffer_names", ()))
+    native_scope["buffers_initialized_by_materialization"] = sorted(
+        set(materialized_buffer_names) - scope_buffer_names
+    )
+    native_scope["frozen_buffer_names"] = materialized_buffer_names
+    if fit.get("native_trainable_scope") != native_scope:
+        raise ValueError("Read-only replay expanded trainable scope differs from the passed fit.")
+
+    scales = fit.get("loss_scales")
+    if not isinstance(scales, Mapping) or not isinstance(scales.get("pressure_limit_by_family"), Mapping):
+        raise ValueError("Passed native fit is missing frozen per-family pressure limits.")  # noqa: TRY004
+    pressure_limits = dict(scales["pressure_limit_by_family"])
+    if set(pressure_limits) != set(family_ids):
+        raise ValueError("Frozen train pressure-limit families differ from the replay panel.")
+    smooth_peak_beta = float(scales.get("smooth_peak_beta", 1.0))
+    arms = {"R_value": value_path, "R_response": response_path}
+    fit_arms = fit.get("arms")
+    fit_checkpoint_paths = fit.get("checkpoint_paths")
+    if not isinstance(fit_arms, Mapping) or not isinstance(fit_checkpoint_paths, Mapping):
+        raise TypeError("Passed paired fit is missing its arm/checkpoint inventory.")
+    arm_checkpoint_evidence: dict[str, dict[str, str]] = {}
+    arm_payloads: dict[str, Mapping[str, Any]] = {}
+    expected_training_config = load_staged_training_config(str(recipe_path), arm="R_response")
+    recorded_fit_wall = fit.get("max_wall_seconds")
+    for arm, path in arms.items():
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        digest = _checkpoint_digest(path)
+        recorded_paths = fit_checkpoint_paths.get(arm)
+        fit_arm = fit_arms.get(arm)
+        if not isinstance(recorded_paths, list) or str(path) not in [
+            str(Path(item).expanduser().resolve()) for item in recorded_paths
+        ]:
+            raise ValueError(f"Passed fit manifest does not record the selected {arm} checkpoint.")
+        if not isinstance(fit_arm, Mapping):
+            raise TypeError(f"Passed fit manifest has no {arm} accounting.")
+        _validate_fit_arm_gate_accounting(fit_arm, arm=arm, required_update=gate)
+        if int(fit_arm.get("total_attempted_optimizer_steps", -1)) < gate:
+            raise ValueError(f"Passed {arm} fit attempt total is below its cumulative update gate.")
+        payload = _load_safe_response_checkpoint(path)
+        if (
+            payload.get("arm") != arm
+            or int(payload.get("actual_optimizer_updates", -1)) != gate
+            or int(payload.get("attempted_optimizer_steps", -1))
+            != int(fit_arm.get("total_attempted_optimizer_steps", -2))
+        ):
+            raise ValueError(f"Passed {arm} checkpoint update/attempt accounting differs from its fit manifest.")
+        saved_training_config = payload.get("training_config")
+        if not isinstance(saved_training_config, Mapping):
+            raise ValueError(f"Passed {arm} checkpoint has no pinned training config.")  # noqa: TRY004
+        checkpoint_wall = saved_training_config.get("max_wall_seconds")
+        if not isinstance(checkpoint_wall, (int, float)) or checkpoint_wall <= 0.0:
+            raise ValueError(f"Passed {arm} checkpoint has no positive max-wall setting.")
+        if recorded_fit_wall is not None and float(recorded_fit_wall) != float(checkpoint_wall):
+            raise ValueError(f"Passed {arm} checkpoint max-wall differs from the fit manifest.")
+        expected_config = training_config_mapping(
+            replace(expected_training_config, max_wall_seconds=float(checkpoint_wall)),
+            arm=arm,
+        )
+        if dict(saved_training_config) != expected_config:
+            raise ValueError(f"Passed {arm} checkpoint training config differs from the pinned recipe.")
+        if not isinstance(payload.get("model"), Mapping) or not payload["model"]:
+            raise ValueError(f"Passed {arm} checkpoint has no model state for replay.")
+        optimizer_state = payload.get("optimizer")
+        if not isinstance(optimizer_state, Mapping) or not isinstance(
+            optimizer_state.get("param_groups"), list
+        ):
+            raise ValueError(f"Passed {arm} checkpoint has no resumable optimizer state.")  # noqa: TRY004
+        required_rng = (
+            "python_rng_state", "numpy_rng_state", "torch_rng_state",
+            "sampler_rng_state", "sampler_remaining_order",
+            "historical_case_order", "historical_next_index",
+        )
+        if any(payload.get(name) is None for name in required_rng):
+            raise ValueError(f"Passed {arm} checkpoint is missing resumable RNG/sampler state.")
+        arm_payloads[arm] = payload
+        arm_checkpoint_evidence[arm] = {"path": str(path), "sha256": digest}
+    if not _same(
+        arm_payloads["R_value"].get("sampler_rng_state"),
+        arm_payloads["R_response"].get("sampler_rng_state"),
+    ):
+        raise ValueError("Read-only replay arm checkpoints have different sampler RNG states.")
+    if not _same(
+        arm_payloads["R_value"].get("sampler_remaining_order"),
+        arm_payloads["R_response"].get("sampler_remaining_order"),
+    ):
+        raise ValueError("Read-only replay arm checkpoints have different remaining sampler order.")
+    historical_case_order = list(historical_replay.get("train_case_order", ()))
+    if (
+        not historical_case_order
+        or len(set(historical_case_order)) != len(historical_case_order)
+        or len(historical_case_order) != int(recipe.get("historical_train_case_count", -1))
+    ):
+        raise ValueError("Passed fit historical train-case order is missing, duplicated, or the wrong size.")
+    for arm, payload in arm_payloads.items():
+        if (
+            list(payload["historical_case_order"]) != historical_case_order
+            or int(payload["historical_next_index"]) != gate % len(historical_case_order)
+        ):
+            raise ValueError(f"Passed {arm} checkpoint historical replay cursor differs from the fit gate.")
+    response_weights = fit.get("calibrated_response_weights")
+    if not isinstance(response_weights, Mapping) or dict(
+        arm_payloads["R_response"].get("calibrated_loss_weights", {})
+    ) != dict(response_weights):
+        raise ValueError("Passed response checkpoint weights differ from the frozen paired-fit weights.")
+
+    train_entries = [
+        {"path": str(path), "sha256": _checkpoint_digest(path), "json_sha256": _checkpoint_digest(path.with_suffix(".json"))}
+        for path in resolved_stencils
+    ]
+    result: dict[str, Any] = {
+        "status": "running",
+        "mode": "read_only_full_grid_train_replay",
+        "review_gate_update": gate,
+        "source_fit_manifest": {"path": str(fit_path), "sha256": _checkpoint_digest(fit_path)},
+        "source_checkpoint": str(source_path),
+        "source_checkpoint_sha256": _checkpoint_digest(source_path),
+        "refit_config": refit_config,
+        "native_trainable_scope": native_scope,
+        "train_stencils": train_entries,
+        "train_family_ids": family_ids,
+        "per_stencil_reference_states": {stencil.physical_family_id: len(stencil.records) for stencil in stencils},
+        "arm_checkpoints": arm_checkpoint_evidence,
+        "optimizer_instances_created": 0,
+        "optimizer_calls": 0,
+        "optimizer_updates": 0,
+        "reference_solver_calls": 0,
+        "reference_solves": 0,
+        "optimizer_accounting_basis": "Replay constructs no optimizer and only evaluates stored train atlas states.",
+        "deterministic_algorithms_enabled": bool(recipe.get("deterministic_algorithms", False)),
+        "cublas_workspace_config": cublas_workspace,
+        "evaluations": {arm: [] for arm in arms},
+        "started_unix_seconds": time.time(),
+    }
+    progress_path = output_dir / "read_only_full_grid_train_replay_progress.json"
+    _atomic_json(progress_path, result)
+    active_arm = {"name": "setup"}
+    forward_calls = {arm: 0 for arm in arms}
+
+    def count_forward(_module: nn.Module, _inputs: tuple[Any, ...], _output: Any) -> None:
+        name = str(active_arm["name"])
+        if name in forward_calls:
+            forward_calls[name] += 1
+
+    hook = target_model.register_forward_hook(count_forward)
+    try:
+        for arm, path in arms.items():
+            if time.monotonic() - started >= max_wall_seconds:
+                raise TimeoutError("Read-only full-grid train replay reached its wall cap.")
+            target_model.load_state_dict(arm_payloads[arm]["model"], strict=True)
+            target_model.eval()
+            active_arm["name"] = arm
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+                torch.cuda.reset_peak_memory_stats(device)
+            arm_started = time.perf_counter()
+            rows: list[dict[str, Any]] = []
+            for stencil in stencils:
+                if time.monotonic() - started >= max_wall_seconds:
+                    raise TimeoutError("Read-only full-grid train replay reached its wall cap.")
+                family_id = stencil.physical_family_id
+                with torch.no_grad():
+                    metrics = evaluate_stencil(
+                        operator,
+                        stencil,
+                        pressure_limit={family_id: float(pressure_limits[family_id])},
+                        mixed_specs=_mixed_specs(stencil),
+                        smooth_peak_beta=smooth_peak_beta,
+                        device=device,
+                    )
+                rows.append({
+                    "family_id": family_id,
+                    "split": stencil.split.value,
+                    "source": stencil.source.value,
+                    "record_count": len(stencil.records),
+                    "pressure_limit_frozen_from_fit": float(pressure_limits[family_id]),
+                    "metrics": metrics,
+                })
+                result["evaluations"][arm] = list(rows)
+                result["native_model_forward_calls_by_arm"] = dict(forward_calls)
+                result["elapsed_wall_seconds"] = time.monotonic() - started
+                _atomic_json(progress_path, result)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+                peak = {
+                    "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(device)),
+                    "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(device)),
+                }
+            else:
+                peak = None
+            result.setdefault("arm_wall_seconds", {})[arm] = time.perf_counter() - arm_started
+            result.setdefault("cuda_peak_bytes_by_arm", {})[arm] = peak
+        result.update({
+            "status": "passed",
+            "native_model_forward_calls_by_arm": dict(forward_calls),
+            "total_wall_seconds": time.monotonic() - started,
+            "finished_unix_seconds": time.time(),
+            "cuda": _cuda_evidence(device),
+        })
+        _atomic_json(progress_path, result)
+        return result
+    except Exception as exc:
+        result.update({
+            "status": "timed_out" if isinstance(exc, TimeoutError) else "failed",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "native_model_forward_calls_by_arm": dict(forward_calls),
+            "total_wall_seconds": time.monotonic() - started,
+            "finished_unix_seconds": time.time(),
+        })
+        _atomic_json(progress_path, result)
+        raise
+    finally:
+        hook.remove()
+
+
 def run_paired_fit(
     *,
     checkpoint_path: Path,
@@ -2725,6 +3853,7 @@ def run_paired_fit(
     initialization_mode: str = "three_term_conversion",
     recipe_config_path: Path | None = None,
     r0_diagnostic_path: Path | None = None,
+    fit_capability_probe_path: Path | None = None,
     learning_rate: float | None = None,
     weight_decay: float | None = None,
     review_cap: int,
@@ -2774,6 +3903,22 @@ def run_paired_fit(
         if native_recipe is not None
         else {}
     )
+    recipe_name = recipe_payload.get("name")
+    expanded_recipe = recipe_name == "native_expanded_response_interface"
+    nonlinear_recipe = recipe_name in {
+        "native_nonlinear_interface",
+        "native_expanded_response_interface",
+    }
+    expanded_probe_evidence: dict[str, Any] | None = None
+    if expanded_recipe:
+        if native_recipe is None or fit_capability_probe_path is None:
+            raise ValueError(
+                "Expanded native fitting requires its named recipe and a passed train-only capability probe."
+            )
+        if r0_diagnostic_path is not None:
+            raise ValueError("The previous nonlinear-head R0 projection report does not apply to expanded scope.")
+    elif fit_capability_probe_path is not None:
+        raise ValueError("The expanded fit-capability report applies only to its separately named recipe.")
     if bool(recipe_payload.get("deterministic_algorithms", False)):
         _enable_deterministic_algorithms(device)
     source_model, checkpoint = load_model(checkpoint_path, device)
@@ -2782,12 +3927,20 @@ def run_paired_fit(
     raw_stencils = [stencil for stencil, _ in loaded_stencils]
     if any(stencil.split is not EvidenceSplit.TRAIN for stencil in raw_stencils):
         raise ValueError("Paired fitting accepts EvidenceSplit.TRAIN stencils only.")
-    nonlinear_recipe = recipe_payload.get("name") == "native_nonlinear_interface"
     raw_family_ids = sorted({stencil.physical_family_id for stencil in raw_stencils})
     if nonlinear_recipe and len(raw_family_ids) != 8:
         raise ValueError(
-            "native_nonlinear_interface formal fitting requires all eight distinct train families; "
+            "Native response recipes require all eight distinct train families; "
             f"received {len(raw_family_ids)}: {raw_family_ids}."
+        )
+    if expanded_recipe:
+        assert native_recipe is not None and fit_capability_probe_path is not None
+        expanded_probe_evidence = _load_expanded_probe_evidence(
+            fit_capability_probe_path,
+            checkpoint_path=checkpoint_path,
+            recipe_path=native_recipe,
+            train_atlas_paths=stencil_paths,
+            expected_family_ids=raw_family_ids,
         )
     loaded_development = [
         (path, *load_response_atlas_stencil(path)) for path in development_paths
@@ -2795,7 +3948,7 @@ def run_paired_fit(
     if nonlinear_recipe:
         if len(loaded_development) != 4:
             raise ValueError(
-                "native_nonlinear_interface u200 review requires all four stored Re90 development stencils."
+                "Native response recipes require all four stored Re90 development stencils for review."
             )
         invalid_dev = [
             str(path)
@@ -2808,7 +3961,7 @@ def run_paired_fit(
                 "The nonlinear-interface development panel must contain only stored Re90 non-train stencils: "
                 f"{invalid_dev}."
             )
-    response_arm = "R_response" if recipe_payload.get("name") == "native_nonlinear_interface" else "B_response"
+    response_arm = "R_response" if nonlinear_recipe else "B_response"
     value_arm = f"{response_arm[0]}_value"
     config = replace(
         load_staged_training_config(
@@ -2817,23 +3970,25 @@ def run_paired_fit(
         max_wall_seconds=max_wall_seconds,
     )
     projection_evidence: dict[str, Any] | None = None
-    if recipe_payload.get("name") == "native_nonlinear_interface":
+    if nonlinear_recipe:
         if int(checkpoint.get("epoch", checkpoint.get("current_epoch", -1))) != 4738:
-            raise ValueError("native_nonlinear_interface requires the intact Run1804 e4738 checkpoint.")
+            raise ValueError("Native response recipes require the intact Run1804 e4738 checkpoint.")
         if str(source_model.config.core_honf.forward_architecture) != "dense_pairwise_field":
-            raise ValueError("native_nonlinear_interface requires the Run1804 dense native architecture.")
+            raise ValueError("Native response recipes require the Run1804 dense native architecture.")
         required = set(config.required_response_terms)
         active_at_u50 = set(config.active_terms(49))
         if not required.issubset(active_at_u50) or any(
             config.term_multiplier(term, 49) != 1.0 for term in required
         ):
-            raise ValueError("The nonlinear-interface response and pressure objectives must be fully active by update 50.")
+            raise ValueError("Native response and pressure objectives must be fully active by update 50.")
         required_controls = set(config.required_control_terms)
         if not required_controls.issubset(active_at_u50) or any(
             config.term_multiplier(term, 49) != 1.0 for term in required_controls
         ):
-            raise ValueError("The nonlinear-interface fixed-heat control objectives must be fully active by update 50.")
-        if config.project_response_gradient_blockwise:
+            raise ValueError("Native fixed-heat control objectives must be fully active by update 50.")
+        if expanded_recipe and config.project_response_gradient_blockwise:
+            raise ValueError("Expanded response fitting does not use the previous three-head gradient projection.")
+        if not expanded_recipe and config.project_response_gradient_blockwise:
             if r0_diagnostic_path is None:
                 raise ValueError(
                     "The nonlinear-interface recipe requires its train-only R0 diagnostic to justify projection."
@@ -2888,7 +4043,14 @@ def run_paired_fit(
         else None
     )
     if nonlinear_recipe and historical_value_source is None:
-        raise ValueError("native_nonlinear_interface requires the packed historical train cohort.")
+        raise ValueError("Native response recipes require the packed historical train cohort.")
+    if expanded_recipe and historical_value_source is not None:
+        expected_historical_count = int(recipe_payload.get("historical_train_case_count", -1))
+        if len(historical_value_source.case_ids) != expected_historical_count:
+            raise ValueError(
+                "Expanded response fitting requires the complete packed train cohort: "
+                f"expected {expected_historical_count}, got {len(historical_value_source.case_ids)}."
+            )
     historical_calibration_case_map = (
         _historical_calibration_case_map(raw_family_ids, historical_value_source)
         if nonlinear_recipe and historical_value_source is not None
@@ -2986,6 +4148,8 @@ def run_paired_fit(
         requested_scope = recipe_payload.get("native_trainable_scope", "native_output_heads")
         if requested_scope == "native_nonlinear_interface":
             native_scope = _configure_native_nonlinear_interface_scope(target_model)
+        elif requested_scope == "native_expanded_response_interface":
+            native_scope = _configure_native_expanded_response_interface_scope(target_model)
         elif requested_scope == "native_output_heads":
             native_scope = _configure_native_output_head_scope(target_model)
         else:
@@ -3147,6 +4311,8 @@ def run_paired_fit(
     lr = float(
         learning_rate
         if learning_rate is not None
+        else recipe_payload.get("learning_rate", 1.0e-5)
+        if expanded_recipe
         else 1.0e-5
         if initialization_mode == "native_checkpoint"
         else optimizer_config.get("learning_rate", 3.0e-4)
@@ -3154,8 +4320,15 @@ def run_paired_fit(
     decay = float(
         weight_decay
         if weight_decay is not None
+        else recipe_payload.get("weight_decay", 1.0e-5)
+        if expanded_recipe
         else optimizer_config.get("weight_decay", 1.0e-5)
     )
+    if expanded_recipe and (
+        not np.isclose(lr, float(recipe_payload["learning_rate"]), rtol=0.0, atol=1.0e-15)
+        or not np.isclose(decay, float(recipe_payload["weight_decay"]), rtol=0.0, atol=1.0e-15)
+    ):
+        raise ValueError("Expanded matched fitting uses only its pinned learning rate and weight decay.")
 
     def optimizer_factory(model: torch.nn.Module) -> torch.optim.Optimizer:
         return torch.optim.AdamW(
@@ -3240,6 +4413,7 @@ def run_paired_fit(
             ),
             "plan_schema": 1,
             "active_scope": native_scope,
+            "expanded_fit_capability_probe": expanded_probe_evidence,
             "frozen_buffer_checkpoint_audit": checkpoint_buffer_audit,
             "native_forward_call_counts_by_phase": {
                 name: dict(counts) for name, counts in native_forward_call_counts.items()
@@ -3505,6 +4679,26 @@ def run_paired_fit(
     target_forward_hook.remove()
     if incumbent_forward_hook is not None:
         incumbent_forward_hook.remove()
+    historical_replay_coverage_by_arm: dict[str, Any] = {}
+    paired_historical_case_sequence_equal: bool | None = None
+    if historical_value_source is not None:
+        segment_ids = {
+            arm: tuple(step.historical_case_id for step in fit.history)
+            for arm, fit in paired.arms.items()
+        }
+        if any(any(case_id is None for case_id in values) for values in segment_ids.values()):
+            raise RuntimeError("Native paired-fit history omitted historical train case IDs.")
+        paired_historical_case_sequence_equal = len(set(segment_ids.values())) == 1
+        if not paired_historical_case_sequence_equal:
+            raise RuntimeError("Matched native arms consumed different historical train case sequences.")
+        historical_replay_coverage_by_arm = {
+            arm: historical_replay_coverage(
+                historical_value_source.case_ids,
+                initial_update=fit.initial_update,
+                segment_case_ids=tuple(str(case_id) for case_id in segment_ids[arm]),
+            )
+            for arm, fit in paired.arms.items()
+        }
     return {
         "status": "passed",
         "mode": "paired_staged_fit",
@@ -3514,6 +4708,8 @@ def run_paired_fit(
         "initialization_mode": initialization_mode,
         "staged_recipe": str(native_recipe) if native_recipe is not None else "historical_default",
         "staged_recipe_name": recipe_payload.get("name"),
+        "expanded_fit_capability_probe": expanded_probe_evidence,
+        "read_only_comparator": recipe_payload.get("read_only_comparator") if expanded_recipe else None,
         "train_atlas_paths": [str(path.resolve()) for path in stencil_paths],
         "train_family_ids": [stencil.physical_family_id for stencil in training_stencils],
         "train_contexts": [dict(stencil.baseline.context.values) for stencil in training_stencils],
@@ -3530,6 +4726,8 @@ def run_paired_fit(
                 "realized_case_coverage": historical_value_source.realized_coverage,
             }
         ),
+        "historical_replay_coverage_by_arm": historical_replay_coverage_by_arm,
+        "paired_historical_case_sequence_equal": paired_historical_case_sequence_equal,
         "development_paths": [str(path.resolve()) for path in development_paths],
         "refit_config": refit_config,
         "warm_start": transfer,
@@ -4056,7 +5254,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=("preflight", "r0", "paired", "checkpoint_review"),
+        choices=("preflight", "r0", "expanded_probe", "paired", "checkpoint_review", "train_replay"),
         default="preflight",
     )
     parser.add_argument(
@@ -4071,6 +5269,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--recipe-config", type=Path, default=None)
     parser.add_argument("--r0-diagnostic-json", type=Path, default=None)
+    parser.add_argument("--fit-capability-probe-json", type=Path, default=None)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--max-wall-seconds", type=float, default=1800.0)
     parser.add_argument("--max-fluid-queries", type=int, default=3072)
@@ -4081,8 +5280,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--smooth-peak-beta", type=float, default=1.0)
     parser.add_argument("--learning-rate", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
-    parser.add_argument("--review-cap", type=int, choices=(100, 200, 300, 500, 1000, 2000), default=100)
-    parser.add_argument("--continue-after", type=int, choices=(100, 200, 300, 500, 1000), action="append", default=[])
+    parser.add_argument("--review-cap", type=int, choices=(100, 200, 300, 500, 600, 1000, 2000), default=100)
+    parser.add_argument("--continue-after", type=int, choices=(100, 200, 300, 500, 600, 1000), action="append", default=[])
     parser.add_argument("--development-stencil", type=Path, action="append", default=[])
     parser.add_argument("--resume-value", "--resume-b-value", dest="resume_b_value", type=Path, default=None)
     parser.add_argument("--resume-response", "--resume-b-response", dest="resume_b_response", type=Path, default=None)
@@ -4094,6 +5293,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--review-value-checkpoint", type=Path, default=None)
     parser.add_argument("--review-response-checkpoint", type=Path, default=None)
     parser.add_argument("--review-update", type=int, choices=(200,), default=200)
+    parser.add_argument("--replay-fit-manifest-json", type=Path, default=None)
+    parser.add_argument("--replay-value-checkpoint", type=Path, default=None)
+    parser.add_argument("--replay-response-checkpoint", type=Path, default=None)
     return parser
 
 
@@ -4107,10 +5309,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         for index in range(len(path_parts) - 1)
     ):
         raise ValueError("Run outputs must be placed under an ignored diagnostics/generated directory.")
-    if args.mode == "checkpoint_review" and output_dir.exists() and any(output_dir.iterdir()):
-        raise FileExistsError("Checkpoint-only review requires a fresh empty ignored output directory.")
+    if args.mode in {"checkpoint_review", "train_replay"} and output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError("Read-only review modes require a fresh empty ignored output directory.")
+    replay_only_args = (
+        args.replay_fit_manifest_json,
+        args.replay_value_checkpoint,
+        args.replay_response_checkpoint,
+    )
+    if args.mode != "train_replay" and any(value is not None for value in replay_only_args):
+        raise ValueError("Train replay source arguments apply only to --mode train_replay.")
     output_dir.mkdir(parents=True, exist_ok=True)
-    manifest_path = output_dir / "response_control_manifest.json"
+    manifest_path = output_dir / (
+        "read_only_full_grid_train_replay_manifest.json"
+        if args.mode == "train_replay"
+        else "response_control_manifest.json"
+    )
     manifest: dict[str, Any] = {
         "status": "running",
         "mode": args.mode,
@@ -4133,6 +5346,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             None if args.r0_diagnostic_json is None
             else str(args.r0_diagnostic_json.expanduser().resolve())
         ),
+        "fit_capability_probe_json": (
+            None if args.fit_capability_probe_json is None
+            else str(args.fit_capability_probe_json.expanduser().resolve())
+        ),
         "frozen_loss_scales_json": (
             None
             if args.frozen_loss_scales_json is None
@@ -4154,6 +5371,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         "review_response_checkpoint": (
             None if args.review_response_checkpoint is None
             else str(args.review_response_checkpoint.expanduser().resolve())
+        ),
+        "replay_fit_manifest_json": (
+            None if args.replay_fit_manifest_json is None
+            else str(args.replay_fit_manifest_json.expanduser().resolve())
+        ),
+        "replay_value_checkpoint": (
+            None if args.replay_value_checkpoint is None
+            else str(args.replay_value_checkpoint.expanduser().resolve())
+        ),
+        "replay_response_checkpoint": (
+            None if args.replay_response_checkpoint is None
+            else str(args.replay_response_checkpoint.expanduser().resolve())
         ),
         "review_update": args.review_update,
         "resume_fit_manifest_json": (
@@ -4248,6 +5477,51 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_wall_seconds=args.max_wall_seconds,
                 query_batch_size=args.query_batch_size,
             )
+        elif args.mode == "train_replay":
+            if args.initialization_mode != "native_checkpoint":
+                raise ValueError("Read-only expanded train replay requires native_checkpoint initialization.")
+            required_paths = {
+                "named expanded recipe": args.recipe_config,
+                "passed paired-fit manifest": args.replay_fit_manifest_json,
+                "R_value gate checkpoint": args.replay_value_checkpoint,
+                "R_response gate checkpoint": args.replay_response_checkpoint,
+            }
+            missing = [name for name, path in required_paths.items() if path is None]
+            if missing:
+                raise ValueError(f"Read-only train replay is missing required paths: {missing}.")
+            if args.development_stencil:
+                raise ValueError("Read-only full-grid train replay rejects development stencils.")
+            forbidden = (
+                args.r0_diagnostic_json,
+                args.fit_capability_probe_json,
+                args.learning_rate,
+                args.weight_decay,
+                args.resume_b_value,
+                args.resume_b_response,
+                args.resume_fit_manifest_json,
+                args.resume_replay_manifest_json,
+                args.frozen_loss_scales_json,
+                args.frozen_response_weights_json,
+                args.review_source_manifest,
+                args.review_value_checkpoint,
+                args.review_response_checkpoint,
+                bool(args.continue_after),
+            )
+            if any(value is not None and value is not False for value in forbidden):
+                raise ValueError("Read-only train replay does not accept optimizer, fit, or review overrides.")
+            result = run_read_only_full_grid_train_replay(
+                checkpoint_path=args.checkpoint.expanduser().resolve(),
+                stencil_paths=[path.expanduser().resolve() for path in args.train_stencil],
+                dataset_path=args.dataset,
+                recipe_config_path=args.recipe_config.expanduser().resolve(),  # type: ignore[union-attr]
+                fit_manifest_path=args.replay_fit_manifest_json.expanduser().resolve(),  # type: ignore[union-attr]
+                value_checkpoint_path=args.replay_value_checkpoint.expanduser().resolve(),  # type: ignore[union-attr]
+                response_checkpoint_path=args.replay_response_checkpoint.expanduser().resolve(),  # type: ignore[union-attr]
+                output_dir=output_dir,
+                device=device,
+                query_batch_size=args.query_batch_size,
+                max_wall_seconds=args.max_wall_seconds,
+            )
         elif args.mode == "preflight":
             if args.recipe_config is not None:
                 raise ValueError("A named staged recipe applies only to paired-fit mode.")
@@ -4261,6 +5535,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.resume_fit_manifest_json,
                     args.resume_replay_manifest_json,
                     args.r0_diagnostic_json,
+                    args.fit_capability_probe_json,
                 )
             ):
                 raise ValueError("Frozen calibration and resume overrides apply only to paired-fit mode.")
@@ -4294,6 +5569,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.resume_b_response,
                     args.resume_fit_manifest_json,
                     args.resume_replay_manifest_json,
+                    args.fit_capability_probe_json,
                 )
             ):
                 raise ValueError("R0 does not accept paired-fit recipes, frozen calibration, or resume overrides.")
@@ -4311,6 +5587,49 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sampling=sampling,
                 query_batch_size=args.query_batch_size,
                 max_wall_seconds=args.max_wall_seconds,
+            )
+        elif args.mode == "expanded_probe":
+            if args.initialization_mode != "native_checkpoint":
+                raise ValueError("The expanded fit-capability probe requires native_checkpoint initialization.")
+            if args.recipe_config is None or not args.recipe_config.is_file():
+                raise ValueError("The expanded fit-capability probe requires its checked-in named recipe.")
+            if args.development_stencil:
+                raise ValueError("The expanded fit-capability probe is train-only and rejects development stencils.")
+            if len(args.train_stencil) != 8:
+                raise ValueError("The expanded fit-capability probe requires exactly eight train stencils.")
+            forbidden = (
+                args.r0_diagnostic_json,
+                args.fit_capability_probe_json,
+                args.learning_rate,
+                args.weight_decay,
+                args.resume_b_value,
+                args.resume_b_response,
+                args.resume_fit_manifest_json,
+                args.resume_replay_manifest_json,
+                args.frozen_loss_scales_json,
+                args.frozen_response_weights_json,
+                args.review_source_manifest,
+                args.review_value_checkpoint,
+                args.review_response_checkpoint,
+                bool(args.continue_after),
+            )
+            if any(value is not None and value is not False for value in forbidden):
+                raise ValueError("The expanded fit-capability probe does not accept paired/resume overrides.")
+            manifest["planned_optimizer_updates"] = 80
+            manifest["shared_remedy_optimizer_call_ceiling"] = 600
+            manifest["reference_solver_calls"] = 0
+            _atomic_json(manifest_path, manifest)
+            result = run_expanded_response_fit_capability_probe(
+                checkpoint_path=args.checkpoint.expanduser().resolve(),
+                stencil_paths=[path.expanduser().resolve() for path in args.train_stencil],
+                dataset_path=args.dataset,
+                recipe_config_path=args.recipe_config.expanduser().resolve(),
+                output_dir=output_dir,
+                device=device,
+                sampling=sampling,
+                query_batch_size=args.query_batch_size,
+                max_wall_seconds=args.max_wall_seconds,
+                smooth_peak_beta=args.smooth_peak_beta,
             )
         else:
             resuming = args.resume_b_value is not None or args.resume_b_response is not None
@@ -4354,6 +5673,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 initialization_mode=args.initialization_mode,
                 recipe_config_path=args.recipe_config,
                 r0_diagnostic_path=args.r0_diagnostic_json,
+                fit_capability_probe_path=args.fit_capability_probe_json,
                 learning_rate=args.learning_rate,
                 weight_decay=args.weight_decay,
                 review_cap=args.review_cap,
@@ -4394,6 +5714,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "reference_solver_calls": 0,
                 })
                 _atomic_json(r0_path, r0_payload)
+        if args.mode == "expanded_probe":
+            probe_path = output_dir / "expanded_response_fit_capability_probe.json"
+            if probe_path.is_file():
+                probe_payload = json.loads(probe_path.read_text(encoding="utf-8"))
+                timed_out = isinstance(exc, TimeoutError)
+                attempted = int(probe_payload.get("optimizer_updates_attempted", 0))
+                probe_payload.update({
+                    "status": (
+                        "timed_out_or_partial" if timed_out and attempted
+                        else "timed_out" if timed_out
+                        else "failed"
+                    ),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "finished_unix_seconds": time.time(),
+                    "reference_solver_calls": 0,
+                    "optimizer_calls_charged_to_shared_remedy_ledger": attempted,
+                })
+                _atomic_json(probe_path, probe_payload)
+                manifest["optimizer_updates_attempted"] = attempted
+                manifest["optimizer_updates_completed"] = int(
+                    probe_payload.get("optimizer_updates_completed", 0)
+                )
+                manifest["optimizer_calls_charged_to_shared_remedy_ledger"] = attempted
         manifest.update(
             {
                 "status": "timed_out" if isinstance(exc, TimeoutError) else "failed",

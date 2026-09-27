@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 
 import pytest
@@ -688,6 +688,7 @@ def test_typed_g6_direct_pair_plan_runs_through_dense_masked_complete_core_path(
     preparation = prepared.backend_state["cover_preparation_ledger"]
     query_ledger = direct_output["_interaction_aux"]
     assert preparation["cover_prepare_executor_dense_masked"] == 1
+    assert prepared.backend_state["cover_execution_views"] is None
     for mechanism in ("MM", "ME", "EM"):
         assert int(preparation[f"cover_prepare_{mechanism.lower()}_unique_pairs"]) == summary[
             "mechanisms"][mechanism][f"cover_{mechanism.lower()}_unique_source_receiver_pairs"]
@@ -701,6 +702,65 @@ def test_typed_g6_direct_pair_plan_runs_through_dense_masked_complete_core_path(
         ]
     )
     assert summary["total_unique_source_receiver_pairs_across_mechanisms"] == learned_pair_count
+
+    full_direct, _ = fit_workflow._typed_direct_pair_plan(record, full, batch.query_xy[0])
+    sparse_access = dict(full_direct.direct_pair_access)
+    sparse_access["QE"] = torch.zeros_like(sparse_access["QE"])
+    sparse_qe = replace(full_direct, direct_pair_access=sparse_access)
+    with torch.inference_mode():
+        full_direct_prepared = core.prepare(
+            encoded,
+            encoded.module_tokens,
+            fixed_cover_plans=(full_direct,),
+            interaction_context=context,
+        )
+        full_direct_output = core.decode_queries(
+            full_direct_prepared,
+            batch.query_xy,
+            batch.query_features,
+            interaction_context=context,
+        )["pred_field"]
+        sparse_qe_prepared = core.prepare(
+            encoded,
+            encoded.module_tokens,
+            fixed_cover_plans=(sparse_qe,),
+            interaction_context=context,
+        )
+        sparse_qe_output = core.decode_queries(
+            sparse_qe_prepared,
+            batch.query_xy,
+            batch.query_features,
+            interaction_context=context,
+        )["pred_field"]
+
+    assert full_direct_prepared.backend_state["cover_execution_views"] is None
+    assert sparse_qe_prepared.backend_state["cover_execution_views"] is None
+    assert float((full_direct_output - sparse_qe_output).abs().max()) > 1.0e-7
+    full_direct_work = workflow._typed_work_summary(
+        full_direct, encoded, batch.query_xy[0], include_root_child_support=False
+    )
+    sparse_qe_work = workflow._typed_work_summary(
+        sparse_qe, encoded, batch.query_xy[0], include_root_child_support=False
+    )
+    full_qe_pairs = int(
+        full_direct_work["mechanisms"]["QE"]["cover_qe_unique_source_receiver_pairs"]
+    )
+    sparse_qe_pairs = int(
+        sparse_qe_work["mechanisms"]["QE"]["cover_qe_unique_source_receiver_pairs"]
+    )
+    assert full_qe_pairs > 0
+    assert sparse_qe_pairs == 0
+    for mechanism in ("MM", "ME", "EM", "QM"):
+        assert sparse_qe_work["mechanisms"][mechanism][
+            f"cover_{mechanism.lower()}_unique_source_receiver_pairs"
+        ] == full_direct_work["mechanisms"][mechanism][
+            f"cover_{mechanism.lower()}_unique_source_receiver_pairs"
+        ]
+    assert (
+        full_direct_work["total_unique_source_receiver_pairs_across_mechanisms"]
+        - sparse_qe_work["total_unique_source_receiver_pairs_across_mechanisms"]
+        == full_qe_pairs
+    )
 
 
 def test_typed_g6_direct_pair_executor_is_restored_before_next_variant(monkeypatch: pytest.MonkeyPatch) -> None:

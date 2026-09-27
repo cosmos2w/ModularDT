@@ -83,6 +83,27 @@ def test_forward_profile_registry_is_complete_and_keeps_metadata_out_of_profiles
             )
 
 
+def test_windfarm_joint_forward_profile_passes_strict_config_loader(tmp_path: Path) -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    profile_path = project_root / "src/config_core/forward/windfarm_joint_forward_maturation.json"
+    bundle = load_config_bundle(profile_path, project_root=project_root)
+
+    joint_forward = bundle.effective["training"]["joint_forward"]
+    assert bundle.effective["case"]["id"] == "WindFarm"
+    assert joint_forward["max_updates"] == 1500
+    assert joint_forward["role_catalogue_cache_max_bytes"] == 64 * 1024**3
+    assert joint_forward["source_checkpoint_path"].endswith("checkpoints/best_field.pt")
+    assert joint_forward["typed_search_dir"].endswith("typed_incremental_search_merged_corrected01")
+    assert bundle.core_source_payload["training"]["joint_forward"] == joint_forward
+
+    malformed_profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    malformed_profile["training"]["joint_forward"]["ignored_option"] = True
+    malformed_path = tmp_path / "windfarm_joint_forward_unknown_option.json"
+    malformed_path.write_text(json.dumps(malformed_profile), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"Unknown core.training\.joint_forward configuration sections"):
+        load_config_bundle(malformed_path, project_root=project_root)
+
+
 def test_run1503_v3_profile_round_trips_converged_architecture_settings() -> None:
     from honf_forward_core.config import UnifiedForwardConfig
 

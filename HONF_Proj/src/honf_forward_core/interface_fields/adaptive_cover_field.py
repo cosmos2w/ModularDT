@@ -19,6 +19,7 @@ import torch
 from .adaptive_interaction_cover import (
     AdaptiveCoverPlan,
     CaseLocalReceiverTree,
+    CompiledMechanismExecutionView,
     CoverPairLedger,
     InteractionContext,
     InteractionPermissionKey,
@@ -400,13 +401,13 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
                 plan.permission_matrix(mechanism, phase=phase).requires_grad
                 for mechanism in mechanisms
             )
-        if "MM" in mechanisms or "EM" in mechanisms or "QM" in mechanisms:
-            if plan.module_membership.requires_grad:
-                return True
-        if "ME" in mechanisms or "QE" in mechanisms:
-            if plan.environment_membership.requires_grad:
-                return True
-        return False
+        return (
+            ("MM" in mechanisms or "EM" in mechanisms or "QM" in mechanisms)
+            and plan.module_membership.requires_grad
+        ) or (
+            ("ME" in mechanisms or "QE" in mechanisms)
+            and plan.environment_membership.requires_grad
+        )
 
     @staticmethod
     def _differentiable_plan_inputs(
@@ -1204,7 +1205,12 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
         for tree, plan in zip(state["cover_trees"], plans, strict=True):
             if plan.tree is not tree:
                 raise ValueError("external plan must use the prepared case-local receiver tree")
-        return {**state, "cover_plans": plans}
+        updated = {**state, "cover_plans": plans}
+        if "cover_execution_views" in updated:
+            # An externally substituted plan must never inherit stale
+            # per-plan metadata from the original preparation.
+            updated["cover_execution_views"] = None
+        return updated
 
     @staticmethod
     def _combine_pairs(items: list[PackedPairs], case_count: int) -> PackedPairs:
@@ -1276,6 +1282,28 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
             for case, plan in enumerate(plans)
         ])
         return module_access, environment_access
+
+    @staticmethod
+    def _compiled_query_accesses(
+        plans: tuple[AdaptiveCoverPlan | MechanismPlan, ...],
+        views: tuple[CompiledMechanismExecutionView, ...],
+        receivers: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, tuple[torch.Tensor, ...]]:
+        """Evaluate one live receiver access matrix per case for both query routes."""
+
+        if len(plans) != len(views) or len(plans) != int(receivers.shape[0]):
+            raise ValueError("compiled cover views must align with the prepared cases")
+        module_access = []
+        environment_access = []
+        receiver_access = []
+        for case, (plan, view) in enumerate(zip(plans, views, strict=True)):
+            if not view.matches(plan, phase=view.phase):
+                raise ValueError("compiled cover execution view no longer matches its prepared plan")
+            alpha = view.receiver_access(receivers[case], plan.split_gates)
+            receiver_access.append(alpha)
+            module_access.append(alpha @ view.permission_matrix("QM"))
+            environment_access.append(alpha @ view.permission_matrix("QE"))
+        return torch.stack(module_access), torch.stack(environment_access), tuple(receiver_access)
 
     @staticmethod
     def _environment_access_prior(
@@ -1402,30 +1430,42 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
         receivers: torch.Tensor,
         module_access: torch.Tensor,
         environment_prior: torch.Tensor,
-        module_actual_rows: int,
-        environment_actual_rows: int,
-        module_unique_rows: int,
-        environment_unique_rows: int,
+        module_actual_rows: int | torch.Tensor,
+        environment_actual_rows: int | torch.Tensor,
+        module_unique_rows: int | torch.Tensor,
+        environment_unique_rows: int | torch.Tensor,
         *,
         phase: str | None,
         executor: str,
         include_diagnostics: bool = True,
+        compiled_views: tuple[CompiledMechanismExecutionView, ...] | None = None,
+        receiver_group_access: tuple[torch.Tensor, ...] | None = None,
     ) -> dict[str, torch.Tensor]:
         device = encoded.module_present.device
         query_count = int(module_access.shape[1])
+
+        def count_tensor(value: int | torch.Tensor) -> torch.Tensor:
+            if torch.is_tensor(value):
+                return value.to(device=device, dtype=torch.long).reshape(())
+            return torch.tensor(int(value), device=device, dtype=torch.long)
+
+        module_actual = count_tensor(module_actual_rows)
+        environment_actual = count_tensor(environment_actual_rows)
+        module_unique = count_tensor(module_unique_rows)
+        environment_unique = count_tensor(environment_unique_rows)
         aux: dict[str, torch.Tensor] = {
-            "cover_qm_unique_rows": torch.tensor(module_unique_rows, device=device, dtype=torch.long),
-            "cover_qe_unique_rows": torch.tensor(environment_unique_rows, device=device, dtype=torch.long),
-            "cover_qm_unique_source_receiver_pairs": torch.tensor(module_unique_rows, device=device, dtype=torch.long),
-            "cover_qe_unique_source_receiver_pairs": torch.tensor(environment_unique_rows, device=device, dtype=torch.long),
-            "cover_qm_actual_rows": torch.tensor(module_actual_rows, device=device, dtype=torch.long),
-            "cover_qe_actual_rows": torch.tensor(environment_actual_rows, device=device, dtype=torch.long),
-            "cover_qm_executed_rows": torch.tensor(module_actual_rows, device=device, dtype=torch.long),
-            "cover_qe_executed_rows": torch.tensor(environment_actual_rows, device=device, dtype=torch.long),
-            "cover_qm_padded_rows": torch.tensor(max(0, module_actual_rows - module_unique_rows), device=device, dtype=torch.long),
-            "cover_qe_padded_rows": torch.tensor(max(0, environment_actual_rows - environment_unique_rows), device=device, dtype=torch.long),
-            "cover_qm_rectangular_rows": torch.tensor(module_actual_rows, device=device, dtype=torch.long),
-            "cover_qe_rectangular_rows": torch.tensor(environment_actual_rows, device=device, dtype=torch.long),
+            "cover_qm_unique_rows": module_unique,
+            "cover_qe_unique_rows": environment_unique,
+            "cover_qm_unique_source_receiver_pairs": module_unique,
+            "cover_qe_unique_source_receiver_pairs": environment_unique,
+            "cover_qm_actual_rows": module_actual,
+            "cover_qe_actual_rows": environment_actual,
+            "cover_qm_executed_rows": module_actual,
+            "cover_qe_executed_rows": environment_actual,
+            "cover_qm_padded_rows": (module_actual - module_unique).clamp_min(0),
+            "cover_qe_padded_rows": (environment_actual - environment_unique).clamp_min(0),
+            "cover_qm_rectangular_rows": module_actual,
+            "cover_qe_rectangular_rows": environment_actual,
             "cover_environment_fallback_queries": torch.tensor(0, device=device, dtype=torch.long),
             "cover_path_diagnostics_available": torch.tensor(int(include_diagnostics), device=device, dtype=torch.long),
             "cover_query_count": torch.tensor(query_count * len(plans), device=device, dtype=torch.long),
@@ -1451,61 +1491,78 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
             aux[f"cover_{tag}_dense_fallback"] = torch.tensor(
                 int(executor == "full_access"), device=device, dtype=torch.long
             )
-            aux[f"cover_{tag}_unique_source_receiver_pairs"] = torch.tensor(
-                int(unique_pairs), device=device, dtype=torch.long
-            )
+            aux[f"cover_{tag}_unique_source_receiver_pairs"] = count_tensor(unique_pairs)
         if not include_diagnostics:
             return aux
 
-        raw_paths_qm = raw_paths_qe = 0
+        raw_path_counts_qm: list[torch.Tensor] = []
+        raw_path_counts_qe: list[torch.Tensor] = []
         query_degrees: list[torch.Tensor] = []
-        for case, plan in enumerate(plans):
-            alpha = plan.tree.access(receivers[case], plan.split_gates)
-            if isinstance(plan, MechanismPlan):
-                qm_membership = plan.permission_matrix("QM", phase=phase, module_present=encoded.module_present[case])
-                qe_membership = plan.permission_matrix("QE", phase=phase)
-            else:
-                qm_membership = plan.module_membership
-                qe_membership = plan.environment_membership
-            active_receiver_counts = (alpha > 0).sum(dim=0, dtype=torch.int64)
-            qm_source_counts = (qm_membership > 0).sum(dim=1, dtype=torch.int64)
-            qe_source_counts = (qe_membership > 0).sum(dim=1, dtype=torch.int64)
-            pair_counts = torch.stack((
-                (active_receiver_counts * qm_source_counts).sum(),
-                (active_receiver_counts * qe_source_counts).sum(),
-            ))
-            # Count the Cartesian receiver/source pairs through the shared
-            # node axis. This is exact int64 arithmetic and avoids an
-            # unsupported integer GEMM plus its potentially large [Q,S]
-            # intermediate on CUDA.
-            qm_count, qe_count = pair_counts.detach().cpu().tolist()
-            raw_paths_qm += int(qm_count)
-            raw_paths_qe += int(qe_count)
-            active_source_nodes = (qm_membership > 0).any(dim=1) | (qe_membership > 0).any(dim=1)
-            query_degrees.append(((alpha > 0) & active_source_nodes[None, :]).sum(dim=1))
-        degree = torch.cat(query_degrees) if query_degrees else torch.zeros(0, device=device, dtype=torch.long)
-        # The concrete rows and unions are authoritative. Frontier summaries
-        # retain the structural K diagnostics independently of execution.
-        k_values = [
-            max(
-                plan.frontier_summary("QM", phase).source_bearing_active_nodes,
-                plan.frontier_summary("QE", phase).source_bearing_active_nodes,
-            ) if isinstance(plan, MechanismPlan) else plan.active_group_count()
-            for plan in plans
-        ]
-        transitions = [
-            sum(0.0 < float(plan.split_gates[index].detach()) < 1.0 for index, node in enumerate(plan.tree.nodes) if not node.is_leaf)
-            for plan in plans
-        ]
-        nodes = [len(plan.tree.nodes) for plan in plans]
-        saturated = [bool(plan.tree.capacity_saturated) for plan in plans]
+        if compiled_views is not None:
+            if receiver_group_access is None or len(compiled_views) != len(plans):
+                raise ValueError("compiled diagnostics require one receiver access matrix per case")
+            for view, alpha in zip(compiled_views, receiver_group_access, strict=True):
+                qm_membership = view.permission_matrix("QM")
+                qe_membership = view.permission_matrix("QE")
+                active_receiver_counts = (alpha > 0).sum(dim=0, dtype=torch.int64)
+                qm_source_counts = (qm_membership > 0).sum(dim=1, dtype=torch.int64)
+                qe_source_counts = (qe_membership > 0).sum(dim=1, dtype=torch.int64)
+                raw_path_counts_qm.append((active_receiver_counts * qm_source_counts).sum())
+                raw_path_counts_qe.append((active_receiver_counts * qe_source_counts).sum())
+                active_source_nodes = (qm_membership > 0).any(dim=1) | (qe_membership > 0).any(dim=1)
+                query_degrees.append(((alpha > 0) & active_source_nodes[None, :]).sum(dim=1))
+            k_values = [
+                max(view.summary("QM").source_bearing_active_nodes,
+                    view.summary("QE").source_bearing_active_nodes)
+                for view in compiled_views
+            ]
+            transitions = [view.transition_count for view in compiled_views]
+            nodes = [view.candidate_node_count for view in compiled_views]
+            saturated = [view.capacity_saturated for view in compiled_views]
+            raw_paths_qm = torch.stack(raw_path_counts_qm).sum() if raw_path_counts_qm else torch.zeros((), device=device, dtype=torch.long)
+            raw_paths_qe = torch.stack(raw_path_counts_qe).sum() if raw_path_counts_qe else torch.zeros((), device=device, dtype=torch.long)
+            degree = torch.cat(query_degrees) if query_degrees else torch.zeros(0, device=device, dtype=torch.long)
+        else:
+            raw_paths_qm = torch.zeros((), device=device, dtype=torch.long)
+            raw_paths_qe = torch.zeros((), device=device, dtype=torch.long)
+            for case, plan in enumerate(plans):
+                alpha = plan.tree.access(receivers[case], plan.split_gates)
+                if isinstance(plan, MechanismPlan):
+                    qm_membership = plan.permission_matrix("QM", phase=phase, module_present=encoded.module_present[case])
+                    qe_membership = plan.permission_matrix("QE", phase=phase)
+                else:
+                    qm_membership = plan.module_membership
+                    qe_membership = plan.environment_membership
+                active_receiver_counts = (alpha > 0).sum(dim=0, dtype=torch.int64)
+                qm_source_counts = (qm_membership > 0).sum(dim=1, dtype=torch.int64)
+                qe_source_counts = (qe_membership > 0).sum(dim=1, dtype=torch.int64)
+                raw_paths_qm = raw_paths_qm + (active_receiver_counts * qm_source_counts).sum()
+                raw_paths_qe = raw_paths_qe + (active_receiver_counts * qe_source_counts).sum()
+                active_source_nodes = (qm_membership > 0).any(dim=1) | (qe_membership > 0).any(dim=1)
+                query_degrees.append(((alpha > 0) & active_source_nodes[None, :]).sum(dim=1))
+            degree = torch.cat(query_degrees) if query_degrees else torch.zeros(0, device=device, dtype=torch.long)
+            # The concrete rows and unions are authoritative. Frontier summaries
+            # retain structural K diagnostics independently of execution.
+            k_values = [
+                max(
+                    plan.frontier_summary("QM", phase).source_bearing_active_nodes,
+                    plan.frontier_summary("QE", phase).source_bearing_active_nodes,
+                ) if isinstance(plan, MechanismPlan) else plan.active_group_count()
+                for plan in plans
+            ]
+            transitions = [
+                sum(0.0 < float(plan.split_gates[index].detach()) < 1.0 for index, node in enumerate(plan.tree.nodes) if not node.is_leaf)
+                for plan in plans
+            ]
+            nodes = [len(plan.tree.nodes) for plan in plans]
+            saturated = [bool(plan.tree.capacity_saturated) for plan in plans]
         aux.update({
             "cover_k_case": torch.tensor(k_values, device=device, dtype=torch.long),
             "cover_transition_case": torch.tensor(transitions, device=device, dtype=torch.long),
             "cover_candidate_nodes": torch.tensor(nodes, device=device, dtype=torch.long),
             "cover_capacity_saturated": torch.tensor(saturated, device=device, dtype=torch.long),
-            "cover_qm_raw_paths": torch.tensor(raw_paths_qm, device=device, dtype=torch.long),
-            "cover_qe_raw_paths": torch.tensor(raw_paths_qe, device=device, dtype=torch.long),
+            "cover_qm_raw_paths": count_tensor(raw_paths_qm),
+            "cover_qe_raw_paths": count_tensor(raw_paths_qe),
             "cover_path_diagnostics_available": torch.ones((), device=device, dtype=torch.long),
             "cover_query_degree_sum": degree.sum().to(torch.long),
             "cover_query_degree_max": degree.max().to(torch.long) if degree.numel() else torch.zeros((), device=device, dtype=torch.long),
@@ -1517,7 +1574,13 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
             nonredundant_packets = 0
             source_union = 0
             for case, plan in enumerate(plans):
-                if isinstance(plan, MechanismPlan):
+                if compiled_views is not None:
+                    summary = compiled_views[case].summary(mechanism)
+                    raw_frontier += summary.raw_active_frontier_nodes
+                    source_bearing_frontier += summary.source_bearing_active_nodes
+                    nonredundant_packets += summary.nonredundant_packet_count
+                    source_union += summary.source_union_count
+                elif isinstance(plan, MechanismPlan):
                     summary = plan.frontier_summary(mechanism, phase)
                     raw_frontier += summary.raw_active_frontier_nodes
                     source_bearing_frontier += summary.source_bearing_active_nodes
@@ -1563,7 +1626,10 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
         for mechanism in ("QM", "QE"):
             key_missing = full_access = 0
             for case, plan in enumerate(plans):
-                if isinstance(plan, MechanismPlan):
+                if compiled_views is not None:
+                    key_missing += int(compiled_views[case].permission_key_missing(mechanism))
+                    full_access += int(compiled_views[case].is_full_access(mechanism))
+                elif isinstance(plan, MechanismPlan):
                     key_missing += int(plan.permission_status(mechanism, phase=phase) == "full_access_bypass_missing_key")
                     full_access += int(plan.is_full_access(phase=phase, mechanisms=(mechanism,)))
                 else:
@@ -1572,6 +1638,110 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
                     ))
             aux[f"cover_{mechanism.lower()}_key_missing"] = torch.tensor(key_missing, device=device, dtype=torch.long)
             aux[f"cover_{mechanism.lower()}_full_access_bypass"] = torch.tensor(full_access, device=device, dtype=torch.long)
+        return aux
+
+    @staticmethod
+    def _compiled_full_access_query_aux(
+        views: tuple[CompiledMechanismExecutionView, ...],
+        encoded: EncodedInterfaceCase,
+        receivers: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Report native full-access work from the prepared execution view.
+
+        Full access has one exact all-source action per receiver after equal
+        packet actions are compacted. Static frontier counts therefore need
+        no query tree walk or permission tensor transfer in the receiver loop.
+        Query-dependent path and degree counts are marked unavailable here;
+        computing them would evaluate the receiver frontier solely for
+        diagnostics.
+        """
+
+        batch, query_count = receivers.shape[:2]
+        module_count = int(encoded.module_present.shape[1])
+        environment_count = int(encoded.env_coords.shape[1])
+        query_total = int(batch) * int(query_count)
+        module_unique = sum(view.summary("QM").source_union_count for view in views) * int(query_count)
+        environment_unique = sum(view.summary("QE").source_union_count for view in views) * int(query_count)
+        module_actual = query_total * module_count
+        environment_actual = query_total * environment_count
+        device = receivers.device
+        k_case = [
+            max(
+                view.summary("QM").source_bearing_active_nodes,
+                view.summary("QE").source_bearing_active_nodes,
+            )
+            for view in views
+        ]
+
+        def scalar(value: int | bool) -> torch.Tensor:
+            return torch.tensor(int(value), device=device, dtype=torch.long)
+
+        aux: dict[str, torch.Tensor] = {
+            "cover_k_case": torch.tensor(k_case, device=device, dtype=torch.long),
+            "cover_transition_case": torch.tensor(
+                [view.transition_count for view in views], device=device, dtype=torch.long
+            ),
+            "cover_candidate_nodes": torch.tensor(
+                [view.candidate_node_count for view in views], device=device, dtype=torch.long
+            ),
+            "cover_capacity_saturated": torch.tensor(
+                [view.capacity_saturated for view in views], device=device, dtype=torch.long
+            ),
+            "cover_qm_unique_rows": scalar(module_unique),
+            "cover_qe_unique_rows": scalar(environment_unique),
+            "cover_qm_unique_source_receiver_pairs": scalar(module_unique),
+            "cover_qe_unique_source_receiver_pairs": scalar(environment_unique),
+            "cover_qm_actual_rows": scalar(module_actual),
+            "cover_qe_actual_rows": scalar(environment_actual),
+            "cover_qm_executed_rows": scalar(module_actual),
+            "cover_qe_executed_rows": scalar(environment_actual),
+            "cover_qm_padded_rows": scalar(max(0, module_actual - module_unique)),
+            "cover_qe_padded_rows": scalar(max(0, environment_actual - environment_unique)),
+            "cover_qm_rectangular_rows": scalar(module_actual),
+            "cover_qe_rectangular_rows": scalar(environment_actual),
+            "cover_environment_fallback_queries": scalar(0),
+            "cover_path_diagnostics_available": scalar(0),
+            "cover_query_degree_sum": scalar(0),
+            "cover_query_degree_max": scalar(0),
+            "cover_query_count": scalar(query_total),
+            "cover_qm_raw_paths": scalar(0),
+            "cover_qe_raw_paths": scalar(0),
+            "cover_executor_dense_fallback": scalar(1),
+            "cover_executor_dense_masked": scalar(0),
+            "cover_executor_rectangular_subset": scalar(0),
+            "cover_executor_packed": scalar(0),
+            "cover_executor_native_dense": scalar(1),
+        }
+        for mechanism, unique_rows in (("QM", module_unique), ("QE", environment_unique)):
+            tag = mechanism.lower()
+            summary = [view.summary(mechanism) for view in views]
+            aux.update({
+                f"cover_{tag}_executor_dense_masked": scalar(0),
+                f"cover_{tag}_executor_rectangular_subset": scalar(0),
+                f"cover_{tag}_executor_packed": scalar(0),
+                f"cover_{tag}_executor_full_access": scalar(1),
+                f"cover_{tag}_dense_fallback": scalar(1),
+                f"cover_{tag}_unique_source_receiver_pairs": scalar(unique_rows),
+                f"cover_{tag}_raw_active_frontier_nodes": scalar(
+                    sum(item.raw_active_frontier_nodes for item in summary)
+                ),
+                f"cover_{tag}_source_bearing_active_frontier_nodes": scalar(
+                    sum(item.source_bearing_active_nodes for item in summary)
+                ),
+                f"cover_{tag}_nonredundant_packets": scalar(
+                    sum(item.nonredundant_packet_count for item in summary)
+                ),
+                f"cover_{tag}_source_union_count": scalar(
+                    sum(item.source_union_count for item in summary)
+                ),
+                f"cover_{tag}_raw_paths": scalar(0),
+                f"cover_{tag}_key_missing": scalar(
+                    sum(view.permission_key_missing(mechanism) for view in views)
+                ),
+                f"cover_{tag}_full_access_bypass": scalar(
+                    sum(view.is_full_access(mechanism) for view in views)
+                ),
+            })
         return aux
 
     def _read_cover_dense_masked(
@@ -1585,13 +1755,20 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
         phase: str | None,
         return_routing_maps: bool,
         include_cover_diagnostics: bool,
+        compiled_views: tuple[CompiledMechanismExecutionView, ...] | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         batch, query_count = receivers.shape[:2]
         modules = int(encoded.module_present.shape[1])
         environment_count = int(encoded.env_coords.shape[1])
-        module_access, environment_access = self._query_accesses(
-            plans, encoded, receivers, phase=phase
-        )
+        receiver_group_access = None
+        if compiled_views is not None:
+            module_access, environment_access, receiver_group_access = self._compiled_query_accesses(
+                plans, compiled_views, receivers
+            )
+        else:
+            module_access, environment_access = self._query_accesses(
+                plans, encoded, receivers, phase=phase
+            )
         module_prior = module_access * (encoded.module_present > 0.5).to(module_access.dtype)[:, None, :]
         scale_rows = self._environment_scale_rows(encoded.coordinate_scale, batch)[:, 0, :]
         module_relative = (
@@ -1639,11 +1816,13 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
             environment_prior,
             batch * query_count * modules,
             batch * query_count * environment_count,
-            int((module_prior > 0).sum()),
-            int((environment_prior > 0).sum()),
+            (module_prior > 0).sum(),
+            (environment_prior > 0).sum(),
             phase=phase,
             executor="dense_masked",
             include_diagnostics=include_cover_diagnostics,
+            compiled_views=compiled_views,
+            receiver_group_access=receiver_group_access,
         )
         aux["cover_environment_fallback_queries"] = fallback.sum().to(torch.long)
         if return_routing_maps:
@@ -1662,10 +1841,17 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
         phase: str | None,
         return_routing_maps: bool,
         include_cover_diagnostics: bool,
+        compiled_views: tuple[CompiledMechanismExecutionView, ...] | None = None,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        module_access, environment_access = self._query_accesses(
-            plans, encoded, receivers, phase=phase
-        )
+        receiver_group_access = None
+        if compiled_views is not None:
+            module_access, environment_access, receiver_group_access = self._compiled_query_accesses(
+                plans, compiled_views, receivers
+            )
+        else:
+            module_access, environment_access = self._query_accesses(
+                plans, encoded, receivers, phase=phase
+            )
         module_prior = module_access * (encoded.module_present > 0.5).to(module_access.dtype)[:, None, :]
         environment_prior, fallback = self._environment_access_prior(
             environment_access,
@@ -1686,11 +1872,13 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
             environment_prior,
             module_actual,
             environment_actual,
-            int((module_prior > 0).sum()),
-            int((environment_prior > 0).sum()),
+            (module_prior > 0).sum(),
+            (environment_prior > 0).sum(),
             phase=phase,
             executor="rectangular_subset",
             include_diagnostics=include_cover_diagnostics,
+            compiled_views=compiled_views,
+            receiver_group_access=receiver_group_access,
         )
         aux["cover_environment_fallback_queries"] = fallback.sum().to(torch.long)
         if return_routing_maps:
@@ -1715,25 +1903,48 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
         stored_context = state.get("cover_interaction_context")
         context = interaction_context if interaction_context is not None else stored_context
         phase = None if context is None else context.phase
-        query_full_access = plans is not None and all(
-            self.is_full_access_plan(
-                plan,
-                encoded.module_present[case],
-                int(encoded.env_coords.shape[1]),
-                phase=phase,
-                mechanisms=("QM", "QE"),
-            )
-            for case, plan in enumerate(plans)
-        )
-        differentiable_query = plans is not None and any(
-            self._plan_has_differentiable_routing(
-                plan, phase=phase, mechanisms=("QM", "QE")
-            )
-            for plan in plans
-        )
-        differentiable_full_access_query = query_full_access and differentiable_query
         if plans is not None and len(plans) != int(receivers.shape[0]):
             raise ValueError("cover plans must align with the case batch")
+        stored_views = state.get("cover_execution_views")
+        compiled_views = None
+        if (
+            plans is not None
+            and isinstance(stored_views, tuple)
+            and len(stored_views) == len(plans)
+            and all(
+                isinstance(view, CompiledMechanismExecutionView)
+                and view.matches(plan, phase=phase)
+                for view, plan in zip(stored_views, plans, strict=True)
+            )
+        ):
+            compiled_views = stored_views
+        if compiled_views is not None:
+            query_full_access = all(
+                view.is_full_access("QM") and view.is_full_access("QE")
+                for view in compiled_views
+            )
+            differentiable_query = any(
+                view.has_differentiable_routing(("QM", "QE"))
+                for view in compiled_views
+            )
+        else:
+            query_full_access = plans is not None and all(
+                self.is_full_access_plan(
+                    plan,
+                    encoded.module_present[case],
+                    int(encoded.env_coords.shape[1]),
+                    phase=phase,
+                    mechanisms=("QM", "QE"),
+                )
+                for case, plan in enumerate(plans)
+            )
+            differentiable_query = plans is not None and any(
+                self._plan_has_differentiable_routing(
+                    plan, phase=phase, mechanisms=("QM", "QE")
+                )
+                for plan in plans
+            )
+        differentiable_full_access_query = query_full_access and differentiable_query
         if differentiable_full_access_query:
             # Keep exact native values and input/model derivatives. A detached
             # prepared state isolates this read surrogate from the separate
@@ -1755,6 +1966,7 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
                 phase=phase,
                 return_routing_maps=bool(return_routing_maps),
                 include_cover_diagnostics=bool(include_cover_diagnostics),
+                compiled_views=compiled_views,
             )
             query_routing = self._differentiable_plan_inputs(
                 plans, phase=phase, mechanisms=("QM", "QE")
@@ -1791,13 +2003,15 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
                 phase=phase,
                 return_routing_maps=bool(return_routing_maps),
                 include_cover_diagnostics=bool(include_cover_diagnostics),
+                compiled_views=compiled_views,
             )
         if (
             (self.cover_mode == "full_access")
             or plans is None
             or (
                 query_full_access
-                and self.cover_mode != "external"
+                and not differentiable_query
+                and (self.cover_mode != "external" or compiled_views is not None)
             )
         ):
             context, aux = DensePairwiseField.read(
@@ -1850,6 +2064,11 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
                         dtype=torch.long,
                     )
                 return context, aux
+            if compiled_views is not None and query_full_access:
+                aux.update(self._compiled_full_access_query_aux(
+                    compiled_views, encoded, receivers
+                ))
+                return context, aux
             aux.update({
                 "cover_k_case": torch.ones(int(receivers.shape[0]), device=receivers.device, dtype=torch.long),
                 "cover_transition_case": torch.zeros(int(receivers.shape[0]), device=receivers.device, dtype=torch.long),
@@ -1875,9 +2094,15 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
                 "cover_query_count": torch.tensor(query_count * int(receivers.shape[0]), device=receivers.device),
                 "cover_executor_dense_fallback": torch.tensor(1, device=receivers.device),
             })
-            module_access, environment_access = self._query_accesses(
-                plans, encoded, receivers, phase=phase
-            )
+            receiver_group_access = None
+            if compiled_views is not None:
+                module_access, environment_access, receiver_group_access = self._compiled_query_accesses(
+                    plans, compiled_views, receivers
+                )
+            else:
+                module_access, environment_access = self._query_accesses(
+                    plans, encoded, receivers, phase=phase
+                )
             module_prior = module_access * (encoded.module_present > 0.5).to(module_access.dtype)[:, None, :]
             environment_prior, fallback = self._environment_access_prior(
                 environment_access,
@@ -1892,10 +2117,12 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
                 environment_prior,
                 module_executed_rows,
                 environment_rows,
-                int((module_prior > 0).sum()),
-                int((environment_prior > 0).sum()),
+                (module_prior > 0).sum(),
+                (environment_prior > 0).sum(),
                 phase=phase,
                 executor="full_access",
+                compiled_views=compiled_views,
+                receiver_group_access=receiver_group_access,
             ))
             aux["cover_environment_fallback_queries"] = fallback.sum().to(torch.long)
             aux["cover_executor_dense_fallback"] = torch.ones((), device=receivers.device, dtype=torch.long)
@@ -1906,12 +2133,14 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
                 state, encoded, receivers, receiver_features, plans,
                 phase=phase, return_routing_maps=bool(return_routing_maps),
                 include_cover_diagnostics=bool(include_cover_diagnostics),
+                compiled_views=compiled_views,
             )
         if self.cover_executor == "rectangular_subset":
             return self._read_cover_rectangular_subset(
                 state, encoded, receivers, receiver_features, plans,
                 phase=phase, return_routing_maps=bool(return_routing_maps),
                 include_cover_diagnostics=bool(include_cover_diagnostics),
+                compiled_views=compiled_views,
             )
         module_pairs: list[PackedPairs] = []
         environment_pairs: list[PackedPairs] = []

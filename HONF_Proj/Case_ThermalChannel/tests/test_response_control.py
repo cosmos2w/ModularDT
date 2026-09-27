@@ -58,6 +58,7 @@ from channelthermal.response_control.losses import (
     fixed_heat_material_peak_coverage,
 )
 from channelthermal.response_control.resume_provenance import (
+    _validate_fit_arm_gate_accounting,
     file_sha256,
     training_config_mapping,
     validate_checkpoint_only_review_provenance,
@@ -68,11 +69,13 @@ from channelthermal.response_control.runner import (
     _atomic_json,
     _audit_named_buffers,
     _combine_r0_response_gradient,
+    _configure_native_expanded_response_interface_scope,
     _configure_native_nonlinear_interface_scope,
     _configure_native_output_head_scope,
     _dataclass_record,
     _historical_calibration_case_map,
     _json_default,
+    _load_expanded_probe_evidence,
     _load_frozen_loss_scales,
     _load_frozen_response_weights,
     _load_r0_projection_evidence,
@@ -93,7 +96,12 @@ from channelthermal.response_control.sampling import (
     SamplingSummary,
     sample_training_stencil,
 )
-from channelthermal.response_control.training import TrainingStep, _family_visit_counts
+from channelthermal.response_control.training import (
+    TrainingStep,
+    _family_visit_counts,
+    historical_replay_coverage,
+    historical_replay_sequence,
+)
 from torch import nn
 
 
@@ -752,6 +760,67 @@ def test_native_nonlinear_scope_trains_all_existing_head_layers_in_eval_mode() -
     assert scope["frozen_buffer_names"] == ["backbone.1.running_mean", "backbone.1.running_var", "backbone.1.num_batches_tracked"]
 
 
+def test_native_expanded_response_scope_selects_exact_heads_and_backend_blocks() -> None:
+    class _ScopeModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.core = nn.Module()
+            self.core.common = nn.Module()
+            self.core.common.field_head = nn.Sequential(nn.Linear(3, 5), nn.Tanh(), nn.Linear(5, 2))
+            self.core.common.context_builder = nn.Linear(2, 2)
+            self.core.backend = nn.Module()
+            for name in (
+                "mm_message", "me_message", "em_message", "module_update", "env_update",
+                "query_module_message", "query_module_output", "env_query",
+                "env_attention", "env_geometry_bias",
+            ):
+                setattr(self.core.backend, name, nn.Sequential(nn.Linear(4, 4), nn.Tanh()))
+            self.core.backend.unselected_policy = nn.Linear(2, 2)
+            self.local_coupling = nn.Module()
+            self.local_coupling.has_local_surrogate = True
+            self.local_coupling.port_head = nn.Sequential(nn.Linear(4, 4), nn.Tanh(), nn.Linear(4, 2))
+            self.local_coupling.port_refinement_head = nn.Sequential(nn.Linear(4, 4), nn.Tanh(), nn.Linear(4, 2))
+            self.local_coupling.local_latent_fusion = nn.Linear(2, 2)
+            self.local_coupling.local_response_summary_proj = nn.Linear(2, 2)
+            self.local_coupling.flux_correction_head = nn.Linear(2, 2)
+            self.local_coupling.local_surrogate = nn.Sequential(nn.Linear(2, 2), nn.Dropout(0.5))
+            self.backbone = nn.Sequential(nn.Linear(2, 2), nn.BatchNorm1d(2))
+
+    model = _ScopeModel()
+    model.train()
+    scope = _configure_native_expanded_response_interface_scope(model)  # type: ignore[arg-type]
+    trainable = {name for name, parameter in model.named_parameters() if parameter.requires_grad}
+    selected_modules = {
+        "core.common.field_head",
+        "local_coupling.port_head",
+        "local_coupling.port_refinement_head",
+        *(f"core.backend.{name}" for name in (
+            "mm_message", "me_message", "em_message", "module_update", "env_update",
+            "query_module_message", "query_module_output", "env_query", "env_attention",
+            "env_geometry_bias",
+        )),
+    }
+    expected = {
+        name for name, _parameter in model.named_parameters()
+        if any(name.startswith(f"{module_name}.") for module_name in selected_modules)
+    }
+    assert scope["name"] == "native_expanded_response_interface"
+    assert trainable == expected
+    assert set(scope["trainable_module_names"]) == selected_modules
+    assert set(scope["trainable_parameter_count_by_block"]) == {
+        "field_head", "port_head", "port_refinement_head",
+        "native_module_environment_updates", "native_fine_receiver_reads",
+    }
+    assert all(not parameter.requires_grad for parameter in model.core.common.context_builder.parameters())
+    assert all(not parameter.requires_grad for parameter in model.core.backend.unselected_policy.parameters())
+    assert all(not parameter.requires_grad for parameter in model.local_coupling.local_surrogate.parameters())
+    assert all(not module.training for module in model.modules())
+    assert scope["dropout_modules_disabled_by_eval"]
+    assert scope["frozen_buffer_names"] == [
+        "backbone.1.running_mean", "backbone.1.running_var", "backbone.1.num_batches_tracked"
+    ]
+
+
 def test_native_checkpoint_initialization_keeps_incumbent_as_a_separate_model() -> None:
     class _NativeSource(nn.Module):
         def __init__(self) -> None:
@@ -857,6 +926,30 @@ def test_training_step_result_serialization_preserves_mappingproxy_fields() -> N
     assert json.loads(encoded)["active_term_weights"] == {"finite": 1.0}
 
 
+def test_historical_replay_coverage_reports_partial_and_complete_first_passes() -> None:
+    case_order = tuple(f"case-{index:03d}" for index in range(600))
+    probe_ids = historical_replay_sequence(case_order, start_update=0, update_count=80)
+    probe_coverage = historical_replay_coverage(
+        case_order, initial_update=0, segment_case_ids=probe_ids
+    )
+    assert probe_coverage["unique_train_cases_visited"] == 80
+    assert probe_coverage["first_pass_train_cases_visited"] == 80
+    assert probe_coverage["first_pass_complete"] is False
+    continuation_ids = historical_replay_sequence(case_order, start_update=200, update_count=400)
+    formal_coverage = historical_replay_coverage(
+        case_order, initial_update=200, segment_case_ids=continuation_ids
+    )
+    assert formal_coverage["updates_through_gate"] == 600
+    assert formal_coverage["unique_train_cases_visited"] == 600
+    assert formal_coverage["first_pass_train_cases_visited"] == 600
+    assert formal_coverage["first_pass_complete"] is True
+    assert formal_coverage["first_pass_case_ids"] == list(case_order)
+    with pytest.raises(ValueError, match="does not match the fixed train-case sequence"):
+        historical_replay_coverage(
+            case_order, initial_update=200, segment_case_ids=tuple(reversed(continuation_ids))
+        )
+
+
 def test_staged_config_exposes_bounded_review_gates_and_runs_actual_updates() -> None:
     configured = load_staged_training_config()
     assert configured.max_optimizer_updates == 2000
@@ -896,6 +989,33 @@ def test_staged_config_exposes_bounded_review_gates_and_runs_actual_updates() ->
     assert _validate_review_gate(100, configured, 3) == 1500
     with pytest.raises(ValueError, match="review gate 2000 is unreachable"):
         _validate_review_gate(2000, configured, 3)
+
+    expanded_recipe = Path(__file__).resolve().parents[1] / "configs" / "response_control_native_expanded_interface.json"
+    expanded = load_staged_training_config(str(expanded_recipe), arm="R_response")
+    expanded_value = load_staged_training_config(str(expanded_recipe), arm="R_value")
+    assert expanded.max_optimizer_updates == 600
+    assert expanded.max_epochs == 75
+    assert expanded.total_optimizer_update_ceiling == 600
+    assert expanded.review_updates == (200, 600)
+    assert expanded.project_response_gradient_blockwise is False
+    assert expanded.active_terms(9) == ("value",)
+    assert set(expanded.active_terms(49)) == {
+        "value", "finite", "finite_peak", "pressure_value", "pressure_response",
+        "fixed_heat_null", "fixed_heat_thermal",
+    }
+    assert set(expanded.required_response_terms) == {
+        "finite", "finite_peak", "pressure_value", "pressure_response",
+    }
+    assert set(expanded.required_control_terms) == {"fixed_heat_null", "fixed_heat_thermal"}
+    assert all(expanded_value.active_terms(update) == ("value",) for update in (0, 9, 10, 49, 599))
+    with expanded_recipe.open("r", encoding="utf-8") as stream:
+        expanded_payload = json.load(stream)
+    assert expanded_payload["probe_optimizer_updates"] == 80
+    assert expanded_payload["shared_remedy_optimizer_call_ceiling"] == 600
+    assert expanded_payload["historical_train_case_count"] == 600
+    assert expanded_payload["expected_source_checkpoint_sha256"] == (
+        "71ed480ff0396813491c650dd11d887195174019b373fbd9a1fb25505142c066"
+    )
 
     config = StagedTrainingConfig(
         arm="B_value",
@@ -1484,6 +1604,7 @@ def _resume_provenance_fixture(tmp_path: Path):
         "review_decisions": {"100": "stop"},
         "arms": {
             arm: {
+                "initial_update": 0,
                 "actual_optimizer_updates": 100,
                 "attempted_optimizer_steps": 100,
                 "total_attempted_optimizer_steps": 100,
@@ -1534,6 +1655,70 @@ def _resume_provenance_fixture(tmp_path: Path):
         "training_config": config,
     }
     return kwargs, fit_path, replay_path, checkpoint_paths
+
+
+def test_segmented_resume_gate_accounting_preserves_updates_and_attempts() -> None:
+    # This no-optimizer fixture mirrors the staged native schedule. The
+    # second manifest reports 300 local updates while its checkpoint is at
+    # cumulative u500; that manifest must remain eligible for a u600 resume.
+    staged_arms = (
+        {"initial_update": 0, "actual_optimizer_updates": 200, "attempted_optimizer_steps": 200, "total_attempted_optimizer_steps": 200, "final_update": 200},
+        {"initial_update": 200, "actual_optimizer_updates": 300, "attempted_optimizer_steps": 300, "total_attempted_optimizer_steps": 500, "final_update": 500},
+        {"initial_update": 500, "actual_optimizer_updates": 100, "attempted_optimizer_steps": 100, "total_attempted_optimizer_steps": 600, "final_update": 600},
+    )
+    for gate, fit_arm in zip((200, 500, 600), staged_arms, strict=True):
+        _validate_fit_arm_gate_accounting(fit_arm, arm="R_response", required_update=gate)
+
+    with pytest.raises(ValueError, match="fit manifest does not end at u500"):
+        _validate_fit_arm_gate_accounting(
+            {
+                "initial_update": 200,
+                "actual_optimizer_updates": 299,
+                "attempted_optimizer_steps": 300,
+                "final_update": 500,
+            },
+            arm="R_response",
+            required_update=500,
+        )
+
+    with pytest.raises(ValueError, match="attempt accounting differs from its completed updates"):
+        _validate_fit_arm_gate_accounting(
+            {
+                "initial_update": 200,
+                "actual_optimizer_updates": 300,
+                "attempted_optimizer_steps": 301,
+                "total_attempted_optimizer_steps": 500,
+                "final_update": 500,
+            },
+            arm="R_response",
+            required_update=500,
+        )
+
+
+def test_resumed_u500_manifest_is_eligible_for_u600_gate_resume(tmp_path: Path) -> None:
+    kwargs, fit_path, _replay_path, _checkpoints = _resume_provenance_fixture(tmp_path)
+    fit = json.loads(fit_path.read_text(encoding="utf-8"))
+    fit["review_cap"] = 500
+    fit["review_decisions"] = {"500": "stop"}
+    for arm in ("B_value", "B_response"):
+        fit["arms"][arm].update({
+            "initial_update": 200,
+            "actual_optimizer_updates": 300,
+            "attempted_optimizer_steps": 300,
+            "total_attempted_optimizer_steps": 500,
+            "final_update": 500,
+        })
+        kwargs["resume_payloads"][arm]["actual_optimizer_updates"] = 500
+        kwargs["resume_payloads"][arm]["attempted_optimizer_steps"] = 500
+    fit_path.write_text(json.dumps(fit), encoding="utf-8")
+
+    provenance = validate_paired_resume_provenance(**kwargs, required_update=500)
+    assert provenance["resume_gate_update"] == 500
+
+    fit["arms"]["B_response"]["attempted_optimizer_steps"] = 299
+    fit_path.write_text(json.dumps(fit), encoding="utf-8")
+    with pytest.raises(ValueError, match="attempt accounting differs from its completed updates"):
+        validate_paired_resume_provenance(**kwargs, required_update=500)
 
 
 def test_scale_only_resume_provenance_binds_pair_scales_and_rng(tmp_path: Path) -> None:
@@ -2266,3 +2451,108 @@ def test_atomic_review_json_recursively_serializes_config_stages_and_enums(tmp_p
     assert written["training_config"]["stages"][0]["name"] == config.stages[0].name
     assert written["stages"][1]["active_terms"] == list(config.stages[1].active_terms)
     assert written["split"] == EvidenceSplit.TRAIN.value
+
+
+def test_expanded_review500_recipe_changes_only_review_schedule() -> None:
+    config_dir = Path(__file__).resolve().parents[1] / "configs"
+    probe_path = config_dir / "response_control_native_expanded_interface.json"
+    paired_path = config_dir / "response_control_native_expanded_interface_review500.json"
+    probe_recipe = json.loads(probe_path.read_text(encoding="utf-8"))
+    paired_recipe = json.loads(paired_path.read_text(encoding="utf-8"))
+    probe_schedule = probe_recipe.pop("review_updates")
+    paired_schedule = paired_recipe.pop("review_updates")
+    assert probe_schedule == [200, 600]
+    assert paired_schedule == [200, 500, 600]
+    assert probe_recipe == paired_recipe
+    config = load_staged_training_config(str(paired_path), arm="R_response")
+    assert config.review_updates == (200, 500, 600)
+    assert config.max_optimizer_updates == 600
+    assert config.total_optimizer_update_ceiling == 600
+
+
+def test_expanded_probe_evidence_attests_review_schedule_only_recipe_delta(tmp_path: Path) -> None:
+    probe_recipe_path = tmp_path / "response_control_native_expanded_interface.json"
+    paired_recipe_path = tmp_path / "response_control_native_expanded_interface_review500.json"
+    base_recipe = {
+        "name": "native_expanded_response_interface",
+        "architecture": "Run1804_dense_pairwise_field_native_checkpoint",
+        "review_updates": [200, 600],
+        "learning_rate": 1.0e-5,
+    }
+    paired_recipe = {**base_recipe, "review_updates": [200, 500, 600]}
+    probe_recipe_path.write_text(json.dumps(base_recipe), encoding="utf-8")
+    paired_recipe_path.write_text(json.dumps(paired_recipe), encoding="utf-8")
+    checkpoint_path = tmp_path / "Run1804_e4738.pt"
+    checkpoint_path.write_bytes(b"checkpoint identity fixture")
+    train_paths = []
+    train_hashes = []
+    family_ids = [f"train-family-{index}" for index in range(8)]
+    for index in range(8):
+        atlas_path = tmp_path / f"train_{index:04d}_responses.npz"
+        metadata_path = atlas_path.with_suffix(".json")
+        atlas_path.write_bytes(f"atlas-{index}".encode())
+        metadata_path.write_text(f'{{"family_id": "{family_ids[index]}"}}', encoding="utf-8")
+        train_paths.append(atlas_path)
+        train_hashes.append({
+            "sha256": file_sha256(atlas_path),
+            "metadata_sha256": file_sha256(metadata_path),
+        })
+    probe_report = {
+        "status": "passed",
+        "mode": "expanded_response_fit_capability_probe",
+        "checkpoint_sha256": file_sha256(checkpoint_path),
+        "recipe": str(probe_recipe_path.resolve()),
+        "recipe_sha256": file_sha256(probe_recipe_path),
+        "native_trainable_scope": {"name": "native_expanded_response_interface"},
+        "optimizer_updates_completed": 80,
+        "optimizer_updates_attempted": 80,
+        "optimizer_calls_charged_to_shared_remedy_ledger": 80,
+        "reference_solver_calls": 0,
+        "development_stencil_count": 0,
+        "capability_gate": {"supports_matched_trial": True},
+        "train_atlas_hashes": train_hashes,
+        "train_family_ids": family_ids,
+    }
+    evidence_path = tmp_path / "expanded_probe.json"
+    evidence_path.write_text(json.dumps(probe_report), encoding="utf-8")
+
+    evidence = _load_expanded_probe_evidence(
+        evidence_path,
+        checkpoint_path=checkpoint_path,
+        recipe_path=paired_recipe_path,
+        train_atlas_paths=train_paths,
+        expected_family_ids=family_ids,
+    )
+    assert evidence["probe_recipe_path"] == str(probe_recipe_path.resolve())
+    assert evidence["probe_recipe_sha256"] == file_sha256(probe_recipe_path)
+    assert evidence["paired_recipe_path"] == str(paired_recipe_path.resolve())
+    assert evidence["paired_recipe_sha256"] == file_sha256(paired_recipe_path)
+    assert evidence["recipe_schedule_difference"] == {
+        "field": "review_updates",
+        "probe": [200, 600],
+        "paired": [200, 500, 600],
+    }
+
+    probe_report["optimizer_calls_charged_to_shared_remedy_ledger"] = 79
+    evidence_path.write_text(json.dumps(probe_report), encoding="utf-8")
+    with pytest.raises(ValueError, match="shared-remedy ledger charge must equal its 80 completed attempts"):
+        _load_expanded_probe_evidence(
+            evidence_path,
+            checkpoint_path=checkpoint_path,
+            recipe_path=paired_recipe_path,
+            train_atlas_paths=train_paths,
+            expected_family_ids=family_ids,
+        )
+
+    probe_report["optimizer_calls_charged_to_shared_remedy_ledger"] = 80
+    evidence_path.write_text(json.dumps(probe_report), encoding="utf-8")
+    paired_recipe["learning_rate"] = 5.0e-5
+    paired_recipe_path.write_text(json.dumps(paired_recipe), encoding="utf-8")
+    with pytest.raises(ValueError, match="may differ from the probe-pinned recipe only in review_updates"):
+        _load_expanded_probe_evidence(
+            evidence_path,
+            checkpoint_path=checkpoint_path,
+            recipe_path=paired_recipe_path,
+            train_atlas_paths=train_paths,
+            expected_family_ids=family_ids,
+        )

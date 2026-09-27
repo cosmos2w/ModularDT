@@ -599,9 +599,21 @@ class MechanismPlan:
         phase: str | None = None,
         mechanisms: tuple[InteractionMechanism, ...] = INTERACTION_MECHANISMS,
     ) -> bool:
-        active = self.active_node_mask()
-        if not bool(active.any()):
-            return False
+        # A live receiver may reach a branch that has zero access on the
+        # finite anchor sample. Check every branch allowed by the split gates
+        # before declaring the plan safe for a native all-access shortcut.
+        reachable = {0}
+        frontier = (0,)
+        gate_values = self.split_gates.detach().cpu().tolist()
+        while frontier:
+            children_next: list[int] = []
+            for index in frontier:
+                node = self.tree.nodes[index]
+                if node.left is not None and node.right is not None and float(gate_values[index]) > 0.0:
+                    children_next.extend((node.left, node.right))
+                    reachable.update((node.left, node.right))
+            frontier = tuple(children_next)
+        reachable_indices = sorted(reachable)
         for mechanism in mechanisms:
             matrix = self.permission_matrix(mechanism, phase=phase)
             expected = (
@@ -609,7 +621,10 @@ class MechanismPlan:
                 if mechanism in {"MM", "EM", "QM"}
                 else matrix.new_ones(matrix.shape[1])
             )
-            if not torch.equal(matrix[active], expected[None, :].expand(int(active.sum()), -1)):
+            if not torch.equal(
+                matrix[reachable_indices],
+                expected[None, :].expand(len(reachable_indices), -1),
+            ):
                 return False
         return True
 
@@ -788,6 +803,382 @@ class MechanismPlan:
         if expected_hash is not None and str(expected_hash) != result.canonical_hash():
             raise ValueError("serialized mechanism plan hash does not match its contents")
         return result
+
+
+def _compiled_plan_tensor_versions(
+    plan: AdaptiveCoverPlan | MechanismPlan,
+) -> tuple[tuple[str, int, int], ...]:
+    tensors: list[tuple[str, torch.Tensor]] = [("split_gates", plan.split_gates)]
+    universe = plan.tree.universe
+    tensors.extend((
+        ("anchor_coordinates", universe.coordinates),
+        ("coordinate_scale", universe.coordinate_scale),
+    ))
+    if isinstance(plan, MechanismPlan):
+        tensors.append(("module_present", plan.module_present))
+        tensors.extend(
+            (f"permission:{key.canonical_name}", value)
+            for key, value in sorted(plan.permissions.items(), key=lambda item: item[0].canonical_name)
+        )
+    else:
+        tensors.extend((
+            ("module_membership", plan.module_membership),
+            ("environment_membership", plan.environment_membership),
+        ))
+    versions = []
+    for name, tensor in tensors:
+        try:
+            version = int(tensor._version)
+        except RuntimeError:  # Inference tensors do not expose a version counter.
+            version = -1
+        versions.append((name, id(tensor), version))
+    return tuple(versions)
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledMechanismExecutionView:
+    """Private immutable routing metadata bound to one prepared plan and phase.
+
+    Continuous access is still evaluated from live receiver coordinates. This
+    view only caches structure and values that are static for the prepared
+    plan: the active anchor frontier, typed source sets, exact action classes,
+    and full-access/differentiability flags.
+    """
+
+    plan_identity: int
+    phase: str | None
+    tensor_versions: tuple[tuple[str, int, int], ...]
+    active_node_indices: tuple[int, ...]
+    parent_child_relations: tuple[tuple[int, int, int], ...]
+    hard_execution_node_mask: tuple[bool, ...]
+    split_axes: tuple[int | None, ...]
+    children_by_node: tuple[tuple[int, int] | None, ...]
+    split_boundaries: tuple[torch.Tensor | None, ...]
+    overlap_widths: tuple[torch.Tensor | None, ...]
+    coordinate_dim: int
+    device: torch.device
+    full_access_flags: tuple[tuple[str, bool], ...]
+    differentiable_flags: tuple[tuple[str, bool], ...]
+    key_missing_flags: tuple[tuple[str, bool], ...]
+    permission_matrices: tuple[tuple[str, torch.Tensor], ...]
+    source_indices_by_mechanism: tuple[
+        tuple[str, tuple[tuple[int, ...], ...]], ...
+    ]
+    compact_action_classes: tuple[
+        tuple[str, tuple[tuple[int, ...], ...]], ...
+    ]
+    frontier_summaries: tuple[tuple[str, CoverFrontierSummary], ...]
+    candidate_node_count: int
+    capacity_saturated: bool
+    transition_count: int
+
+    def matches(self, plan: AdaptiveCoverPlan | MechanismPlan, *, phase: str | None) -> bool:
+        """Check that this runtime view still belongs to the supplied plan."""
+
+        return (
+            self.plan_identity == id(plan)
+            and self.phase == phase
+            and self.tensor_versions == _compiled_plan_tensor_versions(plan)
+        )
+
+    def receiver_access(self, queries: torch.Tensor, split_gates: torch.Tensor) -> torch.Tensor:
+        """Evaluate live query access with prepared levels and split geometry.
+
+        Hard split gates use the precompiled structurally reachable node set,
+        which skips closed subtrees while retaining the original node order.
+        Trainable gates retain the full graph, including endpoint surrogate
+        derivatives through currently closed branches.
+        """
+
+        if queries.ndim != 2 or queries.shape[1] != self.coordinate_dim:
+            raise ValueError("queries must have shape [Q,d] in the prepared anchor frame")
+        if split_gates.shape != (len(self.split_axes),):
+            raise ValueError("split gates must have one value per candidate-node capacity")
+        if queries.device != split_gates.device:
+            raise ValueError("queries and split gates must use one device")
+        if queries.device != self.device:
+            raise ValueError("queries, compiled geometry, and split gates must use one device")
+        hard_gates = not split_gates.requires_grad
+        result: list[torch.Tensor | None] = [None] * len(self.split_axes)
+
+        def descend(index: int, incoming: torch.Tensor) -> None:
+            if hard_gates and not self.hard_execution_node_mask[index]:
+                return
+            axis = self.split_axes[index]
+            if axis is None:
+                result[index] = incoming
+                return
+            boundary = self.split_boundaries[index]
+            overlap = self.overlap_widths[index]
+            assert boundary is not None and overlap is not None
+            split_gate = split_gates[index]
+            smooth_gate = endpoint_smoothstep(split_gate)
+            if split_gate.requires_grad:
+                endpoint = (split_gate.detach() == 0.0) | (split_gate.detach() == 1.0)
+                surrogate_gate = torch.where(endpoint, split_gate, smooth_gate)
+                gate = surrogate_gate + (smooth_gate - surrogate_gate).detach()
+            else:
+                gate = smooth_gate
+            result[index] = incoming * (1.0 - gate)
+            children = self.children_by_node[index]
+            assert children is not None
+            left, right = children
+            if hard_gates and not self.hard_execution_node_mask[left]:
+                return
+            left_weight = endpoint_smoothstep(
+                (boundary + overlap / 2.0 - queries[:, axis]) / overlap
+            )
+            descend(left, incoming * gate * left_weight)
+            descend(right, incoming * gate * (1.0 - left_weight))
+
+        if result:
+            descend(0, queries.new_ones((int(queries.shape[0]),)))
+        zero = queries.new_zeros((int(queries.shape[0]),))
+        return torch.stack([zero if value is None else value for value in result], dim=1)
+
+    def permission_matrix(self, mechanism: str) -> torch.Tensor:
+        tag = InteractionPermissionKey(mechanism).mechanism
+        return next(value for key, value in self.permission_matrices if key == tag)
+
+    def is_full_access(self, mechanism: str) -> bool:
+        tag = InteractionPermissionKey(mechanism).mechanism
+        return next(value for key, value in self.full_access_flags if key == tag)
+
+    def has_differentiable_routing(self, mechanisms: tuple[str, ...]) -> bool:
+        requested = {InteractionPermissionKey(mechanism).mechanism for mechanism in mechanisms}
+        return any(key in requested and value for key, value in self.differentiable_flags)
+
+    def permission_key_missing(self, mechanism: str) -> bool:
+        tag = InteractionPermissionKey(mechanism).mechanism
+        return next(value for key, value in self.key_missing_flags if key == tag)
+
+    def source_indices(self, mechanism: str) -> tuple[tuple[int, ...], ...]:
+        tag = InteractionPermissionKey(mechanism).mechanism
+        return next(value for key, value in self.source_indices_by_mechanism if key == tag)
+
+    def action_classes(self, mechanism: str) -> tuple[tuple[int, ...], ...]:
+        tag = InteractionPermissionKey(mechanism).mechanism
+        return next(value for key, value in self.compact_action_classes if key == tag)
+
+    def summary(self, mechanism: str) -> CoverFrontierSummary:
+        tag = InteractionPermissionKey(mechanism).mechanism
+        return next(value for key, value in self.frontier_summaries if key == tag)
+
+
+def compile_mechanism_execution_view(
+    plan: AdaptiveCoverPlan | MechanismPlan,
+    *,
+    module_present: torch.Tensor,
+    environment_count: int,
+    phase: str | None = None,
+) -> CompiledMechanismExecutionView:
+    """Compile static typed routing metadata once for one prepared plan.
+
+    This is deliberately runtime-only; plan serialization and canonical
+    identity remain unchanged. The anchor access matrix is evaluated once,
+    then shared by all five mechanism summaries.
+    """
+
+    selected_phase = None if phase is None else str(phase).strip()
+    if selected_phase == "":
+        raise ValueError("execution view phase cannot be empty")
+    if type(plan) not in {AdaptiveCoverPlan, MechanismPlan}:
+        raise TypeError(
+            "compiled execution views require an exact plan type; custom access_for overrides "
+            "must use the reference executor"
+        )
+    typed = (
+        plan
+        if isinstance(plan, MechanismPlan)
+        else MechanismPlan.from_legacy(plan, module_present)
+    )
+    if typed.module_present.shape != module_present.shape or not torch.equal(
+        typed.module_present > 0.5, module_present > 0.5
+    ):
+        raise ValueError("execution view module source ordering does not match the prepared case")
+    if typed.environment_count != int(environment_count):
+        raise ValueError("execution view environment source ordering does not match the prepared case")
+    if typed.split_gates.device != module_present.device:
+        raise ValueError("execution view plan and prepared source catalogue must share a device")
+
+    # The anchor universe defines which plan nodes are structurally active.
+    # It is intentionally detached: this metadata never participates in trial
+    # coordinate or organizer gradients.
+    with torch.no_grad():
+        anchor_access = typed.tree.access(
+            typed.tree.universe.coordinates.detach(), typed.split_gates.detach()
+        )
+        active_mask = (anchor_access > 0).any(dim=0)
+        active_node_indices = tuple(
+            int(index) for index in torch.nonzero(active_mask, as_tuple=False).flatten().cpu().tolist()
+        )
+
+    full_access_flags: list[tuple[str, bool]] = []
+    differentiable_flags: list[tuple[str, bool]] = []
+    key_missing_flags: list[tuple[str, bool]] = []
+    permission_matrices: list[tuple[str, torch.Tensor]] = []
+    source_indices_by_mechanism: list[tuple[str, tuple[tuple[int, ...], ...]]] = []
+    compact_action_classes: list[tuple[str, tuple[tuple[int, ...], ...]]] = []
+    frontier_summaries: list[tuple[str, CoverFrontierSummary]] = []
+    split_axes = tuple(node.split_axis for node in typed.tree.nodes)
+    children_by_node = tuple(
+        None if node.left is None else (node.left, node.right)
+        for node in typed.tree.nodes
+    )
+    split_boundaries: list[torch.Tensor | None] = [None] * len(typed.tree.nodes)
+    overlap_widths: list[torch.Tensor | None] = [None] * len(typed.tree.nodes)
+    for index, node in enumerate(typed.tree.nodes):
+        if node.left is None:
+            continue
+        assert node.right is not None and node.split_axis is not None
+        axis = node.split_axis
+        anchor_axis = typed.tree.universe.coordinates[:, axis]
+        left_center = anchor_axis[list(typed.tree.nodes[node.left].anchor_indices)].mean()
+        right_center = anchor_axis[list(typed.tree.nodes[node.right].anchor_indices)].mean()
+        split_boundaries[index] = (left_center + right_center) / 2.0
+        overlap_widths[index] = (
+            typed.tree.overlap_fraction * typed.tree.universe.coordinate_scale[axis]
+        )
+    # The hard executor may skip only branches whose incoming mass is
+    # structurally zero for every receiver. This criterion depends on split
+    # gates, not anchor-space activity, so it remains exact outside the anchor
+    # envelope and keeps live split-boundary geometry derivatives intact.
+    hard_reachable = {0}
+    hard_gate_values = typed.split_gates.detach().cpu().tolist()
+    frontier = (0,)
+    while frontier:
+        following: list[int] = []
+        for index in frontier:
+            children = children_by_node[index]
+            if children is not None and float(hard_gate_values[index]) > 0.0:
+                hard_reachable.update(children)
+                following.extend(children)
+        frontier = tuple(following)
+    hard_execution_node_mask = tuple(
+        index in hard_reachable for index in range(len(typed.tree.nodes))
+    )
+    hard_execution_node_indices = tuple(
+        index for index, reachable in enumerate(hard_execution_node_mask) if reachable
+    )
+    hard_execution_index_tensor = torch.as_tensor(
+        hard_execution_node_indices, device=module_present.device, dtype=torch.long
+    )
+    active_index_tensor = torch.as_tensor(
+        active_node_indices, device=module_present.device, dtype=torch.long
+    )
+    parent_child_relations = tuple(
+        (index, int(node.left), int(node.right))
+        for index, node in enumerate(typed.tree.nodes)
+        if node.left is not None and node.right is not None
+    )
+
+    for mechanism in INTERACTION_MECHANISMS:
+        matrix = typed.permission_matrix(
+            mechanism,
+            phase=selected_phase,
+            module_present=module_present,
+        )
+        permission_matrices.append((mechanism, matrix))
+        detached_matrix = matrix.detach()
+        if mechanism in {"MM", "EM", "QM"}:
+            expected = (module_present > 0.5).to(detached_matrix.dtype)
+        else:
+            expected = detached_matrix.new_ones((detached_matrix.shape[1],))
+        # A native all-access bypass must stay safe for live receiver queries
+        # outside the anchor sample. Anchor-inactive nodes can still be reached
+        # by a perturbed receiver, so validate every structurally reachable
+        # hard node rather than only the anchor-active frontier.
+        is_full = bool(hard_execution_node_indices) and torch.equal(
+            detached_matrix.index_select(0, hard_execution_index_tensor),
+            expected[None, :].expand(len(hard_execution_node_indices), -1),
+        )
+        full_access_flags.append((mechanism, is_full))
+        differentiable_flags.append((
+            mechanism,
+            bool(typed.split_gates.requires_grad or matrix.requires_grad),
+        ))
+        key_missing_flags.append((
+            mechanism,
+            typed.permission_status(mechanism, phase=selected_phase)
+            == "full_access_bypass_missing_key",
+        ))
+
+        with torch.no_grad():
+            positive = detached_matrix > 0
+            source_index_rows: list[tuple[int, ...]] = [() for _ in typed.tree.nodes]
+            for row in active_node_indices:
+                source_index_rows[row] = tuple(
+                    int(value)
+                    for value in torch.nonzero(positive[row], as_tuple=False).flatten().cpu().tolist()
+                )
+            source_indices = tuple(source_index_rows)
+            active_anchor_support = anchor_access.index_select(
+                1, active_index_tensor
+            ) > 0
+            active_source_support = positive.index_select(0, active_index_tensor)
+            effective_support = (
+                active_anchor_support.to(torch.float32)
+                @ active_source_support.to(torch.float32)
+            ) > 0
+            source_union_count = int(effective_support.any(dim=0).sum().cpu())
+            unique_pairs = int(effective_support.sum().cpu())
+            active_bearing = active_mask & positive.any(dim=1)
+            bearing_ids = tuple(
+                int(index) for index in torch.nonzero(active_bearing, as_tuple=False).flatten().cpu().tolist()
+            )
+            bearing_rows = detached_matrix.index_select(
+                0, torch.as_tensor(bearing_ids, device=module_present.device, dtype=torch.long)
+            ).cpu().tolist()
+            classes: dict[tuple[float, ...], list[int]] = {}
+            for index, row in zip(bearing_ids, bearing_rows, strict=True):
+                # Float tuples preserve the exact stored permission value;
+                # no thresholding or approximate mask match is used.
+                classes.setdefault(tuple(float(value) for value in row), []).append(index)
+            action_groups = tuple(tuple(indices) for indices in classes.values())
+            summary = CoverFrontierSummary(
+                mechanism=mechanism,
+                phase=selected_phase,
+                candidate_node_count=len(typed.tree.nodes),
+                raw_active_frontier_nodes=len(active_node_indices),
+                source_bearing_active_nodes=len(bearing_ids),
+                nonredundant_packet_count=len(action_groups),
+                source_union_count=source_union_count,
+                unique_source_receiver_pairs=unique_pairs,
+            )
+
+        source_indices_by_mechanism.append((mechanism, source_indices))
+        compact_action_classes.append((mechanism, action_groups))
+        frontier_summaries.append((mechanism, summary))
+
+    transition_count = sum(
+        0.0 < float(value) < 1.0
+        for index, value in enumerate(typed.split_gates.detach().cpu().tolist())
+        if typed.tree.nodes[index].left is not None
+    )
+    return CompiledMechanismExecutionView(
+        plan_identity=id(plan),
+        phase=selected_phase,
+        tensor_versions=_compiled_plan_tensor_versions(plan),
+        active_node_indices=active_node_indices,
+        parent_child_relations=parent_child_relations,
+        hard_execution_node_mask=hard_execution_node_mask,
+        split_axes=split_axes,
+        children_by_node=children_by_node,
+        split_boundaries=tuple(split_boundaries),
+        overlap_widths=tuple(overlap_widths),
+        coordinate_dim=int(typed.tree.universe.coordinates.shape[1]),
+        device=typed.tree.universe.coordinates.device,
+        full_access_flags=tuple(full_access_flags),
+        differentiable_flags=tuple(differentiable_flags),
+        key_missing_flags=tuple(key_missing_flags),
+        permission_matrices=tuple(permission_matrices),
+        source_indices_by_mechanism=tuple(source_indices_by_mechanism),
+        compact_action_classes=tuple(compact_action_classes),
+        frontier_summaries=tuple(frontier_summaries),
+        candidate_node_count=len(typed.tree.nodes),
+        capacity_saturated=bool(typed.tree.capacity_saturated),
+        transition_count=transition_count,
+    )
 
 
 @dataclass(frozen=True)
@@ -1002,6 +1393,7 @@ __all__ = [
     "AdaptiveCoverPlan",
     "CandidateNode",
     "CaseLocalReceiverTree",
+    "CompiledMechanismExecutionView",
     "CoverAccess",
     "CoverFrontierSummary",
     "CoverPairLedger",
@@ -1012,5 +1404,6 @@ __all__ = [
     "ReceiverAnchorUniverse",
     "compile_cover_pairs",
     "compile_cover_transport_pairs",
+    "compile_mechanism_execution_view",
     "endpoint_smoothstep",
 ]

@@ -296,6 +296,82 @@
         "max_train_batches_per_epoch": {"type": ["integer", "null"], "minimum": 1},
         "max_val_batches": {"type": ["integer", "null"], "minimum": 1},
         "init_checkpoint_path": {"type": ["string", "null"]},
+        "joint_forward": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source_checkpoint_path", "typed_search_dir", "max_updates"],
+          "properties": {
+            "source_checkpoint_path": {"type": "string", "minLength": 1},
+            "typed_search_dir": {"type": "string", "minLength": 1},
+            "max_updates": {"type": "integer", "minimum": 1, "maximum": 6000},
+            "preflight_only": {"type": "boolean"},
+            "max_wall_seconds": {"type": "integer", "minimum": 1, "maximum": 72000},
+            "max_attempted_optimizer_calls": {"type": "integer", "minimum": 1, "maximum": 18000},
+            "early_stop_budget_failure_max_ratio": {"type": "number", "exclusiveMinimum": 0},
+            "early_stop_budget_failure_min_relative_improvement": {"type": "number", "minimum": 0},
+            "early_stop_budget_failure_min_update": {"type": "integer", "minimum": 501, "maximum": 6000},
+            "early_stop_disconnected_organizer_review_update": {"type": "integer", "minimum": 501, "maximum": 6000},
+            "sample_seed": {"type": "integer"},
+            "preflight_row": {"type": "integer", "minimum": 0},
+            "baseline_layout_count": {"type": "integer", "minimum": 1, "maximum": 8},
+            "role_query_counts": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["volume", "hub_slab", "downstream_envelope", "near_turbine", "background"],
+              "properties": {
+                "volume": {"type": "integer", "minimum": 1},
+                "hub_slab": {"type": "integer", "minimum": 1},
+                "downstream_envelope": {"type": "integer", "minimum": 1},
+                "near_turbine": {"type": "integer", "minimum": 1},
+                "background": {"type": "integer", "minimum": 1}
+              }
+            },
+            "audit_query_counts": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["volume", "hub_slab", "downstream_envelope", "near_turbine", "background"],
+              "properties": {
+                "volume": {"type": "integer", "minimum": 1},
+                "hub_slab": {"type": "integer", "minimum": 1},
+                "downstream_envelope": {"type": "integer", "minimum": 1},
+                "near_turbine": {"type": "integer", "minimum": 1},
+                "background": {"type": "integer", "minimum": 1}
+              }
+            },
+            "organizer_hidden_dim": {"type": "integer", "minimum": 1},
+            "organizer_learning_rate": {"type": "number", "exclusiveMinimum": 0},
+            "organizer_weight_decay": {"type": "number", "minimum": 0},
+            "role_budget_delta": {"type": "number", "minimum": 0},
+            "role_budget_floor_mps": {"type": "number", "exclusiveMinimum": 0},
+            "risk_dual_learning_rate": {"type": "number", "minimum": 0},
+            "risk_dual_max": {"type": "number", "exclusiveMinimum": 0},
+            "risk_ema_rate": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+            "work_proxy_weight": {"type": "number", "minimum": 0},
+            "full_replay_interval": {"type": "integer", "minimum": 2},
+            "review_updates": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "integer", "minimum": 1, "maximum": 6000}
+            },
+            "full_grid_review_updates": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "integer", "minimum": 1, "maximum": 6000}
+            },
+            "fixed_g2_full_grid_review_updates": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {"type": "integer", "minimum": 1, "maximum": 6000}
+            },
+            "fixed_g2_grid_minimum_remaining_wall_seconds": {"type": "integer", "minimum": 1, "maximum": 72000},
+            "full_grid_chunk_size": {"type": "integer", "minimum": 1},
+            "receiver_chunk_size": {"type": "integer", "minimum": 1},
+            "role_catalogue_cache_max_bytes": {"type": "integer", "minimum": 1},
+            "anchor_measure_variant": {"enum": ["raw", "role_balanced"]},
+            "minimum_nonzero_reviews_to_restore_work": {"type": "integer", "minimum": 1},
+            "minimum_soft_qe_permission": {"type": "number", "exclusiveMinimum": 0}
+          }
+        },
         "port_curriculum": {
           "type": "object",
           "additionalProperties": false,

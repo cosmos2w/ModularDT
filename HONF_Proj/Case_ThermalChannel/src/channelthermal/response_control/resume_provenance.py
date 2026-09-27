@@ -114,6 +114,29 @@ def _require_equal(actual: Any, expected: Any, reason: str) -> None:
         raise ValueError(f"Resume provenance mismatch: {reason}.")
 
 
+def _validate_fit_arm_gate_accounting(
+    fit_arm: Mapping[str, Any], *, arm: str, required_update: int
+) -> None:
+    """Bind a resume checkpoint to the cumulative gate across fit segments."""
+
+    initial_update = int(fit_arm.get("initial_update", -1))
+    segment_updates = int(fit_arm.get("actual_optimizer_updates", -1))
+    segment_attempts = int(fit_arm.get("attempted_optimizer_steps", -1))
+    cumulative_attempts = int(fit_arm.get("total_attempted_optimizer_steps", -1))
+    final_update = int(fit_arm.get("final_update", -1))
+    if (
+        initial_update < 0
+        or segment_updates < 0
+        or initial_update + segment_updates != required_update
+        or final_update != required_update
+    ):
+        raise ValueError(f"Resume provenance mismatch: fit manifest does not end at u{required_update}.")
+    if segment_attempts != segment_updates or cumulative_attempts != required_update:
+        raise ValueError(
+            f"Resume provenance mismatch: {arm} attempt accounting differs from its completed updates."
+        )
+
+
 def validate_paired_resume_provenance(
     *,
     fit_manifest_path: str | Path,
@@ -287,10 +310,7 @@ def validate_paired_resume_provenance(
             fit_arm.get("total_attempted_optimizer_steps", -2)
         ):
             raise ValueError(f"Resume provenance mismatch: {arm} attempted-step count differs.")
-        if int(fit_arm.get("actual_optimizer_updates", -1)) != required_update or int(
-            fit_arm.get("final_update", -1)
-        ) != required_update:
-            raise ValueError(f"Resume provenance mismatch: fit manifest does not end at u{required_update}.")
+        _validate_fit_arm_gate_accounting(fit_arm, arm=arm, required_update=required_update)
         saved_training_config = dict(payload.get("training_config") or {})
         if arm.startswith("B_"):
             # Older B checkpoints omit additive response-control metadata.

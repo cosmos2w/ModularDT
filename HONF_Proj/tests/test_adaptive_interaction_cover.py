@@ -22,6 +22,7 @@ from honf_forward_core.interface_fields.adaptive_interaction_cover import (
     MechanismPlan,
     ReceiverAnchorUniverse,
     compile_cover_pairs,
+    compile_mechanism_execution_view,
 )
 
 
@@ -121,6 +122,128 @@ def test_typed_plan_hash_serialization_and_missing_key_full_access_ledger() -> N
     payload = implicit.to_dict()
     assert set(payload["explicit_bypass_keys"]) == {"MM", "ME", "EM", "QM", "QE"}
     assert MechanismPlan.from_dict(payload).canonical_hash() == implicit.canonical_hash()
+
+
+def test_compiled_execution_view_keeps_exact_plan_metadata_runtime_only(monkeypatch) -> None:
+    assert torch.cuda.is_available(), "this execution regression is assigned to physical GPU 2"
+    device = torch.device("cuda:0")
+    tree, _legacy = _fixture(device)
+    module_present = torch.tensor([1.0, 1.0, 0.0], device=device)
+    plan = MechanismPlan.full_access(tree, module_present, 2, phase="P0").with_split(0, 1.0)
+    queries = torch.tensor([[-0.1, 0.0], [0.0, 0.0], [0.1, 0.0]], device=device)
+    reference_access = tree.access(queries, plan.split_gates)
+    calls = {"tree_access": 0}
+    original_access = CaseLocalReceiverTree.access
+
+    def counted_access(self, queries, split_gates):
+        calls["tree_access"] += 1
+        return original_access(self, queries, split_gates)
+
+    monkeypatch.setattr(CaseLocalReceiverTree, "access", counted_access)
+    view = compile_mechanism_execution_view(
+        plan,
+        module_present=module_present,
+        environment_count=2,
+        phase="P0",
+    )
+
+    assert calls["tree_access"] == 1
+    assert view.matches(plan, phase="P0")
+    assert not view.matches(plan, phase="P1")
+    assert view.active_node_indices == (1, 2)
+    assert view.hard_execution_node_mask == (True, True, True, False, False, False, False)
+    assert view.parent_child_relations == ((0, 1, 2), (1, 3, 4), (2, 5, 6))
+    assert view.is_full_access("QM") and view.is_full_access("QE")
+    assert not view.has_differentiable_routing(("QM", "QE"))
+    assert view.source_indices("QM") == (
+        (), (0, 1), (0, 1), (), (), (), ()
+    )
+    assert view.action_classes("QM") == ((1, 2),)
+    torch.testing.assert_close(
+        view.receiver_access(queries, plan.split_gates), reference_access, rtol=0.0, atol=0.0
+    )
+    qm = view.summary("QM")
+    assert qm.raw_active_frontier_nodes == 2
+    assert qm.source_bearing_active_nodes == 2
+    assert qm.nonredundant_packet_count == 1
+    assert qm.source_union_count == 2
+    # Compiled views are execution state only and do not alter the serialized
+    # plan contract or its canonical identity.
+    restored = MechanismPlan.from_dict(plan.to_dict())
+    assert restored.canonical_hash() == plan.canonical_hash()
+    with torch.no_grad():
+        plan.split_gates[0].zero_()
+    assert not view.matches(plan, phase="P0")
+
+
+@pytest.mark.parametrize("root_gate", [0.0, 0.45, 1.0])
+@pytest.mark.parametrize("trainable_gate", [False, True])
+def test_compiled_receiver_access_matches_hard_and_soft_geometry_gradients(
+    root_gate: float, trainable_gate: bool,
+) -> None:
+    """Prepared split levels preserve exact values and live geometry gradients."""
+
+    assert torch.cuda.is_available(), "this execution regression is assigned to physical GPU 2"
+    device = torch.device("cuda:0")
+    initial_tree, _legacy = _fixture(device)
+    coordinates = initial_tree.universe.coordinates.detach().clone().requires_grad_(True)
+    coordinate_scale = initial_tree.universe.coordinate_scale.detach().clone().requires_grad_(True)
+    universe = ReceiverAnchorUniverse(
+        coordinates,
+        initial_tree.universe.weights,
+        initial_tree.universe.roles,
+        coordinate_scale,
+    )
+    tree = CaseLocalReceiverTree(
+        universe,
+        initial_tree.nodes,
+        initial_tree.overlap_fraction,
+        initial_tree.capacity_saturated,
+    )
+    module_present = torch.tensor([1.0, 1.0, 0.0], device=device)
+    plan = MechanismPlan.full_access(tree, module_present, 2, phase="P0")
+    gate_values = torch.zeros(len(tree.nodes), device=device)
+    gate_values[0] = root_gate
+    gate_values[1] = 0.35
+    gate_values[2] = 0.65
+    if trainable_gate:
+        gate_values.requires_grad_()
+    plan = replace(plan, split_gates=gate_values)
+    view = compile_mechanism_execution_view(
+        plan,
+        module_present=module_present,
+        environment_count=2,
+        phase="P0",
+    )
+    queries = torch.tensor(
+        [[-1.7, -0.2], [-0.4, 0.1], [0.3, 0.0], [1.8, 0.3]],
+        device=device,
+        requires_grad=True,
+    )
+    expected = tree.access(queries, plan.split_gates)
+    actual = view.receiver_access(queries, plan.split_gates)
+    torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+
+    weights = torch.arange(1, actual.numel() + 1, device=device, dtype=actual.dtype).reshape_as(actual)
+    inputs = [queries, coordinates, coordinate_scale]
+    if trainable_gate:
+        inputs.append(plan.split_gates)
+    expected_loss = (expected * weights).sum()
+    actual_loss = (actual * weights).sum()
+    expected_grads = (
+        torch.autograd.grad(expected_loss, inputs, retain_graph=True, allow_unused=True)
+        if expected_loss.requires_grad else (None,) * len(inputs)
+    )
+    actual_grads = (
+        torch.autograd.grad(actual_loss, inputs, retain_graph=True, allow_unused=True)
+        if actual_loss.requires_grad else (None,) * len(inputs)
+    )
+    for expected_grad, actual_grad, input_tensor in zip(expected_grads, actual_grads, inputs, strict=True):
+        if expected_grad is None:
+            expected_grad = torch.zeros_like(input_tensor)
+        if actual_grad is None:
+            actual_grad = torch.zeros_like(input_tensor)
+        torch.testing.assert_close(actual_grad, expected_grad, rtol=2.0e-6, atol=2.0e-7)
 
 
 def test_cover_continuity_chunk_order_source_relabel_and_empty_fallback() -> None:

@@ -6,14 +6,14 @@ import copy
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from honf_forward_core.config import UnifiedForwardConfig
 
 from .paths import PROJECT_ROOT, resolve_path
-
 
 CORE_TOP_LEVEL_KEYS = {
     "schema_version",
@@ -56,6 +56,44 @@ CORE_TRAINING_KEYS = {
     "max_train_batches_per_epoch",
     "max_val_batches",
     "init_checkpoint_path",
+    "joint_forward",
+}
+JOINT_FORWARD_KEYS = {
+    "source_checkpoint_path",
+    "typed_search_dir",
+    "max_updates",
+    "preflight_only",
+    "max_wall_seconds",
+    "max_attempted_optimizer_calls",
+    "early_stop_budget_failure_max_ratio",
+    "early_stop_budget_failure_min_relative_improvement",
+    "early_stop_budget_failure_min_update",
+    "early_stop_disconnected_organizer_review_update",
+    "sample_seed",
+    "preflight_row",
+    "baseline_layout_count",
+    "role_query_counts",
+    "audit_query_counts",
+    "organizer_hidden_dim",
+    "organizer_learning_rate",
+    "organizer_weight_decay",
+    "role_budget_delta",
+    "role_budget_floor_mps",
+    "risk_dual_learning_rate",
+    "risk_dual_max",
+    "risk_ema_rate",
+    "work_proxy_weight",
+    "full_replay_interval",
+    "review_updates",
+    "full_grid_review_updates",
+    "fixed_g2_full_grid_review_updates",
+    "fixed_g2_grid_minimum_remaining_wall_seconds",
+    "full_grid_chunk_size",
+    "receiver_chunk_size",
+    "role_catalogue_cache_max_bytes",
+    "anchor_measure_variant",
+    "minimum_nonzero_reviews_to_restore_work",
+    "minimum_soft_qe_permission",
 }
 PORT_CURRICULUM_KEYS = {
     "schedule",
@@ -130,6 +168,24 @@ def _validate_core_sections(core: Mapping[str, Any]) -> None:
     workflow = str(core.get("workflow", ""))
     if workflow not in {"forward", "local_module"}:
         raise ValueError("Core workflow must be 'forward' or 'local_module'.")
+    if "joint_forward" in training:
+        joint_forward = _mapping(training["joint_forward"], label="core.training.joint_forward")
+        if workflow != "forward" or str(case.get("id", "")) != "WindFarm":
+            raise ValueError("core.training.joint_forward is only valid for the WindFarm forward workflow.")
+        _reject_unknown(joint_forward, JOINT_FORWARD_KEYS, label="core.training.joint_forward")
+        missing_joint = [
+            key
+            for key in ("source_checkpoint_path", "typed_search_dir", "max_updates")
+            if key not in joint_forward
+        ]
+        if missing_joint:
+            raise ValueError(f"core.training.joint_forward is missing required values: {missing_joint}")
+        for key in ("source_checkpoint_path", "typed_search_dir"):
+            if not isinstance(joint_forward[key], str) or not joint_forward[key].strip():
+                raise ValueError(f"core.training.joint_forward.{key} must be a nonempty string.")
+        max_updates = joint_forward["max_updates"]
+        if isinstance(max_updates, bool) or not isinstance(max_updates, int) or not 1 <= max_updates <= 6000:
+            raise ValueError("core.training.joint_forward.max_updates must be an integer from 1 to 6000.")
     if workflow == "forward":
         _reject_unknown(model, {"core_honf"}, label="core.model")
         core_honf = _mapping(model.get("core_honf"), label="core.model.core_honf")
@@ -240,7 +296,7 @@ def load_config_bundle(
 
     case_ref = core.get("case")
     if not isinstance(case_ref, dict):
-        raise ValueError("Core configuration must contain a 'case' object.")
+        raise ValueError("Core configuration must contain a 'case' object.")  # noqa: TRY004
     case_path_value = case_ref.get("config")
     if not case_path_value:
         raise ValueError("Core configuration must set case.config.")
