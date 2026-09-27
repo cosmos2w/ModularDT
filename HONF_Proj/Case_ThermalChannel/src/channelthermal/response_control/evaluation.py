@@ -111,6 +111,40 @@ class SolidPeakMetric:
     absolute_error: float
 
 
+@dataclass(frozen=True)
+class SolidPeakResponseMetric:
+    family_id: str
+    evidence_source: str
+    variant: str
+    module_id: str
+    units: str
+    reference_delta: float
+    predicted_delta: float
+    absolute_error: float
+    reference_sign: int
+    predicted_sign: int
+    sign_correct: bool
+    reference_hottest_baseline_module: str
+    reference_hottest_trial_module: str
+    predicted_hottest_baseline_module: str
+    predicted_hottest_trial_module: str
+
+
+@dataclass(frozen=True)
+class SolidPeakResponseSummaryMetric:
+    family_id: str
+    evidence_source: str
+    variant: str
+    reduction: str
+    units: str
+    reference_delta: float
+    predicted_delta: float
+    absolute_error: float
+    reference_sign: int
+    predicted_sign: int
+    sign_correct: bool
+
+
 def _metric_rows(
     predicted: torch.Tensor,
     *,
@@ -220,6 +254,8 @@ def evaluate_stencil(
         "pressure": [],
         "solid_peaks": [],
         "solid_peak_summary": [],
+        "solid_peak_responses": [],
+        "solid_peak_response_summary": [],
     }
     records = [("baseline", stencil.baseline), *stencil.variants.items()]
     for label, record in records:
@@ -271,8 +307,12 @@ def evaluate_stencil(
             _design_like(record, absolute.role_values["solid_temperature"]),
         )
         slot_by_id = {module.module_id: index for index, module in enumerate(record.design.modules)}
-        peak_quantity = output.quantities.get("internal_temperature_max")
-        peak_units = peak_quantity.units if peak_quantity is not None else output.units_metadata.get("temperature", "unknown")
+        solid_role = output.roles["solid_temperature"]
+        temperature_channel = solid_role.channel_names.index("temperature")
+        # Per-module peak labels are reduced from this role's valid material
+        # receivers, so retain its declared channel units without substituting
+        # an undocumented SI label or a separate aggregate quantity's metadata.
+        peak_units = solid_role.channel_units[temperature_channel]
         target_peaks = {slot_by_id[module_id]: float(value) for module_id, value in output.module_peak_temperature.items()}
         predicted_values = [float(value.detach().cpu()) for _, value in sorted(peak_by_slot.items())]
         target_values = [value for _, value in sorted(target_peaks.items())]
@@ -348,6 +388,139 @@ def evaluate_stencil(
                 family_pressure_limit, None, None, None,
             )))
 
+        baseline_record = stencil.baseline
+        trial_record = stencil.variants[label]
+        baseline_output = baseline_record.output
+        trial_output = trial_record.output
+        assert baseline_output is not None and trial_output is not None
+        baseline_slots = module_peak_temperatures_from_role(
+            predictions.values["baseline"].role_values["solid_temperature"],
+            predictions.role_queries["solid_temperature"],
+            _design_like(baseline_record, predictions.values["baseline"].role_values["solid_temperature"]),
+        )
+        trial_slots = module_peak_temperatures_from_role(
+            predictions.values[label].role_values["solid_temperature"],
+            predictions.role_queries["solid_temperature"],
+            _design_like(trial_record, predictions.values[label].role_values["solid_temperature"]),
+        )
+        baseline_slot_by_id = {module.module_id: index for index, module in enumerate(baseline_record.design.modules)}
+        trial_slot_by_id = {module.module_id: index for index, module in enumerate(trial_record.design.modules)}
+        baseline_reference = {str(key): float(value) for key, value in baseline_output.module_peak_temperature.items()}
+        trial_reference = {str(key): float(value) for key, value in trial_output.module_peak_temperature.items()}
+        baseline_prediction = {
+            module_id: float(baseline_slots[slot].detach().cpu())
+            for module_id, slot in baseline_slot_by_id.items()
+            if slot in baseline_slots
+        }
+        trial_prediction = {
+            module_id: float(trial_slots[slot].detach().cpu())
+            for module_id, slot in trial_slot_by_id.items()
+            if slot in trial_slots
+        }
+        common_ids = sorted(
+            set(baseline_reference)
+            & set(trial_reference)
+            & set(baseline_prediction)
+            & set(trial_prediction)
+        )
+        if not common_ids:
+            raise ValueError(f"Finite per-module peak evaluation has no common module IDs for {label!r}.")
+        baseline_solid_role = baseline_output.roles["solid_temperature"]
+        trial_solid_role = trial_output.roles["solid_temperature"]
+        baseline_temperature_channel = baseline_solid_role.channel_names.index("temperature")
+        trial_temperature_channel = trial_solid_role.channel_names.index("temperature")
+        units = baseline_solid_role.channel_units[baseline_temperature_channel]
+        if units != trial_solid_role.channel_units[trial_temperature_channel]:
+            raise ValueError(f"Finite material peak response changes temperature units for {label!r}.")
+        reference_delta_by_id = {
+            module_id: trial_reference[module_id] - baseline_reference[module_id]
+            for module_id in common_ids
+        }
+        predicted_delta_by_id = {
+            module_id: trial_prediction[module_id] - baseline_prediction[module_id]
+            for module_id in common_ids
+        }
+        reference_hottest_baseline = max(common_ids, key=lambda key: baseline_reference[key])
+        reference_hottest_trial = max(common_ids, key=lambda key: trial_reference[key])
+        predicted_hottest_baseline = max(common_ids, key=lambda key: baseline_prediction[key])
+        predicted_hottest_trial = max(common_ids, key=lambda key: trial_prediction[key])
+        for module_id in common_ids:
+            reference_delta = reference_delta_by_id[module_id]
+            predicted_delta = predicted_delta_by_id[module_id]
+            reference_sign = int(np.sign(reference_delta))
+            predicted_sign = int(np.sign(predicted_delta))
+            rows["solid_peak_responses"].append(asdict(SolidPeakResponseMetric(
+                family,
+                source,
+                label,
+                module_id,
+                units,
+                reference_delta,
+                predicted_delta,
+                abs(predicted_delta - reference_delta),
+                reference_sign,
+                predicted_sign,
+                reference_sign == predicted_sign,
+                reference_hottest_baseline,
+                reference_hottest_trial,
+                predicted_hottest_baseline,
+                predicted_hottest_trial,
+            )))
+        true_reference_delta = max(trial_reference[key] for key in common_ids) - max(
+            baseline_reference[key] for key in common_ids
+        )
+        true_predicted_delta = max(trial_prediction[key] for key in common_ids) - max(
+            baseline_prediction[key] for key in common_ids
+        )
+        rows["solid_peak_response_summary"].append(asdict(SolidPeakResponseSummaryMetric(
+            family,
+            source,
+            label,
+            "true_module_max_delta",
+            units,
+            true_reference_delta,
+            true_predicted_delta,
+            abs(true_predicted_delta - true_reference_delta),
+            int(np.sign(true_reference_delta)),
+            int(np.sign(true_predicted_delta)),
+            bool(np.sign(true_reference_delta) == np.sign(true_predicted_delta)),
+        )))
+        baseline_smooth = float(smooth_module_peak(
+            {slot: torch.tensor(baseline_prediction[module_id], dtype=torch.float64)
+             for module_id, slot in baseline_slot_by_id.items() if module_id in common_ids},
+            smooth_peak_beta,
+        ).item())
+        trial_smooth = float(smooth_module_peak(
+            {slot: torch.tensor(trial_prediction[module_id], dtype=torch.float64)
+             for module_id, slot in trial_slot_by_id.items() if module_id in common_ids},
+            smooth_peak_beta,
+        ).item())
+        reference_baseline_smooth = float(smooth_module_peak(
+            {baseline_slot_by_id[module_id]: torch.tensor(baseline_reference[module_id], dtype=torch.float64)
+             for module_id in common_ids},
+            smooth_peak_beta,
+        ).item())
+        reference_trial_smooth = float(smooth_module_peak(
+            {trial_slot_by_id[module_id]: torch.tensor(trial_reference[module_id], dtype=torch.float64)
+             for module_id in common_ids},
+            smooth_peak_beta,
+        ).item())
+        smooth_reference_delta = reference_trial_smooth - reference_baseline_smooth
+        smooth_predicted_delta = trial_smooth - baseline_smooth
+        rows["solid_peak_response_summary"].append(asdict(SolidPeakResponseSummaryMetric(
+            family,
+            source,
+            label,
+            "smooth_module_max_delta",
+            units,
+            smooth_reference_delta,
+            smooth_predicted_delta,
+            abs(smooth_predicted_delta - smooth_reference_delta),
+            int(np.sign(smooth_reference_delta)),
+            int(np.sign(smooth_predicted_delta)),
+            bool(np.sign(smooth_reference_delta) == np.sign(smooth_predicted_delta)),
+        )))
+
     for spec in mixed_specs:
         if not {spec.joint_variant, spec.first_variant, spec.second_variant}.issubset(stencil.variants):
             continue
@@ -404,6 +577,8 @@ def evaluate_absolute_record(
         "pressure": [],
         "solid_peaks": [],
         "solid_peak_summary": [],
+        "solid_peak_responses": [],
+        "solid_peak_response_summary": [],
     }
     for role_name, target_role in record.output.roles.items():
         absolute_values = prediction.role_values[role_name]
@@ -505,6 +680,8 @@ __all__ = [
     "ChannelMetric",
     "PressureMetric",
     "SolidPeakMetric",
+    "SolidPeakResponseMetric",
+    "SolidPeakResponseSummaryMetric",
     "SolidPeakSummaryMetric",
     "evaluate_absolute_record",
     "evaluate_stencil",

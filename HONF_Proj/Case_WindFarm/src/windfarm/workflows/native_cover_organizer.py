@@ -11,9 +11,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
+import os
 import statistics
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -30,9 +32,14 @@ from honf_forward_core.interface_fields.adaptive_cover_oracle import (
     teacher_preservation_gate,
 )
 from honf_forward_core.interface_fields.adaptive_interaction_cover import (
+    INTERACTION_MECHANISMS,
     AdaptiveCoverPlan,
     CaseLocalReceiverTree,
+    InteractionContext,
+    InteractionPermissionKey,
+    MechanismPlan,
     compile_cover_pairs,
+    compile_cover_transport_pairs,
 )
 from honf_forward_core.interface_fields.input_cover_organizer import (
     InputOnlyCoverOrganizer,
@@ -56,8 +63,10 @@ from ..study_spatial import WeightedVelocityErrors, downstream_envelope, native_
 from .evaluate_forward import load_checkpoint
 from .native_cover_panel import (
     NativeProbeSet,
+    freeze_organizer_layout_split,
     make_disjoint_native_probes,
     select_training_layouts,
+    write_organizer_split_lock,
 )
 from .train_forward import _as_device_batch, _split_from_checkpoint
 
@@ -74,17 +83,46 @@ class _AllAccessPolicy(nn.Module):
 
 
 class _FixedPlanPolicy(nn.Module):
-    """Replay plans on the fresh geometry tree supplied by native preparation."""
+    """Replay plans only on the same source and anchor catalogue."""
 
     def __init__(self, plans: tuple[AdaptiveCoverPlan, ...]) -> None:
         super().__init__()
         self.plans = plans
 
     def plan_cases(self, encoded: Any, prepared_state: Any, trees: Any) -> tuple[AdaptiveCoverPlan, ...]:
-        del encoded, prepared_state
+        del prepared_state
         if len(trees) != len(self.plans):
             raise ValueError("fixed cover replay requires one saved plan per prepared case")
-        return tuple(replace(plan, tree=tree) for plan, tree in zip(self.plans, trees, strict=True))
+        rebound: list[AdaptiveCoverPlan] = []
+        for case, (plan, tree) in enumerate(zip(self.plans, trees, strict=True)):
+            saved = plan.tree
+            if (
+                saved.nodes != tree.nodes
+                or saved.overlap_fraction != tree.overlap_fraction
+                or saved.capacity_saturated != tree.capacity_saturated
+            ):
+                raise ValueError("fixed cover replay requires the same receiver tree topology")
+            for name in ("coordinates", "weights", "roles", "coordinate_scale"):
+                old = getattr(saved.universe, name)
+                current = getattr(tree.universe, name)
+                if old.shape != current.shape or not torch.equal(
+                    old.to(device=current.device, dtype=current.dtype), current
+                ):
+                    raise ValueError(f"fixed cover replay requires the same receiver {name}")
+            if int(encoded.module_present.shape[1]) != int(plan.module_membership.shape[1]):
+                raise ValueError("fixed cover replay requires the same module catalogue size")
+            if int(encoded.env_coords.shape[1]) != int(plan.environment_membership.shape[1]):
+                raise ValueError("fixed cover replay requires the same environment catalogue size")
+            environment = saved.universe.roles == 0
+            source_coords = saved.universe.coordinates[environment]
+            current_coords = encoded.env_coords[case]
+            if source_coords.shape != current_coords.shape or not torch.equal(
+                source_coords.to(device=current_coords.device, dtype=current_coords.dtype),
+                current_coords,
+            ):
+                raise ValueError("fixed cover replay requires the same environment source order")
+            rebound.append(replace(plan, tree=tree))
+        return tuple(rebound)
 
 
 @dataclass
@@ -267,6 +305,821 @@ def _input_state(prepared: Any) -> dict[str, torch.Tensor]:
         "environment_states": encoded.env_tokens,
         "global_state": encoded.global_token,
     }
+
+
+TYPED_SEARCH_MAX_EVALUATIONS_PER_ROW = 96
+TYPED_SEARCH_MAX_TOTAL_FORWARDS = 4096
+TYPED_SEARCH_BEAM_WIDTH = 4
+TYPED_TRAIN_LAYOUT_COUNT = 8
+TYPED_PROTECTED_ROLE_TEACHER_LIMIT = 0.10
+TYPED_REPORTED_TEACHER_GATES = (0.01, 0.05, 0.10)
+
+
+def _atomic_json_write(payload: Mapping[str, Any], destination: Path) -> None:
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
+    os.replace(temporary, destination)
+
+
+def _tensor_fingerprint_update(digest: Any, name: str, value: Any) -> None:
+    if value is None:
+        digest.update(name.encode("utf-8"))
+        digest.update(b"<none>")
+        return
+    if torch.is_tensor(value):
+        array = value.detach().contiguous().cpu().numpy()
+    else:
+        array = np.ascontiguousarray(np.asarray(value))
+    digest.update(name.encode("utf-8"))
+    digest.update(str(array.shape).encode("ascii"))
+    digest.update(str(array.dtype).encode("ascii"))
+    digest.update(array.tobytes())
+
+
+def _typed_input_hash(record: _PanelCase) -> str:
+    digest = hashlib.sha256()
+    for name in (
+        "module_centers", "module_present", "module_features", "global_context",
+        "env_coords", "env_features", "env_weights", "receiver_anchor_coords",
+        "receiver_anchor_weights", "receiver_anchor_roles", "query_xy", "query_features",
+        "target_field",
+    ):
+        _tensor_fingerprint_update(digest, name, getattr(record.search_batch, name, None))
+    _tensor_fingerprint_update(digest, "probe_flat_indices", record.search.flat_indices)
+    digest.update(str(record.case.wind_direction_deg).encode("ascii"))
+    return digest.hexdigest()
+
+
+def _typed_observation_cache_key(
+    *,
+    input_hash: str,
+    checkpoint_hash: str,
+    probe_hash: str,
+    mechanism: str,
+    plan_hash: str,
+) -> str:
+    payload = {
+        "input_hash": input_hash,
+        "checkpoint_sha256": checkpoint_hash,
+        "probe_hash": probe_hash,
+        "mechanism": mechanism,
+        "complete_plan_hash": plan_hash,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _typed_mechanism_receivers(
+    encoded: Any,
+    query_receivers: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    """Return the native receiver coordinates for each typed interaction."""
+
+    if encoded.module_present.shape[0] != 1:
+        raise ValueError("typed search work summaries require one encoded case")
+    module_valid = encoded.module_present[0] > 0.5
+    module_receivers = encoded.module_centers[0][module_valid]
+    environment_receivers = encoded.env_coords[0]
+    return {
+        "MM": module_receivers,
+        "ME": module_receivers,
+        "EM": environment_receivers,
+        "QM": query_receivers,
+        "QE": query_receivers,
+    }
+
+
+def _typed_work_summary(
+    plan: MechanismPlan,
+    encoded: Any,
+    query_receivers: torch.Tensor,
+    *,
+    include_root_child_support: bool = True,
+) -> dict[str, Any]:
+    """Measure each typed route on its native receiver and source axes.
+
+    ``frontier_summary`` supplies structural K/frontier counts, but its pair
+    count is the unfiltered ``alpha @ membership`` rectangle.  The native
+    executor applies module presence, environment measure, and MM self-pair
+    masks before compiling actual rows, so use the same core pair compilers
+    for the logical work objective and report structure separately.
+    """
+
+    if encoded.module_present.shape[0] != 1:
+        raise ValueError("typed search work summaries require one encoded case")
+    module_receivers = encoded.module_centers[0]
+    module_present = encoded.module_present[0]
+    environment_receivers = encoded.env_coords[0]
+    environment_weights = encoded.env_weights[0]
+    module_receiver_valid = module_present > 0.5
+    environment_source_valid = environment_weights > 0.0
+
+    receiver_axes = _typed_mechanism_receivers(encoded, query_receivers)
+    preparation_pairs = {
+        "MM": compile_cover_transport_pairs(
+            plan,
+            module_receivers,
+            source_role="module",
+            mechanism="MM",
+            phase=None,
+            module_present=module_present,
+            environment_weights=environment_weights,
+            receiver_valid=module_present,
+            exclude_self=True,
+        ),
+        "ME": compile_cover_transport_pairs(
+            plan,
+            module_receivers,
+            source_role="environment",
+            mechanism="ME",
+            phase=None,
+            module_present=module_present,
+            environment_weights=environment_weights,
+            receiver_valid=module_present,
+        ),
+        "EM": compile_cover_transport_pairs(
+            plan,
+            environment_receivers,
+            source_role="module",
+            mechanism="EM",
+            phase=None,
+            module_present=module_present,
+            environment_weights=environment_weights,
+        ),
+    }
+    query_module_pairs, query_environment_pairs, _query_ledger = compile_cover_pairs(
+        plan,
+        query_receivers,
+        module_present=module_present,
+        environment_weights=environment_weights,
+        phase=None,
+        include_path_diagnostics=False,
+    )
+    actual_pairs = {
+        **preparation_pairs,
+        "QM": query_module_pairs,
+        "QE": query_environment_pairs,
+    }
+
+    mechanisms: dict[str, dict[str, Any]] = {}
+    summaries = {}
+    valid_packet_counts: dict[str, int] = {}
+    root = plan.tree.nodes[0]
+    root_children = (
+        None
+        if root.left is None or root.right is None
+        else (int(root.left), int(root.right))
+    )
+    root_split_active = float(plan.split_gates[0].detach().cpu()) > 0.0
+    for mechanism in INTERACTION_MECHANISMS:
+        summary = plan.frontier_summary(
+            mechanism,
+            receivers=receiver_axes[mechanism],
+        )
+        summaries[mechanism] = summary
+        item: dict[str, Any] = summary.as_dict(prefix="cover")
+        source_valid = (
+            module_receiver_valid
+            if mechanism in {"MM", "EM", "QM"}
+            else environment_source_valid
+        )
+        packet_receiver_coordinates = {
+            "MM": module_receivers,
+            "ME": module_receivers,
+            "EM": environment_receivers,
+            "QM": query_receivers,
+            "QE": query_receivers,
+        }[mechanism]
+        receiver_valid = (
+            module_receiver_valid
+            if mechanism in {"MM", "ME"}
+            else torch.ones(
+                packet_receiver_coordinates.shape[0],
+                dtype=torch.bool,
+                device=packet_receiver_coordinates.device,
+            )
+        )
+        valid_membership = (
+            plan.permission_matrix(mechanism) > 0.0
+        ) & source_valid[None, :]
+        receiver_access = plan.tree.access(packet_receiver_coordinates, plan.split_gates)
+        active_receivers_by_node = (receiver_access > 0.0) & receiver_valid[:, None]
+        active_nodes = active_receivers_by_node.any(dim=0)
+        if mechanism == "MM":
+            # The native MM compiler excludes every receiver's self source.
+            # A packet with just one active module receiver cannot claim that
+            # same module as an actually reachable source.
+            for node_index in torch.nonzero(active_nodes, as_tuple=False).flatten().tolist():
+                receiver_ids = torch.nonzero(
+                    active_receivers_by_node[:, node_index], as_tuple=False
+                ).flatten()
+                if receiver_ids.numel() == 1:
+                    valid_membership[node_index, receiver_ids[0]] = False
+        valid_bearing_nodes = active_nodes & valid_membership.any(dim=1)
+        valid_signatures = {
+            tuple(bool(value) for value in row)
+            for row, active in zip(
+                valid_membership.detach().cpu().tolist(),
+                valid_bearing_nodes.detach().cpu().tolist(),
+                strict=True,
+            )
+            if active
+        }
+        native_valid_packet_count = len(valid_signatures)
+        valid_packet_counts[mechanism] = native_valid_packet_count
+        item[f"cover_{mechanism.lower()}_structural_source_bearing_active_nodes"] = (
+            summary.source_bearing_active_nodes
+        )
+        item[f"cover_{mechanism.lower()}_structural_nonredundant_packets"] = (
+            summary.nonredundant_packet_count
+        )
+        item[f"cover_{mechanism.lower()}_native_pair_reachable_source_bearing_nodes"] = int(
+            valid_bearing_nodes.sum().detach().cpu()
+        )
+        item[f"cover_{mechanism.lower()}_native_pair_reachable_distinct_packets"] = (
+            native_valid_packet_count
+        )
+        pairs = actual_pairs[mechanism]
+        source_indices = torch.unique(pairs.source_index, sorted=True)
+        # Replace the structural helper's unfiltered alpha-mask work with the
+        # exact native pair compiler's valid, measured source/receiver rows.
+        tag = mechanism.lower()
+        item[f"cover_{tag}_source_union_count"] = int(source_indices.numel())
+        item[f"cover_{tag}_unique_source_receiver_pairs"] = int(pairs.unique_pair_count)
+        item["native_source_indices"] = [
+            int(value) for value in source_indices.detach().cpu().tolist()
+        ]
+        item["source_axis"] = (
+            "module" if mechanism in {"MM", "EM", "QM"} else "environment"
+        )
+        item["native_receiver_count"] = int(receiver_axes[mechanism].shape[0])
+        item["native_valid_source_count"] = int(
+            module_receiver_valid.sum()
+            if mechanism in {"MM", "EM", "QM"}
+            else environment_source_valid.sum()
+        )
+
+        child_support: dict[str, list[int]] = {}
+        child_pair_counts: dict[str, int] = {}
+        if include_root_child_support and root_children is not None and root_split_active:
+            pair_receiver_coordinates = {
+                "MM": module_receivers,
+                "ME": module_receivers,
+                "EM": environment_receivers,
+                "QM": query_receivers,
+                "QE": query_receivers,
+            }[mechanism]
+            alpha = plan.tree.access(pair_receiver_coordinates, plan.split_gates)
+            source_valid = (
+                module_receiver_valid
+                if mechanism in {"MM", "EM", "QM"}
+                else environment_source_valid
+            )
+            receiver_valid = (
+                module_present > 0.5
+                if mechanism in {"MM", "ME"}
+                else torch.ones(
+                    pair_receiver_coordinates.shape[0],
+                    dtype=torch.bool,
+                    device=pair_receiver_coordinates.device,
+                )
+            )
+            permission = plan.permission_matrix(mechanism) > 0.0
+            def subtree_nodes(root_id: int) -> list[int]:
+                result: list[int] = []
+                pending = [root_id]
+                while pending:
+                    node_id = pending.pop()
+                    result.append(node_id)
+                    node = plan.tree.nodes[node_id]
+                    if not node.is_leaf:
+                        assert node.left is not None and node.right is not None
+                        pending.extend((int(node.left), int(node.right)))
+                return result
+
+            for child_id in root_children:
+                nodes = subtree_nodes(child_id)
+                active_nodes = (
+                    (alpha[:, nodes] > 0.0) & receiver_valid[:, None]
+                ).to(torch.float32)
+                allowed_sources = (
+                    permission[nodes]
+                    & source_valid[None, :]
+                ).to(torch.float32)
+                child_pair_support = (active_nodes @ allowed_sources) > 0.0
+                if mechanism == "MM":
+                    child_pair_support &= ~torch.eye(
+                        child_pair_support.shape[0],
+                        child_pair_support.shape[1],
+                        dtype=torch.bool,
+                        device=child_pair_support.device,
+                    )
+                selected_pairs = child_pair_support[
+                    pairs.receiver_index, pairs.source_index
+                ]
+                selected_pairs = (
+                    selected_pairs
+                    & source_valid[pairs.source_index]
+                )
+                child_pair_counts[str(child_id)] = int(selected_pairs.sum().detach().cpu())
+                support = torch.unique(pairs.source_index[selected_pairs], sorted=True)
+                child_support[str(child_id)] = [int(value) for value in support.detach().cpu().tolist()]
+        item["root_children_source_indices"] = child_support
+        item["root_children_unique_source_receiver_pairs"] = child_pair_counts
+        item["root_children_support_differs"] = (
+            None
+            if len(child_support) != 2
+            else child_support[str(root_children[0])] != child_support[str(root_children[1])]
+        )
+        item["root_split_active"] = root_split_active
+        mechanisms[mechanism] = item
+
+    flattened = {key: value for item in mechanisms.values() for key, value in item.items()}
+    pair_count = sum(item.unique_pair_count for item in actual_pairs.values())
+    structural_packet_count = sum(
+        int(summary.nonredundant_packet_count) for summary in summaries.values()
+    )
+    native_valid_packet_count = sum(valid_packet_counts.values())
+    return {
+        "mechanisms": mechanisms,
+        "structural_counters": flattened,
+        "total_unique_source_receiver_pairs_across_mechanisms": pair_count,
+        "total_structural_nonredundant_packets_across_mechanisms": structural_packet_count,
+        "total_native_pair_reachable_distinct_packets_across_mechanisms": native_valid_packet_count,
+        "logical_work_score": float(pair_count + 0.05 * native_valid_packet_count),
+        "active_group_count_on_anchor_universe": int(plan.active_group_count()),
+        "pair_work_semantics": (
+            "exact valid pair rows from native core compilers: MM excludes self and padded modules; "
+            "ME uses present module receivers and positive environment weights; EM uses all environment "
+            "receiver slots and present module sources; QM/QE use Q query receivers and valid sources"
+        ),
+        "logical_work_score_semantics": (
+            "heuristic score equal to exact valid native pair rows plus 0.05 times the count of "
+            "receiver-conditioned, source-valid permission signatures on native receiver axes; MM self-pair "
+            "reachability is excluded, and the packet term remains a structural penalty, not executed work or latency"
+        ),
+        "explicit_bypass_keys": list(plan.explicit_bypass_keys),
+    }
+
+
+def _teacher_gate_reason_list(reason: str | Sequence[str]) -> list[str]:
+    """Normalize the core gate's single reason string without splitting text."""
+
+    if isinstance(reason, str):
+        return [] if reason in {"teacher_preserved", "adequate"} else [reason]
+    return [str(item) for item in reason]
+
+
+def _typed_teacher_gate_frontier(
+    observation: Any,
+    protected_roles: Mapping[str, Any],
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for threshold in TYPED_REPORTED_TEACHER_GATES:
+        passed, reasons = teacher_preservation_gate(
+            observation,
+            {role: TeacherDistortionLimit(threshold) for role in protected_roles},
+        )
+        result[f"{threshold:.2f}"] = {
+            "passed_all_protected_roles": bool(passed),
+            "limit_per_role": threshold,
+            "reasons": _teacher_gate_reason_list(reasons),
+        }
+    return result
+
+
+def _aggregate_typed_logical_frontier(row_results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for threshold in TYPED_REPORTED_TEACHER_GATES:
+        key = f"{threshold:.2f}"
+        available = [
+            row["logical_work_frontier_by_teacher_gate"][key]
+            for row in row_results
+            if key in row.get("logical_work_frontier_by_teacher_gate", {})
+        ]
+        feasible = [
+            item for item in available
+            if item.get("best_candidate_total_unique_source_receiver_pairs") is not None
+        ]
+        best = min(
+            feasible,
+            key=lambda item: (
+                int(item["best_candidate_total_unique_source_receiver_pairs"]),
+                str(item["best_candidate_plan_hash"]),
+            ),
+            default=None,
+        )
+        result[key] = {
+            "scope": "aggregate over observed frozen-train search probes; no development rows used",
+            "qualifying_candidate_observation_count": sum(
+                int(item.get("qualifying_candidate_observation_count", 0)) for item in available
+            ),
+            "training_rows_with_any_qualifying_candidate": sum(
+                item.get("qualifying_candidate_observation_count", 0) > 0 for item in available
+            ),
+            "best_candidate_plan_hash": None if best is None else best["best_candidate_plan_hash"],
+            "best_candidate_total_unique_source_receiver_pairs": (
+                None if best is None else int(best["best_candidate_total_unique_source_receiver_pairs"])
+            ),
+        }
+    return result
+
+
+def _typed_plan_supervision(plan: MechanismPlan) -> dict[str, Any]:
+    """Build recursive labels only for reachable split and permission rows."""
+
+    active_nodes = _typed_reachable_nodes(plan, plan.tree.universe.coordinates)
+    active_cpu = active_nodes.detach().cpu()
+    internal = torch.as_tensor(
+        [not node.is_leaf for node in plan.tree.nodes],
+        device=plan.split_gates.device,
+        dtype=torch.bool,
+    )
+    split_observed = active_nodes & internal
+    split_targets = plan.split_gates.detach().cpu()
+    mechanism_targets: dict[str, list[list[float]]] = {}
+    mechanism_observed: dict[str, list[list[bool]]] = {}
+    module_valid = plan.module_present.detach() > 0.5
+    for mechanism in INTERACTION_MECHANISMS:
+        target = plan.permission_matrix(mechanism).detach().cpu()
+        observed = torch.zeros_like(target, dtype=torch.bool)
+        for node_index in torch.nonzero(active_nodes, as_tuple=False).flatten().tolist():
+            if mechanism in {"MM", "EM", "QM"}:
+                observed[node_index] = module_valid.detach().cpu()
+            else:
+                observed[node_index] = True
+        mechanism_targets[mechanism] = target.tolist()
+        mechanism_observed[mechanism] = observed.tolist()
+    return {
+        "schema": "honf_typed_receiver_local_supervision_v1",
+        "semantics": "one complete typed plan; labels are exposed recursively only for reachable nodes and present source slots",
+        "split_targets": split_targets.tolist(),
+        "split_observed": split_observed.detach().cpu().tolist(),
+        "mechanism_targets": mechanism_targets,
+        "mechanism_observed": mechanism_observed,
+        "reachable_node_ids": torch.nonzero(active_cpu, as_tuple=False).flatten().tolist(),
+        "unreachable_node_count": int((~active_cpu).sum()),
+        "explicit_bypass_keys": list(plan.explicit_bypass_keys),
+    }
+
+
+def _typed_reachable_nodes(plan: MechanismPlan, receivers: torch.Tensor) -> torch.Tensor:
+    """Mark nodes reached before applying each node's own split gate."""
+
+    active = (plan.tree.access(receivers, plan.split_gates) > 0).any(dim=0)
+    parents: dict[int, int] = {}
+    for parent, node in enumerate(plan.tree.nodes):
+        if node.left is not None:
+            parents[int(node.left)] = parent
+            assert node.right is not None
+            parents[int(node.right)] = parent
+    active = active.clone()
+    for node_index in torch.nonzero(active, as_tuple=False).flatten().tolist():
+        parent = parents.get(int(node_index))
+        while parent is not None:
+            active[parent] = True
+            parent = parents.get(parent)
+    if len(plan.tree.nodes):
+        active[0] = True
+    return active
+
+
+def _typed_identity_split(plan: MechanismPlan) -> MechanismPlan:
+    if plan.tree.nodes[0].is_leaf:
+        raise ValueError("receiver-local typed search requires a splittable root receiver node")
+    return plan.with_split(0, 1.0)
+
+
+def _merge_equivalent_root_children(plan: MechanismPlan) -> MechanismPlan:
+    """Collapse equivalent root children when their descendant splits are dormant."""
+
+    root = plan.tree.nodes[0]
+    if root.left is None or root.right is None:
+        return plan
+    left_id, right_id = int(root.left), int(root.right)
+    if float(plan.split_gates[0].detach().cpu()) < 1.0:
+        return plan
+
+    def has_active_subtree_split(node_id: int) -> bool:
+        pending = [node_id]
+        while pending:
+            current = pending.pop()
+            node = plan.tree.nodes[current]
+            if node.is_leaf:
+                continue
+            # Any positive gate activates descendants through the native
+            # smooth endpoint gate, so only exact-zero descendant splits are
+            # dormant and safe to discard with the redundant root split.
+            if float(plan.split_gates[current].detach().cpu()) > 0.0:
+                return True
+            assert node.left is not None and node.right is not None
+            pending.extend((int(node.left), int(node.right)))
+        return False
+
+    if has_active_subtree_split(left_id) or has_active_subtree_split(right_id):
+        return plan
+    phases = sorted({key.phase for key in plan.permissions if key.phase is not None})
+    contexts: tuple[str | None, ...] = (None, *phases)
+    for mechanism in INTERACTION_MECHANISMS:
+        for phase in contexts:
+            matrix = plan.permission_matrix(mechanism, phase=phase)
+            if not torch.equal(matrix[left_id], matrix[right_id]):
+                return plan
+
+    gates = plan.split_gates.clone()
+    gates[0] = 0.0
+    # Keep the declared key set exactly as supplied.  Adding a missing base
+    # permission would erase its explicit full-access-bypass provenance, and
+    # materializing inherited phase rows would turn inheritance into an
+    # override.  Only existing rows need to move to the merged root.
+    permissions: dict[InteractionPermissionKey, torch.Tensor] = {}
+    for key, value in plan.permissions.items():
+        matrix = value.clone()
+        matrix[0] = matrix[left_id]
+        permissions[key] = matrix
+    return MechanismPlan(
+        plan.tree,
+        gates,
+        plan.module_present,
+        plan.environment_count,
+        permissions,
+    )
+
+
+def _prepare_typed_plan(
+    model: Any,
+    batch: Any,
+    plan: MechanismPlan,
+    *,
+    device: torch.device,
+) -> tuple[Any, Any, InteractionContext]:
+    """Call the native core directly so each typed replay has explicit context."""
+
+    del device
+    core = model.core
+    encoded = core.encode_case(batch)
+    context = InteractionContext(receiver_role="query")
+    prepared = core.prepare(
+        encoded,
+        encoded.module_tokens,
+        fixed_cover_plans=(plan,),
+        interaction_context=context,
+    )
+    return prepared, encoded, context
+
+
+def _typed_replay_plan(
+    model: Any,
+    batch: Any,
+    plan: MechanismPlan,
+    *,
+    device: torch.device,
+    synchronize: bool = True,
+    include_aux: bool = True,
+) -> tuple[Any, torch.Tensor, dict[str, Any], float, float]:
+    model.set_native_interaction_policy(None)
+    if synchronize:
+        prepared_bundle, prepare_ms = _timed(
+            lambda: _prepare_typed_plan(model, batch, plan, device=device), device
+        )
+    else:
+        started = time.perf_counter()
+        prepared_bundle = _prepare_typed_plan(model, batch, plan, device=device)
+        prepare_ms = (time.perf_counter() - started) * 1000.0
+    prepared, _encoded, context = prepared_bundle
+    query, features = _batch_query_tensors(batch)
+    def decode() -> Any:
+        return model.core.decode_queries(
+            prepared,
+            query,
+            query_features=features,
+            return_interaction_aux=include_aux,
+            interaction_context=context,
+        )
+    if synchronize:
+        output, decode_ms = _timed(decode, device)
+    else:
+        started = time.perf_counter()
+        output = decode()
+        decode_ms = (time.perf_counter() - started) * 1000.0
+    normalizer: VelocityNormalizer = model.velocity_transform
+    mean = query.new_tensor(normalizer.mean)
+    scale = query.new_tensor(normalizer.safe_std)
+    physical = (output["pred_field"] * scale + mean) * float(normalizer.u_ref_mps)
+    return prepared, physical.detach(), output, float(prepare_ms), float(decode_ms)
+
+
+def _typed_gradient_removal_scores(
+    model: Any,
+    record: _PanelCase,
+    plan: MechanismPlan,
+    *,
+    device: torch.device,
+    progress_callback: Callable[[str], None] | None = None,
+) -> tuple[dict[str, torch.Tensor], dict[str, float]]:
+    """Rank local removals from the native-reference loss gradient at full support."""
+
+    module_permissions = {
+        mechanism: plan.permission_matrix(mechanism).detach().clone().requires_grad_(True)
+        for mechanism in INTERACTION_MECHANISMS
+    }
+    differentiable_plan = MechanismPlan(
+        plan.tree,
+        plan.split_gates.detach(),
+        plan.module_present.detach(),
+        plan.environment_count,
+        module_permissions,
+    )
+    model.set_native_interaction_policy(None)
+    prepared, encoded, context = _prepare_typed_plan(
+        model, record.search_batch, differentiable_plan, device=device
+    )
+    if progress_callback is not None:
+        progress_callback("prepare_complete")
+    query, features = _batch_query_tensors(record.search_batch)
+    output = model.core.decode_queries(
+        prepared,
+        query,
+        query_features=features,
+        interaction_context=context,
+    )
+    if progress_callback is not None:
+        progress_callback("decode_complete")
+    target = record.search_batch.target_field
+    loss = torch.mean((output["pred_field"] - target) ** 2)
+    variables = tuple(module_permissions[mechanism] for mechanism in INTERACTION_MECHANISMS)
+    gradients = torch.autograd.grad(loss, variables, allow_unused=True)
+    scores = {
+        mechanism: (
+            -gradient.detach()
+            if gradient is not None
+            else torch.zeros_like(module_permissions[mechanism])
+        )
+        for mechanism, gradient in zip(INTERACTION_MECHANISMS, gradients, strict=True)
+    }
+    gradient_norms = {
+        mechanism: float(torch.linalg.vector_norm(value).detach().cpu())
+        for mechanism, value in scores.items()
+    }
+    if not bool(torch.isfinite(loss)) or any(not math.isfinite(value) for value in gradient_norms.values()):
+        raise FloatingPointError("typed local-search gate-gradient ranking is nonfinite")
+    del encoded
+    return scores, {"native_reference_mse": float(loss.detach().cpu()), "removal_gradient_l2": gradient_norms}
+
+
+def _typed_flow_frame_environment_blocks(
+    plan: MechanismPlan,
+    encoded: Any,
+    node_id: int,
+    *,
+    bins_per_axis: int = 4,
+) -> tuple[tuple[int, ...], ...]:
+    """Partition sources into flow-frame global quantile cells.
+
+    The child identifies which receiver-plan row is edited, but it does not
+    change the source partition. Subtracting a child center before quantiling
+    leaves the cell memberships unchanged, so these are global cells.
+    """
+
+    universe = plan.tree.universe
+    scale = universe.coordinate_scale.to(
+        device=encoded.env_coords.device, dtype=encoded.env_coords.dtype
+    )
+    del node_id
+    source_xy = encoded.env_coords[0, :, :2] / scale[:2]
+    coordinates = source_xy.detach().cpu().numpy().astype(np.float64, copy=False)
+    x_edges = np.quantile(coordinates[:, 0], np.linspace(0.0, 1.0, bins_per_axis + 1))
+    y_edges = np.quantile(coordinates[:, 1], np.linspace(0.0, 1.0, bins_per_axis + 1))
+    x_bin = np.searchsorted(x_edges[1:-1], coordinates[:, 0], side="right")
+    y_bin = np.searchsorted(y_edges[1:-1], coordinates[:, 1], side="right")
+    buckets = []
+    for x_index in range(bins_per_axis):
+        for y_index in range(bins_per_axis):
+            members = np.flatnonzero((x_bin == x_index) & (y_bin == y_index))
+            if members.size:
+                buckets.append(tuple(map(int, members.tolist())))
+    return tuple(buckets)
+
+
+def _typed_child_local_proposals(
+    plan: MechanismPlan,
+    encoded: Any,
+    removal_scores: Mapping[str, torch.Tensor],
+    *,
+    train_evidence_id: str,
+    top_module_sources_per_child_mechanism: int = 2,
+    top_environment_blocks_per_child_mechanism: int = 4,
+) -> tuple[dict[str, Any], ...]:
+    """Make one-child/one-mechanism omission proposals from a cumulative state."""
+
+    root = plan.tree.nodes[0]
+    if root.is_leaf or root.left is None or root.right is None:
+        return ()
+    proposals: list[dict[str, Any]] = []
+    module_centers = encoded.module_centers[0]
+    module_valid = encoded.module_present[0] > 0.5
+    for node_id in (int(root.left), int(root.right)):
+        receiver_ids = torch.as_tensor(
+            plan.tree.nodes[node_id].anchor_indices,
+            device=plan.tree.universe.coordinates.device,
+            dtype=torch.long,
+        )
+        receiver_center = (
+            plan.tree.universe.coordinates.index_select(0, receiver_ids).mean(dim=0)
+            / plan.tree.universe.coordinate_scale
+        ).to(device=module_centers.device, dtype=module_centers.dtype)
+        module_coordinates = module_centers / encoded.coordinate_scale[0]
+        distances = torch.linalg.vector_norm(module_coordinates - receiver_center, dim=-1)
+        valid_ids = torch.nonzero(module_valid, as_tuple=False).flatten().tolist()
+        if valid_ids:
+            nearest = min(valid_ids, key=lambda index: (float(distances[index].detach().cpu()), int(index)))
+        else:
+            nearest = -1
+        for mechanism in ("MM", "EM", "QM"):
+            matrix = plan.permission_matrix(mechanism)
+            eligible = [
+                source for source in valid_ids
+                if source != nearest and float(matrix[node_id, source].detach().cpu()) > 0.5
+            ]
+            score = removal_scores[mechanism]
+            eligible.sort(key=lambda source: (float(score[node_id, source].detach().cpu()), int(source)))
+            for source in eligible[:top_module_sources_per_child_mechanism]:
+                changed = matrix.clone()
+                changed[node_id, source] = 0.0
+                candidate = plan.with_permission(mechanism, changed)
+                proposals.append({
+                    "kind": "one_child_module_source_remove",
+                    "node": node_id,
+                    "mechanism": mechanism,
+                    "source_indices": [int(source)],
+                    "ranked_native_loss_delta": float(score[node_id, source].detach().cpu()),
+                    "train_evidence_id": train_evidence_id,
+                    "parent_plan_hash": plan.canonical_hash(),
+                    "plan": candidate,
+                })
+
+        blocks = _typed_flow_frame_environment_blocks(plan, encoded, node_id)
+        for mechanism in ("ME", "QE"):
+            matrix = plan.permission_matrix(mechanism)
+            score = removal_scores[mechanism]
+            ranked_blocks = []
+            for block_index, members in enumerate(blocks):
+                member_tensor = torch.as_tensor(members, device=matrix.device, dtype=torch.long)
+                if not bool((matrix[node_id].index_select(0, member_tensor) > 0.5).any()):
+                    continue
+                delta = float(score[node_id].index_select(0, member_tensor).sum().detach().cpu())
+                ranked_blocks.append((delta, block_index, members))
+            ranked_blocks.sort(key=lambda item: (item[0], item[1]))
+            for delta, block_index, members in ranked_blocks[:top_environment_blocks_per_child_mechanism]:
+                changed = matrix.clone()
+                changed[node_id, torch.as_tensor(members, device=matrix.device)] = 0.0
+                candidate = plan.with_permission(mechanism, changed)
+                proposals.append({
+                    "kind": "one_child_flow_frame_global_environment_cell_remove",
+                    "node": node_id,
+                    "mechanism": mechanism,
+                    "source_indices": list(members),
+                    "block_index": int(block_index),
+                    "ranked_native_loss_delta": float(delta),
+                    "flow_frame": {
+                        "x": "native downstream axis; no second wind-direction rotation",
+                        "y": "native crosswind axis",
+                        "partition": "4 by 4 flow-frame global quantile cells",
+                    },
+                    "train_evidence_id": train_evidence_id,
+                    "parent_plan_hash": plan.canonical_hash(),
+                    "plan": candidate,
+                })
+    return tuple(proposals)
+
+
+def _typed_nondominated_beam(
+    states: Sequence[dict[str, Any]], *, width: int = TYPED_SEARCH_BEAM_WIDTH
+) -> list[dict[str, Any]]:
+    unique: dict[str, dict[str, Any]] = {}
+    for state in states:
+        unique.setdefault(str(state["plan_hash"]), state)
+    candidates = list(unique.values())
+    frontier: list[dict[str, Any]] = []
+    for item in candidates:
+        cost = int(item["logical_work"]["total_unique_source_receiver_pairs_across_mechanisms"])
+        error = float(item["worst_teacher_distortion"])
+        dominated = any(
+            int(other["logical_work"]["total_unique_source_receiver_pairs_across_mechanisms"]) <= cost
+            and float(other["worst_teacher_distortion"]) <= error
+            and (
+                int(other["logical_work"]["total_unique_source_receiver_pairs_across_mechanisms"]) < cost
+                or float(other["worst_teacher_distortion"]) < error
+            )
+            for other in candidates if other["plan_hash"] != item["plan_hash"]
+        )
+        if not dominated:
+            frontier.append(item)
+    frontier.sort(key=lambda item: (
+        int(item["logical_work"]["total_unique_source_receiver_pairs_across_mechanisms"]),
+        float(item["worst_teacher_distortion"]),
+        str(item["plan_hash"]),
+    ))
+    return frontier[:width]
 
 
 def _native_cover_proposals(
@@ -1288,6 +2141,10 @@ def _freeze_training_panel(
     )
     split = _split_from_checkpoint(view, payload)
     layouts = select_training_layouts(view, split.train, count=layout_count)
+    organizer_split = freeze_organizer_layout_split(layouts)
+    active_layout_indices = set(
+        map(int, organizer_split["training_layout_indices"][:active_layouts])
+    )
     raw_anchor_mass_rows = []
     for layout in layouts:
         for row in layout.rows:
@@ -1312,6 +2169,7 @@ def _freeze_training_panel(
         "layout_count": layout_count,
         "active_layouts_for_this_run": active_layouts,
         "anchor_measure_variant": anchor_measure_variant,
+        "organizer_split_frozen_before_new_outcomes": organizer_split,
         "raw_receiver_anchor_role_masses": raw_anchor_mass_rows,
         "tree_index_measure_rule": (
             "raw WindFarm receiver-anchor weights"
@@ -1330,7 +2188,7 @@ def _freeze_training_panel(
                 "training_rows_direction_order": list(item.rows),
                 "turbine_count": item.turbine_count,
                 "geometry_feature_vector": list(item.feature_vector),
-                "activated_in_this_run": index < active_layouts,
+                "activated_in_this_run": int(item.layout_index) in active_layout_indices,
             }
             for index, item in enumerate(layouts)
         ],
@@ -1362,14 +2220,1147 @@ def write_training_panel_manifest(
         active_layouts=active_layouts,
         anchor_measure_variant=anchor_measure_variant,
     )
+    split_lock = write_organizer_split_lock(
+        layouts,
+        checkpoint_sha256=checkpoint_hash,
+        output_dir=destination,
+    )
     return {
         "manifest_path": str(destination / "panel_manifest.json"),
         "checkpoint_sha256": checkpoint_hash,
+        "organizer_split_sha256": manifest["organizer_split_frozen_before_new_outcomes"]["split_sha256"],
+        "organizer_split_lock_path": split_lock["path"],
+        "organizer_split_lock_sha256": split_lock["artifact_sha256"],
+        "organizer_split_frozen_at_utc": split_lock["frozen_at_utc"],
         "training_row_count": int(split.train.size),
         "selected_layout_count": len(layouts),
         "active_layout_count": int(manifest["active_layouts_for_this_run"]),
-        "active_direction_rows": [row for item in layouts[:active_layouts] for row in item.rows],
+        "active_direction_rows": [
+            row for item in _active_organizer_training_layouts(layouts, active_layouts) for row in item.rows
+        ],
     }
+
+
+def run_incremental_typed_search(
+    *,
+    checkpoint_path: str | Path,
+    volume_path: str | Path,
+    compact_path: str | Path,
+    device: str | torch.device,
+    output_dir: str | Path,
+    query_count: int = 1024,
+    seed: int = 2103,
+    candidate_evaluations_per_row: int = TYPED_SEARCH_MAX_EVALUATIONS_PER_ROW,
+    max_total_forwards: int = TYPED_SEARCH_MAX_TOTAL_FORWARDS,
+    anchor_measure_variant: str = "raw",
+    training_rows: Sequence[int] | None = None,
+) -> dict[str, Any]:
+    """Search cumulative hard typed plans by one child/mechanism omission at a time."""
+
+    if query_count != 1024:
+        raise ValueError("formal WindFarm typed search is frozen to disjoint Q1024 probes")
+    if not 1 <= candidate_evaluations_per_row <= TYPED_SEARCH_MAX_EVALUATIONS_PER_ROW:
+        raise ValueError(
+            f"typed search is capped at {TYPED_SEARCH_MAX_EVALUATIONS_PER_ROW} candidate forwards per row"
+        )
+    if max_total_forwards < 1 or max_total_forwards > TYPED_SEARCH_MAX_TOTAL_FORWARDS:
+        raise ValueError(f"typed search total forward cap is at most {TYPED_SEARCH_MAX_TOTAL_FORWARDS}")
+    destination = Path(output_dir).expanduser().resolve()
+    if "generated" not in destination.parts:
+        raise ValueError("typed search outputs must stay under diagnostics/generated")
+    destination.mkdir(parents=True, exist_ok=True)
+    observations_path = destination / "typed_candidate_observations.jsonl"
+    progress_path = destination / "typed_search_progress.json"
+    if observations_path.exists() or progress_path.exists():
+        raise FileExistsError("typed search output already exists; use a fresh ignored run directory")
+
+    (
+        checkpoint,
+        payload,
+        checkpoint_hash,
+        view,
+        _split,
+        layouts,
+        _manifest_path,
+        panel_manifest,
+    ) = _freeze_training_panel(
+        checkpoint_path=checkpoint_path,
+        volume_path=volume_path,
+        compact_path=compact_path,
+        output_dir=destination,
+        layout_count=12,
+        active_layouts=TYPED_TRAIN_LAYOUT_COUNT,
+        anchor_measure_variant=anchor_measure_variant,
+    )
+    frozen_split = freeze_organizer_layout_split(layouts)
+    split_lock = write_organizer_split_lock(
+        layouts, checkpoint_sha256=checkpoint_hash, output_dir=destination
+    )
+    active_layouts = _active_organizer_training_layouts(layouts, TYPED_TRAIN_LAYOUT_COUNT)
+    all_active_rows = [int(row) for layout in active_layouts for row in layout.rows]
+    expected_rows = list(map(int, frozen_split["training_rows_direction_order"]))
+    if all_active_rows != expected_rows:
+        raise RuntimeError("typed search rows do not match the pre-outcome frozen eight-layout train order")
+    if training_rows is None:
+        active_rows = list(expected_rows)
+    else:
+        requested_rows = list(map(int, training_rows))
+        if not requested_rows or len(set(requested_rows)) != len(requested_rows):
+            raise ValueError("typed row stage requires a nonempty list of unique training-row indices")
+        if not set(requested_rows).issubset(expected_rows):
+            raise ValueError("typed row stage may include only frozen training rows")
+        requested_set = set(requested_rows)
+        active_rows = [row for row in expected_rows if row in requested_set]
+        for layout in active_layouts:
+            layout_rows = set(map(int, layout.rows))
+            if layout_rows.intersection(requested_set) and not layout_rows.issubset(requested_set):
+                raise ValueError(
+                    f"typed row stage must keep all three directions for layout {layout.layout_index} together"
+                )
+    stage_layout_indices = [
+        int(layout.layout_index)
+        for layout in active_layouts
+        if set(map(int, layout.rows)).intersection(active_rows)
+    ]
+    dev_rows = set(map(int, frozen_split["development_rows_direction_order"]))
+    if dev_rows.intersection(active_rows):
+        raise RuntimeError("a frozen development direction entered typed search")
+    panel_manifest["typed_search_train_layout_indices"] = list(frozen_split["training_layout_indices"])
+    panel_manifest["typed_search_development_layout_indices"] = list(frozen_split["development_layout_indices"])
+    panel_manifest["typed_search_split_lock_path"] = split_lock["path"]
+    panel_manifest["typed_search_split_lock_sha256"] = split_lock["artifact_sha256"]
+    _atomic_json_write(panel_manifest, destination / "panel_manifest.json")
+
+    target_device = torch.device(device)
+    normalizer = VelocityNormalizer.from_dict(dict(payload["normalization"]))
+    first_case = view.run(active_rows[0])
+    first_search, _first_verification = make_disjoint_native_probes(
+        first_case, query_count=query_count, seed=seed
+    )
+    materialization_batch = _model_batch(_probe_batch(first_case, first_search, normalizer), target_device)
+    model, _loaded = load_checkpoint(
+        checkpoint, device=target_device, materialization_batch=materialization_batch
+    )
+    if model.architecture != "dense_pairwise_field":
+        raise ValueError("typed search requires the exact frozen Run2103 Dense teacher")
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    model.eval()
+    teacher_checkpoint_id = f"Run2103:e2475:{checkpoint_hash[:16]}"
+
+    records: list[_PanelCase] = []
+    baseline_timings: list[dict[str, Any]] = []
+    for row in active_rows:
+        record, timing = _build_panel_case(
+            model,
+            view.run(row),
+            query_count=query_count,
+            seed=seed,
+            teacher_checkpoint_id=teacher_checkpoint_id,
+            device=target_device,
+            anchor_measure_variant=anchor_measure_variant,
+        )
+        records.append(record)
+        baseline_timings.append(timing)
+
+    # Count complete model outputs, including the one materialization forward
+    # and the four Dense/all-access search/verification predictions per row.
+    total_forward_count = 1 + 4 * len(records)
+    total_candidate_forward_count = 0
+    total_gradient_forward_count = 0
+    total_identity_forward_count = 0
+    total_verification_forward_count = 0
+    total_prepare_calls = 1 + 2 * len(records)
+    total_decode_calls = 1 + 4 * len(records)
+    completed_rows: list[dict[str, Any]] = []
+    progress: dict[str, Any] = {
+        "workflow": "windfarm_receiver_local_incremental_typed_search",
+        "status": "running",
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": checkpoint_hash,
+        "teacher_checkpoint_id": teacher_checkpoint_id,
+        "device": str(target_device),
+        "query_count_per_search_and_verification_probe": query_count,
+        "frozen_split_sha256": frozen_split["split_sha256"],
+        "split_lock_path": split_lock["path"],
+        "split_lock_sha256": split_lock["artifact_sha256"],
+        "training_layout_indices": list(frozen_split["training_layout_indices"]),
+        "development_layout_indices": list(frozen_split["development_layout_indices"]),
+        "training_rows": active_rows,
+        "expected_training_rows": expected_rows,
+        "stage_layout_indices": stage_layout_indices,
+        "candidate_evaluations_per_row_cap": candidate_evaluations_per_row,
+        "beam_width_cap": TYPED_SEARCH_BEAM_WIDTH,
+        "candidate_observation_cap_per_row": TYPED_SEARCH_MAX_EVALUATIONS_PER_ROW,
+        "total_forward_cap": max_total_forwards,
+        "completed_row_artifacts": [],
+        "total_candidate_forward_calls": total_candidate_forward_count,
+        "total_generated_candidate_plan_count": 0,
+        "total_skipped_without_query_pair_reduction": 0,
+        "total_gradient_ranking_forward_calls": total_gradient_forward_count,
+        "total_identity_forward_calls": total_identity_forward_count,
+        "total_disjoint_verification_forward_calls": total_verification_forward_count,
+        "total_complete_forward_calls": total_forward_count,
+        "total_prepare_case_calls": total_prepare_calls,
+        "total_decode_calls": total_decode_calls,
+        "optimizer_updates": 0,
+        "new_physical_solves": 0,
+    }
+    _atomic_json_write(progress, progress_path)
+    observations_path.write_text("", encoding="utf-8")
+    wall_started = time.perf_counter()
+    for record in records:
+        row = int(record.case.index)
+        layout = int(record.case.layout_index)
+        evidence_id = f"run2103_typed_train_row_{row}_search_s{seed}_Q{query_count}"
+        input_hash = _typed_input_hash(record)
+        probe_digest = hashlib.sha256()
+        _tensor_fingerprint_update(probe_digest, "flat_indices", record.search.flat_indices)
+        _tensor_fingerprint_update(probe_digest, "coordinates_D", record.search.coordinates_D)
+        probe_hash = probe_digest.hexdigest()
+        typed_full = MechanismPlan.full_access(
+            record.trees[0],
+            record.encoded.module_present[0],
+            int(record.encoded.env_coords.shape[1]),
+        )
+        identity_plan = _typed_identity_split(typed_full)
+        _identity_prepared, identity_prediction, _identity_output, identity_prepare_ms, identity_decode_ms = (
+            _typed_replay_plan(
+                model, record.search_batch, identity_plan, device=target_device
+            )
+        )
+        total_identity_forward_count += 1
+        total_forward_count += 1
+        total_prepare_calls += 1
+        total_decode_calls += 1
+        progress.update({
+            "total_identity_forward_calls": total_identity_forward_count,
+            "total_complete_forward_calls": total_forward_count,
+            "total_prepare_case_calls": total_prepare_calls,
+            "total_decode_calls": total_decode_calls,
+            "current_row_index": row,
+            "current_stage": "gradient_ranking",
+        })
+        _atomic_json_write(progress, progress_path)
+        identity_delta = _max_abs(identity_prediction, record.full_search_prediction)
+        if not torch.allclose(
+            identity_prediction,
+            record.full_search_prediction,
+            atol=COLD_WARM_ABS_TOLERANCE_MPS,
+            rtol=COLD_WARM_REL_TOLERANCE,
+        ):
+            raise RuntimeError(
+                f"typed identity split failed all-access parity on row {row}: max_abs={identity_delta:.8g} m/s"
+            )
+        identity_work = _typed_work_summary(
+            identity_plan,
+            record.encoded,
+            record.search_batch.query_xy[0],
+            include_root_child_support=False,
+        )
+        identity_obs, _identity_metrics = _probe_observation(
+            identity_prediction[0],
+            record.full_search_prediction[0],
+            record.search,
+            normalizer,
+            teacher_checkpoint_id=teacher_checkpoint_id,
+            training_evidence_id=evidence_id,
+        )
+        identity_distortions = [
+            float(error.teacher) for error in identity_obs.roles.values()
+            if error.resolved and error.teacher is not None and math.isfinite(error.teacher)
+        ]
+        baseline_state = {
+            "plan": identity_plan,
+            "plan_hash": identity_plan.canonical_hash(),
+            "logical_work": identity_work,
+            "worst_teacher_distortion": max(identity_distortions, default=0.0),
+            "depth": 0,
+            "accepted": True,
+            "baseline_identity": True,
+        }
+        def record_gradient_progress(component: str, row_index: int = row) -> None:
+            nonlocal total_gradient_forward_count, total_forward_count
+            nonlocal total_prepare_calls, total_decode_calls
+            if component == "prepare_complete":
+                total_prepare_calls += 1
+            elif component == "decode_complete":
+                total_decode_calls += 1
+                total_gradient_forward_count += 1
+                total_forward_count += 1
+            else:
+                raise ValueError(f"unknown typed gradient progress component {component!r}")
+            progress.update({
+                "total_gradient_ranking_forward_calls": total_gradient_forward_count,
+                "total_complete_forward_calls": total_forward_count,
+                "total_prepare_case_calls": total_prepare_calls,
+                "total_decode_calls": total_decode_calls,
+                "current_row_index": row_index,
+                "current_stage": "gradient_ranking",
+            })
+            _atomic_json_write(progress, progress_path)
+
+        try:
+            removal_scores, gradient_ranking = _typed_gradient_removal_scores(
+                model,
+                record,
+                identity_plan,
+                device=target_device,
+                progress_callback=record_gradient_progress,
+            )
+        except Exception as exc:
+            progress.update({
+                "status": "failed",
+                "failure_stage": "gradient_ranking",
+                "failure_row_index": row,
+                "failure_type": type(exc).__name__,
+                "failure_message": str(exc),
+                "total_candidate_forward_calls": total_candidate_forward_count,
+                "total_gradient_ranking_forward_calls": total_gradient_forward_count,
+                "total_identity_forward_calls": total_identity_forward_count,
+                "total_complete_forward_calls": total_forward_count,
+                "total_prepare_case_calls": total_prepare_calls,
+                "total_decode_calls": total_decode_calls,
+                "optimizer_updates": 0,
+                "new_physical_solves": 0,
+            })
+            _atomic_json_write(progress, progress_path)
+            raise
+        observations: list[dict[str, Any]] = []
+        evaluated_hashes = {identity_plan.canonical_hash()}
+        accepted_states: list[dict[str, Any]] = [baseline_state]
+        beam = [baseline_state]
+        candidate_forward_count = 0
+        generated_candidate_count = 0
+        skipped_no_pair_reduction = 0
+        depth = 1
+        while beam and candidate_forward_count < candidate_evaluations_per_row:
+            proposal_by_hash: dict[str, dict[str, Any]] = {}
+            for parent in beam:
+                generated = _typed_child_local_proposals(
+                    parent["plan"],
+                    record.encoded,
+                    removal_scores,
+                    train_evidence_id=evidence_id,
+                )
+                for proposal in generated:
+                    candidate_plan = proposal["plan"]
+                    candidate_hash = candidate_plan.canonical_hash()
+                    if candidate_hash in evaluated_hashes:
+                        continue
+                    proposal_by_hash.setdefault(candidate_hash, proposal)
+            if not proposal_by_hash:
+                break
+            newly_accepted: list[dict[str, Any]] = []
+            for candidate_hash, proposal in list(proposal_by_hash.items()):
+                if candidate_forward_count >= candidate_evaluations_per_row:
+                    break
+                if total_forward_count >= max_total_forwards:
+                    raise RuntimeError("typed search reached its hard total-forward cap")
+                generated_candidate_count += 1
+                plan = proposal["plan"]
+                parent = next(
+                    item for item in beam if item["plan_hash"] == proposal["parent_plan_hash"]
+                )
+                candidate_work = _typed_work_summary(
+                    plan,
+                    record.encoded,
+                    record.search_batch.query_xy[0],
+                    include_root_child_support=False,
+                )
+                parent_pairs = int(parent["logical_work"]["total_unique_source_receiver_pairs_across_mechanisms"])
+                candidate_pairs = int(candidate_work["total_unique_source_receiver_pairs_across_mechanisms"])
+                item: dict[str, Any] = {
+                    "row_index": row,
+                    "layout_index": layout,
+                    "depth": depth,
+                    "proposal": {key: value for key, value in proposal.items() if key != "plan"},
+                    "complete_plan_hash": candidate_hash,
+                    "input_hash": input_hash,
+                    "checkpoint_sha256": checkpoint_hash,
+                    "probe_hash": probe_hash,
+                    "cache_key": _typed_observation_cache_key(
+                        input_hash=input_hash,
+                        checkpoint_hash=checkpoint_hash,
+                        probe_hash=probe_hash,
+                        mechanism=str(proposal["mechanism"]),
+                        plan_hash=candidate_hash,
+                    ),
+                    "logical_work": candidate_work,
+                    "parent_logical_pair_count": parent_pairs,
+                    "candidate_logical_pair_count": candidate_pairs,
+                    "executed_forward": False,
+                }
+                if candidate_pairs >= parent_pairs:
+                    skipped_no_pair_reduction += 1
+                    item["reason"] = "no_actual_query_source_receiver_pair_reduction"
+                    item["teacher_gate_frontier"] = {
+                        f"{threshold:.2f}": {
+                            "passed_all_protected_roles": None,
+                            "limit_per_role": threshold,
+                            "status": "not_measured_no_pair_reduction",
+                        }
+                        for threshold in TYPED_REPORTED_TEACHER_GATES
+                    }
+                    item["native_reference_rmse_mps_by_role"] = None
+                    observations.append(item)
+                    with observations_path.open("a", encoding="utf-8") as stream:
+                        stream.write(json.dumps(item, sort_keys=True, allow_nan=False) + "\n")
+                        stream.flush()
+                    progress.update({
+                        "total_complete_forward_calls": total_forward_count,
+                        "total_prepare_case_calls": total_prepare_calls,
+                        "total_decode_calls": total_decode_calls,
+                    })
+                    _atomic_json_write(progress, progress_path)
+                    evaluated_hashes.add(candidate_hash)
+                    continue
+
+                prepared, candidate_prediction, candidate_output, prepare_ms, decode_ms = _typed_replay_plan(
+                    model,
+                    record.search_batch,
+                    plan,
+                    device=target_device,
+                )
+                candidate_forward_count += 1
+                total_candidate_forward_count += 1
+                total_forward_count += 1
+                total_prepare_calls += 1
+                total_decode_calls += 1
+                evaluated_hashes.add(candidate_hash)
+                observation, role_metrics = _probe_observation(
+                    candidate_prediction[0],
+                    record.full_search_prediction[0],
+                    record.search,
+                    normalizer,
+                    teacher_checkpoint_id=teacher_checkpoint_id,
+                    training_evidence_id=evidence_id,
+                )
+                limits = {
+                    name: TeacherDistortionLimit(TYPED_PROTECTED_ROLE_TEACHER_LIMIT)
+                    for name in record.search.roles
+                }
+                gate_passed, gate_reasons = teacher_preservation_gate(observation, limits)
+                gate_frontier = _typed_teacher_gate_frontier(observation, record.search.roles)
+                distortions = {
+                    name: (None if error.teacher is None else float(error.teacher))
+                    for name, error in observation.roles.items()
+                }
+                finite_distortions = [
+                    value for value in distortions.values()
+                    if value is not None and math.isfinite(value)
+                ]
+                accepted = bool(gate_passed and candidate_pairs < parent_pairs)
+                item.update({
+                    "executed_forward": True,
+                    "candidate_index": candidate_forward_count,
+                    "parent_plan_hash": proposal["parent_plan_hash"],
+                    "teacher_preservation": {
+                        "passed": bool(gate_passed),
+                        "limit_per_protected_role": TYPED_PROTECTED_ROLE_TEACHER_LIMIT,
+                        "reasons": _teacher_gate_reason_list(gate_reasons),
+                        "normalized_distortion_by_role": distortions,
+                    },
+                    "teacher_gate_frontier": gate_frontier,
+                    "native_reference_rmse_mps_by_role": {
+                        role: error.reference for role, error in observation.roles.items()
+                    },
+                    "role_metrics": role_metrics,
+                    "actual_synchronized_prepare_ms": float(prepare_ms),
+                    "actual_synchronized_decode_ms": float(decode_ms),
+                    "actual_synchronized_complete_ms": float(prepare_ms + decode_ms),
+                    "actual_typed_preparation_rows": {
+                        key: int(value) for key, value in (
+                            prepared.backend_state.get("cover_preparation_ledger", {})
+                        ).items()
+                    },
+                    "executor_counters": {
+                        key: int(value.detach().cpu()) if torch.is_tensor(value) else int(value)
+                        for key, value in candidate_output.get("_interaction_aux", {}).items()
+                        if key.startswith("cover_") and torch.is_tensor(value)
+                        and value.numel() == 1
+                    },
+                    "accepted_into_cumulative_search": accepted,
+                })
+                observations.append(item)
+                with observations_path.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(item, sort_keys=True, allow_nan=False) + "\n")
+                    stream.flush()
+                if accepted:
+                    newly_accepted.append({
+                        "plan": plan,
+                        "plan_hash": candidate_hash,
+                        "logical_work": candidate_work,
+                        "worst_teacher_distortion": max(finite_distortions, default=float("inf")),
+                        "depth": depth,
+                        "accepted": True,
+                        "baseline_identity": False,
+                    })
+                progress.update({
+                    "total_candidate_forward_calls": total_candidate_forward_count,
+                    "total_gradient_ranking_forward_calls": total_gradient_forward_count,
+                    "total_identity_forward_calls": total_identity_forward_count,
+                    "total_disjoint_verification_forward_calls": total_verification_forward_count,
+                    "total_complete_forward_calls": total_forward_count,
+                    "total_prepare_case_calls": total_prepare_calls,
+                    "total_decode_calls": total_decode_calls,
+                    "current_row_index": row,
+                    "current_row_candidate_forwards": candidate_forward_count,
+                    "current_search_depth": depth,
+                })
+                _atomic_json_write(progress, progress_path)
+            if not newly_accepted:
+                break
+            accepted_states.extend(newly_accepted)
+            next_beam = _typed_nondominated_beam(accepted_states)
+            if [item["plan_hash"] for item in next_beam] == [item["plan_hash"] for item in beam]:
+                break
+            beam = next_beam
+            depth += 1
+
+        partial_states = [item for item in accepted_states if not item["baseline_identity"]]
+        selected = min(
+            partial_states or [baseline_state],
+            key=lambda item: (
+                int(item["logical_work"]["total_unique_source_receiver_pairs_across_mechanisms"]),
+                float(item["worst_teacher_distortion"]),
+                str(item["plan_hash"]),
+            ),
+        )
+        selected_plan_before_merge = selected["plan"]
+        selected_premerge_work = _typed_work_summary(
+            selected_plan_before_merge, record.encoded, record.search_batch.query_xy[0]
+        )
+        selected_plan = _merge_equivalent_root_children(selected_plan_before_merge)
+        equivalent_child_merge_applied = (
+            selected_plan.canonical_hash() != selected_plan_before_merge.canonical_hash()
+        )
+        _verification_prepared, verification_prediction, verification_output, verify_prepare_ms, verify_decode_ms = (
+            _typed_replay_plan(
+                model, record.verification_batch, selected_plan, device=target_device
+            )
+        )
+        total_verification_forward_count += 1
+        total_forward_count += 1
+        total_prepare_calls += 1
+        total_decode_calls += 1
+        verification_observation, verification_metrics = _probe_observation(
+            verification_prediction[0],
+            record.full_verification_prediction[0],
+            record.verification,
+            normalizer,
+            teacher_checkpoint_id=teacher_checkpoint_id,
+            training_evidence_id=f"run2103_typed_train_row_{row}_verification_s{seed}_Q{query_count}",
+        )
+        verification_passed, verification_reasons = teacher_preservation_gate(
+            verification_observation,
+            {
+                name: TeacherDistortionLimit(TYPED_PROTECTED_ROLE_TEACHER_LIMIT)
+                for name in record.verification.roles
+            },
+        )
+        verification_gate_frontier = _typed_teacher_gate_frontier(
+            verification_observation, record.verification.roles
+        )
+        verification_distortions = {
+            name: (None if error.teacher is None else float(error.teacher))
+            for name, error in verification_observation.roles.items()
+        }
+        if not verification_passed:
+            selected_plan = identity_plan
+            selected = baseline_state
+        selected_plan_hash = selected_plan.canonical_hash()
+        selected_work = _typed_work_summary(
+            selected_plan, record.encoded, record.search_batch.query_xy[0]
+        )
+        selected_document = {
+            "schema": "windfarm_typed_receiver_local_selected_plan_v1",
+            "row_index": row,
+            "layout_index": layout,
+            "direction_deg": float(record.case.wind_direction_deg),
+            "teacher_checkpoint_id": teacher_checkpoint_id,
+            "checkpoint_sha256": checkpoint_hash,
+            "frozen_split_sha256": frozen_split["split_sha256"],
+            "input_hash": input_hash,
+            "search_probe_hash": probe_hash,
+            "plan_schema": "honf-mechanism-plan-v1",
+            "plan_hash": selected_plan_hash,
+            "plan": selected_plan.to_dict(),
+            "supervision": _typed_plan_supervision(selected_plan),
+            "search_selection": {
+                "selected_from_plan_hash": str(selected["plan_hash"]),
+                "selected_search_work": selected_work,
+                "selected_candidate_premerge_work": selected_premerge_work,
+                "equivalent_root_children_merge_applied": bool(equivalent_child_merge_applied),
+                "verified_partial_state_count": len(partial_states),
+                "candidate_forward_count": candidate_forward_count,
+                "generated_candidate_plan_count": generated_candidate_count,
+                "skipped_without_query_pair_reduction": skipped_no_pair_reduction,
+                "gradient_ranking": gradient_ranking,
+                "gradient_score_semantics": "first-order removal delta of the frozen model's stored-native-reference MSE; ranking heuristic only, never a physical label",
+                "identity_split_parity": {
+                    "max_abs_mps_vs_policy_none_dense": identity_delta,
+                    "prepare_ms": float(identity_prepare_ms),
+                    "decode_ms": float(identity_decode_ms),
+                    "passed": True,
+                },
+                "selected_disjoint_teacher_verification": {
+                    "passed": bool(verification_passed),
+                    "limit_per_protected_role": TYPED_PROTECTED_ROLE_TEACHER_LIMIT,
+                    "reasons": _teacher_gate_reason_list(verification_reasons),
+                    "teacher_gate_frontier": verification_gate_frontier,
+                    "normalized_distortion_by_role": verification_distortions,
+                    "native_reference_rmse_mps_by_role": {
+                        role: error.reference for role, error in verification_observation.roles.items()
+                    },
+                    "role_metrics": verification_metrics,
+                    "prepare_ms": float(verify_prepare_ms),
+                    "decode_ms": float(verify_decode_ms),
+                    "fallback_to_full_access_identity_on_failure": not bool(verification_passed),
+                    "executor_counters": {
+                        key: int(value.detach().cpu()) if torch.is_tensor(value) else int(value)
+                        for key, value in verification_output.get("_interaction_aux", {}).items()
+                        if key.startswith("cover_") and torch.is_tensor(value) and value.numel() == 1
+                    },
+                },
+            },
+            "candidate_observations": observations,
+        }
+        plan_path = destination / f"selected_typed_plan_row_{row:04d}.json"
+        _atomic_json_write(selected_document, plan_path)
+        logical_frontier: dict[str, Any] = {}
+        for threshold in TYPED_REPORTED_TEACHER_GATES:
+            key = f"{threshold:.2f}"
+            qualifying = [
+                item
+                for item in observations
+                if item.get("executed_forward")
+                and item.get("teacher_gate_frontier", {}).get(key, {}).get(
+                    "passed_all_protected_roles"
+                ) is True
+            ]
+            best = min(
+                qualifying,
+                key=lambda item: (
+                    int(item["logical_work"]["total_unique_source_receiver_pairs_across_mechanisms"]),
+                    str(item["complete_plan_hash"]),
+                ),
+                default=None,
+            )
+            logical_frontier[key] = {
+                "scope": "executed search-probe candidate observations only; final selected plan is checked on disjoint probes separately",
+                "qualifying_candidate_observation_count": len(qualifying),
+                "best_candidate_plan_hash": None if best is None else best["complete_plan_hash"],
+                "best_candidate_total_unique_source_receiver_pairs": (
+                    None if best is None else int(
+                        best["logical_work"]["total_unique_source_receiver_pairs_across_mechanisms"]
+                    )
+                ),
+            }
+        row_result = {
+            "row_index": row,
+            "layout_index": layout,
+            "direction_deg": float(record.case.wind_direction_deg),
+            "selected_plan_path": str(plan_path),
+            "selected_plan_hash": selected_plan_hash,
+            "selected_plan_work": selected_work,
+            "logical_work_frontier_by_teacher_gate": logical_frontier,
+            "selected_disjoint_teacher_passed": bool(verification_passed),
+            "selected_plan_fallback_to_identity": not bool(verification_passed),
+            "candidate_forward_count": candidate_forward_count,
+            "generated_candidate_plan_count": generated_candidate_count,
+            "skipped_without_query_pair_reduction": skipped_no_pair_reduction,
+            "gradient_ranking_forward_count": 1,
+            "identity_parity_forward_count": 1,
+            "verification_forward_count": 1,
+            "hard_source_support_by_mechanism": {
+                mechanism: {
+                    "source_count": selected_work["mechanisms"][mechanism][
+                        f"cover_{mechanism.lower()}_source_union_count"
+                    ],
+                    "source_indices": selected_work["mechanisms"][mechanism][
+                        "native_source_indices"
+                    ],
+                    "valid_source_catalog_count": selected_work["mechanisms"][mechanism][
+                        "native_valid_source_count"
+                    ],
+                    "reachable_source_bearing_node_count": selected_work["mechanisms"][mechanism][
+                        f"cover_{mechanism.lower()}_source_bearing_active_nodes"
+                    ],
+                    "nonredundant_packet_count": selected_work["mechanisms"][mechanism][
+                        f"cover_{mechanism.lower()}_nonredundant_packets"
+                    ],
+                    "frontier_and_native_work": selected_work["mechanisms"][mechanism],
+                    "source_indices_by_root_child": selected_work["mechanisms"][mechanism][
+                        "root_children_source_indices"
+                    ],
+                    "root_child_support_differs": selected_work["mechanisms"][mechanism][
+                        "root_children_support_differs"
+                    ],
+                    "root_split_active": selected_work["mechanisms"][mechanism][
+                        "root_split_active"
+                    ],
+                    "native_unique_source_receiver_pairs": selected_work["mechanisms"][mechanism][
+                        f"cover_{mechanism.lower()}_unique_source_receiver_pairs"
+                    ],
+                    "native_source_union_count": selected_work["mechanisms"][mechanism][
+                        f"cover_{mechanism.lower()}_source_union_count"
+                    ],
+                }
+                for mechanism in INTERACTION_MECHANISMS
+            },
+            "disjoint_teacher_distortion_by_role": verification_distortions,
+            "learning_eligible": True,
+            "reference_sufficient": "unknown",
+            "deployment_eligible": False,
+        }
+        row_path = destination / f"typed_search_row_{row:04d}.json"
+        _atomic_json_write(row_result, row_path)
+        completed_rows.append(row_result)
+        progress["completed_row_artifacts"] = [*progress["completed_row_artifacts"], str(row_path)]
+        progress.update({
+            "total_candidate_forward_calls": total_candidate_forward_count,
+            "total_generated_candidate_plan_count": sum(
+                int(item["generated_candidate_plan_count"]) for item in completed_rows
+            ),
+            "total_skipped_without_query_pair_reduction": sum(
+                int(item["skipped_without_query_pair_reduction"]) for item in completed_rows
+            ),
+            "total_gradient_ranking_forward_calls": total_gradient_forward_count,
+            "total_identity_forward_calls": total_identity_forward_count,
+            "total_disjoint_verification_forward_calls": total_verification_forward_count,
+            "total_complete_forward_calls": total_forward_count,
+            "total_prepare_case_calls": total_prepare_calls,
+            "total_decode_calls": total_decode_calls,
+            "completed_training_rows": len(completed_rows),
+        })
+        _atomic_json_write(progress, progress_path)
+    result = {
+        "status": "complete" if active_rows == expected_rows else "stage_complete",
+        "workflow": "windfarm_receiver_local_incremental_typed_search",
+        "plan_schema": "honf-mechanism-plan-v1",
+        "legacy_g0_plan_schema_distinction": "legacy_adaptive_cover_root_membership_v1",
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": checkpoint_hash,
+        "teacher_checkpoint_id": teacher_checkpoint_id,
+        "device": str(target_device),
+        "query_count_per_search_and_verification_probe": query_count,
+        "anchor_measure_variant": anchor_measure_variant,
+        "frozen_split": frozen_split,
+        "split_lock_path": split_lock["path"],
+        "split_lock_sha256": split_lock["artifact_sha256"],
+        "training_layout_indices": list(frozen_split["training_layout_indices"]),
+        "development_layout_indices": list(frozen_split["development_layout_indices"]),
+        "training_rows": active_rows,
+        "expected_training_rows": expected_rows,
+        "stage_layout_indices": stage_layout_indices,
+        "is_row_stage": active_rows != expected_rows,
+        "development_rows_used_for_search_or_fit": [],
+        "protected_receiver_roles": sorted(records[0].search.roles),
+        "teacher_distortion_limit_per_protected_role": TYPED_PROTECTED_ROLE_TEACHER_LIMIT,
+        "proposal_rule": "each move removes one physical module source or one small flow-frame global environment quantile cell from exactly one receiver child and one typed mechanism; previously accepted omissions remain cumulative",
+        "beam_width": TYPED_SEARCH_BEAM_WIDTH,
+        "candidate_evaluations_per_row_cap": candidate_evaluations_per_row,
+        "total_forward_cap": max_total_forwards,
+        "total_candidate_forward_calls": total_candidate_forward_count,
+        "total_generated_candidate_plan_count": sum(
+            int(item["generated_candidate_plan_count"]) for item in completed_rows
+        ),
+        "total_skipped_without_query_pair_reduction": sum(
+            int(item["skipped_without_query_pair_reduction"]) for item in completed_rows
+        ),
+        "total_gradient_ranking_forward_calls": total_gradient_forward_count,
+        "total_identity_forward_calls": total_identity_forward_count,
+        "total_disjoint_verification_forward_calls": total_verification_forward_count,
+        "total_panel_reference_forward_calls": 4 * len(records),
+        "materialization_forward_calls": 1,
+        "total_complete_forward_calls": total_forward_count,
+        "total_prepare_case_calls": total_prepare_calls,
+        "total_decode_calls": total_decode_calls,
+        "optimizer_updates": 0,
+        "new_physical_solves": 0,
+        "elapsed_seconds": float(time.perf_counter() - wall_started),
+        "candidate_observation_log": str(observations_path),
+        "logical_work_frontier_by_teacher_gate": _aggregate_typed_logical_frontier(completed_rows),
+        "rows": completed_rows,
+        "reference_sufficient": "unknown",
+        "deployment_eligible": False,
+    }
+    progress.update({
+        "status": result["status"],
+        "completed_training_rows": len(completed_rows),
+        "summary_path": str(destination / "typed_search_report.json"),
+        "total_candidate_forward_calls": total_candidate_forward_count,
+        "total_complete_forward_calls": total_forward_count,
+        "total_prepare_case_calls": total_prepare_calls,
+        "total_decode_calls": total_decode_calls,
+        "elapsed_seconds": result["elapsed_seconds"],
+    })
+    _atomic_json_write(progress, progress_path)
+    _atomic_json_write(result, destination / "typed_search_report.json")
+    return result
+
+
+def merge_incremental_typed_search_stages(
+    stage_directories: Sequence[str | Path],
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    """Merge direction-complete G2 shards after validating their frozen provenance."""
+
+    if len(stage_directories) < 2:
+        raise ValueError("typed search merge requires at least two staged row directories")
+    destination = Path(output_dir).expanduser().resolve()
+    if "generated" not in destination.parts:
+        raise ValueError("merged typed search artifacts must stay under diagnostics/generated")
+    destination.mkdir(parents=True, exist_ok=True)
+    if any((destination / name).exists() for name in (
+        "typed_search_report.json", "typed_search_progress.json", "typed_candidate_observations.jsonl"
+    )):
+        raise FileExistsError("typed search merge output already contains a report or observation log")
+
+    loaded: list[tuple[Path, dict[str, Any], dict[str, Any]]] = []
+    for value in stage_directories:
+        directory = Path(value).expanduser().resolve()
+        report_path = directory / "typed_search_report.json"
+        manifest_path = directory / "panel_manifest.json"
+        if not report_path.is_file() or not manifest_path.is_file():
+            raise FileNotFoundError(f"typed search stage lacks its report or panel manifest: {directory}")
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if report.get("workflow") != "windfarm_receiver_local_incremental_typed_search":
+            raise ValueError(f"not a formal typed search stage: {directory}")
+        if report.get("status") not in {"stage_complete", "complete"}:
+            raise ValueError(f"typed search stage is incomplete: {directory}")
+        if report.get("development_rows_used_for_search_or_fit") != []:
+            raise ValueError("development rows are forbidden in staged typed search")
+        loaded.append((directory, report, manifest))
+
+    first_report = loaded[0][1]
+    first_manifest = loaded[0][2]
+    expected_rows = list(map(int, first_report.get("expected_training_rows", [])))
+    frozen_split = first_report.get("frozen_split", {})
+    split_sha256 = frozen_split.get("split_sha256")
+    checkpoint_sha256 = first_report.get("checkpoint_sha256")
+    anchor_variant = first_report.get("anchor_measure_variant")
+    if not expected_rows or split_sha256 is None or checkpoint_sha256 is None:
+        raise ValueError("typed search stage lacks frozen split or checkpoint identity")
+    if expected_rows != list(map(int, frozen_split.get("training_rows_direction_order", []))):
+        raise ValueError("typed search stage expected rows differ from the geometry-frozen training order")
+    if len(expected_rows) != 24 or len(frozen_split.get("training_layout_indices", [])) != 8:
+        raise ValueError("typed search merge requires the exact frozen 8-layout, 24-direction training panel")
+    if list(map(int, first_report.get("development_layout_indices", []))) != list(
+        map(int, frozen_split.get("development_layout_indices", []))
+    ):
+        raise ValueError("typed search stage development-layout provenance differs from the frozen split")
+    if first_manifest.get("checkpoint_sha256") != checkpoint_sha256:
+        raise ValueError("typed search stage panel manifest checkpoint differs from its report")
+    protected_roles = set(map(str, first_report.get("protected_receiver_roles", [])))
+    if "near_turbine" not in protected_roles or "volume" not in protected_roles:
+        raise ValueError("typed search merge requires protected near-turbine and volume receiver roles")
+
+    row_owner: dict[int, Path] = {}
+    reports: list[dict[str, Any]] = []
+    for directory, report, manifest in loaded:
+        if report.get("checkpoint_sha256") != checkpoint_sha256:
+            raise ValueError("typed search stages use different Run2103 checkpoint bytes")
+        if report.get("frozen_split", {}).get("split_sha256") != split_sha256:
+            raise ValueError("typed search stages use different geometry-frozen layout splits")
+        if report.get("expected_training_rows") != expected_rows:
+            raise ValueError("typed search stages use different frozen training row order")
+        if report.get("anchor_measure_variant") != anchor_variant:
+            raise ValueError("typed search stages use different anchor-measure variants")
+        if manifest.get("checkpoint_sha256") != checkpoint_sha256:
+            raise ValueError("typed stage manifest checkpoint hash differs from its report")
+        if manifest.get("anchor_measure_variant") != anchor_variant:
+            raise ValueError("typed stage manifest anchor measure differs from its report")
+        if manifest.get("organizer_split_frozen_before_new_outcomes", {}).get("split_sha256") != split_sha256:
+            raise ValueError("typed stage panel manifest lacks the same pre-outcome split lock")
+        stage_lock_path = Path(str(report.get("split_lock_path", ""))).expanduser().resolve()
+        if not stage_lock_path.is_file() or _checkpoint_sha256(stage_lock_path) != report.get("split_lock_sha256"):
+            raise ValueError("typed stage split-lock artifact is absent or fails its reported byte hash")
+        stage_rows = list(map(int, report.get("training_rows", [])))
+        if not stage_rows or not set(stage_rows).issubset(expected_rows):
+            raise ValueError("typed stage has empty or out-of-split training rows")
+        if len(set(stage_rows)) != len(stage_rows):
+            raise ValueError("typed stage repeats a training row")
+        stage_set = set(stage_rows)
+        expected_stage_layouts = [
+            int(item["layout_index"])
+            for item in frozen_split.get("training_layouts", [])
+            if set(map(int, item.get("rows_direction_order", []))).intersection(stage_set)
+        ]
+        if list(map(int, report.get("stage_layout_indices", []))) != expected_stage_layouts:
+            raise ValueError("typed stage layout attestation does not match its direction-complete rows")
+        for layout in frozen_split.get("training_layouts", []):
+            layout_rows = set(map(int, layout.get("rows_direction_order", [])))
+            if layout_rows.intersection(stage_set) and not layout_rows.issubset(stage_set):
+                raise ValueError("typed stage splits the directions from a frozen layout")
+        for row in stage_rows:
+            if row in row_owner:
+                raise ValueError(f"typed training row {row} appears in multiple stages")
+            row_owner[row] = directory
+        cap_per_row = int(report.get("candidate_evaluations_per_row_cap", -1))
+        candidate_path = directory / "typed_candidate_observations.jsonl"
+        if not candidate_path.is_file():
+            raise FileNotFoundError(f"typed search stage observation ledger is missing: {candidate_path}")
+        observed_candidate_calls = 0
+        calls_by_row: dict[int, int] = {}
+        with candidate_path.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                row = int(item.get("row_index", -1))
+                if row not in stage_set:
+                    raise ValueError("typed candidate observation references a row outside its stage")
+                plan_hash = str(item.get("complete_plan_hash", ""))
+                if len(plan_hash) != 64:
+                    raise ValueError("typed candidate observation lacks a complete canonical plan hash")
+                if bool(item.get("executed_forward")):
+                    expected_gates = {f"{threshold:.2f}" for threshold in TYPED_REPORTED_TEACHER_GATES}
+                    if set(item.get("teacher_gate_frontier", {})) != expected_gates:
+                        raise ValueError("typed executed candidate lacks the 0.01/0.05/0.10 teacher frontier")
+                    if set(item.get("native_reference_rmse_mps_by_role", {})) != protected_roles:
+                        raise ValueError("typed executed candidate lacks physical reference errors by protected role")
+                    normalized_by_role = item.get("teacher_preservation", {}).get(
+                        "normalized_distortion_by_role", {}
+                    )
+                    if set(normalized_by_role) != protected_roles:
+                        raise ValueError("typed executed candidate lacks normalized teacher errors by protected role")
+                    observed_candidate_calls += 1
+                    calls_by_row[row] = calls_by_row.get(row, 0) + 1
+        if observed_candidate_calls != int(report.get("total_candidate_forward_calls", -1)):
+            raise ValueError("typed stage candidate count differs from its complete-forward observation ledger")
+        if cap_per_row < 1 or any(count > cap_per_row for count in calls_by_row.values()):
+            raise ValueError("typed stage exceeds its per-row candidate-forward cap")
+        expected_fixed = {
+            "materialization_forward_calls": 1,
+            "total_panel_reference_forward_calls": 4 * len(stage_rows),
+            "total_gradient_ranking_forward_calls": len(stage_rows),
+            "total_identity_forward_calls": len(stage_rows),
+            "total_disjoint_verification_forward_calls": len(stage_rows),
+        }
+        for key, expected in expected_fixed.items():
+            if int(report.get(key, -1)) != expected:
+                raise ValueError(f"typed stage {key} is inconsistent with its staged row count")
+        expected_total = observed_candidate_calls + sum(expected_fixed.values())
+        if int(report.get("total_complete_forward_calls", -1)) != expected_total:
+            raise ValueError("typed stage complete-forward count does not match its call ledger")
+        if expected_total > TYPED_SEARCH_MAX_TOTAL_FORWARDS:
+            raise ValueError("typed stage exceeds the 4,096 complete-forward cap")
+        reports.append(report)
+
+    if set(row_owner) != set(expected_rows):
+        missing = sorted(set(expected_rows) - set(row_owner))
+        raise ValueError(f"typed search stages do not cover the exact frozen 24-row train set; missing={missing}")
+
+    first_split_lock = Path(str(first_report.get("split_lock_path", ""))).expanduser().resolve()
+    if not first_split_lock.is_file():
+        raise FileNotFoundError("typed search stage split-lock artifact is missing")
+    split_lock_hash = _checkpoint_sha256(first_split_lock)
+    if split_lock_hash != first_report.get("split_lock_sha256"):
+        raise ValueError("typed search stage split-lock bytes do not match the report")
+    merged_split_lock = destination / "organizer_split_lock.json"
+    temporary_lock = merged_split_lock.with_name(f".{merged_split_lock.name}.tmp")
+    temporary_lock.write_bytes(first_split_lock.read_bytes())
+    os.replace(temporary_lock, merged_split_lock)
+    manifest = dict(first_manifest)
+    manifest["typed_search_split_lock_path"] = str(merged_split_lock)
+    manifest["typed_search_split_lock_sha256"] = split_lock_hash
+    _atomic_json_write(manifest, destination / "panel_manifest.json")
+
+    row_summaries: dict[int, dict[str, Any]] = {}
+    row_candidate_counts: dict[int, int] = {}
+    row_generated_candidate_counts: dict[int, int] = {}
+    row_skipped_candidate_counts: dict[int, int] = {}
+    for directory, report, _manifest in loaded:
+        for row in map(int, report["training_rows"]):
+            plan_path = directory / f"selected_typed_plan_row_{row:04d}.json"
+            row_path = directory / f"typed_search_row_{row:04d}.json"
+            if not plan_path.is_file() or not row_path.is_file():
+                raise FileNotFoundError(f"typed stage row {row} lacks atomic plan or row evidence")
+            selected = json.loads(plan_path.read_text(encoding="utf-8"))
+            plan = MechanismPlan.from_dict(selected["plan"])
+            if plan.canonical_hash() != selected.get("plan_hash"):
+                raise ValueError(f"typed stage row {row} plan hash does not match its full plan")
+            verification = selected.get("search_selection", {}).get("selected_disjoint_teacher_verification", {})
+            if not bool(verification.get("passed")):
+                raise ValueError(f"typed stage row {row} failed disjoint teacher verification")
+            row_summary = json.loads(row_path.read_text(encoding="utf-8"))
+            if int(row_summary.get("row_index", -1)) != row:
+                raise ValueError(f"typed stage row evidence identity mismatch for row {row}")
+            if row_summary.get("selected_plan_hash") != selected.get("plan_hash"):
+                raise ValueError(f"typed stage row {row} summary differs from its full plan hash")
+            row_candidate_counts[row] = int(row_summary.get("candidate_forward_count", -1))
+            if row_candidate_counts[row] < 0:
+                raise ValueError(f"typed stage row {row} lacks an exact candidate-forward count")
+            row_generated_candidate_counts[row] = int(
+                selected.get("search_selection", {}).get("generated_candidate_plan_count", -1)
+            )
+            row_skipped_candidate_counts[row] = int(
+                selected.get("search_selection", {}).get("skipped_without_query_pair_reduction", -1)
+            )
+            if row_generated_candidate_counts[row] < 0 or row_skipped_candidate_counts[row] < 0:
+                raise ValueError(f"typed stage row {row} lacks generated/skipped candidate counts")
+            if row_generated_candidate_counts[row] != (
+                row_candidate_counts[row] + row_skipped_candidate_counts[row]
+            ):
+                raise ValueError(f"typed stage row {row} candidate count is inconsistent")
+            _atomic_json_write(selected, destination / plan_path.name)
+            row_summary["selected_plan_path"] = str(destination / plan_path.name)
+            _atomic_json_write(row_summary, destination / row_path.name)
+            row_summaries[row] = row_summary
+
+    observation_path = destination / "typed_candidate_observations.jsonl"
+    temporary_observations = observation_path.with_name(f".{observation_path.name}.tmp")
+    with temporary_observations.open("w", encoding="utf-8") as output:
+        for directory, _report, _manifest in loaded:
+            path = directory / "typed_candidate_observations.jsonl"
+            with path.open("r", encoding="utf-8") as source:
+                for line in source:
+                    if line.strip():
+                        json.loads(line)
+                        output.write(line if line.endswith("\n") else line + "\n")
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary_observations, observation_path)
+
+    sum_fields = (
+        "total_candidate_forward_calls",
+        "total_gradient_ranking_forward_calls",
+        "total_identity_forward_calls",
+        "total_disjoint_verification_forward_calls",
+        "total_panel_reference_forward_calls",
+        "materialization_forward_calls",
+        "total_complete_forward_calls",
+        "total_prepare_case_calls",
+        "total_decode_calls",
+    )
+    for report in reports:
+        if report.get("beam_width") != first_report.get("beam_width"):
+            raise ValueError("typed search stages use different beam widths")
+        if report.get("candidate_evaluations_per_row_cap") != first_report.get("candidate_evaluations_per_row_cap"):
+            raise ValueError("typed search stages use different per-row candidate caps")
+    totals = {key: sum(int(report.get(key, 0)) for report in reports) for key in sum_fields}
+    if totals["total_candidate_forward_calls"] > TYPED_SEARCH_MAX_EVALUATIONS_PER_ROW * len(expected_rows):
+        raise RuntimeError("merged typed search exceeds the 96-candidate-per-row cap")
+    if sum(row_candidate_counts.values()) != totals["total_candidate_forward_calls"]:
+        raise ValueError("merged per-row candidate counts do not sum to the observation ledger")
+    if totals["total_complete_forward_calls"] > TYPED_SEARCH_MAX_TOTAL_FORWARDS:
+        raise RuntimeError("merged typed search exceeds the cumulative 4,096-forward cap")
+    row_results = [row_summaries[row] for row in expected_rows]
+    merged_frontier: dict[str, Any] = {}
+    for threshold in TYPED_REPORTED_TEACHER_GATES:
+        key = f"{threshold:.2f}"
+        available = [
+            row["logical_work_frontier_by_teacher_gate"][key]
+            for row in row_results
+            if key in row.get("logical_work_frontier_by_teacher_gate", {})
+        ]
+        best_values = [
+            item for item in available
+            if item.get("best_candidate_total_unique_source_receiver_pairs") is not None
+        ]
+        best = min(
+            best_values,
+            key=lambda item: (
+                int(item["best_candidate_total_unique_source_receiver_pairs"]),
+                str(item["best_candidate_plan_hash"]),
+            ),
+            default=None,
+        )
+        merged_frontier[key] = {
+            "scope": "aggregate over the frozen 24-row train search probes; no development rows used",
+            "qualifying_candidate_observation_count": sum(
+                int(item.get("qualifying_candidate_observation_count", 0)) for item in available
+            ),
+            "training_rows_with_any_qualifying_candidate": sum(
+                item.get("qualifying_candidate_observation_count", 0) > 0 for item in available
+            ),
+            "best_row_candidate_plan_hash": None if best is None else best["best_candidate_plan_hash"],
+            "best_row_candidate_total_unique_source_receiver_pairs": (
+                None if best is None else int(best["best_candidate_total_unique_source_receiver_pairs"])
+            ),
+        }
+    result = {
+        "status": "complete",
+        "workflow": "windfarm_receiver_local_incremental_typed_search",
+        "plan_schema": "honf-mechanism-plan-v1",
+        "legacy_g0_plan_schema_distinction": "legacy_adaptive_cover_root_membership_v1",
+        "checkpoint": first_report.get("checkpoint"),
+        "checkpoint_sha256": checkpoint_sha256,
+        "teacher_checkpoint_id": first_report.get("teacher_checkpoint_id"),
+        "device": first_report.get("device"),
+        "query_count_per_search_and_verification_probe": first_report.get(
+            "query_count_per_search_and_verification_probe"
+        ),
+        "anchor_measure_variant": anchor_variant,
+        "frozen_split": frozen_split,
+        "split_lock_path": str(merged_split_lock),
+        "split_lock_sha256": split_lock_hash,
+        "training_layout_indices": list(frozen_split["training_layout_indices"]),
+        "development_layout_indices": list(frozen_split["development_layout_indices"]),
+        "training_rows": expected_rows,
+        "expected_training_rows": expected_rows,
+        "development_rows_used_for_search_or_fit": [],
+        "protected_receiver_roles": first_report.get("protected_receiver_roles", []),
+        "teacher_distortion_limit_per_protected_role": first_report.get(
+            "teacher_distortion_limit_per_protected_role"
+        ),
+        "proposal_rule": first_report.get("proposal_rule"),
+        "beam_width": first_report.get("beam_width"),
+        "candidate_evaluations_per_row_cap": first_report.get("candidate_evaluations_per_row_cap"),
+        "total_forward_cap": TYPED_SEARCH_MAX_TOTAL_FORWARDS,
+        **totals,
+        "optimizer_updates": 0,
+        "new_physical_solves": 0,
+        "elapsed_seconds": sum(float(report.get("elapsed_seconds", 0.0)) for report in reports),
+        "candidate_observation_log": str(observation_path),
+        "total_generated_candidate_plan_count": sum(row_generated_candidate_counts.values()),
+        "total_skipped_without_query_pair_reduction": sum(row_skipped_candidate_counts.values()),
+        "logical_work_frontier_by_teacher_gate": merged_frontier,
+        "merged_stage_directories": [str(directory) for directory, _report, _manifest in loaded],
+        "rows": row_results,
+        "reference_sufficient": "unknown",
+        "deployment_eligible": False,
+    }
+    progress = {
+        "workflow": result["workflow"],
+        "status": "complete",
+        "checkpoint_sha256": checkpoint_sha256,
+        "frozen_split_sha256": split_sha256,
+        "training_rows": expected_rows,
+        "development_rows_used_for_search_or_fit": [],
+        "completed_training_rows": len(expected_rows),
+        "completed_row_artifacts": [str(destination / f"typed_search_row_{row:04d}.json") for row in expected_rows],
+        "total_candidate_forward_calls": totals["total_candidate_forward_calls"],
+        "total_complete_forward_calls": totals["total_complete_forward_calls"],
+        "total_prepare_case_calls": totals["total_prepare_case_calls"],
+        "total_decode_calls": totals["total_decode_calls"],
+        "optimizer_updates": 0,
+        "new_physical_solves": 0,
+        "summary_path": str(destination / "typed_search_report.json"),
+        "elapsed_seconds": result["elapsed_seconds"],
+    }
+    _atomic_json_write(progress, destination / "typed_search_progress.json")
+    _atomic_json_write(result, destination / "typed_search_report.json")
+    return result
+
+
+def _active_organizer_training_layouts(
+    layouts: Sequence[Any], active_layouts: int
+) -> tuple[Any, ...]:
+    """Return active layouts only in the preregistered organizer-train order."""
+
+    split = freeze_organizer_layout_split(layouts)
+    indices = tuple(map(int, split["training_layout_indices"]))
+    if not 1 <= int(active_layouts) <= len(indices):
+        raise ValueError("active layout count must select one or more frozen training layouts")
+    by_index = {int(item.layout_index): item for item in layouts}
+    selected = tuple(by_index[index] for index in indices[: int(active_layouts)])
+    if any(int(item.layout_index) not in set(indices) for item in selected):
+        raise RuntimeError("frozen organizer development layout entered the active training selection")
+    return selected
 
 
 def run_oracle_benchmark(
@@ -1407,7 +3398,9 @@ def run_oracle_benchmark(
     teacher_checkpoint_id = f"Run2103:e2475:{checkpoint_hash[:16]}"
     target_device = torch.device(device)
     normalizer = VelocityNormalizer.from_dict(dict(payload["normalization"]))
-    active_rows = [row for item in layouts[:active_layouts] for row in item.rows]
+    active_rows = [
+        row for item in _active_organizer_training_layouts(layouts, active_layouts) for row in item.rows
+    ]
     first_case = view.run(active_rows[0])
     first_search, _first_verification = make_disjoint_native_probes(
         first_case, query_count=query_count, seed=seed
@@ -1835,7 +3828,9 @@ def run_oracle_benchmark(
                         }
                     ),
                     "teacher_search_gate_passed": bool(oracle_search_gate_passed),
-                    "teacher_search_gate_reasons": list(oracle_search_gate_reasons),
+                    "teacher_search_gate_reasons": _teacher_gate_reason_list(
+                        oracle_search_gate_reasons
+                    ),
                     "teacher_disjoint_verification_gate_passed": oracle_label_disjoint_gate_passed,
                     "teacher_adequate_for_primary_labels": oracle_label_plan_verified,
                     "estimated_complete_ms": oracle_selected_estimated_ms,
@@ -2181,7 +4176,39 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--preflight-only", action="store_true")
     parser.add_argument("--manifest-only", action="store_true")
     parser.add_argument("--fit-only", action="store_true")
+    parser.add_argument("--typed-fit", action="store_true")
+    parser.add_argument("--typed-search-dir", default=None)
+    parser.add_argument("--merge-typed-search-stages", nargs="+", default=None)
+    parser.add_argument("--typed-fit-supervised-updates", type=int, default=150)
+    parser.add_argument("--typed-fit-predictive-updates", type=int, default=500)
+    parser.add_argument("--evaluate-typed-organizer-state", default=None)
+    parser.add_argument(
+        "--typed-evaluation-stage", choices=("disjoint", "full-grid"), default="disjoint"
+    )
+    parser.add_argument("--typed-disjoint-results-dir", default=None)
+    parser.add_argument("--typed-native-validation-layouts", type=int, default=2)
+    parser.add_argument("--typed-include-development-native-grid", action="store_true")
+    parser.add_argument("--typed-search", action="store_true")
+    parser.add_argument(
+        "--typed-search-rows",
+        default=None,
+        help="comma-separated frozen train row indices for a direction-complete staged search shard",
+    )
+    parser.add_argument(
+        "--typed-search-candidates-per-row",
+        type=int,
+        default=TYPED_SEARCH_MAX_EVALUATIONS_PER_ROW,
+    )
+    parser.add_argument(
+        "--typed-search-total-forward-cap",
+        type=int,
+        default=TYPED_SEARCH_MAX_TOTAL_FORWARDS,
+    )
     parser.add_argument("--oracle-dir", default=None)
+    parser.add_argument("--evaluate-organizer-state", default=None)
+    parser.add_argument("--evaluation-stage", choices=("disjoint", "full-grid"), default="disjoint")
+    parser.add_argument("--disjoint-results-dir", default=None)
+    parser.add_argument("--resume-evaluation", action="store_true")
     parser.add_argument("--fit-updates", type=int, default=100)
     parser.add_argument("--native-validation-layouts", type=int, default=2)
     parser.add_argument("--query-count", type=int, default=None)
@@ -2193,18 +4220,80 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _parse_typed_search_rows(value: str | None) -> list[int] | None:
+    if value is None:
+        return None
+    try:
+        rows = [int(piece.strip()) for piece in value.split(",") if piece.strip()]
+    except ValueError as exc:
+        raise ValueError("--typed-search-rows must be comma-separated integer row indices") from exc
+    if not rows:
+        raise ValueError("--typed-search-rows cannot be empty")
+    if len(rows) != len(set(rows)):
+        raise ValueError("--typed-search-rows cannot repeat a row index")
+    return rows
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    active_modes = sum((args.manifest_only, args.preflight_only, args.fit_only))
+    evaluate_saved_state = args.evaluate_organizer_state is not None
+    evaluate_typed_state = args.evaluate_typed_organizer_state is not None
+    active_modes = sum((
+        args.manifest_only, args.preflight_only, args.fit_only,
+        args.typed_search, args.typed_fit,
+        args.merge_typed_search_stages is not None,
+        evaluate_saved_state,
+        evaluate_typed_state,
+    ))
     if active_modes > 1:
-        raise ValueError("--manifest-only, --preflight-only, and --fit-only are distinct modes")
+        raise ValueError(
+            "--manifest-only, --preflight-only, --fit-only, --typed-search, "
+            "--typed-fit, --merge-typed-search-stages, --evaluate-organizer-state, and "
+            "--evaluate-typed-organizer-state are distinct modes"
+        )
     if args.fit_only and not args.oracle_dir:
         raise ValueError("--fit-only requires --oracle-dir")
+    if args.typed_fit and not args.typed_search_dir:
+        raise ValueError("--typed-fit requires --typed-search-dir")
+    if evaluate_typed_state and not args.typed_search_dir:
+        raise ValueError("--evaluate-typed-organizer-state requires --typed-search-dir")
+    if args.typed_evaluation_stage == "full-grid" and not args.typed_disjoint_results_dir:
+        raise ValueError("--typed-evaluation-stage full-grid requires --typed-disjoint-results-dir")
+    if args.typed_fit:
+        if args.typed_native_validation_layouts not in {0, 1, 2}:
+            raise ValueError("--typed-native-validation-layouts must be zero, one, or two for typed fitting")
+    elif args.typed_native_validation_layouts not in {1, 2}:
+        raise ValueError("--typed-native-validation-layouts must be one or two for typed evaluation")
+    if not evaluate_typed_state and (
+        args.typed_evaluation_stage != "disjoint" or args.typed_disjoint_results_dir is not None
+    ):
+        raise ValueError("typed checkpoint evaluation options require --evaluate-typed-organizer-state")
+    if args.typed_include_development_native_grid and (
+        not evaluate_typed_state or args.typed_evaluation_stage != "full-grid"
+    ):
+        raise ValueError(
+            "--typed-include-development-native-grid requires typed checkpoint-only full-grid evaluation"
+        )
+    if args.typed_search_rows is not None and not args.typed_search:
+        raise ValueError("--typed-search-rows applies only with --typed-search")
+    if evaluate_saved_state and not args.oracle_dir:
+        raise ValueError("--evaluate-organizer-state requires --oracle-dir")
+    if args.evaluation_stage == "full-grid" and not args.disjoint_results_dir:
+        raise ValueError("--evaluation-stage full-grid requires --disjoint-results-dir")
+    if args.resume_evaluation and not evaluate_saved_state:
+        raise ValueError("--resume-evaluation applies only to checkpoint-only evaluation")
     if args.preflight_only and args.anchor_measure != "raw":
         raise ValueError("role-balanced anchor indexing is a separate oracle mode, not preflight")
     query_count = args.query_count if args.query_count is not None else (32 if args.preflight_only else 1024)
+    if args.typed_search and query_count != 1024:
+        raise ValueError("--typed-search is locked to --query-count 1024")
     try:
-        if args.manifest_only:
+        if args.merge_typed_search_stages is not None:
+            report = merge_incremental_typed_search_stages(
+                args.merge_typed_search_stages,
+                args.output_dir,
+            )
+        elif args.manifest_only:
             report = write_training_panel_manifest(
                 checkpoint_path=args.checkpoint,
                 volume_path=args.volume,
@@ -2228,6 +4317,72 @@ def main(argv: list[str] | None = None) -> int:
                 seed=args.seed,
                 updates=args.fit_updates,
                 native_validation_layouts=args.native_validation_layouts,
+            )
+        elif evaluate_saved_state:
+            from .native_cover_organizer_fit import run_saved_organizer_evaluation
+
+            report = run_saved_organizer_evaluation(
+                checkpoint_path=args.checkpoint,
+                volume_path=args.volume,
+                compact_path=args.compact,
+                oracle_dir=args.oracle_dir,
+                organizer_checkpoint_path=args.evaluate_organizer_state,
+                device=args.device,
+                output_dir=args.output_dir,
+                stage=args.evaluation_stage,
+                disjoint_results_dir=args.disjoint_results_dir,
+                query_count=query_count,
+                seed=args.seed,
+                native_validation_layouts=args.native_validation_layouts,
+                resume=args.resume_evaluation,
+            )
+        elif args.typed_search:
+            report = run_incremental_typed_search(
+                checkpoint_path=args.checkpoint,
+                volume_path=args.volume,
+                compact_path=args.compact,
+                device=args.device,
+                output_dir=args.output_dir,
+                query_count=query_count,
+                seed=args.seed,
+                candidate_evaluations_per_row=args.typed_search_candidates_per_row,
+                max_total_forwards=args.typed_search_total_forward_cap,
+                anchor_measure_variant=args.anchor_measure,
+                training_rows=_parse_typed_search_rows(args.typed_search_rows),
+            )
+        elif args.typed_fit:
+            from .native_cover_organizer_fit import run_typed_organizer_fit
+
+            report = run_typed_organizer_fit(
+                checkpoint_path=args.checkpoint,
+                volume_path=args.volume,
+                compact_path=args.compact,
+                typed_search_dir=args.typed_search_dir,
+                device=args.device,
+                output_dir=args.output_dir,
+                query_count=query_count,
+                seed=args.seed,
+                supervised_updates=args.typed_fit_supervised_updates,
+                predictive_updates=args.typed_fit_predictive_updates,
+                native_validation_layouts=args.typed_native_validation_layouts,
+            )
+        elif evaluate_typed_state:
+            from .native_cover_organizer_fit import run_typed_checkpoint_only_evaluation
+
+            report = run_typed_checkpoint_only_evaluation(
+                checkpoint_path=args.checkpoint,
+                volume_path=args.volume,
+                compact_path=args.compact,
+                typed_search_dir=args.typed_search_dir,
+                organizer_state_path=args.evaluate_typed_organizer_state,
+                device=args.device,
+                output_dir=args.output_dir,
+                stage=args.typed_evaluation_stage,
+                disjoint_results_dir=args.typed_disjoint_results_dir,
+                query_count=query_count,
+                seed=args.seed,
+                native_validation_layouts=args.typed_native_validation_layouts,
+                include_development_native_grid=args.typed_include_development_native_grid,
             )
         elif args.preflight_only:
             report = run_preflight(
@@ -2256,29 +4411,82 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         destination = Path(args.output_dir).expanduser().resolve()
         destination.mkdir(parents=True, exist_ok=True)
-        candidate_log = destination / "candidate_observations.jsonl"
+        if args.typed_search:
+            progress_path = destination / "typed_search_progress.json"
+        elif args.typed_fit:
+            progress_path = destination / "typed_fit_progress.json"
+        elif evaluate_typed_state:
+            progress_path = destination / "typed_checkpoint_evaluation_progress.json"
+        elif evaluate_saved_state:
+            progress_path = destination / (
+                "full_grid_evaluation_progress.json"
+                if args.evaluation_stage == "full-grid"
+                else "disjoint_evaluation_progress.json"
+            )
+        else:
+            progress_path = destination / "oracle_progress.json"
+        progress = (
+            json.loads(progress_path.read_text(encoding="utf-8"))
+            if progress_path.is_file()
+            else {}
+        )
+        candidate_log = destination / (
+            "typed_candidate_observations.jsonl" if args.typed_search else "candidate_observations.jsonl"
+        )
         partial_result = destination / "partial_oracle_benchmark.json"
         cold_warm_result = destination / "cold_warm_timing.json"
+        accounting_keys = (
+            "status",
+            "total_forward_cap",
+            "total_candidate_forward_calls",
+            "total_gradient_ranking_forward_calls",
+            "total_identity_forward_calls",
+            "total_disjoint_verification_forward_calls",
+            "materialization_complete_forward_calls",
+            "panel_reference_complete_forward_calls",
+            "all_access_parity_complete_forward_calls",
+            "initial_gradient_probe_complete_forward_calls",
+            "predictive_native_forward_calls",
+            "total_complete_forward_calls",
+            "total_complete_native_forward_calls",
+            "total_prepare_case_calls",
+            "total_decode_calls",
+            "optimizer_updates",
+            "completed_updates",
+            "attempted_updates",
+            "new_physical_solves",
+            "training_rows",
+            "stage_layout_indices",
+            "current_row_index",
+            "current_stage",
+            "latest_stage",
+            "failure_stage",
+            "failure_row_index",
+        )
         failure = {
             "workflow": "native_cover_oracle_failure_manifest",
             "checkpoint_argument": str(args.checkpoint),
             "exception_type": type(exc).__name__,
             "exception": str(exc),
-            "candidate_observation_log": str(candidate_log),
+            "progress_artifact": str(progress_path) if progress_path.is_file() else None,
+            "execution_accounting": {
+                key: progress[key] for key in accounting_keys if key in progress
+            },
+            "candidate_observation_log": (
+                str(candidate_log) if args.typed_search or args.fit_only else None
+            ),
             "candidate_observations_written": (
                 sum(
                     bool(line.strip())
                     for line in candidate_log.read_text(encoding="utf-8").splitlines()
                 )
-                if candidate_log.is_file()
+                if (args.typed_search or args.fit_only) and candidate_log.is_file()
                 else 0
             ),
             "partial_result": str(partial_result) if partial_result.is_file() else None,
             "cold_warm_diagnostic": str(cold_warm_result) if cold_warm_result.is_file() else None,
         }
-        (destination / "failure_manifest.json").write_text(
-            json.dumps(failure, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        _atomic_json_write(failure, destination / "failure_manifest.json")
         raise
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

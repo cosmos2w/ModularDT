@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import random
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import pairwise
 from types import MappingProxyType
 from typing import Any
@@ -19,9 +20,26 @@ from channelthermal.interaction_evidence.types import EvidenceSplit
 from .algebra import MixedResponseSpec, predict_stencil
 from .contracts import AbsoluteOperator
 from .historical import HistoricalValueSource
-from .losses import ThermalLossScales, compute_stencil_loss_terms, historical_absolute_value_loss
+from .losses import (
+    FixedHeatNullControl,
+    ThermalLossScales,
+    compute_stencil_loss_terms,
+    fixed_heat_control_loss_terms,
+    historical_absolute_value_loss,
+)
 
-RESPONSE_TERMS = ("value", "finite", "mixed", "decision", "constraint")
+RESPONSE_TERMS = (
+    "value",
+    "finite",
+    "mixed",
+    "decision",
+    "constraint",
+    "finite_peak",
+    "pressure_value",
+    "pressure_response",
+    "fixed_heat_null",
+    "fixed_heat_thermal",
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +74,15 @@ class StagedTrainingConfig:
     max_wall_seconds: float | None = None
     review_updates: tuple[int, ...] = (100, 300, 1000, 2000)
     random_seed: int = 2317
+    deterministic_eval_mode: bool = False
+    deterministic_algorithms: bool = False
+    project_response_gradient_blockwise: bool = False
+    response_ramp_start_update: int | None = None
+    response_ramp_end_update: int | None = None
+    response_ramp_terms: tuple[str, ...] = ()
+    required_response_terms: tuple[str, ...] = ()
+    required_control_terms: tuple[str, ...] = ()
+    include_feasibility_bce: bool = True
     stages: tuple[TrainingStage, ...] = (
         TrainingStage("value_warmup", 0, 100, ("value",)),
         TrainingStage("finite_response", 100, 300, ("value", "finite")),
@@ -68,8 +95,8 @@ class StagedTrainingConfig:
     )
 
     def __post_init__(self) -> None:
-        if self.arm not in {"B_value", "B_response"}:
-            raise ValueError("arm must be B_value or B_response.")
+        if self.arm not in {"B_value", "B_response", "R_value", "R_response"}:
+            raise ValueError("arm must be one of B_value, B_response, R_value, or R_response.")
         if min(self.max_optimizer_updates, self.max_epochs, self.total_optimizer_update_ceiling) <= 0:
             raise ValueError("Training update and epoch ceilings must be positive.")
         if self.max_optimizer_updates > self.total_optimizer_update_ceiling:
@@ -89,13 +116,34 @@ class StagedTrainingConfig:
         for left, right in pairwise(stages):
             if left.stop_update != right.start_update:
                 raise ValueError("Training stages must be contiguous and nonoverlapping.")
+        ramp_terms = tuple(dict.fromkeys(self.response_ramp_terms))
+        required_terms = tuple(dict.fromkeys(self.required_response_terms))
+        required_control_terms = tuple(dict.fromkeys(self.required_control_terms))
+        if (self.response_ramp_start_update is None) != (self.response_ramp_end_update is None):
+            raise ValueError("Response ramp start/end must be specified together.")
+        if self.response_ramp_start_update is not None:
+            if self.response_ramp_start_update < 0 or self.response_ramp_end_update <= self.response_ramp_start_update:
+                raise ValueError("Response ramp must span a positive completed-update interval.")
+            stage_terms = {term for stage in stages for term in stage.active_terms}
+            if not set(ramp_terms).issubset(stage_terms):
+                raise ValueError("Every ramped objective must be active in the configured stages.")
+        elif ramp_terms:
+            raise ValueError("Ramped terms require response ramp boundaries.")
+        if any(
+            term not in RESPONSE_TERMS or term == "value"
+            for term in (*ramp_terms, *required_terms, *required_control_terms)
+        ):
+            raise ValueError("Ramped and required response terms must be non-value training objectives.")
         object.__setattr__(self, "review_updates", reviews)
         object.__setattr__(self, "stages", stages)
+        object.__setattr__(self, "response_ramp_terms", ramp_terms)
+        object.__setattr__(self, "required_response_terms", required_terms)
+        object.__setattr__(self, "required_control_terms", required_control_terms)
 
     def active_terms(self, completed_updates: int) -> tuple[str, ...]:
         if completed_updates < 0:
             raise ValueError("completed_updates must be nonnegative.")
-        if self.arm == "B_value":
+        if self.arm.endswith("_value"):
             return ("value",)
         for stage in self.stages:
             if stage.start_update <= completed_updates < stage.stop_update:
@@ -104,6 +152,15 @@ class StagedTrainingConfig:
         # interval. In particular, do not silently make unresolved mixed
         # labels active through this fallback.
         return self.stages[-1].active_terms
+
+    def term_multiplier(self, term: str, completed_updates: int) -> float:
+        """Return a deterministic linear warm-in multiplier for one response term."""
+
+        if term not in self.response_ramp_terms or self.response_ramp_start_update is None:
+            return 1.0
+        span = self.response_ramp_end_update - self.response_ramp_start_update
+        fraction = (completed_updates - self.response_ramp_start_update + 1) / span
+        return float(np.clip(fraction, 0.0, 1.0))
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> StagedTrainingConfig:
@@ -145,6 +202,15 @@ def load_staged_training_config(path: str | None = None, *, arm: str = "B_respon
         "max_wall_seconds": payload.get("max_wall_seconds"),
         "review_updates": tuple(payload["review_updates"]),
         "random_seed": payload["random_seed"],
+        "deterministic_eval_mode": bool(payload.get("deterministic_eval_mode", False)),
+        "deterministic_algorithms": bool(payload.get("deterministic_algorithms", False)),
+        "project_response_gradient_blockwise": bool(payload.get("project_response_gradient_blockwise", False)),
+        "response_ramp_start_update": payload.get("response_ramp_start_update"),
+        "response_ramp_end_update": payload.get("response_ramp_end_update"),
+        "response_ramp_terms": tuple(payload.get("response_ramp_terms", ())),
+        "required_response_terms": tuple(payload.get("required_response_terms", ())),
+        "required_control_terms": tuple(payload.get("required_control_terms", ())),
+        "include_feasibility_bce": bool(payload.get("include_feasibility_bce", True)),
         "stages": tuple(payload["stages"]),
     }
     return StagedTrainingConfig.from_mapping(fields)
@@ -236,6 +302,10 @@ def calibrate_operator_weights(
     historical_value_source: HistoricalValueSource | None = None,
     parameters: Iterable[torch.nn.Parameter],
     device: torch.device | str | None = None,
+    enabled_terms: Sequence[str] | None = None,
+    include_feasibility_bce: bool = True,
+    diagnostic_sink: dict[str, Any] | None = None,
+    fixed_heat_controls: Sequence[FixedHeatNullControl] = (),
 ) -> Mapping[str, float]:
     """Calibrate against the same value objective used by each fit update."""
 
@@ -246,30 +316,122 @@ def calibrate_operator_weights(
     params = tuple(parameter for parameter in parameters if parameter.requires_grad)
     if not params:
         raise ValueError("Gradient calibration needs trainable parameters.")
-    historical_record = None
+    family_ids = tuple(sorted({stencil.physical_family_id for stencil in training_stencils}))
+    historical_records: Mapping[str, Any] = {}
     if historical_value_source is not None:
-        if not historical_value_source.case_ids:
-            raise ValueError("Historical gradient calibration needs a train case.")
-        historical_record = historical_value_source.load(historical_value_source.case_ids[0])
-    squared_norms: dict[str, list[float]] = {}
+        if len(historical_value_source.case_ids) < len(family_ids):
+            raise ValueError(
+                "Balanced response calibration needs one distinct historical train case per physical family."
+            )
+        historical_records = {
+            family_id: historical_value_source.load(historical_value_source.case_ids[index])
+            for index, family_id in enumerate(family_ids)
+        }
+    family_squared_norms: dict[str, dict[str, list[float]]] = {}
+    controls_by_family: dict[str, list[FixedHeatNullControl]] = {}
+    for control in fixed_heat_controls:
+        controls_by_family.setdefault(control.family_id, []).append(control)
+    active_control_terms = set(enabled_terms or ()) & {"fixed_heat_null", "fixed_heat_thermal"}
+    if active_control_terms and not controls_by_family:
+        raise ValueError("Fixed-heat calibration requires verified train-only controls.")
     saw_reference = False
-    for stencil in training_stencils:
+    for index, stencil in enumerate(training_stencils):
         predictions = predict_stencil(operator, stencil, device=device)
         terms = compute_stencil_loss_terms(
-            predictions, stencil, scales=scales, mixed_specs=mixed_specs
+            predictions,
+            stencil,
+            scales=scales,
+            mixed_specs=mixed_specs,
+            enabled_terms=enabled_terms,
+            include_feasibility_bce=include_feasibility_bce,
         )
         calibrated_terms = dict(terms.terms)
-        if historical_record is not None:
+        family_id = stencil.physical_family_id
+        if historical_records:
             if "value" not in calibrated_terms:
                 raise ValueError("Historical calibration requires a stencil value loss.")
             calibrated_terms["value"] = calibrated_terms["value"] + historical_absolute_value_loss(
-                operator, historical_record, scales=scales, device=device
+                operator,
+                historical_records[family_id],
+                scales=scales,
+                device=device,
             )
         saw_reference = saw_reference or "value" in calibrated_terms
         for name, norm_squared in _gradient_squared_norms(calibrated_terms, params).items():
-            squared_norms.setdefault(name, []).append(norm_squared)
+            family_squared_norms.setdefault(family_id, {}).setdefault(name, []).append(norm_squared)
+        if family_id in controls_by_family:
+            for control in controls_by_family[family_id]:
+                control_terms, _diagnostics = fixed_heat_control_loss_terms(
+                    operator, control, scales=scales, device=device
+                )
+                selected_control_terms = {
+                    name: value for name, value in control_terms.items()
+                    if name in active_control_terms
+                }
+                for name, norm_squared in _gradient_squared_norms(selected_control_terms, params).items():
+                    family_squared_norms.setdefault(family_id, {}).setdefault(name, []).append(norm_squared)
         del predictions, terms
-    return _weights_from_squared_norms(squared_norms, "value", saw_reference)
+    # Average repeated stencils within each physical family first, then give
+    # each family one equal vote in the gradient scale. This makes a balanced
+    # recipe insensitive to unequal stencil counts per family.
+    family_balanced_norms: dict[str, list[float]] = {}
+    report_terms = tuple(dict.fromkeys(tuple(enabled_terms or ()) + tuple(
+        term
+        for family_values in family_squared_norms.values()
+        for term in family_values
+    )))
+    family_gradient_rms: dict[str, dict[str, float]] = {family_id: {} for family_id in family_ids}
+    for term in report_terms:
+        family_means = {
+            family_id: float(np.mean(family_squared_norms.get(family_id, {}).get(term, (0.0,))))
+            for family_id in family_ids
+        }
+        for family_id, mean_squared_norm in family_means.items():
+            family_gradient_rms[family_id][term] = float(np.sqrt(mean_squared_norm))
+        if any(value > 0.0 for value in family_means.values()):
+            # Missing/zero gradients contribute zero to this family's vote;
+            # they do not silently remove that family from the calibration.
+            family_balanced_norms[term] = list(family_means.values())
+    weights = _weights_from_squared_norms(family_balanced_norms, "value", saw_reference)
+    if diagnostic_sink is not None:
+        global_gradient_rms = {
+            term: float(np.sqrt(np.mean(values)))
+            for term, values in family_balanced_norms.items()
+        }
+        value_norm = global_gradient_rms.get("value", 0.0)
+        family_ratios = {
+            family_id: {
+                term: (norm / family_gradient_rms[family_id]["value"])
+                if family_gradient_rms.get(family_id, {}).get("value", 0.0) > 0.0
+                else None
+                for term, norm in family_gradient_rms.get(family_id, {}).items()
+            }
+            for family_id in family_ids
+        }
+        diagnostic_sink.clear()
+        diagnostic_sink.update({
+            "family_ids": list(family_ids),
+            "family_stencil_counts": {
+                family_id: sum(stencil.physical_family_id == family_id for stencil in training_stencils)
+                for family_id in family_ids
+            },
+            "enabled_terms": list(enabled_terms) if enabled_terms is not None else None,
+            "include_feasibility_bce": bool(include_feasibility_bce),
+            "reference_term": "value",
+            "family_gradient_rms": family_gradient_rms,
+            "family_gradient_to_value_ratio": family_ratios,
+            "family_terms_with_zero_gradient": {
+                family_id: [term for term, norm in family_gradient_rms[family_id].items() if norm == 0.0]
+                for family_id in family_ids
+            },
+            "equal_family_gradient_rms": global_gradient_rms,
+            "equal_family_gradient_to_value_ratio": {
+                term: (norm / value_norm if value_norm > 0.0 else None)
+                for term, norm in global_gradient_rms.items()
+            },
+            "calibrated_weights": dict(weights),
+        })
+    return weights
 
 
 @dataclass(frozen=True)
@@ -282,6 +444,9 @@ class TrainingStep:
     total_loss: float
     term_losses: Mapping[str, float]
     historical_case_id: str | None = None
+    active_term_weights: Mapping[str, float] = field(default_factory=dict)
+    response_gradient_projection_blocks: tuple[str, ...] = ()
+    response_gradient_dot_before: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -360,6 +525,15 @@ def checkpoint_payload(
             "max_wall_seconds": config.max_wall_seconds,
             "review_updates": list(config.review_updates),
             "random_seed": config.random_seed,
+            "deterministic_eval_mode": config.deterministic_eval_mode,
+            "deterministic_algorithms": config.deterministic_algorithms,
+            "project_response_gradient_blockwise": config.project_response_gradient_blockwise,
+            "response_ramp_start_update": config.response_ramp_start_update,
+            "response_ramp_end_update": config.response_ramp_end_update,
+            "response_ramp_terms": list(config.response_ramp_terms),
+            "required_response_terms": list(config.required_response_terms),
+            "required_control_terms": list(config.required_control_terms),
+            "include_feasibility_bce": config.include_feasibility_bce,
             "stages": [
                 {
                     "name": stage.name,
@@ -384,7 +558,23 @@ def restore_checkpoint_payload(
 
     if payload.get("schema_version") != 1 or payload.get("arm") != config.arm:
         raise ValueError("Resume checkpoint schema/arm does not match this training run.")
-    saved_config = payload.get("training_config", {})
+    saved_config = dict(payload.get("training_config", {}))
+    if config.arm.startswith("B_"):
+        # Historical B checkpoints predate response-ramp/projection metadata.
+        # Their omission is equivalent to the legacy defaults, so preserve
+        # exact B-recipe resume compatibility without weakening R checkpoints.
+        for key, legacy_default in (
+            ("deterministic_eval_mode", False),
+            ("deterministic_algorithms", False),
+            ("project_response_gradient_blockwise", False),
+            ("response_ramp_start_update", None),
+            ("response_ramp_end_update", None),
+            ("response_ramp_terms", []),
+            ("required_response_terms", []),
+            ("required_control_terms", []),
+            ("include_feasibility_bce", True),
+        ):
+            saved_config.setdefault(key, legacy_default)
     expected_config = {
         "arm": config.arm,
         "max_optimizer_updates": config.max_optimizer_updates,
@@ -394,6 +584,15 @@ def restore_checkpoint_payload(
         "max_wall_seconds": config.max_wall_seconds,
         "review_updates": list(config.review_updates),
         "random_seed": config.random_seed,
+        "deterministic_eval_mode": config.deterministic_eval_mode,
+        "deterministic_algorithms": config.deterministic_algorithms,
+        "project_response_gradient_blockwise": config.project_response_gradient_blockwise,
+        "response_ramp_start_update": config.response_ramp_start_update,
+        "response_ramp_end_update": config.response_ramp_end_update,
+        "response_ramp_terms": list(config.response_ramp_terms),
+        "required_response_terms": list(config.required_response_terms),
+        "required_control_terms": list(config.required_control_terms),
+        "include_feasibility_bce": config.include_feasibility_bce,
         "stages": [
             {
                 "name": stage.name,
@@ -445,7 +644,9 @@ def run_staged_fit(
     stop_at_update: int | None = None,
     device: torch.device | str | None = None,
     on_checkpoint: Callable[[Mapping[str, Any], str], None] | None = None,
+    on_optimizer_attempt: Callable[[int, int], None] | None = None,
     on_review: Callable[[TrainingStep], str | None] | None = None,
+    fixed_heat_controls: Sequence[FixedHeatNullControl] = (),
 ) -> StagedFitResult:
     """Fit a fixed training panel and count each successful optimizer step.
 
@@ -453,10 +654,23 @@ def run_staged_fit(
     consume the same fixed historical case order and role-aware value batch.
     Checkpoint serialization is delegated to ``on_checkpoint``; its zero-update
     invocation runs before any training step, so a schema/write failure cannot
-    consume optimizer work.
+    consume optimizer work. ``on_optimizer_attempt`` runs after finite-loss /
+    finite-gradient checks and immediately before ``optimizer.step``; it lets a
+    caller persist attempted-step counts even if that update fails.
     """
 
     config = StagedTrainingConfig() if config is None else config
+    if config.deterministic_algorithms:
+        if any(parameter.device.type == "cuda" for parameter in model.parameters()) and (
+            os.environ.get("CUBLAS_WORKSPACE_CONFIG") not in {":4096:8", ":16:8"}
+        ):
+            raise RuntimeError(
+                "Deterministic CUDA response training requires CUBLAS_WORKSPACE_CONFIG "
+                "to be set before Python starts."
+            )
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
     if not training_stencils or any(stencil.split is not EvidenceSplit.TRAIN for stencil in training_stencils):
         raise ValueError("run_staged_fit accepts a nonempty training-split stencil panel only.")
     if initial_update < 0 or initial_update > config.max_optimizer_updates:
@@ -464,6 +678,11 @@ def run_staged_fit(
     historical_order = tuple(historical_value_source.case_ids) if historical_value_source is not None else ()
     if historical_value_source is not None and (not historical_order or len(set(historical_order)) != len(historical_order)):
         raise ValueError("Historical replay needs a nonempty, unique train case order.")
+    fixed_controls_by_family: dict[str, list[FixedHeatNullControl]] = {}
+    for fixed_control in fixed_heat_controls:
+        fixed_controls_by_family.setdefault(fixed_control.family_id, []).append(fixed_control)
+    if config.required_control_terms and not fixed_controls_by_family:
+        raise ValueError("The training recipe requires fixed-heat controls, but none were supplied.")
 
     total_cap = min(
         config.max_optimizer_updates,
@@ -514,7 +733,8 @@ def run_staged_fit(
         stop_at_update <= initial_update or stop_at_update > total_cap
     ):
         raise ValueError("stop_at_update must be ahead of the resume point and within the effective cap.")
-    if config.arm == "B_value":
+    fixed_heat_visits = _family_visit_counts(training_stencils, initial_update, order)
+    if config.arm.endswith("_value"):
         weights = {"value": 1.0}
     if "value" not in weights:
         raise ValueError("Every staged fit requires a calibrated absolute-value loss weight.")
@@ -551,7 +771,7 @@ def run_staged_fit(
     history: list[TrainingStep] = []
     stopped_at_review = False
     stopped_for_wall_time = False
-    model.train()
+    model.train(not config.deterministic_eval_mode)
     while completed < total_cap and (stop_at_update is None or completed < stop_at_update):
         if (
             config.max_wall_seconds is not None
@@ -566,18 +786,45 @@ def run_staged_fit(
         stencil = training_stencils[sample_index]
         active_terms = config.active_terms(completed)
         predictions = predict_stencil(operator, stencil, device=device)
+        family_controls = fixed_controls_by_family.get(stencil.physical_family_id, ())
+        requested_control_terms = set(config.required_control_terms) & set(active_terms)
+        supplemental_terms: Mapping[str, torch.Tensor] = {}
+        supplemental_diagnostics: Mapping[str, torch.Tensor] = {}
+        if family_controls and requested_control_terms:
+            control_visit = fixed_heat_visits.get(stencil.physical_family_id, 0)
+            selected_control = family_controls[control_visit % len(family_controls)]
+            fixed_heat_visits[stencil.physical_family_id] = control_visit + 1
+            supplemental_terms, supplemental_diagnostics = fixed_heat_control_loss_terms(
+                operator, selected_control, scales=scales, device=device
+            )
+            if not requested_control_terms.issubset(supplemental_terms):
+                raise ValueError(
+                    "Fixed-heat control omitted active required objectives: "
+                    f"{sorted(requested_control_terms - set(supplemental_terms))}."
+                )
         losses = compute_stencil_loss_terms(
             predictions,
             stencil,
             scales=scales,
             mixed_specs=mixed_specs,
             enabled_terms=active_terms,
+            include_feasibility_bce=config.include_feasibility_bce,
+            supplemental_terms=supplemental_terms,
         )
         active_weights = {
-            name: weights[name]
+            name: weights[name] * config.term_multiplier(name, completed)
             for name in active_terms
             if name in weights and name in losses.terms and weights[name] > 0.0
         }
+        required_now = set(config.required_response_terms) & set(active_terms)
+        missing_now = required_now - set(active_weights)
+        if family_controls:
+            missing_now |= requested_control_terms - set(active_weights)
+        if missing_now:
+            raise ValueError(
+                f"Training stencil {stencil.physical_family_id!r} has no active required response terms: "
+                f"{sorted(missing_now)}."
+            )
         if not active_weights:
             if "value" not in losses.terms:
                 raise ValueError("The training stencil has no observed absolute-value objective.")
@@ -599,15 +846,71 @@ def run_staged_fit(
         if not bool(torch.isfinite(total)):
             raise FloatingPointError(f"Non-finite total loss before optimizer update {completed + 1}.")
         optimizer.zero_grad(set_to_none=True)
-        total.backward()
+        projected_blocks: tuple[str, ...] = ()
+        projection_dots: Mapping[str, float] = MappingProxyType({})
+        response_weights = {name: value for name, value in active_weights.items() if name != "value"}
+        if config.project_response_gradient_blockwise and response_weights:
+            value_objective = losses.terms["value"] * active_weights.get("value", 0.0)
+            if historical_loss is not None:
+                value_objective = value_objective + weights["value"] * historical_loss
+            response_objective = losses.total(response_weights)
+            value_gradients = torch.autograd.grad(
+                value_objective, params, retain_graph=True, allow_unused=True
+            )
+            response_gradients = torch.autograd.grad(
+                response_objective, params, retain_graph=False, allow_unused=True
+            )
+            named_trainable = {
+                id(parameter): name
+                for name, parameter in model.named_parameters()
+                if parameter.requires_grad
+            }
+            grouped_indices: dict[str, list[int]] = {}
+            for index, parameter in enumerate(params):
+                name = named_trainable.get(id(parameter), f"parameter_{index}")
+                block = _gradient_block_name(name)
+                grouped_indices.setdefault(block, []).append(index)
+            mutable_dots: dict[str, float] = {}
+            changed_blocks: list[str] = []
+            for block, indices in grouped_indices.items():
+                value_parts = [value_gradients[index] for index in indices if value_gradients[index] is not None]
+                dot = sum(
+                    float((value_gradients[index].detach().double() * response_gradients[index].detach().double()).sum().cpu())
+                    for index in indices
+                    if value_gradients[index] is not None and response_gradients[index] is not None
+                )
+                value_norm_squared = sum(float(value.detach().double().square().sum().cpu()) for value in value_parts)
+                mutable_dots[block] = dot
+                projection_coefficient = min(dot / value_norm_squared, 0.0) if value_norm_squared > 0.0 else 0.0
+                if dot < 0.0 and value_norm_squared > 0.0:
+                    changed_blocks.append(block)
+                for index in indices:
+                    value_gradient = value_gradients[index]
+                    response_gradient = response_gradients[index]
+                    if value_gradient is None and response_gradient is None:
+                        params[index].grad = None
+                        continue
+                    value_gradient = torch.zeros_like(params[index]) if value_gradient is None else value_gradient
+                    response_gradient = torch.zeros_like(params[index]) if response_gradient is None else response_gradient
+                    params[index].grad = value_gradient + response_gradient - projection_coefficient * value_gradient
+            projected_blocks = tuple(sorted(changed_blocks))
+            projection_dots = MappingProxyType(mutable_dots)
+        else:
+            total.backward()
         if any(parameter.grad is not None and not bool(torch.isfinite(parameter.grad).all()) for parameter in params):
             optimizer.zero_grad(set_to_none=True)
             raise FloatingPointError(f"Non-finite gradient before optimizer update {completed + 1}.")
         attempted += 1
         attempted_total += 1
+        if on_optimizer_attempt is not None:
+            on_optimizer_attempt(completed, attempted_total)
         optimizer.step()
         completed += 1
         term_losses = {name: float(value.detach().cpu()) for name, value in losses.terms.items()}
+        term_losses.update({
+            name: float(value.detach().cpu())
+            for name, value in supplemental_diagnostics.items()
+        })
         if historical_loss is not None:
             term_losses["historical_value"] = float(historical_loss.detach().cpu())
         step = TrainingStep(
@@ -619,6 +922,9 @@ def run_staged_fit(
             total_loss=float(total.detach().cpu()),
             term_losses=term_losses,
             historical_case_id=historical_case_id,
+            active_term_weights=MappingProxyType(dict(active_weights)),
+            response_gradient_projection_blocks=projected_blocks,
+            response_gradient_dot_before=projection_dots,
         )
         history.append(step)
         review_decision = None
@@ -630,7 +936,8 @@ def run_staged_fit(
         elif is_review:
             review_decision = "stop"
         if on_checkpoint is not None and (
-            completed % config.checkpoint_every_updates == 0
+            (config.arm.startswith("R_") and completed == 1)
+            or completed % config.checkpoint_every_updates == 0
             or completed in config.review_updates
             or completed == total_cap
             or completed == stop_at_update
@@ -713,6 +1020,56 @@ def _stage_name(config: StagedTrainingConfig, update: int) -> str:
         if stage.start_update <= update < stage.stop_update:
             return stage.name
     return config.stages[-1].name
+
+
+def _gradient_block_name(parameter_name: str) -> str:
+    """Map the native nonlinear response scope to its three explicit blocks."""
+
+    for prefix, label in (
+        ("core.common.field_head.", "field_head"),
+        ("local_coupling.port_refinement_head.", "port_refinement_head"),
+        ("local_coupling.port_head.", "port_head"),
+    ):
+        if parameter_name.startswith(prefix):
+            return label
+    return parameter_name
+
+
+def _family_visit_counts(
+    training_stencils: Sequence[ResponseStencil],
+    completed_updates: int,
+    remaining_order: Sequence[int],
+) -> dict[str, int]:
+    """Reconstruct per-family sample visits from the saved shuffled epoch tail."""
+
+    panel_size = len(training_stencils)
+    if panel_size <= 0 or completed_updates < 0:
+        raise ValueError("Family visit reconstruction needs a nonempty panel and nonnegative update count.")
+    remaining = [int(index) for index in remaining_order]
+    if len(remaining) != len(set(remaining)) or any(index < 0 or index >= panel_size for index in remaining):
+        raise ValueError("Saved sampler tail is not a unique in-range panel permutation subset.")
+    if completed_updates == 0 and not remaining:
+        return {stencil.physical_family_id: 0 for stencil in training_stencils}
+    full_epochs, partial_epoch = divmod(int(completed_updates), panel_size)
+    if len(remaining) != panel_size - partial_epoch and not (
+        partial_epoch == 0 and not remaining
+    ):
+        raise ValueError("Saved sampler tail length does not match the completed-update epoch position.")
+    counts: dict[str, int] = {}
+    for stencil in training_stencils:
+        family_id = stencil.physical_family_id
+        counts[family_id] = counts.get(family_id, 0) + full_epochs
+    consumed_this_epoch = (
+        set(range(panel_size)) - set(remaining)
+        if partial_epoch > 0
+        else set()
+    )
+    if len(consumed_this_epoch) != partial_epoch:
+        raise ValueError("Saved sampler tail does not identify the consumed samples in its partial epoch.")
+    for index in consumed_this_epoch:
+        family_id = training_stencils[index].physical_family_id
+        counts[family_id] = counts.get(family_id, 0) + 1
+    return counts
 
 
 __all__ = [

@@ -11,6 +11,7 @@ import torch
 
 from honf_forward_core.config import BatchData
 from honf_forward_core.interface_fields import PreparedInterfaceField
+from honf_forward_core.interface_fields.adaptive_interaction_cover import InteractionContext
 from .routing_geometry import ChannelThermalRoutingGeometry
 from .local_coupling import (
     build_local_module_params_from_global,
@@ -19,6 +20,15 @@ from .local_coupling import (
 
 
 TASK_TRAINED_FUNCTIONAL_COALESCENCE = "task_trained_functional_coalescence_honf"
+
+
+def _interaction_context(read_role: str) -> InteractionContext:
+    """Bind a native read to its explicit physical phase and receiver role."""
+
+    phase = read_role[:2].upper()
+    if phase not in {"P0", "P1", "P2"}:
+        raise ValueError(f"Unknown interface read phase for role {read_role!r}.")
+    return InteractionContext(phase=phase, receiver_role=read_role)
 
 
 @dataclass(frozen=True)
@@ -355,6 +365,7 @@ def _decode_temperature(
             prepared,
             flat,
             query_features=model._query_features(flat),
+            interaction_context=_interaction_context(read_role),
             return_routing_maps=bool(return_routing_maps),
             return_interaction_aux=(
                 model.config.core_honf.forward_architecture == "routed_pairwise_honf"
@@ -379,6 +390,7 @@ def _read_port_context(
         read = model.core.read(
             prepared,
             port_xy.reshape(batch, modules * ports, dimension),
+            interaction_context=_interaction_context("p0_port"),
             return_routing_maps=bool(return_routing_maps),
         )
     return read.context.reshape(batch, modules, ports, -1), read.interaction_aux
@@ -484,6 +496,7 @@ def forward_interface_field(
     case_edge_selection_mode: Optional[str],
     case_edge_probe_relative_rms_tolerance: Optional[float],
     case_edge_probe_channel_tolerance: Optional[float],
+    fixed_cover_plans: tuple[Any, ...] | None = None,
 ) -> Dict[str, Any]:
     """Run autonomous ports, frozen local physics, one refinement, and final read."""
 
@@ -651,6 +664,8 @@ def forward_interface_field(
             encoded,
             base_module_state,
             layout_cache=layout_cache,
+            fixed_cover_plans=fixed_cover_plans,
+            interaction_context=_interaction_context("p0_port"),
             return_routing_maps=bool(return_routing_maps),
             **detail_prepare_kwargs,
             **_phase_functional_probe_kwargs(
@@ -739,6 +754,8 @@ def forward_interface_field(
                         encoded,
                         module_state,
                         layout_cache=layout_cache,
+                        fixed_cover_plans=fixed_cover_plans,
+                        interaction_context=_interaction_context("p1_refinement"),
                         return_routing_maps=bool(return_routing_maps),
                         phase_shared_state=prepared0.phase_shared_state,
                         **detail_prepare_kwargs,
@@ -757,6 +774,8 @@ def forward_interface_field(
                         encoded,
                         module_state,
                         layout_cache=layout_cache,
+                        fixed_cover_plans=fixed_cover_plans,
+                        interaction_context=_interaction_context("p1_refinement"),
                         return_routing_maps=bool(return_routing_maps),
                         **detail_prepare_kwargs,
                         **_phase_functional_probe_kwargs(
@@ -841,6 +860,11 @@ def forward_interface_field(
                 "predicted_port_interface": predicted_interface,
             }
 
+    if fixed_cover_plans is not None and local_outputs is None:
+        raise ValueError(
+            "A fixed native cover requires a fresh P2 preparation; the global-head "
+            "reuse path would carry P0 preparation permissions into P2 decoding."
+        )
     with _interface_read_role(model, "p2_field"):
         final_prepared = (
             prepared0
@@ -850,6 +874,8 @@ def forward_interface_field(
                     encoded,
                     module_state,
                     layout_cache=layout_cache,
+                    fixed_cover_plans=fixed_cover_plans,
+                    interaction_context=_interaction_context("p2_field"),
                     return_routing_maps=bool(return_routing_maps),
                     phase_shared_state=prepared0.phase_shared_state,
                     **detail_prepare_kwargs,
@@ -868,6 +894,8 @@ def forward_interface_field(
                     encoded,
                     module_state,
                     layout_cache=layout_cache,
+                    fixed_cover_plans=fixed_cover_plans,
+                    interaction_context=_interaction_context("p2_field"),
                     return_routing_maps=bool(return_routing_maps),
                     **detail_prepare_kwargs,
                     **_phase_functional_probe_kwargs(
@@ -887,6 +915,7 @@ def forward_interface_field(
             final_prepared,
             query_xy.float(),
             query_features=model._query_features(query_xy.float()),
+            interaction_context=_interaction_context("p2_field"),
             return_routing_maps=return_routing_maps,
             return_interaction_aux=True,
         )

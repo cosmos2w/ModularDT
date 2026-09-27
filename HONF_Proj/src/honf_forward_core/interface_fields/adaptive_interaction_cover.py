@@ -9,11 +9,102 @@ region; rebuilding it is a separately measured boundary event.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+import hashlib
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from types import MappingProxyType
+from typing import Literal
 
 import torch
 
 from .routing_index.types import PackedPairs
+
+InteractionMechanism = Literal["MM", "ME", "EM", "QM", "QE"]
+INTERACTION_MECHANISMS: tuple[InteractionMechanism, ...] = ("MM", "ME", "EM", "QM", "QE")
+
+
+@dataclass(frozen=True)
+class InteractionContext:
+    """Explicit physical phase and receiver role for a native policy call."""
+
+    phase: str | None = None
+    receiver_role: str | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("phase", "receiver_role"):
+            value = getattr(self, name)
+            if value is not None:
+                value = str(value).strip()
+                if not value:
+                    raise ValueError(f"interaction {name} cannot be empty")
+                object.__setattr__(self, name, value)
+
+
+@dataclass(frozen=True, order=True)
+class InteractionPermissionKey:
+    """A typed transport permission, optionally scoped to a physical phase."""
+
+    mechanism: InteractionMechanism
+    phase: str | None = None
+
+    def __post_init__(self) -> None:
+        mechanism = str(self.mechanism).upper()
+        if mechanism not in INTERACTION_MECHANISMS:
+            raise ValueError(f"unsupported interaction mechanism {self.mechanism!r}")
+        phase = None if self.phase is None else str(self.phase).strip()
+        if phase == "":
+            raise ValueError("permission phase cannot be an empty string")
+        object.__setattr__(self, "mechanism", mechanism)
+        object.__setattr__(self, "phase", phase)
+
+    @property
+    def canonical_name(self) -> str:
+        return self.mechanism if self.phase is None else f"{self.phase}:{self.mechanism}"
+
+    @classmethod
+    def coerce(cls, value: InteractionPermissionKey | str | tuple[str, str | None]) -> InteractionPermissionKey:
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, tuple):
+            if len(value) != 2:
+                raise ValueError("permission tuple keys must be (mechanism, phase)")
+            return cls(str(value[0]), value[1])
+        text = str(value).strip()
+        if ":" in text:
+            phase, mechanism = text.split(":", 1)
+            return cls(mechanism, phase)
+        if "/" in text:
+            phase, mechanism = text.split("/", 1)
+            return cls(mechanism, phase)
+        return cls(text)
+
+
+@dataclass(frozen=True)
+class CoverFrontierSummary:
+    """Recursive receiver-frontier and unique-source work for one typed route."""
+
+    mechanism: InteractionMechanism
+    phase: str | None
+    candidate_node_count: int
+    raw_active_frontier_nodes: int
+    source_bearing_active_nodes: int
+    nonredundant_packet_count: int
+    source_union_count: int
+    unique_source_receiver_pairs: int
+
+    def as_dict(self, *, prefix: str = "cover") -> dict[str, int | str]:
+        tag = self.mechanism.lower()
+        if self.phase is not None:
+            tag = f"{self.phase.lower()}_{tag}"
+        return {
+            f"{prefix}_{tag}_candidate_nodes": self.candidate_node_count,
+            f"{prefix}_{tag}_raw_active_frontier_nodes": self.raw_active_frontier_nodes,
+            f"{prefix}_{tag}_source_bearing_active_nodes": self.source_bearing_active_nodes,
+            f"{prefix}_{tag}_nonredundant_packets": self.nonredundant_packet_count,
+            f"{prefix}_{tag}_source_union_count": self.source_union_count,
+            f"{prefix}_{tag}_unique_source_receiver_pairs": self.unique_source_receiver_pairs,
+        }
 
 
 def endpoint_smoothstep(value: torch.Tensor) -> torch.Tensor:
@@ -158,7 +249,19 @@ class CaseLocalReceiverTree:
                 result[index] = incoming
                 return
             assert node.left is not None and node.right is not None and node.split_axis is not None
-            gate = endpoint_smoothstep(split_gates[index])
+            split_gate = split_gates[index]
+            smooth_gate = endpoint_smoothstep(split_gate)
+            if split_gate.requires_grad:
+                # A hard-forward organizer gate needs a useful local
+                # surrogate at 0/1. Preserve the exact smoothstep forward and
+                # its derivative for interior gates, while using identity
+                # backward only at exact endpoints. This is an explicitly
+                # surrogate derivative through a discrete topology choice.
+                endpoint = ((split_gate.detach() == 0.0) | (split_gate.detach() == 1.0))
+                surrogate_gate = torch.where(endpoint, split_gate, smooth_gate)
+                gate = surrogate_gate + (smooth_gate - surrogate_gate).detach()
+            else:
+                gate = smooth_gate
             result[index] = incoming * (1.0 - gate)
             left_ids = self.nodes[node.left].anchor_indices
             right_ids = self.nodes[node.right].anchor_indices
@@ -256,6 +359,438 @@ class AdaptiveCoverPlan:
 
 
 @dataclass(frozen=True)
+class MechanismPlan:
+    """Immutable typed permissions over a case-local receiver tree.
+
+    ``permissions`` may contain any subset of the five initial transport
+    mechanisms. A missing mechanism key means that mechanism is explicitly
+    full-access at execution time; it is never interpreted as an empty mask.
+    A phase-specific key takes precedence over a mechanism-wide key, which in
+    turn takes precedence over the recorded full-access default.
+    """
+
+    tree: CaseLocalReceiverTree
+    split_gates: torch.Tensor
+    module_present: torch.Tensor
+    environment_count: int
+    permissions: Mapping[
+        InteractionPermissionKey | str | tuple[str, str | None], torch.Tensor
+    ] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        node_count = len(self.tree.nodes)
+        if self.split_gates.shape != (node_count,):
+            raise ValueError("split gates must match candidate-node capacity")
+        if not bool(torch.isfinite(self.split_gates).all()) or bool(
+            ((self.split_gates < 0) | (self.split_gates > 1)).any()
+        ):
+            raise ValueError("split gates must be finite and in [0,1]")
+        if self.module_present.ndim != 1:
+            raise ValueError("module presence must have shape [M]")
+        if self.environment_count < 1:
+            raise ValueError("environment source count must be positive")
+        if not bool(torch.isfinite(self.module_present).all()):
+            raise ValueError("module presence must be finite")
+        if self.split_gates.device != self.module_present.device:
+            raise ValueError("split gates and source validity must use one device")
+        if self.split_gates.device != self.tree.universe.coordinates.device:
+            raise ValueError("cover tensors and receiver tree must use one device")
+        normalized: dict[InteractionPermissionKey, torch.Tensor] = {}
+        for raw_key, raw_value in self.permissions.items():
+            key = InteractionPermissionKey.coerce(raw_key)
+            if key in normalized:
+                raise ValueError(f"duplicate normalized permission key {key.canonical_name!r}")
+            source_count = self._source_count(key.mechanism)
+            value = raw_value
+            if value.shape != (node_count, source_count):
+                raise ValueError(
+                    f"permission {key.canonical_name} must have shape [{node_count},{source_count}]"
+                )
+            if value.device != self.split_gates.device:
+                raise ValueError("permission tensors, split gates, and receiver tree must share a device")
+            if not bool(torch.isfinite(value).all()) or bool(((value < 0) | (value > 1)).any()):
+                raise ValueError("permissions must be finite and in [0,1]")
+            normalized[key] = value.clone()
+        object.__setattr__(self, "split_gates", self.split_gates.clone())
+        object.__setattr__(self, "module_present", self.module_present.clone())
+        object.__setattr__(self, "permissions", MappingProxyType(normalized))
+
+    def _source_count(self, mechanism: InteractionMechanism) -> int:
+        return int(self.module_present.numel()) if mechanism in {"MM", "EM", "QM"} else int(self.environment_count)
+
+    @classmethod
+    def full_access(
+        cls,
+        tree: CaseLocalReceiverTree,
+        module_present: torch.Tensor,
+        environment_count: int,
+        *,
+        phase: str | None = None,
+    ) -> MechanismPlan:
+        """Build a fully explicit all-access plan for all five mechanisms."""
+
+        gates = tree.universe.coordinates.new_zeros((len(tree.nodes),))
+        module = (module_present > 0.5).to(gates.dtype)[None, :].expand(len(tree.nodes), -1).clone()
+        environment = gates.new_ones((len(tree.nodes), int(environment_count)))
+        permissions = {
+            InteractionPermissionKey(mechanism, phase): (
+                module if mechanism in {"MM", "EM", "QM"} else environment
+            )
+            for mechanism in INTERACTION_MECHANISMS
+        }
+        return cls(tree, gates, module_present, int(environment_count), permissions)
+
+    @classmethod
+    def from_legacy(cls, plan: AdaptiveCoverPlan, module_present: torch.Tensor | None = None) -> MechanismPlan:
+        """Convert the historical tied module/environment mask explicitly."""
+
+        if module_present is None:
+            module_present = plan.module_membership[0]
+        permissions = {
+            mechanism: (
+                plan.module_membership
+                if mechanism in {"MM", "EM", "QM"}
+                else plan.environment_membership
+            )
+            for mechanism in INTERACTION_MECHANISMS
+        }
+        return cls(
+            plan.tree,
+            plan.split_gates,
+            module_present,
+            int(plan.environment_membership.shape[1]),
+            permissions,
+        )
+
+    @property
+    def module_membership(self) -> torch.Tensor:
+        """Compatibility view of the query-module permission."""
+
+        return self.permission_matrix("QM")
+
+    @property
+    def environment_membership(self) -> torch.Tensor:
+        """Compatibility view of the query-environment permission."""
+
+        return self.permission_matrix("QE")
+
+    @property
+    def explicit_bypass_keys(self) -> tuple[str, ...]:
+        """Mechanisms whose absent key compiles to the declared full default."""
+
+        return tuple(
+            mechanism
+            for mechanism in INTERACTION_MECHANISMS
+            if InteractionPermissionKey(mechanism) not in self.permissions
+        )
+
+    @property
+    def explicit_phase_keys(self) -> tuple[str, ...]:
+        return tuple(sorted(key.canonical_name for key in self.permissions if key.phase is not None))
+
+    def permission_status(self, mechanism: str, *, phase: str | None = None) -> str:
+        key = InteractionPermissionKey.coerce((mechanism, phase))
+        if key in self.permissions:
+            return "phase_permission" if phase is not None else "mechanism_permission"
+        if phase is not None and InteractionPermissionKey(mechanism) in self.permissions:
+            return "mechanism_permission_inherited"
+        return "full_access_bypass_missing_key"
+
+    def permission_matrix(
+        self,
+        mechanism: str,
+        source_count: int | None = None,
+        *,
+        phase: str | None = None,
+        module_present: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Resolve a typed mask and apply module padding validity."""
+
+        base_key = InteractionPermissionKey(mechanism)
+        selected_key = InteractionPermissionKey(mechanism, phase)
+        key = selected_key if selected_key in self.permissions else base_key
+        expected_count = self._source_count(base_key.mechanism)
+        if source_count is not None and int(source_count) != expected_count:
+            raise ValueError(f"{mechanism} source count must be {expected_count}")
+        if key in self.permissions:
+            value = self.permissions[key]
+        elif base_key.mechanism in {"MM", "EM", "QM"}:
+            value = self.split_gates.new_ones((len(self.tree.nodes), expected_count))
+        else:
+            value = self.split_gates.new_ones((len(self.tree.nodes), expected_count))
+        if base_key.mechanism in {"MM", "EM", "QM"}:
+            valid = self.module_present if module_present is None else module_present
+            if valid.shape != (expected_count,):
+                raise ValueError("module validity does not match the typed module source axis")
+            value = value * (valid > 0.5).to(value.dtype)[None, :]
+        return value
+
+    def access_for(
+        self,
+        mechanism: str,
+        receivers: torch.Tensor,
+        source_count: int | None = None,
+        *,
+        phase: str | None = None,
+        module_present: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Return one typed receiver/source access matrix ``[Q,S]``."""
+
+        alpha = self.tree.access(receivers, self.split_gates)
+        membership = self.permission_matrix(
+            mechanism, source_count, phase=phase, module_present=module_present
+        )
+        return alpha @ membership
+
+    def access(self, queries: torch.Tensor) -> CoverAccess:
+        """Compatibility view with QM/QE sources for existing diagnostics."""
+
+        alpha = self.tree.access(queries, self.split_gates)
+        module = self.access_for("QM", queries)
+        environment = self.access_for("QE", queries)
+        transitions = sum(
+            0.0 < float(self.split_gates[index].detach()) < 1.0
+            for index, node in enumerate(self.tree.nodes)
+            if not node.is_leaf
+        )
+        return CoverAccess(
+            alpha,
+            module,
+            environment,
+            self.active_group_count(),
+            transitions,
+            self.tree.capacity_saturated,
+        )
+
+    def with_split(self, node: int, gate: float | torch.Tensor) -> MechanismPlan:
+        if self.tree.nodes[node].is_leaf:
+            raise ValueError("a leaf has no split")
+        replacement = torch.as_tensor(gate, device=self.split_gates.device, dtype=self.split_gates.dtype)
+        gates = torch.cat((self.split_gates[:node], replacement.reshape(1), self.split_gates[node + 1 :]))
+        return replace(self, split_gates=gates)
+
+    def with_permission(
+        self,
+        mechanism: str,
+        membership: torch.Tensor,
+        *,
+        phase: str | None = None,
+    ) -> MechanismPlan:
+        key = InteractionPermissionKey(mechanism, phase)
+        permissions = dict(self.permissions)
+        permissions[key] = membership
+        return replace(self, permissions=permissions)
+
+    def active_node_mask(self, receivers: torch.Tensor | None = None) -> torch.Tensor:
+        if receivers is None:
+            receivers = self.tree.universe.coordinates
+        return (self.tree.access(receivers, self.split_gates) > 0).any(dim=0)
+
+    def active_group_count(self) -> int:
+        active = self.active_node_mask()
+        source_bearing = torch.zeros_like(active)
+        for mechanism in INTERACTION_MECHANISMS:
+            source_bearing |= (self.permission_matrix(mechanism) > 0).any(dim=1)
+        return int((active & source_bearing).sum())
+
+    def is_full_access(
+        self,
+        *,
+        phase: str | None = None,
+        mechanisms: tuple[InteractionMechanism, ...] = INTERACTION_MECHANISMS,
+    ) -> bool:
+        active = self.active_node_mask()
+        if not bool(active.any()):
+            return False
+        for mechanism in mechanisms:
+            matrix = self.permission_matrix(mechanism, phase=phase)
+            expected = (
+                (self.module_present > 0.5).to(matrix.dtype)
+                if mechanism in {"MM", "EM", "QM"}
+                else matrix.new_ones(matrix.shape[1])
+            )
+            if not torch.equal(matrix[active], expected[None, :].expand(int(active.sum()), -1)):
+                return False
+        return True
+
+    def frontier_summary(
+        self,
+        mechanism: str,
+        phase: str | None = None,
+        *,
+        receivers: torch.Tensor | None = None,
+    ) -> CoverFrontierSummary:
+        """Count recursive frontier nodes, equivalent packets, and source work."""
+
+        if receivers is None:
+            receivers = self.tree.universe.coordinates
+        alpha = self.tree.access(receivers, self.split_gates)
+        active_nodes = (alpha > 0).any(dim=0)
+        membership = self.permission_matrix(mechanism, phase=phase)
+        has_sources = (membership > 0).any(dim=1)
+        active_bearing = active_nodes & has_sources
+        active_bearing_cpu = active_bearing.detach().cpu().tolist()
+        membership_cpu = membership.detach().cpu().tolist()
+        signatures = {
+            tuple(float(value) for value in row)
+            for row, is_active in zip(membership_cpu, active_bearing_cpu)
+            if is_active
+        }
+        effective = alpha @ membership
+        return CoverFrontierSummary(
+            InteractionPermissionKey(mechanism, phase).mechanism,
+            phase,
+            len(self.tree.nodes),
+            int(active_nodes.sum()),
+            int(active_bearing.sum()),
+            len(signatures),
+            int((effective > 0).any(dim=0).sum()),
+            int((effective > 0).sum()),
+        )
+
+    def canonical_hash(self) -> str:
+        """Return a device-independent hash of geometry and every effective permission."""
+
+        digest = hashlib.sha256()
+
+        def add_tensor(name: str, tensor: torch.Tensor) -> None:
+            value = tensor.detach().contiguous().cpu()
+            digest.update(name.encode("utf-8"))
+            digest.update(str(tuple(value.shape)).encode("ascii"))
+            digest.update(str(value.dtype).encode("ascii"))
+            digest.update(value.view(torch.uint8).numpy().tobytes())
+
+        universe = self.tree.universe
+        for name, tensor in (
+            ("anchor_coordinates", universe.coordinates),
+            ("anchor_weights", universe.weights),
+            ("anchor_roles", universe.roles),
+            ("coordinate_scale", universe.coordinate_scale),
+            ("module_present", self.module_present),
+            ("split_gates", self.split_gates),
+        ):
+            add_tensor(name, tensor)
+        digest.update(json.dumps(
+            {
+                "nodes": [
+                    (node.anchor_indices, node.left, node.right, node.split_axis)
+                    for node in self.tree.nodes
+                ],
+                "overlap_fraction": self.tree.overlap_fraction,
+                "capacity_saturated": self.tree.capacity_saturated,
+                "environment_count": self.environment_count,
+                "default_permission": "full_access_bypass",
+                "explicit_permission_keys": sorted(
+                    key.canonical_name for key in self.permissions
+                ),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"))
+        phases = sorted({key.phase for key in self.permissions if key.phase is not None})
+        contexts = [(mechanism, None) for mechanism in INTERACTION_MECHANISMS]
+        contexts.extend((mechanism, phase) for phase in phases for mechanism in INTERACTION_MECHANISMS)
+        for mechanism, phase in contexts:
+            key = InteractionPermissionKey(mechanism, phase)
+            digest.update(key.canonical_name.encode("utf-8"))
+            add_tensor(key.canonical_name, self.permission_matrix(mechanism, phase=phase))
+        return digest.hexdigest()
+
+    def to_dict(self) -> dict[str, object]:
+        """Return a JSON-compatible, stable serialization of this plan."""
+
+        universe = self.tree.universe
+        return {
+            "schema": "honf-mechanism-plan-v1",
+            "default_permission": "full_access_bypass",
+            "explicit_bypass_keys": list(self.explicit_bypass_keys),
+            "tree": {
+                "coordinates": universe.coordinates.detach().cpu().tolist(),
+                "weights": universe.weights.detach().cpu().tolist(),
+                "roles": universe.roles.detach().cpu().tolist(),
+                "coordinate_scale": universe.coordinate_scale.detach().cpu().tolist(),
+                "nodes": [
+                    {
+                        "anchor_indices": list(node.anchor_indices),
+                        "left": node.left,
+                        "right": node.right,
+                        "split_axis": node.split_axis,
+                    }
+                    for node in self.tree.nodes
+                ],
+                "overlap_fraction": self.tree.overlap_fraction,
+                "capacity_saturated": self.tree.capacity_saturated,
+            },
+            "split_gates": self.split_gates.detach().cpu().tolist(),
+            "module_present": self.module_present.detach().cpu().tolist(),
+            "environment_count": self.environment_count,
+            "permissions": {
+                key.canonical_name: value.detach().cpu().tolist()
+                for key, value in sorted(self.permissions.items(), key=lambda item: item[0].canonical_name)
+            },
+            "canonical_hash": self.canonical_hash(),
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        device: torch.device | str = "cpu",
+        dtype: torch.dtype = torch.float32,
+    ) -> MechanismPlan:
+        if payload.get("schema") != "honf-mechanism-plan-v1":
+            raise ValueError("unsupported mechanism plan serialization schema")
+        tree_payload = payload.get("tree")
+        if not isinstance(tree_payload, Mapping):
+            raise TypeError("serialized mechanism plan has no tree record")
+        target_device = torch.device(device)
+        universe = ReceiverAnchorUniverse(
+            coordinates=torch.as_tensor(tree_payload["coordinates"], device=target_device, dtype=dtype),
+            weights=torch.as_tensor(tree_payload["weights"], device=target_device, dtype=dtype),
+            roles=torch.as_tensor(tree_payload["roles"], device=target_device, dtype=torch.long),
+            coordinate_scale=torch.as_tensor(tree_payload["coordinate_scale"], device=target_device, dtype=dtype),
+        )
+        nodes = tuple(
+            CandidateNode(
+                tuple(int(value) for value in node["anchor_indices"]),
+                None if node["left"] is None else int(node["left"]),
+                None if node["right"] is None else int(node["right"]),
+                None if node["split_axis"] is None else int(node["split_axis"]),
+            )
+            for node in tree_payload["nodes"]
+        )
+        tree = CaseLocalReceiverTree(
+            universe,
+            nodes,
+            float(tree_payload["overlap_fraction"]),
+            bool(tree_payload["capacity_saturated"]),
+        )
+        permissions_payload = payload.get("permissions", {})
+        if not isinstance(permissions_payload, Mapping):
+            raise TypeError("serialized permissions must be a mapping")
+        result = cls(
+            tree,
+            torch.as_tensor(payload["split_gates"], device=target_device, dtype=dtype),
+            torch.as_tensor(payload["module_present"], device=target_device, dtype=dtype),
+            int(payload["environment_count"]),
+            {
+                str(key): torch.as_tensor(value, device=target_device, dtype=dtype)
+                for key, value in permissions_payload.items()
+            },
+        )
+        declared_bypasses = payload.get("explicit_bypass_keys")
+        if declared_bypasses is not None and tuple(sorted(str(key) for key in declared_bypasses)) != tuple(
+            sorted(result.explicit_bypass_keys)
+        ):
+            raise ValueError("serialized full-access bypass ledger does not match its permissions")
+        expected_hash = payload.get("canonical_hash")
+        if expected_hash is not None and str(expected_hash) != result.canonical_hash():
+            raise ValueError("serialized mechanism plan hash does not match its contents")
+        return result
+
+
+@dataclass(frozen=True)
 class CoverPairLedger:
     qm_unique_rows: int
     qe_unique_rows: int
@@ -271,11 +806,12 @@ class CoverPairLedger:
 
 
 def compile_cover_pairs(
-    plan: AdaptiveCoverPlan,
+    plan: AdaptiveCoverPlan | MechanismPlan,
     queries: torch.Tensor,
     *,
     module_present: torch.Tensor,
     environment_weights: torch.Tensor,
+    phase: str | None = None,
     empty_environment: str = "fallback_full",
     include_path_diagnostics: bool = True,
 ) -> tuple[PackedPairs, PackedPairs, CoverPairLedger]:
@@ -284,36 +820,46 @@ def compile_cover_pairs(
     QM priors use ``rho/M`` so the inherited packed reader's
     ``M/(1+M)`` factor reproduces Dense at full access. QE priors keep
     quadrature separate from access until their product enters one global
-    attention normalization. A no-support QE query explicitly falls back to
-    full access and is counted; silent zero-output attention is forbidden.
+    attention normalization. Historical tied plans retain a safety
+    full-access fallback for no-support QE queries. Typed plans honor an
+    explicit all-zero QE permission as a closed route.
     """
 
     if empty_environment != "fallback_full":
         raise ValueError("only explicit full-access empty-environment fallback is supported")
-    access = plan.access(queries)
-    if module_present.shape != (access.module_source.shape[1],):
+    access = plan.access(queries) if isinstance(plan, AdaptiveCoverPlan) else None
+    if isinstance(plan, MechanismPlan):
+        module_source = plan.access_for("QM", queries, phase=phase, module_present=module_present)
+        environment_source = plan.access_for("QE", queries, phase=phase)
+    else:
+        assert access is not None
+        module_source = access.module_source
+        environment_source = access.environment_source
+    if module_present.shape != (module_source.shape[1],):
         raise ValueError("module validity must have shape [M]")
     if environment_weights.numel() == 0:
         raise ValueError("the packed environmental reader requires nonempty positive quadrature")
-    if environment_weights.shape != (access.environment_source.shape[1],):
+    if environment_weights.shape != (environment_source.shape[1],):
         raise ValueError("environment weights must have shape [E]")
     if bool((environment_weights <= 0).any()) or not bool(torch.isfinite(environment_weights).all()):
         raise ValueError("environment weights must be finite and positive")
     module_valid = module_present > 0.5
     module_count = module_valid.sum().clamp_min(1)
-    module_prior = access.module_source * module_valid.to(access.module_source.dtype) / module_count
-    environment_prior = access.environment_source * environment_weights
-    # The all-zero environment needs a defined attention denominator. Ramp
-    # the fallback in *before* that endpoint so the field has a finite
-    # one-sided limit while positive source support vanishes. Near-empty
-    # rows pay for all E sources and are counted as fallback work.
-    safety_mass = environment_weights.sum() * 1.0e-4
-    environmental_mass = environment_prior.sum(dim=1)
-    fallback = environmental_mass < safety_mass
-    safety_weight = endpoint_smoothstep(
-        (safety_mass - environmental_mass) / safety_mass
-    )
-    environment_prior = environment_prior + safety_weight[:, None] * environment_weights[None, :]
+    module_prior = module_source * module_valid.to(module_source.dtype) / module_count
+    environment_prior = environment_source * environment_weights
+    if isinstance(plan, AdaptiveCoverPlan):
+        # Preserve the compatibility behavior of the historical tied plan.
+        safety_mass = environment_weights.sum() * 1.0e-4
+        environmental_mass = environment_prior.sum(dim=1)
+        fallback = environmental_mass < safety_mass
+        safety_weight = endpoint_smoothstep(
+            (safety_mass - environmental_mass) / safety_mass
+        )
+        environment_prior = environment_prior + safety_weight[:, None] * environment_weights[None, :]
+    else:
+        fallback = torch.zeros(
+            (int(queries.shape[0]),), device=queries.device, dtype=torch.bool
+        )
 
     def pack(prior: torch.Tensor, raw_paths: int) -> PackedPairs:
         receiver, source = torch.nonzero(prior > 0, as_tuple=True)
@@ -332,7 +878,8 @@ def compile_cover_pairs(
         # Q x N x E Boolean product is much larger than the pair union. Each
         # contracted cell is an integer count <= tree capacity, so converting
         # the cells back to integers before summation is exact.
-        active_paths = (access.receiver_group > 0).to(torch.float32)
+        alpha = plan.tree.access(queries, plan.split_gates)
+        active_paths = (alpha > 0).to(torch.float32)
 
         def count_paths(membership: torch.Tensor, source_valid: torch.Tensor | None = None) -> int:
             support = membership > 0
@@ -346,14 +893,28 @@ def compile_cover_pairs(
                 total = total + counts.to(torch.int64).sum()
             return int(total.item())
 
-        qm_paths = count_paths(plan.module_membership, module_valid)
-        qe_paths = count_paths(plan.environment_membership)
+        if isinstance(plan, MechanismPlan):
+            qm_membership = plan.permission_matrix("QM", phase=phase, module_present=module_valid)
+            qe_membership = plan.permission_matrix("QE", phase=phase)
+        else:
+            qm_membership = plan.module_membership
+            qe_membership = plan.environment_membership
+        qm_paths = count_paths(qm_membership, module_valid)
+        qe_paths = count_paths(qe_membership)
     qm = pack(module_prior, qm_paths)
     qe = pack(environment_prior, qe_paths)
-    source_nonempty = (plan.module_membership > 0).any(dim=1) | (
-        plan.environment_membership > 0
-    ).any(dim=1)
-    query_degree = ((access.receiver_group > 0) & source_nonempty[None, :]).sum(dim=1)
+    if isinstance(plan, MechanismPlan):
+        source_nonempty = (plan.permission_matrix("QM", phase=phase, module_present=module_valid) > 0).any(dim=1) | (
+            plan.permission_matrix("QE", phase=phase) > 0
+        ).any(dim=1)
+        receiver_group = plan.tree.access(queries, plan.split_gates)
+    else:
+        source_nonempty = (plan.module_membership > 0).any(dim=1) | (
+            plan.environment_membership > 0
+        ).any(dim=1)
+        assert access is not None
+        receiver_group = access.receiver_group
+    query_degree = ((receiver_group > 0) & source_nonempty[None, :]).sum(dim=1)
     ledger = CoverPairLedger(
         qm.unique_pair_count,
         qe.unique_pair_count,
@@ -373,10 +934,12 @@ def compile_cover_pairs(
 
 
 def compile_cover_transport_pairs(
-    plan: AdaptiveCoverPlan,
+    plan: AdaptiveCoverPlan | MechanismPlan,
     receivers: torch.Tensor,
     *,
     source_role: str,
+    mechanism: str | None = None,
+    phase: str | None = None,
     module_present: torch.Tensor,
     environment_weights: torch.Tensor,
     receiver_valid: torch.Tensor | None = None,
@@ -392,17 +955,28 @@ def compile_cover_transport_pairs(
 
     if source_role not in {"module", "environment"}:
         raise ValueError("source_role must be module or environment")
-    access = plan.access(receivers)
-    if source_role == "module":
-        if module_present.shape != (access.module_source.shape[1],):
-            raise ValueError("module validity must have shape [M]")
-        prior = access.module_source * (module_present > 0.5).to(access.module_source.dtype)
+    if mechanism is None:
+        mechanism = "MM" if source_role == "module" else "ME"
+    if isinstance(plan, MechanismPlan):
+        access_source = plan.access_for(
+            mechanism,
+            receivers,
+            phase=phase,
+            module_present=module_present if source_role == "module" else None,
+        )
     else:
-        if environment_weights.shape != (access.environment_source.shape[1],):
+        access = plan.access(receivers)
+        access_source = access.module_source if source_role == "module" else access.environment_source
+    if source_role == "module":
+        if module_present.shape != (access_source.shape[1],):
+            raise ValueError("module validity must have shape [M]")
+        prior = access_source * (module_present > 0.5).to(access_source.dtype)
+    else:
+        if environment_weights.shape != (access_source.shape[1],):
             raise ValueError("environment weights must have shape [E]")
         if not bool(torch.isfinite(environment_weights).all()) or bool((environment_weights < 0).any()):
             raise ValueError("environment weights must be finite and nonnegative")
-        prior = access.environment_source * environment_weights[None, :]
+        prior = access_source * environment_weights[None, :]
     if receiver_valid is not None:
         if receiver_valid.shape != (receivers.shape[0],):
             raise ValueError("receiver validity must have shape [Q]")
@@ -424,11 +998,17 @@ def compile_cover_transport_pairs(
 
 
 __all__ = [
+    "INTERACTION_MECHANISMS",
     "AdaptiveCoverPlan",
     "CandidateNode",
     "CaseLocalReceiverTree",
     "CoverAccess",
+    "CoverFrontierSummary",
     "CoverPairLedger",
+    "InteractionContext",
+    "InteractionMechanism",
+    "InteractionPermissionKey",
+    "MechanismPlan",
     "ReceiverAnchorUniverse",
     "compile_cover_pairs",
     "compile_cover_transport_pairs",

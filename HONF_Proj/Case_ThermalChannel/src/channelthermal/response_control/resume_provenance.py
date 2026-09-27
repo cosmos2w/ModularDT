@@ -34,6 +34,15 @@ def training_config_mapping(config: Any, *, arm: str) -> dict[str, Any]:
         "max_wall_seconds": config.max_wall_seconds,
         "review_updates": list(config.review_updates),
         "random_seed": int(config.random_seed),
+        "deterministic_eval_mode": bool(config.deterministic_eval_mode),
+        "deterministic_algorithms": bool(config.deterministic_algorithms),
+        "project_response_gradient_blockwise": bool(config.project_response_gradient_blockwise),
+        "response_ramp_start_update": config.response_ramp_start_update,
+        "response_ramp_end_update": config.response_ramp_end_update,
+        "response_ramp_terms": list(config.response_ramp_terms),
+        "required_response_terms": list(config.required_response_terms),
+        "required_control_terms": list(config.required_control_terms),
+        "include_feasibility_bce": bool(config.include_feasibility_bce),
         "stages": [
             {
                 "name": stage.name,
@@ -225,9 +234,13 @@ def validate_paired_resume_provenance(
             {"path": current_path, "sha256": atlas_digest, "json_sha256": metadata_digest}
         )
 
+    response_arm = str(training_config.arm)
+    if not response_arm.endswith("_response"):
+        raise ValueError("Resume provenance requires a paired response-arm training config.")
+    value_arm = f"{response_arm[0]}_value"
     expected_config = {
         arm: training_config_mapping(training_config, arm=arm)
-        for arm in ("B_value", "B_response")
+        for arm in (value_arm, response_arm)
     }
     if set(resume_payloads) != set(expected_config) or set(resume_checkpoint_paths) != set(
         expected_config
@@ -248,7 +261,7 @@ def validate_paired_resume_provenance(
         raise ValueError("Resume provenance mismatch: source checkpoint was not stopped at its review gate.")
 
     checkpoint_evidence: dict[str, dict[str, Any]] = {}
-    for arm in ("B_value", "B_response"):
+    for arm in (value_arm, response_arm):
         path = Path(resume_checkpoint_paths[arm]).expanduser().resolve()
         digest = file_sha256(path)
         saved_checkpoint = replay_checkpoints.get(arm)
@@ -278,8 +291,24 @@ def validate_paired_resume_provenance(
             fit_arm.get("final_update", -1)
         ) != required_update:
             raise ValueError(f"Resume provenance mismatch: fit manifest does not end at u{required_update}.")
+        saved_training_config = dict(payload.get("training_config") or {})
+        if arm.startswith("B_"):
+            # Older B checkpoints omit additive response-control metadata.
+            # Interpret those omissions as the unchanged historical defaults.
+            for key, legacy_default in (
+                ("deterministic_eval_mode", False),
+                ("deterministic_algorithms", False),
+                ("project_response_gradient_blockwise", False),
+                ("response_ramp_start_update", None),
+                ("response_ramp_end_update", None),
+                ("response_ramp_terms", []),
+                ("required_response_terms", []),
+                ("required_control_terms", []),
+                ("include_feasibility_bce", True),
+            ):
+                saved_training_config.setdefault(key, legacy_default)
         _require_equal(
-            payload.get("training_config"),
+            saved_training_config,
             expected_config[arm],
             f"{arm} checkpoint training schedule changed",
         )
@@ -304,8 +333,8 @@ def validate_paired_resume_provenance(
                 raise ValueError(f"Resume provenance mismatch: {arm} checkpoint lacks {key}.")
         checkpoint_evidence[arm] = {"path": str(path), "sha256": digest}
 
-    value_payload = resume_payloads["B_value"]
-    response_payload = resume_payloads["B_response"]
+    value_payload = resume_payloads[value_arm]
+    response_payload = resume_payloads[response_arm]
     matched_sampler_fields = ["sampler_rng_state", "sampler_remaining_order"]
     if fit.get("initialization_mode") == "native_checkpoint":
         matched_sampler_fields.extend(("historical_case_order", "historical_next_index"))
@@ -318,7 +347,7 @@ def validate_paired_resume_provenance(
     _require_equal(
         response_payload.get("calibrated_loss_weights"),
         expected_weights,
-        f"B_response checkpoint weights differ from the frozen u{required_update} snapshot",
+        f"{response_arm} checkpoint weights differ from the frozen u{required_update} snapshot",
     )
 
     return {
@@ -351,7 +380,7 @@ def validate_paired_resume_provenance(
                 "sampler_rng_state": True,
                 "sampler_remaining_order": True,
             }
-            for arm in ("B_value", "B_response")
+            for arm in (value_arm, response_arm)
         },
         "validated_contracts": [
             "source checkpoint identity",
@@ -362,6 +391,191 @@ def validate_paired_resume_provenance(
             "full-access refit configuration",
             "u100 arm checkpoint bytes and optimizer state",
             "training schedule, per-arm RNG state, and shared sampler continuity",
-            "frozen B_response loss multipliers",
+            f"frozen {response_arm} loss multipliers",
+        ],
+    }
+
+
+def validate_checkpoint_only_review_provenance(
+    *,
+    failed_manifest_path: str | Path,
+    source_checkpoint_path: str | Path,
+    recipe_path: str | Path,
+    r0_diagnostic_path: str | Path,
+    frozen_scales_path: str | Path,
+    train_atlas_paths: Sequence[str | Path],
+    development_atlas_paths: Sequence[str | Path],
+    arm_checkpoint_paths: Mapping[str, str | Path],
+    arm_payloads: Mapping[str, Mapping[str, Any]],
+    training_config: Any,
+    review_update: int = 200,
+) -> dict[str, Any]:
+    """Attest saved u200 pair inputs for evaluation without optimizer updates."""
+
+    if review_update != 200:
+        raise ValueError("This checkpoint-only R1 review entrypoint is restricted to u200.")
+    expected_arms = {"R_value", "R_response"}
+    if set(arm_checkpoint_paths) != expected_arms or set(arm_payloads) != expected_arms:
+        raise ValueError("Checkpoint-only review requires exactly R_value and R_response checkpoints.")
+    if len(train_atlas_paths) != 8 or len(development_atlas_paths) != 4:
+        raise ValueError("Checkpoint-only R1 review requires eight train and four Re90 development atlases.")
+
+    manifest_path, manifest = _read_manifest(failed_manifest_path, label="Source fit manifest")
+    if manifest.get("status") != "failed" or manifest.get("mode") != "paired":
+        raise ValueError("Checkpoint-only review requires the preserved failed paired-run manifest.")
+    if manifest.get("error_type") != "ValueError" or "quadrature weights differ" not in str(manifest.get("error", "")):
+        raise ValueError("Source manifest does not identify the known fixed-heat quadrature evaluation failure.")
+    if manifest.get("initialization_mode") != "native_checkpoint":
+        raise ValueError("Checkpoint-only R1 review requires native-checkpoint initialization.")
+
+    source_path = Path(source_checkpoint_path).expanduser().resolve()
+    recipe = Path(recipe_path).expanduser().resolve()
+    r0_path = Path(r0_diagnostic_path).expanduser().resolve()
+    scales_path = Path(frozen_scales_path).expanduser().resolve()
+    for path in (source_path, recipe, r0_path, scales_path):
+        if not path.is_file():
+            raise FileNotFoundError(path)
+    _require_equal(manifest.get("checkpoint"), str(source_path), "source checkpoint identity changed")
+    _require_equal(manifest.get("recipe_config"), str(recipe), "training recipe path changed")
+    _require_equal(manifest.get("r0_diagnostic_json"), str(r0_path), "R0 diagnostic path changed")
+    _require_equal(
+        [str(Path(path).expanduser().resolve()) for path in manifest.get("train_stencils", ())],
+        [str(Path(path).expanduser().resolve()) for path in train_atlas_paths],
+        "train atlas order or identity changed",
+    )
+    recorded_dev = manifest.get("development_stencils", manifest.get("development_paths"))
+    if recorded_dev is not None:
+        _require_equal(
+            [str(Path(path).expanduser().resolve()) for path in recorded_dev],
+            [str(Path(path).expanduser().resolve()) for path in development_atlas_paths],
+            "development atlas order or identity changed",
+        )
+
+    source_digest = file_sha256(source_path)
+    recipe_digest = file_sha256(recipe)
+    r0_digest = file_sha256(r0_path)
+    scales_digest = file_sha256(scales_path)
+    scales_payload = json.loads(scales_path.read_text(encoding="utf-8"))
+    frozen_scales = scales_payload.get("frozen_scales")
+    if not isinstance(frozen_scales, Mapping):
+        raise TypeError("Frozen scales file has no frozen_scales mapping.")
+
+    atlas_hashes: list[dict[str, str | None]] = []
+    for path_text in (*train_atlas_paths, *development_atlas_paths):
+        path = Path(path_text).expanduser().resolve()
+        metadata_path = path.with_suffix(".json")
+        if not path.is_file() or not metadata_path.is_file():
+            raise FileNotFoundError(path if not path.is_file() else metadata_path)
+        atlas_hashes.append({
+            "path": str(path),
+            "sha256": file_sha256(path),
+            "metadata_sha256": file_sha256(metadata_path),
+        })
+
+    config_mappings = {
+        arm: training_config_mapping(training_config, arm=arm)
+        for arm in ("R_value", "R_response")
+    }
+    checkpoint_digests: dict[str, dict[str, Any]] = {}
+    model_states: dict[str, Mapping[str, Any]] = {}
+    active_scopes: dict[str, Mapping[str, Any]] = {}
+    for arm in ("R_value", "R_response"):
+        path = Path(arm_checkpoint_paths[arm]).expanduser().resolve()
+        expected_name = f"response_control_{arm}_training_checkpoint_u00200.pt"
+        if path.name != expected_name or path.parent != manifest_path.parent:
+            raise ValueError("Review checkpoints must be the exact u200 files in the failed run directory.")
+        payload = arm_payloads[arm]
+        if payload.get("arm") != arm:
+            raise ValueError(f"Checkpoint arm identity differs for {arm}.")
+        completed = int(payload.get("actual_optimizer_updates", -1))
+        attempted = int(payload.get("attempted_optimizer_steps", -1))
+        if completed != review_update or attempted != review_update:
+            raise ValueError(f"{arm} must have exactly {review_update} attempted and completed updates.")
+        if dict(payload.get("training_config") or {}) != config_mappings[arm]:
+            raise ValueError(f"{arm} saved training schedule differs from the declared R1 recipe.")
+        state = payload.get("model")
+        if not isinstance(state, Mapping):
+            raise TypeError(f"{arm} checkpoint model state is not a mapping.")
+        model_states[arm] = state
+        provenance = payload.get("response_control_calibration_provenance")
+        if not isinstance(provenance, Mapping):
+            raise TypeError(f"{arm} checkpoint lacks saved calibration provenance.")
+        if Path(str(provenance.get("source_checkpoint", ""))).expanduser().resolve() != source_path:
+            raise ValueError(f"{arm} saved source checkpoint path differs.")
+        if provenance.get("source_checkpoint_sha256") != source_digest:
+            raise ValueError(f"{arm} saved source checkpoint digest differs.")
+        if Path(str(provenance.get("training_recipe", ""))).expanduser().resolve() != recipe:
+            raise ValueError(f"{arm} saved training recipe path differs.")
+        if provenance.get("training_recipe_sha256") != recipe_digest:
+            raise ValueError(f"{arm} saved training recipe digest differs.")
+        scale_source = provenance.get("loss_scales_source")
+        if not isinstance(scale_source, Mapping):
+            raise TypeError(f"{arm} checkpoint has no frozen-scale provenance.")
+        if Path(str(scale_source.get("path", ""))).expanduser().resolve() != scales_path:
+            raise ValueError(f"{arm} frozen-scale source path differs.")
+        if scale_source.get("sha256") != scales_digest:
+            raise ValueError(f"{arm} frozen-scale digest differs.")
+        if not _same(provenance.get("loss_scales"), frozen_scales):
+            raise ValueError(f"{arm} saved frozen-scale values differ from the source file.")
+        audit = provenance.get("frozen_buffer_checkpoint_audit")
+        if not isinstance(audit, Mapping) or audit.get("passed") is not True:
+            raise ValueError(f"{arm} saved frozen-buffer audit did not pass.")
+        scope = provenance.get("active_scope")
+        if not isinstance(scope, Mapping) or scope.get("name") != "native_nonlinear_interface":
+            raise ValueError(f"{arm} saved active trainable scope is not native_nonlinear_interface.")
+        active_scopes[arm] = scope
+        weights = payload.get("calibrated_loss_weights")
+        if not isinstance(weights, Mapping) or not weights:
+            raise ValueError(f"{arm} has no frozen objective weights.")
+        if any(not np.isfinite(float(value)) or float(value) <= 0.0 for value in weights.values()):
+            raise ValueError(f"{arm} objective weights must be positive and finite.")
+        checkpoint_digests[arm] = {"path": str(path), "sha256": file_sha256(path)}
+
+    if set(model_states["R_value"]) != set(model_states["R_response"]):
+        raise ValueError("Paired u200 model state names differ.")
+    for arm in expected_arms:
+        if set(active_scopes[arm].get("trainable_parameter_names", ())) != set(
+            active_scopes["R_value"].get("trainable_parameter_names", ())
+        ):
+            raise ValueError("Paired u200 checkpoints have different trainable scopes.")
+    for field in ("sampler_rng_state", "sampler_remaining_order", "historical_case_order", "historical_next_index"):
+        if not _same(arm_payloads["R_value"].get(field), arm_payloads["R_response"].get(field)):
+            raise ValueError(f"Paired u200 checkpoints differ in {field}.")
+
+    return {
+        "status": "passed",
+        "mode": "checkpoint_only_review",
+        "review_update": review_update,
+        "optimizer_calls": 0,
+        "optimizer_instances_created": 0,
+        "source_failure_manifest": {
+            "path": str(manifest_path),
+            "sha256": file_sha256(manifest_path),
+            "error": manifest["error"],
+        },
+        "source_checkpoint": {"path": str(source_path), "sha256": source_digest},
+        "recipe": {"path": str(recipe), "sha256": recipe_digest},
+        "r0_diagnostic": {"path": str(r0_path), "sha256": r0_digest},
+        "r0_content_hash_attested_by_source_run": False,
+        "frozen_scales": {"path": str(scales_path), "sha256": scales_digest},
+        "train_and_development_atlas_hashes": atlas_hashes,
+        "development_panel_attestation": (
+            "matched to source failure manifest"
+            if recorded_dev is not None
+            else "explicit calibration/Re90 panel; source failure manifest did not persist development paths"
+        ),
+        "checkpoints": checkpoint_digests,
+        "active_scope": {
+            arm: list(active_scopes[arm].get("trainable_parameter_names", ()))
+            for arm in ("R_value", "R_response")
+        },
+        "validated_contracts": [
+            "known post-fit evaluation failure preserved in source manifest",
+            "source checkpoint, recipe, and frozen-scale hashes; R0 path and current bytes are recorded without claiming source-run hash attestation",
+            "exact eight train and four development atlas bytes",
+            "both exact u200 arm checkpoint files and finite objective weights",
+            "saved training schedules and native nonlinear trainable scope",
+            "paired sampler and historical-cohort cursors",
+            "zero optimizer construction and calls in review mode",
         ],
     }

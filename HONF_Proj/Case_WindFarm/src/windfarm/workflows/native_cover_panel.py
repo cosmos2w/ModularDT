@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from ..geometry import support_weights
 from ..study_spatial import downstream_envelope, native_coordinates
+
+ORGANIZER_TRAIN_LAYOUT_INDICES = (4, 24, 70, 88, 115, 119, 174, 177)
+ORGANIZER_DEVELOPMENT_LAYOUT_INDICES = (81, 103, 107, 196)
+ORGANIZER_SPLIT_ID = "windfarm_run2103_e2475_receiver_local_8_train_4_development_v1"
 
 
 @dataclass(frozen=True)
@@ -30,6 +38,117 @@ class NativeProbeSet:
     quadrature_weights_D3: np.ndarray
     roles: Mapping[str, np.ndarray]
     split: str
+
+
+def freeze_organizer_layout_split(layouts: Sequence[TrainingLayout]) -> dict[str, Any]:
+    """Return the preregistered geometry-only eight/four layout split.
+
+    The exact twelve identities are those selected by the checkpoint-owned
+    seed-42 training split and the compact turbine geometry. The split keeps
+    every stored direction of a layout together and puts repeated turbine
+    counts on both sides where available.
+    """
+
+    by_index = {int(item.layout_index): item for item in layouts}
+    expected = set(ORGANIZER_TRAIN_LAYOUT_INDICES) | set(ORGANIZER_DEVELOPMENT_LAYOUT_INDICES)
+    if len(by_index) != len(layouts) or set(by_index) != expected:
+        raise ValueError(
+            "receiver-local organizer split requires the frozen twelve layout identities "
+            f"{sorted(expected)}, received {sorted(by_index)}"
+        )
+    for item in layouts:
+        if len(item.rows) != 3 or len(set(item.rows)) != 3:
+            raise ValueError(f"layout {item.layout_index} must keep its three direction rows together")
+
+    training = [by_index[index] for index in ORGANIZER_TRAIN_LAYOUT_INDICES]
+    development = [by_index[index] for index in ORGANIZER_DEVELOPMENT_LAYOUT_INDICES]
+    train_counts = {int(item.turbine_count) for item in training}
+    development_counts = {int(item.turbine_count) for item in development}
+    shared_counts = sorted(train_counts & development_counts)
+    if not {6, 29}.issubset(shared_counts):
+        raise ValueError("frozen organizer split must retain same-M layout checks for M=6 and M=29")
+
+    def layout_document(item: TrainingLayout) -> dict[str, Any]:
+        return {
+            "layout_index": int(item.layout_index),
+            "rows_direction_order": [int(row) for row in item.rows],
+            "turbine_count": int(item.turbine_count),
+            "geometry_feature_vector": [float(value) for value in item.feature_vector],
+        }
+
+    content: dict[str, Any] = {
+        "split_id": ORGANIZER_SPLIT_ID,
+        "selection_basis": (
+            "fixed identities from checkpoint-owned seed-42 training geometry; split frozen before "
+            "new organizer outcome inspection; no field errors or pruning outcomes used"
+        ),
+        "direction_grouping": "all three stored directions remain in the same layout partition",
+        "training_layouts": [layout_document(item) for item in training],
+        "development_layouts": [layout_document(item) for item in development],
+        "training_layout_indices": list(ORGANIZER_TRAIN_LAYOUT_INDICES),
+        "development_layout_indices": list(ORGANIZER_DEVELOPMENT_LAYOUT_INDICES),
+        "training_rows_direction_order": [
+            int(row) for item in training for row in item.rows
+        ],
+        "development_rows_direction_order": [
+            int(row) for item in development for row in item.rows
+        ],
+        "same_turbine_count_cross_split": {
+            str(count): {
+                "training_layouts": [
+                    int(item.layout_index) for item in training if int(item.turbine_count) == count
+                ],
+                "development_layouts": [
+                    int(item.layout_index) for item in development if int(item.turbine_count) == count
+                ],
+            }
+            for count in shared_counts
+        },
+        "training_turbine_count_range": [
+            min(int(item.turbine_count) for item in training),
+            max(int(item.turbine_count) for item in training),
+        ],
+    }
+    canonical = json.dumps(content, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return {**content, "split_sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest()}
+
+
+def write_organizer_split_lock(
+    layouts: Sequence[TrainingLayout],
+    *,
+    checkpoint_sha256: str,
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    """Persist the geometry-only split and its first freeze time/hash."""
+
+    if len(checkpoint_sha256) != 64 or any(char not in "0123456789abcdef" for char in checkpoint_sha256):
+        raise ValueError("organizer split lock requires a lowercase SHA256 checkpoint identity")
+    split = freeze_organizer_layout_split(layouts)
+    destination = Path(output_dir).expanduser().resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    lock_path = destination / "organizer_split_lock.json"
+    if lock_path.is_file():
+        existing = json.loads(lock_path.read_text(encoding="utf-8"))
+        if (
+            existing.get("split_sha256") != split["split_sha256"]
+            or existing.get("checkpoint_sha256") != checkpoint_sha256
+        ):
+            raise ValueError("existing organizer split lock differs from the frozen geometry/checkpoint")
+        return {
+            **existing,
+            "artifact_sha256": hashlib.sha256(lock_path.read_bytes()).hexdigest(),
+            "path": str(lock_path),
+        }
+
+    lock = {
+        "workflow": "windfarm_receiver_local_organizer_split_freeze",
+        "frozen_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "checkpoint_sha256": checkpoint_sha256,
+        **split,
+    }
+    lock_path.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    lock_sha256 = hashlib.sha256(lock_path.read_bytes()).hexdigest()
+    return {**lock, "artifact_sha256": lock_sha256, "path": str(lock_path)}
 
 
 def _layout_features(view: Any, row: int) -> tuple[int, tuple[float, float, float, float]]:
@@ -273,4 +392,11 @@ def make_disjoint_native_probes(
     return probes[0], probes[1]
 
 
-__all__ = ["NativeProbeSet", "TrainingLayout", "make_disjoint_native_probes", "select_training_layouts"]
+__all__ = [
+    "NativeProbeSet",
+    "TrainingLayout",
+    "freeze_organizer_layout_split",
+    "make_disjoint_native_probes",
+    "select_training_layouts",
+    "write_organizer_split_lock",
+]

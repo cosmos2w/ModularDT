@@ -6,14 +6,22 @@ import numpy as np
 import pytest
 import torch
 from channelthermal.inverse.interaction_guided import DecisionEstimate, DecisionObservation
+from channelthermal.inverse.local_interface_contract import LocalInterfacePlan
 from channelthermal.inverse.native_corrected import (
     NativeBaselineCorrection,
     ThermalNativeQuantityPredictor,
     baseline_correct_quantities,
+    baseline_correct_tensor_quantities,
 )
 from channelthermal.inverse.native_matched import NativeCandidate, run_matched_native_round
-from channelthermal.response_control.contracts import AbsolutePrediction, RoleQuery
+from channelthermal.response_control.contracts import AbsolutePrediction, DesignInput, RoleQuery
 
+from honf_forward_core.interface_fields.adaptive_interaction_cover import (
+    CandidateNode,
+    CaseLocalReceiverTree,
+    MechanismPlan,
+    ReceiverAnchorUniverse,
+)
 from honf_inverse_core.contracts import NamedContext, PhysicalDesign
 from honf_inverse_core.request_schema import GeometryConstraints
 
@@ -151,6 +159,29 @@ def test_teacher_output_cannot_be_used_as_measured_anchor() -> None:
     assert predictor.calls == []
 
 
+def test_frozen_plan_rejects_a_hash_only_policy_substitute() -> None:
+    class HashOnlyPlan:
+        def canonical_hash(self) -> str:
+            return "f" * 64
+
+    queries = {
+        "fluid_fields": RoleQuery(
+            "fluid_fields", torch.tensor([[0.0, 0.0]]),
+            ("p",), ("Pa",), None, "eulerian",
+        ),
+        "solid_temperature": RoleQuery(
+            "solid_temperature", torch.zeros((2, 2)),
+            ("temperature",), ("degC",), (0, 1), "solid_material_normalized_xy",
+        ),
+    }
+    with pytest.raises(ValueError, match="typed mechanism cover plan"):
+        LocalInterfacePlan.from_anchor(
+            baseline=_design(), module_ids_by_slot=IDS, context=_context(),
+            role_queries=queries, checkpoint_hash="a" * 64,
+            cover_plans=(HashOnlyPlan(),), max_position_delta=0.2,
+        )
+
+
 def test_native_bridge_uses_fresh_design_and_keeps_tensor_gradient() -> None:
     class AbsoluteProbe:
         def __init__(self) -> None:
@@ -197,8 +228,101 @@ def test_native_bridge_uses_fresh_design_and_keeps_tensor_gradient() -> None:
     assert tensors.module_peak_temperature[IDS[0]].requires_grad
     assert tensors.pressure_drop.requires_grad
     assert derivative[0, 0].item() == pytest.approx(1.1, abs=1.0e-5)
-    with pytest.raises(ValueError, match="no cover-policy"):
+    with pytest.raises(TypeError, match="LocalInterfacePlan"):
         predictor(_design(), _context(), IDS, frozen_topology=("unconnected",))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Native inverse gradient test requires CUDA")
+def test_frozen_native_cover_uses_live_caller_tensors_and_rejects_invalid_trial() -> None:
+    device = torch.device("cuda:0")  # The test runner exposes only physical GPU2.
+
+    class MaskedProbe:
+        def __init__(self) -> None:
+            self.masked_calls = 0
+
+        def __call__(self, design, context, role_queries):
+            x = design.module_positions[0, 0]
+            p = torch.stack((10.0 + 0.1 * x, x.new_tensor(2.0)))[:, None]
+            solid = (design.module_heating + design.module_positions[:, 0])[:, None]
+            return AbsolutePrediction({"fluid_fields": p, "solid_temperature": solid})
+
+        def predict_with_frozen_topology(self, design, context, role_queries, *, fixed_cover_plans):
+            assert len(fixed_cover_plans) == 1 and isinstance(fixed_cover_plans[0], MechanismPlan)
+            self.masked_calls += 1
+            x = design.module_positions[0, 0]
+            p = torch.stack((10.0 + 0.3 * x, x.new_tensor(2.0)))[:, None]
+            solid = (design.module_heating + 2.0 * design.module_positions[:, 0])[:, None]
+            return AbsolutePrediction({"fluid_fields": p, "solid_temperature": solid})
+
+    queries = {
+        "fluid_fields": RoleQuery(
+            "fluid_fields", torch.tensor([[0.0, 0.0], [5.0, 0.0]], device=device),
+            ("p",), ("Pa",), None, "eulerian",
+        ),
+        "solid_temperature": RoleQuery(
+            "solid_temperature", torch.zeros((2, 2), device=device),
+            ("temperature",), ("degC",), (0, 1), "solid_material_normalized_xy",
+        ),
+    }
+    checkpoint_hash = "a" * 64
+    universe = ReceiverAnchorUniverse(
+        coordinates=torch.tensor([[1.0, 1.0], [3.0, 1.0]], device=device),
+        weights=torch.ones(2, device=device),
+        roles=torch.ones(2, dtype=torch.int64, device=device),
+        coordinate_scale=torch.ones(2, device=device),
+    )
+    tree = CaseLocalReceiverTree(universe, (CandidateNode((0, 1)),), 0.06, False)
+    cover = MechanismPlan.full_access(tree, torch.ones(2, device=device), 1)
+    topology = LocalInterfacePlan.from_anchor(
+        baseline=_design(), module_ids_by_slot=IDS, context=_context(), role_queries=queries,
+        checkpoint_hash=checkpoint_hash, cover_plans=(cover,), max_position_delta=0.2,
+    )
+    operator = MaskedProbe()
+    predictor = ThermalNativeQuantityPredictor(
+        operator, queries, device=device, checkpoint_hash=checkpoint_hash,
+    )
+    anchor = NativeBaselineCorrection(
+        predictor=predictor, baseline_design=_design(), reference_baseline=_reference(),
+        context=_context(), module_ids_by_slot=IDS, topology_factory=lambda *_: topology,
+    )
+    result = anchor.evaluate(_design(x=1.1))
+    assert operator.masked_calls == 2
+    assert result.baseline_corrected.module_temperature_by_id[IDS[0]] == pytest.approx(100.2)
+    assert result.baseline_corrected.pressure_drop == pytest.approx(5.03)
+
+    positions = torch.tensor(_design(x=1.1).module_centers, device=device, requires_grad=True)
+    heating = torch.tensor(_design().heat_powers, device=device, requires_grad=True)
+    live = DesignInput(positions, heating, torch.ones(2, device=device, dtype=torch.bool))
+    model_baseline = predictor.tensor_quantities(_design(), _context(), IDS, frozen_topology=topology)
+    model_trial = predictor.tensor_quantities_from_input(
+        live, _context(), IDS, module_family_id="thermal_disk", frozen_topology=topology,
+    )
+    corrected = baseline_correct_tensor_quantities(_reference(), model_baseline, model_trial)
+    gradients = torch.autograd.grad(
+        corrected.module_peak_temperature[IDS[0]] + corrected.pressure_drop,
+        (positions, heating),
+    )
+    assert gradients[0][0, 0].item() == pytest.approx(2.3, abs=1e-5)
+    assert gradients[1][0].item() == pytest.approx(1.0, abs=1e-5)
+    with pytest.raises(ValueError, match="trust region"):
+        anchor.evaluate(_design(x=1.3))
+    with pytest.raises(ValueError, match="heating"):
+        anchor.evaluate(_design(x=1.1, heat=(11.0, 10.0)))
+    changed_queries = dict(queries)
+    changed_queries["fluid_fields"] = RoleQuery(
+        "fluid_fields", queries["fluid_fields"].query_features.clone() + 0.01,
+        ("p",), ("Pa",), None, "eulerian",
+    )
+    with pytest.raises(ValueError, match="receiver coordinates"):
+        topology.validate_trial(
+            _design(), _context(), changed_queries, checkpoint_hash=checkpoint_hash,
+            module_ids_by_slot=IDS,
+        )
+    with pytest.raises(ValueError, match="module-to-slot"):
+        topology.validate_trial(
+            _design(), _context(), queries, checkpoint_hash=checkpoint_hash,
+            module_ids_by_slot=tuple(reversed(IDS)),
+        )
 
 
 def _position_candidates(first: tuple[int, int], second: tuple[int, int]):

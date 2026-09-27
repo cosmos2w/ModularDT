@@ -16,7 +16,12 @@ from typing import Literal
 
 import torch
 
-from .adaptive_interaction_cover import AdaptiveCoverPlan, CoverPairLedger, compile_cover_pairs
+from .adaptive_interaction_cover import (
+    AdaptiveCoverPlan,
+    CoverPairLedger,
+    MechanismPlan,
+    compile_cover_pairs,
+)
 
 
 @dataclass(frozen=True)
@@ -54,17 +59,62 @@ class TeacherDistortionLimit:
 
 
 @dataclass(frozen=True)
+class CostWorkAccounting:
+    """Separate organizer scoring work, plan structure, and executed rows."""
+
+    candidate_nodes: int
+    scored_candidate_source_rows: int
+    active_frontier_nodes: int
+    nonredundant_packets: int
+    unique_source_receiver_pairs: int
+    dense_masked_executed_rows: int
+    subset_executed_rows: int
+    packed_executed_rows: int
+    dense_masked_padded_rows: int
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "candidate_nodes": self.candidate_nodes,
+            "scored_candidate_source_rows": self.scored_candidate_source_rows,
+            "active_frontier_nodes": self.active_frontier_nodes,
+            "nonredundant_packets": self.nonredundant_packets,
+            "unique_source_receiver_pairs": self.unique_source_receiver_pairs,
+            "dense_masked_executed_rows": self.dense_masked_executed_rows,
+            "subset_executed_rows": self.subset_executed_rows,
+            "packed_executed_rows": self.packed_executed_rows,
+            "dense_masked_padded_rows": self.dense_masked_padded_rows,
+        }
+
+
+@dataclass(frozen=True)
 class MeasuredCostCoefficients:
-    """Coefficients fit from real preparation/organization/execution timing."""
+    """Measured v1 compatibility or v2 candidate-work execution coefficients.
+
+    Positional v1 records preserve their historical active-group formula.
+    Typed structural estimates must explicitly opt into ``candidate_work_v2``
+    and provide the all-candidate scoring coefficients and executor fixed
+    costs measured for that path.
+    """
 
     measurement_id: str
     preparation_ms: float
-    organization_ms_per_node: float  # per active source-bearing node, not tree capacity
+    organization_ms_per_node: float  # legacy v1 only: per active source-bearing node
     route_ms_per_path: float
     qm_ms_per_row: float
     qe_ms_per_row: float
     pack_ms_per_row: float
     wrapper_ms: float
+    cost_model: Literal["legacy_active_group_v1", "candidate_work_v2"] = "legacy_active_group_v1"
+    organization_ms_per_candidate_node: float | None = None
+    organization_ms_per_candidate_source_row: float | None = None
+    packet_ms_per_packet: float = 0.0
+    dense_dispatch_ms: float = 0.0
+    dense_launch_ms: float = 0.0
+    subset_dispatch_ms: float = 0.0
+    subset_launch_ms: float = 0.0
+    packed_dispatch_ms: float = 0.0
+    packed_launch_ms: float = 0.0
+    subset_gather_ms_per_row: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.measurement_id:
@@ -72,20 +122,164 @@ class MeasuredCostCoefficients:
         for key in (
             "preparation_ms", "organization_ms_per_node", "route_ms_per_path",
             "qm_ms_per_row", "qe_ms_per_row", "pack_ms_per_row", "wrapper_ms",
+            "packet_ms_per_packet", "dense_dispatch_ms", "dense_launch_ms",
+            "subset_dispatch_ms", "subset_launch_ms", "packed_dispatch_ms",
+            "packed_launch_ms", "subset_gather_ms_per_row",
         ):
             if not math.isfinite(getattr(self, key)) or getattr(self, key) < 0.0:
                 raise ValueError(f"cost coefficient {key} must be finite and nonnegative")
 
-    def estimate_ms(self, plan: AdaptiveCoverPlan, ledger: CoverPairLedger) -> float:
+        for key in (
+            "organization_ms_per_candidate_node",
+            "organization_ms_per_candidate_source_row",
+        ):
+            value = getattr(self, key)
+            if value is not None and (not math.isfinite(value) or value < 0.0):
+                raise ValueError(f"cost coefficient {key} must be finite and nonnegative")
+        if self.cost_model not in {"legacy_active_group_v1", "candidate_work_v2"}:
+            raise ValueError("unknown measured cost model")
+        if self.cost_model == "candidate_work_v2" and (
+            self.organization_ms_per_candidate_node is None
+            or self.organization_ms_per_candidate_source_row is None
+        ):
+            raise ValueError(
+                "candidate_work_v2 requires measured node and scored-source-row coefficients"
+            )
+
+    @staticmethod
+    def work_accounting(
+        plan: AdaptiveCoverPlan | MechanismPlan,
+        ledger: CoverPairLedger,
+        *,
+        phase: str | None = None,
+    ) -> CostWorkAccounting:
+        candidate_nodes = len(plan.tree.nodes)
+        module_sources = (
+            int(plan.module_membership.shape[1])
+            if isinstance(plan, AdaptiveCoverPlan)
+            else int(plan.module_present.numel())
+        )
+        environment_sources = (
+            int(plan.environment_membership.shape[1])
+            if isinstance(plan, AdaptiveCoverPlan)
+            else int(plan.environment_count)
+        )
+        scored_candidate_source_rows = candidate_nodes * (
+            3 * module_sources + 2 * environment_sources
+        )
+        if isinstance(plan, MechanismPlan):
+            summaries = [
+                plan.frontier_summary(mechanism, phase)
+                for mechanism in ("MM", "ME", "EM", "QM", "QE")
+            ]
+            active_frontier_nodes = sum(item.source_bearing_active_nodes for item in summaries)
+            nonredundant_packets = sum(item.nonredundant_packet_count for item in summaries)
+        else:
+            active_frontier_nodes = plan.active_group_count()
+            active = (
+                plan.tree.access(plan.tree.universe.coordinates, plan.split_gates) > 0
+            ).any(dim=0)
+            signatures = {
+                (
+                    tuple(float(value) for value in plan.module_membership[index].detach().cpu().tolist()),
+                    tuple(float(value) for value in plan.environment_membership[index].detach().cpu().tolist()),
+                )
+                for index in torch.nonzero(active, as_tuple=False).flatten().tolist()
+            }
+            nonredundant_packets = len(signatures)
+        unique_pairs = int(ledger.qm_unique_rows + ledger.qe_unique_rows)
+        dense_rows = int(ledger.qm_rectangular_rows + ledger.qe_rectangular_rows)
+        return CostWorkAccounting(
+            candidate_nodes,
+            scored_candidate_source_rows,
+            int(active_frontier_nodes),
+            int(nonredundant_packets),
+            unique_pairs,
+            dense_rows,
+            unique_pairs,
+            unique_pairs,
+            max(0, dense_rows - unique_pairs),
+        )
+
+    def estimate_ms(
+        self,
+        plan: AdaptiveCoverPlan | MechanismPlan,
+        ledger: CoverPairLedger,
+        *,
+        executor: Literal["dense_masked", "rectangular_subset", "packed", "full_access"] = "packed",
+        phase: str | None = None,
+    ) -> float:
+        if self.cost_model == "legacy_active_group_v1":
+            if isinstance(plan, MechanismPlan):
+                raise ValueError(
+                    "legacy active-group coefficients cannot estimate typed plans; fit candidate_work_v2"
+                )
+            return (
+                self.preparation_ms
+                + self.organization_ms_per_node * plan.active_group_count()
+                + self.route_ms_per_path * (ledger.qm_raw_paths + ledger.qe_raw_paths)
+                + self.qm_ms_per_row * ledger.qm_unique_rows
+                + self.qe_ms_per_row * ledger.qe_unique_rows
+                + self.pack_ms_per_row * (ledger.qm_unique_rows + ledger.qe_unique_rows)
+                + self.wrapper_ms
+            )
+        if executor not in {"dense_masked", "rectangular_subset", "packed", "full_access"}:
+            raise ValueError("unsupported executor for candidate-work cost estimate")
+        work = self.work_accounting(plan, ledger, phase=phase)
+        if executor == "full_access":
+            executor = "dense_masked"
+        if executor == "dense_masked":
+            dispatch_ms = self.dense_dispatch_ms
+            launch_ms = self.dense_launch_ms
+            qm_rows = int(ledger.qm_rectangular_rows)
+            qe_rows = int(ledger.qe_rectangular_rows)
+            gather_ms = 0.0
+            pack_ms = 0.0
+        elif executor == "rectangular_subset":
+            dispatch_ms = self.subset_dispatch_ms
+            launch_ms = self.subset_launch_ms
+            qm_rows = int(ledger.qm_unique_rows)
+            qe_rows = int(ledger.qe_unique_rows)
+            gather_ms = self.subset_gather_ms_per_row * (qm_rows + qe_rows)
+            pack_ms = 0.0
+        else:
+            dispatch_ms = self.packed_dispatch_ms
+            launch_ms = self.packed_launch_ms
+            qm_rows = int(ledger.qm_unique_rows)
+            qe_rows = int(ledger.qe_unique_rows)
+            gather_ms = 0.0
+            pack_ms = self.pack_ms_per_row * (qm_rows + qe_rows)
         return (
             self.preparation_ms
-            + self.organization_ms_per_node * plan.active_group_count()
+            + float(self.organization_ms_per_candidate_node) * work.candidate_nodes
+            + float(self.organization_ms_per_candidate_source_row) * work.scored_candidate_source_rows
+            + self.packet_ms_per_packet * work.nonredundant_packets
             + self.route_ms_per_path * (ledger.qm_raw_paths + ledger.qe_raw_paths)
-            + self.qm_ms_per_row * ledger.qm_unique_rows
-            + self.qe_ms_per_row * ledger.qe_unique_rows
-            + self.pack_ms_per_row * (ledger.qm_unique_rows + ledger.qe_unique_rows)
-            + self.wrapper_ms
+            + self.qm_ms_per_row * qm_rows
+            + self.qe_ms_per_row * qe_rows
+            + gather_ms + pack_ms + dispatch_ms + launch_ms + self.wrapper_ms
         )
+
+    def estimate_breakdown(
+        self,
+        plan: AdaptiveCoverPlan | MechanismPlan,
+        ledger: CoverPairLedger,
+        *,
+        executor: Literal["dense_masked", "rectangular_subset", "packed", "full_access"] = "packed",
+        phase: str | None = None,
+    ) -> dict[str, int | float | str]:
+        """Expose scorer work and executor row alternatives with estimated time."""
+
+        work = self.work_accounting(plan, ledger, phase=phase)
+        return {
+            "measurement_id": self.measurement_id,
+            "cost_model": self.cost_model,
+            "executor": executor,
+            **work.as_dict(),
+            "estimated_ms": self.estimate_ms(
+                plan, ledger, executor=executor, phase=phase
+            ),
+        }
 
 
 @dataclass(frozen=True)
@@ -107,6 +301,7 @@ class OracleTrial:
     accepted: bool
     reason: str
     gate_passed: bool
+    work: CostWorkAccounting | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +315,8 @@ class OracleResult:
     selected_estimated_ms: float
     trials: tuple[OracleTrial, ...]
     evidence_mode: str = "reference_sufficiency"
+    baseline_work: CostWorkAccounting | None = None
+    selected_work: CostWorkAccounting | None = None
 
 
 def _adequate(
@@ -301,7 +498,9 @@ def search_training_cover(
     selected_observation = baseline
     selected_ledger = baseline_ledger
     baseline_ms = costs.estimate_ms(full_access, baseline_ledger)
+    baseline_work = costs.work_accounting(full_access, baseline_ledger)
     selected_ms = baseline_ms
+    selected_work = baseline_work
     history: list[OracleTrial] = []
     evaluated = 0
     while evaluated < max_evaluations:
@@ -336,28 +535,32 @@ def search_training_cover(
             else:
                 gate_passed, reason = teacher_preservation_gate(observation, teacher_limits or {})
             estimated_ms = costs.estimate_ms(proposal.plan, ledger)
+            work = costs.work_accounting(proposal.plan, ledger)
             accepted = gate_passed and estimated_ms < selected_ms * (1.0 - minimum_cost_improvement)
             if gate_passed and not accepted:
                 reason = "no_estimated_cost_gain"
-            history.append(OracleTrial(proposal, observation, ledger, estimated_ms, accepted, reason, gate_passed))
+            history.append(OracleTrial(
+                proposal, observation, ledger, estimated_ms, accepted, reason, gate_passed, work
+            ))
             if accepted and (best_in_round is None or estimated_ms < best_in_round[3]):
                 best_in_round = (proposal.plan, observation, ledger, estimated_ms)
                 if not explore_alternatives:
                     break
         if best_in_round is not None:
             selected_plan, selected_observation, selected_ledger, selected_ms = best_in_round
+            selected_work = costs.work_accounting(selected_plan, selected_ledger)
             changed = True
         if not changed:
             break
     return OracleResult(
         baseline, baseline_ledger, baseline_ms,
         selected_plan, selected_observation, selected_ledger, selected_ms,
-        tuple(history), evidence_mode,
+        tuple(history), evidence_mode, baseline_work, selected_work,
     )
 
 
 __all__ = [
-    "MeasuredCostCoefficients", "OracleObservation", "OracleProposal", "OracleResult",
+    "CostWorkAccounting", "MeasuredCostCoefficients", "OracleObservation", "OracleProposal", "OracleResult",
     "OracleTrial", "RoleError", "RoleLimit", "TeacherDistortionLimit",
     "local_cover_proposals", "search_training_cover", "teacher_preservation_gate",
 ]

@@ -136,6 +136,33 @@ class DifferentiableThermalOperator:
             raise RuntimeError(
                 "Native response fitting requires predicted-port T_env/h summaries in local-module inputs."
             )
+        self._capture_cover_plans = False
+        self._captured_cover_plans: tuple[Any, ...] | None = None
+
+    def capture_anchor_cover_plans(
+        self,
+        design: DesignInput,
+        context: Mapping[str, Any],
+        role_queries: Mapping[str, RoleQuery],
+    ) -> tuple[Any, ...]:
+        """Freeze an attached input-only organizer's baseline decision once."""
+
+        if self.model.config.core_honf.forward_architecture != "dense_pairwise_field":
+            raise ValueError("Native cover capture requires the intact Dense checkpoint.")
+        if self.model.core.native_interaction_policy is None:
+            raise ValueError("Attach an input-only native cover policy before anchor capture.")
+        if self._capture_cover_plans:
+            raise RuntimeError("Native cover capture cannot be nested.")
+        self._captured_cover_plans = None
+        self._capture_cover_plans = True
+        try:
+            with torch.no_grad():
+                self(design, context, role_queries)
+        finally:
+            self._capture_cover_plans = False
+        if self._captured_cover_plans is None:
+            raise RuntimeError("The native organizer did not supply an applied cover plan.")
+        return self._captured_cover_plans
 
     def _normalize_heat(self, heat: torch.Tensor) -> torch.Tensor:
         if not self.normalize_inputs:
@@ -314,7 +341,14 @@ class DifferentiableThermalOperator:
         design: DesignInput,
         context: Mapping[str, Any],
         role_queries: Mapping[str, RoleQuery],
+        *,
+        fixed_cover_plans: tuple[Any, ...] | None = None,
     ) -> AbsolutePrediction:
+        if fixed_cover_plans is not None:
+            if self.model.config.core_honf.forward_architecture != "dense_pairwise_field":
+                raise ValueError("Frozen native covers require the intact Dense interface-field model.")
+            if len(fixed_cover_plans) != 1:
+                raise ValueError("The native Thermal adapter expects one frozen plan for its one-case batch.")
         expected_roles = {"fluid_fields", "interface", "solid_temperature"}
         if set(role_queries) != expected_roles:
             raise ValueError(f"Native callback expects exactly {sorted(expected_roles)} roles.")
@@ -354,10 +388,17 @@ class DifferentiableThermalOperator:
                     local_query_points=local_query,
                     local_port_condition_mode="predicted",
                     mixed_teacher_ratio=0.0,
+                    fixed_cover_plans=fixed_cover_plans,
                     return_prepared_state=True,
                 )
                 prepared = output["prepared_state"]
                 first_output = output
+                if self._capture_cover_plans:
+                    backend_state = getattr(getattr(prepared, "prepared", None), "backend_state", None)
+                    plans = backend_state.get("cover_plans") if isinstance(backend_state, dict) else None
+                    if plans is None:
+                        raise RuntimeError("The native P2 preparation did not apply a cover plan.")
+                    self._captured_cover_plans = tuple(plans)
             else:
                 output = self.model.decode_prepared(prepared, query_chunk)
             output_chunks.append(output["pred_field"].squeeze(0))
@@ -417,6 +458,23 @@ class DifferentiableThermalOperator:
                 "solid_temperature": solid_values,
             },
             receiver_world_xy=world_xy,
+        )
+
+    def predict_with_frozen_topology(
+        self,
+        design: DesignInput,
+        context: Mapping[str, Any],
+        role_queries: Mapping[str, RoleQuery],
+        *,
+        fixed_cover_plans: tuple[Any, ...],
+    ) -> AbsolutePrediction:
+        """Use the real core permission path for one fresh continuous state."""
+
+        return self(
+            design,
+            context,
+            role_queries,
+            fixed_cover_plans=fixed_cover_plans,
         )
 
 

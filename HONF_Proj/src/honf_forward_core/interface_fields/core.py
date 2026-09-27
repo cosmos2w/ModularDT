@@ -14,6 +14,7 @@ from honf_forward_core.config import (
 )
 from honf_forward_core.nn import FourierFeatures, LazyMLP
 
+from .adaptive_interaction_cover import AdaptiveCoverPlan, InteractionContext, MechanismPlan
 from .common import SharedInterfaceContext
 from .dense_pairwise import DensePairwiseField
 from .group_operator import SparseInterfaceHONF, SparseLayoutCache, packed_coarse_group_sources
@@ -1029,6 +1030,8 @@ class InterfaceFieldCore(nn.Module):
         phase_shared_state: Any = None,
         functional_probes: FunctionalProbeCatalogue | None = None,
         functional_detail_stochastic_mask: torch.Tensor | None = None,
+        fixed_cover_plans: tuple[AdaptiveCoverPlan | MechanismPlan, ...] | None = None,
+        interaction_context: InteractionContext | None = None,
     ) -> PreparedInterfaceField:
         functional_architecture = (
             self.config.forward_architecture == "continuous_functional_coalescence_honf"
@@ -1046,7 +1049,24 @@ class InterfaceFieldCore(nn.Module):
                 "task_trained_functional_coalescence_honf."
             )
         native_policy = self.native_interaction_policy
-        if native_policy is not None:
+        if fixed_cover_plans is not None:
+            if not bool(getattr(self.backend, "optional_native_policy", False)):
+                raise TypeError("fixed cover plans require the checkpoint-native Dense cover backend")
+            plans = self.backend.rebind_fixed_plans(encoded, tuple(fixed_cover_plans))
+            trees = tuple(plan.tree for plan in plans)
+            backend_state = self.backend.prepare(
+                encoded,
+                module_states,
+                cover_trees=trees,
+                cover_plans=plans,
+                interaction_context=interaction_context,
+                return_routing_maps=bool(return_routing_maps),
+            )
+            # Keep fixed-plan provenance in the prepared state.  A later
+            # explicit read context may select a receiver role within the
+            # same phase, but it must not reinterpret phase-keyed permissions.
+            backend_state["cover_fixed_plans_explicit"] = True
+        elif native_policy is not None:
             if not bool(getattr(self.backend, "optional_native_policy", False)):
                 raise TypeError("native interaction policy is attached to an incompatible backend")
             trees = self.backend.build_case_trees(encoded)
@@ -1065,6 +1085,7 @@ class InterfaceFieldCore(nn.Module):
                 module_states,
                 cover_trees=trees,
                 cover_plans=plans,
+                interaction_context=interaction_context,
                 cover_tree_cache_hits=tree_cache_hits,
                 return_routing_maps=bool(return_routing_maps),
             )
@@ -1154,7 +1175,7 @@ class InterfaceFieldCore(nn.Module):
                 else 0
             ),
         }
-        if native_policy is not None:
+        if native_policy is not None or fixed_cover_plans is not None:
             aux.update(
                 self.backend.preparation_aux(
                     backend_state,
@@ -1264,6 +1285,8 @@ class InterfaceFieldCore(nn.Module):
         *,
         receiver_chunk_size: int | None = None,
         return_routing_maps: bool = False,
+        interaction_context: InteractionContext | None = None,
+        include_cover_diagnostics: bool = True,
     ) -> InterfaceRead:
         """Read receivers with an optional evaluation-only chunk override.
 
@@ -1272,6 +1295,23 @@ class InterfaceFieldCore(nn.Module):
         enter the model configuration or checkpoint state.
         """
         receivers = receiver_coordinates.float()
+        backend_state = prepared.backend_state
+        if (
+            isinstance(backend_state, dict)
+            and bool(backend_state.get("cover_fixed_plans_explicit", False))
+            and interaction_context is not None
+        ):
+            prepared_context = backend_state.get("cover_interaction_context")
+            prepared_phase = (
+                prepared_context.phase
+                if isinstance(prepared_context, InteractionContext)
+                else None
+            )
+            if interaction_context.phase != prepared_phase:
+                raise ValueError(
+                    "explicit fixed cover plans cannot be read in a different interaction phase "
+                    f"(prepared={prepared_phase!r}, requested={interaction_context.phase!r})"
+                )
         chunk_size = self.receiver_chunk_size if receiver_chunk_size is None else int(receiver_chunk_size)
         if chunk_size <= 0:
             raise ValueError("receiver_chunk_size must be positive.")
@@ -1281,15 +1321,22 @@ class InterfaceFieldCore(nn.Module):
         coarse_norms = []
         local_norms = []
         backend_aux_chunks: list[tuple[dict[str, torch.Tensor], int]] = []
+        effective_context = interaction_context
+        if effective_context is None and isinstance(prepared.backend_state, dict):
+            effective_context = prepared.backend_state.get("cover_interaction_context")
         for start in range(0, int(receivers.shape[1]), chunk_size):
             chunk = receivers[:, start : start + chunk_size]
             receiver_features = self._receiver_features(prepared, chunk)
+            backend_kwargs = {"return_routing_maps": bool(return_routing_maps)}
+            if bool(getattr(self.backend, "optional_native_policy", False)) or self.config.forward_architecture == "adaptive_interaction_cover_honf":
+                backend_kwargs["interaction_context"] = effective_context
+                backend_kwargs["include_cover_diagnostics"] = bool(include_cover_diagnostics)
             main, backend_aux = self.backend.read(
                 prepared.backend_state,
                 prepared.encoded,
                 chunk,
                 receiver_features,
-                return_routing_maps=bool(return_routing_maps),
+                **backend_kwargs,
             )
             coarse = self.common.read_coarse(
                 receiver_features, prepared.encoded.global_token, prepared.coarse_state
@@ -1346,9 +1393,20 @@ class InterfaceFieldCore(nn.Module):
                     continue
                 first = values[0]
                 if key.startswith("cover_") and key.endswith((
+                    "_raw_active_frontier_nodes",
+                    "_source_bearing_active_frontier_nodes",
+                    "_nonredundant_packets",
+                    "_source_union_count",
+                )):
+                    # These describe the same frozen case plans in every
+                    # receiver chunk; retain one structural count rather than
+                    # multiplying it by the number of read tiles.
+                    aux[key] = torch.stack(values).max()
+                    continue
+                if key.startswith("cover_") and key.endswith((
                     "_unique_rows", "_executed_rows", "_padded_rows", "_raw_paths",
                     "_rectangular_rows", "_fallback_queries", "_query_degree_sum",
-                    "_query_count",
+                    "_query_count", "_unique_source_receiver_pairs",
                 )):
                     # A cover is chosen once per case, but physically read
                     # pairs and fallback work accrue in every query chunk.
@@ -1461,6 +1519,7 @@ class InterfaceFieldCore(nn.Module):
         return_edge_fields: bool = False,
         return_interaction_aux: bool = False,
         receiver_chunk_size: int | None = None,
+        interaction_context: InteractionContext | None = None,
     ) -> dict[str, Any]:
         if return_edge_fields:
             raise ValueError("Per-edge fields are not defined for interface-field baselines.")
@@ -1469,6 +1528,8 @@ class InterfaceFieldCore(nn.Module):
             query_xy,
             receiver_chunk_size=receiver_chunk_size,
             return_routing_maps=bool(return_routing_maps),
+            interaction_context=interaction_context,
+            include_cover_diagnostics=bool(return_routing_maps or return_interaction_aux),
         )
         receiver_features = self._receiver_features(prepared, query_xy.float())
         pred_field = self.common.predict_field(

@@ -23,6 +23,7 @@ from channelthermal.response_control.thermal import (
 from honf_inverse_core.contracts import NamedContext, PhysicalDesign
 
 from .interaction_guided import DecisionEstimate, DecisionObservation
+from .local_interface_contract import LocalInterfacePlan
 
 
 class NativeQuantityPredictor(Protocol):
@@ -50,10 +51,9 @@ class ThermalNativeQuantityPredictor:
     stencil, but only target-free query features enter the operator. The
     optional material validity mask is used after prediction to select the
     maintained measured material query universe. No reference value, class,
-    case ID, or objective enters the forward pass. This adapter deliberately
-    refuses a nonempty topology until that exact native model exposes a cover
-    policy; an inverse grouping alone is not presented as graph-mediated
-    forward computation.
+    case ID, or objective enters the forward pass. A frozen plan must reach a
+    real native cover path; an inverse grouping alone is never accepted as
+    graph-mediated forward computation.
     """
 
     def __init__(
@@ -64,12 +64,14 @@ class ThermalNativeQuantityPredictor:
         device: torch.device | str,
         dtype: torch.dtype = torch.float32,
         solid_valid_mask: np.ndarray | torch.Tensor | None = None,
+        checkpoint_hash: str | None = None,
     ) -> None:
         self.operator = operator
         self.role_queries = dict(role_queries)
         self.device = torch.device(device)
         self.dtype = dtype
         self.solid_valid_mask = solid_valid_mask
+        self.checkpoint_hash = checkpoint_hash
         if {"fluid_fields", "solid_temperature"} - set(self.role_queries):
             raise ValueError("Native inverse needs fluid and material receiver roles.")
         if any(query.query_features.device != self.device for query in self.role_queries.values()):
@@ -86,8 +88,6 @@ class ThermalNativeQuantityPredictor:
     ) -> NativeThermalQuantities:
         """Return differentiable native quantities before scalar detachment."""
 
-        if frozen_topology is not None:
-            raise ValueError("This native Thermal operator has no cover-policy input.")
         active_ids = _active_ids(design, module_ids_by_slot)
         if not active_ids:
             raise ValueError("Native inverse requires active modules.")
@@ -104,15 +104,93 @@ class ThermalNativeQuantityPredictor:
                 np.asarray(design.module_present) > 0.5, device=self.device, dtype=torch.bool
             ),
         )
+        return self.tensor_quantities_from_input(
+            live, context, module_ids_by_slot,
+            module_family_id=design.module_family_id,
+            frozen_topology=frozen_topology,
+        )
+
+    def capture_frozen_topology(
+        self,
+        baseline: PhysicalDesign,
+        context: NamedContext,
+        module_ids_by_slot: Sequence[Hashable | None],
+        *,
+        max_position_delta: float,
+    ) -> LocalInterfacePlan:
+        """Capture one input-only native organizer decision at the anchor."""
+
+        _active_ids(baseline, module_ids_by_slot)
+        if self.checkpoint_hash is None:
+            raise ValueError("Native topology capture requires the checkpoint SHA256.")
+        capture = getattr(self.operator, "capture_anchor_cover_plans", None)
+        if not callable(capture):
+            raise TypeError("The absolute operator cannot capture an applied native cover.")
+        live = DesignInput(
+            module_positions=torch.as_tensor(np.array(baseline.module_centers, copy=True), device=self.device, dtype=self.dtype),
+            module_heating=torch.as_tensor(np.array(baseline.heat_powers, copy=True), device=self.device, dtype=self.dtype),
+            module_present=torch.as_tensor(np.array(baseline.module_present > 0.5, copy=True), device=self.device, dtype=torch.bool),
+        )
+        plans = capture(live, context.as_mapping(), self.role_queries)
+        return LocalInterfacePlan.from_anchor(
+            baseline=baseline,
+            module_ids_by_slot=module_ids_by_slot,
+            context=context,
+            role_queries=self.role_queries,
+            checkpoint_hash=self.checkpoint_hash,
+            cover_plans=plans,
+            max_position_delta=max_position_delta,
+        )
+
+    def tensor_quantities_from_input(
+        self,
+        live: DesignInput,
+        context: NamedContext,
+        module_ids_by_slot: Sequence[Hashable | None],
+        *,
+        module_family_id: str,
+        frozen_topology: LocalInterfacePlan | None = None,
+    ) -> NativeThermalQuantities:
+        """Preserve autograd to caller-owned positions and heating tensors."""
+
+        if live.module_positions.device != self.device or live.module_heating.device != self.device:
+            raise ValueError("Caller-owned native design tensors must use the declared device.")
+        if live.module_positions.dtype != self.dtype or live.module_heating.dtype != self.dtype:
+            raise ValueError("Caller-owned native design tensors must use the declared dtype.")
+        if len(module_ids_by_slot) != int(live.module_present.numel()):
+            raise ValueError("Physical module IDs must align with every live design slot.")
+        if any(bool(active) != (module_id is not None) for active, module_id in zip(
+            live.module_present.detach().cpu().tolist(), module_ids_by_slot, strict=True
+        )):
+            raise ValueError("Only active live modules may carry physical IDs.")
         physical_ids = tuple("" if module_id is None else str(module_id) for module_id in module_ids_by_slot)
         active_physical_ids = {
             physical_ids[index]
             for index, flag in enumerate(live.module_present)
             if bool(flag)
         }
-        if len(active_physical_ids) != len(active_ids):
+        if not active_physical_ids or len(active_physical_ids) != int(live.module_present.sum().item()):
             raise ValueError("Physical IDs collide after conversion to native strings.")
-        values = self.operator(live, context.as_mapping(), self.role_queries)
+        if frozen_topology is None:
+            values = self.operator(live, context.as_mapping(), self.role_queries)
+        else:
+            if not isinstance(frozen_topology, LocalInterfacePlan):
+                raise TypeError("Native frozen topology must be a typed LocalInterfacePlan.")
+            if self.checkpoint_hash is None:
+                raise ValueError("Frozen topology requires a verified predictor checkpoint hash.")
+            frozen_topology.validate_trial(
+                live, context, self.role_queries,
+                checkpoint_hash=self.checkpoint_hash,
+                module_ids_by_slot=module_ids_by_slot,
+                module_family_id=module_family_id,
+            )
+            predict_masked = getattr(self.operator, "predict_with_frozen_topology", None)
+            if not callable(predict_masked):
+                raise ValueError("The absolute operator has no native fixed-cover execution path.")
+            values = predict_masked(
+                live, context.as_mapping(), self.role_queries,
+                fixed_cover_plans=frozen_topology.cover_plans,
+            )
         return reduce_native_thermal_quantities(
             values, live, self.role_queries, context.as_mapping(),
             module_ids=physical_ids, solid_valid_mask=self.solid_valid_mask,
@@ -203,6 +281,42 @@ def baseline_correct_quantities(
         pressure_drop=pressure,
         pressure_drop_units=reference_baseline.pressure_drop_units,
         pressure_drop_definition=reference_baseline.pressure_drop_definition,
+    )
+
+
+def baseline_correct_tensor_quantities(
+    reference_baseline: DecisionObservation,
+    model_baseline: NativeThermalQuantities,
+    model_trial: NativeThermalQuantities,
+) -> NativeThermalQuantities:
+    """Correct per-ID live tensors before any nonsmooth peak reduction."""
+
+    ids = set(reference_baseline.module_temperature_by_id)
+    if ids != set(model_baseline.module_peak_temperature) or ids != set(model_trial.module_peak_temperature):
+        raise ValueError("Reference and both native tensor predictions need identical physical module IDs.")
+    if not (reference_baseline.pressure_drop_units == model_baseline.pressure_drop_units == model_trial.pressure_drop_units):
+        raise ValueError("Pressure-drop units differ across tensor correction inputs.")
+    if model_baseline.temperature_units != model_trial.temperature_units:
+        raise ValueError("Material-temperature units differ across tensor correction inputs.")
+    pressure = model_trial.pressure_drop + (
+        model_trial.pressure_drop.new_tensor(float(reference_baseline.pressure_drop))
+        - model_baseline.pressure_drop.detach()
+    )
+    corrected = {
+        module_id: model_trial.module_peak_temperature[module_id]
+        + (
+            model_trial.module_peak_temperature[module_id].new_tensor(
+                float(reference_baseline.module_temperature_by_id[module_id])
+            )
+            - model_baseline.module_peak_temperature[module_id].detach()
+        )
+        for module_id in reference_baseline.module_temperature_by_id
+    }
+    return NativeThermalQuantities(
+        pressure_drop=pressure,
+        pressure_drop_units=model_trial.pressure_drop_units,
+        module_peak_temperature=corrected,
+        temperature_units=model_trial.temperature_units,
     )
 
 
@@ -325,4 +439,5 @@ __all__ = [
     "NativeQuantityPredictor",
     "ThermalNativeQuantityPredictor",
     "baseline_correct_quantities",
+    "baseline_correct_tensor_quantities",
 ]

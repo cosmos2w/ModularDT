@@ -194,4 +194,77 @@ class HistoricalValueSource:
         return {case_id: dict(summary) for case_id, summary in self._coverage.items()}
 
 
-__all__ = ["HistoricalValueSource"]
+def select_broad_evaluation_cases(
+    dataset: GlobalChannelThermalDataset,
+    *,
+    requested: int = 30,
+) -> tuple[dict[str, Any], ...]:
+    """Select the fixed broad train panel by module count and Reynolds quantiles.
+
+    The initial panel takes minimum, median, and maximum Reynolds cases from
+    each active-module-count stratum. If those rows do not reach ``requested``,
+    it fills from the remaining sorted rows using the historical replay rule.
+    """
+
+    if dataset.split != "train":
+        raise ValueError("The broad response evaluation panel uses packed train records only.")
+    if requested <= 0:
+        raise ValueError("requested broad case count must be positive.")
+    strata: dict[int, list[tuple[str, float]]] = defaultdict(list)
+    with h5py.File(dataset.path, "r") as handle:
+        for case_id, module_count, converged in zip(
+            dataset.selected_case_ids,
+            dataset.selected_module_counts,
+            dataset.selected_converged_flags,
+            strict=True,
+        ):
+            if not converged:
+                continue
+            group = handle["cases"][str(case_id)]
+            raw_config = group["case_config_json"][()]
+            if isinstance(raw_config, bytes):
+                raw_config = raw_config.decode("utf-8")
+            reynolds = float(json.loads(str(raw_config))["flow"]["re"])
+            if not np.isfinite(reynolds):
+                raise ValueError(f"Broad evaluation case {case_id!r} has non-finite Reynolds number.")
+            strata[int(module_count)].append((str(case_id), reynolds))
+    for rows in strata.values():
+        rows.sort(key=lambda item: (item[1], item[0]))
+
+    selected: dict[str, dict[str, Any]] = {}
+    for module_count, rows in sorted(strata.items()):
+        if not rows:
+            continue
+        for quantile in (0.0, 0.5, 1.0):
+            index = round(quantile * (len(rows) - 1))
+            case_id, reynolds = rows[index]
+            selected[case_id] = {
+                "case_id": case_id,
+                "module_count": module_count,
+                "re": reynolds,
+                "stratum_n": len(rows),
+                "re_quantile": quantile,
+            }
+    if len(selected) < requested:
+        for module_count, rows in sorted(strata.items()):
+            for index, (case_id, reynolds) in enumerate(rows):
+                if case_id in selected:
+                    continue
+                selected[case_id] = {
+                    "case_id": case_id,
+                    "module_count": module_count,
+                    "re": reynolds,
+                    "stratum_n": len(rows),
+                    "re_quantile": index / max(len(rows) - 1, 1),
+                }
+                if len(selected) >= requested:
+                    break
+            if len(selected) >= requested:
+                break
+    rows = list(selected.values())[:requested]
+    if len(rows) != requested:
+        raise ValueError(f"Only selected {len(rows)} of {requested} requested broad train cases.")
+    return tuple(sorted(rows, key=lambda row: (row["module_count"], row["re"], row["case_id"])))
+
+
+__all__ = ["HistoricalValueSource", "select_broad_evaluation_cases"]

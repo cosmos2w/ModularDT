@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 import hashlib
 import json
 import os
@@ -18,6 +19,8 @@ import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, replace
+from dataclasses import fields as dataclass_fields
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -28,8 +31,13 @@ from torch.nn.parameter import UninitializedParameter
 
 from channelthermal.data.datasets import GlobalChannelThermalDataset
 from channelthermal.evaluation.loading import load_model
+from channelthermal.interaction_evidence.reference_adapter import (
+    AnalyticWakeReferenceAdapter,
+    load_stored_reference_case,
+)
 from channelthermal.interaction_evidence.response_atlas import load_response_atlas_stencil
 from channelthermal.interaction_evidence.response_dataset import ResponseStencil
+from channelthermal.interaction_evidence.storage import load_solve_record
 from channelthermal.interaction_evidence.types import EvidenceSplit, MeasuredQuantity
 from channelthermal.model import ChannelThermalHONFModel
 from honf_forward_core.config import UnifiedForwardConfig
@@ -38,24 +46,55 @@ from honf_forward_core.interface_fields.checkpoint_warm_start import (
 )
 from honf_forward_core.interface_fields.core import InterfaceFieldCore
 
-from .algebra import MixedResponseSpec
-from .contracts import DesignInput, RoleQuery, context_inputs, role_queries_from_stencil
+from .algebra import MixedResponseSpec, predict_stencil
+from .contracts import (
+    DesignInput,
+    RoleQuery,
+    context_inputs,
+    role_queries_from_stencil,
+)
 from .derivative_check import check_pressure_peak_ad_fd
-from .evaluation import evaluate_stencil
-from .historical import HistoricalValueSource
-from .losses import ThermalLossScales
+from .evaluation import evaluate_absolute_record, evaluate_stencil
+from .historical import HistoricalValueSource, select_broad_evaluation_cases
+from .losses import (
+    FixedHeatNullControl,
+    ThermalLossScales,
+    compute_stencil_loss_terms,
+    fixed_heat_material_peak_coverage,
+    historical_absolute_value_loss,
+)
 from .native import DifferentiableThermalOperator
 from .paired import run_paired_staged_fits, write_paired_training_curves
-from .resume_provenance import validate_paired_resume_provenance
+from .resume_provenance import (
+    validate_checkpoint_only_review_provenance,
+    validate_paired_resume_provenance,
+)
 from .sampling import ReceiverSamplingConfig, SamplingSummary, sample_training_panel
 from .thermal import pressure_section_masks
 from .training import (
+    StagedFitResult,
     StagedTrainingConfig,
     TrainingStage,
+    calibrate_operator_weights,
     load_staged_training_config,
     restore_checkpoint_payload,
     run_staged_fit,
 )
+
+
+def _enable_deterministic_algorithms(device: torch.device) -> str | None:
+    """Enable strict deterministic Torch kernels for native response work."""
+
+    cublas_workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    if device.type == "cuda" and cublas_workspace not in {":4096:8", ":16:8"}:
+        raise RuntimeError(
+            "Deterministic CUDA response work requires CUBLAS_WORKSPACE_CONFIG=:4096:8 "
+            "or :16:8 set before Python starts."
+        )
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    return cublas_workspace
 
 
 def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -67,7 +106,7 @@ def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
             prefix=f".{path.name}.tmp-", delete=False,
         ) as stream:
             temporary = Path(stream.name)
-            json.dump(payload, stream, indent=2, sort_keys=True, default=_json_default)
+            json.dump(_json_safe(payload), stream, indent=2, sort_keys=True, default=_json_default)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
@@ -79,19 +118,42 @@ def _atomic_json(path: Path, payload: Mapping[str, Any]) -> None:
 
 
 def _json_default(value: Any) -> Any:
-    if isinstance(value, (np.integer, np.floating)):
+    return _json_safe(value)
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively convert scientific result values to JSON-native objects."""
+
+    if isinstance(value, Enum):
+        return _json_safe(value.value)
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return [_json_safe(item) for item in sorted(value, key=str)]
+    if hasattr(value, "__dataclass_fields__"):
+        return {
+            field.name: _json_safe(getattr(value, field.name))
+            for field in dataclass_fields(value)
+        }
+    if isinstance(value, (np.integer, np.floating, np.bool_)):
         return value.item()
     if isinstance(value, np.ndarray):
-        return value.tolist()
+        return _json_safe(value.tolist())
     if isinstance(value, torch.Tensor):
-        return value.detach().cpu().tolist()
+        return _json_safe(value.detach().cpu().tolist())
     if isinstance(value, Path):
         return str(value)
-    if isinstance(value, Mapping):
-        return dict(value)
-    if hasattr(value, "value"):
-        return value.value
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
     raise TypeError(f"Cannot serialize {type(value).__name__} to the run manifest.")
+
+
+def _dataclass_record(value: Any) -> dict[str, Any]:
+    """Extract dataclass fields without deepcopying immutable mapping values."""
+
+    return {field.name: getattr(value, field.name) for field in dataclass_fields(value)}
 
 
 def _atomic_torch_save(path: Path, payload: Mapping[str, Any]) -> None:
@@ -120,6 +182,123 @@ def _checkpoint_digest(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _load_safe_response_checkpoint(path: Path) -> Mapping[str, Any]:
+    """Load response checkpoints through PyTorch's restricted unpickler.
+
+    The legacy NumPy RNG tuple uses ndarray reconstruction and a uint32 dtype;
+    those exact NumPy globals are the only additions to the weights-only
+    allowlist. Arbitrary globals in a CLI-selected resume path remain rejected.
+    """
+
+    numpy_core = getattr(np, "_core", None)
+    if numpy_core is None:  # NumPy 1.x compatibility.
+        numpy_core = np.core
+    safe_numpy_globals = [
+        numpy_core.multiarray._reconstruct,
+        np.ndarray,
+        np.dtype,
+        type(np.dtype(np.uint32)),
+    ]
+    with torch.serialization.safe_globals(safe_numpy_globals):
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+    if not isinstance(payload, Mapping):
+        raise TypeError(f"Response checkpoint {path} must contain a mapping.")
+    return payload
+
+
+def _load_r0_projection_evidence(path: Path, checkpoint_path: Path) -> dict[str, Any]:
+    """Validate measured train-only M10 projection evidence.
+
+    Accept either the direct passed R0 report or the read-only recovery
+    manifest whose 80-update fit and gradient diagnostic completed but whose
+    outer serializer failed at the known lazy-buffer lookup. The recovered
+    path is intentionally narrow: any other failed R0 wrapper is rejected.
+    """
+
+    resolved = path.expanduser().resolve()
+    payload = json.loads(resolved.read_text(encoding="utf-8"))
+    source_digest = payload.get("checkpoint_sha256", payload.get("source_checkpoint_sha256"))
+    if source_digest != _checkpoint_digest(checkpoint_path):
+        raise ValueError("The supplied R0 projection evidence belongs to a different source checkpoint.")
+    if payload.get("status") == "passed" and payload.get("mode") == "train_only_scope_diagnostic":
+        justification = payload.get("projection_justification")
+        if not isinstance(justification, Mapping):
+            raise ValueError("The passed R0 report has no measured projection-justification record.")
+        family_id = justification.get("family_id")
+        justified = bool(justification.get("justified_by_measured_m10_combined_value_conflict"))
+        detail = dict(justification)
+        evidence_status = "passed_train_only_scope_diagnostic"
+    elif (
+        payload.get("mode") == "r0_missing_native_nonlinear_interface_scope"
+        and payload.get("status") == "failed"
+        and payload.get("error_type") == "KeyError"
+        and payload.get("error") == "'core.position_fourier.frequencies'"
+        and int(payload.get("optimizer_updates_completed", -1)) == 80
+        and int(payload.get("optimizer_updates_attempted", -1)) == 80
+        and int(payload.get("prior_optimizer_attempts_preserved", -1)) == 100
+        and int(payload.get("total_r0_optimizer_attempts_including_prior", -1)) == 180
+        and int(payload.get("reference_solver_calls", -1)) == 0
+        and payload.get("m10_projection_justified") is True
+    ):
+        gradient_path_value = payload.get("m10_gradient_diagnostic")
+        if not gradient_path_value:
+            raise ValueError("Recovered R0 manifest is missing its combined M10 gradient diagnostic path.")
+        gradient_path = Path(str(gradient_path_value)).expanduser().resolve()
+        gradient = json.loads(gradient_path.read_text(encoding="utf-8"))
+        blocks = gradient.get("combined_response_gradient_vs_combined_value_gradient")
+        expected_blocks = {"field_head", "port_head", "port_refinement_head"}
+        if not isinstance(blocks, Mapping) or set(blocks) != expected_blocks:
+            raise ValueError("Recovered M10 gradient diagnostic does not cover every trainable parameter block.")
+        computed_blocks: dict[str, dict[str, Any]] = {}
+        for name, item in blocks.items():
+            if not isinstance(item, Mapping):
+                raise TypeError(f"Recovered M10 gradient block {name!r} is malformed.")
+            dot = float(item["dot_product"])
+            value_norm = float(item["combined_value_gradient_norm"])
+            if not np.isfinite(dot) or not np.isfinite(value_norm):
+                raise ValueError(f"Recovered M10 gradient block {name!r} is non-finite.")
+            adverse = dot < 0.0 and value_norm > 0.0
+            if bool(item.get("adverse")) != adverse:
+                raise ValueError(f"Recovered M10 gradient block {name!r} has an inconsistent conflict flag.")
+            computed_blocks[str(name)] = {**dict(item), "adverse": adverse}
+        family_id = gradient.get("family_id")
+        justified = any(item["adverse"] for item in computed_blocks.values())
+        if family_id != "stored_family:0350" or not justified:
+            raise ValueError("Recovered M10 diagnostic does not establish the declared train-family conflict.")
+        if not payload.get("m10_projection_justified") == justified:
+            raise ValueError("Recovered R0 manifest and combined M10 gradient conflict flags disagree.")
+        detail = {
+            "family_id": family_id,
+            "justified_by_measured_m10_combined_value_conflict": justified,
+            "combined_gradient_gate_by_block": computed_blocks,
+            "individual_response_term_diagnostics": gradient.get("individual_response_term_diagnostics"),
+            "calibrated_weights": gradient.get("calibrated_weights"),
+            "m10_gradient_diagnostic_path": str(gradient_path),
+            "m10_gradient_diagnostic_sha256": _checkpoint_digest(gradient_path),
+            "r0_outer_status": "failed_after_80_updates_on_lazy_buffer_KeyError",
+            "r0_error": payload.get("error"),
+            "charged_updates_including_prior": 180,
+            "reference_solver_calls": 0,
+        }
+        evidence_status = "recovered_train_only_fit_and_m10_gradient; outer serialization failed"
+    else:
+        raise ValueError(
+            "The supplied R0 evidence is neither a passed direct diagnostic nor the verified read-only "
+            "u80 lazy-buffer recovery manifest."
+        )
+    if family_id != "stored_family:0350":
+        raise ValueError("Projection evidence does not cover the declared M10 conflict family.")
+    return {
+        **detail,
+        "family_id": family_id,
+        "justified_by_measured_m10_combined_value_conflict": justified,
+        "evidence_status": evidence_status,
+        "r0_diagnostic_path": str(resolved),
+        "r0_diagnostic_sha256": _checkpoint_digest(resolved),
+        "projection_enabled_for_fit": justified,
+    }
+
+
 def _resolve_dataset_path(checkpoint: Mapping[str, Any], override: str | None) -> Path:
     if override:
         return Path(override).expanduser().resolve()
@@ -129,6 +308,237 @@ def _resolve_dataset_path(checkpoint: Mapping[str, Any], override: str | None) -
     if not configured:
         raise ValueError("Checkpoint has no packed_h5_path; pass --dataset explicitly.")
     return Path(str(configured)).expanduser().resolve()
+
+
+def _validate_rehydrated_raw_baseline(
+    atlas_baseline: Any,
+    raw_baseline: Any,
+    *,
+    coordinate_atol: float = 1.0e-7,
+) -> dict[str, Any]:
+    """Bind an existing raw solver baseline to its atlas target without solving."""
+
+    if atlas_baseline.output is None or raw_baseline.output is None:
+        raise ValueError("Fixed-heat review baseline binding requires solved atlas and raw records.")
+    if raw_baseline.status.value != "converged" or atlas_baseline.status.value != "converged":
+        raise ValueError("Fixed-heat review baseline binding requires converged records.")
+    if raw_baseline.source is not atlas_baseline.source:
+        raise ValueError("Rehydrated raw baseline changes the atlas evidence source.")
+    if raw_baseline.design != atlas_baseline.design:
+        raise ValueError("Rehydrated raw baseline design differs from the atlas baseline.")
+    if dict(raw_baseline.context.values) != dict(atlas_baseline.context.values):
+        raise ValueError("Rehydrated raw baseline context differs from the atlas baseline.")
+    atlas_output = atlas_baseline.output
+    raw_output = raw_baseline.output
+    if set(raw_output.roles) != set(atlas_output.roles):
+        raise ValueError("Rehydrated raw baseline role set differs from the atlas baseline.")
+    role_checks: dict[str, dict[str, Any]] = {}
+    for role_name, atlas_role in atlas_output.roles.items():
+        raw_role = raw_output.roles[role_name]
+        identity_equal = (
+            raw_role.role == atlas_role.role
+            and raw_role.coordinate_kind == atlas_role.coordinate_kind
+            and raw_role.channel_names == atlas_role.channel_names
+            and raw_role.channel_units == atlas_role.channel_units
+            and raw_role.query_ids == atlas_role.query_ids
+            and raw_role.receiver_module_ids == atlas_role.receiver_module_ids
+            and raw_role.values.shape == atlas_role.values.shape
+            and raw_role.query_features.shape == atlas_role.query_features.shape
+        )
+        if not identity_equal:
+            raise ValueError(f"Rehydrated raw baseline {role_name!r} schema differs from its atlas record.")
+        coordinate_delta = float(np.max(np.abs(raw_role.query_features - atlas_role.query_features)))
+        if coordinate_delta > coordinate_atol:
+            raise ValueError(
+                f"Rehydrated raw baseline {role_name!r} coordinates exceed the declared atlas-rounding "
+                f"tolerance {coordinate_atol}: max_abs={coordinate_delta}."
+            )
+        if not np.array_equal(raw_role.values, atlas_role.values):
+            raise ValueError(f"Rehydrated raw baseline {role_name!r} target values differ from the atlas record.")
+        if not np.array_equal(raw_role.valid_mask, atlas_role.valid_mask):
+            raise ValueError(f"Rehydrated raw baseline {role_name!r} validity mask differs from the atlas record.")
+        role_checks[role_name] = {
+            "identity_schema_equal": True,
+            "coordinates_max_abs_difference": coordinate_delta,
+            "coordinate_absolute_tolerance": coordinate_atol,
+            "values_exact": True,
+            "valid_mask_exact": True,
+            "quadrature_weights_compared": False,
+            "quadrature_note": "Atlas and raw solver retain separate documented quadrature schemas.",
+        }
+    atlas_pressure = atlas_output.quantities["pressure_drop"]
+    raw_pressure = raw_output.quantities["pressure_drop"]
+    if (
+        not atlas_pressure.resolved
+        or not raw_pressure.resolved
+        or atlas_pressure.units != raw_pressure.units
+        or float(atlas_pressure.value) != float(raw_pressure.value)
+    ):
+        raise ValueError("Rehydrated raw baseline pressure differs from the atlas baseline target.")
+    if raw_output.module_peak_temperature != atlas_output.module_peak_temperature:
+        raise ValueError("Rehydrated raw baseline per-module peak labels differ from the atlas baseline.")
+    return {
+        "status": "passed",
+        "design_exact": True,
+        "context_exact": True,
+        "pressure_exact": True,
+        "module_peaks_exact": True,
+        "role_checks": role_checks,
+        "raw_baseline_case_dir": raw_output.case_dir,
+        "atlas_baseline_case_dir": atlas_output.case_dir,
+    }
+
+
+def _load_fixed_heat_null_controls(
+    recipe_payload: Mapping[str, Any],
+    raw_stencils: Sequence[ResponseStencil],
+    sampled_panel: Sequence[Any],
+    *,
+    stencil_paths: Sequence[Path],
+) -> tuple[tuple[FixedHeatNullControl, ...], dict[str, Any], tuple[tuple[str, ResponseStencil], ...]]:
+    """Load the already-solved train-only fixed-geometry heating controls."""
+
+    relative_panel = recipe_payload.get("fixed_heat_control_panel")
+    family_id = str(recipe_payload.get("fixed_heat_control_family_id", ""))
+    if not relative_panel or not family_id:
+        raise ValueError("The named nonlinear recipe must identify its fixed-heat train panel and family.")
+    project_root = Path(__file__).resolve().parents[4]
+    panel_dir = (project_root / str(relative_panel)).resolve()
+    frozen_path = panel_dir / "frozen_inputs.json"
+    frozen = json.loads(frozen_path.read_text(encoding="utf-8"))
+    if frozen.get("status") != "frozen_before_new_reference_calls" or frozen.get("reference_split") != "train":
+        raise ValueError("Fixed-heat inputs lack their frozen train-only provenance.")
+    family_atlas_stencil = next(
+        (stencil for stencil in raw_stencils if stencil.physical_family_id == family_id),
+        None,
+    )
+    if family_atlas_stencil is None or family_atlas_stencil.baseline.output is None:
+        raise ValueError(f"The named fixed-heat family {family_id!r} is absent from the train panel.")
+    atlas_path = next(
+        (path for path in stencil_paths if path.name == "train_0001_responses.npz"),
+        None,
+    )
+    if atlas_path is None or _checkpoint_digest(atlas_path) != frozen.get("source_atlas_sha256"):
+        raise ValueError("Fixed-heat controls do not match the verified train-0001 source atlas.")
+    raw_baseline_path = Path(str(family_atlas_stencil.baseline.output.case_dir)).expanduser().resolve()
+    raw_baseline_config = raw_baseline_path / "case_config.json"
+    if not raw_baseline_config.is_file():
+        raise FileNotFoundError(f"Stored raw atlas baseline is missing: {raw_baseline_config}")
+    raw_baseline_adapter = AnalyticWakeReferenceAdapter(
+        demo_root=Path(__file__).resolve().parents[5] / "1_Demo_ChannelThermal",
+        output_root=panel_dir,
+        case_template=json.loads(raw_baseline_config.read_text(encoding="utf-8")),
+    )
+    raw_baseline = raw_baseline_adapter.load_record(
+        raw_baseline_path,
+        family_atlas_stencil.baseline.design,
+        family_atlas_stencil.baseline.context,
+        record_id=family_atlas_stencil.baseline.record_id,
+        elapsed_seconds=family_atlas_stencil.baseline.elapsed_seconds,
+    )
+    raw_baseline_binding = _validate_rehydrated_raw_baseline(
+        family_atlas_stencil.baseline,
+        raw_baseline,
+    )
+    raw_baseline_binding["raw_case_config_sha256"] = _checkpoint_digest(raw_baseline_config)
+    frame_index_path = raw_baseline_path / "frame_index.csv"
+    raw_baseline_binding["raw_frame_index_sha256"] = _checkpoint_digest(frame_index_path)
+    raw_baseline_binding["raw_grid_sha256"] = _checkpoint_digest(raw_baseline_path / "grid.npz")
+    with frame_index_path.open("r", encoding="utf-8", newline="") as stream:
+        frame_rows = list(csv.DictReader(stream))
+    if not frame_rows:
+        raise ValueError("Stored raw atlas baseline has no indexed solver frames.")
+    raw_frame_path = (raw_baseline_path / "scene" / str(frame_rows[-1]["file"])).resolve()
+    if raw_frame_path.parent != (raw_baseline_path / "scene").resolve() or not raw_frame_path.is_file():
+        raise ValueError("Stored raw atlas baseline final frame path is invalid or missing.")
+    raw_baseline_binding["raw_final_frame"] = str(raw_frame_path)
+    raw_baseline_binding["raw_final_frame_sha256"] = _checkpoint_digest(raw_frame_path)
+    raw_baseline_binding["read_only_rehydration"] = True
+    raw_baseline_binding["reference_solver_calls"] = 0
+    sampled_family = next(
+        (item.stencil for item in sampled_panel if item.stencil.physical_family_id == family_id),
+        None,
+    )
+    if sampled_family is None:
+        raise ValueError("Fixed-heat controls cannot align to the sampled family-0001 response stencil.")
+    candidate_rows = list(frozen.get("candidates", ()))
+    if len(candidate_rows) != 4 or len({row.get("record_id") for row in candidate_rows}) != 4:
+        raise ValueError("The fixed-heat train panel must contain its four unique frozen controls.")
+    controls: list[FixedHeatNullControl] = []
+    review_stencils: list[tuple[str, ResponseStencil]] = []
+    record_hashes: list[dict[str, str]] = []
+    summaries: list[dict[str, Any]] = []
+    for candidate in candidate_rows:
+        control_id = str(candidate["record_id"])
+        record_dir = panel_dir / "records" / control_id
+        outcome_path = panel_dir / f"{control_id}.outcome.json"
+        outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+        if (
+            outcome.get("solve_status") != "converged"
+            or outcome.get("serialization_status") != "stored"
+            or outcome.get("solver_invoked") is not True
+            or outcome.get("raw_solver_completed") is not True
+            or outcome.get("pressure_delta_from_existing_baseline") != 0.0
+        ):
+            raise ValueError(f"Fixed-heat train control {control_id!r} is not a verified stored null case.")
+        record = load_solve_record(record_dir)
+        control = FixedHeatNullControl(
+            control_id=control_id,
+            baseline=family_atlas_stencil.baseline,
+            control=record,
+        ).sampled_for_panel(sampled_family.baseline)
+        controls.append(control)
+        review_stencil = ResponseStencil(raw_baseline, {control_id: record})
+        for role_name in raw_baseline.output.roles:  # type: ignore[union-attr]
+            # This call keeps the physical comparison strict: IDs, coordinates,
+            # masks, and the raw solver's quadrature weights must all align.
+            review_stencil.finite_change(control_id, role_name)
+        review_stencils.append((control_id, review_stencil))
+        record_hashes.append({
+            "record_id": control_id,
+            "record_json_sha256": _checkpoint_digest(record_dir / "record.json"),
+            "physical_output_sha256": _checkpoint_digest(record_dir / "physical_output.npz"),
+            "outcome_sha256": _checkpoint_digest(outcome_path),
+        })
+        summaries.append({
+            "record_id": control_id,
+            "family_id": control.family_id,
+            "role_query_counts": {
+                role: len(indices) for role, indices in control.sampled_role_indices.items()
+            },
+            "solid_temperature_full_receiver_universe": (
+                len(control.sampled_role_indices["solid_temperature"])
+                == len(record.output.roles["solid_temperature"].query_ids)
+            ),
+            "solid_temperature_receiver_ids_exact": tuple(
+                record.output.roles["solid_temperature"].query_ids[index]
+                for index in control.sampled_role_indices["solid_temperature"]
+            ) == tuple(record.output.roles["solid_temperature"].query_ids),
+            "solid_temperature_peak_scoring": "all stored receiver IDs using per-record validity masks; quadrature weights do not filter peaks",
+            "solid_temperature_peak_coverage": {
+                "baseline": fixed_heat_material_peak_coverage(family_atlas_stencil.baseline),
+                "control": fixed_heat_material_peak_coverage(record),
+            },
+            "uses_control_quadrature_with_sample_factors": True,
+            "review_uses_original_raw_baseline_and_control": True,
+            "review_strict_response_alignment_passed": True,
+            "pressure_drop_reducer": "maintained unweighted 8-percent inlet/outlet means over protected sampled rows",
+            "stored_pressure_delta": float(outcome["pressure_delta_from_existing_baseline"]),
+        })
+    provenance = {
+        "panel_path": str(panel_dir),
+        "panel_policy": str(recipe_payload["fixed_heat_control_policy"]),
+        "frozen_inputs_sha256": _checkpoint_digest(frozen_path),
+        "source_atlas": str(atlas_path.resolve()),
+        "source_atlas_sha256": _checkpoint_digest(atlas_path),
+        "family_id": family_id,
+        "review_raw_baseline_binding": raw_baseline_binding,
+        "control_count": len(controls),
+        "control_records": record_hashes,
+        "sampling_adapter": summaries,
+        "reference_solver_calls_during_fit": 0,
+    }
+    return tuple(controls), provenance, tuple(review_stencils)
 
 
 def _make_refit_model(
@@ -222,7 +632,7 @@ def _native_checkpoint_initialization(
             "native_checkpoint initialization requires an incumbent native architecture; "
             f"got {architecture!r}."
         )
-    return source_model, {
+    return copy.deepcopy(source_model), {
         "initialization_mode": "native_checkpoint",
         "forward_architecture": architecture,
         "native_checkpoint_tensor_count": len(source_model.state_dict()),
@@ -293,6 +703,70 @@ def _configure_native_output_head_scope(
     }
 
 
+def _configure_native_nonlinear_interface_scope(
+    model: ChannelThermalHONFModel,
+) -> dict[str, Any]:
+    """Train all existing layers in the native field and port interface heads."""
+
+    if not model.local_coupling.has_local_surrogate:
+        raise RuntimeError("Native nonlinear-interface fitting requires the attached local surrogate.")
+    blocks = {
+        "field_head": ("core.common.field_head", model.core.common.field_head),
+        "port_head": ("local_coupling.port_head", model.local_coupling.port_head),
+        "port_refinement_head": (
+            "local_coupling.port_refinement_head",
+            model.local_coupling.port_refinement_head,
+        ),
+    }
+    for parameter in model.parameters():
+        parameter.requires_grad_(False)
+    selected: dict[str, nn.Parameter] = {}
+    parameter_counts: dict[str, int] = {}
+    selected_modules: dict[str, str] = {}
+    for label, (module_path, module) in blocks.items():
+        selected_modules[label] = module_path
+        block_parameters = dict(module.named_parameters(recurse=True))
+        if not block_parameters:
+            raise TypeError(f"Native interface block {module_path!r} has no materialized parameters.")
+        for relative_name, parameter in block_parameters.items():
+            full_name = f"{module_path}.{relative_name}" if relative_name else module_path
+            selected[full_name] = parameter
+            parameter.requires_grad_(True)
+        parameter_counts[label] = sum(parameter.numel() for parameter in block_parameters.values())
+    trainable_names = [
+        name for name, parameter in model.named_parameters() if parameter.requires_grad
+    ]
+    if set(trainable_names) != set(selected):
+        raise RuntimeError(
+            "Native nonlinear-interface scope mismatch: "
+            f"expected {sorted(selected)}, got {sorted(trainable_names)}."
+        )
+    # Full evaluation mode fixes BatchNorm buffers and disables dropout for
+    # both absolute states in every finite stencil response.
+    model.eval()
+    stochastic_modules = [
+        name for name, module in model.named_modules()
+        if isinstance(module, nn.modules.dropout._DropoutNd) and module.p > 0.0
+    ]
+    training_modules = [name for name, module in model.named_modules() if module.training]
+    if training_modules:
+        raise RuntimeError(f"Deterministic native response mode left modules in training mode: {training_modules}.")
+    return {
+        "name": "native_nonlinear_interface",
+        "trainable_module_names": selected_modules,
+        "trainable_parameter_names": trainable_names,
+        "trainable_parameter_count_by_block": parameter_counts,
+        "trainable_parameter_count": sum(parameter.numel() for parameter in selected.values()),
+        "frozen_parameter_count": sum(
+            parameter.numel() for parameter in model.parameters() if not parameter.requires_grad
+        ),
+        "frozen_buffer_names": [name for name, _ in model.named_buffers()],
+        "model_mode": "eval_for_all_updates_and_absolute_stencil_states",
+        "dropout_modules_disabled_by_eval": stochastic_modules,
+        "non_eval_modules": training_modules,
+    }
+
+
 def _optimizer_hyperparameter_inventory(
     optimizer: torch.optim.Optimizer,
     *,
@@ -350,6 +824,57 @@ def _parameter_inventory(model: torch.nn.Module) -> dict[str, Any]:
     }
 
 
+def _audit_named_buffers(
+    model: torch.nn.Module,
+    snapshot: Mapping[str, torch.Tensor],
+) -> dict[str, Any]:
+    """Compare registered buffers without assuming state_dict persistence.
+
+    Lazy positional encoders can register a nonpersistent frequency buffer on
+    their first real input. The audit compares common names, reports additions
+    separately, and never indexes a state_dict with a name that may not be
+    present there.
+    """
+
+    current = dict(model.named_buffers())
+    previous_names = set(snapshot)
+    current_names = set(current)
+    missing = sorted(previous_names - current_names)
+    added = sorted(current_names - previous_names)
+    changed = sorted(
+        name
+        for name in previous_names & current_names
+        if not torch.equal(current[name].detach().cpu(), snapshot[name].detach().cpu())
+    )
+    persistent_names = set(model.state_dict())
+    nonpersistent = sorted(name for name in current_names if name not in persistent_names)
+    persistent_additions = sorted(set(added) - set(nonpersistent))
+    return {
+        "passed": not missing and not changed and not persistent_additions,
+        "buffer_count": len(current),
+        "missing_names": missing,
+        "added_names": added,
+        "persistent_added_names": persistent_additions,
+        "changed_names": changed,
+        "nonpersistent_names": nonpersistent,
+        "added_nonpersistent_names": sorted(set(added) & set(nonpersistent)),
+    }
+
+
+def _restore_review_arm_state(
+    model: torch.nn.Module,
+    arm: str,
+    checkpoint_payloads: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Load the named arm state before reusing a shared review operator."""
+
+    payload = checkpoint_payloads.get(arm)
+    if payload is None or not isinstance(payload.get("model"), Mapping):
+        raise ValueError(f"The matched review checkpoint for {arm!r} is missing its model state.")
+    model.load_state_dict(payload["model"], strict=True)
+    model.eval()
+
+
 def _verify_optimizer_inventory(
     model: torch.nn.Module, optimizer: torch.optim.Optimizer
 ) -> dict[str, int | bool]:
@@ -403,76 +928,150 @@ def _rms_from_arrays(values: Sequence[np.ndarray], masks: Sequence[np.ndarray], 
     return max(float(np.sqrt(np.mean(np.concatenate(squares)))), 1.0e-6)
 
 
+def _historical_calibration_case_map(
+    family_ids: Sequence[str], historical_value_source: HistoricalValueSource
+) -> dict[str, str]:
+    """Assign one distinct, deterministically ordered historical train case per family slot."""
+
+    ordered_families = tuple(sorted(set(family_ids)))
+    if len(historical_value_source.case_ids) < len(ordered_families):
+        raise ValueError("Balanced calibration needs at least one historical train case per family.")
+    selected = tuple(historical_value_source.case_ids[:len(ordered_families)])
+    if len(set(selected)) != len(selected):
+        raise ValueError("Balanced calibration historical case IDs must be distinct.")
+    return dict(zip(ordered_families, selected, strict=True))
+
+
 def derive_training_scales(
-    stencils: Sequence[ResponseStencil], *, smooth_peak_beta: float = 1.0
+    stencils: Sequence[ResponseStencil],
+    *,
+    smooth_peak_beta: float = 1.0,
+    historical_value_source: HistoricalValueSource | None = None,
 ) -> ThermalLossScales:
-    """Freeze physical loss scales from train stencils only."""
+    """Freeze train-only scales with equal weight per physical family.
+
+    When supplied, one historical absolute-value record contributes to each
+    family's absolute role scale. Finite and pressure-response scales remain
+    derived from matched stencil changes because historical cases have no
+    paired perturbation labels.
+    """
 
     if not stencils or any(stencil.split is not EvidenceSplit.TRAIN for stencil in stencils):
         raise ValueError("Loss-scale derivation requires only nonempty train stencils.")
+    family_groups: dict[str, list[ResponseStencil]] = {}
+    for stencil in stencils:
+        family_groups.setdefault(stencil.physical_family_id, []).append(stencil)
+    family_ids = tuple(sorted(family_groups))
     roles = tuple(stencils[0].baseline.output.roles)  # type: ignore[union-attr]
+    historical_by_family: dict[str, Any] = {}
+    if historical_value_source is not None:
+        historical_case_map = _historical_calibration_case_map(family_ids, historical_value_source)
+        historical_by_family = {
+            family_id: historical_value_source.load(case_id)
+            for family_id, case_id in historical_case_map.items()
+        }
+        for family_id, record in historical_by_family.items():
+            if record.output is None or record.design.split is not EvidenceSplit.TRAIN:
+                raise ValueError(
+                    f"Historical scale example for {family_id!r} must be a solved train record."
+                )
+            if set(roles) - set(record.output.roles):
+                raise ValueError(
+                    f"Historical scale example for {family_id!r} is missing a required role."
+                )
     value_scales: dict[str, tuple[float, ...]] = {}
     finite_scales: dict[str, tuple[float, ...]] = {}
     mixed_scales: dict[str, tuple[float, ...]] = {}
     for role_name in roles:
-        role_examples = [
-            record.output.roles[role_name]
-            for stencil in stencils
-            for record in stencil.records
-            if record.output is not None
-        ]
+        family_role_examples = {
+            family: [
+                record.output.roles[role_name]
+                for stencil in group_stencils
+                for record in stencil.records
+                if record.output is not None
+            ] + (
+                [historical_by_family[family].output.roles[role_name]]
+                if family in historical_by_family
+                else []
+            )
+            for family, group_stencils in family_groups.items()
+        }
+        # One RMS per physical family, then an equal-family RMS. This keeps
+        # larger module counts and query panels from setting the global scale.
+        role_examples = next(iter(family_role_examples.values()))
         channels = len(role_examples[0].channel_names)
         value_scales[role_name] = tuple(
-            _rms_from_arrays(
-                [role.values for role in role_examples],
-                [role.valid_mask for role in role_examples],
-                channel,
-            )
+            max(float(np.sqrt(np.mean([
+                _rms_from_arrays(
+                    [role.values for role in family_role_examples[family]],
+                    [role.valid_mask for role in family_role_examples[family]],
+                    channel,
+                ) ** 2
+                for family in sorted(family_role_examples)
+            ]))), 1.0e-6)
             for channel in range(channels)
         )
-        finite_blocks = [
-            stencil.finite_change(label, role_name)
-            for stencil in stencils
-            for label in stencil.variants
-        ]
         finite_scales[role_name] = tuple(
-            _rms_from_arrays(
-                [block.delta for block in finite_blocks],
-                [block.valid_mask for block in finite_blocks],
-                channel,
-            )
+            max(float(np.sqrt(np.mean([
+                _rms_from_arrays(
+                    [block.delta for stencil in family_groups[family] for block in (
+                        stencil.finite_change(label, role_name) for label in stencil.variants
+                    )],
+                    [block.valid_mask for stencil in family_groups[family] for block in (
+                        stencil.finite_change(label, role_name) for label in stencil.variants
+                    )],
+                    channel,
+                ) ** 2
+                for family in sorted(family_groups)
+            ]))), 1.0e-6)
             for channel in range(channels)
         )
         # There is no mixed noise floor in the current atlas. These scales
         # define units only; the loss builder leaves those labels unknown.
         mixed_scales[role_name] = finite_scales[role_name]
 
-    baseline_pressure = [
-        float(stencil.baseline.output.quantities["pressure_drop"].value)  # type: ignore[union-attr]
-        for stencil in stencils
-    ]
-    pressure_deltas = [
-        float(stencil.variants[label].output.quantities["pressure_drop"].value)  # type: ignore[union-attr]
-        - float(stencil.baseline.output.quantities["pressure_drop"].value)  # type: ignore[union-attr]
-        for stencil in stencils
-        for label in stencil.variants
-    ]
-    pressure_value = max(float(np.sqrt(np.mean(np.square(baseline_pressure)))), 1.0e-6)
-    pressure_response = max(float(np.sqrt(np.mean(np.square(pressure_deltas)))), pressure_value * 1.0e-4, 1.0e-6)
-    peak_values = [
-        float(value)
-        for stencil in stencils
-        for record in stencil.records
-        for value in (record.output.module_peak_temperature.values() if record.output else ())
-    ]
-    solid_scale = max(float(np.sqrt(np.mean(np.square(peak_values)))), 1.0e-6)
+    baseline_pressure = {
+        family: [
+            float(stencil.baseline.output.quantities["pressure_drop"].value)  # type: ignore[union-attr]
+            for stencil in group
+        ]
+        for family, group in family_groups.items()
+    }
+    pressure_deltas = {
+        family: [
+            float(stencil.variants[label].output.quantities["pressure_drop"].value)  # type: ignore[union-attr]
+            - float(stencil.baseline.output.quantities["pressure_drop"].value)  # type: ignore[union-attr]
+            for stencil in group
+            for label in stencil.variants
+        ]
+        for family, group in family_groups.items()
+    }
+    pressure_value = max(float(np.sqrt(np.mean([
+        np.mean(np.square(values)) for values in baseline_pressure.values()
+    ]))), 1.0e-6)
+    pressure_response = max(float(np.sqrt(np.mean([
+        np.mean(np.square(values)) for values in pressure_deltas.values()
+    ]))), pressure_value * 1.0e-4, 1.0e-6)
+    peak_values = {
+        family: [
+            float(value)
+            for stencil in group
+            for record in stencil.records
+            for value in (record.output.module_peak_temperature.values() if record.output else ())
+        ]
+        for family, group in family_groups.items()
+    }
+    solid_scale = max(float(np.sqrt(np.mean([
+        np.mean(np.square(values)) for values in peak_values.values()
+    ]))), 1.0e-6)
+    family_pressure_means = [float(np.mean(values)) for values in baseline_pressure.values()]
     scales = ThermalLossScales(
         value=value_scales,
         finite=finite_scales,
         mixed=mixed_scales,
         pressure_value=pressure_value,
         pressure_response=pressure_response,
-        pressure_limit=float(np.median(baseline_pressure) * 1.05),
+        pressure_limit=float(np.median(family_pressure_means) * 1.05),
         pressure_boundary=max(pressure_value * 0.05, 1.0e-6),
         solid_temperature=solid_scale,
         smooth_peak_beta=float(smooth_peak_beta),
@@ -486,6 +1085,9 @@ def _load_frozen_loss_scales(
     training_stencils: Sequence[ResponseStencil],
     *,
     smooth_peak_beta: float,
+    expected_calibration_scope: str | None = None,
+    expected_family_ids: Sequence[str] | None = None,
+    expected_historical_case_map: Mapping[str, str] | None = None,
 ) -> tuple[ThermalLossScales, dict[str, Any]]:
     """Load and validate a train-only calibration frozen by an earlier recipe."""
 
@@ -494,6 +1096,18 @@ def _load_frozen_loss_scales(
     frozen = payload.get("frozen_scales", payload)
     if not isinstance(frozen, Mapping):
         raise TypeError("Frozen scale JSON must contain an object named frozen_scales.")
+    if expected_calibration_scope is not None:
+        if payload.get("calibration_scope") != expected_calibration_scope:
+            raise ValueError(
+                "Frozen R1 scales must carry the eight-family plus historical calibration scope."
+            )
+        if payload.get("equal_family_weighting") is not True:
+            raise ValueError("Frozen R1 scales must declare equal-family weighting.")
+        if list(payload.get("train_family_ids", ())) != sorted(set(expected_family_ids or ())):
+            raise ValueError("Frozen R1 scale family IDs do not match the current eight-family panel.")
+        expected_cases = dict(expected_historical_case_map or {})
+        if dict(payload.get("historical_train_examples_by_family", {})) != expected_cases:
+            raise ValueError("Frozen R1 historical calibration cases do not match the deterministic train cohort.")
     required = {
         "value",
         "finite",
@@ -562,7 +1176,9 @@ def _load_frozen_loss_scales(
     }
 
 
-def _load_frozen_response_weights(path: Path) -> tuple[dict[str, float], dict[str, Any]]:
+def _load_frozen_response_weights(
+    path: Path, *, required_terms: Sequence[str] | None = None
+) -> tuple[dict[str, float], dict[str, Any]]:
     """Load a previously calibrated paired response multiplier set."""
 
     source = path.expanduser().resolve()
@@ -571,7 +1187,11 @@ def _load_frozen_response_weights(path: Path) -> tuple[dict[str, float], dict[st
     if not isinstance(raw_weights, Mapping):
         raise TypeError("Frozen weight JSON must contain calibrated_response_weights.")
     weights = {str(name): float(value) for name, value in raw_weights.items()}
-    required = {"value", "finite", "decision", "constraint"}
+    required = (
+        {"value", *required_terms}
+        if required_terms is not None
+        else {"value", "finite", "decision", "constraint"}
+    )
     if not required.issubset(weights):
         raise ValueError(f"Frozen response weights are missing: {sorted(required - set(weights))}")
     if any(not np.isfinite(value) or value <= 0.0 for value in weights.values()):
@@ -646,7 +1266,7 @@ def _roundtrip_checkpoint(
 ) -> Path:
     path = output_dir / f"response_control_{label}.pt"
     _atomic_torch_save(path, payload)
-    restored_payload = torch.load(path, map_location="cpu", weights_only=False)
+    restored_payload = _load_safe_response_checkpoint(path)
     restore_checkpoint_payload(model, optimizer, restored_payload, config=config)
     return path
 
@@ -1159,7 +1779,7 @@ def run_one_update_preflight(
         "spectator_intervention_changed_prediction": spectator_changed,
         "optimizer_updates": fit.actual_optimizer_updates,
         "attempted_optimizer_steps": fit.attempted_optimizer_steps,
-        "losses": [asdict(step) for step in fit.history],
+        "losses": [_dataclass_record(step) for step in fit.history],
         "checkpoint_roundtrip_paths": checkpoint_paths,
         "fit_wall_seconds": fit_seconds,
         "total_wall_seconds": float(time.monotonic() - started),
@@ -1170,6 +1790,926 @@ def run_one_update_preflight(
             preflight_peak_reserved_bytes=preflight_peak_reserved,
         ),
     }
+
+
+_R0_RESPONSE_TERMS = ("finite", "finite_peak", "pressure_value", "pressure_response")
+_R0_TERMS = ("value", *_R0_RESPONSE_TERMS)
+
+
+def _response_parameter_blocks(model: torch.nn.Module) -> dict[str, tuple[torch.nn.Parameter, ...]]:
+    groups: dict[str, list[torch.nn.Parameter]] = {
+        "field_head": [],
+        "port_head": [],
+        "port_refinement_head": [],
+    }
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if name.startswith("core.common.field_head."):
+            groups["field_head"].append(parameter)
+        elif name.startswith("local_coupling.port_head."):
+            groups["port_head"].append(parameter)
+        elif name.startswith("local_coupling.port_refinement_head."):
+            groups["port_refinement_head"].append(parameter)
+        else:
+            raise ValueError(f"Trainable parameter {name!r} is outside the response blocks.")
+    if any(not values for values in groups.values()):
+        raise ValueError(f"Native response scope is missing a trainable block: {groups.keys()}.")
+    return {name: tuple(values) for name, values in groups.items()}
+
+
+def _combine_r0_response_gradient(
+    value_gradient: np.ndarray,
+    response_gradients: Mapping[str, np.ndarray],
+    response_weights: Mapping[str, float],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Combine calibrated response gradients before deciding on projection."""
+
+    value = np.asarray(value_gradient, dtype=np.float64).reshape(-1)
+    if not response_gradients or set(response_gradients) != set(response_weights):
+        raise ValueError("Projection evidence needs aligned response gradients and calibrated weights.")
+    combined = np.zeros_like(value)
+    for term, gradient in response_gradients.items():
+        vector = np.asarray(gradient, dtype=np.float64).reshape(-1)
+        if vector.shape != value.shape:
+            raise ValueError(f"Response gradient {term!r} does not match the value-gradient block.")
+        weight = float(response_weights[term])
+        if not np.isfinite(weight) or weight <= 0.0:
+            raise ValueError(f"Response gradient weight {term!r} must be positive and finite.")
+        combined += weight * vector
+    dot = float(np.dot(value, combined))
+    value_norm = float(np.linalg.norm(value))
+    response_norm = float(np.linalg.norm(combined))
+    denominator = value_norm * response_norm
+    return combined, {
+        "combined_value_gradient_norm": value_norm,
+        "calibrated_combined_response_gradient_norm": response_norm,
+        "dot_product": dot,
+        "cosine": float(dot / denominator) if denominator > 0.0 else None,
+        "adverse": bool(dot < 0.0),
+        "response_term_weights": {name: float(value) for name, value in response_weights.items()},
+    }
+
+
+def _r0_gradient_loss_terms(
+    stencil_losses: Mapping[str, torch.Tensor],
+    historical_loss: torch.Tensor,
+    calibrated_weights: Mapping[str, float],
+) -> dict[str, torch.Tensor]:
+    """Build gradient objectives with keys matching calibrated loss names."""
+
+    missing_weights = set(_R0_TERMS) - set(calibrated_weights)
+    if missing_weights:
+        raise ValueError(
+            "R0 cannot construct calibrated gradient objectives; "
+            f"missing weights for {sorted(missing_weights)}."
+        )
+    missing_losses = set(_R0_TERMS) - set(stencil_losses)
+    if missing_losses:
+        raise ValueError(
+            "R0 cannot construct gradient objectives; "
+            f"missing stencil losses for {sorted(missing_losses)}."
+        )
+    return {
+        "stencil_value": stencil_losses["value"],
+        "historical_value": historical_loss,
+        "combined_value": float(calibrated_weights["value"])
+        * (stencil_losses["value"] + historical_loss),
+        **{term: stencil_losses[term] for term in _R0_RESPONSE_TERMS},
+    }
+
+
+def _r0_gradient_diagnostic(
+    operator: DifferentiableThermalOperator,
+    model: ChannelThermalHONFModel,
+    stencils: Sequence[ResponseStencil],
+    historical_source: HistoricalValueSource,
+    scales: ThermalLossScales,
+    calibrated_weights: Mapping[str, float],
+    *,
+    device: torch.device,
+) -> dict[str, Any]:
+    """Measure train-only task gradients by family and native head block."""
+
+    parameters = tuple(parameter for parameter in model.parameters() if parameter.requires_grad)
+    blocks = _response_parameter_blocks(model)
+    historical_ids = historical_source.case_ids[:len(stencils)]
+    family_rows: list[dict[str, Any]] = []
+    for index, stencil in enumerate(stencils):
+        predictions = predict_stencil(operator, stencil, device=device)
+        losses = compute_stencil_loss_terms(
+            predictions,
+            stencil,
+            scales=scales,
+            enabled_terms=_R0_TERMS,
+            include_feasibility_bce=False,
+        )
+        historical_record = historical_source.load(historical_ids[index])
+        historical_loss = historical_absolute_value_loss(
+            operator, historical_record, scales=scales, device=device
+        )
+        gradient_losses = _r0_gradient_loss_terms(
+            losses.terms,
+            historical_loss,
+            calibrated_weights,
+        )
+        block_vectors: dict[str, dict[str, np.ndarray]] = {term: {} for term in gradient_losses}
+        for term_index, (term_name, loss) in enumerate(gradient_losses.items()):
+            if not loss.requires_grad:
+                gradients = tuple(None for _ in parameters)
+            else:
+                gradients = torch.autograd.grad(
+                    loss,
+                    parameters,
+                    retain_graph=term_index + 1 < len(gradient_losses),
+                    allow_unused=True,
+                )
+            gradient_by_id = {
+                id(parameter): gradient
+                for parameter, gradient in zip(parameters, gradients, strict=True)
+            }
+            for block_name, block_parameters in blocks.items():
+                pieces = []
+                for parameter in block_parameters:
+                    gradient = gradient_by_id[id(parameter)]
+                    pieces.append(
+                        np.zeros(parameter.numel(), dtype=np.float64)
+                        if gradient is None
+                        else gradient.detach().reshape(-1).double().cpu().numpy()
+                    )
+                flat = np.concatenate(pieces) if pieces else np.zeros(0, dtype=np.float64)
+                block_vectors[term_name][block_name] = flat
+            del gradients
+        projection_gate: dict[str, dict[str, Any]] = {}
+        for block_name in blocks:
+            combined, evidence = _combine_r0_response_gradient(
+                block_vectors["combined_value"][block_name],
+                {
+                    term: block_vectors[term][block_name]
+                    for term in _R0_RESPONSE_TERMS
+                },
+                {term: float(calibrated_weights[term]) for term in _R0_RESPONSE_TERMS},
+            )
+            block_vectors.setdefault("combined_response", {})[block_name] = combined
+            projection_gate[block_name] = evidence
+        norms = {
+            term: {block: float(np.linalg.norm(vector)) for block, vector in per_block.items()}
+            for term, per_block in block_vectors.items()
+        }
+        cosines: dict[str, dict[str, dict[str, float | None]]] = {}
+        for block_name in blocks:
+            term_names = tuple(gradient_losses)
+            cosines[block_name] = {}
+            for left_index, left in enumerate(term_names):
+                cosines[block_name][left] = {}
+                for right in term_names[left_index + 1:]:
+                    left_vector = block_vectors[left][block_name]
+                    right_vector = block_vectors[right][block_name]
+                    denominator = float(np.linalg.norm(left_vector) * np.linalg.norm(right_vector))
+                    cosine = (
+                        float(np.dot(left_vector, right_vector) / denominator)
+                        if denominator > 0.0 else None
+                    )
+                    cosines[block_name][left][right] = cosine
+        family_rows.append({
+            "family_id": stencil.physical_family_id,
+            "module_count": len(stencil.baseline.design.active_modules),
+            "historical_case_id": historical_ids[index],
+            "loss_values": {
+                name: float(loss.detach().cpu()) for name, loss in gradient_losses.items()
+            },
+            "gradient_term_display_names": {"finite": "finite_field"},
+            "gradient_norms_by_term_and_block": norms,
+            "pairwise_gradient_cosines_by_block": cosines,
+            "calibrated_combined_projection_gate_by_block": projection_gate,
+        })
+    return {
+        "scope_parameter_counts": {
+            name: sum(parameter.numel() for parameter in values)
+            for name, values in blocks.items()
+        },
+        "families": family_rows,
+        "family_equal_weighting": True,
+        "historical_train_case_ids": list(historical_ids),
+    }
+
+
+def _evaluate_r0_train_objective(
+    operator: DifferentiableThermalOperator,
+    stencils: Sequence[ResponseStencil],
+    historical_source: HistoricalValueSource,
+    scales: ThermalLossScales,
+    weights: Mapping[str, float],
+    *,
+    device: torch.device,
+) -> dict[str, Any]:
+    family_rows: list[dict[str, Any]] = []
+    for index, stencil in enumerate(stencils):
+        with torch.no_grad():
+            predictions = predict_stencil(operator, stencil, device=device)
+            losses = compute_stencil_loss_terms(
+                predictions,
+                stencil,
+                scales=scales,
+                enabled_terms=_R0_TERMS,
+                include_feasibility_bce=False,
+            )
+            historical_loss = historical_absolute_value_loss(
+                operator,
+                historical_source.load(historical_source.case_ids[index]),
+                scales=scales,
+                device=device,
+            )
+        terms = {name: float(value.detach().cpu()) for name, value in losses.terms.items()}
+        terms["historical_value"] = float(historical_loss.detach().cpu())
+        value_objective = float(weights.get("value", 1.0)) * (
+            terms.get("value", 0.0) + terms["historical_value"]
+        )
+        response_objective = sum(
+            float(weights.get(name, 0.0)) * terms.get(name, 0.0)
+            for name in _R0_RESPONSE_TERMS
+        )
+        family_rows.append({
+            "family_id": stencil.physical_family_id,
+            "module_count": len(stencil.baseline.design.active_modules),
+            "term_losses": terms,
+            "weighted_value_objective": value_objective,
+            "weighted_response_objective": response_objective,
+            "weighted_total_objective": value_objective + response_objective,
+        })
+    return {
+        "families": family_rows,
+        "equal_family_mean": {
+            key: float(np.mean([row[key] for row in family_rows]))
+            for key in (
+                "weighted_value_objective",
+                "weighted_response_objective",
+                "weighted_total_objective",
+            )
+        },
+        "equal_family_mean_term_losses": {
+            term: float(np.mean([
+                row["term_losses"].get(term, 0.0) for row in family_rows
+            ]))
+            for term in (*_R0_TERMS, "historical_value")
+        },
+    }
+
+
+def _r0_fit_config(
+    *, rate_probe: bool, max_wall_seconds: float, max_optimizer_updates: int = 100
+) -> StagedTrainingConfig:
+    if rate_probe:
+        return StagedTrainingConfig(
+            arm="R_response",
+            max_optimizer_updates=10,
+            max_epochs=3,
+            total_optimizer_update_ceiling=400,
+            checkpoint_every_updates=5,
+            max_wall_seconds=max_wall_seconds,
+            review_updates=(10,),
+            random_seed=2317,
+            deterministic_eval_mode=True,
+            deterministic_algorithms=True,
+            include_feasibility_bce=False,
+            stages=(TrainingStage("rate_probe_response", 0, 10, _R0_TERMS),),
+        )
+    response_terms = ("value", *_R0_RESPONSE_TERMS)
+    if max_optimizer_updates < 50:
+        raise ValueError("An R0 scope comparison requires at least 50 updates so response terms are active.")
+    return StagedTrainingConfig(
+        arm="R_response",
+        max_optimizer_updates=max_optimizer_updates,
+        max_epochs=(max_optimizer_updates + 3) // 4,
+        total_optimizer_update_ceiling=400,
+        checkpoint_every_updates=50,
+        max_wall_seconds=max_wall_seconds,
+        review_updates=(max_optimizer_updates,),
+        random_seed=2317,
+        deterministic_eval_mode=True,
+        deterministic_algorithms=True,
+        include_feasibility_bce=False,
+        response_ramp_start_update=10,
+        response_ramp_end_update=50,
+        response_ramp_terms=_R0_RESPONSE_TERMS,
+        stages=(
+            TrainingStage("value_warmup", 0, 10, ("value",)),
+            TrainingStage("balanced_response_ramp", 10, 50, response_terms),
+            TrainingStage("response_probe", 50, max_optimizer_updates, response_terms),
+        ),
+    )
+
+
+def run_train_only_scope_diagnostic(
+    *,
+    checkpoint_path: Path,
+    stencil_paths: Sequence[Path],
+    dataset_path: Path | None,
+    output_dir: Path,
+    device: torch.device,
+    sampling: ReceiverSamplingConfig,
+    query_batch_size: int,
+    max_wall_seconds: float = 1800.0,
+    weight_decay: float = 1.0e-5,
+) -> dict[str, Any]:
+    """Run the bounded R0 train-only gradient, scope, and rate diagnosis."""
+
+    started = time.monotonic()
+    cublas_workspace = _enable_deterministic_algorithms(device)
+    if max_wall_seconds <= 0.0:
+        raise ValueError("R0 max_wall_seconds must be positive.")
+    deadline = started + max_wall_seconds
+    output_dir.mkdir(parents=True, exist_ok=True)
+    result_path = output_dir / "r0_train_only_scope_diagnostic.json"
+    progress: dict[str, Any] = {
+        "status": "running",
+        "mode": "train_only_scope_diagnostic",
+        "reference_solver_calls": 0,
+        "max_wall_seconds": float(max_wall_seconds),
+        "deterministic_algorithms_enabled": True,
+        "cublas_workspace_config": cublas_workspace,
+        "planned_optimizer_updates_max": 180,
+        "optimizer_updates_completed_total": 0,
+        "attempted_optimizer_updates_total": 0,
+        "current_phase": "input_validation_and_load",
+        "phase_update_counts": {},
+        "optimizer_trial_status": [],
+        "started_unix_seconds": time.time(),
+    }
+    _atomic_json(result_path, progress)
+
+    def save_progress() -> None:
+        progress["total_wall_seconds"] = float(time.monotonic() - started)
+        _atomic_json(result_path, progress)
+
+    def ensure_time_remaining(phase: str) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            progress["current_phase"] = phase
+            progress["status"] = "timed_out"
+            progress["error"] = f"R0 total wall cap of {max_wall_seconds:.1f} seconds expired."
+            progress["finished_unix_seconds"] = time.time()
+            save_progress()
+            raise TimeoutError(progress["error"])
+        return remaining
+
+    def begin_trial(name: str, update_cap: int, learning_rate: float) -> None:
+        progress["current_phase"] = name
+        progress["optimizer_trial_status"].append({
+            "name": name,
+            "learning_rate": float(learning_rate),
+            "planned_update_cap": int(update_cap),
+            "status": "running",
+            "updates_completed": 0,
+            "attempted_optimizer_steps": 0,
+        })
+        save_progress()
+
+    def record_trial_checkpoint(name: str, payload: Mapping[str, Any], label: str) -> None:
+        trial = next(row for row in reversed(progress["optimizer_trial_status"]) if row["name"] == name)
+        trial["last_checkpoint_label"] = label
+        trial["updates_completed"] = max(
+            int(trial["updates_completed"]), int(payload["actual_optimizer_updates"])
+        )
+        trial["attempted_optimizer_steps"] = max(
+            int(trial["attempted_optimizer_steps"]), int(payload["attempted_optimizer_steps"])
+        )
+        counts = progress["phase_update_counts"]
+        counts[name] = {
+            "updates_completed": trial["updates_completed"],
+            "attempted_optimizer_steps": trial["attempted_optimizer_steps"],
+        }
+        progress["optimizer_updates_completed_total"] = sum(
+            item["updates_completed"] for item in counts.values()
+        )
+        progress["attempted_optimizer_updates_total"] = sum(
+            item["attempted_optimizer_steps"] for item in counts.values()
+        )
+        save_progress()
+
+    def record_trial_attempt(name: str, completed: int, attempted: int) -> None:
+        trial = next(row for row in reversed(progress["optimizer_trial_status"]) if row["name"] == name)
+        trial["updates_completed"] = max(int(trial["updates_completed"]), int(completed))
+        trial["attempted_optimizer_steps"] = max(
+            int(trial["attempted_optimizer_steps"]), int(attempted)
+        )
+        counts = progress["phase_update_counts"]
+        counts[name] = {
+            "updates_completed": trial["updates_completed"],
+            "attempted_optimizer_steps": trial["attempted_optimizer_steps"],
+        }
+        progress["optimizer_updates_completed_total"] = sum(
+            item["updates_completed"] for item in counts.values()
+        )
+        progress["attempted_optimizer_updates_total"] = sum(
+            item["attempted_optimizer_steps"] for item in counts.values()
+        )
+        save_progress()
+
+    def finish_trial(name: str, fit: StagedFitResult, expected_updates: int) -> None:
+        trial = next(row for row in reversed(progress["optimizer_trial_status"]) if row["name"] == name)
+        complete = int(fit.actual_optimizer_updates) == int(expected_updates)
+        trial.update({
+            "status": "passed" if complete else "timed_out_or_partial",
+            "updates_completed": int(fit.actual_optimizer_updates),
+            "attempted_optimizer_steps": int(fit.attempted_optimizer_steps),
+            "wall_seconds": float(fit.wall_seconds),
+        })
+        record_trial_checkpoint(name, {
+            "actual_optimizer_updates": fit.actual_optimizer_updates,
+            "attempted_optimizer_steps": fit.attempted_optimizer_steps,
+        }, "fit_complete")
+        if not complete:
+            progress["status"] = "timed_out_or_partial"
+            progress["error"] = (
+                f"{name} completed {fit.actual_optimizer_updates}/{expected_updates} updates; "
+                "partial checkpoints and attempted-step counts were preserved."
+            )
+            progress["finished_unix_seconds"] = time.time()
+            save_progress()
+            raise TimeoutError(progress["error"])
+
+    if len(stencil_paths) != 4:
+        raise ValueError("R0 requires exactly four preselected train families spanning M=3,5,7,10.")
+    loaded = [load_response_atlas_stencil(path) for path in stencil_paths]
+    raw_stencils = [stencil for stencil, _metadata in loaded]
+    if any(stencil.split is not EvidenceSplit.TRAIN for stencil in raw_stencils):
+        raise ValueError("R0 accepts train-split atlas stencils only.")
+    module_counts = {len(stencil.baseline.design.active_modules) for stencil in raw_stencils}
+    if module_counts != {3, 5, 7, 10} or len({stencil.physical_family_id for stencil in raw_stencils}) != 4:
+        raise ValueError("R0 requires four distinct train families with module counts 3, 5, 7, and 10.")
+    m10_family_ids = {
+        stencil.physical_family_id
+        for stencil in raw_stencils
+        if len(stencil.baseline.design.active_modules) == 10
+    }
+    if m10_family_ids != {"stored_family:0350"}:
+        raise ValueError(
+            "R0 requires the established M10 conflict family stored_family:0350; "
+            f"got {sorted(m10_family_ids)}."
+        )
+    source_model, checkpoint = load_model(checkpoint_path, device)
+    if int(checkpoint.get("epoch", checkpoint.get("current_epoch", -1))) != 4738:
+        raise ValueError("R0 is fixed to the intact Run1804 e4738 checkpoint.")
+    if str(source_model.config.core_honf.forward_architecture) != "dense_pairwise_field":
+        raise ValueError("R0 requires the intact Run1804 dense_pairwise_field architecture.")
+    source_model.eval()
+    dataset_root = _resolve_dataset_path(checkpoint, str(dataset_path) if dataset_path else None)
+    train_config = checkpoint.get("train_config", {})
+    dataset_config = train_config.get("dataset", {})
+    raw_dataset = GlobalChannelThermalDataset(
+        dataset_root,
+        split="train",
+        points_per_case=1,
+        normalize_inputs=False,
+        normalize_targets=False,
+        random_point_sampling=False,
+        include_grid=False,
+        include_structure_targets=False,
+    )
+    template = _make_input_template(raw_dataset)
+    source_operator = DifferentiableThermalOperator(
+        source_model,
+        template,
+        dataset_config=dataset_config,
+        normalization_stats=checkpoint.get("global_normalization_stats", {}),
+        query_batch_size=query_batch_size,
+    )
+    historical_sampling = replace(sampling, max_fluid_queries=max(3072, sampling.max_fluid_queries))
+    historical_source = HistoricalValueSource.from_dataset(raw_dataset, sampling=historical_sampling)
+    sampled_panel = sample_training_panel(raw_stencils, config=sampling)
+    training_stencils = tuple(item.stencil for item in sampled_panel)
+    scales = derive_training_scales(training_stencils, smooth_peak_beta=1.0)
+    progress.update({
+        "checkpoint": str(checkpoint_path.expanduser().resolve()),
+        "training_atlas_paths": [str(path.expanduser().resolve()) for path in stencil_paths],
+        "family_ids": [stencil.physical_family_id for stencil in training_stencils],
+        "module_counts": [len(stencil.baseline.design.active_modules) for stencil in training_stencils],
+        "current_phase": "update_zero_scope_parity_and_gradient_diagnostics",
+        "reference_solver_calls": 0,
+    })
+    save_progress()
+
+    def build_scope(scope_name: str) -> tuple[ChannelThermalHONFModel, DifferentiableThermalOperator, dict[str, Any]]:
+        target_model = copy.deepcopy(source_model)
+        operator = DifferentiableThermalOperator(
+            target_model,
+            template,
+            dataset_config=dataset_config,
+            normalization_stats=checkpoint.get("global_normalization_stats", {}),
+            query_batch_size=query_batch_size,
+        )
+        first = training_stencils[0]
+        with torch.no_grad():
+            operator(
+                DesignInput.from_state(first.baseline.design, device=device),
+                context_inputs(first.baseline.context),
+                role_queries_from_stencil(first, device=device),
+            )
+        scope = (
+            _configure_native_output_head_scope(target_model)
+            if scope_name == "native_output_heads"
+            else _configure_native_nonlinear_interface_scope(target_model)
+        )
+        target_model.eval()
+        scope["parameter_inventory"] = _parameter_inventory(target_model)
+        output_differences: dict[str, float] = {}
+        with torch.no_grad():
+            for stencil in training_stencils:
+                queries = role_queries_from_stencil(stencil, device=device)
+                for label, record in (("baseline", stencil.baseline), *stencil.variants.items()):
+                    design = DesignInput.from_state(record.design, device=device)
+                    context = context_inputs(record.context)
+                    reference_prediction = source_operator(design, context, queries)
+                    target_prediction = operator(design, context, queries)
+                    if not isinstance(reference_prediction, type(target_prediction)):
+                        raise TypeError("Native update-zero parity returned a different prediction type.")
+                    for role_name in target_prediction.role_values:
+                        error = float((
+                            reference_prediction.role_values[role_name]
+                            - target_prediction.role_values[role_name]
+                        ).abs().max().cpu())
+                        output_differences[f"{stencil.physical_family_id}/{label}/{role_name}"] = error
+        if any(value != 0.0 for value in output_differences.values()):
+            raise AssertionError(f"R0 scope initialization changed native outputs: {output_differences}")
+        scope["update_zero_max_abs_output_difference_by_family_state_role"] = output_differences
+        return target_model, operator, scope
+
+    scope_models: dict[str, tuple[ChannelThermalHONFModel, DifferentiableThermalOperator, dict[str, Any]]] = {}
+    for scope_name in ("native_output_heads", "native_nonlinear_interface"):
+        scope_models[scope_name] = build_scope(scope_name)
+        ensure_time_remaining(f"update_zero_scope_parity_{scope_name}")
+    gradient_results: dict[str, Any] = {}
+    calibration_weights: dict[str, Mapping[str, float]] = {}
+    for scope_name, (model, operator, _scope) in scope_models.items():
+        calibration_weights[scope_name] = dict(calibrate_operator_weights(
+            operator,
+            training_stencils,
+            scales=scales,
+            historical_value_source=historical_source,
+            parameters=model.parameters(),
+            device=device,
+            enabled_terms=_R0_TERMS,
+            include_feasibility_bce=False,
+        ))
+        missing_response_weights = set(_R0_RESPONSE_TERMS) - set(calibration_weights[scope_name])
+        if missing_response_weights:
+            raise ValueError(
+                f"R0 {scope_name} calibration has no nonzero gradient weight for "
+                f"{sorted(missing_response_weights)}."
+            )
+        gradient_results[scope_name] = _r0_gradient_diagnostic(
+            operator,
+            model,
+            training_stencils,
+            historical_source,
+            scales,
+            calibration_weights[scope_name],
+            device=device,
+        )
+        ensure_time_remaining(f"gradient_calibration_{scope_name}")
+
+    rate_rows: list[dict[str, Any]] = []
+    selected_learning_rate: float
+    nonlinear_template, _nonlinear_operator, _nonlinear_scope = scope_models["native_nonlinear_interface"]
+    initial_state = {name: value.detach().clone() for name, value in nonlinear_template.state_dict().items()}
+    source_checkpoint_sha256 = _checkpoint_digest(checkpoint_path)
+    recipe_path = Path(__file__).resolve().parents[3] / "configs" / "response_control_native_nonlinear_interface.json"
+
+    def save_r0_checkpoint(
+        root: Path, label: str, payload: Mapping[str, Any], *, scope_name: str
+    ) -> Path:
+        update = int(payload["actual_optimizer_updates"])
+        safe_label = "".join(character if character.isalnum() else "_" for character in label)
+        persisted_payload = dict(payload)
+        persisted_payload["response_control_run_provenance"] = {
+            "source_checkpoint": str(checkpoint_path.expanduser().resolve()),
+            "source_checkpoint_sha256": source_checkpoint_sha256,
+            "training_recipe": str(recipe_path.resolve()),
+            "training_recipe_sha256": _checkpoint_digest(recipe_path),
+            "plan_schema": 1,
+            "active_scope_name": scope_name,
+            "active_scope_inventory": scope_models[scope_name][2],
+            "training_atlas_paths": [str(path.expanduser().resolve()) for path in stencil_paths],
+            "training_family_ids": [stencil.physical_family_id for stencil in training_stencils],
+            "reference_solver_calls": 0,
+        }
+        path = root / f"checkpoint_{safe_label}_u{update:05d}.pt"
+        _atomic_torch_save(path, persisted_payload)
+        return path
+
+    rate_probe_config: StagedTrainingConfig
+    for learning_rate in (1.0e-5, 3.0e-5):
+        remaining = ensure_time_remaining(f"rate_probe_lr_{learning_rate:.0e}")
+        trial_name = f"rate_probe_lr_{learning_rate:.0e}"
+        begin_trial(trial_name, 10, learning_rate)
+        rate_probe_config = _r0_fit_config(rate_probe=True, max_wall_seconds=remaining)
+        probe_model = copy.deepcopy(nonlinear_template)
+        probe_operator = DifferentiableThermalOperator(
+            probe_model,
+            template,
+            dataset_config=dataset_config,
+            normalization_stats=checkpoint.get("global_normalization_stats", {}),
+            query_batch_size=query_batch_size,
+        )
+        probe_model.load_state_dict(initial_state, strict=True)
+        probe_model.eval()
+        optimizer = torch.optim.AdamW(
+            (parameter for parameter in probe_model.parameters() if parameter.requires_grad),
+            lr=learning_rate,
+            weight_decay=weight_decay,
+        )
+        probe_dir = output_dir / f"rate_probe_lr_{learning_rate:.0e}"
+
+        def save_rate_probe(
+            payload: Mapping[str, Any], label: str, *, root: Path = probe_dir, name: str = trial_name
+        ) -> None:
+            save_r0_checkpoint(root, label, payload, scope_name="native_nonlinear_interface")
+            record_trial_checkpoint(name, payload, label)
+
+        initial_metrics = _evaluate_r0_train_objective(
+            probe_operator,
+            training_stencils,
+            historical_source,
+            scales,
+            calibration_weights["native_nonlinear_interface"],
+            device=device,
+        )
+        fit_started = time.perf_counter()
+        fit = run_staged_fit(
+            probe_operator,
+            probe_model,
+            optimizer,
+            training_stencils,
+            scales=scales,
+            loss_weights=calibration_weights["native_nonlinear_interface"],
+            historical_value_source=historical_source,
+            config=rate_probe_config,
+            device=device,
+            on_checkpoint=save_rate_probe,
+            on_optimizer_attempt=lambda completed, attempted, name=trial_name: record_trial_attempt(
+                name, completed, attempted
+            ),
+        )
+        finish_trial(trial_name, fit, 10)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        fit_seconds = time.perf_counter() - fit_started
+        final_metrics = _evaluate_r0_train_objective(
+            probe_operator,
+            training_stencils,
+            historical_source,
+            scales,
+            calibration_weights["native_nonlinear_interface"],
+            device=device,
+        )
+        rate_rows.append({
+            "learning_rate": learning_rate,
+            "optimizer_updates": fit.actual_optimizer_updates,
+            "attempted_optimizer_steps": fit.attempted_optimizer_steps,
+            "fit_wall_seconds": fit_seconds,
+            "initial": initial_metrics,
+            "final": final_metrics,
+            "checkpoint_paths": sorted(str(path) for path in probe_dir.glob("checkpoint_*.pt")),
+        })
+        ensure_time_remaining("scope_comparison_fits")
+    candidates_under_value_guard = [
+        row for row in rate_rows
+        if row["final"]["equal_family_mean"]["weighted_value_objective"]
+        <= 1.02 * row["initial"]["equal_family_mean"]["weighted_value_objective"]
+    ]
+    selection_pool = candidates_under_value_guard or rate_rows
+    selected_rate_row = min(
+        selection_pool,
+        key=lambda row: row["final"]["equal_family_mean"]["weighted_response_objective"],
+    )
+    selected_learning_rate = float(selected_rate_row["learning_rate"])
+    m10_termwise_conflicts: list[dict[str, Any]] = []
+    m10_combined_projection_gates: list[dict[str, Any]] = []
+    for scope_name, diagnostic in gradient_results.items():
+        for family in diagnostic["families"]:
+            if family["family_id"] != "stored_family:0350":
+                continue
+            for block_name, terms in family["pairwise_gradient_cosines_by_block"].items():
+                response_cosines = terms.get("combined_value", {})
+                for diagnostic_term, response_term in (
+                    ("finite", "finite"),
+                    ("finite_peak", "finite_peak"),
+                    ("pressure_value", "pressure_value"),
+                    ("pressure_response", "pressure_response"),
+                ):
+                    cosine = response_cosines.get(diagnostic_term)
+                    if cosine is not None:
+                        m10_termwise_conflicts.append({
+                            "scope": scope_name,
+                            "family_id": family["family_id"],
+                            "block": block_name,
+                            "response_term": response_term,
+                            "combined_value_cosine": float(cosine),
+                            "adverse": bool(cosine < 0.0),
+                        })
+                combined_gate = family["calibrated_combined_projection_gate_by_block"][block_name]
+                m10_combined_projection_gates.append({
+                    "scope": scope_name,
+                    "family_id": family["family_id"],
+                    "block": block_name,
+                    **combined_gate,
+                })
+    projection_justified = any(
+        row["adverse"] and row["scope"] == "native_nonlinear_interface"
+        for row in m10_combined_projection_gates
+    )
+
+    scope_fit_rows: dict[str, Any] = {}
+    for scope_name, (scope_model, _old_operator, scope) in scope_models.items():
+        remaining = ensure_time_remaining(f"scope_fit_{scope_name}")
+        trial_name = f"scope_fit_{scope_name}"
+        scope_update_cap = 80
+        begin_trial(trial_name, scope_update_cap, selected_learning_rate)
+        model = copy.deepcopy(scope_model)
+        operator = DifferentiableThermalOperator(
+            model,
+            template,
+            dataset_config=dataset_config,
+            normalization_stats=checkpoint.get("global_normalization_stats", {}),
+            query_batch_size=query_batch_size,
+        )
+        model.eval()
+        optimizer = torch.optim.AdamW(
+            (parameter for parameter in model.parameters() if parameter.requires_grad),
+            lr=selected_learning_rate,
+            weight_decay=weight_decay,
+        )
+        scope_config = _r0_fit_config(
+            rate_probe=False,
+            max_wall_seconds=remaining,
+            max_optimizer_updates=scope_update_cap,
+        )
+        initial_metrics = _evaluate_r0_train_objective(
+            operator,
+            training_stencils,
+            historical_source,
+            scales,
+            calibration_weights[scope_name],
+            device=device,
+        )
+        buffer_snapshot = {
+            name: value.detach().clone()
+            for name, value in model.named_buffers()
+        }
+        checkpoint_root = output_dir / scope_name
+
+        def save_scope_fit(
+            payload: Mapping[str, Any], label: str, *, root: Path = checkpoint_root,
+            name: str = trial_name, active_scope: str = scope_name,
+        ) -> None:
+            save_r0_checkpoint(root, label, payload, scope_name=active_scope)
+            record_trial_checkpoint(name, payload, label)
+
+        fit_started = time.perf_counter()
+        fit = run_staged_fit(
+            operator,
+            model,
+            optimizer,
+            training_stencils,
+            scales=scales,
+            loss_weights=calibration_weights[scope_name],
+            historical_value_source=historical_source,
+            config=scope_config,
+            device=device,
+            on_checkpoint=save_scope_fit,
+            on_optimizer_attempt=lambda completed, attempted, name=trial_name: record_trial_attempt(
+                name, completed, attempted
+            ),
+        )
+        finish_trial(trial_name, fit, scope_update_cap)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        fit_seconds = time.perf_counter() - fit_started
+        final_metrics = _evaluate_r0_train_objective(
+            operator,
+            training_stencils,
+            historical_source,
+            scales,
+            calibration_weights[scope_name],
+            device=device,
+        )
+        changed_buffers = [
+            name for name, value in model.named_buffers()
+            if name not in buffer_snapshot or not torch.equal(value, buffer_snapshot[name])
+        ]
+        if changed_buffers:
+            raise AssertionError(f"R0 deterministic fit changed frozen buffers: {changed_buffers}.")
+        scope_fit_rows[scope_name] = {
+            "parameter_scope": scope,
+            "learning_rate": selected_learning_rate,
+            "weight_decay": weight_decay,
+            "optimizer_updates": fit.actual_optimizer_updates,
+            "attempted_optimizer_steps": fit.attempted_optimizer_steps,
+            "fit_wall_seconds": fit_seconds,
+            "initial": initial_metrics,
+            "final": final_metrics,
+            "response_objective_reduction_fraction": (
+                1.0 - final_metrics["equal_family_mean"]["weighted_response_objective"]
+                / max(initial_metrics["equal_family_mean"]["weighted_response_objective"], 1.0e-12)
+            ),
+            "buffer_values_unchanged": True,
+            "checkpoint_paths": sorted(str(path) for path in checkpoint_root.glob("checkpoint_*.pt")),
+            "update_history": [_dataclass_record(step) for step in fit.history],
+        }
+    result = {
+        "status": "passed",
+        "mode": "train_only_scope_diagnostic",
+        "checkpoint": str(checkpoint_path.resolve()),
+        "checkpoint_sha256": _checkpoint_digest(checkpoint_path),
+        "selected_epoch": checkpoint.get("epoch", checkpoint.get("current_epoch")),
+        "reference_solver_calls": 0,
+        "training_atlas_paths": [str(path.resolve()) for path in stencil_paths],
+        "training_atlas_hashes": [
+            {"path": str(path.resolve()), "sha256": _checkpoint_digest(path),
+             "metadata_sha256": _checkpoint_digest(path.with_suffix(".json"))}
+            for path in stencil_paths
+        ],
+        "family_ids": [stencil.physical_family_id for stencil in training_stencils],
+        "module_counts": [len(stencil.baseline.design.active_modules) for stencil in training_stencils],
+        "sampling": [_sampling_summary_mapping(item.summary) for item in sampled_panel],
+        "historical_value_replay": {
+            "dataset": str(historical_source.dataset_path),
+            "dataset_size_bytes": historical_source.dataset_path.stat().st_size,
+            "dataset_mtime_ns": historical_source.dataset_path.stat().st_mtime_ns,
+            "train_case_count": len(historical_source.case_ids),
+            "balanced_calibration_case_ids": list(historical_source.case_ids[:len(training_stencils)]),
+            "one_case_per_update": True,
+        },
+        "loss_scales": _dataclass_record(scales),
+        "loss_scale_calibration": {
+            "scope": "four_family_train_diagnostic_only",
+            "family_ids": [stencil.physical_family_id for stencil in training_stencils],
+            "reusable_for_formal_fit": False,
+        },
+        "gradient_diagnostics": gradient_results,
+        "gradient_calibration_weights": calibration_weights,
+        "gradient_calibration_scope": {
+            "scope": "four_family_train_diagnostic_only",
+            "family_ids": [stencil.physical_family_id for stencil in training_stencils],
+            "reusable_for_formal_fit": False,
+        },
+        "learning_rate_candidates": rate_rows,
+        "learning_rate_selection": {
+            "selected_learning_rate": selected_learning_rate,
+            "selection_rule": "lowest equal-family calibrated response objective among candidates with no more than 2 percent value-objective regression; if none meet the value guard, choose the lowest response objective",
+            "value_guard_passed": bool(candidates_under_value_guard),
+        },
+        "scope_fit_comparison": scope_fit_rows,
+        "actual_optimizer_updates_total": sum(
+            int(row["optimizer_updates"])
+            for row in rate_rows
+        ) + sum(int(row["optimizer_updates"]) for row in scope_fit_rows.values()),
+        "attempted_optimizer_updates_total": sum(
+            int(row["attempted_optimizer_steps"]) for row in rate_rows
+        ) + sum(int(row["attempted_optimizer_steps"]) for row in scope_fit_rows.values()),
+        "optimizer_trial_status": list(progress["optimizer_trial_status"]),
+        "gradient_diagnostic_optimizer_updates": 0,
+        "matched_arm_names_for_subsequent_formal_fit": ["R_value", "R_response"],
+        "projection_justification": {
+            "justified_by_measured_m10_combined_value_conflict": projection_justified,
+            "family_id": "stored_family:0350",
+            "scope": "native_nonlinear_interface",
+            "combined_calibrated_response_vs_value_by_block": m10_combined_projection_gates,
+            "individual_response_term_vs_value_by_block": m10_termwise_conflicts,
+            "policy": (
+                "Enable blockwise response-gradient projection only if the calibrated weighted "
+                "combined response gradient has a negative dot with the combined value gradient "
+                "in a nonlinear-interface block on train-only M10. Individual response-term "
+                "conflicts are recorded but do not independently activate projection."
+            ),
+        },
+        "scope_fit_update_caps": {
+            "native_output_heads": 80,
+            "native_nonlinear_interface": 80,
+            "native_nonlinear_interface_rate_candidates_combined": 20,
+        },
+        "total_wall_seconds": float(time.monotonic() - started),
+        "deterministic_eval_mode": True,
+        "deterministic_algorithms_enabled": True,
+        "cublas_workspace_config": cublas_workspace,
+        "projection_in_r0_scope_fits": False,
+    }
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+        result["cuda"] = {
+            "logical_device": str(device),
+            "physical_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+            "peak_allocated_bytes": int(torch.cuda.max_memory_allocated(device)),
+            "peak_reserved_bytes": int(torch.cuda.max_memory_reserved(device)),
+        }
+    ensure_time_remaining("final_manifest_write")
+    result["finished_unix_seconds"] = time.time()
+    progress.update(result)
+    progress["status"] = "passed"
+    progress["current_phase"] = "complete"
+    save_progress()
+    return result
 
 
 def run_paired_fit(
@@ -1183,6 +2723,8 @@ def run_paired_fit(
     sampling: ReceiverSamplingConfig,
     max_wall_seconds: float,
     initialization_mode: str = "three_term_conversion",
+    recipe_config_path: Path | None = None,
+    r0_diagnostic_path: Path | None = None,
     learning_rate: float | None = None,
     weight_decay: float | None = None,
     review_cap: int,
@@ -1218,40 +2760,170 @@ def run_paired_fit(
             )
         if resume_fit_manifest_path is not None or resume_replay_manifest_path is not None:
             raise ValueError("Resume manifests can be supplied only with a paired checkpoint resume.")
+    if recipe_config_path is not None and initialization_mode != "native_checkpoint":
+        raise ValueError("Named native response recipes require native_checkpoint initialization.")
+    native_recipe = (
+        recipe_config_path.expanduser().resolve()
+        if recipe_config_path is not None
+        else Path(__file__).resolve().parents[3] / "configs" / "response_control_native_staged.json"
+        if initialization_mode == "native_checkpoint"
+        else None
+    )
+    recipe_payload = (
+        json.loads(native_recipe.read_text(encoding="utf-8"))
+        if native_recipe is not None
+        else {}
+    )
+    if bool(recipe_payload.get("deterministic_algorithms", False)):
+        _enable_deterministic_algorithms(device)
     source_model, checkpoint = load_model(checkpoint_path, device)
     source_model.eval()
     loaded_stencils = [load_response_atlas_stencil(path) for path in stencil_paths]
     raw_stencils = [stencil for stencil, _ in loaded_stencils]
     if any(stencil.split is not EvidenceSplit.TRAIN for stencil in raw_stencils):
         raise ValueError("Paired fitting accepts EvidenceSplit.TRAIN stencils only.")
-    native_recipe = (
-        Path(__file__).resolve().parents[3] / "configs" / "response_control_native_staged.json"
-        if initialization_mode == "native_checkpoint"
-        else None
-    )
+    nonlinear_recipe = recipe_payload.get("name") == "native_nonlinear_interface"
+    raw_family_ids = sorted({stencil.physical_family_id for stencil in raw_stencils})
+    if nonlinear_recipe and len(raw_family_ids) != 8:
+        raise ValueError(
+            "native_nonlinear_interface formal fitting requires all eight distinct train families; "
+            f"received {len(raw_family_ids)}: {raw_family_ids}."
+        )
+    loaded_development = [
+        (path, *load_response_atlas_stencil(path)) for path in development_paths
+    ]
+    if nonlinear_recipe:
+        if len(loaded_development) != 4:
+            raise ValueError(
+                "native_nonlinear_interface u200 review requires all four stored Re90 development stencils."
+            )
+        invalid_dev = [
+            str(path)
+            for path, stencil, _ in loaded_development
+            if stencil.split is EvidenceSplit.TRAIN
+            or not np.isclose(float(stencil.baseline.context.values.get("re", np.nan)), 90.0)
+        ]
+        if invalid_dev:
+            raise ValueError(
+                "The nonlinear-interface development panel must contain only stored Re90 non-train stencils: "
+                f"{invalid_dev}."
+            )
+    response_arm = "R_response" if recipe_payload.get("name") == "native_nonlinear_interface" else "B_response"
+    value_arm = f"{response_arm[0]}_value"
     config = replace(
-        load_staged_training_config(path=None if native_recipe is None else str(native_recipe), arm="B_response"),
+        load_staged_training_config(
+            path=None if native_recipe is None else str(native_recipe), arm=response_arm
+        ),
         max_wall_seconds=max_wall_seconds,
     )
+    projection_evidence: dict[str, Any] | None = None
+    if recipe_payload.get("name") == "native_nonlinear_interface":
+        if int(checkpoint.get("epoch", checkpoint.get("current_epoch", -1))) != 4738:
+            raise ValueError("native_nonlinear_interface requires the intact Run1804 e4738 checkpoint.")
+        if str(source_model.config.core_honf.forward_architecture) != "dense_pairwise_field":
+            raise ValueError("native_nonlinear_interface requires the Run1804 dense native architecture.")
+        required = set(config.required_response_terms)
+        active_at_u50 = set(config.active_terms(49))
+        if not required.issubset(active_at_u50) or any(
+            config.term_multiplier(term, 49) != 1.0 for term in required
+        ):
+            raise ValueError("The nonlinear-interface response and pressure objectives must be fully active by update 50.")
+        required_controls = set(config.required_control_terms)
+        if not required_controls.issubset(active_at_u50) or any(
+            config.term_multiplier(term, 49) != 1.0 for term in required_controls
+        ):
+            raise ValueError("The nonlinear-interface fixed-heat control objectives must be fully active by update 50.")
+        if config.project_response_gradient_blockwise:
+            if r0_diagnostic_path is None:
+                raise ValueError(
+                    "The nonlinear-interface recipe requires its train-only R0 diagnostic to justify projection."
+                )
+            r0_path = r0_diagnostic_path.expanduser().resolve()
+            projection_evidence = _load_r0_projection_evidence(r0_path, checkpoint_path)
+            justified = bool(projection_evidence["justified_by_measured_m10_combined_value_conflict"])
+            config = replace(config, project_response_gradient_blockwise=justified)
+    elif r0_diagnostic_path is not None:
+        raise ValueError("R0 projection evidence applies only to native_nonlinear_interface.")
     effective_update_cap = _validate_review_gate(
         review_cap, config, len(raw_stencils)
     )
     sampled_panel = sample_training_panel(raw_stencils, config=sampling)
     training_stencils = tuple(item.stencil for item in sampled_panel)
+    fixed_heat_controls: tuple[FixedHeatNullControl, ...] = ()
+    fixed_heat_provenance: dict[str, Any] | None = None
+    fixed_heat_review_stencils: tuple[tuple[str, ResponseStencil], ...] = ()
+    if nonlinear_recipe:
+        fixed_heat_controls, fixed_heat_provenance, fixed_heat_review_stencils = _load_fixed_heat_null_controls(
+            recipe_payload,
+            raw_stencils,
+            sampled_panel,
+            stencil_paths=stencil_paths,
+        )
+    dataset_root = _resolve_dataset_path(checkpoint, str(dataset_path) if dataset_path else None)
+    train_config = checkpoint.get("train_config", {})
+    dataset_config = train_config.get("dataset", {})
+    raw_dataset = GlobalChannelThermalDataset(
+        dataset_root,
+        split="train",
+        points_per_case=1,
+        normalize_inputs=False,
+        normalize_targets=False,
+        random_point_sampling=False,
+        include_grid=False,
+        include_structure_targets=False,
+    )
+    broad_eval_cases = (
+        select_broad_evaluation_cases(raw_dataset, requested=30)
+        if nonlinear_recipe
+        else ()
+    )
+    template = _make_input_template(raw_dataset)
+    # Pressure sections alone occupy 1,280 rows on the stored 64x128 grid.
+    # Keep interior fluid support in the broad historical replay even when a
+    # small stencil-only pilot requests fewer ordinary fluid queries.
+    historical_sampling = replace(sampling, max_fluid_queries=max(3072, sampling.max_fluid_queries))
+    historical_value_source = (
+        HistoricalValueSource.from_dataset(raw_dataset, sampling=historical_sampling)
+        if initialization_mode == "native_checkpoint"
+        else None
+    )
+    if nonlinear_recipe and historical_value_source is None:
+        raise ValueError("native_nonlinear_interface requires the packed historical train cohort.")
+    historical_calibration_case_map = (
+        _historical_calibration_case_map(raw_family_ids, historical_value_source)
+        if nonlinear_recipe and historical_value_source is not None
+        else {}
+    )
     scales_provenance: dict[str, Any] | None = None
     response_weight_provenance: dict[str, Any] | None = None
     fixed_response_weights: dict[str, float] | None = None
     if frozen_loss_scales_path is None:
-        scales = derive_training_scales(training_stencils, smooth_peak_beta=smooth_peak_beta)
+        scales = derive_training_scales(
+            training_stencils,
+            smooth_peak_beta=smooth_peak_beta,
+            historical_value_source=(historical_value_source if nonlinear_recipe else None),
+        )
     else:
         scales, scales_provenance = _load_frozen_loss_scales(
             frozen_loss_scales_path,
             raw_stencils,
             smooth_peak_beta=smooth_peak_beta,
+            expected_calibration_scope=(
+                "eight_train_families_plus_one_historical_train_case_per_family"
+                if nonlinear_recipe
+                else None
+            ),
+            expected_family_ids=(raw_family_ids if nonlinear_recipe else None),
+            expected_historical_case_map=(
+                historical_calibration_case_map if nonlinear_recipe else None
+            ),
         )
         if not resuming:
             fixed_response_weights, response_weight_provenance = _load_frozen_response_weights(
-                frozen_response_weights_path  # type: ignore[arg-type]
+                frozen_response_weights_path,  # type: ignore[arg-type]
+                required_terms=(
+                    config.required_response_terms if response_arm.startswith("R_") else None
+                ),
             )
     loss_scales_snapshot = {
         "value": dict(scales.value),
@@ -1275,7 +2947,17 @@ def run_paired_fit(
         derived_scale_path = output_dir / "native_train_loss_scales.json"
         derived_payload = {
             "frozen_scales": loss_scales_snapshot,
-            "train_family_ids": [stencil.physical_family_id for stencil in raw_stencils],
+            "train_family_ids": raw_family_ids,
+            "historical_train_case_ids": (
+                list(historical_calibration_case_map.values())
+            ),
+            "historical_train_examples_by_family": historical_calibration_case_map,
+            "equal_family_weighting": True,
+            "calibration_scope": (
+                "eight_train_families_plus_one_historical_train_case_per_family"
+                if nonlinear_recipe
+                else "train_stencils_before_native_fit"
+            ),
             "source": "derived_from_train_stencils_before_native_fit",
         }
         comparable_payload = json.loads(json.dumps(derived_payload, default=_json_default))
@@ -1287,42 +2969,27 @@ def run_paired_fit(
         scales_provenance = {
             "path": str(derived_scale_path.resolve()),
             "sha256": _checkpoint_digest(derived_scale_path),
-            "scope": "derived_train_only_before_native_fit",
-            "family_ids": sorted(stencil.physical_family_id for stencil in raw_stencils),
+            "scope": derived_payload["calibration_scope"],
+            "family_ids": raw_family_ids,
+            "historical_train_case_ids": derived_payload["historical_train_case_ids"],
+            "equal_family_weighting": True,
         }
     resume_payloads = None
     if resuming:
         resume_payloads = {
-            "B_value": torch.load(resume_value_path, map_location="cpu", weights_only=False),
-            "B_response": torch.load(resume_response_path, map_location="cpu", weights_only=False),
+            value_arm: _load_safe_response_checkpoint(resume_value_path),
+            response_arm: _load_safe_response_checkpoint(resume_response_path),
         }
-    dataset_root = _resolve_dataset_path(checkpoint, str(dataset_path) if dataset_path else None)
-    train_config = checkpoint.get("train_config", {})
-    dataset_config = train_config.get("dataset", {})
-    raw_dataset = GlobalChannelThermalDataset(
-        dataset_root,
-        split="train",
-        points_per_case=1,
-        normalize_inputs=False,
-        normalize_targets=False,
-        random_point_sampling=False,
-        include_grid=False,
-        include_structure_targets=False,
-    )
-    template = _make_input_template(raw_dataset)
-    # Pressure sections alone occupy 1,280 rows on the stored 64x128 grid.
-    # Keep interior fluid support in the broad historical replay even when a
-    # small stencil-only pilot requests fewer ordinary fluid queries.
-    historical_sampling = replace(sampling, max_fluid_queries=max(3072, sampling.max_fluid_queries))
-    historical_value_source = (
-        HistoricalValueSource.from_dataset(raw_dataset, sampling=historical_sampling)
-        if initialization_mode == "native_checkpoint"
-        else None
-    )
     native_scope = None
     if initialization_mode == "native_checkpoint":
         target_model, refit_config = _native_checkpoint_initialization(source_model)
-        native_scope = _configure_native_output_head_scope(target_model)
+        requested_scope = recipe_payload.get("native_trainable_scope", "native_output_heads")
+        if requested_scope == "native_nonlinear_interface":
+            native_scope = _configure_native_nonlinear_interface_scope(target_model)
+        elif requested_scope == "native_output_heads":
+            native_scope = _configure_native_output_head_scope(target_model)
+        else:
+            raise ValueError(f"Unknown native trainable scope {requested_scope!r}.")
     elif initialization_mode == "three_term_conversion":
         target_model, refit_config = _make_refit_model(source_model, checkpoint, device=device)
     else:
@@ -1345,15 +3012,15 @@ def run_paired_fit(
             historical_case_order=(historical_value_source.case_ids if historical_value_source is not None else ()),
             historical_dataset_path=(historical_value_source.dataset_path if historical_value_source is not None else None),
             resume_checkpoint_paths={
-                "B_value": resume_value_path,  # type: ignore[dict-item]
-                "B_response": resume_response_path,  # type: ignore[dict-item]
+                value_arm: resume_value_path,  # type: ignore[dict-item]
+                response_arm: resume_response_path,  # type: ignore[dict-item]
             },
             resume_payloads=resume_payloads,  # type: ignore[arg-type]
             training_config=config,
-            required_update=int(resume_payloads["B_value"]["actual_optimizer_updates"]),
+            required_update=int(resume_payloads[value_arm]["actual_optimizer_updates"]),
         )
         response_weight_provenance = {
-            "source": f"verified_B_response_u{int(resume_payloads['B_value']['actual_optimizer_updates'])}_checkpoint",
+            "source": f"verified_{response_arm}_u{int(resume_payloads[value_arm]['actual_optimizer_updates'])}_checkpoint",
             "fit_manifest_sha256": resume_provenance["fit_manifest"]["sha256"],
         }
     operator = DifferentiableThermalOperator(
@@ -1378,6 +3045,45 @@ def run_paired_fit(
         transfer = _materialize_and_warm_start(
             source_model, target_model, operator, training_stencils[0], device=device
         )
+    incumbent_operator: DifferentiableThermalOperator | None = None
+    if nonlinear_recipe:
+        # Keep the intact e4738 incumbent on its original checkpoint state.
+        # The paired target is a separate native copy and is the only model
+        # passed to either optimizer.
+        incumbent_operator = DifferentiableThermalOperator(
+            source_model,
+            template,
+            dataset_config=dataset_config,
+            normalization_stats=checkpoint.get("global_normalization_stats", {}),
+            query_batch_size=query_batch_size,
+        )
+        incumbent_model_state_before = {
+            name: value.detach().cpu().clone()
+            for name, value in source_model.state_dict().items()
+        }
+        initial_queries = role_queries_from_stencil(training_stencils[0], device=device)
+        initial_design = DesignInput.from_state(training_stencils[0].baseline.design, device=device)
+        with torch.no_grad():
+            incumbent_operator(
+                initial_design,
+                context_inputs(training_stencils[0].baseline.context),
+                initial_queries,
+            )
+        changed_incumbent_state = [
+            name
+            for name, value in source_model.state_dict().items()
+            if name in incumbent_model_state_before
+            and not torch.equal(value.detach().cpu(), incumbent_model_state_before[name])
+        ]
+        missing_incumbent_state = sorted(
+            set(incumbent_model_state_before) - set(source_model.state_dict())
+        )
+        if changed_incumbent_state or missing_incumbent_state:
+            raise RuntimeError(
+                "Materializing incumbent review inputs changed persistent checkpoint state: "
+                f"changed={changed_incumbent_state}, missing={missing_incumbent_state}."
+            )
+        source_model.eval()
     parameter_inventory = _parameter_inventory(target_model)
     target_model.eval()
     derivative_started = time.perf_counter()
@@ -1394,6 +3100,48 @@ def run_paired_fit(
     if not derivative["passed"]:
         raise RuntimeError(f"Whole-wrapper pressure/peak AD-FD check failed: {derivative}")
     derivative_wall_seconds = time.perf_counter() - derivative_started
+
+    forward_phase = {"name": "paired_response_weight_calibration"}
+    native_forward_call_counts: dict[str, dict[str, int]] = {
+        "target_model": {},
+        "incumbent_e4738": {},
+    }
+
+    def _forward_counter(model_label: str):
+        def count_forward(_module: nn.Module, _inputs: tuple[Any, ...], _output: Any) -> None:
+            phase = str(forward_phase["name"])
+            counts = native_forward_call_counts[model_label]
+            counts[phase] = counts.get(phase, 0) + 1
+
+        return count_forward
+
+    target_forward_hook = target_model.register_forward_hook(_forward_counter("target_model"))
+    incumbent_forward_hook = (
+        source_model.register_forward_hook(_forward_counter("incumbent_e4738"))
+        if nonlinear_recipe
+        else None
+    )
+
+    frozen_parameter_snapshot: dict[str, torch.Tensor] = {}
+    frozen_buffer_snapshot: dict[str, torch.Tensor] = {}
+    frozen_buffer_checkpoint_audit: list[dict[str, Any]] = []
+    if native_scope is not None:
+        frozen_parameter_snapshot = {
+            name: parameter.detach().cpu().clone()
+            for name, parameter in target_model.named_parameters()
+            if not parameter.requires_grad
+        }
+        frozen_buffer_snapshot = {
+            name: value.detach().cpu().clone()
+            for name, value in target_model.named_buffers()
+        }
+        scope_buffer_names = set(native_scope.get("frozen_buffer_names", ()))
+        native_scope["buffers_initialized_by_materialization"] = sorted(
+            set(frozen_buffer_snapshot) - scope_buffer_names
+        )
+        # Scope provenance is refreshed after lazy positional encoders have
+        # seen the complete warm-up/AD-FD input path.
+        native_scope["frozen_buffer_names"] = sorted(frozen_buffer_snapshot)
 
     optimizer_config = checkpoint.get("train_config", {}).get("training", {})
     lr = float(
@@ -1417,22 +3165,88 @@ def run_paired_fit(
         )
 
     latest_payloads: dict[str, Mapping[str, Any]] = {}
-    checkpoint_paths: dict[str, list[str]] = {"B_value": [], "B_response": []}
+    checkpoint_paths: dict[str, list[str]] = {value_arm: [], response_arm: []}
 
     def save_checkpoint(arm: str, payload: Mapping[str, Any], label: str) -> None:
         arm_config = StagedTrainingConfig.from_mapping(payload["training_config"])
         safe_label = "".join(character if character.isalnum() else "_" for character in label)
         update = int(payload["actual_optimizer_updates"])
         path = output_dir / f"response_control_{arm}_{safe_label}_u{update:05d}.pt"
+        checkpoint_buffer_audit: dict[str, Any] | None = None
+        if native_scope is not None:
+            state = payload.get("model")
+            if not isinstance(state, Mapping):
+                raise TypeError("Native checkpoint payload has no named model state.")
+            current_parameters = dict(target_model.named_parameters())
+            missing_parameters = sorted(
+                set(frozen_parameter_snapshot) - set(current_parameters)
+            )
+            changed_parameters = sorted(
+                name
+                for name, reference in frozen_parameter_snapshot.items()
+                if name in current_parameters
+                and not torch.equal(current_parameters[name].detach().cpu(), reference)
+            )
+            missing_checkpoint_parameters = sorted(
+                name for name in frozen_parameter_snapshot if state.get(name) is None
+            )
+            changed_checkpoint_parameters = sorted(
+                name
+                for name, reference in frozen_parameter_snapshot.items()
+                if state.get(name) is not None
+                and not torch.equal(state[name].detach().cpu(), reference)
+            )
+            if (
+                missing_parameters
+                or changed_parameters
+                or missing_checkpoint_parameters
+                or changed_checkpoint_parameters
+            ):
+                raise RuntimeError(
+                    f"Frozen native parameters changed at {arm} update {update}: "
+                    f"missing={missing_parameters}, changed={changed_parameters}, "
+                    f"checkpoint_missing={missing_checkpoint_parameters}, "
+                    f"checkpoint_changed={changed_checkpoint_parameters}."
+                )
+            checkpoint_buffer_audit = _audit_named_buffers(
+                target_model, frozen_buffer_snapshot
+            )
+            if not checkpoint_buffer_audit["passed"]:
+                raise RuntimeError(
+                    f"Frozen native buffers changed at {arm} update {update}: "
+                    f"{checkpoint_buffer_audit}."
+                )
+            for name in checkpoint_buffer_audit["added_names"]:
+                frozen_buffer_snapshot[name] = (
+                    dict(target_model.named_buffers())[name].detach().cpu().clone()
+                )
+            frozen_buffer_checkpoint_audit.append({
+                "arm": arm,
+                "label": label,
+                "update": update,
+                **checkpoint_buffer_audit,
+            })
         persisted_payload = dict(payload)
         persisted_payload["response_control_calibration_provenance"] = {
             "loss_scales": loss_scales_snapshot,
             "loss_scales_source": scales_provenance,
             "response_weight_source": response_weight_provenance,
             "resume_provenance": resume_provenance,
+            "source_checkpoint": str(checkpoint_path.expanduser().resolve()),
+            "source_checkpoint_sha256": _checkpoint_digest(checkpoint_path),
+            "training_recipe": None if native_recipe is None else str(native_recipe),
+            "training_recipe_sha256": (
+                None if native_recipe is None else _checkpoint_digest(native_recipe)
+            ),
+            "plan_schema": 1,
+            "active_scope": native_scope,
+            "frozen_buffer_checkpoint_audit": checkpoint_buffer_audit,
+            "native_forward_call_counts_by_phase": {
+                name: dict(counts) for name, counts in native_forward_call_counts.items()
+            },
         }
         _atomic_torch_save(path, persisted_payload)
-        loaded = torch.load(path, map_location="cpu", weights_only=False)
+        loaded = _load_safe_response_checkpoint(path)
         restore_checkpoint_payload(target_model, active_optimizers[arm], loaded, config=arm_config)
         latest_payloads[arm] = loaded
         checkpoint_paths[arm].append(str(path))
@@ -1445,7 +3259,8 @@ def run_paired_fit(
         _optimizer_hyperparameter_inventory(
             optimizer, learning_rate=lr, weight_decay=decay
         )
-        arm = "B_value" if len(active_optimizers) == 0 else "B_response"
+        arm = value_arm if len(active_optimizers) == 0 else response_arm
+        forward_phase["name"] = f"{arm}_training"
         active_optimizers[arm] = optimizer
         return optimizer
 
@@ -1483,6 +3298,7 @@ def run_paired_fit(
         review_continuations=review_continuations,
         resume_payloads=resume_payloads,
         fixed_response_weights=fixed_response_weights,
+        fixed_heat_controls=fixed_heat_controls,
     )
     if device.type == "cuda":
         torch.cuda.synchronize(device)
@@ -1504,35 +3320,179 @@ def run_paired_fit(
             "Any numbered checkpoints and partial loss curve were preserved."
         )
 
-    development_results: dict[str, list[dict[str, Any]]] = {"B_value": [], "B_response": []}
+    development_results: dict[str, list[dict[str, Any]]] = {value_arm: [], response_arm: []}
+    review_evaluation: dict[str, Any] | None = None
     development_started = time.perf_counter()
-    for arm in ("B_value", "B_response"):
-        if not latest_payloads.get(arm):
-            continue
-        target_model.load_state_dict(latest_payloads[arm]["model"], strict=True)
-        target_model.eval()
-        for path in development_paths:
-            dev_stencil, _ = load_response_atlas_stencil(path)
-            if dev_stencil.split is EvidenceSplit.TRAIN:
-                raise ValueError("Development evaluation paths must not carry the train split label.")
-            dev_limit = float(dev_stencil.baseline.output.quantities["pressure_drop"].value) * 1.05  # type: ignore[union-attr]
-            metrics = evaluate_stencil(
-                operator,
-                dev_stencil,
-                pressure_limit={dev_stencil.physical_family_id: dev_limit},
-                mixed_specs=_mixed_specs(dev_stencil),
-                smooth_peak_beta=smooth_peak_beta,
-                device=device,
+    if nonlinear_recipe:
+        if incumbent_operator is None:
+            raise RuntimeError("The intact incumbent operator was not prepared for nonlinear review.")
+        panel_stencils: dict[str, list[tuple[str, ResponseStencil, float]]] = {
+            "train_eight_families": [],
+            "re90_four_development": [],
+            "fixed_heat_four_controls": [],
+        }
+        family_pressure_limits = dict(scales.pressure_limit_by_family or {})
+        for stencil in raw_stencils:
+            if stencil.physical_family_id not in family_pressure_limits:
+                raise ValueError(
+                    f"Train review is missing the original fixed pressure limit for {stencil.physical_family_id!r}."
+                )
+            panel_stencils["train_eight_families"].append((
+                stencil.physical_family_id,
+                stencil,
+                float(family_pressure_limits[stencil.physical_family_id]),
+            ))
+        for path, stencil, _ in loaded_development:
+            del path
+            pressure = stencil.baseline.output.quantities["pressure_drop"]  # type: ignore[union-attr]
+            if not pressure.resolved:
+                raise ValueError("Re90 review requires its resolved original baseline pressure.")
+            dev_limit = float(pressure.value) * 1.05
+            panel_stencils["re90_four_development"].append((
+                stencil.physical_family_id, stencil, dev_limit
+            ))
+        for control_id, review_stencil in fixed_heat_review_stencils:
+            family_id = review_stencil.physical_family_id
+            if family_id not in family_pressure_limits:
+                raise ValueError(
+                    f"Fixed-heat review has no frozen family pressure limit for {family_id!r}."
+                )
+            panel_stencils["fixed_heat_four_controls"].append((
+                control_id,
+                review_stencil,
+                float(family_pressure_limits[family_id]),
+            ))
+        if len(panel_stencils["train_eight_families"]) != 8:
+            raise ValueError("The u200 train review panel must contain eight family stencils.")
+        if len(panel_stencils["fixed_heat_four_controls"]) != 4:
+            raise ValueError("The u200 fixed-heat review panel must contain all four controls.")
+        broad_records = [
+            (
+                row,
+                load_stored_reference_case(dataset_root, str(row["case_id"])),
             )
-            development_results[arm].append(
-                {
-                    "family_id": dev_stencil.physical_family_id,
-                    "split": dev_stencil.split.value,
-                    "source": dev_stencil.source.value,
-                    "pressure_limit_from_original_start": dev_limit,
+            for row in broad_eval_cases
+        ]
+        if len(broad_records) != 30 or len({row["case_id"] for row, _ in broad_records}) != 30:
+            raise ValueError("The u200 broad train review panel must contain 30 unique stored cases.")
+        for row, record in broad_records:
+            if record.output is None or record.design.split is not EvidenceSplit.TRAIN:
+                raise ValueError(f"Broad review case {row['case_id']!r} is not a solved train record.")
+            pressure_target = record.output.quantities["pressure_drop"]
+            if not pressure_target.resolved or not np.isfinite(float(pressure_target.value)):
+                raise ValueError("Broad train review pressure target is non-finite.")
+
+        models: dict[str, DifferentiableThermalOperator] = {
+            "incumbent_e4738": incumbent_operator,
+            value_arm: operator,
+            response_arm: operator,
+        }
+        for arm in (value_arm, response_arm):
+            if not latest_payloads.get(arm):
+                raise RuntimeError(f"The paired u{review_cap} checkpoint for {arm} is missing.")
+
+        review_models: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        for model_name, review_operator in models.items():
+            if model_name in latest_payloads:
+                # The operator closes over the shared target module. Restore
+                # the requested arm immediately before its complete panel so
+                # both names cannot accidentally replay the last loaded arm.
+                _restore_review_arm_state(target_model, model_name, latest_payloads)
+            model_panels: dict[str, list[dict[str, Any]]] = {}
+            for panel_name, items in panel_stencils.items():
+                forward_phase["name"] = f"review_{model_name}_{panel_name}"
+                result_rows: list[dict[str, Any]] = []
+                for case_id, stencil, pressure_limit in items:
+                    with torch.no_grad():
+                        metrics = evaluate_stencil(
+                            review_operator,
+                            stencil,
+                            pressure_limit={stencil.physical_family_id: pressure_limit},
+                            mixed_specs=_mixed_specs(stencil),
+                            smooth_peak_beta=smooth_peak_beta,
+                            device=device,
+                        )
+                    result_rows.append({
+                        "case_id": case_id,
+                        "family_id": stencil.physical_family_id,
+                        "split": stencil.split.value,
+                        "source": stencil.source.value,
+                        "pressure_limit_original": pressure_limit,
+                        "metrics": metrics,
+                    })
+                model_panels[panel_name] = result_rows
+            broad_rows: list[dict[str, Any]] = []
+            forward_phase["name"] = f"review_{model_name}_broad_train_historical_30"
+            for row, record in broad_records:
+                pressure_target = record.output.quantities["pressure_drop"]  # type: ignore[union-attr]
+                if not pressure_target.resolved or not np.isfinite(float(pressure_target.value)):
+                    raise ValueError(f"Broad case {row['case_id']!r} has unresolved original pressure.")
+                fixed_limit = float(pressure_target.value) * 1.05
+                with torch.no_grad():
+                    metrics = evaluate_absolute_record(
+                        review_operator,
+                        record,
+                        pressure_limit=fixed_limit,
+                        device=device,
+                    )
+                broad_rows.append({
+                    **dict(row),
+                    "split": record.design.split.value,
+                    "source": record.source.value,
+                    "pressure_limit_original": fixed_limit,
+                    "pressure_limit_rule": "1.05x stored original train-record pressure baseline",
                     "metrics": metrics,
-                }
-            )
+                })
+            model_panels["broad_train_historical_30"] = broad_rows
+            review_models[model_name] = model_panels
+            if model_name in development_results:
+                development_results[model_name] = model_panels["re90_four_development"]
+        review_evaluation = {
+            "review_update": review_cap,
+            "models": review_models,
+            "panel_counts": {
+                "train_eight_families": 8,
+                "re90_four_development": 4,
+                "fixed_heat_four_controls": 4,
+                "broad_train_historical_30": 30,
+            },
+            "broad_train_selection": {
+                "rule": "minimum, median, and maximum Reynolds cases per active-module-count stratum; deterministic fill if needed",
+                "cases": [dict(row) for row in broad_eval_cases],
+                "pressure_limit_rule": "1.05x each stored original train-record pressure baseline, frozen before model prediction",
+            },
+            "temperature_units": "Each metric row carries the source role's declared channel_units; no SI relabeling is inferred.",
+            "fixed_heat_control_provenance": fixed_heat_provenance,
+        }
+    else:
+        for arm in (value_arm, response_arm):
+            if not latest_payloads.get(arm):
+                continue
+            target_model.load_state_dict(latest_payloads[arm]["model"], strict=True)
+            target_model.eval()
+            forward_phase["name"] = f"development_evaluation_{arm}"
+            for path, dev_stencil, _ in loaded_development:
+                if dev_stencil.split is EvidenceSplit.TRAIN:
+                    raise ValueError("Development evaluation paths must not carry the train split label.")
+                dev_limit = float(dev_stencil.baseline.output.quantities["pressure_drop"].value) * 1.05  # type: ignore[union-attr]
+                with torch.no_grad():
+                    metrics = evaluate_stencil(
+                        operator,
+                        dev_stencil,
+                        pressure_limit={dev_stencil.physical_family_id: dev_limit},
+                        mixed_specs=_mixed_specs(dev_stencil),
+                        smooth_peak_beta=smooth_peak_beta,
+                        device=device,
+                    )
+                development_results[arm].append(
+                    {
+                        "family_id": dev_stencil.physical_family_id,
+                        "split": dev_stencil.split.value,
+                        "source": dev_stencil.source.value,
+                        "pressure_limit_from_original_start": dev_limit,
+                        "metrics": metrics,
+                    }
+                )
     if device.type == "cuda":
         torch.cuda.synchronize(device)
         development_cuda_peak = {
@@ -1542,6 +3502,9 @@ def run_paired_fit(
     else:
         development_cuda_peak = None
     development_wall_seconds = time.perf_counter() - development_started
+    target_forward_hook.remove()
+    if incumbent_forward_hook is not None:
+        incumbent_forward_hook.remove()
     return {
         "status": "passed",
         "mode": "paired_staged_fit",
@@ -1550,6 +3513,7 @@ def run_paired_fit(
         "selected_epoch": checkpoint.get("epoch", checkpoint.get("current_epoch")),
         "initialization_mode": initialization_mode,
         "staged_recipe": str(native_recipe) if native_recipe is not None else "historical_default",
+        "staged_recipe_name": recipe_payload.get("name"),
         "train_atlas_paths": [str(path.resolve()) for path in stencil_paths],
         "train_family_ids": [stencil.physical_family_id for stencil in training_stencils],
         "train_contexts": [dict(stencil.baseline.context.values) for stencil in training_stencils],
@@ -1571,11 +3535,13 @@ def run_paired_fit(
         "warm_start": transfer,
         "parameter_inventory": parameter_inventory,
         "native_trainable_scope": native_scope,
+        "projection_evidence": projection_evidence,
+        "projection_active": bool(config.project_response_gradient_blockwise),
         "resolved_optimizer": {
             "name": "AdamW",
             "learning_rate": lr,
             "weight_decay": decay,
-            "scope": "native_output_heads" if initialization_mode == "native_checkpoint" else "all_trainable_parameters",
+            "scope": native_scope["name"] if native_scope is not None else "all_trainable_parameters",
         },
         "whole_wrapper_ad_fd": derivative,
         "whole_wrapper_ad_fd_wall_seconds": derivative_wall_seconds,
@@ -1585,20 +3551,23 @@ def run_paired_fit(
                 if resume_payloads is not None
                 else "frozen_recipe_calibration"
                 if fixed_response_weights is not None
-                else "first_fixed_train_stencil_plus_first_historical_train_case"
+                else "eight_train_families_plus_one_historical_train_case_per_family"
+                if nonlinear_recipe and historical_value_source is not None
+                else "balanced_train_families_plus_historical_train_cases"
                 if historical_value_source is not None
-                else "first_fixed_train_stencil_only"
+                else "balanced_train_families_only"
             ),
-            "physical_family_id": training_stencils[0].physical_family_id,
-            "split": training_stencils[0].split.value,
-            "historical_train_case_id": (
-                historical_value_source.case_ids[0]
+            "train_family_ids": sorted({stencil.physical_family_id for stencil in training_stencils}),
+            "historical_train_case_ids": (
+                list(historical_calibration_case_map.values())
                 if historical_value_source is not None and resume_payloads is None
                 and fixed_response_weights is None
-                else None
+                else []
             ),
+            "historical_train_examples_by_family": historical_calibration_case_map,
             "weights_source": response_weight_provenance,
             "weights": dict(paired.calibrated_response_weights),
+            "gradient_diagnostics": dict(paired.gradient_calibration),
         },
         "loss_scales_source": scales_provenance,
         "loss_scales": loss_scales_snapshot,
@@ -1621,12 +3590,24 @@ def run_paired_fit(
             for arm, result in paired.arms.items()
         },
         "calibrated_response_weights": dict(paired.calibrated_response_weights),
+        "fixed_heat_control_provenance": fixed_heat_provenance,
+        "frozen_buffer_integrity": dict(paired.buffer_integrity),
+        "frozen_parameter_snapshot_count": len(frozen_parameter_snapshot),
+        "frozen_buffer_checkpoint_audit": frozen_buffer_checkpoint_audit,
         "curve_path": str(curve_path),
         "checkpoint_paths": checkpoint_paths,
         "development_evaluation": development_results,
+        "review_evaluation": review_evaluation,
         "development_evaluation_wall_seconds": development_wall_seconds,
+        "native_forward_call_counts": {
+            name: dict(counts) for name, counts in native_forward_call_counts.items()
+        },
+        "native_forward_call_count_definition": (
+            "Root ChannelThermalHONFModel forward-hook invocations by named calibration, arm-training, and review panel phase; "
+            "excludes pre-fit input materialization and AD-FD checks before the hook was attached."
+        ),
         "checkpoint_selection_rule": (
-            "No automatic selection. Review matched B_value/B_response at this gate; "
+            f"No automatic selection. Review matched {value_arm}/{response_arm} at this gate; "
             "feasibility and critical responses first, then decision and role-separated receiver quality."
         ),
         "fit_wall_seconds": fit_seconds,
@@ -1637,6 +3618,409 @@ def run_paired_fit(
             "development_replay": development_cuda_peak,
         },
     }
+
+
+def run_checkpoint_only_review(
+    *,
+    checkpoint_path: Path,
+    source_manifest_path: Path,
+    value_checkpoint_path: Path,
+    response_checkpoint_path: Path,
+    stencil_paths: Sequence[Path],
+    development_paths: Sequence[Path],
+    dataset_path: Path | None,
+    recipe_config_path: Path,
+    r0_diagnostic_path: Path,
+    frozen_loss_scales_path: Path,
+    output_dir: Path,
+    device: torch.device,
+    sampling: ReceiverSamplingConfig,
+    max_wall_seconds: float,
+    query_batch_size: int,
+) -> dict[str, Any]:
+    """Evaluate the exact saved R1 u200 pair without creating an optimizer."""
+
+    started = time.monotonic()
+    source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
+    recipe_payload = json.loads(recipe_config_path.read_text(encoding="utf-8"))
+    cublas_workspace = (
+        _enable_deterministic_algorithms(device)
+        if bool(recipe_payload.get("deterministic_algorithms", False))
+        else None
+    )
+    source_model, source_checkpoint = load_model(checkpoint_path, device)
+    if int(source_checkpoint.get("epoch", source_checkpoint.get("current_epoch", -1))) != 4738:
+        raise ValueError("Checkpoint-only R1 review requires the intact Run1804 e4738 source.")
+    source_model.eval()
+
+    train_loaded = [load_response_atlas_stencil(path) for path in stencil_paths]
+    train_stencils = [stencil for stencil, _ in train_loaded]
+    if len(train_stencils) != 8 or len({stencil.physical_family_id for stencil in train_stencils}) != 8:
+        raise ValueError("Checkpoint-only R1 review requires eight unique train families.")
+    if any(stencil.split is not EvidenceSplit.TRAIN for stencil in train_stencils):
+        raise ValueError("Checkpoint-only train review received a non-train response atlas.")
+    development_loaded = [
+        (path, *load_response_atlas_stencil(path)) for path in development_paths
+    ]
+    if len(development_loaded) != 4 or any(
+        stencil.split is EvidenceSplit.TRAIN
+        or not np.isclose(float(stencil.baseline.context.values.get("re", np.nan)), 90.0)
+        for _, stencil, _ in development_loaded
+    ):
+        raise ValueError("Checkpoint-only review requires the four stored non-train Re90 stencils.")
+
+    config = load_staged_training_config(str(recipe_config_path), arm="R_response")
+    config = replace(config, max_wall_seconds=float(source_manifest.get("max_wall_seconds", 1800.0)))
+    projection_evidence: dict[str, Any] | None = None
+    if config.project_response_gradient_blockwise:
+        projection_evidence = _load_r0_projection_evidence(r0_diagnostic_path, checkpoint_path)
+        config = replace(
+            config,
+            project_response_gradient_blockwise=bool(
+                projection_evidence["justified_by_measured_m10_combined_value_conflict"]
+            ),
+        )
+
+    value_payload = _load_safe_response_checkpoint(value_checkpoint_path)
+    response_payload = _load_safe_response_checkpoint(response_checkpoint_path)
+    arm_payloads = {"R_value": value_payload, "R_response": response_payload}
+    scales_payload = json.loads(frozen_loss_scales_path.read_text(encoding="utf-8"))
+    frozen_scales = scales_payload["frozen_scales"]
+    provenance = validate_checkpoint_only_review_provenance(
+        failed_manifest_path=source_manifest_path,
+        source_checkpoint_path=checkpoint_path,
+        recipe_path=recipe_config_path,
+        r0_diagnostic_path=r0_diagnostic_path,
+        frozen_scales_path=frozen_loss_scales_path,
+        train_atlas_paths=stencil_paths,
+        development_atlas_paths=development_paths,
+        arm_checkpoint_paths={
+            "R_value": value_checkpoint_path,
+            "R_response": response_checkpoint_path,
+        },
+        arm_payloads=arm_payloads,
+        training_config=config,
+        review_update=200,
+    )
+    family_pressure_limits = {
+        str(key): float(value)
+        for key, value in frozen_scales.get("pressure_limit_by_family", {}).items()
+    }
+    if set(family_pressure_limits) != {stencil.physical_family_id for stencil in train_stencils}:
+        raise ValueError("Frozen original pressure limits do not cover the eight train families exactly.")
+    smooth_peak_beta = float(frozen_scales["smooth_peak_beta"])
+
+    dataset_root = _resolve_dataset_path(
+        source_checkpoint,
+        str(dataset_path) if dataset_path is not None else None,
+    )
+    train_config = source_checkpoint.get("train_config", {})
+    dataset_config = train_config.get("dataset", {})
+    raw_dataset = GlobalChannelThermalDataset(
+        dataset_root,
+        split="train",
+        points_per_case=1,
+        normalize_inputs=False,
+        normalize_targets=False,
+        random_point_sampling=False,
+        include_grid=False,
+        include_structure_targets=False,
+    )
+    broad_eval_cases = select_broad_evaluation_cases(raw_dataset, requested=30)
+    if len(broad_eval_cases) != 30:
+        raise ValueError("Checkpoint-only review requires exactly 30 selected broad train cases.")
+    template = _make_input_template(raw_dataset)
+
+    target_model, refit_config = _native_checkpoint_initialization(source_model)
+    target_operator = DifferentiableThermalOperator(
+        target_model,
+        template,
+        dataset_config=dataset_config,
+        normalization_stats=source_checkpoint.get("global_normalization_stats", {}),
+        query_batch_size=query_batch_size,
+    )
+    source_operator = DifferentiableThermalOperator(
+        source_model,
+        template,
+        dataset_config=dataset_config,
+        normalization_stats=source_checkpoint.get("global_normalization_stats", {}),
+        query_batch_size=query_batch_size,
+    )
+    setup_forward_counts = {"incumbent_e4738": 0, "target_initialization": 0}
+
+    def _setup_forward_counter(name: str):
+        def count_forward(_module: nn.Module, _inputs: tuple[Any, ...], _output: Any) -> None:
+            setup_forward_counts[name] += 1
+
+        return count_forward
+
+    source_setup_hook = source_model.register_forward_hook(
+        _setup_forward_counter("incumbent_e4738")
+    )
+    target_setup_hook = target_model.register_forward_hook(
+        _setup_forward_counter("target_initialization")
+    )
+    first_stencil = train_stencils[0]
+    initial_design = DesignInput.from_state(first_stencil.baseline.design, device=device)
+    initial_queries = role_queries_from_stencil(first_stencil, device=device)
+    initial_context = context_inputs(first_stencil.baseline.context)
+    try:
+        with torch.no_grad():
+            source_operator(initial_design, initial_context, initial_queries)
+            target_operator(initial_design, initial_context, initial_queries)
+    finally:
+        source_setup_hook.remove()
+        target_setup_hook.remove()
+    source_state = source_model.state_dict()
+    target_state = target_model.state_dict()
+    if set(source_state) != set(target_state) or any(
+        not torch.equal(source_state[name].detach().cpu(), target_state[name].detach().cpu())
+        for name in source_state
+    ):
+        raise RuntimeError("Deep-copied source and target differ after lazy-state materialization.")
+    source_buffers = dict(source_model.named_buffers())
+    target_buffers = dict(target_model.named_buffers())
+    if set(source_buffers) != set(target_buffers) or any(
+        not torch.equal(source_buffers[name].detach().cpu(), target_buffers[name].detach().cpu())
+        for name in source_buffers
+    ):
+        raise RuntimeError("Deep-copied source and target buffers differ after materialization.")
+
+    native_scope = _configure_native_nonlinear_interface_scope(target_model)
+    trainable_names = set(native_scope["trainable_parameter_names"])
+    source_parameters = dict(source_model.named_parameters())
+    target_parameters = dict(target_model.named_parameters())
+    if set(source_parameters) != set(target_parameters):
+        raise RuntimeError("Source and target parameter inventories differ after materialization.")
+    for arm, payload in arm_payloads.items():
+        target_model.load_state_dict(payload["model"], strict=True)
+        for name, parameter in target_model.named_parameters():
+            if name not in trainable_names and not torch.equal(
+                parameter.detach().cpu(), source_parameters[name].detach().cpu()
+            ):
+                raise RuntimeError(f"{arm} changed frozen source parameter {name!r}.")
+        loaded_buffers = dict(target_model.named_buffers())
+        if set(loaded_buffers) != set(source_buffers) or any(
+            not torch.equal(loaded_buffers[name].detach().cpu(), source_buffers[name].detach().cpu())
+            for name in source_buffers
+        ):
+            raise RuntimeError(f"{arm} changed a frozen or lazy materialized source buffer.")
+
+    sampled_panel = sample_training_panel(train_stencils, config=sampling)
+    fixed_heat_controls, fixed_heat_provenance, fixed_heat_review_stencils = (
+        _load_fixed_heat_null_controls(
+            recipe_payload,
+            train_stencils,
+            sampled_panel,
+            stencil_paths=stencil_paths,
+        )
+    )
+    del fixed_heat_controls
+    if len(fixed_heat_review_stencils) != 4:
+        raise ValueError("Checkpoint-only review requires four strict raw fixed-heat stencils.")
+
+    panel_stencils: dict[str, list[tuple[str, ResponseStencil, float]]] = {
+        "train_eight_families": [],
+        "re90_four_development": [],
+        "fixed_heat_four_controls": [],
+    }
+    for stencil in train_stencils:
+        panel_stencils["train_eight_families"].append((
+            stencil.physical_family_id,
+            stencil,
+            family_pressure_limits[stencil.physical_family_id],
+        ))
+    for _, stencil, _ in development_loaded:
+        pressure = stencil.baseline.output.quantities["pressure_drop"]  # type: ignore[union-attr]
+        if not pressure.resolved or not np.isfinite(float(pressure.value)):
+            raise ValueError("Re90 review requires its resolved original baseline pressure.")
+        panel_stencils["re90_four_development"].append((
+            stencil.physical_family_id,
+            stencil,
+            float(pressure.value) * 1.05,
+        ))
+    for control_id, stencil in fixed_heat_review_stencils:
+        panel_stencils["fixed_heat_four_controls"].append((
+            control_id,
+            stencil,
+            family_pressure_limits[stencil.physical_family_id],
+        ))
+    broad_records = [
+        (row, load_stored_reference_case(dataset_root, str(row["case_id"])))
+        for row in broad_eval_cases
+    ]
+    if len(broad_records) != 30 or len({row["case_id"] for row, _ in broad_records}) != 30:
+        raise ValueError("The broad train review panel must contain 30 unique stored cases.")
+
+    forward_counts: dict[str, dict[str, int]] = {
+        model_name: {} for model_name in ("incumbent_e4738", "R_value", "R_response")
+    }
+    active_forward_model = {"name": "setup"}
+
+    def _count_forward(_module: nn.Module, _inputs: tuple[Any, ...], _output: Any) -> None:
+        name = str(active_forward_model["name"])
+        if name not in forward_counts:
+            return
+        forward_counts[name]["native_model_forward_calls"] = (
+            forward_counts[name].get("native_model_forward_calls", 0) + 1
+        )
+
+    source_hook = source_model.register_forward_hook(_count_forward)
+    target_hook = target_model.register_forward_hook(_count_forward)
+    progress_path = output_dir / "checkpoint_review_progress.json"
+    result_path = output_dir / "checkpoint_review_result.json"
+    review_models: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    result: dict[str, Any] = {
+        **provenance,
+        "status": "running",
+        "optimizer_calls": 0,
+        "optimizer_instances_created": 0,
+        "reference_solver_calls": 0,
+        "optimizer_accounting_basis": "checkpoint_review code constructs no optimizer and invokes no training/update function",
+        "setup_native_forward_call_counts": setup_forward_counts,
+        "deterministic_algorithms_enabled": bool(recipe_payload.get("deterministic_algorithms", False)),
+        "cublas_workspace_config": cublas_workspace,
+        "source_checkpoint_identity": {
+            "path": str(checkpoint_path.resolve()),
+            "sha256": _checkpoint_digest(checkpoint_path),
+        },
+        "native_initialization": refit_config,
+        "native_scope": native_scope,
+        "materialized_initial_state_equal": True,
+        "frozen_parameters_and_buffers_equal_source": True,
+        "projection_evidence": (
+            None if projection_evidence is None else {
+                "justified_by_measured_m10_combined_value_conflict": bool(
+                    projection_evidence["justified_by_measured_m10_combined_value_conflict"]
+                ),
+                "r0_content_hash_attested_by_source_checkpoint": False,
+            }
+        ),
+        "training_config": config,
+        "loss_scales": frozen_scales,
+        "checkpoint_calibrated_loss_weights": {
+            arm: dict(arm_payloads[arm]["calibrated_loss_weights"])
+            for arm in ("R_value", "R_response")
+        },
+        "fixed_heat_control_provenance": fixed_heat_provenance,
+        "panel_counts": {
+            "train_eight_families": 8,
+            "re90_four_development": 4,
+            "fixed_heat_four_controls": 4,
+            "broad_train_historical_30": 30,
+        },
+        "development_panel_attestation": provenance["development_panel_attestation"],
+        "temperature_units": "Each metric row carries the source role's declared channel_units; no SI relabeling is inferred.",
+        "models": review_models,
+        "native_forward_call_counts": forward_counts,
+        "started_unix_seconds": time.time(),
+    }
+    _atomic_json(progress_path, result)
+
+    def save_progress() -> None:
+        result["native_forward_call_counts"] = {
+            name: dict(counts) for name, counts in forward_counts.items()
+        }
+        result["elapsed_wall_seconds"] = time.monotonic() - started
+        _atomic_json(progress_path, result)
+
+    try:
+        for model_name in ("incumbent_e4738", "R_value", "R_response"):
+            if time.monotonic() - started >= max_wall_seconds:
+                raise TimeoutError("Checkpoint-only review reached its internal wall cap.")
+            if model_name == "incumbent_e4738":
+                review_operator = source_operator
+                active_forward_model["name"] = model_name
+                source_model.eval()
+            else:
+                target_model.load_state_dict(arm_payloads[model_name]["model"], strict=True)
+                target_model.eval()
+                review_operator = target_operator
+                active_forward_model["name"] = model_name
+            model_panels: dict[str, list[dict[str, Any]]] = {}
+            for panel_name, items in panel_stencils.items():
+                panel_rows: list[dict[str, Any]] = []
+                for case_id, stencil, pressure_limit in items:
+                    if time.monotonic() - started >= max_wall_seconds:
+                        raise TimeoutError("Checkpoint-only review reached its internal wall cap.")
+                    with torch.no_grad():
+                        metrics = evaluate_stencil(
+                            review_operator,
+                            stencil,
+                            pressure_limit={stencil.physical_family_id: pressure_limit},
+                            mixed_specs=_mixed_specs(stencil),
+                            smooth_peak_beta=smooth_peak_beta,
+                            device=device,
+                        )
+                    panel_rows.append({
+                        "case_id": case_id,
+                        "family_id": stencil.physical_family_id,
+                        "split": stencil.split.value,
+                        "source": stencil.source.value,
+                        "pressure_limit_original": pressure_limit,
+                        "metrics": metrics,
+                    })
+                    model_panels[panel_name] = list(panel_rows)
+                    review_models[model_name] = model_panels
+                    result["models"] = review_models
+                    save_progress()
+
+            broad_rows: list[dict[str, Any]] = []
+            for row, record in broad_records:
+                if time.monotonic() - started >= max_wall_seconds:
+                    raise TimeoutError("Checkpoint-only review reached its internal wall cap.")
+                pressure = record.output.quantities["pressure_drop"]  # type: ignore[union-attr]
+                if not pressure.resolved or not np.isfinite(float(pressure.value)):
+                    raise ValueError(f"Broad case {row['case_id']!r} has unresolved original pressure.")
+                fixed_limit = float(pressure.value) * 1.05
+                with torch.no_grad():
+                    metrics = evaluate_absolute_record(
+                        review_operator,
+                        record,
+                        pressure_limit=fixed_limit,
+                        device=device,
+                    )
+                broad_rows.append({
+                    **dict(row),
+                    "split": record.design.split.value,
+                    "source": record.source.value,
+                    "pressure_limit_original": fixed_limit,
+                    "pressure_limit_rule": "1.05x each stored original train-record pressure baseline",
+                    "metrics": metrics,
+                })
+                model_panels["broad_train_historical_30"] = list(broad_rows)
+                review_models[model_name] = model_panels
+                result["models"] = review_models
+                save_progress()
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        result.update({
+            "status": "passed",
+            "finished_unix_seconds": time.time(),
+            "total_wall_seconds": time.monotonic() - started,
+            "native_forward_call_counts": {
+                name: dict(counts) for name, counts in forward_counts.items()
+            },
+        })
+        _atomic_json(result_path, result)
+        _atomic_json(progress_path, result)
+        return result
+    except Exception as exc:
+        result.update({
+            "status": "timed_out" if isinstance(exc, TimeoutError) else "failed",
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "finished_unix_seconds": time.time(),
+            "total_wall_seconds": time.monotonic() - started,
+            "native_forward_call_counts": {
+                name: dict(counts) for name, counts in forward_counts.items()
+            },
+        })
+        _atomic_json(progress_path, result)
+        raise
+    finally:
+        source_hook.remove()
+        target_hook.remove()
 
 
 def _cuda_evidence(
@@ -1670,7 +4054,11 @@ def _cuda_evidence(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("preflight", "paired"), default="preflight")
+    parser.add_argument(
+        "--mode",
+        choices=("preflight", "r0", "paired", "checkpoint_review"),
+        default="preflight",
+    )
     parser.add_argument(
         "--initialization-mode",
         choices=("native_checkpoint", "three_term_conversion"),
@@ -1681,6 +4069,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train-stencil", required=True, type=Path, action="append")
     parser.add_argument("--dataset", type=Path, default=None)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--recipe-config", type=Path, default=None)
+    parser.add_argument("--r0-diagnostic-json", type=Path, default=None)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--max-wall-seconds", type=float, default=1800.0)
     parser.add_argument("--max-fluid-queries", type=int, default=3072)
@@ -1691,15 +4081,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--smooth-peak-beta", type=float, default=1.0)
     parser.add_argument("--learning-rate", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
-    parser.add_argument("--review-cap", type=int, choices=(100, 300, 1000, 2000), default=100)
-    parser.add_argument("--continue-after", type=int, choices=(100, 300, 1000), action="append", default=[])
+    parser.add_argument("--review-cap", type=int, choices=(100, 200, 300, 500, 1000, 2000), default=100)
+    parser.add_argument("--continue-after", type=int, choices=(100, 200, 300, 500, 1000), action="append", default=[])
     parser.add_argument("--development-stencil", type=Path, action="append", default=[])
-    parser.add_argument("--resume-b-value", type=Path, default=None)
-    parser.add_argument("--resume-b-response", type=Path, default=None)
+    parser.add_argument("--resume-value", "--resume-b-value", dest="resume_b_value", type=Path, default=None)
+    parser.add_argument("--resume-response", "--resume-b-response", dest="resume_b_response", type=Path, default=None)
     parser.add_argument("--resume-fit-manifest-json", type=Path, default=None)
     parser.add_argument("--resume-replay-manifest-json", type=Path, default=None)
     parser.add_argument("--frozen-loss-scales-json", type=Path, default=None)
     parser.add_argument("--frozen-response-weights-json", type=Path, default=None)
+    parser.add_argument("--review-source-manifest", type=Path, default=None)
+    parser.add_argument("--review-value-checkpoint", type=Path, default=None)
+    parser.add_argument("--review-response-checkpoint", type=Path, default=None)
+    parser.add_argument("--review-update", type=int, choices=(200,), default=200)
     return parser
 
 
@@ -1713,6 +4107,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         for index in range(len(path_parts) - 1)
     ):
         raise ValueError("Run outputs must be placed under an ignored diagnostics/generated directory.")
+    if args.mode == "checkpoint_review" and output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError("Checkpoint-only review requires a fresh empty ignored output directory.")
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / "response_control_manifest.json"
     manifest: dict[str, Any] = {
@@ -1721,9 +4117,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         "initialization_mode": args.initialization_mode,
         "checkpoint": str(args.checkpoint.expanduser().resolve()),
         "train_stencils": [str(path.expanduser().resolve()) for path in args.train_stencil],
+        "development_stencils": [
+            str(path.expanduser().resolve()) for path in args.development_stencil
+        ],
         "dataset": None if args.dataset is None else str(args.dataset.expanduser().resolve()),
         "device": args.device,
         "max_wall_seconds": args.max_wall_seconds,
+        "review_cap": args.review_cap,
+        "random_seed": args.random_seed,
+        "recipe_config": (
+            None if args.recipe_config is None
+            else str(args.recipe_config.expanduser().resolve())
+        ),
+        "r0_diagnostic_json": (
+            None if args.r0_diagnostic_json is None
+            else str(args.r0_diagnostic_json.expanduser().resolve())
+        ),
         "frozen_loss_scales_json": (
             None
             if args.frozen_loss_scales_json is None
@@ -1734,6 +4143,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.frozen_response_weights_json is None
             else str(args.frozen_response_weights_json.expanduser().resolve())
         ),
+        "review_source_manifest": (
+            None if args.review_source_manifest is None
+            else str(args.review_source_manifest.expanduser().resolve())
+        ),
+        "review_value_checkpoint": (
+            None if args.review_value_checkpoint is None
+            else str(args.review_value_checkpoint.expanduser().resolve())
+        ),
+        "review_response_checkpoint": (
+            None if args.review_response_checkpoint is None
+            else str(args.review_response_checkpoint.expanduser().resolve())
+        ),
+        "review_update": args.review_update,
         "resume_fit_manifest_json": (
             None
             if args.resume_fit_manifest_json is None
@@ -1770,7 +4192,65 @@ def main(argv: Sequence[str] | None = None) -> int:
             hot_solid_points_per_module=args.hot_solid_points_per_module,
             random_seed=args.random_seed,
         )
-        if args.mode == "preflight":
+        if args.mode == "checkpoint_review":
+            required_paths = {
+                "source failed manifest": args.review_source_manifest,
+                "R_value u200 checkpoint": args.review_value_checkpoint,
+                "R_response u200 checkpoint": args.review_response_checkpoint,
+                "named recipe": args.recipe_config,
+                "R0 diagnostic": args.r0_diagnostic_json,
+                "frozen scales": args.frozen_loss_scales_json,
+            }
+            missing = [name for name, path in required_paths.items() if path is None]
+            if missing:
+                raise ValueError(f"Checkpoint-only review is missing required inputs: {missing}.")
+            if args.initialization_mode != "native_checkpoint":
+                raise ValueError("Checkpoint-only R1 review requires native_checkpoint initialization.")
+            if len(args.train_stencil) != 8 or len(args.development_stencil) != 4:
+                raise ValueError("Checkpoint-only R1 review requires exactly eight train and four Re90 stencils.")
+            if args.review_update != 200:
+                raise ValueError("Checkpoint-only review is restricted to the saved u200 gate.")
+            forbidden = (
+                args.resume_b_value,
+                args.resume_b_response,
+                args.resume_fit_manifest_json,
+                args.resume_replay_manifest_json,
+                args.frozen_response_weights_json,
+                args.learning_rate,
+                args.weight_decay,
+                bool(args.continue_after),
+            )
+            if any(value is not None and value is not False for value in forbidden):
+                raise ValueError("Checkpoint-only review does not accept resume, optimizer, or continuation controls.")
+            for name, path in required_paths.items():
+                assert path is not None
+                if not path.is_file():
+                    raise FileNotFoundError(f"{name} is missing: {path}")
+            manifest["planned_optimizer_updates"] = 0
+            manifest["optimizer_calls"] = 0
+            manifest["optimizer_instances_created"] = 0
+            manifest["reference_solver_calls"] = 0
+            _atomic_json(manifest_path, manifest)
+            result = run_checkpoint_only_review(
+                checkpoint_path=args.checkpoint.expanduser().resolve(),
+                source_manifest_path=args.review_source_manifest.expanduser().resolve(),  # type: ignore[union-attr]
+                value_checkpoint_path=args.review_value_checkpoint.expanduser().resolve(),  # type: ignore[union-attr]
+                response_checkpoint_path=args.review_response_checkpoint.expanduser().resolve(),  # type: ignore[union-attr]
+                stencil_paths=[path.expanduser().resolve() for path in args.train_stencil],
+                development_paths=[path.expanduser().resolve() for path in args.development_stencil],
+                dataset_path=args.dataset,
+                recipe_config_path=args.recipe_config.expanduser().resolve(),  # type: ignore[union-attr]
+                r0_diagnostic_path=args.r0_diagnostic_json.expanduser().resolve(),  # type: ignore[union-attr]
+                frozen_loss_scales_path=args.frozen_loss_scales_json.expanduser().resolve(),  # type: ignore[union-attr]
+                output_dir=output_dir,
+                device=device,
+                sampling=sampling,
+                max_wall_seconds=args.max_wall_seconds,
+                query_batch_size=args.query_batch_size,
+            )
+        elif args.mode == "preflight":
+            if args.recipe_config is not None:
+                raise ValueError("A named staged recipe applies only to paired-fit mode.")
             if any(
                 value is not None
                 for value in (
@@ -1780,6 +4260,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.resume_b_response,
                     args.resume_fit_manifest_json,
                     args.resume_replay_manifest_json,
+                    args.r0_diagnostic_json,
                 )
             ):
                 raise ValueError("Frozen calibration and resume overrides apply only to paired-fit mode.")
@@ -1798,6 +4279,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 weight_decay=args.weight_decay,
                 smooth_peak_beta=args.smooth_peak_beta,
                 query_batch_size=args.query_batch_size,
+            )
+        elif args.mode == "r0":
+            if args.development_stencil:
+                raise ValueError("R0 is train-only and does not accept development stencil paths.")
+            if any(
+                value is not None
+                for value in (
+                    args.recipe_config,
+                    args.r0_diagnostic_json,
+                    args.frozen_loss_scales_json,
+                    args.frozen_response_weights_json,
+                    args.resume_b_value,
+                    args.resume_b_response,
+                    args.resume_fit_manifest_json,
+                    args.resume_replay_manifest_json,
+                )
+            ):
+                raise ValueError("R0 does not accept paired-fit recipes, frozen calibration, or resume overrides.")
+            if len(args.train_stencil) != 4:
+                raise ValueError("R0 requires exactly four train stencils spanning M=3,5,7,10.")
+            manifest["planned_optimizer_updates_max"] = 180
+            manifest["reference_solver_calls"] = 0
+            _atomic_json(manifest_path, manifest)
+            result = run_train_only_scope_diagnostic(
+                checkpoint_path=args.checkpoint.expanduser().resolve(),
+                stencil_paths=[path.expanduser().resolve() for path in args.train_stencil],
+                dataset_path=args.dataset,
+                output_dir=output_dir,
+                device=device,
+                sampling=sampling,
+                query_batch_size=args.query_batch_size,
+                max_wall_seconds=args.max_wall_seconds,
             )
         else:
             resuming = args.resume_b_value is not None or args.resume_b_response is not None
@@ -1827,6 +4340,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise FileNotFoundError(args.resume_fit_manifest_json)
             if args.resume_replay_manifest_json is not None and not args.resume_replay_manifest_json.is_file():
                 raise FileNotFoundError(args.resume_replay_manifest_json)
+            if args.r0_diagnostic_json is not None and not args.r0_diagnostic_json.is_file():
+                raise FileNotFoundError(args.r0_diagnostic_json)
             result = run_paired_fit(
                 checkpoint_path=args.checkpoint.expanduser().resolve(),
                 stencil_paths=[path.expanduser().resolve() for path in args.train_stencil],
@@ -1837,6 +4352,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sampling=sampling,
                 max_wall_seconds=args.max_wall_seconds,
                 initialization_mode=args.initialization_mode,
+                recipe_config_path=args.recipe_config,
+                r0_diagnostic_path=args.r0_diagnostic_json,
                 learning_rate=args.learning_rate,
                 weight_decay=args.weight_decay,
                 review_cap=args.review_cap,
@@ -1855,9 +4372,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         _atomic_json(manifest_path, manifest)
         return 0
     except Exception as exc:
+        if args.mode == "r0":
+            r0_path = output_dir / "r0_train_only_scope_diagnostic.json"
+            if r0_path.is_file():
+                r0_payload = json.loads(r0_path.read_text(encoding="utf-8"))
+                timed_out = isinstance(exc, TimeoutError)
+                trial_status = r0_payload.get("optimizer_trial_status", [])
+                for trial in trial_status:
+                    if trial.get("status") == "running":
+                        trial["status"] = "timed_out" if timed_out else "failed"
+                r0_payload.update({
+                    "status": (
+                        r0_payload.get("status")
+                        if r0_payload.get("status") in {"timed_out", "timed_out_or_partial"}
+                        else "timed_out" if timed_out else "failed"
+                    ),
+                    "optimizer_trial_status": trial_status,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "finished_unix_seconds": time.time(),
+                    "reference_solver_calls": 0,
+                })
+                _atomic_json(r0_path, r0_payload)
         manifest.update(
             {
-                "status": "failed",
+                "status": "timed_out" if isinstance(exc, TimeoutError) else "failed",
                 "error_type": type(exc).__name__,
                 "error": str(exc),
                 "total_wall_seconds": time.time() - float(manifest["started_unix_seconds"]),

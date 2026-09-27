@@ -20,6 +20,7 @@ import torch.nn as nn
 
 from honf_forward_core.model import HONFNeuralField
 from honf_forward_core.interface_fields import InterfaceFieldCore
+from honf_forward_core.interface_fields.adaptive_interaction_cover import InteractionContext
 from honf_forward_core.config import BatchData
 from honf_forward_core.selection.predictive_rank import (
     build_deterministic_case_probes,
@@ -191,6 +192,7 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
         case_edge_selection_mode: Optional[str] = None,
         case_edge_probe_relative_rms_tolerance: Optional[float] = None,
         case_edge_probe_channel_tolerance: Optional[float] = None,
+        fixed_cover_plans: tuple[Any, ...] | None = None,
     ) -> Dict[str, Any]:
         """Predict the global field and per-module thermal responses.
 
@@ -238,7 +240,11 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
                 case_edge_selection_mode=case_edge_selection_mode,
                 case_edge_probe_relative_rms_tolerance=case_edge_probe_relative_rms_tolerance,
                 case_edge_probe_channel_tolerance=case_edge_probe_channel_tolerance,
+                fixed_cover_plans=fixed_cover_plans,
             )
+
+        if fixed_cover_plans is not None:
+            raise ValueError("Fixed interface cover plans require an interface-field architecture.")
 
         if structure is not None:
             re = structure.get("re", re)
@@ -681,6 +687,7 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
                 prepared.prepared,
                 query_xy.float(),
                 query_features=self._query_features(query_xy.float()),
+                interaction_context=InteractionContext(phase="P2", receiver_role="p2_field"),
                 return_routing_maps=return_routing_maps,
                 return_edge_fields=return_edge_fields,
                 receiver_chunk_size=receiver_chunk_size,

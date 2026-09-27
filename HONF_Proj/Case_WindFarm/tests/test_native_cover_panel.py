@@ -3,8 +3,15 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
-from windfarm.workflows.native_cover_panel import make_disjoint_native_probes, select_training_layouts
+from windfarm.workflows.native_cover_panel import (
+    TrainingLayout,
+    freeze_organizer_layout_split,
+    make_disjoint_native_probes,
+    select_training_layouts,
+    write_organizer_split_lock,
+)
 
 
 class _PanelView:
@@ -69,6 +76,73 @@ def test_training_layout_selection_keeps_all_direction_rows_and_spans_geometry()
     assert all(set(item.rows).issubset(set(train_rows.tolist())) for item in selected)
     assert len({item.turbine_count for item in selected}) > 4
     assert len({item.feature_vector[3] for item in selected}) > 4
+
+
+def test_receiver_local_split_is_geometry_frozen_and_keeps_same_m_layouts_across_partitions(
+    tmp_path,
+) -> None:
+    turbine_counts = {
+        4: 14,
+        24: 6,
+        70: 27,
+        81: 29,
+        88: 7,
+        103: 6,
+        107: 13,
+        115: 18,
+        119: 8,
+        174: 29,
+        177: 30,
+        196: 15,
+    }
+    layouts = tuple(
+        TrainingLayout(
+            layout_index=layout,
+            rows=(3 * layout, 3 * layout + 1, 3 * layout + 2),
+            turbine_count=count,
+            feature_vector=(float(count), float(layout), 1.0, float(count) / max(layout, 1)),
+        )
+        for layout, count in turbine_counts.items()
+    )
+
+    split = freeze_organizer_layout_split(layouts)
+    repeat = freeze_organizer_layout_split(tuple(reversed(layouts)))
+
+    assert split["training_layout_indices"] == [4, 24, 70, 88, 115, 119, 174, 177]
+    assert split["development_layout_indices"] == [81, 103, 107, 196]
+    assert len(split["training_rows_direction_order"]) == 24
+    assert len(split["development_rows_direction_order"]) == 12
+    assert split["same_turbine_count_cross_split"]["6"] == {
+        "training_layouts": [24],
+        "development_layouts": [103],
+    }
+    assert split["same_turbine_count_cross_split"]["29"] == {
+        "training_layouts": [174],
+        "development_layouts": [81],
+    }
+    assert split["split_sha256"] == repeat["split_sha256"]
+    first_lock = write_organizer_split_lock(
+        layouts,
+        checkpoint_sha256="a" * 64,
+        output_dir=tmp_path,
+    )
+    repeated_lock = write_organizer_split_lock(
+        tuple(reversed(layouts)),
+        checkpoint_sha256="a" * 64,
+        output_dir=tmp_path,
+    )
+    assert first_lock["frozen_at_utc"] == repeated_lock["frozen_at_utc"]
+    assert first_lock["artifact_sha256"] == repeated_lock["artifact_sha256"]
+
+
+def test_receiver_local_split_rejects_a_changed_twelve_layout_panel() -> None:
+    wrong = tuple(
+        TrainingLayout(layout, (3 * layout, 3 * layout + 1, 3 * layout + 2), 6, (6.0, 1.0, 1.0, 6.0))
+        for layout in range(12)
+    )
+
+    with pytest.raises(ValueError, match="frozen twelve layout identities"):
+        freeze_organizer_layout_split(wrong)
 
 
 def test_native_oracle_probes_are_disjoint_and_keep_protected_roles() -> None:

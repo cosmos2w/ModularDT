@@ -19,6 +19,7 @@ from honf_forward_core.interface_fields.adaptive_cover_oracle import (
 from honf_forward_core.interface_fields.adaptive_interaction_cover import (
     AdaptiveCoverPlan,
     CaseLocalReceiverTree,
+    MechanismPlan,
     ReceiverAnchorUniverse,
     compile_cover_pairs,
 )
@@ -88,6 +89,38 @@ def test_case_cover_endpoints_transition_count_and_unique_physical_pairs() -> No
     assert transition_ledger.qe_unique_rows == 4
     assert (transition_ledger.query_degree_sum, transition_ledger.query_degree_max) == (4, 2)
     assert len(tree.nodes) <= 7
+
+
+def test_typed_plan_hash_serialization_and_missing_key_full_access_ledger() -> None:
+    tree, legacy = _fixture(torch.device("cpu"))
+    module_present = torch.tensor([1.0, 1.0, 0.0])
+    plan = MechanismPlan.from_legacy(legacy, module_present)
+    reversed_plan = MechanismPlan(
+        plan.tree,
+        plan.split_gates,
+        plan.module_present,
+        plan.environment_count,
+        dict(reversed(tuple(plan.permissions.items()))),
+    )
+    assert plan.canonical_hash() == reversed_plan.canonical_hash()
+    restored = MechanismPlan.from_dict(plan.to_dict())
+    assert restored.canonical_hash() == plan.canonical_hash()
+    assert restored.explicit_bypass_keys == plan.explicit_bypass_keys == ()
+    for mechanism in ("MM", "ME", "EM", "QM", "QE"):
+        torch.testing.assert_close(
+            restored.permission_matrix(mechanism), plan.permission_matrix(mechanism)
+        )
+
+    implicit = MechanismPlan(tree, torch.zeros(len(tree.nodes)), module_present, 2, {})
+    assert set(implicit.explicit_bypass_keys) == {"MM", "ME", "EM", "QM", "QE"}
+    assert implicit.permission_status("QM") == "full_access_bypass_missing_key"
+    torch.testing.assert_close(
+        implicit.access_for("QM", tree.universe.coordinates),
+        torch.ones((tree.universe.coordinates.shape[0], 3)) * module_present[None],
+    )
+    payload = implicit.to_dict()
+    assert set(payload["explicit_bypass_keys"]) == {"MM", "ME", "EM", "QM", "QE"}
+    assert MechanismPlan.from_dict(payload).canonical_hash() == implicit.canonical_hash()
 
 
 def test_cover_continuity_chunk_order_source_relabel_and_empty_fallback() -> None:
@@ -185,6 +218,59 @@ def test_cost_model_charges_active_cover_resolution_not_fixed_tree_capacity() ->
     assert full.active_group_count() == 1
     assert split.active_group_count() == 2
     assert cost.estimate_ms(split, split_ledger) - cost.estimate_ms(full, full_ledger) == 2.0
+
+
+def test_candidate_work_v2_records_full_scoring_work_and_executor_fixed_costs() -> None:
+    device = torch.device("cpu")
+    tree, legacy_plan = _fixture(device)
+    plan = MechanismPlan.from_legacy(
+        legacy_plan, torch.tensor([1.0, 1.0, 0.0], device=device)
+    )
+    queries = tree.universe.coordinates
+    module_present = torch.tensor([1.0, 1.0, 0.0], device=device)
+    environment_weights = torch.tensor([2.0, 3.0], device=device)
+    _qm, _qe, ledger = compile_cover_pairs(
+        plan,
+        queries,
+        module_present=module_present,
+        environment_weights=environment_weights,
+    )
+    cost = MeasuredCostCoefficients(
+        "synthetic-candidate-work-fixture",
+        0.0,
+        99.0,  # ignored by v2; retained solely for v1 record compatibility
+        0.0,
+        1.0,
+        1.0,
+        0.5,
+        0.0,
+        cost_model="candidate_work_v2",
+        organization_ms_per_candidate_node=0.2,
+        organization_ms_per_candidate_source_row=0.01,
+        packet_ms_per_packet=0.3,
+        dense_dispatch_ms=1.0,
+        dense_launch_ms=2.0,
+        subset_dispatch_ms=3.0,
+        subset_launch_ms=4.0,
+        packed_dispatch_ms=5.0,
+        packed_launch_ms=6.0,
+        subset_gather_ms_per_row=0.05,
+    )
+    work = cost.work_accounting(plan, ledger)
+    assert work.candidate_nodes == len(tree.nodes)
+    assert work.scored_candidate_source_rows == len(tree.nodes) * (3 * 3 + 2 * 2)
+    assert work.active_frontier_nodes < work.candidate_nodes * 5
+    assert work.unique_source_receiver_pairs == ledger.qm_unique_rows + ledger.qe_unique_rows
+    assert work.dense_masked_executed_rows == ledger.qm_rectangular_rows + ledger.qe_rectangular_rows
+    assert work.subset_executed_rows == work.packed_executed_rows == work.unique_source_receiver_pairs
+    assert work.dense_masked_padded_rows == work.dense_masked_executed_rows - work.unique_source_receiver_pairs
+    breakdown = cost.estimate_breakdown(plan, ledger, executor="rectangular_subset")
+    assert breakdown["candidate_nodes"] == work.candidate_nodes
+    assert breakdown["scored_candidate_source_rows"] == work.scored_candidate_source_rows
+    assert breakdown["subset_executed_rows"] == work.subset_executed_rows
+    legacy = MeasuredCostCoefficients("legacy-v1-fixture", 0, 1, 0, 0, 0, 0, 0)
+    with pytest.raises(ValueError, match="cannot estimate typed plans"):
+        legacy.estimate_ms(plan, ledger)
 
 
 def test_bounded_oracle_accepts_only_protected_train_evidence_and_real_row_gain() -> None:
