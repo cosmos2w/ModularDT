@@ -146,7 +146,7 @@ def _panel_manifest(active_layouts: int) -> dict[str, object]:
     }
 
 
-def test_fit_gate_rejects_limited_sample_without_disjoint_verified_fast_k_gt_1_labels() -> None:
+def test_fit_gate_rejects_limited_sample_without_disjoint_verified_fast_partial_labels() -> None:
     rows = []
     baselines = []
     documents = {}
@@ -194,7 +194,10 @@ def test_fit_gate_rejects_limited_sample_without_disjoint_verified_fast_k_gt_1_l
     assert assessment["controls"]["fixed_cover"] == "not_evaluated_target_unavailable"
 
 
-def test_fit_gate_accepts_two_layout_competitive_verified_split_labels_without_full_sweep() -> None:
+@pytest.mark.parametrize("hard_cover_k", [1, 2])
+def test_fit_gate_accepts_two_layout_competitive_verified_partial_labels_without_full_sweep(
+    hard_cover_k: int,
+) -> None:
     rows = []
     baselines = []
     documents = {}
@@ -207,19 +210,29 @@ def test_fit_gate_accepts_two_layout_competitive_verified_split_labels_without_f
                 "candidate_observations": [],
             }
             if direction < 2:
+                split_targets = [1.0, 0.0, 0.0] if hard_cover_k == 2 else [0.0, 0.0, 0.0]
+                module_targets = [[1.0, 0.0]] if hard_cover_k == 2 else [[1.0, 1.0]]
+                environment_targets = (
+                    [[1.0, 0.0, 1.0]] if direction == 0 else [[1.0, 1.0, 0.0]]
+                )
                 row["teacher_oracle_search_winner"] = {
-                    "proposal": {"kind": "split_child_prune_nearest_child"},
+                    "proposal": {
+                        "kind": "split_child_prune_nearest_child" if hard_cover_k == 2 else "environment_block_prune"
+                    },
                     "teacher_search_gate_passed": True,
                     "teacher_adequate_for_primary_labels": True,
                     "actual_synchronized_complete_ms": 5.0,
-                    "actual_hard_support": {"hard_cover_k": 2},
+                    "actual_hard_support": {"hard_cover_k": hard_cover_k},
                     "disjoint_verification": {"teacher_preservation": {"gate_0p10": True}},
-                    "split_gates": [1.0, 0.0, 0.0],
-                    "module_membership": [[1.0, 0.0]],
-                    "environment_membership": (
-                        [[1.0, 0.0, 1.0]] if direction == 0 else [[1.0, 1.0, 0.0]]
-                    ),
+                    "split_gates": split_targets,
+                    "module_membership": module_targets,
+                    "environment_membership": environment_targets,
                 }
+                row["candidate_observations"] = [{
+                    "accepted_by_oracle": True,
+                    "actual_synchronized_complete_ms": 5.0,
+                    "proposal": row["teacher_oracle_search_winner"]["proposal"],
+                }]
             rows.append(row)
             baselines.append({
                 "row_index": row_index,
@@ -228,11 +241,9 @@ def test_fit_gate_accepts_two_layout_competitive_verified_split_labels_without_f
             })
             documents[row_index] = {
                 "primary_supervision": {
-                    "split_targets": [1.0, 0.0, 0.0],
-                    "module_targets": [[1.0, 0.0]],
-                    "environment_targets": (
-                        [[1.0, 0.0, 1.0]] if direction == 0 else [[1.0, 1.0, 0.0]]
-                    ),
+                    "split_targets": split_targets,
+                    "module_targets": module_targets,
+                    "environment_targets": environment_targets,
                 }
             }
     report = {"active_training_layouts": 2, "rows": rows, "baseline_timings": baselines}
@@ -241,9 +252,19 @@ def test_fit_gate_accepts_two_layout_competitive_verified_split_labels_without_f
 
     assert assessment["status"] == "fit_eligible"
     assert assessment["partial_evidence"]["distinct_verified_primary_label_signatures"] > 1
-    assert len(assessment["partial_evidence"]["K_gt_1_and_measured_faster_layouts"]) == 2
+    assert len(assessment["partial_evidence"]["measured_faster_partial_layouts"]) == 2
+    assert assessment["partial_evidence"]["train_search_accepted_partial_observations"] == 4
+    assert assessment["partial_evidence"]["search_only_accepted_partial_observations_not_used_as_joint_labels"] == 0
     assert assessment["optimizer"]["updates"] == 100
     assert fit_workflow._fit_row_ids_to_use(list(range(6)), assessment) == [0, 1, 3, 4]
+
+    missing_dense = dict(report)
+    missing_dense["baseline_timings"] = baselines[:3]
+    without_two_measured_comparators = fit_workflow._assess_fit_target(
+        missing_dense, _panel_manifest(2), documents
+    )
+    assert without_two_measured_comparators["status"] == "target_unavailable"
+    assert without_two_measured_comparators["partial_evidence"]["measured_faster_partial_layouts"] == [0]
 
 
 def test_fit_target_assessment_rejects_a_checkpoint_with_different_bytes(tmp_path) -> None:

@@ -8,6 +8,7 @@ when the bounded evidence has no variable, cost-competitive hard-cover target.
 from __future__ import annotations
 
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,7 @@ from .native_cover_panel import make_disjoint_native_probes
 
 FIT_UPDATES = 100
 FIT_SEED = 2103
-MIN_COMPETITIVE_SPLIT_LAYOUTS = 2
+MIN_COMPETITIVE_PARTIAL_LAYOUTS = 2
 
 
 def _load_fit_artifacts(oracle_dir: str | Path) -> tuple[Path, dict[str, Any], dict[str, Any], dict[int, dict[str, Any]]]:
@@ -66,6 +67,8 @@ def _teacher_verified_partial(row: dict[str, Any], plan_document: dict[str, Any]
     if not bool(winner.get("teacher_search_gate_passed")):
         return False
     if not bool(verification_gate) or not bool(winner.get("teacher_adequate_for_primary_labels")):
+        return False
+    if int(winner.get("actual_hard_support", {}).get("hard_cover_k", 0)) < 1:
         return False
     supervision = plan_document.get("primary_supervision")
     if not isinstance(supervision, dict):
@@ -111,6 +114,7 @@ def _assess_fit_target(
         and item.get("dense_search_decode_ms") is not None
     }
     selected_partial_rows: list[dict[str, Any]] = []
+    train_search_accepted_partial = 0
     search_only_accepted_partial = 0
     accepted_partial_faster_than_dense = 0
     label_signatures: set[str] = set()
@@ -118,18 +122,24 @@ def _assess_fit_target(
         row_index = int(row["row_index"])
         row_document = row_documents.get(row_index)
         winner = row.get("teacher_oracle_search_winner", {})
-        if _teacher_verified_partial(row, row_document):
+        selected_verified = _teacher_verified_partial(row, row_document)
+        if selected_verified:
             support = winner.get("actual_hard_support", {})
             k = int(support.get("hard_cover_k", 0))
             actual_ms = float(winner.get("actual_synchronized_complete_ms", float("inf")))
-            dense_ms = dense_baselines.get(row_index, float("inf"))
+            dense_ms = dense_baselines.get(row_index)
             selected_partial_rows.append({
                 "row_index": row_index,
                 "layout_index": int(row.get("layout_index", -1)),
                 "hard_cover_k": k,
                 "partial_complete_ms": actual_ms,
                 "policy_none_dense_complete_ms": dense_ms,
-                "faster_than_policy_none_dense": bool(actual_ms < dense_ms),
+                "faster_than_policy_none_dense": bool(
+                    dense_ms is not None
+                    and math.isfinite(actual_ms)
+                    and math.isfinite(dense_ms)
+                    and 0.0 < actual_ms < dense_ms
+                ),
             })
             supervision = row_document["primary_supervision"]
             label_signatures.add(json.dumps({
@@ -137,18 +147,31 @@ def _assess_fit_target(
                 "module_targets": supervision["module_targets"],
                 "environment_targets": supervision["environment_targets"],
             }, sort_keys=True, separators=(",", ":")))
+        selected_observation_consumed = False
         for trial in row.get("candidate_observations", []):
             proposal = trial.get("proposal", {})
             if bool(trial.get("accepted_by_oracle")) and proposal.get("kind") != "root_full_access":
+                train_search_accepted_partial += 1
+                selected_observation = bool(
+                    selected_verified
+                    and not selected_observation_consumed
+                    and proposal == winner.get("proposal")
+                    and float(trial.get("actual_synchronized_complete_ms", float("inf")))
+                    == float(winner.get("actual_synchronized_complete_ms", float("inf")))
+                )
+                if selected_observation:
+                    selected_observation_consumed = True
+                    continue
                 search_only_accepted_partial += 1
-                dense_ms = dense_baselines.get(row_index, float("inf"))
-                if float(trial.get("actual_synchronized_complete_ms", float("inf"))) < dense_ms:
+                dense_ms = dense_baselines.get(row_index)
+                if (
+                    dense_ms is not None
+                    and math.isfinite(dense_ms)
+                    and 0.0 < float(trial.get("actual_synchronized_complete_ms", float("inf"))) < dense_ms
+                ):
                     accepted_partial_faster_than_dense += 1
 
-    qualifying = [
-        item for item in selected_partial_rows
-        if item["hard_cover_k"] > 1 and item["faster_than_policy_none_dense"]
-    ]
+    qualifying = [item for item in selected_partial_rows if item["faster_than_policy_none_dense"]]
     qualifying_layouts = sorted({item["layout_index"] for item in qualifying})
     active_layouts = int(oracle_report.get("active_training_layouts", 0))
     panel_layout_count = int(panel_manifest.get("layout_count", 0))
@@ -170,17 +193,17 @@ def _assess_fit_target(
         reasons.append("frozen checkpoint-owned panel does not contain all 12 layout identities")
     if actual_rows != expected_active_rows or actual_row_ids != expected_active_row_ids:
         reasons.append("oracle row identities do not match the activated frozen-panel direction rows")
-    if active_layouts < MIN_COMPETITIVE_SPLIT_LAYOUTS:
+    if active_layouts < MIN_COMPETITIVE_PARTIAL_LAYOUTS:
         reasons.append(
-            f"oracle evidence covers fewer than {MIN_COMPETITIVE_SPLIT_LAYOUTS} independent layouts"
+            f"oracle evidence covers fewer than {MIN_COMPETITIVE_PARTIAL_LAYOUTS} independent layouts"
         )
     if not selected_partial_rows:
         reasons.append("no coherent partial plan is directly recorded with both search and disjoint teacher gates")
     if not qualifying:
-        reasons.append("no directly observed K>1 partial plan beats policy=None Dense on complete measured work")
-    if len(qualifying_layouts) < MIN_COMPETITIVE_SPLIT_LAYOUTS:
+        reasons.append("no directly observed partial plan beats policy=None Dense on complete measured work")
+    if len(qualifying_layouts) < MIN_COMPETITIVE_PARTIAL_LAYOUTS:
         reasons.append(
-            f"cost-competitive K>1 labels cover fewer than {MIN_COMPETITIVE_SPLIT_LAYOUTS} independent layouts"
+            f"cost-competitive partial labels cover fewer than {MIN_COMPETITIVE_PARTIAL_LAYOUTS} independent layouts"
         )
     if len(label_signatures) < 2:
         reasons.append("coherent verified partial labels do not vary across cases")
@@ -201,13 +224,14 @@ def _assess_fit_target(
         },
         "partial_evidence": {
             "directly_search_and_disjoint_verified_partial_rows": selected_partial_rows,
+            "train_search_accepted_partial_observations": train_search_accepted_partial,
             "search_only_accepted_partial_observations_not_used_as_joint_labels": search_only_accepted_partial,
             "search_acceptance_semantics": (
                 "These proposals passed the train-search oracle. They are not called teacher-inadequate; the available artifact lacks a coherent selected-plan label and a disjoint verification record for them."
             ),
             "search_only_accepted_candidates_faster_than_policy_none_dense": accepted_partial_faster_than_dense,
             "distinct_verified_primary_label_signatures": len(label_signatures),
-            "K_gt_1_and_measured_faster_layouts": qualifying_layouts,
+            "measured_faster_partial_layouts": qualifying_layouts,
         },
         "dense_cost_comparator": {
             "definition": "policy=None native Dense prepare_case plus decode synchronized timings from the same search probes",
