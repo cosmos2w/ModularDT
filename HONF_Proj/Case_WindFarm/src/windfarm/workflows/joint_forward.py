@@ -1844,7 +1844,7 @@ def _stream_full_grid(
             update=np.asarray([int(slice_update)], dtype=np.int64),
             model_state_sha256=np.asarray([selected_model_state_sha256 or ""]),
             execution_path=np.asarray([execution_path]),
-            reference_provenance=np.asarray(["stored native WindFarm field with local analytic-wake provenance; not CFD"]),
+            reference_provenance=np.asarray(["stored cell-centred OpenFOAM CFD field; no new CFD solve"]),
         )
         saved_slice_path = str(slice_output_path)
     role_rmse = {
@@ -1879,7 +1879,7 @@ def _stream_full_grid(
         } if saved_slice_path is not None else None,
         "execution_path": execution_path,
         "plan_hash": None if prepared_plan is None else prepared_plan.canonical_hash(),
-        "reference_provenance": "stored WindFarm native fields with local analytic-wake provenance; no CFD solve",
+        "reference_provenance": "stored cell-centred OpenFOAM CFD fields; no new CFD solve",
     }
 
 
@@ -2215,7 +2215,7 @@ def _full_grid_review(
         "selected_model_state_sha256": model_state_sha256,
         "native_grid_results": results,
         "completed_grid_progress_path": str(progress_path),
-        "interpretation": "repeated development and training-grid evidence; stored analytic-wake fields, not CFD",
+        "interpretation": "repeated development and training-grid evidence from stored OpenFOAM CFD fields",
     }
 
 
@@ -3628,7 +3628,7 @@ def run_joint_forward_from_config(
         "continuation_semantics": preflight["continuation_semantics"],
         "train_dev_split_provenance": split_provenance,
         "interpretation": {
-            "physical_reference": "stored native WindFarm fields with local analytic-wake provenance; not CFD",
+            "physical_reference": "stored cell-centred OpenFOAM CFD fields; no new CFD solve",
             "organizational_coverage": "typed fine MM/ME/EM/QM/QE routes only; frozen global/coarse/local paths remain active",
             "logical_work": WORK_INTERPRETATION,
             "updates": "one per-case native sample per physical optimizer update; not epochs",
