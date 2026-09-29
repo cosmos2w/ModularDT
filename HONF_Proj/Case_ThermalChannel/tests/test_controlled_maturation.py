@@ -57,6 +57,75 @@ def test_full_replay_reuses_prior_family_and_does_not_consume_sparse_pass() -> N
     assert next_sparse.relative_sparse_update == 4
 
 
+def test_custom_family_sampler_resumes_with_empty_partial_epoch_tail() -> None:
+    stencils = [_stencil(), _stencil()]
+    config = StagedTrainingConfig(
+        arm="R_response",
+        max_optimizer_updates=3,
+        max_epochs=2,
+        total_optimizer_update_ceiling=3,
+        checkpoint_every_updates=1,
+        review_updates=(3,),
+        stages=(TrainingStage("custom_family_schedule", 0, 3, ("value",)),),
+    )
+    scales = ThermalLossScales(
+        value={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
+        finite={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
+        mixed={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
+        pressure_value=1.0,
+        pressure_response=1.0,
+        pressure_limit=3.0,
+        pressure_boundary=0.5,
+        solid_temperature=1.0,
+        smooth_peak_beta=1.0,
+        near_limit_band=0.5,
+    )
+    selector = lambda completed_update: completed_update % len(stencils)
+    saved: list[dict[str, object]] = []
+
+    model = _AbsoluteField()
+    optimizer = torch.optim.SGD(model.parameters(), lr=1.0e-4)
+    first = run_staged_fit(
+        model,
+        model,
+        optimizer,
+        stencils,
+        scales=scales,
+        config=config,
+        stop_at_update=1,
+        device="cpu",
+        training_stencil_index_for_update=selector,
+        on_checkpoint=lambda payload, _label: saved.append(dict(payload)),
+    )
+
+    assert first.final_update == 1
+    assert saved[-1]["actual_optimizer_updates"] == 1
+    assert saved[-1]["sampler_remaining_order"] == []
+    assert 1 % len(stencils) != 0
+
+    resumed_model = _AbsoluteField()
+    resumed_optimizer = torch.optim.SGD(resumed_model.parameters(), lr=1.0e-4)
+    resumed = run_staged_fit(
+        resumed_model,
+        resumed_model,
+        resumed_optimizer,
+        stencils,
+        scales=scales,
+        config=config,
+        initial_update=1,
+        resume_payload=saved[-1],
+        stop_at_update=2,
+        device="cpu",
+        training_stencil_index_for_update=selector,
+    )
+
+    assert resumed.initial_update == 1
+    assert resumed.final_update == 2
+    assert resumed.actual_optimizer_updates == 1
+    assert len(resumed.history) == 1
+    assert resumed.history[0].training_stencil_index == 1
+
+
 def test_early_leaf_resolves_to_available_complete_cut_without_increasing_k() -> None:
     # Root splits, but its left branch is already a physical leaf.
     early_left = _tree((1, 2), (None, None), (3, 4), (None, None), (None, None))

@@ -794,7 +794,17 @@ def run_staged_fit(
         stop_at_update <= initial_update or stop_at_update > total_cap
     ):
         raise ValueError("stop_at_update must be ahead of the resume point and within the effective cap.")
-    fixed_heat_visits = _family_visit_counts(training_stencils, initial_update, order)
+    # The saved shuffled-panel tail reconstructs fixed-control rotation only
+    # for the default sampler. Controlled maturation supplies its own family
+    # schedule and no fixed-heat controls, so its intentionally empty tail
+    # must not be interpreted as a partially consumed default epoch.
+    if fixed_controls_by_family and training_stencil_index_for_update is not None and initial_update > 0:
+        raise ValueError("Resuming custom family selection with fixed-heat controls needs explicit visit history.")
+    fixed_heat_visits = (
+        _family_visit_counts(training_stencils, initial_update, order)
+        if fixed_controls_by_family and training_stencil_index_for_update is None
+        else {}
+    )
     if config.arm.endswith("_value"):
         weights = {"value": 1.0}
     if "value" not in weights:

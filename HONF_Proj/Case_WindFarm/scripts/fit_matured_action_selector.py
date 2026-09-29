@@ -200,17 +200,23 @@ def _train_fixed_limits(
 ) -> tuple[torch.Tensor, list[dict[str, Any]]]:
     calibration = []
     for family in sorted(train_families):
-        primary = [row for row in rows if row.family_key == family and row.full_access
-                   and case_metadata[row.case_key]["query_panel"] == "fixed"]
-        if len(primary) != 1:
-            raise ValueError(f"Train layout {family!r} needs one primary full-access panel.")
-        row = primary[0]
+        primary = [
+            row for row in rows if row.family_key == family and row.full_access
+            and case_metadata[row.case_key]["query_panel"] == "fixed"
+        ]
+        if not primary:
+            raise ValueError(f"Train layout {family!r} needs a fixed full-access panel.")
+        incumbent_median = torch.stack([row.incumbent_role_error.double() for row in primary]).median(dim=0).values
+        floor = primary[0].numerical_floor.double()
+        if any(not torch.equal(row.numerical_floor.double(), floor) for row in primary[1:]):
+            raise ValueError(f"Train layout {family!r} changes the role numerical floor across directions.")
         limit = incumbent_role_log_limit(
-            row.incumbent_role_error.double(), row.numerical_floor.double(),
+            incumbent_median, floor,
             allowance.double(), relative_allowance=RELATIVE_ALLOWANCE,
         )
-        calibration.append({"family_key": family, "case_key": row.case_key,
-                            "incumbent_role_rmse_mps": row.incumbent_role_error.tolist(),
+        calibration.append({"family_key": family, "case_keys": [row.case_key for row in primary],
+                            "fixed_direction_count": len(primary),
+                            "incumbent_role_rmse_mps_median": incumbent_median.tolist(),
                             "role_log_limit": limit.tolist()})
     limits = torch.tensor([record["role_log_limit"] for record in calibration]).amin(dim=0)
     return limits, calibration
@@ -330,6 +336,7 @@ def fit_and_evaluate(
     train_set = set(train_families)
     allowance = metadata["allowance"].double()
     limits, calibration = _train_fixed_limits(rows, train_families, metadata["case_metadata"], allowance)
+    full_work = {row.case_key: row.exact_work for row in rows if row.full_access}
     result: dict[str, Any] = {
         "forward_checkpoint_sha256": forward_sha,
         "role_order": list(metadata["roles"]),
@@ -341,6 +348,24 @@ def fit_and_evaluate(
         "selector_fit": "unavailable_no_exposed_train_sparse_action",
         "optimizer_calls": 0,
         "split_results": {},
+        "action_prediction_rows": [{
+            "case_key": row.case_key,
+            "family_key": row.family_key,
+            "split": metadata["case_metadata"][row.case_key]["split"],
+            "query_panel": metadata["case_metadata"][row.case_key]["query_panel"],
+            "module_count": metadata["case_metadata"][row.case_key]["module_count"],
+            "action_key": row.action_key,
+            "trained_sparse": row.trained_sparse,
+            "full_access": row.full_access,
+            "nonredundant_k": None if row.full_access else row.nonredundant_k,
+            "exact_work": row.exact_work,
+            "exact_work_over_full": row.exact_work / full_work[row.case_key],
+            "candidate_role_rmse_mps": row.candidate_role_error.tolist(),
+            "wfull_role_rmse_mps": row.incumbent_role_error.tolist(),
+            "measured_signed_log_role_risk": row.target_log_risk.tolist(),
+            "neural_predicted_log_role_risk": None,
+            "ridge_predicted_log_role_risk": None,
+        } for row in rows],
     }
     for split, families in splits.items():
         split_rows = [row for row in rows if row.family_key in set(families)]
@@ -386,6 +411,11 @@ def fit_and_evaluate(
         rows, current_forward_sha256=forward_sha, train_families=train_families,
     )
     neural_map, ridge_map = _predictions(rows, crossfit, neural_fit, ridge_fit, train_set)
+    for record in result["action_prediction_rows"]:
+        key = (record["case_key"], record["action_key"])
+        if key in neural_map:
+            record["neural_predicted_log_role_risk"] = neural_map[key].tolist()
+            record["ridge_predicted_log_role_risk"] = ridge_map[key].tolist()
     train_in_sample = {}
     with torch.no_grad():
         for row in rows:
@@ -401,6 +431,9 @@ def fit_and_evaluate(
         "crossfit_folds": folds,
         "neural_train_first_loss": neural_fit.first_loss,
         "neural_train_last_loss": neural_fit.last_loss,
+        "ridge_train_feature_mean": ridge_fit.mean.tolist(),
+        "ridge_train_feature_scale": ridge_fit.scale.tolist(),
+        "ridge_train_coefficients": ridge_fit.coefficients.tolist(),
         "neural_empirical_upper_margin_by_role": crossfit.neural_upper_margin.tolist(),
         "ridge_empirical_upper_margin_by_role": crossfit.ridge_upper_margin.tolist(),
         "train_in_sample_ranking": _ranking(

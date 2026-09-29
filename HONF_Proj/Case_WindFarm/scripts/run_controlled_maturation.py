@@ -62,6 +62,7 @@ FROZEN_090_PROBE = {"QE": 0.90, "MM": 0.90}
 MAX_ADDITIONAL_UPDATES = 6000
 LANE_BUDGET_SECONDS = 14 * 60 * 60
 REVIEW_SPARSE_COUNTS = {204, 408, 816, 1632, 3264, 4896}
+DURABLE_CHECKPOINT_INTERVAL = 50
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -469,10 +470,15 @@ def _train_one_arm(
     physical_calls = int(warm.get("physical_optimizer_calls", 100))
     route_calls = int(warm.get("organizer_optimizer_calls", 0) if arm == "g" else warm.get("direct_scorer_optimizer_calls", 0))
     checkpoint_state = None
-    if (arm_dir / "latest_review.json").is_file():
-        review = json.loads((arm_dir / "latest_review.json").read_text(encoding="utf-8"))
-        previous_update = int(review["update_count"])
+    latest_checkpoint_record = arm_dir / "latest_checkpoint.json"
+    if not latest_checkpoint_record.is_file():
+        latest_checkpoint_record = arm_dir / "latest_review.json"
+    if latest_checkpoint_record.is_file():
+        checkpoint_summary = json.loads(latest_checkpoint_record.read_text(encoding="utf-8"))
+        previous_update = int(checkpoint_summary["update_count"])
         checkpoint_file = checkpoint_dir / f"updates_{previous_update:06d}.pt"
+        if checkpoint_summary.get("checkpoint_sha256") != runner._file_sha256(checkpoint_file):
+            raise ValueError("Run2112 resume checkpoint differs from its saved SHA256")
         checkpoint_state = load_trusted_checkpoint(checkpoint_file, map_location="cpu")
         if not isinstance(checkpoint_state, Mapping) or checkpoint_state.get("run_id") != RUN_ID:
             raise ValueError("Run2112 checkpoint identity is invalid")
@@ -483,7 +489,7 @@ def _train_one_arm(
         with ledger.open(encoding="utf-8") as stream:
             rows = [json.loads(line) for line in stream if line.strip()]
         if not any(int(row["update_count"]) == previous_update for row in rows):
-            raise ValueError("Run2112 update ledger does not contain the latest review checkpoint")
+            raise ValueError("Run2112 update ledger does not contain the latest durable checkpoint")
         orphaned_updates = [row for row in rows if int(row["update_count"]) > previous_update]
         attempt_ledger = arm_dir / "optimizer_attempts.jsonl"
         attempt_rows = []
@@ -580,7 +586,7 @@ def _train_one_arm(
     optimizer_calls_this_invocation = 0
     route_calls_this_invocation = 0
 
-    def save_review(record: Mapping[str, Any]) -> str:
+    def save_checkpoint(record: Mapping[str, Any], *, review: bool) -> str:
         elapsed_total = elapsed_prior + time.monotonic() - start_time
         state = {
             "schema_version": 1,
@@ -617,8 +623,11 @@ def _train_one_arm(
         }
         summary["checkpoint"] = str(path)
         summary["checkpoint_sha256"] = runner._file_sha256(path)
-        _write_json(arm_dir / "latest_review.json", summary)
-        _append_jsonl(run_dir / "reviews.jsonl", summary)
+        summary["checkpoint_kind"] = "scheduled_review" if review else "durability_only"
+        _write_json(arm_dir / "latest_checkpoint.json", summary)
+        if review:
+            _write_json(arm_dir / "latest_review.json", summary)
+            _append_jsonl(run_dir / "reviews.jsonl", summary)
         return str(path)
 
     resource_budget_exhausted = False
@@ -900,9 +909,12 @@ def _train_one_arm(
             and schedule_item.pass_position == 0
             and schedule_item.primary_pass in {2, 3, 4, 5, 6, 7}
         )
-        if sparse_count in REVIEW_SPARSE_COUNTS or stage_start or absolute_update == target_absolute_update:
+        scheduled_review = (
+            sparse_count in REVIEW_SPARSE_COUNTS or stage_start or absolute_update == target_absolute_update
+        )
+        if scheduled_review or absolute_update % DURABLE_CHECKPOINT_INTERVAL == 0:
             record["gpu_active_seconds_elapsed"] = elapsed_now
-            save_review(record)
+            save_checkpoint(record, review=scheduled_review)
         if absolute_update % 10 == 0 or absolute_update == previous_update + 1:
             torch.cuda.synchronize()
             print(
@@ -913,10 +925,10 @@ def _train_one_arm(
             )
 
     if completed_update > previous_update and latest_record is not None:
-        if not (arm_dir / "latest_review.json").is_file() or int(
-            json.loads((arm_dir / "latest_review.json").read_text(encoding="utf-8"))["update_count"]
+        if not (arm_dir / "latest_checkpoint.json").is_file() or int(
+            json.loads((arm_dir / "latest_checkpoint.json").read_text(encoding="utf-8"))["update_count"]
         ) != completed_update:
-            save_review(latest_record)
+            save_checkpoint(latest_record, review=True)
     invocation_seconds = time.monotonic() - start_time
     return {
         "arm": arm_name,

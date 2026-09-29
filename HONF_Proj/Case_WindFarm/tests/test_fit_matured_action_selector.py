@@ -111,6 +111,26 @@ def test_action_table_rejects_stale_checkpoint_and_changed_feature_bytes(tmp_pat
         SELECTOR._load_action_table(table, features, masks, checkpoint)
 
 
+def test_train_gate_uses_fixed_directions_within_each_layout(tmp_path: Path) -> None:
+    rows, metadata = SELECTOR._load_action_table(*_table(tmp_path))
+    original = next(row for row in rows if row.family_key == "layout_1" and row.full_access)
+    extra = [
+        replace(original, case_key=f"layout_1_direction_{index}",
+                incumbent_role_error=torch.full((5,), error))
+        for index, error in ((2, 0.06), (3, 0.08))
+    ]
+    case_metadata = dict(metadata["case_metadata"])
+    for row in extra:
+        case_metadata[row.case_key] = {**case_metadata[original.case_key], "query_panel": "fixed"}
+    _limits, calibration = SELECTOR._train_fixed_limits(
+        [*rows, *extra], metadata["split_families"]["train_fit"],
+        case_metadata, metadata["allowance"],
+    )
+    layout = next(item for item in calibration if item["family_key"] == "layout_1")
+    assert layout["fixed_direction_count"] == 3
+    assert layout["incumbent_role_rmse_mps_median"] == pytest.approx([0.06] * 5)
+
+
 def test_no_exposed_sparse_action_is_explicit_fallback_not_success(tmp_path: Path) -> None:
     rows, metadata = SELECTOR._load_action_table(*_table(tmp_path))
     unexposed = [replace(row, trained_sparse=False) if not row.full_access else row for row in rows]
