@@ -1038,7 +1038,9 @@ def _evaluate(
         if split_by_layout[int(record["family_key"])] == "train_fit"
     ]
     numerical_floor = _numerical_floor_role_mps(wfull_train_records, roles=roles)
-    allowance, allowance_meta = _sampling_allowance_role_mps(q512_deltas, roles=roles)
+    sampling_sensitivity, sampling_sensitivity_meta = _sampling_allowance_role_mps(
+        q512_deltas, roles=roles
+    )
     feature_hashes = {key: _array_sha256(value) for key, value in feature_arrays.items()}
     mask_hashes = {key: _array_sha256(value) for key, value in mask_arrays.items()}
     _validate_action_rows(rows, expected_sha=g_sha)
@@ -1079,11 +1081,17 @@ def _evaluate(
         "training_split_identity": split_record,
         "roles": list(roles),
         "numerical_floor_role_mps": numerical_floor,
-        "absolute_allowance_role_mps": allowance,
+        # Every candidate and retained reference is scored on identical Q2048
+        # receivers. Q512-vs-Q2048 sampling variation is useful uncertainty
+        # evidence, but it is not a software-numerical or reference-discrepancy
+        # allowance for declaring a sparse action physically adequate.
+        "absolute_allowance_role_mps": [0.0 for _ in roles],
         "absolute_allowance_calibration": {
-            "calibration_kind": "physical query-sampling allowance, separate from the software numerical floor",
-            **allowance_meta,
+            "calibration_kind": "zero extra physical-risk allowance for paired same-query comparison",
+            "method": "candidate and retained W-full errors use identical native query receivers; no measured software-numerical or reference-discrepancy allowance is added",
         },
+        "query_sampling_sensitivity_role_mps": sampling_sensitivity,
+        "query_sampling_sensitivity": sampling_sensitivity_meta,
         "g_action_exposure_lineage": exposure_lineage,
         "numerical_floor_method": (
             "max(1e-8 m/s, 1e-6 times median train-family retained W-full role RMSE)"

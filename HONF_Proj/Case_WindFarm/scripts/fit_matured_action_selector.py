@@ -118,6 +118,14 @@ def _load_action_table(
     allowance = _role_tensor(payload["absolute_allowance_role_mps"], roles)
     if floor.shape != (5,) or not bool((floor > 0).all()) or allowance.shape != (5,) or bool((allowance < 0).any()):
         raise ValueError("Role floor and physical allowance must be finite and aligned.")
+    if (
+        bool((allowance != 0).any())
+        or payload.get("absolute_allowance_calibration", {}).get("calibration_kind")
+        != "zero extra physical-risk allowance for paired same-query comparison"
+    ):
+        raise ValueError(
+            "Paired same-query Wind adequacy cannot add query-sampling variability as a physical-risk allowance."
+        )
     case_metadata: dict[str, dict[str, Any]] = {}
     rows: list[ActionEvidenceRow] = []
     with np.load(feature_path, allow_pickle=False) as npz:

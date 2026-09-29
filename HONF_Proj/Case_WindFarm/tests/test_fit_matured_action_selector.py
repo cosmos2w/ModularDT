@@ -71,6 +71,9 @@ def _table(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         "roles": roles,
         "numerical_floor_role_mps": [1e-8] * 5,
         "absolute_allowance_role_mps": [0.0] * 5,
+        "absolute_allowance_calibration": {
+            "calibration_kind": "zero extra physical-risk allowance for paired same-query comparison"
+        },
         "rows": rows,
     }
     table_path = tmp_path / "action_table.json"
@@ -109,6 +112,15 @@ def test_action_table_rejects_stale_checkpoint_and_changed_feature_bytes(tmp_pat
     np.savez(features, **arrays)
     with pytest.raises(ValueError, match="archive differs"):
         SELECTOR._load_action_table(table, features, masks, checkpoint)
+
+
+def test_paired_native_gate_rejects_sampling_variation_as_extra_allowance(tmp_path: Path) -> None:
+    table_path, features, masks, checkpoint = _table(tmp_path)
+    table = json.loads(table_path.read_text(encoding="utf-8"))
+    table["absolute_allowance_role_mps"] = [0.005] * 5
+    table_path.write_text(json.dumps(table), encoding="utf-8")
+    with pytest.raises(ValueError, match="query-sampling variability"):
+        SELECTOR._load_action_table(table_path, features, masks, checkpoint)
 
 
 def test_train_gate_uses_fixed_directions_within_each_layout(tmp_path: Path) -> None:
