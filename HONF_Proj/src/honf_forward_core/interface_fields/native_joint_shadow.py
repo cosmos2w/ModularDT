@@ -7,7 +7,7 @@ its inputs. Callers evaluate the deterministic hard plan at every review.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import Any
 
@@ -15,7 +15,7 @@ import torch
 from torch import nn
 from torch.func import functional_call
 
-from .adaptive_interaction_cover import MechanismPlan
+from .adaptive_interaction_cover import InteractionContext, MechanismPlan
 from .core import InterfaceFieldCore
 from .input_cover_organizer import InputOnlyCoverOrganizer
 from .types import EncodedInterfaceCase, PreparedInterfaceField
@@ -66,8 +66,12 @@ class _FixedPlanPrediction(nn.Module):
         query_coords: torch.Tensor,
         query_features: torch.Tensor | None,
         receiver_chunk_size: int | None,
+        interaction_context: InteractionContext | None = None,
     ) -> torch.Tensor:
-        prepared = self.core.prepare(encoded, module_states, fixed_cover_plans=plans)
+        prepare_kwargs = {"fixed_cover_plans": plans}
+        if interaction_context is not None:
+            prepare_kwargs["interaction_context"] = interaction_context
+        prepared = self.core.prepare(encoded, module_states, **prepare_kwargs)
         return self.core.decode_queries(
             prepared, query_coords, query_features,
             receiver_chunk_size=receiver_chunk_size,
@@ -84,6 +88,9 @@ def hard_value_soft_organizer_forward(
     *,
     receiver_chunk_size: int | None = None,
     collect_hard_aux: bool = False,
+    budgets: Mapping[str, float | torch.Tensor] | torch.Tensor | None = None,
+    frontier_cuts: Sequence[Sequence[int]] | None = None,
+    budget_fractions: Mapping[str, float] | None = None,
 ) -> JointShadowResult:
     """Return exact hard values and physical AD, plus soft organizer AD.
 
@@ -111,17 +118,25 @@ def hard_value_soft_organizer_forward(
     detached_features = None if query_features is None else query_features.detach()
 
     trees = core.backend.build_case_trees(detached_encoded)
-    scores = organizer.score_cases(
-        detached_encoded,
-        {
-            "module_states": detached_states,
-            "environment_states": detached_encoded.env_tokens,
-            "global_state": detached_encoded.global_token,
-        },
-        trees,
+    score_inputs = {
+        "module_states": detached_states,
+        "environment_states": detached_encoded.env_tokens,
+        "global_state": detached_encoded.global_token,
+    }
+    if budgets is None:
+        scores = organizer.score_cases(detached_encoded, score_inputs, trees)
+    else:
+        scores = organizer.score_cases(detached_encoded, score_inputs, trees, budgets=budgets)
+    planning_options = {
+        "frontier_cuts": frontier_cuts,
+        "budget_fractions": budget_fractions,
+    }
+    hard_plans = organizer.plans_from_scores(
+        scores, detached_encoded, trees, hard=True, **planning_options
     )
-    hard_plans = organizer.plans_from_scores(scores, detached_encoded, trees, hard=True)
-    soft_plans = organizer.plans_from_scores(scores, detached_encoded, trees, hard=False)
+    soft_plans = organizer.plans_from_scores(
+        scores, detached_encoded, trees, hard=False, **planning_options
+    )
     if any(bool((plan.permission_matrix("QE") <= 0).any()) for plan in soft_plans):
         raise FloatingPointError("soft QE probabilities lost positive support; organizer logits may be saturated")
     if any(plan.split_gates.requires_grad or any(

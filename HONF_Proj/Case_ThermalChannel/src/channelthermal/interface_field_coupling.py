@@ -497,6 +497,8 @@ def forward_interface_field(
     case_edge_probe_relative_rms_tolerance: Optional[float],
     case_edge_probe_channel_tolerance: Optional[float],
     fixed_cover_plans: tuple[Any, ...] | None = None,
+    return_packet_inputs: bool = False,
+    cover_plan_builder: Any | None = None,
 ) -> Dict[str, Any]:
     """Run autonomous ports, frozen local physics, one refinement, and final read."""
 
@@ -659,12 +661,30 @@ def forward_interface_field(
         detail_stochastic_mask,
     )
     base_module_state = encoded.module_tokens
+    applied_cover_plans = fixed_cover_plans
+    packet_trees = None
+    if cover_plan_builder is not None:
+        if fixed_cover_plans is not None:
+            raise ValueError("Pass either fixed_cover_plans or cover_plan_builder, not both.")
+        backend = model.core.backend
+        if architecture != "dense_pairwise_field" or not bool(
+            getattr(backend, "optional_native_policy", False)
+        ):
+            raise TypeError("Input-built packet plans require the checkpoint-native Dense cover backend.")
+        packet_trees = backend.build_case_trees(encoded)
+        # The plan builder sees only the freshly encoded physical input,
+        # current model-side P0 state, and geometry-built receiver trees.
+        # Callers detach scorer inputs internally and return one plan per
+        # case; no labels, case IDs, or output targets cross this boundary.
+        applied_cover_plans = tuple(cover_plan_builder(encoded, base_module_state, packet_trees))
+        if len(applied_cover_plans) != int(encoded.module_present.shape[0]):
+            raise ValueError("cover_plan_builder must return one plan per encoded case.")
     with _interface_read_role(model, "p0_port"):
         prepared0 = model.core.prepare(
             encoded,
             base_module_state,
             layout_cache=layout_cache,
-            fixed_cover_plans=fixed_cover_plans,
+            fixed_cover_plans=applied_cover_plans,
             interaction_context=_interaction_context("p0_port"),
             return_routing_maps=bool(return_routing_maps),
             **detail_prepare_kwargs,
@@ -754,7 +774,7 @@ def forward_interface_field(
                         encoded,
                         module_state,
                         layout_cache=layout_cache,
-                        fixed_cover_plans=fixed_cover_plans,
+                        fixed_cover_plans=applied_cover_plans,
                         interaction_context=_interaction_context("p1_refinement"),
                         return_routing_maps=bool(return_routing_maps),
                         phase_shared_state=prepared0.phase_shared_state,
@@ -774,7 +794,7 @@ def forward_interface_field(
                         encoded,
                         module_state,
                         layout_cache=layout_cache,
-                        fixed_cover_plans=fixed_cover_plans,
+                        fixed_cover_plans=applied_cover_plans,
                         interaction_context=_interaction_context("p1_refinement"),
                         return_routing_maps=bool(return_routing_maps),
                         **detail_prepare_kwargs,
@@ -860,7 +880,7 @@ def forward_interface_field(
                 "predicted_port_interface": predicted_interface,
             }
 
-    if fixed_cover_plans is not None and local_outputs is None:
+    if applied_cover_plans is not None and local_outputs is None:
         raise ValueError(
             "A fixed native cover requires a fresh P2 preparation; the global-head "
             "reuse path would carry P0 preparation permissions into P2 decoding."
@@ -874,7 +894,7 @@ def forward_interface_field(
                     encoded,
                     module_state,
                     layout_cache=layout_cache,
-                    fixed_cover_plans=fixed_cover_plans,
+                    fixed_cover_plans=applied_cover_plans,
                     interaction_context=_interaction_context("p2_field"),
                     return_routing_maps=bool(return_routing_maps),
                     phase_shared_state=prepared0.phase_shared_state,
@@ -894,7 +914,7 @@ def forward_interface_field(
                     encoded,
                     module_state,
                     layout_cache=layout_cache,
-                    fixed_cover_plans=fixed_cover_plans,
+                    fixed_cover_plans=applied_cover_plans,
                     interaction_context=_interaction_context("p2_field"),
                     return_routing_maps=bool(return_routing_maps),
                     **detail_prepare_kwargs,
@@ -1120,4 +1140,13 @@ def forward_interface_field(
             prepared=final_prepared,
             phase_shared_state=final_prepared.phase_shared_state,
         )
+    if return_packet_inputs:
+        backend = model.core.backend
+        if not bool(getattr(backend, "optional_native_policy", False)):
+            raise TypeError("Packet input capture requires the checkpoint-native Dense cover backend.")
+        result["packet_inputs"] = {
+            "encoded": encoded,
+            "trees": backend.build_case_trees(encoded) if packet_trees is None else packet_trees,
+            "p0_module_states": base_module_state,
+        }
     return result

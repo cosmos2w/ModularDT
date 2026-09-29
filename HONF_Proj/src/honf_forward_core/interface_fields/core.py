@@ -1258,10 +1258,17 @@ class InterfaceFieldCore(nn.Module):
                             module_present=encoded.module_present[case],
                             environment_count=environment_count,
                             phase=prepared_phase,
-                        )
-                        for case, plan in enumerate(cover_plans)
                     )
-                    if all(type(plan) in {AdaptiveCoverPlan, MechanismPlan} for plan in cover_plans)
+                    for case, plan in enumerate(cover_plans)
+                    )
+                    if all(
+                        type(plan) in {AdaptiveCoverPlan, MechanismPlan}
+                        and not (
+                            isinstance(plan, MechanismPlan)
+                            and (plan.direct_access or plan.direct_policies)
+                        )
+                        for plan in cover_plans
+                    )
                     else None
                 )
                 backend_state = {

@@ -989,7 +989,11 @@ class _TypedDirectPairPlan(MechanismPlan):
         *,
         phase: str | None = None,
         module_present: torch.Tensor | None = None,
+        receiver_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Exact coordinate-bound controls do not score receiver features, but
+        # keep the base plan's native access interface.
+        del receiver_features
         if mechanism not in self.direct_pair_access:
             raise ValueError(f"direct pair mask has no mechanism {mechanism!r}")
         if phase is not None:
@@ -1266,13 +1270,13 @@ def _typed_direct_pair_plan(
         coordinate_rows[mechanism] = receiver_coords[mechanism]
     root_plan = _typed_root_permissions_plan(record, permission_supports)
     direct_plan = _TypedDirectPairPlan(
-        root_plan.tree,
-        root_plan.split_gates,
-        root_plan.module_present,
-        root_plan.environment_count,
-        root_plan.permissions,
-        matrices,
-        coordinate_rows,
+        tree=root_plan.tree,
+        split_gates=root_plan.split_gates,
+        module_present=root_plan.module_present,
+        environment_count=root_plan.environment_count,
+        permissions=root_plan.permissions,
+        direct_pair_access=matrices,
+        direct_receiver_coordinates=coordinate_rows,
     )
     exact_summary = base._typed_work_summary(
         direct_plan, encoded, query_receivers, include_root_child_support=False

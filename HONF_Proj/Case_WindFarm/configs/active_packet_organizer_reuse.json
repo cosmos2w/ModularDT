@@ -1,0 +1,170 @@
+{
+  "schema_version": 1,
+  "run": {
+    "id": "2111",
+    "name": "active_budgeted_packet_reuse",
+    "case_id": "WindFarm",
+    "output_root": "project://Trained_Results/WindFarm/HONF_Forward_Runs"
+  },
+  "device": "cuda:0",
+  "source_checkpoint": "project://Trained_Results/WindFarm/HONF_Forward_Runs/Run_2110_20260927_164943_windfarm_joint_forward_maturation/arms/w_full/checkpoints/updates_001500.pt",
+  "source_checkpoint_sha256": "f69eb6924b28642a3d7671a9f76abdc3cc73d40094f9c73f6898e66022365131",
+  "seed": 2111,
+  "dataset": {
+    "manifest": "project://Case_WindFarm/Dataset/dataset_manifest.json",
+    "locations": "project://Case_WindFarm/Dataset/dataset_locations.local.json",
+    "compact_dataset_id": "wind_farm_tensor_v1",
+    "volume_dataset_id": "wind_farm_volume_v1",
+    "derived_view": "project://Case_WindFarm/Dataset/derived/forward_velocity_v1",
+    "split_indices": "project://Case_WindFarm/Dataset/derived/forward_velocity_v1/split_indices.npz",
+    "memory_map_volume": true,
+    "require_complete_volume_runs": true,
+    "split_seed": 42,
+    "excluded_organizer_development_layout_indices": [
+      81,
+      103,
+      107,
+      196
+    ]
+  },
+  "forward": {
+    "max_physical_updates_per_arm": 3000,
+    "review_updates": [
+      10,
+      100,
+      500,
+      1500,
+      3000
+    ],
+    "stage_a": {
+      "all_access_updates": 50,
+      "primary_budget_updates": 150,
+      "subsequent_budget_mix": {
+        "full_access": 0.2,
+        "primary": 0.6,
+        "stress": 0.2
+      },
+      "frontier_cut_depth": 3,
+      "frontier_sampling": "balanced_root_intermediate_leaf",
+      "secondary_route_pilot": {
+        "training_layout_count": 12,
+        "role_query_counts": {
+          "volume": 64,
+          "hub_slab": 64,
+          "downstream_envelope": 64,
+          "near_turbine": 64,
+          "background": 64
+        },
+        "selection": "largest_training_only_native_omission_restoration_loss_gain_then_access_loss_gradient_rms",
+        "candidate_routes": [
+          "MM",
+          "EM"
+        ]
+      },
+      "query_count_total": 2048,
+      "role_query_counts": {
+        "volume": 1024,
+        "hub_slab": 256,
+        "downstream_envelope": 256,
+        "near_turbine": 256,
+        "background": 256
+      },
+      "role_loss_scales_mps": {
+        "background": 0.0064534678545061595,
+        "downstream_envelope": 0.02094316674590352,
+        "hub_slab": 0.016643493285225772,
+        "near_turbine": 0.03333675446803432,
+        "volume": 0.01018451709027641
+      },
+      "trainable_scope": "native_fine_interactions_and_existing_field_head; freeze_encoders_coarse_local"
+    },
+    "budgets": {
+      "full_access": 1.0,
+      "primary": 0.9,
+      "stress": 0.75,
+      "mandatory_route": "QE",
+      "secondary_route_candidates": [
+        "MM",
+        "EM"
+      ],
+      "secondary_route_selection": "training_only_native_omission_restoration_and_loss_gradient"
+    },
+    "stage_b": {
+      "initial_training_rows": 12,
+      "maximum_training_rows": 24,
+      "maximum_frontier_cuts_per_case": 26,
+      "budget_fraction": 0.9,
+      "role_query_counts": {
+        "volume": 256,
+        "hub_slab": 128,
+        "downstream_envelope": 128,
+        "near_turbine": 128,
+        "background": 128
+      },
+      "numerical_allowance": "measured_per_role_max_abs_mps_of_repeated_same_plan_chunk_and_full_access_parity_on_identical_role_query_panel",
+      "same_student_full_access_comparison": true,
+      "adequacy_reference_ratio": 1.1,
+      "selection": "measured_fidelity_work_pareto"
+    },
+    "stage_c": {
+      "maximum_frontier_supervision_updates": 400,
+      "selected_hard_cut_joint_refinement": true,
+      "retain_full_access_replay": true,
+      "unsupported_at_budget_is_explicit": true,
+      "selected_hard_cut_joint_refinement_updates": 100,
+      "full_access_replay_every": 5,
+      "physical_learning_rate": 1e-05,
+      "permission_learning_rate": 0.0002
+    }
+  },
+  "evaluation": {
+    "sampled_native_split": "validation",
+    "sampled_native_panel_rows": 90,
+    "sampled_native_queries": {
+      "volume": 32768,
+      "hub_band": 8192
+    },
+    "predeclared_full_grid_rows": [
+      72,
+      309,
+      531,
+      243
+    ],
+    "compare": [
+      "stored_openfoam_reference",
+      "same_student_full_access",
+      "learned_grouped_packet",
+      "independently_trained_direct_pair",
+      "root_source_union"
+    ],
+    "include_exact_hard_support_and_executor_rows": true,
+    "include_same_weight_grouping_interventions": true
+  },
+  "inverse": {
+    "task": "conditional_turbine_position_completion",
+    "training_split": "train_after_organizer_development_exclusions",
+    "development_split": "validation",
+    "design_mask_hidden_turbines": 1,
+    "max_hidden_turbines_after_primary_gate": 2,
+    "fixed_sensor_count": 24,
+    "observed_sensor_count": 16,
+    "held_sensor_count": 8,
+    "development_task_count": 8,
+    "samples_per_task": 8,
+    "reverse_steps": 20,
+    "max_updates_per_arm": 800,
+    "matched_arms": [
+      "frozen_grouped_packet",
+      "frozen_dense_interaction_access"
+    ],
+    "rewired_packet_diagnostic": true,
+    "rebuild_candidate_encoder_anchors_and_graph_each_reverse_step": true,
+    "candidate_graph_uses_known_visible_and_current_hidden_positions_only": true,
+    "no_new_cfd": true
+  },
+  "compute": {
+    "gpu_time_budget_seconds": 36000,
+    "zero_new_windfarm_cfd_solves": true,
+    "no_automatic_5000_epoch_continuation": true
+  }
+}

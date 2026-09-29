@@ -9,12 +9,15 @@ reads field targets, solved boundary values, or evidence masks.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
+from torch.func import functional_call
+from torch import nn
 
 from channelthermal.model import ChannelThermalHONFModel
 
@@ -28,6 +31,17 @@ NATIVE_RESPONSE_ARCHITECTURES = frozenset(
         "three_term_full_access_honf",
     }
 )
+
+
+class _DecodedPreparedCall(nn.Module):
+    """Expose the model's maintained prepared-query decoder to functional_call."""
+
+    def __init__(self, target: ChannelThermalHONFModel) -> None:
+        super().__init__()
+        self.target = target
+
+    def forward(self, prepared: Any, query_xy: torch.Tensor) -> Mapping[str, torch.Tensor]:
+        return self.target.decode_prepared(prepared, query_xy)
 
 
 def _array_tensor(value: Any, *, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -82,6 +96,7 @@ class DifferentiableThermalOperator:
         dataset_config: Mapping[str, Any],
         normalization_stats: Mapping[str, Any],
         query_batch_size: int = 2048,
+        capture_packet_inputs: bool = False,
     ) -> None:
         if query_batch_size <= 0:
             raise ValueError("query_batch_size must be positive.")
@@ -89,6 +104,8 @@ class DifferentiableThermalOperator:
         self.dataset_config = dict(dataset_config)
         self.normalization_stats = dict(normalization_stats)
         self.query_batch_size = int(query_batch_size)
+        self.capture_packet_inputs = bool(capture_packet_inputs)
+        self.last_packet_inputs: Mapping[str, Any] | None = None
         self.normalize_inputs = bool(self.dataset_config.get("normalize_inputs", False))
         self.normalize_targets = bool(self.dataset_config.get("normalize_targets", False))
         parameter = next(
@@ -343,15 +360,33 @@ class DifferentiableThermalOperator:
         role_queries: Mapping[str, RoleQuery],
         *,
         fixed_cover_plans: tuple[Any, ...] | None = None,
+        cover_plan_builder: Any | None = None,
+        detach_model_parameters: bool = False,
     ) -> AbsolutePrediction:
-        if fixed_cover_plans is not None:
+        if fixed_cover_plans is not None and cover_plan_builder is not None:
+            raise ValueError("Pass either fixed_cover_plans or cover_plan_builder, not both.")
+        if fixed_cover_plans is not None or cover_plan_builder is not None:
             if self.model.config.core_honf.forward_architecture != "dense_pairwise_field":
                 raise ValueError("Frozen native covers require the intact Dense interface-field model.")
-            if len(fixed_cover_plans) != 1:
+            if fixed_cover_plans is not None and len(fixed_cover_plans) != 1:
                 raise ValueError("The native Thermal adapter expects one frozen plan for its one-case batch.")
         expected_roles = {"fluid_fields", "interface", "solid_temperature"}
         if set(role_queries) != expected_roles:
             raise ValueError(f"Native callback expects exactly {sorted(expected_roles)} roles.")
+        if detach_model_parameters:
+            design = DesignInput(
+                module_positions=design.module_positions.detach(),
+                module_heating=design.module_heating.detach(),
+                module_present=design.module_present.detach(),
+            )
+            context = {
+                str(key): value.detach() if torch.is_tensor(value) else value
+                for key, value in context.items()
+            }
+            role_queries = {
+                str(name): replace(query, query_features=query.query_features.detach())
+                for name, query in role_queries.items()
+            }
         fluid = role_queries["fluid_fields"]
         interface = role_queries["interface"]
         solid = role_queries["solid_temperature"]
@@ -376,23 +411,53 @@ class DifferentiableThermalOperator:
         output_chunks: list[torch.Tensor] = []
         prepared = None
         first_output: Mapping[str, Any] | None = None
+        detached_parameters = (
+            {name: parameter.detach() for name, parameter in self.model.named_parameters()}
+            if detach_model_parameters else None
+        )
+        detached_buffers = (
+            {name: buffer.detach().clone() for name, buffer in self.model.named_buffers()}
+            if detach_model_parameters else None
+        )
+        decode_call = _DecodedPreparedCall(self.model) if detach_model_parameters else None
+        decode_parameters = (
+            {f"target.{name}": value for name, value in detached_parameters.items()}
+            if detached_parameters is not None else None
+        )
+        decode_buffers = (
+            {f"target.{name}": value for name, value in detached_buffers.items()}
+            if detached_buffers is not None else None
+        )
         for start in range(0, int(field_coordinates.shape[0]), self.query_batch_size):
             query_chunk = field_coordinates[start : start + self.query_batch_size].unsqueeze(0)
             if prepared is None:
-                output = self.model(
-                    structure,
-                    query_chunk,
-                    interface_condition=interface_condition,
-                    local_module_params=local_params,
-                    teacher_port_tokens=teacher_ports,
-                    local_query_points=local_query,
-                    local_port_condition_mode="predicted",
-                    mixed_teacher_ratio=0.0,
-                    fixed_cover_plans=fixed_cover_plans,
-                    return_prepared_state=True,
-                )
+                call_args = (structure, query_chunk)
+                call_kwargs = {
+                    "interface_condition": interface_condition,
+                    "local_module_params": local_params,
+                    "teacher_port_tokens": teacher_ports,
+                    "local_query_points": local_query,
+                    "local_port_condition_mode": "predicted",
+                    "mixed_teacher_ratio": 0.0,
+                    "fixed_cover_plans": fixed_cover_plans,
+                    "return_prepared_state": True,
+                    "return_packet_inputs": self.capture_packet_inputs,
+                    "cover_plan_builder": cover_plan_builder,
+                }
+                if detach_model_parameters:
+                    assert detached_parameters is not None and detached_buffers is not None
+                    output = functional_call(
+                        self.model,
+                        (detached_parameters, detached_buffers),
+                        call_args,
+                        call_kwargs,
+                        strict=True,
+                    )
+                else:
+                    output = self.model(*call_args, **call_kwargs)
                 prepared = output["prepared_state"]
                 first_output = output
+                self.last_packet_inputs = output.get("packet_inputs")
                 if self._capture_cover_plans:
                     backend_state = getattr(getattr(prepared, "prepared", None), "backend_state", None)
                     plans = backend_state.get("cover_plans") if isinstance(backend_state, dict) else None
@@ -400,7 +465,16 @@ class DifferentiableThermalOperator:
                         raise RuntimeError("The native P2 preparation did not apply a cover plan.")
                     self._captured_cover_plans = tuple(plans)
             else:
-                output = self.model.decode_prepared(prepared, query_chunk)
+                if detach_model_parameters:
+                    assert decode_call is not None and decode_parameters is not None and decode_buffers is not None
+                    output = functional_call(
+                        decode_call,
+                        (decode_parameters, decode_buffers),
+                        (prepared, query_chunk),
+                        strict=True,
+                    )
+                else:
+                    output = self.model.decode_prepared(prepared, query_chunk)
             output_chunks.append(output["pred_field"].squeeze(0))
 
         field = _physical_output(

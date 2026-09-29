@@ -1,0 +1,171 @@
+"""Behavioral checks for the bounded frozen-packet inverse pilot."""
+
+from __future__ import annotations
+
+import torch
+
+from honf_inverse_core.models.frozen_packet_diffusion import (
+    ConditionalPacketDenoiser,
+    DiffusionCondition,
+    FrozenPacketDiffusion,
+    PacketLinks,
+    dense_access,
+    heat_from_logits,
+)
+
+
+def _condition(task: str) -> DiffusionCondition:
+    batch, modules, sensors = 2, 4, 3
+    design_dim = 1 if task == "heat" else 2
+    known = torch.zeros(batch, modules, design_dim)
+    design_mask = torch.ones(batch, modules, dtype=torch.bool)
+    if task == "position":
+        design_mask[:, :2] = False
+        known[:, 0] = torch.tensor([0.2, 0.3])
+        known[:, 1] = torch.tensor([0.7, 0.8])
+    return DiffusionCondition(
+        known_state=known,
+        design_mask=design_mask,
+        module_valid=torch.ones(batch, modules, dtype=torch.bool),
+        module_features=torch.randn(batch, modules, 3),
+        sensor_features=torch.randn(batch, sensors, 4),
+        sensor_valid=torch.ones(batch, sensors, dtype=torch.bool),
+    )
+
+
+class CandidateProvider:
+    def __init__(self) -> None:
+        self.scale = torch.nn.Parameter(torch.tensor(1.0))
+        self.calls: list[torch.Tensor] = []
+        self.forbidden_clean_cache = torch.tensor(float("nan"))
+
+    def __call__(self, candidate: torch.Tensor, condition: DiffusionCondition) -> PacketLinks:
+        self.calls.append(candidate.clone())
+        batch, modules, _ = candidate.shape
+        sensors = condition.sensor_features.shape[1]
+        # Depend on the current candidate. The poisoned clean cache above is
+        # intentionally inaccessible through the provider's call arguments.
+        base = torch.sigmoid(candidate[..., 0] * self.scale)
+        mm = base[:, None, :].expand(batch, modules, modules).clone()
+        mm.diagonal(dim1=1, dim2=2).zero_()
+        sm = base[:, None, :].expand(batch, sensors, modules).clone()
+        embed = candidate.mean(dim=-1, keepdim=True).expand(batch, modules, 2)
+        return PacketLinks(mm, sm, embed)
+
+
+def _model(task: str) -> FrozenPacketDiffusion:
+    denoiser = ConditionalPacketDenoiser(
+        design_dim=1 if task == "heat" else 2,
+        module_dim=3,
+        sensor_dim=4,
+        embedding_dim=2,
+        hidden_dim=16,
+        layers=2,
+    )
+    return FrozenPacketDiffusion(denoiser, task=task, steps=4)
+
+
+def test_heat_allocation_and_frozen_graph_training_gradient() -> None:
+    torch.manual_seed(23)
+    condition = _condition("heat")
+    model = _model("heat")
+    provider = CandidateProvider()
+    logits = torch.tensor([[[0.2], [0.4], [-0.1], [0.3]]] * 2)
+    allocation = heat_from_logits(logits, torch.tensor([[5.0], [7.0]]), condition.module_valid)
+    assert torch.all(allocation >= 0)
+    torch.testing.assert_close(allocation.sum(dim=1), torch.tensor([[5.0], [7.0]]))
+
+    loss = model.training_loss(
+        logits,
+        condition,
+        provider,
+        timesteps=torch.tensor([1, 2]),
+        noise=torch.randn_like(logits),
+    )
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert any(parameter.grad is not None and parameter.grad.abs().sum() > 0 for parameter in model.parameters())
+    assert provider.scale.grad is None
+    assert len(provider.calls) == 1
+
+    initial = torch.randn_like(logits)
+    trail = model.sample(condition, provider, initial_noise=initial, save_every=1)
+    assert trail.organizer_calls == model.steps
+    assert len(provider.calls) == 1 + model.steps
+    assert not torch.equal(provider.calls[1], provider.calls[-1])
+    torch.testing.assert_close(trail.final_state.sum(dim=1), torch.zeros(2, 1), atol=5e-5, rtol=0)
+    assert torch.isfinite(trail.final_state).all()
+
+
+def test_position_visible_modules_fixed_and_matched_dense_links() -> None:
+    torch.manual_seed(29)
+    condition = _condition("position")
+    model = _model("position")
+    provider = CandidateProvider()
+    noise = torch.randn_like(condition.known_state)
+    graph_trail = model.sample(condition, provider, initial_noise=noise)
+    dense_trail = model.sample(condition, provider, initial_noise=noise, dense=True)
+    torch.testing.assert_close(graph_trail.final_state[:, :2], condition.known_state[:, :2])
+    torch.testing.assert_close(dense_trail.final_state[:, :2], condition.known_state[:, :2])
+    assert not torch.equal(graph_trail.final_state[:, 2:], dense_trail.final_state[:, 2:])
+
+    links = provider(noise, condition)
+    full = dense_access(links, condition)
+    assert torch.equal(full.module_source.diagonal(dim1=1, dim2=2), torch.zeros(2, 4))
+    torch.testing.assert_close(full.module_embeddings, links.module_embeddings)
+
+
+def test_heat_denoiser_respects_physical_module_permutation() -> None:
+    torch.manual_seed(31)
+    condition = _condition("heat")
+    model = _model("heat")
+    provider = CandidateProvider()
+    state = torch.randn_like(condition.known_state)
+    links = provider(state, condition)
+    time = torch.tensor([0.3, 0.7])
+    original = model.denoiser(state, time, condition, links)
+
+    order = torch.tensor([2, 0, 3, 1])
+    rearranged = DiffusionCondition(
+        known_state=condition.known_state[:, order],
+        design_mask=condition.design_mask[:, order],
+        module_valid=condition.module_valid[:, order],
+        module_features=condition.module_features[:, order],
+        sensor_features=condition.sensor_features,
+        sensor_valid=condition.sensor_valid,
+    )
+    permuted_links = PacketLinks(
+        module_source=links.module_source[:, order][:, :, order],
+        sensor_source=links.sensor_source[:, :, order],
+        module_embeddings=links.module_embeddings[:, order],
+    )
+    permuted = model.denoiser(state[:, order], time, rearranged, permuted_links)
+    torch.testing.assert_close(permuted, original[:, order], rtol=1e-5, atol=1e-6)
+
+
+def test_typed_environment_routes_change_output_and_dense_control_keeps_embeddings() -> None:
+    torch.manual_seed(37)
+    condition = _condition("heat")
+    model = _model("heat")
+    state = torch.randn_like(condition.known_state)
+    base = CandidateProvider()(state, condition)
+    batch, modules, _ = state.shape
+    sensors = condition.sensor_features.shape[1]
+    links = PacketLinks(
+        module_source=base.module_source,
+        sensor_source=base.sensor_source,
+        module_embeddings=base.module_embeddings,
+        module_environment=torch.rand(batch, modules, 2),
+        environment_module=torch.rand(batch, 2, modules),
+        sensor_environment=torch.rand(batch, sensors, 2),
+        environment_embeddings=torch.randn(batch, 2, 2),
+        environment_valid=torch.tensor([[True, False], [True, False]]),
+    )
+    time = torch.tensor([0.2, 0.6])
+    with_environment = model.denoiser(state, time, condition, links)
+    without_environment = model.denoiser(state, time, condition, base)
+    assert not torch.equal(with_environment, without_environment)
+    dense = dense_access(links, condition)
+    torch.testing.assert_close(dense.environment_embeddings, links.environment_embeddings)
+    assert torch.all(dense.module_environment[..., 1] == 0)
+    assert torch.all(dense.sensor_environment[..., 0] == 1)

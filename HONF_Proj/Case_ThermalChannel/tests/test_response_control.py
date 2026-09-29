@@ -1117,6 +1117,120 @@ def test_r_arm_writes_first_finite_update_checkpoint_without_changing_b_schedule
     ]
 
 
+def test_staged_fit_can_checkpoint_and_resume_at_nonreview_update() -> None:
+    config = StagedTrainingConfig(
+        arm="B_value",
+        max_optimizer_updates=2,
+        max_epochs=2,
+        total_optimizer_update_ceiling=2,
+        checkpoint_every_updates=2,
+        review_updates=(2,),
+        stages=(TrainingStage("value", 0, 2, ("value",)),),
+    )
+    scales = ThermalLossScales(
+        value={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
+        finite={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
+        mixed={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
+        pressure_value=1.0,
+        pressure_response=1.0,
+        pressure_limit=3.0,
+        pressure_boundary=0.5,
+        solid_temperature=1.0,
+        smooth_peak_beta=1.0,
+        near_limit_band=0.5,
+    )
+    first_model = _AbsoluteField()
+    first_optimizer = torch.optim.SGD(first_model.parameters(), lr=1.0e-4)
+    saved: list[tuple[dict[str, object], str]] = []
+    first = run_staged_fit(
+        first_model,
+        first_model,
+        first_optimizer,
+        [_stencil()],
+        scales=scales,
+        config=config,
+        stop_at_update=1,
+        on_checkpoint=lambda payload, label: saved.append((dict(payload), label)),
+    )
+    assert first.final_update == 1
+    assert first.stopped_at_review is False
+    assert saved[-1][1] == "training_checkpoint"
+    assert saved[-1][0]["training_config"]["review_updates"] == [2]
+
+    resumed_model = _AbsoluteField()
+    resumed_optimizer = torch.optim.SGD(resumed_model.parameters(), lr=1.0e-4)
+    resumed = run_staged_fit(
+        resumed_model,
+        resumed_model,
+        resumed_optimizer,
+        [_stencil()],
+        scales=scales,
+        config=config,
+        initial_update=1,
+        resume_payload=saved[-1][0],
+        stop_at_update=2,
+    )
+    assert resumed.initial_update == 1
+    assert resumed.final_update == 2
+    assert resumed.actual_optimizer_updates == 1
+
+
+def test_terminal_stage_can_extend_from_exact_cap_checkpoint() -> None:
+    initial = StagedTrainingConfig(
+        arm="B_value",
+        max_optimizer_updates=2,
+        max_epochs=2,
+        total_optimizer_update_ceiling=2,
+        checkpoint_every_updates=1,
+        review_updates=(2,),
+        stages=(TrainingStage("value", 0, 2, ("value",)),),
+    )
+    scales = ThermalLossScales(
+        value={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
+        finite={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
+        mixed={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
+        pressure_value=1.0,
+        pressure_response=1.0,
+        pressure_limit=3.0,
+        pressure_boundary=0.5,
+        solid_temperature=1.0,
+        smooth_peak_beta=1.0,
+        near_limit_band=0.5,
+    )
+    model = _AbsoluteField()
+    optimizer = torch.optim.SGD(model.parameters(), lr=1.0e-4)
+    saved: list[dict[str, object]] = []
+    result = run_staged_fit(
+        model,
+        model,
+        optimizer,
+        [_stencil()],
+        scales=scales,
+        config=initial,
+        on_checkpoint=lambda payload, _label: saved.append(dict(payload)),
+    )
+    assert result.final_update == 2
+    extension = StagedTrainingConfig(
+        arm="B_value",
+        max_optimizer_updates=4,
+        max_epochs=4,
+        total_optimizer_update_ceiling=4,
+        checkpoint_every_updates=1,
+        review_updates=(4,),
+        stages=(TrainingStage("value", 0, 4, ("value",)),),
+    )
+    resumed_model = _AbsoluteField()
+    resumed_optimizer = torch.optim.SGD(resumed_model.parameters(), lr=1.0e-4)
+    restored_update, attempted, _sampler, _remaining, _weights = restore_checkpoint_payload(
+        resumed_model,
+        resumed_optimizer,
+        saved[-1],
+        config=extension,
+    )
+    assert restored_update == 2
+    assert attempted == 2
+
+
 def test_lazy_nonpersistent_buffer_audit_uses_registered_names_not_state_dict_keys() -> None:
     model = nn.Module()
     core = nn.Module()

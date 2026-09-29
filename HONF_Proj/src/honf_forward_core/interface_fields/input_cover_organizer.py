@@ -21,6 +21,14 @@ from .adaptive_interaction_cover import (
     CaseLocalReceiverTree,
     MechanismPlan,
 )
+from .budgeted_frontier import (
+    FrontierUtilityHead,
+    FrontierUtilityPrediction,
+    canonical_pair_catalog,
+    enumerate_frontier_cuts,
+    project_unique_pair_budget,
+    split_gates_for_frontier,
+)
 from .types import EncodedInterfaceCase
 
 
@@ -32,6 +40,10 @@ class OrganizerScores:
     module_logits: torch.Tensor  # [N,M]
     environment_logits: torch.Tensor  # [N,E]
     mechanism_logits: Mapping[str, torch.Tensor] = field(default_factory=dict)
+    node_embeddings: torch.Tensor | None = None  # [N,H]
+    module_embeddings: torch.Tensor | None = None  # [M,H]
+    environment_embeddings: torch.Tensor | None = None  # [E,H]
+    budget_vector: torch.Tensor | None = None  # [MM,ME,EM,QM,QE]
 
 
 def masked_binary_logit_loss(
@@ -100,6 +112,9 @@ class InputOnlyCoverOrganizer(nn.Module):
         split_threshold: float = 0.5,
         source_threshold: float = 0.5,
         quadrature_invariant_source_measure: bool = False,
+        budget_dim: int = len(INTERACTION_MECHANISMS),
+        frontier_utility_enabled: bool = False,
+        frontier_role_count: int | None = None,
     ) -> None:
         super().__init__()
         if min(state_dim, hidden_dim, role_count, source_chunk_size) < 1:
@@ -117,6 +132,19 @@ class InputOnlyCoverOrganizer(nn.Module):
         self.split_threshold = float(split_threshold)
         self.source_threshold = float(source_threshold)
         self.quadrature_invariant_source_measure = bool(quadrature_invariant_source_measure)
+        if budget_dim != len(INTERACTION_MECHANISMS):
+            raise ValueError("budget_dim must provide one typed fraction for each mechanism")
+        self.budget_dim = int(budget_dim)
+        self.frontier_utility_enabled = bool(frontier_utility_enabled)
+        if self.frontier_utility_enabled and frontier_role_count is None:
+            raise ValueError(
+                "frontier_role_count must be set from the case's physical error-role table"
+            )
+        if frontier_role_count is not None and frontier_role_count < 1:
+            raise ValueError("frontier_role_count must be positive")
+        self.frontier_role_count = (
+            int(frontier_role_count) if frontier_role_count is not None else 0
+        )
 
         # Geometry is summarized across its actual spatial axes, so one
         # organizer can consume both 2-D and 3-D input cases.
@@ -139,6 +167,55 @@ class InputOnlyCoverOrganizer(nn.Module):
             )
             for mechanism in INTERACTION_MECHANISMS
         })
+        # The scalar budget is part of the encoded input through a parameter-
+        # free multiplicative conditioning, preserving historical organizer
+        # state-dict keys and exact all-access logits at budget 1. Frontier
+        # utility is opt-in so legacy organizer checkpoints still load under
+        # strict trust checks without missing-key exceptions.
+        self.frontier_utility_head = (
+            FrontierUtilityHead(
+                hidden_dim=hidden_dim,
+                budget_dim=self.budget_dim,
+                role_count=self.frontier_role_count,
+            )
+            if self.frontier_utility_enabled
+            else None
+        )
+
+    def _budget_matrix(
+        self,
+        budgets: Mapping[str, float | torch.Tensor] | torch.Tensor | None,
+        *,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Normalize explicit mechanism budgets to ``[B,5]`` fractions."""
+
+        if budgets is None:
+            return torch.ones((batch_size, self.budget_dim), device=device, dtype=dtype)
+        if torch.is_tensor(budgets):
+            values = budgets.to(device=device, dtype=dtype)
+            if values.ndim == 1 and values.shape == (self.budget_dim,):
+                values = values[None, :].expand(batch_size, -1)
+            elif values.shape != (batch_size, self.budget_dim):
+                raise ValueError("budget tensor must have shape [5] or [batch,5]")
+        else:
+            values = torch.ones((batch_size, self.budget_dim), device=device, dtype=dtype)
+            for mechanism, raw in budgets.items():
+                key = str(mechanism).upper()
+                if key not in INTERACTION_MECHANISMS:
+                    raise ValueError(f"unsupported mechanism budget {mechanism!r}")
+                item = torch.as_tensor(raw, device=device, dtype=dtype)
+                if item.numel() == 1:
+                    values[:, INTERACTION_MECHANISMS.index(key)] = item.reshape(())
+                elif item.shape == (batch_size,):
+                    values[:, INTERACTION_MECHANISMS.index(key)] = item
+                else:
+                    raise ValueError("each mechanism budget must be scalar or have one value per case")
+        if not bool(torch.isfinite(values).all()) or bool(((values < 0.0) | (values > 1.0)).any()):
+            raise ValueError("all mechanism budgets must be finite fractions in [0,1]")
+        return values
 
     @property
     def pair_scorer(self) -> nn.Module:
@@ -176,9 +253,9 @@ class InputOnlyCoverOrganizer(nn.Module):
         if scale.ndim == 1:
             return scale
         if scale.ndim == 2:
-            return scale[case]
+            return scale[0 if int(scale.shape[0]) == 1 else case]
         if scale.ndim == 3 and int(scale.shape[1]) == 1:
-            return scale[case, 0]
+            return scale[0 if int(scale.shape[0]) == 1 else case, 0]
         raise ValueError("coordinate scale must provide one physical vector per case")
 
     @staticmethod
@@ -305,6 +382,8 @@ class InputOnlyCoverOrganizer(nn.Module):
         encoded: EncodedInterfaceCase,
         prepared_state: Mapping[str, Any] | Any,
         trees: Sequence[CaseLocalReceiverTree],
+        *,
+        budgets: Mapping[str, float | torch.Tensor] | torch.Tensor | None = None,
     ) -> tuple[OrganizerScores, ...]:
         """Return shared pre-activation scores for an input-only case batch."""
 
@@ -326,6 +405,12 @@ class InputOnlyCoverOrganizer(nn.Module):
         module_states = module_states.to(device=model_device, dtype=model_dtype)
         environment_states = environment_states.to(device=model_device, dtype=model_dtype)
         global_states = global_states.to(device=model_device, dtype=model_dtype)
+        budget_matrix = self._budget_matrix(
+            budgets,
+            batch_size=batch_size,
+            device=model_device,
+            dtype=model_dtype,
+        )
         for case, tree in enumerate(trees):
             node_embedding, node_center, _extent = self._node_embeddings(
                 tree, global_states[case]
@@ -364,16 +449,21 @@ class InputOnlyCoverOrganizer(nn.Module):
             split_logits = self.split_head(node_embedding).squeeze(-1)
             mechanism_logits: dict[str, torch.Tensor] = {}
             for mechanism in INTERACTION_MECHANISMS:
+                route_budget = budget_matrix[case, INTERACTION_MECHANISMS.index(mechanism)]
                 if mechanism in {"MM", "EM", "QM"}:
                     logits = self._score_sources(
                         node_embedding, module_embedding, module_relative,
                         scorer=self.pair_scorers[mechanism],
+                        mechanism=mechanism,
+                        budget_fraction=route_budget,
                     )
                     logits = logits.masked_fill(~(module_present > 0.5)[None, :], -30.0)
                 else:
                     logits = self._score_sources(
                         node_embedding, environment_embedding, environment_relative,
                         scorer=self.pair_scorers[mechanism],
+                        mechanism=mechanism,
+                        budget_fraction=route_budget,
                     )
                 mechanism_logits[mechanism] = logits
             results.append(OrganizerScores(
@@ -381,6 +471,10 @@ class InputOnlyCoverOrganizer(nn.Module):
                 mechanism_logits["QM"],
                 mechanism_logits["QE"],
                 mechanism_logits,
+                node_embedding,
+                module_embedding,
+                environment_embedding,
+                budget_matrix[case],
             ))
         return tuple(results)
 
@@ -391,12 +485,18 @@ class InputOnlyCoverOrganizer(nn.Module):
         relative: torch.Tensor,
         *,
         scorer: nn.Module | None = None,
+        mechanism: str = "QM",
+        budget_fraction: torch.Tensor | float = 1.0,
     ) -> torch.Tensor:
         node_count, source_count = int(nodes.shape[0]), int(sources.shape[0])
+        budget = torch.as_tensor(budget_fraction, device=nodes.device, dtype=nodes.dtype)
+        if budget.numel() != 1:
+            raise ValueError("one scalar mechanism budget is required for each typed source score")
+        conditioned_nodes = nodes * budget.reshape(1, 1)
         chunks: list[torch.Tensor] = []
         for start in range(0, source_count, self.source_chunk_size):
             stop = min(source_count, start + self.source_chunk_size)
-            node_block = nodes[:, None, :].expand(-1, stop - start, -1)
+            node_block = conditioned_nodes[:, None, :].expand(-1, stop - start, -1)
             source_block = sources[None, start:stop, :].expand(node_count, -1, -1)
             relative_block = relative[:, start:stop, :]
             pair_features = torch.cat((
@@ -407,6 +507,31 @@ class InputOnlyCoverOrganizer(nn.Module):
             chunks.append((self.pair_scorer if scorer is None else scorer)(pair_features).squeeze(-1))
         return torch.cat(chunks, dim=1)
 
+    def score_frontiers(
+        self,
+        scores: OrganizerScores,
+        tree: CaseLocalReceiverTree,
+        *,
+        budget_vector: torch.Tensor | None = None,
+        cuts: Sequence[Sequence[int]] | None = None,
+        max_depth: int = 3,
+    ) -> FrontierUtilityPrediction:
+        """Predict Stage-B per-role distortion and utility for each cut."""
+
+        if scores.node_embeddings is None:
+            raise ValueError("frontier utility requires node embeddings from score_cases")
+        if self.frontier_utility_head is None:
+            raise RuntimeError(
+                "frontier utility is disabled; construct the organizer with frontier_utility_enabled=True"
+            )
+        selected_cuts = tuple(cuts) if cuts is not None else enumerate_frontier_cuts(
+            tree, max_depth=max_depth
+        )
+        budget = scores.budget_vector if budget_vector is None else budget_vector
+        if budget is None:
+            budget = scores.node_embeddings.new_ones((self.budget_dim,))
+        return self.frontier_utility_head(scores.node_embeddings, selected_cuts, budget)
+
     def plans_from_scores(
         self,
         scores: Sequence[OrganizerScores],
@@ -415,6 +540,8 @@ class InputOnlyCoverOrganizer(nn.Module):
         *,
         hard: bool,
         straight_through_hard: bool = False,
+        frontier_cuts: Sequence[Sequence[int]] | None = None,
+        budget_fractions: Mapping[str, float] | None = None,
     ) -> tuple[MechanismPlan, ...]:
         """Build typed plans from scores.
 
@@ -429,13 +556,27 @@ class InputOnlyCoverOrganizer(nn.Module):
             raise ValueError("straight-through hard plans require hard=True")
         if len(scores) != len(trees) or len(trees) != int(encoded.module_present.shape[0]):
             raise ValueError("scores, geometry trees, and encoded cases must align")
+        if frontier_cuts is not None and len(frontier_cuts) != len(trees):
+            raise ValueError("one explicit frontier cut is required per case")
+        normalized_budgets: dict[str, float] = {}
+        for mechanism, fraction in (budget_fractions or {}).items():
+            key = str(mechanism).upper()
+            if key not in INTERACTION_MECHANISMS:
+                raise ValueError(f"unsupported mechanism budget {mechanism!r}")
+            value = float(fraction)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError("budget fractions must lie in [0,1]")
+            normalized_budgets[key] = value
+        budgeted_trial = budget_fractions is not None
         plans: list[MechanismPlan] = []
         for case, (item, tree) in enumerate(zip(scores, trees, strict=True)):
             internal = torch.tensor(
                 [not node.is_leaf for node in tree.nodes], device=item.split_logits.device, dtype=torch.bool
             )
             split_probabilities = torch.sigmoid(item.split_logits)
-            if hard:
+            if frontier_cuts is not None:
+                split = split_gates_for_frontier(tree, frontier_cuts[case])
+            elif hard:
                 split_decisions = (
                     item.split_logits >= torch.logit(item.split_logits.new_tensor(self.split_threshold))
                 ).to(item.split_logits.dtype)
@@ -457,8 +598,51 @@ class InputOnlyCoverOrganizer(nn.Module):
             permissions: dict[str, torch.Tensor] = {}
             for mechanism in INTERACTION_MECHANISMS:
                 logits = typed_scores[mechanism]
-                probabilities = torch.sigmoid(logits)
-                if hard:
+                fraction = normalized_budgets.get(mechanism)
+                if budgeted_trial and fraction is None:
+                    # Missing MechanismPlan keys have an explicit native
+                    # full-access meaning. Keep unbudgeted routes as bypasses
+                    # instead of accidentally thresholding their random init.
+                    continue
+                projection = None
+                if fraction is not None:
+                    catalog = canonical_pair_catalog(
+                        encoded, tree, mechanism, case_index=case
+                    )
+                    projection = project_unique_pair_budget(
+                        logits,
+                        tree,
+                        split.detach(),
+                        budget_fraction=fraction,
+                        source_validity=catalog.source_validity,
+                        receiver_validity=catalog.receiver_validity,
+                        pair_validity=catalog.pair_validity,
+                        receiver_weights=catalog.receiver_weights,
+                        receiver_coordinates=catalog.receiver_coordinates,
+                    )
+                if projection is not None:
+                    threshold = projection.threshold.to(device=logits.device, dtype=logits.dtype)
+                    if bool(torch.isinf(threshold)):
+                        active_nodes = (tree.access(
+                            canonical_pair_catalog(encoded, tree, mechanism, case_index=case).receiver_coordinates,
+                            split.detach(),
+                        ) > 0.0).any(dim=0)
+                        valid_scores = logits.detach()[
+                            active_nodes[:, None]
+                            & catalog.source_validity.to(device=logits.device)[None, :]
+                        ]
+                        if valid_scores.numel():
+                            # Empty hard projections still receive a finite,
+                            # nonzero restoration signal in the soft shadow.
+                            threshold = valid_scores.max() + 1.0
+                    probabilities = torch.sigmoid(logits - threshold)
+                    decisions = projection.membership.to(logits.dtype)
+                    membership = (
+                        decisions + (probabilities - probabilities.detach())
+                        if straight_through_hard else decisions
+                    ) if hard else probabilities
+                elif hard:
+                    probabilities = torch.sigmoid(logits)
                     decisions = (
                         logits >= torch.logit(logits.new_tensor(self.source_threshold))
                     ).to(logits.dtype)
@@ -467,7 +651,7 @@ class InputOnlyCoverOrganizer(nn.Module):
                         if straight_through_hard else decisions
                     )
                 else:
-                    membership = probabilities
+                    membership = torch.sigmoid(logits)
                 if mechanism in {"MM", "EM", "QM"}:
                     membership = membership * (present > 0.5).to(membership.dtype)[None, :]
                 permissions[mechanism] = membership
@@ -487,6 +671,9 @@ class InputOnlyCoverOrganizer(nn.Module):
         trees: Sequence[CaseLocalReceiverTree],
         *,
         straight_through_hard: bool = False,
+        budgets: Mapping[str, float | torch.Tensor] | torch.Tensor | None = None,
+        frontier_cuts: Sequence[Sequence[int]] | None = None,
+        budget_fractions: Mapping[str, float] | None = None,
     ) -> tuple[MechanismPlan, ...]:
         """Implement the native policy API; train mode is soft, eval is hard.
 
@@ -494,7 +681,7 @@ class InputOnlyCoverOrganizer(nn.Module):
         forward masks and sigmoid surrogate gradients through each decision.
         """
 
-        scores = self.score_cases(encoded, prepared_state, trees)
+        scores = self.score_cases(encoded, prepared_state, trees, budgets=budgets)
         hard = bool(straight_through_hard or not self.training)
         return self.plans_from_scores(
             scores,
@@ -502,6 +689,8 @@ class InputOnlyCoverOrganizer(nn.Module):
             trees,
             hard=hard,
             straight_through_hard=bool(straight_through_hard),
+            frontier_cuts=frontier_cuts,
+            budget_fractions=budget_fractions,
         )
 
     def hard_plan_cases(
@@ -509,9 +698,20 @@ class InputOnlyCoverOrganizer(nn.Module):
         encoded: EncodedInterfaceCase,
         prepared_state: Mapping[str, Any] | Any,
         trees: Sequence[CaseLocalReceiverTree],
+        *,
+        budgets: Mapping[str, float | torch.Tensor] | torch.Tensor | None = None,
+        frontier_cuts: Sequence[Sequence[int]] | None = None,
+        budget_fractions: Mapping[str, float] | None = None,
     ) -> tuple[MechanismPlan, ...]:
-        scores = self.score_cases(encoded, prepared_state, trees)
-        return self.plans_from_scores(scores, encoded, trees, hard=True)
+        scores = self.score_cases(encoded, prepared_state, trees, budgets=budgets)
+        return self.plans_from_scores(
+            scores,
+            encoded,
+            trees,
+            hard=True,
+            frontier_cuts=frontier_cuts,
+            budget_fractions=budget_fractions,
+        )
 
 
 __all__ = ["InputOnlyCoverOrganizer", "OrganizerScores", "masked_binary_logit_loss"]

@@ -604,7 +604,55 @@ def restore_checkpoint_payload(
         ],
     }
     if any(saved_config.get(key) != value for key, value in expected_config.items()):
-        raise ValueError("Resume checkpoint training schedule differs from the requested recipe.")
+        # Permit a bounded, exact continuation when the checkpoint has reached
+        # the old recipe's terminal update and the only requested change is to
+        # extend that same terminal stage. Model, optimizer, RNG, sampler, loss
+        # ramps, and the complete pre-extension schedule must still match.
+        old_cap = int(saved_config.get("max_optimizer_updates", -1))
+        new_cap = int(config.max_optimizer_updates)
+        completed_for_extension = int(payload.get("actual_optimizer_updates", -1))
+        extension_fields = {
+            "max_optimizer_updates",
+            "max_epochs",
+            "total_optimizer_update_ceiling",
+            "review_updates",
+            "stages",
+        }
+        can_extend_terminal_stage = (
+            old_cap > 0
+            and new_cap > old_cap
+            and completed_for_extension == old_cap
+            and int(saved_config.get("max_epochs", -1)) == old_cap
+            and int(saved_config.get("total_optimizer_update_ceiling", -1)) == old_cap
+            and list(saved_config.get("review_updates", ())) == [old_cap]
+            and int(expected_config["max_epochs"]) == new_cap
+            and int(expected_config["total_optimizer_update_ceiling"]) == new_cap
+            and list(expected_config["review_updates"]) == [new_cap]
+            and len(saved_config.get("stages", ())) == len(expected_config["stages"])
+            and len(expected_config["stages"]) > 0
+        )
+        if can_extend_terminal_stage:
+            saved_stages = list(saved_config["stages"])
+            requested_stages = list(expected_config["stages"])
+            final_saved = dict(saved_stages[-1])
+            final_requested = dict(requested_stages[-1])
+            final_saved_stop = int(final_saved.pop("stop_update", -1))
+            final_requested_stop = int(final_requested.pop("stop_update", -1))
+            can_extend_terminal_stage = (
+                final_saved_stop == old_cap
+                and final_requested_stop == new_cap
+                and final_saved == final_requested
+                and saved_stages[:-1] == requested_stages[:-1]
+            )
+        if can_extend_terminal_stage:
+            for key, value in expected_config.items():
+                if key in extension_fields:
+                    continue
+                if saved_config.get(key) != value:
+                    can_extend_terminal_stage = False
+                    break
+        if not can_extend_terminal_stage:
+            raise ValueError("Resume checkpoint training schedule differs from the requested recipe.")
     model.load_state_dict(payload["model"], strict=True)
     optimizer.load_state_dict(payload["optimizer"])
     random.setstate(payload["python_rng_state"])
@@ -646,6 +694,7 @@ def run_staged_fit(
     on_checkpoint: Callable[[Mapping[str, Any], str], None] | None = None,
     on_optimizer_attempt: Callable[[int, int], None] | None = None,
     on_review: Callable[[TrainingStep], str | None] | None = None,
+    on_step: Callable[[TrainingStep], None] | None = None,
     fixed_heat_controls: Sequence[FixedHeatNullControl] = (),
 ) -> StagedFitResult:
     """Fit a fixed training panel and count each successful optimizer step.
@@ -693,8 +742,6 @@ def run_staged_fit(
         raise ValueError("initial_update exceeds the effective update cap for this panel.")
     if stop_at_update is not None:
         stop_at_update = int(stop_at_update)
-        if stop_at_update not in config.review_updates:
-            raise ValueError("stop_at_update must be one of the configured review gates.")
         if stop_at_update <= initial_update or stop_at_update > total_cap:
             raise ValueError("stop_at_update must be ahead of the resume point and within the effective cap.")
 
@@ -927,6 +974,8 @@ def run_staged_fit(
             response_gradient_dot_before=projection_dots,
         )
         history.append(step)
+        if on_step is not None:
+            on_step(step)
         review_decision = None
         is_review = completed in config.review_updates
         if on_review is not None and is_review:
@@ -996,7 +1045,9 @@ def run_staged_fit(
                         attempted,
                     ) from exc
         if completed == stop_at_update or review_decision == "stop" or wall_expired:
-            stopped_at_review = completed == stop_at_update or review_decision == "stop"
+            stopped_at_review = review_decision == "stop" or (
+                completed == stop_at_update and completed in config.review_updates
+            )
             break
 
     return StagedFitResult(

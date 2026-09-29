@@ -316,6 +316,78 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
             )
             current_universe = self._default_universe(encoded, case)
             frozen_universe = plan.tree.universe
+            if plan.direct_access or plan.direct_policies:
+                # Direct receiver/source matrices are candidate-built physical
+                # permissions. Never move them to another geometry by
+                # rebinding a fixed plan; the caller must score a new plan for
+                # the current design. Query panels are checked again by the
+                # exact access_for call at decode time.
+                for name, current, frozen in (
+                    ("receiver anchor coordinates", current_universe.coordinates, frozen_universe.coordinates),
+                    ("receiver anchor weights", current_universe.weights, frozen_universe.weights),
+                    ("receiver roles", current_universe.roles, frozen_universe.roles),
+                    ("coordinate normalization", current_universe.coordinate_scale, frozen_universe.coordinate_scale),
+                ):
+                    if current.shape != frozen.shape or not torch.equal(
+                        current.to(device=frozen.device, dtype=frozen.dtype), frozen
+                    ):
+                        raise ValueError(
+                            f"direct-pair plan for case {case} is stale for current {name}; rebuild it from this candidate"
+                        )
+                for key, direct in plan.direct_access.items():
+                    if key.mechanism in {"MM", "ME"}:
+                        expected_receivers = encoded.module_centers[case]
+                    elif key.mechanism == "EM":
+                        expected_receivers = encoded.env_coords[case]
+                    else:
+                        continue
+                    if direct.receiver_coordinates.shape != expected_receivers.shape or not torch.equal(
+                        direct.receiver_coordinates.to(
+                            device=expected_receivers.device, dtype=expected_receivers.dtype
+                        ),
+                        expected_receivers,
+                    ):
+                        raise ValueError(
+                            f"direct-pair {key.canonical_name} receiver panel is stale; rebuild it from this candidate"
+                        )
+                for key, policy in plan.direct_policies.items():
+                    if key.mechanism in {"MM", "EM", "QM"}:
+                        expected_coordinates = encoded.module_centers[case]
+                        expected_features = encoded.module_tokens[case]
+                        expected_validity = encoded.module_present[case]
+                    else:
+                        expected_coordinates = encoded.env_coords[case]
+                        expected_features = encoded.env_tokens[case]
+                        # DirectPairPolicy stores a Boolean validity mask, not
+                        # quadrature magnitudes. Positive environmental
+                        # measures remain eligible regardless of their scale.
+                        expected_validity = encoded.env_weights[case] > 0.0
+                    if (
+                        policy.source_coordinates.shape != expected_coordinates.shape
+                        or not torch.equal(
+                            policy.source_coordinates.to(
+                                device=expected_coordinates.device, dtype=expected_coordinates.dtype
+                            ),
+                            expected_coordinates,
+                        )
+                        or policy.source_features.shape != expected_features.shape
+                        or not torch.equal(
+                            policy.source_features.to(
+                                device=expected_features.device, dtype=expected_features.dtype
+                            ),
+                            expected_features,
+                        )
+                        or policy.source_validity.shape != expected_validity.shape
+                        or not torch.equal(
+                            policy.source_validity.to(
+                                device=expected_validity.device, dtype=expected_validity.dtype
+                            ),
+                            expected_validity,
+                        )
+                    ):
+                        raise ValueError(
+                            f"dynamic direct-pair {key.canonical_name} source binding is stale; rebuild it from this encoded candidate"
+                        )
             if current_universe.coordinates.shape != frozen_universe.coordinates.shape:
                 raise ValueError(f"fixed cover plan for case {case} has a different receiver-anchor shape")
             if current_universe.roles.shape != frozen_universe.roles.shape or not torch.equal(
@@ -397,10 +469,27 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
         if plan.split_gates.requires_grad:
             return True
         if isinstance(plan, MechanismPlan):
-            return any(
-                plan.permission_matrix(mechanism, phase=phase).requires_grad
-                for mechanism in mechanisms
-            )
+            for mechanism in mechanisms:
+                policy = plan.direct_pair_policy_for(mechanism, phase=phase)
+                if policy is not None:
+                    if (
+                        not policy.hard
+                        and float(policy.budget_fraction) < 1.0
+                        and any(
+                            parameter.requires_grad
+                            for parameter in getattr(policy.scorer, "parameters", lambda: ())()
+                        )
+                    ):
+                        return True
+                    continue
+                direct = plan.direct_pair_access_for(mechanism, phase=phase)
+                if direct is not None:
+                    if direct.weights.requires_grad:
+                        return True
+                    continue
+                if plan.permission_matrix(mechanism, phase=phase).requires_grad:
+                    return True
+            return False
         return (
             ("MM" in mechanisms or "EM" in mechanisms or "QM" in mechanisms)
             and plan.module_membership.requires_grad
@@ -443,6 +532,13 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
                     # custom bridge even though it is used by the executor.
                     if selected_key in plan.permissions:
                         add(plan.permissions[selected_key])
+                    direct_key = (
+                        phase_key
+                        if phase is not None and phase_key in plan.direct_access
+                        else base_key
+                    )
+                    if direct_key in plan.direct_access:
+                        add(plan.direct_access[direct_key].weights)
             else:
                 if "MM" in mechanisms or "EM" in mechanisms or "QM" in mechanisms:
                     add(plan.module_membership)
@@ -805,6 +901,7 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
         *,
         phase: str | None,
         module_present: torch.Tensor,
+        receiver_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if isinstance(plan, MechanismPlan):
             return plan.access_for(
@@ -813,6 +910,7 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
                 source_count,
                 phase=phase,
                 module_present=module_present if mechanism in {"MM", "EM", "QM"} else None,
+                receiver_features=receiver_features,
             )
         access = plan.access(receivers)
         values = access.module_source if mechanism in {"MM", "EM", "QM"} else access.environment_source
@@ -1095,6 +1193,13 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
                 for case, tree in enumerate(cover_trees)
             )
         self._validate_plans(encoded, cover_trees, cover_plans)
+        if any(
+            isinstance(plan, MechanismPlan) and (plan.direct_access or plan.direct_policies)
+            for plan in cover_plans
+        ) and self.cover_executor != "dense_masked":
+            raise ValueError(
+                "direct-pair P plans require the exact dense-masked native executor"
+            )
         phase = None if interaction_context is None else interaction_context.phase
         all_access = all(
             self.is_full_access_plan(
@@ -1266,11 +1371,13 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
         receivers: torch.Tensor,
         *,
         phase: str | None,
+        receiver_features: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         module_access = torch.stack([
             self._plan_access(
                 plan, "QM", receivers[case], int(encoded.module_present.shape[1]),
                 phase=phase, module_present=encoded.module_present[case],
+                receiver_features=None if receiver_features is None else receiver_features[case],
             )
             for case, plan in enumerate(plans)
         ])
@@ -1278,6 +1385,7 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
             self._plan_access(
                 plan, "QE", receivers[case], int(encoded.env_coords.shape[1]),
                 phase=phase, module_present=encoded.module_present[case],
+                receiver_features=None if receiver_features is None else receiver_features[case],
             )
             for case, plan in enumerate(plans)
         ])
@@ -1528,18 +1636,51 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
             for case, plan in enumerate(plans):
                 alpha = plan.tree.access(receivers[case], plan.split_gates)
                 if isinstance(plan, MechanismPlan):
-                    qm_membership = plan.permission_matrix("QM", phase=phase, module_present=encoded.module_present[case])
-                    qe_membership = plan.permission_matrix("QE", phase=phase)
+                    qm_direct = (
+                        plan.direct_pair_access_for("QM", phase=phase) is not None
+                        or plan.direct_pair_policy_for("QM", phase=phase) is not None
+                    )
+                    qe_direct = (
+                        plan.direct_pair_access_for("QE", phase=phase) is not None
+                        or plan.direct_pair_policy_for("QE", phase=phase) is not None
+                    )
+                    qm_membership = None if qm_direct else plan.permission_matrix(
+                        "QM", phase=phase, module_present=encoded.module_present[case]
+                    )
+                    qe_membership = None if qe_direct else plan.permission_matrix(
+                        "QE", phase=phase
+                    )
                 else:
                     qm_membership = plan.module_membership
                     qe_membership = plan.environment_membership
-                active_receiver_counts = (alpha > 0).sum(dim=0, dtype=torch.int64)
-                qm_source_counts = (qm_membership > 0).sum(dim=1, dtype=torch.int64)
-                qe_source_counts = (qe_membership > 0).sum(dim=1, dtype=torch.int64)
-                raw_paths_qm = raw_paths_qm + (active_receiver_counts * qm_source_counts).sum()
-                raw_paths_qe = raw_paths_qe + (active_receiver_counts * qe_source_counts).sum()
-                active_source_nodes = (qm_membership > 0).any(dim=1) | (qe_membership > 0).any(dim=1)
-                query_degrees.append(((alpha > 0) & active_source_nodes[None, :]).sum(dim=1))
+                if qm_membership is None:
+                    raw_paths_qm = raw_paths_qm + (module_access[case].detach() > 0).sum()
+                else:
+                    active_receiver_counts = (alpha > 0).sum(dim=0, dtype=torch.int64)
+                    qm_source_counts = (qm_membership > 0).sum(dim=1, dtype=torch.int64)
+                    raw_paths_qm = raw_paths_qm + (active_receiver_counts * qm_source_counts).sum()
+                if qe_membership is None:
+                    raw_paths_qe = raw_paths_qe + (environment_prior[case].detach() > 0).sum()
+                else:
+                    active_receiver_counts = (alpha > 0).sum(dim=0, dtype=torch.int64)
+                    qe_source_counts = (qe_membership > 0).sum(dim=1, dtype=torch.int64)
+                    raw_paths_qe = raw_paths_qe + (active_receiver_counts * qe_source_counts).sum()
+                if qm_membership is None and qe_membership is None:
+                    # Direct routes have no node or packet degree. Preserve
+                    # that distinction instead of synthesizing grouped K.
+                    query_degrees.append(torch.zeros(
+                        int(receivers.shape[1]), device=device, dtype=torch.long
+                    ))
+                elif qm_membership is None:
+                    assert qe_membership is not None
+                    active_source_nodes = (qe_membership > 0).any(dim=1)
+                    query_degrees.append(((alpha > 0) & active_source_nodes[None, :]).sum(dim=1))
+                elif qe_membership is None:
+                    active_source_nodes = (qm_membership > 0).any(dim=1)
+                    query_degrees.append(((alpha > 0) & active_source_nodes[None, :]).sum(dim=1))
+                else:
+                    active_source_nodes = (qm_membership > 0).any(dim=1) | (qe_membership > 0).any(dim=1)
+                    query_degrees.append(((alpha > 0) & active_source_nodes[None, :]).sum(dim=1))
             degree = torch.cat(query_degrees) if query_degrees else torch.zeros(0, device=device, dtype=torch.long)
             # The concrete rows and unions are authoritative. Frontier summaries
             # retain structural K diagnostics independently of execution.
@@ -1767,7 +1908,7 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
             )
         else:
             module_access, environment_access = self._query_accesses(
-                plans, encoded, receivers, phase=phase
+                plans, encoded, receivers, phase=phase, receiver_features=receiver_features
             )
         module_prior = module_access * (encoded.module_present > 0.5).to(module_access.dtype)[:, None, :]
         scale_rows = self._environment_scale_rows(encoded.coordinate_scale, batch)[:, 0, :]
@@ -1850,7 +1991,7 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
             )
         else:
             module_access, environment_access = self._query_accesses(
-                plans, encoded, receivers, phase=phase
+                plans, encoded, receivers, phase=phase, receiver_features=receiver_features
             )
         module_prior = module_access * (encoded.module_present > 0.5).to(module_access.dtype)[:, None, :]
         environment_prior, fallback = self._environment_access_prior(
@@ -2101,7 +2242,7 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
                 )
             else:
                 module_access, environment_access = self._query_accesses(
-                    plans, encoded, receivers, phase=phase
+                    plans, encoded, receivers, phase=phase, receiver_features=receiver_features
                 )
             module_prior = module_access * (encoded.module_present > 0.5).to(module_access.dtype)[:, None, :]
             environment_prior, fallback = self._environment_access_prior(
@@ -2230,7 +2371,7 @@ class AdaptiveCoverPairwiseField(RoutedPairwiseField):
                 sum(item.qe_raw_paths for item in ledgers), device=receivers.device
             )
         module_access, environment_access = self._query_accesses(
-            plans, encoded, receivers, phase=phase
+            plans, encoded, receivers, phase=phase, receiver_features=receiver_features
         )
         module_prior = module_access * (encoded.module_present > 0.5).to(module_access.dtype)[:, None, :]
         environment_prior, fallback = self._environment_access_prior(

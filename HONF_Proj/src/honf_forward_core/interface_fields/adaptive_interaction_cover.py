@@ -14,7 +14,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 
@@ -290,6 +290,128 @@ class CoverAccess:
 
 
 @dataclass(frozen=True)
+class DirectPairAccess:
+    """Exact independently scored physical receiver/source permissions."""
+
+    receiver_coordinates: torch.Tensor  # [R,d], current native receiver order
+    weights: torch.Tensor  # [R,S], hard support or differentiable soft shadow
+    receiver_validity: torch.Tensor | None = None  # [R], optional native row validity
+
+    def __post_init__(self) -> None:
+        if self.receiver_coordinates.ndim != 2 or self.weights.ndim != 2:
+            raise ValueError("direct pair access needs [R,d] coordinates and [R,S] weights")
+        if self.receiver_coordinates.shape[0] != self.weights.shape[0]:
+            raise ValueError("direct pair receiver coordinates and weights must align")
+        if self.receiver_validity is not None and self.receiver_validity.shape != self.weights.shape[:1]:
+            raise ValueError("direct pair receiver validity must align with receiver rows")
+        if not bool(torch.isfinite(self.receiver_coordinates).all()) or not bool(torch.isfinite(self.weights).all()):
+            raise ValueError("direct pair coordinates and weights must be finite")
+        if bool(((self.weights < 0.0) | (self.weights > 1.0)).any()):
+            raise ValueError("direct pair weights must lie in [0,1]")
+        if self.receiver_coordinates.device != self.weights.device:
+            raise ValueError("direct pair coordinates and weights must share one device")
+        if self.receiver_validity is not None and self.receiver_validity.device != self.weights.device:
+            raise ValueError("direct pair receiver validity and weights must share one device")
+        if self.receiver_validity is not None and not bool(torch.isfinite(self.receiver_validity).all()):
+            raise ValueError("direct pair receiver validity must be finite")
+
+
+@dataclass(frozen=True)
+class DirectPairPolicy:
+    """Runtime-only direct scorer for panels that are known only at read time."""
+
+    scorer: Any
+    source_coordinates: torch.Tensor  # [S,d], current input-only catalogue
+    source_features: torch.Tensor  # [S,F], detached current source encoding
+    source_validity: torch.Tensor  # [S]
+    hard_threshold: torch.Tensor  # scalar canonical threshold (may be +/-inf)
+    soft_threshold: torch.Tensor  # scalar finite restoration threshold
+    budget_fraction: float
+    hard: bool
+    temperature: float = 1.0
+
+    def __post_init__(self) -> None:
+        if not callable(self.scorer):
+            raise TypeError("direct pair policy scorer must be callable")
+        if self.source_coordinates.ndim != 2 or self.source_features.ndim != 2:
+            raise ValueError("dynamic direct sources require [S,d] coordinates and [S,F] features")
+        if self.source_coordinates.shape[0] != self.source_features.shape[0]:
+            raise ValueError("dynamic direct source coordinates and features must align")
+        if self.source_validity.shape != self.source_features.shape[:1]:
+            raise ValueError("dynamic direct source validity must align with sources")
+        if self.hard_threshold.numel() != 1 or self.soft_threshold.numel() != 1:
+            raise ValueError("dynamic direct thresholds must be scalar")
+        if not bool(torch.isfinite(self.source_coordinates).all()) or not bool(torch.isfinite(self.source_features).all()):
+            raise ValueError("dynamic direct source descriptors must be finite")
+        if not bool(torch.isfinite(self.source_validity).all()):
+            raise ValueError("dynamic direct source validity must be finite")
+        if not bool(torch.isfinite(self.soft_threshold).all()):
+            raise ValueError("dynamic direct soft threshold must be finite")
+        if not 0.0 <= float(self.budget_fraction) <= 1.0 or self.temperature <= 0.0:
+            raise ValueError("dynamic direct budget and temperature are invalid")
+        object.__setattr__(self, "source_coordinates", self.source_coordinates.detach().clone())
+        object.__setattr__(self, "source_features", self.source_features.detach().clone())
+        object.__setattr__(self, "source_validity", self.source_validity.detach().clone())
+        object.__setattr__(self, "hard_threshold", self.hard_threshold.detach().clone())
+        object.__setattr__(self, "soft_threshold", self.soft_threshold.detach().clone())
+
+    def access_for(
+        self,
+        mechanism: str,
+        receiver_coordinates: torch.Tensor,
+        receiver_features: torch.Tensor | None,
+        *,
+        receiver_validity: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Score one live native panel; only soft P mode carries score gradients."""
+
+        if receiver_features is None:
+            raise ValueError("dynamic direct P needs the current detached receiver features")
+        if receiver_coordinates.ndim != 2 or receiver_features.ndim != 2:
+            raise ValueError("dynamic direct receivers must be [R,d] coordinates and [R,F] features")
+        if receiver_coordinates.shape[0] != receiver_features.shape[0]:
+            raise ValueError("dynamic direct receiver coordinates and features must align")
+        if receiver_coordinates.shape[1] != self.source_coordinates.shape[1]:
+            raise ValueError("dynamic direct receivers and sources use different physical frames")
+        source_coordinates = self.source_coordinates.to(
+            device=receiver_coordinates.device, dtype=receiver_coordinates.dtype
+        )
+        source_features = self.source_features.to(
+            device=receiver_features.device, dtype=receiver_features.dtype
+        )
+        source_validity = self.source_validity.to(device=receiver_coordinates.device) > 0.5
+        eligible_rows = source_validity[None, :].expand(
+            int(receiver_coordinates.shape[0]), -1
+        )
+        if receiver_validity is not None:
+            if receiver_validity.shape != receiver_coordinates.shape[:1]:
+                raise ValueError("dynamic direct receiver validity must align with live rows")
+            eligible_rows = eligible_rows & (
+                receiver_validity.to(device=receiver_coordinates.device) > 0.5
+            )[:, None]
+        if float(self.budget_fraction) == 1.0:
+            # Matched full-access control/warm start: exact native all-source
+            # values and no direct scorer gradient until sparse adaptation.
+            return eligible_rows.to(receiver_features.dtype)
+        # This scorer is an independent routing control. Inputs are frozen;
+        # only scorer parameters receive gradients in soft P training.
+        scores = self.scorer(
+            receiver_features.detach(),
+            source_features,
+            receiver_coordinates.detach(),
+            source_coordinates,
+            mechanism=mechanism,
+            budget_fraction=float(self.budget_fraction),
+        )
+        eligible = eligible_rows.to(device=scores.device)
+        if self.hard:
+            threshold = self.hard_threshold.to(device=scores.device, dtype=scores.dtype)
+            return ((scores.detach() >= threshold) & eligible).to(scores.dtype)
+        threshold = self.soft_threshold.to(device=scores.device, dtype=scores.dtype)
+        return torch.sigmoid((scores - threshold) / float(self.temperature)) * eligible.to(scores.dtype)
+
+
+@dataclass(frozen=True)
 class AdaptiveCoverPlan:
     """One frozen case plan; learned scores must be converted before evaluation."""
 
@@ -376,6 +498,12 @@ class MechanismPlan:
     permissions: Mapping[
         InteractionPermissionKey | str | tuple[str, str | None], torch.Tensor
     ] = field(default_factory=dict)
+    direct_access: Mapping[
+        InteractionPermissionKey | str | tuple[str, str | None], DirectPairAccess
+    ] = field(default_factory=dict)
+    direct_policies: Mapping[
+        InteractionPermissionKey | str | tuple[str, str | None], DirectPairPolicy
+    ] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         node_count = len(self.tree.nodes)
@@ -411,9 +539,44 @@ class MechanismPlan:
             if not bool(torch.isfinite(value).all()) or bool(((value < 0) | (value > 1)).any()):
                 raise ValueError("permissions must be finite and in [0,1]")
             normalized[key] = value.clone()
+        direct: dict[InteractionPermissionKey, DirectPairAccess] = {}
+        for raw_key, raw_value in self.direct_access.items():
+            key = InteractionPermissionKey.coerce(raw_key)
+            if key in direct:
+                raise ValueError(f"duplicate normalized direct access key {key.canonical_name!r}")
+            if not isinstance(raw_value, DirectPairAccess):
+                raise TypeError("direct_access values must be DirectPairAccess records")
+            source_count = self._source_count(key.mechanism)
+            if raw_value.weights.shape[1] != source_count:
+                raise ValueError(f"direct access {key.canonical_name} source order does not match the plan")
+            if raw_value.weights.device != self.split_gates.device:
+                raise ValueError("direct access, split gates, and receiver tree must share one device")
+            if raw_value.receiver_coordinates.shape[1] != self.tree.universe.coordinates.shape[1]:
+                raise ValueError("direct access coordinates use a different physical frame")
+            direct[key] = DirectPairAccess(
+                raw_value.receiver_coordinates.detach().clone(),
+                raw_value.weights.clone(),
+                None if raw_value.receiver_validity is None else raw_value.receiver_validity.detach().clone(),
+            )
+        policies: dict[InteractionPermissionKey, DirectPairPolicy] = {}
+        for raw_key, raw_value in self.direct_policies.items():
+            key = InteractionPermissionKey.coerce(raw_key)
+            if key in policies:
+                raise ValueError(f"duplicate normalized direct policy key {key.canonical_name!r}")
+            if key in direct:
+                raise ValueError(f"route {key.canonical_name} cannot have both fixed and dynamic direct access")
+            if not isinstance(raw_value, DirectPairPolicy):
+                raise TypeError("direct_policies values must be DirectPairPolicy records")
+            if raw_value.source_coordinates.shape[1] != self.tree.universe.coordinates.shape[1]:
+                raise ValueError("direct policy source coordinates use a different physical frame")
+            if raw_value.source_features.device != self.split_gates.device:
+                raise ValueError("direct policy sources, split gates, and tree must share a device")
+            policies[key] = raw_value
         object.__setattr__(self, "split_gates", self.split_gates.clone())
         object.__setattr__(self, "module_present", self.module_present.clone())
         object.__setattr__(self, "permissions", MappingProxyType(normalized))
+        object.__setattr__(self, "direct_access", MappingProxyType(direct))
+        object.__setattr__(self, "direct_policies", MappingProxyType(policies))
 
     def _source_count(self, mechanism: InteractionMechanism) -> int:
         return int(self.module_present.numel()) if mechanism in {"MM", "EM", "QM"} else int(self.environment_count)
@@ -482,14 +645,50 @@ class MechanismPlan:
             mechanism
             for mechanism in INTERACTION_MECHANISMS
             if InteractionPermissionKey(mechanism) not in self.permissions
+            and InteractionPermissionKey(mechanism) not in self.direct_access
+            and InteractionPermissionKey(mechanism) not in self.direct_policies
         )
 
     @property
     def explicit_phase_keys(self) -> tuple[str, ...]:
-        return tuple(sorted(key.canonical_name for key in self.permissions if key.phase is not None))
+        return tuple(sorted(
+            key.canonical_name
+            for key in (*self.permissions.keys(), *self.direct_access.keys(), *self.direct_policies.keys())
+            if key.phase is not None
+        ))
+
+    def direct_pair_access_for(
+        self, mechanism: str, *, phase: str | None = None
+    ) -> DirectPairAccess | None:
+        """Resolve an exact physical-pair route, preserving its receiver panel."""
+
+        base_key = InteractionPermissionKey(mechanism)
+        selected_key = InteractionPermissionKey(mechanism, phase)
+        if phase is not None and selected_key in self.direct_access:
+            return self.direct_access[selected_key]
+        return self.direct_access.get(base_key)
+
+    def direct_pair_policy_for(
+        self, mechanism: str, *, phase: str | None = None
+    ) -> DirectPairPolicy | None:
+        """Resolve the runtime-only scorer for a dynamic native receiver panel."""
+
+        base_key = InteractionPermissionKey(mechanism)
+        selected_key = InteractionPermissionKey(mechanism, phase)
+        if phase is not None and selected_key in self.direct_policies:
+            return self.direct_policies[selected_key]
+        return self.direct_policies.get(base_key)
 
     def permission_status(self, mechanism: str, *, phase: str | None = None) -> str:
         key = InteractionPermissionKey.coerce((mechanism, phase))
+        if key in self.direct_access:
+            return "direct_pair_permission"
+        if key in self.direct_policies:
+            return "direct_pair_policy_runtime"
+        if phase is not None and InteractionPermissionKey(mechanism) in self.direct_access:
+            return "direct_pair_permission_inherited"
+        if phase is not None and InteractionPermissionKey(mechanism) in self.direct_policies:
+            return "direct_pair_policy_inherited"
         if key in self.permissions:
             return "phase_permission" if phase is not None else "mechanism_permission"
         if phase is not None and InteractionPermissionKey(mechanism) in self.permissions:
@@ -504,7 +703,36 @@ class MechanismPlan:
         phase: str | None = None,
         module_present: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Resolve a typed mask and apply module padding validity."""
+        """Resolve a node/source mask and apply module padding validity.
+
+        Exact direct-pair routes have no faithful node/source matrix. Callers
+        must use ``access_for`` or ``direct_pair_access_for`` for those routes.
+        """
+
+        if (
+            self.direct_pair_access_for(mechanism, phase=phase) is not None
+            or self.direct_pair_policy_for(mechanism, phase=phase) is not None
+        ):
+            key = InteractionPermissionKey(mechanism, phase)
+            raise ValueError(
+                f"{key.canonical_name} is an exact direct-pair route; its access cannot be represented as node memberships"
+            )
+        return self.node_permission_matrix(
+            mechanism,
+            source_count,
+            phase=phase,
+            module_present=module_present,
+        )
+
+    def node_permission_matrix(
+        self,
+        mechanism: str,
+        source_count: int | None = None,
+        *,
+        phase: str | None = None,
+        module_present: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Resolve the stored node/source fallback, without direct overrides."""
 
         base_key = InteractionPermissionKey(mechanism)
         selected_key = InteractionPermissionKey(mechanism, phase)
@@ -533,8 +761,55 @@ class MechanismPlan:
         *,
         phase: str | None = None,
         module_present: torch.Tensor | None = None,
+        receiver_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Return one typed receiver/source access matrix ``[Q,S]``."""
+
+        policy = self.direct_pair_policy_for(mechanism, phase=phase)
+        if policy is not None:
+            expected_count = self._source_count(InteractionPermissionKey(mechanism).mechanism)
+            if source_count is not None and int(source_count) != expected_count:
+                raise ValueError(f"{mechanism} source count must be {expected_count}")
+            values = policy.access_for(
+                mechanism,
+                receivers,
+                receiver_features,
+                receiver_validity=None,
+            )
+            if InteractionPermissionKey(mechanism).mechanism in {"MM", "EM", "QM"}:
+                valid = self.module_present if module_present is None else module_present
+                if valid.shape != (expected_count,):
+                    raise ValueError("module validity does not match the typed module source axis")
+                values = values * (valid.to(device=values.device) > 0.5).to(values.dtype)[None, :]
+            return values
+        direct = self.direct_pair_access_for(mechanism, phase=phase)
+        if direct is not None:
+            base_key = InteractionPermissionKey(mechanism)
+            expected_count = self._source_count(base_key.mechanism)
+            if source_count is not None and int(source_count) != expected_count:
+                raise ValueError(f"{mechanism} source count must be {expected_count}")
+            coordinates = receivers.to(
+                device=direct.receiver_coordinates.device,
+                dtype=direct.receiver_coordinates.dtype,
+            )
+            if coordinates.shape != direct.receiver_coordinates.shape or not torch.equal(
+                coordinates.detach(), direct.receiver_coordinates
+            ):
+                direct_key = InteractionPermissionKey(mechanism, phase)
+                raise ValueError(
+                    f"direct {direct_key.canonical_name} access was built for a different receiver panel/order"
+                )
+            values = direct.weights
+            if base_key.mechanism in {"MM", "EM", "QM"}:
+                valid = self.module_present if module_present is None else module_present
+                if valid.shape != (expected_count,):
+                    raise ValueError("module validity does not match the typed module source axis")
+                values = values * (valid.to(device=values.device) > 0.5).to(values.dtype)[None, :]
+            if direct.receiver_validity is not None:
+                values = values * (direct.receiver_validity.to(device=values.device) > 0.5).to(
+                    values.dtype
+                )[:, None]
+            return values
 
         alpha = self.tree.access(receivers, self.split_gates)
         membership = self.permission_matrix(
@@ -544,6 +819,16 @@ class MechanismPlan:
 
     def access(self, queries: torch.Tensor) -> CoverAccess:
         """Compatibility view with QM/QE sources for existing diagnostics."""
+
+        if (
+            self.direct_pair_access_for("QM") is not None
+            or self.direct_pair_access_for("QE") is not None
+            or self.direct_pair_policy_for("QM") is not None
+            or self.direct_pair_policy_for("QE") is not None
+        ):
+            raise ValueError(
+                "direct query routes cannot be represented by CoverAccess; call access_for with the typed physical panel"
+            )
 
         alpha = self.tree.access(queries, self.split_gates)
         module = self.access_for("QM", queries)
@@ -581,6 +866,67 @@ class MechanismPlan:
         permissions[key] = membership
         return replace(self, permissions=permissions)
 
+    def with_direct_pair_access(
+        self,
+        mechanism: str,
+        receiver_coordinates: torch.Tensor,
+        weights: torch.Tensor,
+        *,
+        phase: str | None = None,
+        receiver_validity: torch.Tensor | None = None,
+    ) -> MechanismPlan:
+        """Attach exact receiver/source access without a tree approximation.
+
+        The receiver panel and its order are part of the frozen direct plan.
+        Native execution rejects a different panel rather than silently
+        rebinding the independently scored physical pairs.
+        """
+
+        key = InteractionPermissionKey(mechanism, phase)
+        direct = dict(self.direct_access)
+        direct[key] = DirectPairAccess(
+            receiver_coordinates.detach(), weights, receiver_validity
+        )
+        return replace(self, direct_access=direct)
+
+    def with_direct_pair_policy(
+        self,
+        mechanism: str,
+        scorer: Any,
+        *,
+        source_coordinates: torch.Tensor,
+        source_features: torch.Tensor,
+        source_validity: torch.Tensor,
+        hard_threshold: torch.Tensor,
+        soft_threshold: torch.Tensor,
+        budget_fraction: float,
+        hard: bool,
+        temperature: float = 1.0,
+        phase: str | None = None,
+    ) -> MechanismPlan:
+        """Attach an independently scored route evaluated on live read panels.
+
+        Source descriptors are frozen input-only tensors. The core revalidates
+        them against the candidate's module or environmental catalogue at
+        every fixed-plan bind. Query receiver features are supplied by the
+        native read and detached inside the policy.
+        """
+
+        key = InteractionPermissionKey(mechanism, phase)
+        policies = dict(self.direct_policies)
+        policies[key] = DirectPairPolicy(
+            scorer=scorer,
+            source_coordinates=source_coordinates,
+            source_features=source_features,
+            source_validity=source_validity,
+            hard_threshold=hard_threshold,
+            soft_threshold=soft_threshold,
+            budget_fraction=float(budget_fraction),
+            hard=bool(hard),
+            temperature=float(temperature),
+        )
+        return replace(self, direct_policies=policies)
+
     def active_node_mask(self, receivers: torch.Tensor | None = None) -> torch.Tensor:
         if receivers is None:
             receivers = self.tree.universe.coordinates
@@ -590,7 +936,11 @@ class MechanismPlan:
         active = self.active_node_mask()
         source_bearing = torch.zeros_like(active)
         for mechanism in INTERACTION_MECHANISMS:
-            source_bearing |= (self.permission_matrix(mechanism) > 0).any(dim=1)
+            if (
+                self.direct_pair_access_for(mechanism) is None
+                and self.direct_pair_policy_for(mechanism) is None
+            ):
+                source_bearing |= (self.permission_matrix(mechanism) > 0).any(dim=1)
         return int((active & source_bearing).sum())
 
     def is_full_access(
@@ -615,6 +965,28 @@ class MechanismPlan:
             frontier = tuple(children_next)
         reachable_indices = sorted(reachable)
         for mechanism in mechanisms:
+            # A dynamic policy is evaluated for the live read panel and is
+            # never eligible for a native full-access shortcut.
+            if self.direct_pair_policy_for(mechanism, phase=phase) is not None:
+                return False
+            direct = self.direct_pair_access_for(mechanism, phase=phase)
+            if direct is not None:
+                expected = (
+                    (self.module_present > 0.5).to(direct.weights.dtype)
+                    if mechanism in {"MM", "EM", "QM"}
+                    else direct.weights.new_ones((direct.weights.shape[1],))
+                )
+                expected_rows = expected[None, :].expand_as(direct.weights)
+                if direct.receiver_validity is not None:
+                    expected_rows = expected_rows * (
+                        direct.receiver_validity.detach().to(expected_rows.dtype) > 0.5
+                    ).to(expected_rows.dtype)[:, None]
+                if not torch.equal(
+                    direct.weights.detach(),
+                    expected_rows,
+                ):
+                    return False
+                continue
             matrix = self.permission_matrix(mechanism, phase=phase)
             expected = (
                 (self.module_present > 0.5).to(matrix.dtype)
@@ -639,6 +1011,30 @@ class MechanismPlan:
 
         if receivers is None:
             receivers = self.tree.universe.coordinates
+        direct = self.direct_pair_access_for(mechanism, phase=phase)
+        if direct is not None:
+            live = direct.weights.detach() > 0.0
+            return CoverFrontierSummary(
+                InteractionPermissionKey(mechanism).mechanism,
+                phase,
+                len(self.tree.nodes),
+                0,
+                0,
+                0,
+                int(live.any(dim=0).sum()),
+                int(live.sum()),
+            )
+        if self.direct_pair_policy_for(mechanism, phase=phase) is not None:
+            return CoverFrontierSummary(
+                InteractionPermissionKey(mechanism, phase).mechanism,
+                phase,
+                len(self.tree.nodes),
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
         alpha = self.tree.access(receivers, self.split_gates)
         active_nodes = (alpha > 0).any(dim=0)
         membership = self.permission_matrix(mechanism, phase=phase)
@@ -665,6 +1061,9 @@ class MechanismPlan:
 
     def canonical_hash(self) -> str:
         """Return a device-independent hash of geometry and every effective permission."""
+
+        if self.direct_policies:
+            raise ValueError("dynamic direct-pair policies are runtime-only and cannot be hashed for persistence")
 
         digest = hashlib.sha256()
 
@@ -708,11 +1107,23 @@ class MechanismPlan:
         for mechanism, phase in contexts:
             key = InteractionPermissionKey(mechanism, phase)
             digest.update(key.canonical_name.encode("utf-8"))
-            add_tensor(key.canonical_name, self.permission_matrix(mechanism, phase=phase))
+            add_tensor(key.canonical_name, self.node_permission_matrix(mechanism, phase=phase))
+        if self.direct_access:
+            for key, direct in sorted(
+                self.direct_access.items(), key=lambda item: item[0].canonical_name
+            ):
+                digest.update(f"direct:{key.canonical_name}".encode())
+                add_tensor(f"direct_coordinates:{key.canonical_name}", direct.receiver_coordinates)
+                add_tensor(f"direct_weights:{key.canonical_name}", direct.weights)
+                if direct.receiver_validity is not None:
+                    add_tensor(f"direct_receiver_validity:{key.canonical_name}", direct.receiver_validity)
         return digest.hexdigest()
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-compatible, stable serialization of this plan."""
+
+        if self.direct_policies:
+            raise ValueError("dynamic direct-pair policies are runtime-only and cannot be serialized")
 
         universe = self.tree.universe
         return {
@@ -742,6 +1153,18 @@ class MechanismPlan:
             "permissions": {
                 key.canonical_name: value.detach().cpu().tolist()
                 for key, value in sorted(self.permissions.items(), key=lambda item: item[0].canonical_name)
+            },
+            "direct_access": {
+                key.canonical_name: {
+                    "receiver_coordinates": direct.receiver_coordinates.detach().cpu().tolist(),
+                    "weights": direct.weights.detach().cpu().tolist(),
+                    "receiver_validity": None
+                    if direct.receiver_validity is None
+                    else direct.receiver_validity.detach().cpu().tolist(),
+                }
+                for key, direct in sorted(
+                    self.direct_access.items(), key=lambda item: item[0].canonical_name
+                )
             },
             "canonical_hash": self.canonical_hash(),
         }
@@ -784,6 +1207,9 @@ class MechanismPlan:
         permissions_payload = payload.get("permissions", {})
         if not isinstance(permissions_payload, Mapping):
             raise TypeError("serialized permissions must be a mapping")
+        direct_payload = payload.get("direct_access", {})
+        if not isinstance(direct_payload, Mapping):
+            raise TypeError("serialized direct access must be a mapping")
         result = cls(
             tree,
             torch.as_tensor(payload["split_gates"], device=target_device, dtype=dtype),
@@ -792,6 +1218,16 @@ class MechanismPlan:
             {
                 str(key): torch.as_tensor(value, device=target_device, dtype=dtype)
                 for key, value in permissions_payload.items()
+            },
+            {
+                str(key): DirectPairAccess(
+                    torch.as_tensor(value["receiver_coordinates"], device=target_device, dtype=dtype),
+                    torch.as_tensor(value["weights"], device=target_device, dtype=dtype),
+                    None
+                    if value.get("receiver_validity") is None
+                    else torch.as_tensor(value["receiver_validity"], device=target_device, dtype=dtype),
+                )
+                for key, value in direct_payload.items()
             },
         )
         declared_bypasses = payload.get("explicit_bypass_keys")
@@ -820,6 +1256,30 @@ def _compiled_plan_tensor_versions(
             (f"permission:{key.canonical_name}", value)
             for key, value in sorted(plan.permissions.items(), key=lambda item: item[0].canonical_name)
         )
+        for key, value in sorted(
+            plan.direct_access.items(), key=lambda item: item[0].canonical_name
+        ):
+            tensors.extend((
+                (f"direct_coordinates:{key.canonical_name}", value.receiver_coordinates),
+                (f"direct_weights:{key.canonical_name}", value.weights),
+            ))
+            if value.receiver_validity is not None:
+                tensors.append((f"direct_receiver_validity:{key.canonical_name}", value.receiver_validity))
+        for key, policy in sorted(
+            plan.direct_policies.items(), key=lambda item: item[0].canonical_name
+        ):
+            tensors.extend((
+                (f"direct_policy_coordinates:{key.canonical_name}", policy.source_coordinates),
+                (f"direct_policy_features:{key.canonical_name}", policy.source_features),
+                (f"direct_policy_validity:{key.canonical_name}", policy.source_validity),
+                (f"direct_policy_hard_threshold:{key.canonical_name}", policy.hard_threshold),
+                (f"direct_policy_soft_threshold:{key.canonical_name}", policy.soft_threshold),
+            ))
+            scorer_parameters = getattr(policy.scorer, "named_parameters", lambda: ())()
+            tensors.extend(
+                (f"direct_policy_scorer:{key.canonical_name}:{name}", tensor)
+                for name, tensor in scorer_parameters
+            )
     else:
         tensors.extend((
             ("module_membership", plan.module_membership),
@@ -1000,6 +1460,11 @@ def compile_mechanism_execution_view(
         raise ValueError("execution view environment source ordering does not match the prepared case")
     if typed.split_gates.device != module_present.device:
         raise ValueError("execution view plan and prepared source catalogue must share a device")
+    if typed.direct_access or typed.direct_policies:
+        raise ValueError(
+            "direct receiver/source plans cannot be represented by compiled node memberships; "
+            "use the exact native reference executor"
+        )
 
     # The anchor universe defines which plan nodes are structurally active.
     # It is intentionally detached: this metadata never participates in trial

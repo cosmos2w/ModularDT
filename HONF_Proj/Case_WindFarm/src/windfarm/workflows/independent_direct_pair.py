@@ -990,13 +990,16 @@ def build_matched_direct_pair_control(
     }
     root = typed_fit._typed_root_permissions_plan(record, supports)
     direct_plan = typed_fit._TypedDirectPairPlan(
-        root.tree,
-        root.split_gates,
-        root.module_present,
-        root.environment_count,
-        root.permissions,
-        matrices,
-        {mechanism: pair_inputs[mechanism].receiver_coordinates for mechanism in INTERACTION_MECHANISMS},
+        tree=root.tree,
+        split_gates=root.split_gates,
+        module_present=root.module_present,
+        environment_count=root.environment_count,
+        permissions=root.permissions,
+        direct_pair_access=matrices,
+        direct_receiver_coordinates={
+            mechanism: pair_inputs[mechanism].receiver_coordinates
+            for mechanism in INTERACTION_MECHANISMS
+        },
     )
     exact_work = base._typed_work_summary(
         direct_plan, record.encoded, query_receivers, include_root_child_support=False

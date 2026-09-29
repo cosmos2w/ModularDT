@@ -193,6 +193,8 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
         case_edge_probe_relative_rms_tolerance: Optional[float] = None,
         case_edge_probe_channel_tolerance: Optional[float] = None,
         fixed_cover_plans: tuple[Any, ...] | None = None,
+        return_packet_inputs: bool = False,
+        cover_plan_builder: Any | None = None,
     ) -> Dict[str, Any]:
         """Predict the global field and per-module thermal responses.
 
@@ -241,6 +243,8 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
                 case_edge_probe_relative_rms_tolerance=case_edge_probe_relative_rms_tolerance,
                 case_edge_probe_channel_tolerance=case_edge_probe_channel_tolerance,
                 fixed_cover_plans=fixed_cover_plans,
+                return_packet_inputs=return_packet_inputs,
+                cover_plan_builder=cover_plan_builder,
             )
 
         if fixed_cover_plans is not None:
