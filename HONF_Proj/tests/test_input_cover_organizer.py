@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 
 from honf_forward_core.interface_fields.adaptive_interaction_cover import (
+    INTERACTION_MECHANISMS,
     CaseLocalReceiverTree,
     MechanismPlan,
     ReceiverAnchorUniverse,
@@ -85,6 +86,132 @@ def test_input_only_organizer_returns_hard_case_plans_and_masks_padding() -> Non
             assert set(plan.permission_matrix(mechanism).unique().tolist()) <= {0.0, 1.0}
     assert not bool(plans[0].module_membership[:, 2].any())
     assert not bool(plans[1].module_membership[:, 2].any())
+
+
+def test_budgeted_plans_distinguish_full_zero_and_empty_partial_tie() -> None:
+    encoded_batch = _encoded()
+    encoded = EncodedInterfaceCase(
+        **{
+            name: value[:1]
+            if isinstance(value, torch.Tensor) and value.ndim > 0 and value.shape[0] == 2
+            else value
+            for name, value in encoded_batch.__dict__.items()
+        }
+    )
+    encoded = EncodedInterfaceCase(
+        **{
+            **encoded.__dict__,
+            # Exercise the environment source-validity mask independently of
+            # the padded module mask.
+            "env_weights": torch.tensor([[1.0, 1.0, 1.0, 0.0]]),
+        }
+    )
+    tree = _tree(torch.device("cpu"))
+    nodes = len(tree.nodes)
+    typed = {
+        "MM": torch.nn.Parameter(torch.full((nodes, 3), 0.5)),
+        "ME": torch.nn.Parameter(torch.full((nodes, 4), 0.5)),
+        "EM": torch.nn.Parameter(torch.full((nodes, 3), 0.5)),
+        "QM": torch.nn.Parameter(torch.full((nodes, 3), 0.5)),
+        "QE": torch.nn.Parameter(torch.full((nodes, 4), 0.5)),
+    }
+    scores = (OrganizerScores(
+        torch.zeros(nodes, requires_grad=True),
+        typed["QM"],
+        typed["QE"],
+        typed,
+    ),)
+    organizer = InputOnlyCoverOrganizer(
+        state_dim=8, module_feature_dim=2, environment_feature_dim=3, hidden_dim=16,
+    )
+
+    full_budget = {mechanism: 1.0 for mechanism in INTERACTION_MECHANISMS}
+    full_hard = organizer.plans_from_scores(
+        scores, encoded, (tree,), hard=True, budget_fractions=full_budget,
+    )[0]
+    full_soft = organizer.plans_from_scores(
+        scores, encoded, (tree,), hard=False, budget_fractions=full_budget,
+    )[0]
+    expected_modules = torch.tensor([1.0, 1.0, 0.0]).expand(nodes, -1)
+    expected_environments = torch.tensor([1.0, 1.0, 1.0, 0.0]).expand(nodes, -1)
+    for plan in (full_hard, full_soft):
+        torch.testing.assert_close(plan.permission_matrix("QM"), expected_modules)
+        torch.testing.assert_close(plan.permission_matrix("QE"), expected_environments)
+        assert not plan.permission_matrix("QM").requires_grad
+        assert not plan.permission_matrix("QE").requires_grad
+
+    zero_soft = organizer.plans_from_scores(
+        scores, encoded, (tree,), hard=False, budget_fractions={"QE": 0.0},
+    )[0].permission_matrix("QE")
+    assert torch.equal(zero_soft, torch.zeros_like(zero_soft))
+    assert not zero_soft.requires_grad
+
+    # The tied source group cannot be partially selected under this tiny
+    # positive budget. Its hard plan stays empty while its soft shadow keeps
+    # the finite max+1 restoration route (sigmoid(0.5 - 1.5) = sigmoid(-1)).
+    positive_empty = organizer.plans_from_scores(
+        scores, encoded, (tree,), hard=False, budget_fractions={"QE": 0.01},
+    )[0].permission_matrix("QE")
+    torch.testing.assert_close(
+        positive_empty,
+        torch.tensor([float(torch.sigmoid(torch.tensor(-1.0)))] * 3 + [0.0]).expand(nodes, -1),
+    )
+    assert positive_empty.requires_grad
+    hard_positive_empty = organizer.plans_from_scores(
+        scores, encoded, (tree,), hard=True, budget_fractions={"QE": 0.01},
+    )[0].permission_matrix("QE")
+    assert torch.equal(hard_positive_empty, torch.zeros_like(hard_positive_empty))
+
+
+def test_mixed_typed_budget_leaves_full_and_zero_scorers_out_of_adamw_step() -> None:
+    torch.manual_seed(1903)
+    encoded_batch = _encoded()
+    encoded = EncodedInterfaceCase(
+        **{
+            name: value[:1]
+            if isinstance(value, torch.Tensor) and value.ndim > 0 and value.shape[0] == 2
+            else value
+            for name, value in encoded_batch.__dict__.items()
+        }
+    )
+    tree = _tree(torch.device("cpu"))
+    organizer = InputOnlyCoverOrganizer(
+        state_dim=8, module_feature_dim=2, environment_feature_dim=3, hidden_dim=16,
+    )
+    prepared = {
+        "module_states": encoded.module_tokens,
+        "environment_states": encoded.env_tokens,
+        "global_state": encoded.global_token,
+    }
+    route_budgets = {"QE": 1.0, "MM": 0.0, "QM": 0.5}
+    optimizer = torch.optim.AdamW(organizer.parameters(), lr=0.05, weight_decay=0.2)
+    # Prime AdamW's per-route moments so this also catches stale momentum and
+    # decay being applied when a route is inapplicable on the next update.
+    for parameter in organizer.parameters():
+        parameter.grad = torch.ones_like(parameter)
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+
+    scores = organizer.score_cases(encoded, prepared, (tree,), budgets=route_budgets)
+    plans = organizer.plans_from_scores(
+        scores, encoded, (tree,), hard=False, budget_fractions=route_budgets,
+    )
+    full_before = [p.detach().clone() for p in organizer.pair_scorers["QE"].parameters()]
+    zero_before = [p.detach().clone() for p in organizer.pair_scorers["MM"].parameters()]
+
+    loss = plans[0].permission_matrix("QM").sum()
+    loss.backward()
+    assert all(p.grad is None for p in organizer.pair_scorers["QE"].parameters())
+    assert all(p.grad is None for p in organizer.pair_scorers["MM"].parameters())
+    assert any(
+        p.grad is not None and bool((p.grad != 0).any())
+        for p in organizer.pair_scorers["QM"].parameters()
+    )
+    optimizer.step()
+    for before, after in zip(full_before, organizer.pair_scorers["QE"].parameters(), strict=True):
+        torch.testing.assert_close(after, before, rtol=0.0, atol=0.0)
+    for before, after in zip(zero_before, organizer.pair_scorers["MM"].parameters(), strict=True):
+        torch.testing.assert_close(after, before, rtol=0.0, atol=0.0)
 
 
 def test_input_only_organizer_supports_two_dimensional_cases() -> None:

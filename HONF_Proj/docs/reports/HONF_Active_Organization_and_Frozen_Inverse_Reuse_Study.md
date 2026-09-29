@@ -17,7 +17,7 @@ The study trains a budget-conditioned grouped packet student and an independentl
 
 **Overall judgment:** the grouped sparse student shows a limited Wind near-turbine and Thermal role-entry advantage against the matched direct-pair control, while the retained full-access references remain stronger or mixed. Neither frozen selector establishes supported case-dependent sparse deployment or measured speedup. Reusing the frozen organizer does not improve the tested inverse tasks over the matched dense controls. These are bounded development results, not a basis for automatic 5,000-epoch continuation.
 
-**Visual reading guide:** Figures A–H below are populated only from saved numerical arrays or measured runs; Figure A is a labelled schematic. Their captions identify reference source, role, partition, checkpoint, unit, and what each comparison cannot establish.
+**Visual reading guide:** The eight key figures below use saved numerical arrays or measured runs. Their descriptions identify the reference source, role, partition, checkpoint, unit, and limits of the comparison.
 
 ## Data, frozen sources, and scope
 
@@ -208,7 +208,7 @@ At Q8192 and Q16384, canonical MM/QE unique selected-pair counts and route work 
 
 ## Key visual results
 
-These are the 12 selected result figures for the two datasets. Each PDF is the retained master; a matching PNG is kept only so this local Markdown report can display it inline. Both formats remain in ignored local paths under the upload rule. Numerical descriptions use saved, unclipped arrays and ledgers, not values estimated from pixels. The study's other field components and cases remain in the numerical exports described above.
+These are the eight key result figures for the two datasets: physical fields, interaction support, fidelity versus work, and inverse sample trails. Each PDF is the retained master; a small PNG companion is kept only for direct Markdown embedding. Both formats remain in ignored local paths under the upload rule. The complete measured inverse-quality and synchronized-cost results are in the tables above, with their numerical evidence retained locally. Figure descriptions use saved, unclipped arrays and ledgers, not values estimated from pixels.
 
 ### Predictor: native fields and residuals
 
@@ -263,32 +263,6 @@ These are the 12 selected result figures for the two datasets. Each PDF is the r
 ![ThermalChannel graph and dense heat-allocation sampler states for four checked tasks](../../diagnostics/generated/active_packet_reuse_20260929/key_figures/F2_ThermalChannel_heat_trails.png)
 
 **Quantitative description:** Six saved states come from each 20-step reverse sampler. Across the 64 as-observed draws per arm, every final heat allocation was finite, nonnegative and fixed-total; the largest slot exceeded 99% of total heat in 33/64 I-G draws versus 13/64 I-dense draws. **Summary:** Valid total heat did not prevent graph-arm concentration, and saved states are not optimization progress.
-
-#### G1 — WindFarm inverse quality and failures ([PDF](../../diagnostics/generated/active_packet_reuse_20260929/key_figures/G1_WindFarm_inverse_quality.pdf))
-
-![WindFarm completion validity, diversity and frozen-surrogate sensor errors](../../diagnostics/generated/active_packet_reuse_20260929/key_figures/G1_WindFarm_inverse_quality.png)
-
-**Quantitative description:** In the u200 as-observed review, both arms had 13/64 native-valid proposals; mean held-sensor frozen-surrogate RMSE was 0.04580 m/s for I-G and 0.04731 for I-dense. **Summary:** This small surrogate difference is not generated-layout CFD accuracy or a robust valid-design gain.
-
-#### G2 — ThermalChannel inverse quality and local checks ([PDF](../../diagnostics/generated/active_packet_reuse_20260929/key_figures/G2_ThermalChannel_inverse_checks.pdf))
-
-![ThermalChannel heat validity, diversity, conditions and preselected local-reference checks](../../diagnostics/generated/active_packet_reuse_20260929/key_figures/G2_ThermalChannel_inverse_checks.png)
-
-**Quantitative description:** All eight preselected local-generator checks converged and passed the pressure limit. Four checks per arm gave mean disjoint held-sensor RMSE 13.6841 for I-G versus 10.4417 for I-dense, in dataset temperature units. **Summary:** The dense control was better on this small development check; frozen graph reuse did not establish an inverse-quality gain.
-
-### Synchronized complete-call cost
-
-#### H1 — WindFarm GPU0 cost ([PDF](../../diagnostics/generated/active_packet_reuse_20260929/key_figures/H1_WindFarm_cost.pdf))
-
-![WindFarm three-repeat complete native-call latency and memory on physical GPU0](../../diagnostics/generated/active_packet_reuse_20260929/key_figures/H1_WindFarm_cost.png)
-
-**Quantitative description:** At Q8192 on row 3, G-u500 full/hard took 43.99/303.51 ms, P-u500 full/hard took 44.51/1418.29 ms, and every hard QE condition still executed 4,194,304 rectangular rows. **Summary:** Neither hard policy saved measured executor work or latency.
-
-#### H2 — ThermalChannel GPU2 cost ([PDF](../../diagnostics/generated/active_packet_reuse_20260929/key_figures/H2_ThermalChannel_cost.pdf))
-
-![ThermalChannel three-repeat complete-call latency, memory and canonical work on physical GPU2](../../diagnostics/generated/active_packet_reuse_20260929/key_figures/H2_ThermalChannel_cost.png)
-
-**Quantitative description:** At M=5 and Q8192, G-full/G-hard took 90.15/567.99 ms and P-full/P-hard took 91.64/1051.80 ms. Native executor-row counters were unavailable. **Summary:** Both hard routes were slower than their full-access controls; canonical selected-pair fractions cannot be called row or latency savings.
 
 ## Reproducibility and limitations
 

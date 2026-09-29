@@ -195,6 +195,8 @@ def packet_links_from_interfaces(
         sensor_environment=torch.stack(sensor_environment),
         environment_embeddings=torch.stack(environment_embeddings),
         environment_valid=torch.stack(environment_valid),
+        module_coordinates=module_centers,
+        sensor_coordinates=sensor_xy,
     )
 
 

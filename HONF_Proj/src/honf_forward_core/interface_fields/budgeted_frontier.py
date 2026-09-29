@@ -658,6 +658,7 @@ class BudgetConditionedDirectPairScorer(nn.Module):
         source_feature_dim: int,
         hidden_dim: int = 96,
         source_chunk_size: int = 128,
+        factorized_first_layer: bool = False,
     ) -> None:
         super().__init__()
         if min(receiver_feature_dim, source_feature_dim, source_chunk_size) < 1 or hidden_dim < 2:
@@ -665,6 +666,7 @@ class BudgetConditionedDirectPairScorer(nn.Module):
         self.receiver_feature_dim = int(receiver_feature_dim)
         self.source_feature_dim = int(source_feature_dim)
         self.source_chunk_size = int(source_chunk_size)
+        self.factorized_first_layer = bool(factorized_first_layer)
         input_dim = self.receiver_feature_dim + self.source_feature_dim + 6
         mechanisms = ("MM", "ME", "EM", "QM", "QE")
         self.scorers = nn.ModuleDict({
@@ -716,20 +718,52 @@ class BudgetConditionedDirectPairScorer(nn.Module):
         source_features = source_features.to(device=reference.device, dtype=reference.dtype)
         receiver_coordinates = receiver_coordinates.to(device=reference.device, dtype=reference.dtype)
         source_coordinates = source_coordinates.to(device=reference.device, dtype=reference.dtype)
+        if not self.factorized_first_layer:
+            chunks: list[torch.Tensor] = []
+            for start in range(0, int(source_features.shape[0]), self.source_chunk_size):
+                stop = min(int(source_features.shape[0]), start + self.source_chunk_size)
+                relative = receiver_coordinates[:, None, :] - source_coordinates[None, start:stop, :]
+                receiver_block = receiver_features[:, None, :].expand(-1, stop - start, -1)
+                source_block = source_features[None, start:stop, :].expand(int(receiver_features.shape[0]), -1, -1)
+                budget_block = budget.reshape(1, 1, 1).expand(int(receiver_features.shape[0]), stop - start, 1)
+                pair_features = torch.cat((
+                    receiver_block,
+                    source_block,
+                    self._spatial_summary(relative),
+                    budget_block,
+                ), dim=-1)
+                chunks.append(self.scorers[key](pair_features).squeeze(-1))
+            return torch.cat(chunks, dim=1)
+        scorer = self.scorers[key]
+        first = scorer[0]
+        # Split the saved first Linear's weight by feature block. Its wide
+        # receiver/source projections are shared across pairs; only the six
+        # spatial/budget channels need per-pair projection. Parameter names,
+        # nonlinear layers, and the scored pair function stay unchanged.
+        receiver_width = self.receiver_feature_dim
+        source_width = self.source_feature_dim
+        receiver_weight = first.weight[:, :receiver_width]
+        source_weight = first.weight[:, receiver_width : receiver_width + source_width]
+        spatial_weight = first.weight[:, receiver_width + source_width :]
+        receiver_projection = F.linear(receiver_features, receiver_weight)
+        budget_projection = budget.reshape(1, 1, 1) * spatial_weight[:, -1].reshape(1, 1, -1)
         chunks: list[torch.Tensor] = []
         for start in range(0, int(source_features.shape[0]), self.source_chunk_size):
             stop = min(int(source_features.shape[0]), start + self.source_chunk_size)
             relative = receiver_coordinates[:, None, :] - source_coordinates[None, start:stop, :]
-            receiver_block = receiver_features[:, None, :].expand(-1, stop - start, -1)
-            source_block = source_features[None, start:stop, :].expand(int(receiver_features.shape[0]), -1, -1)
-            budget_block = budget.reshape(1, 1, 1).expand(int(receiver_features.shape[0]), stop - start, 1)
-            pair_features = torch.cat((
-                receiver_block,
-                source_block,
-                self._spatial_summary(relative),
-                budget_block,
-            ), dim=-1)
-            chunks.append(self.scorers[key](pair_features).squeeze(-1))
+            source_projection = F.linear(source_features[start:stop], source_weight)
+            spatial_projection = F.linear(
+                self._spatial_summary(relative), spatial_weight[:, :5], first.bias
+            )
+            first_hidden = (
+                receiver_projection[:, None, :]
+                + source_projection[None, :, :]
+                + spatial_projection
+                + budget_projection
+            )
+            hidden = scorer[1](first_hidden)
+            hidden = scorer[3](scorer[2](hidden))
+            chunks.append(scorer[4](hidden).squeeze(-1))
         return torch.cat(chunks, dim=1)
 
 

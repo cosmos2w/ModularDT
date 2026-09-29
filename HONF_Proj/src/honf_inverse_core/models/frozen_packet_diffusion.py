@@ -38,6 +38,8 @@ class PacketLinks:
     sensor_environment: torch.Tensor | None = None  # QE [B, S, E_source]
     environment_embeddings: torch.Tensor | None = None  # [B, E, embedding_dim]
     environment_valid: torch.Tensor | None = None  # [B, E]
+    module_coordinates: torch.Tensor | None = None  # [B, M, spatial_dim]
+    sensor_coordinates: torch.Tensor | None = None  # [B, S, spatial_dim]
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,9 @@ class DiffusionCondition:
     module_features: torch.Tensor  # [B, M, F]; known geometry/context only
     sensor_features: torch.Tensor  # [B, S, O]; fixed-location observations
     sensor_valid: torch.Tensor  # [B, S]
+    design_lower: torch.Tensor | None = None  # optional public native design bounds [B,D]
+    design_upper: torch.Tensor | None = None  # paired with design_lower
+    sensor_channel_valid: torch.Tensor | None = None  # optional [B,S,O] availability flags
 
     def validate(self, design_dim: int, module_dim: int, sensor_dim: int) -> None:
         batch, modules, width = self.known_state.shape
@@ -65,6 +70,20 @@ class DiffusionCondition:
             raise ValueError("Sensor features have an incompatible width.")
         if self.sensor_valid.shape != self.sensor_features.shape[:2]:
             raise ValueError("Sensor validity has an incompatible shape.")
+        if self.sensor_channel_valid is not None:
+            if self.sensor_channel_valid.shape != self.sensor_features.shape:
+                raise ValueError("Sensor-channel validity has an incompatible shape.")
+            if self.sensor_channel_valid.dtype != torch.bool:
+                raise TypeError("Sensor-channel availability flags must be boolean.")
+        if (self.design_lower is None) != (self.design_upper is None):
+            raise ValueError("Public design bounds must be supplied together.")
+        if self.design_lower is not None:
+            if self.design_lower.shape != (batch, design_dim) or self.design_upper.shape != (batch, design_dim):
+                raise ValueError("Public design bounds have an incompatible shape.")
+            if (not torch.isfinite(self.design_lower).all()
+                    or not torch.isfinite(self.design_upper).all()
+                    or torch.any(self.design_lower >= self.design_upper)):
+                raise ValueError("Public design bounds must be finite and ordered.")
         if torch.any(self.design_mask.bool() & ~self.module_valid.bool()):
             raise ValueError("Generated modules must be valid modules.")
         if torch.any(self.design_mask.sum(dim=1) == 0):
@@ -126,6 +145,8 @@ def dense_access(links: PacketLinks, condition: DiffusionCondition) -> PacketLin
         module_source=module.to(links.module_source.dtype),
         sensor_source=sensor.to(links.sensor_source.dtype),
         module_embeddings=links.module_embeddings,
+        module_coordinates=links.module_coordinates,
+        sensor_coordinates=links.sensor_coordinates,
         **extra,
     )
 
@@ -198,6 +219,21 @@ class ConditionalPacketDenoiser(nn.Module):
         )
         self.output = nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, design_dim))
 
+    def _sensor_tokens(self, condition: DiffusionCondition) -> torch.Tensor:
+        """Historical linear token encoder, retained for old inverse checkpoints."""
+
+        return self.sensor_input(condition.sensor_features)
+
+    def _module_observation(
+        self,
+        hidden: torch.Tensor,
+        sensed: torch.Tensor,
+        sensor_weights: torch.Tensor,
+        condition: DiffusionCondition,
+        links: PacketLinks,
+    ) -> torch.Tensor:
+        return _normalized_message(sensor_weights.transpose(1, 2), sensed)
+
     def forward(
         self,
         state: torch.Tensor,
@@ -249,7 +285,7 @@ class ConditionalPacketDenoiser(nn.Module):
         )
         hidden = self.module_input(module_input) + self.time_input(time).unsqueeze(1)
         hidden = hidden * valid.unsqueeze(-1)
-        sensor = self.sensor_input(condition.sensor_features)
+        sensor = self._sensor_tokens(condition)
         sensor = sensor * condition.sensor_valid.to(sensor.dtype).unsqueeze(-1)
         module_weights = links.module_source.to(state.dtype) * (
             valid[:, :, None] * valid[:, None, :]
@@ -285,12 +321,100 @@ class ConditionalPacketDenoiser(nn.Module):
                 environment_message = _normalized_message(module_env_weights, environment_hidden)
             else:
                 environment_message = torch.zeros_like(hidden)
-            observation = _normalized_message(sensor_weights.transpose(1, 2), sensed)
+            observation = self._module_observation(
+                hidden, sensed, sensor_weights, condition, links
+            )
             hidden = hidden + block(
                 torch.cat((hidden, module_message, environment_message, observation), dim=-1)
             )
             hidden = hidden * valid.unsqueeze(-1)
         return self.output(hidden) * condition.design_mask.to(state.dtype).unsqueeze(-1)
+
+
+class SpatialConditionalPacketDenoiser(ConditionalPacketDenoiser):
+    """Sensor-bound inverse conditioner for new runs; legacy weights stay loadable.
+
+    Sensor tokens are nonlinear in their coordinate/value pair. Every module
+    then attends to sensor tokens with a candidate-specific relative-coordinate
+    bias and its frozen graph access as a prior. Dense uses the identical
+    conditioner with full admissible access. Coordinates are supplied by the
+    candidate-only interface and never inferred from a clean hidden target.
+    """
+
+    def __init__(self, *, coordinate_dim: int, **kwargs: int) -> None:
+        super().__init__(**kwargs)
+        if not 1 <= coordinate_dim <= self.sensor_dim:
+            raise ValueError("Spatial coordinate width must fit the sensor features.")
+        self.coordinate_dim = int(coordinate_dim)
+        width = self.module_input.out_features
+        self.sensor_input = nn.Sequential(
+            nn.Linear(2 * self.sensor_dim, width), nn.SiLU(), nn.Linear(width, width)
+        )
+        self.sensor_query = nn.Linear(width, width, bias=False)
+        self.sensor_key = nn.Linear(width, width, bias=False)
+        self.sensor_value = nn.Linear(width, width, bias=False)
+        self.relative_bias = nn.Sequential(
+            nn.Linear(self.coordinate_dim, width // 2 or 1),
+            nn.SiLU(),
+            nn.Linear(width // 2 or 1, 1),
+        )
+
+    def _sensor_tokens(self, condition: DiffusionCondition) -> torch.Tensor:
+        present = condition.sensor_valid.bool()[..., None]
+        channels = (
+            torch.ones_like(condition.sensor_features, dtype=torch.bool)
+            if condition.sensor_channel_valid is None else condition.sensor_channel_valid
+        )
+        if bool((present & ~channels[..., : self.coordinate_dim]).any()):
+            raise ValueError("Observed sensors require valid location channels.")
+        available = present & channels
+        if not bool(torch.isfinite(condition.sensor_features[available]).all()):
+            raise ValueError("Available sensor coordinates and values must be finite.")
+        values = torch.where(available, condition.sensor_features, 0.0)
+        tokens = torch.cat((values, available.to(values.dtype)), dim=-1)
+        return self.sensor_input(tokens)
+
+    def _module_observation(
+        self,
+        hidden: torch.Tensor,
+        sensed: torch.Tensor,
+        sensor_weights: torch.Tensor,
+        condition: DiffusionCondition,
+        links: PacketLinks,
+    ) -> torch.Tensor:
+        module_xy = links.module_coordinates
+        sensor_xy = links.sensor_coordinates
+        batch, modules, width = hidden.shape
+        sensors = sensed.shape[1]
+        expected_module = (batch, modules, self.coordinate_dim)
+        expected_sensor = (batch, sensors, self.coordinate_dim)
+        if module_xy is None or module_xy.shape != expected_module:
+            raise ValueError("Spatial conditioner needs candidate module coordinates.")
+        if sensor_xy is None or sensor_xy.shape != expected_sensor:
+            raise ValueError("Spatial conditioner needs fixed sensor coordinates.")
+        if not torch.isfinite(module_xy).all() or not torch.isfinite(sensor_xy).all():
+            raise ValueError("Spatial conditioner coordinates must be finite.")
+        # The input-only span makes relative coordinates comparable across
+        # native units without indexing statistics by a future task or sensor.
+        locations = torch.cat((module_xy, sensor_xy), dim=1)
+        location_valid = torch.cat(
+            (condition.module_valid.bool(), condition.sensor_valid.bool()), dim=1
+        )
+        maximum = locations.masked_fill(~location_valid[..., None], -torch.inf).amax(dim=1)
+        minimum = locations.masked_fill(~location_valid[..., None], torch.inf).amin(dim=1)
+        span = (maximum - minimum).clamp_min(1e-6)
+        relative = (module_xy[:, :, None, :] - sensor_xy[:, None, :, :]) / span[:, None, None]
+        logits = torch.bmm(
+            self.sensor_query(hidden), self.sensor_key(sensed).transpose(1, 2)
+        ) / math.sqrt(width)
+        logits = logits + self.relative_bias(relative).squeeze(-1)
+        prior = sensor_weights.transpose(1, 2)
+        allowed = (prior > 0) & condition.module_valid.bool()[:, :, None]
+        logits = logits + prior.clamp_min(1e-8).log()
+        logits = logits.masked_fill(~allowed, torch.finfo(logits.dtype).min)
+        attention = torch.softmax(logits, dim=-1) * allowed.to(logits.dtype)
+        attention = attention / attention.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+        return torch.bmm(attention, self.sensor_value(sensed))
 
 
 @dataclass(frozen=True)
@@ -359,6 +483,8 @@ class FrozenPacketDiffusion(nn.Module):
                 links.sensor_environment,
                 links.environment_embeddings,
                 links.environment_valid,
+                links.module_coordinates,
+                links.sensor_coordinates,
             )),
         )
         return dense_access(links, condition) if dense else links
@@ -452,6 +578,7 @@ class FrozenPacketDiffusion(nn.Module):
 
 __all__ = [
     "ConditionalPacketDenoiser",
+    "SpatialConditionalPacketDenoiser",
     "DiffusionCondition",
     "FrozenPacketDiffusion",
     "PacketLinks",

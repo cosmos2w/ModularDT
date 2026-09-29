@@ -279,6 +279,19 @@ class _ScheduledThermalOperator:
                         "optimizer_update": self.schedule.current_update + 1,
                         "state": state_label,
                         "frontier": case_record["frontier"],
+                        "frontier_paths": case_record["frontier_paths"],
+                        "raw_frontier_k": case_record["raw_frontier_k"],
+                        "nonredundant_k": case_record["nonredundant_k"],
+                        "nonredundant_k_status": case_record["nonredundant_k_status"],
+                        "joint_support_mechanisms": case_record["joint_support_mechanisms"],
+                        "joint_support_signature_hex_by_frontier": case_record[
+                            "joint_support_signature_hex_by_frontier"
+                        ],
+                        "collapsed_cut_rows": case_record["collapsed_cut_rows"],
+                        "source_mask_evidence": case_record["source_mask_evidence"],
+                        "direct_scorer_factorized_first_layer": case_record.get(
+                            "direct_scorer_factorized_first_layer"
+                        ),
                         "budgets": budgets,
                         "routes": route_rows,
                         "full_access_bypass_routes": case_record["full_access_bypass_routes"],
@@ -303,7 +316,14 @@ def _route_module(arm: str, core: Any, encoded: Any, device: torch.device) -> nn
             role_count=8,
         ).to(device=device, dtype=encoded.module_tokens.dtype)
     if arm == "P":
-        return make_direct_scorer(core, device=device, dtype=encoded.module_tokens.dtype, hidden_dim=96)
+        factorized_first_layer = os.environ.get("THERMAL_FACTOR_DIRECT_SCORER", "0") == "1"
+        return make_direct_scorer(
+            core,
+            device=device,
+            dtype=encoded.module_tokens.dtype,
+            hidden_dim=96,
+            factorized_first_layer=factorized_first_layer,
+        )
     raise ValueError(f"Unknown Thermal arm {arm!r}.")
 
 

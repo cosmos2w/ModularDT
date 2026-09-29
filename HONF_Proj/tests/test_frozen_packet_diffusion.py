@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
 import torch
 
 from honf_inverse_core.models.frozen_packet_diffusion import (
@@ -9,6 +12,7 @@ from honf_inverse_core.models.frozen_packet_diffusion import (
     DiffusionCondition,
     FrozenPacketDiffusion,
     PacketLinks,
+    SpatialConditionalPacketDenoiser,
     dense_access,
     heat_from_logits,
 )
@@ -169,3 +173,106 @@ def test_typed_environment_routes_change_output_and_dense_control_keeps_embeddin
     torch.testing.assert_close(dense.environment_embeddings, links.environment_embeddings)
     assert torch.all(dense.module_environment[..., 1] == 0)
     assert torch.all(dense.sensor_environment[..., 0] == 1)
+
+
+def test_spatial_conditioner_binds_values_to_locations_without_sensor_order() -> None:
+    torch.manual_seed(47)
+    condition = DiffusionCondition(
+        known_state=torch.zeros(1, 3, 2),
+        design_mask=torch.tensor([[False, True, True]]),
+        module_valid=torch.ones(1, 3, dtype=torch.bool),
+        module_features=torch.randn(1, 3, 3),
+        sensor_features=torch.tensor([[[0.0, 0.0, 1.0], [1.0, 0.0, -1.0], [0.0, 1.0, 0.5]]]),
+        sensor_valid=torch.ones(1, 3, dtype=torch.bool),
+    )
+    coords = torch.tensor([[[0.1, 0.1], [0.7, 0.2], [0.2, 0.9]]])
+    links = PacketLinks(
+        module_source=torch.ones(1, 3, 3) - torch.eye(3)[None],
+        sensor_source=torch.ones(1, 3, 3),
+        module_embeddings=torch.randn(1, 3, 4),
+        module_coordinates=coords,
+        sensor_coordinates=condition.sensor_features[..., :2],
+    )
+    denoiser = SpatialConditionalPacketDenoiser(
+        design_dim=2, module_dim=3, sensor_dim=3, embedding_dim=4,
+        hidden_dim=24, layers=2, coordinate_dim=2,
+    )
+    state = torch.randn_like(condition.known_state)
+    time = torch.tensor([0.4])
+    original = denoiser(state, time, condition, links)
+    order = torch.tensor([2, 0, 1])
+    shuffled = replace(
+        condition,
+        sensor_features=condition.sensor_features[:, order],
+        sensor_valid=condition.sensor_valid[:, order],
+    )
+    shuffled_links = replace(
+        links,
+        sensor_source=links.sensor_source[:, order],
+        sensor_coordinates=links.sensor_coordinates[:, order],
+    )
+    torch.testing.assert_close(
+        denoiser(state, time, shuffled, shuffled_links), original, atol=1e-6, rtol=1e-5
+    )
+    swapped_features = condition.sensor_features.clone()
+    swapped_features[:, [0, 1], 2] = swapped_features[:, [1, 0], 2]
+    swapped = denoiser(state, time, replace(condition, sensor_features=swapped_features), links)
+    assert float((swapped - original).abs().max()) > 1e-4
+    # Full-link G and Dense are exactly the same conditioner and access action.
+    torch.testing.assert_close(denoiser(state, time, condition, dense_access(links, condition)), original)
+
+
+def test_spatial_conditioner_handles_missing_sensors_and_frozen_links() -> None:
+    torch.manual_seed(53)
+    condition = DiffusionCondition(
+        known_state=torch.zeros(1, 2, 1),
+        design_mask=torch.ones(1, 2, dtype=torch.bool),
+        module_valid=torch.ones(1, 2, dtype=torch.bool),
+        module_features=torch.zeros(1, 2, 2),
+        sensor_features=torch.tensor([[[0.0, 0.0, 0.8], [1.0, 0.0, -0.2]]]),
+        sensor_valid=torch.tensor([[False, False]]),
+    )
+    links = PacketLinks(
+        module_source=torch.ones(1, 2, 2) - torch.eye(2)[None],
+        sensor_source=torch.ones(1, 2, 2),
+        module_embeddings=torch.randn(1, 2, 3),
+        module_coordinates=torch.tensor([[[0.2, 0.1], [0.8, 0.1]]]),
+        sensor_coordinates=condition.sensor_features[..., :2],
+    )
+    denoiser = SpatialConditionalPacketDenoiser(
+        design_dim=1, module_dim=2, sensor_dim=3, embedding_dim=3,
+        hidden_dim=16, layers=1, coordinate_dim=2,
+    )
+    model = FrozenPacketDiffusion(denoiser, task="heat", steps=3)
+    def provider(_candidate: torch.Tensor, _condition: DiffusionCondition) -> PacketLinks:
+        return links
+    clean = torch.randn_like(condition.known_state)
+    loss = model.training_loss(
+        clean, condition, provider, timesteps=torch.tensor([1]), noise=torch.ones_like(clean)
+    )
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert any(parameter.grad is not None and parameter.grad.abs().sum() > 0 for parameter in model.parameters())
+    assert links.module_embeddings.grad is None
+    changed = replace(condition, sensor_features=condition.sensor_features + torch.tensor([0.0, 0.0, 7.0]))
+    time = torch.tensor([0.2])
+    state = torch.randn_like(clean)
+    torch.testing.assert_close(denoiser(state, time, condition, links), denoiser(state, time, changed, links))
+
+    dropped = torch.tensor([[[True, True, False], [True, True, True]]])
+    one_missing_value = condition.sensor_features.clone()
+    one_missing_value[0, 0, 2] = float("nan")
+    observed = replace(
+        condition, sensor_valid=torch.ones_like(condition.sensor_valid),
+        sensor_features=one_missing_value, sensor_channel_valid=dropped,
+    )
+    dropped_output = denoiser(state, time, observed, links)
+    assert torch.isfinite(dropped_output).all()
+    alternate = one_missing_value.clone()
+    alternate[0, 0, 2] = 1000.0
+    torch.testing.assert_close(
+        denoiser(state, time, replace(observed, sensor_features=alternate), links),
+        dropped_output,
+    )
+    with pytest.raises(ValueError, match="Available sensor"):
+        denoiser(state, time, replace(observed, sensor_channel_valid=None), links)

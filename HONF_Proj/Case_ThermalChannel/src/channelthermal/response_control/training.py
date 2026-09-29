@@ -447,6 +447,11 @@ class TrainingStep:
     active_term_weights: Mapping[str, float] = field(default_factory=dict)
     response_gradient_projection_blocks: tuple[str, ...] = ()
     response_gradient_dot_before: Mapping[str, float] = field(default_factory=dict)
+    training_family_id: str | None = None
+    training_metadata: Mapping[str, Any] = field(default_factory=dict)
+    auxiliary_loss_diagnostics: Mapping[str, float] = field(default_factory=dict)
+    update_wall_seconds: float = 0.0
+    update_gpu_milliseconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -688,6 +693,7 @@ def run_staged_fit(
     historical_value_source: HistoricalValueSource | None = None,
     config: StagedTrainingConfig | None = None,
     initial_update: int = 0,
+    initial_attempted_optimizer_steps: int = 0,
     resume_payload: Mapping[str, Any] | None = None,
     stop_at_update: int | None = None,
     device: torch.device | str | None = None,
@@ -696,6 +702,14 @@ def run_staged_fit(
     on_review: Callable[[TrainingStep], str | None] | None = None,
     on_step: Callable[[TrainingStep], None] | None = None,
     fixed_heat_controls: Sequence[FixedHeatNullControl] = (),
+    training_stencil_index_for_update: Callable[[int], int] | None = None,
+    training_stencil_transform: Callable[
+        [ResponseStencil, int], tuple[ResponseStencil, Mapping[str, Any]]
+    ] | None = None,
+    auxiliary_loss_fn: Callable[
+        [int, ResponseStencil, Any, Mapping[str, torch.Tensor]],
+        tuple[torch.Tensor | None, Mapping[str, float]],
+    ] | None = None,
 ) -> StagedFitResult:
     """Fit a fixed training panel and count each successful optimizer step.
 
@@ -751,7 +765,7 @@ def run_staged_fit(
     if resume_payload is None:
         sampler = random.Random(config.random_seed)
         order: list[int] = []
-        attempted_total = 0
+        attempted_total = int(initial_attempted_optimizer_steps)
         weights = dict(loss_weights or {"value": 1.0})
     else:
         restored_update, attempted_total, sampler, order, saved_weights = restore_checkpoint_payload(
@@ -826,11 +840,27 @@ def run_staged_fit(
         ):
             stopped_for_wall_time = True
             break
-        if not order:
-            order = list(range(len(training_stencils)))
-            sampler.shuffle(order)
-        sample_index = order.pop()
+        update_started = time.monotonic()
+        cuda_start = cuda_end = None
+        if params[0].device.type == "cuda":
+            cuda_start = torch.cuda.Event(enable_timing=True)
+            cuda_end = torch.cuda.Event(enable_timing=True)
+            cuda_start.record()
+        if training_stencil_index_for_update is None:
+            if not order:
+                order = list(range(len(training_stencils)))
+                sampler.shuffle(order)
+            sample_index = order.pop()
+        else:
+            sample_index = int(training_stencil_index_for_update(completed))
+            if sample_index < 0 or sample_index >= len(training_stencils):
+                raise ValueError("The training stencil selector returned an out-of-range family index.")
         stencil = training_stencils[sample_index]
+        training_metadata: Mapping[str, Any] = {}
+        if training_stencil_transform is not None:
+            stencil, training_metadata = training_stencil_transform(stencil, completed)
+            if stencil.split is not EvidenceSplit.TRAIN:
+                raise ValueError("The per-update stencil transform returned a non-training record.")
         active_terms = config.active_terms(completed)
         predictions = predict_stencil(operator, stencil, device=device)
         family_controls = fixed_controls_by_family.get(stencil.physical_family_id, ())
@@ -879,6 +909,18 @@ def run_staged_fit(
                 raise ValueError("The absolute-value loss multiplier must be positive.")
             active_weights = {"value": weights["value"]}
         total = losses.total(active_weights)
+        auxiliary_loss: torch.Tensor | None = None
+        auxiliary_diagnostics: Mapping[str, float] = MappingProxyType({})
+        if auxiliary_loss_fn is not None:
+            auxiliary_loss, auxiliary_diagnostics = auxiliary_loss_fn(
+                completed, stencil, predictions, losses.terms
+            )
+            if auxiliary_loss is not None:
+                if not bool(torch.isfinite(auxiliary_loss)):
+                    raise FloatingPointError(
+                        f"Non-finite auxiliary loss before optimizer update {completed + 1}."
+                    )
+                total = total + auxiliary_loss
         historical_case_id = None
         historical_loss = None
         if historical_value_source is not None:
@@ -900,6 +942,12 @@ def run_staged_fit(
             value_objective = losses.terms["value"] * active_weights.get("value", 0.0)
             if historical_loss is not None:
                 value_objective = value_objective + weights["value"] * historical_loss
+            if auxiliary_loss is not None:
+                # The retained-incumbent anchor protects value fidelity. It
+                # belongs in the value side of the blockwise projection; a
+                # diagnostic-only addition to ``total`` would never reach the
+                # optimizer in this branch.
+                value_objective = value_objective + auxiliary_loss
             response_objective = losses.total(response_weights)
             value_gradients = torch.autograd.grad(
                 value_objective, params, retain_graph=True, allow_unused=True
@@ -952,8 +1000,15 @@ def run_staged_fit(
         if on_optimizer_attempt is not None:
             on_optimizer_attempt(completed, attempted_total)
         optimizer.step()
+        update_gpu_milliseconds = None
+        if cuda_start is not None and cuda_end is not None:
+            cuda_end.record()
+            cuda_end.synchronize()
+            update_gpu_milliseconds = float(cuda_start.elapsed_time(cuda_end))
+        update_wall_seconds = time.monotonic() - update_started
         completed += 1
         term_losses = {name: float(value.detach().cpu()) for name, value in losses.terms.items()}
+        term_losses.update({str(name): float(value) for name, value in auxiliary_diagnostics.items()})
         term_losses.update({
             name: float(value.detach().cpu())
             for name, value in supplemental_diagnostics.items()
@@ -972,6 +1027,11 @@ def run_staged_fit(
             active_term_weights=MappingProxyType(dict(active_weights)),
             response_gradient_projection_blocks=projected_blocks,
             response_gradient_dot_before=projection_dots,
+            training_family_id=stencil.physical_family_id,
+            training_metadata=MappingProxyType(dict(training_metadata)),
+            auxiliary_loss_diagnostics=MappingProxyType(dict(auxiliary_diagnostics)),
+            update_wall_seconds=update_wall_seconds,
+            update_gpu_milliseconds=update_gpu_milliseconds,
         )
         history.append(step)
         if on_step is not None:

@@ -622,25 +622,46 @@ class InputOnlyCoverOrganizer(nn.Module):
                     )
                 if projection is not None:
                     threshold = projection.threshold.to(device=logits.device, dtype=logits.dtype)
-                    if bool(torch.isinf(threshold)):
-                        active_nodes = (tree.access(
-                            canonical_pair_catalog(encoded, tree, mechanism, case_index=case).receiver_coordinates,
-                            split.detach(),
-                        ) > 0.0).any(dim=0)
-                        valid_scores = logits.detach()[
-                            active_nodes[:, None]
-                            & catalog.source_validity.to(device=logits.device)[None, :]
-                        ]
-                        if valid_scores.numel():
-                            # Empty hard projections still receive a finite,
-                            # nonzero restoration signal in the soft shadow.
-                            threshold = valid_scores.max() + 1.0
-                    probabilities = torch.sigmoid(logits - threshold)
-                    decisions = projection.membership.to(logits.dtype)
-                    membership = (
-                        decisions + (probabilities - probabilities.detach())
-                        if straight_through_hard else decisions
-                    ) if hard else probabilities
+                    if projection.budget_fraction == 1.0:
+                        # A full budget is exact full access. Keeping the
+                        # permissions detached also leaves this route scorer's
+                        # gradients as None, so AdamW does not apply stale
+                        # momentum or weight decay to an inapplicable route.
+                        probabilities = projection.membership.to(logits.dtype)
+                        decisions = probabilities
+                        membership = decisions
+                    elif projection.budget_fraction == 0.0:
+                        # Intentional zero budget means exact empty access and
+                        # has no restoration gradient. Positive partial budgets
+                        # retain the separate empty-projection remedy below.
+                        probabilities = projection.membership.to(logits.dtype)
+                        decisions = probabilities
+                        membership = decisions
+                    else:
+                        if bool(torch.isposinf(threshold)):
+                            active_nodes = (tree.access(
+                                canonical_pair_catalog(encoded, tree, mechanism, case_index=case).receiver_coordinates,
+                                split.detach(),
+                            ) > 0.0).any(dim=0)
+                            valid_scores = logits.detach()[
+                                active_nodes[:, None]
+                                & catalog.source_validity.to(device=logits.device)[None, :]
+                            ]
+                            if valid_scores.numel():
+                                # Empty positive partial projections still
+                                # receive a finite restoration signal. Keep
+                                # this distinct from full-access (-inf) and
+                                # intentional-zero (+inf) budgets.
+                                threshold = valid_scores.max() + 1.0
+                        probabilities = torch.sigmoid(logits - threshold)
+                        probabilities = probabilities * catalog.source_validity.to(
+                            device=logits.device, dtype=logits.dtype
+                        )[None, :]
+                        decisions = projection.membership.to(logits.dtype)
+                        membership = (
+                            decisions + (probabilities - probabilities.detach())
+                            if straight_through_hard else decisions
+                        ) if hard else probabilities
                 elif hard:
                     probabilities = torch.sigmoid(logits)
                     decisions = (

@@ -239,10 +239,38 @@ def known_from_wind_task(task: WindCompletionTask) -> WindCompletionKnown:
     )
 
 
-def _position_logits(xy_D: np.ndarray) -> np.ndarray:
-    fraction = (np.asarray(xy_D, dtype=np.float32) - DESIGN_LOWER_D) / (
-        DESIGN_UPPER_D - DESIGN_LOWER_D
-    )
+def native_clearance_design_bounds(
+    support_lower_D: Sequence[float],
+    support_upper_D: Sequence[float],
+    rotor_radius_D: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Intersect declared public support with the design box and rotor clearance.
+
+    The caller supplies support independently of hidden positions. In
+    particular, row-specific CFD axes are not presumed to be public inverse
+    inputs when the row's native domain varies with the hidden layout.
+    """
+
+    radius_D = float(rotor_radius_D)
+    if not np.isfinite(radius_D) or radius_D < 0:
+        raise ValueError("Native rotor clearance must be finite and nonnegative")
+    supplied_lower = np.asarray(support_lower_D, dtype=np.float32)
+    supplied_upper = np.asarray(support_upper_D, dtype=np.float32)
+    if supplied_lower.shape != (2,) or supplied_upper.shape != (2,):
+        raise ValueError("Public native support must give two XY bounds")
+    lower = np.maximum(DESIGN_LOWER_D, supplied_lower + radius_D)
+    upper = np.minimum(DESIGN_UPPER_D, supplied_upper - radius_D)
+    if not np.all(np.isfinite(lower)) or not np.all(np.isfinite(upper)) or np.any(lower >= upper):
+        raise ValueError("Public design and native rotor-clearance domains do not overlap")
+    return lower.astype(np.float32), upper.astype(np.float32)
+
+
+def _position_logits(
+    xy_D: np.ndarray,
+    lower_D: np.ndarray = DESIGN_LOWER_D,
+    upper_D: np.ndarray = DESIGN_UPPER_D,
+) -> np.ndarray:
+    fraction = (np.asarray(xy_D, dtype=np.float32) - lower_D) / (upper_D - lower_D)
     fraction = np.clip(fraction, 1.0e-4, 1.0 - 1.0e-4)
     return np.log(fraction / (1.0 - fraction)).astype(np.float32)
 
@@ -253,15 +281,31 @@ def wind_condition_from_task(
     device: torch.device | str = "cpu",
     sensor_velocity_center_mps: Sequence[Sequence[float]] | Sequence[float] | None = None,
     sensor_velocity_scale_mps: Sequence[Sequence[float]] | Sequence[float] | None = None,
+    public_support_bounds_D: tuple[Sequence[float], Sequence[float]] | None = None,
 ) -> tuple[torch.Tensor, DiffusionCondition, WindCompletionKnown]:
     """Build no-leakage condition and a separate clean denoising target."""
 
     known = known_from_wind_task(task)
     count = int(task.clean_centers_D.shape[0])
     visible = known.visible_mask
-    clean = _position_logits(task.clean_centers_D[:, :2])
+    public_bounded = public_support_bounds_D is not None
+    lower_D, upper_D = (
+        native_clearance_design_bounds(
+            public_support_bounds_D[0], public_support_bounds_D[1],
+            float(known.template_case.module_features[0, 0]),
+        ) if public_bounded else (DESIGN_LOWER_D, DESIGN_UPPER_D)
+    )
+    hidden_xy_D = task.clean_centers_D[~visible, :2]
+    if public_bounded and np.any((hidden_xy_D < lower_D) | (hidden_xy_D > upper_D)):
+        raise ValueError("Clean hidden target falls outside public native-clearance bounds")
+    clean = _position_logits(task.clean_centers_D[:, :2], lower_D, upper_D)
     visible_logits = np.zeros_like(clean)
-    visible_logits[visible] = clean[visible]
+    if not public_bounded:
+        # Preserve the historical inverse protocol. Under a narrower public
+        # hidden-design domain, visible turbines may lie outside that domain;
+        # their exact physical XY is supplied separately in module_features
+        # and kept fixed by candidate_centers_from_state.
+        visible_logits[visible] = clean[visible]
     template = known.template_case
     visible_xy = np.zeros_like(task.clean_centers_D[:, :2])
     visible_xy[visible] = task.clean_centers_D[visible, :2]
@@ -302,6 +346,8 @@ def wind_condition_from_task(
         module_features=torch.as_tensor(module_features[None], device=target_device),
         sensor_features=torch.as_tensor(sensor_features[None], device=target_device),
         sensor_valid=torch.ones((1, len(SENSOR_OBSERVED_INDICES)), device=target_device, dtype=torch.bool),
+        design_lower=(torch.as_tensor(lower_D[None], device=target_device) if public_bounded else None),
+        design_upper=(torch.as_tensor(upper_D[None], device=target_device) if public_bounded else None),
     )
     return torch.as_tensor(clean[None], device=target_device), condition, known
 
@@ -318,8 +364,14 @@ def candidate_centers_from_state(
     count = int(known.template_case.n_turbines)
     if state.shape[1] != count or condition.design_mask.shape != (1, count):
         raise ValueError("Candidate state and known turbine count do not align")
-    lower = state.new_tensor(DESIGN_LOWER_D)
-    upper = state.new_tensor(DESIGN_UPPER_D)
+    lower = (
+        condition.design_lower[0].to(device=state.device, dtype=state.dtype)
+        if condition.design_lower is not None else state.new_tensor(DESIGN_LOWER_D)
+    )
+    upper = (
+        condition.design_upper[0].to(device=state.device, dtype=state.dtype)
+        if condition.design_upper is not None else state.new_tensor(DESIGN_UPPER_D)
+    )
     xy = lower + torch.sigmoid(state[0]) * (upper - lower)
     visible = torch.as_tensor(known.visible_mask, device=state.device)
     original_visible = torch.as_tensor(
@@ -537,6 +589,8 @@ def packet_links_from_wind_interface(
         sensor_environment=interface.receiver_source_weights("QE", observed)[None],
         environment_embeddings=environment_embedding[None],
         environment_valid=interface.environment_validity[None],
+        module_coordinates=module[None],
+        sensor_coordinates=observed[None],
     )
 
 

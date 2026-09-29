@@ -6,8 +6,12 @@ import json
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
-from honf_inverse_core.models.frozen_packet_diffusion import ConditionalPacketDenoiser
+from honf_inverse_core.models.frozen_packet_diffusion import (
+    ConditionalPacketDenoiser,
+    SpatialConditionalPacketDenoiser,
+)
 from torch import nn
 
 from windfarm.data import NativeCase
@@ -19,6 +23,7 @@ from windfarm.inverse.packet_completion import (
     fixed_native_sensor_panel,
     hidden_set_error_D,
     make_wind_completion_task,
+    native_clearance_design_bounds,
     permute_wind_task,
     train_matched_wind_diffusion,
     wind_condition_from_task,
@@ -147,6 +152,49 @@ def test_train_only_centered_sensor_features_use_explicit_per_sensor_statistics(
     )
 
 
+def test_native_clearance_bounds_generate_inside_public_support_and_keep_visible() -> None:
+    task = make_wind_completion_task(_case(), partition="train", hidden_count=1, seed=9)
+    public_bounds = (
+        np.asarray((-10.0, -8.0), dtype=np.float32),
+        np.asarray((20.0, 8.0), dtype=np.float32),
+    )
+    lower, upper = native_clearance_design_bounds(
+        public_bounds[0], public_bounds[1], rotor_radius_D=0.5,
+    )
+    np.testing.assert_allclose(lower, [-9.5, -7.5])
+    np.testing.assert_allclose(upper, [15.0, 7.5])
+    clean, condition, known = wind_condition_from_task(
+        task, public_support_bounds_D=public_bounds,
+    )
+    condition.validate(design_dim=2, module_dim=16, sensor_dim=6)
+    visible_tensor = torch.as_tensor(task.visible_mask)
+    assert torch.equal(
+        condition.known_state[0, visible_tensor],
+        torch.zeros_like(condition.known_state[0, visible_tensor]),
+    )
+    torch.testing.assert_close(
+        condition.module_features[0, visible_tensor, -3:-1],
+        torch.as_tensor(task.clean_centers_D[task.visible_mask, :2])
+        / torch.tensor((50.0, 38.0)),
+    )
+    state = clean.clone()
+    state[:, ~torch.as_tensor(task.visible_mask), :] = 20.0
+    candidate = candidate_centers_from_state(state, condition, known)
+    hidden = candidate[~torch.as_tensor(task.visible_mask)]
+    assert bool((hidden[:, :2] >= torch.as_tensor(lower)).all())
+    assert bool((hidden[:, :2] <= torch.as_tensor(upper)).all())
+    torch.testing.assert_close(
+        candidate[torch.as_tensor(task.visible_mask)],
+        torch.as_tensor(task.clean_centers_D[task.visible_mask]),
+    )
+    _, legacy_condition, _ = wind_condition_from_task(task)
+    legacy = candidate_centers_from_state(state, legacy_condition, known)
+    assert bool((legacy[~torch.as_tensor(task.visible_mask), 1] > upper[1]).any())
+    task.clean_centers_D[~task.visible_mask, 1] = 8.0
+    with pytest.raises(ValueError, match="Clean hidden target"):
+        wind_condition_from_task(task, public_support_bounds_D=public_bounds)
+
+
 def test_hidden_set_matching_geometry_and_permutation() -> None:
     task = make_wind_completion_task(_case(), partition="train", hidden_count=2, seed=22)
     permuted = permute_wind_task(task, seed=700)
@@ -191,6 +239,23 @@ def test_one_matched_diffusion_update_keeps_frozen_weights() -> None:
     assert result.frozen_state_hashes_before == result.frozen_state_hashes_after
     for key, value in frozen.state_dict().items():
         torch.testing.assert_close(value, before[key], rtol=0, atol=0)
+
+
+def test_spatial_conditioner_runs_small_matched_candidate_rebuild() -> None:
+    task = make_wind_completion_task(_case(), partition="train", hidden_count=1, seed=18)
+    torch.manual_seed(18)
+    denoiser = SpatialConditionalPacketDenoiser(
+        design_dim=2, module_dim=16, sensor_dim=6, embedding_dim=8,
+        hidden_dim=16, layers=1, coordinate_dim=3,
+    )
+    result = train_matched_wind_diffusion(
+        [task], denoiser_template=denoiser, provider_factory=_provider_factory,
+        frozen_modules={"forward": nn.Linear(2, 2)}, updates=2, steps=3,
+        device="cpu",
+    )
+    assert result.updates_per_arm == 2 and result.organizer_calls == 2
+    assert all(np.isfinite(value) for value in (*result.graph_losses, *result.dense_losses))
+    assert result.frozen_state_hashes_before == result.frozen_state_hashes_after
 
 
 def test_matched_sampling_retains_all_attempts_and_identical_seeds() -> None:

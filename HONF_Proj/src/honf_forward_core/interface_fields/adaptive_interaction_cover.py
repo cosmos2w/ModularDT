@@ -395,14 +395,18 @@ class DirectPairPolicy:
             return eligible_rows.to(receiver_features.dtype)
         # This scorer is an independent routing control. Inputs are frozen;
         # only scorer parameters receive gradients in soft P training.
-        scores = self.scorer(
-            receiver_features.detach(),
-            source_features,
-            receiver_coordinates.detach(),
-            source_coordinates,
-            mechanism=mechanism,
-            budget_fraction=float(self.budget_fraction),
-        )
+        # Hard access is a detached threshold decision. Building a scorer
+        # autograd graph here only stores and recomputes the large pair panel;
+        # the soft policy below remains the trainable route shadow.
+        with torch.set_grad_enabled(torch.is_grad_enabled() and not self.hard):
+            scores = self.scorer(
+                receiver_features.detach(),
+                source_features,
+                receiver_coordinates.detach(),
+                source_coordinates,
+                mechanism=mechanism,
+                budget_fraction=float(self.budget_fraction),
+            )
         eligible = eligible_rows.to(device=scores.device)
         if self.hard:
             threshold = self.hard_threshold.to(device=scores.device, dtype=scores.dtype)

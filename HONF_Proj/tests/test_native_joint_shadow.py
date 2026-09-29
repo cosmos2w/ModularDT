@@ -23,7 +23,7 @@ class _ControlledOrganizer(InputOnlyCoverOrganizer):
             state_dim=8, module_feature_dim=2, environment_feature_dim=2,
             hidden_dim=12,
         )
-        self.qe_logit = torch.nn.Parameter(torch.tensor(-2.0))
+        self.qe_logit = torch.nn.Parameter(torch.tensor(-0.25))
 
     def score_cases(self, encoded, prepared_state, trees):  # type: ignore[override]
         del prepared_state
@@ -34,7 +34,7 @@ class _ControlledOrganizer(InputOnlyCoverOrganizer):
             modules = encoded.module_present.shape[1]
             environments = encoded.env_coords.shape[1]
             module_logits = torch.full((nodes, modules), 4.0, device=device)
-            environment_logits = torch.full((nodes, environments), 4.0, device=device)
+            environment_logits = torch.zeros((nodes, environments), device=device)
             qe_logits = environment_logits.clone()
             qe_logits = torch.cat((
                 self.qe_logit.expand(nodes, 1), qe_logits[:, 1:],
@@ -141,6 +141,66 @@ def test_native_shadow_exact_hard_values_and_physical_gradients() -> None:
     assert abs(float(joint_gradients[-1])) > 1.0e-10
 
 
+def test_native_full_budget_shadow_matches_hard_values_and_skips_route_update() -> None:
+    assert torch.cuda.is_available(), "native shadow validation requires the selected GPU"
+    device = torch.device("cuda:0")
+    core, batch, organizer = _case(device)
+    core.set_native_interaction_policy(organizer)
+    route_optimizer = torch.optim.AdamW(
+        [organizer.qe_logit], lr=0.05, weight_decay=0.2,
+    )
+    organizer.qe_logit.grad = torch.ones_like(organizer.qe_logit)
+    route_optimizer.step()
+    route_optimizer.zero_grad(set_to_none=True)
+    route_after_momentum = organizer.qe_logit.detach().clone()
+
+    encoded = core.encode_case(batch)
+    full_budgets = {mechanism: 1.0 for mechanism in INTERACTION_MECHANISMS}
+    result = hard_value_soft_organizer_forward(
+        core, encoded, encoded.module_tokens, organizer,
+        batch.query_xy, batch.query_features, receiver_chunk_size=2,
+        frontier_cuts=((0,),), budget_fractions=full_budgets,
+    )
+    assert torch.equal(result.hard_prediction, result.soft_prediction)
+    assert torch.equal(result.prediction, result.hard_prediction)
+    for hard_plan, soft_plan in zip(result.hard_plans, result.soft_plans, strict=True):
+        for mechanism in INTERACTION_MECHANISMS:
+            hard_access = hard_plan.permission_matrix(mechanism)
+            soft_access = soft_plan.permission_matrix(mechanism)
+            assert torch.equal(hard_access, soft_access)
+            assert not soft_access.requires_grad
+
+    target = result.hard_prediction.detach() + 0.1
+    joint_loss = (result.prediction - target).square().mean()
+    hard_loss = (result.hard_prediction - target).square().mean()
+    physical_parameters = tuple(
+        parameter for name, parameter in core.named_parameters()
+        if parameter.requires_grad and not name.startswith("native_interaction_policy.")
+    )
+    joint_gradients = torch.autograd.grad(
+        joint_loss, physical_parameters, retain_graph=True, allow_unused=True,
+    )
+    hard_gradients = torch.autograd.grad(
+        hard_loss, physical_parameters, retain_graph=True, allow_unused=True,
+    )
+    for actual, expected in zip(joint_gradients, hard_gradients, strict=True):
+        if expected is None:
+            assert actual is None
+        else:
+            assert actual is not None
+            torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-7)
+    route_grad = torch.autograd.grad(
+        joint_loss, organizer.qe_logit, allow_unused=True,
+    )[0]
+    assert route_grad is None
+    joint_loss.backward()
+    assert organizer.qe_logit.grad is None
+    route_optimizer.step()
+    torch.testing.assert_close(
+        organizer.qe_logit, route_after_momentum, rtol=0.0, atol=0.0,
+    )
+
+
 def test_current_omitted_qe_logit_has_zero_local_gradient_despite_restore() -> None:
     assert torch.cuda.is_available(), "native attention validation requires the selected GPU"
     device = torch.device("cuda:0")
@@ -148,7 +208,12 @@ def test_current_omitted_qe_logit_has_zero_local_gradient_despite_restore() -> N
     encoded = core.encode_case(batch)
     trees = core.backend.build_case_trees(encoded)
     scores = organizer.score_cases(encoded, {}, trees)
-    hard = organizer.plans_from_scores(scores, encoded, trees, hard=True)[0]
+    positive_partial_budget = {"QE": 0.01}
+    hard = organizer.plans_from_scores(
+        scores, encoded, trees, hard=True,
+        budget_fractions=positive_partial_budget,
+    )[0]
+    assert torch.equal(hard.permission_matrix("QE"), torch.zeros_like(hard.permission_matrix("QE")))
     restored_qe = hard.permission_matrix("QE").clone()
     restored_qe[0, 0] = 1.0
     restored = hard.with_permission("QE", restored_qe)
@@ -161,6 +226,7 @@ def test_current_omitted_qe_logit_has_zero_local_gradient_despite_restore() -> N
         )["pred_field"].detach()
     straight_through = organizer.plans_from_scores(
         scores, encoded, trees, hard=True, straight_through_hard=True,
+        budget_fractions=positive_partial_budget,
     )[0]
     omitted_prepared = core.prepare(
         encoded, encoded.module_tokens, fixed_cover_plans=(straight_through,),
@@ -176,7 +242,9 @@ def test_current_omitted_qe_logit_has_zero_local_gradient_despite_restore() -> N
     shadow = hard_value_soft_organizer_forward(
         core, encoded, encoded.module_tokens, organizer,
         batch.query_xy, batch.query_features,
+        budget_fractions=positive_partial_budget,
     )
+    assert bool((shadow.soft_plans[0].permission_matrix("QE") > 0).any())
     repaired_loss = (shadow.prediction - target).square().mean()
     repaired_gradient = torch.autograd.grad(repaired_loss, organizer.qe_logit)[0]
     assert abs(float(repaired_gradient.detach())) > 1.0e-10

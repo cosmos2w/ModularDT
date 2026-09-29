@@ -9,10 +9,12 @@ native read panel.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import torch
 from torch import nn
 from torch.utils.checkpoint import checkpoint
@@ -25,6 +27,7 @@ from honf_forward_core.interface_fields.budgeted_frontier import (
     canonical_pair_catalog,
     direct_pair_weights_at_threshold,
     enumerate_frontier_cuts,
+    frontier_paths,
     project_direct_pair_budget_by_fraction,
     project_unique_pair_budget,
     split_gates_for_frontier,
@@ -187,6 +190,7 @@ class ThermalCoverPlanBuilder:
         self.frontier_selector = frontier_selector
         self.last_records: tuple[dict[str, Any], ...] = ()
         self.last_plans: tuple[MechanismPlan, ...] = ()
+        self.last_scores: tuple[Any, ...] = ()
         self.last_encoded: Any | None = None
         self.last_trees: tuple[Any, ...] = ()
 
@@ -228,6 +232,7 @@ class ThermalCoverPlanBuilder:
                 trees,
                 budgets=self.budget_fractions,
             )
+            self.last_scores = tuple(scores)
             plans = self.organizer.plans_from_scores(
                 scores,
                 detached_encoded,
@@ -245,6 +250,7 @@ class ThermalCoverPlanBuilder:
             return plans
 
         assert self.direct_scorer is not None
+        self.last_scores = ()
         plans_out: list[MechanismPlan] = []
         records: list[dict[str, Any]] = []
         for case, tree in enumerate(trees):
@@ -258,7 +264,14 @@ class ThermalCoverPlanBuilder:
             contextual = _ContextualDirectPairScorer(
                 self.direct_scorer, detached_encoded.global_token[case]
             )
-            case_records: dict[str, Any] = {"mode": "P", "frontier": list(cuts[case]), "routes": {}}
+            case_records: dict[str, Any] = {
+                "mode": "P",
+                "frontier": list(cuts[case]),
+                "routes": {},
+                "direct_scorer_factorized_first_layer": bool(
+                    getattr(self.direct_scorer, "factorized_first_layer", False)
+                ),
+            }
             for mechanism, fraction in self.budget_fractions.items():
                 catalog = canonical_pair_catalog(
                     detached_encoded, tree, mechanism, case_index=case
@@ -273,14 +286,27 @@ class ThermalCoverPlanBuilder:
                 # use this checkpoint's Fourier coordinate scale and features.
                 receiver_coordinates = catalog.receiver_coordinates
                 receiver_features = self._receiver_features(detached_encoded, receiver_coordinates, case)
-                route_scores = contextual(
-                    receiver_features,
-                    source_features,
-                    receiver_coordinates,
-                    source_coordinates,
-                    mechanism=mechanism,
-                    budget_fraction=fraction,
-                )
+                if self.hard:
+                    # Hard-plan scores only determine detached routing decisions;
+                    # the soft shadow owns route gradients for the P arm.
+                    with torch.no_grad():
+                        route_scores = contextual(
+                            receiver_features,
+                            source_features,
+                            receiver_coordinates,
+                            source_coordinates,
+                            mechanism=mechanism,
+                            budget_fraction=fraction,
+                        )
+                else:
+                    route_scores = contextual(
+                        receiver_features,
+                        source_features,
+                        receiver_coordinates,
+                        source_coordinates,
+                        mechanism=mechanism,
+                        budget_fraction=fraction,
+                    )
                 projection = project_direct_pair_budget_by_fraction(
                     route_scores.detach(),
                     budget_fraction=fraction,
@@ -330,6 +356,11 @@ class ThermalCoverPlanBuilder:
                     executor=executor,
                 )
             case_records["full_access_bypass_routes"] = list(plan.explicit_bypass_keys)
+            case_records.update(
+                self._realized_action_evidence(
+                    plan, detached_encoded, tree, case, cuts[case]
+                )
+            )
             self._add_total_route_work(case_records, detached_encoded, tree, case)
             plans_out.append(plan)
             records.append(case_records)
@@ -391,8 +422,174 @@ class ThermalCoverPlanBuilder:
                 sparse_success=projection.sparse_success,
                 executor="grouped_frontier_packets",
             )
+        record.update(
+            self._realized_action_evidence(plan, encoded, tree, case, frontier)
+        )
         self._add_total_route_work(record, encoded, tree, case)
         return record
+
+    def _realized_action_evidence(
+        self,
+        plan: MechanismPlan,
+        encoded: Any,
+        tree: Any,
+        case: int,
+        frontier: tuple[int, ...],
+    ) -> dict[str, Any]:
+        """Record the realized cut and typed source-mask evidence for this plan.
+
+        The cut K used by the action selector is based on the union of typed
+        source-permission signatures, not the sum of route counts. Packed masks
+        retain enough information to measure support turnover across weights.
+        """
+
+        mechanisms = (self.extra_route, "QE")
+        route_masks: dict[str, dict[str, Any]] = {}
+        for mechanism in mechanisms:
+            catalog = canonical_pair_catalog(encoded, tree, mechanism, case_index=case)
+            direct_policy = plan.direct_pair_policy_for(mechanism)
+            direct_access = plan.direct_pair_access_for(mechanism)
+            direct = direct_policy is not None or direct_access is not None
+            source_valid = catalog.source_validity.to(dtype=torch.bool)
+            valid_cpu = source_valid.detach().to(device="cpu", dtype=torch.uint8).numpy()
+            valid_bits = np.packbits(valid_cpu, bitorder="little").tobytes()
+            if direct_policy is not None:
+                # Runtime policies already score the actual native read panels.
+                # Do not score a second, potentially much larger canonical panel
+                # just to build a training diagnostic.
+                route_masks[mechanism] = {
+                    "permission_scope": "dynamic_direct_policy_runtime_not_rematerialized",
+                    "receiver_axis": "canonical_native_receiver_queries",
+                    "receiver_count": int(catalog.receiver_coordinates.shape[0]),
+                    "source_index_space": "canonical_pair_catalog_source_order",
+                    "source_count": int(source_valid.numel()),
+                    "valid_source_count": int(source_valid.sum().detach().cpu()),
+                    "source_validity_bits_little_endian_hex": valid_bits.hex(),
+                    "support_materialized": False,
+                    "support_note": "Runtime direct policy masks are not recomputed for logging; route work is recorded from the live execution.",
+                }
+                continue
+            if direct_access is not None:
+                receiver_coordinates = catalog.receiver_coordinates
+                if direct_access.receiver_coordinates.shape != receiver_coordinates.shape or not torch.equal(
+                    direct_access.receiver_coordinates.detach(), receiver_coordinates.detach()
+                ):
+                    raise ValueError(
+                        f"Realized {mechanism} direct access does not match the canonical receiver axis."
+                    )
+                permission = direct_access.weights
+                receiver_axis = "canonical_native_receiver_queries"
+            else:
+                permission = plan.permission_matrix(mechanism)[
+                    list(frontier)
+                ]
+                receiver_axis = "realized_frontier_nodes"
+            if permission.ndim != 2:
+                raise ValueError(f"Realized {mechanism} permission must be a receiver/source matrix.")
+            if direct and permission.shape[0] != catalog.receiver_coordinates.shape[0]:
+                raise ValueError(
+                    f"Realized {mechanism} direct-access rows do not align with canonical native queries."
+                )
+            if not direct and permission.shape[0] != len(frontier):
+                raise ValueError(
+                    f"Realized {mechanism} permission rows do not align with its {receiver_axis} axis."
+                )
+            if permission.shape[1] != source_valid.numel():
+                raise ValueError(
+                    f"Realized {mechanism} permission sources do not align with canonical validity."
+                )
+            hard_support = (permission.detach() >= 0.5) & source_valid[None]
+            support_cpu = hard_support.to(device="cpu", dtype=torch.uint8).numpy()
+            packed_rows = [
+                np.packbits(row, bitorder="little").tobytes()
+                for row in support_cpu
+            ]
+            valid_cpu = source_valid.detach().to(device="cpu", dtype=torch.uint8).numpy()
+            valid_bits = np.packbits(valid_cpu, bitorder="little").tobytes()
+            packed_matrix = np.packbits(support_cpu.reshape(-1), bitorder="little").tobytes()
+            matrix_shape_bytes = np.asarray(support_cpu.shape, dtype=np.int64).tobytes()
+            route_masks[mechanism] = {
+                "permission_scope": "direct_pair_at_canonical_native_receiver_queries" if direct else "realized_plan_at_frontier_nodes",
+                "receiver_axis": receiver_axis,
+                "receiver_count": int(permission.shape[0]),
+                "hard_support_threshold": 0.5,
+                "support_materialized": True,
+                "source_index_space": "canonical_pair_catalog_source_order",
+                "source_count": int(source_valid.numel()),
+                "valid_source_count": int(source_valid.sum().detach().cpu()),
+                "source_validity_bits_little_endian_hex": valid_bits.hex(),
+                "permission_matrix_shape": [int(value) for value in support_cpu.shape],
+                "permission_matrix_sha256": hashlib.sha256(matrix_shape_bytes + packed_matrix).hexdigest(),
+                "active_receiver_count_by_source": support_cpu.sum(axis=0, dtype=np.int64).tolist(),
+            }
+            if not direct:
+                route_masks[mechanism]["permission_bits_by_receiver_little_endian_hex"] = [
+                    row.hex() for row in packed_rows
+                ]
+                route_masks[mechanism]["permission_mask_sha256_by_receiver"] = [
+                    hashlib.sha256(row).hexdigest() for row in packed_rows
+                ]
+
+        signatures: list[bytes] = []
+        packet_aligned = all(
+            route_masks[mechanism]["receiver_axis"] == "realized_frontier_nodes"
+            and route_masks[mechanism]["receiver_count"] == len(frontier)
+            for mechanism in mechanisms
+        )
+        signature_nonempty: list[bool] = []
+        if packet_aligned:
+            for packet_index in range(len(frontier)):
+                combined = bytearray()
+                has_source = False
+                for mechanism in mechanisms:
+                    support = bytes.fromhex(
+                        route_masks[mechanism]["permission_bits_by_receiver_little_endian_hex"][packet_index]
+                    )
+                    has_source = has_source or any(support)
+                    combined.extend(len(support).to_bytes(4, "little"))
+                    combined.extend(support)
+                signatures.append(bytes(combined))
+                signature_nonempty.append(has_source)
+        else:
+            signatures = []
+            signature_nonempty = []
+        first_for_signature: dict[bytes, int] = {}
+        nonempty: set[bytes] = set()
+        collapsed: list[dict[str, Any]] = []
+        for index, signature in enumerate(signatures):
+            if signature_nonempty[index]:
+                nonempty.add(signature)
+            if not signature_nonempty[index]:
+                collapsed.append({
+                    "frontier_index": index,
+                    "frontier_node_id": int(frontier[index]),
+                    "joint_support_signature_hex": signature.hex(),
+                    "reason": "empty_source_support",
+                })
+            elif signature in first_for_signature:
+                collapsed.append({
+                    "frontier_index": index,
+                    "frontier_node_id": int(frontier[index]),
+                    "joint_support_signature_hex": signature.hex(),
+                    "collapsed_into_frontier_index": first_for_signature[signature],
+                    "reason": "duplicate_joint_source_support",
+                })
+            else:
+                first_for_signature[signature] = index
+        paths = frontier_paths(tree, frontier, max_depth=self.max_depth)
+        return {
+            "execution_hardness": "hard" if self.hard else "soft",
+            "frontier_paths": list(paths),
+            "raw_frontier_k": len(frontier),
+            "nonredundant_k": len(nonempty) if packet_aligned else None,
+            "nonredundant_k_status": "measured_from_realized_typed_source_support" if packet_aligned else "not_applicable_to_direct_pair_receiver_axis",
+            "joint_support_mechanisms": list(mechanisms),
+            "joint_support_signature_hex_by_frontier": [
+                signature.hex() for signature in signatures
+            ],
+            "collapsed_cut_rows": collapsed,
+            "source_mask_evidence": route_masks,
+        }
 
     @staticmethod
     def _add_total_route_work(
@@ -518,6 +715,7 @@ def make_direct_scorer(
     device: torch.device | str,
     dtype: torch.dtype = torch.float32,
     hidden_dim: int = 96,
+    factorized_first_layer: bool = False,
 ) -> BudgetConditionedDirectPairScorer:
     """Size the P scorer from this checkpoint's Fourier and token widths."""
 
@@ -529,6 +727,7 @@ def make_direct_scorer(
         receiver_feature_dim=int(receiver_features.shape[-1]) + token_dim,
         source_feature_dim=2 * token_dim,
         hidden_dim=hidden_dim,
+        factorized_first_layer=factorized_first_layer,
     ).to(device=device, dtype=dtype)
 
 

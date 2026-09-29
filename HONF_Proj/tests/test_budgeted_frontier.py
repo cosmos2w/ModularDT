@@ -65,6 +65,43 @@ def _tree(case: EncodedInterfaceCase) -> CaseLocalReceiverTree:
     )
 
 
+@pytest.mark.parametrize("dtype", (torch.float32, torch.float64))
+def test_factorized_direct_scorer_matches_dense_pair_values_and_gradients(dtype: torch.dtype) -> None:
+    """The faster first layer preserves the saved direct scorer's computation."""
+
+    torch.manual_seed(718)
+    scorer = BudgetConditionedDirectPairScorer(
+        receiver_feature_dim=7, source_feature_dim=8, hidden_dim=12, source_chunk_size=2,
+        factorized_first_layer=True,
+    ).to(dtype=dtype)
+    receivers = torch.randn(5, 7, dtype=dtype, requires_grad=True)
+    sources = torch.randn(4, 8, dtype=dtype, requires_grad=True)
+    receiver_coordinates = torch.randn(5, 3, dtype=dtype, requires_grad=True)
+    source_coordinates = torch.randn(4, 3, dtype=dtype, requires_grad=True)
+    parameters = tuple(scorer.scorers["QE"].parameters())
+
+    factorized = scorer(
+        receivers, sources, receiver_coordinates, source_coordinates,
+        mechanism="QE", budget_fraction=0.9,
+    )
+    relative = receiver_coordinates[:, None, :] - source_coordinates[None, :, :]
+    pair_features = torch.cat((
+        receivers[:, None, :].expand(-1, sources.shape[0], -1),
+        sources[None, :, :].expand(receivers.shape[0], -1, -1),
+        scorer._spatial_summary(relative),
+        receivers.new_full((receivers.shape[0], sources.shape[0], 1), 0.9),
+    ), dim=-1)
+    dense = scorer.scorers["QE"](pair_features).squeeze(-1)
+    tolerance = 2e-6 if dtype == torch.float32 else 1e-12
+    torch.testing.assert_close(factorized, dense, rtol=tolerance, atol=tolerance)
+
+    inputs = (receivers, sources, receiver_coordinates, source_coordinates, *parameters)
+    factorized_gradients = torch.autograd.grad(factorized.square().sum(), inputs, retain_graph=True)
+    dense_gradients = torch.autograd.grad(dense.square().sum(), inputs)
+    for actual, expected in zip(factorized_gradients, dense_gradients, strict=True):
+        torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-6)
+
+
 def test_depth_three_frontiers_have_26_complete_cuts_and_realized_gates() -> None:
     coordinates = torch.arange(8, dtype=torch.float32)[:, None]
     universe = ReceiverAnchorUniverse(
@@ -428,10 +465,12 @@ def test_dynamic_direct_policy_scores_current_panels_across_phases() -> None:
         def __init__(self, **kwargs):
             super().__init__(**kwargs)
             self.receiver_panels: list[torch.Tensor] = []
+            self.grad_modes: list[bool] = []
 
         def forward(self, receiver_features, source_features, receiver_coordinates,
                     source_coordinates, *, mechanism, budget_fraction):
             self.receiver_panels.append(receiver_coordinates.detach().clone())
+            self.grad_modes.append(torch.is_grad_enabled())
             return super().forward(
                 receiver_features, source_features, receiver_coordinates,
                 source_coordinates, mechanism=mechanism,
@@ -487,6 +526,19 @@ def test_dynamic_direct_policy_scores_current_panels_across_phases() -> None:
         return plan
 
     hard_plan, soft_plan = policy_plan(hard=True), policy_plan(hard=False)
+    scorer.grad_modes.clear()
+    hard_access = hard_plan.direct_pair_policy_for("QE", phase="P0").access_for(
+        "QE", anchor_coordinates, anchor_features,
+    )
+    assert scorer.grad_modes == [False]
+    assert not hard_access.requires_grad
+    scorer.grad_modes.clear()
+    soft_access = soft_plan.direct_pair_policy_for("QE", phase="P0").access_for(
+        "QE", anchor_coordinates, anchor_features,
+    )
+    assert scorer.grad_modes == [True]
+    assert soft_access.requires_grad
+    scorer.grad_modes.clear()
     states = torch.randn(1, 3, 8, generator=torch.Generator().manual_seed(73), requires_grad=True)
     query0 = torch.tensor([[[0.3, 0.4], [1.7, 1.1]]])
     result = hard_value_soft_direct_forward(
@@ -502,6 +554,7 @@ def test_dynamic_direct_policy_scores_current_panels_across_phases() -> None:
     )
     result.soft_prediction.sum().backward()
     assert any(parameter.grad is not None and bool((parameter.grad.abs() > 0).any()) for parameter in scorer.parameters())
+    assert False in scorer.grad_modes and True in scorer.grad_modes
     assert states.grad is None
     first_phase_panels = [panel for panel in scorer.receiver_panels if panel.shape[0] == 1]
     assert any(torch.allclose(panel, query0[0, :1]) for panel in first_phase_panels)

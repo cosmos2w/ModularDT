@@ -25,7 +25,7 @@ from honf_forward_core.interface_fields.types import EncodedInterfaceCase
 _SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
-from run_active_packet_forward import _FrontierSchedule, _budgeted_route_status
+from run_active_packet_forward import _FrontierSchedule, _budgeted_route_status, _route_module
 import run_active_packet_stage_c as stage_c
 
 
@@ -86,6 +86,16 @@ def test_thermal_grouped_and_direct_builders_preserve_budget_and_gradient_contra
     assert any(parameter.grad is not None for parameter in organizer.parameters())
     assert isinstance(grouped_soft.last_records[0]["routes"]["ME"].sparse_success, bool)
     grouped_record = grouped_soft.last_records[0]
+    assert grouped_record["frontier_paths"]
+    assert grouped_record["raw_frontier_k"] == len(grouped_record["frontier"])
+    assert grouped_record["nonredundant_k"] >= 1
+    assert grouped_record["nonredundant_k"] <= grouped_record["raw_frontier_k"]
+    assert grouped_record["joint_support_mechanisms"] == ["ME", "QE"]
+    assert set(grouped_record["source_mask_evidence"]) == {"ME", "QE"}
+    for evidence in grouped_record["source_mask_evidence"].values():
+        assert evidence["receiver_axis"] == "realized_frontier_nodes"
+        assert len(evidence["permission_bits_by_receiver_little_endian_hex"]) == grouped_record["raw_frontier_k"]
+        assert len(evidence["permission_mask_sha256_by_receiver"]) == grouped_record["raw_frontier_k"]
     grouped_totals = grouped_record["all_mechanism_route_work"]
     assert set(grouped_totals) == {"MM", "ME", "EM", "QM", "QE"}
     assert grouped_record["all_mechanisms_total"]["achieved_work"] == sum(
@@ -113,6 +123,16 @@ def test_thermal_grouped_and_direct_builders_preserve_budget_and_gradient_contra
     assert direct_plan.direct_pair_policy_for("QE") is not None
     assert direct_plan.explicit_bypass_keys == ("MM", "EM", "QM")
     direct_record = direct_soft.last_records[0]
+    assert direct_record["frontier_paths"]
+    assert direct_record["raw_frontier_k"] == len(direct_record["frontier"])
+    assert direct_record["nonredundant_k"] is None
+    assert direct_record["nonredundant_k_status"] == "not_applicable_to_direct_pair_receiver_axis"
+    assert direct_record["joint_support_mechanisms"] == ["ME", "QE"]
+    assert direct_record["source_mask_evidence"]["ME"]["permission_scope"] == "direct_pair_at_canonical_native_receiver_queries"
+    assert direct_record["source_mask_evidence"]["ME"]["support_materialized"] is True
+    assert direct_record["source_mask_evidence"]["QE"]["permission_scope"] == "dynamic_direct_policy_runtime_not_rematerialized"
+    assert direct_record["source_mask_evidence"]["QE"]["support_materialized"] is False
+    assert direct_record["source_mask_evidence"]["QE"]["receiver_axis"] == "canonical_native_receiver_queries"
     direct_totals = direct_record["all_mechanism_route_work"]
     assert direct_record["all_mechanisms_total"]["achieved_work"] == sum(
         row["achieved_work"] for row in direct_totals.values()
@@ -173,6 +193,53 @@ def test_stage_c_rewiring_preserves_packet_sizes_and_source_degrees() -> None:
         assert info["accepted_switches"] > 0
         assert torch.equal(before.sum(dim=1), after.sum(dim=1))
         assert torch.equal(before.sum(dim=0), after.sum(dim=0))
+
+
+def test_hard_direct_canonical_scoring_skips_autograd_and_soft_shadow_keeps_it() -> None:
+    core, encoded, tree = _fixture()
+    scorer = make_direct_scorer(core, device="cpu", hidden_dim=16)
+    grad_modes: list[bool] = []
+    scorer.register_forward_pre_hook(
+        lambda module, args: grad_modes.append(torch.is_grad_enabled())
+    )
+    budgets = {"QE": 0.35, "ME": 0.35}
+    hard = ThermalCoverPlanBuilder(
+        core=core,
+        budget_fractions=budgets,
+        mode="P",
+        direct_scorer=scorer,
+        extra_route="ME",
+    )
+    hard.hard = True
+    hard_plan = hard(encoded, encoded.module_tokens, (tree,))[0]
+    assert grad_modes == [False, False]
+    assert hard_plan.direct_pair_access_for("ME").weights.requires_grad is False
+
+    grad_modes.clear()
+    soft = ThermalCoverPlanBuilder(
+        core=core,
+        budget_fractions=budgets,
+        mode="P",
+        direct_scorer=scorer,
+        extra_route="ME",
+    )
+    soft.hard = False
+    soft_plan = soft(encoded, encoded.module_tokens, (tree,))[0]
+    assert grad_modes == [True, True]
+    soft_plan.direct_pair_access_for("ME").weights.sum().backward()
+    assert any(parameter.grad is not None for parameter in scorer.parameters())
+
+
+def test_factorized_direct_scorer_is_opt_in_for_only_the_p_route(monkeypatch) -> None:
+    core, encoded, _tree = _fixture()
+    monkeypatch.setenv("THERMAL_FACTOR_DIRECT_SCORER", "1")
+    factorized = _route_module("P", core, encoded, torch.device("cpu"))
+    assert factorized.factorized_first_layer is True
+    grouped = _route_module("G", core, encoded, torch.device("cpu"))
+    assert not hasattr(grouped, "factorized_first_layer")
+    monkeypatch.delenv("THERMAL_FACTOR_DIRECT_SCORER")
+    legacy = _route_module("P", core, encoded, torch.device("cpu"))
+    assert legacy.factorized_first_layer is False
 
 def test_extended_thermal_budget_curriculum_matches_declared_mix_without_forcing_k() -> None:
     schedule = _FrontierSchedule(
