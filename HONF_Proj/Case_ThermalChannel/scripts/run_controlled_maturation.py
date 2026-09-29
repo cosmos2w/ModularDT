@@ -1027,6 +1027,25 @@ def _recorded_lane_active_seconds(path: Path) -> float:
     return total
 
 
+def _validate_p_execution_mode(
+    route_model: Any, source_payload: Mapping[str, Any], *, requested_factorized: bool
+) -> bool:
+    """Reject a resumed P checkpoint under a different direct-scorer execution path."""
+
+    resolved_factorized = bool(getattr(route_model, "factorized_first_layer", False))
+    if resolved_factorized != requested_factorized:
+        raise RuntimeError("The constructed P scorer differs from the requested factorized execution mode.")
+    checkpoint_mode = source_payload.get("execution_mode")
+    if checkpoint_mode is not None:
+        if not isinstance(checkpoint_mode, Mapping) or not isinstance(
+            checkpoint_mode.get("thermal_factor_direct_scorer"), bool
+        ):
+            raise ValueError("The manifest-bound P checkpoint has an invalid execution-mode record.")
+        if checkpoint_mode["thermal_factor_direct_scorer"] != resolved_factorized:
+            raise RuntimeError("The P checkpoint scorer execution mode differs from this invocation.")
+    return resolved_factorized
+
+
 def _run_arm(
     *,
     arm: str,
@@ -1128,6 +1147,13 @@ def _run_arm(
         extra_route=inputs["extra_route"],
         device=device,
     )
+    resolved_factorized_scorer = (
+        _validate_p_execution_mode(
+            route_model, source_payload,
+            requested_factorized=os.environ.get("THERMAL_FACTOR_DIRECT_SCORER", "0") == "1",
+        )
+        if arm == "P" else False
+    )
     optimizer = torch.optim.AdamW(
         (parameter for parameter in bundle.parameters() if parameter.requires_grad),
         lr=1.0e-5,
@@ -1186,7 +1212,15 @@ def _run_arm(
     def save_checkpoint(payload: Mapping[str, Any], label: str) -> None:
         update = int(payload["actual_optimizer_updates"])
         path = checkpoint_dir / f"{arm}_u{update:04d}_{label}.pt"
-        _atomic_torch_save(path, dict(payload))
+        saved_payload = dict(payload)
+        if arm == "P":
+            saved_payload["execution_mode"] = {
+                "thermal_factor_direct_scorer": resolved_factorized_scorer,
+                "environment": {"THERMAL_FACTOR_DIRECT_SCORER": "1" if resolved_factorized_scorer else "0"},
+                "driver_path": str(Path(__file__).resolve()),
+                "driver_sha256": _sha256(Path(__file__).resolve()),
+            }
+        _atomic_torch_save(path, saved_payload)
         state = manifest["arms"].setdefault(arm, {})
         state.update({
             "latest_checkpoint": str(path),
@@ -1552,6 +1586,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             raise RuntimeError("Thermal controlled maturation must set CUDA_VISIBLE_DEVICES=2.")
         if os.environ.get("CUBLAS_WORKSPACE_CONFIG") != ":4096:8":
             raise RuntimeError("Set CUBLAS_WORKSPACE_CONFIG=:4096:8 before launching deterministic CUDA work.")
+        requested_direct_scorer_mode = os.environ.get("THERMAL_FACTOR_DIRECT_SCORER", "0")
+        if requested_direct_scorer_mode not in {"0", "1"}:
+            raise ValueError("THERMAL_FACTOR_DIRECT_SCORER must be 0 or 1.")
         gpu_uuid, gpu_name = _physical_gpu2_identity()
         if gpu_uuid != AUTHORIZED_GPU2_UUID:
             raise RuntimeError(
@@ -1652,6 +1689,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "driver_sha256": _sha256(Path(__file__).resolve()),
                 "stop_after_update": args.stop_after_update,
                 "preflight_only": bool(args.preflight_only),
+                "thermal_factor_direct_scorer_requested": requested_direct_scorer_mode == "1",
             })
         if args.resume:
             manifest.setdefault("invocation_history", []).append({
@@ -1661,6 +1699,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "driver_sha256": _sha256(Path(__file__).resolve()),
                 "stop_after_update": args.stop_after_update,
                 "preflight_only": bool(args.preflight_only),
+                "thermal_factor_direct_scorer_requested": requested_direct_scorer_mode == "1",
             })
         if args.preflight_only:
             manifest["status"] = "preflight_passed_no_training"
@@ -1708,8 +1747,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         for arm in args.arms:
             arm_state = manifest.get("arms", {}).get(arm, {})
             if args.resume and int(arm_state.get("latest_update", START_UPDATE)) >= args.stop_after_update:
-                last_summary = arm_state
-                last_arm = arm
                 continue
             arm_started = time.time()
             _record_job_event(
@@ -1754,7 +1791,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             if summary["final_update"] != args.stop_after_update:
                 break
         if last_summary is None or last_arm is None:
-            raise RuntimeError("No Thermal arm was run or found at the requested stop update.")
+            if not all(
+                int(manifest.get("arms", {}).get(arm, {}).get("latest_update", START_UPDATE)) >= args.stop_after_update
+                for arm in args.arms
+            ):
+                raise RuntimeError("No Thermal arm was run or found at the requested stop update.")
+            last_arm = "P"
+            last_summary = manifest["arms"]["P"]
         all_at_target = all(
             int(manifest.get("arms", {}).get(arm, {}).get("final_update", manifest.get("arms", {}).get(arm, {}).get("latest_update", START_UPDATE)))
             >= args.stop_after_update
@@ -1772,6 +1815,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             manifest["status"] = "completed_update_cap"
         elif any_wall_censored:
             manifest["status"] = f"resource_censored_after_{last_arm}_u{last_summary['final_update']}"
+        elif all_at_target and last_arm != "P":
+            manifest["status"] = f"matched_G_P_u{args.stop_after_update}_after_{last_arm}_catchup"
         else:
             manifest["status"] = f"paused_after_{last_arm}_u{last_summary['final_update']}"
         status = manifest["status"]

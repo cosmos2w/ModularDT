@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import importlib.util
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from channelthermal.response_control.training import (
@@ -16,6 +19,33 @@ from channelthermal.response_control.maturation import (
     available_frontier_for_paths,
 )
 from test_response_control import _AbsoluteField, _stencil
+
+
+def test_resumed_direct_scorer_requires_bound_execution_mode() -> None:
+    driver_path = Path(__file__).resolve().parents[1] / "scripts" / "run_controlled_maturation.py"
+    spec = importlib.util.spec_from_file_location("thermal_maturation_driver_mode_test", driver_path)
+    assert spec is not None and spec.loader is not None
+    driver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(driver)
+
+    factorized = SimpleNamespace(factorized_first_layer=True)
+    assert driver._validate_p_execution_mode(factorized, {}, requested_factorized=True)
+    assert driver._validate_p_execution_mode(
+        factorized, {"execution_mode": {"thermal_factor_direct_scorer": True}},
+        requested_factorized=True,
+    )
+    with pytest.raises(RuntimeError, match="checkpoint scorer execution mode"):
+        driver._validate_p_execution_mode(
+            factorized, {"execution_mode": {"thermal_factor_direct_scorer": False}},
+            requested_factorized=True,
+        )
+    with pytest.raises(RuntimeError, match="constructed P scorer"):
+        driver._validate_p_execution_mode(factorized, {}, requested_factorized=False)
+    with pytest.raises(ValueError, match="invalid execution-mode"):
+        driver._validate_p_execution_mode(
+            factorized, {"execution_mode": {"thermal_factor_direct_scorer": "1"}},
+            requested_factorized=True,
+        )
 
 
 def _tree(*children: tuple[int | None, int | None]):

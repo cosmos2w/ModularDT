@@ -1,0 +1,1218 @@
+#!/usr/bin/env python3
+"""Measure the Wind G cut family at one immutable selected checkpoint.
+
+Only G actions enter the flat action table. Retained W-full and same-G full
+predictions, plus selected P direct and P full controls, are measured beside
+those actions and kept outside selector training rows. Planner features use
+current inputs, realized G permissions, and native geometry; reference targets
+are used only for the reported metrics.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import sys
+import time
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+
+REPO = Path(__file__).resolve().parents[3]
+PROJECT = REPO / "HONF_Proj"
+for _path in (
+    str(PROJECT / "src"),
+    str(PROJECT / "Case_WindFarm" / "src"),
+    str(Path(__file__).resolve().parent),
+):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+import evaluate_controlled_maturation_panel as panel
+import run_active_packet_reuse as runner
+import run_controlled_maturation as maturation
+from honf_forward_core.interface_fields.action_aware_frontier import (
+    describe_realized_plan,
+    receiver_role_descriptors,
+)
+from honf_forward_core.interface_fields.adaptive_interaction_cover import MechanismPlan
+from honf_runtime.compat import load_trusted_checkpoint
+from windfarm.workflows.maturation import WIND_ACTION_PATHS, available_frontier_for_paths
+
+
+RUN_ID = "2112"
+ACTION_ORDER = ("root", "two_packet", "four_packet", "full_access")
+PRIMARY_CAPACITY = {"QE": 0.95, "MM": 0.90}
+FIXED_QUERY_SEED = 2_112_291
+REPEAT_QUERY_SEED = 2_112_929
+Q512_ROLE_COUNTS = {
+    "volume": 256, "hub_slab": 64, "downstream_envelope": 64,
+    "near_turbine": 64, "background": 64,
+}
+Q2048_ROLE_COUNTS = {
+    "volume": 1024, "hub_slab": 256, "downstream_envelope": 256,
+    "near_turbine": 256, "background": 256,
+}
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _array_sha256(value: np.ndarray) -> str:
+    return hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
+
+
+def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def _role_vector(values: Mapping[str, float], roles: Sequence[str]) -> list[float]:
+    if set(values) != set(roles):
+        raise ValueError("Role metric keys differ from the declared Wind role order")
+    result = [float(values[role]) for role in roles]
+    if not all(math.isfinite(value) and value >= 0.0 for value in result):
+        raise ValueError("Role metric contains a negative or nonfinite value")
+    return result
+
+
+def _role_delta_rmse(
+    prediction: torch.Tensor,
+    reference: torch.Tensor,
+    role_slices: Mapping[str, slice],
+    normalizer: Any,
+) -> dict[str, float]:
+    physical_delta = runner._standardized_delta_to_mps(prediction - reference, normalizer)
+    result: dict[str, float] = {}
+    for role in runner.ROLE_NAMES:
+        part = physical_delta[0, role_slices[role]]
+        result[role] = float(part.square().mean().sqrt().detach().cpu())
+    return result
+
+
+def _canonical_packet_features(
+    raw_packet_features: np.ndarray,
+    module_masks: np.ndarray,
+    environment_masks: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    """Quotient exact duplicate typed support rows and average input features."""
+    features = np.asarray(raw_packet_features, dtype=np.float32)
+    mm = np.asarray(module_masks, dtype=np.uint8)
+    qe = np.asarray(environment_masks, dtype=np.uint8)
+    if features.ndim != 2 or mm.ndim != 2 or qe.ndim != 2:
+        raise ValueError("Packet features and MM/QE masks must be rank two")
+    if not (features.shape[0] == mm.shape[0] == qe.shape[0]):
+        raise ValueError("Packet features and typed masks have different packet counts")
+    grouped: dict[tuple[bytes, bytes], list[int]] = {}
+    for index in range(features.shape[0]):
+        if not bool(mm[index].any() or qe[index].any()):
+            continue
+        signature = (
+            np.ascontiguousarray(mm[index]).tobytes(),
+            np.ascontiguousarray(qe[index]).tobytes(),
+        )
+        grouped.setdefault(signature, []).append(index)
+    if not grouped:
+        raise ValueError("Realized action has no source-bearing packet")
+    groups = list(grouped.values())
+    packet_rows = np.stack([features[indexes].mean(axis=0) for indexes in groups]).astype(
+        np.float32, copy=False
+    )
+    canonical_mm = np.stack([mm[indexes[0]] for indexes in groups]).astype(np.uint8, copy=False)
+    canonical_qe = np.stack([qe[indexes[0]] for indexes in groups]).astype(np.uint8, copy=False)
+    signatures = [hashlib.sha256(left + b"\0" + right).hexdigest() for left, right in grouped]
+    return packet_rows, canonical_mm, canonical_qe, signatures
+
+
+def _summarize_action_exposure(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    training_rows: Sequence[int],
+    selected_update: int,
+    archived_optimizer_attempt_keys: Sequence[str] = (),
+    required_passes: int = 2,
+) -> dict[str, dict[str, Any]]:
+    """Count fully covered primary action passes; scaffolds/replays do not qualify."""
+    expected = set(map(int, training_rows))
+    archived = set(map(str, archived_optimizer_attempt_keys))
+    if not expected:
+        raise ValueError("Exposure audit requires the exact eligible training rows")
+    grouped: dict[str, dict[int, list[int]]] = {
+        action: defaultdict(list) for action in ("root", "two_packet", "four_packet")
+    }
+    for record in records:
+        if int(record.get("update_count", -1)) > int(selected_update):
+            continue
+        attempt_key = str(record.get("optimizer_attempt_key", ""))
+        if not attempt_key:
+            raise ValueError("G update record is missing its optimizer-attempt lineage key")
+        if attempt_key in archived:
+            continue
+        action = str(record.get("requested_action", ""))
+        if action not in grouped or record.get("full_access_replay", False):
+            continue
+        if str(record.get("phase", "")) != "action_family":
+            continue
+        if list(record.get("requested_cut_paths", [])) != list(WIND_ACTION_PATHS[action]):
+            continue
+        capacity = record.get("capacity_vector", {})
+        if (
+            not isinstance(capacity, Mapping)
+            or float(capacity.get("MM", -1.0)) != PRIMARY_CAPACITY["MM"]
+            or float(capacity.get("QE", -1.0)) != PRIMARY_CAPACITY["QE"]
+        ):
+            continue
+        if "primary_pass" not in record:
+            raise ValueError("G update record is missing its primary-pass identity")
+        grouped[action][int(record["primary_pass"])].append(int(record["row"]))
+
+    result: dict[str, dict[str, Any]] = {}
+    for action, passes in grouped.items():
+        complete = []
+        for pass_id, row_ids in sorted(passes.items()):
+            if len(row_ids) == len(expected) and set(row_ids) == expected:
+                complete.append(pass_id)
+        result[action] = {
+            "completed_primary_action_passes": len(complete),
+            "completed_primary_pass_ids": complete,
+            "required_complete_passes": int(required_passes),
+            "trained_action": len(complete) >= int(required_passes),
+            "training_row_count": len(expected),
+            "primary_capacity": {"MM": PRIMARY_CAPACITY["MM"], "QE": PRIMARY_CAPACITY["QE"]},
+            "phase": "action_family",
+            "scaffold_passes_excluded": True,
+            "scheduled_full_access_replays_excluded": True,
+        }
+    return result
+
+
+def _trained_sparse_action(
+    action: str, *, exact_work: float, full_work: float,
+    exposure_record: Mapping[str, Any],
+) -> bool:
+    sparse_success = float(exact_work) < float(full_work) - max(
+        1.0e-9, 1.0e-12 * float(full_work)
+    )
+    return bool(
+        action != "full_access"
+        and exposure_record.get("trained_action", False)
+        and sparse_success
+    )
+
+
+def _action_budget_vector(action: str) -> np.ndarray:
+    if action not in ACTION_ORDER:
+        raise ValueError(f"Unknown G action budget {action!r}")
+    values = {"MM": 1.0, "QE": 1.0} if action == "full_access" else PRIMARY_CAPACITY
+    return np.asarray([values["MM"], values["QE"]], dtype=np.float32)
+
+
+def _family_role_medians(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    role_field: str,
+    roles: Sequence[str],
+) -> np.ndarray:
+    by_family: dict[str, list[list[float]]] = defaultdict(list)
+    for record in records:
+        by_family[str(record["family_key"])].append(_role_vector(record[role_field], roles))
+    if not by_family:
+        raise ValueError(f"No family records available for {role_field}")
+    return np.stack([
+        np.median(np.asarray(values, dtype=np.float64), axis=0)
+        for _family, values in sorted(by_family.items())
+    ])
+
+
+def _numerical_floor_role_mps(
+    wfull_records: Sequence[Mapping[str, Any]], *, roles: Sequence[str]
+) -> list[float]:
+    family_medians = _family_role_medians(
+        wfull_records, role_field="wfull_role_rmse_mps", roles=roles
+    )
+    train_family_median = np.median(family_medians, axis=0)
+    return np.maximum(1.0e-8, 1.0e-6 * train_family_median).tolist()
+
+
+def _sampling_allowance_role_mps(
+    q512_vs_q2048: Mapping[str, Mapping[str, Sequence[float]]],
+    *,
+    roles: Sequence[str],
+) -> tuple[list[float], dict[str, Any]]:
+    """Use family medians then a 95th percentile of same-G-full query-size deltas."""
+    if len(q512_vs_q2048) < 2:
+        raise ValueError("Q512/Q2048 allowance needs at least two train-fit layout families")
+    family_medians = []
+    details = {}
+    for family, values in sorted(q512_vs_q2048.items()):
+        if set(values) != set(roles):
+            raise ValueError("Q512/Q2048 calibration roles differ from the declared order")
+        role_medians = []
+        for role in roles:
+            deltas = np.asarray(values[role], dtype=np.float64)
+            if deltas.size == 0 or not np.isfinite(deltas).all() or bool((deltas < 0).any()):
+                raise ValueError("Q512/Q2048 calibration deltas must be finite and nonnegative")
+            role_medians.append(float(np.median(deltas)))
+        family_medians.append(role_medians)
+        details[str(family)] = {
+            role: role_medians[index] for index, role in enumerate(roles)
+        }
+    matrix = np.asarray(family_medians, dtype=np.float64)
+    allowance = np.quantile(matrix, 0.95, axis=0)
+    return allowance.tolist(), {
+        "method": "per-layout median absolute same-G-full RMSE delta, then 95th percentile across train_fit layouts",
+        "family_median_abs_delta_role_mps": details,
+        "absolute_allowance_role_mps": allowance.tolist(),
+        "train_fit_family_count": len(family_medians),
+        "q512_role_query_counts": dict(Q512_ROLE_COUNTS),
+        "q2048_role_query_counts": dict(Q2048_ROLE_COUNTS),
+    }
+
+
+def _validate_action_rows(rows: Sequence[Mapping[str, Any]], *, expected_sha: str) -> None:
+    by_case: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    allowed = set(ACTION_ORDER)
+    for row in rows:
+        action = str(row.get("action_key", ""))
+        if action not in allowed:
+            raise ValueError(f"Non-G action {action!r} was placed in the selector table")
+        if row.get("forward_checkpoint_sha256") != expected_sha:
+            raise ValueError("An action row is not bound to the selected G checkpoint")
+        if str(row.get("family_key")) != str(row.get("layout_key")):
+            raise ValueError("Physical family key must identify the Wind layout")
+        if action == "full_access":
+            if row.get("nonredundant_k") is not None or row.get("full_access") is not True:
+                raise ValueError("Explicit full action must use null K and full_access=true")
+        elif row.get("nonredundant_k") is None or int(row["nonredundant_k"]) < 1:
+            raise ValueError("Every sparse G action needs measured nonredundant K")
+        for field in ("exact_work", "full_work"):
+            if not math.isfinite(float(row[field])):
+                raise ValueError("Action work must be finite raw canonical work")
+        if (
+            float(row["full_work"]) <= 0
+            or not 0 <= float(row["exact_work"]) <= float(row["full_work"]) * (1 + 1e-6)
+        ):
+            raise ValueError("Action work lies outside its same-case canonical full-access bound")
+        by_case[str(row["case_key"])].append(row)
+    if not by_case:
+        raise ValueError("Measured action table contains no cases")
+    for case_key, case_rows in by_case.items():
+        actions = [str(row["action_key"]) for row in case_rows]
+        if len(actions) != len(set(actions)) or set(actions) != allowed:
+            raise ValueError(f"Case {case_key!r} does not have exactly four G actions")
+        identities = {
+            (row["split"], row["family_key"], row["query_panel"], row["row_id"])
+            for row in case_rows
+        }
+        if len(identities) != 1:
+            raise ValueError(f"Case {case_key!r} changes identity across G actions")
+
+
+def _split_selected_layouts(layouts: Sequence[int], *, seed: int) -> dict[int, str]:
+    unique = sorted(set(map(int, layouts)))
+    if len(unique) < 6:
+        raise ValueError("Selected action table needs at least six distinct training layouts")
+    rng = np.random.default_rng(int(seed))
+    shuffled = [int(value) for value in rng.permutation(unique)]
+    train_count = max(2, int(round(0.5 * len(shuffled))))
+    dev_count = max(2, int(round(0.25 * len(shuffled))))
+    if train_count + dev_count >= len(shuffled):
+        dev_count = len(shuffled) - train_count - 1
+    if train_count < 2 or dev_count < 1 or len(shuffled) - train_count - dev_count < 1:
+        raise ValueError("Unable to form disjoint train_fit/dev/held layout groups")
+    return {
+        **{layout: "train_fit" for layout in shuffled[:train_count]},
+        **{layout: "dev" for layout in shuffled[train_count:train_count + dev_count]},
+        **{layout: "held_family_audit" for layout in shuffled[train_count + dev_count:]},
+    }
+
+
+def _effective_action_features(
+    *, scores: Any, plan: Any, encoded: Any, cut: tuple[int, ...]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
+    raw = describe_realized_plan(scores, plan, encoded, cut, case_index=0)
+    raw_features = raw.detach().cpu().numpy().astype(np.float32, copy=False)
+    source_masks = panel._packet_source_masks(plan, encoded, cut)
+    packet_rows, mm, qe, signatures = _canonical_packet_features(
+        raw_features, source_masks["MM"], source_masks["QE"]
+    )
+    measured_k = panel._action_union_k(plan, encoded, cut)
+    if packet_rows.shape[0] != measured_k:
+        raise RuntimeError("Exact action quotient differs from the shared realized-plan K count")
+    return packet_rows, mm, qe, signatures
+
+
+def _metric_row(
+    *,
+    prediction: torch.Tensor,
+    full_prediction: torch.Tensor,
+    batch: Any,
+    sample: Any,
+    normalizer: Any,
+) -> tuple[dict[str, float], dict[str, float]]:
+    _loss, _mse, role_rmse = runner._role_objective(
+        prediction, batch.target_field, sample.role_slices, normalizer,
+        {role: 1.0 for role in runner.ROLE_NAMES},
+    )
+    distortion = _role_delta_rmse(prediction, full_prediction, sample.role_slices, normalizer)
+    return role_rmse, distortion
+
+
+def _case_record(
+    *,
+    split: str,
+    row_id: int,
+    query_panel: str,
+    query_seed: int,
+    query_counts: Mapping[str, int],
+    view: Any,
+    sampler: Any,
+    normalizer: Any,
+    role_scales: Mapping[str, float],
+    source_model: Any,
+    g_model: Any,
+    g_control: Any,
+    p_model: Any,
+    p_control: Any,
+    device: torch.device,
+    feature_arrays: dict[str, np.ndarray],
+    mask_arrays: dict[str, np.ndarray],
+    exposure: Mapping[str, Mapping[str, Any]],
+    prepared_inputs: tuple[Any, Any, Any] | None = None,
+    query_seed_retry_count: int = 0,
+    fixed_query_sample_index_sha256: str | None = None,
+    query_repeat_overlap_count: int | None = None,
+    query_repeat_candidate_attempt_count: int | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    if prepared_inputs is None:
+        case, sample, batch = maturation._case_batch(
+            view=view, row_id=int(row_id), query_seed=int(query_seed), role_counts=query_counts,
+            sampler=sampler, normalizer=normalizer, device=device,
+        )
+    else:
+        case, sample, batch = prepared_inputs
+    layout_id = int(view.metadata["layout_index"][int(row_id)])
+    layout_key = str(layout_id)
+    case_key = f"layout{layout_id:03d}_row{int(row_id):03d}_{query_panel}"
+    query_sample_index_sha256 = hashlib.sha256(
+        np.ascontiguousarray(sample.flat_indices, dtype=np.int64).tobytes()
+    ).hexdigest()
+    roles = tuple(runner.ROLE_NAMES)
+
+    with torch.inference_mode():
+        source_model.core.backend.set_cover_mode("external")
+        source_encoded = source_model.core.encode_case(batch)
+        source_tree = source_model.core.backend.build_case_trees(source_encoded)[0]
+        source_full = MechanismPlan.full_access(
+            source_tree, source_encoded.module_present[0], int(source_encoded.env_coords.shape[1])
+        )
+        wfull_prediction, _wfull_aux = runner._prediction_with_plan(
+            source_model, source_encoded, batch, source_full
+        )
+        _wloss, _wmse, wfull_rmse = runner._role_objective(
+            wfull_prediction, batch.target_field, sample.role_slices, normalizer, role_scales
+        )
+
+        g_model.core.backend.set_cover_mode("external")
+        encoded = g_model.core.encode_case(batch)
+        tree = g_model.core.backend.build_case_trees(encoded)[0]
+        scores = g_control.score_cases(
+            encoded,
+            {
+                "module_states": encoded.module_tokens,
+                "environment_states": encoded.env_tokens,
+                "global_state": encoded.global_token,
+            },
+            (tree,),
+            budgets=PRIMARY_CAPACITY,
+        )
+        g_full_plan = MechanismPlan.full_access(
+            tree, encoded.module_present[0], int(encoded.env_coords.shape[1])
+        )
+        g_full_prediction, g_full_aux = runner._prediction_with_plan(
+            g_model, encoded, batch, g_full_plan, return_interaction_aux=True
+        )
+        _gfloss, _gfmse, same_g_full_rmse = runner._role_objective(
+            g_full_prediction, batch.target_field, sample.role_slices, normalizer, role_scales
+        )
+        g_full_work = panel._plan_work(
+            plan=g_full_plan, encoded=encoded, tree=tree, batch=batch, sample=sample
+        )
+        g_action_metrics: dict[str, dict[str, Any]] = {}
+        g_features: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]] = {}
+        g_plans: dict[str, Any] = {}
+        g_cuts: dict[str, tuple[int, ...]] = {}
+        for action in ("root", "two_packet", "four_packet"):
+            cut, resolved_paths = available_frontier_for_paths(tree, WIND_ACTION_PATHS[action])
+            plan = g_control.plans_from_scores(
+                scores, encoded, (tree,), hard=True, frontier_cuts=(cut,),
+                budget_fractions=PRIMARY_CAPACITY,
+            )[0]
+            prediction, aux = runner._prediction_with_plan(
+                g_model, encoded, batch, plan, return_interaction_aux=True
+            )
+            candidate_rmse, distortion = _metric_row(
+                prediction=prediction, full_prediction=g_full_prediction, batch=batch,
+                sample=sample, normalizer=normalizer,
+            )
+            work = panel._plan_work(
+                plan=plan, encoded=encoded, tree=tree, batch=batch, sample=sample
+            )
+            packet_rows, mm, qe, signatures = _effective_action_features(
+                scores=scores, plan=plan, encoded=encoded, cut=cut
+            )
+            g_action_metrics[action] = {
+                "candidate_role_rmse_mps": candidate_rmse,
+                "same_g_full_role_rmse_mps": same_g_full_rmse,
+                "same_g_full_distortion_role_rmse_mps": distortion,
+                "work": work,
+                "executor_rows": runner._summarize_executor_rows(aux),
+                "resolved_cut_paths": list(resolved_paths),
+                "nonredundant_k": int(panel._action_union_k(plan, encoded, cut)),
+                "permission_status": {route: plan.permission_status(route) for route in ("MM", "QE")},
+            }
+            g_features[action] = (packet_rows, mm, qe, signatures)
+            g_plans[action] = plan
+            g_cuts[action] = tuple(cut)
+
+        full_rows, full_mm, full_qe, full_signatures = _effective_action_features(
+            scores=scores, plan=g_full_plan, encoded=encoded, cut=(0,)
+        )
+        g_action_metrics["full_access"] = {
+            "candidate_role_rmse_mps": same_g_full_rmse,
+            "same_g_full_role_rmse_mps": same_g_full_rmse,
+            "same_g_full_distortion_role_rmse_mps": {role: 0.0 for role in roles},
+            "work": g_full_work,
+            "executor_rows": runner._summarize_executor_rows(g_full_aux),
+            "resolved_cut_paths": [],
+            "nonredundant_k": None,
+            "permission_status": {
+                route: g_full_plan.permission_status(route) for route in ("MM", "QE")
+            },
+        }
+        g_features["full_access"] = (full_rows, full_mm, full_qe, full_signatures)
+        g_plans["full_access"] = g_full_plan
+        g_cuts["full_access"] = (0,)
+
+        # A matched root-union control uses the four-packet action's source
+        # union as one packet. It is not a selector row or a trained root cut.
+        four_plan = g_plans["four_packet"]
+        four_cut = torch.as_tensor(g_cuts["four_packet"], device=four_plan.split_gates.device)
+        root_union_plan = MechanismPlan.full_access(
+            tree, encoded.module_present[0], int(encoded.env_coords.shape[1])
+        )
+        for route in ("MM", "QE"):
+            packet_support = four_plan.permission_matrix(route)[four_cut] > 0.0
+            source_union = packet_support.any(dim=0)
+            root_membership = source_union[None, :].expand_as(
+                root_union_plan.permission_matrix(route)
+            ).to(dtype=root_union_plan.permission_matrix(route).dtype)
+            root_union_plan = root_union_plan.with_permission(route, root_membership)
+        root_union_prediction, root_union_aux = runner._prediction_with_plan(
+            g_model, encoded, batch, root_union_plan, return_interaction_aux=True
+        )
+        root_union_rmse, root_union_distortion = _metric_row(
+            prediction=root_union_prediction, full_prediction=g_full_prediction, batch=batch,
+            sample=sample, normalizer=normalizer,
+        )
+        root_union_work = panel._plan_work(
+            plan=root_union_plan, encoded=encoded, tree=tree, batch=batch, sample=sample
+        )
+        root_union_features = _effective_action_features(
+            scores=scores, plan=root_union_plan, encoded=encoded, cut=(0,)
+        )
+        root_union_key = hashlib.sha256(f"{case_key}\0g_root_union".encode("utf-8")).hexdigest()[:20]
+        root_union_mm_key = f"g_root_union_mm_{root_union_key}"
+        root_union_qe_key = f"g_root_union_qe_{root_union_key}"
+        mask_arrays[root_union_mm_key] = np.ascontiguousarray(root_union_features[1], dtype=np.uint8)
+        mask_arrays[root_union_qe_key] = np.ascontiguousarray(root_union_features[2], dtype=np.uint8)
+
+        p_model.core.backend.set_cover_mode("external")
+        p_encoded = p_model.core.encode_case(batch)
+        p_tree = p_model.core.backend.build_case_trees(p_encoded)[0]
+        p_full_plan = MechanismPlan.full_access(
+            p_tree, p_encoded.module_present[0], int(p_encoded.env_coords.shape[1])
+        )
+        p_full_prediction, p_full_aux = runner._prediction_with_plan(
+            p_model, p_encoded, batch, p_full_plan, return_interaction_aux=True
+        )
+        _pfloss, _pfmse, p_full_rmse = runner._role_objective(
+            p_full_prediction, batch.target_field, sample.role_slices, normalizer, role_scales
+        )
+        p_full_work = panel._plan_work(
+            plan=p_full_plan, encoded=p_encoded, tree=p_tree, batch=batch, sample=sample
+        )
+        p_direct, _p_soft, p_projections, _p_actual = maturation._direct_plan_pair_by_route(
+            model=p_model, encoded=p_encoded, batch=batch, scorer=p_control,
+            route_fractions=PRIMARY_CAPACITY,
+        )
+        p_prediction, p_direct_aux = panel._predict_direct_pair_full_panel(
+            model=p_model, encoded=p_encoded, batch=batch, plan=p_direct
+        )
+        p_projection_map = {name: projection for name, projection in p_projections.items()}
+        p_direct_metric = panel._metric(
+            action_key="p_direct_primary", prediction=p_prediction, encoded=p_encoded, tree=p_tree,
+            plan=p_direct, cut=(0,), paths=("direct_pair_plan",), batch=batch, sample=sample,
+            normalizer=normalizer,
+            role_scales={role: 1.0 for role in roles}, same_student_full_rmse=p_full_rmse,
+            incumbent_rmse=wfull_rmse, executor_aux=dict(p_direct_aux), capacity=PRIMARY_CAPACITY,
+            direct_projection=p_projection_map,
+        )
+        controls = {
+            "p": {
+                "full_access": {
+                    "role_rmse_mps": p_full_rmse,
+                    "canonical_exact_work": float(p_full_work["canonical_total_work"]),
+                    "canonical_full_work": float(p_full_work["canonical_full_access_total_work"]),
+                    "executor_rows": runner._summarize_executor_rows(p_full_aux),
+                },
+                "direct_primary": {
+                    "role_rmse_mps": dict(p_direct_metric["role_rmse_mps"]),
+                    "same_p_full_role_rmse_mps": dict(p_direct_metric["same_student_full_role_rmse_mps"]),
+                    "canonical_exact_work": float(p_direct_metric["work"]["canonical_total_work"]),
+                    "canonical_full_work": float(p_direct_metric["work"]["canonical_full_access_total_work"]),
+                    "work": p_direct_metric["work"],
+                    "executor_rows": p_direct_metric["native_executor_rows"],
+                },
+            },
+            "g_root_union": {
+                "definition": "four-packet typed source union applied as one root packet",
+                "role_rmse_mps": root_union_rmse,
+                "same_g_full_role_rmse_mps": dict(same_g_full_rmse),
+                "same_g_full_distortion_role_rmse_mps": root_union_distortion,
+                "nonredundant_k": 1,
+                "canonical_exact_work": float(root_union_work["canonical_total_work"]),
+                "canonical_full_work": float(root_union_work["canonical_full_access_total_work"]),
+                "work": root_union_work,
+                "executor_rows": runner._summarize_executor_rows(root_union_aux),
+                "mm_mask_npz_key": root_union_mm_key,
+                "qe_mask_npz_key": root_union_qe_key,
+                "effective_mm_mask_shape": list(root_union_features[1].shape),
+                "effective_qe_mask_shape": list(root_union_features[2].shape),
+            },
+        }
+        role_descriptors = receiver_role_descriptors(tree, role_count=len(roles)).detach().cpu().numpy().astype(
+            np.float32, copy=False
+        )
+
+    base_info = {
+        "case_key": case_key,
+        "row_id": int(row_id),
+        "layout_id": layout_id,
+        "layout_key": layout_key,
+        "family_key": layout_key,
+        "module_count": int(case.n_turbines),
+        "wind_direction_deg": float(case.wind_direction_deg),
+        "source_partition": "native_training",
+        "split": str(split),
+        "query_panel": str(query_panel),
+        "query_seed": int(query_seed),
+        "query_seed_retry_count": int(query_seed_retry_count),
+        "query_repeat_disjoint_from_fixed": (
+            None if query_panel != "query_repeat" else int(query_repeat_overlap_count or 0) == 0
+        ),
+        "query_repeat_overlap_count": query_repeat_overlap_count,
+        "query_repeat_candidate_attempt_count": query_repeat_candidate_attempt_count,
+        "query_sample_index_sha256": query_sample_index_sha256,
+        "fixed_query_sample_index_sha256": (
+            query_sample_index_sha256 if query_panel == "fixed" else fixed_query_sample_index_sha256
+        ),
+        "selector_primary_fit_row": query_panel == "fixed",
+        "role_query_counts": {str(key): int(value) for key, value in query_counts.items()},
+        "role_names": list(roles),
+    }
+
+    action_rows: list[dict[str, Any]] = []
+    for action in ACTION_ORDER:
+        metric = g_action_metrics[action]
+        packet_rows, mm, qe, signatures = g_features[action]
+        key_suffix = hashlib.sha256(f"{case_key}\0{action}".encode("utf-8")).hexdigest()[:20]
+        packet_key = f"packet_{key_suffix}"
+        budget_key = f"budget_{key_suffix}"
+        roles_key = f"receiver_roles_{key_suffix}"
+        mm_key = f"mm_mask_{key_suffix}"
+        qe_key = f"qe_mask_{key_suffix}"
+        feature_arrays[packet_key] = np.ascontiguousarray(packet_rows, dtype=np.float32)
+        feature_arrays[budget_key] = _action_budget_vector(action)
+        feature_arrays[roles_key] = np.ascontiguousarray(role_descriptors, dtype=np.float32)
+        mask_arrays[mm_key] = np.ascontiguousarray(mm, dtype=np.uint8)
+        mask_arrays[qe_key] = np.ascontiguousarray(qe, dtype=np.uint8)
+        exposure_row = dict(exposure[action]) if action != "full_access" else {
+            "trained_action": False,
+            "reason": "full access is a control, not a trained sparse cut",
+            "required_complete_passes": 2,
+            "completed_primary_action_passes": 0,
+        }
+        exact_work = float(metric["work"]["canonical_total_work"])
+        full_work = float(metric["work"]["canonical_full_access_total_work"])
+        trained_sparse = _trained_sparse_action(
+            action, exact_work=exact_work, full_work=full_work,
+            exposure_record=exposure_row,
+        )
+        candidate = metric["candidate_role_rmse_mps"]
+        action_rows.append({
+            **base_info,
+            "action_key": action,
+            "forward_checkpoint_sha256": "__SET_G_SHA256__",
+            "full_access": action == "full_access",
+            "trained_sparse": trained_sparse,
+            "trained_action_after_two_complete_passes": bool(exposure_row.get("trained_action", False)),
+            "training_exposure": exposure_row,
+            "nonredundant_k": None if action == "full_access" else int(metric["nonredundant_k"]),
+            "packet_mask_signature_sha256": signatures,
+            "permission_status": metric["permission_status"],
+            "candidate_role_error": {role: float(candidate[role]) for role in roles},
+            "candidate_role_rmse_mps": {role: float(candidate[role]) for role in roles},
+            "incumbent_role_error": {role: float(wfull_rmse[role]) for role in roles},
+            "retained_wfull_role_rmse_mps": {role: float(wfull_rmse[role]) for role in roles},
+            "same_g_full_role_rmse_mps": {
+                role: float(metric["same_g_full_role_rmse_mps"][role]) for role in roles
+            },
+            "same_g_full_distortion_role_rmse_mps": {
+                role: float(metric["same_g_full_distortion_role_rmse_mps"][role]) for role in roles
+            },
+            "exact_work": exact_work,
+            "full_work": full_work,
+            "canonical_work_by_route": metric["work"]["routes"],
+            "live_query_qe_work": metric["work"]["qe_live_query_panel"],
+            "executed_work": {
+                "executor": "dense_masked native executor",
+                "native_executor_rows": metric["executor_rows"],
+                "measured": True,
+            },
+            "packet_rows_npz_key": packet_key,
+            "budget_vector_npz_key": budget_key,
+            "receiver_role_features_npz_key": roles_key,
+            "mm_mask_npz_key": mm_key,
+            "qe_mask_npz_key": qe_key,
+            "feature_packet_rows_shape": list(packet_rows.shape),
+            "effective_mm_mask_shape": list(mm.shape),
+            "effective_qe_mask_shape": list(qe.shape),
+        })
+    controls["p"].update(base_info)
+    controls["g_root_union"].update(base_info)
+    return action_rows, controls, {
+        "wfull_role_rmse_mps": dict(wfull_rmse),
+        "same_g_full_role_rmse_mps": dict(same_g_full_rmse),
+        "same_g_full_work": g_full_work,
+    }
+
+
+def _layout_rows(
+    train_rows: Sequence[int], view: Any, *, layout_limit: int, seed: int
+) -> dict[int, list[int]]:
+    by_layout: dict[int, list[int]] = defaultdict(list)
+    for row in train_rows:
+        by_layout[int(view.metadata["layout_index"][int(row)])].append(int(row))
+    layouts = sorted(by_layout)
+    if layout_limit < 1 or layout_limit > 24:
+        raise ValueError("The selected native action table is bounded to 1–24 layouts")
+    layout_limit = min(layout_limit, len(layouts))
+    rng = np.random.default_rng(int(seed))
+    chosen = sorted(map(int, rng.choice(layouts, size=layout_limit, replace=False)))
+    result = {
+        layout: sorted(
+            by_layout[layout],
+            key=lambda row: (float(view.run(row).wind_direction_deg), row),
+        )
+        for layout in chosen
+    }
+    for layout, rows in result.items():
+        if not rows:
+            raise ValueError(f"Selected Wind layout {layout} has no eligible training row")
+    return result
+
+
+def _read_exposure(
+    path: Path, *, training_rows: Sequence[int], update_count: int
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    if not path.is_file():
+        raise FileNotFoundError(f"G training update ledger is missing: {path}")
+    records = [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    recovery_path = path.parent / "recovery_events.jsonl"
+    recovery_records = (
+        [json.loads(line) for line in recovery_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if recovery_path.is_file() else []
+    )
+    archived_keys = sorted({
+        str(key)
+        for event in recovery_records
+        for field in ("orphaned_update_attempt_ids", "orphaned_attempt_keys")
+        for key in event.get(field, [])
+        if key
+    })
+    exposure = _summarize_action_exposure(
+        records,
+        training_rows=training_rows,
+        selected_update=update_count,
+        archived_optimizer_attempt_keys=archived_keys,
+    )
+    return exposure, {
+        "update_ledger_path": str(path),
+        "update_ledger_sha256": _sha256(path),
+        "recovery_ledger_path": str(recovery_path) if recovery_path.is_file() else None,
+        "recovery_ledger_sha256": _sha256(recovery_path) if recovery_path.is_file() else None,
+        "archived_optimizer_attempt_key_count": len(archived_keys),
+        "selected_update_count": int(update_count),
+    }
+
+
+def _evaluate(
+    *,
+    run_dir: Path,
+    update_count: int,
+    p_update_count: int,
+    output_dir: Path,
+    layout_limit: int,
+    repeat_layout_limit: int,
+    selection_seed: int,
+) -> dict[str, Any]:
+    config_path = Path(runner.DEFAULT_CONFIG).resolve()
+    config = runner._load_config(config_path)
+    view, _canonical, train_rows, split_record = runner._native_inputs(config)
+    source_path, source_payload, normalizer, source_sha = runner._load_source(config)
+    if source_sha != runner.EXPECTED_SOURCE_SHA256:
+        raise ValueError("Retained W-full checkpoint differs from the audited Run2110 source")
+    role_scales = {
+        str(key): float(value)
+        for key, value in config["forward"]["stage_a"]["role_loss_scales_mps"].items()
+    }
+    if set(role_scales) != set(runner.ROLE_NAMES):
+        raise ValueError("Native physical role scales differ from the Wind role order")
+
+    manifest_path = run_dir / "run_manifest.json"
+    manifest_sha = _sha256(manifest_path)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("run_id") != RUN_ID:
+        raise ValueError("Selected Wind run manifest is not Run2112")
+    g_path, g_review, g_review_line_sha = panel._checkpoint_review_binding(
+        run_dir, arm="g_packet", update_count=update_count
+    )
+    p_path, p_review, p_review_line_sha = panel._checkpoint_review_binding(
+        run_dir, arm="direct_pair", update_count=p_update_count
+    )
+    g_sha, p_sha = _sha256(g_path), _sha256(p_path)
+    g_payload = load_trusted_checkpoint(g_path, map_location="cpu")
+    p_payload = load_trusted_checkpoint(p_path, map_location="cpu")
+    expected_train_rows_sha = split_record["student_train_rows_sha256"]
+    for arm, payload, digest, expected_arm, review in (
+        ("G", g_payload, g_sha, "g_packet", g_review),
+        ("P", p_payload, p_sha, "direct_pair", p_review),
+    ):
+        expected_update = update_count if arm == "G" else p_update_count
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("run_id") != RUN_ID
+            or payload.get("arm") != expected_arm
+            or int(payload.get("update_count", -1)) != int(expected_update)
+            or payload.get("source_checkpoint_sha256") != source_sha
+            or payload.get("train_rows_sha256") != expected_train_rows_sha
+            or digest != review.get("checkpoint_sha256")
+        ):
+            raise ValueError(f"{arm} checkpoint does not match selected update, source, split, or review")
+
+    layout_rows = _layout_rows(
+        train_rows, view, layout_limit=layout_limit, seed=selection_seed
+    )
+    split_by_layout = _split_selected_layouts(list(layout_rows), seed=selection_seed + 1)
+    repeat_rng = np.random.default_rng(selection_seed + 2)
+    repeat_count = min(max(0, int(repeat_layout_limit)), len(layout_rows))
+    repeat_layouts = (
+        sorted(map(int, repeat_rng.choice(sorted(layout_rows), size=repeat_count, replace=False)))
+        if repeat_count else []
+    )
+
+    first_row = next(iter(layout_rows.values()))[0]
+    init_case, _init_sample, init_batch = maturation._case_batch(
+        view=view, row_id=first_row, query_seed=FIXED_QUERY_SEED + first_row,
+        role_counts=Q2048_ROLE_COUNTS, sampler=runner.NativeRoleCatalogueCache(),
+        normalizer=normalizer, device=torch.device("cuda:0"),
+    )
+    del init_case
+    source_model = runner._new_model_from_source(
+        source_payload, normalizer, init_batch, torch.device("cuda:0")
+    )
+    source_model.eval()
+    for parameter in source_model.parameters():
+        parameter.requires_grad_(False)
+    g_model, g_control = panel._load_student(
+        arm="g", payload=g_payload, source_payload=source_payload, normalizer=normalizer,
+        batch=init_batch, forward_config=config["forward"], device=torch.device("cuda:0"),
+    )
+    p_model, p_control = panel._load_student(
+        arm="p", payload=p_payload, source_payload=source_payload, normalizer=normalizer,
+        batch=init_batch, forward_config=config["forward"], device=torch.device("cuda:0"),
+    )
+    exposure, exposure_lineage = _read_exposure(
+        run_dir / "arms" / "g_packet" / "updates.jsonl",
+        training_rows=train_rows, update_count=update_count,
+    )
+
+    feature_arrays: dict[str, np.ndarray] = {}
+    mask_arrays: dict[str, np.ndarray] = {}
+    rows: list[dict[str, Any]] = []
+    p_controls: list[dict[str, Any]] = []
+    g_root_union_controls: list[dict[str, Any]] = []
+    measured_wfull: list[dict[str, Any]] = []
+    q512_deltas: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: {role: [] for role in runner.ROLE_NAMES}
+    )
+    sampler = runner.NativeRoleCatalogueCache()
+    fixed_query_indices_by_row: dict[int, set[int]] = {}
+    evaluations: list[tuple[int, str, int, Mapping[str, int]]] = []
+    for layout, row_ids in sorted(layout_rows.items()):
+        split = split_by_layout[layout]
+        for row_id in row_ids:
+            fixed_seed = int(FIXED_QUERY_SEED + int(row_id) * 1_009)
+            evaluations.append((row_id, "fixed", fixed_seed, Q2048_ROLE_COUNTS))
+            if layout in repeat_layouts:
+                repeat_seed = int(REPEAT_QUERY_SEED + int(row_id) * 1_009)
+                evaluations.append((row_id, "query_repeat", repeat_seed, Q2048_ROLE_COUNTS))
+    fixed_query_sample_index_sha_by_row: dict[int, str] = {}
+
+    fixed_panel_count = sum(query_panel == "fixed" for _row, query_panel, _seed, _counts in evaluations)
+    repeat_panel_count = len(evaluations) - fixed_panel_count
+    q512_calibration_panel_count = sum(
+        query_panel == "fixed" and split_by_layout[int(view.metadata["layout_index"][row_id])] == "train_fit"
+        for row_id, query_panel, _seed, _counts in evaluations
+    )
+    prediction_calls_per_primary_panel = 8
+    predicted_native_prediction_calls = (
+        len(evaluations) * prediction_calls_per_primary_panel + q512_calibration_panel_count
+    )
+    call_forecast = {
+        "measured": False,
+        "basis": "one native model prediction per listed plan; Q512 calibration adds one selected-G full prediction per train_fit fixed row",
+        "fixed_q2048_panel_count": fixed_panel_count,
+        "query_repeat_q2048_panel_count": repeat_panel_count,
+        "q512_train_fit_calibration_panel_count": q512_calibration_panel_count,
+        "q2048_role_query_counts": dict(Q2048_ROLE_COUNTS),
+        "q512_role_query_counts": dict(Q512_ROLE_COUNTS),
+        "q2048_native_prediction_calls": len(evaluations) * prediction_calls_per_primary_panel,
+        "q512_native_prediction_calls": q512_calibration_panel_count,
+        "estimated_native_prediction_calls_total": predicted_native_prediction_calls,
+        "q2048_query_points_total": (fixed_panel_count + repeat_panel_count) * sum(Q2048_ROLE_COUNTS.values()),
+        "q512_query_points_total": q512_calibration_panel_count * sum(Q512_ROLE_COUNTS.values()),
+        "query_points_total": (
+            (fixed_panel_count + repeat_panel_count) * sum(Q2048_ROLE_COUNTS.values())
+            + q512_calibration_panel_count * sum(Q512_ROLE_COUNTS.values())
+        ),
+        "estimated_decoder_query_evaluations_total": (
+            len(evaluations) * prediction_calls_per_primary_panel * sum(Q2048_ROLE_COUNTS.values())
+            + q512_calibration_panel_count * sum(Q512_ROLE_COUNTS.values())
+        ),
+    }
+    print(json.dumps({"preflight_native_call_forecast": call_forecast}, sort_keys=True), flush=True)
+
+    for row_id, query_panel, query_seed, query_counts in evaluations:
+        layout = int(view.metadata["layout_index"][row_id])
+        split = split_by_layout[layout]
+        case_sample = maturation._case_batch(
+            view=view, row_id=row_id, query_seed=query_seed, role_counts=query_counts,
+            sampler=sampler, normalizer=normalizer, device=torch.device("cuda:0"),
+        )
+        retry_count = 0
+        repeat_overlap_count: int | None = None
+        repeat_attempt_count: int | None = None
+        if query_panel == "fixed":
+            fixed_indices = set(map(int, np.asarray(case_sample[1].flat_indices).tolist()))
+            fixed_query_indices_by_row[row_id] = fixed_indices
+            fixed_query_sample_index_sha_by_row[row_id] = hashlib.sha256(
+                np.ascontiguousarray(case_sample[1].flat_indices, dtype=np.int64).tobytes()
+            ).hexdigest()
+        elif query_panel == "query_repeat":
+            fixed_indices = fixed_query_indices_by_row[row_id]
+            initial_seed = query_seed
+            best_sample = case_sample
+            best_seed = query_seed
+            best_indices = set(map(int, np.asarray(case_sample[1].flat_indices).tolist()))
+            best_overlap = len(best_indices & fixed_indices)
+            repeat_attempt_count = 0
+            for attempt in range(1024):
+                candidate_indices = set(map(int, np.asarray(case_sample[1].flat_indices).tolist()))
+                overlap = len(candidate_indices & fixed_indices)
+                repeat_attempt_count = attempt + 1
+                if overlap < best_overlap:
+                    best_sample, best_seed, best_indices, best_overlap = (
+                        case_sample, query_seed, candidate_indices, overlap
+                    )
+                if overlap == 0:
+                    best_sample, best_seed, best_indices, best_overlap = (
+                        case_sample, query_seed, candidate_indices, overlap
+                    )
+                    break
+                if attempt + 1 < 1024:
+                    query_seed += 1
+                    case_sample = maturation._case_batch(
+                        view=view, row_id=row_id, query_seed=query_seed, role_counts=query_counts,
+                        sampler=sampler, normalizer=normalizer, device=torch.device("cuda:0"),
+                    )
+            case_sample = best_sample
+            query_seed = best_seed
+            retry_count = query_seed - initial_seed
+            repeat_overlap_count = int(best_overlap)
+        action_rows, controls, baseline_record = _case_record(
+            split=split, row_id=row_id, query_panel=query_panel, query_seed=query_seed,
+            query_counts=query_counts, view=view, sampler=sampler, normalizer=normalizer,
+            role_scales=role_scales, source_model=source_model, g_model=g_model,
+            g_control=g_control, p_model=p_model, p_control=p_control, device=torch.device("cuda:0"),
+            feature_arrays=feature_arrays, mask_arrays=mask_arrays, exposure=exposure,
+            prepared_inputs=case_sample, query_seed_retry_count=retry_count,
+            fixed_query_sample_index_sha256=fixed_query_sample_index_sha_by_row.get(row_id),
+            query_repeat_overlap_count=repeat_overlap_count,
+            query_repeat_candidate_attempt_count=repeat_attempt_count,
+        )
+        for row in action_rows:
+            row["forward_checkpoint_sha256"] = g_sha
+        rows.extend(action_rows)
+        controls["p"]["p_control_checkpoint_sha256"] = p_sha
+        controls["p"]["control_checkpoint_path"] = str(p_path)
+        controls["p"]["p_control_update_count"] = int(p_update_count)
+        controls["p"]["g_p_update_counts_equal"] = int(update_count) == int(p_update_count)
+        controls["p"]["g_p_comparison_class"] = (
+            "matched_checkpoint_pair" if int(update_count) == int(p_update_count)
+            else "unequal_update_diagnostic"
+        )
+        controls["g_root_union"]["forward_checkpoint_sha256"] = g_sha
+        p_controls.append(controls["p"])
+        g_root_union_controls.append(controls["g_root_union"])
+
+        if query_panel != "fixed":
+            continue
+        measured_wfull.append({
+            "family_key": str(layout),
+            "row_id": row_id,
+            "wfull_role_rmse_mps": baseline_record["wfull_role_rmse_mps"],
+        })
+        if split != "train_fit":
+            continue
+
+        # Compare same selected G full weights at Q512 and Q2048 on the same
+        # physical training row. This calibration is never used as a fit row.
+        _case512, sample512, batch512 = maturation._case_batch(
+            view=view, row_id=row_id, query_seed=query_seed, role_counts=Q512_ROLE_COUNTS,
+            sampler=sampler, normalizer=normalizer, device=torch.device("cuda:0"),
+        )
+        with torch.inference_mode():
+            encoded512 = g_model.core.encode_case(batch512)
+            tree512 = g_model.core.backend.build_case_trees(encoded512)[0]
+            full512 = MechanismPlan.full_access(
+                tree512, encoded512.module_present[0], int(encoded512.env_coords.shape[1])
+            )
+            prediction512, _aux512 = runner._prediction_with_plan(
+                g_model, encoded512, batch512, full512
+            )
+            _l512, _m512, rmse512 = runner._role_objective(
+                prediction512, batch512.target_field, sample512.role_slices, normalizer, role_scales
+            )
+        same_g_full = baseline_record["same_g_full_role_rmse_mps"]
+        for role in runner.ROLE_NAMES:
+            q512_deltas[str(layout)][role].append(
+                abs(float(same_g_full[role]) - float(rmse512[role]))
+            )
+
+    roles = tuple(runner.ROLE_NAMES)
+    wfull_train_records = [
+        record for record in measured_wfull
+        if split_by_layout[int(record["family_key"])] == "train_fit"
+    ]
+    numerical_floor = _numerical_floor_role_mps(wfull_train_records, roles=roles)
+    allowance, allowance_meta = _sampling_allowance_role_mps(q512_deltas, roles=roles)
+    feature_hashes = {key: _array_sha256(value) for key, value in feature_arrays.items()}
+    mask_hashes = {key: _array_sha256(value) for key, value in mask_arrays.items()}
+    _validate_action_rows(rows, expected_sha=g_sha)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    feature_path = output_dir / "action_features.npz"
+    mask_path = output_dir / "action_masks.npz"
+    np.savez_compressed(feature_path, **feature_arrays)
+    np.savez_compressed(mask_path, **mask_arrays)
+
+    dataset_manifest_path = runner.resolve_path(str(config["dataset"]["manifest"]))
+    table = {
+        "format_version": 1,
+        "study": "Run2112 selected-checkpoint Wind native action table",
+        "run_id": RUN_ID,
+        "selected_update_count": int(update_count),
+        "p_control_update_count": int(p_update_count),
+        "g_p_update_counts_equal": int(update_count) == int(p_update_count),
+        "g_p_comparison_class": (
+            "matched_checkpoint_pair" if int(update_count) == int(p_update_count)
+            else "unequal_update_diagnostic"
+        ),
+        "forward_checkpoint_path": str(g_path),
+        "forward_checkpoint_sha256": g_sha,
+        "p_control_checkpoint_path": str(p_path),
+        "p_control_checkpoint_sha256": p_sha,
+        "retained_wfull_checkpoint_path": str(source_path),
+        "retained_wfull_checkpoint_sha256": source_sha,
+        "run_manifest_path": str(manifest_path),
+        "run_manifest_sha256": manifest_sha,
+        "g_review_record_line_sha256": g_review_line_sha,
+        "p_review_record_line_sha256": p_review_line_sha,
+        "g_review_record": g_review,
+        "p_review_record": p_review,
+        "config_path": str(config_path),
+        "config_sha256": _sha256(config_path),
+        "native_dataset_manifest_path": str(dataset_manifest_path),
+        "native_dataset_manifest_sha256": _sha256(dataset_manifest_path),
+        "training_split_identity": split_record,
+        "roles": list(roles),
+        "numerical_floor_role_mps": numerical_floor,
+        "absolute_allowance_role_mps": allowance,
+        "absolute_allowance_calibration": {
+            "calibration_kind": "physical query-sampling allowance, separate from the software numerical floor",
+            **allowance_meta,
+        },
+        "g_action_exposure_lineage": exposure_lineage,
+        "numerical_floor_method": (
+            "max(1e-8 m/s, 1e-6 times median train-family retained W-full role RMSE)"
+        ),
+        "feature_npz_path": str(feature_path),
+        "mask_npz_path": str(mask_path),
+        "feature_npz_sha256": _sha256(feature_path),
+        "mask_npz_sha256": _sha256(mask_path),
+        "feature_sha256_by_npz_key": feature_hashes,
+        "mask_sha256_by_npz_key": mask_hashes,
+        "capacity_vector_order": ["MM", "QE"],
+        "primary_capacity": {"MM": PRIMARY_CAPACITY["MM"], "QE": PRIMARY_CAPACITY["QE"]},
+        "action_order": list(ACTION_ORDER),
+        "action_exposure_by_key": exposure,
+        "panel_design": {
+            "candidate_measurements_use_native_training_rows_only": True,
+            "selected_layout_count": len(layout_rows),
+            "split_layout_count": {
+                split: len({family for family, assigned in split_by_layout.items() if assigned == split})
+                for split in ("train_fit", "dev", "held_family_audit")
+            },
+            "all_native_directions_for_selected_layouts": True,
+            "primary_query_panel": "fixed",
+            "query_repeat_panel": "query_repeat",
+            "query_repeat_layouts": repeat_layouts,
+            "fixed_role_query_counts": dict(Q2048_ROLE_COUNTS),
+            "query_repeat_role_query_counts": dict(Q2048_ROLE_COUNTS),
+            "q512_calibration_role_query_counts": dict(Q512_ROLE_COUNTS),
+            "query_repeat_is_disjoint": True,
+            "hidden_test_rows_opened": False,
+            "query_rows_are_split_by_layout_family": True,
+        },
+        "p_controls_are_excluded_from_selector_rows": True,
+        "g_p_pairing_note": (
+            "G/P checkpoint comparison uses equal selected update counts."
+            if int(update_count) == int(p_update_count)
+            else "Unequal-update diagnostic only; do not interpret as a matched G/P comparison."
+        ),
+        "native_call_forecast": call_forecast,
+        "p_controls": p_controls,
+        "g_root_union_controls": g_root_union_controls,
+        "rows": rows,
+        "case_count": len({row["case_key"] for row in rows}),
+        "selector_action_row_count": len(rows),
+        "physical_grid_calls": 0,
+        "reference": "stored native OpenFOAM CFD velocity fields; no new physical solve",
+    }
+    table_path = output_dir / "action_table.json"
+    _write_json(table_path, table)
+    return {
+        "status": "completed",
+        "action_table": str(table_path),
+        "action_table_sha256": _sha256(table_path),
+        "feature_npz": str(feature_path),
+        "feature_npz_sha256": table["feature_npz_sha256"],
+        "mask_npz": str(mask_path),
+        "mask_npz_sha256": table["mask_npz_sha256"],
+        "selected_g_sha256": g_sha,
+        "selected_p_sha256": p_sha,
+        "case_count": table["case_count"],
+        "action_rows": len(rows),
+        "output_dir": str(output_dir),
+    }
+
+
+def main() -> None:
+    default_run_dir = (
+        PROJECT
+        / "Trained_Results/WindFarm/HONF_Forward_Runs/Run_2112_controlled_maturation_20260929"
+    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run-dir", type=Path, default=default_run_dir)
+    parser.add_argument("--update-count", type=int, required=True)
+    parser.add_argument(
+        "--p-update-count", type=int,
+        help="selected P control checkpoint update; defaults to the G update",
+    )
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--layout-count", type=int, default=24,
+        help="number of distinct eligible training layouts (bounded to 24)",
+    )
+    parser.add_argument("--query-repeat-layout-count", type=int, default=6)
+    parser.add_argument("--selection-seed", type=int, default=21_122_471)
+    args = parser.parse_args()
+    if (
+        args.update_count <= 100
+        or (args.p_update_count is not None and args.p_update_count <= 100)
+        or not 6 <= args.layout_count <= 24
+        or args.query_repeat_layout_count < 0
+        or args.query_repeat_layout_count > args.layout_count
+    ):
+        raise ValueError("update-count must exceed 100; layout counts must be nonnegative")
+    if (
+        Path(sys.executable).resolve()
+        != Path("/home/wanglz/miniconda3/envs/ModularDT/bin/python").resolve()
+    ):
+        raise RuntimeError("Run native selected-action evaluation with the ModularDT interpreter")
+    if os.environ.get("CUDA_VISIBLE_DEVICES", "").strip() != "0":
+        raise RuntimeError("Wind selected-action evaluation requires CUDA_VISIBLE_DEVICES=0")
+    if (
+        not torch.cuda.is_available()
+        or torch.cuda.get_device_name(0) != "NVIDIA RTX 6000 Ada Generation"
+    ):
+        raise RuntimeError("Authorized Wind CUDA device is unavailable")
+    if maturation._gpu_uuid() != maturation.DEVICE_UUID:
+        raise RuntimeError("CUDA_VISIBLE_DEVICES=0 did not resolve to the authorized physical GPU")
+    run_dir = args.run_dir.resolve()
+    output_dir = (
+        args.output_dir
+        or PROJECT
+        / "Case_WindFarm/diagnostics/generated/matured_action_table"
+        / f"run2112_u{args.update_count:06d}"
+    ).resolve()
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(f"Refusing to overwrite existing action-table evidence: {output_dir}")
+    started = time.monotonic()
+    result = _evaluate(
+        run_dir=run_dir,
+        update_count=args.update_count,
+        p_update_count=(args.update_count if args.p_update_count is None else args.p_update_count),
+        output_dir=output_dir,
+        layout_limit=args.layout_count,
+        repeat_layout_limit=args.query_repeat_layout_count,
+        selection_seed=args.selection_seed,
+    )
+    result["active_wall_seconds"] = time.monotonic() - started
+    print(json.dumps(result, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
