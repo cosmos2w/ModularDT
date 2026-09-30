@@ -490,7 +490,6 @@ def _train_one_arm(
             rows = [json.loads(line) for line in stream if line.strip()]
         if not any(int(row["update_count"]) == previous_update for row in rows):
             raise ValueError("Run2112 update ledger does not contain the latest durable checkpoint")
-        orphaned_updates = [row for row in rows if int(row["update_count"]) > previous_update]
         attempt_ledger = arm_dir / "optimizer_attempts.jsonl"
         attempt_rows = []
         if attempt_ledger.is_file():
@@ -504,6 +503,12 @@ def _train_one_arm(
                     if line.strip():
                         event = json.loads(line)
                         archived_keys.update(str(key) for key in event.get("orphaned_attempt_keys", []))
+                        archived_keys.update(str(key) for key in event.get("orphaned_update_attempt_ids", []))
+        orphaned_updates = [
+            row for row in rows
+            if int(row["update_count"]) > previous_update
+            and str(row.get("optimizer_attempt_key", "")) not in archived_keys
+        ]
         orphaned_attempts = [
             row for row in attempt_rows
             if int(row.get("update_count", -1)) > previous_update
