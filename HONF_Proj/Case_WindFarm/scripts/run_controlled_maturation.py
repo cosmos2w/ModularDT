@@ -27,18 +27,27 @@ for _path in (str(CORE_SRC), str(CASE_SRC), str(Path(__file__).resolve().parent)
         sys.path.insert(0, _path)
 
 import run_active_packet_reuse as runner
+from honf_forward_core.interface_fields.action_aware_frontier import describe_realized_plan
 from honf_forward_core.interface_fields.budgeted_frontier import canonical_pair_catalog
 from honf_forward_core.interface_fields.native_direct_pair import hard_value_soft_direct_forward
 from honf_forward_core.interface_fields.native_joint_shadow import hard_value_soft_organizer_forward
-from honf_forward_core.interface_fields.action_aware_frontier import describe_realized_plan
 from honf_runtime.compat import load_trusted_checkpoint
-from honf_runtime.paths import resolve_path
+
 from windfarm.normalization import VelocityNormalizer
 from windfarm.workflows.maturation import (
+    BASE_LANE_GPU_BUDGET_SECONDS,
+    BASE_RECIPE_STAGE,
+    MAX_LANE_GPU_BUDGET_SECONDS,
+    QE_FULL_RECIPE_STAGE,
+    REMEDY_ACTION_ORDER,
+    REMEDY_PASSES_PER_ACTION,
+    REMEDY_RECIPE_AMENDMENT_ID,
+    REMEDY_START_AFTER_UPDATE,
     WindMaturationSchedule,
     available_frontier_for_paths,
+    sparse_capacity_for_recipe,
+    validated_lane_gpu_budget_seconds,
 )
-
 
 RUN_ID = "2112"
 SEED = 2112
@@ -59,8 +68,16 @@ WARM_SHA256 = {
 DEVICE_UUID = "GPU-233fcd85-5c6a-6212-3f44-655252afec70"
 PRIMARY_CAPACITY = {"QE": 0.95, "MM": 0.90}
 FROZEN_090_PROBE = {"QE": 0.90, "MM": 0.90}
+REMEDY_BASE_CHECKPOINT_SHA256 = {
+    "g_packet": "07091f307f595eb696678b7475d0970a6147155bb7ca8c4c74f4aa24f2daa2e3",
+    "direct_pair": "fa77bbde827a457b32f307753eda21b7a1f6271a780f3760da1d18e76370c289",
+}
 MAX_ADDITIONAL_UPDATES = 6000
-LANE_BUDGET_SECONDS = 14 * 60 * 60
+LANE_BUDGET_SECONDS = BASE_LANE_GPU_BUDGET_SECONDS
+REMEDY_TOTAL_SPARSE_UPDATES = 408 * len(REMEDY_ACTION_ORDER)
+REMEDY_TOTAL_FULL_REPLAYS = REMEDY_TOTAL_SPARSE_UPDATES // 4
+REMEDY_TOTAL_UPDATES = REMEDY_TOTAL_SPARSE_UPDATES + REMEDY_TOTAL_FULL_REPLAYS
+REMEDY_FINAL_ABSOLUTE_UPDATE = REMEDY_START_AFTER_UPDATE + REMEDY_TOTAL_UPDATES
 REVIEW_SPARSE_COUNTS = {204, 408, 816, 1632, 3264, 4896}
 DURABLE_CHECKPOINT_INTERVAL = 50
 
@@ -78,6 +95,189 @@ def _append_jsonl(path: Path, payload: Mapping[str, Any]) -> None:
         stream.write(json.dumps(dict(payload), sort_keys=True, allow_nan=False) + "\n")
         stream.flush()
         os.fsync(stream.fileno())
+
+
+def _canonical_payload_sha256(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _remedy_base_checkpoint_bindings(
+    *,
+    run_dir: Path,
+    source_sha: str,
+    train_rows_sha: str,
+) -> dict[str, dict[str, str]]:
+    """Verify and return the immutable matched u1850 transition anchors."""
+
+    bindings: dict[str, dict[str, str]] = {}
+    for arm_name in ("g_packet", "direct_pair"):
+        checkpoint = (
+            run_dir / "arms" / arm_name / "checkpoints" / "updates_001850.pt"
+        ).resolve()
+        if not checkpoint.is_file():
+            raise FileNotFoundError(f"missing exact {arm_name} u1850 remedy base: {checkpoint}")
+        digest = runner._file_sha256(checkpoint)
+        expected = REMEDY_BASE_CHECKPOINT_SHA256[arm_name]
+        if digest != expected:
+            raise ValueError(
+                f"{arm_name} u1850 remedy base SHA changed: expected {expected}, got {digest}"
+            )
+        payload = load_trusted_checkpoint(checkpoint, map_location="cpu")
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("run_id") != RUN_ID
+            or payload.get("arm") != arm_name
+            or int(payload.get("update_count", -1)) != REMEDY_START_AFTER_UPDATE
+            or payload.get("source_checkpoint_sha256") != source_sha
+            or payload.get("train_rows_sha256") != train_rows_sha
+        ):
+            raise ValueError(f"{arm_name} u1850 remedy base payload identity changed")
+        bindings[arm_name] = {"path": str(checkpoint), "sha256": digest}
+    return bindings
+
+
+def _build_recipe_amendment(
+    *,
+    run_dir: Path,
+    split_record: Mapping[str, Any],
+    source_sha: str,
+    driver_record: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build a deterministic, source- and checkpoint-bound recipe amendment."""
+
+    helper_sha = runner._file_sha256(MATURATION_HELPER_PATH)
+    driver_path = Path(str(driver_record["driver_script"])).resolve()
+    driver_sha = runner._file_sha256(driver_path)
+    if driver_sha != driver_record.get("driver_source_sha256"):
+        raise ValueError("Run2112 driver changed after its attempt source identity was recorded")
+    config_path = Path(str(driver_record["config_path"])).resolve()
+    config_sha = runner._file_sha256(config_path)
+    if config_sha != driver_record.get("config_sha256"):
+        raise ValueError("Run2112 config changed after its attempt source identity was recorded")
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "amendment_id": REMEDY_RECIPE_AMENDMENT_ID,
+        "recipe_stage": QE_FULL_RECIPE_STAGE,
+        "effective_after_completed_update": REMEDY_START_AFTER_UPDATE,
+        "first_update": REMEDY_START_AFTER_UPDATE + 1,
+        "base_checkpoint_bindings": _remedy_base_checkpoint_bindings(
+            run_dir=run_dir,
+            source_sha=source_sha,
+            train_rows_sha=str(split_record["student_train_rows_sha256"]),
+        ),
+        "source_checkpoint_sha256": source_sha,
+        "train_rows_sha256": str(split_record["student_train_rows_sha256"]),
+        "schedule_seed": SEED,
+        "query_seed_policy": "Continue the Run2112 absolute update formula without resetting the query seed clock.",
+        "global_sparse_clock_policy": "Continue the global sparse-update index; reset only the remedy-local action-family pass clock.",
+        "sparse_capacity_vector": dict(sparse_capacity_for_recipe(QE_FULL_RECIPE_STAGE)),
+        "full_replay_capacity_vector": {"QE": 1.0, "MM": 1.0},
+        "sparse_full_cadence": {"sparse_updates": 4, "full_access_replay_updates": 1},
+        "actions_in_order": list(REMEDY_ACTION_ORDER),
+        "passes_per_action": REMEDY_PASSES_PER_ACTION,
+        "training_rows_per_pass": int(split_record["student_train_rows"]),
+        "total_sparse_updates": int(split_record["student_train_rows"])
+        * len(REMEDY_ACTION_ORDER),
+        "total_full_replays": (
+            int(split_record["student_train_rows"]) * len(REMEDY_ACTION_ORDER) // 4
+        ),
+        "source_files": {
+            "maturation_helper": {
+                "path": str(MATURATION_HELPER_PATH.resolve()),
+                "sha256": helper_sha,
+            },
+            "training_driver": {"path": str(driver_path), "sha256": driver_sha},
+            "config": {"path": str(config_path), "sha256": config_sha},
+        },
+    }
+    payload["amendment_sha256"] = _canonical_payload_sha256(payload)
+    return payload
+
+
+def _validated_recipe_amendment(
+    manifest: Mapping[str, Any], expected_sha256: str | None = None,
+) -> dict[str, Any] | None:
+    amendments = manifest.get("schedule_amendments", [])
+    if not isinstance(amendments, list):
+        raise TypeError("Run2112 schedule_amendments must be a list")
+    matches = [
+        dict(item) for item in amendments
+        if isinstance(item, Mapping) and item.get("amendment_id") == REMEDY_RECIPE_AMENDMENT_ID
+    ]
+    if not matches:
+        if expected_sha256 is not None:
+            raise ValueError("Run2112 QE-full remedy amendment is missing from the run manifest")
+        return None
+    if len(matches) != 1:
+        raise ValueError("Run2112 manifest contains duplicate QE-full remedy amendments")
+    record = matches[0]
+    recorded_sha = str(record.get("amendment_sha256", ""))
+    digest_payload = {key: value for key, value in record.items() if key not in {"amendment_sha256", "recorded_at_utc"}}
+    if _canonical_payload_sha256(digest_payload) != recorded_sha:
+        raise ValueError("Run2112 QE-full remedy amendment digest is invalid")
+    if expected_sha256 is not None and recorded_sha != expected_sha256:
+        raise ValueError("Run2112 checkpoint and manifest remedy amendment digests disagree")
+    return record
+
+
+def _validate_recipe_resume_checkpoint(
+    *,
+    run_dir: Path,
+    arm_name: str,
+    source_sha: str,
+    train_rows_sha: str,
+    amendment: Mapping[str, Any],
+) -> tuple[int, Path, dict[str, Any]]:
+    """Fail closed on the selected arm's exact remedy-transition lineage."""
+
+    arm_dir = run_dir / "arms" / arm_name
+    summary_path = arm_dir / "latest_checkpoint.json"
+    if not summary_path.is_file():
+        summary_path = arm_dir / "latest_review.json"
+    if not summary_path.is_file():
+        raise FileNotFoundError(f"{arm_name} has no saved checkpoint for the QE-full remedy")
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    update_count = int(summary.get("update_count", -1))
+    checkpoint = (arm_dir / "checkpoints" / f"updates_{update_count:06d}.pt").resolve()
+    if not checkpoint.is_file() or runner._file_sha256(checkpoint) != summary.get("checkpoint_sha256"):
+        raise ValueError(f"{arm_name} latest checkpoint pointer fails SHA verification")
+    payload = load_trusted_checkpoint(checkpoint, map_location="cpu")
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("run_id") != RUN_ID
+        or payload.get("arm") != arm_name
+        or int(payload.get("update_count", -1)) != update_count
+        or payload.get("source_checkpoint_sha256") != source_sha
+        or payload.get("train_rows_sha256") != train_rows_sha
+    ):
+        raise ValueError(f"{arm_name} latest checkpoint identity does not match the remedy run")
+    amendment_record = _validated_recipe_amendment(
+        {"schedule_amendments": [dict(amendment)]},
+        expected_sha256=str(amendment.get("amendment_sha256", "")),
+    )
+    if amendment_record is None:
+        raise ValueError("The QE-full remedy amendment is invalid")
+    if update_count == REMEDY_START_AFTER_UPDATE:
+        binding = amendment_record["base_checkpoint_bindings"].get(arm_name)
+        if (
+            not isinstance(binding, Mapping)
+            or Path(str(binding.get("path", ""))).resolve() != checkpoint
+            or binding.get("sha256") != runner._file_sha256(checkpoint)
+        ):
+            raise ValueError(f"{arm_name} u1850 base checkpoint differs from the approved amendment")
+    elif update_count > REMEDY_START_AFTER_UPDATE:
+        if (
+            payload.get("recipe_stage") != QE_FULL_RECIPE_STAGE
+            or payload.get("recipe_amendment_id") != REMEDY_RECIPE_AMENDMENT_ID
+            or payload.get("recipe_amendment_sha256") != amendment_record["amendment_sha256"]
+        ):
+            raise ValueError(f"{arm_name} latest checkpoint is not on the bound QE-full remedy stage")
+    else:
+        raise ValueError(
+            f"{arm_name} must resume from exact u1850 or later QE-full checkpoint; got u{update_count}"
+        )
+    return update_count, checkpoint, dict(payload)
 
 
 def _gpu_uuid() -> str:
@@ -449,6 +649,8 @@ def _train_one_arm(
     source_path: Path,
     source_sha: str,
     anchor_calibration: Mapping[str, Any],
+    recipe_amendment: Mapping[str, Any] | None,
+    lane_budget_seconds: float,
     stop_after_seconds: int | None,
     attempt_id: str,
     active_invocation_started_monotonic: float,
@@ -534,10 +736,32 @@ def _train_one_arm(
         raise ValueError("target additional update count must exceed the saved Run2112 endpoint")
     if target_additional_updates > MAX_ADDITIONAL_UPDATES:
         raise ValueError("Wind maturation is capped at 6,000 additional physical updates per arm")
+    if target_absolute_update > REMEDY_FINAL_ABSOLUTE_UPDATE:
+        raise ValueError(
+            f"The current bounded Wind recipe ends at u{REMEDY_FINAL_ABSOLUTE_UPDATE}; "
+            "a later schedule amendment is required for any further updates"
+        )
+    if target_absolute_update > REMEDY_START_AFTER_UPDATE:
+        if recipe_amendment is None or previous_update < REMEDY_START_AFTER_UPDATE:
+            raise ValueError("QE-full remedy training requires an exact u1850-or-later bound resume")
+        if previous_update > REMEDY_START_AFTER_UPDATE and (
+            checkpoint_state.get("recipe_stage") != QE_FULL_RECIPE_STAGE
+            or checkpoint_state.get("recipe_amendment_id") != REMEDY_RECIPE_AMENDMENT_ID
+            or checkpoint_state.get("recipe_amendment_sha256")
+            != recipe_amendment.get("amendment_sha256")
+        ):
+            raise ValueError("Run2112 resume checkpoint belongs to a different remedy recipe amendment")
+        if previous_update == REMEDY_START_AFTER_UPDATE:
+            binding = recipe_amendment.get("base_checkpoint_bindings", {}).get(arm_name)
+            if (
+                not isinstance(binding, Mapping)
+                or runner._file_sha256(checkpoint_dir / f"updates_{previous_update:06d}.pt")
+                != binding.get("sha256")
+            ):
+                raise ValueError("Run2112 remedy must start from its exact immutable u1850 checkpoint")
 
     first_next = schedule.plan(previous_update)
     init_hit_before = sampler.hit_count
-    init_miss_before = sampler.miss_count
     init_case_batch_start = time.perf_counter()
     _case, _sample, init_batch = _case_batch(
         view=view,
@@ -610,14 +834,27 @@ def _train_one_arm(
             "warm_start_checkpoint_sha256": warm_sha,
             "train_rows_sha256": split_record["student_train_rows_sha256"],
             "seed": SEED,
-            "primary_capacity": PRIMARY_CAPACITY,
+            "primary_capacity": dict(record["sparse_capacity_vector"]),
+            "base_primary_capacity": dict(PRIMARY_CAPACITY),
+            "recipe_stage": str(record["recipe_stage"]),
+            "recipe_amendment_id": (
+                REMEDY_RECIPE_AMENDMENT_ID
+                if record["recipe_stage"] == QE_FULL_RECIPE_STAGE else None
+            ),
+            "recipe_amendment_sha256": (
+                None if recipe_amendment is None
+                else recipe_amendment.get("amendment_sha256")
+            ),
+            "recipe_pass": record.get("recipe_pass"),
+            "recipe_pass_position": record.get("recipe_pass_position"),
+            "recipe_sparse_update": record.get("recipe_sparse_update"),
             "fixed_incumbent_anchor": dict(anchor_calibration),
             "physical_optimizer_calls": physical_calls,
             "route_optimizer_calls": route_calls,
             "optimizer_calls_this_invocation": optimizer_calls_this_invocation,
             "route_calls_this_invocation": route_calls_this_invocation,
             "elapsed_seconds_total": elapsed_total,
-            "resource_budget_seconds": LANE_BUDGET_SECONDS,
+            "resource_budget_seconds": lane_budget_seconds,
         }
         path = checkpoint_dir / f"updates_{int(record['update_count']):06d}.pt"
         runner._atomic_checkpoint(path, state)
@@ -639,7 +876,7 @@ def _train_one_arm(
     for absolute_update in range(previous_update + 1, target_absolute_update + 1):
         if stop_after_seconds is not None and time.monotonic() - start_time >= stop_after_seconds:
             break
-        if lane_budget_before + time.monotonic() - start_time >= LANE_BUDGET_SECONDS:
+        if lane_budget_before + time.monotonic() - start_time >= lane_budget_seconds:
             resource_budget_exhausted = True
             break
         schedule_item = schedule.plan(absolute_update - 1)
@@ -687,7 +924,7 @@ def _train_one_arm(
             route_projection_records = {}
             actual_paths: tuple[str, ...] = ()
         else:
-            capacity = dict(PRIMARY_CAPACITY)
+            capacity = dict(schedule_item.capacity_vector)
             model.core.backend.set_cover_mode("external")
             encoded = model.core.encode_case(batch)
             tree = model.core.backend.build_case_trees(encoded)[0]
@@ -810,9 +1047,19 @@ def _train_one_arm(
             "row": int(schedule_item.row_id),
             "layout_index": int(view.metadata["layout_index"][schedule_item.row_id]),
             "query_seed": int(schedule_item.query_seed),
+            "recipe_stage": str(schedule_item.recipe_stage),
             "phase": schedule_item.phase,
             "action": schedule_item.action,
             "full_access_replay": bool(schedule_item.full_access_replay),
+            "capacity_vector": dict(schedule_item.capacity_vector),
+            "recipe_amendment_id": (
+                REMEDY_RECIPE_AMENDMENT_ID
+                if schedule_item.recipe_stage == QE_FULL_RECIPE_STAGE else None
+            ),
+            "recipe_amendment_sha256": (
+                None if recipe_amendment is None
+                else recipe_amendment.get("amendment_sha256")
+            ),
             "physical_parameter_group": True,
             "route_parameter_group": not schedule_item.full_access_replay,
             "optimizer_call_entered": True,
@@ -870,9 +1117,22 @@ def _train_one_arm(
             "layout_index": int(view.metadata["layout_index"][schedule_item.row_id]),
             "wind_direction_deg": float(case.wind_direction_deg),
             "query_seed": int(schedule_item.query_seed),
+            "recipe_stage": str(schedule_item.recipe_stage),
+            "recipe_amendment_id": (
+                REMEDY_RECIPE_AMENDMENT_ID
+                if schedule_item.recipe_stage == QE_FULL_RECIPE_STAGE else None
+            ),
+            "recipe_amendment_sha256": (
+                None if recipe_amendment is None
+                else recipe_amendment.get("amendment_sha256")
+            ),
             "primary_pass": int(schedule_item.primary_pass),
             "pass_position": int(schedule_item.pass_position),
             "primary_sparse_update": int(schedule_item.relative_sparse_update),
+            "recipe_pass": schedule_item.recipe_pass,
+            "recipe_pass_position": schedule_item.recipe_pass_position,
+            "recipe_sparse_update": schedule_item.recipe_sparse_update,
+            "sparse_capacity_vector": dict(schedule_item.sparse_capacity_vector),
             "effective_sparse_passes": (schedule_item.relative_sparse_update + 1) / len(train_rows),
             "processed_case_passes": (absolute_update - 100) / len(train_rows),
             "phase": schedule_item.phase,
@@ -912,7 +1172,13 @@ def _train_one_arm(
         stage_start = (
             not schedule_item.full_access_replay
             and schedule_item.pass_position == 0
-            and schedule_item.primary_pass in {2, 3, 4, 5, 6, 7}
+            and (
+                schedule_item.primary_pass in {2, 3, 4, 5, 6, 7}
+                or (
+                    schedule_item.recipe_stage == QE_FULL_RECIPE_STAGE
+                    and schedule_item.recipe_pass_position == 0
+                )
+            )
         )
         scheduled_review = (
             sparse_count in REVIEW_SPARSE_COUNTS or stage_start or absolute_update == target_absolute_update
@@ -929,11 +1195,17 @@ def _train_one_arm(
                 flush=True,
             )
 
-    if completed_update > previous_update and latest_record is not None:
-        if not (arm_dir / "latest_checkpoint.json").is_file() or int(
+    if (
+        completed_update > previous_update
+        and latest_record is not None
+        and (
+            not (arm_dir / "latest_checkpoint.json").is_file()
+            or int(
             json.loads((arm_dir / "latest_checkpoint.json").read_text(encoding="utf-8"))["update_count"]
-        ) != completed_update:
-            save_checkpoint(latest_record, review=True)
+            ) != completed_update
+        )
+    ):
+        save_checkpoint(latest_record, review=True)
     invocation_seconds = time.monotonic() - start_time
     return {
         "arm": arm_name,
@@ -946,7 +1218,13 @@ def _train_one_arm(
         "route_optimizer_calls_this_invocation": route_calls_this_invocation,
         "elapsed_seconds_this_invocation": invocation_seconds,
         "median_step_seconds_last_100": None,
-        "primary_capacity": PRIMARY_CAPACITY,
+        "primary_capacity": (
+            dict(latest_record["sparse_capacity_vector"])
+            if latest_record is not None else dict(PRIMARY_CAPACITY)
+        ),
+        "recipe_stage": (
+            latest_record["recipe_stage"] if latest_record is not None else BASE_RECIPE_STAGE
+        ),
         "resource_budget_exhausted": resource_budget_exhausted,
     }
 
@@ -960,7 +1238,6 @@ def _direct_plan_pair_by_route(
     route_fractions: Mapping[str, float],
 ) -> tuple[Any, Any, dict[str, Any], dict[str, Any]]:
     """Build the matched P plan with independently fixed QE and MM capacities."""
-    from dataclasses import replace
 
     encoded_for_scores = runner._detach_inputs(encoded)
     trees = model.core.backend.build_case_trees(encoded_for_scores)
@@ -1036,6 +1313,8 @@ def _create_or_validate_run_dir(
     source_path: Path,
     source_sha: str,
     driver_record: Mapping[str, Any],
+    target_absolute_update: int,
+    arm_name: str,
 ) -> dict[str, Any]:
     path.mkdir(parents=True, exist_ok=True)
     manifest_path = path / "run_manifest.json"
@@ -1051,6 +1330,43 @@ def _create_or_validate_run_dir(
             or previous.get("schedule_seed") != SEED
         ):
             raise ValueError("Run2112 manifest does not match requested source, data, capacity, or schedule")
+    lane_budget_seconds = validated_lane_gpu_budget_seconds(
+        previous if previous else {"lane_gpu_budget_seconds": LANE_BUDGET_SECONDS}
+    )
+    resource_reallocation_history = list(previous.get("resource_reallocation_history", []))
+    schedule_amendments = list(previous.get("schedule_amendments", []))
+    active_recipe_stage = BASE_RECIPE_STAGE
+    if target_absolute_update > REMEDY_START_AFTER_UPDATE:
+        expected_amendment = _build_recipe_amendment(
+            run_dir=path,
+            split_record=split_record,
+            source_sha=source_sha,
+            driver_record=driver_record,
+        )
+        existing_amendment = _validated_recipe_amendment(previous)
+        if existing_amendment is None:
+            existing_amendment = {
+                **expected_amendment,
+                "recorded_at_utc": datetime.now(timezone.utc).isoformat(),
+            }
+            schedule_amendments.append(existing_amendment)
+        else:
+            existing_identity = {
+                key: value for key, value in existing_amendment.items()
+                if key != "recorded_at_utc"
+            }
+            if existing_identity != expected_amendment:
+                raise ValueError(
+                    "Run2112 QE-full recipe amendment differs from its saved source/checkpoint binding"
+                )
+        _validate_recipe_resume_checkpoint(
+            run_dir=path,
+            arm_name=arm_name,
+            source_sha=source_sha,
+            train_rows_sha=str(split_record["student_train_rows_sha256"]),
+            amendment=existing_amendment,
+        )
+        active_recipe_stage = QE_FULL_RECIPE_STAGE
     manifest = {
         "run_id": RUN_ID,
         "arm_identity": "matched G/P controlled WindFarm maturation from exact Run2111 u100 states",
@@ -1067,12 +1383,20 @@ def _create_or_validate_run_dir(
         "query_sampling": "fresh deterministic native query panel at every physical update, including same-row full replay",
         "sparse_full_cadence": {"sparse_updates": 4, "full_access_replay_updates": 1},
         "primary_capacity": dict(PRIMARY_CAPACITY),
+        "active_sparse_recipe_stage": active_recipe_stage,
+        "active_sparse_capacity_vector": dict(
+            sparse_capacity_for_recipe(active_recipe_stage)
+        ),
+        "schedule_amendments": schedule_amendments,
         "historical_primary_probe_capacity": dict(FROZEN_090_PROBE),
         "stress_0p75_training": False,
         "scaffold": {"passes": 2, "paths": ["L", "R"], "k": 2},
         "action_blocks": {"actions": ["root", "two_packet", "four_packet"], "passes_each": 2},
         "max_additional_updates_per_arm": MAX_ADDITIONAL_UPDATES,
-        "lane_gpu_budget_seconds": LANE_BUDGET_SECONDS,
+        "lane_gpu_budget_seconds": lane_budget_seconds,
+        "base_lane_gpu_budget_seconds": LANE_BUDGET_SECONDS,
+        "maximum_reallocated_lane_gpu_budget_seconds": MAX_LANE_GPU_BUDGET_SECONDS,
+        "resource_reallocation_history": resource_reallocation_history,
         "gpu_active_seconds": float(previous.get("gpu_active_seconds", 0.0)),
         "arm_active_seconds": dict(previous.get("arm_active_seconds", {})),
         "optimizer_attempt_counts_by_arm": dict(previous.get("optimizer_attempt_counts_by_arm", {})),
@@ -1129,6 +1453,15 @@ def main() -> None:
                         help="stop at an update boundary after this many active seconds")
     args = parser.parse_args()
 
+    if args.target_additional_updates < 1 or args.target_additional_updates > MAX_ADDITIONAL_UPDATES:
+        raise ValueError("target additional updates must be within the 1..6000 lane cap")
+    target_absolute_update = 100 + int(args.target_additional_updates)
+    if target_absolute_update > REMEDY_FINAL_ABSOLUTE_UPDATE:
+        raise ValueError(
+            f"The current bounded Wind recipe ends at u{REMEDY_FINAL_ABSOLUTE_UPDATE}; "
+            "a later schedule amendment is required for any further updates"
+        )
+
     run_dir = args.run_dir.resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
     started_at = datetime.now(timezone.utc).isoformat()
@@ -1153,6 +1486,9 @@ def main() -> None:
             "arm_active_seconds": {},
             "optimizer_attempt_counts_by_arm": {},
             "lane_gpu_budget_seconds": LANE_BUDGET_SECONDS,
+            "base_lane_gpu_budget_seconds": LANE_BUDGET_SECONDS,
+            "maximum_reallocated_lane_gpu_budget_seconds": MAX_LANE_GPU_BUDGET_SECONDS,
+            "resource_reallocation_history": [],
         })
     start_event = {
         "event": "attempt_started",
@@ -1174,6 +1510,7 @@ def main() -> None:
         "physical_gpu_index": 0,
         "gpu_uuid_expected": DEVICE_UUID,
         "requested_target_additional_updates": args.target_additional_updates,
+        "requested_target_absolute_update": target_absolute_update,
         "warm_start_checkpoint_sha256": WARM_SHA256[arm_name],
     }
     _append_jsonl(run_dir / "attempts.jsonl", start_event)
@@ -1189,9 +1526,6 @@ def main() -> None:
             raise RuntimeError("physical GPU0 is unavailable as logical cuda:0")
         if torch.cuda.get_device_name(0) != "NVIDIA RTX 6000 Ada Generation" or _gpu_uuid() != DEVICE_UUID:
             raise RuntimeError("CUDA_VISIBLE_DEVICES=0 did not resolve to the authorized physical GPU")
-        if args.target_additional_updates < 1 or args.target_additional_updates > MAX_ADDITIONAL_UPDATES:
-            raise ValueError("target additional updates must be within the 1..6000 lane cap")
-
         config_path = Path(runner.DEFAULT_CONFIG).resolve()
         config_sha = runner._file_sha256(config_path)
         driver_record = {
@@ -1218,11 +1552,17 @@ def main() -> None:
             source_path=source_path,
             source_sha=source_sha,
             driver_record=driver_record,
+            target_absolute_update=target_absolute_update,
+            arm_name=arm_name,
         )
         if _gpu_uuid() != manifest["gpu_device"]["uuid"]:
             raise RuntimeError("physical GPU UUID changed after Run2112 manifest initialization")
-        if float(manifest["gpu_active_seconds"]) + (time.monotonic() - started_monotonic) >= LANE_BUDGET_SECONDS:
-            raise RuntimeError("Run2112 14 GPU-hour lane allocation is exhausted")
+        lane_budget_seconds = validated_lane_gpu_budget_seconds(manifest)
+        if float(manifest["gpu_active_seconds"]) + (time.monotonic() - started_monotonic) >= lane_budget_seconds:
+            raise RuntimeError("Run2112 Wind lane GPU allocation is exhausted")
+        recipe_amendment = _validated_recipe_amendment(manifest)
+        if target_absolute_update > REMEDY_START_AFTER_UPDATE and recipe_amendment is None:
+            raise ValueError("Run2112 QE-full recipe amendment was not retained in the manifest")
         g_warm, _ = _load_warm_start("g_packet")
         role_counts = {str(key): int(value) for key, value in config["forward"]["stage_a"]["role_query_counts"].items()}
         role_scales = {str(key): float(value) for key, value in config["forward"]["stage_a"]["role_loss_scales_mps"].items()}
@@ -1269,6 +1609,8 @@ def main() -> None:
             source_path=source_path,
             source_sha=source_sha,
             anchor_calibration=anchor_calibration,
+            recipe_amendment=recipe_amendment,
+            lane_budget_seconds=lane_budget_seconds,
             stop_after_seconds=args.stop_after_seconds,
             attempt_id=attempt_id,
             active_invocation_started_monotonic=started_monotonic,

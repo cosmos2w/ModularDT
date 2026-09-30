@@ -91,6 +91,40 @@ def test_budget_feature_uses_realized_full_access_budget() -> None:
     np.testing.assert_array_equal(TABLE._action_budget_vector("full_access"), [1.0, 1.0])
 
 
+def test_qe_full_recipe_does_not_count_old_capacity_as_mature_exposure(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = [16, 17]
+    ledger = []
+    for pass_id, qe, covered in (
+        (2, 0.95, rows),
+        (3, 0.95, rows),
+        (4, 1.0, rows),
+        (5, 1.0, rows[:1]),
+    ):
+        for row in covered:
+            ledger.append({
+                "update_count": 700 + len(ledger),
+                "optimizer_attempt_key": f"accepted:{len(ledger)}",
+                "row": row,
+                "requested_action": "root",
+                "requested_cut_paths": [""],
+                "realized_cut_paths": [""],
+                "realized_nonredundant_k": 1,
+                "capacity_vector": {"MM": 0.90, "QE": qe},
+                "phase": "action_family",
+                "primary_pass": pass_id,
+                "full_access_replay": False,
+            })
+    monkeypatch.setattr(TABLE, "PRIMARY_CAPACITY", {"QE": 1.0, "MM": 0.90})
+    exposure = TABLE._summarize_action_exposure(
+        ledger, training_rows=rows, selected_update=800
+    )["root"]
+    assert exposure["completed_primary_pass_ids"] == [4]
+    assert exposure["eligible_action_family_update_count"] == 3
+    assert exposure["trained_action"] is False
+    assert exposure["primary_capacity"] == {"MM": 0.90, "QE": 1.0}
+    np.testing.assert_allclose(TABLE._action_budget_vector("root"), [0.90, 1.0])
+
+
 def test_training_exposure_requires_two_complete_primary_action_passes() -> None:
     rows = [16, 17]
     ledger = []

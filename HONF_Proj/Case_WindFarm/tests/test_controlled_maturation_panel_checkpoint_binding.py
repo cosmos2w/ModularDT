@@ -12,6 +12,72 @@ PANEL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PANEL)
 
 
+def test_selected_sparse_capacity_is_bound_to_both_checkpoint_recipes() -> None:
+    amendment = {
+        "amendment_id": PANEL.maturation.REMEDY_RECIPE_AMENDMENT_ID,
+        "recipe_stage": PANEL.maturation.QE_FULL_RECIPE_STAGE,
+        "effective_after_completed_update": PANEL.maturation.REMEDY_START_AFTER_UPDATE,
+        "base_checkpoint_bindings": {
+            arm: {"sha256": digest}
+            for arm, digest in PANEL.maturation.REMEDY_BASE_CHECKPOINT_SHA256.items()
+        },
+    }
+    amendment["amendment_sha256"] = PANEL.maturation._canonical_payload_sha256(amendment)
+    manifest = {
+        "run_id": "2112",
+        "primary_capacity": {"QE": 0.95, "MM": 0.90},
+        "schedule_amendments": [amendment],
+    }
+
+    def payload(arm: str, update: int, qe: float) -> dict[str, object]:
+        record = {
+            "arm": arm,
+            "update_count": update,
+            "primary_capacity": {"QE": qe, "MM": 0.90},
+        }
+        if qe == 1.0 and update > 1850:
+            record.update({
+                "recipe_stage": PANEL.maturation.QE_FULL_RECIPE_STAGE,
+                "recipe_amendment_id": PANEL.maturation.REMEDY_RECIPE_AMENDMENT_ID,
+                "recipe_amendment_sha256": amendment["amendment_sha256"],
+            })
+        return record
+
+    old_g = payload("g_packet", 1850, 0.95)
+    old_p = payload("direct_pair", 1850, 0.95)
+    new_g = payload("g_packet", 1900, 1.0)
+    new_p = payload("direct_pair", 1900, 1.0)
+    assert PANEL.verified_selected_sparse_capacity(old_g, old_p, manifest) == {"QE": 0.95, "MM": 0.90}
+    assert PANEL.verified_selected_sparse_capacity(new_g, new_p, manifest) == {"QE": 1.0, "MM": 0.90}
+    with pytest.raises(ValueError, match="different sparse recipes"):
+        PANEL.verified_selected_sparse_capacity(new_g, old_p, manifest)
+    with pytest.raises(ValueError, match="predates"):
+        PANEL.verified_selected_sparse_capacity(payload("g_packet", 1850, 1.0), new_p, manifest)
+    with pytest.raises(ValueError, match="unreviewed"):
+        PANEL.verified_selected_sparse_capacity(payload("g_packet", 1900, 0.98), new_p, manifest)
+    with pytest.raises(ValueError, match="no manifest recipe amendment"):
+        PANEL.verified_selected_sparse_capacity(
+            new_g, new_p, {"run_id": "2112", "primary_capacity": {"QE": 0.95, "MM": 0.90}}
+        )
+    with pytest.raises(ValueError, match="checkpoint and manifest recipe amendment disagree"):
+        PANEL.verified_selected_sparse_capacity(
+            {**new_g, "recipe_amendment_sha256": "0" * 64}, new_p, manifest
+        )
+    bad_binding = {**amendment, "base_checkpoint_bindings": {
+        **amendment["base_checkpoint_bindings"],
+        "g_packet": {"sha256": "0" * 64},
+    }}
+    bad_binding["amendment_sha256"] = PANEL.maturation._canonical_payload_sha256({
+        key: value for key, value in bad_binding.items() if key != "amendment_sha256"
+    })
+    with pytest.raises(ValueError, match="invalid transition binding"):
+        PANEL.verified_selected_sparse_capacity(
+            new_g, new_p, {**manifest, "schedule_amendments": [bad_binding]}
+        )
+    with pytest.raises(ValueError, match="extends beyond"):
+        PANEL.verified_selected_sparse_capacity(payload("g_packet", 1900, 0.95), new_p, manifest)
+
+
 def test_checkpoint_binding_uses_requested_immutable_review_after_later_endpoint(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     checkpoint_dir = run_dir / "arms" / "g_packet" / "checkpoints"

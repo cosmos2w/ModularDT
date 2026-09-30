@@ -27,19 +27,65 @@ for _path in (str(PROJECT / "src"), str(PROJECT / "Case_WindFarm" / "src"), str(
 import run_active_packet_reuse as runner
 import run_controlled_maturation as maturation
 from honf_forward_core.interface_fields.adaptive_interaction_cover import MechanismPlan
-from honf_forward_core.interface_fields.budgeted_frontier import canonical_pair_catalog
 from honf_runtime.compat import load_trusted_checkpoint
-from windfarm.workflows.maturation import WIND_ACTION_PATHS, available_frontier_for_paths
 
+from windfarm.workflows.maturation import WIND_ACTION_PATHS, available_frontier_for_paths
 
 RUN_ID = "2112"
 DEVICE_UUID = maturation.DEVICE_UUID
 ALL_MECHANISMS = ("MM", "ME", "EM", "QM", "QE")
 ROLE_NAMES = tuple(runner.ROLE_NAMES)
 PRIMARY_CAPACITY = {"QE": 0.95, "MM": 0.90}
+QE_FULL_MM_SPARSE_CAPACITY = {"QE": 1.0, "MM": 0.90}
 FROZEN_090_PROBE = {"QE": 0.90, "MM": 0.90}
 FIXED_QUERY_SEED = 2_112_291
 REFRESH_QUERY_SEED = 2_112_929
+
+
+def verified_selected_sparse_capacity(
+    g_payload: Mapping[str, Any],
+    p_payload: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+) -> dict[str, float]:
+    """Use the sparse recipe saved by both arms, never the current code default."""
+
+    if manifest.get("run_id") != RUN_ID or manifest.get("primary_capacity") != PRIMARY_CAPACITY:
+        raise ValueError("Run2112 base sparse-capacity identity changed")
+    amendment = maturation._validated_recipe_amendment(manifest)
+    selected: list[dict[str, float]] = []
+    for arm, payload in (("g_packet", g_payload), ("direct_pair", p_payload)):
+        raw = payload.get("primary_capacity")
+        if payload.get("arm") != arm or not isinstance(raw, Mapping) or set(raw) != {"QE", "MM"}:
+            raise ValueError(f"{arm} checkpoint has no bound sparse recipe")
+        capacity = {route: float(raw[route]) for route in ("QE", "MM")}
+        if capacity not in (PRIMARY_CAPACITY, QE_FULL_MM_SPARSE_CAPACITY):
+            raise ValueError(f"{arm} checkpoint declares an unreviewed sparse recipe")
+        update = int(payload.get("update_count", -1))
+        if capacity == QE_FULL_MM_SPARSE_CAPACITY:
+            if update <= maturation.REMEDY_START_AFTER_UPDATE:
+                raise ValueError(f"{arm} QE-full recipe predates the declared u1851 amendment")
+            if amendment is None:
+                raise ValueError(f"{arm} QE-full checkpoint has no manifest recipe amendment")
+            base = amendment.get("base_checkpoint_bindings", {}).get(arm, {})
+            if (
+                amendment.get("recipe_stage") != maturation.QE_FULL_RECIPE_STAGE
+                or amendment.get("effective_after_completed_update")
+                != maturation.REMEDY_START_AFTER_UPDATE
+                or base.get("sha256") != maturation.REMEDY_BASE_CHECKPOINT_SHA256[arm]
+            ):
+                raise ValueError(f"{arm} QE-full manifest amendment has an invalid transition binding")
+            if (
+                payload.get("recipe_stage") != maturation.QE_FULL_RECIPE_STAGE
+                or payload.get("recipe_amendment_id") != maturation.REMEDY_RECIPE_AMENDMENT_ID
+                or payload.get("recipe_amendment_sha256") != amendment["amendment_sha256"]
+            ):
+                raise ValueError(f"{arm} QE-full checkpoint and manifest recipe amendment disagree")
+        elif update > maturation.REMEDY_START_AFTER_UPDATE:
+            raise ValueError(f"{arm} old sparse recipe extends beyond the u1850 amendment boundary")
+        selected.append(capacity)
+    if selected[0] != selected[1]:
+        raise ValueError("G/P selected checkpoints use different sparse recipes")
+    return selected[0]
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -764,6 +810,7 @@ def _evaluate_case_panel(
     query_counts: dict[str, int],
     normalizer: Any,
     role_scales: dict[str, float],
+    primary_capacity: Mapping[str, float],
     source_model: Any,
     g_model: Any,
     g_organizer: Any,
@@ -794,7 +841,7 @@ def _evaluate_case_panel(
             source_encoded.module_present[0],
             int(source_encoded.env_coords.shape[1]),
         )
-        source_pred, source_aux = runner._prediction_with_plan(
+        source_pred, _source_aux = runner._prediction_with_plan(
             source_model, source_encoded, batch, source_full_plan, return_interaction_aux=True
         )
         _loss, _mse, source_rmse = runner._role_objective(
@@ -845,7 +892,7 @@ def _evaluate_case_panel(
                     "environment_states": encoded.env_tokens,
                     "global_state": encoded.global_token,
                 }
-                for capacity_name, capacity in (("primary", PRIMARY_CAPACITY), ("probe_090", FROZEN_090_PROBE)):
+                for capacity_name, capacity in (("primary", primary_capacity), ("probe_090", FROZEN_090_PROBE)):
                     scores = control.score_cases(encoded, score_inputs, (tree,), budgets=capacity)
                     for action, requested_paths in WIND_ACTION_PATHS.items():
                         cut, actual_paths = available_frontier_for_paths(tree, requested_paths)
@@ -877,7 +924,7 @@ def _evaluate_case_panel(
                         )
                         conditions[key] = metric
             else:
-                for capacity_name, capacity in (("primary", PRIMARY_CAPACITY), ("probe_090", FROZEN_090_PROBE)):
+                for capacity_name, capacity in (("primary", primary_capacity), ("probe_090", FROZEN_090_PROBE)):
                     hard_plan, _soft_plan, projections, _actual = maturation._direct_plan_pair_by_route(
                         model=model,
                         encoded=encoded,
@@ -1047,6 +1094,10 @@ def main() -> None:
             checkpoint_payloads[arm] = payload
             checkpoint_hashes[arm] = digest
 
+        selected_sparse_capacity = verified_selected_sparse_capacity(
+            checkpoint_payloads["g_packet"], checkpoint_payloads["direct_pair"], manifest
+        )
+
         device = torch.device("cuda:0")
         probe_row = train_panel_rows[0]
         _probe_case, _probe_sample, init_batch = maturation._case_batch(
@@ -1089,6 +1140,7 @@ def main() -> None:
                     query_counts=query_counts,
                     normalizer=normalizer,
                     role_scales=role_scales,
+                    primary_capacity=selected_sparse_capacity,
                     source_model=source_model,
                     g_model=g_model,
                     g_organizer=g_control,
@@ -1189,7 +1241,8 @@ def main() -> None:
                 "same_sample_indices_across_G_P_actions_and_reference": True,
             },
             "capacity_design": {
-                "trained_primary": dict(PRIMARY_CAPACITY),
+                "trained_primary": dict(selected_sparse_capacity),
+                "base_run_primary": dict(PRIMARY_CAPACITY),
                 "frozen_090_probe_only": dict(FROZEN_090_PROBE),
                 "no_075_probe_in_review": True,
                 "G_actions": ["root", "two_packet", "four_packet", "explicit_full"],

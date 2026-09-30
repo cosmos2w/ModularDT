@@ -49,6 +49,9 @@ from windfarm.workflows.maturation import WIND_ACTION_PATHS, available_frontier_
 
 RUN_ID = "2112"
 ACTION_ORDER = ("root", "two_packet", "four_packet", "full_access")
+# This module is a single selected-checkpoint CLI evaluation. `_evaluate`
+# rebinds this active recipe from both checkpoint payloads before any action,
+# exposure, or control is constructed. The declaration is the historical base.
 PRIMARY_CAPACITY = {"QE": 0.95, "MM": 0.90}
 FIXED_QUERY_SEED = 2_112_291
 REPEAT_QUERY_SEED = 2_112_929
@@ -1617,6 +1620,7 @@ def _evaluate(
     repeat_layout_limit: int,
     selection_seed: int,
 ) -> dict[str, Any]:
+    global PRIMARY_CAPACITY
     config_path = Path(runner.DEFAULT_CONFIG).resolve()
     config = runner._load_config(config_path)
     view, _canonical, train_rows, split_record = runner._native_inputs(config)
@@ -1660,6 +1664,13 @@ def _evaluate(
             or digest != binding_record.get("checkpoint_sha256")
         ):
             raise ValueError(f"{arm} checkpoint does not match selected update, source, split, or verified binding")
+
+    # The action table belongs to these weights and their actual sparse
+    # recipe. Earlier QE .95 exposure must not mature a QE-full action.
+    selected_sparse_capacity = panel.verified_selected_sparse_capacity(
+        g_payload, p_payload, manifest
+    )
+    PRIMARY_CAPACITY = dict(selected_sparse_capacity)
 
     layout_rows = _layout_rows(
         train_rows, view, layout_limit=layout_limit, seed=selection_seed
@@ -2050,7 +2061,7 @@ def _evaluate(
         "feature_sha256_by_npz_key": feature_hashes,
         "mask_sha256_by_npz_key": mask_hashes,
         "capacity_vector_order": ["MM", "QE"],
-        "primary_capacity": {"MM": PRIMARY_CAPACITY["MM"], "QE": PRIMARY_CAPACITY["QE"]},
+        "primary_capacity": dict(selected_sparse_capacity),
         "action_order": list(ACTION_ORDER),
         "action_exposure_by_key": exposure,
         "training_population_organizer_features": training_population_audit,

@@ -51,6 +51,8 @@ from windfarm.workflows.maturation import WIND_ACTION_PATHS, available_frontier_
 RUN_ID = "2112"
 ACTION_ORDER = ("root", "two_packet", "four_packet", "full_access")
 MODE_ORDER = ("g_action_policy", "g_full", "p_direct", "retained_wfull")
+# `_run_cuda_panel` rebinds this script-level recipe from the verified selected
+# checkpoint/table pair before constructing or timing any wrapper.
 PRIMARY_CAPACITY = {"QE": 0.95, "MM": 0.90}
 ROLE_COUNTS = {
     64: {"volume": 32, "hub_slab": 8, "downstream_envelope": 8, "near_turbine": 8, "background": 8},
@@ -291,6 +293,12 @@ def validate_latency_inputs(
             or payload.get("checkpoint_sha256", binding.get("checkpoint_sha256")) != binding.get("checkpoint_sha256")
         ):
             raise ValueError(f"Selected {arm} checkpoint fails run/source/split/binding identity.")
+    manifest = json.loads((run_dir.resolve() / "run_manifest.json").read_text(encoding="utf-8"))
+    selected_sparse_capacity = panel.verified_selected_sparse_capacity(
+        selected_g_payload, selected_p_payload, manifest
+    )
+    if table.get("primary_capacity") != selected_sparse_capacity:
+        raise ValueError("Action table sparse recipe differs from the bound G/P checkpoints.")
     if source_sha != expected_source_sha or str(source_path) != str(table.get("retained_wfull_checkpoint_path")):
         raise ValueError("Retained W-full comparison checkpoint differs from the action table.")
     feature_path = _resolve_table_path(table_path, str(table["feature_npz_path"]))
@@ -328,6 +336,7 @@ def validate_latency_inputs(
         "selected_p_checkpoint_sha256": p_sha,
         "selected_p_checkpoint_binding_source": p_binding_source,
         "selected_p_checkpoint_binding_record_sha256": p_binding_sha,
+        "selected_sparse_capacity": dict(selected_sparse_capacity),
         "retained_wfull_checkpoint": str(source_path),
         "retained_wfull_checkpoint_sha256": source_sha,
         "action_table": str(table_path),
@@ -614,6 +623,8 @@ def _run_cuda_panel(
     risk_head_path: Path | None, selected_g_path: Path, selected_p_path: Path,
     run_dir: Path, update_count: int, device: torch.device, seed: int,
 ) -> dict[str, Any]:
+    global PRIMARY_CAPACITY
+    PRIMARY_CAPACITY = dict(plan["selected_sparse_capacity"])
     config = runner._load_config(Path(runner.DEFAULT_CONFIG).resolve())
     view, _canonical, _train_rows, split_record = runner._native_inputs(config)
     _source_path, source_payload, normalizer, source_sha = runner._load_source(config)
@@ -688,6 +699,7 @@ def _run_cuda_panel(
         "selected_p_checkpoint_sha256": _sha256(selected_p_path),
         "selected_p_checkpoint_binding_source": plan["selected_p_checkpoint_binding_source"],
         "selected_p_checkpoint_binding_record_sha256": plan["selected_p_checkpoint_binding_record_sha256"],
+        "selected_sparse_capacity": dict(PRIMARY_CAPACITY),
         "retained_wfull_checkpoint_sha256": source_sha,
         "action_table_sha256": _sha256(table_path.resolve()),
         "selector_json_sha256": _sha256(selector_json_path.resolve()),
