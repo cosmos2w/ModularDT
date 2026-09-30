@@ -89,6 +89,51 @@ def _resolve_table_path(table_path: Path, value: str) -> Path:
     return path.resolve() if path.is_absolute() else (table_path.parent / path).resolve()
 
 
+def _verified_table_checkpoint_binding(
+    table: Mapping[str, Any], *, run_dir: Path, arm: str, update_count: int,
+) -> tuple[Path, Mapping[str, Any], str, str]:
+    """Rebind the table's exact scheduled or durability checkpoint source."""
+    if arm not in {"g_packet", "direct_pair"}:
+        raise ValueError(f"Unknown selected action-table arm: {arm}")
+    prefix = "g" if arm == "g_packet" else "p"
+    path, record, digest, source = panel._verified_checkpoint_binding(
+        run_dir.resolve(), arm=arm, update_count=int(update_count)
+    )
+    table_format = table.get("format_version")
+    checkpoint_sha = table.get(
+        "forward_checkpoint_sha256" if arm == "g_packet" else "p_control_checkpoint_sha256"
+    )
+    if table_format == 1:
+        legacy_record = table.get(f"{prefix}_review_record")
+        legacy_sha = table.get(f"{prefix}_review_record_line_sha256")
+        agrees = (
+            source == "append_only_scheduled_review"
+            and legacy_record == record
+            and legacy_sha == digest
+        )
+    elif table_format == 2:
+        binding_record = table.get(f"{prefix}_checkpoint_binding_record")
+        binding_sha = table.get(f"{prefix}_checkpoint_binding_record_sha256")
+        binding_source = table.get(f"{prefix}_checkpoint_binding_source")
+        review_record = table.get(f"{prefix}_checkpoint_review_record")
+        review_sha = table.get(f"{prefix}_checkpoint_review_record_line_sha256")
+        review_agrees = (
+            (source == "append_only_scheduled_review" and review_record == record and review_sha == digest)
+            or (source == "current_durability_checkpoint" and review_record is None and review_sha is None)
+        )
+        agrees = (
+            binding_record == record
+            and binding_sha == digest
+            and binding_source == source
+            and review_agrees
+        )
+    else:
+        raise ValueError("Unknown Wind action table format.")
+    if not agrees or checkpoint_sha != _sha256(path):
+        raise ValueError(f"Action table does not match the verified {arm} checkpoint binding source.")
+    return path, record, digest, source
+
+
 def interleaved_workload_order(
     workloads: Sequence[str], modes: Sequence[str], *, rounds: int, seed: int,
 ) -> list[list[tuple[str, str]]]:
@@ -179,26 +224,24 @@ def validate_latency_inputs(
     table_path = table_path.resolve()
     table = json.loads(table_path.read_text(encoding="utf-8"))
     if (
-        table.get("format_version") != 1
+        table.get("format_version") not in (1, 2)
         or table.get("run_id") != RUN_ID
         or int(table.get("selected_update_count", -1)) != int(update_count)
     ):
         raise ValueError("Action table is not the requested selected Run2112 checkpoint.")
-    selected_g_path, selected_g_review, g_line_sha = panel._checkpoint_review_binding(
-        run_dir.resolve(), arm="g_packet", update_count=int(update_count)
+    selected_g_path, selected_g_binding, g_binding_sha, g_binding_source = _verified_table_checkpoint_binding(
+        table, run_dir=run_dir, arm="g_packet", update_count=int(update_count)
     )
     p_update = int(table.get("p_control_update_count", -1))
-    selected_p_path, selected_p_review, p_line_sha = panel._checkpoint_review_binding(
-        run_dir.resolve(), arm="direct_pair", update_count=p_update
+    selected_p_path, selected_p_binding, p_binding_sha, p_binding_source = _verified_table_checkpoint_binding(
+        table, run_dir=run_dir, arm="direct_pair", update_count=p_update
     )
     g_sha, p_sha = _sha256(selected_g_path), _sha256(selected_p_path)
     if (
         table.get("forward_checkpoint_sha256") != g_sha
-        or table.get("g_review_record_line_sha256") != g_line_sha
         or table.get("p_control_checkpoint_sha256") != p_sha
-        or table.get("p_review_record_line_sha256") != p_line_sha
     ):
-        raise ValueError("Action table no longer matches the immutable selected G/P review records.")
+        raise ValueError("Action table no longer matches the immutable selected G/P checkpoint bindings.")
     selector_json_path = selector_json_path.resolve()
     selector = json.loads(selector_json_path.read_text(encoding="utf-8"))
     table_sha = _sha256(table_path)
@@ -233,9 +276,9 @@ def validate_latency_inputs(
     )
     expected_source_sha = str(table.get("retained_wfull_checkpoint_sha256", ""))
     split = table.get("training_split_identity", {})
-    for arm, payload, expected_arm, review in (
-        ("G", selected_g_payload, "g_packet", selected_g_review),
-        ("P", selected_p_payload, "direct_pair", selected_p_review),
+    for arm, payload, expected_arm, binding in (
+        ("G", selected_g_payload, "g_packet", selected_g_binding),
+        ("P", selected_p_payload, "direct_pair", selected_p_binding),
     ):
         expected_update = update_count if arm == "G" else p_update
         if (
@@ -245,9 +288,9 @@ def validate_latency_inputs(
             or int(payload.get("update_count", -1)) != expected_update
             or payload.get("source_checkpoint_sha256") != source_sha
             or payload.get("train_rows_sha256") != split.get("student_train_rows_sha256")
-            or payload.get("checkpoint_sha256", review.get("checkpoint_sha256")) != review.get("checkpoint_sha256")
+            or payload.get("checkpoint_sha256", binding.get("checkpoint_sha256")) != binding.get("checkpoint_sha256")
         ):
-            raise ValueError(f"Selected {arm} checkpoint fails run/source/split/review identity.")
+            raise ValueError(f"Selected {arm} checkpoint fails run/source/split/binding identity.")
     if source_sha != expected_source_sha or str(source_path) != str(table.get("retained_wfull_checkpoint_path")):
         raise ValueError("Retained W-full comparison checkpoint differs from the action table.")
     feature_path = _resolve_table_path(table_path, str(table["feature_npz_path"]))
@@ -279,8 +322,12 @@ def validate_latency_inputs(
         "selected_p_update_count": p_update,
         "selected_g_checkpoint": str(selected_g_path),
         "selected_g_checkpoint_sha256": g_sha,
+        "selected_g_checkpoint_binding_source": g_binding_source,
+        "selected_g_checkpoint_binding_record_sha256": g_binding_sha,
         "selected_p_checkpoint": str(selected_p_path),
         "selected_p_checkpoint_sha256": p_sha,
+        "selected_p_checkpoint_binding_source": p_binding_source,
+        "selected_p_checkpoint_binding_record_sha256": p_binding_sha,
         "retained_wfull_checkpoint": str(source_path),
         "retained_wfull_checkpoint_sha256": source_sha,
         "action_table": str(table_path),
@@ -636,7 +683,11 @@ def _run_cuda_panel(
         "selected_update_count": int(update_count),
         "selected_p_update_count": int(table["p_control_update_count"]),
         "selected_g_checkpoint_sha256": _sha256(selected_g_path),
+        "selected_g_checkpoint_binding_source": plan["selected_g_checkpoint_binding_source"],
+        "selected_g_checkpoint_binding_record_sha256": plan["selected_g_checkpoint_binding_record_sha256"],
         "selected_p_checkpoint_sha256": _sha256(selected_p_path),
+        "selected_p_checkpoint_binding_source": plan["selected_p_checkpoint_binding_source"],
+        "selected_p_checkpoint_binding_record_sha256": plan["selected_p_checkpoint_binding_record_sha256"],
         "retained_wfull_checkpoint_sha256": source_sha,
         "action_table_sha256": _sha256(table_path.resolve()),
         "selector_json_sha256": _sha256(selector_json_path.resolve()),
@@ -716,12 +767,12 @@ def main() -> None:
         raise RuntimeError("Authorized Wind RTX 6000 Ada is unavailable")
     if maturation._gpu_uuid() != maturation.DEVICE_UUID:
         raise RuntimeError("CUDA_VISIBLE_DEVICES=0 did not resolve to the authorized physical GPU")
-    selected_g_path, _g_review, _g_line_sha = panel._checkpoint_review_binding(
-        args.run_dir.resolve(), arm="g_packet", update_count=args.update_count
-    )
     table = json.loads(args.action_table.resolve().read_text(encoding="utf-8"))
-    selected_p_path, _p_review, _p_line_sha = panel._checkpoint_review_binding(
-        args.run_dir.resolve(), arm="direct_pair", update_count=int(table["p_control_update_count"])
+    selected_g_path, _g_binding, _g_binding_sha, _g_binding_source = _verified_table_checkpoint_binding(
+        table, run_dir=args.run_dir, arm="g_packet", update_count=args.update_count
+    )
+    selected_p_path, _p_binding, _p_binding_sha, _p_binding_source = _verified_table_checkpoint_binding(
+        table, run_dir=args.run_dir, arm="direct_pair", update_count=int(table["p_control_update_count"])
     )
     result = _run_cuda_panel(
         plan=plan, table_path=args.action_table, selector_json_path=args.selector_results,

@@ -7,6 +7,7 @@ import importlib.util
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -125,7 +126,7 @@ def _table(tmp_path: Path, *, include_repeat: bool = False) -> tuple[Path, Path,
     np.savez(feature_path, **arrays)
     np.savez(mask_path, **masks)
     table = {
-        "format_version": 1,
+        "format_version": 2,
         "run_id": "2112",
         "selected_update_count": 211,
         "forward_checkpoint_sha256": SELECTOR._sha256(checkpoint),
@@ -142,10 +143,18 @@ def _table(tmp_path: Path, *, include_repeat: bool = False) -> tuple[Path, Path,
         },
         "action_exposure_by_key": exposure_by_action,
         "run_manifest_path": str((tmp_path / "run2112" / "run_manifest.json").resolve()),
-        "g_review_record_line_sha256": "b" * 64,
-        "g_review_record": {
+        "g_checkpoint_binding_source": "append_only_scheduled_review",
+        "g_checkpoint_binding_record_sha256": "b" * 64,
+        "g_checkpoint_binding_record": {
             "arm": "g_packet", "update_count": 211,
             "checkpoint_sha256": SELECTOR._sha256(checkpoint),
+            "checkpoint": str(checkpoint), "checkpoint_kind": "scheduled_review",
+        },
+        "g_checkpoint_review_record_line_sha256": "b" * 64,
+        "g_checkpoint_review_record": {
+            "arm": "g_packet", "update_count": 211,
+            "checkpoint_sha256": SELECTOR._sha256(checkpoint),
+            "checkpoint": str(checkpoint), "checkpoint_kind": "scheduled_review",
         },
         "g_action_exposure_lineage": {
             "update_ledger_path": str((tmp_path / "run2112" / "arms" / "g_packet" / "updates.jsonl").resolve()),
@@ -219,8 +228,107 @@ def test_action_table_binds_exposure_snapshot_to_selected_g_endpoint(tmp_path: P
     table = json.loads(table_path.read_text(encoding="utf-8"))
     table["g_action_exposure_lineage"]["selected_update_count"] = 210
     table_path.write_text(json.dumps(table), encoding="utf-8")
-    with pytest.raises(ValueError, match="selected G review, update, and exposure ledger snapshot"):
+    with pytest.raises(ValueError, match="selected G checkpoint binding, update, and exposure ledger snapshot"):
         SELECTOR._load_action_table(table_path, features, masks, checkpoint)
+
+
+def test_legacy_v1_scheduled_review_table_remains_readable(tmp_path: Path) -> None:
+    table_path, features, masks, checkpoint = _table(tmp_path)
+    payload = json.loads(table_path.read_text(encoding="utf-8"))
+    payload["format_version"] = 1
+    payload["g_review_record"] = payload.pop("g_checkpoint_binding_record")
+    payload["g_review_record_line_sha256"] = payload.pop("g_checkpoint_binding_record_sha256")
+    payload.pop("g_checkpoint_binding_source")
+    payload.pop("g_checkpoint_review_record")
+    payload.pop("g_checkpoint_review_record_line_sha256")
+    table_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    _rows, metadata = SELECTOR._load_action_table(table_path, features, masks, checkpoint)
+
+    assert metadata["checkpoint_binding_source"] == "append_only_scheduled_review"
+    assert metadata["checkpoint_binding_record"]["checkpoint_kind"] == "scheduled_review"
+
+
+def test_durability_checkpoint_binding_is_explicit_and_not_a_review(tmp_path: Path) -> None:
+    table_path, features, masks, checkpoint = _table(tmp_path)
+    payload = json.loads(table_path.read_text(encoding="utf-8"))
+    record = payload["g_checkpoint_binding_record"]
+    record.update({"checkpoint_kind": "durability_only", "run_id": "2112"})
+    payload["g_checkpoint_binding_source"] = "current_durability_checkpoint"
+    payload["g_checkpoint_binding_record_sha256"] = "d" * 64
+    payload["g_checkpoint_review_record"] = None
+    payload["g_checkpoint_review_record_line_sha256"] = None
+    table_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    _rows, metadata = SELECTOR._load_action_table(table_path, features, masks, checkpoint)
+
+    assert metadata["checkpoint_binding_source"] == "current_durability_checkpoint"
+    assert metadata["checkpoint_binding_record"]["checkpoint_kind"] == "durability_only"
+    assert metadata["checkpoint_binding_record_sha256"] == "d" * 64
+
+    payload["g_checkpoint_review_record"] = dict(record)
+    payload["g_checkpoint_review_record_line_sha256"] = "d" * 64
+    table_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="explicit G checkpoint source"):
+        SELECTOR._load_action_table(table_path, features, masks, checkpoint)
+
+
+def test_policy_summary_counts_decisions_separately_from_candidate_mismatches() -> None:
+    results = [
+        SimpleNamespace(
+            case_key="selected_bad", family_key="f1", selected_action_key="root",
+            measured_oracle_action_key="two_packet", unsupported_at_budget=False,
+            selected_supported_sparse=False, measured_adequate_sparse=("two_packet",),
+            predicted_safe_sparse=("root",), false_safe_sparse=("root",),
+            false_reject_sparse=("two_packet",), selected_work=10.0,
+            measured_oracle_sparse_work=15.0, selected_nonredundant_k=1,
+        ),
+        SimpleNamespace(
+            case_key="fallback_bad", family_key="f2", selected_action_key="full_access",
+            measured_oracle_action_key="root", unsupported_at_budget=True,
+            selected_supported_sparse=False, measured_adequate_sparse=("root",),
+            predicted_safe_sparse=(), false_safe_sparse=(), false_reject_sparse=("root",),
+            selected_work=40.0, measured_oracle_sparse_work=8.0,
+            selected_nonredundant_k=None,
+        ),
+        SimpleNamespace(
+            case_key="selected_unsupported", family_key="f3", selected_action_key="two_packet",
+            measured_oracle_action_key=None, unsupported_at_budget=False,
+            selected_supported_sparse=False, measured_adequate_sparse=(),
+            predicted_safe_sparse=("root", "two_packet"),
+            false_safe_sparse=("root", "two_packet"), false_reject_sparse=(),
+            selected_work=20.0, measured_oracle_sparse_work=None,
+            selected_nonredundant_k=2,
+        ),
+        SimpleNamespace(
+            case_key="selected_good", family_key="f4", selected_action_key="root",
+            measured_oracle_action_key="root", unsupported_at_budget=False,
+            selected_supported_sparse=True, measured_adequate_sparse=("root",),
+            predicted_safe_sparse=("root",), false_safe_sparse=(), false_reject_sparse=(),
+            selected_work=8.0, measured_oracle_sparse_work=8.0,
+            selected_nonredundant_k=1,
+        ),
+    ]
+    full_rows = [
+        SimpleNamespace(case_key=row.case_key, exact_work=40.0, full_access=True)
+        for row in results
+    ]
+    metadata = {
+        row.case_key: {"module_count": 10 + index}
+        for index, row in enumerate(results)
+    }
+
+    summary = SELECTOR._policy_summary(results, full_rows, metadata)
+
+    assert summary["false_safe_choice_count"] == 2
+    assert summary["false_reject_choice_count"] == 1
+    assert summary["candidate_false_safe_count"] == 3
+    assert summary["candidate_false_reject_count"] == 2
+    by_case = {row["case_key"]: row for row in summary["per_case"]}
+    assert by_case["selected_bad"]["selected_false_safe"] is True
+    assert by_case["fallback_bad"]["full_fallback_with_adequate_sparse"] is True
+    assert by_case["selected_unsupported"]["selected_false_safe"] is True
+    assert by_case["selected_good"]["selected_false_safe"] is False
 
 
 def test_query_repeats_are_audited_but_do_not_enter_primary_fit(tmp_path: Path) -> None:

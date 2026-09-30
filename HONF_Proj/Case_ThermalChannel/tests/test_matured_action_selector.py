@@ -14,6 +14,42 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 import evaluate_matured_action_selector as selector
 
+from honf_forward_core.interface_fields.action_risk_fit import ActionPolicyCaseResult
+
+
+def test_policy_summary_separates_selected_errors_from_candidate_diagnostics() -> None:
+    def case(
+        key: str, *, selected: str, oracle: str | None, supported: bool,
+        false_safe: tuple[str, ...] = (), false_reject: tuple[str, ...] = (),
+    ) -> ActionPolicyCaseResult:
+        full = selected == "full_access"
+        return ActionPolicyCaseResult(
+            case_key=key, family_key=key, selected_action_key=selected,
+            measured_oracle_action_key=oracle, unsupported_at_budget=full,
+            selected_supported_sparse=supported,
+            measured_adequate_sparse=() if oracle is None else (oracle,),
+            predicted_safe_sparse=() if full else tuple(dict.fromkeys((selected, *false_safe))),
+            false_safe_sparse=false_safe, false_reject_sparse=false_reject,
+            selected_work=1.0 if full else 0.8,
+            measured_oracle_sparse_work=None if oracle is None else 0.75,
+            selected_nonredundant_k=None if full else 2,
+        )
+
+    result = selector.summarize_policy_results([
+        case("a", selected="two_packet", oracle="root", supported=False,
+             false_safe=("two_packet",), false_reject=("root",)),
+        case("b", selected="full_access", oracle="root", supported=False,
+             false_reject=("root",)),
+        case("c", selected="root", oracle="root", supported=True,
+             false_safe=("four_packet",)),
+    ], split="development", model_name="neural")
+    assert result["false_safe_choice_count"] == 1
+    assert result["false_reject_choice_count"] == 1
+    assert result["candidate_false_safe_count"] == 2
+    assert result["candidate_false_reject_count"] == 2
+    assert [row["selected_false_safe"] for row in result["per_case"]] == [True, False, False]
+    assert [row["full_fallback_with_adequate_sparse"] for row in result["per_case"]] == [False, True, False]
+
 
 def test_training_exposure_requires_executed_baseline_cuts(tmp_path: Path) -> None:
     steps = tmp_path / "training_steps.jsonl"

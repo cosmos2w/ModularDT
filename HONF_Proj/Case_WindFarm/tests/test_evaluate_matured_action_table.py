@@ -46,6 +46,29 @@ def _four_action_rows(checkpoint_sha: str) -> list[dict[str, object]]:
     return rows
 
 
+def test_checkpoint_binding_fields_do_not_label_durability_as_review() -> None:
+    durability = {
+        "run_id": "2112", "arm": "g_packet", "update_count": 1750,
+        "checkpoint_kind": "durability_only", "checkpoint": "/tmp/g_u1750.pt",
+        "checkpoint_sha256": "a" * 64,
+    }
+    fields = TABLE._checkpoint_binding_fields(
+        "g", durability, "b" * 64, "current_durability_checkpoint"
+    )
+    assert fields["g_checkpoint_binding_source"] == "current_durability_checkpoint"
+    assert fields["g_checkpoint_binding_record"] == durability
+    assert fields["g_checkpoint_review_record"] is None
+    assert fields["g_checkpoint_review_record_line_sha256"] is None
+
+    scheduled = {**durability, "checkpoint_kind": "scheduled_review"}
+    fields = TABLE._checkpoint_binding_fields(
+        "p", scheduled, "c" * 64, "append_only_scheduled_review"
+    )
+    assert fields["p_checkpoint_binding_source"] == "append_only_scheduled_review"
+    assert fields["p_checkpoint_review_record"] == scheduled
+    assert fields["p_checkpoint_review_record_line_sha256"] == "c" * 64
+
+
 def test_effective_packet_feature_quotient_deduplicates_typed_sources_and_drops_empty() -> None:
     features = np.asarray([[1.0, 0.0], [3.0, 2.0], [9.0, 9.0], [5.0, 7.0]], dtype=np.float32)
     mm = np.asarray([[1, 0], [1, 0], [0, 0], [0, 1]], dtype=np.uint8)

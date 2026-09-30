@@ -102,3 +102,45 @@ def test_query_counts_and_latency_summary_are_explicit_and_bounded() -> None:
             workloads=[], wrapper=lambda _mode, _workload: {},
             device=__import__("torch").device("cpu"), warmups=0, repeats=LATENCY.MAX_REPEATS + 1,
         )
+
+
+def test_table_binding_accepts_durability_source_without_synthetic_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "g_u1750.pt"
+    checkpoint.write_bytes(b"durability checkpoint fixture")
+    checkpoint_sha = LATENCY._sha256(checkpoint)
+    binding_sha = "a" * 64
+    record = {
+        "run_id": "2112", "arm": "g_packet", "update_count": 1750,
+        "checkpoint_kind": "durability_only", "checkpoint": str(checkpoint),
+        "checkpoint_sha256": checkpoint_sha,
+    }
+    monkeypatch.setattr(
+        LATENCY.panel, "_verified_checkpoint_binding",
+        lambda *_args, **_kwargs: (checkpoint, record, binding_sha, "current_durability_checkpoint"),
+    )
+    table = {
+        "format_version": 2,
+        "forward_checkpoint_sha256": checkpoint_sha,
+        "g_checkpoint_binding_source": "current_durability_checkpoint",
+        "g_checkpoint_binding_record": record,
+        "g_checkpoint_binding_record_sha256": binding_sha,
+        "g_checkpoint_review_record": None,
+        "g_checkpoint_review_record_line_sha256": None,
+    }
+
+    path, bound, digest, source = LATENCY._verified_table_checkpoint_binding(
+        table, run_dir=tmp_path, arm="g_packet", update_count=1750
+    )
+    assert path == checkpoint
+    assert bound["checkpoint_kind"] == "durability_only"
+    assert digest == binding_sha
+    assert source == "current_durability_checkpoint"
+
+    table["g_checkpoint_review_record"] = dict(record)
+    table["g_checkpoint_review_record_line_sha256"] = binding_sha
+    with pytest.raises(ValueError, match="verified g_packet checkpoint binding source"):
+        LATENCY._verified_table_checkpoint_binding(
+            table, run_dir=tmp_path, arm="g_packet", update_count=1750
+        )

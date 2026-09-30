@@ -125,6 +125,55 @@ def _valid_action_paths(action_key: str, row: Mapping[str, Any]) -> tuple[str, .
     return realized
 
 
+def _selected_checkpoint_binding(
+    payload: Mapping[str, Any], *, selected_update: int,
+    expected_sha256: str, checkpoint_path: Path,
+) -> tuple[str, Mapping[str, Any], str]:
+    """Read legacy scheduled-review or explicit v2 scheduled/durability identity."""
+    table_format = payload.get("format_version")
+    if table_format == 1:
+        source = "append_only_scheduled_review"
+        record = payload.get("g_review_record")
+        record_sha256 = payload.get("g_review_record_line_sha256")
+        review_record, review_line_sha = record, record_sha256
+    elif table_format == 2:
+        source = payload.get("g_checkpoint_binding_source")
+        record = payload.get("g_checkpoint_binding_record")
+        record_sha256 = payload.get("g_checkpoint_binding_record_sha256")
+        review_record = payload.get("g_checkpoint_review_record")
+        review_line_sha = payload.get("g_checkpoint_review_record_line_sha256")
+    else:
+        raise ValueError("Unknown Wind action table format.")
+    if (
+        source not in {"append_only_scheduled_review", "current_durability_checkpoint"}
+        or not isinstance(record, Mapping)
+        or not _is_sha256(record_sha256)
+        or record.get("arm") != "g_packet"
+        or not isinstance(record.get("update_count"), int)
+        or isinstance(record.get("update_count"), bool)
+        or record.get("update_count") != selected_update
+        or record.get("checkpoint_sha256") != expected_sha256
+        or not isinstance(record.get("checkpoint"), str)
+        or Path(record["checkpoint"]).resolve() != Path(checkpoint_path).resolve()
+        or source == "current_durability_checkpoint"
+        and (
+            table_format != 2
+            or record.get("checkpoint_kind") != "durability_only"
+            or record.get("run_id") != payload.get("run_id")
+            or review_record is not None
+            or review_line_sha is not None
+        )
+        or source == "append_only_scheduled_review"
+        and (
+            not isinstance(review_record, Mapping)
+            or review_record != record
+            or review_line_sha != record_sha256
+        )
+    ):
+        raise ValueError("Action table does not bind an explicit G checkpoint source, record, and identity.")
+    return str(source), record, str(record_sha256)
+
+
 def _validated_training_exposure(
     action_key: str, row: Mapping[str, Any], *, row_id: int,
     realized_paths: Sequence[str], nonredundant_k: int,
@@ -228,24 +277,20 @@ def _load_action_table(
     table_path: Path, feature_path: Path, mask_path: Path, checkpoint_path: Path,
 ) -> tuple[list[ActionEvidenceRow], dict[str, Any]]:
     payload = json.loads(table_path.read_text(encoding="utf-8"))
-    if payload.get("format_version") != 1:
+    table_format = payload.get("format_version")
+    if table_format not in (1, 2):
         raise ValueError("Unknown Wind action table format.")
     expected_forward_sha = str(payload["forward_checkpoint_sha256"])
     selected_update = payload.get("selected_update_count")
-    g_review = payload.get("g_review_record")
-    g_review_line_sha = payload.get("g_review_record_line_sha256")
+    g_binding_source, g_binding_record, g_binding_record_sha = _selected_checkpoint_binding(
+        payload, selected_update=selected_update, expected_sha256=expected_forward_sha,
+        checkpoint_path=checkpoint_path,
+    )
     exposure_lineage = payload.get("g_action_exposure_lineage")
     run_manifest_path = payload.get("run_manifest_path")
     if (
         payload.get("run_id") != "2112"
-        or not isinstance(selected_update, int) or selected_update <= 100
-        or not isinstance(g_review, Mapping)
-        or g_review.get("arm") != "g_packet"
-        or not isinstance(g_review.get("update_count"), int)
-        or isinstance(g_review.get("update_count"), bool)
-        or g_review.get("update_count") != selected_update
-        or g_review.get("checkpoint_sha256") != expected_forward_sha
-        or not _is_sha256(g_review_line_sha)
+        or not isinstance(selected_update, int) or isinstance(selected_update, bool) or selected_update <= 100
         or not isinstance(exposure_lineage, Mapping)
         or not isinstance(exposure_lineage.get("selected_update_count"), int)
         or isinstance(exposure_lineage.get("selected_update_count"), bool)
@@ -259,7 +304,7 @@ def _load_action_table(
         or Path(str(exposure_lineage.get("update_ledger_path", ""))).resolve()
         != Path(run_manifest_path).resolve().parent / "arms" / "g_packet" / "updates.jsonl"
     ):
-        raise ValueError("Action table does not bind the selected G review, update, and exposure ledger snapshot.")
+        raise ValueError("Action table does not bind the selected G checkpoint binding, update, and exposure ledger snapshot.")
     if _sha256(checkpoint_path) != expected_forward_sha:
         raise ValueError("Selected G checkpoint differs from the measured action table.")
     if _sha256(feature_path) != payload["feature_npz_sha256"]:
@@ -395,6 +440,9 @@ def _load_action_table(
         "roles": roles,
         "allowance": allowance,
         "checkpoint_sha256": expected_forward_sha,
+        "checkpoint_binding_source": g_binding_source,
+        "checkpoint_binding_record": g_binding_record,
+        "checkpoint_binding_record_sha256": g_binding_record_sha,
         "action_exposure_by_key": exposure_by_action,
     }
 
@@ -696,6 +744,14 @@ def _policy_summary(
 ) -> dict[str, Any]:
     full_work = {row.case_key: row.exact_work for row in rows if row.full_access}
     oracle = [row for row in results if row.measured_oracle_action_key is not None]
+    selected_false_safe = [
+        row for row in results
+        if not row.unsupported_at_budget and not row.selected_supported_sparse
+    ]
+    full_fallback_with_adequate_sparse = [
+        row for row in results
+        if row.unsupported_at_budget and row.measured_oracle_action_key is not None
+    ]
     by_m: defaultdict[int, Counter[int]] = defaultdict(Counter)
     for row in results:
         if row.selected_nonredundant_k is not None:
@@ -705,8 +761,10 @@ def _policy_summary(
         "measured_oracle_available_count": len(oracle),
         "supported_sparse_deployment_count": sum(row.selected_supported_sparse for row in results),
         "explicit_full_fallback_count": sum(row.unsupported_at_budget for row in results),
-        "false_safe_choice_count": sum(len(row.false_safe_sparse) for row in results),
-        "false_reject_choice_count": sum(len(row.false_reject_sparse) for row in results),
+        "false_safe_choice_count": len(selected_false_safe),
+        "false_reject_choice_count": len(full_fallback_with_adequate_sparse),
+        "candidate_false_safe_count": sum(len(row.false_safe_sparse) for row in results),
+        "candidate_false_reject_count": sum(len(row.false_reject_sparse) for row in results),
         "mean_selected_exact_work": float(np.mean([row.selected_work for row in results])) if results else None,
         "mean_selected_work_over_same_case_full": float(np.mean([
             row.selected_work / full_work[row.case_key] for row in results
@@ -732,6 +790,12 @@ def _policy_summary(
             "predicted_safe_sparse": list(row.predicted_safe_sparse),
             "false_safe_sparse": list(row.false_safe_sparse),
             "false_reject_sparse": list(row.false_reject_sparse),
+            "selected_false_safe": (
+                not row.unsupported_at_budget and not row.selected_supported_sparse
+            ),
+            "full_fallback_with_adequate_sparse": (
+                row.unsupported_at_budget and row.measured_oracle_action_key is not None
+            ),
             "selected_exact_work": row.selected_work,
             "selected_nonredundant_k": row.selected_nonredundant_k,
             "module_count": case_metadata[row.case_key]["module_count"],

@@ -1262,6 +1262,12 @@ def summarize_policy_results(results: Sequence[Any], *, split: str, model_name: 
     if not results:
         return {"split": split, "model": model_name, "case_count": 0}
     oracle_cases = [row for row in results if row.measured_oracle_action_key is not None]
+    selected_false_safe = [
+        row for row in results if not row.unsupported_at_budget and not row.selected_supported_sparse
+    ]
+    full_fallback_with_adequate_sparse = [
+        row for row in results if row.unsupported_at_budget and row.measured_oracle_action_key is not None
+    ]
     return {
         "split": split,
         "model": model_name,
@@ -1271,8 +1277,10 @@ def summarize_policy_results(results: Sequence[Any], *, split: str, model_name: 
         "selected_supported_sparse_case_count": sum(bool(row.selected_supported_sparse) for row in results),
         "supported_sparse_deployment_rate": sum(bool(row.selected_supported_sparse) for row in results) / len(results),
         "explicit_full_fallback_case_count": sum(bool(row.unsupported_at_budget) for row in results),
-        "false_safe_choice_count": sum(len(row.false_safe_sparse) for row in results),
-        "false_reject_choice_count": sum(len(row.false_reject_sparse) for row in results),
+        "false_safe_choice_count": len(selected_false_safe),
+        "false_reject_choice_count": len(full_fallback_with_adequate_sparse),
+        "candidate_false_safe_count": sum(len(row.false_safe_sparse) for row in results),
+        "candidate_false_reject_count": sum(len(row.false_reject_sparse) for row in results),
         "measured_adequate_sparse_choice_count": sum(len(row.measured_adequate_sparse) for row in results),
         "predicted_safe_sparse_choice_count": sum(len(row.predicted_safe_sparse) for row in results),
         "mean_selected_exact_work": float(np.mean([row.selected_work for row in results])),
@@ -1285,7 +1293,18 @@ def summarize_policy_results(results: Sequence[Any], *, split: str, model_name: 
                 for row in oracle_cases
             ])) if oracle_cases else None
         ),
-        "per_case": [_jsonable(row) for row in results],
+        "per_case": [
+            {
+                **_jsonable(row),
+                "selected_false_safe": (
+                    not row.unsupported_at_budget and not row.selected_supported_sparse
+                ),
+                "full_fallback_with_adequate_sparse": (
+                    row.unsupported_at_budget and row.measured_oracle_action_key is not None
+                ),
+            }
+            for row in results
+        ],
     }
 
 

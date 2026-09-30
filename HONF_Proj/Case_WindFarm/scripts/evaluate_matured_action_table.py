@@ -71,6 +71,29 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _checkpoint_binding_fields(
+    arm_prefix: str, record: Mapping[str, Any], record_sha256: str, source: str,
+) -> dict[str, Any]:
+    """Serialize the verified source without relabeling a durability pointer as a review."""
+    if arm_prefix not in {"g", "p"}:
+        raise ValueError(f"Unknown checkpoint-binding arm prefix: {arm_prefix}")
+    if source not in {"append_only_scheduled_review", "current_durability_checkpoint"}:
+        raise ValueError(f"Unsupported checkpoint-binding source: {source}")
+    digest = str(record_sha256).lower()
+    if not isinstance(record, Mapping) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ValueError("Checkpoint binding needs a record and a SHA-256 digest")
+    if source == "current_durability_checkpoint" and record.get("checkpoint_kind") != "durability_only":
+        raise ValueError("Current durability binding must retain checkpoint_kind=durability_only")
+    is_review = source == "append_only_scheduled_review"
+    return {
+        f"{arm_prefix}_checkpoint_binding_source": source,
+        f"{arm_prefix}_checkpoint_binding_record": dict(record),
+        f"{arm_prefix}_checkpoint_binding_record_sha256": digest,
+        f"{arm_prefix}_checkpoint_review_record": dict(record) if is_review else None,
+        f"{arm_prefix}_checkpoint_review_record_line_sha256": digest if is_review else None,
+    }
+
+
 def _array_sha256(value: np.ndarray) -> str:
     return hashlib.sha256(np.ascontiguousarray(value).tobytes()).hexdigest()
 
@@ -1612,19 +1635,19 @@ def _evaluate(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("run_id") != RUN_ID:
         raise ValueError("Selected Wind run manifest is not Run2112")
-    g_path, g_review, g_review_line_sha = panel._checkpoint_review_binding(
+    g_path, g_binding_record, g_binding_record_sha, g_binding_source = panel._verified_checkpoint_binding(
         run_dir, arm="g_packet", update_count=update_count
     )
-    p_path, p_review, p_review_line_sha = panel._checkpoint_review_binding(
+    p_path, p_binding_record, p_binding_record_sha, p_binding_source = panel._verified_checkpoint_binding(
         run_dir, arm="direct_pair", update_count=p_update_count
     )
     g_sha, p_sha = _sha256(g_path), _sha256(p_path)
     g_payload = load_trusted_checkpoint(g_path, map_location="cpu")
     p_payload = load_trusted_checkpoint(p_path, map_location="cpu")
     expected_train_rows_sha = split_record["student_train_rows_sha256"]
-    for arm, payload, digest, expected_arm, review in (
-        ("G", g_payload, g_sha, "g_packet", g_review),
-        ("P", p_payload, p_sha, "direct_pair", p_review),
+    for arm, payload, digest, expected_arm, binding_record in (
+        ("G", g_payload, g_sha, "g_packet", g_binding_record),
+        ("P", p_payload, p_sha, "direct_pair", p_binding_record),
     ):
         expected_update = update_count if arm == "G" else p_update_count
         if (
@@ -1634,9 +1657,9 @@ def _evaluate(
             or int(payload.get("update_count", -1)) != int(expected_update)
             or payload.get("source_checkpoint_sha256") != source_sha
             or payload.get("train_rows_sha256") != expected_train_rows_sha
-            or digest != review.get("checkpoint_sha256")
+            or digest != binding_record.get("checkpoint_sha256")
         ):
-            raise ValueError(f"{arm} checkpoint does not match selected update, source, split, or review")
+            raise ValueError(f"{arm} checkpoint does not match selected update, source, split, or verified binding")
 
     layout_rows = _layout_rows(
         train_rows, view, layout_limit=layout_limit, seed=selection_seed
@@ -1972,7 +1995,7 @@ def _evaluate(
 
     dataset_manifest_path = runner.resolve_path(str(config["dataset"]["manifest"]))
     table = {
-        "format_version": 1,
+        "format_version": 2,
         "study": "Run2112 selected-checkpoint Wind native action table",
         "run_id": RUN_ID,
         "selected_update_count": int(update_count),
@@ -1992,10 +2015,12 @@ def _evaluate(
         "run_manifest_sha256": manifest_sha,
         "evaluation_driver_path": str(Path(__file__).resolve()),
         "evaluation_driver_sha256": _sha256(Path(__file__).resolve()),
-        "g_review_record_line_sha256": g_review_line_sha,
-        "p_review_record_line_sha256": p_review_line_sha,
-        "g_review_record": g_review,
-        "p_review_record": p_review,
+        **_checkpoint_binding_fields(
+            "g", g_binding_record, g_binding_record_sha, g_binding_source
+        ),
+        **_checkpoint_binding_fields(
+            "p", p_binding_record, p_binding_record_sha, p_binding_source
+        ),
         "config_path": str(config_path),
         "config_sha256": _sha256(config_path),
         "native_dataset_manifest_path": str(dataset_manifest_path),
