@@ -9,7 +9,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "evaluate_matured_action_table.py"
 SPEC = importlib.util.spec_from_file_location("wind_matured_action_table", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
@@ -79,6 +78,8 @@ def test_training_exposure_requires_two_complete_primary_action_passes() -> None
                 "row": row,
                 "requested_action": action,
                 "requested_cut_paths": list(TABLE.WIND_ACTION_PATHS[action]),
+                "realized_cut_paths": list(TABLE.WIND_ACTION_PATHS[action]),
+                "realized_nonredundant_k": len(TABLE.WIND_ACTION_PATHS[action]),
                 "capacity_vector": {"MM": 0.90, "QE": 0.95},
                 "phase": "action_family",
                 "primary_pass": pass_id,
@@ -89,6 +90,8 @@ def test_training_exposure_requires_two_complete_primary_action_passes() -> None
             "update_count": 749, "row": 16, "requested_action": "two_packet",
             "optimizer_attempt_key": "accepted:replay",
             "requested_cut_paths": list(TABLE.WIND_ACTION_PATHS["two_packet"]),
+            "realized_cut_paths": list(TABLE.WIND_ACTION_PATHS["two_packet"]),
+            "realized_nonredundant_k": 2,
             "capacity_vector": {"MM": 0.90, "QE": 0.95}, "phase": "action_family",
             "primary_pass": 4, "full_access_replay": True,
         },
@@ -96,6 +99,8 @@ def test_training_exposure_requires_two_complete_primary_action_passes() -> None
             "update_count": 751, "row": 16, "requested_action": "four_packet",
             "optimizer_attempt_key": "accepted:future",
             "requested_cut_paths": list(TABLE.WIND_ACTION_PATHS["four_packet"]),
+            "realized_cut_paths": list(TABLE.WIND_ACTION_PATHS["four_packet"]),
+            "realized_nonredundant_k": 4,
             "capacity_vector": {"MM": 0.90, "QE": 0.95}, "phase": "action_family",
             "primary_pass": 4, "full_access_replay": False,
         },
@@ -105,6 +110,8 @@ def test_training_exposure_requires_two_complete_primary_action_passes() -> None
                 "optimizer_attempt_key": f"orphaned:{row}",
                 "requested_action": "root",
                 "requested_cut_paths": list(TABLE.WIND_ACTION_PATHS["root"]),
+                "realized_cut_paths": list(TABLE.WIND_ACTION_PATHS["root"]),
+                "realized_nonredundant_k": 1,
                 "capacity_vector": {"MM": 0.90, "QE": 0.95}, "phase": "action_family",
                 "primary_pass": 5, "full_access_replay": False,
             }
@@ -123,14 +130,123 @@ def test_training_exposure_requires_two_complete_primary_action_passes() -> None
     assert exposure["two_packet"]["trained_action"] is False
     assert exposure["four_packet"]["completed_primary_action_passes"] == 2
     assert TABLE._trained_sparse_action(
-        "root", exact_work=20.0, full_work=40.0, exposure_record=exposure["root"]
+        "root", exact_work=20.0, full_work=40.0, exposure_record=exposure["root"],
+        row_id=16, realized_cut_paths=[""], nonredundant_k=1,
     ) is True
     assert TABLE._trained_sparse_action(
-        "root", exact_work=40.0, full_work=40.0, exposure_record=exposure["root"]
+        "root", exact_work=40.0, full_work=40.0, exposure_record=exposure["root"],
+        row_id=16, realized_cut_paths=[""], nonredundant_k=1,
     ) is False
     assert TABLE._trained_sparse_action(
-        "two_packet", exact_work=20.0, full_work=40.0, exposure_record=exposure["two_packet"]
+        "two_packet", exact_work=20.0, full_work=40.0, exposure_record=exposure["two_packet"],
+        row_id=16, realized_cut_paths=["L", "R"], nonredundant_k=2,
     ) is False
+
+
+def test_exposure_audit_reports_path_k_overlap_without_inventing_exact_k_maturity() -> None:
+    ledger = []
+    for pass_id, records in (
+        (2, [(1, ["L", "R"], 2), (2, [""], 1)]),
+        (3, [(1, [""], 1), (2, ["L", "R"], 2)]),
+    ):
+        for row_id, paths, k in records:
+            ledger.append({
+                "update_count": 700 + len(ledger),
+                "optimizer_attempt_key": f"accepted:{len(ledger)}",
+                "row": row_id,
+                "requested_action": "two_packet",
+                "requested_cut_paths": ["L", "R"],
+                "realized_cut_paths": paths,
+                "realized_nonredundant_k": k,
+                "capacity_vector": {"MM": 0.90, "QE": 0.95},
+                "phase": "action_family",
+                "primary_pass": pass_id,
+                "full_access_replay": False,
+            })
+    exposure = TABLE._summarize_action_exposure(
+        ledger, training_rows=[1, 2], selected_update=800,
+    )["two_packet"]
+    assert exposure["trained_action"] is True
+    assert exposure["realized_cut_paths_by_primary_pass"]["2"]["resolved_path_families"][
+        '["L","R"]'
+    ]["realized_nonredundant_k_counts"] == {"2": 1}
+    assert len(exposure["resolved_path_exposure_by_row"]["1"]) == 2
+    row_audit = TABLE._row_action_exposure(
+        exposure, action="two_packet", row_id=1,
+        realized_cut_paths=["L", "R"], nonredundant_k=2,
+    )
+    assert row_audit["same_realized_path_primary_pass_ids"] == [2]
+    assert row_audit["same_realized_path_and_k_primary_pass_ids"] == [2]
+    assert TABLE._trained_sparse_action(
+        "two_packet", exact_work=10.0, full_work=20.0, exposure_record=exposure,
+        row_id=1, realized_cut_paths=["L", "R"], nonredundant_k=2,
+    ) is True
+
+
+def test_missing_or_invalid_realized_k_prevents_a_complete_training_pass() -> None:
+    ledger = []
+    for pass_id in (2, 3):
+        for row_id in (1, 2):
+            ledger.append({
+                "update_count": 700 + len(ledger),
+                "optimizer_attempt_key": f"accepted:{len(ledger)}",
+                "row": row_id,
+                "requested_action": "root",
+                "requested_cut_paths": [""],
+                "realized_cut_paths": [""],
+                "realized_nonredundant_k": (None if pass_id == 2 and row_id == 2 else 1),
+                "capacity_vector": {"MM": 0.90, "QE": 0.95},
+                "phase": "action_family",
+                "primary_pass": pass_id,
+                "full_access_replay": False,
+            })
+
+    exposure = TABLE._summarize_action_exposure(
+        ledger, training_rows=[1, 2], selected_update=800,
+    )["root"]
+    assert exposure["invalid_realized_cut_path_update_count"] == 0
+    assert exposure["invalid_realized_nonredundant_k_update_count"] == 1
+    assert exposure["invalid_realized_execution_update_count"] == 1
+    assert exposure["completed_primary_pass_ids"] == [3]
+    assert exposure["trained_action"] is False
+
+
+def test_exposure_lineage_hashes_the_same_complete_ledger_snapshot_it_parses(tmp_path: Path) -> None:
+    ledger = tmp_path / "arms" / "g_packet" / "updates.jsonl"
+    ledger.parent.mkdir(parents=True)
+    ledger_bytes = b"\n"
+    ledger.write_bytes(ledger_bytes)
+    recovery = ledger.parent / "recovery_events.jsonl"
+    recovery_bytes = b'{"orphaned_attempt_keys":["discarded"]}\n'
+    recovery.write_bytes(recovery_bytes)
+
+    exposure, lineage = TABLE._read_exposure(ledger, training_rows=[1], update_count=1630)
+    assert exposure["root"]["completed_primary_action_passes"] == 0
+    assert lineage["update_ledger_sha256"] == hashlib.sha256(ledger_bytes).hexdigest()
+    assert lineage["update_ledger_snapshot_bytes"] == len(ledger_bytes)
+    assert lineage["update_ledger_snapshot_record_count"] == 0
+    assert lineage["recovery_ledger_sha256"] == hashlib.sha256(recovery_bytes).hexdigest()
+
+    ledger.write_bytes(b'{"partial":')
+    with pytest.raises(ValueError, match="partial JSONL record"):
+        TABLE._read_exposure(ledger, training_rows=[1], update_count=1630)
+
+
+def test_query_repeat_summary_uses_measured_overlap_and_preserves_partial_overlap() -> None:
+    summary = TABLE._query_repeat_overlap_summary([
+        {
+            "case_key": f"repeat_{row_id}", "row_id": row_id,
+            "query_panel": "query_repeat", "query_repeat_overlap_count": overlap,
+            "query_repeat_disjoint_from_fixed": overlap == 0,
+            "query_repeat_candidate_attempt_count": 1024,
+        }
+        for row_id, overlap in ((1, 0), (2, 3))
+    ])
+    assert summary["measured_repeat_case_count"] == 2
+    assert summary["disjoint_repeat_case_count"] == 1
+    assert summary["overlapping_repeat_case_count"] == 1
+    assert summary["total_intersecting_query_indices"] == 3
+    assert summary["all_measured_repeats_disjoint"] is False
 
 
 def test_floor_and_query_allowance_are_rolewise_train_family_calibrations() -> None:

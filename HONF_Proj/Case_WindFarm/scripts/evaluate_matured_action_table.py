@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Measure the Wind G cut family at one immutable selected checkpoint.
 
 Only G actions enter the flat action table. Retained W-full and same-G full
@@ -17,7 +16,7 @@ import math
 import os
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -44,8 +43,8 @@ from honf_forward_core.interface_fields.action_aware_frontier import (
 )
 from honf_forward_core.interface_fields.adaptive_interaction_cover import MechanismPlan
 from honf_runtime.compat import load_trusted_checkpoint
-from windfarm.workflows.maturation import WIND_ACTION_PATHS, available_frontier_for_paths
 
+from windfarm.workflows.maturation import WIND_ACTION_PATHS, available_frontier_for_paths
 
 RUN_ID = "2112"
 ACTION_ORDER = ("root", "two_packet", "four_packet", "full_access")
@@ -149,14 +148,18 @@ def _summarize_action_exposure(
     archived_optimizer_attempt_keys: Sequence[str] = (),
     required_passes: int = 2,
 ) -> dict[str, dict[str, Any]]:
-    """Count fully covered primary action passes; scaffolds/replays do not qualify."""
+    """Audit complete primary passes and the realized path/K exposure within them."""
     expected = set(map(int, training_rows))
     archived = set(map(str, archived_optimizer_attempt_keys))
     if not expected:
         raise ValueError("Exposure audit requires the exact eligible training rows")
-    grouped: dict[str, dict[int, list[int]]] = {
+    grouped: dict[str, dict[int, list[dict[str, Any]]]] = {
         action: defaultdict(list) for action in ("root", "two_packet", "four_packet")
     }
+    eligible_updates = Counter()
+    invalid_realized_path_updates = Counter()
+    invalid_realized_k_updates = Counter()
+    invalid_realized_execution_updates = Counter()
     for record in records:
         if int(record.get("update_count", -1)) > int(selected_update):
             continue
@@ -181,40 +184,208 @@ def _summarize_action_exposure(
             continue
         if "primary_pass" not in record:
             raise ValueError("G update record is missing its primary-pass identity")
-        grouped[action][int(record["primary_pass"])].append(int(record["row"]))
+        eligible_updates[action] += 1
+        realized_paths = _valid_realized_cut_paths(
+            requested_paths=WIND_ACTION_PATHS[action],
+            realized_paths=record.get("realized_cut_paths"),
+        )
+        if realized_paths is None:
+            invalid_realized_path_updates[action] += 1
+        raw_realized_k = record.get("realized_nonredundant_k")
+        realized_k = (
+            int(raw_realized_k)
+            if isinstance(raw_realized_k, int) and not isinstance(raw_realized_k, bool)
+            and raw_realized_k >= 1 else None
+        )
+        if realized_k is None:
+            invalid_realized_k_updates[action] += 1
+        if realized_paths is None or realized_k is None:
+            invalid_realized_execution_updates[action] += 1
+            continue
+        grouped[action][int(record["primary_pass"])].append({
+            "row_id": int(record["row"]),
+            "realized_cut_paths": list(realized_paths),
+            "realized_nonredundant_k": realized_k,
+        })
 
     result: dict[str, dict[str, Any]] = {}
     for action, passes in grouped.items():
         complete = []
+        pass_audits: dict[str, Any] = {}
+        row_path_exposure: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
         for pass_id, row_ids in sorted(passes.items()):
-            if len(row_ids) == len(expected) and set(row_ids) == expected:
+            observed_rows = [int(entry["row_id"]) for entry in row_ids]
+            complete_pass = len(observed_rows) == len(expected) and set(observed_rows) == expected
+            if complete_pass:
                 complete.append(pass_id)
+            path_families: dict[str, dict[str, Any]] = {}
+            for entry in row_ids:
+                path_key = json.dumps(entry["realized_cut_paths"], separators=(",", ":"))
+                family = path_families.setdefault(path_key, {
+                    "realized_cut_paths": entry["realized_cut_paths"],
+                    "row_ids": [],
+                    "realized_nonredundant_k_counts": Counter(),
+                })
+                family["row_ids"].append(int(entry["row_id"]))
+                if entry["realized_nonredundant_k"] is not None:
+                    family["realized_nonredundant_k_counts"][str(entry["realized_nonredundant_k"])] += 1
+                if complete_pass:
+                    row_path_exposure[str(entry["row_id"])][path_key].append({
+                        "primary_pass": int(pass_id),
+                        "realized_nonredundant_k": entry["realized_nonredundant_k"],
+                    })
+            for family in path_families.values():
+                family["row_count"] = len(family["row_ids"])
+                family["row_ids"] = sorted(family["row_ids"])
+                family["realized_nonredundant_k_counts"] = dict(sorted(
+                    family["realized_nonredundant_k_counts"].items(), key=lambda item: int(item[0])
+                ))
+            pass_audits[str(pass_id)] = {
+                "eligible_row_count": len(observed_rows),
+                "distinct_row_count": len(set(observed_rows)),
+                "complete_primary_pass": bool(complete_pass),
+                "expected_row_count": len(expected),
+                "resolved_path_families": dict(sorted(path_families.items())),
+            }
+        row_path_records: dict[str, list[dict[str, Any]]] = {}
+        for row_id, by_path in sorted(row_path_exposure.items(), key=lambda item: int(item[0])):
+            row_path_records[row_id] = []
+            for path_key, observations in sorted(by_path.items()):
+                paths = json.loads(path_key)
+                row_path_records[row_id].append({
+                    "realized_cut_paths": paths,
+                    "primary_pass_observations": sorted(
+                        observations, key=lambda item: int(item["primary_pass"])
+                    ),
+                    "primary_pass_ids": [int(item["primary_pass"]) for item in observations],
+                    "realized_nonredundant_k_counts": dict(sorted(Counter(
+                        str(item["realized_nonredundant_k"])
+                        for item in observations if item["realized_nonredundant_k"] is not None
+                    ).items(), key=lambda item: int(item[0]))),
+                })
         result[action] = {
             "completed_primary_action_passes": len(complete),
             "completed_primary_pass_ids": complete,
             "required_complete_passes": int(required_passes),
             "trained_action": len(complete) >= int(required_passes),
+            "eligible_action_family_update_count": int(eligible_updates[action]),
+            "invalid_realized_cut_path_update_count": int(invalid_realized_path_updates[action]),
+            "invalid_realized_nonredundant_k_update_count": int(invalid_realized_k_updates[action]),
+            "invalid_realized_execution_update_count": int(invalid_realized_execution_updates[action]),
             "training_row_count": len(expected),
             "primary_capacity": {"MM": PRIMARY_CAPACITY["MM"], "QE": PRIMARY_CAPACITY["QE"]},
             "phase": "action_family",
             "scaffold_passes_excluded": True,
             "scheduled_full_access_replays_excluded": True,
+            "exposure_unit": "resolved_path_family_and_measured_nonredundant_K_within_a_complete_primary_action_pass",
+            "realized_cut_paths_by_primary_pass": pass_audits,
+            "resolved_path_exposure_by_row": row_path_records,
         }
     return result
 
 
+def _valid_realized_cut_paths(
+    *, requested_paths: Sequence[str], realized_paths: Any,
+) -> tuple[str, ...] | None:
+    """Validate that ledger paths are a complete cut produced by ancestor collapse."""
+    if not isinstance(realized_paths, (list, tuple)) or not realized_paths:
+        return None
+    paths = tuple(str(path) for path in realized_paths)
+    if paths != tuple(sorted(set(paths))) or any(
+        len(path) > 3 or set(path) - {"L", "R"} for path in paths
+    ):
+        return None
+    if any(
+        left != right and (left.startswith(right) or right.startswith(left))
+        for index, left in enumerate(paths)
+        for right in paths[index + 1:]
+    ):
+        return None
+    kraft_sum = sum(2.0 ** (-len(path)) for path in paths)
+    if not math.isclose(kraft_sum, 1.0, rel_tol=0.0, abs_tol=1e-12):
+        return None
+    requested = tuple(str(path) for path in requested_paths)
+    if any(not any(requested_path.startswith(path) for path in paths) for requested_path in requested):
+        return None
+    if any(not any(requested_path.startswith(path) for requested_path in requested) for path in paths):
+        return None
+    return paths
+
+
 def _trained_sparse_action(
     action: str, *, exact_work: float, full_work: float,
-    exposure_record: Mapping[str, Any],
+    exposure_record: Mapping[str, Any], row_id: int | None = None,
+    realized_cut_paths: Sequence[str] = (), nonredundant_k: int | None = None,
 ) -> bool:
     sparse_success = float(exact_work) < float(full_work) - max(
         1.0e-9, 1.0e-12 * float(full_work)
     )
+    required = int(exposure_record.get("required_complete_passes", 2))
+    complete_pass_ids = set(map(int, exposure_record.get("completed_primary_pass_ids", [])))
+    row_families = exposure_record.get("resolved_path_exposure_by_row", {})
+    row_pass_ids: set[int] = set()
+    if row_id is not None and isinstance(row_families, Mapping):
+        for family in row_families.get(str(int(row_id)), []):
+            for item in family.get("primary_pass_observations", []):
+                pass_id = int(item["primary_pass"])
+                if pass_id in complete_pass_ids:
+                    row_pass_ids.add(pass_id)
+    valid_current_execution = (
+        action in WIND_ACTION_PATHS
+        and _valid_realized_cut_paths(
+            requested_paths=WIND_ACTION_PATHS[action], realized_paths=list(realized_cut_paths)
+        ) is not None
+        and nonredundant_k is not None
+        and int(nonredundant_k) >= 1
+    )
     return bool(
         action != "full_access"
         and exposure_record.get("trained_action", False)
+        and len(complete_pass_ids) >= required
+        and len(row_pass_ids & complete_pass_ids) >= required
+        and valid_current_execution
         and sparse_success
     )
+
+
+def _row_action_exposure(
+    exposure_record: Mapping[str, Any], *, action: str, row_id: int,
+    realized_cut_paths: Sequence[str], nonredundant_k: int | None,
+) -> dict[str, Any]:
+    """Keep the full exposure audit once at table level and bind only this row here."""
+    same_path_passes: set[int] = set()
+    same_path_k_passes: set[int] = set()
+    for family in exposure_record.get("resolved_path_exposure_by_row", {}).get(str(int(row_id)), []):
+        if list(family.get("realized_cut_paths", [])) != list(realized_cut_paths):
+            continue
+        for observation in family.get("primary_pass_observations", []):
+            same_path_passes.add(int(observation["primary_pass"]))
+            if observation.get("realized_nonredundant_k") == nonredundant_k:
+                same_path_k_passes.add(int(observation["primary_pass"]))
+    return {
+        "action_key": action,
+        "required_complete_passes": int(exposure_record.get("required_complete_passes", 2)),
+        "completed_primary_action_passes": int(exposure_record.get("completed_primary_action_passes", 0)),
+        "completed_primary_pass_ids": list(exposure_record.get("completed_primary_pass_ids", [])),
+        "trained_action": bool(exposure_record.get("trained_action", False)),
+        "training_row_count": int(exposure_record.get("training_row_count", 0)),
+        "invalid_realized_cut_path_update_count": int(
+            exposure_record.get("invalid_realized_cut_path_update_count", 0)
+        ),
+        "invalid_realized_nonredundant_k_update_count": int(
+            exposure_record.get("invalid_realized_nonredundant_k_update_count", 0)
+        ),
+        "invalid_realized_execution_update_count": int(
+            exposure_record.get("invalid_realized_execution_update_count", 0)
+        ),
+        "resolved_path_exposure_for_case": list(
+            exposure_record.get("resolved_path_exposure_by_row", {}).get(str(int(row_id)), [])
+        ),
+        "same_realized_path_primary_pass_ids": sorted(same_path_passes),
+        "same_realized_path_and_k_primary_pass_ids": sorted(same_path_k_passes),
+    }
 
 
 def _action_budget_vector(action: str) -> np.ndarray:
@@ -331,8 +502,8 @@ def _split_selected_layouts(layouts: Sequence[int], *, seed: int) -> dict[int, s
         raise ValueError("Selected action table needs at least six distinct training layouts")
     rng = np.random.default_rng(int(seed))
     shuffled = [int(value) for value in rng.permutation(unique)]
-    train_count = max(2, int(round(0.5 * len(shuffled))))
-    dev_count = max(2, int(round(0.25 * len(shuffled))))
+    train_count = max(2, round(0.5 * len(shuffled)))
+    dev_count = max(2, round(0.25 * len(shuffled)))
     if train_count + dev_count >= len(shuffled):
         dev_count = len(shuffled) - train_count - 1
     if train_count < 2 or dev_count < 1 or len(shuffled) - train_count - dev_count < 1:
@@ -538,7 +709,7 @@ def _case_record(
         root_union_features = _effective_action_features(
             scores=scores, plan=root_union_plan, encoded=encoded, cut=(0,)
         )
-        root_union_key = hashlib.sha256(f"{case_key}\0g_root_union".encode("utf-8")).hexdigest()[:20]
+        root_union_key = hashlib.sha256(f"{case_key}\0g_root_union".encode()).hexdigest()[:20]
         root_union_mm_key = f"g_root_union_mm_{root_union_key}"
         root_union_qe_key = f"g_root_union_qe_{root_union_key}"
         mask_arrays[root_union_mm_key] = np.ascontiguousarray(root_union_features[1], dtype=np.uint8)
@@ -643,7 +814,7 @@ def _case_record(
     for action in ACTION_ORDER:
         metric = g_action_metrics[action]
         packet_rows, mm, qe, signatures = g_features[action]
-        key_suffix = hashlib.sha256(f"{case_key}\0{action}".encode("utf-8")).hexdigest()[:20]
+        key_suffix = hashlib.sha256(f"{case_key}\0{action}".encode()).hexdigest()[:20]
         packet_key = f"packet_{key_suffix}"
         budget_key = f"budget_{key_suffix}"
         roles_key = f"receiver_roles_{key_suffix}"
@@ -665,6 +836,9 @@ def _case_record(
         trained_sparse = _trained_sparse_action(
             action, exact_work=exact_work, full_work=full_work,
             exposure_record=exposure_row,
+            row_id=int(row_id),
+            realized_cut_paths=metric.get("resolved_cut_paths", []),
+            nonredundant_k=(None if action == "full_access" else int(metric["nonredundant_k"])),
         )
         candidate = metric["candidate_role_rmse_mps"]
         action_rows.append({
@@ -674,7 +848,13 @@ def _case_record(
             "full_access": action == "full_access",
             "trained_sparse": trained_sparse,
             "trained_action_after_two_complete_passes": bool(exposure_row.get("trained_action", False)),
-            "training_exposure": exposure_row,
+            "training_exposure": _row_action_exposure(
+                exposure_row, action=action, row_id=int(row_id),
+                realized_cut_paths=metric.get("resolved_cut_paths", []),
+                nonredundant_k=(None if action == "full_access" else int(metric["nonredundant_k"])),
+            ) if action != "full_access" else exposure_row,
+            "requested_cut_paths": list(WIND_ACTION_PATHS[action]) if action != "full_access" else [],
+            "realized_cut_paths": list(metric.get("resolved_cut_paths", [])),
             "nonredundant_k": None if action == "full_access" else int(metric["nonredundant_k"]),
             "packet_mask_signature_sha256": signatures,
             "permission_status": metric["permission_status"],
@@ -745,15 +925,10 @@ def _read_exposure(
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     if not path.is_file():
         raise FileNotFoundError(f"G training update ledger is missing: {path}")
-    records = [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    ledger_records, ledger_bytes = _read_jsonl_snapshot(path)
     recovery_path = path.parent / "recovery_events.jsonl"
-    recovery_records = (
-        [json.loads(line) for line in recovery_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-        if recovery_path.is_file() else []
+    recovery_records, recovery_bytes = (
+        _read_jsonl_snapshot(recovery_path) if recovery_path.is_file() else ([], None)
     )
     archived_keys = sorted({
         str(key)
@@ -763,18 +938,82 @@ def _read_exposure(
         if key
     })
     exposure = _summarize_action_exposure(
-        records,
+        ledger_records,
         training_rows=training_rows,
         selected_update=update_count,
         archived_optimizer_attempt_keys=archived_keys,
     )
     return exposure, {
         "update_ledger_path": str(path),
-        "update_ledger_sha256": _sha256(path),
+        "update_ledger_sha256": hashlib.sha256(ledger_bytes).hexdigest(),
+        "update_ledger_snapshot_bytes": len(ledger_bytes),
+        "update_ledger_snapshot_record_count": len(ledger_records),
         "recovery_ledger_path": str(recovery_path) if recovery_path.is_file() else None,
-        "recovery_ledger_sha256": _sha256(recovery_path) if recovery_path.is_file() else None,
+        "recovery_ledger_sha256": (
+            hashlib.sha256(recovery_bytes).hexdigest() if recovery_bytes is not None else None
+        ),
+        "recovery_ledger_snapshot_bytes": len(recovery_bytes) if recovery_bytes is not None else None,
+        "recovery_ledger_snapshot_record_count": (
+            len(recovery_records) if recovery_bytes is not None else None
+        ),
         "archived_optimizer_attempt_key_count": len(archived_keys),
         "selected_update_count": int(update_count),
+    }
+
+
+def _read_jsonl_snapshot(path: Path) -> tuple[list[dict[str, Any]], bytes]:
+    """Parse and hash the same complete append-only ledger snapshot."""
+    raw = path.read_bytes()
+    if raw and not raw.endswith(b"\n"):
+        raise ValueError(f"Ledger snapshot ends with a partial JSONL record: {path}")
+    records = [
+        json.loads(line)
+        for line in raw.decode("utf-8").splitlines()
+        if line.strip()
+    ]
+    return records, raw
+
+
+def _query_repeat_overlap_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Summarize measured fixed/repeat overlap once per physical query panel."""
+    by_case: dict[str, Mapping[str, Any]] = {}
+    for row in rows:
+        if str(row.get("query_panel", "")) != "query_repeat":
+            continue
+        case_key = str(row["case_key"])
+        identity = {
+            "row_id": int(row["row_id"]),
+            "overlap_count": row.get("query_repeat_overlap_count"),
+            "disjoint": row.get("query_repeat_disjoint_from_fixed"),
+            "attempt_count": row.get("query_repeat_candidate_attempt_count"),
+        }
+        prior = by_case.setdefault(case_key, identity)
+        if prior != identity:
+            raise ValueError(f"Query-repeat overlap metadata changes across actions for {case_key!r}")
+    records = list(by_case.values())
+    if any(
+        item["overlap_count"] is None
+        or int(item["overlap_count"]) < 0
+        or bool(item["disjoint"]) != (int(item["overlap_count"]) == 0)
+        for item in records
+    ):
+        raise ValueError("Query-repeat disjointness must agree with measured sample-index overlap")
+    disjoint_count = sum(int(item["overlap_count"]) == 0 for item in records)
+    overlap_count = len(records) - disjoint_count
+    overlaps = [int(item["overlap_count"]) for item in records]
+    return {
+        "measured_repeat_case_count": len(records),
+        "disjoint_repeat_case_count": disjoint_count,
+        "overlapping_repeat_case_count": overlap_count,
+        "total_intersecting_query_indices": sum(overlaps),
+        "maximum_intersection_count": max(overlaps) if overlaps else None,
+        "all_measured_repeats_disjoint": (disjoint_count == len(records)) if records else None,
+        "rows": [{
+            "row_id": int(item["row_id"]),
+            "overlap_count": int(item["overlap_count"]),
+            "disjoint": bool(item["disjoint"]),
+            "candidate_attempt_count": int(item["attempt_count"]),
+        } for item in records],
     }
 
 
@@ -1044,6 +1283,7 @@ def _evaluate(
     feature_hashes = {key: _array_sha256(value) for key, value in feature_arrays.items()}
     mask_hashes = {key: _array_sha256(value) for key, value in mask_arrays.items()}
     _validate_action_rows(rows, expected_sha=g_sha)
+    query_repeat_overlap = _query_repeat_overlap_summary(rows)
     output_dir.mkdir(parents=True, exist_ok=True)
     feature_path = output_dir / "action_features.npz"
     mask_path = output_dir / "action_masks.npz"
@@ -1120,7 +1360,8 @@ def _evaluate(
             "fixed_role_query_counts": dict(Q2048_ROLE_COUNTS),
             "query_repeat_role_query_counts": dict(Q2048_ROLE_COUNTS),
             "q512_calibration_role_query_counts": dict(Q512_ROLE_COUNTS),
-            "query_repeat_is_disjoint": True,
+            "query_repeat_is_disjoint": query_repeat_overlap["all_measured_repeats_disjoint"],
+            "query_repeat_overlap_summary": query_repeat_overlap,
             "hidden_test_rows_opened": False,
             "query_rows_are_split_by_layout_family": True,
         },

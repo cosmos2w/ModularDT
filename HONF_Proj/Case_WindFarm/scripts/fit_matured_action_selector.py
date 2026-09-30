@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Fit and audit a layout-grouped WindFarm packet-action risk selector.
 
 The native action table is produced at one frozen forward checkpoint by
@@ -35,6 +34,11 @@ from honf_forward_core.interface_fields.action_risk_fit import (
 )
 
 ACTION_KEYS = ("root", "two_packet", "four_packet", "full_access")
+ACTION_PATHS = {
+    "root": ("",),
+    "two_packet": ("L", "R"),
+    "four_packet": ("LL", "LR", "RL", "RR"),
+}
 RELATIVE_ALLOWANCE = 0.10
 MAX_FIT_UPDATES = 200
 
@@ -45,6 +49,13 @@ def _sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _is_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str) and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _write_json(path: Path, data: Mapping[str, Any]) -> None:
@@ -89,6 +100,130 @@ def _role_tensor(values: Mapping[str, Any] | Sequence[float], roles: Sequence[st
     return _float_tensor(values)
 
 
+def _valid_action_paths(action_key: str, row: Mapping[str, Any]) -> tuple[str, ...]:
+    requested = tuple(str(value) for value in row.get("requested_cut_paths", ()))
+    realized_raw = row.get("realized_cut_paths")
+    if requested != ACTION_PATHS[action_key] or not isinstance(realized_raw, (list, tuple)):
+        raise ValueError(f"Action {action_key!r} lacks its requested and realized path identity.")
+    realized = tuple(str(value) for value in realized_raw)
+    if not realized or realized != tuple(sorted(set(realized))) or any(
+        len(path) > 3 or set(path) - {"L", "R"} for path in realized
+    ):
+        raise ValueError("A sparse action has an invalid realized cut-path family.")
+    if any(
+        left != right and (left.startswith(right) or right.startswith(left))
+        for index, left in enumerate(realized)
+        for right in realized[index + 1:]
+    ) or not math.isclose(
+        sum(2.0 ** (-len(path)) for path in realized), 1.0, rel_tol=0.0, abs_tol=1e-12
+    ):
+        raise ValueError("Realized cut paths do not identify one complete native cut.")
+    if any(not any(path.startswith(ancestor) for ancestor in realized) for path in requested):
+        raise ValueError("Realized paths cannot be obtained by resolving the requested action.")
+    if any(not any(path.startswith(realized_path) for path in requested) for realized_path in realized):
+        raise ValueError("Realized paths contain a node outside the requested action family.")
+    return realized
+
+
+def _validated_training_exposure(
+    action_key: str, row: Mapping[str, Any], *, row_id: int,
+    realized_paths: Sequence[str], nonredundant_k: int,
+    exact_work: float, full_work: float,
+    action_exposure_by_key: Mapping[str, Any],
+) -> tuple[bool, Mapping[str, Any]]:
+    row_lineage = row.get("training_exposure")
+    exposure = action_exposure_by_key.get(action_key)
+    if not isinstance(row_lineage, Mapping) or not isinstance(exposure, Mapping):
+        raise TypeError(f"Sparse action {action_key!r} lacks nested training exposure evidence.")
+    required = exposure.get("required_complete_passes")
+    pass_ids = exposure.get("completed_primary_pass_ids")
+    invalid_path_count = exposure.get("invalid_realized_cut_path_update_count")
+    invalid_k_count = exposure.get("invalid_realized_nonredundant_k_update_count")
+    invalid_execution_count = exposure.get("invalid_realized_execution_update_count")
+    if (
+        required != 2
+        or not isinstance(pass_ids, list)
+        or any(not isinstance(value, int) for value in pass_ids)
+        or len(pass_ids) != len(set(pass_ids))
+        or int(exposure.get("completed_primary_action_passes", -1)) != len(pass_ids)
+        or bool(exposure.get("trained_action")) != (len(pass_ids) >= required)
+        or not all(isinstance(value, int) and value >= 0 for value in (
+            invalid_path_count, invalid_k_count, invalid_execution_count
+        ))
+        or invalid_execution_count < max(invalid_path_count, invalid_k_count)
+        or invalid_execution_count > invalid_path_count + invalid_k_count
+    ):
+        raise ValueError(f"Sparse action {action_key!r} has inconsistent complete-pass lineage.")
+    pass_audits = exposure.get("realized_cut_paths_by_primary_pass")
+    if not isinstance(pass_audits, Mapping):
+        raise TypeError(f"Sparse action {action_key!r} lacks realized-path pass audits.")
+    for pass_id in pass_ids:
+        audit = pass_audits.get(str(pass_id))
+        if (
+            not isinstance(audit, Mapping)
+            or audit.get("complete_primary_pass") is not True
+            or int(audit.get("distinct_row_count", -1)) != int(exposure.get("training_row_count", -2))
+            or int(audit.get("expected_row_count", -1)) != int(exposure.get("training_row_count", -2))
+        ):
+            raise ValueError(f"Sparse action {action_key!r} completed pass {pass_id} is not row-complete.")
+    row_path_map = exposure.get("resolved_path_exposure_by_row")
+    if not isinstance(row_path_map, Mapping):
+        raise TypeError(f"Sparse action {action_key!r} lacks per-row realized-path exposure.")
+    if (
+        row.get("trained_action_after_two_complete_passes") != exposure.get("trained_action")
+        or row_lineage.get("action_key") != action_key
+        or row_lineage.get("completed_primary_pass_ids") != pass_ids
+        or row_lineage.get("completed_primary_action_passes") != len(pass_ids)
+        or row_lineage.get("trained_action") != exposure.get("trained_action")
+        or row_lineage.get("training_row_count") != exposure.get("training_row_count")
+        or row_lineage.get("invalid_realized_cut_path_update_count")
+        != exposure.get("invalid_realized_cut_path_update_count")
+        or row_lineage.get("invalid_realized_nonredundant_k_update_count")
+        != exposure.get("invalid_realized_nonredundant_k_update_count")
+        or row_lineage.get("invalid_realized_execution_update_count")
+        != exposure.get("invalid_realized_execution_update_count")
+        or row_lineage.get("resolved_path_exposure_for_case")
+        != row_path_map.get(str(int(row_id)), [])
+    ):
+        raise ValueError(f"Sparse action {action_key!r} row lineage differs from its table-level exposure audit.")
+    row_pass_ids: set[int] = set()
+    same_path_pass_ids: set[int] = set()
+    same_path_k_pass_ids: set[int] = set()
+    for family in row_lineage.get("resolved_path_exposure_for_case", []):
+        if not isinstance(family, Mapping):
+            continue
+        observations = family.get("primary_pass_observations", [])
+        if not isinstance(observations, list):
+            continue
+        for observation in observations:
+            if not isinstance(observation, Mapping) or observation.get("primary_pass") not in pass_ids:
+                continue
+            pass_id = int(observation["primary_pass"])
+            row_pass_ids.add(pass_id)
+            if list(family.get("realized_cut_paths", [])) == list(realized_paths):
+                same_path_pass_ids.add(pass_id)
+                if observation.get("realized_nonredundant_k") == int(nonredundant_k):
+                    same_path_k_pass_ids.add(pass_id)
+    if (
+        row_lineage.get("same_realized_path_primary_pass_ids") != sorted(same_path_pass_ids)
+        or row_lineage.get("same_realized_path_and_k_primary_pass_ids") != sorted(same_path_k_pass_ids)
+    ):
+        raise ValueError(f"Sparse action {action_key!r} overstates its realized path/K overlap audit.")
+    strict_work_saving = exact_work < full_work - max(1.0e-9, 1.0e-12 * full_work)
+    qualified = bool(
+        exposure.get("trained_action") is True
+        and len(row_pass_ids & set(pass_ids)) >= required
+        and strict_work_saving
+    )
+    if bool(row.get("trained_action_after_two_complete_passes")) != bool(exposure.get("trained_action")):
+        raise ValueError(f"Sparse action {action_key!r} disagrees with its nested pass-exposure flag.")
+    if bool(row.get("trained_sparse")) != qualified:
+        raise ValueError(
+            f"Sparse action {action_key!r} trained_sparse flag disagrees with complete-pass exposure, valid row execution, or strict work saving."
+        )
+    return qualified, exposure
+
+
 def _load_action_table(
     table_path: Path, feature_path: Path, mask_path: Path, checkpoint_path: Path,
 ) -> tuple[list[ActionEvidenceRow], dict[str, Any]]:
@@ -96,12 +231,44 @@ def _load_action_table(
     if payload.get("format_version") != 1:
         raise ValueError("Unknown Wind action table format.")
     expected_forward_sha = str(payload["forward_checkpoint_sha256"])
+    selected_update = payload.get("selected_update_count")
+    g_review = payload.get("g_review_record")
+    g_review_line_sha = payload.get("g_review_record_line_sha256")
+    exposure_lineage = payload.get("g_action_exposure_lineage")
+    run_manifest_path = payload.get("run_manifest_path")
+    if (
+        payload.get("run_id") != "2112"
+        or not isinstance(selected_update, int) or selected_update <= 100
+        or not isinstance(g_review, Mapping)
+        or g_review.get("arm") != "g_packet"
+        or not isinstance(g_review.get("update_count"), int)
+        or isinstance(g_review.get("update_count"), bool)
+        or g_review.get("update_count") != selected_update
+        or g_review.get("checkpoint_sha256") != expected_forward_sha
+        or not _is_sha256(g_review_line_sha)
+        or not isinstance(exposure_lineage, Mapping)
+        or not isinstance(exposure_lineage.get("selected_update_count"), int)
+        or isinstance(exposure_lineage.get("selected_update_count"), bool)
+        or exposure_lineage.get("selected_update_count") != selected_update
+        or not _is_sha256(exposure_lineage.get("update_ledger_sha256"))
+        or not isinstance(exposure_lineage.get("update_ledger_snapshot_bytes"), int)
+        or exposure_lineage.get("update_ledger_snapshot_bytes") < 0
+        or not isinstance(exposure_lineage.get("update_ledger_snapshot_record_count"), int)
+        or exposure_lineage.get("update_ledger_snapshot_record_count") < 0
+        or not isinstance(run_manifest_path, str) or not run_manifest_path
+        or Path(str(exposure_lineage.get("update_ledger_path", ""))).resolve()
+        != Path(run_manifest_path).resolve().parent / "arms" / "g_packet" / "updates.jsonl"
+    ):
+        raise ValueError("Action table does not bind the selected G review, update, and exposure ledger snapshot.")
     if _sha256(checkpoint_path) != expected_forward_sha:
         raise ValueError("Selected G checkpoint differs from the measured action table.")
     if _sha256(feature_path) != payload["feature_npz_sha256"]:
         raise ValueError("Planner feature archive differs from the measured action table.")
     if _sha256(mask_path) != payload["mask_npz_sha256"]:
         raise ValueError("Realized permission-mask archive differs from the measured action table.")
+    exposure_by_action = payload.get("action_exposure_by_key")
+    if not isinstance(exposure_by_action, Mapping):
+        raise TypeError("Wind action table lacks its action-level realized exposure audit.")
     observed_splits: defaultdict[str, set[str]] = defaultdict(set)
     for row in payload["rows"]:
         observed_splits[str(row["split"])].add(str(row["family_key"]))
@@ -139,8 +306,17 @@ def _load_action_table(
                 raise ValueError(f"Case {case_key!r} uses stale G physical or scorer weights.")
             identity = {"family_key": family_key, "split": split,
                         "query_panel": str(action["query_panel"]),
+                        "selector_primary_fit_row": action.get("selector_primary_fit_row"),
                         "row_id": int(action["row_id"]), "layout_id": int(action["layout_id"]),
-                        "module_count": int(action["module_count"])}
+                        "module_count": int(action["module_count"]),
+                        "query_repeat_overlap_count": action.get("query_repeat_overlap_count"),
+                        "query_repeat_disjoint_from_fixed": action.get("query_repeat_disjoint_from_fixed")}
+            if (
+                identity["query_panel"] not in {"fixed", "query_repeat"}
+                or not isinstance(identity["selector_primary_fit_row"], bool)
+                or identity["selector_primary_fit_row"] != (identity["query_panel"] == "fixed")
+            ):
+                raise ValueError(f"Case {case_key!r} does not explicitly separate primary and repeat panels.")
             if case_key in case_metadata and case_metadata[case_key] != identity:
                 raise ValueError(f"Case {case_key!r} changes identity across actions.")
             case_metadata[case_key] = identity
@@ -162,13 +338,33 @@ def _load_action_table(
                 raise ValueError("Full access must have undefined external packet K.")
             if not is_full and (not isinstance(count, int) or count < 1):
                 raise ValueError("Sparse packet action needs measured nonredundant K.")
-            trained_sparse = bool(action["trained_sparse"])
-            if is_full and trained_sparse:
-                raise ValueError("Full fallback cannot count as sparse exposure.")
             exact_work = float(action["exact_work"])
             full_work = float(action["full_work"])
             if not math.isfinite(exact_work) or not math.isfinite(full_work) or full_work <= 0 or not 0 <= exact_work <= full_work * (1 + 1e-6):
                 raise ValueError("Canonical action and full work must be raw finite work units.")
+            if is_full:
+                if bool(action.get("trained_sparse")) or action.get("realized_cut_paths") != []:
+                    raise ValueError("Explicit full access must remain outside sparse exposure and cut-path K.")
+                trained_sparse = False
+            else:
+                realized_paths = _valid_action_paths(action_key, action)
+                trained_sparse, _exposure = _validated_training_exposure(
+                    action_key, action, row_id=identity["row_id"],
+                    realized_paths=realized_paths, nonredundant_k=int(count),
+                    exact_work=exact_work, full_work=full_work,
+                    action_exposure_by_key=exposure_by_action,
+                )
+            repeat_overlap = action.get("query_repeat_overlap_count")
+            repeat_disjoint = action.get("query_repeat_disjoint_from_fixed")
+            if identity["query_panel"] == "fixed":
+                if repeat_overlap is not None or repeat_disjoint is not None:
+                    raise ValueError("Fixed primary-fit rows cannot carry repeat-overlap measurements.")
+            elif (
+                not isinstance(repeat_overlap, int) or repeat_overlap < 0
+                or not isinstance(repeat_disjoint, bool)
+                or repeat_disjoint != (repeat_overlap == 0)
+            ):
+                raise ValueError("Query-repeat overlap flags must match the measured sample-index intersection.")
             rows.append(ActionEvidenceRow(
                 family_key=family_key,
                 case_key=case_key,
@@ -199,6 +395,7 @@ def _load_action_table(
         "roles": roles,
         "allowance": allowance,
         "checkpoint_sha256": expected_forward_sha,
+        "action_exposure_by_key": exposure_by_action,
     }
 
 
@@ -230,6 +427,31 @@ def _train_fixed_limits(
     return limits, calibration
 
 
+def _query_repeat_fit_audit(case_metadata: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    repeats = [
+        (case_key, item) for case_key, item in case_metadata.items()
+        if item["query_panel"] == "query_repeat"
+    ]
+    disjoint = sum(item["query_repeat_overlap_count"] == 0 for _, item in repeats)
+    overlaps = [int(item["query_repeat_overlap_count"]) for _, item in repeats]
+    return {
+        "query_repeat_case_count": len(repeats),
+        "disjoint_repeat_case_count": disjoint,
+        "overlapping_repeat_case_count": len(repeats) - disjoint,
+        "total_intersecting_query_indices": sum(overlaps),
+        "maximum_intersection_count": max(overlaps) if overlaps else None,
+        "used_for_primary_selector_fit": False,
+        "used_for_primary_threshold_calibration": False,
+        "used_for_primary_split_evaluation": False,
+        "cases": [{
+            "case_key": case_key,
+            "row_id": int(item["row_id"]),
+            "overlap_count": int(item["query_repeat_overlap_count"]),
+            "disjoint": bool(item["query_repeat_disjoint_from_fixed"]),
+        } for case_key, item in repeats],
+    }
+
+
 def _predictions(
     rows: Sequence[ActionEvidenceRow], crossfit: Any, neural_fit: Any,
     ridge_fit: Any, train_families: set[str],
@@ -253,6 +475,191 @@ def _predictions(
                 ).detach().cpu()
                 ridge[key] = ridge_fit.predict(row).detach().cpu()
     return neural, ridge
+
+
+def _final_model_predictions(
+    rows: Sequence[ActionEvidenceRow], neural_model: Any, ridge_fit: Any,
+) -> tuple[dict[tuple[str, str], torch.Tensor], dict[tuple[str, str], torch.Tensor]]:
+    """Score rows with the final fit; used only for the separate repeat diagnostic."""
+    neural: dict[tuple[str, str], torch.Tensor] = {}
+    ridge: dict[tuple[str, str], torch.Tensor] = {}
+    with torch.no_grad():
+        for row in rows:
+            if not row.trained_sparse and not row.full_access:
+                continue
+            key = (row.case_key, row.action_key)
+            neural[key] = neural_model(
+                row.packet_rows, row.budget_vector, row.receiver_role_features,
+                nonredundant_k=row.nonredundant_k,
+            ).detach().cpu()
+            ridge[key] = ridge_fit.predict(row).detach().cpu()
+    return neural, ridge
+
+
+def _paired_repeat_stability(
+    primary_results: Sequence[Any], repeat_results: Sequence[Any],
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compare final-fit selection on fixed/repeat panels of the same native row."""
+    primary_by_row: dict[tuple[str, int], Any] = {}
+    repeat_by_row: dict[tuple[str, int], Any] = {}
+    for destination, results, panel in (
+        (primary_by_row, primary_results, "fixed"),
+        (repeat_by_row, repeat_results, "query_repeat"),
+    ):
+        for result in results:
+            identity = metadata["case_metadata"][result.case_key]
+            key = (str(result.family_key), int(identity["row_id"]))
+            if identity["query_panel"] != panel:
+                raise ValueError("Paired query-repeat stability received a row from the wrong panel.")
+            if key in destination:
+                raise ValueError(f"Multiple {panel} cases map to the same native row {key!r}.")
+            destination[key] = result
+
+    pairs = []
+    for key in sorted(set(primary_by_row) & set(repeat_by_row)):
+        fixed = primary_by_row[key]
+        repeat = repeat_by_row[key]
+        repeat_identity = metadata["case_metadata"][repeat.case_key]
+
+        def jaccard(left: Sequence[str], right: Sequence[str]) -> float | None:
+            union = set(left) | set(right)
+            return len(set(left) & set(right)) / len(union) if union else None
+
+        oracle_agrees = (
+            fixed.measured_oracle_action_key == repeat.measured_oracle_action_key
+            if fixed.measured_oracle_action_key is not None
+            and repeat.measured_oracle_action_key is not None else None
+        )
+        pairs.append({
+            "family_key": key[0],
+            "row_id": key[1],
+            "fixed_case_key": fixed.case_key,
+            "query_repeat_case_key": repeat.case_key,
+            "query_repeat_overlap_count": int(repeat_identity["query_repeat_overlap_count"]),
+            "query_repeat_disjoint_from_fixed": bool(repeat_identity["query_repeat_disjoint_from_fixed"]),
+            "fixed_selected_action_key": fixed.selected_action_key,
+            "query_repeat_selected_action_key": repeat.selected_action_key,
+            "selected_action_agrees": fixed.selected_action_key == repeat.selected_action_key,
+            "fixed_measured_oracle_action_key": fixed.measured_oracle_action_key,
+            "query_repeat_measured_oracle_action_key": repeat.measured_oracle_action_key,
+            "measured_oracle_action_agrees": oracle_agrees,
+            "measured_adequate_sparse_jaccard": jaccard(
+                fixed.measured_adequate_sparse, repeat.measured_adequate_sparse
+            ),
+            "predicted_safe_sparse_jaccard": jaccard(
+                fixed.predicted_safe_sparse, repeat.predicted_safe_sparse
+            ),
+        })
+    oracle_pairs = [pair for pair in pairs if pair["measured_oracle_action_agrees"] is not None]
+    measured_jaccards = [
+        pair["measured_adequate_sparse_jaccard"] for pair in pairs
+        if pair["measured_adequate_sparse_jaccard"] is not None
+    ]
+    predicted_jaccards = [
+        pair["predicted_safe_sparse_jaccard"] for pair in pairs
+        if pair["predicted_safe_sparse_jaccard"] is not None
+    ]
+    return {
+        "paired_case_count": len(pairs),
+        "unpaired_query_repeat_case_count": len(set(repeat_by_row) - set(primary_by_row)),
+        "selected_action_agreement_count": sum(bool(pair["selected_action_agrees"]) for pair in pairs),
+        "selected_action_agreement_rate": (
+            sum(bool(pair["selected_action_agrees"]) for pair in pairs) / len(pairs) if pairs else None
+        ),
+        "measured_oracle_comparable_pair_count": len(oracle_pairs),
+        "measured_oracle_action_agreement_rate": (
+            sum(bool(pair["measured_oracle_action_agrees"]) for pair in oracle_pairs) / len(oracle_pairs)
+            if oracle_pairs else None
+        ),
+        "mean_measured_adequate_sparse_jaccard": (
+            float(np.mean(measured_jaccards)) if measured_jaccards else None
+        ),
+        "mean_predicted_safe_sparse_jaccard": (
+            float(np.mean(predicted_jaccards)) if predicted_jaccards else None
+        ),
+        "per_pair": pairs,
+    }
+
+
+def _query_repeat_diagnostic(
+    primary_rows: Sequence[ActionEvidenceRow], repeat_rows: Sequence[ActionEvidenceRow],
+    metadata: Mapping[str, Any], *, neural_model: Any, ridge_fit: Any,
+    fixed_limits: torch.Tensor, neural_margin: torch.Tensor, ridge_margin: torch.Tensor,
+    repeat_audit: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Evaluate query repeats after fitting, without feeding repeat labels into fit or calibration."""
+    common = {
+        "evaluation_scope": (
+            "separate query-repeat stability diagnostic; repeat labels are post-fit audit only and do not "
+            "enter primary calibration, fitting, or headline split results"
+        ),
+        "used_for_primary_selector_fit": False,
+        "used_for_primary_threshold_calibration": False,
+        "used_for_primary_split_evaluation": False,
+        "overlap_cases": list(repeat_audit["cases"]),
+    }
+    if not repeat_rows:
+        return {"status": "no_query_repeat_rows", **common}
+
+    primary_neural, primary_ridge = _final_model_predictions(
+        primary_rows, neural_model, ridge_fit
+    )
+    repeat_neural, repeat_ridge = _final_model_predictions(
+        repeat_rows, neural_model, ridge_fit
+    )
+    primary_allowance = {row.case_key: metadata["allowance"] for row in primary_rows}
+    repeat_allowance = {row.case_key: metadata["allowance"] for row in repeat_rows}
+    evaluations = {}
+    for name, primary_predictions, repeat_predictions, margin in (
+        ("neural", primary_neural, repeat_neural, neural_margin),
+        ("ridge", primary_ridge, repeat_ridge, ridge_margin),
+    ):
+        primary_results = evaluate_action_policy(
+            primary_rows, primary_predictions, current_forward_sha256=metadata["checkpoint_sha256"],
+            fixed_role_log_limits=fixed_limits, absolute_allowance_by_case=primary_allowance,
+            empirical_margin=margin, relative_allowance=RELATIVE_ALLOWANCE,
+        )
+        repeat_results = evaluate_action_policy(
+            repeat_rows, repeat_predictions, current_forward_sha256=metadata["checkpoint_sha256"],
+            fixed_role_log_limits=fixed_limits, absolute_allowance_by_case=repeat_allowance,
+            empirical_margin=margin, relative_allowance=RELATIVE_ALLOWANCE,
+        )
+        evaluations[name] = {
+            **_policy_summary(repeat_results, repeat_rows, metadata["case_metadata"]),
+            "paired_fixed_repeat_stability": _paired_repeat_stability(
+                primary_results, repeat_results, metadata
+            ),
+        }
+    repeat_predictions = [
+        {
+            "case_key": row.case_key,
+            "family_key": row.family_key,
+            "action_key": row.action_key,
+            "trained_sparse": row.trained_sparse,
+            "full_access": row.full_access,
+            "nonredundant_k": None if row.full_access else row.nonredundant_k,
+            "measured_signed_log_role_risk": row.target_log_risk.tolist(),
+            "neural_predicted_log_role_risk": (
+                repeat_neural[(row.case_key, row.action_key)].tolist()
+                if (row.case_key, row.action_key) in repeat_neural else None
+            ),
+            "ridge_predicted_log_role_risk": (
+                repeat_ridge[(row.case_key, row.action_key)].tolist()
+                if (row.case_key, row.action_key) in repeat_ridge else None
+            ),
+        }
+        for row in repeat_rows
+    ]
+    return {
+        "status": "evaluated",
+        **common,
+        "prediction_source": "final neural and ridge fits; repeat families did not update either fit",
+        "threshold_source": "fixed primary train_fit full-access calibration and primary-only crossfit residual margin",
+        "neural": evaluations["neural"],
+        "ridge": evaluations["ridge"],
+        "action_predictions": repeat_predictions,
+    }
 
 
 def _ranking(
@@ -343,7 +750,18 @@ def fit_and_evaluate(
     train_families = tuple(splits["train_fit"])
     train_set = set(train_families)
     allowance = metadata["allowance"].double()
-    limits, calibration = _train_fixed_limits(rows, train_families, metadata["case_metadata"], allowance)
+    primary_rows = [
+        row for row in rows if metadata["case_metadata"][row.case_key]["selector_primary_fit_row"]
+    ]
+    repeat_rows = [
+        row for row in rows if not metadata["case_metadata"][row.case_key]["selector_primary_fit_row"]
+    ]
+    if not primary_rows:
+        raise ValueError("The primary selector fit requires fixed query-panel action rows.")
+    repeat_audit = _query_repeat_fit_audit(metadata["case_metadata"])
+    limits, calibration = _train_fixed_limits(
+        primary_rows, train_families, metadata["case_metadata"], allowance
+    )
     full_work = {row.case_key: row.exact_work for row in rows if row.full_access}
     result: dict[str, Any] = {
         "forward_checkpoint_sha256": forward_sha,
@@ -352,15 +770,27 @@ def fit_and_evaluate(
         "absolute_allowance_role_mps": allowance.tolist(),
         "fixed_train_role_log_limits": limits.tolist(),
         "train_gate_calibration": calibration,
+        "query_repeat_audit": repeat_audit,
+        "primary_fit_action_row_count": len(primary_rows),
+        "query_repeat_action_row_count_excluded_from_primary_fit": len(repeat_rows),
         "relative_physical_allowance": RELATIVE_ALLOWANCE,
         "selector_fit": "unavailable_no_exposed_train_sparse_action",
         "optimizer_calls": 0,
         "split_results": {},
+        "query_repeat_diagnostic": {
+            "status": "not_evaluated_no_fitted_selector",
+            "evaluation_scope": "repeat rows are post-fit diagnostics only",
+            "used_for_primary_selector_fit": False,
+            "used_for_primary_threshold_calibration": False,
+            "used_for_primary_split_evaluation": False,
+            "overlap_cases": list(repeat_audit["cases"]),
+        },
         "action_prediction_rows": [{
             "case_key": row.case_key,
             "family_key": row.family_key,
             "split": metadata["case_metadata"][row.case_key]["split"],
             "query_panel": metadata["case_metadata"][row.case_key]["query_panel"],
+            "selector_primary_fit_row": metadata["case_metadata"][row.case_key]["selector_primary_fit_row"],
             "module_count": metadata["case_metadata"][row.case_key]["module_count"],
             "action_key": row.action_key,
             "trained_sparse": row.trained_sparse,
@@ -376,7 +806,7 @@ def fit_and_evaluate(
         } for row in rows],
     }
     for split, families in splits.items():
-        split_rows = [row for row in rows if row.family_key in set(families)]
+        split_rows = [row for row in primary_rows if row.family_key in set(families)]
         result["split_results"][split] = {
             "case_count": len({row.case_key for row in split_rows}),
             "fixed_action": {action: {
@@ -404,21 +834,21 @@ def fit_and_evaluate(
                 },
             } for action in ACTION_KEYS[:-1]}
         }
-    if not any(row.trained_sparse for row in rows if row.family_key in train_set):
+    if not any(row.trained_sparse for row in primary_rows if row.family_key in train_set):
         return result, None
     folds = min(5, len(train_families))
     crossfit = crossfit_action_risk(
-        rows, current_forward_sha256=forward_sha, train_families=train_families,
+        primary_rows, current_forward_sha256=forward_sha, train_families=train_families,
         folds=folds, updates=updates, seed=seed,
     )
     neural_fit = fit_action_risk_head(
-        rows, current_forward_sha256=forward_sha, train_families=train_families,
+        primary_rows, current_forward_sha256=forward_sha, train_families=train_families,
         updates=updates, seed=seed + 1997,
     )
     ridge_fit = fit_ridge_action_baseline(
-        rows, current_forward_sha256=forward_sha, train_families=train_families,
+        primary_rows, current_forward_sha256=forward_sha, train_families=train_families,
     )
-    neural_map, ridge_map = _predictions(rows, crossfit, neural_fit, ridge_fit, train_set)
+    neural_map, ridge_map = _predictions(primary_rows, crossfit, neural_fit, ridge_fit, train_set)
     for record in result["action_prediction_rows"]:
         key = (record["case_key"], record["action_key"])
         if key in neural_map:
@@ -426,7 +856,7 @@ def fit_and_evaluate(
             record["ridge_predicted_log_role_risk"] = ridge_map[key].tolist()
     train_in_sample = {}
     with torch.no_grad():
-        for row in rows:
+        for row in primary_rows:
             if row.family_key in train_set and row.trained_sparse:
                 train_in_sample[(row.case_key, row.action_key)] = neural_fit.model(
                     row.packet_rows, row.budget_vector, row.receiver_role_features,
@@ -445,11 +875,11 @@ def fit_and_evaluate(
         "neural_empirical_upper_margin_by_role": crossfit.neural_upper_margin.tolist(),
         "ridge_empirical_upper_margin_by_role": crossfit.ridge_upper_margin.tolist(),
         "train_in_sample_ranking": _ranking(
-            [row for row in rows if row.family_key in train_set], train_in_sample
+            [row for row in primary_rows if row.family_key in train_set], train_in_sample
         ),
     })
     for split, families in splits.items():
-        split_rows = [row for row in rows if row.family_key in set(families)]
+        split_rows = [row for row in primary_rows if row.family_key in set(families)]
         case_keys = {row.case_key for row in split_rows}
         allowances = {case_key: allowance for case_key in case_keys}
         for name, predictions, margin in (
@@ -467,6 +897,13 @@ def fit_and_evaluate(
                 **_policy_summary(measured, split_rows, metadata["case_metadata"]),
                 "ranking": _ranking(split_rows, predictions),
             }
+    result["query_repeat_diagnostic"] = _query_repeat_diagnostic(
+        primary_rows, repeat_rows, metadata, neural_model=neural_fit.model,
+        ridge_fit=ridge_fit, fixed_limits=limits,
+        neural_margin=crossfit.neural_upper_margin,
+        ridge_margin=crossfit.ridge_upper_margin,
+        repeat_audit=repeat_audit,
+    )
     return result, neural_fit.model
 
 
