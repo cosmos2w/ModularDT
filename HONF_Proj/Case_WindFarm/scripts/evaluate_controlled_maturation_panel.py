@@ -1017,9 +1017,8 @@ def main() -> None:
         checkpoint_payloads: dict[str, Mapping[str, Any]] = {}
         checkpoint_hashes: dict[str, str] = {}
         for arm, path in checkpoint_paths.items():
-            _bound_path, checkpoint_record, _record_sha = checkpoint_bindings[arm]
+            _bound_path, checkpoint_record, _record_sha, binding_source = checkpoint_bindings[arm]
             digest = runner._file_sha256(path)
-            binding_source = checkpoint_bindings[arm][3]
             pointer_name = (
                 "latest_checkpoint.json"
                 if binding_source == "current_durability_checkpoint"
