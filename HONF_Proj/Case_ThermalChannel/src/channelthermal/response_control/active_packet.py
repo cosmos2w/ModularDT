@@ -668,9 +668,14 @@ class ThermalHardValueSoftOperator:
         design: DesignInput,
         context: Mapping[str, Any],
         role_queries: Mapping[str, RoleQuery],
+        *,
+        soft_shadow_scale: float = 1.0,
     ) -> AbsolutePrediction:
         self.hard_plan_builder.hard = True
         self.soft_plan_builder.hard = False
+        shadow_scale = float(soft_shadow_scale)
+        if not np.isfinite(shadow_scale) or shadow_scale < 0.0:
+            raise ValueError("soft_shadow_scale must be finite and nonnegative.")
         if self.hard_plan_builder.exact_full_access and self.soft_plan_builder.exact_full_access:
             # The budget-one warm/mix endpoint is the untouched checkpoint
             # Dense path. Do not build trees or route through a plan that only
@@ -685,6 +690,9 @@ class ThermalHardValueSoftOperator:
             cover_plan_builder=self.hard_plan_builder,
             detach_model_parameters=False,
         )
+        if shadow_scale == 0.0:
+            self.last_soft = None
+            return self.last_hard
         self.last_soft = self.operator(
             design,
             context,
@@ -702,7 +710,7 @@ class ThermalHardValueSoftOperator:
             soft = self.last_soft.role_values[name]
             if hard.shape != soft.shape:
                 raise ValueError(f"Hard and soft {name} outputs have different physical panels.")
-            values[name] = hard + (soft - soft.detach())
+            values[name] = hard + shadow_scale * (soft - soft.detach())
         return AbsolutePrediction(
             role_values=values,
             receiver_world_xy=self.last_hard.receiver_world_xy,

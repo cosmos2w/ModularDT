@@ -242,6 +242,9 @@ class _ScheduledThermalOperator:
         self.route_log = route_log
         self.sparse_route_verified = sparse_route_verified
         self.calls_this_update = 0
+        self.soft_shadow_scale_by_state: Mapping[str, float] | None = None
+        self.pending_route_work_rows: list[dict[str, Any]] = []
+        self.realized_cut_records_this_update: list[dict[str, Any]] = []
         self._apply_stage()
 
     def _apply_stage(self) -> None:
@@ -257,13 +260,34 @@ class _ScheduledThermalOperator:
             state_label = "historical_value_replay"
         else:
             raise RuntimeError("Unexpected extra native calls inside one Thermal optimizer update.")
-        prediction = self.paired(design, context, role_queries)
+        soft_shadow_scale = (
+            1.0
+            if self.soft_shadow_scale_by_state is None
+            else float(self.soft_shadow_scale_by_state.get(state_label, 1.0))
+        )
         budgets = self.schedule.budgets()
+        if (
+            state_label == "historical_value_replay"
+            and any(float(value) < 1.0 for value in budgets.values())
+            and soft_shadow_scale != 1.0
+        ):
+            raise RuntimeError(
+                "Sparse historical-value replay must retain unit soft-shadow scale."
+            )
+        prediction = self.paired(
+            design,
+            context,
+            role_queries,
+            soft_shadow_scale=soft_shadow_scale,
+        )
+        soft_shadow_evaluated = (
+            soft_shadow_scale > 0.0 and not self.hard_builder.exact_full_access
+        )
         if all(value < 1.0 for value in budgets.values()):
             records = self.hard_builder.last_records
             if not records:
                 raise RuntimeError("Sparse Thermal hard forward did not expose route-work records.")
-            for case_record in records:
+            for case_index, case_record in enumerate(records):
                 route_rows = {}
                 for mechanism, work in case_record["routes"].items():
                     route_rows[mechanism] = asdict(work)
@@ -272,12 +296,22 @@ class _ScheduledThermalOperator:
                         route_rows[mechanism]["route_status"] = route_status
                         if route_status == "sparse_success":
                             self.sparse_route_verified[mechanism] = True
-                _append_jsonl(
-                    self.route_log,
+                self.realized_cut_records_this_update.append(
+                    {
+                        "state": state_label,
+                        "case_index": case_index,
+                        "frontier": list(case_record["frontier"]),
+                        "frontier_paths": list(case_record["frontier_paths"]),
+                        "raw_frontier_k": int(case_record["raw_frontier_k"]),
+                        "nonredundant_k": case_record["nonredundant_k"],
+                        "nonredundant_k_status": case_record["nonredundant_k_status"],
+                    }
+                )
+                self.pending_route_work_rows.append(
                     {
                         "arm": self.arm,
-                        "optimizer_update": self.schedule.current_update + 1,
                         "state": state_label,
+                        "case_index": case_index,
                         "frontier": case_record["frontier"],
                         "frontier_paths": case_record["frontier_paths"],
                         "raw_frontier_k": case_record["raw_frontier_k"],
@@ -292,17 +326,64 @@ class _ScheduledThermalOperator:
                         "direct_scorer_factorized_first_layer": case_record.get(
                             "direct_scorer_factorized_first_layer"
                         ),
+                        "soft_shadow_evaluated": soft_shadow_evaluated,
+                        "soft_shadow_gradient_scale": (
+                            soft_shadow_scale if soft_shadow_evaluated else 0.0
+                        ),
                         "budgets": budgets,
                         "routes": route_rows,
                         "full_access_bypass_routes": case_record["full_access_bypass_routes"],
-                    },
+                    }
                 )
         self.calls_this_update += 1
         return prediction
 
     def optimizer_attempt(self, completed: int, attempted_total: int) -> None:
+        if int(completed) != int(self.schedule.current_update):
+            raise RuntimeError("Optimizer-attempt cursor differs from pending Thermal route records.")
+        expected_call_count = len(self.state_labels) + 1
+        if self.calls_this_update != expected_call_count:
+            raise RuntimeError(
+                "Thermal optimizer attempt did not evaluate exactly one native call per "
+                f"stencil state plus historical replay: expected {expected_call_count}, "
+                f"got {self.calls_this_update}."
+            )
+        if any(float(value) < 1.0 for value in self.schedule.budgets().values()):
+            expected_states = {*self.state_labels, "historical_value_replay"}
+            actual_states = {str(row["state"]) for row in self.realized_cut_records_this_update}
+            state_counts = {
+                state: sum(str(row["state"]) == state for row in self.realized_cut_records_this_update)
+                for state in expected_states
+            }
+            if (
+                actual_states != expected_states
+                or len(self.realized_cut_records_this_update) != len(expected_states)
+                or any(count != 1 for count in state_counts.values())
+                or any(int(row["case_index"]) != 0 for row in self.realized_cut_records_this_update)
+            ):
+                raise RuntimeError(
+                    "Sparse optimizer attempt did not produce exactly one baseline/variant/historical "
+                    "hard-cut record for the expected single case: "
+                    f"expected {sorted(expected_states)}, states={sorted(actual_states)}, "
+                    f"counts={state_counts}."
+                )
+        elif self.pending_route_work_rows or self.realized_cut_records_this_update:
+            raise RuntimeError("Full-access replay unexpectedly retained sparse route-work rows.")
+        for route_row in self.pending_route_work_rows:
+            _append_jsonl(
+                self.route_log,
+                {
+                    **route_row,
+                    "completed_updates_before_attempt": int(completed),
+                    "attempted_optimizer_step_including_old_branch": int(attempted_total),
+                    "optimizer_update": int(completed) + 1,
+                },
+            )
         self.schedule.current_update = int(completed) + 1
         self.calls_this_update = 0
+        self.soft_shadow_scale_by_state = None
+        self.pending_route_work_rows.clear()
+        self.realized_cut_records_this_update.clear()
         self._apply_stage()
 
 

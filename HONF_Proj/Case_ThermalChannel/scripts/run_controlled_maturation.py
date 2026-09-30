@@ -43,6 +43,8 @@ from channelthermal.response_control.losses import compute_stencil_loss_terms, w
 from channelthermal.response_control.maturation import (  # noqa: E402
     ThermalMaturationSchedule,
     available_frontier_for_paths,
+    complementary_soft_shadow_variants,
+    summarize_realized_cut_records,
 )
 from channelthermal.response_control.native import DifferentiableThermalOperator  # noqa: E402
 from channelthermal.response_control.runner import (  # noqa: E402
@@ -145,6 +147,154 @@ def _atomic_json(path: Path, value: Any) -> None:
         encoding="utf-8",
     )
     os.replace(temporary, path)
+
+
+def _gpu2_compute_process_ids() -> set[int]:
+    result = subprocess.run(
+        [
+            "nvidia-smi",
+            "-i",
+            "2",
+            "--query-compute-apps=pid",
+            "--format=csv,noheader,nounits",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        int(line.strip())
+        for line in result.stdout.splitlines()
+        if line.strip() and line.strip().lower() != "no running processes found"
+    }
+
+
+def _apply_u300_protocol_amendment(
+    manifest_path: Path,
+    parity_path: Path,
+    *,
+    active_gpu2_pids: set[int] | None = None,
+) -> dict[str, Any]:
+    """Apply the one-time parity-bound source transition from stopped u300."""
+
+    manifest_path = manifest_path.expanduser().resolve()
+    parity_path = parity_path.expanduser().resolve()
+    if manifest_path.name != "run_manifest.json" or not manifest_path.is_file() or not parity_path.is_file():
+        raise FileNotFoundError("The u300 amendment requires the existing manifest and parity result.")
+    old_bytes = manifest_path.read_bytes()
+    old_sha = hashlib.sha256(old_bytes).hexdigest()
+    manifest = json.loads(old_bytes)
+    parity = json.loads(parity_path.read_text(encoding="utf-8"))
+    parity_sha = _sha256(parity_path)
+    if manifest.get("u300_protocol_amendment") is not None:
+        raise ValueError("The u300 protocol amendment is one-time only.")
+    if manifest.get("status") != "passed_timing_gate_u300":
+        raise ValueError("The source transition requires the stopped matched u300 gate.")
+    latest_recorded_driver_sha = next(
+        (
+            row.get("new_driver_sha256")
+            for row in reversed(manifest.get("driver_source_amendments", []))
+            if row.get("kind") == "post_u300_execution_mode_guard_source_amendment"
+        ),
+        None,
+    )
+    if not latest_recorded_driver_sha or manifest.get("driver_sha256") != latest_recorded_driver_sha:
+        raise ValueError("The old manifest SHA does not match its latest recorded driver amendment.")
+    if parity.get("status") != "passed" or any(
+        not parity.get("arms", {}).get(arm, {}).get("gate", {}).get("all_gates_pass")
+        for arm in ("G", "P")
+    ):
+        raise ValueError("The exact G/P parity artifact did not pass all gates.")
+    if (
+        parity.get("controlled_manifest_sha256") != old_sha
+        or int(parity.get("optimizer_calls", -1)) != 0
+        or int(parity.get("reference_solver_calls", -1)) != 0
+        or parity.get("changed_model_weights") is not False
+        or parity.get("physical_gpu", {}).get("uuid") != AUTHORIZED_GPU2_UUID
+    ):
+        raise ValueError("Parity is not bound to this unchanged u300 manifest/checkpoints/device.")
+    if manifest.get("physical_gpu_uuid") != AUTHORIZED_GPU2_UUID:
+        raise ValueError("The stopped manifest is not bound to the authorized physical GPU2.")
+
+    checkpoint_hashes: dict[str, str] = {}
+    bindings = parity.get("train_only_input", {}).get("checkpoint_bindings", {})
+    for arm in ("G", "P"):
+        state = manifest.get("arms", {}).get(arm, {})
+        checkpoint_path = Path(str(state.get("latest_checkpoint", ""))).expanduser().resolve()
+        checkpoint_sha = state.get("latest_checkpoint_sha256")
+        binding = bindings.get(arm, {})
+        if (
+            state.get("status") != "passed_timing_gate"
+            or int(state.get("latest_update", -1)) != 300
+            or int(state.get("final_update", -1)) != 300
+            or not checkpoint_path.is_file()
+            or _sha256(checkpoint_path) != checkpoint_sha
+            or binding.get("sha256") != checkpoint_sha
+        ):
+            raise ValueError(f"The {arm} arm is not bound to its unchanged passed u300 checkpoint.")
+        checkpoint_hashes[arm] = str(checkpoint_sha)
+    if parity.get("checkpoint_sha256") != checkpoint_hashes:
+        raise ValueError("Parity checkpoint hashes differ from the exact stopped G/P checkpoints.")
+    parity_runner_sha = parity.get("source_sha256", {}).get(str(Path(__file__).resolve()))
+    if not parity_runner_sha:
+        raise ValueError("Parity result lacks the pre-amendment runner SHA.")
+
+    attempts_path = manifest_path.parent / "optimizer_attempts.jsonl"
+    if not attempts_path.is_file() or any(
+        int(row.get("completed_updates_before_attempt", -1)) >= 300
+        for row in (
+            json.loads(line)
+            for line in attempts_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+        if row.get("arm") in {"G", "P"}
+    ):
+        raise ValueError("An optimizer attempt is open at or beyond the u300 boundary.")
+    running_pids = _gpu2_compute_process_ids() if active_gpu2_pids is None else set(active_gpu2_pids)
+    if running_pids - {os.getpid()}:
+        raise RuntimeError(f"GPU2 is not idle: active compute PIDs {sorted(running_pids)}.")
+
+    backup = manifest_path.with_name("run_manifest_before_u301_protocol_amendment.json")
+    if backup.exists():
+        if backup.read_bytes() != old_bytes:
+            raise FileExistsError("The protocol-amendment backup does not match the original manifest.")
+    else:
+        temporary = backup.with_name(f".{backup.name}.tmp")
+        temporary.write_bytes(old_bytes)
+        os.replace(temporary, backup)
+
+    final_driver_sha = _sha256(Path(__file__).resolve())
+    lineage = {
+        "old_manifest_sha256": old_sha,
+        "old_driver_sha256": manifest["driver_sha256"],
+        "parity_runner_sha256": parity_runner_sha,
+        "final_driver_sha256": final_driver_sha,
+        "parity_result_sha256": parity_sha,
+        "checkpoint_sha256": checkpoint_hashes,
+        "first_new_update": 301,
+        "backup_manifest_path": str(backup),
+        "backup_manifest_sha256": _sha256(backup),
+    }
+    manifest["u300_protocol_amendment"] = {
+        **lineage,
+        "old_phase_updates": [201, 300],
+        "old_phase_preserved_without_relabeling": True,
+        "new_phase": {
+            "capacity_fraction": 0.90,
+            "random_tail_fluid_queries": 128,
+            "random_tail_solid_queries_per_module": 16,
+            "soft_shadow": "complementary 5-of-10 variant masks in deterministic sparse-update pairs; baseline/history scale 1 and selected variants scale 2",
+        },
+        "optimizer_calls": 0,
+        "reference_solver_calls": 0,
+        "timestamp_utc": _utc_now(),
+    }
+    manifest["driver_sha256"] = final_driver_sha
+    manifest.setdefault("driver_source_amendments", []).append(
+        {"kind": "u300_complementary_shadow_protocol_amendment", **lineage}
+    )
+    _atomic_json(manifest_path, manifest)
+    return manifest
 
 
 def _append_jsonl(path: Path, row: Mapping[str, Any]) -> None:
@@ -1178,13 +1328,23 @@ def _run_arm(
         query_batch_size=args.query_batch_size,
     )
     paired = ThermalHardValueSoftOperator(native, hard_builder, soft_builder)
+    state_labels = ("baseline", *tuple(inputs["raw_stencils"][0].variants))
+    expected_variant_order = state_labels[1:]
+    for raw_stencil in inputs["raw_stencils"]:
+        actual_variant_order = tuple(raw_stencil.variants)
+        if actual_variant_order != expected_variant_order:
+            raise RuntimeError(
+                "Thermal raw train stencil variant order differs from the scheduled "
+                f"native-call order for family {raw_stencil.physical_family_id}: "
+                f"expected {expected_variant_order}, got {actual_variant_order}."
+            )
     route_log = output_dir / f"{arm}_route_work.jsonl"
     scheduled = forward._ScheduledThermalOperator(
         paired=paired,
         schedule=schedule,
         hard_builder=hard_builder,
         soft_builder=soft_builder,
-        state_labels=("baseline", *tuple(inputs["raw_stencils"][0].variants)),
+        state_labels=state_labels,
         arm=arm,
         route_log=route_log,
         sparse_route_verified={"QE": False, inputs["extra_route"]: False},
@@ -1198,6 +1358,7 @@ def _run_arm(
     exposure_counts: Counter[tuple[str, str, str]] = Counter()
     historical_case_counts: Counter[str] = Counter()
     global_attempted_for_update: dict[int, int] = {}
+    realized_cut_records_for_update: dict[int, list[dict[str, Any]]] = {}
     if metric_path.is_file():
         with metric_path.open("r", encoding="utf-8") as stream:
             for line in stream:
@@ -1235,7 +1396,9 @@ def _run_arm(
             _append_jsonl(reviews_path, review)
         _atomic_json(output_dir / "run_manifest.json", manifest)
 
-    def on_attempt(completed: int, attempted_total: int) -> None:
+    def on_attempt(
+        completed: int, attempted_total: int, scheduled_operator: Any = scheduled
+    ) -> None:
         physical_parameters = tuple(value for value in forward_model.parameters() if value.requires_grad)
         route_parameters = tuple(value for value in route_model.parameters() if value.requires_grad)
         physical_raw = forward._gradient_norm(forward_model)
@@ -1265,6 +1428,14 @@ def _run_arm(
             "route_optimizer_call_is_shared": True,
         }
         global_attempted_for_update[completed] = int(attempted_total)
+        realized_cut_records_for_update[completed] = [
+            {
+                **record,
+                "completed_updates_before_attempt": int(completed),
+                "attempted_optimizer_step_including_old_branch": int(attempted_total),
+            }
+            for record in scheduled_operator.realized_cut_records_this_update
+        ]
         pre_step_parameters[completed] = {
             "physical": tuple(parameter.detach().clone() for parameter in physical_parameters),
             "route": tuple(parameter.detach().clone() for parameter in route_parameters),
@@ -1297,16 +1468,61 @@ def _run_arm(
                 "timestamp_utc": _utc_now(),
             },
         )
-        scheduled.optimizer_attempt(completed, attempted_total)
+        scheduled_operator.optimizer_attempt(completed, attempted_total)
 
-    def transform(stencil: Any, completed: int) -> tuple[Any, Mapping[str, Any]]:
+    def transform(
+        stencil: Any, completed: int, scheduled_operator: Any = scheduled
+    ) -> tuple[Any, Mapping[str, Any]]:
+        if scheduled_operator.soft_shadow_scale_by_state is not None:
+            raise RuntimeError(
+                "Soft-shadow scale mapping was not reset after the previous optimizer attempt."
+            )
         plan = schedule.plan(completed)
         if stencil.physical_family_id != plan.family_id:
             raise RuntimeError("Maturation family selector and requested raw stencil disagree.")
+        selected_soft_variants = (
+            ()
+            if plan.full_access_replay
+            else complementary_soft_shadow_variants(
+                state_labels,
+                relative_sparse_update=plan.relative_sparse_update,
+                seed=schedule.maturation.seed,
+            )
+        )
+        soft_shadow_scale_by_state = {
+            "baseline": 0.0 if plan.full_access_replay else 1.0,
+            **{
+                label: (
+                    0.0
+                    if plan.full_access_replay or label not in selected_soft_variants
+                    else 2.0
+                )
+                for label in state_labels[1:]
+            },
+            "historical_value_replay": 0.0 if plan.full_access_replay else 1.0,
+        }
+        if set(soft_shadow_scale_by_state) != {
+            *state_labels,
+            "historical_value_replay",
+        }:
+            raise RuntimeError("Soft-shadow scale mapping does not cover the scheduled call order.")
+        if (
+            not plan.full_access_replay
+            and soft_shadow_scale_by_state["historical_value_replay"] != 1.0
+        ):
+            raise RuntimeError("Sparse historical-value replay must retain unit soft-shadow scale.")
+        scheduled_operator.soft_shadow_scale_by_state = soft_shadow_scale_by_state
         sampled = sample_training_panel(
             (stencil,),
             config=replace(
-                ReceiverSamplingConfig(128, 8, 4, random_seed=plan.query_seed),
+                ReceiverSamplingConfig(
+                    128,
+                    8,
+                    4,
+                    random_seed=plan.query_seed,
+                    random_tail_fluid_queries=128,
+                    random_tail_solid_queries_per_module=16,
+                ),
                 random_seed=plan.query_seed,
             ),
         )[0]
@@ -1330,6 +1546,25 @@ def _run_arm(
                 "sampled_counts": dict(sampled.summary.sampled_counts),
                 "protected_counts": dict(sampled.summary.protected_counts),
                 "solid_peak_query_coverage": dict(sampled.summary.solid_peak_query_coverage),
+                "random_tail_counts": dict(sampled.summary.random_tail_counts),
+                "random_tail_query_id_sha256": dict(
+                    sampled.summary.random_tail_query_id_sha256
+                ),
+            },
+            "soft_shadow": {
+                "selection_rule": "complementary_5_of_10_by_relative_sparse_update_pair",
+                "relative_sparse_update": plan.relative_sparse_update,
+                "pair_index": plan.relative_sparse_update // 2,
+                "complement_half": plan.relative_sparse_update % 2,
+                "variant_state_order": list(state_labels[1:]),
+                "selected_variant_labels": list(selected_soft_variants),
+                "gradient_scale_by_state": dict(soft_shadow_scale_by_state),
+                "realized_soft_state_labels": (
+                    []
+                    if plan.full_access_replay
+                    else ["baseline", *selected_soft_variants, "historical_value_replay"]
+                ),
+                "route_gradient_inclusion_probability": 0.5,
             },
             "replay_of_sparse_action": previous.action if plan.full_access_replay and previous is not None else None,
             "replay_of_sparse_family": previous.family_id if plan.full_access_replay and previous is not None else None,
@@ -1340,6 +1575,10 @@ def _run_arm(
         source_update = step.completed_update - 1
         gradient = gradients_for_update.pop(source_update, {})
         before = pre_step_parameters.pop(source_update, {})
+        attempted_identity = global_attempted_for_update.pop(source_update, None)
+        cut_records = realized_cut_records_for_update.pop(source_update, None)
+        if attempted_identity is None or cut_records is None:
+            raise RuntimeError("Completed Thermal update lacks a matching optimizer-attempt snapshot.")
         update_norms = {}
         for name, parameters in (("physical", tuple(value for value in forward_model.parameters() if value.requires_grad)), ("route", tuple(value for value in route_model.parameters() if value.requires_grad))):
             previous = before.get(name, ())
@@ -1349,6 +1588,24 @@ def _run_arm(
             )
             update_norms[f"{name}_parameter_update_l2"] = math.sqrt(squared)
         metadata = dict(step.training_metadata)
+        cut_evidence = summarize_realized_cut_records(
+            cut_records,
+            expected_states=(*state_labels, "historical_value_replay"),
+            completed_updates_before_attempt=source_update,
+            attempted_optimizer_step_including_old_branch=attempted_identity,
+            full_access_replay=bool(metadata.get("full_access_replay")),
+        )
+        metadata["realized_cut_evidence"] = cut_evidence
+        metadata["resolved_cut_paths"] = (
+            list(cut_evidence["baseline"]["frontier_paths"])
+            if cut_evidence["status"] == "realized_sparse_cut"
+            else []
+        )
+        metadata["resolved_cut_paths_status"] = (
+            "actual_baseline_hard_route_record"
+            if cut_evidence["status"] == "realized_sparse_cut"
+            else "full_access_no_cut"
+        )
         exposure_counts[(step.training_family_id or "unknown", str(metadata.get("phase")), str(metadata.get("action")))] += 1
         if step.historical_case_id is not None:
             historical_case_counts[str(step.historical_case_id)] += 1
@@ -1357,7 +1614,7 @@ def _run_arm(
             "completed_update": step.completed_update,
             "new_branch_optimizer_update": step.completed_update - START_UPDATE,
             "attempted_optimizer_step_this_invocation": step.attempted_optimizer_step,
-            "attempted_optimizer_steps_including_old_branch": global_attempted_for_update.pop(source_update, None),
+            "attempted_optimizer_steps_including_old_branch": attempted_identity,
             "training_stencil_index": step.training_stencil_index,
             "training_family_id": step.training_family_id,
             "training_metadata": metadata,
@@ -1386,10 +1643,17 @@ def _run_arm(
                 "phase": metadata.get("phase"),
                 "action": metadata.get("action"),
                 "requested_cut_paths": metadata.get("requested_cut_paths"),
+                "resolved_cut_paths": metadata.get("resolved_cut_paths"),
+                "resolved_cut_paths_status": metadata.get("resolved_cut_paths_status"),
+                "realized_cut_evidence": cut_evidence,
                 "capacity_fraction": metadata.get("capacity_fraction"),
                 "full_access_replay": metadata.get("full_access_replay"),
                 "historical_case_id": step.historical_case_id,
                 "query_seed": metadata.get("query_seed"),
+                "random_tail_query_id_sha256": metadata.get("sampling_summary", {}).get(
+                    "random_tail_query_id_sha256", {}
+                ),
+                "soft_shadow": metadata.get("soft_shadow", {}),
                 "timestamp_unix": time.time(),
             },
         )
@@ -1549,6 +1813,25 @@ def _run_arm(
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
     output_dir = args.output_dir.expanduser().resolve()
+    amendment_path = getattr(args, "u300_protocol_amendment", None)
+    if amendment_path is not None:
+        if not args.resume or not args.preflight_only:
+            raise ValueError(
+                "--u300-protocol-amendment requires --resume --preflight-only and cannot train."
+            )
+        if tuple(args.arms) != ("G", "P"):
+            raise ValueError("The u300 amendment requires the matched G/P run manifest.")
+        manifest = _apply_u300_protocol_amendment(
+            output_dir / "run_manifest.json",
+            amendment_path,
+        )
+        return {
+            "status": "u300_protocol_amended_no_training",
+            "run_id": manifest.get("run_id"),
+            "output_dir": str(output_dir),
+            "source_lineage": manifest["u300_protocol_amendment"],
+        }
+
     output_dir.mkdir(parents=True, exist_ok=True)
     ledger_path = output_dir / "lane_execution_ledger.jsonl"
     prior_payload_files = [
@@ -1703,9 +1986,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             })
         if args.preflight_only:
             manifest["status"] = "preflight_passed_no_training"
+            status = manifest["status"]
             manifest["preflight_only_finished_at_utc"] = _utc_now()
             _atomic_json(output_manifest_path, manifest)
-            status = manifest["status"]
             return {
                 "status": status,
                 "run_id": run_id,
@@ -1865,6 +2148,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stop-after-update", type=int, default=300)
     parser.add_argument("--max-wall-seconds", type=float, default=7200.0)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--u300-protocol-amendment",
+        type=Path,
+        default=None,
+        help="apply the one-time parity-bound protocol transition at exact G/P u300 (requires --resume --preflight-only)",
+    )
     parser.add_argument("--preflight-only", action="store_true", help="write GPU-bound preflight evidence without optimizer updates")
     return parser
 

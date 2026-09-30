@@ -1606,6 +1606,83 @@ def test_sampler_protects_pressure_and_all_state_near_interface_union() -> None:
     assert sampled.summary.sampled_counts["fluid_fields"] == len(pressure_ids | near_ids)
 
 
+def test_sampler_adds_seeded_unprotected_tails_and_records_id_hashes() -> None:
+    fluid_x = np.linspace(0.0, 12.0, 241)
+    stencil = ResponseStencil(
+        _record("base", fluid_x=fluid_x),
+        {
+            "heat": _record("heat", heating=1.2, fluid_x=fluid_x),
+            "shift": _record("shift", position_x=5.5, fluid_x=fluid_x),
+            "both": _record("both", position_x=5.5, heating=1.2, fluid_x=fluid_x),
+        },
+    )
+    base = sample_training_stencil(
+        stencil,
+        config=ReceiverSamplingConfig(
+            max_fluid_queries=2,
+            solid_queries_per_module=1,
+            hot_solid_points_per_module=1,
+            random_seed=13,
+        ),
+    )
+    first = sample_training_stencil(
+        stencil,
+        config=ReceiverSamplingConfig(
+            max_fluid_queries=2,
+            solid_queries_per_module=1,
+            hot_solid_points_per_module=1,
+            random_seed=13,
+            random_tail_fluid_queries=3,
+            random_tail_solid_queries_per_module=1,
+        ),
+    )
+    same_seed = sample_training_stencil(
+        stencil,
+        config=ReceiverSamplingConfig(
+            max_fluid_queries=2,
+            solid_queries_per_module=1,
+            hot_solid_points_per_module=1,
+            random_seed=13,
+            random_tail_fluid_queries=3,
+            random_tail_solid_queries_per_module=1,
+        ),
+    )
+    other_seed = sample_training_stencil(
+        stencil,
+        config=ReceiverSamplingConfig(
+            max_fluid_queries=2,
+            solid_queries_per_module=1,
+            hot_solid_points_per_module=1,
+            random_seed=14,
+            random_tail_fluid_queries=3,
+            random_tail_solid_queries_per_module=1,
+        ),
+    )
+
+    assert first.summary.sampled_counts["fluid_fields"] == (
+        first.summary.protected_counts["fluid_protected_union"] + 3
+    )
+    assert first.summary.random_tail_counts == {
+        "fluid_fields": 3,
+        "solid_temperature_per_module": 1,
+        "solid_temperature_total": 1,
+    }
+    assert first.summary.random_tail_query_id_sha256 == same_seed.summary.random_tail_query_id_sha256
+    assert (
+        first.summary.random_tail_query_id_sha256["fluid_fields"]
+        != other_seed.summary.random_tail_query_id_sha256["fluid_fields"]
+    )
+    assert first.summary.random_tail_query_id_sha256["fluid_fields"]
+    assert len(first.summary.random_tail_query_id_sha256["fluid_fields"]) == 64
+    assert first.summary.random_tail_query_id_sha256["solid_temperature"]
+    assert first.summary.solid_peak_query_coverage == base.summary.solid_peak_query_coverage
+    assert first.stencil.baseline.output.roles["interface"].query_ids == stencil.baseline.output.roles["interface"].query_ids
+    assert any(
+        weight > 1.0
+        for weight in first.stencil.baseline.output.roles["fluid_fields"].quadrature_weights
+    )
+
+
 def test_frozen_train_calibration_loads_exact_scales_and_response_weights(tmp_path: Path) -> None:
     stencil = _stencil()
     scales_path = tmp_path / "scales.json"

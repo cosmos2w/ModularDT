@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import zlib
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 
 import numpy as np
@@ -30,10 +32,22 @@ class SamplingSummary:
     protected_counts: dict[str, int]
     solid_peak_query_coverage: dict[str, bool]
     inverse_probability_weighting: bool
+    random_tail_counts: dict[str, int] = field(default_factory=dict)
+    random_tail_query_id_sha256: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for name in ("original_counts", "sampled_counts", "protected_counts"):
+        for name in (
+            "original_counts",
+            "sampled_counts",
+            "protected_counts",
+            "random_tail_counts",
+        ):
             object.__setattr__(self, name, MappingProxyType({str(key): int(value) for key, value in getattr(self, name).items()}))
+        object.__setattr__(
+            self,
+            "random_tail_query_id_sha256",
+            MappingProxyType({str(key): str(value) for key, value in self.random_tail_query_id_sha256.items()}),
+        )
         object.__setattr__(
             self,
             "solid_peak_query_coverage",
@@ -60,12 +74,18 @@ class ReceiverSamplingConfig:
     solid_queries_per_module: int = 128
     hot_solid_points_per_module: int = 16
     random_seed: int = 2317
+    random_tail_fluid_queries: int = 0
+    random_tail_solid_queries_per_module: int = 0
 
     def __post_init__(self) -> None:
         if min(self.max_fluid_queries, self.solid_queries_per_module) <= 0:
             raise ValueError("Receiver query budgets must be positive.")
-        if self.hot_solid_points_per_module < 0:
-            raise ValueError("hot_solid_points_per_module must be nonnegative.")
+        if min(
+            self.hot_solid_points_per_module,
+            self.random_tail_fluid_queries,
+            self.random_tail_solid_queries_per_module,
+        ) < 0:
+            raise ValueError("Hot-point and random-tail receiver counts must be nonnegative.")
 
 
 def _sample_rows(
@@ -90,6 +110,15 @@ def _sample_rows(
         selected_other = np.isin(indices, sampled_other, assume_unique=True)
         inclusion_probability[selected_other] = sample_count / float(other.size)
     return indices, inclusion_probability, int(protected.size)
+
+
+def _query_id_sha256(query_ids: Sequence[str]) -> str:
+    payload = json.dumps(
+        sorted(str(value) for value in query_ids),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _role_channels(role: RoleOutput) -> tuple[int, ...]:
@@ -240,17 +269,25 @@ def sample_training_stencil(
     )
     protected_near_interface = _protected_near_interface_fluid_indices(stencil)
     protected_fluid_union = np.union1d(protected_fluid, protected_near_interface)
+    fluid_budget = max(
+        int(config.max_fluid_queries),
+        int(protected_fluid_union.size) + int(config.random_tail_fluid_queries),
+    )
     fluid_indices, fluid_probability, fluid_protected_count = _sample_rows(
-        fluid.values.shape[0], protected_fluid_union, config.max_fluid_queries, rng
+        fluid.values.shape[0], protected_fluid_union, fluid_budget, rng
     )
     solid = roles["solid_temperature"]
     if solid.receiver_module_ids is None:
         raise ValueError("Solid training receivers must declare module IDs.")
     module_order = tuple(dict.fromkeys(solid.receiver_module_ids))
     hot_local_indices = _protected_solid_local_indices(stencil, config.hot_solid_points_per_module)
+    solid_budget = max(
+        int(config.solid_queries_per_module),
+        int(hot_local_indices.size) + int(config.random_tail_solid_queries_per_module),
+    )
     local_count = sum(solid.receiver_module_ids[index] == module_order[0] for index in range(len(solid.receiver_module_ids)))
     local_indices, local_probability, local_protected_count = _sample_rows(
-        local_count, hot_local_indices, config.solid_queries_per_module, rng
+        local_count, hot_local_indices, solid_budget, rng
     )
     solid_rows_by_module = {
         module_id: np.asarray(
@@ -285,6 +322,33 @@ def sample_training_stencil(
         }
         sampled_records.append(_replace_record_roles(record, sampled_roles))
     sampled = ResponseStencil(sampled_records[0], dict(zip(stencil.variants, sampled_records[1:])))
+    random_tail_counts: dict[str, int] = {}
+    random_tail_hashes: dict[str, str] = {}
+    if config.random_tail_fluid_queries or config.random_tail_solid_queries_per_module:
+        random_fluid_indices = np.setdiff1d(
+            fluid_indices, protected_fluid_union, assume_unique=True
+        )
+        random_solid_local_indices = np.setdiff1d(
+            local_indices, hot_local_indices, assume_unique=True
+        )
+        random_solid_rows = tuple(
+            int(solid_rows_by_module[module_id][local_index])
+            for module_id in module_order
+            for local_index in random_solid_local_indices
+        )
+        random_tail_counts = {
+            "fluid_fields": int(random_fluid_indices.size),
+            "solid_temperature_per_module": int(random_solid_local_indices.size),
+            "solid_temperature_total": len(random_solid_rows),
+        }
+        random_tail_hashes = {
+            "fluid_fields": _query_id_sha256(
+                tuple(fluid.query_ids[int(index)] for index in random_fluid_indices)
+            ),
+            "solid_temperature": _query_id_sha256(
+                tuple(solid.query_ids[index] for index in random_solid_rows)
+            ),
+        }
     selected_ids = set(sampled.baseline.output.roles["solid_temperature"].query_ids)  # type: ignore[union-attr]
     coverage: dict[str, bool] = {}
     temperature_channel = _role_channels(solid)[0]
@@ -318,6 +382,8 @@ def sample_training_stencil(
         },
         solid_peak_query_coverage=coverage,
         inverse_probability_weighting=True,
+        random_tail_counts=random_tail_counts,
+        random_tail_query_id_sha256=random_tail_hashes,
     )
     return SampledResponseStencil(sampled, summary)
 
