@@ -29,7 +29,11 @@ import run_controlled_maturation as maturation
 from honf_forward_core.interface_fields.adaptive_interaction_cover import MechanismPlan
 from honf_runtime.compat import load_trusted_checkpoint
 
-from windfarm.workflows.maturation import WIND_ACTION_PATHS, available_frontier_for_paths
+from windfarm.workflows.maturation import (
+    WIND_ACTION_PATHS,
+    available_frontier_for_paths,
+    validated_lane_gpu_budget_seconds,
+)
 
 RUN_ID = "2112"
 DEVICE_UUID = maturation.DEVICE_UUID
@@ -326,6 +330,23 @@ def _select_layout_rows(
     for layout in layouts:
         candidates = sorted(by_layout[layout])
         selected.append(candidates[int(rng.integers(0, len(candidates)))])
+    return selected
+
+
+def _select_development_rows(
+    rows: list[int], view: Any, *, seed: int, layout_count: int,
+    all_validation_rows: bool,
+) -> list[int]:
+    if not all_validation_rows:
+        return _select_layout_rows(rows, view, seed=seed, layout_count=layout_count)
+    selected = sorted(map(int, rows))
+    if len(selected) != 90 or len(set(selected)) != 90:
+        raise ValueError("all-validation-rows requires the exact 90 canonical validation rows")
+    directions_per_layout = Counter(
+        int(view.metadata["layout_index"][row]) for row in selected
+    )
+    if len(directions_per_layout) != 30 or set(directions_per_layout.values()) != {3}:
+        raise ValueError("all-validation-rows requires three directions for each of 30 layouts")
     return selected
 
 
@@ -983,6 +1004,10 @@ def main() -> None:
         "--layouts-per-split", type=int, default=4,
         help="number of distinct layouts per train/development panel; use 0 for every layout",
     )
+    parser.add_argument(
+        "--all-validation-rows", action="store_true",
+        help="evaluate all 90 canonical validation rows; layouts-per-split still selects training layouts",
+    )
     args = parser.parse_args()
     run_dir = args.run_dir.resolve()
     update_count = int(args.update_count)
@@ -991,7 +1016,10 @@ def main() -> None:
         raise ValueError("update-count must exceed 100 and layouts-per-split must be nonnegative")
     started_at = datetime.now(timezone.utc).isoformat()
     started_monotonic = time.monotonic()
-    attempt_id = f"u{update_count}_review_{started_at.replace(':', '').replace('-', '')}_{os.getpid()}"
+    review_kind = "all90_validation" if args.all_validation_rows else "fixed_panel"
+    attempt_id = (
+        f"u{update_count}_{review_kind}_{started_at.replace(':', '').replace('-', '')}_{os.getpid()}"
+    )
     script_path = Path(__file__).resolve()
     command_argv = [sys.executable, str(script_path), *sys.argv[1:]]
     attempt_log = run_dir / "attempts.jsonl"
@@ -1024,9 +1052,16 @@ def main() -> None:
 
         manifest_path = run_dir / "run_manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if manifest.get("run_id") != RUN_ID or float(manifest.get("gpu_active_seconds", 0.0)) >= maturation.LANE_BUDGET_SECONDS:
-            raise ValueError("Run2112 identity is invalid or its 14 GPU-hour lane budget is exhausted")
-        output_dir = run_dir / f"u{update_count}_fixed_panel_review"
+        if (
+            manifest.get("run_id") != RUN_ID
+            or float(manifest.get("gpu_active_seconds", 0.0))
+            >= validated_lane_gpu_budget_seconds(manifest)
+        ):
+            raise ValueError("Run2112 identity is invalid or its validated GPU lane budget is exhausted")
+        output_dir = run_dir / (
+            f"u{update_count}_all90_validation_review"
+            if args.all_validation_rows else f"u{update_count}_fixed_panel_review"
+        )
         output_dir.mkdir(parents=True, exist_ok=True)
         output_json = output_dir / "fixed_train_dev_review.json"
         if output_json.exists():
@@ -1045,14 +1080,22 @@ def main() -> None:
             train_rows, view, seed=212_119, layout_count=layouts_per_split
         )
         development_rows = [int(row) for row in canonical.validation]
-        dev_panel_rows = _select_layout_rows(
-            development_rows, view, seed=212_229, layout_count=layouts_per_split
+        dev_panel_rows = _select_development_rows(
+            development_rows, view, seed=212_229,
+            layout_count=layouts_per_split,
+            all_validation_rows=bool(args.all_validation_rows),
         )
         if (
             len(train_panel_rows) != len(set(layout_indices[train_panel_rows].tolist()))
-            or len(dev_panel_rows) != len(set(layout_indices[dev_panel_rows].tolist()))
+            or (
+                not args.all_validation_rows
+                and len(dev_panel_rows) != len(set(layout_indices[dev_panel_rows].tolist()))
+            )
             or (layouts_per_split > 0 and len(train_panel_rows) != layouts_per_split)
-            or (layouts_per_split > 0 and len(dev_panel_rows) != layouts_per_split)
+            or (
+                not args.all_validation_rows
+                and layouts_per_split > 0 and len(dev_panel_rows) != layouts_per_split
+            )
         ):
             raise ValueError("fixed review must contain the requested number of unique train/development layouts")
 
@@ -1189,7 +1232,10 @@ def main() -> None:
         summary = {
             "run_id": RUN_ID,
             "update_count": update_count,
-            "review_identity": f"same saved train/development role panels at matched G/P u{update_count} physical/scorer states",
+            "review_identity": (
+                f"same saved train/development role panels at matched G/P u{update_count} physical/scorer states; "
+                + ("all 90 canonical validation rows" if args.all_validation_rows else "one direction per layout")
+            ),
             "source_checkpoint": str(source_path),
             "source_checkpoint_sha256": source_sha,
             "maturation_helper_path": str(maturation.MATURATION_HELPER_PATH),
@@ -1234,7 +1280,12 @@ def main() -> None:
                 "development_rows": len(dev_panel_rows),
                 "development_layouts": len(set(layout_indices[dev_panel_rows].tolist())),
                 "requested_layouts_per_split": layouts_per_split,
-                "one_direction_row_per_layout": True,
+                "one_direction_row_per_layout": not args.all_validation_rows,
+                "train_one_direction_row_per_layout": True,
+                "development_all_direction_rows": bool(args.all_validation_rows),
+                "development_row_ids_sha256": hashlib.sha256(
+                    np.asarray(dev_panel_rows, dtype=np.int64).tobytes()
+                ).hexdigest(),
                 "test_rows_opened": False,
                 "fixed_query_seed_base": FIXED_QUERY_SEED,
                 "refreshed_query_seed_base": REFRESH_QUERY_SEED,

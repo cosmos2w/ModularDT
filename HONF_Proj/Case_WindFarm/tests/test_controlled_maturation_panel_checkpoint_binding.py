@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -10,6 +11,32 @@ SPEC = importlib.util.spec_from_file_location("wind_panel_checkpoint_binding", S
 assert SPEC is not None and SPEC.loader is not None
 PANEL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PANEL)
+
+
+def test_all_validation_rows_include_every_direction_of_each_layout() -> None:
+    view = SimpleNamespace(metadata={"layout_index": np.repeat(np.arange(30), 3)})
+    rows = list(range(90))
+    selected = PANEL._select_development_rows(
+        rows, view, seed=212_229, layout_count=4, all_validation_rows=True,
+    )
+    assert selected == rows
+    assert len({int(view.metadata["layout_index"][row]) for row in selected}) == 30
+
+    sampled = PANEL._select_development_rows(
+        rows, view, seed=212_229, layout_count=4, all_validation_rows=False,
+    )
+    assert len(sampled) == 4
+    assert len({int(view.metadata["layout_index"][row]) for row in sampled}) == 4
+
+    with pytest.raises(ValueError, match="exact 90"):
+        PANEL._select_development_rows(
+            rows[:-1], view, seed=212_229, layout_count=4, all_validation_rows=True,
+        )
+    bad_view = SimpleNamespace(metadata={"layout_index": np.repeat(np.arange(45), 2)})
+    with pytest.raises(ValueError, match="three directions"):
+        PANEL._select_development_rows(
+            rows, bad_view, seed=212_229, layout_count=4, all_validation_rows=True,
+        )
 
 
 def test_selected_sparse_capacity_is_bound_to_both_checkpoint_recipes() -> None:
