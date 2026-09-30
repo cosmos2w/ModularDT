@@ -176,6 +176,7 @@ def _selected_checkpoint_binding(
 
 def _validated_training_exposure(
     action_key: str, row: Mapping[str, Any], *, row_id: int,
+    split: str,
     realized_paths: Sequence[str], nonredundant_k: int,
     exact_work: float, full_work: float,
     action_exposure_by_key: Mapping[str, Any],
@@ -258,10 +259,39 @@ def _validated_training_exposure(
         or row_lineage.get("same_realized_path_and_k_primary_pass_ids") != sorted(same_path_k_pass_ids)
     ):
         raise ValueError(f"Sparse action {action_key!r} overstates its realized path/K overlap audit.")
+    path_key = json.dumps(list(realized_paths), separators=(",", ":"))
+    path_k_pass_ids = set()
+    for pass_id in pass_ids:
+        audited_count = int(pass_audits[str(pass_id)].get("resolved_path_families", {})
+                            .get(path_key, {}).get("realized_nonredundant_k_counts", {})
+                            .get(str(nonredundant_k), 0))
+        observed_count = sum(
+            observation.get("primary_pass") == pass_id
+            and observation.get("realized_nonredundant_k") == nonredundant_k
+            for families in row_path_map.values()
+            for family in families
+            if list(family.get("realized_cut_paths", [])) == list(realized_paths)
+            for observation in family.get("primary_pass_observations", [])
+        )
+        if audited_count != observed_count:
+            raise ValueError(f"Sparse action {action_key!r} path/K pass audit differs from its training rows")
+        if audited_count > 0:
+            path_k_pass_ids.add(int(pass_id))
+    if split == "train_fit":
+        # A seen native row needs its own resolved cut and K in both passes.
+        exposed_pass_ids = same_path_k_pass_ids & path_k_pass_ids
+    elif split in {"dev", "held_family_audit"}:
+        # Held layouts have no training row ID; use exact cut/K exposure
+        # transferred from complete training passes, not a fictitious visit.
+        if row_pass_ids:
+            raise ValueError("Held Wind case unexpectedly has training-row exposure")
+        exposed_pass_ids = path_k_pass_ids
+    else:
+        raise ValueError(f"Unknown Wind action-table split: {split}")
     strict_work_saving = exact_work < full_work - max(1.0e-9, 1.0e-12 * full_work)
     qualified = bool(
         exposure.get("trained_action") is True
-        and len(row_pass_ids & set(pass_ids)) >= required
+        and len(exposed_pass_ids & set(pass_ids)) >= required
         and strict_work_saving
     )
     if bool(row.get("trained_action_after_two_complete_passes")) != bool(exposure.get("trained_action")):
@@ -395,6 +425,7 @@ def _load_action_table(
                 realized_paths = _valid_action_paths(action_key, action)
                 trained_sparse, _exposure = _validated_training_exposure(
                     action_key, action, row_id=identity["row_id"],
+                    split=split,
                     realized_paths=realized_paths, nonredundant_k=int(count),
                     exact_work=exact_work, full_work=full_work,
                     action_exposure_by_key=exposure_by_action,

@@ -239,7 +239,17 @@ def test_exposure_audit_reports_path_k_overlap_without_inventing_exact_k_maturit
     assert TABLE._trained_sparse_action(
         "two_packet", exact_work=10.0, full_work=20.0, exposure_record=exposure,
         row_id=1, realized_cut_paths=["L", "R"], nonredundant_k=2,
+    ) is False
+    assert TABLE._trained_sparse_action(
+        "two_packet", exact_work=10.0, full_work=20.0, exposure_record=exposure,
+        row_id=99, realized_cut_paths=["L", "R"], nonredundant_k=2,
+        split="dev",
     ) is True
+    assert TABLE._trained_sparse_action(
+        "two_packet", exact_work=10.0, full_work=20.0, exposure_record=exposure,
+        row_id=99, realized_cut_paths=["L", "R"], nonredundant_k=3,
+        split="dev",
+    ) is False
 
 
 def test_missing_or_invalid_realized_k_prevents_a_complete_training_pass() -> None:

@@ -346,20 +346,34 @@ def _trained_sparse_action(
     action: str, *, exact_work: float, full_work: float,
     exposure_record: Mapping[str, Any], row_id: int | None = None,
     realized_cut_paths: Sequence[str] = (), nonredundant_k: int | None = None,
+    split: str = "train_fit",
 ) -> bool:
     sparse_success = float(exact_work) < float(full_work) - max(
         1.0e-9, 1.0e-12 * float(full_work)
     )
     required = int(exposure_record.get("required_complete_passes", 2))
     complete_pass_ids = set(map(int, exposure_record.get("completed_primary_pass_ids", [])))
-    row_families = exposure_record.get("resolved_path_exposure_by_row", {})
-    row_pass_ids: set[int] = set()
-    if row_id is not None and isinstance(row_families, Mapping):
-        for family in row_families.get(str(int(row_id)), []):
-            for item in family.get("primary_pass_observations", []):
-                pass_id = int(item["primary_pass"])
-                if pass_id in complete_pass_ids:
-                    row_pass_ids.add(pass_id)
+    path_k_pass_ids = set(_complete_path_k_pass_ids(
+        exposure_record, realized_cut_paths=realized_cut_paths,
+        nonredundant_k=nonredundant_k,
+    ))
+    if split == "train_fit":
+        row_families = exposure_record.get("resolved_path_exposure_by_row", {})
+        row_path_k_pass_ids: set[int] = set()
+        if row_id is not None and isinstance(row_families, Mapping):
+            for family in row_families.get(str(int(row_id)), []):
+                if list(family.get("realized_cut_paths", [])) != list(realized_cut_paths):
+                    continue
+                for item in family.get("primary_pass_observations", []):
+                    if item.get("realized_nonredundant_k") == nonredundant_k:
+                        row_path_k_pass_ids.add(int(item["primary_pass"]))
+        exposed_pass_ids = row_path_k_pass_ids & path_k_pass_ids
+    elif split in {"dev", "held_family_audit"}:
+        # Held layouts have no training row ID. Transfer exposure only when
+        # their resolved path and K occurred in two complete training passes.
+        exposed_pass_ids = path_k_pass_ids
+    else:
+        raise ValueError(f"Unknown action-table split: {split}")
     valid_current_execution = (
         action in WIND_ACTION_PATHS
         and _valid_realized_cut_paths(
@@ -372,10 +386,32 @@ def _trained_sparse_action(
         action != "full_access"
         and exposure_record.get("trained_action", False)
         and len(complete_pass_ids) >= required
-        and len(row_pass_ids & complete_pass_ids) >= required
+        and len(exposed_pass_ids & complete_pass_ids) >= required
         and valid_current_execution
         and sparse_success
     )
+
+
+def _complete_path_k_pass_ids(
+    exposure_record: Mapping[str, Any], *, realized_cut_paths: Sequence[str],
+    nonredundant_k: int | None,
+) -> list[int]:
+    """Find complete training passes containing this exact resolved cut and K."""
+    if nonredundant_k is None:
+        return []
+    pass_audits = exposure_record.get("realized_cut_paths_by_primary_pass", {})
+    if not isinstance(pass_audits, Mapping):
+        return []
+    path_key = json.dumps(list(realized_cut_paths), separators=(",", ":"))
+    result = []
+    for pass_id in exposure_record.get("completed_primary_pass_ids", []):
+        audit = pass_audits.get(str(pass_id), {})
+        if audit.get("complete_primary_pass") is not True:
+            continue
+        family = audit.get("resolved_path_families", {}).get(path_key, {})
+        if int(family.get("realized_nonredundant_k_counts", {}).get(str(nonredundant_k), 0)) > 0:
+            result.append(int(pass_id))
+    return sorted(result)
 
 
 def _row_action_exposure(
@@ -1430,6 +1466,7 @@ def _case_record(
             row_id=int(row_id),
             realized_cut_paths=metric.get("resolved_cut_paths", []),
             nonredundant_k=(None if action == "full_access" else int(metric["nonredundant_k"])),
+            split=split,
         )
         candidate = metric["candidate_role_rmse_mps"]
         action_rows.append({

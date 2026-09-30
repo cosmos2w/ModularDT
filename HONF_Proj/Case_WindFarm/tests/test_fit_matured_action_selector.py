@@ -42,7 +42,7 @@ def _table(tmp_path: Path, *, include_repeat: bool = False) -> tuple[Path, Path,
             realized_paths = list(requested_paths)
             if action_key != "full_access" and action_key not in exposure_by_action:
                 row_path_map = {}
-                for exposed_row in (1, 2, 3):
+                for exposed_row in (1, 2):
                     row_path_map[str(exposed_row)] = [{
                         "realized_cut_paths": list(SELECTOR.ACTION_PATHS[action_key]),
                         "primary_pass_observations": [
@@ -57,15 +57,19 @@ def _table(tmp_path: Path, *, include_repeat: bool = False) -> tuple[Path, Path,
                     "completed_primary_pass_ids": [2, 3],
                     "required_complete_passes": 2,
                     "trained_action": True,
-                    "training_row_count": 3,
+                    "training_row_count": 2,
                     "invalid_realized_cut_path_update_count": 0,
                     "invalid_realized_nonredundant_k_update_count": 0,
                     "invalid_realized_execution_update_count": 0,
                     "realized_cut_paths_by_primary_pass": {
                         str(pass_id): {
-                            "eligible_row_count": 3, "distinct_row_count": 3,
-                            "complete_primary_pass": True, "expected_row_count": 3,
-                            "resolved_path_families": {},
+                            "eligible_row_count": 2, "distinct_row_count": 2,
+                            "complete_primary_pass": True, "expected_row_count": 2,
+                            "resolved_path_families": {
+                                json.dumps(list(SELECTOR.ACTION_PATHS[action_key]), separators=(",", ":")): {
+                                    "realized_nonredundant_k_counts": {str(count): 2}
+                                }
+                            },
                         } for pass_id in (2, 3)
                     },
                     "resolved_path_exposure_by_row": row_path_map,
@@ -86,19 +90,19 @@ def _table(tmp_path: Path, *, include_repeat: bool = False) -> tuple[Path, Path,
                     "completed_primary_action_passes": 2,
                     "completed_primary_pass_ids": [2, 3],
                     "trained_action": action_key != "full_access",
-                    "training_row_count": 3,
+                    "training_row_count": 2,
                     "invalid_realized_cut_path_update_count": 0,
                     "invalid_realized_nonredundant_k_update_count": 0,
                     "invalid_realized_execution_update_count": 0,
                     "resolved_path_exposure_for_case": (
-                        exposure_by_action[action_key]["resolved_path_exposure_by_row"][str(row_id)]
+                        exposure_by_action[action_key]["resolved_path_exposure_by_row"].get(str(row_id), [])
                         if action_key != "full_access" else []
                     ),
                     "same_realized_path_primary_pass_ids": (
-                        [2, 3] if action_key != "full_access" else []
+                        [2, 3] if action_key != "full_access" and split == "train_fit" else []
                     ),
                     "same_realized_path_and_k_primary_pass_ids": (
-                        [2, 3] if action_key != "full_access" else []
+                        [2, 3] if action_key != "full_access" and split == "train_fit" else []
                     ),
                 }
                 rows.append({
@@ -173,6 +177,8 @@ def _table(tmp_path: Path, *, include_repeat: bool = False) -> tuple[Path, Path,
 def test_action_fit_keeps_held_labels_out_of_risk_weights_and_gate(tmp_path: Path) -> None:
     paths = _table(tmp_path)
     rows, metadata = SELECTOR._load_action_table(*paths)
+    assert "3" not in metadata["action_exposure_by_key"]["root"]["resolved_path_exposure_by_row"]
+    assert all(row.trained_sparse for row in rows if row.family_key == "layout_3" and not row.full_access)
     first, model = SELECTOR.fit_and_evaluate(rows, metadata, updates=2, seed=19)
     poisoned = [replace(row, candidate_role_error=torch.full((5,), 0.9))
                 if row.family_key == "layout_3" else row for row in rows]
