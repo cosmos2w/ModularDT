@@ -332,6 +332,39 @@ def _summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return summary
 
 
+def _checkpointed_training_updates(
+    updates_path: Path, *, checkpoint_update: int
+) -> list[dict[str, Any]]:
+    """Use only updates represented by the selected checkpoint lineage."""
+
+    update_rows = [
+        json.loads(line)
+        for line in updates_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    recovery_path = updates_path.parent / "recovery_events.jsonl"
+    archived_keys: set[str] = set()
+    if recovery_path.is_file():
+        for line in recovery_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            for field in ("orphaned_update_attempt_ids", "orphaned_attempt_keys"):
+                archived_keys.update(str(key) for key in event.get(field, []) if key)
+    accepted = [
+        row for row in update_rows
+        if int(row.get("update_count", -1)) <= int(checkpoint_update)
+        and str(row.get("optimizer_attempt_key", "")) not in archived_keys
+    ]
+    counts = Counter(int(row["update_count"]) for row in accepted)
+    duplicates = sorted(update for update, count in counts.items() if count != 1)
+    if duplicates:
+        raise ValueError(
+            f"checkpointed training exposure contains duplicate update IDs: {duplicates[:8]}"
+        )
+    return accepted
+
+
 def _summarize_training_exposure(
     updates_path: Path,
     *,
@@ -339,11 +372,9 @@ def _summarize_training_exposure(
     train_rows: list[int],
     layout_indices: np.ndarray,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    update_rows = [
-        json.loads(line)
-        for line in updates_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    update_rows = _checkpointed_training_updates(
+        updates_path, checkpoint_update=checkpoint_update
+    )
     sparse_rows = [
         row for row in update_rows
         if not row.get("full_access_replay", False)
@@ -413,11 +444,9 @@ def _summarize_paired_training_loss_tail(run_dir: Path, *, checkpoint_update: in
     by_arm: dict[str, dict[int, dict[str, Any]]] = {}
     for arm, directory in (("g_packet", "g_packet"), ("direct_pair", "direct_pair")):
         path = run_dir / "arms" / directory / "updates.jsonl"
-        records = [
-            json.loads(line)
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        records = _checkpointed_training_updates(
+            path, checkpoint_update=checkpoint_update
+        )
         by_arm[arm] = {
             int(record["update_count"]): record
             for record in records
