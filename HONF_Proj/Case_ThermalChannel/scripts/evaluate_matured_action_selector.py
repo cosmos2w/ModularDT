@@ -2289,6 +2289,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "role_relative_allowance": ROLE_RELATIVE_ALLOWANCE,
         "elapsed_seconds": stage_c.time.monotonic() - started,
     }
+    qualified_train_actions = {
+        row.action_key for row in primary_evidence_rows
+        if row.family_key in train_family_set and row.trained_sparse
+    }
     summary = {
         "status": (
             "completed_train_only_action_evaluation" if selector_fitted
@@ -2300,11 +2304,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             else "selector_not_fitted_no_qualified_actions"
         ),
         "exposure_qualified_sparse_actions": [
-            action for action in SPARSE_ACTION_KEYS if trained_sparse[action]
+            action for action in SPARSE_ACTION_KEYS if action in qualified_train_actions
         ],
         "sparse_actions_excluded_from_selector_fit": [
-            action for action in SPARSE_ACTION_KEYS if not trained_sparse[action]
+            action for action in SPARSE_ACTION_KEYS if action not in qualified_train_actions
         ],
+        "sparse_qualification_scope": (
+            "per-case exact baseline cut-path and nonredundant-K exposure in two "
+            "complete training-family passes, with strict same-case canonical-work saving; "
+            "action lists summarize qualified primary train rows only"
+        ),
         "identity": identity,
         "exposure": exposure,
         "maturity": exposure["maturation_gates"],
