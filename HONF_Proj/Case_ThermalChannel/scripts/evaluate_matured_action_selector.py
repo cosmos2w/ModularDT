@@ -174,6 +174,249 @@ def validate_family_partitions(
                     )
 
 
+def _valid_action_cut_paths(action: str, realized_paths: Any) -> bool:
+    """Check that an executed path cut is a complete ancestor collapse of an action."""
+    requested = THERMAL_ACTION_PATHS.get(str(action))
+    if requested is None or not isinstance(realized_paths, (list, tuple)) or not realized_paths:
+        return False
+    paths = tuple(str(value) for value in realized_paths)
+    if paths != tuple(sorted(set(paths))) or any(
+        len(path) > 3 or set(path) - {"L", "R"} for path in paths
+    ):
+        return False
+    if any(
+        left != right and (left.startswith(right) or right.startswith(left))
+        for index, left in enumerate(paths)
+        for right in paths[index + 1:]
+    ):
+        return False
+    if not math.isclose(
+        sum(2.0 ** (-len(path)) for path in paths), 1.0, rel_tol=0.0, abs_tol=1e-12
+    ):
+        return False
+    return not any(
+        not any(requested_path.startswith(path) for path in paths)
+        for requested_path in requested
+    ) and not any(
+        not any(requested_path.startswith(path) for requested_path in requested)
+        for path in paths
+    )
+
+
+def _validate_training_route_join(
+    *,
+    action: str,
+    metadata: Mapping[str, Any],
+    metric_attempted_step: Any,
+    route_record: Mapping[str, Any],
+    update: int,
+    expected_capacity: float,
+    extra_route: str | None,
+) -> tuple[tuple[str, ...], int | None]:
+    """Bind a scheduled action row to its exact executed baseline route record."""
+    evidence = metadata.get("realized_cut_evidence")
+    baseline = evidence.get("baseline") if isinstance(evidence, Mapping) else None
+    paths_value = route_record.get("frontier_paths")
+    if (
+        route_record.get("arm") != "G"
+        or route_record.get("state") != "baseline"
+        or int(route_record.get("case_index", -1)) != 0
+        or int(route_record.get("optimizer_update", -1)) != int(update)
+        or int(route_record.get("completed_updates_before_attempt", -2)) != int(update) - 1
+        or not isinstance(evidence, Mapping)
+        or evidence.get("status") != "realized_sparse_cut"
+        or int(evidence.get("completed_updates_before_attempt", -2)) != int(update) - 1
+        or int(route_record.get("attempted_optimizer_step_including_old_branch", -1))
+        != int(evidence.get("attempted_optimizer_step_including_old_branch", -2))
+        or int(metric_attempted_step if metric_attempted_step is not None else -1)
+        != int(evidence.get("attempted_optimizer_step_including_old_branch", -2))
+        or not isinstance(baseline, Mapping)
+        or metadata.get("action") != action
+        or metadata.get("phase") != "action_family"
+        or metadata.get("resolved_cut_paths_status") != "actual_baseline_hard_route_record"
+        or metadata.get("requested_cut_paths") != list(THERMAL_ACTION_PATHS.get(action, ()))
+        or not isinstance(paths_value, (list, tuple))
+        or not _valid_action_cut_paths(action, paths_value)
+        or list(metadata.get("resolved_cut_paths", ())) != list(paths_value)
+    ):
+        raise ValueError(
+            f"Thermal action {action!r} at update {update} does not match its executed baseline cut."
+        )
+
+    route_fields = (
+        "frontier", "frontier_paths", "raw_frontier_k", "nonredundant_k",
+        "nonredundant_k_status", "case_index",
+    )
+    if any(route_record.get(field) != baseline.get(field) for field in route_fields):
+        raise ValueError(
+            f"Thermal action {action!r} at update {update} disagrees with completed-step cut evidence."
+        )
+
+    capacity = float(metadata.get("capacity_fraction", math.nan))
+    if not math.isfinite(capacity) or not math.isclose(
+        capacity, expected_capacity, rel_tol=0.0, abs_tol=1e-12
+    ):
+        raise ValueError(f"Thermal action {action!r} at update {update} has an unexpected capacity.")
+    budgets = route_record.get("budgets")
+    routes = route_record.get("routes")
+    if not isinstance(budgets, Mapping) or not isinstance(routes, Mapping):
+        raise TypeError(f"Thermal action {action!r} at update {update} lacks executed route budgets.")
+    resolved_extra_route = extra_route
+    if resolved_extra_route is None:
+        resolved_extra_route = next((name for name in ("MM", "ME") if name in budgets), None)
+    if resolved_extra_route not in {"MM", "ME"}:
+        raise ValueError(f"Thermal action {action!r} at update {update} lacks its selected extra route.")
+    for mechanism in ("QE", resolved_extra_route):
+        route = routes.get(mechanism)
+        if (
+            mechanism not in budgets
+            or not math.isclose(float(budgets[mechanism]), capacity, rel_tol=0.0, abs_tol=1e-12)
+            or not isinstance(route, Mapping)
+            or not math.isclose(
+                float(route.get("requested_fraction", math.nan)),
+                capacity,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        ):
+            raise ValueError(
+                f"Thermal action {action!r} at update {update} has a route/capacity mismatch for {mechanism}."
+            )
+    return tuple(str(value) for value in paths_value), baseline.get("nonredundant_k")
+
+
+def _has_complete_training_route_binding(
+    *,
+    metadata: Mapping[str, Any],
+    metric_attempted_step: Any,
+    route_record: Mapping[str, Any],
+    extra_route: str | None,
+) -> bool:
+    """Return false for legacy rows that cannot establish a strict route join."""
+    evidence = metadata.get("realized_cut_evidence")
+    baseline = evidence.get("baseline") if isinstance(evidence, Mapping) else None
+    route_fields = (
+        "frontier", "frontier_paths", "raw_frontier_k", "nonredundant_k",
+        "nonredundant_k_status", "case_index",
+    )
+    extra = extra_route
+    budgets = route_record.get("budgets")
+    routes = route_record.get("routes")
+    if extra is None and isinstance(budgets, Mapping):
+        extra = next((name for name in ("MM", "ME") if name in budgets), None)
+    mechanisms = ("QE", extra) if extra in {"MM", "ME"} else ()
+    return (
+        metric_attempted_step is not None
+        and all(field in route_record for field in (
+            *route_fields,
+            "arm", "state", "optimizer_update", "completed_updates_before_attempt",
+            "attempted_optimizer_step_including_old_branch", "budgets", "routes",
+        ))
+        and bool(route_record.get("frontier_paths"))
+        and isinstance(budgets, Mapping)
+        and isinstance(routes, Mapping)
+        and bool(mechanisms)
+        and all(
+            mechanism in budgets
+            and isinstance(routes.get(mechanism), Mapping)
+            and "requested_fraction" in routes[mechanism]
+            for mechanism in mechanisms
+        )
+        and all(field in metadata for field in (
+            "action", "phase", "requested_cut_paths", "resolved_cut_paths",
+            "resolved_cut_paths_status", "capacity_fraction", "realized_cut_evidence",
+        ))
+        and bool(metadata.get("requested_cut_paths"))
+        and bool(metadata.get("resolved_cut_paths"))
+        and isinstance(evidence, Mapping)
+        and all(field in evidence for field in (
+            "status", "completed_updates_before_attempt",
+            "attempted_optimizer_step_including_old_branch", "baseline",
+        ))
+        and isinstance(baseline, Mapping)
+        and all(field in baseline for field in route_fields)
+    )
+
+
+def _query_id_overlap_audit(primary: Any, repeat: Any) -> dict[str, Any]:
+    """Measure primary/repeat sampled query identity intersections by role."""
+    primary_roles = primary.baseline.output.roles
+    repeat_roles = repeat.baseline.output.roles
+    role_overlap: dict[str, Any] = {}
+    sampled_roles = ("fluid_fields", "solid_temperature")
+    role_names = set(primary_roles) | set(repeat_roles) | set(sampled_roles)
+    for role_name in sorted(role_names):
+        primary_role = primary_roles.get(role_name)
+        repeat_role = repeat_roles.get(role_name)
+        primary_values = getattr(primary_role, "query_ids", None)
+        repeat_values = getattr(repeat_role, "query_ids", None)
+        primary_ids = tuple(primary_values) if primary_values is not None else ()
+        repeat_ids = tuple(repeat_values) if repeat_values is not None else ()
+        comparable = bool(primary_role is not None and repeat_role is not None and primary_ids and repeat_ids)
+        if comparable:
+            primary_set = {str(value) for value in primary_ids}
+            repeat_set = {str(value) for value in repeat_ids}
+            role_overlap[role_name] = {
+                "comparable": True,
+                "primary_unique_query_count": len(primary_set),
+                "repeat_unique_query_count": len(repeat_set),
+                "intersection_count": len(primary_set & repeat_set),
+                "primary_query_ids_sha256": hashlib.sha256(
+                    json.dumps(sorted(primary_set), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                ).hexdigest(),
+                "repeat_query_ids_sha256": hashlib.sha256(
+                    json.dumps(sorted(repeat_set), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                ).hexdigest(),
+            }
+        else:
+            role_overlap[role_name] = {
+                "comparable": False,
+                "primary_unique_query_count": None,
+                "repeat_unique_query_count": None,
+                "intersection_count": None,
+                "primary_query_ids_sha256": None,
+                "repeat_query_ids_sha256": None,
+            }
+    sampled_comparable = bool(sampled_roles) and all(
+        role_overlap[role]["comparable"] for role in sampled_roles
+    )
+    return {
+        "status": "measured_query_id_intersections" if sampled_comparable else "independently_reseeded_overlap_unavailable",
+        "sampled_roles": list(sampled_roles),
+        "sampled_roles_disjoint": (
+            all(role_overlap[role]["intersection_count"] == 0 for role in sampled_roles)
+            if sampled_comparable else None
+        ),
+        "complete_role_panel_disjoint": (
+            all(item["intersection_count"] == 0 for item in role_overlap.values())
+            if role_overlap and all(item["comparable"] for item in role_overlap.values()) else None
+        ),
+        "role_overlap": role_overlap,
+    }
+
+
+def _partition_query_repeat_rows(
+    rows: Sequence[ActionEvidenceRow],
+) -> tuple[list[ActionEvidenceRow], list[ActionEvidenceRow]]:
+    """Keep same-family query repeats separate from all primary evidence rows."""
+    primary_rows = []
+    repeat_rows = []
+    for row in rows:
+        panel_id = row.case_key.rsplit("|", maxsplit=1)[-1]
+        (repeat_rows if panel_id.startswith("query_repeat_") else primary_rows).append(row)
+    return primary_rows, repeat_rows
+
+
+def _primary_training_rows(
+    rows: Sequence[ActionEvidenceRow],
+    *,
+    train_families: set[str],
+) -> list[ActionEvidenceRow]:
+    """Select only primary panels from the declared train families for fitting."""
+    primary_rows, _ = _partition_query_repeat_rows(rows)
+    return [row for row in primary_rows if row.family_key in train_families]
+
+
 def _load_checkpoint_binding(
     manifest_path: Path,
     checkpoint_path: Path,
@@ -240,6 +483,7 @@ def summarize_training_exposure(
     family_ids: Sequence[str],
     expected_capacity: float = PRIMARY_CAPACITY,
     route_work_path: Path | None = None,
+    extra_route: str | None = None,
 ) -> dict[str, Any]:
     """Bind action exposure to completed updates and their executed baseline cuts."""
     realized_by_update: dict[int, dict[str, Any]] = {}
@@ -262,12 +506,12 @@ def summarize_training_exposure(
                 paths = tuple(str(value) for value in record.get("frontier_paths") or ())
                 if paths and len(paths) != len(frontier):
                     raise ValueError(f"Executed path/count mismatch at {route_work_path}:{line_number}.")
-                candidate = {"frontier": frontier, "paths": paths}
+                candidate = {"frontier": frontier, "paths": paths, "record": record}
                 prior = realized_by_update.get(update)
                 if prior is not None:
                     if prior["frontier"] != frontier or (
                         prior["paths"] and paths and prior["paths"] != paths
-                    ):
+                    ) or prior["record"].get("budgets") != record.get("budgets"):
                         raise ValueError(f"Conflicting executed baseline cuts at update {update}.")
                     if prior["paths"]:
                         continue
@@ -302,6 +546,7 @@ def summarize_training_exposure(
 
     family_set = {str(value) for value in family_ids}
     counts: Counter[tuple[str, str, str, float]] = Counter()
+    certified_counts: Counter[tuple[str, str, str, float]] = Counter()
     pass_families: dict[tuple[str, int, float], Counter[str]] = defaultdict(Counter)
     scaffold_counts: Counter[str] = Counter()
     historical_visits = 0
@@ -310,6 +555,7 @@ def summarize_training_exposure(
     realized_frontier_counts: dict[str, Counter[str]] = defaultdict(Counter)
     realized_path_counts: dict[str, Counter[str]] = defaultdict(Counter)
     missing_realized_updates: dict[str, list[int]] = defaultdict(list)
+    uncertified_realized_reasons: dict[str, dict[int, str]] = defaultdict(dict)
     for update, row in by_update.items():
         family = str(row.get("training_family_id") or "")
         metadata = row.get("training_metadata") or {}
@@ -326,14 +572,41 @@ def summarize_training_exposure(
             counts[(family, action, phase, capacity)] += 1
             if phase == "action_family" and math.isclose(capacity, expected_capacity):
                 realized = realized_by_update.get(update)
-                if route_work_path is not None and realized is None:
+                metric_attempted_step = row.get("attempted_optimizer_steps_including_old_branch")
+                if route_work_path is None:
                     missing_realized_updates[action].append(update)
+                    uncertified_realized_reasons[action][update] = "route_work_ledger_unavailable"
+                    continue
+                if realized is None:
+                    missing_realized_updates[action].append(update)
+                    uncertified_realized_reasons[action][update] = "no_baseline_route_record"
+                    continue
+                if not _has_complete_training_route_binding(
+                    metadata=metadata,
+                    metric_attempted_step=metric_attempted_step,
+                    route_record=realized["record"],
+                    extra_route=extra_route,
+                ):
+                    missing_realized_updates[action].append(update)
+                    uncertified_realized_reasons[action][update] = (
+                        "legacy_or_incomplete_route_metric_binding_fields"
+                    )
                     continue
                 if realized is not None:
+                    action_paths, _realized_k = _validate_training_route_join(
+                        action=action,
+                        metadata=metadata,
+                        metric_attempted_step=metric_attempted_step,
+                        route_record=realized["record"],
+                        update=update,
+                        expected_capacity=expected_capacity,
+                        extra_route=extra_route,
+                    )
+                    certified_counts[(family, action, phase, capacity)] += 1
                     frontier = tuple(realized["frontier"])
                     realized_k_counts[action][len(frontier)] += 1
                     realized_frontier_counts[action][",".join(map(str, frontier))] += 1
-                    paths = tuple(realized["paths"])
+                    paths = action_paths
                     if paths:
                         realized_path_counts[action]["|".join(paths)] += 1
                 try:
@@ -352,9 +625,17 @@ def summarize_training_exposure(
             if all(families[family] >= 1 for family in family_set):
                 complete_passes.append(primary_pass)
                 action_passes[str(primary_pass)] = sum(families.values())
-        per_family = {
+        per_family_raw = {
             family: sum(
                 count for (logged_family, logged_action, phase, capacity), count in counts.items()
+                if logged_family == family and logged_action == action
+                and phase == "action_family" and math.isclose(capacity, expected_capacity)
+            )
+            for family in sorted(family_set)
+        }
+        per_family_audited = {
+            family: sum(
+                count for (logged_family, logged_action, phase, capacity), count in certified_counts.items()
                 if logged_family == family and logged_action == action
                 and phase == "action_family" and math.isclose(capacity, expected_capacity)
             )
@@ -367,12 +648,23 @@ def summarize_training_exposure(
             "trained_sparse": (
                 len(complete_passes) >= TRAIN_PASSES_PER_ACTION
                 and route_work_path is not None
-                and not missing_realized_updates[action]
             ),
-            "per_family_action_capacity_updates": per_family,
+            "per_family_raw_scheduled_action_capacity_updates": per_family_raw,
+            "per_family_audited_action_capacity_updates": per_family_audited,
+            "per_family_uncertified_action_capacity_updates": {
+                family: per_family_raw[family] - per_family_audited[family]
+                for family in sorted(family_set)
+            },
             "updates_by_primary_pass": action_passes,
-            "realized_baseline_cut_audited": route_work_path is not None,
+            "realized_baseline_cut_audited": (
+                sum(per_family_audited.values()) > 0
+                and sum(per_family_audited.values()) == sum(per_family_raw.values())
+            ),
             "missing_realized_baseline_updates": sorted(missing_realized_updates[action]),
+            "uncertified_realized_baseline_reasons": {
+                str(update): reason
+                for update, reason in sorted(uncertified_realized_reasons[action].items())
+            },
             "realized_baseline_raw_k_counts": dict(sorted(realized_k_counts[action].items())),
             "realized_baseline_frontier_index_counts": dict(sorted(realized_frontier_counts[action].items())),
             "realized_baseline_path_counts": dict(sorted(realized_path_counts[action].items())),
@@ -539,6 +831,9 @@ def _load_action_stencils(args: argparse.Namespace) -> tuple[dict[str, list[Any]
         atlas_dir / f"train_{forward.TRAIN_ATLAS_IDS[0]}_responses.npz"
     )
     repeat = _target_free_pair(repeat_raw, seed=args.panel_seed + 1009)
+    if repeat.physical_family_id != train[0].physical_family_id:
+        raise ValueError("Query-repeat atlas does not match the first primary train family.")
+    repeat_query_audit = _query_id_overlap_audit(train[0], repeat)
     return {
         "train": train,
         "dev": dev,
@@ -549,10 +844,14 @@ def _load_action_stencils(args: argparse.Namespace) -> tuple[dict[str, list[Any]
         "atlas_file_sha256": atlas_hashes,
         "query_sampling": "fixed geometry and masks; no target-value hot-point selection",
         "primary_panel_seed": args.panel_seed,
-        "disjoint_query_repeat": {
+        "query_repeat_audit": {
             "family_id": repeat.physical_family_id,
             "panel_seed": args.panel_seed + 1009,
-            "partition": "train; same physical family remains grouped in cross-fit",
+            "partition": (
+                "same-family diagnostic; excluded from primary fitting, cross-fit, and calibration"
+            ),
+            "independent_generalization_evidence": False,
+            "query_id_overlap": repeat_query_audit,
         },
         "known_duplicate_alias_check": "only documented 0001+0273 duplicate is canonicalized before exact-context split validation",
         "shared_geometry_across_partitions": shared_geometry_across_splits(splits),
@@ -1584,6 +1883,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         checkpoint_update=forward_update,
         family_ids=train_families,
         route_work_path=route_work_path,
+        extra_route=extra_route,
     )
     exposure["training_steps_path"] = str(metric_path)
     exposure["training_steps_sha256"] = _sha256(metric_path)
@@ -1655,7 +1955,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         for index, stencil in enumerate(stencils_by_split[split]):
             all_stencils.append((split, stencil.physical_family_id, f"primary_{index}", stencil))
     for index, stencil in enumerate(stencils_by_split["train_query_repeat"]):
-        all_stencils.append(("train", stencil.physical_family_id, f"query_repeat_{index}", stencil))
+        all_stencils.append(("train_query_repeat", stencil.physical_family_id, f"query_repeat_{index}", stencil))
     for split, family_id, panel_id, stencil in all_stencils:
         module_counts[family_id] = len(stencil.baseline.design.active_modules)
         local_rows, local_table, case_record = _metric_case(
@@ -1695,15 +1995,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         case_key: torch.as_tensor(record["absolute_allowance"], dtype=torch.float64)
         for case_key, record in case_metadata.items()
     }
+    primary_evidence_rows, query_repeat_evidence_rows = _partition_query_repeat_rows(evidence_rows)
     fixed_role_log_limits, fixed_train_gate_rows = _fixed_train_role_log_limits(
-        evidence_rows,
+        primary_evidence_rows,
         train_families=train_family_set,
         allowances=allowances,
     )
-    train_case_rows = [row for row in evidence_rows if row.family_key in train_family_set]
+    train_case_rows = _primary_training_rows(evidence_rows, train_families=train_family_set)
     fit_bundle = _fit_selector_models(
         train_case_rows,
-        evidence_rows,
+        primary_evidence_rows,
         train_families=train_families,
         current_forward_sha256=endpoint_sha,
         seed=args.risk_seed,
@@ -1711,11 +2012,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     selector_fitted = fit_bundle is not None
     crossfit = fit_bundle["crossfit"] if fit_bundle is not None else None
     neural_final = fit_bundle["neural_final"] if fit_bundle is not None else None
+    ridge_final = fit_bundle["ridge_final"] if fit_bundle is not None else None
     neural_predictions = fit_bundle["neural_predictions"] if fit_bundle is not None else {}
     ridge_predictions = fit_bundle["ridge_predictions"] if fit_bundle is not None else {}
+    query_repeat_neural_predictions: dict[tuple[str, str], torch.Tensor] = {}
+    query_repeat_ridge_predictions: dict[tuple[str, str], torch.Tensor] = {}
+    if selector_fitted and query_repeat_evidence_rows:
+        with torch.no_grad():
+            for row in query_repeat_evidence_rows:
+                key = (row.case_key, row.action_key)
+                query_repeat_neural_predictions[key] = neural_final.model(
+                    row.packet_rows,
+                    row.budget_vector,
+                    row.receiver_role_features,
+                    nonredundant_k=row.nonredundant_k,
+                ).detach().cpu()
+                query_repeat_ridge_predictions[key] = ridge_final.predict(row).detach().cpu()
     timed_risk_selection = (
         _time_neural_risk_selection(
-            evidence_rows,
+            primary_evidence_rows,
             neural_fit=neural_final,
             fixed_role_log_limits=fixed_role_log_limits,
             empirical_margin=crossfit.neural_upper_margin,
@@ -1732,7 +2047,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     ranking_summaries = []
     fixed_summaries = []
     for split, families in split_sets.items():
-        split_rows = [row for row in evidence_rows if row.family_key in families]
+        split_rows = [row for row in primary_evidence_rows if row.family_key in families]
         case_keys = {row.case_key for row in split_rows}
         split_allowances = {key: allowances[key] for key in case_keys}
         if selector_fitted:
@@ -1759,7 +2074,52 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             split_rows, split=split, family_ids=families, allowances=split_allowances,
         ))
 
-    k_summary = _k_summary(evidence_rows, split_sets, module_counts)
+    k_summary = _k_summary(primary_evidence_rows, split_sets, module_counts)
+    query_repeat_fixed_summaries = _fixed_action_summary(
+        query_repeat_evidence_rows,
+        split="train_query_repeat_diagnostic",
+        family_ids=train_family_set,
+        allowances=allowances,
+    )
+    query_repeat_policy_summaries = []
+    query_repeat_timed_risk_selection = []
+    query_repeat_k_summary = []
+    if selector_fitted and query_repeat_evidence_rows:
+        query_repeat_allowances = {
+            key: allowances[key]
+            for key in {row.case_key for row in query_repeat_evidence_rows}
+        }
+        for model_name, prediction_map, margin in (
+            ("neural_predeclared", query_repeat_neural_predictions, crossfit.neural_upper_margin),
+            ("ridge_comparison", query_repeat_ridge_predictions, crossfit.ridge_upper_margin),
+        ):
+            repeat_results = evaluate_action_policy(
+                query_repeat_evidence_rows,
+                prediction_map,
+                current_forward_sha256=endpoint_sha,
+                fixed_role_log_limits=fixed_role_log_limits,
+                absolute_allowance_by_case=query_repeat_allowances,
+                empirical_margin=margin,
+                relative_allowance=ROLE_RELATIVE_ALLOWANCE,
+            )
+            query_repeat_policy_summaries.append(summarize_policy_results(
+                repeat_results,
+                split="train_query_repeat_diagnostic_same_family",
+                model_name=model_name,
+            ))
+        query_repeat_timed_risk_selection = _time_neural_risk_selection(
+            query_repeat_evidence_rows,
+            neural_fit=neural_final,
+            fixed_role_log_limits=fixed_role_log_limits,
+            empirical_margin=crossfit.neural_upper_margin,
+            device=device,
+        )
+    if query_repeat_evidence_rows:
+        query_repeat_k_summary = _k_summary(
+            query_repeat_evidence_rows,
+            {"train_query_repeat_diagnostic": train_family_set},
+            module_counts,
+        )
     output_rows = []
     for row in table:
         case_key = str(row["case_key"])
@@ -1774,10 +2134,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 + allowances[case_key]
             ).all())
         )
-        for model_name, prediction_map in (("neural", neural_predictions), ("ridge", ridge_predictions)):
+        for model_name, prediction_map in (
+            ("neural", {**neural_predictions, **query_repeat_neural_predictions}),
+            ("ridge", {**ridge_predictions, **query_repeat_ridge_predictions}),
+        ):
             prediction = prediction_map.get((case_key, action))
             row[f"{model_name}_predicted_log_risk"] = None if prediction is None else prediction.tolist()
         output_rows.append(row)
+    primary_output_rows = [row for row in output_rows if row["split"] != "train_query_repeat"]
+    query_repeat_output_rows = [row for row in output_rows if row["split"] == "train_query_repeat"]
 
     identity = {
         "driver": str(Path(__file__).resolve()),
@@ -1817,6 +2182,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "organizer_weights_unchanged": True,
         "incumbent_weights_unchanged": True,
         "query_panel_seed": args.panel_seed,
+        "query_repeat_training_use": (
+            "separate_same_family_diagnostic; excluded from primary fitting, cross-fit calibration, "
+            "fixed train limits, and primary train summaries"
+        ),
         "fit_seed": args.risk_seed,
         "margin_source": "train-family grouped crossfit residuals only" if selector_fitted else None,
         "policy_model_predeclared": "neural; ridge remains a same-split comparison and is not selected using dev/held results",
@@ -1865,18 +2234,33 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "families": list(train_families),
         },
         "policy_results": policy_summaries,
+        "train_query_repeat_diagnostic": {
+            "status": "same_family_query_repeat_diagnostic_only",
+            "family_id": split_manifest["query_repeat_audit"]["family_id"],
+            "relationship_to_primary": "same physical family as the first primary train panel",
+            "independent_generalization_evidence": False,
+            "excluded_from_selector_fit_crossfit_and_fixed_limits": True,
+            "query_id_overlap": split_manifest["query_repeat_audit"]["query_id_overlap"],
+            "measured_fixed_action_results": query_repeat_fixed_summaries,
+            "policy_results_using_final_primary_fit": query_repeat_policy_summaries,
+            "policy_results_are_diagnostic_only": True,
+            "timed_risk_selection": query_repeat_timed_risk_selection,
+            "nonredundant_k_by_action_and_m": query_repeat_k_summary,
+            "action_rows": len(query_repeat_output_rows),
+            "case_panels": len({row["case_key"] for row in query_repeat_output_rows}),
+        },
         "fixed_train_role_log_limits": fixed_role_log_limits.tolist(),
         "timing": {
             "score_hard_plan_and_feature_prep_by_action": {
                 action: {
-                    "case_count": sum(1 for row in output_rows if row["action"] == action),
+                    "case_count": sum(1 for row in primary_output_rows if row["action"] == action),
                     "mean_seconds": float(np.mean([
                         row["paired_selector_input_prep_seconds"]
-                        for row in output_rows if row["action"] == action
+                        for row in primary_output_rows if row["action"] == action
                     ])),
                     "median_seconds": float(np.median([
                         row["paired_selector_input_prep_seconds"]
-                        for row in output_rows if row["action"] == action
+                        for row in primary_output_rows if row["action"] == action
                     ])),
                 }
                 for action in ACTION_KEYS
@@ -1895,18 +2279,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 action: {
                     "mean_seconds": float(np.mean([
                         row["paired_baseline_i_plus_complete_call_latency_seconds"]
-                        for row in output_rows if row["action"] == action
+                        for row in primary_output_rows if row["action"] == action
                     ])),
                     "median_seconds": float(np.median([
                         row["paired_baseline_i_plus_complete_call_latency_seconds"]
-                        for row in output_rows if row["action"] == action
+                        for row in primary_output_rows if row["action"] == action
                     ])),
                 }
                 for action in ACTION_KEYS
             },
             "fixed_run1804_complete_call": {
-                "mean_seconds": float(np.mean([row["fixed_run1804_complete_call_latency_seconds"] for row in output_rows if row["action"] == "full_access"])),
-                "median_seconds": float(np.median([row["fixed_run1804_complete_call_latency_seconds"] for row in output_rows if row["action"] == "full_access"])),
+                "mean_seconds": float(np.mean([row["fixed_run1804_complete_call_latency_seconds"] for row in primary_output_rows if row["action"] == "full_access"])),
+                "median_seconds": float(np.median([row["fixed_run1804_complete_call_latency_seconds"] for row in primary_output_rows if row["action"] == "full_access"])),
             },
             "synchronized": True,
             "query_batch_size": 512,
@@ -1918,9 +2302,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "label_roles": [item["name"] for item in stage_c._role_rows(stencils_by_split["train"][0])],
         "action_rows": len(output_rows),
         "case_panels": len(case_metadata),
+        "primary_action_rows": len(primary_output_rows),
+        "primary_case_panels": len({row["case_key"] for row in primary_output_rows}),
         "reference_solver_attempts": 0,
         "limitations": [
             "The two dev and two held-family audit contexts are development evidence, not untouched generalization.",
+            "The train query-repeat panel shares the first train family and is a diagnostic, not new-family generalization evidence.",
             "Run1804 epoch 4738 is the fixed dense native field incumbent; comparison to its saved outputs is not a global superiority claim.",
             "Canonical pair work and live executor rows are reported separately; support counts are not speedup.",
             "Cross-fit residual margins are empirical for this small selected family set, not formal coverage guarantees.",

@@ -54,9 +54,19 @@ def test_policy_summary_separates_selected_errors_from_candidate_diagnostics() -
 def test_training_exposure_requires_executed_baseline_cuts(tmp_path: Path) -> None:
     steps = tmp_path / "training_steps.jsonl"
     routes = tmp_path / "route_work.jsonl"
-    step_rows = [
-        {
+    def records(update: int, primary_pass: int, paths: tuple[str, ...], frontier: tuple[int, ...]):
+        baseline = {
+            "frontier": list(frontier),
+            "frontier_paths": list(paths),
+            "raw_frontier_k": len(frontier),
+            "nonredundant_k": len(frontier),
+            "nonredundant_k_status": "source_signature_quotient",
+            "case_index": 0,
+        }
+        attempted = 1000 + update
+        step = {
             "completed_update": update,
+            "attempted_optimizer_steps_including_old_branch": attempted,
             "training_family_id": "family-a",
             "historical_case_id": f"history-{update}",
             "training_metadata": {
@@ -64,31 +74,144 @@ def test_training_exposure_requires_executed_baseline_cuts(tmp_path: Path) -> No
                 "phase": "action_family",
                 "primary_pass": primary_pass,
                 "capacity_fraction": selector.PRIMARY_CAPACITY,
+                "requested_cut_paths": list(selector.THERMAL_ACTION_PATHS["four_packet"]),
+                "resolved_cut_paths": list(paths),
+                "resolved_cut_paths_status": "actual_baseline_hard_route_record",
+                "realized_cut_evidence": {
+                    "status": "realized_sparse_cut",
+                    "completed_updates_before_attempt": update - 1,
+                    "attempted_optimizer_step_including_old_branch": attempted,
+                    "baseline": baseline,
+                },
                 "full_access_replay": False,
             },
         }
-        for update, primary_pass in ((1, 2), (2, 5))
-    ]
+        route = {
+            "arm": "G",
+            "state": "baseline",
+            "case_index": 0,
+            "optimizer_update": update,
+            "completed_updates_before_attempt": update - 1,
+            "attempted_optimizer_step_including_old_branch": attempted,
+            **baseline,
+            "budgets": {"QE": selector.PRIMARY_CAPACITY, "MM": selector.PRIMARY_CAPACITY},
+            "routes": {
+                "QE": {"requested_fraction": selector.PRIMARY_CAPACITY},
+                "MM": {"requested_fraction": selector.PRIMARY_CAPACITY},
+            },
+        }
+        return step, route
+
+    step_rows, route_rows = zip(
+        records(1, 2, ("L", "R"), (3, 4)),
+        records(2, 5, ("LL", "LR", "RL", "RR"), (1, 2, 3, 4)),
+        strict=True,
+    )
     steps.write_text("".join(json.dumps(row) + "\n" for row in step_rows), encoding="utf-8")
-    route_rows = [
-        {"arm": "G", "optimizer_update": 1, "state": "baseline", "frontier": [3, 4, 5, 6]},
-        {"arm": "G", "optimizer_update": 2, "state": "baseline", "frontier": [1, 2]},
-    ]
     routes.write_text("".join(json.dumps(row) + "\n" for row in route_rows), encoding="utf-8")
 
     measured = selector.summarize_training_exposure(
         steps, checkpoint_update=2, family_ids=("family-a",), route_work_path=routes,
+        extra_route="MM",
     )["per_action"]["four_packet"]
     assert measured["trained_sparse"]
     assert measured["realized_baseline_raw_k_counts"] == {2: 1, 4: 1}
+    assert measured["realized_baseline_path_counts"] == {"L|R": 1, "LL|LR|RL|RR": 1}
     assert measured["requested_action_is_path_resolving_family"]
+    assert measured["per_family_raw_scheduled_action_capacity_updates"] == {"family-a": 2}
+    assert measured["per_family_audited_action_capacity_updates"] == {"family-a": 2}
+    assert measured["realized_baseline_cut_audited"]
+
+    mismatch = dict(route_rows[0])
+    mismatch["frontier_paths"] = ["LL", "RR"]
+    routes.write_text(json.dumps(mismatch) + "\n" + json.dumps(route_rows[1]) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match its executed baseline cut"):
+        selector.summarize_training_exposure(
+            steps, checkpoint_update=2, family_ids=("family-a",), route_work_path=routes,
+            extra_route="MM",
+        )
 
     routes.write_text(json.dumps(route_rows[0]) + "\n", encoding="utf-8")
     missing = selector.summarize_training_exposure(
         steps, checkpoint_update=2, family_ids=("family-a",), route_work_path=routes,
+        extra_route="MM",
     )["per_action"]["four_packet"]
     assert not missing["trained_sparse"]
     assert missing["missing_realized_baseline_updates"] == [2]
+    assert not missing["realized_baseline_cut_audited"]
+
+    legacy_route = {
+        "arm": "G",
+        "state": "baseline",
+        "optimizer_update": 1,
+        "frontier": [0],
+    }
+    later_step, later_route = records(3, 8, ("LL", "LR", "RL", "RR"), (1, 2, 3, 4))
+    steps.write_text(
+        "".join(json.dumps(row) + "\n" for row in step_rows)
+        + json.dumps(later_step) + "\n",
+        encoding="utf-8",
+    )
+    routes.write_text(
+        json.dumps(legacy_route) + "\n" + json.dumps(route_rows[1]) + "\n"
+        + json.dumps(later_route) + "\n",
+        encoding="utf-8",
+    )
+    legacy = selector.summarize_training_exposure(
+        steps, checkpoint_update=3, family_ids=("family-a",), route_work_path=routes,
+        extra_route="MM",
+    )["per_action"]["four_packet"]
+    assert legacy["complete_primary_pass_ids"] == [5, 8]
+    assert legacy["trained_sparse"]
+    assert legacy["missing_realized_baseline_updates"] == [1]
+    assert legacy["uncertified_realized_baseline_reasons"] == {
+        "1": "legacy_or_incomplete_route_metric_binding_fields"
+    }
+    assert legacy["per_family_raw_scheduled_action_capacity_updates"] == {"family-a": 3}
+    assert legacy["per_family_audited_action_capacity_updates"] == {"family-a": 2}
+    assert legacy["per_family_uncertified_action_capacity_updates"] == {"family-a": 1}
+    assert not legacy["realized_baseline_cut_audited"]
+
+
+def test_query_repeat_audit_measures_intersections_and_labels_missing_ids() -> None:
+    def stencil(**role_ids: tuple[str, ...] | None) -> SimpleNamespace:
+        roles = {
+            name: SimpleNamespace(query_ids=ids)
+            for name, ids in role_ids.items()
+        }
+        return SimpleNamespace(
+            baseline=SimpleNamespace(output=SimpleNamespace(roles=roles))
+        )
+
+    audit = selector._query_id_overlap_audit(
+        stencil(fluid_fields=("f0", "f1"), solid_temperature=("s0", "s1")),
+        stencil(fluid_fields=("f1", "f2"), solid_temperature=("s2",)),
+    )
+    assert audit["status"] == "measured_query_id_intersections"
+    assert audit["role_overlap"]["fluid_fields"]["intersection_count"] == 1
+    assert audit["role_overlap"]["solid_temperature"]["intersection_count"] == 0
+    assert not audit["sampled_roles_disjoint"]
+
+    unavailable = selector._query_id_overlap_audit(
+        stencil(fluid_fields=("f0",), solid_temperature=None),
+        stencil(fluid_fields=("f1",), solid_temperature=None),
+    )
+    assert unavailable["status"] == "independently_reseeded_overlap_unavailable"
+    assert unavailable["sampled_roles_disjoint"] is None
+
+
+def test_query_repeat_is_excluded_from_primary_training_rows() -> None:
+    primary = SimpleNamespace(family_key="family-a", case_key="family-a|primary_0")
+    repeat = SimpleNamespace(family_key="family-a", case_key="family-a|query_repeat_0")
+    dev = SimpleNamespace(family_key="family-b", case_key="family-b|primary_0")
+
+    fit_rows = selector._primary_training_rows(
+        [primary, repeat, dev], train_families={"family-a"}
+    )
+    primary_rows, repeat_rows = selector._partition_query_repeat_rows([primary, repeat, dev])
+    assert fit_rows == [primary]
+    assert primary_rows == [primary, dev]
+    assert repeat_rows == [repeat]
 
 
 def test_exact_context_partition_allows_correlated_reynolds_contexts_and_catches_known_alias() -> None:
