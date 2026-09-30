@@ -1,10 +1,11 @@
 """Measure the Wind G cut family at one immutable selected checkpoint.
 
 Only G actions enter the flat action table. Retained W-full and same-G full
-predictions, plus selected P direct and P full controls, are measured beside
-those actions and kept outside selector training rows. Planner features use
-current inputs, realized G permissions, and native geometry; reference targets
-are used only for the reported metrics.
+predictions, plus root-union, count-matched P, geometry, rewire, fixed-feature,
+selected P direct, and P full controls, are measured beside those actions and
+kept outside selector training rows. Planner features use current inputs,
+realized G permissions, and native geometry; reference targets are used only
+for the reported metrics.
 """
 
 from __future__ import annotations
@@ -59,6 +60,7 @@ Q2048_ROLE_COUNTS = {
     "volume": 1024, "hub_slab": 256, "downstream_envelope": 256,
     "near_turbine": 256, "background": 256,
 }
+Q5_FEATURE_ROLE_COUNTS = {role: 1 for role in runner.ROLE_NAMES}
 
 
 def _sha256(path: Path) -> str:
@@ -546,6 +548,274 @@ def _metric_row(
     return role_rmse, distortion
 
 
+def _nearest_geometry_membership(
+    packet_centers: np.ndarray,
+    source_coordinates: np.ndarray,
+    source_validity: np.ndarray,
+    packet_sizes: np.ndarray,
+    coordinate_scale: np.ndarray,
+) -> np.ndarray:
+    """Choose each packet's nearest valid sources while preserving its size."""
+    centers = np.asarray(packet_centers, dtype=np.float64)
+    sources = np.asarray(source_coordinates, dtype=np.float64)
+    valid = np.asarray(source_validity, dtype=bool)
+    sizes = np.asarray(packet_sizes, dtype=np.int64)
+    scale = np.asarray(coordinate_scale, dtype=np.float64)
+    if centers.ndim != 2 or sources.ndim != 2 or centers.shape[1] != sources.shape[1]:
+        raise ValueError("Packet centers and source coordinates must share [count,dimension]")
+    if valid.shape != (sources.shape[0],) or sizes.shape != (centers.shape[0],):
+        raise ValueError("Geometry support validity and packet sizes do not align")
+    if scale.shape != (centers.shape[1],) or np.any(~np.isfinite(scale)) or np.any(scale <= 0.0):
+        raise ValueError("Geometry support scale must be finite and positive")
+    if np.any(~np.isfinite(centers)) or np.any(~np.isfinite(sources)):
+        raise ValueError("Geometry support coordinates must be finite")
+    if np.any(sizes < 0) or np.any(sizes > int(valid.sum())):
+        raise ValueError("Geometry packet size exceeds the valid source population")
+    membership = np.zeros((centers.shape[0], sources.shape[0]), dtype=np.uint8)
+    eligible = np.flatnonzero(valid)
+    scaled_sources = sources[eligible] / scale[None, :]
+    for row, (center, size) in enumerate(zip(centers, sizes, strict=True)):
+        count = int(size)
+        if count == 0:
+            continue
+        squared_distance = ((scaled_sources - center[None, :] / scale[None, :]) ** 2).sum(axis=1)
+        # Source index is the deterministic tie break after geometric distance.
+        order = np.lexsort((eligible, squared_distance))
+        membership[row, eligible[order[:count]]] = 1
+    return membership
+
+
+def _geometry_action_masks(
+    *, plan: Any, encoded: Any, tree: Any, cut: tuple[int, ...]
+) -> dict[str, np.ndarray]:
+    indices = torch.as_tensor(cut, device=plan.split_gates.device, dtype=torch.long)
+    universe = tree.universe
+    coordinates = universe.coordinates.detach().cpu().numpy()
+    weights = universe.weights.detach().cpu().numpy()
+    centers = np.stack([
+        (coordinates[list(tree.nodes[node].anchor_indices)]
+         * weights[list(tree.nodes[node].anchor_indices), None]).sum(axis=0)
+        / weights[list(tree.nodes[node].anchor_indices)].sum()
+        for node in cut
+    ])
+    scale = universe.coordinate_scale.detach().cpu().numpy()
+    route_data = {
+        "MM": (encoded.module_centers[0], encoded.module_present[0] > 0.5),
+        "QE": (encoded.env_coords[0], encoded.env_weights[0] > 0.0),
+    }
+    result: dict[str, np.ndarray] = {}
+    for route, (source_coordinates, validity) in route_data.items():
+        valid = validity.detach().cpu().numpy().astype(bool, copy=False)
+        realized = (plan.permission_matrix(route)[indices] > 0.0).detach().cpu().numpy()
+        realized &= valid[None, :]
+        result[route] = _nearest_geometry_membership(
+            centers,
+            source_coordinates.detach().cpu().numpy(),
+            valid,
+            realized.sum(axis=1),
+            scale,
+        )
+    return result
+
+
+def _degree_size_preserving_rewire(
+    membership: np.ndarray, *, seed: int, max_swaps: int = 31
+) -> tuple[np.ndarray, int, int]:
+    """Apply valid bipartite 2-switches and report actual changed links."""
+    values = np.asarray(membership, dtype=np.uint8)
+    if values.ndim != 2 or not np.isin(values, (0, 1)).all():
+        raise ValueError("Packet membership must be a binary packet/source matrix")
+    values = values.copy()
+    edges = np.argwhere(values > 0)
+    if len(edges) < 2 or max_swaps < 1:
+        return values, 0, 0
+    original_rows = (values > 0).sum(axis=1)
+    original_columns = (values > 0).sum(axis=0)
+    rng = np.random.default_rng(int(seed))
+    swaps = 0
+    target_swaps = min(int(max_swaps), max(1, len(edges) // 4))
+    for _ in range(min(10 * len(edges), 2_000)):
+        first, second = rng.choice(len(edges), size=2, replace=False)
+        row_a, source_a = map(int, edges[first])
+        row_b, source_b = map(int, edges[second])
+        if row_a == row_b or source_a == source_b:
+            continue
+        if values[row_a, source_b] or values[row_b, source_a]:
+            continue
+        values[row_a, source_a] = values[row_b, source_b] = 0
+        values[row_a, source_b] = values[row_b, source_a] = 1
+        edges[first] = (row_a, source_b)
+        edges[second] = (row_b, source_a)
+        swaps += 1
+        if swaps >= target_swaps:
+            break
+    if not np.array_equal((values > 0).sum(axis=1), original_rows) or not np.array_equal(
+        (values > 0).sum(axis=0), original_columns
+    ):
+        raise AssertionError("Degree-preserving rewire changed packet size or source degree")
+    changed_links = int(np.count_nonzero(values != np.asarray(membership, dtype=np.uint8)))
+    return values, swaps, changed_links
+
+
+def _plan_with_packet_masks(
+    plan: Any, *, cut: tuple[int, ...], masks: Mapping[str, np.ndarray]
+) -> Any:
+    indices = torch.as_tensor(cut, device=plan.split_gates.device, dtype=torch.long)
+    replacement = plan
+    for route in ("MM", "QE"):
+        current = plan.permission_matrix(route)
+        values = np.asarray(masks[route], dtype=np.uint8)
+        if values.shape != (len(cut), int(current.shape[1])):
+            raise ValueError(f"{route} support does not match the selected packet/source axes")
+        membership = torch.zeros_like(current)
+        membership[indices] = torch.as_tensor(values, device=current.device, dtype=current.dtype)
+        replacement = replacement.with_permission(route, membership)
+    return replacement
+
+
+def _top_count_pair_mask(
+    scores: torch.Tensor, eligible_pairs: torch.Tensor, target_count: int
+) -> torch.Tensor:
+    """Select exactly N scored pairs with a stable row-major tie break."""
+    if scores.ndim != 2 or eligible_pairs.shape != scores.shape or eligible_pairs.dtype != torch.bool:
+        raise ValueError("Pair scores and eligibility must share a boolean [receiver,source] shape")
+    if not bool(torch.isfinite(scores).all()):
+        raise ValueError("Pair scores must be finite before count matching")
+    if isinstance(target_count, bool) or int(target_count) != target_count or int(target_count) < 0:
+        raise ValueError("Count-matched target must be a nonnegative integer")
+    flat_indices = torch.nonzero(eligible_pairs.reshape(-1), as_tuple=False).reshape(-1)
+    count = int(target_count)
+    if count > int(flat_indices.numel()):
+        raise ValueError("Count-matched target exceeds the eligible live-pair population")
+    selected = torch.zeros_like(eligible_pairs)
+    if count:
+        eligible_scores = scores.reshape(-1).index_select(0, flat_indices)
+        order = torch.argsort(eligible_scores, descending=True, stable=True)
+        chosen = flat_indices.index_select(0, order[:count])
+        selected.reshape(-1)[chosen] = True
+    return selected
+
+
+def _count_matched_direct_plan(
+    *, encoded: Any, tree: Any, batch: Any, scorer: Any,
+    target_pairs_by_route: Mapping[str, int],
+) -> tuple[Any, dict[str, np.ndarray], dict[str, Any]]:
+    """Build a query-bound direct P replay at exact G live pair counts."""
+    tables = runner._direct_feature_tables(encoded)
+    plan = MechanismPlan.full_access(
+        tree, encoded.module_present[0], int(encoded.env_coords.shape[1])
+    )
+    masks: dict[str, np.ndarray] = {}
+    route_records: dict[str, Any] = {}
+    for route in ("MM", "QE"):
+        catalog = runner.canonical_pair_catalog(encoded, tree, route)
+        source_features, source_coordinates, source_validity = runner._direct_source_for_route(
+            route, tables
+        )
+        if route == "MM":
+            receivers = catalog.receiver_coordinates
+            receiver_validity = catalog.receiver_validity
+            eligible = catalog.pair_validity
+        else:
+            receivers = batch.query_xy[0]
+            receiver_validity = torch.ones(
+                receivers.shape[0], device=receivers.device, dtype=torch.bool
+            )
+            eligible = receiver_validity[:, None] & source_validity[None, :]
+        receiver_features = runner._receiver_features_for_route(route, receivers, tables)
+        scores = scorer(
+            receiver_features,
+            source_features,
+            receivers,
+            source_coordinates,
+            mechanism=route,
+            budget_fraction=PRIMARY_CAPACITY[route],
+        )
+        desired = int(target_pairs_by_route[route])
+        selected = _top_count_pair_mask(scores, eligible, desired)
+        if int(selected.sum().detach().cpu()) != desired:
+            raise RuntimeError(f"{route} direct reprojection did not preserve the requested pair count")
+        plan = plan.with_direct_pair_access(
+            route,
+            receivers,
+            selected.to(dtype=scores.dtype),
+            receiver_validity=receiver_validity,
+        )
+        masks[route] = selected.detach().cpu().numpy().astype(np.uint8, copy=False)
+        route_records[route] = {
+            "target_pair_count_from_g_four_packet": desired,
+            "actual_selected_pair_count": desired,
+            "eligible_live_pair_count": int(eligible.sum().detach().cpu()),
+            "pair_count_basis": (
+                "native module receiver/source panel" if route == "MM"
+                else "sampled live query panel"
+            ),
+            "selected_mask_shape": list(masks[route].shape),
+            "stable_score_tie_break": "descending score, then row-major receiver/source index",
+            "selected_mask_sha256": _array_sha256(masks[route]),
+        }
+    return plan, masks, route_records
+
+
+def _training_population_feature_means(
+    records: Sequence[Mapping[str, torch.Tensor]],
+) -> dict[str, torch.Tensor]:
+    """Compute equal-case means from input-only train_fit organizer tokens."""
+    if not records:
+        raise ValueError("Fixed training-population organizer inputs need at least one train_fit case")
+    module_case_means = []
+    environment_case_means = []
+    global_case_means = []
+    reference_device = records[0]["module_states"].device
+    reference_dtype = records[0]["module_states"].dtype
+    for record in records:
+        modules = record["module_states"]
+        module_valid = record["module_valid"].to(device=modules.device, dtype=torch.bool)
+        environments = record["environment_states"]
+        weights = record["environment_weights"].to(device=environments.device, dtype=environments.dtype)
+        global_state = record["global_state"]
+        if modules.ndim != 2 or module_valid.shape != (modules.shape[0],):
+            raise ValueError("Training-population module tokens and validity do not align")
+        if environments.ndim != 2 or weights.shape != (environments.shape[0],):
+            raise ValueError("Training-population environment tokens and measure do not align")
+        if global_state.numel() < 1 or modules.shape[1] != environments.shape[1]:
+            raise ValueError("Training-population organizer token widths do not agree")
+        if not bool(module_valid.any()) or not bool((weights > 0).any()):
+            raise ValueError("Training-population case has no valid typed source tokens")
+        module_case_means.append(modules[module_valid].mean(dim=0))
+        positive = weights > 0
+        normalized_weights = weights[positive] / weights[positive].sum()
+        environment_case_means.append(
+            (environments[positive] * normalized_weights[:, None]).sum(dim=0)
+        )
+        global_case_means.append(global_state.reshape(-1, modules.shape[1]).mean(dim=0))
+    means = {
+        "module_state": torch.stack(module_case_means).mean(dim=0),
+        "environment_state": torch.stack(environment_case_means).mean(dim=0),
+        "global_state": torch.stack(global_case_means).mean(dim=0),
+    }
+    if any(value.device != reference_device or value.dtype != reference_dtype for value in means.values()):
+        means = {key: value.to(device=reference_device, dtype=reference_dtype) for key, value in means.items()}
+    if any(not bool(torch.isfinite(value).all()) for value in means.values()):
+        raise ValueError("Training-population organizer means must be finite")
+    return means
+
+
+def _fixed_population_context(encoded: Any, means: Mapping[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Broadcast typed population means over the current case's source rows."""
+    states = {}
+    for name, key, target in (
+        ("module_states", "module_state", encoded.module_tokens),
+        ("environment_states", "environment_state", encoded.env_tokens),
+        ("global_state", "global_state", encoded.global_token),
+    ):
+        mean = means[key].to(device=target.device, dtype=target.dtype).reshape(
+            (1,) + (1,) * max(0, target.ndim - 2) + (-1,)
+        )
+        states[name] = mean.expand_as(target)
+    return states
+
+
 def _case_record(
     *,
     split: str,
@@ -566,6 +836,8 @@ def _case_record(
     feature_arrays: dict[str, np.ndarray],
     mask_arrays: dict[str, np.ndarray],
     exposure: Mapping[str, Mapping[str, Any]],
+    training_population_features: Mapping[str, torch.Tensor] | None = None,
+    training_population_feature_sha256: str | None = None,
     prepared_inputs: tuple[Any, Any, Any] | None = None,
     query_seed_retry_count: int = 0,
     fixed_query_sample_index_sha256: str | None = None,
@@ -715,6 +987,298 @@ def _case_record(
         mask_arrays[root_union_mm_key] = np.ascontiguousarray(root_union_features[1], dtype=np.uint8)
         mask_arrays[root_union_qe_key] = np.ascontiguousarray(root_union_features[2], dtype=np.uint8)
 
+        same_weight_controls: dict[str, dict[str, Any]] = {}
+        if query_panel == "fixed":
+            four_cut_tuple = tuple(g_cuts["four_packet"])
+            four_packet_masks = panel._packet_source_masks(four_plan, encoded, four_cut_tuple)
+            four_g_support_mm = runner._canonical_route_support(
+                four_plan, encoded, tree, "MM"
+            )
+            four_g_support_qe = runner._query_qe_support(
+                four_plan, encoded, sample, batch
+            )
+            target_pair_counts = {
+                "MM": int(four_g_support_mm["actual_live_unique_pairs"]),
+                "QE": int(four_g_support_qe["actual_selected_pairs"]),
+            }
+
+            # Reuse the selected P scorer on the selected G physical weights.
+            # The exact G live pair counts make this a query-bound diagnostic,
+            # not a production or query-independent P policy.
+            count_matched_plan, count_matched_masks, count_matched_routes = (
+                _count_matched_direct_plan(
+                    encoded=encoded,
+                    tree=tree,
+                    batch=batch,
+                    scorer=p_control,
+                    target_pairs_by_route=target_pair_counts,
+                )
+            )
+            count_matched_prediction, count_matched_aux = panel._predict_direct_pair_full_panel(
+                model=g_model, encoded=encoded, batch=batch, plan=count_matched_plan
+            )
+            count_matched_rmse, count_matched_distortion = _metric_row(
+                prediction=count_matched_prediction,
+                full_prediction=g_full_prediction,
+                batch=batch,
+                sample=sample,
+                normalizer=normalizer,
+            )
+            count_matched_mm = runner._canonical_route_support(
+                count_matched_plan, encoded, tree, "MM"
+            )
+            count_matched_qe = runner._query_qe_support(
+                count_matched_plan, encoded, sample, batch
+            )
+            if (
+                int(count_matched_mm["actual_live_unique_pairs"]) != target_pair_counts["MM"]
+                or int(count_matched_qe["actual_selected_pairs"]) != target_pair_counts["QE"]
+            ):
+                raise RuntimeError("Count-matched P diagnostic changed its declared live pair counts")
+            count_matched_key = hashlib.sha256(
+                f"{case_key}\0g_direct_p_count_matched_four_packet".encode()
+            ).hexdigest()[:20]
+            count_matched_npz_keys = {}
+            for route, mask in count_matched_masks.items():
+                key = f"g_direct_p_count_matched_{route.lower()}_{count_matched_key}"
+                mask_arrays[key] = np.ascontiguousarray(mask, dtype=np.uint8)
+                count_matched_npz_keys[f"{route.lower()}_mask_npz_key"] = key
+            same_weight_controls["g_direct_p_count_matched_four_packet"] = {
+                "definition": (
+                    "P scorer applied to selected G encoded inputs and G physical weights; "
+                    "top-N direct pairs match the same-case four-packet G MM native-panel and QE live-query counts"
+                ),
+                "action_key": "four_packet",
+                "realized_cut_paths": list(g_action_metrics["four_packet"]["resolved_cut_paths"]),
+                "g_four_packet_nonredundant_k": int(g_action_metrics["four_packet"]["nonredundant_k"]),
+                "diagnostic_only": True,
+                "production_p_policy": False,
+                "same_physical_forward_weights_as_grouped_action": True,
+                "direct_policy_source": "selected P checkpoint scorer on current G encoded inputs",
+                "budget_feature_for_p_scorer": dict(PRIMARY_CAPACITY),
+                "selection_rule": "descending P score with stable row-major tie break at the exact G pair count",
+                "count_matched_live_pair_counts": count_matched_routes,
+                "role_rmse_mps": count_matched_rmse,
+                "same_g_full_role_rmse_mps": dict(same_g_full_rmse),
+                "same_g_full_distortion_role_rmse_mps": count_matched_distortion,
+                "MM_native_panel_support": count_matched_mm,
+                "QE_live_query_support": count_matched_qe,
+                "native_executor_rows": runner._summarize_executor_rows(count_matched_aux),
+                "selected_mask_sha256_by_route": {
+                    route: _array_sha256(mask) for route, mask in count_matched_masks.items()
+                },
+                "selected_mask_shape_by_route": {
+                    route: list(mask.shape) for route, mask in count_matched_masks.items()
+                },
+                **count_matched_npz_keys,
+            }
+
+            # Geometry selection preserves each realized G packet's typed
+            # source count, then takes nearest sources to that packet's native
+            # receiver-anchor centroid. It uses no output values.
+            geometry_masks = _geometry_action_masks(
+                plan=four_plan, encoded=encoded, tree=tree, cut=four_cut_tuple
+            )
+            geometry_plan = _plan_with_packet_masks(
+                four_plan, cut=four_cut_tuple, masks=geometry_masks
+            )
+            geometry_prediction, geometry_aux = runner._prediction_with_plan(
+                g_model, encoded, batch, geometry_plan, return_interaction_aux=True
+            )
+            geometry_rmse, geometry_distortion = _metric_row(
+                prediction=geometry_prediction,
+                full_prediction=g_full_prediction,
+                batch=batch,
+                sample=sample,
+                normalizer=normalizer,
+            )
+            geometry_work = panel._plan_work(
+                plan=geometry_plan, encoded=encoded, tree=tree, batch=batch, sample=sample
+            )
+            geometry_key = hashlib.sha256(
+                f"{case_key}\0g_geometry_selected_four_packet".encode()
+            ).hexdigest()[:20]
+            geometry_npz_keys = {}
+            for route, mask in geometry_masks.items():
+                key = f"g_geometry_{route.lower()}_{geometry_key}"
+                mask_arrays[key] = np.ascontiguousarray(mask, dtype=np.uint8)
+                geometry_npz_keys[f"{route.lower()}_mask_npz_key"] = key
+            same_weight_controls["g_geometry_selected_four_packet"] = {
+                "definition": "four-packet G cut with per-packet typed source counts held fixed",
+                "action_key": "four_packet",
+                "realized_cut_paths": list(g_action_metrics["four_packet"]["resolved_cut_paths"]),
+                "g_four_packet_nonredundant_k": int(g_action_metrics["four_packet"]["nonredundant_k"]),
+                "selection_rule": "nearest valid native sources to weighted packet anchor centroids",
+                "role_rmse_mps": geometry_rmse,
+                "same_g_full_role_rmse_mps": dict(same_g_full_rmse),
+                "same_g_full_distortion_role_rmse_mps": geometry_distortion,
+                "canonical_exact_work": float(geometry_work["canonical_total_work"]),
+                "canonical_full_work": float(geometry_work["canonical_full_access_total_work"]),
+                "work": geometry_work,
+                "nonredundant_k": int(panel._action_union_k(geometry_plan, encoded, four_cut_tuple)),
+                "native_executor_rows": runner._summarize_executor_rows(geometry_aux),
+                "effective_support_shapes": {
+                    route: list(mask.shape) for route, mask in geometry_masks.items()
+                },
+                **geometry_npz_keys,
+            }
+
+            # Rewire each typed incidence matrix independently. A zero-switch
+            # result is explicitly inactive and is not run as an identical
+            # prediction or interpreted as evidence of robustness.
+            rewired_masks: dict[str, np.ndarray] = {}
+            rewire_swaps: dict[str, int] = {}
+            rewire_changed_links: dict[str, int] = {}
+            rewire_seed_hashes: dict[str, str] = {}
+            for route in ("MM", "QE"):
+                stable_seed_bytes = hashlib.sha256(
+                    f"{case_key}\0g_four_packet_rewire\0{route}".encode()
+                ).digest()
+                rewire_seed = int.from_bytes(stable_seed_bytes[:4], "little")
+                rewired_masks[route], rewire_swaps[route], rewire_changed_links[route] = (
+                    _degree_size_preserving_rewire(
+                        four_packet_masks[route], seed=rewire_seed
+                    )
+                )
+                rewire_seed_hashes[route] = hashlib.sha256(stable_seed_bytes).hexdigest()
+            total_changed_links = sum(rewire_changed_links.values())
+            rewire_record: dict[str, Any] = {
+                "definition": "four-packet G support with packet sizes and source degrees preserved per typed route",
+                "action_key": "four_packet",
+                "realized_cut_paths": list(g_action_metrics["four_packet"]["resolved_cut_paths"]),
+                "g_four_packet_nonredundant_k": int(g_action_metrics["four_packet"]["nonredundant_k"]),
+                "status": "active" if total_changed_links else "inactive_zero_effective_switches",
+                "diagnostic_only": True,
+                "seed_sha256_by_route": rewire_seed_hashes,
+                "successful_switches_by_route": rewire_swaps,
+                "changed_link_count_by_route": rewire_changed_links,
+                "actual_changed_link_count": total_changed_links,
+                "packet_sizes_preserved_by_route": {
+                    route: np.asarray(rewired_masks[route].sum(axis=1), dtype=int).tolist()
+                    == np.asarray(four_packet_masks[route].sum(axis=1), dtype=int).tolist()
+                    for route in ("MM", "QE")
+                },
+                "source_degrees_preserved_by_route": {
+                    route: np.asarray(rewired_masks[route].sum(axis=0), dtype=int).tolist()
+                    == np.asarray(four_packet_masks[route].sum(axis=0), dtype=int).tolist()
+                    for route in ("MM", "QE")
+                },
+            }
+            rewire_key = hashlib.sha256(
+                f"{case_key}\0g_degree_size_rewire_four_packet".encode()
+            ).hexdigest()[:20]
+            rewire_npz_keys = {}
+            for route, mask in rewired_masks.items():
+                key = f"g_rewire_{route.lower()}_{rewire_key}"
+                mask_arrays[key] = np.ascontiguousarray(mask, dtype=np.uint8)
+                rewire_npz_keys[f"{route.lower()}_mask_npz_key"] = key
+            rewire_record.update(rewire_npz_keys)
+            if total_changed_links:
+                rewire_plan = _plan_with_packet_masks(
+                    four_plan, cut=four_cut_tuple, masks=rewired_masks
+                )
+                rewire_prediction, rewire_aux = runner._prediction_with_plan(
+                    g_model, encoded, batch, rewire_plan, return_interaction_aux=True
+                )
+                rewire_rmse, rewire_distortion = _metric_row(
+                    prediction=rewire_prediction,
+                    full_prediction=g_full_prediction,
+                    batch=batch,
+                    sample=sample,
+                    normalizer=normalizer,
+                )
+                rewire_work = panel._plan_work(
+                    plan=rewire_plan, encoded=encoded, tree=tree, batch=batch, sample=sample
+                )
+                rewire_record.update({
+                    "role_rmse_mps": rewire_rmse,
+                    "same_g_full_role_rmse_mps": dict(same_g_full_rmse),
+                    "same_g_full_distortion_role_rmse_mps": rewire_distortion,
+                    "canonical_exact_work": float(rewire_work["canonical_total_work"]),
+                    "canonical_full_work": float(rewire_work["canonical_full_access_total_work"]),
+                    "work": rewire_work,
+                    "native_executor_rows": runner._summarize_executor_rows(rewire_aux),
+                })
+            else:
+                rewire_record["inactive_reason"] = (
+                    "the bounded bipartite 2-switch search found no valid incidence exchange"
+                )
+            same_weight_controls["g_degree_size_rewire_four_packet"] = rewire_record
+
+            if training_population_features is None or not training_population_feature_sha256:
+                raise ValueError("Selected action table lacks train_fit organizer population features")
+            fixed_context = _fixed_population_context(encoded, training_population_features)
+            fixed_scores = g_control.score_cases(
+                encoded, fixed_context, (tree,), budgets=PRIMARY_CAPACITY
+            )
+            fixed_population_plan = g_control.plans_from_scores(
+                fixed_scores,
+                encoded,
+                (tree,),
+                hard=True,
+                frontier_cuts=(four_cut_tuple,),
+                budget_fractions=PRIMARY_CAPACITY,
+            )[0]
+            fixed_population_prediction, fixed_population_aux = runner._prediction_with_plan(
+                g_model, encoded, batch, fixed_population_plan, return_interaction_aux=True
+            )
+            fixed_population_rmse, fixed_population_distortion = _metric_row(
+                prediction=fixed_population_prediction,
+                full_prediction=g_full_prediction,
+                batch=batch,
+                sample=sample,
+                normalizer=normalizer,
+            )
+            fixed_population_work = panel._plan_work(
+                plan=fixed_population_plan, encoded=encoded, tree=tree,
+                batch=batch, sample=sample,
+            )
+            fixed_population_features = _effective_action_features(
+                scores=fixed_scores,
+                plan=fixed_population_plan,
+                encoded=encoded,
+                cut=four_cut_tuple,
+            )
+            fixed_population_key = hashlib.sha256(
+                f"{case_key}\0g_fixed_train_population_four_packet".encode()
+            ).hexdigest()[:20]
+            fixed_population_npz_keys = {}
+            for route, mask in zip(
+                ("MM", "QE"), (fixed_population_features[1], fixed_population_features[2]),
+                strict=True,
+            ):
+                key = f"g_fixed_population_{route.lower()}_{fixed_population_key}"
+                mask_arrays[key] = np.ascontiguousarray(mask, dtype=np.uint8)
+                fixed_population_npz_keys[f"{route.lower()}_mask_npz_key"] = key
+            same_weight_controls["g_fixed_population_features_four_packet"] = {
+                "definition": "same selected G model/organizer weights with train_fit population-mean organizer tokens",
+                "action_key": "four_packet",
+                "realized_cut_paths": list(g_action_metrics["four_packet"]["resolved_cut_paths"]),
+                "g_four_packet_nonredundant_k": int(g_action_metrics["four_packet"]["nonredundant_k"]),
+                "organizer_population_feature_sha256": training_population_feature_sha256,
+                "replaced_organizer_inputs": [
+                    "module_states", "environment_states", "global_state"
+                ],
+                "current_case_inputs_retained": [
+                    "native module/environment features and coordinates",
+                    "receiver tree geometry and role descriptors",
+                ],
+                "case_varying_action_role_rmse_mps": g_action_metrics["four_packet"]["candidate_role_rmse_mps"],
+                "fixed_population_action_role_rmse_mps": fixed_population_rmse,
+                "fixed_population_same_g_full_role_rmse_mps": dict(same_g_full_rmse),
+                "fixed_population_same_g_full_distortion_role_rmse_mps": fixed_population_distortion,
+                "canonical_exact_work": float(fixed_population_work["canonical_total_work"]),
+                "canonical_full_work": float(fixed_population_work["canonical_full_access_total_work"]),
+                "work": fixed_population_work,
+                "nonredundant_k": int(panel._action_union_k(
+                    fixed_population_plan, encoded, four_cut_tuple
+                )),
+                "native_executor_rows": runner._summarize_executor_rows(fixed_population_aux),
+                "effective_mm_mask_shape": list(fixed_population_features[1].shape),
+                "effective_qe_mask_shape": list(fixed_population_features[2].shape),
+                **fixed_population_npz_keys,
+            }
+
         p_model.core.backend.set_cover_mode("external")
         p_encoded = p_model.core.encode_case(batch)
         p_tree = p_model.core.backend.build_case_trees(p_encoded)[0]
@@ -778,6 +1342,7 @@ def _case_record(
                 "effective_mm_mask_shape": list(root_union_features[1].shape),
                 "effective_qe_mask_shape": list(root_union_features[2].shape),
             },
+            "g_same_weight_controls": same_weight_controls,
         }
         role_descriptors = receiver_role_descriptors(tree, role_count=len(roles)).detach().cpu().numpy().astype(
             np.float32, copy=False
@@ -888,6 +1453,8 @@ def _case_record(
         })
     controls["p"].update(base_info)
     controls["g_root_union"].update(base_info)
+    for control in controls["g_same_weight_controls"].values():
+        control.update(base_info)
     return action_rows, controls, {
         "wfull_role_rmse_mps": dict(wfull_rmse),
         "same_g_full_role_rmse_mps": dict(same_g_full_rmse),
@@ -1108,16 +1675,88 @@ def _evaluate(
         training_rows=train_rows, update_count=update_count,
     )
 
+    sampler = runner.NativeRoleCatalogueCache()
+    population_input_records: list[dict[str, torch.Tensor]] = []
+    training_population_rows: list[int] = []
+    training_population_layouts: list[int] = []
+    for layout, row_ids in sorted(layout_rows.items()):
+        if split_by_layout[layout] != "train_fit":
+            continue
+        for row_id in row_ids:
+            _population_case, _population_sample, population_batch = maturation._case_batch(
+                view=view,
+                row_id=int(row_id),
+                query_seed=int(FIXED_QUERY_SEED + int(row_id) * 1_009),
+                role_counts=Q5_FEATURE_ROLE_COUNTS,
+                sampler=sampler,
+                normalizer=normalizer,
+                device=torch.device("cuda:0"),
+            )
+            with torch.inference_mode():
+                g_model.core.backend.set_cover_mode("external")
+                population_encoded = g_model.core.encode_case(population_batch)
+            population_input_records.append({
+                "module_states": population_encoded.module_tokens[0].detach(),
+                "module_valid": population_encoded.module_present[0].detach() > 0.5,
+                "environment_states": population_encoded.env_tokens[0].detach(),
+                "environment_weights": population_encoded.env_weights[0].detach(),
+                "global_state": population_encoded.global_token[0].detach(),
+            })
+            training_population_rows.append(int(row_id))
+            training_population_layouts.append(int(layout))
+    training_population_features = _training_population_feature_means(population_input_records)
+    population_feature_arrays = {
+        f"control_training_population_{name}": value.detach().cpu().numpy().astype(
+            np.float32, copy=False
+        )
+        for name, value in training_population_features.items()
+    }
+    training_population_feature_sha256 = hashlib.sha256(b"".join(
+        name.encode() + b"\0" + np.ascontiguousarray(value).tobytes()
+        for name, value in sorted(population_feature_arrays.items())
+    )).hexdigest()
+    training_population_audit = {
+        "population_basis": "selected action-table train_fit layout families, fixed native rows only",
+        "source_partition": "native_training",
+        "split": "train_fit",
+        "selected_g_checkpoint_sha256": g_sha,
+        "fixed_query_panel_only": True,
+        "reference_targets_used": False,
+        "case_count": len(population_input_records),
+        "row_ids": training_population_rows,
+        "layout_ids_by_row": training_population_layouts,
+        "row_layout_identities": [
+            {"row_id": row_id, "layout_id": layout_id}
+            for row_id, layout_id in zip(
+                training_population_rows, training_population_layouts, strict=True
+            )
+        ],
+        "query_role_counts_used_to_materialize_rows": Q5_FEATURE_ROLE_COUNTS,
+        "organizer_inputs_query_independent": True,
+        "aggregation": (
+            "equal row weight; valid-module arithmetic mean; environment-token mean weighted by "
+            "that row's environment measure; one global token mean per row"
+        ),
+        "replaced_inputs": ["module_states", "environment_states", "global_state"],
+        "current_case_geometry_and_adapter_features_retained": True,
+        "organizer_population_feature_sha256": training_population_feature_sha256,
+        "feature_npz_keys": sorted(population_feature_arrays),
+    }
+
     feature_arrays: dict[str, np.ndarray] = {}
+    feature_arrays.update(population_feature_arrays)
     mask_arrays: dict[str, np.ndarray] = {}
     rows: list[dict[str, Any]] = []
     p_controls: list[dict[str, Any]] = []
     g_root_union_controls: list[dict[str, Any]] = []
+    g_direct_p_count_matched_controls: list[dict[str, Any]] = []
+    g_geometry_controls: list[dict[str, Any]] = []
+    g_rewire_controls: list[dict[str, Any]] = []
+    g_fixed_population_controls: list[dict[str, Any]] = []
     measured_wfull: list[dict[str, Any]] = []
     q512_deltas: dict[str, dict[str, list[float]]] = defaultdict(
         lambda: {role: [] for role in runner.ROLE_NAMES}
     )
-    sampler = runner.NativeRoleCatalogueCache()
     fixed_query_indices_by_row: dict[int, set[int]] = {}
     evaluations: list[tuple[int, str, int, Mapping[str, int]]] = []
     for layout, row_ids in sorted(layout_rows.items()):
@@ -1137,28 +1776,39 @@ def _evaluate(
         for row_id, query_panel, _seed, _counts in evaluations
     )
     prediction_calls_per_primary_panel = 8
-    predicted_native_prediction_calls = (
-        len(evaluations) * prediction_calls_per_primary_panel + q512_calibration_panel_count
+    extra_fixed_diagnostic_prediction_upper_bound = 4
+    predicted_native_prediction_calls_upper_bound = (
+        len(evaluations) * prediction_calls_per_primary_panel
+        + fixed_panel_count * extra_fixed_diagnostic_prediction_upper_bound
+        + q512_calibration_panel_count
     )
     call_forecast = {
         "measured": False,
-        "basis": "one native model prediction per listed plan; Q512 calibration adds one selected-G full prediction per train_fit fixed row",
+        "basis": "eight primary native predictions per listed panel; up to four same-weight fixed-panel controls plus one Q512 G-full calibration prediction per train_fit row",
         "fixed_q2048_panel_count": fixed_panel_count,
         "query_repeat_q2048_panel_count": repeat_panel_count,
+        "same_weight_control_predictions_per_fixed_panel_upper_bound": extra_fixed_diagnostic_prediction_upper_bound,
+        "same_weight_control_prediction_upper_bound": fixed_panel_count * extra_fixed_diagnostic_prediction_upper_bound,
+        "train_fit_organizer_population_encode_case_count": len(training_population_rows),
+        "train_fit_organizer_population_materialization_query_points": (
+            len(training_population_rows) * sum(Q5_FEATURE_ROLE_COUNTS.values())
+        ),
         "q512_train_fit_calibration_panel_count": q512_calibration_panel_count,
         "q2048_role_query_counts": dict(Q2048_ROLE_COUNTS),
         "q512_role_query_counts": dict(Q512_ROLE_COUNTS),
         "q2048_native_prediction_calls": len(evaluations) * prediction_calls_per_primary_panel,
         "q512_native_prediction_calls": q512_calibration_panel_count,
-        "estimated_native_prediction_calls_total": predicted_native_prediction_calls,
+        "estimated_native_prediction_calls_upper_bound": predicted_native_prediction_calls_upper_bound,
         "q2048_query_points_total": (fixed_panel_count + repeat_panel_count) * sum(Q2048_ROLE_COUNTS.values()),
         "q512_query_points_total": q512_calibration_panel_count * sum(Q512_ROLE_COUNTS.values()),
         "query_points_total": (
             (fixed_panel_count + repeat_panel_count) * sum(Q2048_ROLE_COUNTS.values())
             + q512_calibration_panel_count * sum(Q512_ROLE_COUNTS.values())
         ),
-        "estimated_decoder_query_evaluations_total": (
-            len(evaluations) * prediction_calls_per_primary_panel * sum(Q2048_ROLE_COUNTS.values())
+        "estimated_decoder_query_evaluations_upper_bound": (
+            (len(evaluations) * prediction_calls_per_primary_panel
+             + fixed_panel_count * extra_fixed_diagnostic_prediction_upper_bound)
+            * sum(Q2048_ROLE_COUNTS.values())
             + q512_calibration_panel_count * sum(Q512_ROLE_COUNTS.values())
         ),
     }
@@ -1217,6 +1867,8 @@ def _evaluate(
             role_scales=role_scales, source_model=source_model, g_model=g_model,
             g_control=g_control, p_model=p_model, p_control=p_control, device=torch.device("cuda:0"),
             feature_arrays=feature_arrays, mask_arrays=mask_arrays, exposure=exposure,
+            training_population_features=training_population_features,
+            training_population_feature_sha256=training_population_feature_sha256,
             prepared_inputs=case_sample, query_seed_retry_count=retry_count,
             fixed_query_sample_index_sha256=fixed_query_sample_index_sha_by_row.get(row_id),
             query_repeat_overlap_count=repeat_overlap_count,
@@ -1236,6 +1888,24 @@ def _evaluate(
         controls["g_root_union"]["forward_checkpoint_sha256"] = g_sha
         p_controls.append(controls["p"])
         g_root_union_controls.append(controls["g_root_union"])
+        if query_panel == "fixed":
+            for key, target in (
+                ("g_direct_p_count_matched_four_packet", g_direct_p_count_matched_controls),
+                ("g_geometry_selected_four_packet", g_geometry_controls),
+                ("g_degree_size_rewire_four_packet", g_rewire_controls),
+                ("g_fixed_population_features_four_packet", g_fixed_population_controls),
+            ):
+                record = controls["g_same_weight_controls"][key]
+                record["forward_checkpoint_sha256"] = g_sha
+                record["direct_policy_checkpoint_sha256"] = p_sha if key.startswith("g_direct_p") else None
+                record["selected_g_update_count"] = int(update_count)
+                record["selected_direct_policy_update_count"] = (
+                    int(p_update_count) if key.startswith("g_direct_p") else None
+                )
+                record["direct_policy_checkpoint_path"] = (
+                    str(p_path) if key.startswith("g_direct_p") else None
+                )
+                target.append(record)
 
         if query_panel != "fixed":
             continue
@@ -1284,6 +1954,16 @@ def _evaluate(
     mask_hashes = {key: _array_sha256(value) for key, value in mask_arrays.items()}
     _validate_action_rows(rows, expected_sha=g_sha)
     query_repeat_overlap = _query_repeat_overlap_summary(rows)
+    call_forecast["same_weight_control_prediction_count_executed"] = (
+        len(g_direct_p_count_matched_controls)
+        + len(g_geometry_controls)
+        + sum("role_rmse_mps" in record for record in g_rewire_controls)
+        + len(g_fixed_population_controls)
+    )
+    call_forecast["rewire_predictions_skipped_inactive_count"] = sum(
+        record.get("status") == "inactive_zero_effective_switches"
+        for record in g_rewire_controls
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
     feature_path = output_dir / "action_features.npz"
     mask_path = output_dir / "action_masks.npz"
@@ -1310,6 +1990,8 @@ def _evaluate(
         "retained_wfull_checkpoint_sha256": source_sha,
         "run_manifest_path": str(manifest_path),
         "run_manifest_sha256": manifest_sha,
+        "evaluation_driver_path": str(Path(__file__).resolve()),
+        "evaluation_driver_sha256": _sha256(Path(__file__).resolve()),
         "g_review_record_line_sha256": g_review_line_sha,
         "p_review_record_line_sha256": p_review_line_sha,
         "g_review_record": g_review,
@@ -1346,6 +2028,7 @@ def _evaluate(
         "primary_capacity": {"MM": PRIMARY_CAPACITY["MM"], "QE": PRIMARY_CAPACITY["QE"]},
         "action_order": list(ACTION_ORDER),
         "action_exposure_by_key": exposure,
+        "training_population_organizer_features": training_population_audit,
         "panel_design": {
             "candidate_measurements_use_native_training_rows_only": True,
             "selected_layout_count": len(layout_rows),
@@ -1364,8 +2047,16 @@ def _evaluate(
             "query_repeat_overlap_summary": query_repeat_overlap,
             "hidden_test_rows_opened": False,
             "query_rows_are_split_by_layout_family": True,
+            "same_weight_controls_run_on_fixed_query_panels_only": True,
+            "same_weight_controls_action_key": "four_packet",
+            "same_weight_control_prediction_upper_bound_per_fixed_panel": extra_fixed_diagnostic_prediction_upper_bound,
         },
         "p_controls_are_excluded_from_selector_rows": True,
+        "all_same_weight_controls_are_excluded_from_selector_rows": True,
+        "same_weight_control_interpretation_note": (
+            "These selected-weight interventions compare computations and source support; they do not identify physical causal edges. "
+            "The count-matched P reprojection is query-bound and is not the production P policy."
+        ),
         "g_p_pairing_note": (
             "G/P checkpoint comparison uses equal selected update counts."
             if int(update_count) == int(p_update_count)
@@ -1374,6 +2065,10 @@ def _evaluate(
         "native_call_forecast": call_forecast,
         "p_controls": p_controls,
         "g_root_union_controls": g_root_union_controls,
+        "g_direct_p_count_matched_controls": g_direct_p_count_matched_controls,
+        "g_geometry_controls": g_geometry_controls,
+        "g_rewire_controls": g_rewire_controls,
+        "g_fixed_population_feature_controls": g_fixed_population_controls,
         "rows": rows,
         "case_count": len({row["case_key"] for row in rows}),
         "selector_action_row_count": len(rows),

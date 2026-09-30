@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "evaluate_matured_action_table.py"
 SPEC = importlib.util.spec_from_file_location("wind_matured_action_table", SCRIPT)
@@ -247,6 +249,86 @@ def test_query_repeat_summary_uses_measured_overlap_and_preserves_partial_overla
     assert summary["overlapping_repeat_case_count"] == 1
     assert summary["total_intersecting_query_indices"] == 3
     assert summary["all_measured_repeats_disjoint"] is False
+
+
+def test_geometry_support_keeps_realized_packet_sizes_and_ignores_invalid_sources() -> None:
+    selected = TABLE._nearest_geometry_membership(
+        packet_centers=np.asarray([[0.0, 0.0], [10.0, 0.0]]),
+        source_coordinates=np.asarray([[0.1, 0.0], [8.0, 0.0], [10.2, 0.0], [0.0, 0.0]]),
+        source_validity=np.asarray([True, True, True, False]),
+        packet_sizes=np.asarray([1, 2]),
+        coordinate_scale=np.asarray([1.0, 1.0]),
+    )
+
+    np.testing.assert_array_equal(selected.sum(axis=1), [1, 2])
+    np.testing.assert_array_equal(selected.sum(axis=0), [1, 1, 1, 0])
+    np.testing.assert_array_equal(selected, [[1, 0, 0, 0], [0, 1, 1, 0]])
+
+
+def test_degree_size_rewire_preserves_both_marginals_and_reports_changed_links() -> None:
+    support = np.asarray([[1, 1, 0, 0], [0, 0, 1, 1]], dtype=np.uint8)
+    rewired, swaps, changed_links = TABLE._degree_size_preserving_rewire(support, seed=2)
+
+    assert swaps >= 1
+    assert changed_links == int(np.count_nonzero(rewired != support)) == 4 * swaps
+    np.testing.assert_array_equal(rewired.sum(axis=1), support.sum(axis=1))
+    np.testing.assert_array_equal(rewired.sum(axis=0), support.sum(axis=0))
+    assert not np.array_equal(rewired, support)
+
+    dense, no_swaps, no_changed_links = TABLE._degree_size_preserving_rewire(
+        np.ones((2, 2), dtype=np.uint8), seed=2
+    )
+    np.testing.assert_array_equal(dense, np.ones((2, 2), dtype=np.uint8))
+    assert no_swaps == no_changed_links == 0
+
+
+def test_count_matched_pair_projection_uses_stable_exact_top_n_and_fails_closed() -> None:
+    scores = torch.tensor([[2.0, 2.0], [3.0, -100.0]])
+    eligible = torch.tensor([[True, True], [True, False]])
+
+    selected = TABLE._top_count_pair_mask(scores, eligible, 2)
+
+    assert int(selected.sum()) == 2
+    torch.testing.assert_close(selected, torch.tensor([[True, False], [True, False]]))
+    with pytest.raises(ValueError, match="exceeds the eligible live-pair population"):
+        TABLE._top_count_pair_mask(scores, eligible, 4)
+
+
+def test_training_population_feature_means_are_train_case_weighted_and_typed() -> None:
+    records = [
+        {
+            "module_states": torch.tensor([[1.0, 2.0], [99.0, 99.0]]),
+            "module_valid": torch.tensor([True, False]),
+            "environment_states": torch.tensor([[0.0, 1.0], [0.0, 3.0]]),
+            "environment_weights": torch.tensor([1.0, 3.0]),
+            "global_state": torch.tensor([[2.0, 2.0]]),
+        },
+        {
+            "module_states": torch.tensor([[5.0, 6.0]]),
+            "module_valid": torch.tensor([True]),
+            "environment_states": torch.tensor([[0.0, 5.0], [0.0, 7.0]]),
+            "environment_weights": torch.tensor([1.0, 1.0]),
+            "global_state": torch.tensor([[4.0, 4.0]]),
+        },
+    ]
+    means = TABLE._training_population_feature_means(records)
+    encoded = SimpleNamespace(
+        module_tokens=torch.zeros(1, 3, 2),
+        env_tokens=torch.zeros(1, 2, 2),
+        global_token=torch.zeros(1, 2),
+    )
+
+    torch.testing.assert_close(means["module_state"], torch.tensor([3.0, 4.0]))
+    torch.testing.assert_close(means["environment_state"], torch.tensor([0.0, 4.25]))
+    torch.testing.assert_close(means["global_state"], torch.tensor([3.0, 3.0]))
+    context = TABLE._fixed_population_context(encoded, means)
+    assert tuple(context["module_states"].shape) == (1, 3, 2)
+    assert tuple(context["environment_states"].shape) == (1, 2, 2)
+    assert tuple(context["global_state"].shape) == (1, 2)
+    torch.testing.assert_close(context["module_states"], means["module_state"].expand(1, 3, 2))
+    torch.testing.assert_close(
+        context["environment_states"], means["environment_state"].expand(1, 2, 2)
+    )
 
 
 def test_floor_and_query_allowance_are_rolewise_train_family_calibrations() -> None:
