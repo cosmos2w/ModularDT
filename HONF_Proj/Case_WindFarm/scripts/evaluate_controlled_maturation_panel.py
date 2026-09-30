@@ -565,6 +565,56 @@ def _checkpoint_review_binding(
     return checkpoint, record, line_sha256
 
 
+def _verified_checkpoint_binding(
+    run_dir: Path, *, arm: str, update_count: int
+) -> tuple[Path, dict[str, Any], str, str]:
+    """Allow a current durability checkpoint without inventing a review row."""
+
+    review_log = run_dir / "reviews.jsonl"
+    if review_log.is_file():
+        for line in review_log.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if str(record.get("arm")) == arm and int(record.get("update_count", -1)) == update_count:
+                path, bound_record, digest = _checkpoint_review_binding(
+                    run_dir, arm=arm, update_count=update_count
+                )
+                return path, bound_record, digest, "append_only_scheduled_review"
+
+    arm_dir = run_dir / "arms" / arm
+    pointer_path = arm_dir / "latest_checkpoint.json"
+    if not pointer_path.is_file():
+        raise FileNotFoundError(f"no review or current durability checkpoint for {arm} u{update_count}")
+    pointer_bytes = pointer_path.read_bytes()
+    record = json.loads(pointer_bytes)
+    checkpoint = (arm_dir / "checkpoints" / f"updates_{update_count:06d}.pt").resolve()
+    if (
+        record.get("run_id") != RUN_ID
+        or record.get("arm") != arm
+        or int(record.get("update_count", -1)) != update_count
+        or record.get("checkpoint_kind") != "durability_only"
+        or Path(str(record.get("checkpoint", ""))).resolve() != checkpoint
+        or not checkpoint.is_file()
+        or runner._file_sha256(checkpoint) != record.get("checkpoint_sha256")
+    ):
+        raise ValueError(f"current {arm} u{update_count} durability checkpoint binding is invalid")
+    update_log = arm_dir / "updates.jsonl"
+    matches = []
+    for line in update_log.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        update_row = json.loads(line)
+        if (
+            int(update_row.get("update_count", -1)) == update_count
+            and update_row.get("optimizer_attempt_key") == record.get("optimizer_attempt_key")
+        ):
+            matches.append(update_row)
+    if len(matches) != 1 or matches[0].get("attempt_id") != record.get("attempt_id"):
+        raise ValueError(f"current {arm} u{update_count} durability pointer lacks one matching update")
+    return checkpoint, record, hashlib.sha256(pointer_bytes).hexdigest(), "current_durability_checkpoint"
+
+
 def _source_mask_turnover(
     *,
     run_dir: Path,
@@ -960,7 +1010,7 @@ def main() -> None:
             raise ValueError("fixed review must contain the requested number of unique train/development layouts")
 
         checkpoint_bindings = {
-            arm: _checkpoint_review_binding(run_dir, arm=arm, update_count=update_count)
+            arm: _verified_checkpoint_binding(run_dir, arm=arm, update_count=update_count)
             for arm in ("g_packet", "direct_pair")
         }
         checkpoint_paths = {arm: value[0] for arm, value in checkpoint_bindings.items()}
@@ -969,7 +1019,13 @@ def main() -> None:
         for arm, path in checkpoint_paths.items():
             _bound_path, checkpoint_record, _record_sha = checkpoint_bindings[arm]
             digest = runner._file_sha256(path)
-            latest = json.loads((path.parents[1] / "latest_review.json").read_text(encoding="utf-8"))
+            binding_source = checkpoint_bindings[arm][3]
+            pointer_name = (
+                "latest_checkpoint.json"
+                if binding_source == "current_durability_checkpoint"
+                else "latest_review.json"
+            )
+            latest = json.loads((path.parents[1] / pointer_name).read_text(encoding="utf-8"))
             latest_update = int(latest.get("update_count", -1))
             if latest_update < update_count:
                 raise ValueError(f"u{update_count} {arm} checkpoint is newer than the arm's latest pointer")
@@ -977,7 +1033,7 @@ def main() -> None:
                 latest.get("checkpoint_sha256") != digest
                 and latest_update == update_count
             ):
-                raise ValueError(f"u{update_count} {arm} latest pointer conflicts with its immutable review record")
+                raise ValueError(f"u{update_count} {arm} latest pointer conflicts with its checkpoint binding")
             payload = load_trusted_checkpoint(path, map_location="cpu")
             if (
                 not isinstance(payload, Mapping)
@@ -1095,12 +1151,30 @@ def main() -> None:
             "train_rows_sha256": split_record["student_train_rows_sha256"],
             "g_checkpoint": str(checkpoint_paths["g_packet"]),
             "g_checkpoint_sha256": checkpoint_hashes["g_packet"],
-            "g_checkpoint_review_record": checkpoint_bindings["g_packet"][1],
-            "g_checkpoint_review_record_line_sha256": checkpoint_bindings["g_packet"][2],
+            "g_checkpoint_binding_source": checkpoint_bindings["g_packet"][3],
+            "g_checkpoint_binding_record": checkpoint_bindings["g_packet"][1],
+            "g_checkpoint_binding_record_sha256": checkpoint_bindings["g_packet"][2],
+            "g_checkpoint_review_record": (
+                checkpoint_bindings["g_packet"][1]
+                if checkpoint_bindings["g_packet"][3] == "append_only_scheduled_review" else None
+            ),
+            "g_checkpoint_review_record_line_sha256": (
+                checkpoint_bindings["g_packet"][2]
+                if checkpoint_bindings["g_packet"][3] == "append_only_scheduled_review" else None
+            ),
             "p_checkpoint": str(checkpoint_paths["direct_pair"]),
             "p_checkpoint_sha256": checkpoint_hashes["direct_pair"],
-            "p_checkpoint_review_record": checkpoint_bindings["direct_pair"][1],
-            "p_checkpoint_review_record_line_sha256": checkpoint_bindings["direct_pair"][2],
+            "p_checkpoint_binding_source": checkpoint_bindings["direct_pair"][3],
+            "p_checkpoint_binding_record": checkpoint_bindings["direct_pair"][1],
+            "p_checkpoint_binding_record_sha256": checkpoint_bindings["direct_pair"][2],
+            "p_checkpoint_review_record": (
+                checkpoint_bindings["direct_pair"][1]
+                if checkpoint_bindings["direct_pair"][3] == "append_only_scheduled_review" else None
+            ),
+            "p_checkpoint_review_record_line_sha256": (
+                checkpoint_bindings["direct_pair"][2]
+                if checkpoint_bindings["direct_pair"][3] == "append_only_scheduled_review" else None
+            ),
             "physical_gpu_uuid": DEVICE_UUID,
             "query_panel_design": {
                 "role_query_counts": query_counts,
