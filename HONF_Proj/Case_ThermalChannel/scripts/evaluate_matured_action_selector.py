@@ -239,8 +239,39 @@ def summarize_training_exposure(
     checkpoint_update: int,
     family_ids: Sequence[str],
     expected_capacity: float = PRIMARY_CAPACITY,
+    route_work_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Bind per-action exposure counts and pass gates to one checkpoint update."""
+    """Bind action exposure to completed updates and their executed baseline cuts."""
+    realized_by_update: dict[int, dict[str, Any]] = {}
+    if route_work_path is not None:
+        with route_work_path.open("r", encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, 1):
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if record.get("arm") != "G" or record.get("state") != "baseline":
+                    continue
+                update = int(record.get("optimizer_update", -1))
+                if update < 0:
+                    raise ValueError(f"Missing baseline optimizer update at {route_work_path}:{line_number}.")
+                if update > checkpoint_update:
+                    continue
+                frontier = tuple(int(value) for value in record.get("frontier", ()))
+                if not frontier or len(frontier) != len(set(frontier)):
+                    raise ValueError(f"Invalid executed baseline cut at {route_work_path}:{line_number}.")
+                paths = tuple(str(value) for value in record.get("frontier_paths") or ())
+                if paths and len(paths) != len(frontier):
+                    raise ValueError(f"Executed path/count mismatch at {route_work_path}:{line_number}.")
+                candidate = {"frontier": frontier, "paths": paths}
+                prior = realized_by_update.get(update)
+                if prior is not None:
+                    if prior["frontier"] != frontier or (
+                        prior["paths"] and paths and prior["paths"] != paths
+                    ):
+                        raise ValueError(f"Conflicting executed baseline cuts at update {update}.")
+                    if prior["paths"]:
+                        continue
+                realized_by_update[update] = candidate
     by_update: dict[int, dict[str, Any]] = {}
     with metric_path.open("r", encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, 1):
@@ -275,6 +306,10 @@ def summarize_training_exposure(
     scaffold_counts: Counter[str] = Counter()
     historical_visits = 0
     visits_per_response_family: Counter[str] = Counter()
+    realized_k_counts: dict[str, Counter[int]] = defaultdict(Counter)
+    realized_frontier_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    realized_path_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    missing_realized_updates: dict[str, list[int]] = defaultdict(list)
     for update, row in by_update.items():
         family = str(row.get("training_family_id") or "")
         metadata = row.get("training_metadata") or {}
@@ -290,6 +325,17 @@ def summarize_training_exposure(
         if action in SPARSE_ACTION_KEYS and family in family_set and not bool(metadata.get("full_access_replay")):
             counts[(family, action, phase, capacity)] += 1
             if phase == "action_family" and math.isclose(capacity, expected_capacity):
+                realized = realized_by_update.get(update)
+                if route_work_path is not None and realized is None:
+                    missing_realized_updates[action].append(update)
+                    continue
+                if realized is not None:
+                    frontier = tuple(realized["frontier"])
+                    realized_k_counts[action][len(frontier)] += 1
+                    realized_frontier_counts[action][",".join(map(str, frontier))] += 1
+                    paths = tuple(realized["paths"])
+                    if paths:
+                        realized_path_counts[action]["|".join(paths)] += 1
                 try:
                     primary_pass = int(metadata["primary_pass"])
                 except (KeyError, TypeError, ValueError):
@@ -318,9 +364,25 @@ def summarize_training_exposure(
             "required_complete_primary_passes": TRAIN_PASSES_PER_ACTION,
             "complete_primary_pass_ids": complete_passes,
             "complete_primary_pass_count": len(complete_passes),
-            "trained_sparse": len(complete_passes) >= TRAIN_PASSES_PER_ACTION,
+            "trained_sparse": (
+                len(complete_passes) >= TRAIN_PASSES_PER_ACTION
+                and route_work_path is not None
+                and not missing_realized_updates[action]
+            ),
             "per_family_action_capacity_updates": per_family,
             "updates_by_primary_pass": action_passes,
+            "realized_baseline_cut_audited": route_work_path is not None,
+            "missing_realized_baseline_updates": sorted(missing_realized_updates[action]),
+            "realized_baseline_raw_k_counts": dict(sorted(realized_k_counts[action].items())),
+            "realized_baseline_frontier_index_counts": dict(sorted(realized_frontier_counts[action].items())),
+            "realized_baseline_path_counts": dict(sorted(realized_path_counts[action].items())),
+            "realized_path_labelled_update_count": sum(realized_path_counts[action].values()),
+            "realized_path_labels_complete": (
+                bool(realized_k_counts[action])
+                and sum(realized_path_counts[action].values())
+                == sum(realized_k_counts[action].values())
+            ),
+            "requested_action_is_path_resolving_family": True,
         }
     minimum_family_visits = min((visits_per_response_family[family] for family in family_set), default=0)
     historical_passes = None
@@ -341,6 +403,7 @@ def summarize_training_exposure(
         "historical_replay_visits": historical_visits,
         "historical_case_count_from_manifest": historical_case_count,
         "historical_replay_passes_observed": historical_passes,
+        "route_work_path": None if route_work_path is None else str(route_work_path),
     }
 
 
@@ -1494,13 +1557,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     metric_path = Path(str(manifest["arms"][arm]["training_steps"])).expanduser().resolve()
     if not metric_path.is_file():
         raise FileNotFoundError(f"Manifest-bound G training log is missing: {metric_path}")
+    route_work_path = Path(str(manifest["arms"][arm]["route_work_ledger"])).expanduser().resolve()
+    if not route_work_path.is_file():
+        raise FileNotFoundError(f"Manifest-bound G route-work log is missing: {route_work_path}")
     exposure = summarize_training_exposure(
         metric_path,
         checkpoint_update=forward_update,
         family_ids=train_families,
+        route_work_path=route_work_path,
     )
     exposure["training_steps_path"] = str(metric_path)
     exposure["training_steps_sha256"] = _sha256(metric_path)
+    exposure["route_work_sha256"] = _sha256(route_work_path)
     exposure["maturation_gates"] = complete_maturity_gates(
         exposure,
         historical_case_count=int(manifest.get("historical_case_count", 0)),

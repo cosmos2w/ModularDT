@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,46 @@ _SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 import evaluate_matured_action_selector as selector
+
+
+def test_training_exposure_requires_executed_baseline_cuts(tmp_path: Path) -> None:
+    steps = tmp_path / "training_steps.jsonl"
+    routes = tmp_path / "route_work.jsonl"
+    step_rows = [
+        {
+            "completed_update": update,
+            "training_family_id": "family-a",
+            "historical_case_id": f"history-{update}",
+            "training_metadata": {
+                "action": "four_packet",
+                "phase": "action_family",
+                "primary_pass": primary_pass,
+                "capacity_fraction": selector.PRIMARY_CAPACITY,
+                "full_access_replay": False,
+            },
+        }
+        for update, primary_pass in ((1, 2), (2, 5))
+    ]
+    steps.write_text("".join(json.dumps(row) + "\n" for row in step_rows), encoding="utf-8")
+    route_rows = [
+        {"arm": "G", "optimizer_update": 1, "state": "baseline", "frontier": [3, 4, 5, 6]},
+        {"arm": "G", "optimizer_update": 2, "state": "baseline", "frontier": [1, 2]},
+    ]
+    routes.write_text("".join(json.dumps(row) + "\n" for row in route_rows), encoding="utf-8")
+
+    measured = selector.summarize_training_exposure(
+        steps, checkpoint_update=2, family_ids=("family-a",), route_work_path=routes,
+    )["per_action"]["four_packet"]
+    assert measured["trained_sparse"]
+    assert measured["realized_baseline_raw_k_counts"] == {2: 1, 4: 1}
+    assert measured["requested_action_is_path_resolving_family"]
+
+    routes.write_text(json.dumps(route_rows[0]) + "\n", encoding="utf-8")
+    missing = selector.summarize_training_exposure(
+        steps, checkpoint_update=2, family_ids=("family-a",), route_work_path=routes,
+    )["per_action"]["four_packet"]
+    assert not missing["trained_sparse"]
+    assert missing["missing_realized_baseline_updates"] == [2]
 
 
 def test_exact_context_partition_allows_correlated_reynolds_contexts_and_catches_known_alias() -> None:
