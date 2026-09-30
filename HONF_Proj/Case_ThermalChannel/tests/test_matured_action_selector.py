@@ -121,6 +121,36 @@ def test_training_exposure_requires_executed_baseline_cuts(tmp_path: Path) -> No
     assert measured["per_family_raw_scheduled_action_capacity_updates"] == {"family-a": 2}
     assert measured["per_family_audited_action_capacity_updates"] == {"family-a": 2}
     assert measured["realized_baseline_cut_audited"]
+    assert len(measured["certified_realized_path_k_observations"]) == 2
+    # The action was scheduled in two complete passes, but neither realized
+    # path/K was actually repeated. It is not a matured candidate yet.
+    exposure = {"per_action": {"four_packet": measured}}
+    qualified, lineage = selector._certified_sparse_case(
+        exposure=exposure, action="four_packet", family_id="family-a",
+        split="train", realized_paths=("LL", "LR", "RL", "RR"),
+        nonredundant_k=4, exact_work=90.0, full_work=100.0,
+    )
+    assert not qualified
+    assert lineage["exact_path_and_k_complete_pass_ids"] == [5]
+
+    repeated = dict(measured)
+    repeated["certified_realized_path_k_observations"] = [
+        {"primary_pass": pass_id, "training_family_id": "family-a",
+         "realized_cut_paths": ["LL", "LR", "RL", "RR"],
+         "realized_nonredundant_k": 4}
+        for pass_id in (2, 5)
+    ]
+    repeated_exposure = {"per_action": {"four_packet": repeated}}
+    def qualify(split: str, family: str, work: float) -> bool:
+        return selector._certified_sparse_case(
+            exposure=repeated_exposure, action="four_packet", family_id=family,
+            split=split, realized_paths=("LL", "LR", "RL", "RR"),
+            nonredundant_k=4, exact_work=work, full_work=100.0,
+        )[0]
+    assert qualify("train", "family-a", 90.0)
+    assert qualify("dev", "family-held", 90.0)
+    assert not qualify("train", "family-held", 90.0)
+    assert not qualify("dev", "family-held", 100.0)
 
     mismatch = dict(route_rows[0])
     mismatch["frontier_paths"] = ["LL", "RR"]

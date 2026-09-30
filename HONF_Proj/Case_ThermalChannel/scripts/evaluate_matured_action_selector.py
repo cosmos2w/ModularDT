@@ -23,7 +23,7 @@ import sys
 import time
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -554,6 +554,7 @@ def summarize_training_exposure(
     realized_k_counts: dict[str, Counter[int]] = defaultdict(Counter)
     realized_frontier_counts: dict[str, Counter[str]] = defaultdict(Counter)
     realized_path_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    realized_path_k_observations: dict[str, list[dict[str, Any]]] = defaultdict(list)
     missing_realized_updates: dict[str, list[int]] = defaultdict(list)
     uncertified_realized_reasons: dict[str, dict[int, str]] = defaultdict(dict)
     for update, row in by_update.items():
@@ -593,7 +594,7 @@ def summarize_training_exposure(
                     )
                     continue
                 if realized is not None:
-                    action_paths, _realized_k = _validate_training_route_join(
+                    action_paths, realized_k = _validate_training_route_join(
                         action=action,
                         metadata=metadata,
                         metric_attempted_step=metric_attempted_step,
@@ -602,6 +603,14 @@ def summarize_training_exposure(
                         expected_capacity=expected_capacity,
                         extra_route=extra_route,
                     )
+                    if (
+                        not isinstance(realized_k, int)
+                        or isinstance(realized_k, bool)
+                        or realized_k < 1
+                    ):
+                        missing_realized_updates[action].append(update)
+                        uncertified_realized_reasons[action][update] = "missing_valid_nonredundant_k"
+                        continue
                     certified_counts[(family, action, phase, capacity)] += 1
                     frontier = tuple(realized["frontier"])
                     realized_k_counts[action][len(frontier)] += 1
@@ -613,6 +622,13 @@ def summarize_training_exposure(
                     primary_pass = int(metadata["primary_pass"])
                 except (KeyError, TypeError, ValueError):
                     continue
+                realized_path_k_observations[action].append({
+                    "completed_update": int(update),
+                    "primary_pass": int(primary_pass),
+                    "training_family_id": family,
+                    "realized_cut_paths": list(action_paths),
+                    "realized_nonredundant_k": int(realized_k),
+                })
                 pass_families[(action, primary_pass, capacity)][family] += 1
 
     per_action: dict[str, Any] = {}
@@ -675,6 +691,10 @@ def summarize_training_exposure(
                 == sum(realized_k_counts[action].values())
             ),
             "requested_action_is_path_resolving_family": True,
+            "certified_realized_path_k_observations": sorted(
+                realized_path_k_observations[action],
+                key=lambda item: (item["primary_pass"], item["training_family_id"], item["completed_update"]),
+            ),
         }
     minimum_family_visits = min((visits_per_response_family[family] for family in family_set), default=0)
     historical_passes = None
@@ -722,6 +742,56 @@ def complete_maturity_gates(
         "historical_case_count_from_manifest": historical_case_count,
         "historical_replay_passes_observed": historical_passes,
         "gates": gates,
+    }
+
+
+def _certified_sparse_case(
+    *,
+    exposure: Mapping[str, Any],
+    action: str,
+    family_id: str,
+    split: str,
+    realized_paths: Sequence[str],
+    nonredundant_k: int,
+    exact_work: float,
+    full_work: float,
+) -> tuple[bool, dict[str, Any]]:
+    """Qualify this executed path/K, with no inferred visits for held families."""
+    action_exposure = exposure["per_action"][action]
+    complete = set(map(int, action_exposure["complete_primary_pass_ids"]))
+    matched = {
+        int(item["primary_pass"])
+        for item in action_exposure["certified_realized_path_k_observations"]
+        if int(item["primary_pass"]) in complete
+        and list(item["realized_cut_paths"]) == list(realized_paths)
+        and int(item["realized_nonredundant_k"]) == int(nonredundant_k)
+        and (split not in {"train", "train_query_repeat"}
+             or str(item["training_family_id"]) == str(family_id))
+    }
+    if split not in {"train", "train_query_repeat", "dev", "held_family_audit"}:
+        raise ValueError(f"Unknown Thermal action-table split: {split}")
+    strict_work_saving = (
+        math.isfinite(exact_work)
+        and math.isfinite(full_work)
+        and exact_work < full_work - max(1.0e-9, 1.0e-12 * full_work)
+    )
+    valid_paths = _valid_action_cut_paths(action, realized_paths)
+    qualified = bool(
+        action_exposure["trained_sparse"]
+        and valid_paths
+        and len(matched) >= TRAIN_PASSES_PER_ACTION
+        and strict_work_saving
+    )
+    return qualified, {
+        "action_has_two_complete_primary_passes": bool(action_exposure["trained_sparse"]),
+        "exact_path_and_k_complete_pass_ids": sorted(matched),
+        "exact_path_and_k_exposure_scope": (
+            "same_training_family" if split in {"train", "train_query_repeat"}
+            else "transfer_from_completed_training_family_passes"
+        ),
+        "valid_realized_cut_paths": bool(valid_paths),
+        "strict_canonical_work_saving": bool(strict_work_saving),
+        "same_case_full_canonical_work": float(full_work),
     }
 
 
@@ -1369,7 +1439,7 @@ def _metric_case(
     incumbent_operator: DifferentiableThermalOperator,
     extra_route: str,
     forward_sha256: str,
-    trained_sparse_by_action: Mapping[str, bool],
+    training_exposure: Mapping[str, Any],
     numerical_allowance_by_role: np.ndarray,
     numerical_floor_by_role: np.ndarray,
     device: torch.device,
@@ -1472,7 +1542,7 @@ def _metric_case(
             numerical_floor=floor_tensor,
             exact_work=mean_work,
             nonredundant_k=nonredundant_k,
-            trained_sparse=bool(trained_sparse_by_action.get(action, False)) if action != "full_access" else False,
+            trained_sparse=False,
             full_access=(action == "full_access"),
         )
         rows.append(evidence_row)
@@ -1518,6 +1588,24 @@ def _metric_case(
             "action": action,
             **measurements[action],
         })
+    full_work = next(row.exact_work for row in rows if row.full_access)
+    for index, (row, table_row) in enumerate(zip(rows, table_rows, strict=True)):
+        if row.full_access:
+            continue
+        realized_paths = table_row["frontier_paths_by_state"][0]
+        qualified, lineage = _certified_sparse_case(
+            exposure=training_exposure,
+            action=row.action_key,
+            family_id=family_id,
+            split=split,
+            realized_paths=realized_paths,
+            nonredundant_k=row.nonredundant_k,
+            exact_work=row.exact_work,
+            full_work=full_work,
+        )
+        rows[index] = replace(row, trained_sparse=qualified)
+        table_row["trained_sparse_action_exposure_sufficient"] = qualified
+        table_row["sparse_qualification"] = lineage
     allowance_case = np.asarray(numerical_allowance_by_role, dtype=np.float64)
     floor_case = np.asarray(numerical_floor_by_role, dtype=np.float64)
     return rows, table_rows, {
@@ -1892,10 +1980,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         exposure,
         historical_case_count=int(manifest.get("historical_case_count", 0)),
     )
-    trained_sparse = {
-        action: bool(exposure["per_action"][action]["trained_sparse"])
-        for action in SPARSE_ACTION_KEYS
-    }
     numerical_floor_by_role, train_median_reference_scales = _train_numerical_floor_by_role(
         stencils_by_split["train"]
     )
@@ -1970,7 +2054,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             incumbent_operator=incumbent_operator,
             extra_route=extra_route,
             forward_sha256=endpoint_sha,
-            trained_sparse_by_action=trained_sparse,
+            training_exposure=exposure,
             numerical_allowance_by_role=numerical_allowance_by_role,
             numerical_floor_by_role=numerical_floor_by_role,
             device=device,
