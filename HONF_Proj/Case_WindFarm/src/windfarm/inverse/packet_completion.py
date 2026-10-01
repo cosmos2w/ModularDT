@@ -239,6 +239,26 @@ def known_from_wind_task(task: WindCompletionTask) -> WindCompletionKnown:
     )
 
 
+def task_native_support_bounds_D(
+    task: WindCompletionTask,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return this task's native XY bounds for an explicit public-input mode.
+
+    The bounds come from the row's exact native mesh and may depend on how
+    that mesh was selected for the clean layout. Callers must opt in and
+    record that provenance; this helper is not a common layout-independent
+    domain.
+    """
+
+    lower = np.asarray(task.template_case.support.lower_D, dtype=np.float32)
+    upper = np.asarray(task.template_case.support.upper_D, dtype=np.float32)
+    if lower.ndim != 1 or upper.shape != lower.shape or lower.size < 2:
+        raise ValueError("Task native support must provide aligned XYZ bounds")
+    if not np.all(np.isfinite(lower[:2])) or not np.all(np.isfinite(upper[:2])):
+        raise ValueError("Task native support XY bounds must be finite")
+    return lower[:2].copy(), upper[:2].copy()
+
+
 def native_clearance_design_bounds(
     support_lower_D: Sequence[float],
     support_upper_D: Sequence[float],
@@ -283,7 +303,13 @@ def wind_condition_from_task(
     sensor_velocity_scale_mps: Sequence[Sequence[float]] | Sequence[float] | None = None,
     public_support_bounds_D: tuple[Sequence[float], Sequence[float]] | None = None,
 ) -> tuple[torch.Tensor, DiffusionCondition, WindCompletionKnown]:
-    """Build no-leakage condition and a separate clean denoising target."""
+    """Build the condition separately from clean targets and disclose bound inputs.
+
+    Clean target coordinates never enter the condition. With no support bounds,
+    the historical design-box parameterization is retained. Supplied support
+    bounds are an additional task input whose provenance must be audited by
+    the caller because row-native bounds may encode clean-layout information.
+    """
 
     known = known_from_wind_task(task)
     count = int(task.clean_centers_D.shape[0])
@@ -373,6 +399,7 @@ def candidate_centers_from_state(
         if condition.design_upper is not None else state.new_tensor(DESIGN_UPPER_D)
     )
     xy = lower + torch.sigmoid(state[0]) * (upper - lower)
+    xy = torch.maximum(torch.minimum(xy, upper), lower)
     visible = torch.as_tensor(known.visible_mask, device=state.device)
     original_visible = torch.as_tensor(
         known.template_case.module_centers[:, :2], device=state.device, dtype=state.dtype
@@ -388,17 +415,23 @@ def wind_geometry_validity(
     *,
     support_lower_D: np.ndarray | None = None,
     support_upper_D: np.ndarray | None = None,
-) -> dict[str, float | bool]:
+) -> dict[str, float | bool | None | str]:
     """Record support-box and rotor-overlap checks before any rejection."""
 
     centers = np.asarray(centers_D, dtype=np.float64)
     if centers.ndim != 2 or centers.shape[1] != 3 or not np.all(np.isfinite(centers)):
-        return {"finite": False, "inside_design_box": False, "inside_native_domain": False,
-                "rotors_nonoverlap": False, "min_spacing_D": float("nan")}
+        return {
+            "finite": False,
+            "inside_design_box": False,
+            "inside_native_domain": False,
+            "native_support_status": "invalid_geometry",
+            "rotors_nonoverlap": False,
+            "min_spacing_D": float("nan"),
+        }
     inside = bool(np.all((centers[:, :2] >= DESIGN_LOWER_D) & (centers[:, :2] <= DESIGN_UPPER_D)))
     if (support_lower_D is None) != (support_upper_D is None):
         raise ValueError("Native support bounds must be supplied together")
-    native = True if support_lower_D is None else bool(np.all(
+    native = None if support_lower_D is None else bool(np.all(
         (centers >= np.asarray(support_lower_D)[None, :])
         & (centers <= np.asarray(support_upper_D)[None, :])
     ))
@@ -410,6 +443,7 @@ def wind_geometry_validity(
         "finite": True,
         "inside_design_box": inside,
         "inside_native_domain": native,
+        "native_support_status": "unknown" if native is None else "checked",
         "rotors_nonoverlap": bool(minimum >= 2.0 * float(rotor_radius_D)),
         "min_spacing_D": minimum,
     }
@@ -767,6 +801,10 @@ def train_matched_wind_diffusion(
     attempt_log_path: Path | None = None,
     sensor_velocity_center_mps: Sequence[Sequence[float]] | Sequence[float] | None = None,
     sensor_velocity_scale_mps: Sequence[Sequence[float]] | Sequence[float] | None = None,
+    public_support_bounds_for_task: Callable[
+        [WindCompletionTask], tuple[Sequence[float], Sequence[float]]
+    ] | None = None,
+    public_support_input_label: str = "none",
     allow_sensor_transform_transition: bool = False,
 ) -> WindMatchedDiffusionResult:
     """Fit graph/full-link arms with equal weights, cases, noise and updates."""
@@ -781,6 +819,12 @@ def train_matched_wind_diffusion(
         raise ValueError("Inverse checkpoint period must be positive")
     if resume_checkpoint is not None and checkpoint_dir is None:
         raise ValueError("Resume requires the checkpoint directory for provenance")
+    if public_support_bounds_for_task is None and public_support_input_label != "none":
+        raise ValueError("Public support bounds and their explicit input label must be supplied together")
+    if public_support_bounds_for_task is not None and (
+        not public_support_input_label.strip() or public_support_input_label == "none"
+    ):
+        raise ValueError("An explicit public support bounds provider needs a non-'none' provenance label")
     if (sensor_velocity_center_mps is None) != (sensor_velocity_scale_mps is None):
         raise ValueError("Sensor velocity centering and scaling must be supplied together")
     transform_record = None
@@ -816,6 +860,10 @@ def train_matched_wind_diffusion(
         task_hash.update(str(task.row_index).encode("ascii"))
         task_hash.update(np.asarray(task.clean_centers_D, dtype=np.float32).tobytes())
         task_hash.update(np.asarray(task.visible_mask, dtype=np.uint8).tobytes())
+        if public_support_bounds_for_task is not None:
+            support_lower, support_upper = public_support_bounds_for_task(task)
+            task_hash.update(np.asarray(support_lower, dtype=np.float32).tobytes())
+            task_hash.update(np.asarray(support_upper, dtype=np.float32).tobytes())
     task_digest = task_hash.hexdigest()
     start_update = 0
     elapsed_before = 0.0
@@ -837,6 +885,8 @@ def train_matched_wind_diffusion(
         }
         if any(saved.get(key) != value for key, value in expected.items()):
             raise ValueError("Inverse resume checkpoint does not match task, initialization, or frozen forward")
+        if saved.get("public_support_input_label", "none") != public_support_input_label:
+            raise ValueError("Inverse resume checkpoint public support input differs from this run")
         saved_transform = saved.get("sensor_velocity_transform")
         if saved_transform != transform_record and not (
             allow_sensor_transform_transition and saved_transform is None and transform_record is not None
@@ -870,6 +920,7 @@ def train_matched_wind_diffusion(
                 "seed": int(seed),
                 "steps": int(steps),
                 "learning_rate": float(learning_rate),
+                "public_support_input_label": public_support_input_label,
                 "train_task_sha256": task_digest,
                 "initial_denoiser_hash": initial_hash,
                 "frozen_state_hashes": frozen_hashes_before,
@@ -892,10 +943,16 @@ def train_matched_wind_diffusion(
     for update in range(start_update, int(updates)):
         source = train_tasks[int(index_rng.integers(0, len(train_tasks)))]
         task = permute_wind_task(source, int(index_rng.integers(0, 2**31 - 1)))
+        public_support_bounds = (
+            None
+            if public_support_bounds_for_task is None
+            else public_support_bounds_for_task(task)
+        )
         clean, condition, known = wind_condition_from_task(
             task, device=target_device,
             sensor_velocity_center_mps=sensor_velocity_center_mps,
             sensor_velocity_scale_mps=sensor_velocity_scale_mps,
+            public_support_bounds_D=public_support_bounds,
         )
         candidate_provider = provider_factory(known)
         cached_state: torch.Tensor | None = None
@@ -1063,6 +1120,10 @@ def evaluate_matched_wind_completion(
     device: torch.device | str = "cpu",
     sensor_velocity_center_mps: Sequence[Sequence[float]] | Sequence[float] | None = None,
     sensor_velocity_scale_mps: Sequence[Sequence[float]] | Sequence[float] | None = None,
+    public_support_bounds_for_task: Callable[
+        [WindCompletionTask], tuple[Sequence[float], Sequence[float]]
+    ] | None = None,
+    public_support_input_label: str | None = None,
 ) -> list[dict[str, object]]:
     """Sample matched arms and retain every attempted design and proposal trail.
 
@@ -1078,14 +1139,26 @@ def evaluate_matched_wind_completion(
         raise ValueError("The matched Wind inverse evaluation uses eight samples per task")
     if acceptable_observation_slack_mps < 0:
         raise ValueError("Observation slack must be nonnegative")
+    if public_support_input_label is not None and not public_support_input_label.strip():
+        raise ValueError("Public support input label must be nonempty when supplied")
+    if public_support_bounds_for_task is None and public_support_input_label not in (None, "none"):
+        raise ValueError("A public support label requires a task support bounds provider")
+    if public_support_bounds_for_task is not None and public_support_input_label == "none":
+        raise ValueError("A public support bounds provider cannot be labelled 'none'")
     target_device = torch.device(device)
     ordinary_arms = (("I-G", matched.graph_model, False), ("I-dense", matched.dense_model, True))
     rows: list[dict[str, object]] = []
     for task_index, task in enumerate(tasks):
+        public_support_bounds = (
+            None
+            if public_support_bounds_for_task is None
+            else public_support_bounds_for_task(task)
+        )
         _, base_condition, known = wind_condition_from_task(
             task, device=target_device,
             sensor_velocity_center_mps=sensor_velocity_center_mps,
             sensor_velocity_scale_mps=sensor_velocity_scale_mps,
+            public_support_bounds_D=public_support_bounds,
         )
         clean_case = _candidate_from_centers(known, task.clean_centers_D)
         clean_pred = surrogate_predictor(clean_case, known.observed_coordinates_D)
@@ -1201,6 +1274,21 @@ def evaluate_matched_wind_completion(
                             "generated_centers_D": centers.tolist(),
                             "native_support_lower_D": known.template_case.support.lower_D.tolist(),
                             "native_support_upper_D": known.template_case.support.upper_D.tolist(),
+                            "public_support_input": (
+                                "none"
+                                if public_support_bounds_for_task is None
+                                else public_support_input_label or "caller_supplied_public_support"
+                            ),
+                            "generation_design_lower_D": (
+                                condition.design_lower[0].detach().cpu().tolist()
+                                if condition.design_lower is not None
+                                else DESIGN_LOWER_D.tolist()
+                            ),
+                            "generation_design_upper_D": (
+                                condition.design_upper[0].detach().cpu().tolist()
+                                if condition.design_upper is not None
+                                else DESIGN_UPPER_D.tolist()
+                            ),
                             "hidden_set_error_D": hidden_set_error_D(
                                 centers, task.clean_centers_D, known.visible_mask
                             ),

@@ -25,6 +25,7 @@ from windfarm.inverse.packet_completion import (
     make_wind_completion_task,
     native_clearance_design_bounds,
     permute_wind_task,
+    task_native_support_bounds_D,
     train_matched_wind_diffusion,
     wind_condition_from_task,
     wind_geometry_validity,
@@ -110,6 +111,9 @@ def test_fixed_sensors_and_known_provider_do_not_expose_hidden_layout() -> None:
     assert panel.reference_velocity_mps.shape == (24, 3)
     assert float(panel.snap_distance_D.max()) < 0.4
     task = make_wind_completion_task(case, partition="train", hidden_count=1, seed=19)
+    task_lower, task_upper = task_native_support_bounds_D(task)
+    np.testing.assert_array_equal(task_lower, case.support.lower_D[:2])
+    np.testing.assert_array_equal(task_upper, case.support.upper_D[:2])
     another_mask = make_wind_completion_task(case, partition="train", hidden_count=2, seed=123)
     np.testing.assert_array_equal(task.sensors.intended_coordinates_D, another_mask.sensors.intended_coordinates_D)
     np.testing.assert_array_equal(task.sensors.native_flat_indices, another_mask.sensors.native_flat_indices)
@@ -212,6 +216,9 @@ def test_hidden_set_matching_geometry_and_permutation() -> None:
         support_upper_D=np.asarray((20.0, 8.0, 6.0)),
     )
     assert not outside["inside_native_domain"]
+    unknown = wind_geometry_validity(task.clean_centers_D, rotor_radius_D=0.5)
+    assert unknown["inside_native_domain"] is None
+    assert unknown["native_support_status"] == "unknown"
     generated[0, :2] = generated[1, :2]
     assert not wind_geometry_validity(generated, rotor_radius_D=0.5)["rotors_nonoverlap"]
 
@@ -224,17 +231,36 @@ def test_one_matched_diffusion_update_keeps_frozen_weights() -> None:
     )
     frozen = nn.Linear(2, 2)
     before = {key: value.detach().clone() for key, value in frozen.state_dict().items()}
+    public_bounds = (np.asarray((-10.0, -8.0)), np.asarray((20.0, 8.0)))
+    seen_generation_bounds: list[tuple[list[float], list[float]]] = []
+
+    def capturing_provider_factory(known):
+        provider = _provider_factory(known)
+
+        def capture(state, condition):
+            assert condition.design_lower is not None and condition.design_upper is not None
+            seen_generation_bounds.append((
+                condition.design_lower[0].detach().cpu().tolist(),
+                condition.design_upper[0].detach().cpu().tolist(),
+            ))
+            return provider(state, condition)
+
+        return capture
+
     result = train_matched_wind_diffusion(
         [task],
         denoiser_template=denoiser,
-        provider_factory=_provider_factory,
+        provider_factory=capturing_provider_factory,
         frozen_modules={"forward": frozen},
         updates=1,
         steps=4,
         device="cpu",
+        public_support_bounds_for_task=lambda _task: public_bounds,
+        public_support_input_label="common_public_domain_control",
     )
     assert result.updates_per_arm == 1
     assert result.organizer_calls == 1
+    assert seen_generation_bounds == [([-9.5, -7.5], [15.0, 7.5])]
     assert np.isfinite(result.graph_losses[0]) and np.isfinite(result.dense_losses[0])
     assert result.frozen_state_hashes_before == result.frozen_state_hashes_after
     for key, value in frozen.state_dict().items():
@@ -290,10 +316,17 @@ def test_matched_sampling_retains_all_attempts_and_identical_seeds() -> None:
         surrogate_predictor=lambda _candidate, coordinates: np.zeros_like(coordinates),
         controls=("as_observed", "no_observations"),
         device="cpu",
+        public_support_bounds_for_task=lambda _task: (
+            np.asarray((-10.0, -8.0)), np.asarray((20.0, 8.0))
+        ),
+        public_support_input_label="common_public_domain_control",
     )
     assert len(rows) == 8 * 8 * 2 * 2
     for graph, dense in zip(rows[0::2], rows[1::2], strict=True):
         assert graph["arm"] == "I-G" and dense["arm"] == "I-dense"
+        assert graph["public_support_input"] == dense["public_support_input"] == "common_public_domain_control"
+        assert graph["generation_design_lower_D"] == dense["generation_design_lower_D"] == [-9.5, -7.5]
+        assert graph["generation_design_upper_D"] == dense["generation_design_upper_D"] == [15.0, 7.5]
         assert graph["sample_seed"] == dense["sample_seed"]
         assert graph["organizer_calls"] == dense["organizer_calls"] == 3
         assert graph["full_forward_calls"] == dense["full_forward_calls"] == 1

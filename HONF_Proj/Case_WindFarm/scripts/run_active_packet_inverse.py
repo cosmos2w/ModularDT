@@ -37,11 +37,14 @@ from run_active_packet_reuse import (
 )
 
 from windfarm.inverse.packet_completion import (
+    DESIGN_LOWER_D,
+    DESIGN_UPPER_D,
     WindCandidateInterfaceBuilder,
     WindCandidatePacketProvider,
     evaluate_matched_wind_completion,
     hidden_set_error_D,
     make_wind_completion_task,
+    task_native_support_bounds_D,
     train_matched_wind_diffusion,
     wind_surrogate_predictor,
 )
@@ -186,6 +189,12 @@ def run(args: argparse.Namespace) -> Path:
     if not torch.cuda.is_available() or torch.cuda.get_device_name(0) != "NVIDIA RTX 6000 Ada Generation":
         raise RuntimeError("Authorized physical GPU 0 did not resolve to the expected device")
     device = torch.device("cuda:0")
+    public_support_input = str(getattr(args, "public_support_input", "none"))
+    if public_support_input not in {"none", "task_native_mesh"}:
+        raise ValueError("Public support input must be 'none' or the explicit 'task_native_mesh' opt-in")
+    public_support_bounds_for_task = (
+        task_native_support_bounds_D if public_support_input == "task_native_mesh" else None
+    )
     stage_c_path = args.stage_c_checkpoint.resolve()
     selected_forward, selection_sha = _verify_forward_selection(
         args.forward_selection.resolve(), stage_c_path
@@ -285,6 +294,22 @@ def run(args: argparse.Namespace) -> Path:
         "development_rows_selected_before_inverse_outcomes": development_rows,
         "development_layouts": [int(view.run(row).layout_index) for row in development_rows],
         "design_hidden_count": 1,
+        "design_box_lower_D": DESIGN_LOWER_D.tolist(),
+        "design_box_upper_D": DESIGN_UPPER_D.tolist(),
+        "public_support_input": {
+            "mode": public_support_input,
+            "shared_across_graph_and_dense": True,
+            "layout_independence": (
+                "not established; task mesh bounds may depend on the clean layout"
+                if public_support_input == "task_native_mesh"
+                else "not applicable to diffusion bounds; row native mesh remains in candidate forward input"
+            ),
+            "provenance": (
+                "per-task exact native mesh XY bounds; may depend on the clean layout"
+                if public_support_input == "task_native_mesh"
+                else "not supplied to the diffusion design parameterization; historical design box retained"
+            ),
+        },
         "fixed_sensor_count": 24,
         "observed_sensor_count": 16,
         "held_sensor_count": 8,
@@ -322,6 +347,8 @@ def run(args: argparse.Namespace) -> Path:
         checkpoint_every=50,
         resume_checkpoint=args.resume,
         attempt_log_path=attempt_log_path,
+        public_support_bounds_for_task=public_support_bounds_for_task,
+        public_support_input_label=public_support_input,
     )
     attempt_rows = [json.loads(line) for line in attempt_log_path.read_text(encoding="utf-8").splitlines()]
     attempt_counts = {
@@ -329,6 +356,7 @@ def run(args: argparse.Namespace) -> Path:
         for arm in ("I-G", "I-dense")
     }
     training_summary = {
+        "public_support_input": public_support_input,
         "updates_per_arm": matched.updates_per_arm,
         "optimizer_attempts_by_arm_including_failed_invocations": attempt_counts,
         "optimizer_attempt_log": str(attempt_log_path),
@@ -355,12 +383,15 @@ def run(args: argparse.Namespace) -> Path:
         seed=int(args.seed) + 1,
         include_rewired=True,
         device=device,
+        public_support_bounds_for_task=public_support_bounds_for_task,
+        public_support_input_label=public_support_input,
     )
     with (inverse_dir / "sample_attempts.jsonl").open("w", encoding="utf-8") as stream:
         for row in rows:
             stream.write(json.dumps(row, sort_keys=True, allow_nan=False) + "\n")
     _write_json(inverse_dir / "sample_summary.json", {
         "groups": _sample_summary(rows),
+        "public_support_input": public_support_input,
         "development_task_count": len(development_tasks),
         "samples_per_task_per_arm_per_control": 8,
         "observation_slack_mps": 0.5,
@@ -381,6 +412,15 @@ def main() -> None:
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--training-only", action="store_true")
     parser.add_argument("--evaluate-only", action="store_true", help="Load a completed inverse checkpoint and run development sampling without optimizer updates")
+    parser.add_argument(
+        "--public-support-input",
+        choices=("none", "task_native_mesh"),
+        default="none",
+        help=(
+            "explicitly constrain hidden centers by each task's native mesh support; "
+            "this support may depend on the clean layout and is recorded in the task contract"
+        ),
+    )
     arguments = parser.parse_args()
     if not 1 <= arguments.updates <= 800:
         parser.error("--updates must be between 1 and 800 per arm")
