@@ -398,6 +398,8 @@ def _g_action_policy_wrapper(
         (tree,),
         budgets=PRIMARY_CAPACITY,
     )
+    if len(scores) != 1:
+        raise ValueError("One timed Wind workload requires exactly one organizer score case")
     receiver_features = receiver_role_descriptors(tree, len(runner.ROLE_NAMES))
     role_limits = torch.as_tensor(
         selector["fixed_train_role_log_limits"], device=batch.query_xy.device, dtype=torch.float32
@@ -452,7 +454,7 @@ def _g_action_policy_wrapper(
             trained.append(False)
         exact_work.append(work)
         packet_counts.append(int(action_k))
-        action_features = describe_realized_plan(scores, plan, encoded, tuple(cut))
+        action_features = describe_realized_plan(scores[0], plan, encoded, tuple(cut))
         if action_valid:
             risk = risk_head(
                 action_features, budget, receiver_features, nonredundant_k=int(action_k)

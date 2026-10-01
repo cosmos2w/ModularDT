@@ -10,6 +10,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import torch
+from honf_forward_core.interface_fields.adaptive_interaction_cover import (
+    CaseLocalReceiverTree,
+    MechanismPlan,
+    ReceiverAnchorUniverse,
+)
+from honf_forward_core.interface_fields.input_cover_organizer import OrganizerScores
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "evaluate_matured_action_table.py"
 SPEC = importlib.util.spec_from_file_location("wind_matured_action_table", SCRIPT)
@@ -84,6 +90,42 @@ def test_effective_packet_feature_quotient_deduplicates_typed_sources_and_drops_
     np.testing.assert_array_equal(effective_qe, [[0, 0, 1], [0, 0, 0]])
     assert len(signatures) == 2
     assert len(set(signatures)) == 2
+
+
+def test_effective_action_features_accepts_native_single_case_score_tuple() -> None:
+    coordinates = torch.tensor([[0., 0.], [1., 0.], [0., 1.], [1., 1.]])
+    universe = ReceiverAnchorUniverse(
+        coordinates, torch.ones(4), torch.tensor([0, 0, 1, 1]), torch.ones(2),
+    )
+    tree = CaseLocalReceiverTree.build(universe, max_nodes=7, min_leaf_anchors=1)
+    node_count = len(tree.nodes)
+    score = OrganizerScores(
+        split_logits=torch.zeros(node_count),
+        module_logits=torch.zeros(node_count, 2),
+        environment_logits=torch.zeros(node_count, 2),
+        mechanism_logits={
+            "MM": torch.zeros(node_count, 2), "QE": torch.zeros(node_count, 2),
+        },
+        node_embeddings=torch.randn(node_count, 4),
+        module_embeddings=torch.randn(2, 4),
+        environment_embeddings=torch.randn(2, 4),
+        budget_vector=torch.ones(5),
+    )
+    encoded = SimpleNamespace(
+        module_centers=coordinates[:2][None],
+        module_present=torch.ones(1, 2),
+        env_coords=coordinates[2:][None],
+        env_weights=torch.ones(1, 2),
+    )
+    plan = MechanismPlan.full_access(tree, torch.ones(2), 2)
+
+    packet_rows, mm, qe, signatures = TABLE._effective_action_features(
+        scores=(score,), plan=plan, encoded=encoded, cut=(0,),
+    )
+
+    assert packet_rows.shape[0] == len(signatures) == 1
+    np.testing.assert_array_equal(mm, [[1, 1]])
+    np.testing.assert_array_equal(qe, [[1, 1]])
 
 
 def test_budget_feature_uses_realized_full_access_budget() -> None:

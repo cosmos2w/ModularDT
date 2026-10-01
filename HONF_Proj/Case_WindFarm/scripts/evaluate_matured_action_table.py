@@ -582,7 +582,9 @@ def _split_selected_layouts(layouts: Sequence[int], *, seed: int) -> dict[int, s
 def _effective_action_features(
     *, scores: Any, plan: Any, encoded: Any, cut: tuple[int, ...]
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
-    raw = describe_realized_plan(scores, plan, encoded, cut, case_index=0)
+    if len(scores) != 1:
+        raise ValueError("One native action-table panel requires exactly one organizer score case")
+    raw = describe_realized_plan(scores[0], plan, encoded, cut, case_index=0)
     raw_features = raw.detach().cpu().numpy().astype(np.float32, copy=False)
     source_masks = panel._packet_source_masks(plan, encoded, cut)
     packet_rows, mm, qe, signatures = _canonical_packet_features(
