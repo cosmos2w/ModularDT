@@ -169,6 +169,257 @@ def _gpu2_compute_process_ids() -> set[int]:
     }
 
 
+def _validated_loss_weight_map(value: Any, *, label: str) -> dict[str, float]:
+    """Validate a complete positive loss-weight map for this runner's loss terms."""
+
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{label} must be a mapping of every configured loss term.")
+    expected_terms = set(forward.LOSS_WEIGHTS)
+    if set(value) != expected_terms:
+        raise ValueError(f"{label} terms differ from the configured loss-term set.")
+    weights: dict[str, float] = {}
+    for name, raw_value in value.items():
+        if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float)):
+            raise TypeError(f"{label}[{name!r}] must be a finite positive number.")
+        weight = float(raw_value)
+        if not math.isfinite(weight) or weight <= 0.0:
+            raise ValueError(f"{label}[{name!r}] must be a finite positive number.")
+        weights[name] = weight
+    return weights
+
+
+def _is_sha256_digest(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _loss_weight_transition_spec_sha256(transition: Mapping[str, Any]) -> str:
+    """Hash the immutable fields that define one loss-weight transition."""
+
+    matched_arms = transition["matched_arms"]
+    sources = transition["source_checkpoints"]
+    spec = {
+        "transition_id": transition["transition_id"],
+        "matched_arms": list(matched_arms),
+        "first_new_update": int(transition["first_new_update"]),
+        "source_checkpoints": {
+            arm: {
+                "update": int(sources[arm]["update"]),
+                "sha256": str(sources[arm]["sha256"]),
+            }
+            for arm in matched_arms
+        },
+        "old_loss_weights": _validated_loss_weight_map(
+            transition["old_loss_weights"], label="old_loss_weights"
+        ),
+        "new_loss_weights": _validated_loss_weight_map(
+            transition["new_loss_weights"], label="new_loss_weights"
+        ),
+        "source_manifest_sha256": transition["source_manifest_sha256"],
+        "source_manifest_snapshot_path": transition["source_manifest_snapshot_path"],
+        "evidence_sha256": transition["evidence_sha256"],
+    }
+    encoded = json.dumps(spec, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _loss_weight_transition_checkpoint_marker(
+    transition: Mapping[str, Any],
+    *,
+    arm: str,
+    loss_weights: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the provenance marker shared by preflight and later checkpoints."""
+
+    sources = transition.get("source_checkpoints")
+    source = sources.get(arm) if isinstance(sources, Mapping) else None
+    if not isinstance(source, Mapping):
+        raise TypeError("The loss-weight transition has no source checkpoint for this arm.")
+    new_weights = _validated_loss_weight_map(
+        transition.get("new_loss_weights"), label="transition new_loss_weights"
+    )
+    active_weights = _validated_loss_weight_map(loss_weights, label="active loss_weights")
+    if active_weights != new_weights:
+        raise ValueError("The checkpoint loss weights differ from the declared transition weights.")
+    return {
+        "transition_id": str(transition["transition_id"]),
+        "source_checkpoint_sha256": str(source["sha256"]),
+        "source_manifest_sha256": str(transition["source_manifest_sha256"]),
+        "source_manifest_snapshot_path": str(transition["source_manifest_snapshot_path"]),
+        "transition_spec_sha256": str(transition["transition_spec_sha256"]),
+        "evidence_sha256": str(transition["evidence_sha256"]),
+        "first_new_update": int(transition["first_new_update"]),
+        "loss_weights": new_weights,
+    }
+
+
+def _mark_loss_weight_transition_checkpoint(
+    payload: Mapping[str, Any],
+    transition: Mapping[str, Any],
+    *,
+    arm: str,
+    loss_weights: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Copy a completed checkpoint payload and attach the active transition marker."""
+
+    marked = dict(payload)
+    marked["loss_weight_transition"] = _loss_weight_transition_checkpoint_marker(
+        transition, arm=arm, loss_weights=loss_weights
+    )
+    return marked
+
+
+def _prepare_loss_weight_transition_payload(
+    payload: Mapping[str, Any],
+    *,
+    arm: str,
+    checkpoint_sha256: str,
+    transition: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Apply a manifest-bound loss-weight transition once, preserving optimizer and RNG state."""
+
+    matched_arms = transition.get("matched_arms")
+    sources = transition.get("source_checkpoints")
+    source = sources.get(arm) if isinstance(sources, Mapping) else None
+    old_weight_values = transition.get("old_loss_weights")
+    new_weight_values = transition.get("new_loss_weights")
+    transition_id = transition.get("transition_id")
+    spec_sha = transition.get("transition_spec_sha256")
+    evidence_sha = transition.get("evidence_sha256")
+    source_manifest_sha = transition.get("source_manifest_sha256")
+    first_update = transition.get("first_new_update")
+    source_manifest_snapshot_path = transition.get("source_manifest_snapshot_path")
+    if (
+        not isinstance(matched_arms, list)
+        or not matched_arms
+        or not all(isinstance(name, str) and name for name in matched_arms)
+        or len(set(matched_arms)) != len(matched_arms)
+        or arm not in matched_arms
+        or not isinstance(source, Mapping)
+        or not isinstance(transition_id, str)
+        or not transition_id
+        or not all(character.isalnum() or character in "_-" for character in transition_id)
+        or not _is_sha256_digest(spec_sha)
+        or not _is_sha256_digest(evidence_sha)
+        or not _is_sha256_digest(source_manifest_sha)
+        or isinstance(first_update, bool)
+        or not isinstance(first_update, int)
+        or first_update <= 1
+        or not isinstance(source_manifest_snapshot_path, str)
+        or not Path(source_manifest_snapshot_path).is_absolute()
+    ):
+        raise ValueError("The manifest does not contain a complete loss-weight transition record.")
+    snapshot_path = Path(source_manifest_snapshot_path).expanduser()
+    if snapshot_path.is_symlink() or not snapshot_path.is_file():
+        raise ValueError("The immutable source-manifest snapshot is missing or is not a regular file.")
+    if _sha256(snapshot_path) != source_manifest_sha:
+        raise ValueError("The immutable source-manifest snapshot SHA256 differs from the transition record.")
+    if not isinstance(sources, Mapping) or set(sources) != set(matched_arms):
+        raise ValueError("The matched-arm list and per-arm source checkpoint map differ.")
+    old_weights = _validated_loss_weight_map(old_weight_values, label="old_loss_weights")
+    new_weights = _validated_loss_weight_map(new_weight_values, label="new_loss_weights")
+    for source_arm in matched_arms:
+        source_record = sources[source_arm]
+        source_update = source_record.get("update") if isinstance(source_record, Mapping) else None
+        source_sha = source_record.get("sha256") if isinstance(source_record, Mapping) else None
+        if (
+            isinstance(source_update, bool)
+            or not isinstance(source_update, int)
+            or source_update != first_update - 1
+            or not _is_sha256_digest(source_sha)
+        ):
+            raise ValueError("The loss-weight transition source or provenance binding is invalid.")
+    source_sha = str(source["sha256"])
+    source_update = int(source["update"])
+    if _loss_weight_transition_spec_sha256(transition) != spec_sha:
+        raise ValueError("The loss-weight transition specification SHA256 differs from its fields.")
+    if not isinstance(payload.get("optimizer"), Mapping):
+        raise TypeError("The transitioned checkpoint optimizer state must be a mapping.")
+    training_config = payload.get("training_config")
+    if not isinstance(training_config, Mapping):
+        raise TypeError("The transitioned checkpoint training config must be a mapping.")
+    if payload.get("arm") != training_config.get("arm"):
+        raise ValueError("The transitioned checkpoint arm/config identity is inconsistent.")
+    marker = _loss_weight_transition_checkpoint_marker(
+        transition, arm=arm, loss_weights=new_weights
+    )
+    calibrated_weights = _validated_loss_weight_map(
+        payload.get("calibrated_loss_weights"), label="checkpoint calibrated_loss_weights"
+    )
+    update = int(payload.get("actual_optimizer_updates", -1))
+    if (
+        update == source_update
+        and checkpoint_sha256 == source_sha
+        and calibrated_weights == old_weights
+        and payload.get("loss_weight_transition") is None
+    ):
+        prepared = dict(payload)
+        prepared["calibrated_loss_weights"] = new_weights
+        prepared["loss_weight_transition"] = marker
+        return prepared, "transitioned_from_exact_source_checkpoint"
+    if (
+        update >= source_update
+        and calibrated_weights == new_weights
+        and payload.get("loss_weight_transition") == marker
+    ):
+        return dict(payload), "already_transitioned_checkpoint"
+    raise ValueError("The checkpoint is neither the exact old transition source nor a provenance-bound transitioned checkpoint.")
+
+
+def _checkpoint_values_equal(left: Any, right: Any) -> bool:
+    """Compare checkpoint payload values exactly, including nested tensors and NumPy RNG state."""
+
+    if isinstance(left, torch.Tensor) or isinstance(right, torch.Tensor):
+        return (
+            isinstance(left, torch.Tensor)
+            and isinstance(right, torch.Tensor)
+            and left.dtype == right.dtype
+            and left.shape == right.shape
+            and torch.equal(left, right)
+        )
+    if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+        return isinstance(left, np.ndarray) and isinstance(right, np.ndarray) and np.array_equal(left, right)
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        return (
+            isinstance(left, Mapping)
+            and isinstance(right, Mapping)
+            and left.keys() == right.keys()
+            and all(_checkpoint_values_equal(left[key], right[key]) for key in left)
+        )
+    if isinstance(left, (list, tuple)) or isinstance(right, (list, tuple)):
+        return (
+            type(left) is type(right)
+            and len(left) == len(right)
+            and all(_checkpoint_values_equal(a, b) for a, b in zip(left, right, strict=True))
+        )
+    return type(left) is type(right) and left == right
+
+
+def _persist_resume_preflight_checkpoint(
+    checkpoint_dir: Path,
+    *,
+    arm: str,
+    prepared_payload: Mapping[str, Any],
+    transition_id: str,
+    source_update: int,
+) -> tuple[Path, str, bool]:
+    """Save the preflight payload or adopt an exact atomic-write orphan after a crash."""
+
+    if not transition_id or not all(character.isalnum() or character in "_-" for character in transition_id):
+        raise ValueError("The transition identifier is not safe for a checkpoint filename.")
+    path = checkpoint_dir / f"{arm}_u{source_update:04d}_resume_preflight_{transition_id}.pt"
+    if path.exists():
+        existing = load_trusted_checkpoint(path, map_location="cpu")
+        if not _checkpoint_values_equal(existing, prepared_payload):
+            raise ValueError("Orphaned resume-preflight checkpoint differs from the exact transitioned source payload.")
+        return path, _sha256(path), True
+    _atomic_torch_save(path, prepared_payload)
+    return path, _sha256(path), False
+
+
 def _apply_u300_protocol_amendment(
     manifest_path: Path,
     parity_path: Path,
@@ -1207,6 +1458,20 @@ def _run_arm(
     lambda_anchor: float,
 ) -> dict[str, Any]:
     config = _config(max_wall_seconds=args.max_wall_seconds)
+    weight_transition = manifest.get("calibrated_loss_weight_transition")
+    if weight_transition is None:
+        active_loss_weights = _validated_loss_weight_map(
+            forward.LOSS_WEIGHTS, label="configured loss weights"
+        )
+    else:
+        active_loss_weights = _validated_loss_weight_map(
+            manifest.get("loss_weights"), label="manifest loss_weights"
+        )
+        transition_weights = _validated_loss_weight_map(
+            weight_transition.get("new_loss_weights"), label="transition new_loss_weights"
+        )
+        if active_loss_weights != transition_weights:
+            raise ValueError("The active loss weights differ from the provenance-bound transition.")
     base_payload = inputs["base_payloads"][arm]
     arm_dir = output_dir / arm
     arm_dir.mkdir(parents=True, exist_ok=True)
@@ -1215,6 +1480,7 @@ def _run_arm(
     resume_payload = None
     initial_update = START_UPDATE
     recovery = {"discarded_uncheckpointed_rows": {}, "uncheckpointed_optimizer_calls_counted": 0}
+    loaded_checkpoint_sha256: str | None = None
     if args.resume:
         arm_manifest = manifest.get("arms", {}).get(arm, {})
         resume_path_value = arm_manifest.get("latest_checkpoint")
@@ -1225,6 +1491,7 @@ def _run_arm(
             expected_hash = arm_manifest.get("latest_checkpoint_sha256")
             if expected_hash != _sha256(resume_path):
                 raise ValueError(f"Manifest-bound {arm} checkpoint SHA256 mismatch: {resume_path}")
+            loaded_checkpoint_sha256 = str(expected_hash)
         else:
             resume_path = None
         if resume_path is not None:
@@ -1287,6 +1554,43 @@ def _run_arm(
             manifest.setdefault("arms", {}).setdefault(arm, {})["resume_recovery"] = recovery
             _atomic_json(output_dir / "run_manifest.json", manifest)
 
+    transition_status: str | None = None
+    if weight_transition is not None:
+        if resume_payload is None or loaded_checkpoint_sha256 is None:
+            raise ValueError("A loss-weight transition requires an exact manifest-bound resume checkpoint.")
+        resume_payload, transition_status = _prepare_loss_weight_transition_payload(
+            resume_payload,
+            arm=arm,
+            checkpoint_sha256=loaded_checkpoint_sha256,
+            transition=weight_transition,
+        )
+        if transition_status == "transitioned_from_exact_source_checkpoint":
+            source_update = int(weight_transition["source_checkpoints"][arm]["update"])
+            preflight_path, preflight_sha, recovered_orphan = _persist_resume_preflight_checkpoint(
+                checkpoint_dir,
+                arm=arm,
+                prepared_payload=resume_payload,
+                transition_id=str(weight_transition["transition_id"]),
+                source_update=source_update,
+            )
+            arm_state = manifest["arms"].setdefault(arm, {})
+            arm_state["resume_preflight_checkpoint"] = {
+                "path": str(preflight_path),
+                "sha256": preflight_sha,
+                "update": source_update,
+                "optimizer_calls": 0,
+                "reference_solver_calls": 0,
+                "source_checkpoint_sha256": loaded_checkpoint_sha256,
+                "loss_weight_transition": resume_payload["loss_weight_transition"],
+                "recovered_exact_orphan_after_crash": recovered_orphan,
+            }
+            arm_state.update({
+                "latest_checkpoint": str(preflight_path),
+                "latest_checkpoint_sha256": preflight_sha,
+                "latest_update": source_update,
+            })
+            _atomic_json(output_dir / "run_manifest.json", manifest)
+            loaded_checkpoint_sha256 = preflight_sha
     source_payload = resume_payload if resume_payload is not None else base_payload
     _restore_global_rng(source_payload)
     forward_model, route_model, bundle = _setup_bundle(
@@ -1374,6 +1678,13 @@ def _run_arm(
         update = int(payload["actual_optimizer_updates"])
         path = checkpoint_dir / f"{arm}_u{update:04d}_{label}.pt"
         saved_payload = dict(payload)
+        if weight_transition is not None:
+            saved_payload = _mark_loss_weight_transition_checkpoint(
+                saved_payload,
+                weight_transition,
+                arm=arm,
+                loss_weights=active_loss_weights,
+            )
         if arm == "P":
             saved_payload["execution_mode"] = {
                 "thermal_factor_direct_scorer": resolved_factorized_scorer,
@@ -1389,6 +1700,17 @@ def _run_arm(
             "latest_update": update,
             "attempted_optimizer_steps": int(payload["attempted_optimizer_steps"]),
         })
+        if weight_transition is not None:
+            state["loss_weight_transition_id"] = str(weight_transition["transition_id"])
+            state["loss_weight_transition_source_checkpoint_sha256"] = (
+                weight_transition["source_checkpoints"][arm]["sha256"]
+            )
+            state["loss_weight_transition_source_manifest_sha256"] = str(
+                weight_transition["source_manifest_sha256"]
+            )
+            state["loss_weight_transition_source_manifest_snapshot_path"] = str(
+                weight_transition["source_manifest_snapshot_path"]
+            )
         if update in pending_reviews:
             review = pending_reviews.pop(update)
             review["checkpoint"] = str(path)
@@ -1588,6 +1910,24 @@ def _run_arm(
             )
             update_norms[f"{name}_parameter_update_l2"] = math.sqrt(squared)
         metadata = dict(step.training_metadata)
+        metadata["calibrated_loss_weights"] = dict(active_loss_weights)
+        if weight_transition is not None:
+            metadata["loss_weight_transition_id"] = str(weight_transition["transition_id"])
+            metadata["loss_weight_transition_source_checkpoint_sha256"] = (
+                weight_transition["source_checkpoints"][arm]["sha256"]
+            )
+            metadata["loss_weight_transition_source_manifest_sha256"] = str(
+                weight_transition["source_manifest_sha256"]
+            )
+            metadata["loss_weight_transition_source_manifest_snapshot_path"] = str(
+                weight_transition["source_manifest_snapshot_path"]
+            )
+            metadata["loss_weight_transition_spec_sha256"] = str(
+                weight_transition["transition_spec_sha256"]
+            )
+            metadata["loss_weight_transition_evidence_sha256"] = str(
+                weight_transition["evidence_sha256"]
+            )
         cut_evidence = summarize_realized_cut_records(
             cut_records,
             expected_states=(*state_labels, "historical_value_replay"),
@@ -1730,7 +2070,7 @@ def _run_arm(
             arm=config.arm,
             completed_updates=START_UPDATE,
             config=config,
-            calibrated_weights=forward.LOSS_WEIGHTS,
+            calibrated_weights=active_loss_weights,
             sampler_rng_state=sampler.getstate(),
             remaining_order=(),
             attempted_optimizer_steps=attempted_base,
@@ -1749,7 +2089,7 @@ def _run_arm(
         optimizer,
         inputs["raw_stencils"],
         scales=inputs["scales"],
-        loss_weights=forward.LOSS_WEIGHTS,
+        loss_weights=active_loss_weights,
         mixed_specs=mixed,
         historical_value_source=inputs["historical_source"],
         config=config,
@@ -1831,7 +2171,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "output_dir": str(output_dir),
             "source_lineage": manifest["u300_protocol_amendment"],
         }
-
     output_dir.mkdir(parents=True, exist_ok=True)
     ledger_path = output_dir / "lane_execution_ledger.jsonl"
     prior_payload_files = [

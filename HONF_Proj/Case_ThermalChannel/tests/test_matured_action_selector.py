@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 import evaluate_matured_action_selector as selector
 
+from honf_forward_core.interface_fields.action_aware_frontier import ActionAwareRiskHead
 from honf_forward_core.interface_fields.action_risk_fit import ActionPolicyCaseResult
 
 
@@ -410,3 +412,296 @@ def test_predict_maps_leaves_unexposed_train_actions_for_explicit_full_fallback(
         train_families={"train-family"},
     )
     assert set(neural) == set(ridge) == {(case_key, "root"), (case_key, "full_access")}
+
+
+def test_inference_bundle_round_trip_selects_from_saved_input_features(tmp_path: Path) -> None:
+    torch.manual_seed(19)
+    roles = ("fluid", "solid")
+    coordinates = torch.tensor([
+        [0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0],
+    ])
+    from honf_forward_core.interface_fields.action_aware_frontier import (
+        describe_realized_plan,
+        receiver_role_descriptors,
+    )
+    from honf_forward_core.interface_fields.adaptive_interaction_cover import (
+        CaseLocalReceiverTree,
+        MechanismPlan,
+        ReceiverAnchorUniverse,
+    )
+    from honf_forward_core.interface_fields.input_cover_organizer import OrganizerScores
+
+    receiver_universe = ReceiverAnchorUniverse(
+        coordinates,
+        torch.ones(4),
+        torch.tensor([0, 0, 1, 1]),
+        torch.ones(2),
+    )
+    tree = CaseLocalReceiverTree.build(receiver_universe, max_nodes=7, min_leaf_anchors=1)
+    node_count = len(tree.nodes)
+    scores = OrganizerScores(
+        split_logits=torch.zeros(node_count),
+        module_logits=torch.zeros(node_count, 2),
+        environment_logits=torch.zeros(node_count, 2),
+        mechanism_logits={
+            "MM": torch.arange(node_count * 2, dtype=torch.float32).reshape(node_count, 2) / 10,
+            "QE": torch.flip(torch.arange(node_count * 2, dtype=torch.float32).reshape(node_count, 2), (1,)) / 10,
+        },
+        node_embeddings=torch.arange(node_count * 4, dtype=torch.float32).reshape(node_count, 4) / 10,
+        module_embeddings=torch.arange(8, dtype=torch.float32).reshape(2, 4) / 7,
+        environment_embeddings=torch.arange(8, dtype=torch.float32).reshape(2, 4) / 9,
+        budget_vector=torch.tensor([0.9, 0.9, 1.0, 1.0, 1.0]),
+    )
+    encoded = SimpleNamespace(
+        module_centers=coordinates[:2][None],
+        module_present=torch.ones(1, 2),
+        env_coords=coordinates[2:][None],
+        env_weights=torch.ones(1, 2),
+    )
+    left, right = tree.nodes[0].left, tree.nodes[0].right
+    assert left is not None and right is not None
+    grandchildren = (
+        tree.nodes[left].left, tree.nodes[left].right,
+        tree.nodes[right].left, tree.nodes[right].right,
+    )
+    assert all(index is not None for index in grandchildren)
+    cuts = {
+        "root": (0,),
+        "two_packet": (left, right),
+        "four_packet": tuple(int(index) for index in grandchildren),
+        "full_access": tuple(int(index) for index in grandchildren),
+    }
+    role_features = receiver_role_descriptors(tree, role_count=len(roles))
+    action_features = {}
+    for action, cut in cuts.items():
+        if action == "full_access":
+            mm_permission = torch.ones(node_count, 2)
+            qe_permission = torch.ones(node_count, 2)
+        else:
+            mm_permission = torch.zeros(node_count, 2)
+            qe_permission = torch.zeros(node_count, 2)
+            mm_permission[:, 0] = 1.0
+            qe_permission[:, 1] = 1.0
+        plan = MechanismPlan(
+            tree,
+            torch.zeros(node_count),
+            encoded.module_present[0],
+            int(encoded.env_coords.shape[1]),
+            permissions={"MM": mm_permission, "QE": qe_permission},
+        )
+        action_features[action] = {
+            "packet_rows": describe_realized_plan(scores, plan, encoded, cut),
+            "budget_vector": scores.budget_vector,
+            "receiver_role_features": role_features,
+        }
+    packet_width = action_features["root"]["packet_rows"].shape[1]
+    role_width = role_features.shape[1]
+    model = ActionAwareRiskHead(
+        packet_feature_dim=packet_width,
+        budget_dim=len(selector.MECHANISM_ORDER),
+        receiver_role_dim=role_width,
+        hidden_dim=12,
+    ).eval()
+
+    checkpoint_path = tmp_path / "selected_g.pt"
+    source_path = tmp_path / "source.pt"
+    manifest_path = tmp_path / "controlled_manifest.json"
+    action_table_path = tmp_path / "action_table.jsonl"
+    provenance_path = tmp_path / "provenance.json"
+    bundle_path = tmp_path / "action_risk_selector.pt"
+    checkpoint_path.write_bytes(b"selected G endpoint fixture")
+    source_path.write_bytes(b"fixed Run1804 source fixture")
+    manifest_path.write_text('{"run_id":"fixture"}\n', encoding="utf-8")
+    action_table_path.write_text(
+        '{"action":"root","split":"train","reference_label":3.0}\n', encoding="utf-8"
+    )
+    provenance_path.write_text(
+        json.dumps({
+            "run_id": "fixture",
+            "checkpoint_arm": "G",
+            "selector_inference_bundle_path": str(bundle_path.resolve()),
+        }) + "\n",
+        encoding="utf-8",
+    )
+    forward = {
+        "checkpoint": str(checkpoint_path),
+        "checkpoint_sha256": selector._sha256(checkpoint_path),
+        "checkpoint_update": 900,
+        "checkpoint_arm": "G",
+        "source_checkpoint": str(source_path),
+        "source_checkpoint_sha256": selector._sha256(source_path),
+        "controlled_manifest": str(manifest_path),
+        "controlled_manifest_sha256": selector._sha256(manifest_path),
+    }
+
+    packet_counts = {action: len(cuts[action]) for action in selector.ACTION_KEYS}
+    feature_path = tmp_path / "candidate_features.pt"
+    torch.save({
+        "action_features": action_features,
+        "exact_work_by_action": {"root": 7.0, "two_packet": 3.0, "four_packet": 5.0, "full_access": 10.0},
+        "nonredundant_k_by_action": packet_counts,
+        "trained_sparse_by_action": {"root": True, "two_packet": True, "four_packet": False, "full_access": False},
+    }, feature_path)
+    saved_features = torch.load(feature_path, map_location="cpu", weights_only=True)
+    runtime_policy = {
+        "action_order": list(selector.ACTION_KEYS),
+        "exposure_qualified_sparse_actions": ["root", "two_packet"],
+        "role_order": list(roles),
+        "fixed_role_log_limits": [1.0e6, 1.0e6],
+        "empirical_role_margin": [0.1, 0.1],
+    }
+    expected = selector.select_action_with_risk_bundle(
+        model,
+        {"policy": runtime_policy},
+        saved_features["action_features"],
+        exact_work_by_action=saved_features["exact_work_by_action"],
+        nonredundant_k_by_action=saved_features["nonredundant_k_by_action"],
+        trained_sparse_by_action=saved_features["trained_sparse_by_action"],
+    )
+    assert expected["selected_action"] == "two_packet"
+
+    artifact = selector.save_action_risk_selector_bundle(
+        bundle_path,
+        model=model,
+        selected_forward=forward,
+        action_table_path=action_table_path,
+        provenance_path=provenance_path,
+        role_order=roles,
+        train_family_ids=("train-family-a", "train-family-b"),
+        split_manifest_sha256="a" * 64,
+        fixed_role_log_limits=runtime_policy["fixed_role_log_limits"],
+        empirical_margin=runtime_policy["empirical_role_margin"],
+        fit_seed=31,
+        fit_updates=120,
+        crossfit_folds=2,
+        exposure_qualified_sparse_actions=("root", "two_packet"),
+    )
+    with pytest.raises(FileExistsError, match="Refusing to overwrite selector bundle"):
+        selector.save_action_risk_selector_bundle(
+            bundle_path,
+            model=model,
+            selected_forward=forward,
+            action_table_path=action_table_path,
+            provenance_path=provenance_path,
+            role_order=roles,
+            train_family_ids=("train-family-a", "train-family-b"),
+            split_manifest_sha256="a" * 64,
+            fixed_role_log_limits=runtime_policy["fixed_role_log_limits"],
+            empirical_margin=runtime_policy["empirical_role_margin"],
+            fit_seed=31,
+            fit_updates=120,
+            crossfit_folds=2,
+            exposure_qualified_sparse_actions=("root", "two_packet"),
+        )
+    loaded_model, loaded_bundle = selector.load_action_risk_selector_bundle(
+        bundle_path,
+        expected_bundle_sha256=artifact["sha256"],
+        expected_forward_sha256=forward["checkpoint_sha256"],
+    )
+    actual = selector.select_action_with_risk_bundle(
+        loaded_model,
+        loaded_bundle,
+        saved_features["action_features"],
+        exact_work_by_action=saved_features["exact_work_by_action"],
+        nonredundant_k_by_action=saved_features["nonredundant_k_by_action"],
+        trained_sparse_by_action=saved_features["trained_sparse_by_action"],
+    )
+    assert actual == expected
+    assert loaded_bundle["policy"]["action_order"] == list(selector.ACTION_KEYS)
+    assert loaded_bundle["policy"]["exposure_qualified_sparse_actions"] == ["root", "two_packet"]
+    assert loaded_bundle["training"]["train_family_ids"] == ["train-family-a", "train-family-b"]
+    assert "candidate_role_error" not in loaded_bundle
+    assert "reference_labels" not in loaded_bundle
+    assert "action_features" not in loaded_bundle
+    assert artifact["action_table_sha256"] == selector._sha256(action_table_path)
+    assert artifact["provenance_sha256"] == selector._sha256(provenance_path)
+    assert loaded_bundle["feature_schema"]["packet_rows"]["tensor_shape"] == ["realized_cut_k", packet_width]
+    assert loaded_bundle["feature_schema"]["receiver_role_features"]["tensor_shape"] == [len(roles), role_width]
+
+    # Re-run the serialized decision in an independent interpreter to guard
+    # against hidden model state or import-process state.
+    child_code = r"""
+import json, sys, torch
+bundle_path, bundle_sha, forward_sha, features_path, case_src, project_src, script_src = sys.argv[1:]
+sys.path[:0] = [case_src, project_src, script_src]
+import evaluate_matured_action_selector as selector
+model, bundle = selector.load_action_risk_selector_bundle(
+    __import__('pathlib').Path(bundle_path),
+    expected_bundle_sha256=bundle_sha,
+    expected_forward_sha256=forward_sha,
+)
+features = torch.load(features_path, map_location='cpu', weights_only=True)
+decision = selector.select_action_with_risk_bundle(
+    model,
+    bundle,
+    features['action_features'],
+    exact_work_by_action=features['exact_work_by_action'],
+    nonredundant_k_by_action=features['nonredundant_k_by_action'],
+    trained_sparse_by_action=features['trained_sparse_by_action'],
+    device='cpu',
+)
+print(json.dumps(decision, sort_keys=True))
+"""
+    fresh = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            child_code,
+            str(bundle_path),
+            artifact["sha256"],
+            forward["checkpoint_sha256"],
+            str(feature_path),
+            str(selector.CASE_ROOT / "src"),
+            str(selector.PROJECT_ROOT / "src"),
+            str(selector.CASE_ROOT / "scripts"),
+        ],
+        cwd=selector.PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    fresh_decision = json.loads(fresh.stdout)
+    assert fresh_decision["selected_action"] == expected["selected_action"]
+    np.testing.assert_array_equal(
+        np.asarray(fresh_decision["predicted_log_risk_by_action"]),
+        np.asarray(expected["predicted_log_risk_by_action"]),
+    )
+
+    unauthorized_actions = dict(saved_features["trained_sparse_by_action"])
+    unauthorized_actions["four_packet"] = True
+    with pytest.raises(ValueError, match="exposure-qualified set"):
+        selector.select_action_with_risk_bundle(
+            loaded_model,
+            loaded_bundle,
+            saved_features["action_features"],
+            exact_work_by_action=saved_features["exact_work_by_action"],
+            nonredundant_k_by_action=saved_features["nonredundant_k_by_action"],
+            trained_sparse_by_action=unauthorized_actions,
+        )
+    malformed_roles = dict(saved_features["action_features"])
+    malformed_roles["root"] = dict(malformed_roles["root"])
+    malformed_roles["root"]["receiver_role_features"] = role_features[:1]
+    with pytest.raises(ValueError, match="feature shapes"):
+        selector.select_action_with_risk_bundle(
+            loaded_model,
+            loaded_bundle,
+            malformed_roles,
+            exact_work_by_action=saved_features["exact_work_by_action"],
+            nonredundant_k_by_action=saved_features["nonredundant_k_by_action"],
+            trained_sparse_by_action=saved_features["trained_sparse_by_action"],
+        )
+
+    with pytest.raises(ValueError, match="different selected G checkpoint"):
+        selector.load_action_risk_selector_bundle(
+            bundle_path,
+            expected_bundle_sha256=artifact["sha256"],
+            expected_forward_sha256="b" * 64,
+        )
+
+    action_table_path.write_text('{"action":"tampered"}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="action_table identity changed"):
+        selector.load_action_risk_selector_bundle(
+            bundle_path,
+            expected_bundle_sha256=artifact["sha256"],
+            expected_forward_sha256=forward["checkpoint_sha256"],
+        )

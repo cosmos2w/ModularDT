@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import random
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +22,7 @@ from channelthermal.response_control.maturation import (
 from channelthermal.response_control.training import (
     StagedTrainingConfig,
     TrainingStage,
+    checkpoint_payload,
     run_staged_fit,
 )
 from test_response_control import _AbsoluteField, _stencil
@@ -792,3 +794,292 @@ def test_auxiliary_anchor_changes_update_in_blockwise_projection_branch() -> Non
     without_anchor = fit(False)
     with_anchor = fit(True)
     assert with_anchor != without_anchor
+
+
+def _load_transition_test_driver(name: str):
+    driver_path = Path(__file__).resolve().parents[1] / "scripts" / "run_controlled_maturation.py"
+    spec = importlib.util.spec_from_file_location(name, driver_path)
+    assert spec is not None and spec.loader is not None
+    driver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(driver)
+    return driver
+
+
+def _loss_weight_transition_fixture(tmp_path: Path, driver):
+    old_weights = {
+        "value": 1.0,
+        "finite": 1.0,
+        "finite_peak": 1.0,
+        "pressure_value": 1.0,
+        "pressure_response": 1.0,
+    }
+    new_weights = {**old_weights, "value": 4.0}
+    source_manifest_snapshot = tmp_path / "source_manifest_snapshot.json"
+    source_manifest_snapshot.write_text('{"status":"paused"}\n', encoding="utf-8")
+    source_manifest_sha = hashlib.sha256(source_manifest_snapshot.read_bytes()).hexdigest()
+    transition = {
+        "transition_id": "test_value_weight",
+        "matched_arms": ["G", "P"],
+        "first_new_update": 11,
+        "source_checkpoints": {
+            "G": {"update": 10, "sha256": "a" * 64},
+            "P": {"update": 10, "sha256": "b" * 64},
+        },
+        "old_loss_weights": old_weights,
+        "new_loss_weights": new_weights,
+        "source_manifest_sha256": source_manifest_sha,
+        "source_manifest_snapshot_path": str(source_manifest_snapshot),
+        "transition_spec_sha256": "",
+        "evidence_sha256": "d" * 64,
+    }
+    transition["transition_spec_sha256"] = driver._loss_weight_transition_spec_sha256(transition)
+    return old_weights, new_weights, transition
+
+
+def _transition_source_payload(old_weights, *, update=10):
+    return {
+        "arm": "R_response",
+        "actual_optimizer_updates": update,
+        "training_config": {"arm": "R_response"},
+        "optimizer": {"state": {1: {"step": torch.tensor(7)}}, "param_groups": [{"lr": 1.0e-5}]},
+        "model": {"w": torch.tensor([2.0])},
+        "torch_rng_state": torch.tensor([4, 5]),
+        "sampler_rng_state": random.Random(8).getstate(),
+        "calibrated_loss_weights": dict(old_weights),
+    }
+
+
+def test_loss_weight_transition_is_source_bound_and_idempotent(tmp_path: Path) -> None:
+    driver = _load_transition_test_driver("thermal_generic_transition_test")
+    old_weights, new_weights, transition = _loss_weight_transition_fixture(tmp_path, driver)
+    payload = _transition_source_payload(old_weights)
+    optimizer_state = payload["optimizer"]
+    model_state = payload["model"]
+    transitioned, status = driver._prepare_loss_weight_transition_payload(
+        payload, arm="G", checkpoint_sha256="a" * 64, transition=transition
+    )
+    assert status == "transitioned_from_exact_source_checkpoint"
+    assert transitioned is not payload
+    assert transitioned["optimizer"] is optimizer_state
+    assert transitioned["model"] is model_state
+    assert payload["calibrated_loss_weights"] == old_weights
+    assert transitioned["calibrated_loss_weights"] == new_weights
+    assert transitioned["loss_weight_transition"]["source_manifest_sha256"] == transition["source_manifest_sha256"]
+    assert transitioned["loss_weight_transition"]["source_manifest_snapshot_path"] == transition[
+        "source_manifest_snapshot_path"
+    ]
+    assert transitioned["loss_weight_transition"]["transition_spec_sha256"] == transition[
+        "transition_spec_sha256"
+    ]
+
+    resumed, status = driver._prepare_loss_weight_transition_payload(
+        transitioned, arm="G", checkpoint_sha256="e" * 64, transition=transition
+    )
+    assert status == "already_transitioned_checkpoint"
+    assert resumed["loss_weight_transition"] == transitioned["loss_weight_transition"]
+    later = dict(transitioned)
+    later["actual_optimizer_updates"] = 11
+    marked_later = driver._mark_loss_weight_transition_checkpoint(
+        later, transition, arm="G", loss_weights=new_weights
+    )
+    assert marked_later["loss_weight_transition"] == transitioned["loss_weight_transition"]
+    assert marked_later["actual_optimizer_updates"] == 11
+    with pytest.raises(ValueError, match="neither the exact old transition source"):
+        driver._prepare_loss_weight_transition_payload(
+            payload, arm="G", checkpoint_sha256="f" * 64, transition=transition
+        )
+    with pytest.raises(ValueError, match="neither the exact old transition source"):
+        driver._prepare_loss_weight_transition_payload(
+            payload,
+            arm="G",
+            checkpoint_sha256=transition["source_checkpoints"]["P"]["sha256"],
+            transition=transition,
+        )
+    with pytest.raises(ValueError, match="complete loss-weight transition"):
+        driver._prepare_loss_weight_transition_payload(
+            payload,
+            arm="G",
+            checkpoint_sha256="a" * 64,
+            transition={**transition, "transition_spec_sha256": "invalid"},
+        )
+    with pytest.raises(ValueError, match="complete loss-weight transition"):
+        driver._prepare_loss_weight_transition_payload(
+            payload,
+            arm="G",
+            checkpoint_sha256="a" * 64,
+            transition={**transition, "source_manifest_sha256": "invalid"},
+        )
+    with pytest.raises(ValueError, match="specification SHA256"):
+        driver._prepare_loss_weight_transition_payload(
+            payload,
+            arm="G",
+            checkpoint_sha256="a" * 64,
+            transition={**transition, "new_loss_weights": {**new_weights, "value": 3.0}},
+        )
+    with pytest.raises(ValueError, match="snapshot SHA256"):
+        driver._prepare_loss_weight_transition_payload(
+            payload,
+            arm="G",
+            checkpoint_sha256="a" * 64,
+            transition={**transition, "source_manifest_sha256": "f" * 64},
+        )
+    with pytest.raises(ValueError, match="loss-term set"):
+        driver._prepare_loss_weight_transition_payload(
+            payload,
+            arm="G",
+            checkpoint_sha256="a" * 64,
+            transition={
+                **transition,
+                "old_loss_weights": {name: value for name, value in old_weights.items() if name != "finite"},
+            },
+        )
+    with pytest.raises(ValueError, match="finite positive number"):
+        driver._prepare_loss_weight_transition_payload(
+            payload,
+            arm="G",
+            checkpoint_sha256="a" * 64,
+            transition={**transition, "new_loss_weights": {**new_weights, "value": float("nan")}},
+        )
+    with pytest.raises(TypeError, match="finite positive number"):
+        driver._prepare_loss_weight_transition_payload(
+            payload,
+            arm="G",
+            checkpoint_sha256="a" * 64,
+            transition={**transition, "new_loss_weights": {**new_weights, "value": "4.0"}},
+        )
+
+
+def test_loss_weight_transition_recovers_across_matched_arm_crash_boundaries(tmp_path: Path) -> None:
+    driver = _load_transition_test_driver("thermal_generic_transition_crash_test")
+    old_weights, _new_weights, transition = _loss_weight_transition_fixture(tmp_path, driver)
+    source_g, source_p = _transition_source_payload(old_weights), _transition_source_payload(old_weights)
+    original_g_rng = source_g["torch_rng_state"].clone()
+    original_p_rng = source_p["torch_rng_state"].clone()
+
+    # The manifest transition is durable, but neither arm has resumed.
+    g_preflight, status = driver._prepare_loss_weight_transition_payload(
+        source_g, arm="G", checkpoint_sha256="a" * 64, transition=transition
+    )
+    assert status == "transitioned_from_exact_source_checkpoint"
+    # G's preflight pointer is durable, but it has not completed another update.
+    g_recovered, g_status = driver._prepare_loss_weight_transition_payload(
+        g_preflight, arm="G", checkpoint_sha256="e" * 64, transition=transition
+    )
+    p_preflight, p_status = driver._prepare_loss_weight_transition_payload(
+        source_p, arm="P", checkpoint_sha256="b" * 64, transition=transition
+    )
+    assert g_status == "already_transitioned_checkpoint"
+    assert p_status == "transitioned_from_exact_source_checkpoint"
+    # G has advanced while P remains at the original source checkpoint.
+    g_advanced = dict(g_recovered)
+    g_advanced["actual_optimizer_updates"] = 20
+    g_after_restart, g_status = driver._prepare_loss_weight_transition_payload(
+        g_advanced, arm="G", checkpoint_sha256="e" * 64, transition=transition
+    )
+    p_after_restart, p_status = driver._prepare_loss_weight_transition_payload(
+        source_p, arm="P", checkpoint_sha256="b" * 64, transition=transition
+    )
+    assert g_status == "already_transitioned_checkpoint"
+    assert p_status == "transitioned_from_exact_source_checkpoint"
+    assert p_preflight["loss_weight_transition"]["source_checkpoint_sha256"] == "b" * 64
+    assert g_preflight["torch_rng_state"] is source_g["torch_rng_state"]
+    assert p_preflight["sampler_rng_state"] is source_p["sampler_rng_state"]
+    assert g_after_restart["optimizer"] is source_g["optimizer"]
+    assert p_after_restart["optimizer"] is source_p["optimizer"]
+    assert torch.equal(source_g["torch_rng_state"], original_g_rng)
+    assert torch.equal(source_p["torch_rng_state"], original_p_rng)
+    assert source_g["calibrated_loss_weights"] == old_weights
+    assert source_p["calibrated_loss_weights"] == old_weights
+
+
+def test_orphaned_resume_preflight_checkpoint_is_adopted_only_when_exact(tmp_path: Path) -> None:
+    driver = _load_transition_test_driver("thermal_generic_transition_orphan_test")
+    old_weights, _new_weights, transition = _loss_weight_transition_fixture(tmp_path, driver)
+    source = _transition_source_payload(old_weights)
+    prepared, _ = driver._prepare_loss_weight_transition_payload(
+        source, arm="G", checkpoint_sha256="a" * 64, transition=transition
+    )
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    args = {
+        "arm": "G",
+        "prepared_payload": prepared,
+        "transition_id": transition["transition_id"],
+        "source_update": 10,
+    }
+    path, digest, recovered = driver._persist_resume_preflight_checkpoint(checkpoint_dir, **args)
+    assert not recovered
+    adopted_path, adopted_digest, recovered = driver._persist_resume_preflight_checkpoint(checkpoint_dir, **args)
+    assert recovered
+    assert adopted_path == path
+    assert adopted_digest == digest
+
+    altered = dict(prepared)
+    altered["torch_rng_state"] = torch.tensor([4, 6])
+    with pytest.raises(ValueError, match="Orphaned resume-preflight"):
+        driver._persist_resume_preflight_checkpoint(
+            checkpoint_dir, **{**args, "prepared_payload": altered}
+        )
+    assert driver._sha256(path) == digest
+    assert source["calibrated_loss_weights"] == old_weights
+
+
+def test_value_weight_transition_restores_through_staged_fit(tmp_path: Path) -> None:
+    driver = _load_transition_test_driver("thermal_generic_transition_staged_fit_test")
+    _old_weights, new_weights, transition = _loss_weight_transition_fixture(tmp_path, driver)
+    scales = ThermalLossScales(
+        value={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
+        finite={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
+        mixed={"fluid_fields": 1.0, "interface": 1.0, "solid_temperature": 1.0},
+        pressure_value=1.0,
+        pressure_response=1.0,
+        pressure_limit=3.0,
+        pressure_boundary=0.5,
+        solid_temperature=1.0,
+        smooth_peak_beta=1.0,
+        near_limit_band=0.5,
+    )
+    config = StagedTrainingConfig(
+        arm="R_response",
+        max_optimizer_updates=11,
+        max_epochs=11,
+        total_optimizer_update_ceiling=11,
+        checkpoint_every_updates=1,
+        review_updates=(11,),
+        stages=(TrainingStage("value_weight_resume", 0, 11, ("value",)),),
+    )
+    model = _AbsoluteField()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1.0e-5, weight_decay=1.0e-5)
+    (model.gain.square()).backward()
+    optimizer.step()
+    source = checkpoint_payload(
+        model,
+        optimizer,
+        arm="R_response",
+        completed_updates=10,
+        config=config,
+        calibrated_weights=transition["old_loss_weights"],
+        sampler_rng_state=random.Random(31).getstate(),
+        attempted_optimizer_steps=10,
+    )
+    transitioned, _ = driver._prepare_loss_weight_transition_payload(
+        source, arm="G", checkpoint_sha256="a" * 64, transition=transition
+    )
+    result = run_staged_fit(
+        model,
+        model,
+        optimizer,
+        [_stencil()],
+        scales=scales,
+        loss_weights=new_weights,
+        config=config,
+        initial_update=10,
+        initial_attempted_optimizer_steps=10,
+        resume_payload=transitioned,
+        stop_at_update=11,
+        device="cpu",
+        training_stencil_index_for_update=lambda _update: 0,
+    )
+    assert result.final_update == 11
+    assert result.actual_optimizer_updates == 1
+    assert result.history[0].active_term_weights["value"] == 4.0

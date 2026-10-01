@@ -43,6 +43,7 @@ from channelthermal.response_control.native import DifferentiableThermalOperator
 from channelthermal.response_control.thermal import reduce_native_thermal_quantities
 
 from honf_forward_core.interface_fields.action_aware_frontier import (
+    ActionAwareRiskHead,
     describe_realized_plan,
     incumbent_role_log_limit,
     receiver_role_descriptors,
@@ -80,6 +81,449 @@ HISTORICAL_VISIT_MINIMUM = 1200
 FAMILY_VISIT_MINIMUM = 100
 RISK_FIT_UPDATES = 120
 RISK_CROSSFIT_FOLDS = 5
+ACTION_RISK_BUNDLE_FORMAT = 1
+ACTION_RISK_PACKET_MECHANISMS = ("MM", "QE")
+
+
+def _action_risk_feature_schema(
+    role_order: Sequence[str],
+    *,
+    packet_feature_dim: int,
+    receiver_role_dim: int,
+) -> dict[str, Any]:
+    """Describe and validate the rows produced by ``describe_realized_plan``."""
+    role_count = len(role_order)
+    coordinate_numerator = receiver_role_dim - role_count - 2
+    if coordinate_numerator <= 0 or coordinate_numerator % 2:
+        raise ValueError("Receiver-role width does not match coordinate and one-hot role features.")
+    coordinate_dim = coordinate_numerator // 2
+    embedding_numerator = packet_feature_dim - 4 * coordinate_dim - 14
+    if embedding_numerator <= 0 or embedding_numerator % 5:
+        raise ValueError("Packet-row width does not match the realized-plan feature contract.")
+    embedding_dim = embedding_numerator // 5
+    typed_summary_dim = 2 * embedding_dim + 2 * coordinate_dim + 7
+    expected_packet_feature_dim = embedding_dim + 2 * typed_summary_dim
+    if expected_packet_feature_dim != packet_feature_dim:
+        raise ValueError("Packet-row width does not match the realized-plan feature contract.")
+    mechanism_fields = [
+        {"name": "included_source_feature_mean", "width": embedding_dim},
+        {"name": "excluded_source_feature_mean", "width": embedding_dim},
+        {"name": "included_relative_coordinate_mean", "width": coordinate_dim},
+        {"name": "excluded_relative_coordinate_mean", "width": coordinate_dim},
+        {"name": "log1p_included_source_measure", "width": 1},
+        {"name": "log1p_excluded_source_measure", "width": 1},
+        {"name": "sqrt_included_squared_distance", "width": 1},
+        {"name": "log1p_source_count", "width": 1},
+        {"name": "log1p_nonzero_degree", "width": 1},
+        {"name": "included_score_mean", "width": 1},
+        {"name": "excluded_score_mean", "width": 1},
+    ]
+    return {
+        "schema_id": "thermal_action_risk_inputs_v1",
+        "packet_rows": {
+            "producer": "describe_realized_plan",
+            "adapter": "describe_frontier_action",
+            "row_order": "the realized action cut argument order",
+            "tensor_shape": ["realized_cut_k", packet_feature_dim],
+            "base_dimensions": {
+                "frontier_node_embedding": embedding_dim,
+                "source_embedding": embedding_dim,
+                "coordinate": coordinate_dim,
+            },
+            "component_order": [
+                {"name": "frontier_node_embedding", "width": embedding_dim},
+                *[
+                    {
+                        "name": f"{mechanism}_typed_source_summary",
+                        "width": typed_summary_dim,
+                        "fields": mechanism_fields,
+                    }
+                    for mechanism in ACTION_RISK_PACKET_MECHANISMS
+                ],
+            ],
+            "typed_source_summary_order": list(ACTION_RISK_PACKET_MECHANISMS),
+        },
+        "budget_vector_order": list(MECHANISM_ORDER),
+        "receiver_role_features": {
+            "producer": "receiver_role_descriptors",
+            "row_order": "the frozen role_order",
+            "tensor_shape": [role_count, receiver_role_dim],
+            "component_order": [
+                "weighted_mean_coordinates_by_axis",
+                "weighted_coordinate_standard_deviation_by_axis",
+                "log1p_receiver_count",
+                "log1p_receiver_measure",
+                "one_hot_role",
+            ],
+            "one_hot_role_order": list(role_order),
+        },
+        "action_scalar_order": ["nonredundant_k"],
+        "dimension_contract": {
+            "packet_feature_dim": packet_feature_dim,
+            "packet_row_formula": "frontier_embedding_dim + 2 * (2 * frontier_embedding_dim + 2 * coordinate_dim + 7)",
+            "receiver_role_dim": receiver_role_dim,
+            "receiver_role_formula": "2 * coordinate_dim + 2 + role_count",
+        },
+    }
+
+
+def _atomic_torch(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        torch.save(dict(payload), temporary)
+        # A hard link publishes the complete temporary file atomically and
+        # fails if an immutable selected-endpoint bundle already exists.
+        os.link(temporary, path)
+    except FileExistsError as error:
+        raise FileExistsError(f"Refusing to overwrite selector bundle: {path}") from error
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _risk_head_config(model: ActionAwareRiskHead) -> dict[str, int]:
+    if not isinstance(model, ActionAwareRiskHead):
+        raise TypeError("The inference bundle requires the fitted ActionAwareRiskHead.")
+    return {
+        "packet_feature_dim": int(model.packet_feature_dim),
+        "budget_dim": int(model.budget_dim),
+        "receiver_role_dim": int(model.receiver_role_dim),
+        "hidden_dim": int(model.packet_encoder[1].out_features),
+    }
+
+
+def save_action_risk_selector_bundle(
+    path: Path,
+    *,
+    model: ActionAwareRiskHead,
+    selected_forward: Mapping[str, Any],
+    action_table_path: Path,
+    provenance_path: Path,
+    role_order: Sequence[str],
+    train_family_ids: Sequence[str],
+    split_manifest_sha256: str,
+    fixed_role_log_limits: Sequence[float] | torch.Tensor,
+    empirical_margin: Sequence[float] | torch.Tensor,
+    fit_seed: int,
+    fit_updates: int,
+    crossfit_folds: int,
+    exposure_qualified_sparse_actions: Sequence[str],
+) -> dict[str, Any]:
+    """Save only the fitted input-only selector and its exact source identity.
+
+    Physical labels, per-case risk targets, and action outcome rows are kept in
+    the report/table artifacts and are never copied into this inference bundle.
+    """
+    required_forward = (
+        "checkpoint", "checkpoint_sha256", "checkpoint_update", "checkpoint_arm",
+        "source_checkpoint", "source_checkpoint_sha256", "controlled_manifest",
+        "controlled_manifest_sha256",
+    )
+    if any(key not in selected_forward for key in required_forward):
+        raise ValueError("Selected-forward identity is incomplete for selector serialization.")
+    forward = {key: selected_forward[key] for key in required_forward}
+    if forward["checkpoint_arm"] != "G":
+        raise ValueError("Thermal action-risk inference must bind the selected G checkpoint.")
+    checkpoint_update = forward["checkpoint_update"]
+    if (isinstance(checkpoint_update, bool) or not isinstance(checkpoint_update, (int, np.integer))
+            or int(checkpoint_update) < 0):
+        raise ValueError("Selected G checkpoint update must be a nonnegative integer.")
+    forward["checkpoint_update"] = int(checkpoint_update)
+    for key in ("checkpoint_sha256", "source_checkpoint_sha256", "controlled_manifest_sha256", "split_manifest_sha256"):
+        digest = str(forward.get(key, split_manifest_sha256)).lower()
+        if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+            raise ValueError(f"{key} must be a lowercase SHA-256 digest.")
+        if key == "split_manifest_sha256":
+            split_manifest_sha256 = digest
+        else:
+            forward[key] = digest
+    checkpoint_path = Path(str(forward["checkpoint"])).expanduser().resolve()
+    source_path = Path(str(forward["source_checkpoint"])).expanduser().resolve()
+    manifest_path = Path(str(forward["controlled_manifest"])).expanduser().resolve()
+    if _sha256(checkpoint_path) != forward["checkpoint_sha256"]:
+        raise ValueError("Selected G checkpoint SHA differs before selector serialization.")
+    if _sha256(source_path) != forward["source_checkpoint_sha256"]:
+        raise ValueError("Fixed source checkpoint SHA differs before selector serialization.")
+    if _sha256(manifest_path) != forward["controlled_manifest_sha256"]:
+        raise ValueError("Controlled manifest SHA differs before selector serialization.")
+
+    bundle_path = path.expanduser().resolve()
+    table_path = action_table_path.expanduser().resolve()
+    provenance_source_path = provenance_path.expanduser().resolve()
+    if table_path == provenance_source_path or bundle_path in {
+        table_path, provenance_source_path, checkpoint_path, source_path, manifest_path,
+    }:
+        raise ValueError("Selector bundle, provenance, action table, and frozen sources must be distinct files.")
+    table_sha256 = _sha256(table_path)
+    provenance_sha256 = _sha256(provenance_source_path)
+    roles = tuple(str(value) for value in role_order)
+    raw_families = tuple(str(value) for value in train_family_ids)
+    families = tuple(sorted(set(raw_families)))
+    if not roles or any(not role for role in roles) or len(set(roles)) != len(roles):
+        raise ValueError("The exported Thermal receiver-role order must be nonempty and unique.")
+    if not families or any(not family for family in families) or len(families) != len(raw_families):
+        raise ValueError("The selector bundle requires unique, nonempty train-family IDs.")
+    if fit_seed < 0 or fit_updates < 1 or not 1 <= crossfit_folds <= len(families):
+        raise ValueError("Selector fitting metadata must contain positive update/fold counts and a valid seed.")
+    limits = torch.as_tensor(fixed_role_log_limits, dtype=torch.float64).reshape(-1)
+    margin = torch.as_tensor(empirical_margin, dtype=torch.float64).reshape(-1)
+    if (limits.shape != (len(roles),) or margin.shape != limits.shape
+            or not bool(torch.isfinite(limits).all()) or not bool(torch.isfinite(margin).all())
+            or bool((margin < 0).any())):
+        raise ValueError("Frozen train role limits and cross-fit margins must align and be finite.")
+
+    config = _risk_head_config(model)
+    if config["budget_dim"] != len(MECHANISM_ORDER) or config["receiver_role_dim"] <= 0:
+        raise ValueError("Fitted selector dimensions differ from the declared Thermal feature order.")
+    exposure_actions = tuple(str(value) for value in exposure_qualified_sparse_actions)
+    if (not exposure_actions or len(set(exposure_actions)) != len(exposure_actions)
+            or not set(exposure_actions).issubset(SPARSE_ACTION_KEYS)):
+        raise ValueError("A fitted selector bundle requires its unique exposure-qualified sparse actions.")
+    feature_schema = _action_risk_feature_schema(
+        roles,
+        packet_feature_dim=config["packet_feature_dim"],
+        receiver_role_dim=config["receiver_role_dim"],
+    )
+    state_dict = {
+        name: value.detach().to(device="cpu").contiguous().clone()
+        for name, value in model.state_dict().items()
+    }
+    payload = {
+        "bundle_kind": "thermal_action_risk_selector",
+        "format_version": ACTION_RISK_BUNDLE_FORMAT,
+        "selected_forward": {
+            **forward,
+            "checkpoint": str(checkpoint_path),
+            "source_checkpoint": str(source_path),
+            "controlled_manifest": str(manifest_path),
+        },
+        "action_table": {"path": str(table_path), "sha256": table_sha256},
+        "provenance": {"path": str(provenance_source_path), "sha256": provenance_sha256},
+        "training": {
+            "train_family_ids": list(families),
+            "split_manifest_sha256": split_manifest_sha256,
+            "fit_seed": int(fit_seed),
+            "fit_updates": int(fit_updates),
+            "crossfit_folds": int(crossfit_folds),
+            "calibration_source": "train-family grouped cross-fit residuals",
+        },
+        "policy": {
+            "action_order": list(ACTION_KEYS),
+            "sparse_action_order": list(SPARSE_ACTION_KEYS),
+            "full_access_action": "full_access",
+            "exposure_qualified_sparse_actions": [
+                action for action in SPARSE_ACTION_KEYS if action in set(exposure_actions)
+            ],
+            "role_order": list(roles),
+            "fixed_role_log_limits": limits.tolist(),
+            "empirical_role_margin": margin.tolist(),
+            "relative_allowance": float(ROLE_RELATIVE_ALLOWANCE),
+            "exact_work_source": "candidate-specific canonical work supplied by caller",
+        },
+        "feature_schema": feature_schema,
+        "model_config": config,
+        "state_dict": state_dict,
+    }
+    _atomic_torch(bundle_path, payload)
+    resolved = bundle_path
+    return {
+        "path": str(resolved),
+        "sha256": _sha256(resolved),
+        "selected_forward_sha256": forward["checkpoint_sha256"],
+        "action_table_sha256": table_sha256,
+        "provenance_sha256": provenance_sha256,
+        "format_version": ACTION_RISK_BUNDLE_FORMAT,
+    }
+
+
+def load_action_risk_selector_bundle(
+    path: Path,
+    *,
+    expected_bundle_sha256: str,
+    expected_forward_sha256: str,
+) -> tuple[ActionAwareRiskHead, dict[str, Any]]:
+    """Load the exact frozen inference bundle and verify every bound source."""
+    bundle_path = path.expanduser().resolve()
+    if _sha256(bundle_path) != str(expected_bundle_sha256).lower():
+        raise ValueError("Selector inference bundle SHA differs from its frozen record.")
+    payload = torch.load(bundle_path, map_location="cpu", weights_only=True)
+    if (not isinstance(payload, Mapping)
+            or payload.get("bundle_kind") != "thermal_action_risk_selector"
+            or payload.get("format_version") != ACTION_RISK_BUNDLE_FORMAT):
+        raise ValueError("Unsupported Thermal action-risk inference bundle.")
+    if set(payload) != {
+        "bundle_kind", "format_version", "selected_forward", "action_table", "provenance",
+        "training", "policy", "feature_schema", "model_config", "state_dict",
+    }:
+        raise ValueError("Selector bundle contains unsupported or non-inference data.")
+    selected_forward = payload.get("selected_forward", {})
+    if (not isinstance(selected_forward, Mapping)
+            or selected_forward.get("checkpoint_arm") != "G"
+            or selected_forward.get("checkpoint_sha256") != str(expected_forward_sha256).lower()):
+        raise ValueError("Selector bundle belongs to a different selected G checkpoint.")
+    for record_name in ("selected_forward",):
+        record = payload[record_name]
+        for path_key, sha_key in (
+            ("checkpoint", "checkpoint_sha256"),
+            ("source_checkpoint", "source_checkpoint_sha256"),
+            ("controlled_manifest", "controlled_manifest_sha256"),
+        ):
+            source_path = Path(str(record[path_key])).expanduser().resolve()
+            if _sha256(source_path) != record[sha_key]:
+                raise ValueError(f"Selector bundle source changed: {path_key}.")
+    for record_name in ("action_table", "provenance"):
+        record = payload.get(record_name, {})
+        source_path = Path(str(record.get("path", ""))).expanduser().resolve()
+        if _sha256(source_path) != record.get("sha256"):
+            raise ValueError(f"Selector bundle {record_name} identity changed.")
+    policy = payload.get("policy", {})
+    config = payload.get("model_config", {})
+    if not isinstance(config, Mapping):
+        raise TypeError("Selector bundle omits the risk-head dimensions.")
+    roles = policy.get("role_order", ())
+    if (not isinstance(roles, (list, tuple)) or not roles
+            or any(not isinstance(role, str) or not role for role in roles)
+            or len(set(roles)) != len(roles)):
+        raise ValueError("Selector bundle role order is invalid.")
+    exposure_actions = policy.get("exposure_qualified_sparse_actions", ())
+    if (not isinstance(exposure_actions, (list, tuple)) or not exposure_actions
+            or len(set(exposure_actions)) != len(exposure_actions)
+            or not set(exposure_actions).issubset(SPARSE_ACTION_KEYS)):
+        raise ValueError("Selector bundle exposure-qualified action identity is invalid.")
+    if (policy.get("action_order") != list(ACTION_KEYS)
+            or policy.get("sparse_action_order") != list(SPARSE_ACTION_KEYS)
+            or policy.get("full_access_action") != "full_access"
+            or payload.get("feature_schema") != _action_risk_feature_schema(
+                roles,
+                packet_feature_dim=int(config.get("packet_feature_dim", 0)),
+                receiver_role_dim=int(config.get("receiver_role_dim", 0)),
+            )):
+        raise ValueError("Selector bundle action or feature order is unsupported.")
+    model = ActionAwareRiskHead(
+        packet_feature_dim=int(config["packet_feature_dim"]),
+        budget_dim=int(config["budget_dim"]),
+        receiver_role_dim=int(config["receiver_role_dim"]),
+        hidden_dim=int(config["hidden_dim"]),
+    )
+    model.load_state_dict(payload["state_dict"], strict=True)
+    model.eval().requires_grad_(False)
+    return model, dict(payload)
+
+
+def select_action_with_risk_bundle(
+    model: ActionAwareRiskHead,
+    bundle: Mapping[str, Any],
+    action_features: Mapping[str, Mapping[str, Any]],
+    *,
+    exact_work_by_action: Mapping[str, float],
+    nonredundant_k_by_action: Mapping[str, int],
+    trained_sparse_by_action: Mapping[str, bool],
+    device: torch.device | str = "cpu",
+) -> dict[str, Any]:
+    """Replay candidate-specific input-only action selection from a frozen bundle."""
+    order = tuple(bundle["policy"]["action_order"])
+    if any(set(mapping) != set(order) for mapping in (
+        action_features, exact_work_by_action, nonredundant_k_by_action, trained_sparse_by_action,
+    )):
+        raise ValueError("Candidate action inputs must cover the exact frozen action order.")
+    if order != ACTION_KEYS:
+        raise ValueError("Candidate action order differs from the frozen Thermal action order.")
+    if bool(trained_sparse_by_action["full_access"]):
+        raise ValueError("Full access is a fallback and cannot count as a trained sparse action.")
+    exposure_actions = tuple(bundle["policy"].get("exposure_qualified_sparse_actions", ()))
+    if (not exposure_actions or not set(exposure_actions).issubset(SPARSE_ACTION_KEYS)
+            or len(set(exposure_actions)) != len(exposure_actions)):
+        raise ValueError("Candidate claims a sparse action outside the frozen exposure-qualified set.")
+    trained_flags: dict[str, bool] = {}
+    for action in order:
+        flag = trained_sparse_by_action[action]
+        if not isinstance(flag, (bool, np.bool_)):
+            raise TypeError("Candidate sparse-action exposure flags must be boolean.")
+        trained_flags[action] = bool(flag)
+    if trained_flags["full_access"]:
+        raise ValueError("Full access is a fallback and cannot count as a trained sparse action.")
+    if any(
+        trained_flags[action] and action not in exposure_actions
+        for action in SPARSE_ACTION_KEYS
+    ):
+        raise ValueError("Candidate claims a sparse action outside the frozen exposure-qualified set.")
+    target_device = torch.device(device)
+    model = model.to(device=target_device).eval()
+    roles = tuple(bundle["policy"]["role_order"])
+    role_limits = torch.as_tensor(
+        bundle["policy"]["fixed_role_log_limits"], device=target_device, dtype=torch.float32
+    )
+    margin = torch.as_tensor(
+        bundle["policy"]["empirical_role_margin"], device=target_device, dtype=torch.float32
+    )
+    if role_limits.shape != (len(roles),) or margin.shape != role_limits.shape:
+        raise ValueError("Frozen selector calibration does not match its role order.")
+    normalized_features: dict[str, dict[str, torch.Tensor]] = {}
+    exact_work: dict[str, float] = {}
+    packet_counts: dict[str, int] = {}
+    for action in order:
+        feature = action_features[action]
+        if not isinstance(feature, Mapping) or set(feature) != {
+            "packet_rows", "budget_vector", "receiver_role_features",
+        }:
+            raise ValueError("Each action must provide only its input-only realized-plan features.")
+        packet_rows = torch.as_tensor(feature["packet_rows"], device=target_device, dtype=torch.float32)
+        budget_vector = torch.as_tensor(feature["budget_vector"], device=target_device, dtype=torch.float32)
+        role_features = torch.as_tensor(
+            feature["receiver_role_features"], device=target_device, dtype=torch.float32
+        )
+        if (packet_rows.ndim != 2 or packet_rows.shape[0] < 1
+                or packet_rows.shape[1] != model.packet_feature_dim
+                or budget_vector.shape != (model.budget_dim,)
+                or role_features.shape != (len(roles), model.receiver_role_dim)):
+            raise ValueError("Candidate feature shapes differ from the frozen packet or role schema.")
+        if not all(bool(torch.isfinite(value).all()) for value in (packet_rows, budget_vector, role_features)):
+            raise ValueError("Candidate selector features must be finite.")
+        raw_k = nonredundant_k_by_action[action]
+        if isinstance(raw_k, bool) or not isinstance(raw_k, (int, np.integer)):
+            raise TypeError("Candidate nonredundant packet counts must be integers.")
+        k = int(raw_k)
+        if not 1 <= k <= packet_rows.shape[0]:
+            raise ValueError("Candidate nonredundant packet count must fit its realized cut.")
+        work = float(exact_work_by_action[action])
+        if not math.isfinite(work) or work < 0:
+            raise ValueError("Candidate exact work must be finite and nonnegative.")
+        normalized_features[action] = {
+            "packet_rows": packet_rows,
+            "budget_vector": budget_vector,
+            "receiver_role_features": role_features,
+        }
+        exact_work[action] = work
+        packet_counts[action] = k
+    predictions = []
+    with torch.no_grad():
+        for action in order:
+            if action == "full_access" or not trained_flags[action]:
+                predictions.append(torch.zeros_like(role_limits))
+                continue
+            feature = normalized_features[action]
+            predictions.append(model(
+                feature["packet_rows"],
+                feature["budget_vector"],
+                feature["receiver_role_features"],
+                nonredundant_k=packet_counts[action],
+            ))
+    prediction_matrix = torch.stack(predictions)
+    selection = select_action_by_risk(
+        prediction_matrix,
+        torch.tensor([exact_work[action] for action in order], device=target_device, dtype=torch.float64),
+        torch.tensor([packet_counts[action] for action in order], device=target_device),
+        torch.tensor([trained_flags[action] for action in order], device=target_device),
+        role_limits,
+        full_access_index=order.index("full_access"),
+        empirical_margin=margin,
+    )
+    return {
+        "selected_action": order[selection.index],
+        "unsupported_at_budget": bool(selection.unsupported_at_budget),
+        "safe_sparse_actions": [order[index] for index in selection.safe_sparse_indices],
+        "predicted_log_risk_by_action": prediction_matrix.detach().cpu().tolist(),
+    }
 
 
 def _sha256(path: Path) -> str:
@@ -2303,6 +2747,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "fitted_on_exposure_qualified_sparse_actions" if selector_fitted
             else "selector_not_fitted_no_qualified_actions"
         ),
+        "selector_inference_bundle": None,
         "exposure_qualified_sparse_actions": [
             action for action in SPARSE_ACTION_KEYS if action in qualified_train_actions
         ],
@@ -2406,9 +2851,57 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "Cross-fit residual margins are empirical for this small selected family set, not formal coverage guarantees.",
         ],
     }
-    _write_jsonl(output / "action_table.jsonl", output_rows)
+    action_table_path = output / "action_table.jsonl"
+    provenance_path = output / "provenance.json"
+    inference_bundle_path = output / "action_risk_selector.pt"
+    _write_jsonl(action_table_path, output_rows)
+    identity["action_table_path"] = str(action_table_path.resolve())
+    identity["action_table_sha256"] = _sha256(action_table_path)
+    identity["selector_inference_bundle_path"] = (
+        str(inference_bundle_path.resolve()) if selector_fitted else None
+    )
+    summary["identity"] = identity
+    _atomic_json(provenance_path, identity)
+    if selector_fitted:
+        artifact = save_action_risk_selector_bundle(
+            inference_bundle_path,
+            model=neural_final.model,
+            selected_forward={
+                "checkpoint": identity["checkpoint"],
+                "checkpoint_sha256": identity["checkpoint_sha256"],
+                "checkpoint_update": identity["checkpoint_update"],
+                "checkpoint_arm": identity["checkpoint_arm"],
+                "source_checkpoint": identity["source_checkpoint"],
+                "source_checkpoint_sha256": identity["source_checkpoint_sha256"],
+                "controlled_manifest": identity["controlled_manifest"],
+                "controlled_manifest_sha256": identity["controlled_manifest_sha256"],
+            },
+            action_table_path=action_table_path,
+            provenance_path=provenance_path,
+            role_order=summary["label_roles"],
+            train_family_ids=train_families,
+            split_manifest_sha256=identity["split_manifest_sha256"],
+            fixed_role_log_limits=fixed_role_log_limits,
+            empirical_margin=crossfit.neural_upper_margin,
+            fit_seed=args.risk_seed,
+            fit_updates=neural_final.updates,
+            crossfit_folds=min(RISK_CROSSFIT_FOLDS, len(train_families)),
+            exposure_qualified_sparse_actions=tuple(
+                action for action in SPARSE_ACTION_KEYS if action in qualified_train_actions
+            ),
+        )
+        summary["selector_inference_bundle"] = {
+            "status": "written",
+            **artifact,
+            "action_table_path": str(action_table_path.resolve()),
+            "provenance_path": str(provenance_path.resolve()),
+        }
+    else:
+        summary["selector_inference_bundle"] = {
+            "status": "not_written_no_exposure_qualified_sparse_actions",
+            "path": str(inference_bundle_path.resolve()),
+        }
     _atomic_json(output / "summary.json", summary)
-    _atomic_json(output / "provenance.json", identity)
     return summary
 
 
