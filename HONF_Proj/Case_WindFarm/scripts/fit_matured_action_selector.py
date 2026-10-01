@@ -277,17 +277,23 @@ def _validated_training_exposure(
             raise ValueError(f"Sparse action {action_key!r} path/K pass audit differs from its training rows")
         if audited_count > 0:
             path_k_pass_ids.add(int(pass_id))
-    if split == "train_fit":
-        # A seen native row needs its own resolved cut and K in both passes.
-        exposed_pass_ids = same_path_k_pass_ids & path_k_pass_ids
-    elif split in {"dev", "held_family_audit"}:
-        # Held layouts have no training row ID; use exact cut/K exposure
-        # transferred from complete training passes, not a fictitious visit.
-        if row_pass_ids:
-            raise ValueError("Held Wind case unexpectedly has training-row exposure")
-        exposed_pass_ids = path_k_pass_ids
-    else:
+    source_partition = row.get("source_partition")
+    if split not in {"train_fit", "dev", "held_family_audit"}:
         raise ValueError(f"Unknown Wind action-table split: {split}")
+    if split == "train_fit" and source_partition not in (None, "native_training"):
+        raise ValueError("Selector train-fit case is outside the native training partition")
+    if source_partition == "native_training" or split == "train_fit":
+        # Selector-held layouts can still be forward-training rows. Every
+        # native training row needs its own resolved cut and K in both passes.
+        if not row_pass_ids:
+            raise ValueError("Native Wind training row lacks its own action exposure")
+        exposed_pass_ids = same_path_k_pass_ids & path_k_pass_ids
+    else:
+        # A genuinely unseen physical row can only inherit path/K exposure
+        # from complete training passes; it has no native training-row visit.
+        if row_pass_ids:
+            raise ValueError("Unseen Wind case unexpectedly has training-row exposure")
+        exposed_pass_ids = path_k_pass_ids
     strict_work_saving = exact_work < full_work - max(1.0e-9, 1.0e-12 * full_work)
     qualified = bool(
         exposure.get("trained_action") is True

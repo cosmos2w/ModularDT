@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -194,6 +195,52 @@ def test_action_fit_keeps_held_labels_out_of_risk_weights_and_gate(tmp_path: Pat
     assert first["split_results"]["dev"]["neural"]["per_case"][0]["measured_adequate_sparse"] != (
         second["split_results"]["dev"]["neural"]["per_case"][0]["measured_adequate_sparse"]
     )
+
+
+def test_selector_dev_layout_with_forward_training_exposure_requires_own_path_and_k(tmp_path: Path) -> None:
+    table_path, features, masks, checkpoint = _table(tmp_path)
+    table = json.loads(table_path.read_text(encoding="utf-8"))
+    for action_key, exposure in table["action_exposure_by_key"].items():
+        own_exposure = deepcopy(exposure["resolved_path_exposure_by_row"]["2"])
+        exposure["resolved_path_exposure_by_row"]["3"] = own_exposure
+        exposure["training_row_count"] = 3
+        path_key = json.dumps(list(SELECTOR.ACTION_PATHS[action_key]), separators=(",", ":"))
+        for pass_audit in exposure["realized_cut_paths_by_primary_pass"].values():
+            for count_key in ("eligible_row_count", "distinct_row_count", "expected_row_count"):
+                pass_audit[count_key] = 3
+            pass_audit["resolved_path_families"][path_key]["realized_nonredundant_k_counts"][
+                str(len(SELECTOR.ACTION_PATHS[action_key]))
+            ] = 3
+    for row in table["rows"]:
+        row["source_partition"] = "native_training"
+        lineage = row["training_exposure"]
+        lineage["training_row_count"] = 3
+        if row["split"] == "dev" and not row["full_access"]:
+            lineage["resolved_path_exposure_for_case"] = table["action_exposure_by_key"][
+                row["action_key"]
+            ]["resolved_path_exposure_by_row"]["3"]
+            lineage["same_realized_path_primary_pass_ids"] = [2, 3]
+            lineage["same_realized_path_and_k_primary_pass_ids"] = [2, 3]
+    table_path.write_text(json.dumps(table), encoding="utf-8")
+
+    rows, metadata = SELECTOR._load_action_table(table_path, features, masks, checkpoint)
+    assert metadata["split_families"]["dev"] == ("layout_3",)
+    assert all(row.trained_sparse for row in rows if row.family_key == "layout_3" and not row.full_access)
+
+    # Complete action passes elsewhere cannot qualify this physical training
+    # row when its own execution did not realize the advertised packet K.
+    dev_root = next(row for row in table["rows"] if row["split"] == "dev" and row["action_key"] == "root")
+    own_root = table["action_exposure_by_key"]["root"]["resolved_path_exposure_by_row"]["3"]
+    for observation in own_root[0]["primary_pass_observations"]:
+        observation["realized_nonredundant_k"] = 2
+    root_path_key = json.dumps([""], separators=(",", ":"))
+    for pass_audit in table["action_exposure_by_key"]["root"]["realized_cut_paths_by_primary_pass"].values():
+        k_counts = pass_audit["resolved_path_families"][root_path_key]["realized_nonredundant_k_counts"]
+        k_counts.update({"1": 2, "2": 1})
+    dev_root["training_exposure"]["same_realized_path_and_k_primary_pass_ids"] = []
+    table_path.write_text(json.dumps(table), encoding="utf-8")
+    with pytest.raises(ValueError, match="trained_sparse flag"):
+        SELECTOR._load_action_table(table_path, features, masks, checkpoint)
 
 
 def test_action_table_rejects_stale_checkpoint_and_changed_feature_bytes(tmp_path: Path) -> None:
