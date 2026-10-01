@@ -928,7 +928,7 @@ def _case_record(
         source_full = MechanismPlan.full_access(
             source_tree, source_encoded.module_present[0], int(source_encoded.env_coords.shape[1])
         )
-        wfull_prediction, _wfull_aux = runner._prediction_with_plan(
+        wfull_prediction = runner._prediction_with_plan(
             source_model, source_encoded, batch, source_full
         )
         _wloss, _wmse, wfull_rmse = runner._role_objective(
@@ -2000,7 +2000,7 @@ def _evaluate(
             full512 = MechanismPlan.full_access(
                 tree512, encoded512.module_present[0], int(encoded512.env_coords.shape[1])
             )
-            prediction512, _aux512 = runner._prediction_with_plan(
+            prediction512 = runner._prediction_with_plan(
                 g_model, encoded512, batch512, full512
             )
             _l512, _m512, rmse512 = runner._role_objective(
