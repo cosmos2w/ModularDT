@@ -1,0 +1,62 @@
+{
+  "name": "thermal_value_recovery_pair_20261002",
+  "source_checkpoint": "diagnostics/generated/thermal_maturation_20260929/controlled_run/checkpoints/G_u1300_training_checkpoint.pt",
+  "source_manifest": "diagnostics/generated/thermal_maturation_20260929/controlled_run/run_manifest_u1300_closed_snapshot.json",
+  "source_update": 1300,
+  "weights": {
+    "value4": 4.0,
+    "value8": 8.0,
+    "finite": 1.0,
+    "finite_peak": 1.0,
+    "pressure_value": 1.0,
+    "pressure_response": 1.0,
+    "retained_anchor": "source checkpoint"
+  },
+  "paired_initial_state": {
+    "preserve_adam_state": true,
+    "preserve_rng_and_sampler_state": true,
+    "historical_cuda_rng_mapping": {
+      "cuda:0": "cuda:2",
+      "cuda:2": "cuda:2"
+    },
+    "route_parameters_frozen": true,
+    "physical_trainable_tensors": 80,
+    "route_tensors": 40,
+    "organizer_shadow": false,
+    "access": "full_access"
+  },
+  "training": {
+    "response_family_count": 8,
+    "historical_train_value_case_count": 600,
+    "updates_per_arm_default": 240,
+    "review_updates_per_arm": [120, 240],
+    "max_updates_per_arm": 360,
+    "global_update_ceiling": 1660,
+    "checkpoint_every_actual_updates": 50,
+    "query_batch_size": 2048,
+    "family_schedule_seed": 7319,
+    "historical_sampling_seed": 2317,
+    "query_sampling_seed": 7319,
+    "source_optimizer": "retained AdamW state, lr=1e-5, betas=(0.9, 0.999), eps=1e-8, weight_decay=1e-5"
+  },
+  "evaluation": {
+    "additional_re90_families_first": ["0325", "0340"],
+    "complete_re90_calibration_families": ["0310", "0325", "0340", "0355"],
+    "historical_train_case_count": 16,
+    "historical_selection": "sixteen deterministic cases covering every available active-module-count stratum, with extra low/high Reynolds quantiles for module counts 3, 5, 7, and 10",
+    "required_quantities": [
+      "absolute fluid channels u, v, p, omega, temperature",
+      "absolute interface channels T_surface and q_normal",
+      "absolute solid module peaks for every active module",
+      "absolute pressure drop",
+      "baseline-to-i_plus finite fluid/interface/material changes on the four calibration families"
+    ],
+    "physical_solver_calls": 0
+  },
+  "resource_budget": {
+    "physical_gpu_uuid": "GPU-f6a4ddbb-ad44-5ef5-0421-eecf7120df39",
+    "torch_device": "cuda:2",
+    "cuda_visible_devices": "unset",
+    "gpu_associated_seconds_max": 3600
+  }
+}

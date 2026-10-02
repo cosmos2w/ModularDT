@@ -28,7 +28,11 @@ from .thermal import (
 def _sample_value_record(record: SolveRecord, config: ReceiverSamplingConfig) -> SolveRecord:
     """Protect pressure, interface, and exact material peaks in one train case."""
 
-    if record.design.split is not EvidenceSplit.TRAIN or record.status is not SolveStatus.CONVERGED or record.output is None:
+    if (
+        record.design.split is not EvidenceSplit.TRAIN
+        or record.status is not SolveStatus.CONVERGED
+        or record.output is None
+    ):
         raise ValueError("Historical value replay accepts converged train records only.")
     roles = record.output.roles
     rng = np.random.default_rng(config.random_seed ^ zlib.crc32(record.record_id.encode("utf-8")))
@@ -37,7 +41,9 @@ def _sample_value_record(record: SolveRecord, config: ReceiverSamplingConfig) ->
     length_x = float(record.context.values["domain_length_x"])
     radius = float(record.context.values["module_radius"])
     centers = np.asarray([module.position_xy for module in record.design.active_modules])
-    surface_distance = np.linalg.norm(fluid.query_features[:, None, :2] - centers[None, :, :], axis=-1).min(axis=1) - radius
+    surface_distance = (
+        np.linalg.norm(fluid.query_features[:, None, :2] - centers[None, :, :], axis=-1).min(axis=1) - radius
+    )
     near = (surface_distance >= 0.0) & (surface_distance <= NEAR_INTERFACE_DISTANCE)
     pressure_bands = (x <= PRESSURE_INLET_BAND_FRACTION * length_x) | (
         x >= (1.0 - PRESSURE_OUTLET_BAND_FRACTION) * length_x
@@ -104,10 +110,10 @@ def _coverage_summary(original: SolveRecord, sampled: SolveRecord) -> dict[str, 
     length_x = float(original.context.values["domain_length_x"])
     radius = float(original.context.values["module_radius"])
     centers = np.asarray([module.position_xy for module in original.design.active_modules])
-    surface_distance = np.linalg.norm(fluid.query_features[:, None, :2] - centers[None, :, :], axis=-1).min(axis=1) - radius
-    pressure = (x <= PRESSURE_INLET_BAND_FRACTION * length_x) | (
-        x >= (1.0 - PRESSURE_OUTLET_BAND_FRACTION) * length_x
+    surface_distance = (
+        np.linalg.norm(fluid.query_features[:, None, :2] - centers[None, :, :], axis=-1).min(axis=1) - radius
     )
+    pressure = (x <= PRESSURE_INLET_BAND_FRACTION * length_x) | (x >= (1.0 - PRESSURE_OUTLET_BAND_FRACTION) * length_x)
     near = (surface_distance >= 0.0) & (surface_distance <= NEAR_INTERFACE_DISTANCE)
     ordinary = ~(pressure | near)
     selected_fluid_ids = set(selected["fluid_fields"].query_ids)
@@ -126,9 +132,13 @@ def _coverage_summary(original: SolveRecord, sampled: SolveRecord) -> dict[str, 
         "pressure_rows_original": int(pressure.sum()),
         "pressure_rows_retained": int(sum(fluid.query_ids[i] in selected_fluid_ids for i in np.flatnonzero(pressure))),
         "near_interface_rows_original": int(near.sum()),
-        "near_interface_rows_retained": int(sum(fluid.query_ids[i] in selected_fluid_ids for i in np.flatnonzero(near))),
+        "near_interface_rows_retained": int(
+            sum(fluid.query_ids[i] in selected_fluid_ids for i in np.flatnonzero(near))
+        ),
         "ordinary_fluid_rows_original": int(ordinary.sum()),
-        "ordinary_fluid_rows_retained": int(sum(fluid.query_ids[i] in selected_fluid_ids for i in np.flatnonzero(ordinary))),
+        "ordinary_fluid_rows_retained": int(
+            sum(fluid.query_ids[i] in selected_fluid_ids for i in np.flatnonzero(ordinary))
+        ),
         "interface_ports_all_retained": selected["interface"].query_ids == full["interface"].query_ids,
         "solid_exact_peak_retained_by_module": peak_coverage,
     }
@@ -267,4 +277,110 @@ def select_broad_evaluation_cases(
     return tuple(sorted(rows, key=lambda row: (row["module_count"], row["re"], row["case_id"])))
 
 
-__all__ = ["HistoricalValueSource", "select_broad_evaluation_cases"]
+def select_value_recovery_case_rows(
+    strata: dict[int, list[tuple[str, float]]],
+    *,
+    requested: int = 16,
+    focus_module_counts: tuple[int, ...] = (3, 5, 7, 10),
+) -> tuple[dict[str, Any], ...]:
+    """Choose a fixed historical panel covering every module-count stratum.
+
+    One median-Reynolds case is selected from every available module count.
+    Remaining slots cycle through low/high and inner Reynolds quantiles for the
+    primary Thermal counts, then other strata. Ties are resolved by case ID.
+    """
+
+    if requested <= 0:
+        raise ValueError("requested value-recovery case count must be positive.")
+    normalized: dict[int, list[tuple[str, float]]] = {}
+    for module_count, rows in sorted(strata.items()):
+        current = sorted(
+            ((str(case_id), float(reynolds)) for case_id, reynolds in rows),
+            key=lambda item: (item[1], item[0]),
+        )
+        if not current or any(not np.isfinite(re) for _, re in current):
+            raise ValueError(f"Module-count stratum {module_count} is empty or contains non-finite Reynolds values.")
+        if len({case_id for case_id, _ in current}) != len(current):
+            raise ValueError(f"Module-count stratum {module_count} contains duplicate case IDs.")
+        normalized[int(module_count)] = current
+    if not normalized:
+        raise ValueError("Value-recovery historical panel requires at least one module-count stratum.")
+    if requested < len(normalized):
+        raise ValueError(f"Requested {requested} historical cases cannot cover {len(normalized)} module-count strata.")
+
+    selected: dict[str, dict[str, Any]] = {}
+
+    def add_quantile(module_count: int, quantile: float, selection_role: str) -> bool:
+        rows = normalized[module_count]
+        already = {str(row["case_id"]) for row in selected.values() if int(row["module_count"]) == module_count}
+        available = [index for index, (case_id, _) in enumerate(rows) if case_id not in already]
+        if not available:
+            return False
+        target = round(float(quantile) * (len(rows) - 1))
+        index = min(available, key=lambda candidate: (abs(candidate - target), candidate))
+        case_id, reynolds = rows[index]
+        selected[case_id] = {
+            "case_id": case_id,
+            "module_count": module_count,
+            "re": reynolds,
+            "stratum_n": len(rows),
+            "re_quantile_target": float(quantile),
+            "selection_role": selection_role,
+        }
+        return True
+
+    counts = tuple(normalized)
+    for module_count in counts:
+        add_quantile(module_count, 0.5, "module_count_median_re")
+
+    focus = tuple(count for count in focus_module_counts if count in normalized)
+    quantiles = (0.0, 1.0, 0.25, 0.75, 0.125, 0.875, 0.375, 0.625)
+    priority_counts = focus + tuple(count for count in counts if count not in focus)
+    for quantile in quantiles:
+        progress = False
+        for module_count in priority_counts:
+            if len(selected) >= requested:
+                break
+            if add_quantile(module_count, quantile, f"re_quantile_{quantile:g}"):
+                progress = True
+        if len(selected) >= requested or not progress:
+            break
+    if len(selected) != requested:
+        raise ValueError(f"Selected {len(selected)} of {requested} requested historical value-recovery cases.")
+    return tuple(sorted(selected.values(), key=lambda row: (row["module_count"], row["re"], row["case_id"])))
+
+
+def select_value_recovery_historical_cases(
+    dataset: GlobalChannelThermalDataset,
+    *,
+    requested: int = 16,
+    focus_module_counts: tuple[int, ...] = (3, 5, 7, 10),
+) -> tuple[dict[str, Any], ...]:
+    """Select a fixed no-new-solver value-recovery panel from packed train data."""
+
+    if dataset.split != "train":
+        raise ValueError("Value-recovery historical evaluation accepts packed train records only.")
+    strata: dict[int, list[tuple[str, float]]] = defaultdict(list)
+    with h5py.File(dataset.path, "r") as handle:
+        for case_id, module_count, converged in zip(
+            dataset.selected_case_ids,
+            dataset.selected_module_counts,
+            dataset.selected_converged_flags,
+            strict=True,
+        ):
+            if not converged:
+                continue
+            raw_config = handle["cases"][str(case_id)]["case_config_json"][()]
+            if isinstance(raw_config, bytes):
+                raw_config = raw_config.decode("utf-8")
+            reynolds = float(json.loads(str(raw_config))["flow"]["re"])
+            strata[int(module_count)].append((str(case_id), reynolds))
+    return select_value_recovery_case_rows(dict(strata), requested=requested, focus_module_counts=focus_module_counts)
+
+
+__all__ = [
+    "HistoricalValueSource",
+    "select_broad_evaluation_cases",
+    "select_value_recovery_case_rows",
+    "select_value_recovery_historical_cases",
+]

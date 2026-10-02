@@ -172,9 +172,14 @@ class CaseLocalReceiverTree:
         max_nodes: int = 127,
         min_leaf_anchors: int = 4,
         overlap_fraction: float = 0.06,
+        max_depth: int | None = None,
     ) -> CaseLocalReceiverTree:
         if max_nodes < 1 or min_leaf_anchors < 1:
             raise ValueError("tree capacity and minimum leaf size must be positive")
+        if max_depth is not None and (
+            isinstance(max_depth, bool) or not isinstance(max_depth, int) or max_depth < 0
+        ):
+            raise ValueError("max_depth must be a nonnegative integer or None")
         if not 0.0 < overlap_fraction < 1.0:
             raise ValueError("receiver overlap fraction must be between zero and one")
         nodes: list[CandidateNode] = []
@@ -183,9 +188,11 @@ class CaseLocalReceiverTree:
         weights = universe.weights.detach().cpu()
         roles = universe.roles.detach().cpu()
 
-        def refine(index: int, indices: tuple[int, ...]) -> None:
+        def refine(index: int, indices: tuple[int, ...], depth: int) -> None:
             nonlocal saturated
-            if len(indices) <= min_leaf_anchors:
+            if len(indices) <= min_leaf_anchors or (
+                max_depth is not None and depth >= max_depth
+            ):
                 return
             if len(nodes) + 2 > max_nodes:
                 saturated = True
@@ -217,12 +224,12 @@ class CaseLocalReceiverTree:
             left, right = len(nodes), len(nodes) + 1
             nodes.extend((CandidateNode(left_ids), CandidateNode(right_ids)))
             nodes[index] = CandidateNode(indices, left, right, axis)
-            refine(left, left_ids)
-            refine(right, right_ids)
+            refine(left, left_ids, depth + 1)
+            refine(right, right_ids, depth + 1)
 
         root_ids = tuple(range(int(universe.coordinates.shape[0])))
         nodes.append(CandidateNode(root_ids))
-        refine(0, root_ids)
+        refine(0, root_ids, 0)
         return cls(universe, tuple(nodes), overlap_fraction, saturated)
 
     def access(self, queries: torch.Tensor, split_gates: torch.Tensor) -> torch.Tensor:
