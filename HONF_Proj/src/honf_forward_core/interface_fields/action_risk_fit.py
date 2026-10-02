@@ -239,6 +239,206 @@ def fit_ridge_action_baseline(
 
 
 @dataclass(frozen=True)
+class RidgeActionDifferenceFit:
+    """Train-only low-rank ridge fit of sparse risk relative to same-case full access."""
+
+    feature_mean: torch.Tensor
+    feature_scale: torch.Tensor
+    components: torch.Tensor
+    component_mean: torch.Tensor
+    component_scale: torch.Tensor
+    coefficients: torch.Tensor
+    train_families: tuple[str, ...]
+    train_case_keys: tuple[str, ...]
+    ridge: float
+
+    def predict(
+        self, action_row: ActionEvidenceRow, full_access_row: ActionEvidenceRow,
+    ) -> torch.Tensor:
+        features = _action_difference_features(action_row, full_access_row)
+        if features.shape != self.feature_mean.shape:
+            raise ValueError("Action-difference features differ from the fitted input schema.")
+        normalized = (features - self.feature_mean) / self.feature_scale
+        projected = normalized @ self.components.T
+        projected = (projected - self.component_mean) / self.component_scale
+        augmented = torch.cat((projected, torch.ones_like(projected[:1])), dim=0)
+        return augmented @ self.coefficients
+
+
+def _action_difference_features(
+    action_row: ActionEvidenceRow, full_access_row: ActionEvidenceRow,
+) -> torch.Tensor:
+    """Return only input-only descriptor differences from this case's full action."""
+    if (
+        action_row.case_key != full_access_row.case_key
+        or action_row.family_key != full_access_row.family_key
+        or action_row.forward_sha256 != full_access_row.forward_sha256
+        or not full_access_row.full_access
+        or action_row.full_access
+        or action_row.candidate_role_error.shape != full_access_row.candidate_role_error.shape
+        or not torch.equal(action_row.numerical_floor, full_access_row.numerical_floor)
+    ):
+        raise ValueError("Action-difference features require a matched same-case full-access row.")
+    action_features = _ridge_features(action_row).detach()
+    full_features = _ridge_features(full_access_row).detach()
+    if action_features.shape != full_features.shape:
+        raise ValueError("Sparse and full-action descriptors must have the same schema.")
+    differences = action_features - full_features
+    if not torch.allclose(
+        differences, differences[:1].expand_as(differences), rtol=1e-6, atol=1e-7,
+    ):
+        raise ValueError("Same-case receiver-role descriptors must cancel in action differences.")
+    return differences[0]
+
+
+def fit_ridge_action_differences(
+    rows: Sequence[ActionEvidenceRow], *, current_forward_sha256: str,
+    train_families: Sequence[str], ridge: float = 1.0, n_components: int = 8,
+) -> RidgeActionDifferenceFit:
+    """Fit action-vs-full log-risk differences using named layouts only.
+
+    Feature scaling and the low-rank PCA basis are learned from the same
+    training layouts as the regression coefficients. The eight-component
+    default is intentionally small for a tiny family-level sample.
+    """
+
+    _validate_rows(rows, current_forward_sha256)
+    if ridge <= 0 or not math.isfinite(ridge) or n_components < 1:
+        raise ValueError("Action-difference ridge strength and component count must be positive.")
+    allowed = tuple(sorted(set(train_families)))
+    available_families = {row.family_key for row in rows}
+    if not allowed or not set(allowed).issubset(available_families):
+        raise ValueError("Training families must exist in the measured action table.")
+    by_case: defaultdict[str, list[ActionEvidenceRow]] = defaultdict(list)
+    for row in rows:
+        if row.family_key in allowed:
+            by_case[row.case_key].append(row)
+    if not by_case:
+        raise ValueError("No matched case rows are available in the named training families.")
+    sparse_rows: list[ActionEvidenceRow] = []
+    differences: list[torch.Tensor] = []
+    targets: list[torch.Tensor] = []
+    for case_key, case_rows in sorted(by_case.items()):
+        full_rows = [row for row in case_rows if row.full_access]
+        if len(full_rows) != 1:
+            raise ValueError("Every training case needs exactly one same-weight full-access row.")
+        full = full_rows[0]
+        candidates = [row for row in case_rows if row.trained_sparse]
+        if not candidates:
+            raise ValueError("Every named training case needs a trained sparse action.")
+        for action in candidates:
+            differences.append(_action_difference_features(action, full))
+            targets.append(signed_log_role_risk(
+                action.candidate_role_error.double(), full.candidate_role_error.double(),
+                action.numerical_floor.double(),
+            ).detach().to(device=action.packet_rows.device, dtype=torch.float64))
+            sparse_rows.append(action)
+    if {row.family_key for row in sparse_rows} != set(allowed):
+        raise ValueError("Every named training family needs a measured trained sparse action.")
+    x = torch.stack(differences).to(torch.float64)
+    y = torch.stack(targets).to(device=x.device, dtype=torch.float64)
+    feature_mean = x.mean(dim=0)
+    feature_scale = x.std(dim=0, unbiased=False).clamp_min(1e-6)
+    normalized = (x - feature_mean) / feature_scale
+    _u, _s, vh = torch.linalg.svd(normalized, full_matrices=False)
+    component_count = min(int(n_components), int(normalized.shape[0]), int(normalized.shape[1]))
+    components = vh[:component_count]
+    projected = normalized @ components.T
+    component_mean = projected.mean(dim=0)
+    component_scale = projected.std(dim=0, unbiased=False).clamp_min(1e-6)
+    projected = (projected - component_mean) / component_scale
+    augmented = torch.cat((projected, torch.ones_like(projected[:, :1])), dim=1)
+    identity = torch.eye(augmented.shape[1], dtype=augmented.dtype, device=augmented.device)
+    identity[-1, -1] = 0.0
+    coefficients = torch.linalg.solve(
+        augmented.T @ augmented + ridge * identity,
+        augmented.T @ y,
+    )
+    return RidgeActionDifferenceFit(
+        feature_mean=feature_mean,
+        feature_scale=feature_scale,
+        components=components,
+        component_mean=component_mean,
+        component_scale=component_scale,
+        coefficients=coefficients,
+        train_families=allowed,
+        train_case_keys=tuple(sorted(by_case)),
+        ridge=float(ridge),
+    )
+
+
+@dataclass(frozen=True)
+class GroupedActionDifferenceCrossfit:
+    """Out-of-layout predictions for sparse-to-full relative role risks."""
+
+    row_keys: tuple[tuple[str, str], ...]
+    family_keys: tuple[str, ...]
+    measured: torch.Tensor
+    predicted: torch.Tensor
+    fold_family_splits: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]
+
+
+def crossfit_ridge_action_differences(
+    rows: Sequence[ActionEvidenceRow], *, current_forward_sha256: str,
+    train_families: Sequence[str], ridge: float = 1.0, n_components: int = 8,
+) -> GroupedActionDifferenceCrossfit:
+    """Leave out complete layouts, using LOLO when fewer than five are named."""
+
+    _validate_rows(rows, current_forward_sha256)
+    families = tuple(sorted(set(train_families)))
+    if len(families) < 2 or not set(families).issubset({row.family_key for row in rows}):
+        raise ValueError("Grouped action-difference fitting needs at least two named layouts.")
+    folds = min(5, len(families))
+    eligible = [row for row in rows if row.family_key in families and row.trained_sparse]
+    if {row.family_key for row in eligible} != set(families):
+        raise ValueError("Every named cross-fit layout needs trained sparse evidence.")
+    by_case: defaultdict[str, list[ActionEvidenceRow]] = defaultdict(list)
+    for row in rows:
+        if row.family_key in families:
+            by_case[row.case_key].append(row)
+    full_by_case = {
+        case_key: next(row for row in case_rows if row.full_access)
+        for case_key, case_rows in by_case.items()
+    }
+    predictions: dict[tuple[str, str], torch.Tensor] = {}
+    splits = []
+    for fold in range(folds):
+        held = tuple(family for index, family in enumerate(families) if index % folds == fold)
+        training = tuple(family for family in families if family not in held)
+        fit = fit_ridge_action_differences(
+            rows, current_forward_sha256=current_forward_sha256,
+            train_families=training, ridge=ridge, n_components=n_components,
+        )
+        splits.append((training, held))
+        with torch.no_grad():
+            for row in eligible:
+                if row.family_key not in held:
+                    continue
+                key = (row.case_key, row.action_key)
+                predictions[key] = fit.predict(row, full_by_case[row.case_key]).detach().cpu()
+    ordered = sorted(eligible, key=lambda row: (row.family_key, row.case_key, row.action_key))
+    keys = tuple((row.case_key, row.action_key) for row in ordered)
+    if set(predictions) != set(keys):
+        raise RuntimeError("Grouped action-difference cross-fit did not score every named training action.")
+    measured = torch.stack([
+        signed_log_role_risk(
+            row.candidate_role_error.double(),
+            full_by_case[row.case_key].candidate_role_error.double(),
+            row.numerical_floor.double(),
+        ).detach().cpu().double()
+        for row in ordered
+    ])
+    predicted = torch.stack([predictions[key].double() for key in keys])
+    return GroupedActionDifferenceCrossfit(
+        row_keys=keys,
+        family_keys=tuple(row.family_key for row in ordered),
+        measured=measured,
+        predicted=predicted,
+        fold_family_splits=tuple(splits),
+    )
+
+
+@dataclass(frozen=True)
 class GroupedActionCrossfit:
     """Out-of-family risk predictions on exposed actions in the fit population."""
 
@@ -450,9 +650,13 @@ __all__ = [
     "ActionPolicyCaseResult",
     "ActionRiskFit",
     "GroupedActionCrossfit",
+    "GroupedActionDifferenceCrossfit",
+    "RidgeActionDifferenceFit",
     "RidgeActionRiskFit",
     "crossfit_action_risk",
+    "crossfit_ridge_action_differences",
     "evaluate_action_policy",
     "fit_action_risk_head",
     "fit_ridge_action_baseline",
+    "fit_ridge_action_differences",
 ]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 
 import pytest
@@ -67,6 +68,56 @@ def _model(task: str) -> FrozenPacketDiffusion:
         layers=2,
     )
     return FrozenPacketDiffusion(denoiser, task=task, steps=4)
+
+
+def test_sample_progress_callback_persists_terminal_before_later_interruption(tmp_path) -> None:
+    torch.manual_seed(37)
+    condition = _condition("position")
+    model = _model("position")
+    provider = CandidateProvider()
+    initial_noise = torch.randn_like(condition.known_state)
+    terminal_path = tmp_path / "first-terminal.pt"
+    callback_times: list[int] = []
+
+    def save_first_trail(timestep: int, state: torch.Tensor) -> None:
+        assert not state.requires_grad
+        assert state.grad_fn is None
+        callback_times.append(timestep)
+        if timestep == 0:
+            temporary = terminal_path.with_suffix(".tmp")
+            torch.save(
+                {"timestep": timestep, "state": state.detach().cpu().clone()},
+                temporary,
+            )
+            os.replace(temporary, terminal_path)
+
+    first = model.sample(
+        condition,
+        provider,
+        initial_noise=initial_noise,
+        save_every=2,
+        progress_callback=save_first_trail,
+    )
+    assert callback_times == [4, 3, 2, 1, 0]
+    assert first.timesteps == (4, 2, 0)
+    saved_before = torch.load(terminal_path, map_location="cpu", weights_only=True)
+    torch.testing.assert_close(saved_before["state"], first.final_state.detach().cpu())
+
+    def interrupt_second_trail(timestep: int, _state: torch.Tensor) -> None:
+        if timestep == model.steps - 1:
+            raise RuntimeError("simulated interruption after one reverse update")
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        model.sample(
+            condition,
+            provider,
+            initial_noise=initial_noise,
+            progress_callback=interrupt_second_trail,
+        )
+
+    saved_after = torch.load(terminal_path, map_location="cpu", weights_only=True)
+    assert saved_after["timestep"] == 0
+    torch.testing.assert_close(saved_after["state"], saved_before["state"])
 
 
 def test_heat_allocation_and_frozen_graph_training_gradient() -> None:

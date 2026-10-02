@@ -10,9 +10,11 @@ import torch
 from honf_forward_core.interface_fields.action_risk_fit import (
     ActionEvidenceRow,
     crossfit_action_risk,
+    crossfit_ridge_action_differences,
     evaluate_action_policy,
     fit_action_risk_head,
     fit_ridge_action_baseline,
+    fit_ridge_action_differences,
 )
 
 
@@ -95,6 +97,69 @@ def test_grouped_crossfit_uses_only_named_fit_families() -> None:
     assert torch.all(first.neural_upper_margin >= 0)
     torch.testing.assert_close(first.neural, second.neural, rtol=0, atol=0)
     torch.testing.assert_close(first.ridge, second.ridge, rtol=0, atol=0)
+
+
+def test_action_difference_ridge_uses_same_case_full_and_training_families_only() -> None:
+    rows = _rows()
+    fit = fit_ridge_action_differences(
+        rows, current_forward_sha256="fixed-forward-v1", train_families=("fit",),
+    )
+    assert fit.train_families == ("fit",)
+    assert fit.train_case_keys == ("fit-case",)
+    fit_case = [row for row in rows if row.case_key == "fit-case"]
+    full = next(row for row in fit_case if row.full_access)
+    sparse = next(row for row in fit_case if row.trained_sparse)
+    assert fit.predict(sparse, full).shape == (2,)
+
+    changed_held = tuple(
+        replace(row, candidate_role_error=row.candidate_role_error + 25.0)
+        if row.family_key == "held" else row for row in rows
+    )
+    changed_fit = fit_ridge_action_differences(
+        changed_held, current_forward_sha256="fixed-forward-v1", train_families=("fit",),
+    )
+    torch.testing.assert_close(fit.coefficients, changed_fit.coefficients, rtol=0, atol=0)
+
+    crossfit = crossfit_ridge_action_differences(
+        rows, current_forward_sha256="fixed-forward-v1", train_families=("fit", "held"),
+    )
+    assert crossfit.row_keys == tuple(sorted(crossfit.row_keys, key=lambda key: (key[0].split("-")[0], *key)))
+    assert len(crossfit.fold_family_splits) == 2
+    for training, held in crossfit.fold_family_splits:
+        assert len(held) == 1
+        assert set(training).isdisjoint(held)
+        assert set(training) | set(held) == {"fit", "held"}
+    held_rows = [row for row in rows if row.family_key == "held" and row.trained_sparse]
+    for row in held_rows:
+        index = crossfit.row_keys.index((row.case_key, row.action_key))
+        full = next(item for item in rows if item.case_key == row.case_key and item.full_access)
+        expected = torch.log(
+            (row.candidate_role_error.double() + row.numerical_floor.double())
+            / (full.candidate_role_error.double() + full.numerical_floor.double())
+        )
+        torch.testing.assert_close(crossfit.measured[index], expected, rtol=0, atol=0)
+
+    changed_crossfit = crossfit_ridge_action_differences(
+        changed_held, current_forward_sha256="fixed-forward-v1", train_families=("fit", "held"),
+    )
+    held_indices = [index for index, family in enumerate(crossfit.family_keys) if family == "held"]
+    torch.testing.assert_close(
+        crossfit.predicted[held_indices], changed_crossfit.predicted[held_indices], rtol=0, atol=0,
+    )
+
+
+def test_action_difference_ridge_detaches_fixed_action_descriptors() -> None:
+    features = torch.tensor([[0.2, 0.1], [0.4, 0.3]], requires_grad=True)
+    rows = tuple(
+        replace(row, packet_rows=features) if row.family_key == "fit" else row
+        for row in _rows()
+    )
+    fit = fit_ridge_action_differences(
+        rows, current_forward_sha256="fixed-forward-v1", train_families=("fit",),
+    )
+    assert not fit.coefficients.requires_grad
+    assert not fit.feature_mean.requires_grad
+    assert features.grad is None
 
 
 def test_action_risk_fit_does_not_backpropagate_into_frozen_action_inputs() -> None:

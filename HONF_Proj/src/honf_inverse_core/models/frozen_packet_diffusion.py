@@ -534,7 +534,14 @@ class FrozenPacketDiffusion(nn.Module):
         initial_noise: torch.Tensor | None = None,
         generator: torch.Generator | None = None,
         save_every: int = 4,
+        progress_callback: Callable[[int, torch.Tensor], None] | None = None,
     ) -> SampleTrail:
+        """Sample one trail and optionally report detached state snapshots.
+
+        The callback receives the initial ``steps`` state, then each
+        post-update index down through zero. Callback exceptions propagate and
+        stop the sample, leaving any caller-persisted snapshots intact.
+        """
         condition.validate(
             self.denoiser.design_dim, self.denoiser.module_dim, self.denoiser.sensor_dim
         )
@@ -552,6 +559,8 @@ class FrozenPacketDiffusion(nn.Module):
         state = self._project(initial_noise, condition)
         trail: list[torch.Tensor] = [state.detach().clone()]
         times: list[int] = [self.steps]
+        if progress_callback is not None:
+            progress_callback(self.steps, state.detach().clone())
         for index in range(self.steps - 1, -1, -1):
             links = self._links(state, condition, provider, dense=dense)
             time = torch.full(
@@ -570,6 +579,8 @@ class FrozenPacketDiffusion(nn.Module):
                 )
                 mean = mean + variance.sqrt() * self._project(next_noise, condition)
             state = self._project(mean, condition)
+            if progress_callback is not None:
+                progress_callback(index, state.detach().clone())
             if index == 0 or index % save_every == 0:
                 trail.append(state.detach().clone())
                 times.append(index)
@@ -578,11 +589,11 @@ class FrozenPacketDiffusion(nn.Module):
 
 __all__ = [
     "ConditionalPacketDenoiser",
-    "SpatialConditionalPacketDenoiser",
     "DiffusionCondition",
     "FrozenPacketDiffusion",
     "PacketLinks",
     "SampleTrail",
+    "SpatialConditionalPacketDenoiser",
     "centered_active",
     "dense_access",
     "heat_from_logits",

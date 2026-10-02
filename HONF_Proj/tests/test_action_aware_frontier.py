@@ -91,16 +91,23 @@ def test_signed_risk_and_exact_work_selection_reject_untrained_or_unsafe_cuts() 
     packet_counts = torch.tensor([2, 1, 4, 1])
     trained = torch.tensor([True, False, True, True])
     limit = torch.tensor([0.05, 0.05])
-    chosen = select_action_by_risk(
-        predicted, exact_work, packet_counts, trained, limit, full_access_index=3,
-    )
-    assert chosen.index == 2 and chosen.safe_sparse_indices == (0, 2)
-    assert not chosen.unsupported_at_budget
-    fallback = select_action_by_risk(
+    saved_margin = torch.tensor([0.1, 0.1])
+    historical_before = select_action_by_risk(
         predicted, exact_work, packet_counts, trained, limit,
-        full_access_index=3, empirical_margin=torch.tensor([0.1, 0.1]),
+        full_access_index=3, empirical_margin=saved_margin,
     )
-    assert fallback.index == 3 and fallback.unsupported_at_budget
+    no_margin_diagnostic = select_action_by_risk(
+        predicted, exact_work, packet_counts, trained, limit,
+        full_access_index=3, empirical_margin=torch.zeros_like(saved_margin),
+    )
+    historical_after = select_action_by_risk(
+        predicted, exact_work, packet_counts, trained, limit,
+        full_access_index=3, empirical_margin=saved_margin,
+    )
+    assert no_margin_diagnostic.index == 2 and no_margin_diagnostic.safe_sparse_indices == (0, 2)
+    assert historical_before.index == historical_after.index == 3
+    assert historical_before.unsupported_at_budget and historical_after.unsupported_at_budget
+    torch.testing.assert_close(saved_margin, torch.tensor([0.1, 0.1]), rtol=0, atol=0)
     fitted = torch.zeros_like(predicted, requires_grad=True)
     loss = action_risk_loss(fitted, predicted)
     loss.backward()
