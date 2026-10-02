@@ -26,6 +26,7 @@ from honf_forward_core.interface_fields.budgeted_frontier import (
     enumerate_frontier_cuts,
     select_frontier_by_predictions,
 )
+from honf_forward_core.interface_fields.adaptive_interaction_cover import MechanismPlan
 from honf_forward_core.interface_fields.input_cover_organizer import InputOnlyCoverOrganizer
 from honf_forward_core.interface_fields.interaction_interface import (
     InteractionInterface,
@@ -42,7 +43,18 @@ from honf_runtime.compat import load_trusted_checkpoint
 from torch import nn
 
 from windfarm.data import NativeCase, case_batch
-from windfarm.geometry import HUB_HEIGHT_D, POSITIONAL_SCALE_D, U_REF_MPS
+from windfarm.geometry import (
+    ENV_TOKEN_SHAPE,
+    HUB_HEIGHT_D,
+    POSITIONAL_SCALE_D,
+    U_REF_MPS,
+    EnvironmentRepresentation,
+    SupportGeometry,
+    environment_representation,
+    global_geometry_features,
+    module_geometry,
+    support_geometry,
+)
 
 DESIGN_LOWER_D = np.asarray((-15.0, -15.0), dtype=np.float32)
 DESIGN_UPPER_D = np.asarray((15.0, 15.0), dtype=np.float32)
@@ -50,6 +62,15 @@ SENSOR_X_D = np.linspace(-7.0, 17.0, 6, dtype=np.float32)
 SENSOR_Y_D = np.linspace(-5.0, 5.0, 4, dtype=np.float32)
 SENSOR_OBSERVED_INDICES = tuple(index for index in range(24) if index % 3 != 0)
 SENSOR_HELD_INDICES = tuple(index for index in range(24) if index % 3 == 0)
+
+
+def intended_wind_sensor_coordinates() -> np.ndarray:
+    """Return the fixed public sensor grid before any row-native snapping."""
+
+    return np.asarray(
+        [(float(x), float(y), HUB_HEIGHT_D) for y in SENSOR_Y_D for x in SENSOR_X_D],
+        dtype=np.float32,
+    )
 
 
 @dataclass(frozen=True)
@@ -76,10 +97,7 @@ def fixed_native_sensor_panel(case: NativeCase) -> FixedNativeSensorPanel:
     run = case.run
     if run is None:
         raise ValueError("Sensor reference extraction needs an intact stored native run")
-    intended = np.asarray(
-        [(float(x), float(y), HUB_HEIGHT_D) for y in SENSOR_Y_D for x in SENSOR_X_D],
-        dtype=np.float32,
-    )
+    intended = intended_wind_sensor_coordinates()
     lower, upper = case.support.lower_D, case.support.upper_D
     if np.any(intended < lower[None, :]) or np.any(intended > upper[None, :]):
         raise ValueError("Predeclared Wind sensors are outside this native support")
@@ -127,6 +145,8 @@ class WindCompletionTask:
     visible_mask: np.ndarray  # [M]
     template_case: NativeCase  # no run, no hidden clean coordinates/anchors
     sensors: FixedNativeSensorPanel
+    native_support_lower_D: np.ndarray | None = None
+    native_support_upper_D: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         if self.partition not in {"train", "development"}:
@@ -146,6 +166,257 @@ class WindCompletionTask:
             np.zeros((int((~visible).sum()), 2), dtype=np.float32),
         ):
             raise ValueError("Candidate template must replace hidden positions with a fixed placeholder")
+        if (self.native_support_lower_D is None) != (self.native_support_upper_D is None):
+            raise ValueError("Native row support bounds must be supplied together")
+        lower = (
+            np.asarray(self.template_case.support.lower_D, dtype=np.float32).copy()
+            if self.native_support_lower_D is None
+            else np.asarray(self.native_support_lower_D, dtype=np.float32).copy()
+        )
+        upper = (
+            np.asarray(self.template_case.support.upper_D, dtype=np.float32).copy()
+            if self.native_support_upper_D is None
+            else np.asarray(self.native_support_upper_D, dtype=np.float32).copy()
+        )
+        if (
+            lower.ndim != 1
+            or upper.shape != lower.shape
+            or lower.size != 3
+            or not np.all(np.isfinite(lower))
+            or not np.all(np.isfinite(upper))
+            or np.any(lower >= upper)
+        ):
+            raise ValueError("Native row support bounds must be finite ordered XYZ vectors")
+        lower.setflags(write=False)
+        upper.setflags(write=False)
+        object.__setattr__(self, "native_support_lower_D", lower)
+        object.__setattr__(self, "native_support_upper_D", upper)
+
+
+@dataclass(frozen=True)
+class WindCandidateGeometryContext:
+    """Fixed public geometry used by candidate-only inverse construction."""
+
+    support: SupportGeometry
+    environment: EnvironmentRepresentation
+    train_case_indices: tuple[int, ...]
+    train_axis_sha256: str
+    intended_sensor_coordinates_D: np.ndarray
+    context_source: str = "train_axis_intersection"
+    context_source_sha256: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "source_partition": (
+                "train_only"
+                if self.context_source == "train_axis_intersection"
+                else "public_dataset_geometry"
+            ),
+            "context_source": self.context_source,
+            "context_source_sha256": self.context_source_sha256,
+            "train_case_indices": list(self.train_case_indices),
+            "train_axis_sha256": self.train_axis_sha256,
+            "support_lower_D": self.support.lower_D.tolist(),
+            "support_upper_D": self.support.upper_D.tolist(),
+            "environment_token_shape": list(self.environment.token_shape),
+            "environment_coordinates_sha256": hashlib.sha256(
+                np.ascontiguousarray(self.environment.coords_D).tobytes()
+            ).hexdigest(),
+            "environment_features_sha256": hashlib.sha256(
+                np.ascontiguousarray(self.environment.features).tobytes()
+            ).hexdigest(),
+            "environment_weights_sha256": hashlib.sha256(
+                np.ascontiguousarray(self.environment.weights_D3).tobytes()
+            ).hexdigest(),
+            "intended_sensor_coordinates_sha256": hashlib.sha256(
+                np.ascontiguousarray(self.intended_sensor_coordinates_D).tobytes()
+            ).hexdigest(),
+        }
+
+
+# Preserve the train-axis-specific import name for existing callers.
+TrainDerivedWindCandidateContext = WindCandidateGeometryContext
+
+
+def build_train_derived_wind_candidate_context(
+    training_cases: Sequence[tuple[str, NativeCase]],
+    *,
+    intended_sensor_coordinates_D: np.ndarray | None = None,
+) -> WindCandidateGeometryContext:
+    """Build one candidate context from the intersection of train-only axes.
+
+    Callers provide ``(partition, case)`` pairs so a validation/development or
+    test row cannot be used accidentally.  Only axis bounds and the existing
+    public sensor grid are retained; row-native environment tokens are not
+    copied into the common context.
+    """
+
+    if not training_cases or any(partition != "train" for partition, _ in training_cases):
+        raise ValueError("Common Wind support may be built from training cases only")
+    cases = [case for _, case in training_cases]
+    if any(case.run is None for case in cases):
+        raise ValueError("Train-derived Wind support requires intact native axes")
+    token_shapes = {
+        tuple(int(value) for value in getattr(case.environment, "token_shape", ENV_TOKEN_SHAPE))
+        for case in cases
+    }
+    if len(token_shapes) != 1:
+        raise ValueError("Train-layout environment token shapes differ")
+    axis_digest = hashlib.sha256()
+    lower_m: list[float] = []
+    upper_m: list[float] = []
+    for axis_name in ("x_m", "y_m", "z_m"):
+        axes = [np.asarray(getattr(case.run, axis_name), dtype=np.float64) for case in cases]
+        if any(axis.ndim != 1 or axis.size < 2 or not np.all(np.isfinite(axis))
+               or not np.all(np.diff(axis) > 0.0) for axis in axes):
+            raise ValueError(f"Train native {axis_name} axes are not finite and increasing")
+        common_lower = max(float(axis[0]) for axis in axes)
+        common_upper = min(float(axis[-1]) for axis in axes)
+        if common_lower >= common_upper:
+            raise ValueError(f"Train native {axis_name} axes have no positive common interval")
+        lower_m.append(common_lower)
+        upper_m.append(common_upper)
+        for case, axis in zip(cases, axes, strict=True):
+            axis_digest.update(np.asarray([case.index], dtype=np.int64).tobytes())
+            axis_digest.update(axis_name.encode("ascii"))
+            axis_digest.update(np.asarray(axis.shape, dtype=np.int64).tobytes())
+            axis_digest.update(axis.tobytes())
+    bounds = [np.asarray((lo, hi), dtype=np.float64) for lo, hi in zip(lower_m, upper_m, strict=True)]
+    support = support_geometry(*bounds, diameter_m=cases[0].diameter_m)
+    sensors = (
+        intended_wind_sensor_coordinates()
+        if intended_sensor_coordinates_D is None
+        else np.asarray(intended_sensor_coordinates_D, dtype=np.float32).copy()
+    )
+    if sensors.ndim != 2 or sensors.shape[1] != 3 or not np.all(np.isfinite(sensors)):
+        raise ValueError("Fixed intended Wind sensor coordinates must be finite [S,3]")
+    if np.any(sensors < support.lower_D[None, :]) or np.any(sensors > support.upper_D[None, :]):
+        raise ValueError("Fixed intended Wind sensors fall outside train-derived common support")
+    sensors.setflags(write=False)
+    environment = environment_representation(support, token_shape=next(iter(token_shapes)))
+    return WindCandidateGeometryContext(
+        support=support,
+        environment=environment,
+        train_case_indices=tuple(int(case.index) for case in cases),
+        train_axis_sha256=axis_digest.hexdigest(),
+        intended_sensor_coordinates_D=sensors,
+        context_source="train_axis_intersection",
+        context_source_sha256=axis_digest.hexdigest(),
+    )
+
+
+def build_compact_public_wind_candidate_context(
+    training_cases: Sequence[tuple[str, NativeCase]],
+    *,
+    compact_support_axes_D: tuple[Sequence[float], Sequence[float], Sequence[float]],
+    compact_axes_sha256: str,
+    intended_sensor_coordinates_D: np.ndarray | None = None,
+) -> WindCandidateGeometryContext:
+    """Build candidate context from fixed, documented compact raster axes.
+
+    The compact raster coordinate extent is shared across all cases, but its
+    per-case validity mask is not a claim that every coordinate is native CFD.
+    The caller must bind the supplied axes to the compact dataset manifest and
+    record row-native support checks separately.
+    """
+
+    if not training_cases or any(partition != "train" for partition, _ in training_cases):
+        raise ValueError("Compact public Wind context requires explicitly labeled train cases")
+    cases = [case for _, case in training_cases]
+    if any(case.run is None for case in cases):
+        raise ValueError("Compact public Wind context requires intact train cases")
+    if len({float(case.diameter_m) for case in cases}) != 1:
+        raise ValueError("Training cases disagree on the rotor diameter")
+    token_shapes = {
+        tuple(int(value) for value in getattr(case.environment, "token_shape", ENV_TOKEN_SHAPE))
+        for case in cases
+    }
+    if len(token_shapes) != 1:
+        raise ValueError("Train-layout environment token shapes differ")
+    if len(compact_axes_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in compact_axes_sha256.lower()
+    ):
+        raise ValueError("Compact public axis digest must be a SHA-256 hex string")
+
+    axes_D = tuple(np.asarray(axis, dtype=np.float64) for axis in compact_support_axes_D)
+    if len(axes_D) != 3 or any(
+        axis.ndim != 1
+        or axis.size < 2
+        or not np.all(np.isfinite(axis))
+        or not np.all(np.diff(axis) > 0.0)
+        for axis in axes_D
+    ):
+        raise ValueError("Compact public support axes must be finite, increasing XYZ vectors")
+    diameter_m = float(cases[0].diameter_m)
+    support = support_geometry(*(axis * diameter_m for axis in axes_D), diameter_m=diameter_m)
+    sensors = (
+        intended_wind_sensor_coordinates()
+        if intended_sensor_coordinates_D is None
+        else np.asarray(intended_sensor_coordinates_D, dtype=np.float32).copy()
+    )
+    if sensors.ndim != 2 or sensors.shape[1] != 3 or not np.all(np.isfinite(sensors)):
+        raise ValueError("Fixed intended Wind sensor coordinates must be finite [S,3]")
+    if np.any(sensors < support.lower_D[None, :]) or np.any(sensors > support.upper_D[None, :]):
+        raise ValueError("Fixed intended Wind sensors fall outside the compact public domain")
+    sensors.setflags(write=False)
+    environment = environment_representation(support, token_shape=next(iter(token_shapes)))
+
+    train_axis_digest = hashlib.sha256()
+    for case in cases:
+        for axis_name in ("x_m", "y_m", "z_m"):
+            axis = np.asarray(getattr(case.run, axis_name), dtype=np.float64)
+            train_axis_digest.update(np.asarray([case.index], dtype=np.int64).tobytes())
+            train_axis_digest.update(axis_name.encode("ascii"))
+            train_axis_digest.update(np.asarray(axis.shape, dtype=np.int64).tobytes())
+            train_axis_digest.update(axis.tobytes())
+    return WindCandidateGeometryContext(
+        support=support,
+        environment=environment,
+        train_case_indices=tuple(int(case.index) for case in cases),
+        train_axis_sha256=train_axis_digest.hexdigest(),
+        intended_sensor_coordinates_D=sensors,
+        context_source="compact_public_coordinate_axes",
+        context_source_sha256=compact_axes_sha256.lower(),
+    )
+
+
+def apply_train_derived_wind_candidate_context(
+    task: WindCompletionTask,
+    context: WindCandidateGeometryContext,
+) -> WindCompletionTask:
+    """Replace row-native support/features with a frozen public context."""
+
+    if not np.array_equal(task.sensors.intended_coordinates_D, context.intended_sensor_coordinates_D):
+        raise ValueError("Task sensor grid differs from the frozen public sensor grid")
+    template = task.template_case
+    if template.run is not None or template.receiver_anchor_coords is not None:
+        raise ValueError("Wind candidate context cannot be applied to a live or anchored case")
+    centers, present, features = module_geometry(
+        np.asarray(template.module_centers[:, :2], dtype=np.float32),
+        int(template.n_turbines),
+        hub_height_D=float(template.hub_height_m / template.diameter_m),
+    )
+    global_context = global_geometry_features(
+        context.support,
+        float(template.wind_direction_deg),
+        int(template.n_turbines),
+    )
+    candidate_template = replace(
+        template,
+        support=context.support,
+        environment=context.environment,
+        module_centers=centers,
+        module_present=present,
+        module_features=features,
+        global_context=global_context,
+        receiver_anchor_coords=None,
+        receiver_anchor_weights=None,
+        receiver_anchor_roles=None,
+    )
+    return replace(task, template_case=candidate_template)
+
+
+apply_wind_candidate_context = apply_train_derived_wind_candidate_context
 
 
 def make_wind_completion_task(
@@ -232,9 +503,13 @@ def known_from_wind_task(task: WindCompletionTask) -> WindCompletionKnown:
     return WindCompletionKnown(
         template_case=task.template_case,
         visible_mask=task.visible_mask.copy(),
-        observed_coordinates_D=panel.native_coordinates_D[observed].copy(),
+        # Native snapped coordinates and distances remain in ``task.sensors``
+        # for audit.  The candidate conditioner always receives the declared
+        # fixed locations, never coordinates that vary with a row's hidden
+        # layout or native support.
+        observed_coordinates_D=panel.intended_coordinates_D[observed].copy(),
         observed_velocity_mps=panel.reference_velocity_mps[observed].copy(),
-        held_coordinates_D=panel.native_coordinates_D[held].copy(),
+        held_coordinates_D=panel.intended_coordinates_D[held].copy(),
         held_velocity_mps=panel.reference_velocity_mps[held].copy(),
     )
 
@@ -307,8 +582,8 @@ def wind_condition_from_task(
 
     Clean target coordinates never enter the condition. With no support bounds,
     the historical design-box parameterization is retained. Supplied support
-    bounds are an additional task input whose provenance must be audited by
-    the caller because row-native bounds may encode clean-layout information.
+    bounds are an additional task input whose source and scope must be audited
+    by the caller. Row-native bounds are forbidden candidate inputs.
     """
 
     known = known_from_wind_task(task)
@@ -323,7 +598,7 @@ def wind_condition_from_task(
     )
     hidden_xy_D = task.clean_centers_D[~visible, :2]
     if public_bounded and np.any((hidden_xy_D < lower_D) | (hidden_xy_D > upper_D)):
-        raise ValueError("Clean hidden target falls outside public native-clearance bounds")
+        raise ValueError("Clean hidden target falls outside public support-clearance bounds")
     clean = _position_logits(task.clean_centers_D[:, :2], lower_D, upper_D)
     visible_logits = np.zeros_like(clean)
     if not public_bounded:
@@ -415,16 +690,28 @@ def wind_geometry_validity(
     *,
     support_lower_D: np.ndarray | None = None,
     support_upper_D: np.ndarray | None = None,
-) -> dict[str, float | bool | None | str]:
-    """Record support-box and rotor-overlap checks before any rejection."""
+    support_name: str = "native_domain",
+) -> dict[str, object]:
+    """Record design, named-support, and rotor-overlap checks before rejection.
+
+    ``inside_native_domain`` remains reserved for exact row-native support.
+    Other public boxes are returned as ``inside_support`` and are not mislabeled
+    as native CFD validity.
+    """
+
+    label = str(support_name).strip()
+    if not label:
+        label = "native_domain"
 
     centers = np.asarray(centers_D, dtype=np.float64)
     if centers.ndim != 2 or centers.shape[1] != 3 or not np.all(np.isfinite(centers)):
         return {
             "finite": False,
             "inside_design_box": False,
-            "inside_native_domain": False,
-            "native_support_status": "invalid_geometry",
+            "inside_native_domain": False if label == "native_domain" else None,
+            "native_support_status": "invalid_geometry" if label == "native_domain" else "not_checked_here",
+            "inside_support": False,
+            "support_name": label,
             "rotors_nonoverlap": False,
             "min_spacing_D": float("nan"),
         }
@@ -435,6 +722,16 @@ def wind_geometry_validity(
         (centers >= np.asarray(support_lower_D)[None, :])
         & (centers <= np.asarray(support_upper_D)[None, :])
     ))
+    inside_native = native if label == "native_domain" else None
+    native_status = (
+        "invalid_geometry"
+        if label == "native_domain" and not np.all(np.isfinite(centers))
+        else "checked"
+        if label == "native_domain" and native is not None
+        else "unknown"
+        if label == "native_domain"
+        else "not_checked_here"
+    )
     difference = centers[:, None, :2] - centers[None, :, :2]
     distance = np.linalg.norm(difference, axis=-1)
     np.fill_diagonal(distance, np.inf)
@@ -442,8 +739,10 @@ def wind_geometry_validity(
     return {
         "finite": True,
         "inside_design_box": inside,
-        "inside_native_domain": native,
-        "native_support_status": "unknown" if native is None else "checked",
+        "inside_native_domain": inside_native,
+        "native_support_status": native_status,
+        "inside_support": native,
+        "support_name": label,
         "rotors_nonoverlap": bool(minimum >= 2.0 * float(rotor_radius_D)),
         "min_spacing_D": minimum,
     }
@@ -631,6 +930,179 @@ def packet_links_from_wind_interface(
 InterfaceForWindCandidate = Callable[[torch.Tensor, WindCandidateKnown], InteractionInterface]
 
 
+@dataclass(frozen=True)
+class WindFixedActionEvidence:
+    action_key: str
+    requested_paths: tuple[str, ...]
+    realized_paths: tuple[str, ...]
+    policy_selected: bool
+    selection_status: str
+    nonredundant_k: int | None
+    public_support_source: str
+
+
+def _wind_action_nonredundant_k(plan: MechanismPlan, encoded: Any, cut: tuple[int, ...]) -> int:
+    """Count distinct realized packet source signatures for one sparse cut."""
+
+    indices = torch.as_tensor(cut, device=plan.split_gates.device, dtype=torch.long)
+    module = (plan.permission_matrix("MM")[indices] > 0.0) & (
+        encoded.module_present[0] > 0.5
+    )[None, :]
+    environment = (plan.permission_matrix("QE")[indices] > 0.0) & (
+        encoded.env_weights[0] > 0.0
+    )[None, :]
+    signatures = torch.cat((module, environment), dim=1)
+    bearing = signatures.any(dim=1)
+    return len({tuple(row) for row in signatures[bearing].detach().cpu().tolist()})
+
+
+class WindFixedActionCandidateInterfaceBuilder:
+    """Build selected-u4910 candidate links for one declared fixed cut.
+
+    This adapter deliberately does not consult the legacy Stage-C frontier
+    utility head.  The action is a predeclared research intervention resolved
+    against the current candidate tree, while feature context and sensor
+    locations come from the frozen public context recorded by the caller.
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        organizer: InputOnlyCoverOrganizer,
+        *,
+        context: WindCandidateGeometryContext,
+        action_key: str,
+        budget_fractions: Mapping[str, float],
+        numerical_state_version: str,
+        max_frontier_depth: int = 3,
+    ) -> None:
+        if action_key not in {"root", "two_packet", "full_access"}:
+            raise ValueError("Fixed Wind inverse action must be root, two_packet, or full_access")
+        if not numerical_state_version.strip():
+            raise ValueError("Frozen forward/organizer numerical version is required")
+        budgets = {str(key).upper(): float(value) for key, value in budget_fractions.items()}
+        if set(budgets) != {"QE", "MM"} or any(not 0.0 <= value <= 1.0 for value in budgets.values()):
+            raise ValueError("Wind inverse reuse requires valid frozen QE and MM capacities")
+        self.model = model.eval().requires_grad_(False)
+        self.organizer = organizer.eval().requires_grad_(False)
+        self.context = context
+        self.action_key = str(action_key)
+        self.budget_fractions = budgets
+        self.numerical_state_version = numerical_state_version
+        self.max_frontier_depth = int(max_frontier_depth)
+        self.calls = 0
+        self.last_frontier_evidence: WindFixedActionEvidence | None = None
+
+    @torch.no_grad()
+    def __call__(self, centers_D: torch.Tensor, known: WindCandidateKnown) -> InteractionInterface:
+        from windfarm.workflows.maturation import WIND_ACTION_PATHS, available_frontier_for_paths
+
+        if centers_D.ndim != 2 or centers_D.shape != known.template_case.module_centers.shape:
+            raise ValueError("Candidate centers must align with the known Wind template")
+        if not bool(torch.isfinite(centers_D).all()):
+            raise ValueError("Candidate centers must be finite before interface encoding")
+        if known.template_case.run is not None:
+            raise ValueError("Candidate-only interface must not retain a native field view")
+        template = known.template_case
+        support_lower = torch.as_tensor(
+            self.context.support.lower_D, device=centers_D.device, dtype=centers_D.dtype
+        )
+        support_upper = torch.as_tensor(
+            self.context.support.upper_D, device=centers_D.device, dtype=centers_D.dtype
+        )
+        if bool(((centers_D < support_lower) | (centers_D > support_upper)).any()):
+            raise ValueError("Candidate centers fall outside the frozen public support")
+        if not np.array_equal(template.support.lower_D, self.context.support.lower_D) or not np.array_equal(
+            template.support.upper_D, self.context.support.upper_D
+        ):
+            raise ValueError("Candidate template does not use the frozen public support")
+        expected_environment = self.context.environment
+        for name in ("coords_D", "features", "weights_D3"):
+            actual = getattr(template.environment, name, None)
+            expected = getattr(expected_environment, name)
+            if actual is None or not np.array_equal(actual, expected):
+                raise ValueError(
+                    f"Candidate template does not use the frozen public environment {name}"
+                )
+        expected_global_context = global_geometry_features(
+            self.context.support,
+            float(template.wind_direction_deg),
+            int(template.n_turbines),
+        )
+        if not np.array_equal(template.global_context, expected_global_context):
+            raise ValueError("Candidate template does not use the frozen public global context")
+        expected_observed_coordinates = self.context.intended_sensor_coordinates_D[
+            np.asarray(SENSOR_OBSERVED_INDICES, dtype=np.int64)
+        ]
+        if not np.array_equal(known.observed_coordinates_D, expected_observed_coordinates):
+            raise ValueError("Candidate observed sensors differ from the declared fixed sensor subset")
+        candidate = replace(
+            template,
+            module_centers=centers_D.detach().to(device="cpu", dtype=torch.float32).numpy().copy(),
+            support=self.context.support,
+            environment=self.context.environment,
+            receiver_anchor_coords=None,
+            receiver_anchor_weights=None,
+            receiver_anchor_roles=None,
+        )
+        batch = case_batch(
+            candidate,
+            known.observed_coordinates_D,
+            velocity_mps=None,
+            include_receiver_anchors=True,
+        ).to(next(self.model.parameters()).device)
+        core = self.model.core
+        encoded = core.encode_case(batch)
+        trees = core.backend.build_case_trees(encoded)
+        score_inputs = {
+            "module_states": encoded.module_tokens,
+            "environment_states": encoded.env_tokens,
+            "global_state": encoded.global_token,
+        }
+        scores = self.organizer.score_cases(
+            encoded, score_inputs, trees, budgets=self.budget_fractions
+        )
+        if self.action_key == "full_access":
+            plan = MechanismPlan.full_access(
+                trees[0], encoded.module_present[0], int(encoded.env_coords.shape[1])
+            )
+            requested_paths: tuple[str, ...] = ()
+            realized_paths = tuple()
+            nonredundant_k = None
+        else:
+            requested_paths = tuple(WIND_ACTION_PATHS[self.action_key])
+            frontier, realized_paths = available_frontier_for_paths(
+                trees[0], requested_paths, max_depth=self.max_frontier_depth
+            )
+            plan = self.organizer.plans_from_scores(
+                scores,
+                encoded,
+                trees,
+                hard=True,
+                frontier_cuts=(frontier,),
+                budget_fractions=self.budget_fractions,
+            )[0]
+            nonredundant_k = _wind_action_nonredundant_k(plan, encoded, tuple(frontier))
+        interface = interaction_interface_from_plan(
+            plan,
+            encoded,
+            scores[0],
+            numerical_state_version=self.numerical_state_version,
+            evidence_scope=f"selected-u4910-forced-{self.action_key}-research-only",
+        )
+        self.calls += 1
+        self.last_frontier_evidence = WindFixedActionEvidence(
+            action_key=self.action_key,
+            requested_paths=requested_paths,
+            realized_paths=tuple(realized_paths),
+            policy_selected=False,
+            selection_status="forced_research_action_not_policy_selection",
+            nonredundant_k=nonredundant_k,
+            public_support_source=self.context.context_source,
+        )
+        return interface
+
+
 class WindCandidatePacketProvider:
     """Supply current-proposal graph links, with no reference target in scope."""
 
@@ -733,7 +1205,7 @@ class WindRewiredPacketProvider:
     def __init__(
         self,
         known: WindCompletionKnown,
-        builder: WindCandidateInterfaceBuilder,
+        builder: InterfaceForWindCandidate,
         *,
         seed: int,
     ) -> None:
@@ -1106,6 +1578,7 @@ def evaluate_matched_wind_completion(
     provider_factory: Callable[[WindCompletionKnown], LinksForCandidate],
     surrogate_predictor: Callable[[NativeCase, np.ndarray], np.ndarray],
     independent_surrogate_predictor: Callable[[NativeCase, np.ndarray], np.ndarray] | None = None,
+    surrogate_auditors: Mapping[str, Callable[[NativeCase, np.ndarray], np.ndarray]] | None = None,
     samples_per_task: int = 8,
     controls: Sequence[str] = (
         "as_observed",
@@ -1124,6 +1597,8 @@ def evaluate_matched_wind_completion(
         [WindCompletionTask], tuple[Sequence[float], Sequence[float]]
     ] | None = None,
     public_support_input_label: str | None = None,
+    completed_sample_keys: set[tuple[int, str, int, str]] | None = None,
+    row_callback: Callable[[Mapping[str, object]], None] | None = None,
 ) -> list[dict[str, object]]:
     """Sample matched arms and retain every attempted design and proposal trail.
 
@@ -1145,6 +1620,10 @@ def evaluate_matched_wind_completion(
         raise ValueError("A public support label requires a task support bounds provider")
     if public_support_bounds_for_task is not None and public_support_input_label == "none":
         raise ValueError("A public support bounds provider cannot be labelled 'none'")
+    audit_predictors = dict(surrogate_auditors or {})
+    if any(not str(name).strip() for name in audit_predictors):
+        raise ValueError("Surrogate audit predictor names must be nonempty")
+    completed_keys = set(completed_sample_keys or ())
     target_device = torch.device(device)
     ordinary_arms = (("I-G", matched.graph_model, False), ("I-dense", matched.dense_model, True))
     rows: list[dict[str, object]] = []
@@ -1183,12 +1662,13 @@ def evaluate_matched_wind_completion(
                     generator=initial_generator,
                 )
                 for arm, model, dense in arms:
+                    sample_key = (int(task.row_index), str(control), int(sample_index), str(arm))
+                    if sample_key in completed_keys:
+                        continue
                     if arm == "I-G-rewired":
                         ordinary_provider = provider_factory(known)
-                        if not isinstance(ordinary_provider, WindCandidatePacketProvider) or not isinstance(
-                            ordinary_provider.builder, WindCandidateInterfaceBuilder
-                        ):
-                            raise TypeError("Packet rewiring needs the frozen Wind candidate interface")
+                        if not isinstance(ordinary_provider, WindCandidatePacketProvider):
+                            raise TypeError("Packet rewiring needs a Wind candidate packet provider")
                         provider = WindRewiredPacketProvider(
                             known, ordinary_provider.builder, seed=sample_seed ^ 0x7331
                         )
@@ -1219,6 +1699,52 @@ def evaluate_matched_wind_completion(
                         rotor_radius_D,
                         support_lower_D=known.template_case.support.lower_D,
                         support_upper_D=known.template_case.support.upper_D,
+                        support_name=(
+                            "native_domain"
+                            if public_support_bounds_for_task is None
+                            else public_support_input_label or "public_candidate_domain"
+                        ),
+                    )
+                    if public_support_bounds_for_task is not None:
+                        native_validity = wind_geometry_validity(
+                            centers,
+                            rotor_radius_D,
+                            support_lower_D=task.native_support_lower_D,
+                            support_upper_D=task.native_support_upper_D,
+                        )
+                        validity["inside_native_domain"] = native_validity["inside_native_domain"]
+                        validity["native_support_status"] = native_validity["native_support_status"]
+                        validity["native_row_support_lower_D"] = task.native_support_lower_D.tolist()
+                        validity["native_row_support_upper_D"] = task.native_support_upper_D.tolist()
+                        validity["candidate_public_domain_valid"] = validity["inside_support"]
+                    else:
+                        native_validity = validity
+                    generation_lower = (
+                        condition.design_lower[0].detach().cpu().numpy()
+                        if condition.design_lower is not None
+                        else DESIGN_LOWER_D
+                    )
+                    generation_upper = (
+                        condition.design_upper[0].detach().cpu().numpy()
+                        if condition.design_upper is not None
+                        else DESIGN_UPPER_D
+                    )
+                    inside_generation_bounds = bool(np.all(
+                        (centers[:, :2] >= generation_lower[None, :])
+                        & (centers[:, :2] <= generation_upper[None, :])
+                    ))
+                    native_geometry_valid = bool(
+                        validity["finite"]
+                        and inside_generation_bounds
+                        and native_validity["inside_native_domain"]
+                        and native_validity["rotors_nonoverlap"]
+                    )
+                    public_geometry_valid = bool(
+                        validity["finite"]
+                        and validity["inside_design_box"]
+                        and inside_generation_bounds
+                        and validity["inside_support"]
+                        and validity["rotors_nonoverlap"]
                     )
                     candidate = _candidate_from_centers(known, centers)
                     query = np.concatenate(
@@ -1235,8 +1761,10 @@ def evaluate_matched_wind_completion(
                     independent_observed_rmse = None
                     independent_held_rmse = None
                     independent_disagreement = None
+                    independent_predictions = None
                     if independent_surrogate_predictor is not None and control == "as_observed":
                         independent = independent_surrogate_predictor(candidate, query)
+                        independent_predictions = independent
                         independent_observed_rmse = _wind_observation_rmse(
                             independent[:observed_count], known.observed_velocity_mps
                         )
@@ -1246,10 +1774,28 @@ def evaluate_matched_wind_completion(
                         independent_disagreement = _wind_observation_rmse(
                             independent, predicted
                         )
+                    audit_results = {}
+                    if control == "as_observed":
+                        for audit_name, audit_predictor in audit_predictors.items():
+                            audited = audit_predictor(candidate, query)
+                            audit_results[audit_name] = {
+                                "predictions_mps": np.asarray(audited, dtype=np.float32).tolist(),
+                                "observed_rmse_mps": _wind_observation_rmse(
+                                    audited[:observed_count], known.observed_velocity_mps
+                                ),
+                                "held_rmse_mps": _wind_observation_rmse(
+                                    audited[observed_count:], known.held_velocity_mps
+                                ),
+                                "disagreement_with_primary_rmse_mps": _wind_observation_rmse(
+                                    audited, predicted
+                                ),
+                            }
                     complete_candidate_s = time.perf_counter() - started
                     acceptable = bool(
                         validity["finite"]
                         and validity["inside_design_box"]
+                        and inside_generation_bounds
+                        and validity["inside_support"]
                         and validity["inside_native_domain"]
                         and validity["rotors_nonoverlap"]
                         and observed_rmse <= clean_observed_rmse + acceptable_observation_slack_mps
@@ -1259,8 +1805,38 @@ def evaluate_matched_wind_completion(
                         .detach().cpu().numpy().tolist()
                         for state in trail.states
                     ]
-                    rows.append(
-                        {
+                    trail_geometry_statuses = []
+                    for timestep, state_centers in zip(
+                        trail.timesteps, trail_centers, strict=True
+                    ):
+                        state_array = np.asarray(state_centers, dtype=np.float32)
+                        state_public = wind_geometry_validity(
+                            state_array,
+                            rotor_radius_D,
+                            support_lower_D=known.template_case.support.lower_D,
+                            support_upper_D=known.template_case.support.upper_D,
+                            support_name=public_support_input_label or "public_candidate_domain",
+                        )
+                        state_native = wind_geometry_validity(
+                            state_array,
+                            rotor_radius_D,
+                            support_lower_D=task.native_support_lower_D,
+                            support_upper_D=task.native_support_upper_D,
+                        )
+                        trail_geometry_statuses.append({
+                            "timestep": int(timestep),
+                            "finite": bool(state_public["finite"]),
+                            "inside_design_box": bool(state_public["inside_design_box"]),
+                            "inside_generation_design_bounds": bool(np.all(
+                                (state_array[:, :2] >= generation_lower[None, :])
+                                & (state_array[:, :2] <= generation_upper[None, :])
+                            )),
+                            "inside_compact_public_domain": bool(state_public["inside_support"]),
+                            "compact_rotors_nonoverlap": bool(state_public["rotors_nonoverlap"]),
+                            "inside_native_row_support": bool(state_native["inside_native_domain"]),
+                            "native_rotors_nonoverlap": bool(state_native["rotors_nonoverlap"]),
+                        })
+                    row_result = {
                             "row_index": task.row_index,
                             "partition": task.partition,
                             "control": control,
@@ -1272,8 +1848,10 @@ def evaluate_matched_wind_completion(
                             "visible_mask": known.visible_mask.tolist(),
                             "clean_centers_D": task.clean_centers_D.tolist(),
                             "generated_centers_D": centers.tolist(),
-                            "native_support_lower_D": known.template_case.support.lower_D.tolist(),
-                            "native_support_upper_D": known.template_case.support.upper_D.tolist(),
+                            "candidate_public_support_lower_D": known.template_case.support.lower_D.tolist(),
+                            "candidate_public_support_upper_D": known.template_case.support.upper_D.tolist(),
+                            "native_support_lower_D": task.native_support_lower_D.tolist(),
+                            "native_support_upper_D": task.native_support_upper_D.tolist(),
                             "public_support_input": (
                                 "none"
                                 if public_support_bounds_for_task is None
@@ -1289,16 +1867,34 @@ def evaluate_matched_wind_completion(
                                 if condition.design_upper is not None
                                 else DESIGN_UPPER_D.tolist()
                             ),
+                            "inside_generation_design_bounds": inside_generation_bounds,
                             "hidden_set_error_D": hidden_set_error_D(
                                 centers, task.clean_centers_D, known.visible_mask
                             ),
+                            "observed_sensor_coordinates_D": known.observed_coordinates_D.tolist(),
+                            "held_sensor_coordinates_D": known.held_coordinates_D.tolist(),
+                            "surrogate_query_coordinates_D": query.tolist(),
                             "geometry": validity,
+                            "geometry_valid_before_repair": public_geometry_valid,
+                            "geometry_valid_after_repair": public_geometry_valid,
+                            "native_geometry_valid_before_repair": native_geometry_valid,
+                            "native_geometry_valid_after_repair": native_geometry_valid,
+                            "repair_applied": False,
+                            "repair_method": "none_identity",
+                            "trail_geometry_statuses": trail_geometry_statuses,
                             "clean_surrogate_observed_rmse_mps": clean_observed_rmse,
                             "surrogate_observed_rmse_mps": observed_rmse,
                             "surrogate_held_rmse_mps": held_rmse,
+                            "surrogate_primary_predictions_mps": predicted.tolist(),
                             "independent_surrogate_observed_rmse_mps": independent_observed_rmse,
                             "independent_surrogate_held_rmse_mps": independent_held_rmse,
                             "independent_surrogate_disagreement_rmse_mps": independent_disagreement,
+                            "independent_surrogate_predictions_mps": (
+                                None
+                                if independent_predictions is None
+                                else independent_predictions.tolist()
+                            ),
+                            "surrogate_audit_results": audit_results,
                             "acceptable": acceptable,
                             "trail_timesteps": list(trail.timesteps),
                             "trail_centers_D": trail_centers,
@@ -1318,9 +1914,15 @@ def evaluate_matched_wind_completion(
                                 else None
                             ),
                             "organizer_calls": trail.organizer_calls + 1,
-                            "full_forward_calls": 1 + int(independent_disagreement is not None),
+                            "full_forward_calls": (
+                                1
+                                + int(independent_disagreement is not None)
+                                + len(audit_results)
+                            ),
                             "generation_seconds": generation_s,
                             "complete_candidate_seconds": complete_candidate_s,
-                        }
-                    )
+                    }
+                    rows.append(row_result)
+                    if row_callback is not None:
+                        row_callback(row_result)
     return rows

@@ -417,105 +417,255 @@ def _scalar_cover_diagnostics(values: Any) -> dict[str, int | float]:
 
 
 @contextmanager
-def capture_field_decoder_diagnostics(core: Any) -> Iterator[list[dict[str, int | float]] | None]:
-    """Collect P2 field counters from every core decode, without routing maps."""
-    original = getattr(core, "decode_queries", None)
-    if not callable(original):
-        yield None
-        return
-    captured: list[dict[str, int | float]] = []
-    had_instance_method = "decode_queries" in vars(core)
-    previous_instance_value = vars(core).get("decode_queries")
+def capture_complete_wrapper_diagnostics(operator: Any) -> Iterator[dict[str, Any]]:
+    """Trace outer roles and every nested backend call during one wrapper replay."""
+    core = getattr(getattr(operator, "model", None), "core", None)
+    backend = getattr(core, "backend", None)
+    if core is None or backend is None:
+        raise RuntimeError("Complete-wrapper telemetry requires operator.model.core.backend.")
+    names = ("mm_message", "me_message", "em_message", "query_module_message", "env_geometry_bias")
+    trace: dict[str, Any] = {
+        "core_prepare_calls": [], "prepare_calls": [], "core_read_requests": [], "read_calls": [],
+        "feature_module_calls": {name: [] for name in names},
+    }
+    originals: list[tuple[Any, str, bool, Any]] = []
+    handles: list[Any] = []
+    active_prepare: list[dict[str, Any]] = []
+    active_read: list[dict[str, Any]] = []
 
-    def capture(*args: Any, **kwargs: Any) -> Any:
-        context = kwargs.get("interaction_context")
-        if getattr(context, "receiver_role", None) != "p2_field":
-            return original(*args, **kwargs)
-        call_kwargs = dict(kwargs)
-        call_kwargs["return_interaction_aux"] = True
-        output = original(*args, **call_kwargs)
-        captured.append(_scalar_cover_diagnostics(output.get("_interaction_aux", {})))
-        return output
+    def bind(target: Any, name: str, callback: Callable[..., Any]) -> None:
+        values = vars(target)
+        had_value = name in values
+        originals.append((target, name, had_value, values.get(name)))
+        setattr(target, name, callback)
 
-    core.decode_queries = capture
+    def context(context_value: Any) -> dict[str, str | None]:
+        phase = getattr(context_value, "phase", None)
+        role = getattr(context_value, "receiver_role", None)
+        return {"phase": None if phase is None else str(phase),
+                "receiver_role": None if role is None else str(role)}
+
+    def rows(value: Any, label: str) -> int:
+        if not torch.is_tensor(value) or value.ndim < 2:
+            raise RuntimeError(f"Observed {label} has no receiver axis.")
+        return int(value.shape[1])
+
+    core_prepare, core_read = getattr(core, "prepare", None), getattr(core, "read", None)
+    backend_prepare, backend_read = getattr(backend, "prepare", None), getattr(backend, "read", None)
+    if not all(callable(item) for item in (core_prepare, core_read, backend_prepare, backend_read)):
+        raise RuntimeError("Core and backend must expose callable prepare/read methods.")
+
+    def trace_core_prepare(*args: Any, **kwargs: Any) -> Any:
+        outer = context(kwargs.get("interaction_context"))
+        trace["core_prepare_calls"].append(outer)
+        active_prepare.append(outer)
+        try:
+            return core_prepare(*args, **kwargs)
+        finally:
+            active_prepare.pop()
+
+    def trace_backend_prepare(*args: Any, **kwargs: Any) -> Any:
+        state = backend_prepare(*args, **kwargs)
+        direct = kwargs.get("interaction_context")
+        direct_row = context(direct)
+        outer = active_prepare[-1] if active_prepare else {"phase": None, "receiver_role": None}
+        if direct is not None and outer["receiver_role"] is not None and direct_row != outer:
+            raise RuntimeError(f"Backend prepare context {direct_row} conflicts with outer core.prepare {outer}.")
+        ledger = state.get("cover_preparation_ledger") if isinstance(state, Mapping) else None
+        trace["prepare_calls"].append({
+            **(direct_row if direct is not None else outer),
+            "direct_backend_context": direct_row,
+            "context_source": "backend_argument" if direct is not None else "outer_core_prepare",
+            "ledger": _scalar_cover_diagnostics(ledger),
+        })
+        return state
+
+    def trace_core_read(*args: Any, **kwargs: Any) -> Any:
+        receiver = args[1] if len(args) > 1 else kwargs.get("receiver_coordinates")
+        request = {**context(kwargs.get("interaction_context")),
+                   "requested_receiver_rows": rows(receiver, "outer core.read request"),
+                   "backend_chunks": []}
+        trace["core_read_requests"].append(request)
+        active_read.append(request)
+        try:
+            return core_read(*args, **kwargs)
+        finally:
+            active_read.pop()
+
+    def trace_backend_read(*args: Any, **kwargs: Any) -> Any:
+        result = backend_read(*args, **kwargs)
+        if not active_read:
+            raise RuntimeError("backend.read was not nested under an outer core.read request.")
+        direct = kwargs.get("interaction_context")
+        direct_row = context(direct)
+        outer = active_read[-1]
+        outer_row = {"phase": outer["phase"], "receiver_role": outer["receiver_role"]}
+        if direct is not None and outer["receiver_role"] is not None and direct_row != outer_row:
+            raise RuntimeError(f"Backend read context {direct_row} conflicts with outer core.read {outer_row}.")
+        receiver = args[2] if len(args) > 2 else kwargs.get("receiver_coordinates")
+        aux = result[1] if isinstance(result, tuple) and len(result) == 2 else None
+        chunk = {**(direct_row if direct is not None else outer_row),
+                 "direct_backend_context": direct_row,
+                 "context_source": "backend_argument" if direct is not None else "outer_core_read",
+                 "receiver_rows": rows(receiver, "backend.read chunk"),
+                 "cover_aux": _scalar_cover_diagnostics(aux)}
+        outer["backend_chunks"].append(chunk)
+        trace["read_calls"].append(chunk)
+        return result
+
     try:
-        yield captured
+        bind(core, "prepare", trace_core_prepare)
+        bind(core, "read", trace_core_read)
+        bind(backend, "prepare", trace_backend_prepare)
+        bind(backend, "read", trace_backend_read)
+        missing = []
+        for name in names:
+            module = getattr(backend, name, None)
+            if not isinstance(module, torch.nn.Module):
+                missing.append(name)
+                continue
+            def capture(_module: Any, inputs: tuple[Any, ...], *, module_name: str = name) -> None:
+                value = inputs[0] if inputs else None
+                if not torch.is_tensor(value):
+                    trace["feature_module_calls"][module_name].append({"feature_input_rows": None, "input_shape": None})
+                    return
+                shape = tuple(int(dim) for dim in value.shape)
+                count = 1
+                for dim in shape[:-1]:
+                    count *= dim
+                trace["feature_module_calls"][module_name].append({"feature_input_rows": count, "input_shape": shape})
+            handles.append(module.register_forward_pre_hook(capture))
+        if missing:
+            raise RuntimeError(f"Native backend lacks telemetry modules: {missing}.")
+        yield trace
     finally:
-        if had_instance_method:
-            core.decode_queries = previous_instance_value
-        else:
-            delattr(core, "decode_queries")
+        for handle in handles:
+            handle.remove()
+        for target, name, had_value, old_value in reversed(originals):
+            if had_value:
+                setattr(target, name, old_value)
+            else:
+                delattr(target, name)
 
 
 def _counter_rows(diagnostics: Mapping[str, Any], prefix: str) -> int | None:
-    keys = [
-        str(key)
-        for key in diagnostics
-        if str(key).startswith(prefix) and str(key).endswith(("_executed_rows", "_actual_rows"))
-    ]
+    keys = [str(key) for key in diagnostics
+            if str(key).startswith(prefix) and str(key).endswith(("_executed_rows", "_actual_rows"))]
     executed = [key for key in keys if key.endswith("_executed_rows")]
     chosen = executed or [key for key in keys if key.endswith("_actual_rows")]
-    if not chosen:
-        return None
-    return sum(int(diagnostics[key]) for key in chosen)
+    return sum(int(diagnostics[key]) for key in chosen) if chosen else None
 
 
-def complete_executor_row_telemetry(
-    preparation_diagnostics: Mapping[str, Any],
-    field_decoder_diagnostics: Sequence[Mapping[str, Any]] | None,
-    *,
-    expected_field_chunks: int,
-) -> dict[str, Any]:
-    preparation = {
-        mechanism: _counter_rows(preparation_diagnostics, f"cover_prepare_{mechanism.lower()}_")
-        for mechanism in ("MM", "ME", "EM")
-    }
-    chunks = list(field_decoder_diagnostics or ())
-    complete_chunks = field_decoder_diagnostics is not None and len(chunks) == expected_field_chunks
-    field_rows: dict[str, int | None] = {}
+def _validate_wrapper_trace(trace: Mapping[str, Any], *, expected_field_chunks: int, full_access: bool):
+    if expected_field_chunks < 1:
+        raise ValueError("At least one P2 field chunk is required.")
+    prep_order = [("P0", "p0_port"), ("P1", "p1_refinement"), ("P2", "p2_field")]
+    read_order = prep_order[:2] + [("P2", "p2_field")] * int(expected_field_chunks)
+    outer_preps, preps = list(trace.get("core_prepare_calls", ())), list(trace.get("prepare_calls", ()))
+    requests = list(trace.get("core_read_requests", ()))
+    if [ (r.get("phase"), r.get("receiver_role")) for r in outer_preps ] != prep_order:
+        raise RuntimeError("Outer core.prepare roles differ from P0/P1/P2 contract.")
+    if [(r.get("phase"), r.get("receiver_role")) for r in preps] != prep_order:
+        raise RuntimeError("Backend prepare roles differ from outer P0/P1/P2 contract.")
+    for i, (outer, nested) in enumerate(zip(outer_preps, preps)):
+        if (outer.get("phase"), outer.get("receiver_role")) != (nested.get("phase"), nested.get("receiver_role")):
+            raise RuntimeError(f"Backend prepare {i} is not bound to its outer role.")
+        if not full_access and nested.get("context_source") != "backend_argument":
+            raise RuntimeError(f"Sparse backend prepare {i} omitted direct interaction context.")
+    if [(r.get("phase"), r.get("receiver_role")) for r in requests] != read_order:
+        raise RuntimeError("Outer core.read roles differ from P0/P1/P2 contract.")
+    flat_reads = []
+    for i, (request, role) in enumerate(zip(requests, read_order)):
+        expected = int(request.get("requested_receiver_rows", 0))
+        chunks = list(request.get("backend_chunks", ()))
+        if expected <= 0 or not chunks:
+            raise RuntimeError(f"Outer read request {i} has no positive backend chunk trace.")
+        if any((r.get("phase"), r.get("receiver_role")) != role for r in chunks):
+            raise RuntimeError(f"Backend read chunk role differs from outer request {role}.")
+        if not full_access and any(r.get("context_source") != "backend_argument" for r in chunks):
+            raise RuntimeError(f"Sparse backend read request {i} omitted direct interaction context.")
+        counts = [int(r.get("receiver_rows", 0)) for r in chunks]
+        if any(count <= 0 for count in counts) or sum(counts) != expected:
+            raise RuntimeError(f"Backend read chunks {counts} do not sum to outer request {expected}.")
+        flat_reads.extend(chunks)
+    return preps, flat_reads
+
+
+def complete_executor_row_telemetry(trace: Mapping[str, Any], *, expected_field_chunks: int, full_access: bool) -> dict[str, Any]:
+    """Sum all sparse backend counters once; full bypass remains explicitly unavailable."""
+    prepares, reads = _validate_wrapper_trace(trace, expected_field_chunks=expected_field_chunks, full_access=full_access)
+    result = {"status": "unavailable" if full_access else "partially_unavailable",
+              "counter_scope": "all backend.prepare ledgers and every backend.read aux grouped under exact outer core roles",
+              "counter_source": "nested backend calls only; outer summaries and Dense hooks are separate",
+              "prepare_calls_observed": len(prepares),
+              "read_backend_chunks_observed": len(reads),
+              "read_outer_requests_observed": len(trace.get("core_read_requests", ())),
+              "field_outer_requests_observed": sum(row.get("receiver_role") == "p2_field" for row in trace.get("core_read_requests", ())),
+              "by_mechanism": None, "preparation_by_mechanism": None,
+              "read_by_mechanism": None, "measured_total_executor_rows": None}
+    if full_access:
+        result["reason"] = "full_access_native_bypass_has_no_cover_executor_ledger_or_read_aux"
+        return result
+    prep_rows = {}
+    read_rows = {}
+    for mechanism in ("MM", "ME", "EM"):
+        values = [_counter_rows(row.get("ledger") or {}, f"cover_prepare_{mechanism.lower()}_") for row in prepares]
+        prep_rows[mechanism] = sum(values) if len(values) == 3 and all(v is not None for v in values) else None
     for mechanism in ("QM", "QE"):
-        values = [_counter_rows(row, f"cover_{mechanism.lower()}_") for row in chunks]
-        field_rows[mechanism] = (
-            sum(value for value in values if value is not None)
-            if complete_chunks and all(value is not None for value in values)
-            else None
-        )
-    combined = {**preparation, **field_rows}
-    unavailable = [name for name, value in combined.items() if value is None]
-    all_measured = not unavailable
-    return {
-        "status": "measured_complete" if all_measured else "partially_unavailable",
-        "preparation_by_mechanism": preparation,
-        "field_decoder_by_mechanism": field_rows,
-        "by_mechanism": combined,
-        "measured_total_executor_rows": sum(int(value) for value in combined.values()) if all_measured else None,
-        "unavailable_mechanisms": unavailable,
-        "field_decoder_chunks_observed": len(chunks),
-        "field_decoder_chunks_expected": int(expected_field_chunks),
-    }
+        values = [_counter_rows(row.get("cover_aux") or {}, f"cover_{mechanism.lower()}_") for row in reads]
+        read_rows[mechanism] = sum(values) if values and all(v is not None for v in values) else None
+    combined = {**prep_rows, **read_rows}
+    unavailable = [key for key, value in combined.items() if value is None]
+    complete = not unavailable
+    result.update({"status": "measured_complete" if complete else "partially_unavailable",
+                   "preparation_by_mechanism": prep_rows, "read_by_mechanism": read_rows,
+                   "by_mechanism": combined, "unavailable_mechanisms": unavailable,
+                   "measured_total_executor_rows": sum(int(v) for v in combined.values()) if complete else None})
+    return result
+
+
+def native_dense_feature_rows(trace: Mapping[str, Any], *, identity_binding: Mapping[str, Any],
+                              expected_field_chunks: int, full_access: bool) -> dict[str, Any]:
+    """Count actual feature tensor rows in a same-input replay, separate from cover aux."""
+    prepares, reads = _validate_wrapper_trace(trace, expected_field_chunks=expected_field_chunks, full_access=full_access)
+    modules = {"mm_message": ("MM", len(prepares)), "me_message": ("ME", len(prepares)),
+               "em_message": ("EM", len(prepares)), "query_module_message": ("QM", len(reads)),
+               "env_geometry_bias": ("QE", len(reads))}
+    captured = trace.get("feature_module_calls", {})
+    rows_by_mechanism, by_module, expected_calls, observed_calls, missing = {}, {}, {}, {}, []
+    for name, (mechanism, expected) in modules.items():
+        calls = list(captured.get(name, ()))
+        observed_calls[name], expected_calls[name] = len(calls), expected
+        total = 0
+        for call in calls:
+            if call.get("feature_input_rows") is None or call.get("input_shape") is None:
+                missing.append(name)
+            else:
+                total += int(call["feature_input_rows"])
+        rows_by_mechanism[mechanism] = total
+        by_module[name] = {"mechanism": mechanism, "call_count": len(calls),
+                           "expected_call_count": expected, "feature_input_rows": total, "calls": calls}
+    counts_match = observed_calls == expected_calls
+    complete = counts_match and not missing
+    return {"status": "measured_same_input_untimed_complete_wrapper_replay" if complete else "partially_unavailable",
+            "reason": None if complete else "missing_module_input_or_expected_forward_hook_call",
+            "scope": "actual tensors entering native MM/ME/EM/QM/QE feature modules",
+            "interpretation": "feature-input rows are not support pairs or cover executor aux",
+            "execution_mode": "full_access" if full_access else "sparse_selected_action",
+            "identity_binding": dict(identity_binding),
+            "by_mechanism": rows_by_mechanism if complete else None,
+            "raw_observed_feature_rows_by_mechanism": rows_by_mechanism,
+            "by_module": by_module,
+            "total_feature_input_rows": sum(rows_by_mechanism.values()) if complete else None,
+            "expected_module_call_counts": expected_calls, "observed_module_call_counts": observed_calls,
+            "module_call_counts_match_expected": counts_match, "missing_input_modules": sorted(set(missing))}
 
 
 __all__ = [
-    "MECHANISMS",
-    "QUERY_BATCH_SIZE",
-    "QUERY_COUNTS",
-    "RENDERER_LATENCY_FIELDS",
-    "RENDERER_LATENCY_NAME",
-    "RENDERER_MODEL_BY_VARIANT",
-    "capture_field_decoder_diagnostics",
-    "check_sha",
-    "complete_executor_row_telemetry",
-    "hash_json",
-    "input_digest",
-    "interleaved",
-    "max_feasible_query_count",
-    "query_role_counts",
-    "renderer_latency_fields",
-    "role_candidates",
-    "rows_by_role",
-    "scenario",
-    "selected_ids",
-    "sha256_file",
-    "sync",
-    "write_renderer_latency_csv",
+    "MECHANISMS", "QUERY_BATCH_SIZE", "QUERY_COUNTS", "RENDERER_LATENCY_FIELDS",
+    "RENDERER_LATENCY_NAME", "RENDERER_MODEL_BY_VARIANT", "capture_complete_wrapper_diagnostics",
+    "check_sha", "complete_executor_row_telemetry", "hash_json", "input_digest", "interleaved",
+    "max_feasible_query_count", "native_dense_feature_rows", "query_role_counts",
+    "renderer_latency_fields", "role_candidates", "rows_by_role", "scenario", "selected_ids",
+    "sha256_file", "sync", "write_renderer_latency_csv",
 ]

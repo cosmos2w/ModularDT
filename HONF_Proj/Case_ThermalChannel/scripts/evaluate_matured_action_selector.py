@@ -1479,6 +1479,13 @@ def _route_support_for_catalog(
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
     """Return packet source signatures and receiver-resolved hard pair support."""
     cut_tensor = torch.as_tensor(tuple(int(value) for value in cut), device=plan.split_gates.device, dtype=torch.long)
+    split_gates = plan.split_gates.detach()
+    split_gates_binary = bool(torch.isfinite(split_gates).all()) and bool(torch.all(
+        torch.isclose(split_gates, torch.zeros_like(split_gates), atol=1e-6, rtol=0)
+        | torch.isclose(split_gates, torch.ones_like(split_gates), atol=1e-6, rtol=0)
+    ))
+    if not split_gates_binary:
+        raise ValueError(f"{mechanism} split gates must be hard binary before reporting selected hard support.")
     permission = plan.permission_matrix(mechanism, module_present=module_present).detach()
     permission_binary = bool(torch.all(
         torch.isclose(permission, torch.zeros_like(permission), atol=1e-6, rtol=0)
@@ -1501,9 +1508,19 @@ def _route_support_for_catalog(
         torch.isclose(valid_access_values, torch.zeros_like(valid_access_values), atol=1e-6, rtol=0)
         | torch.isclose(valid_access_values, torch.ones_like(valid_access_values), atol=1e-6, rtol=0)
     ))
-    if not permission_binary or not binary_access:
-        raise ValueError(f"{mechanism} hard permissions and canonical access must be binary in this evaluation.")
-    support = (access > 0.5) & eligible
+    access_finite = bool(torch.isfinite(access).all())
+    access_in_unit_interval = bool(((access >= -1e-6) & (access <= 1.0 + 1e-6)).all())
+    if not permission_binary:
+        raise ValueError(f"{mechanism} node/source hard permissions must be binary in this evaluation.")
+    if not access_finite or not access_in_unit_interval:
+        raise ValueError(f"{mechanism} canonical access must be finite and within [0, 1] (1e-6 tolerance).")
+    # CaseLocalReceiverTree access overlaps continuously at geometric splits.
+    # Native execution keeps every eligible pair with strictly positive weight.
+    support = (access > 0) & eligible
+    positive_access = valid_access_values[valid_access_values > 0]
+    fractional_access = valid_access_values[
+        (valid_access_values > 1e-6) & (valid_access_values < 1.0 - 1e-6)
+    ]
     detail = {
         "selected_hard_pairs": int(support.sum().detach().cpu()),
         "eligible_pairs": int(eligible.sum().detach().cpu()),
@@ -1516,7 +1533,19 @@ def _route_support_for_catalog(
             int(value) for value in support.sum(dim=1).detach().cpu().tolist()
         ],
         "hard_permission_matrix_binary": permission_binary,
+        "split_gates_binary": split_gates_binary,
         "canonical_hard_access_binary": binary_access,
+        "canonical_access_binary": binary_access,
+        "canonical_access_finite": access_finite,
+        "canonical_access_within_unit_interval": access_in_unit_interval,
+        "fractional_canonical_access_pairs": int(fractional_access.numel()),
+        "canonical_access_min_positive": (
+            float(positive_access.min().detach().cpu()) if positive_access.numel() else None
+        ),
+        "canonical_access_max": (
+            float(valid_access_values.max().detach().cpu()) if valid_access_values.numel() else None
+        ),
+        "canonical_access_semantics": "continuous_geometric_overlap; hard support is access > 0",
     }
     return packet_sources, support, detail
 
@@ -1609,7 +1638,7 @@ def _fit_panel_features(
     tree = snapshot["trees"][0]
     plan = snapshot["plans"][0]
     scores = snapshot["scores"][0]
-    cut = tuple(int(value) for value in snapshot.get("cut", snapshot["records"][0]["frontier"]))
+    cut = tuple(int(value) for value in snapshot["cut"])
     feature_rows = describe_realized_plan(scores, plan, encoded, cut)
     role_features = receiver_role_descriptors(tree, role_count=role_count)
     signatures, support = _support_signature_and_details(encoded, tree, plan, cut)
@@ -1870,6 +1899,14 @@ def _thermal_quantity_metrics(
     }
 
 
+def _selector_work_from_deployment_state(canonical_work_by_state: Sequence[float]) -> float:
+    """Use the current baseline input's exact work as the selector's cost."""
+    values = np.asarray(canonical_work_by_state, dtype=np.float64)
+    if values.shape != (2,) or not np.isfinite(values).all() or np.any(values < 0):
+        raise ValueError("Selector work requires finite nonnegative baseline and i_plus state work.")
+    return float(values[0])
+
+
 def _metric_case(
     *,
     family_id: str,
@@ -1964,6 +2001,7 @@ def _metric_case(
             canonical_work_states.append(float(details["canonical_work"]))
             live_rows_states.append(details["live_executor_rows"])
         mean_work = float(np.mean(canonical_work_states))
+        selector_work = _selector_work_from_deployment_state(canonical_work_states)
         planning_seconds_by_state = [float(snapshot.get("planner_seconds", 0.0)) for snapshot in snapshots]
         feature_seconds_by_state = [float(descriptor[4]["feature_seconds"]) for descriptor in descriptors]
         planning_seconds = float(sum(planning_seconds_by_state))
@@ -1984,7 +2022,7 @@ def _metric_case(
             candidate_role_error=error_tensor,
             incumbent_role_error=incumbent_tensor,
             numerical_floor=floor_tensor,
-            exact_work=mean_work,
+            exact_work=selector_work,
             nonredundant_k=nonredundant_k,
             trained_sparse=False,
             full_access=(action == "full_access"),
@@ -2004,6 +2042,7 @@ def _metric_case(
                 candidate_errors <= (1.0 + ROLE_RELATIVE_ALLOWANCE) * incumbent_errors + numerical_allowance_by_role
             ).tolist(),
             "exact_canonical_work_by_state": canonical_work_states,
+            "baseline_exact_canonical_work": selector_work,
             "mean_exact_canonical_work": mean_work,
             "score_and_hard_plan_seconds_by_state": planning_seconds_by_state,
             "action_feature_seconds_by_state": feature_seconds_by_state,
@@ -2758,6 +2797,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "per-case exact baseline cut-path and nonredundant-K exposure in two "
             "complete training-family passes, with strict same-case canonical-work saving; "
             "action lists summarize qualified primary train rows only"
+        ),
+        "selector_work_objective": (
+            "baseline-state exact canonical work for the current deployment input; "
+            "paired baseline/i_plus mean work is retained as an outcome diagnostic"
         ),
         "identity": identity,
         "exposure": exposure,

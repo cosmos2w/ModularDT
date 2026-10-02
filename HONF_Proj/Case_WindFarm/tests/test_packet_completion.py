@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -13,15 +14,26 @@ from honf_inverse_core.models.frozen_packet_diffusion import (
     SpatialConditionalPacketDenoiser,
 )
 from torch import nn
+import windfarm.inverse.packet_completion as packet_completion_module
 
 from windfarm.data import NativeCase
+from windfarm.geometry import (
+    environment_representation,
+    global_geometry_features,
+    support_geometry,
+)
 from windfarm.inverse.packet_completion import (
+    WindFixedActionCandidateInterfaceBuilder,
     WindCandidatePacketProvider,
     _degree_preserving_packet_rewire,
+    apply_train_derived_wind_candidate_context,
+    build_compact_public_wind_candidate_context,
+    build_train_derived_wind_candidate_context,
     candidate_centers_from_state,
     evaluate_matched_wind_completion,
     fixed_native_sensor_panel,
     hidden_set_error_D,
+    known_from_wind_task,
     make_wind_completion_task,
     native_clearance_design_bounds,
     permute_wind_task,
@@ -128,6 +140,10 @@ def test_fixed_sensors_and_known_provider_do_not_expose_hidden_layout() -> None:
     assert not hasattr(provider.known, "held_velocity_mps")
     assert not hasattr(provider.known, "held_coordinates_D")
     assert not hasattr(provider.known, "observed_velocity_mps")
+    np.testing.assert_array_equal(
+        provider.known.observed_coordinates_D,
+        task.sensors.intended_coordinates_D[np.asarray(range(24)) % 3 != 0],
+    )
     links_before = provider(clean, condition)
     centers_before = provider.last_candidate_centers_D.clone()
     task.clean_centers_D[~task.visible_mask, :2] = 14.0  # poison forbidden clean target
@@ -136,6 +152,305 @@ def test_fixed_sensors_and_known_provider_do_not_expose_hidden_layout() -> None:
     torch.testing.assert_close(provider.last_candidate_centers_D, centers_before)
     reconstructed = candidate_centers_from_state(clean, condition, known)
     torch.testing.assert_close(reconstructed[task.visible_mask, :2], condition.known_state[0, task.visible_mask].sigmoid() * 30 - 15, atol=1e-5, rtol=1e-5)
+
+
+def test_train_common_context_and_fixed_sensor_locations_ignore_hidden_poison() -> None:
+    source = _case()
+    context = build_train_derived_wind_candidate_context([("train", source)])
+    task = make_wind_completion_task(source, partition="train", hidden_count=1, seed=27)
+    task = apply_train_derived_wind_candidate_context(task, context)
+
+    poisoned_clean = task.clean_centers_D.copy()
+    poisoned_clean[~task.visible_mask, :2] = np.asarray((11.25, -6.5), dtype=np.float32)
+    poisoned_template = replace(
+        task.template_case,
+        support=SimpleNamespace(
+            lower_D=np.asarray((-100.0, -100.0, -100.0), dtype=np.float32),
+            upper_D=np.asarray((100.0, 100.0, 100.0), dtype=np.float32),
+        ),
+        environment=SimpleNamespace(
+            coords_D=np.full((2, 3), 88.0, dtype=np.float32),
+            features=np.full((2, 7), -88.0, dtype=np.float32),
+            weights_D3=np.ones(2, dtype=np.float32),
+            token_shape=(2, 1, 1),
+        ),
+        global_context=np.full_like(task.template_case.global_context, 37.0),
+        module_features=np.full_like(task.template_case.module_features, -19.0),
+    )
+    poisoned = replace(
+        task,
+        clean_centers_D=poisoned_clean,
+        template_case=poisoned_template,
+    )
+    fixed = apply_train_derived_wind_candidate_context(task, context)
+    poisoned_fixed = apply_train_derived_wind_candidate_context(poisoned, context)
+    _, condition_a, known_a = wind_condition_from_task(fixed)
+    _, condition_b, known_b = wind_condition_from_task(poisoned_fixed)
+
+    # The clean hidden coordinates alter only the supervised target. The
+    # candidate-side query coordinates, support, environment, and features
+    # are replaced by the same train-derived public context.
+    torch.testing.assert_close(condition_a.known_state, condition_b.known_state)
+    torch.testing.assert_close(condition_a.design_mask, condition_b.design_mask)
+    torch.testing.assert_close(condition_a.module_features, condition_b.module_features)
+    torch.testing.assert_close(condition_a.sensor_features, condition_b.sensor_features)
+    assert condition_a.sensor_features[0, :, :3].equal(torch.as_tensor(
+        task.sensors.intended_coordinates_D[np.asarray(range(24)) % 3 != 0] / np.asarray((50.0, 38.0, 6.25), dtype=np.float32)
+    ))
+    np.testing.assert_array_equal(known_a.observed_coordinates_D, known_b.observed_coordinates_D)
+    np.testing.assert_array_equal(fixed.template_case.support.lower_D, context.support.lower_D)
+    np.testing.assert_array_equal(poisoned_fixed.template_case.support.lower_D, context.support.lower_D)
+    np.testing.assert_array_equal(
+        fixed.template_case.environment.coords_D,
+        poisoned_fixed.template_case.environment.coords_D,
+    )
+    assert fixed.sensors.native_coordinates_D.shape == (24, 3)
+    assert fixed.sensors.snap_distance_D.shape == (24,)
+    assert not np.array_equal(
+        fixed.sensors.native_coordinates_D[np.asarray(range(24)) % 3 != 0],
+        known_a.observed_coordinates_D,
+    )
+
+    candidate_state = condition_a.known_state.clone()
+    candidate_state[0, ~condition_a.design_mask[0]] = 0.1
+    links_a = _provider_factory(known_a)(candidate_state, condition_a)
+    links_b = _provider_factory(known_b)(candidate_state, condition_b)
+    torch.testing.assert_close(links_a.module_source, links_b.module_source)
+    torch.testing.assert_close(links_a.sensor_source, links_b.sensor_source)
+
+
+def test_common_public_context_rejects_nontrain_axes_and_uncovered_sensor_grid() -> None:
+    case = _case()
+    with pytest.raises(ValueError, match="training cases only"):
+        build_train_derived_wind_candidate_context([("development", case)])
+    narrow = np.asarray(((40.0, 0.0, 0.875),), dtype=np.float32)
+    with pytest.raises(ValueError, match="outside train-derived common support"):
+        build_train_derived_wind_candidate_context(
+            [("train", case)], intended_sensor_coordinates_D=narrow
+        )
+
+
+def test_compact_public_context_is_fixed_and_not_mislabeled_as_native_or_train_axes() -> None:
+    case = _case()
+    compact_axes_D = (
+        np.linspace(-20.0, 30.0, 401),
+        np.linspace(-19.0, 19.0, 305),
+        np.linspace(0.0, 6.25, 51),
+    )
+    context = build_compact_public_wind_candidate_context(
+        [("train", case)],
+        compact_support_axes_D=compact_axes_D,
+        compact_axes_sha256="a" * 64,
+    )
+    record = context.as_dict()
+    assert record["source_partition"] == "public_dataset_geometry"
+    assert record["context_source"] == "compact_public_coordinate_axes"
+    assert record["context_source_sha256"] == "a" * 64
+    np.testing.assert_allclose(context.support.lower_D, [-20.0, -19.0, 0.0])
+    np.testing.assert_allclose(context.support.upper_D, [30.0, 19.0, 6.25])
+
+    task = make_wind_completion_task(case, partition="development", hidden_count=1, seed=91)
+    fixed = apply_train_derived_wind_candidate_context(task, context)
+    np.testing.assert_array_equal(fixed.native_support_lower_D, task.template_case.support.lower_D)
+    np.testing.assert_array_equal(fixed.native_support_upper_D, task.template_case.support.upper_D)
+    _, condition, _known = wind_condition_from_task(
+        fixed,
+        public_support_bounds_D=(context.support.lower_D[:2], context.support.upper_D[:2]),
+    )
+    assert condition.design_lower is not None and condition.design_upper is not None
+    torch.testing.assert_close(
+        condition.design_lower[0], torch.tensor([-15.0, -15.0]), rtol=0, atol=0
+    )
+    torch.testing.assert_close(
+        condition.design_upper[0], torch.tensor([15.0, 15.0]), rtol=0, atol=0
+    )
+    assert bool(condition.design_mask.any())
+    public_validity = wind_geometry_validity(
+        task.clean_centers_D,
+        0.5,
+        support_lower_D=context.support.lower_D,
+        support_upper_D=context.support.upper_D,
+        support_name="compact_public_domain",
+    )
+    assert public_validity["inside_support"] is True
+    assert public_validity["inside_native_domain"] is None
+    assert public_validity["native_support_status"] == "not_checked_here"
+    with pytest.raises(ValueError, match="SHA-256"):
+        build_compact_public_wind_candidate_context(
+            [("train", case)],
+            compact_support_axes_D=compact_axes_D,
+            compact_axes_sha256="not-a-digest",
+        )
+
+
+class _NeverCalledModule(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(()))
+
+
+def test_fixed_action_builder_rejects_unadapted_poisoned_candidate_context() -> None:
+    raw = _case()
+    support = support_geometry(
+        raw.run.x_m,
+        raw.run.y_m,
+        raw.run.z_m,
+        diameter_m=raw.diameter_m,
+    )
+    environment = environment_representation(support)
+    source = replace(
+        raw,
+        support=support,
+        environment=environment,
+        global_context=global_geometry_features(
+            support, raw.wind_direction_deg, raw.n_turbines
+        ),
+    )
+    context = build_train_derived_wind_candidate_context([("train", source)])
+    task = make_wind_completion_task(
+        source, partition="train", hidden_count=1, seed=811
+    )
+    known = known_from_wind_task(task)
+    builder = WindFixedActionCandidateInterfaceBuilder(
+        _NeverCalledModule(),
+        _NeverCalledModule(),
+        context=context,
+        action_key="root",
+        budget_fractions={"QE": 0.95, "MM": 0.90},
+        numerical_state_version="selected-u4910-test",
+    )
+    candidate = torch.as_tensor(task.clean_centers_D)
+
+    nonfinite = candidate.clone()
+    nonfinite[0, 0] = torch.nan
+    with pytest.raises(ValueError, match="centers must be finite"):
+        builder(nonfinite, known)
+
+    outside_public_support = candidate.clone()
+    outside_public_support[0, 0] = context.support.upper_D[0] + 1.0
+    with pytest.raises(ValueError, match="outside the frozen public support"):
+        builder(outside_public_support, known)
+
+    poisoned_features = task.template_case.environment.features.copy()
+    poisoned_features[0, 0] += 0.25
+    bad_environment = replace(
+        task.template_case.environment, features=poisoned_features
+    )
+    with pytest.raises(ValueError, match="environment features"):
+        builder(
+            candidate,
+            replace(
+                known,
+                template_case=replace(
+                    task.template_case, environment=bad_environment
+                ),
+            ),
+        )
+
+    poisoned_weights = task.template_case.environment.weights_D3.copy()
+    poisoned_weights[0] *= 1.25
+    bad_environment = replace(
+        task.template_case.environment, weights_D3=poisoned_weights
+    )
+    with pytest.raises(ValueError, match="environment weights_D3"):
+        builder(
+            candidate,
+            replace(
+                known,
+                template_case=replace(
+                    task.template_case, environment=bad_environment
+                ),
+            ),
+        )
+
+    poisoned_global = task.template_case.global_context.copy()
+    poisoned_global[0] += 0.5
+    with pytest.raises(ValueError, match="global context"):
+        builder(
+            candidate,
+            replace(
+                known,
+                template_case=replace(
+                    task.template_case, global_context=poisoned_global
+                ),
+            ),
+        )
+
+    poisoned_sensors = known.observed_coordinates_D.copy()
+    poisoned_sensors[0, 0] += 0.25
+    with pytest.raises(ValueError, match="fixed sensor subset"):
+        builder(
+            candidate,
+            replace(known, observed_coordinates_D=poisoned_sensors),
+        )
+
+
+def test_fixed_action_evidence_reports_compact_public_context(monkeypatch) -> None:
+    raw = _case()
+    axes_D = tuple(
+        np.asarray(getattr(raw.run, name), dtype=np.float64) / raw.diameter_m
+        for name in ("x_m", "y_m", "z_m")
+    )
+    context = build_compact_public_wind_candidate_context(
+        [("train", raw)],
+        compact_support_axes_D=axes_D,
+        compact_axes_sha256="b" * 64,
+    )
+    task = make_wind_completion_task(raw, partition="train", hidden_count=1, seed=81)
+    fixed = apply_train_derived_wind_candidate_context(task, context)
+    known = known_from_wind_task(fixed)
+
+    encoded = SimpleNamespace(
+        module_tokens=torch.zeros((1, 3, 2)),
+        env_tokens=torch.zeros((1, 2, 2)),
+        global_token=torch.zeros((1, 1, 2)),
+        module_present=torch.ones((1, 3)),
+        env_coords=torch.zeros((1, 2, 3)),
+    )
+
+    class _Batch:
+        def to(self, _device):
+            return self
+
+    class _Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(()))
+            self.core = SimpleNamespace(
+                encode_case=lambda _batch: encoded,
+                backend=SimpleNamespace(build_case_trees=lambda _encoded: [object()]),
+            )
+
+    class _Organizer(nn.Module):
+        def score_cases(self, *_args, **_kwargs):
+            return [object()]
+
+    monkeypatch.setattr(
+        packet_completion_module,
+        "case_batch",
+        lambda *_args, **_kwargs: _Batch(),
+    )
+    monkeypatch.setattr(
+        packet_completion_module.MechanismPlan,
+        "full_access",
+        staticmethod(lambda *_args, **_kwargs: object()),
+    )
+    monkeypatch.setattr(
+        packet_completion_module,
+        "interaction_interface_from_plan",
+        lambda *_args, **_kwargs: object(),
+    )
+    builder = WindFixedActionCandidateInterfaceBuilder(
+        _Model(),
+        _Organizer(),
+        context=context,
+        action_key="full_access",
+        budget_fractions={"QE": 0.95, "MM": 0.90},
+        numerical_state_version="selected-u4910-test",
+    )
+    builder(torch.as_tensor(task.clean_centers_D), known)
+    assert builder.last_frontier_evidence is not None
+    assert builder.last_frontier_evidence.public_support_source == "compact_public_coordinate_axes"
 
 
 def test_train_only_centered_sensor_features_use_explicit_per_sensor_statistics() -> None:
@@ -288,7 +603,10 @@ def test_matched_sampling_retains_all_attempts_and_identical_seeds() -> None:
     source = _case()
     training = make_wind_completion_task(source, partition="train", hidden_count=1, seed=8)
     development = [
-        make_wind_completion_task(source, partition="development", hidden_count=1, seed=100 + k)
+        replace(
+            make_wind_completion_task(source, partition="development", hidden_count=1, seed=100 + k),
+            row_index=100 + k,
+        )
         for k in range(8)
     ]
     _, condition, _ = wind_condition_from_task(development[0])
@@ -309,37 +627,80 @@ def test_matched_sampling_retains_all_attempts_and_identical_seeds() -> None:
         steps=2,
         device="cpu",
     )
+    received_rows = []
+    already_written = {
+        (100, "as_observed", 0, "I-G"),
+        (100, "as_observed", 0, "I-dense"),
+    }
     rows = evaluate_matched_wind_completion(
         development,
         matched=matched,
         provider_factory=_provider_factory,
         surrogate_predictor=lambda _candidate, coordinates: np.zeros_like(coordinates),
+        independent_surrogate_predictor=lambda _candidate, coordinates: np.ones_like(coordinates),
+        surrogate_auditors={
+            "retained_wfull": lambda _candidate, coordinates: np.full_like(coordinates, 0.25),
+        },
         controls=("as_observed", "no_observations"),
         device="cpu",
         public_support_bounds_for_task=lambda _task: (
             np.asarray((-10.0, -8.0)), np.asarray((20.0, 8.0))
         ),
         public_support_input_label="common_public_domain_control",
+        completed_sample_keys=already_written,
+        row_callback=received_rows.append,
     )
-    assert len(rows) == 8 * 8 * 2 * 2
+    assert len(rows) == 8 * 8 * 2 * 2 - 2
+    assert received_rows == rows
+    assert not any(
+        (row["row_index"], row["control"], row["sample_index"], row["arm"]) in already_written
+        for row in rows
+    )
     for graph, dense in zip(rows[0::2], rows[1::2], strict=True):
         assert graph["arm"] == "I-G" and dense["arm"] == "I-dense"
         assert graph["public_support_input"] == dense["public_support_input"] == "common_public_domain_control"
         assert graph["generation_design_lower_D"] == dense["generation_design_lower_D"] == [-9.5, -7.5]
         assert graph["generation_design_upper_D"] == dense["generation_design_upper_D"] == [15.0, 7.5]
+        assert graph["inside_generation_design_bounds"] is True
+        assert dense["inside_generation_design_bounds"] is True
         assert graph["sample_seed"] == dense["sample_seed"]
         assert graph["organizer_calls"] == dense["organizer_calls"] == 3
-        assert graph["full_forward_calls"] == dense["full_forward_calls"] == 1
-        assert len(graph["trail_centers_D"]) == len(graph["trail_timesteps"])
-        assert np.isfinite(graph["hidden_set_error_D"])
+        expected_forward_calls = 3 if graph["control"] == "as_observed" else 1
+        assert graph["full_forward_calls"] == dense["full_forward_calls"] == expected_forward_calls
+        assert graph["surrogate_query_coordinates_D"] == np.concatenate((
+            np.asarray(graph["observed_sensor_coordinates_D"]),
+            np.asarray(graph["held_sensor_coordinates_D"]),
+        )).tolist()
+        if graph["control"] == "as_observed":
+            assert len(graph["surrogate_primary_predictions_mps"]) == 24
+            assert len(graph["independent_surrogate_predictions_mps"]) == 24
+            assert len(graph["surrogate_audit_results"]["retained_wfull"]["predictions_mps"]) == 24
+        else:
+            assert graph["independent_surrogate_predictions_mps"] is None
+            assert graph["surrogate_audit_results"] == {}
+            assert len(graph["trail_centers_D"]) == len(graph["trail_timesteps"])
+            assert len(graph["trail_geometry_statuses"]) == len(graph["trail_timesteps"])
+            assert all(state["inside_generation_design_bounds"] for state in graph["trail_geometry_statuses"])
+            assert graph["repair_applied"] is False
+            assert graph["geometry_valid_before_repair"] == graph["geometry_valid_after_repair"]
+            assert graph["native_geometry_valid_before_repair"] == graph["native_geometry_valid_after_repair"]
+            assert graph["native_geometry_valid_before_repair"] is bool(
+                graph["geometry"]["finite"]
+                and graph["inside_generation_design_bounds"]
+                and graph["geometry"]["inside_native_domain"]
+                and graph["geometry"]["rotors_nonoverlap"]
+            )
+            assert np.isfinite(graph["hidden_set_error_D"])
     seeds = {
         (row["row_index"], row["sample_index"], row["arm"], row["control"]): row["sample_seed"]
         for row in rows
     }
-    for row in rows:
-        assert seeds[(row["row_index"], row["sample_index"], row["arm"], "as_observed")] == seeds[
-            (row["row_index"], row["sample_index"], row["arm"], "no_observations")
-        ]
+    for key, seed in seeds.items():
+        row_index, sample_index, arm, control = key
+        if control == "as_observed":
+            paired_key = (row_index, sample_index, arm, "no_observations")
+            if paired_key in seeds:
+                assert seed == seeds[paired_key]
 
 
 def test_inverse_checkpoint_resume_preserves_noise_and_case_stream(tmp_path) -> None:

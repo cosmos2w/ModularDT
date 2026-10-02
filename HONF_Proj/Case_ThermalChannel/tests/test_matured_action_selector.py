@@ -53,6 +53,35 @@ def test_policy_summary_separates_selected_errors_from_candidate_diagnostics() -
     assert [row["full_fallback_with_adequate_sparse"] for row in result["per_case"]] == [False, True, False]
 
 
+def test_selector_work_uses_current_baseline_input_not_paired_state_mean() -> None:
+    state_work = {
+        "root": [4.0, 20.0],
+        "two_packet": [5.0, 2.0],
+        "four_packet": [6.0, 6.0],
+        "full_access": [20.0, 20.0],
+    }
+    baseline_work = [selector._selector_work_from_deployment_state(state_work[action])
+                     for action in selector.ACTION_KEYS]
+    paired_mean_work = [sum(state_work[action]) / 2.0 for action in selector.ACTION_KEYS]
+    predicted_risk = torch.zeros((4, 2))
+    packet_counts = torch.tensor([1, 2, 4, 8])
+    trained = torch.tensor([True, True, True, False])
+    limits = torch.zeros(2)
+    live = selector.select_action_by_risk(
+        predicted_risk, torch.tensor(baseline_work), packet_counts, trained, limits,
+        full_access_index=3,
+    )
+    paired = selector.select_action_by_risk(
+        predicted_risk, torch.tensor(paired_mean_work), packet_counts, trained, limits,
+        full_access_index=3,
+    )
+
+    assert selector.ACTION_KEYS[live.index] == "root"
+    assert selector.ACTION_KEYS[paired.index] == "two_packet"
+    assert baseline_work == [4.0, 5.0, 6.0, 20.0]
+    assert paired_mean_work == [12.0, 3.5, 6.0, 20.0]
+
+
 def test_training_exposure_requires_executed_baseline_cuts(tmp_path: Path) -> None:
     steps = tmp_path / "training_steps.jsonl"
     routes = tmp_path / "route_work.jsonl"
@@ -309,6 +338,96 @@ def test_packet_signature_and_canonical_pairs_use_different_receiver_axes() -> N
     assert detail["hard_permission_matrix_binary"] and detail["canonical_hard_access_binary"]
 
 
+def test_route_support_accepts_fractional_geometric_overlap_and_uses_positive_support() -> None:
+    access = torch.tensor([
+        [0.0, 0.03851612],
+        [0.5, 0.9614839],
+        [1.0, 0.7],
+        [0.0, 0.0],
+    ])
+
+    class OverlapPlan:
+        split_gates = torch.zeros(2)
+
+        def permission_matrix(self, mechanism: str, *, module_present=None):
+            assert mechanism == "QE"
+            return torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+
+        def access_for(self, mechanism: str, receivers: torch.Tensor, *, module_present=None):
+            assert mechanism == "QE"
+            assert receivers.shape == (4, 2)
+            return access
+
+    catalog = SimpleNamespace(
+        receiver_coordinates=torch.zeros((4, 2)),
+        source_validity=torch.tensor([True, True]),
+        pair_validity=torch.tensor([
+            [True, True],
+            [True, True],
+            [True, False],
+            [False, True],
+        ]),
+    )
+    packet_sources, support, detail = selector._route_support_for_catalog(
+        OverlapPlan(), "QE", catalog, (0, 1)
+    )
+    assert packet_sources.tolist() == [[True, False], [False, True]]
+    assert support.tolist() == [
+        [False, True],
+        [True, True],
+        [True, False],
+        [False, False],
+    ]
+    assert detail["selected_hard_pairs"] == 4
+    assert detail["canonical_hard_access_binary"] is False
+    assert detail["canonical_access_binary"] is False
+    assert detail["split_gates_binary"] is True
+    assert detail["fractional_canonical_access_pairs"] == 3
+    assert detail["canonical_access_min_positive"] == pytest.approx(0.03851612)
+    assert detail["canonical_access_max"] == pytest.approx(1.0)
+
+
+def test_route_support_rejects_soft_split_gates_even_with_binary_permission() -> None:
+    class MixedGatePlan:
+        split_gates = torch.tensor([0.0, 0.5])
+
+        def permission_matrix(self, mechanism: str, *, module_present=None):
+            assert mechanism == "QE"
+            return torch.tensor([[1.0]])
+
+        def access_for(self, mechanism: str, receivers: torch.Tensor, *, module_present=None):
+            assert mechanism == "QE"
+            return torch.tensor([[1.0]])
+
+    catalog = SimpleNamespace(
+        receiver_coordinates=torch.zeros((1, 2)),
+        source_validity=torch.tensor([True]),
+        pair_validity=torch.tensor([[True]]),
+    )
+    with pytest.raises(ValueError, match="split gates must be hard binary"):
+        selector._route_support_for_catalog(MixedGatePlan(), "QE", catalog, (0,))
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), -0.01, 1.01])
+def test_route_support_rejects_nonfinite_or_out_of_range_canonical_access(invalid: float) -> None:
+    class InvalidAccessPlan:
+        split_gates = torch.zeros(1)
+
+        def permission_matrix(self, mechanism: str, *, module_present=None):
+            return torch.tensor([[1.0]])
+
+        def access_for(self, mechanism: str, receivers: torch.Tensor, *, module_present=None):
+            return torch.tensor([[invalid]])
+
+    catalog = SimpleNamespace(
+        receiver_coordinates=torch.zeros((1, 2)),
+        source_validity=torch.tensor([True]),
+        pair_validity=torch.tensor([[True]]),
+    )
+    with pytest.raises(ValueError, match="canonical access must be finite and within"):
+        selector._route_support_for_catalog(InvalidAccessPlan(), "QE", catalog, (0,))
+
+
 def test_baseline_selector_features_ignore_permuted_saved_target_values(monkeypatch: pytest.MonkeyPatch) -> None:
     encoded = SimpleNamespace(module_tokens=torch.zeros((1, 1, 2)))
     monkeypatch.setattr(
@@ -336,7 +455,7 @@ def test_baseline_selector_features_ignore_permuted_saved_target_values(monkeypa
         "plans": (object(),),
         "scores": (object(),),
         "cut": (0, 1),
-        "records": ({"frontier": (0, 1)},),
+        "records": ({"full_access": True},),
         "budget_fractions": {"MM": 0.9, "QE": 0.9},
     }
     targets = np.arange(12, dtype=np.float64)

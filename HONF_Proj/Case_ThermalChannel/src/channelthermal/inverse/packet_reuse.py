@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any
 import random
 import time
@@ -41,6 +41,8 @@ from honf_inverse_core.models.frozen_packet_diffusion import (
     PacketLinks,
     heat_from_logits,
 )
+from channelthermal.response_control.active_packet import ThermalCoverPlanBuilder
+from channelthermal.response_control.maturation import THERMAL_ACTION_PATHS, available_frontier_for_paths
 
 from .heat_allocation import ThermalHeatBatch, ThermalHeatFeatureScaler, ThermalHeatTask, collate_thermal_heat_tasks
 
@@ -431,6 +433,178 @@ class ThermalCandidateInterfaceBuilder:
                 plans[case],
                 encoded,
                 scores[case],
+                numerical_state_version=self.numerical_state_version,
+                evidence_scope=self.evidence_scope,
+                case_index=case,
+            )
+            for case in range(len(plans))
+        )
+
+
+class ThermalForcedActionInterfaceBuilder:
+    """Rebuild one predeclared G packet action from each current heat candidate.
+
+    This builder is for a bounded research intervention such as
+    ``four_packet``. It uses the frozen organizer's current-candidate scores
+    and the maintained Thermal plan/work math, but fixes the cut to the
+    action's named paths. It deliberately does not call the Stage-C frontier
+    utility head or the fitted action-risk selector. Policy replay is a
+    separate input-only audit and must not be conflated with this forced
+    graph/dense intervention.
+
+    The old :class:`ThermalCandidateInterfaceBuilder` remains unchanged for
+    checkpoints that contain its trained frontier utility head. This class
+    supports selected endpoints that have the fitted action-risk selector
+    but no Stage-C frontier utility head.
+    """
+
+    def __init__(
+        self,
+        model: ChannelThermalHONFModel,
+        organizer: InputOnlyCoverOrganizer,
+        *,
+        action: str,
+        budget_fractions: Mapping[str, float],
+        extra_route: str,
+        numerical_state_version: str,
+        evidence_scope: str = "frozen-selected-organizer-forced-research-action",
+        max_frontier_depth: int = 3,
+        dataset_config: Mapping[str, Any] | None = None,
+        normalization_stats: Mapping[str, Any] | None = None,
+        plan_intervention: Callable[[MechanismPlan, int], tuple[MechanismPlan, Mapping[str, Any]]] | None = None,
+    ) -> None:
+        if action not in THERMAL_ACTION_PATHS:
+            raise ValueError(f"Unsupported predeclared Thermal packet action {action!r}.")
+        normalized = {str(key).upper(): float(value) for key, value in budget_fractions.items()}
+        route = str(extra_route).upper()
+        if route not in {"MM", "ME"} or set(normalized) != {"QE", route}:
+            raise ValueError("Thermal forced actions require QE plus exactly one MM/ME route budget.")
+        if any(not 0.0 < value <= 1.0 for value in normalized.values()):
+            raise ValueError("Thermal forced-action route budgets must lie in (0,1].")
+        if max_frontier_depth < 0:
+            raise ValueError("max_frontier_depth must be nonnegative.")
+        if not numerical_state_version.strip() or not evidence_scope.strip():
+            raise ValueError("Candidate graph identity and evidence scope cannot be empty.")
+        if not bool(getattr(model.core.backend, "optional_native_policy", False)):
+            raise TypeError("Frozen Thermal interaction reuse requires the checkpoint-native Dense cover backend.")
+
+        self.model = model.eval().requires_grad_(False)
+        self.organizer = organizer.eval().requires_grad_(False)
+        self.action = str(action)
+        self.budget_fractions = normalized
+        self.extra_route = route
+        self.numerical_state_version = str(numerical_state_version)
+        self.evidence_scope = str(evidence_scope)
+        self.max_frontier_depth = int(max_frontier_depth)
+        self.dataset_config = dict(dataset_config or {})
+        self.normalization_stats = dict(normalization_stats or model.global_normalization_stats)
+        self.plan_intervention = plan_intervention
+        self.candidate_rebuild_calls = 0
+        self.candidate_case_rebuilds = 0
+        self.last_action_evidence: tuple[Mapping[str, Any], ...] = ()
+        self.last_intervention_records: tuple[Mapping[str, Any], ...] = ()
+
+    def _encode_candidate(
+        self,
+        candidate_heat: torch.Tensor,
+        known: ThermalProviderKnownInputs,
+        condition: DiffusionCondition,
+    ) -> Any:
+        """Reuse the target-free encoder without the legacy frontier-head gate."""
+
+        return ThermalCandidateInterfaceBuilder._encode_candidate(
+            self, candidate_heat, known, condition
+        )
+
+    @torch.no_grad()
+    def __call__(
+        self,
+        candidate_heat: torch.Tensor,
+        known: ThermalProviderKnownInputs,
+        condition: DiffusionCondition,
+    ) -> Sequence[InteractionInterface]:
+        if candidate_heat.ndim != 3 or candidate_heat.shape[-1] != 1:
+            raise ValueError("Candidate heat must have shape [B,M,1].")
+        if candidate_heat.shape[:2] != condition.module_valid.shape:
+            raise ValueError("Candidate heat and current design mask must align.")
+        if not torch.isfinite(candidate_heat).all() or bool((candidate_heat < 0.0).any()):
+            raise ValueError("Candidate heat must be finite and nonnegative.")
+        if type(known) is not ThermalProviderKnownInputs or {
+            field.name for field in fields(known)
+        } != {
+            "module_centers", "sensor_xy", "physical_context", "total_heat",
+        }:
+            raise TypeError("Candidate builder received an unsupported or target-bearing known-input schema.")
+
+        self.model.eval()
+        self.organizer.eval()
+        # Re-encode on every callback. The backend may cache only immutable
+        # geometry trees; no candidate state, score, plan, embedding, or link
+        # tensor is stored and reused across diffusion steps.
+        encoded = self._encode_candidate(candidate_heat, known, condition)
+        trees = self.model.core.backend.build_case_trees(encoded)
+        paths = tuple(THERMAL_ACTION_PATHS[self.action])
+
+        def fixed_action_cut(
+            _case: int,
+            _encoded: Any,
+            _module_state: torch.Tensor,
+            tree: Any,
+        ) -> tuple[int, ...]:
+            cut, _resolved_paths = available_frontier_for_paths(
+                tree, paths, max_depth=self.max_frontier_depth
+            )
+            return tuple(int(value) for value in cut)
+
+        plan_builder = ThermalCoverPlanBuilder(
+            core=self.model.core,
+            budget_fractions=self.budget_fractions,
+            mode="G",
+            organizer=self.organizer,
+            extra_route=self.extra_route,
+            frontier_selector=fixed_action_cut,
+            max_depth=self.max_frontier_depth,
+        )
+        plan_builder.hard = True
+        plans = plan_builder(encoded, encoded.module_tokens, trees)
+        if len(plans) != int(candidate_heat.shape[0]):
+            raise RuntimeError("Frozen selected organizer returned the wrong number of candidate plans.")
+
+        if self.plan_intervention is not None:
+            intervened = tuple(
+                self.plan_intervention(plan, case)
+                for case, plan in enumerate(plans)
+            )
+            plans = tuple(item[0] for item in intervened)
+            self.last_intervention_records = tuple(item[1] for item in intervened)
+        else:
+            self.last_intervention_records = ()
+
+        evidence: list[dict[str, Any]] = []
+        for case, record in enumerate(plan_builder.last_records):
+            intervention = (
+                dict(self.last_intervention_records[case])
+                if self.last_intervention_records else None
+            )
+            evidence.append({
+                "action": self.action,
+                "selection_kind": "forced_predeclared_research_action",
+                "deployment_policy_replayed": False,
+                "physical_adequacy_claim": False,
+                "frontier": list(record["frontier"]),
+                "frontier_paths": list(record.get("frontier_paths", ())),
+                "nonredundant_k": record.get("nonredundant_k"),
+                "all_mechanisms_total": dict(record["all_mechanisms_total"]),
+                "intervention": intervention,
+            })
+        self.last_action_evidence = tuple(evidence)
+        self.candidate_rebuild_calls += 1
+        self.candidate_case_rebuilds += len(plans)
+        return tuple(
+            interaction_interface_from_plan(
+                plans[case],
+                encoded,
+                plan_builder.last_scores[case],
                 numerical_state_version=self.numerical_state_version,
                 evidence_scope=self.evidence_scope,
                 case_index=case,
@@ -870,6 +1044,7 @@ def sample_matched_heat_arms(
 __all__ = [
     "MatchedDiffusionTrainingResult",
     "ThermalCandidatePacketProvider",
+    "ThermalForcedActionInterfaceBuilder",
     "ThermalFrontierEvidence",
     "ThermalInverseSamples",
     "ThermalProviderKnownInputs",

@@ -16,6 +16,8 @@ from channelthermal.response_control.maturation import THERMAL_ACTION_PATHS, ava
 
 from honf_forward_core.interface_fields.adaptive_interaction_cover import (
     CaseLocalReceiverTree,
+    DirectPairAccess,
+    MechanismPlan,
     ReceiverAnchorUniverse,
 )
 from honf_forward_core.interface_fields.budgeted_frontier import enumerate_frontier_cuts
@@ -44,6 +46,45 @@ def test_latency_sparse_builder_uses_trained_four_packet_action_on_deep_tree(mon
     assert len(selected) == 4
     assert len(enumerate_frontier_cuts(tree, max_depth=3)[-1]) == 8
     assert builder.hard is True
+
+
+def test_latency_packet_summary_preserves_p_direct_pair_nonapplicability(monkeypatch) -> None:
+    coordinates = torch.arange(8, dtype=torch.float32)[:, None]
+    universe = ReceiverAnchorUniverse(
+        coordinates, torch.ones(8), torch.zeros(8, dtype=torch.long), torch.tensor([8.0])
+    )
+    tree = CaseLocalReceiverTree.build(universe, max_nodes=15, min_leaf_anchors=1)
+    module_present = torch.ones(3)
+    direct_plan = MechanismPlan(
+        tree=tree,
+        split_gates=torch.zeros(len(tree.nodes)),
+        module_present=module_present,
+        environment_count=2,
+        permissions={"QE": torch.ones(len(tree.nodes), 2)},
+        direct_access={
+            "MM": DirectPairAccess(coordinates, torch.ones(8, 3)),
+        },
+    )
+    with pytest.raises(ValueError, match="cannot be represented as node memberships"):
+        direct_plan.permission_matrix("MM")
+
+    def reject_grouped_reconstruction(*_args, **_kwargs):
+        raise AssertionError("P direct-pair support must not be rebuilt as node memberships")
+
+    monkeypatch.setattr(benchmark.selected_controls, "_packet_support_summary", reject_grouped_reconstruction)
+    record = {
+        "frontier": [0, 1, 2, 3],
+        "raw_frontier_k": 4,
+        "nonredundant_k": None,
+        "nonredundant_k_status": "not_applicable_to_direct_pair_receiver_axis",
+    }
+    result = benchmark._latency_packet_support_summary(
+        SimpleNamespace(mode="P"), {"baseline": {"plans": (direct_plan,)}}, record
+    )
+
+    assert result["raw_packet_cut_size"] == 4
+    assert result["nonredundant_packet_count"] is None
+    assert result["nonredundant_packet_count_status"] == "not_applicable_to_direct_pair_receiver_axis"
 
 
 @pytest.mark.parametrize("large_modules", [9, 11])
@@ -308,54 +349,192 @@ def test_renderer_latency_csv_matches_report_schema_and_bindings(tmp_path: Path)
     assert all(float(row["p90_ms"]) == pytest.approx(16.0) for row in rows)
 
 
-def test_executor_telemetry_sums_every_p2_chunk_beyond_512_rows() -> None:
-    class FieldContext:
-        receiver_role = "p2_field"
+def _fake_complete_wrapper(*, full_access: bool):
+    class Context:
+        def __init__(self, phase: str, receiver_role: str):
+            self.phase, self.receiver_role = phase, receiver_role
+
+    class FakeBackend(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            for name in ("mm_message", "me_message", "em_message", "query_module_message", "env_geometry_bias"):
+                setattr(self, name, torch.nn.Identity())
+
+        def prepare(self, *, interaction_context=None):
+            self.mm_message(torch.ones((1, 12, 12, 530)))
+            self.me_message(torch.ones((1, 12, 192, 530)))
+            self.em_message(torch.ones((1, 192, 12, 530)))
+            state = {}
+            if interaction_context is not None:
+                state["cover_interaction_context"] = interaction_context
+            if not full_access:
+                state["cover_preparation_ledger"] = {
+                    "cover_prepare_mm_executed_rows": 144,
+                    "cover_prepare_me_executed_rows": 2304,
+                    "cover_prepare_em_executed_rows": 2304,
+                }
+            return state
+
+        def read(self, _state, _encoded, receivers, _features, *, interaction_context=None):
+            rows = int(receivers.shape[1])
+            self.query_module_message(torch.ones((1, rows, 12, 530)))
+            self.env_geometry_bias(torch.ones((1, rows, 192, 18)))
+            aux = {} if full_access else {
+                "cover_qm_executed_rows": 12 * rows,
+                "cover_qe_executed_rows": 192 * rows,
+            }
+            return receivers[..., :1] + 1.0, aux
 
     class FakeCore:
-        def decode_queries(
-            self,
-            _prepared,
-            query_xy: torch.Tensor,
-            *,
-            interaction_context: FieldContext,
-            return_interaction_aux: bool = False,
-        ) -> dict[str, object]:
-            output: dict[str, object] = {"pred_field": query_xy}
-            if return_interaction_aux:
-                rows = int(query_xy.shape[1])
-                output["_interaction_aux"] = {
-                    "cover_qm_executed_rows": torch.tensor(2 * rows),
-                    "cover_qe_executed_rows": torch.tensor(3 * rows),
-                }
-            return output
+        def __init__(self):
+            self.backend = FakeBackend()
+
+        def prepare(self, *, interaction_context):
+            context = interaction_context
+            if full_access:
+                return self.backend.prepare()
+            return self.backend.prepare(interaction_context=context)
+
+        def read(self, state, receivers, *, interaction_context):
+            outputs = []
+            for start in range(0, receivers.shape[1], 128):
+                chunk = receivers[:, start : start + 128]
+                if full_access:
+                    value, _aux = self.backend.read(state, None, chunk, None)
+                else:
+                    value, _aux = self.backend.read(state, None, chunk, None, interaction_context=interaction_context)
+                outputs.append(value)
+            return torch.cat(outputs, dim=1)
 
     core = FakeCore()
-    query_xy = torch.zeros((1, 513, 2), dtype=torch.float32)
-    with benchmark.capture_field_decoder_diagnostics(core) as chunks:
-        core.decode_queries(None, query_xy[:, :512], interaction_context=FieldContext())
-        core.decode_queries(None, query_xy[:, 512:], interaction_context=FieldContext())
+    operator = SimpleNamespace(model=SimpleNamespace(core=core))
 
-    assert chunks is not None
-    assert len(chunks) == 2
-    preparation = {
-        "cover_prepare_mm_executed_rows": 100,
-        "cover_prepare_mm_actual_rows": 999,
-        "cover_prepare_me_executed_rows": 200,
-        "cover_prepare_em_actual_rows": 300,
-    }
-    telemetry = benchmark.complete_executor_row_telemetry(
-        preparation,
-        chunks,
-        expected_field_chunks=2,
+    def invoke() -> torch.Tensor:
+        outputs = []
+        for phase, role, rows in (("P0", "p0_port", 768), ("P1", "p1_refinement", 768), ("P2", "p2_field", 32)):
+            context = Context(phase, role)
+            state = core.prepare(interaction_context=context)
+            receivers = torch.full((1, rows, 2), float(rows))
+            outputs.append(core.read(state, receivers, interaction_context=context))
+        return torch.cat(outputs, dim=1)
+
+    return operator, invoke
+
+
+def test_complete_wrapper_trace_groups_chunked_reads_and_sums_every_role() -> None:
+    operator, invoke = _fake_complete_wrapper(full_access=False)
+    before = invoke()
+    with benchmark.capture_complete_wrapper_diagnostics(operator) as trace:
+        after = invoke()
+    assert torch.equal(before, after)
+
+    telemetry = benchmark.complete_executor_row_telemetry(trace, expected_field_chunks=1, full_access=False)
+    dense = benchmark.native_dense_feature_rows(
+        trace,
+        identity_binding={
+            "endpoint_checkpoint_sha256": "a" * 64,
+            "selected_rows_sha256": "b" * 64,
+            "selected_query_ids_sha256": "c" * 64,
+            "input_query_panel_digest": "d" * 64,
+        },
+        expected_field_chunks=1,
+        full_access=False,
     )
-
     assert telemetry["status"] == "measured_complete"
-    assert telemetry["preparation_by_mechanism"] == {"MM": 100, "ME": 200, "EM": 300}
-    assert telemetry["field_decoder_by_mechanism"] == {"QM": 1026, "QE": 1539}
-    assert telemetry["by_mechanism"] == {"MM": 100, "ME": 200, "EM": 300, "QM": 1026, "QE": 1539}
-    assert telemetry["measured_total_executor_rows"] == 3165
-    assert telemetry["field_decoder_chunks_observed"] == telemetry["field_decoder_chunks_expected"] == 2
+    assert telemetry["prepare_calls_observed"] == 3
+    assert telemetry["read_outer_requests_observed"] == 3
+    assert telemetry["read_backend_chunks_observed"] == 13
+    assert telemetry["by_mechanism"] == {"MM": 432, "ME": 6912, "EM": 6912, "QM": 18816, "QE": 301056}
+    assert [len(request["backend_chunks"]) for request in trace["core_read_requests"]] == [6, 6, 1]
+    assert [sum(chunk["receiver_rows"] for chunk in request["backend_chunks"]) for request in trace["core_read_requests"]] == [768, 768, 32]
+    assert dense["by_mechanism"] == telemetry["by_mechanism"]
+    assert dense["module_call_counts_match_expected"] is True
+
+
+def test_full_access_binds_context_from_outer_core_and_keeps_cover_rows_unavailable() -> None:
+    operator, invoke = _fake_complete_wrapper(full_access=True)
+    before = invoke()
+    with benchmark.capture_complete_wrapper_diagnostics(operator) as trace:
+        after = invoke()
+    assert torch.equal(before, after)
+    assert [row["context_source"] for row in trace["prepare_calls"]] == ["outer_core_prepare"] * 3
+    assert all(chunk["context_source"] == "outer_core_read" for chunk in trace["read_calls"])
+
+    telemetry = benchmark.complete_executor_row_telemetry(trace, expected_field_chunks=1, full_access=True)
+    dense = benchmark.native_dense_feature_rows(
+        trace,
+        identity_binding={"endpoint_checkpoint_sha256": "c" * 64, "input_query_panel_digest": "e" * 64},
+        expected_field_chunks=1,
+        full_access=True,
+    )
+    assert telemetry["status"] == "unavailable" and telemetry["by_mechanism"] is None
+    assert telemetry["reason"] == "full_access_native_bypass_has_no_cover_executor_ledger_or_read_aux"
+    assert dense["by_mechanism"] == {"MM": 432, "ME": 6912, "EM": 6912, "QM": 18816, "QE": 301056}
+    assert dense["module_call_counts_match_expected"] is True
+
+
+def test_complete_wrapper_trace_rejects_chunk_sum_or_role_mismatch() -> None:
+    operator, invoke = _fake_complete_wrapper(full_access=True)
+    with benchmark.capture_complete_wrapper_diagnostics(operator) as trace:
+        invoke()
+    trace["core_read_requests"][0]["backend_chunks"][0]["receiver_rows"] += 1
+    with pytest.raises(RuntimeError, match="do not sum to outer request"):
+        benchmark.complete_executor_row_telemetry(trace, expected_field_chunks=1, full_access=True)
+
+    operator, invoke = _fake_complete_wrapper(full_access=True)
+    with benchmark.capture_complete_wrapper_diagnostics(operator) as trace:
+        invoke()
+    trace["core_read_requests"][2]["receiver_role"] = "p1_refinement"
+    with pytest.raises(RuntimeError, match="Outer core.read roles"):
+        benchmark.complete_executor_row_telemetry(trace, expected_field_chunks=1, full_access=True)
+
+
+@pytest.mark.parametrize("failure", ["missing_input", "missing_call"])
+def test_native_feature_rows_marks_incomplete_module_telemetry_partial(failure: str) -> None:
+    operator, invoke = _fake_complete_wrapper(full_access=True)
+    with benchmark.capture_complete_wrapper_diagnostics(operator) as trace:
+        invoke()
+    if failure == "missing_input":
+        trace["feature_module_calls"]["me_message"][0] = {"feature_input_rows": None, "input_shape": None}
+    else:
+        trace["feature_module_calls"]["em_message"].pop()
+    result = benchmark.native_dense_feature_rows(
+        trace,
+        identity_binding={"endpoint_checkpoint_sha256": "d" * 64},
+        expected_field_chunks=1,
+        full_access=True,
+    )
+    assert result["status"] == "partially_unavailable"
+    assert result["by_mechanism"] is None and result["total_feature_input_rows"] is None
+    assert result["module_call_counts_match_expected"] is (failure != "missing_call")
+    if failure == "missing_input":
+        assert result["missing_input_modules"] == ["me_message"]
+    else:
+        assert result["missing_input_modules"] == []
+
+
+def test_telemetry_identity_binding_uses_exact_preflight_schema_and_baseline_checkpoint() -> None:
+    preflight = {"controlled_run": {
+        "run_id": "run",
+        "manifest_sha256": "1" * 64,
+        "source_checkpoint_sha256": "2" * 64,
+        "G": {"sha256": "3" * 64},
+        "P": {"sha256": "4" * 64},
+    }}
+    panel = {"path": "/panel.npz", "source_sha256": "5" * 64}
+    shape = {
+        "shape_id": "standard_M5_Q64", "query_count": 64,
+        "selected_rows_sha256": "6" * 64,
+        "selected_query_ids_sha256": "7" * 64,
+        "input_query_panel_digest": "8" * 64,
+    }
+    bound = benchmark._telemetry_identity_binding(
+        preflight, panel_key="standard", panel=panel, shape=shape, variant="B_retained_reference"
+    )
+    assert bound["selected_rows_sha256"] == shape["selected_rows_sha256"]
+    assert bound["selected_query_ids_sha256"] == shape["selected_query_ids_sha256"]
+    assert bound["input_query_panel_digest"] == shape["input_query_panel_digest"]
+    assert bound["endpoint_checkpoint_sha256"] == preflight["controlled_run"]["source_checkpoint_sha256"]
 
 
 def test_run_ledger_appends_jsonl_events(tmp_path: Path) -> None:

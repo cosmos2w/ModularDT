@@ -36,8 +36,9 @@ from channelthermal.response_control.latency import (
     RENDERER_LATENCY_FIELDS,
     RENDERER_LATENCY_NAME,
     RENDERER_MODEL_BY_VARIANT,
-    capture_field_decoder_diagnostics,
+    capture_complete_wrapper_diagnostics,
     complete_executor_row_telemetry,
+    native_dense_feature_rows,
     write_renderer_latency_csv,
 )
 from channelthermal.response_control.latency import (
@@ -385,6 +386,32 @@ def _route_metrics(record: Mapping[str, Any], *, full: bool) -> dict[str, Any]:
     }
 
 
+def _latency_packet_support_summary(
+    builder: Any,
+    state_capture: Mapping[str, Any],
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Summarize grouped packets only when the selected plan has node masks.
+
+    P stores exact MM receiver/source access and a dynamic QE direct policy.
+    Its own route record marks packet K as not applicable; asking the grouped
+    G helper to rebuild MM node memberships correctly raises for this plan.
+    """
+
+    if getattr(builder, "mode", None) == "P":
+        return {
+            "raw_packet_cut_size": int(record.get("raw_frontier_k", len(record.get("frontier", ())))),
+            "nonredundant_packet_count": record.get("nonredundant_k"),
+            "nonredundant_packet_count_status": str(
+                record.get("nonredundant_k_status", "not_applicable_to_direct_pair_receiver_axis")
+            ),
+            "nonredundant_packet_count_definition": (
+                "P uses exact direct-pair access and has no node-membership packet K"
+            ),
+        }
+    return selected_controls._packet_support_summary(state_capture, record)
+
+
 def _diagnostics(
     label: str,
     op: Any,
@@ -393,12 +420,13 @@ def _diagnostics(
     device: torch.device,
     *,
     expected_field_chunks: int,
+    identity_binding: Mapping[str, Any],
 ) -> dict[str, Any]:
     hook = stage_c._capture_cover_diagnostics(op)
     capture_before = bool(op.capture_packet_inputs)
     op.capture_packet_inputs = builder is None
     try:
-        with capture_field_decoder_diagnostics(getattr(op.model, "core", None)) as field_chunks:
+        with capture_complete_wrapper_diagnostics(op) as wrapper_trace:
             _sync(device)
             with torch.inference_mode():
                 output = call()
@@ -407,9 +435,15 @@ def _diagnostics(
         diagnostic = dict(getattr(op, "_active_packet_latest_diagnostics", {}))
         first_call_rows = selected_controls._route_live_rows(diagnostic)
         executor_rows = complete_executor_row_telemetry(
-            diagnostic,
-            field_chunks,
+            wrapper_trace,
             expected_field_chunks=expected_field_chunks,
+            full_access=builder is None,
+        )
+        feature_rows = native_dense_feature_rows(
+            wrapper_trace,
+            identity_binding=identity_binding,
+            expected_field_chunks=expected_field_chunks,
+            full_access=builder is None,
         )
         if builder is None:
             capture = op.last_packet_inputs
@@ -427,13 +461,14 @@ def _diagnostics(
                     "runtime_diagnostics": diagnostic,
                 }
             }
-            packet = selected_controls._packet_support_summary(state_capture, record)
+            packet = _latency_packet_support_summary(builder, state_capture, record)
         return {
             "variant": label,
             "packet_support": packet,
             **_route_metrics(record, full=builder is None),
             "actual_executor_rows": executor_rows["by_mechanism"],
             "executor_row_telemetry": executor_rows,
+            "observed_native_dense_feature_rows": feature_rows,
             "first_native_call_executor_rows": first_call_rows,
             "full_access_bypass_routes": list(record.get("full_access_bypass_routes", ())),
         }
@@ -489,6 +524,34 @@ def _run_identity(preflight_path: Path, preflight: Mapping[str, Any]) -> dict[st
         },
     }
 
+
+def _telemetry_identity_binding(
+    preflight: Mapping[str, Any], *, panel_key: str, panel: Mapping[str, Any], shape: Mapping[str, Any], variant: str
+) -> dict[str, Any]:
+    controlled = preflight["controlled_run"]
+    endpoint_field = {
+        "G_sparse": "G", "G_full_access_fallback": "G",
+        "P_sparse": "P", "P_full_access_fallback": "P",
+        "B_retained_reference": None,
+    }
+    if variant not in endpoint_field:
+        raise ValueError(f"Unknown latency variant for identity binding: {variant!r}.")
+    endpoint = endpoint_field[variant]
+    return {
+        "run_id": controlled["run_id"],
+        "controlled_manifest_sha256": controlled["manifest_sha256"],
+        "source_checkpoint_sha256": controlled["source_checkpoint_sha256"],
+        "endpoint_checkpoint_sha256": controlled["source_checkpoint_sha256"] if endpoint is None else controlled[endpoint]["sha256"],
+        "panel_role": panel_key,
+        "panel_path": panel["path"],
+        "panel_sha256": panel["source_sha256"],
+        "shape_id": shape["shape_id"],
+        "query_count": int(shape["query_count"]),
+        "selected_rows_sha256": shape["selected_rows_sha256"],
+        "selected_query_ids_sha256": shape["selected_query_ids_sha256"],
+        "input_query_panel_digest": shape["input_query_panel_digest"],
+        "variant": variant,
+    }
 
 def _execute_run(
     preflight_path: Path,
@@ -615,6 +678,9 @@ def _execute_run(
                     builders[arm],
                     device,
                     expected_field_chunks=expected_field_chunks,
+                    identity_binding=_telemetry_identity_binding(
+                        preflight, panel_key=panel_key, panel=panel, shape=shape, variant=f"{arm}_sparse"
+                    ),
                 )
                 telemetry[f"{arm}_full_access_fallback"] = _diagnostics(
                     f"{arm}_full_access_fallback",
@@ -623,6 +689,9 @@ def _execute_run(
                     None,
                     device,
                     expected_field_chunks=expected_field_chunks,
+                    identity_binding=_telemetry_identity_binding(
+                        preflight, panel_key=panel_key, panel=panel, shape=shape, variant=f"{arm}_full_access_fallback"
+                    ),
                 )
             telemetry["B_retained_reference"] = _diagnostics(
                 "B_retained_reference",
@@ -631,6 +700,9 @@ def _execute_run(
                 None,
                 device,
                 expected_field_chunks=expected_field_chunks,
+                identity_binding=_telemetry_identity_binding(
+                    preflight, panel_key=panel_key, panel=panel, shape=shape, variant="B_retained_reference"
+                ),
             )
             timing = _interleaved(
                 calls,

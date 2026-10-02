@@ -18,7 +18,10 @@ from channelthermal.inverse.heat_allocation import (
     select_fluid_sensor_indices,
 )
 from channelthermal.inverse.packet_reuse import (
+    ThermalCandidateInterfaceBuilder,
     ThermalCandidatePacketProvider,
+    ThermalForcedActionInterfaceBuilder,
+    ThermalProviderKnownInputs,
     _frontier_evidence_for_selection,
     packet_links_from_interfaces,
     provider_known_inputs,
@@ -364,3 +367,127 @@ def test_matched_heat_training_replays_data_and_keeps_forward_state_frozen(tmp_p
     assert resumed.updates_per_arm == 3
     assert frozen_forward.training is False
     assert resumed.frozen_state_hashes_before == resumed.frozen_state_hashes_after
+
+
+class _FakeFrozenModel:
+    def __init__(self) -> None:
+        self.core = SimpleNamespace(backend=SimpleNamespace(optional_native_policy=True))
+        self.global_normalization_stats = {}
+
+    def eval(self):
+        return self
+
+    def requires_grad_(self, _value):
+        return self
+
+
+class _FakeOrganizer:
+    def eval(self):
+        return self
+
+    def requires_grad_(self, _value):
+        return self
+
+
+def _candidate_inputs() -> tuple[ThermalProviderKnownInputs, object, torch.Tensor]:
+    from honf_inverse_core.models.frozen_packet_diffusion import DiffusionCondition
+
+    known = ThermalProviderKnownInputs(
+        module_centers=torch.tensor([[[0.2, 0.3], [0.7, 0.6]]]),
+        sensor_xy=torch.tensor([[[0.1, 0.4], [0.9, 0.4]]]),
+        physical_context=torch.tensor([[50.0, 1.0, 12.0, 6.0, 0.018, 0.01, 0.02, 1.0, 1.5, 0.45]]),
+        total_heat=torch.tensor([[10.0]]),
+    )
+    condition = DiffusionCondition(
+        known_state=torch.zeros((1, 2, 1)),
+        design_mask=torch.ones((1, 2), dtype=torch.bool),
+        module_valid=torch.ones((1, 2), dtype=torch.bool),
+        module_features=torch.zeros((1, 2, 13)),
+        sensor_features=torch.zeros((1, 2, 3)),
+        sensor_valid=torch.ones((1, 2), dtype=torch.bool),
+    )
+    return known, condition, torch.tensor([[[4.0], [6.0]]])
+
+
+def test_selected_forced_action_rebuilds_candidate_without_stage_c_head(monkeypatch) -> None:
+    import channelthermal.inverse.packet_reuse as reuse
+
+    known, condition, first_heat = _candidate_inputs()
+    model = _FakeFrozenModel()
+    organizer = _FakeOrganizer()
+    encoded_heats: list[torch.Tensor] = []
+    planned_paths: list[tuple[str, ...]] = []
+
+    def encode(self, heat, known_inputs, current):
+        assert type(known_inputs) is ThermalProviderKnownInputs
+        encoded_heats.append(heat.detach().clone())
+        return SimpleNamespace(module_tokens=heat[..., 0], module_present=current.module_valid)
+
+    class Backend:
+        optional_native_policy = True
+
+        def build_case_trees(self, _encoded):
+            return (object(),)
+
+    class PlanBuilder:
+        def __init__(self, *, core, budget_fractions, mode, organizer, extra_route,
+                     frontier_selector, max_depth):
+            assert budget_fractions == {"QE": 0.9, "MM": 0.9}
+            assert mode == "G" and extra_route == "MM" and max_depth == 3
+            self.frontier_selector = frontier_selector
+            self.last_records = ()
+            self.last_scores = ()
+
+        def __call__(self, encoded, module_state, trees):
+            cut = self.frontier_selector(0, encoded, module_state, trees[0])
+            paths = {1: ("",), 2: ("L", "R"), 4: ("LL", "LR", "RL", "RR")}[len(cut)]
+            planned_paths.append(paths)
+            record = {
+                "frontier": list(cut),
+                "frontier_paths": list(paths),
+                "nonredundant_k": len(paths),
+                "all_mechanisms_total": {"achieved_work": 10.0, "full_access_work": 20.0},
+            }
+            self.last_records = (record,)
+            self.last_scores = (object(),)
+            return (object(),)
+
+    monkeypatch.setattr(ThermalCandidateInterfaceBuilder, "_encode_candidate", encode)
+    monkeypatch.setattr(reuse, "ThermalCoverPlanBuilder", PlanBuilder)
+    monkeypatch.setattr(
+        reuse,
+        "available_frontier_for_paths",
+        lambda _tree, paths, max_depth=3: (tuple(range(len(paths))), tuple(paths)),
+    )
+    monkeypatch.setattr(reuse, "interaction_interface_from_plan", lambda *args, **kwargs: object())
+    model.core.backend = Backend()
+    builder = ThermalForcedActionInterfaceBuilder(
+        model,
+        organizer,
+        action="four_packet",
+        budget_fractions={"QE": 0.9, "MM": 0.9},
+        extra_route="MM",
+        numerical_state_version="frozen-u1300-test",
+    )
+    assert not hasattr(organizer, "frontier_utility_head")
+    builder(first_heat, known, condition)
+    second_heat = torch.tensor([[[7.0], [3.0]]])
+    builder(second_heat, known, condition)
+
+    assert builder.candidate_rebuild_calls == 2
+    assert builder.candidate_case_rebuilds == 2
+    assert torch.equal(encoded_heats[-1], second_heat)
+    assert planned_paths == [("LL", "LR", "RL", "RR")] * 2
+    assert builder.last_action_evidence[0]["selection_kind"] == "forced_predeclared_research_action"
+    assert builder.last_action_evidence[0]["deployment_policy_replayed"] is False
+    assert builder.last_action_evidence[0]["physical_adequacy_claim"] is False
+
+    class TargetBearingKnown:
+        module_centers = known.module_centers
+        sensor_xy = known.sensor_xy
+        physical_context = known.physical_context
+        total_heat = known.total_heat
+        clean_heat = torch.tensor([[4.0, 6.0]])
+
+    with pytest.raises(TypeError, match="known-input schema"):
+        builder(second_heat, TargetBearingKnown(), condition)
