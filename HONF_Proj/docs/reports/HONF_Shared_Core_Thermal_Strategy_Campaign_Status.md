@@ -1052,6 +1052,31 @@ Dense100 0.388/0.371 and 1.231/1.341; Fine100 0.372/0.383 and 1.906/1.247.
 Prepared small-Q decode is about 0.0028–0.0033 seconds, excluding preparation.
 Raw samples, p90 and occupancy are saved; host load is shared with the four
 trainers, so these are CPU baselines rather than isolated or GPU speed rankings.
+
+Fine's final field-selected e972 subsequently completes the same native
+low/high-M benchmark on CPU with one thread, two warmups and five repetitions,
+at 10:21:43–10:22:34 UTC from clean source `c25ca14`. Independent sample
+recomputation matches all medians, p90 and minima exactly. All 249 loaded
+parameters/persistent buffers and the read-only selected checkpoint remain
+bitwise/byte unchanged, with no forward gradients or optimizer updates.
+
+| Case / M | Primary Q | Complete P0/P1/P2 median seconds | Prepared P2 median seconds |
+|---|---:|---:|---:|
+| 0274 / 3 | 14 | 0.37149 | 0.002707 |
+| 0274 / 3 | 8192 | 1.88536 | 1.51516 |
+| 0692 / 10 | 14 | 0.38651 | 0.002754 |
+| 0692 / 10 | 8192 | 1.26447 | 0.903151 |
+
+Direct five-route hooks record complete-wrapper Q14/Q8192 fine-MLP input
+rows/calls 330,456/35 and 1,998,768/161 at both M. Prepared P2 records
+2,856/2 and 1,671,168/128. Q counts caller field queries; complete work also
+includes native auxiliary port/coupling reads and padded cells. These are
+measured benchmark panels, not inferred eligible pairs or backfilled work
+for older full90/response archives. Policy, attention, coarse/local physics
+and backward work are outside these fine-MLP counters. Complete and prepared
+latency scopes remain independent. CPU lifetime peak RSS reaches 622.67 MiB,
+which is not an invocation memory peak. Shared-host conditions and fixed
+case order prevent treating these values as GPU or architecture speed ranks.
 Legacy Dense/Fine rows and calls are unavailable in the earlier telemetry:
 they remain unmeasured there, not zero. A reusable evaluation-only hook recorder
 now counts actual inputs/calls at all five fine physical MLPs, including padding.
