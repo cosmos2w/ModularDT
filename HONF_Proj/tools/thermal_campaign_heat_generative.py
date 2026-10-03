@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -171,15 +172,25 @@ def eligible_training_probe(dataset):
     raise ValueError("No training record has M>=2 and positive public total for a meaningful conditioner probe")
 
 
+def resolve_evidence_output(path):
+    """Retain ignored workspace placement through a data-backed symlink."""
+    requested = Path(os.path.abspath(Path(path).expanduser()))
+    roots = tuple(PROJECT_ROOT / name for name in ("diagnostics", "Trained_Results"))
+    if not any(requested.is_relative_to(root) for root in roots):
+        raise ValueError("Generative evidence must remain in ignored local output paths")
+    resolved = requested.resolve()
+    if resolved.is_relative_to(PROJECT_ROOT) and not any(resolved.is_relative_to(root.resolve()) for root in roots):
+        raise ValueError("Generative evidence symlink resolves into a non-output project path")
+    return resolved
+
+
 def run_comparison(args):
     from channelthermal.data.datasets import GlobalChannelThermalDataset
     from channelthermal.evaluation.loading import load_model
 
     from honf_runtime.compat import load_trusted_checkpoint
 
-    output = args.output_dir.resolve()
-    if not any(output.is_relative_to(PROJECT_ROOT / root) for root in ("diagnostics", "Trained_Results")):
-        raise ValueError("Generative evidence must remain in ignored local output paths")
+    output = resolve_evidence_output(args.output_dir)
     if (output / "identity.json").exists() and not args.resume:
         raise ValueError("Existing paired-head evidence requires its explicit saved checkpoint continuation")
     model, checkpoint = load_model(args.checkpoint, torch.device(args.device))

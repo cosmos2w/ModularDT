@@ -19,6 +19,61 @@ def _tool(name):
 
 benchmark = _tool("thermal_campaign_benchmark")
 topology = _tool("thermal_campaign_topology")
+heat_inference = _tool("thermal_campaign_heat_inference")
+
+
+def _frozen_forward():
+    model = torch.nn.Linear(2, 1)
+    model.register_buffer("counter", torch.tensor(0, dtype=torch.int64))
+    model.register_buffer("special_values", torch.tensor([0., float("nan")]))
+    return model.eval().requires_grad_(False)
+
+
+def test_forward_freeze_snapshot_covers_loaded_parameters_and_persistent_buffers():
+    model = _frozen_forward()
+    snapshot = heat_inference.snapshot_forward_state(model)
+    checked = heat_inference.verify_frozen_forward(model, snapshot)
+    assert checked["passed"] and checked["state_dict_unchanged_bitwise"]
+    assert checked["state_dict_tensors_checked"] == 4
+    assert checked["state_dict_scalars_checked"] == 6
+    assert checked["trainable_forward_parameter_tensors"] == 0
+    assert checked["forward_parameter_gradient_tensors"] == 0
+    for name, value in model.state_dict().items():
+        assert snapshot[name].device.type == "cpu" and not snapshot[name].requires_grad
+        assert snapshot[name].data_ptr() != value.data_ptr()
+
+
+@pytest.mark.parametrize("name", ["weight", "counter"])
+def test_forward_freeze_rejects_changed_parameter_or_buffer(name):
+    model = _frozen_forward()
+    snapshot = heat_inference.snapshot_forward_state(model)
+    with torch.no_grad():
+        getattr(model, name).add_(1)
+    with pytest.raises(RuntimeError, match=f"state tensor changed: {name}"):
+        heat_inference.verify_frozen_forward(model, snapshot)
+
+
+def test_forward_freeze_compares_bit_patterns_including_signed_zero_and_nan():
+    model = _frozen_forward()
+    snapshot = heat_inference.snapshot_forward_state(model)
+    assert heat_inference.verify_frozen_forward(model, snapshot)["passed"]
+    model.special_values[0] = -0.
+    with pytest.raises(RuntimeError, match="state tensor changed: special_values"):
+        heat_inference.verify_frozen_forward(model, snapshot)
+
+
+@pytest.mark.parametrize("mutation", ["requires_grad", "gradient", "training_mode"])
+def test_forward_freeze_rejects_trainable_parameters_gradients_or_training_mode(mutation):
+    model = _frozen_forward()
+    snapshot = heat_inference.snapshot_forward_state(model)
+    if mutation == "requires_grad":
+        model.weight.requires_grad_(True)
+    elif mutation == "gradient":
+        model.weight.grad = torch.ones_like(model.weight)
+    else:
+        model.train()
+    with pytest.raises(RuntimeError, match="not frozen|left evaluation mode"):
+        heat_inference.verify_frozen_forward(model, snapshot)
 
 
 def test_repeats_have_one_scope_and_median_p90(monkeypatch):

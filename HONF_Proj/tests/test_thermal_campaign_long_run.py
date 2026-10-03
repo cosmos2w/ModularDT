@@ -33,6 +33,7 @@ def no_optimizer_or_native_resources(monkeypatch, tmp_path):
     monkeypatch.setattr(launcher.ThermalChannelPlugin, "_forward_config", native_config)
     class MetadataDataset:
         field_dim, material_param_dim, n_interface_points = 5, 6, 64
+        selected_module_counts = (1, 2, 3, 4, 5, 6, 7, 9, 10, 12)
         def __init__(self, *args, **kwargs):
             pass
         def __len__(self):
@@ -51,13 +52,94 @@ def _parent(tmp_path):
         "optimizer_state_dict": {"state": {0: {"step": torch.tensor(13000), "exp_avg": torch.tensor([.2])}},
                                  "param_groups": [{"params": [0], "lr": .0003}]},
         "rng_state": {key: {"fixture": key} for key in ("python", "numpy", "torch", "cuda")},
-        "campaign_training_state": {"calibration_policy_version": 2, "structural_scale": .0001}}
+        "selection_state": {"epoch": 1000, "total_epochs": 5000},
+        "campaign_training_state": _calibration()}
     parent = tmp_path / "finished1000"
     parent.mkdir()
     path = parent / "epoch_1000_model.pt"
     torch.save(checkpoint, path)
     (parent / "summary.json").write_text('{"finished": true}\n')
     return path, checkpoint
+
+
+def _calibration():
+    strata = [[1, 2], [3, 4], [5, 6], [7, 9], [10, 12]]
+    return {"physical_loss_policy_amendment": {"physical_loss_policy_from": 1,
+            "physical_loss_policy_to": 2, "checkpoint_epoch": 100, "activation_epoch": 101},
+        "response_scale_samples": [.1] * 5, "response_scale": .1,
+        "response_native_gradient_norm": 1., "response_gradient_norm": .1,
+        "calibration_policy_version": 2, "structural_calibration_policy": "training_module_count_strata_v2",
+        "structural_calibration_complete": True, "structural_calibration_planned_strata": strata,
+        "structural_calibration_observed_strata": strata,
+        "structural_calibration_samples": [{"stratum": value, "observed_module_counts": value,
+            "epoch": 26, "native_batch": index + 1, "task_organizer_gradient_norm": 1.,
+            "cost_organizer_gradient_norm": 1., "coefficient": .001} for index, value in enumerate(strata)],
+        "structural_scale_samples": [.001] * 5, "structural_scale": .001,
+        "last_task_organizer_gradient_norm": 1., "last_cost_organizer_gradient_norm": 1.}
+
+
+@pytest.mark.parametrize("key,value", [
+    ("response_scale_samples", [.1] * 4), ("response_scale_samples", [.1] * 4 + [float("nan")]),
+    ("response_scale", .2), ("response_scale", .05), ("response_gradient_norm", float("inf")),
+    ("response_native_gradient_norm", -1.), ("response_gradient_norm", 100.),
+    ("physical_loss_policy_amendment", {}), ("physical_loss_policy_amendment", [2, 101]),
+    ("structural_calibration_complete", False),
+    ("calibration_policy_version", 1), ("structural_calibration_planned_strata", [[1, 2]] * 5),
+    ("structural_calibration_samples", []), ("structural_scale_samples", [.001] * 4),
+    ("structural_scale", .0001), ("last_cost_organizer_gradient_norm", .5),
+])
+def test_manual_parent_rejects_missing_or_inconsistent_calibration(tmp_path, key, value):
+    _, checkpoint = _parent(tmp_path)
+    checkpoint["campaign_training_state"][key] = value
+    with pytest.raises(ValueError, match="calibration|policy2"):
+        launcher.validate_parent_checkpoint(checkpoint, checkpoint["train_config"])
+
+
+def test_manual_parent_missing_calibration_and_horizon_are_rejected(tmp_path):
+    _, checkpoint = _parent(tmp_path)
+    for state in (None, {}):
+        changed = copy.deepcopy(checkpoint)
+        changed["campaign_training_state"] = state
+        with pytest.raises(ValueError, match="saved campaign calibration"):
+            launcher.validate_parent_checkpoint(changed, changed["train_config"])
+    for selection in ({"epoch": 1000, "total_epochs": 1000}, {"epoch": 999, "total_epochs": 5000}, None):
+        changed = copy.deepcopy(checkpoint)
+        changed["selection_state"] = selection
+        with pytest.raises(ValueError, match="selection and horizon"):
+            launcher.validate_parent_checkpoint(changed, changed["train_config"])
+
+
+@pytest.mark.parametrize("field,value", [
+    ("observed_module_counts", [{}]), ("observed_module_counts", [12]),
+    ("observed_module_counts", []), ("stratum", {"wrong": [1, 2]}),
+    ("task_organizer_gradient_norm", float("nan")), ("coefficient", .1),
+    ("epoch", 0), ("native_batch", 0),
+])
+def test_invalid_structural_sample_is_a_validation_error(tmp_path, field, value):
+    _, checkpoint = _parent(tmp_path)
+    checkpoint["campaign_training_state"]["structural_calibration_samples"][0][field] = value
+    with pytest.raises(ValueError, match="structural calibration"):
+        launcher.validate_parent_checkpoint(checkpoint, checkpoint["train_config"])
+
+
+def test_nondict_and_duplicate_structural_samples_are_rejected(tmp_path):
+    _, checkpoint = _parent(tmp_path)
+    records = checkpoint["campaign_training_state"]["structural_calibration_samples"]
+    for value in (None, copy.deepcopy(records[1])):
+        changed = copy.deepcopy(checkpoint)
+        changed["campaign_training_state"]["structural_calibration_samples"][0] = value
+        with pytest.raises(ValueError, match="structural calibration"):
+            launcher.validate_parent_checkpoint(changed, changed["train_config"])
+
+
+@pytest.mark.parametrize("architecture", ["dense_pairwise_field", "three_term_full_access_honf"])
+def test_baselines_preserve_response_calibration_without_organizer_state(tmp_path, architecture):
+    _, checkpoint = _parent(tmp_path)
+    checkpoint["train_config"]["model"]["core_honf"]["forward_architecture"] = architecture
+    checkpoint["selection_state"] = {"epoch": None, "total_epochs": None}
+    checkpoint["campaign_training_state"] = {key: value for key, value in _calibration().items()
+                                            if key.startswith("response_") or key == "physical_loss_policy_amendment"}
+    launcher.validate_parent_calibration(checkpoint, checkpoint["train_config"])
 
 
 def test_exact1000_preparation_uses_new_runstore_and_preserves_parent(tmp_path):

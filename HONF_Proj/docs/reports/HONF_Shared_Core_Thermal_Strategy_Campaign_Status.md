@@ -7,10 +7,13 @@ e4738 remains an evaluation-only mature reference. Wind scientific training
 is paused; Wind is used for shared-core compatibility checks.
 
 **State: four e100 screens and the first e500 control are complete; the ladder continues.**
-Saved training snapshot at 2026-10-03 05:02 UTC: B-fine completed e500; B-native is at e114,
-H-tree e41, H-overlap e118 and H-local e111. Their exact e100 screens are
+Saved training snapshot at 2026-10-03 06:14 UTC: B-fine is at e601; B-native is at e248,
+H-tree e67, H-overlap e179 and H-local e166. Their exact e100 screens are
 complete except H-tree. The table and progress figure use the same saved snapshot.
-Physical results below also include evaluations completed after that snapshot.
+Results below also include evaluations and audited continuations completed
+after that snapshot. Fine has continued from exact500 on GPU2 and passed exact600;
+its requested 1000-stage training is active, while both immutable e493 selections
+are preserved. Completion of that stage is still pending.
 Work is on `agent/honf-core-next`. The initial
 finite portfolio is Runs 2201–2205; two repaired screens are available only
 when a concrete failure warrants them. No 5,000-epoch job is authorized to
@@ -18,11 +21,11 @@ start automatically.
 
 | Run | Strategy | Complete epoch | Sampled development field / T MSE | Current action |
 |---|---|---:|---|---|
-| 2201 | B-native | 114 | 0.08819 / 0.03938 | GPU1; exact e100→500 continuation |
-| 2202 | B-fine | 500 | 0.02883 / 0.01547 | Exact500 and selected493 full90 physical evaluations complete |
-| 2203 | H-tree | 41 | 0.53763 / 0.38305 | GPU1; reviewed exact e8 engineering resume |
-| 2204 | H-overlap | 118 | 0.23558 / 0.24502 | GPU2; exact e100→500 continuation |
-| 2205 | H-local | 111 | 0.17072 / 0.10870 | GPU2; exact e100→500 continuation |
+| 2201 | B-native | 248 | 0.02988 / 0.01614 | GPU1; exact e100→500 continuation |
+| 2202 | B-fine | 601 | 0.02685 / 0.01081 | GPU2; reviewed exact e500→1000 continuation |
+| 2203 | H-tree | 67 | 0.38333 / 0.41174 | GPU1; reviewed exact e8 engineering resume |
+| 2204 | H-overlap | 179 | 0.27054 / 0.26085 | GPU2; exact e100→500 continuation |
+| 2205 | H-local | 166 | 0.12691 / 0.05180 | GPU2; exact e100→500 continuation |
 
 These MSEs use the maintained normalized, sampled 90-case validation task;
 they are neither full-grid physical errors nor the final 89-case comparison.
@@ -174,6 +177,37 @@ field/T window means improve 0.27943/0.24426 at e101–110 to 0.24836/0.23420 at
 e116–125, while response loss rises 0.01953→0.02065. This establishes no response
 improvement.
 
+Fine's exact500→1000 continuation joined GPU2 at 05:44:25 UTC. Its exact600
+audit passes all 600 full epochs, 120 active AdamW states at step7,800, four
+RNG streams, unchanged frozen Stage-A and response calibration, policy2 and
+horizon5000. The immutable stage500 selections remain unchanged. Window
+means from e501–510 to e591–600 improve normalized field/T MSE
+0.03634/0.01648→0.02030/0.01283, while response loss rises
+0.000236→0.000910. These are sampled development/training measurements,
+not a new full-grid physical or response evaluation.
+
+The placement remains healthy but costlier for the H jobs. In a saved
+06:02 UTC three-job sample, Overlap e162–171 and Local e152–159 have median
+complete-epoch times 91.88/105.02 seconds, compared with their earlier two-job
+59.39/66.08 seconds; Fine e551–560 takes 17.74 seconds. These are measured
+owned-contention regimes, not isolated speed rankings or a demonstrated
+placement speedup. Fine's observed CUDA reservation is about 12.4 GiB,
+exceeding the 8-GiB admission allowance by about 4.1 GiB. GPU2 retains about
+7.5 GiB free with no OOM, and no additional job is admitted. GPU0's unrelated
+TurbulentCombustion job is recorded without intervention. At the 06:14
+snapshot, unchanged recent rates imply about 2.3 hours to Native500,
+1.5 to Tree100, 2.0 to Fine1000 and 8.2/9.7 to Overlap/Local500; the latter
+forecasts will change when Fine finishes. Successful-epoch elapsed sums
+exclude discarded/replayed work and are concurrent job-hours, not exclusive
+physical-GPU occupancy hours.
+
+Overlap's exact175 full-state audit also passes. Its e101–110→e166–175 means
+worsen field 0.27943→0.32164 and T 0.24426→0.28506 while structural cost
+falls 0.77450→0.66480; response loss rises 0.01953→0.03545. Lower structural
+cost establishes neither physical improvement nor saved executor work, and
+the concurrent response ramp prevents attributing the change to structural
+pressure alone. The healthy finite run continues to its authorized500 review.
+
 Local's exact e125 audit passes the same full-state and frozen-physics checks.
 Its e101–110 to e116–125 window means change field 0.19911→0.19627,
 temperature 0.09367→0.09769 and response loss 0.008490→0.007889. Thus early
@@ -262,6 +296,15 @@ six observations), and M7 case0675 has condition number about 1,869. Forward
 and local-surrogate weights remain frozen. Full finalist inverse trials are
 still required at the selected 1000-stage versions.
 
+An independent saved-array review finds all non-time joint/graph/ungrouped
+one-step trails bitwise equal: the latter modes take 24 full-joint fallbacks
+and no meaningful graph update. Mean observed/held residuals worsen
+1.394→2.099 and 1.659→2.264 in this single-step check, so it establishes no
+inverse-quality gain. All proposals remain nonnegative with public-total
+FP32 drift at most 1.91e-6. The retained checkpoint hash is unchanged;
+this readiness evidence has no before/after in-memory tensor snapshots, so
+the saved audit alone does not prove runtime freezing.
+
 Review found the original structural calibration's first five microbatches
 could belong to the same M bucket. Before e26 pressure, calibration policy 2
 collects one sample from each of five training-M strata and saves actual M,
@@ -311,23 +354,27 @@ remain on data. Changes in unrelated occupancy are not attributed to this campai
 
 Figure index: [full-epoch training progress](../../diagnostics/generated/shared_core_campaign_20261002/figures/campaign_training_progress.pdf),
 [screen fields and residuals](../../diagnostics/generated/shared_core_campaign_20261002/figures/predictor_screen_case0692.pdf),
+[interface and material fidelity](../../diagnostics/generated/shared_core_campaign_20261002/figures/interface_material_case0692.pdf),
 [frozen finite responses](../../diagnostics/generated/shared_core_campaign_20261002/figures/reference_response_baseline.pdf),
 [mature inverse baseline](../../diagnostics/generated/shared_core_campaign_20261002/figures/mature_inverse_baseline.pdf),
 [actual overlap graph and work](../../diagnostics/generated/shared_core_campaign_20261002/figures/overlap_e100_graph_work.pdf).
 
 ![Full-epoch training and measured elapsed work](../../diagnostics/generated/shared_core_campaign_20261002/figures/campaign_training_progress.png)
 
-The inspected snapshot contains 114/500/41/118/111 complete epochs for
+The inspected snapshot contains 248/601/67/179/166 complete epochs for
 B-native/B-fine/H-tree/H-overlap/H-local. Every displayed epoch has 600 distinct
 training cases, 13 optimizer steps and 614,400 primary sampled queries. B-fine
-e500 normalized sampled field/T MSE is 0.02883/0.01547; the full-grid physical
+e601 normalized sampled field/T MSE is 0.02685/0.01081; the full-grid physical
 evaluation is reported separately above.
-Successful train/validation time sums are 0.861/1.916/2.469/1.494/1.559 hours;
+Successful train/validation time sums are 2.063/2.411/3.626/2.685/2.744 hours;
 discarded partial work and storage replay overhead remain recorded separately.
 Owned contention and H-tree engineering changes affect timing. These curves
 establish actual model age and work, not sparse speedups or mature-equivalent
 physical fidelity. The figure marks the H pressure ramp and common e101
 response/native-denominator amendment without combining different field units.
+Timing diamonds mark the first complete epochs in GPU2's three-trainer
+placement: Fine501, Overlap162 and Local152. Their slower H timing remains
+separate from architecture or sparse-work claims.
 
 ![Native-grid screening fields and residuals for development case 0692](../../diagnostics/generated/shared_core_campaign_20261002/figures/predictor_screen_case0692.png)
 
@@ -344,6 +391,22 @@ by the completed Fine500 stage. It does not isolate
 architecture from training age. Both the PDF master and small embedding raster
 were visually inspected after fixing clipped labels; numerical arrays remain
 under the ignored evaluation directory.
+
+![Saved native interface, material and pressure fidelity for development case 0692](../../diagnostics/generated/shared_core_campaign_20261002/figures/interface_material_case0692.png)
+
+The geometry-selected leftmost/rightmost modules use all 64 saved native
+interface angles; material quantiles pool 30,960 active-module samples, while
+peaks and role errors include all ten modules. Fine100→selected493 surface,
+material and peak RMSE improve 1.902/1.588/1.552→0.7206/0.5578/0.6022, but
+q_normal proxy RMSE remains 3.274 versus mature1.321. Overlap100 has adverse
+material/peak errors 3.948/4.364 on this case. Pressure-difference errors are
+shown alongside the full fluid-column means, with stored referenceΔp0.06534.
+Common inputs, reference fields, masks and native query indices are verified;
+no finite curve is clipped, and module slots retain physical identity. These
+unequal-age, exposed-development benchmark results show physical role tradeoffs,
+without implying SI accuracy, population superiority or independent design
+validation. PDF and PNG were visually inspected and redundant inspection
+exports removed; all source arrays remain locally retained.
 
 H-overlap e100 is finite but worse than the same-age controls on fluid
 temperature and surface/material errors: near/far T RMSE 3.4390/3.1789,
@@ -426,6 +489,41 @@ and reported. These findings supersede an interpretation of the old geometry
 control as fully matched, and do not establish population utility. Actual
 500-epoch checkpoint reviews remain pending.
 
+The corresponding Local e100 four-case evaluation also completed. Its geometry
+action literally preserves all 423,946 positive-near pairs, 114,469 full-near
+pairs and 1,258 saved positive-near control probes. It changes 16,284 weight
+positions but zero binary supports; this is weight/control reordering, not a
+successful sparse support control. The candidate budget is reached in 389 of
+644 calls, so the action remains a bounded greedy comparison. Normal/full-fixed/
+geometry mean fluid T RMSE is 1.51626/1.61365/1.50549, surface T
+1.40941/1.67565/1.49257 and material peak 1.15803/1.42936/1.25806. Geometry's small
+fluid gain coexists with worse interfaces/material; all three execute the same
+7,995,072 rows in 644 calls. Full normal control arrays were not historically
+persisted: all-entry reconstructed constraints and exactly saved control probes/
+summaries are disclosed separately, rather than claiming an archived full-tensor
+comparison.
+
+An independent saved-only Local audit checks the first QE access for
+cases0647/0692 at P0/P1/P2. P0/P1 are full support; P2 omits 646/1,643 eligible
+pairs. Exhaustive checks over 18,336 equal-measure source pairs in each P2 call
+find no complementary two-receiver/two-source pattern permitting a legal
+binary-degree switch with all four entries valid and outside protected near
+envelopes. Thus these six representative scopes are constraint-degenerate
+before geometry cost or the greedy budget is considered. This does not prove
+global impossibility over all calls or larger multi-edge cycles.
+
+Saved normal accesses also verify graph action on all five typed routes over
+the same four cases and P0/P1/P2. Overlap omits 51/577/1,042/10,000/4,223,089
+eligible pairs on MM/ME/EM/QM/QE; Local omits 14/320/60/310/50,005. Overlap has
+proper multi-source groups in all twelve case-phases on every route; Local
+has them in seven EM and nine QM case-phases, with actual QM omissions in
+only one. Both still execute 7,995,072 fine rows in 644 calls. This establishes
+real typed graph action at e100, without establishing final utility, sparse
+work savings or causality. A future paired inverse-head comparison must use
+all five actual typed links and demonstrate a nonzero same-weight graph/full
+effect at the selected finalist; the local heat block helper alone does not
+qualify that generative comparison.
+
 Actual e100 Overlap and Local invariance/path evaluations now cover native
 low/high-M cases 0274/0692. Module permutation, inactive padding, fixed-action
 quadrature splitting, query order and prepared chunks pass declared tolerances;
@@ -433,12 +531,17 @@ maximum observed context/field change is below 7.2e-7, with padding exactly
 zero. Their trained topology really changes on both fixed-total heat and
 small geometry paths. Eight bisections narrow one detected switch per path
 to parameter width 0.0004883; physical temperature changes across those
-brackets range about 3.1e-5–4.2e-4. These finite brackets do not prove cross-switch
+brackets range about 3.1e-5–4.2e-4. Only two of the eight final brackets change
+actual effective pairs; the rest change group topology without changing those
+binary pairs. These finite brackets do not prove cross-switch
 continuity or a finite jump. Fixed-topology affine continuation is invalid
 farther along some paths and is stopped explicitly rather than silently
-clamped. Within the unchanged local active set, autograd and central differences
-are saved separately by channel; decreasing epsilon from 0.01 to 0.0001
-increases FP32 cancellation errors, particularly for the q_normal proxy.
+clamped. Local case0274 heat and case0692 geometry rebuilt central differences
+at epsilon0.01 cross topology, while their fixed derivative branches reject
+negative continuation. These are separate from within-active-set derivatives.
+Other valid branches retain the anchor supports, with channelwise autograd and
+central differences saved. On those same branches, decreasing epsilon from
+0.01 to 0.0001 increases FP32 cancellation errors, particularly for q_normal.
 These are frozen-surrogate numerical checks, not physical reference solves.
 
 Run1804, both fresh e100 controls and H-overlap/H-local exact e100 have completed finite-response evaluation
@@ -527,9 +630,30 @@ Native checkpoint tests verify hooks stay outside timed calls and backward.
 Unsupported historical backends retain timing with explicitly unmeasured work.
 This recorder excludes attention, coarse/local/policy work and eligible/unique
 pairs; it supplies a common fine-kernel comparison without inferring sparse
-hardware savings. The focused suite passes 39 tests including retained native
+hardware savings. Separate work-only native measurements now confirm all
+three retained baseline/control checkpoints use 330,456 fine rows in 35 calls
+for a Q14 complete wrapper and 1,998,768 in 161 calls for Q8192, at both M3/M10
+cases. Prepared decode alone uses 2,856/2 and 1,671,168/128 rows/calls. The
+equality reflects actual twelve-slot padding and 192 environmental tokens;
+attention, policy and Dense's extra coarse/local branches remain outside this
+fine-MLP scope. Checkpoint hashes stayed unchanged; latency was not remeasured
+during these work-only calls. The focused suite passes 39 tests including retained native
 resources, with Ruff and diff checks clean. Finalist dense/rectangular GPU
 timing and physical-row comparisons are still required.
+
+Frozen-inverse verification now snapshots loaded parameters and persistent
+buffers, checks bit patterns after every case, and rejects forward gradients
+or training mode. A genuine two-case mature4738 CPU1 smoke executes six
+one-step trials and fourteen predictor calls, including two Jacobian calls;
+all 310 state tensors/5,430,548 scalars remain unchanged. An explicit recovery
+reuses six saved trials and makes only two fresh Jacobian calls; its verification
+scope excludes retrospectively certifying prior trial execution. These are
+software/freezing checks, not additional inverse-quality results. The focused
+revision suite passes 64 tests with one unrelated optional native timing test
+skipped; the genuine native freeze smoke is executed separately. Ruff and
+diff checks pass. The generative evidence resolver also accepts the campaign's
+ignored workspace path through its data symlink, while rejecting source-path
+escapes; its actual campaign path resolves correctly without writes.
 
 ## Remaining ladder and delivery
 

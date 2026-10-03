@@ -38,6 +38,37 @@ def atomic_npz(path, **arrays):
     temporary.replace(path)
 
 
+def snapshot_forward_state(model):
+    """Detached CPU copy of loaded parameters and persistent state buffers."""
+    return {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
+
+
+def verify_frozen_forward(model, snapshot):
+    """Reject state mutation or trainable/gradient-bearing forward parameters."""
+    current = model.state_dict()
+    if current.keys() != snapshot.keys():
+        raise RuntimeError("Frozen forward state tensor names changed")
+    for name, original in snapshot.items():
+        value = current[name].detach().cpu()
+        # Byte comparison distinguishes signed zero and preserves NaN payloads.
+        if (value.shape != original.shape or value.dtype != original.dtype
+                or not torch.equal(value.contiguous().reshape(-1).view(torch.uint8),
+                                   original.contiguous().reshape(-1).view(torch.uint8))):
+            raise RuntimeError(f"Frozen forward state tensor changed: {name}")
+    parameters = list(model.named_parameters())
+    trainable = [name for name, value in parameters if value.requires_grad]
+    gradients = [name for name, value in parameters if value.grad is not None]
+    if trainable or gradients:
+        raise RuntimeError(f"Forward parameters are not frozen: trainable={trainable}, gradients={gradients}")
+    if model.training:
+        raise RuntimeError("Frozen forward model left evaluation mode")
+    return {"passed": True, "state_dict_tensors_checked": len(snapshot),
+            "state_dict_scalars_checked": sum(value.numel() for value in snapshot.values()),
+            "state_dict_unchanged_bitwise": True, "trainable_forward_parameter_tensors": 0,
+            "forward_parameter_gradient_tensors": 0,
+            "state_scope": "loaded parameters and persistent buffers in state_dict; prepared-state caches excluded"}
+
+
 def completed_trial(path, record, *, steps):
     """Only skip a saved trial whose arrays agree with its completed receipt."""
     if record is None or not path.is_file():
@@ -160,6 +191,8 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
     from honf_inverse_core.heat_inference import fixed_total_heat_inference, observation_identifiability
     model, checkpoint = load_model(Path(checkpoint_path), torch.device(device))
     model.eval().requires_grad_(False)
+    frozen_snapshot = snapshot_forward_state(model)
+    initial_freeze_check = verify_frozen_forward(model, frozen_snapshot)
     dataset = GlobalChannelThermalDataset(dataset_path, split="test", points_per_case=1,
         random_point_sampling=False, include_grid=True)
     output_dir = Path(output_dir).expanduser().resolve()
@@ -181,7 +214,13 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
         sample = dataset[index]
         case_id = str(sample["case_id"])
         sensors, grid_rows, names, observed_rows, held_rows = sensor_panel(sample)
-        predictor, active = native_heat_predictor(model, checkpoint, sample, sensors, observed_rows, held_rows)
+        native_predictor, active = native_heat_predictor(model, checkpoint, sample, sensors, observed_rows, held_rows)
+        predictor_calls = 0
+
+        def predictor(heat, _native_predictor=native_predictor):
+            nonlocal predictor_calls
+            predictor_calls += 1
+            return _native_predictor(heat)
         field_names = list(dataset.channel_order)
         targets = torch.as_tensor(sample["steady_field"].reshape(-1, len(field_names))[grid_rows, field_names.index("temperature")],
                                   device=device, dtype=torch.float32)
@@ -189,6 +228,7 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
         active_ids = torch.nonzero(active, as_tuple=False).flatten()
         initial = active.float() / active.sum()
         identification = observation_identifiability(predictor, (initial * total).requires_grad_(), active)
+        jacobian_predictor_calls = predictor_calls
         case_dir = output_dir / case_id
         case_dir.mkdir(parents=True, exist_ok=True)
         info = {"case_id": case_id, "checkpoint_epoch": checkpoint.get("epoch"), "reference": "stored exposed development benchmark",
@@ -209,6 +249,7 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
             reference_material_peaks=np.asarray(sample["module_internal_temperature_points"])[active.cpu().numpy()].max(-1),
             reference_pressure_difference=np.asarray(sample["steady_field"]).reshape(-1, len(field_names))[grid_rows[-2], field_names.index("p")]
                 - np.asarray(sample["steady_field"]).reshape(-1, len(field_names))[grid_rows[-1], field_names.index("p")])
+        executed_trials, reused_trials = [], []
         generator = torch.Generator().manual_seed(seed + int(case_id))
         for start in range(starts):
             fractions = initial.clone()
@@ -222,6 +263,8 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
                 path = case_dir / f"start_{start:02d}_{mode}.npz"
                 existing = next((row for row in info["trials"] if row["start"] == start and row["mode"] == mode), None)
                 if resume and completed_trial(path, existing, steps=steps):
+                    existing["execution_in_current_invocation"] = "reused_saved_trial"
+                    reused_trials.append({"start": start, "mode": mode})
                     if mode == "graph":
                         with np.load(path, allow_pickle=False) as saved:
                             graph_sizes = tuple(int(size) for size in saved["selected_block_size"])
@@ -237,6 +280,7 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
                     total, fractions, mode=mode, steps=steps, learning_rate=learning_rate,
                     block_stream=block_stream, permutation_stream=permutations,
                     block_size_stream=graph_sizes if mode == "ungrouped" else None)
+                executed_trials.append({"start": start, "mode": mode})
                 sizes = tuple(int(group.numel()) for group in trail.selected_modules)
                 if mode == "graph":
                     graph_sizes = sizes
@@ -259,6 +303,7 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
                            - np.asarray(sample["steady_field"]).reshape(-1, len(field_names))[grid_rows[-1], field_names.index("p")]),
                     elapsed_seconds=trail.elapsed_seconds)
                 info["trials"].append({"start": start, "mode": mode, "trail": str(path),
+                    "execution_in_current_invocation": "newly_executed_trial",
                     "optimizer_steps": trail.optimizer_steps, "meaningful_graph_steps": trail.meaningful_graph_steps,
                     "full_joint_fallback_steps": trail.group_fallback_steps,
                     "selected_block_sizes": sizes,
@@ -270,12 +315,29 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
                     "nonnegative": bool((trail.heat[-1] >= 0).all()), "surrogate_only": True})
                 atomic_json(case_dir / "summary.json", info)
                 print(f"{case_id} start {start} {mode}: saved {trail.optimizer_steps} steps", flush=True)
+        info["forward_freeze_verification"] = {
+            **verify_frozen_forward(model, frozen_snapshot),
+            "new_predictor_calls": predictor_calls,
+            "new_jacobian_predictor_calls": jacobian_predictor_calls,
+            "new_executed_trials": executed_trials, "reused_saved_trials": reused_trials,
+            "verification_scope": "current invocation predictor calls only; reused trial arrays are not retrospectively certified",
+        }
+        atomic_json(case_dir / "summary.json", info)
         summaries.append(info)
         atomic_json(output_dir / "summary.json", {"checkpoint": str(checkpoint_path),
             "checkpoint_epoch": checkpoint.get("epoch"), "seed": seed, "planned_cases": cases,
             "starts": starts, "steps": steps, "learning_rate": learning_rate,
             "cpu_threads": cpu_threads,
             "update_policy": "canonical physical-slot block reductions",
+            "forward_freeze_verification": {
+                "initial_loaded_state": initial_freeze_check,
+                "verified_cases_current_invocation": len(summaries),
+                "new_executed_trials": sum(len(case["forward_freeze_verification"]["new_executed_trials"]) for case in summaries),
+                "reused_saved_trials": sum(len(case["forward_freeze_verification"]["reused_saved_trials"]) for case in summaries),
+                "new_predictor_calls": sum(case["forward_freeze_verification"]["new_predictor_calls"] for case in summaries),
+                "new_jacobian_predictor_calls": sum(case["forward_freeze_verification"]["new_jacobian_predictor_calls"] for case in summaries),
+                "verification_scope": "current invocation model state only; prior saved trial execution is not retrospectively verified",
+            },
             "evidence_limit": "frozen surrogate observation matching; no new independent physical solve",
             "cases": summaries})
     return output_dir

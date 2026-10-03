@@ -194,3 +194,25 @@ def test_conditioner_probe_skips_single_module_and_zero_public_total():
         {"case_id": "eligible", "structure": {"module_present": np.asarray([1., 1.]), "heat_powers": np.asarray([.2, 1.8])}}]
     dataset = type("Dataset", (), {"split": "train", "__len__": lambda self: len(records), "__getitem__": lambda self, index: records[index]})()
     assert module.eligible_training_probe(dataset)["case_id"] == "eligible"
+
+
+def test_generative_output_accepts_ignored_data_symlink_and_rejects_source_escape(tmp_path, monkeypatch):
+    module = tool_module()
+    project = tmp_path / "project"
+    ignored = project / "diagnostics/generated"
+    ignored.mkdir(parents=True)
+    data = tmp_path / "campaign_data"
+    data.mkdir()
+    (ignored / "campaign").symlink_to(data, target_is_directory=True)
+    source = project / "src"
+    source.mkdir()
+    (ignored / "source_escape").symlink_to(source, target_is_directory=True)
+    monkeypatch.setattr(module, "PROJECT_ROOT", project)
+    assert module.resolve_evidence_output(ignored / "campaign/inverse/review_0200") == data / "inverse/review_0200"
+    assert module.resolve_evidence_output(ignored / "ordinary") == ignored / "ordinary"
+    for rejected in (source / "output", ignored / "../../src/output", data / "unanchored"):
+        with pytest.raises(ValueError, match="ignored local output"):
+            module.resolve_evidence_output(rejected)
+    with pytest.raises(ValueError, match="non-output project path"):
+        module.resolve_evidence_output(ignored / "source_escape/output")
+    assert not (data / "inverse").exists()
