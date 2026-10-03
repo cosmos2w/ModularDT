@@ -102,7 +102,16 @@ unchanged. A native epoch-101 response-pair smoke also completed its combined
 value/response backward and optimizer step; no response family substitutes
 for the full 600-case value epoch. Fresh disposable Wind models passed real
 3-D hard/soft forward, optimizer and typed-export checks for all three new
-architectures. No Wind scientific training was launched.
+architectures. The later H256 check used real Wind case
+`gen_0000_wd270` (11 modules, 512 environment tokens, four native field queries)
+and the campaign's H256/message128/four-head/Fourier4 dimensions. All three
+architectures matched all 98 physical first gradients bitwise against their
+hard-reference pass; organizer gradient L1 totals were 0.07868/1.72595/1.67490.
+Disposable optimizer steps succeeded and the three physical buffers were
+unchanged. Each hard and soft P0 pass executed 13,477 rows in five fine calls.
+The three resource-backed tests passed on CPU with one thread. This verifies
+fresh architecture compatibility, not trained Thermal-to-Wind transfer.
+No Wind scientific training was launched.
 
 Focused tests exercise 2-D/3-D construction, source permutation and padding,
 query order and uneven chunks, phase freshness, empty source types,

@@ -9,6 +9,9 @@ import torch
 
 from honf_forward_core.interface_fields.typed_hypergraph_state import source_moments
 
+from .geometry_budget import geometry_action_budget
+from .typed_work_evidence import control_summary
+
 
 class FixedReferenceAccessReplay(AbstractContextManager):
     """Replay permissions alone, leaving all current physical source values live.
@@ -20,10 +23,13 @@ class FixedReferenceAccessReplay(AbstractContextManager):
     membership/access and verify their normalized weight and support equations.
     """
 
-    def __init__(self, backend, reference):
+    def __init__(self, backend, reference, *, mode="control_identity"):
         if backend.training:
             raise ValueError("Reference access replay is evaluation-only")
         self.backend = backend
+        if mode not in {"control_identity", "full_access_fixed_controls", "geometry_reference_actions"}:
+            raise ValueError("Unknown reference action mode")
+        self.mode = mode
         self._file = np.load(Path(reference), allow_pickle=False) if isinstance(reference, (str, Path)) else None
         self.reference = self._file if self._file is not None else reference
         self.expected = {
@@ -38,12 +44,13 @@ class FixedReferenceAccessReplay(AbstractContextManager):
         self.seen = set()
         self.counts = {}
         self.density_reconstruction_max_weight_error = 0.0
+        self.action_statistics = {}
 
     def __enter__(self):
         self._owned = "_access" in self.backend.__dict__
         self._original = self.backend._access
         self._previous_mode = self.backend.plan_intervention
-        self.backend.set_plan_intervention("control_identity")
+        self.backend.set_plan_intervention("control_identity" if self.mode == "control_identity" else "normal")
 
         def access(plan, receivers, mechanism, *args, **kwargs):
             if kwargs.get("soft", False) or getattr(self.backend, "permission_mode", "hard") != "hard":
@@ -104,6 +111,52 @@ class FixedReferenceAccessReplay(AbstractContextManager):
                 for key in self.reference
                 if key.startswith(f"{prefix}/diagnostics/")
             }
+            control = torch.zeros_like(current.control)
+            if self.mode != "control_identity":
+                group_controls = torch.as_tensor(
+                    self.reference[f"phase/P{route[0]}/group_controls/{route[1]}"], device=weight.device
+                )
+                normal_control = source_moments(
+                    edge_access,
+                    membership,
+                    group_controls,
+                    tensor("source_measures"),
+                    tensor("source_valid"),
+                    pair_valid=tensor("diagnostics/pair_valid"),
+                    near=near,
+                ).control
+                for name, observed in control_summary(normal_control).items():
+                    expected = tensor(name)
+                    if observed.dtype.is_floating_point:
+                        equal = torch.allclose(observed, expected, atol=1e-6, rtol=1e-6)
+                    else:
+                        equal = torch.equal(observed, expected)
+                    if not equal:
+                        raise ValueError(f"Reference reconstructed control {name} mismatch at {prefix}")
+                control = normal_control
+                valid = diagnostics["pair_valid"]
+                if self.mode == "full_access_fixed_controls":
+                    density = valid.to(weight.dtype)
+                    weight = density.clone()
+                    support = valid.clone()
+                else:
+                    (density, weight, support, control), statistics = geometry_action_budget(
+                        density,
+                        weight,
+                        support,
+                        control,
+                        receivers,
+                        tensor("source_coords"),
+                        tensor("source_measures"),
+                        valid,
+                        near,
+                        tensor("source_ids"),
+                    )
+                    self.action_statistics[prefix] = statistics
+                diagnostics["unique_pairs"] = support.sum()
+                diagnostics["far_unique_pairs"] = (valid & (density > 0)).sum()
+                # Source-resolved actions do not assert a new shared-group path decomposition.
+                diagnostics.pop("repeated_paths_removed", None)
             self.seen.add(prefix)
             return replace(
                 current,
@@ -113,7 +166,7 @@ class FixedReferenceAccessReplay(AbstractContextManager):
                 support=support,
                 near=near,
                 diagnostics=diagnostics,
-                control=torch.zeros_like(current.control),
+                control=control,
             )
 
         self.backend._access = access

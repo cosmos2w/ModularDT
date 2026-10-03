@@ -96,6 +96,27 @@ def test_fixed_campaign_screen_preserves_case_identity_across_index_order(tmp_pa
         evaluation.fixed_screen_indices(dataset, panel, 3)
 
 
+def test_reference_only_mature_stage_keeps_four_cases_and_normal_screen_keeps_all90(tmp_path):
+    class Dataset:
+        split = "test"
+        selected_case_ids = tuple(f"{index:04d}" for index in range(90))
+
+        def __len__(self):
+            return len(self.selected_case_ids)
+
+    panel = tmp_path / "panel.json"
+    panel.write_text(json.dumps({"split": "test", "case_ids": ["0003", "0001", "0007", "0009"]}))
+    args = SimpleNamespace(stage=500, panel_config=panel, panel_size=4,
+        interventions=["geometry_reference_actions", "full_access_fixed_controls"])
+    assert evaluation.evaluation_indices(Dataset(), args) == [3, 1, 7, 9]
+    args.interventions = ["normal"]
+    assert evaluation.evaluation_indices(Dataset(), args) == list(range(90))
+    args.interventions = ["normal", "full_access"]
+    assert evaluation.evaluation_indices(Dataset(), args) == list(range(90))
+    args.stage = 100
+    assert evaluation.evaluation_indices(Dataset(), args) == [3, 1, 7, 9]
+
+
 def test_inverse_trail_atomic_write_keeps_previous_complete_file_on_interruption(tmp_path, monkeypatch):
     from thermal_campaign_heat_inference import atomic_npz, completed_trial
     path = tmp_path / "trial.npz"

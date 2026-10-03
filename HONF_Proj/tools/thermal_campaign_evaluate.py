@@ -26,7 +26,10 @@ for source_root in (PROJECT_ROOT / "src", PROJECT_ROOT / "Case_ThermalChannel/sr
 
 INTERVENTIONS = ("normal", "full_access", "root_union", "control_identity",
                  "geometry_control", "effective_rewire", "source_group_exchange", "fixed_frontier", "fixed_summary",
-                 "control_identity_fixed_access")
+                 "control_identity_fixed_access", "full_access_fixed_controls", "geometry_reference_actions")
+REFERENCE_ACTIONS = {"control_identity_fixed_access": "control_identity",
+                     "full_access_fixed_controls": "full_access_fixed_controls",
+                     "geometry_reference_actions": "geometry_reference_actions"}
 
 
 def physical_errors(prediction, reference, mask=None):
@@ -162,6 +165,15 @@ def fixed_screen_indices(dataset, panel_path, count):
     return [lookup[case_id] for case_id in case_ids[:count]]
 
 
+def evaluation_indices(dataset, args):
+    """Bound reference-only controls at every stage; retain mature full screens."""
+    reference_only = all(name in REFERENCE_ACTIONS for name in args.interventions)
+    if args.stage == 100 or reference_only:
+        return (fixed_screen_indices(dataset, args.panel_config, args.panel_size)
+                if args.panel_config is not None else screen_indices(dataset, args.panel_size))
+    return list(range(len(dataset)))
+
+
 @contextmanager
 def intervention(model, name):
     """Same physical weights; preserve degree/weight and report actual pair work."""
@@ -174,7 +186,8 @@ def intervention(model, name):
     old_mode = backend.plan_intervention
     aliases = {"geometry_control": "geometry", "effective_rewire": "rewire",
                "source_group_exchange": "exchange", "fixed_frontier": "fixed_structure",
-               "control_identity_fixed_access": "control_identity"}
+               "control_identity_fixed_access": "control_identity", "full_access_fixed_controls": "normal",
+               "geometry_reference_actions": "normal"}
     backend.set_plan_intervention(aliases.get(name, name))
     try:
         yield
@@ -250,15 +263,13 @@ def evaluate(args):
         random_point_sampling=False, include_grid=True)
     if normalized.selected_case_ids != raw.selected_case_ids:
         raise ValueError("Normalized and physical dataset indices differ")
-    indices = (fixed_screen_indices(raw, args.panel_config, args.panel_size)
-               if args.stage == 100 and args.panel_config is not None else
-               screen_indices(raw, args.panel_size) if args.stage == 100 else list(range(len(raw))))
+    indices = evaluation_indices(raw, args)
     output = args.output_dir.expanduser().resolve()
     if output.is_relative_to(PROJECT_ROOT) and not any(output.is_relative_to(PROJECT_ROOT / root) for root in ("diagnostics", "Trained_Results")):
         raise ValueError("Generated evaluation evidence must live in ignored diagnostics or Trained_Results")
     output.mkdir(parents=True, exist_ok=True)
     reference_access_dir = getattr(args, "reference_access_dir", None)
-    if "control_identity_fixed_access" in args.interventions:
+    if any(name in REFERENCE_ACTIONS for name in args.interventions):
         reference_access_dir = reference_access_dir.expanduser().resolve()
         reference_summary = json.loads((reference_access_dir / "summary.json").read_text())
         if (Path(reference_summary["checkpoint"]).resolve() != checkpoint_path
@@ -303,10 +314,10 @@ def evaluate(args):
                 from honf_forward_core.evaluation.typed_work_evidence import TypedWorkEvidenceRecorder
                 phase_capture = TypedWorkEvidenceRecorder(model.core.backend)
             reference_capture = None
-            if name == "control_identity_fixed_access":
+            if name in REFERENCE_ACTIONS:
                 from honf_forward_core.evaluation.reference_access import FixedReferenceAccessReplay
                 reference_capture = FixedReferenceAccessReplay(model.core.backend,
-                    reference_access_dir / case_id / "normal" / "phase_graphs.npz")
+                    reference_access_dir / case_id / "normal" / "phase_graphs.npz", mode=REFERENCE_ACTIONS[name])
             with intervention(model, name):
                 with reference_capture if reference_capture is not None else nullcontext(), \
                      phase_capture if phase_capture is not None else nullcontext():
@@ -373,7 +384,13 @@ def evaluate(args):
             if reference_capture is not None:
                 row["reference_permission_source"] = str(reference_access_dir / case_id / "normal" / "phase_graphs.npz")
                 row["phase_plan_scope"] = "Current conditional organizer plans recomputed from live physical state; authoritative native access permissions replay saved normal plans"
-                row["reference_permission_scope"] = "All P0/P1/P2 native access density/weight/support/edge_access/near fixed; controls and gain/score biases disabled; physical source values/ports/local physics remain live"
+                row["reference_permission_scope"] = {
+                    "control_identity_fixed_access": "All P0/P1/P2 native access density/weight/support/edge_access/near fixed; controls and gain/score biases disabled; physical source values/ports/local physics remain live",
+                    "full_access_fixed_controls": "All P0/P1/P2 eligible density/weight/support full and uniform; normal source controls and projection biases retained; physical source values/ports/local physics remain live",
+                    "geometry_reference_actions": "All P0/P1/P2 normal joint permission/control tuples reassigned toward physical geometry at fixed receiver/source binary degrees and row tuple multisets; normal projection biases and physical source values/ports/local physics remain live",
+                }[name]
+                row["reference_group_access_scope"] = "Saved edge_access is reference group provenance; authoritative returned source permissions may be reassigned independently of shared groups"
+                row["source_resolved_action_statistics"] = reference_capture.action_statistics
                 row["reference_call_count"] = len(reference_capture.seen)
                 row["reference_density_scope"] = "Missing historical density reconstructed from saved normal membership/access/measures/validity/near with normalized weight/support validation"
                 row["reference_density_max_weight_reconstruction_error"] = reference_capture.density_reconstruction_max_weight_error
@@ -473,11 +490,11 @@ def parse_args(argv=None):
     if min(args.panel_size, args.graph_panel_size, args.query_batch_size,
            args.fixed_summary_train_cases, args.executor_receiver_chunk) < 1:
         parser.error("panel and query sizes must be positive")
-    reference_only = args.interventions == ["control_identity_fixed_access"]
+    reference_only = all(name in REFERENCE_ACTIONS for name in args.interventions)
     if (args.interventions[0] != "normal" and not reference_only) or len(set(args.interventions)) != len(args.interventions):
         parser.error("interventions must start with normal and must not repeat")
-    if "control_identity_fixed_access" in args.interventions and (args.reference_access_dir is None or not args.capture_phase_graphs):
-        parser.error("fixed-access identity requires --reference-access-dir and --capture-phase-graphs")
+    if any(name in REFERENCE_ACTIONS for name in args.interventions) and (args.reference_access_dir is None or not args.capture_phase_graphs):
+        parser.error("reference actions require --reference-access-dir and --capture-phase-graphs")
     if reference_only and (args.panel_size > args.graph_panel_size or args.inverse_cases):
         parser.error("reference-only utility requires all cases in the graph panel and no inverse run")
     if args.inverse_cases < 0 or min(args.inverse_starts, args.inverse_steps) <= 0:

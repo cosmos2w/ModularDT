@@ -142,3 +142,115 @@ def test_missing_extra_and_soft_streams_rejected_and_restored():
     backend.train()
     with pytest.raises(ValueError, match="evaluation-only"):
         FixedReferenceAccessReplay(backend, normal)
+
+
+@pytest.mark.parametrize("mode", ["full_access_fixed_controls", "geometry_reference_actions"])
+def test_reference_controls_kept_normal_bias_mode_and_physical_gradient(mode):
+    backend = Backend().eval()
+    normal = reference(backend)
+    backend.flip = True
+    with FixedReferenceAccessReplay(backend, normal, mode=mode), TypedWorkEvidenceRecorder(backend) as recorded:
+        for phase in range(3):
+            plan = backend.prepare(phase)["hypergraph_plan"]
+            value = backend._access(plan, plan.source_coords["M"], "MM")
+            assert backend.plan_intervention == "normal"
+            (value.weight * backend.live_value).sum().backward()
+            if mode == "full_access_fixed_controls":
+                assert torch.equal(value.weight, value.diagnostics["pair_valid"].float())
+                assert torch.equal(value.support, value.diagnostics["pair_valid"])
+    assert backend.live_value.grad.abs() > 0 and backend.plan_intervention == "normal"
+    for phase in range(3):
+        prefix = f"access/P{phase}/MM/00000"
+        if mode == "full_access_fixed_controls":
+            for key in (
+                "control_probe",
+                "control_receiver_max_abs",
+                "control_receiver_nonzero_count",
+                "control_source_channel_mean",
+            ):
+                np.testing.assert_array_equal(normal[f"{prefix}/{key}"], recorded.arrays[f"{prefix}/{key}"])
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["control_probe", "control_receiver_max_abs", "control_receiver_nonzero_count", "control_source_channel_mean"],
+)
+def test_reference_control_reconstruction_guards(name):
+    backend = Backend().eval()
+    normal = reference(backend, phases=1)
+    normal[f"access/P0/MM/00000/{name}"].flat[0] += 1
+    with (
+        pytest.raises(ValueError, match="reconstructed control"),
+        FixedReferenceAccessReplay(backend, normal, mode="full_access_fixed_controls"),
+    ):
+        plan = backend.prepare(0)["hypergraph_plan"]
+        backend._access(plan, plan.source_coords["M"], "MM")
+    assert backend.plan_intervention == "normal" and "_access" not in backend.__dict__
+
+
+class EmptyBackend(Backend):
+    def __init__(self, kind, source_count):
+        super().__init__()
+        self.kind, self.source_count = kind, source_count
+        self.route = "QM" if kind == "M" else "QE"
+
+    def prepare(self, phase):
+        counts = {kind: self.source_count if kind == self.kind else 2 for kind in ("M", "E")}
+        return {
+            "hypergraph_plan": TypedHypergraphState(
+                {self.route: torch.ones(1, 1, self.source_count)},
+                {self.route: torch.ones(1, 1, 16)},
+                torch.zeros(1, 1, 2),
+                torch.ones(1, 1),
+                {kind: torch.zeros(1, count, 2) for kind, count in counts.items()},
+                {kind: torch.ones(1, count) for kind, count in counts.items()},
+                {kind: torch.ones(1, count, dtype=torch.bool) for kind, count in counts.items()},
+                {kind: torch.arange(count)[None] for kind, count in counts.items()},
+                phase=phase,
+            )
+        }
+
+    def _access(self, plan, receivers, mechanism):
+        self.calls += 1
+        return source_moments(
+            torch.ones(1, receivers.shape[1], 1),
+            plan.memberships[mechanism],
+            plan.controls[mechanism],
+            plan.source_measures[self.kind],
+            plan.source_valid[self.kind],
+            pair_valid=torch.ones(1, receivers.shape[1], self.source_count, dtype=torch.bool),
+        )
+
+
+@pytest.mark.parametrize("kind,receivers,sources", [("M", 2, 0), ("E", 2, 0), ("M", 0, 2), ("E", 0, 2), ("M", 0, 0)])
+@pytest.mark.parametrize("mode", ["control_identity", "full_access_fixed_controls", "geometry_reference_actions"])
+def test_empty_source_types_and_receiver_axes_record_and_reconstruct(kind, receivers, sources, mode):
+    backend = EmptyBackend(kind, sources).eval()
+    queries = torch.zeros(1, receivers, 2)
+    with TypedWorkEvidenceRecorder(backend) as normal:
+        plan = backend.prepare(0)["hypergraph_plan"]
+        backend._access(plan, queries, backend.route)
+    prefix = f"access/P0/{backend.route}/00000"
+    assert normal.arrays[f"{prefix}/control_receiver_max_abs"].shape == (1, receivers)
+    assert normal.arrays[f"{prefix}/control_source_channel_mean"].shape == (1, sources, 16)
+    for name in ("control_probe", "control_receiver_max_abs", "control_source_channel_mean"):
+        assert np.isfinite(normal.arrays[f"{prefix}/{name}"]).all()
+    with FixedReferenceAccessReplay(backend, normal.arrays, mode=mode), TypedWorkEvidenceRecorder(backend) as result:
+        plan = backend.prepare(0)["hypergraph_plan"]
+        access = backend._access(plan, queries, backend.route)
+        assert access.weight.shape == (1, receivers, sources)
+    assert backend.calls == 2 and "_access" not in backend.__dict__ and "prepare" not in backend.__dict__
+    assert backend.plan_intervention == "normal"
+    for name in (
+        "control_probe",
+        "control_receiver_max_abs",
+        "control_receiver_nonzero_count",
+        "control_source_channel_mean",
+    ):
+        np.testing.assert_array_equal(normal.arrays[f"{prefix}/{name}"], result.arrays[f"{prefix}/{name}"])
+    with (
+        pytest.raises(ValueError, match="receivers mismatch"),
+        FixedReferenceAccessReplay(backend, normal.arrays, mode=mode),
+    ):
+        backend._access(plan, torch.zeros(1, receivers + 1, 2), backend.route)
+    assert "_access" not in backend.__dict__ and backend.plan_intervention == "normal"

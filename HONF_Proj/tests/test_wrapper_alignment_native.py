@@ -9,6 +9,7 @@ from the declared git ref; unchanged fine-kernel modules remain shared.
 from __future__ import annotations
 
 import copy
+import json
 import os
 import subprocess
 import sys
@@ -193,42 +194,123 @@ def test_native_wind_replay_chunks_and_disposable_optimizer_step():
 
 @pytest.mark.skipif(not os.environ.get("HONF_ALIGNMENT_WIND_DATASET"), reason="Needs local native Wind geometry")
 @pytest.mark.parametrize("architecture", ["adaptive_receiver_hypergraph_honf", "overlap_control_hypergraph_honf", "local_overlap_hypergraph_honf"])
-def test_disposable_finalist_wind_three_dimensional_wrapper_step(architecture):
+@pytest.mark.parametrize("hidden_dim", [16, 256])
+def test_disposable_finalist_wind_three_dimensional_wrapper_step(architecture, hidden_dim):
+    """Native Q4 construction/AD at tiny and campaign widths, without pretrained case-head transfer."""
+    from channelthermal.training.campaign_work import CampaignForwardWork
     from windfarm.data import WindFarmNativeView, case_batch
     from windfarm.model import WindFarmForwardModel
+    from windfarm.study_spatial import native_coordinates
 
     from honf_forward_core.config import UnifiedForwardConfig
     from honf_forward_core.training.hypergraph_shadow import hard_value_soft_hypergraph_forward
 
+    torch.manual_seed(32)
     case = WindFarmNativeView(os.environ["HONF_ALIGNMENT_WIND_DATASET"]).run(0)
-    points = case.support.lower_D + np.array([[.1, .3, .2], [.3, .4, .3], [.5, .5, .5], [.8, .6, .7]]) * case.support.extent_D
-    batch = case_batch(case, points).to(_device())
-    config = UnifiedForwardConfig.from_dict({"forward_architecture": architecture, "spatial_dim": 3, "field_dim": 3,
-                                             "boundary_feature_mode": "none", "geometry_mode": "nonperiodic",
-                                             "hidden_dim": 16, "coordinate_scale": [50., 38., 6.25],
-                                             "interface_model": {"message_hidden_dim": 8, "attention_heads": 2,
-                                                                 "receiver_chunk_size": 2, "activation_checkpointing": True}})
+    flat = np.arange(1, 5, dtype=np.int64) * (int(np.prod(case.run.shape_nxyz)) // 5)
+    points = native_coordinates(case.run, flat, case.diameter_m)
+    batch = case_batch(case, points, velocity_mps=np.asarray(case.run.U[flat], dtype=np.float32)).to(_device())
+    payload = {"forward_architecture": architecture, "spatial_dim": 3, "field_dim": 3,
+               "boundary_feature_mode": "none", "geometry_mode": "nonperiodic",
+               "hidden_dim": hidden_dim, "coordinate_scale": [50., 38., 6.25],
+               "interface_model": {"message_hidden_dim": 8, "attention_heads": 2,
+                                   "receiver_chunk_size": 2, "activation_checkpointing": True}}
+    profile_path = None
+    if hidden_dim == 256:
+        arm = {"adaptive_receiver_hypergraph_honf": "h-tree", "overlap_control_hypergraph_honf": "h-overlap",
+               "local_overlap_hypergraph_honf": "h-local"}[architecture]
+        profile_path = ROOT / f"HONF_Proj/src/config_core/forward/thermal_campaign/{arm}_e100.json"
+        profile = json.loads(profile_path.read_text())["model"]["core_honf"]
+        for key in ("hidden_dim", "dropout", "use_layer_norm", "query_time_mode", "query_fourier_frequencies",
+                    "position_fourier_frequencies", "use_position_fourier_for_modules", "use_position_fourier_for_env"):
+            payload[key] = profile[key]
+        payload["interface_model"] = copy.deepcopy(profile["interface_model"])
+    config = UnifiedForwardConfig.from_dict(payload)
     model = WindFarmForwardModel(config).to(_device())
     with torch.no_grad():
         model.eval()
         model(batch)
     model.train()
+    model.set_training_progress(epoch=1, total_epochs=5000)
+    frozen = {name: value.detach().clone() for name, value in model.named_parameters() if not value.requires_grad}
+    physical_buffers = {name: value.detach().clone() for name, value in model.named_buffers()
+                        if not name.startswith("core.backend.organizer.")}
+    physical = [(name, value) for name, value in model.named_parameters()
+                if value.requires_grad and not name.startswith("core.backend.organizer.")]
+    # Match stochastic admission draws for the reference and wrapped hard call.
+    devices = [batch.query_xy.device.index] if batch.query_xy.is_cuda else []
+    counter = getattr(model.core.backend.organizer, "exercise_counter", None)
+    saved_counter = counter.detach().clone() if counter is not None else None
+    try:
+        with torch.random.fork_rng(devices=devices):
+            hard = model(batch)["pred_field"]
+            hard_loss = (hard - batch.target_field).square().mean()
+            hard_gradients = torch.autograd.grad(hard_loss, [value for _, value in physical], allow_unused=True)
+    finally:
+        if counter is not None:
+            counter.copy_(saved_counter)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     before = model.core.common.field_head.net[-1].weight.detach().clone()
-    output = hard_value_soft_hypergraph_forward(model, batch)
-    loss = output["pred_field"].square().mean()
+    with CampaignForwardWork(model.core) as measured_work:
+        output = hard_value_soft_hypergraph_forward(model, batch)
+    work_snapshot = copy.deepcopy(measured_work.records)
+    assert set(work_snapshot) == {"hard", "soft"}
+    for mode in work_snapshot.values():
+        assert set(mode) == {"P0"}  # Wind has one native phase, without thermal port refinement.
+        phase = mode["P0"]
+        assert phase["prepare_calls"] == phase["read_calls"] == 1
+        assert all(phase["ledgers"][f"hypergraph_{tau}_executed_rows"] > 0
+                   for tau in ("MM", "ME", "EM", "QM", "QE"))
+    torch.testing.assert_close(output["pred_field"], hard, rtol=0, atol=0)
+    loss = (output["pred_field"] - batch.target_field).square().mean()
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
+    assert measured_work.records == work_snapshot  # Excludes activation-checkpoint backward recomputation.
+    physical_gradient_max_error = 0.
+    for (name, value), expected in zip(physical, hard_gradients):
+        if expected is None:
+            assert value.grad is None, name
+        else:
+            assert value.grad is not None and torch.isfinite(value.grad).all(), name
+            torch.testing.assert_close(value.grad, expected, rtol=2e-4, atol=2e-5)
+            physical_gradient_max_error = max(physical_gradient_max_error, float((value.grad - expected).abs().max()))
+    organizer_gradient = sum(float(value.grad.abs().sum()) for name, value in model.named_parameters()
+                             if name.startswith("core.backend.organizer.") and value.grad is not None)
+    assert np.isfinite(organizer_gradient) and organizer_gradient > 0
     optimizer.step()
     assert torch.isfinite(loss)
     assert not torch.equal(before, model.core.common.field_head.net[-1].weight)
+    for name, parameter in model.named_parameters():
+        if name in frozen:
+            assert torch.equal(parameter, frozen[name]), name
+    for name, value in model.named_buffers():
+        if name in physical_buffers:
+            assert torch.equal(value, physical_buffers[name]), name
     model.eval()
     with torch.no_grad():
         prepared = model.prepare_case(batch)
         exported = model.export_typed_hypergraph(prepared)
         assert exported["source_coords"]["E"].shape[-1] == 3
         torch.testing.assert_close(exported["source_lengths"]["E"], batch.env_characteristic_lengths)
-    print({"Wind_compatibility_architecture": architecture, "native_case": case.case, "loss": float(loss.detach())})
+    compact_work = {mode: {phase: {"prepare_calls": value["prepare_calls"], "read_calls": value["read_calls"],
+                                  **{count: sum(item for key, item in value["ledgers"].items() if key.endswith("_" + count))
+                                     for count in ("executed_rows", "fine_calls", "skipped_eligible_pairs")}}
+                          for phase, value in phases.items()} for mode, phases in work_snapshot.items()}
+    print({"Wind_compatibility_architecture": architecture, "native_case": case.case,
+           "native_grid_indices": flat.tolist(), "M": int(batch.module_present.sum()), "Q": 4, "hidden_dim": hidden_dim,
+           "profile": str(profile_path) if profile_path is not None else None,
+           "message_hidden_dim": config.interface_model.message_hidden_dim,
+           "attention_heads": config.interface_model.attention_heads,
+           "relative_fourier_frequencies": config.interface_model.relative_fourier_frequencies,
+           "organizer_dim": getattr(model.core.backend.organizer, "node_encoder", [None])[0].out_features
+               if architecture == "adaptive_receiver_hypergraph_honf" else None,
+           "group_count": getattr(model.core.backend.organizer, "group_count", None),
+           "control_dim": model.core.backend.organizer.control_dim,
+           "loss": float(loss.detach()), "physical_parameters_with_gradient": sum(value is not None for value in hard_gradients),
+           "physical_gradient_max_error": physical_gradient_max_error, "organizer_gradient_l1": organizer_gradient,
+           "frozen_parameters": len(frozen), "physical_buffers_unchanged": len(physical_buffers),
+           "forward_work": compact_work, "device": str(batch.query_xy.device),
+           "scope": "disposable fresh native architecture/Q4 construction/AD step, no pretrained Thermal-to-Wind transfer; forward work excludes backward recomputation and export"})
 
 
 @pytest.mark.skipif(not os.environ.get("HONF_ALIGNMENT_THERMAL_CHECKPOINT"), reason="Needs native local Thermal resources")

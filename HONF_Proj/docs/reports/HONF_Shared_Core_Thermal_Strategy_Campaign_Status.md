@@ -7,8 +7,8 @@ e4738 remains an evaluation-only mature reference. Wind scientific training
 is paused; Wind is used for shared-core compatibility checks.
 
 **State: full-dataset screening and reviewed control continuation are running.**
-Snapshot at 2026-10-03 03:47 UTC: both controls and overlap e100 completed;
-H-tree completed e15; B-fine completed e240 on its way to 500 and H-local e35.
+Snapshot at 2026-10-03 04:24 UTC: both controls and overlap e100 completed;
+H-tree completed e27; B-fine completed e387 on its way to 500 and H-local e78.
 Work is on `agent/honf-core-next`. The initial
 finite portfolio is Runs 2201–2205; two repaired screens are available only
 when a concrete failure warrants them. No 5,000-epoch job is authorized to
@@ -17,10 +17,10 @@ start automatically.
 | Run | Strategy | Complete epoch | Sampled development field / T MSE | Current action |
 |---|---|---:|---|---|
 | 2201 | B-native | 100 | 0.10121 / 0.06007 | Screen and physical panel complete |
-| 2202 | B-fine | 240 | 0.08034 / 0.02975 | GPU1; exact e100→500 continuation |
-| 2203 | H-tree | 15 | 1.58727 / 0.50713 | GPU1; reviewed exact e8 engineering resume |
+| 2202 | B-fine | 387 | 0.04638 / 0.01840 | GPU1; exact e100→500 continuation |
+| 2203 | H-tree | 27 | 1.31840 / 0.45976 | GPU1; reviewed exact e8 engineering resume |
 | 2204 | H-overlap | 100 | 0.25209 / 0.25632 | Physical screen complete; 500 queued |
-| 2205 | H-local | 35 | 0.54523 / 0.39154 | GPU2; fresh full-dataset screen |
+| 2205 | H-local | 78 | 0.25544 / 0.13666 | GPU2; fresh full-dataset screen |
 
 These MSEs use the maintained normalized, sampled 90-case validation task;
 they are neither full-grid physical errors nor the final 89-case comparison.
@@ -58,6 +58,12 @@ Training-family response pairs begin after 100 and their extra work is recorded.
   disposable optimizer steps passed at the declared 2e-5 tolerance. The frozen
   Stage-A tensors stayed unchanged. Fresh tree/overlap/local wrappers each
   completed real optimizer steps with nonzero organizer gradients.
+- A later full-width H256 Wind check passed all three fresh architectures on
+  real 3-D case `gen_0000_wd270` (M11/E512/Q4). All 98 physical first gradients
+  matched bitwise, organizer gradients were nonzero, optimizer steps succeeded
+  and physical buffers stayed unchanged. Each hard/soft P0 forward executed
+  13,477 rows in five fine calls. This is native compatibility, not transfer
+  accuracy or Wind scientific training.
 - The focused CPU suite passed 107 tests (five optional native-resource tests
   skipped in that CPU invocation, executed separately with local resources).
   Six fixed-total heat-inference tests passed; a native Run1804 smoke completed
@@ -114,8 +120,8 @@ Five actual complete epochs after the second repair, e9–13, average 177.66 s
 training and 8.74 s validation, or 186.40 s total. Every epoch has 600 cases,
 75 microbatches, 13 native optimizer steps and 614,400 primary queries. Exact
 e13 has all 185 active AdamW states at step 169 and four saved RNG streams.
-These epochs share GPU1 with B-fine and establish a current forecast of about
-4.5 hours for the remaining e14–100, excluding later pressure/response changes.
+These epochs share GPU1 with B-fine. At e13 they established a forecast of about
+4.5 hours for e14–100, excluding later pressure/response changes.
 They are not isolated timing or sparse executor savings.
 The first ten resumed epochs e9–18 confirm this cost: mean train/validation
 177.26/9.09 s, total 186.35 s, with the same full-epoch counters. The current
@@ -216,10 +222,25 @@ remain on data. Changes in unrelated occupancy are not attributed to this campai
 
 ## Selected measured figures
 
-Figure index: [screen fields and residuals](../../diagnostics/generated/shared_core_campaign_20261002/figures/predictor_screen_case0692.pdf),
+Figure index: [full-epoch training progress](../../diagnostics/generated/shared_core_campaign_20261002/figures/campaign_training_progress.pdf),
+[screen fields and residuals](../../diagnostics/generated/shared_core_campaign_20261002/figures/predictor_screen_case0692.pdf),
 [frozen finite responses](../../diagnostics/generated/shared_core_campaign_20261002/figures/reference_response_baseline.pdf),
 [mature inverse baseline](../../diagnostics/generated/shared_core_campaign_20261002/figures/mature_inverse_baseline.pdf),
 [actual overlap graph and work](../../diagnostics/generated/shared_core_campaign_20261002/figures/overlap_e100_graph_work.pdf).
+
+![Full-epoch training and measured elapsed work](../../diagnostics/generated/shared_core_campaign_20261002/figures/campaign_training_progress.png)
+
+The inspected snapshot contains 100/387/27/100/78 complete epochs for
+B-native/B-fine/H-tree/H-overlap/H-local. Every displayed epoch has 600 distinct
+training cases, 13 optimizer steps and 614,400 primary sampled queries. B-fine
+e387 normalized sampled field/T MSE is 0.04638/0.01840; this is a continuing
+training trend, not a completed 500-epoch or full-grid physical result.
+Successful train/validation time sums are 0.741/1.464/1.822/1.214/1.053 hours;
+discarded partial work and storage replay overhead remain recorded separately.
+Owned contention and H-tree engineering changes affect timing. These curves
+establish actual model age and work, not sparse speedups or mature-equivalent
+physical fidelity. The figure marks the H pressure ramp and common e101
+response/native-denominator amendment without combining different field units.
 
 ![Native-grid screening fields and residuals for development case 0692](../../diagnostics/generated/shared_core_campaign_20261002/figures/predictor_screen_case0692.png)
 
@@ -274,6 +295,20 @@ with a surface improvement in case0692. This isolates useful collective
 control action on this small exposed panel, with mixed case effects. Geometry
 and rewiring preserve some P0 membership multisets but fail whole-wrapper
 degree/weight matching; they do not establish a globally matched control win.
+
+Two reusable reference-action controls are now implemented and unit-tested
+for the later checkpoint reviews. Full access retains the normal
+source-resolved collective controls and projection biases. The bounded
+geometry control reassigns complete density/weight/support/control tuples
+within equal-measure source strata, preserving both binary graph degrees,
+each receiver's tuple multiset, normalized row mass, invalid padding and all
+positive near envelopes. Source-column weighted sums may change. Its budget
+is 32 support switches, 32 active-tuple swaps and 512 donor-source-pair checks
+per case/native access call; each check scans eligible partner rows. It is
+neither a global geometry optimum nor a newly constructed shared-group
+organizer. Reconstruction from twelve saved native QE scopes matches the
+saved normal control probes and summaries bitwise. Physical inference for these two controls is pending the
+500-epoch reviews; helper tests alone establish no fidelity gain.
 
 Run1804 and both fresh e100 controls have completed finite-response evaluation
 on all eight existing non-training families (11 absolute states per family).

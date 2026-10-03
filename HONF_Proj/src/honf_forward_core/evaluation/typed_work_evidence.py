@@ -14,6 +14,25 @@ def _flatten(prefix, value, arrays):
             _flatten(f"{prefix}/{key}", item, arrays)
 
 
+def control_summary(control):
+    """Small deterministic probes and finite summaries, including empty axes."""
+    batch, receivers, sources, channels = control.shape
+    receiver_indices = torch.linspace(0, receivers - 1, min(4, receivers), device=control.device).long()
+    source_indices = torch.linspace(0, sources - 1, min(16, sources), device=control.device).long()
+    return {
+        "control_probe_receiver_indices": receiver_indices,
+        "control_probe_source_indices": source_indices,
+        "control_probe": control[:, receiver_indices][:, :, source_indices],
+        "control_receiver_max_abs": control.abs().amax(dim=(-1, -2))
+        if sources and channels
+        else control.new_zeros(batch, receivers),
+        "control_receiver_nonzero_count": torch.count_nonzero(control, dim=(-1, -2)),
+        "control_source_channel_mean": control.mean(dim=1)
+        if receivers
+        else control.new_zeros(batch, sources, channels),
+    }
+
+
 class TypedWorkEvidenceRecorder(AbstractContextManager):
     """Record post-intervention plans and source weights without extra reads.
 
@@ -63,21 +82,7 @@ class TypedWorkEvidenceRecorder(AbstractContextManager):
             _flatten(f"{prefix}/diagnostics", value.diagnostics, self.arrays)
             # Keep small deterministic probes and complete per-receiver control
             # summaries rather than the large R x S x 16 tensor.
-            control = value.control
-            receiver_indices = torch.linspace(
-                0, control.shape[1] - 1, min(4, control.shape[1]), device=control.device
-            ).long()
-            source_indices = torch.linspace(
-                0, control.shape[2] - 1, min(16, control.shape[2]), device=control.device
-            ).long()
-            for name, tensor in {
-                "control_probe_receiver_indices": receiver_indices,
-                "control_probe_source_indices": source_indices,
-                "control_probe": control[:, receiver_indices][:, :, source_indices],
-                "control_receiver_max_abs": control.abs().amax(dim=(-1, -2)),
-                "control_receiver_nonzero_count": torch.count_nonzero(control, dim=(-1, -2)),
-                "control_source_channel_mean": control.mean(dim=1),
-            }.items():
+            for name, tensor in control_summary(value.control).items():
                 _flatten(f"{prefix}/{name}", tensor, self.arrays)
             return value
 
@@ -190,4 +195,4 @@ def compare_native_access(reference, changed):
     return routes
 
 
-__all__ = ["TypedWorkEvidenceRecorder", "compare_native_access"]
+__all__ = ["TypedWorkEvidenceRecorder", "compare_native_access", "control_summary"]
