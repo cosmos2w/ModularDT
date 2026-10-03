@@ -7,11 +7,11 @@ e4738 remains an evaluation-only mature reference. Wind scientific training
 is paused; Wind is used for shared-core compatibility checks.
 
 **State: four e100 screens and the first e500 control are complete; the ladder continues.**
-Saved training snapshot at 2026-10-03 06:14 UTC: B-fine is at e601; B-native is at e248,
-H-tree e67, H-overlap e179 and H-local e166. Their exact e100 screens are
+Saved training snapshot at 2026-10-03 07:25 UTC: B-fine is at e837; B-native is at e377,
+H-tree e94, H-overlap e226 and H-local e208. Their exact e100 screens are
 complete except H-tree. The table and progress figure use the same saved snapshot.
 Results below also include evaluations and audited continuations completed
-after that snapshot. Fine has continued from exact500 on GPU2 and passed exact600;
+after that snapshot. Fine has continued from exact500 on GPU2 and passed exact750;
 its requested 1000-stage training is active, while both immutable e493 selections
 are preserved. Completion of that stage is still pending.
 Work is on `agent/honf-core-next`. The initial
@@ -21,11 +21,11 @@ start automatically.
 
 | Run | Strategy | Complete epoch | Sampled development field / T MSE | Current action |
 |---|---|---:|---|---|
-| 2201 | B-native | 248 | 0.02988 / 0.01614 | GPU1; exact e100→500 continuation |
-| 2202 | B-fine | 601 | 0.02685 / 0.01081 | GPU2; reviewed exact e500→1000 continuation |
-| 2203 | H-tree | 67 | 0.38333 / 0.41174 | GPU1; reviewed exact e8 engineering resume |
-| 2204 | H-overlap | 179 | 0.27054 / 0.26085 | GPU2; exact e100→500 continuation |
-| 2205 | H-local | 166 | 0.12691 / 0.05180 | GPU2; exact e100→500 continuation |
+| 2201 | B-native | 377 | 0.02595 / 0.02390 | GPU1; exact e100→500 continuation |
+| 2202 | B-fine | 837 | 0.01340 / 0.00870 | GPU2; reviewed exact e500→1000 continuation |
+| 2203 | H-tree | 94 | 0.26263 / 0.24883 | GPU1; reviewed exact e8 engineering resume |
+| 2204 | H-overlap | 226 | 0.24097 / 0.20869 | GPU2; exact e100→500 continuation |
+| 2205 | H-local | 208 | 0.14540 / 0.08667 | GPU2; exact e100→500 continuation |
 
 These MSEs use the maintained normalized, sampled 90-case validation task;
 they are neither full-grid physical errors nor the final 89-case comparison.
@@ -234,6 +234,13 @@ Its 200 response-active epochs contain 400 wrapper calls and 1,285,156 extra
 role queries. These confirm continuity and work; they do not replace Tree's
 remaining e100 screen or Native's e500 physical review.
 
+Fine's exact e750 audit passes 450,000 training case visits, all 120 AdamW
+states at step 9,750, four RNG streams, unchanged frozen Stage-A/normalization
+and five response calibration records. The immutable field/T-selected e493
+snapshots remain read-only and unchanged. Recent complete epochs take a
+median 17.81 seconds under GPU2's three-job placement. This validates actual
+continuation; its exact/selected e1000 physical evaluation remains pending.
+
 H-overlap's first seven epochs measure median training/validation 42.58/1.20
 seconds and peak allocated memory 10.26 GiB. Its initial e100 screen forecast
 is about 73 minutes, plus periodic save/plot overhead; training to e1000 is
@@ -404,12 +411,12 @@ Figure index: [full-epoch training progress](../../diagnostics/generated/shared_
 
 ![Full-epoch training and measured elapsed work](../../diagnostics/generated/shared_core_campaign_20261002/figures/campaign_training_progress.png)
 
-The inspected snapshot contains 248/601/67/179/166 complete epochs for
+The inspected snapshot contains 377/837/94/226/208 complete epochs for
 B-native/B-fine/H-tree/H-overlap/H-local. Every displayed epoch has 600 distinct
 training cases, 13 optimizer steps and 614,400 primary sampled queries. B-fine
-e601 normalized sampled field/T MSE is 0.02685/0.01081; the full-grid physical
+e837 normalized sampled field/T MSE is 0.01340/0.00870; the full-grid physical
 evaluation is reported separately above.
-Successful train/validation time sums are 2.063/2.411/3.626/2.685/2.744 hours;
+Successful train/validation time sums are 3.238/3.588/4.837/3.858/3.943 hours;
 discarded partial work and storage replay overhead remain recorded separately.
 Owned contention and H-tree engineering changes affect timing. These curves
 establish actual model age and work, not sparse speedups or mature-equivalent
@@ -707,10 +714,35 @@ uses all 600 training records. This is integration evidence, not formal inverse
 head training, a 200-update review or finalist qualification; no generative
 campaign has begun.
 
-The current reporting/freezing revision passes 78 focused tests with two
+The reporting/freezing revision passes 78 focused tests with two
 optional native-resource tests skipped; retained-native local and paired-head
 smokes and saved-array context backfills provide the separately measured
 integration evidence. Ruff and diff checks pass.
+
+The paired inverse task adapter now adds four auxiliary, physically recorded
+baseline/heat-transfer-plus pairs at M3/5/7/10. Each pair retains identical
+geometry/material/context and exact saved/native public total, with different
+nonnegative allocations and six observed temperatures; six disjoint held
+temperatures and individual heat remain separate evaluation supervision.
+All four have archived Re50/viscosity0.018, not the contexts of the original
+twelve native inverse tasks. They remain separately labelled, previously
+exposed final-review cohorts. No new reference solve or review normalization
+is used. The formal review design keeps the original 96 draws and twelve
+labelled controls, adding sixteen auxiliary draws with one shared initial
+noise across both targets and both heads per pair.
+
+On all four retained pairs, native Overlap100 CPU1 at uniform candidate heat
+produces bitwise-equal predictions and all five typed links between each
+pair's tasks, while their recorded observations differ. Sixteen disposable
+untrained two-step draws and their explicit recovery complete successfully;
+all 334 forward-state tensors remain bitwise unchanged. Recovery validates
+public geometry/context/query/source identities, budget and evaluation-only
+references, and rejects draws missing their original reference. All sixteen
+numeric trails remain bitwise equal after these metadata checks. This tests
+execution and target separation, not conditional quality or a trained inverse
+result; no 200/750/1500-update head campaign has started. The revision passes
+109 focused tests with two optional native-resource skips; native integration
+is measured separately. Ruff and diff checks pass.
 
 ## Remaining ladder and delivery
 

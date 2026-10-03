@@ -3,6 +3,7 @@
 import copy
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -233,3 +234,134 @@ def test_paired_review_checks_forward_state_and_labels_recovered_draw_scope(tmp_
         module.record_frozen_review(forward, snapshot, tmp_path / "review_0750",
             update=750, draw_scope={"new_completed_draws": 108, "reused_saved_draws": 0})
     assert not (tmp_path / "review_0750").exists()
+
+
+def test_public_observation_task_needs_no_clean_heat_or_held_targets(monkeypatch):
+    module = tool_module()
+    forward = torch.nn.Linear(1, 1).eval().requires_grad_(False)
+    sample = {"structure": {"module_centers": np.asarray([[1., 2.], [3., 4.]]),
+        "module_present": np.ones(2), "material_params": np.asarray([.018, .01, .02, 1., 1., .45]),
+        "re": np.asarray([50.]), "u_in": np.asarray([1.]),
+        "domain_length_x": np.asarray([12.]), "domain_length_y": np.asarray([6.])},
+        "interface_condition": np.zeros((2, 4, 3)), "module_internal_query_points": np.zeros((3, 2))}
+    captured = []
+
+    def native_predictor(_model, _checkpoint, public, coordinates, observed, held):
+        captured.append(public)
+        assert "heat_powers" not in public["structure"] and "steady_field" not in public
+        np.testing.assert_array_equal(public["structure"]["material_params"], sample["structure"]["material_params"])
+        return (lambda heat: {"observed": heat.sum().expand(len(observed)),
+                              "held": heat.sum().expand(len(held))}), torch.ones(2, dtype=torch.bool)
+
+    monkeypatch.setattr(module, "native_heat_predictor", native_predictor)
+    normalization = module.TrainOnlyNormalization(np.zeros(13), np.ones(13), np.zeros(3), np.ones(3), ())
+    arguments = {"case_id": "stored_pair/baseline", "total": 3.,
+        "coordinates": np.arange(28, dtype=np.float32).reshape(14, 2),
+        "observed": np.arange(0, 12, 2), "held": np.arange(1, 12, 2),
+        "observed_values": np.arange(6, dtype=np.float32)}
+    task = module.build_public_observation_task(forward, {}, sample, "final_review_exposed", normalization, **arguments)
+    assert len(captured) == 1 and not task.condition.known_state.any()
+    assert task.partition == "final_review_exposed"
+    torch.testing.assert_close(task.observed_reference[0, :, 0], torch.arange(6, dtype=torch.float32))
+    torch.testing.assert_close(task.condition.module_features[0, :, -1], torch.full((2,), 3.))
+    heat = torch.tensor([[[.5], [2.5]]], requires_grad=True)
+    prediction = task.predictor(heat)
+    prediction["held"].sum().backward()
+    assert heat.grad is not None and (heat.grad != 0).all()
+    with pytest.raises(ValueError, match="distinct observed/held"):
+        module.build_public_observation_task(forward, {}, sample, "final_review_exposed", normalization,
+            **{**arguments, "held": arguments["observed"]})
+    with pytest.raises(ValueError, match="finite and valid"):
+        module.build_public_observation_task(forward, {}, sample, "final_review_exposed", normalization,
+            **{**arguments, "observed_values": np.full(6, np.nan)})
+
+
+def test_valid_alternative_draws_share_noise_and_recovery_checks_physical_targets(tmp_path, monkeypatch):
+    module = tool_module()
+    original, _target, denoiser, _calls = fixture()
+    heads = PairedHeatHeads(denoiser, steps=2, seed=8)
+    pair = []
+    tasks = {}
+    for label, observation in (("baseline", .2), ("heat_transfer_plus", .4)):
+        case_id = "stored_family:"+label
+        public = SimpleNamespace(case_id=case_id,
+            metadata={"family_id": "stored_family", "variant": label, "previously_exposed": True},
+            public_sample={"structure": {"module_centers": np.zeros((3, 2)), "module_present": np.ones(3),
+                "material_params": np.ones(6), "re": np.asarray([50.]), "u_in": np.asarray([1.]),
+                "domain_length_x": np.asarray([12.]), "domain_length_y": np.asarray([6.])},
+                "interface_condition": np.zeros((3, 4, 3)), "module_internal_query_points": np.zeros((2, 2))},
+            source_module_ids=("m0", "m1", "m2"), source_id_to_slot={"m0": 0, "m1": 1, "m2": 2},
+            sensor_names=("obs0", "obs1", "held0"), sensor_query_ids=("q0", "q1", "q2"),
+            sensor_coordinates=np.asarray([[0., 0.], [1., 0.], [2., 0.]]),
+            observed_rows=np.asarray([0, 1]), held_rows=np.asarray([2]), temperature_unit="fixture_temperature")
+        hidden = SimpleNamespace(held_temperatures=np.asarray([.6]), heat=np.asarray([.2, .8, 2.]))
+        condition = copy.deepcopy(original.condition)
+        condition.sensor_features[..., 2] = observation
+        tasks[case_id] = PublicHeatTask(case_id, "final_review_previously_exposed", condition,
+            original.provider, original.predictor, torch.full((1, 2, 1), observation))
+        pair.append((public, hidden))
+    monkeypatch.setattr(module, "build_atlas_observation_task", lambda _model, _checkpoint, public, _normalization: tasks[public.case_id])
+    args = SimpleNamespace(seed=11, embedding_policy="candidate_projected", evaluate_only=False, steps=2)
+    result = module.evaluate_alternative_draws(heads, None, {}, None, tmp_path, args, [tuple(pair)])
+    assert result == {"new_completed_draws": 4, "reused_saved_draws": 0}
+    from honf_runtime.compat import load_trusted_checkpoint
+    saved = [load_trusted_checkpoint(path, map_location="cpu") for path in sorted(tmp_path.rglob("draw_*.pt"))]
+    assert len(saved) == 4
+    assert all(torch.equal(saved[0]["initial_noise"], row["initial_noise"]) for row in saved)
+    np.testing.assert_allclose(sorted(float(row["observed_reference"][0, 0, 0]) for row in saved), [.2, .2, .4, .4])
+    args.evaluate_only = True
+    assert module.evaluate_alternative_draws(heads, None, {}, None, tmp_path, args, [tuple(pair)]) == {
+        "new_completed_draws": 0, "reused_saved_draws": 4}
+    pair[1][1].held_temperatures = np.asarray([.7])
+    with pytest.raises(ValueError, match="reference changed physical inputs or supervision"):
+        module.evaluate_alternative_draws(heads, None, {}, None, tmp_path, args, [tuple(pair)])
+
+
+def test_reference_recovery_rejects_changed_public_context_and_hidden_heat(tmp_path):
+    module = tool_module()
+    path = tmp_path / "evaluation_reference.pt"
+    payload = {"public_geometry_context": {"re": torch.tensor([50.]), "material": torch.ones(6)},
+               "source_id_to_slot": {"m0": 0, "m1": 1}, "reference_heat": torch.tensor([1., 2.])}
+    module.save_or_validate_reference(payload, path)
+    original_bytes = path.read_bytes()
+    module.save_or_validate_reference(copy.deepcopy(payload), path)
+    assert path.read_bytes() == original_bytes
+    for key in ("context", "heat", "mapping"):
+        changed = copy.deepcopy(payload)
+        if key == "context":
+            changed["public_geometry_context"]["re"] += 1
+        elif key == "heat":
+            changed["reference_heat"] = torch.tensor([2., 1.])
+        else:
+            changed["source_id_to_slot"] = {"m0": 1, "m1": 0}
+        with pytest.raises(ValueError, match="reference changed physical inputs or supervision"):
+            module.save_or_validate_reference(changed, path)
+        assert path.read_bytes() == original_bytes
+
+
+def test_saved_draw_recovery_rejects_changed_public_budget(tmp_path):
+    module = tool_module()
+    task, _target, denoiser, _calls = fixture()
+    heads = PairedHeatHeads(denoiser, steps=2, seed=8)
+    held, noise = torch.tensor([[[.6]]]), torch.zeros_like(task.condition.known_state)
+    path = tmp_path / "draw.pt"
+    args = SimpleNamespace(evaluate_only=False, steps=2)
+    assert module.save_or_reuse_draw(heads.graph, task, held, noise=noise, path=path, dense=False,
+        observation="original", provider=task.provider, args=args)
+    from honf_runtime.compat import load_trusted_checkpoint
+    saved = load_trusted_checkpoint(path, map_location="cpu")
+    saved["public_total_heat"] += 1
+    module.save_heat_payload(saved, path)
+    args.evaluate_only = True
+    with pytest.raises(ValueError, match="identity/integrity mismatch"):
+        module.save_or_reuse_draw(heads.graph, task, held, noise=noise, path=path, dense=False,
+            observation="original", provider=task.provider, args=args)
+
+
+def test_recovery_does_not_recreate_missing_reference_beside_old_draws(tmp_path):
+    module = tool_module()
+    (tmp_path / "draw_00_graph.pt").write_bytes(b"previous draw")
+    reference_path = tmp_path / "evaluation_reference.pt"
+    with pytest.raises(ValueError, match="lack their original evaluation reference"):
+        module.save_or_validate_reference({"public_total": torch.tensor([[3.]])}, reference_path)
+    assert not reference_path.exists()

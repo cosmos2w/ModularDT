@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -117,15 +118,23 @@ def typed_packet_links(model, prepared, coordinates):
         encoded.module_centers, sensor)
 
 
-def build_public_task(model, checkpoint, sample, partition, normalization, channel_order):
-    """Construct the conditioner before exposing clean allocation supervision."""
+def build_public_observation_task(model, checkpoint, sample, partition, normalization, *,
+                                  case_id, total, coordinates, observed, held, observed_values):
+    """Build from public observations only; held values/clean heat are separate."""
     device = next(model.parameters()).device
-    coordinates, grid_rows, _, observed, held = sensor_panel(sample)
-    # Public sum is extracted once from this stored benchmark's supplied budget.
-    total = float(np.asarray(sample["structure"]["heat_powers"]).sum())
+    coordinates = np.array(coordinates, dtype=np.float32, copy=True)
+    observed, held = np.array(observed, dtype=np.int64, copy=True), np.array(held, dtype=np.int64, copy=True)
+    observed_values = np.array(observed_values, dtype=np.float32, copy=True).reshape(-1)
+    if (coordinates.ndim != 2 or coordinates.shape[1] != 2
+            or not np.isfinite(coordinates).all() or not np.isfinite(observed_values).all()
+            or not np.isfinite(total) or total < 0):
+        raise ValueError("Public observation coordinates, values and heat budget must be finite and valid")
+    if (observed.shape != (6,) or held.shape != (6,) or observed_values.shape != (6,)
+            or len(np.unique(np.concatenate((observed, held)))) != 12
+            or min(observed.min(), held.min()) < 0
+            or max(observed.max(), held.max()) >= len(coordinates) - 2):
+        raise ValueError("Public task requires six distinct observed/held sensors and separate pressure endpoints")
     active = torch.as_tensor(np.asarray(sample["structure"]["module_present"]) > .5, device=device)[None]
-    fields = np.asarray(sample["steady_field"]).reshape(-1, len(channel_order))
-    observed_values = fields[grid_rows[observed], list(channel_order).index("temperature")]
     sensor_features = np.concatenate((coordinates[observed], observed_values[:, None]), -1)
     modules = (public_module_features(sample, total)-normalization.module_mean)/normalization.module_std
     sensor_features = (sensor_features-normalization.sensor_mean)/normalization.sensor_std
@@ -157,11 +166,22 @@ def build_public_task(model, checkpoint, sample, partition, normalization, chann
         xy = torch.as_tensor(coordinates[observed], device=device)
         return typed_packet_links(model, captured[0], xy)
 
-    task = PublicHeatTask(str(sample["case_id"]), partition, condition, provider, predictor,
-                         torch.as_tensor(observed_values, device=device)[None, :, None])
-    # These tensors are returned separately and never captured by providers.
+    return PublicHeatTask(str(case_id), partition, condition, provider, predictor,
+                          torch.as_tensor(observed_values, device=device)[None, :, None])
+
+
+def build_public_task(model, checkpoint, sample, partition, normalization, channel_order):
+    """Extract public observations, then return clean supervision separately."""
+    device = next(model.parameters()).device
+    coordinates, grid_rows, _, observed, held = sensor_panel(sample)
+    total = float(np.asarray(sample["structure"]["heat_powers"]).sum())
+    fields = np.asarray(sample["steady_field"]).reshape(-1, len(channel_order))
+    temperature = list(channel_order).index("temperature")
+    task = build_public_observation_task(model, checkpoint, public_template(sample), partition, normalization,
+        case_id=sample["case_id"], total=total, coordinates=coordinates, observed=observed, held=held,
+        observed_values=fields[grid_rows[observed], temperature])
     target = torch.as_tensor(sample["structure"]["heat_powers"], device=device, dtype=torch.float32)[None, :, None]
-    held_reference = torch.as_tensor(fields[grid_rows[held], list(channel_order).index("temperature")],
+    held_reference = torch.as_tensor(fields[grid_rows[held], temperature],
                                      device=device)[None, :, None]
     return task, target, held_reference
 
@@ -200,6 +220,31 @@ def record_frozen_review(model, snapshot, output, *, update, draw_scope):
     return result
 
 
+def load_alternative_observation_panel(path):
+    """Four retained, independently recorded pairs; no fitted review inputs."""
+    from thermal_campaign_atlas_observations import load_final_review_pair
+
+    from honf_runtime.paths import resolve_path
+
+    panel = json.loads(Path(path).read_text())
+    sources = [resolve_path(source) for source in panel["stencils"]]
+    if len(sources) != 4 or len(set(sources)) != 4:
+        raise ValueError("Alternative observation panel requires four distinct stored families")
+    pairs = [load_final_review_pair(source) for source in sources]
+    if ({len(pair[0][0].source_module_ids) for pair in pairs} != {3, 5, 7, 10}
+            or len({pair[0][0].metadata["family_id"] for pair in pairs}) != 4):
+        raise ValueError("Alternative observation panel must span distinct M3/5/7/10 families")
+    return pairs
+
+
+def build_atlas_observation_task(model, checkpoint, public, normalization):
+    """The public archive object contains no clean heat or held values."""
+    return build_public_observation_task(model, checkpoint, public.public_sample,
+        "final_review_previously_exposed", normalization, case_id=public.case_id,
+        total=public.public_total_heat, coordinates=public.sensor_coordinates,
+        observed=public.observed_rows, held=public.held_rows, observed_values=public.observed_temperatures)
+
+
 def run_comparison(args):
     from channelthermal.data.datasets import GlobalChannelThermalDataset
     from channelthermal.evaluation.loading import load_model
@@ -219,6 +264,7 @@ def run_comparison(args):
                                       random_point_sampling=False, include_grid=True)
     dev = GlobalChannelThermalDataset(args.dataset, split="test", points_per_case=1,
                                     random_point_sampling=False, include_grid=True)
+    alternative_pairs = load_alternative_observation_panel(args.alternative_observation_panel)
     normalization = TrainOnlyNormalization.fit(train)
     probe_sample = eligible_training_probe(train)
     first, first_target, _ = build_public_task(model, checkpoint, probe_sample, "train", normalization, train.channel_order)
@@ -243,8 +289,11 @@ def run_comparison(args):
         "baseline_scope": "uniform_public_total fixes both links and embeddings from uniform public budget; candidate_projected rebuilds both from the current noisy feasible proxy",
         "condition_inputs": "known geometry, material/context, supplied total and six named observations; hidden individual heat is a separate training target only",
         "reference_limit": "exposed development records, frozen surrogate; no new physical solve",
-        "alternative_observation_limit": "distinct stored development tasks are used; no separately matched same-geometry alternative physical target is inferred or fabricated"}
-    identity["intervention_scope"] = "96 original draws: 12 tasks x4 noises x2 heads; three labelled same-weight/observation controls on4 eligible tasks x1 noise,12 extra draws"
+        "alternative_observation_panel": str(args.alternative_observation_panel.resolve()),
+        "alternative_observation_pairs": [[dict(public.metadata) for public, _hidden in pair]
+                                          for pair in alternative_pairs],
+        "alternative_observation_limit": "four auxiliary archived baseline/heat-transfer-plus pairs preserve geometry/material/context/public total within pair; original twelve native tasks remain separate; all records previously exposed"}
+    identity["intervention_scope"] = "96 original draws: 12 tasks x4 noises x2 heads; three labelled same-weight/observation controls on4 eligible tasks x1 noise,12 extra draws; four valid-observation pairs x2 physical targets x2 heads x1 common noise,16 auxiliary draws"
     identity["training_probe_selection"] = {"case_id": first.case_id, "criteria": "known M>=2 and positive public total; no hidden individual allocation criterion"}
     if args.resume:
         saved = load_trusted_checkpoint(args.resume, map_location=args.device)
@@ -255,7 +304,8 @@ def run_comparison(args):
         if not args.resume:
             raise ValueError("Evaluation recovery requires an exact paired-head checkpoint")
         review = output / f"review_{heads.update:04d}"
-        scope = evaluate_draws(heads, model, checkpoint, dev, normalization, review, args)
+        scope = evaluate_draws(heads, model, checkpoint, dev, normalization, review, args,
+                               alternative_pairs=alternative_pairs)
         record_frozen_review(model, frozen_snapshot, review, update=heads.update, draw_scope=scope)
         return output
     validate_review_stage(heads.update, args.stop_update)
@@ -281,22 +331,118 @@ def run_comparison(args):
                 for name in heads.models}
             (output / f"train_conditioner_{heads.update:04d}.json").write_text(json.dumps(check, indent=2)+"\n")
             review = output / f"review_{heads.update:04d}"
-            scope = evaluate_draws(heads, model, checkpoint, dev, normalization, review, args)
+            scope = evaluate_draws(heads, model, checkpoint, dev, normalization, review, args,
+                                   alternative_pairs=alternative_pairs)
             record_frozen_review(model, frozen_snapshot, review, update=heads.update, draw_scope=scope)
             print(f"review {heads.update}: complete paired updates and individual draw files", flush=True)
     return output
 
 
-def evaluate_draws(heads, model, checkpoint, dataset, normalization, output, args):
+def public_input_evidence(sample):
+    """Physical inputs read by the native adapter, without solved supervision."""
+    template = public_template(sample)
+    return {"structure": {name: torch.tensor(value) for name, value in template["structure"].items()},
+            "interface_condition": torch.tensor(template["interface_condition"]),
+            "module_internal_query_points": torch.tensor(template["module_internal_query_points"])}
+
+
+def same_reference(left, right):
+    if torch.is_tensor(left) or torch.is_tensor(right):
+        return (torch.is_tensor(left) and torch.is_tensor(right) and left.dtype == right.dtype
+                and torch.equal(left.cpu(), right.cpu()))
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        return (isinstance(left, Mapping) and isinstance(right, Mapping) and left.keys() == right.keys()
+                and all(same_reference(left[name], right[name]) for name in left))
+    if isinstance(left, (tuple, list)) or isinstance(right, (tuple, list)):
+        return (isinstance(left, (tuple, list)) and isinstance(right, (tuple, list)) and len(left) == len(right)
+                and all(same_reference(a, b) for a, b in zip(left, right)))
+    return left == right
+
+
+def save_or_validate_reference(payload, path):
+    """Never reuse trials against a changed physical task at the same path."""
+    if path.exists():
+        from honf_runtime.compat import load_trusted_checkpoint
+        if not same_reference(load_trusted_checkpoint(path, map_location="cpu"), payload):
+            raise ValueError(f"Saved evaluation reference changed physical inputs or supervision: {path}")
+    else:
+        if any(path.parent.glob("draw_*.pt")):
+            raise ValueError(f"Saved draws lack their original evaluation reference: {path}")
+        save_heat_payload(payload, path)
+
+
+def save_or_reuse_draw(head, task, held, *, noise, path, dense, observation, provider, args):
+    """Recover a complete draw only when its public target and noise agree."""
+    if path.exists():
+        if not args.evaluate_only:
+            raise ValueError(f"Preserve existing individual draw evidence: {path}")
+        from honf_runtime.compat import load_trusted_checkpoint
+        saved = load_trusted_checkpoint(path, map_location="cpu")
+        if (saved["case_id"] != task.case_id or saved["partition"] != task.partition
+                or saved["observation_mode"] != observation
+                or saved["access_mode"] != ("full" if dense else "graph")
+                or not torch.equal(saved["initial_noise"], noise.cpu())
+                or not torch.equal(saved["observed_reference"], task.observed_reference.cpu())
+                or not torch.equal(saved["held_reference"], held.cpu())
+                or not torch.equal(saved["public_total_heat"], task.condition.total_heat.cpu())
+                or "held_predictions" not in saved or len(saved["state_timesteps"]) != args.steps+1):
+            raise ValueError(f"Existing individual draw identity/integrity mismatch: {path}")
+        return False
+    save_heat_draw(head, task, held, initial_noise=noise, path=path, dense=dense,
+                   observation_mode=observation, provider=provider)
+    return True
+
+
+def evaluate_alternative_draws(heads, model, checkpoint, normalization, output, args, pairs):
+    """Same noise across two recorded physical targets and both paired heads."""
+    new_draws = reused_draws = 0
+    for index, pair in enumerate(pairs):
+        baseline = pair[0][0]
+        task = build_atlas_observation_task(model, checkpoint, baseline, normalization)
+        generator = torch.Generator(device=task.condition.known_state.device).manual_seed(args.seed+200000+index)
+        noise = torch.randn(task.condition.known_state.shape, device=task.condition.known_state.device,
+                            generator=generator)
+        for public, hidden in pair:
+            task = build_atlas_observation_task(model, checkpoint, public, normalization)
+            directory = output / "valid_observation_pairs" / public.metadata["family_id"] / public.metadata["variant"]
+            directory.mkdir(parents=True, exist_ok=True)
+            reference_path = directory / "evaluation_reference.pt"
+            held = torch.tensor(hidden.held_temperatures, dtype=torch.float32,
+                                device=task.condition.known_state.device)[None, :, None]
+            save_or_validate_reference({"case_id": public.case_id, "source": dict(public.metadata),
+                    "public_geometry_context": public_input_evidence(public.public_sample),
+                    "source_module_ids": public.source_module_ids, "source_id_to_slot": dict(public.source_id_to_slot),
+                    "sensor_names": public.sensor_names, "sensor_query_ids": public.sensor_query_ids,
+                    "sensor_coordinates": torch.tensor(public.sensor_coordinates),
+                    "observed_rows": torch.tensor(public.observed_rows), "held_rows": torch.tensor(public.held_rows),
+                    "reference_heat": torch.tensor(hidden.heat), "held": held.cpu(),
+                    "observation": task.observed_reference.cpu(), "public_total": task.condition.total_heat.cpu(),
+                    "temperature_unit": public.temperature_unit,
+                    "reference_heat_scope": "evaluation only; absent from public task/provider/embeddings"}, reference_path)
+            provider = link_policy(task, args.embedding_policy)
+            for name, head, dense in (("graph", heads.graph, False), ("full", heads.full, True)):
+                created = save_or_reuse_draw(head, task, held, noise=noise,
+                    path=directory / f"draw_00_{name}.pt", dense=dense, observation="original", provider=provider, args=args)
+                new_draws += int(created)
+                reused_draws += int(not created)
+    return {"new_completed_draws": new_draws, "reused_saved_draws": reused_draws}
+
+
+def evaluate_draws(heads, model, checkpoint, dataset, normalization, output, args, *, alternative_pairs):
     control_tasks = []
     new_draws = reused_draws = 0
     for index in screen_indices(dataset, 12):
-        task, reference_heat, held = build_public_task(model, checkpoint, dataset[index], "development", normalization, dataset.channel_order)
+        sample = dataset[index]
+        task, reference_heat, held = build_public_task(model, checkpoint, sample, "development", normalization, dataset.channel_order)
         directory = output / task.case_id
         directory.mkdir(parents=True, exist_ok=True)
         reference_path = directory / "evaluation_reference.pt"
-        if not reference_path.exists():
-            save_heat_payload({"case_id": task.case_id, "reference_heat": reference_heat.cpu(), "held": held.cpu(),
+        coordinates, grid_rows, sensor_names, observed_rows, held_rows = sensor_panel(sample)
+        save_or_validate_reference({"case_id": task.case_id, "reference_heat": reference_heat.cpu(), "held": held.cpu(),
+                        "public_geometry_context": public_input_evidence(sample),
+                        "sensor_coordinates": torch.tensor(coordinates), "sensor_grid_rows": torch.tensor(grid_rows),
+                        "sensor_names": sensor_names, "observed_rows": torch.tensor(observed_rows),
+                        "held_rows": torch.tensor(held_rows),
                         "observation": task.observed_reference.cpu(), "public_total": task.condition.total_heat.cpu(),
                         "reference_heat_scope": "evaluation only; absent from public task/provider/embeddings"}, reference_path)
         provider = link_policy(task, args.embedding_policy)
@@ -313,23 +459,22 @@ def evaluate_draws(heads, model, checkpoint, dataset, normalization, output, arg
                     ("graph_observations_shuffled", heads.graph, False, "shuffled")]
             for name, head, dense, observation in variants:
                 path = output / task.case_id / f"draw_{draw:02d}_{name}.pt"
-                if path.exists():
-                    if not args.evaluate_only:
-                        raise ValueError(f"Preserve existing individual draw evidence: {path}")
-                    from honf_runtime.compat import load_trusted_checkpoint
-                    saved = load_trusted_checkpoint(path, map_location="cpu")
-                    if (saved["case_id"] != task.case_id or not torch.equal(saved["initial_noise"], noise.cpu())
-                            or "held_predictions" not in saved or len(saved["state_timesteps"]) != args.steps+1):
-                        raise ValueError(f"Existing individual draw identity/integrity mismatch: {path}")
-                    reused_draws += 1
-                    continue
-                save_heat_draw(head, task, held, initial_noise=noise, path=path, dense=dense,
-                               observation_mode=observation, provider=provider)
-                new_draws += 1
+                created = save_or_reuse_draw(head, task, held, noise=noise, path=path,
+                    dense=dense, observation=observation, provider=provider, args=args)
+                new_draws += int(created)
+                reused_draws += int(not created)
+    alternative_scope = evaluate_alternative_draws(heads, model, checkpoint, normalization, output, args,
+                                                   alternative_pairs)
     (output / "draw_scope.json").write_text(json.dumps({"original_tasks": 12, "noises_per_task": 4,
         "original_heads": ["graph", "full"], "intervention_tasks": control_tasks, "intervention_noises_per_task": 1,
-        "interventions": ["graph_weight_full_access", "graph_observations_removed", "graph_observations_shuffled"]}, indent=2)+"\n")
-    return {"new_completed_draws": new_draws, "reused_saved_draws": reused_draws}
+        "interventions": ["graph_weight_full_access", "graph_observations_removed", "graph_observations_shuffled"],
+        "valid_alternative_pairs": len(alternative_pairs), "targets_per_pair": 2,
+        "alternative_noises_per_pair": 1, "alternative_heads": ["graph", "full"],
+        "alternative_noise_scope": "identical initial noise within each baseline/plus pair and both heads",
+        "alternative_partition": "stored final_review, previously exposed; auxiliary to original twelve native tasks",
+        "alternative_draw_scope": alternative_scope}, indent=2)+"\n")
+    return {"new_completed_draws": new_draws+alternative_scope["new_completed_draws"],
+            "reused_saved_draws": reused_draws+alternative_scope["reused_saved_draws"]}
 
 
 def parse_args(argv=None):
@@ -338,6 +483,8 @@ def parse_args(argv=None):
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--qualified-organizer", required=True, help="Reviewed finalist qualification lineage label")
+    parser.add_argument("--alternative-observation-panel", type=Path,
+        default=PROJECT_ROOT / "src/config_core/evaluation/thermal_campaign_alternative_observation_panel.json")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--evaluate-only", action="store_true", help="Recover a saved review, preserving each completed draw")
