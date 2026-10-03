@@ -57,6 +57,7 @@ CORE_TRAINING_KEYS = {
     "max_val_batches",
     "init_checkpoint_path",
     "joint_forward",
+    "campaign",
 }
 JOINT_FORWARD_KEYS = {
     "source_checkpoint_path",
@@ -186,6 +187,22 @@ def _validate_core_sections(core: Mapping[str, Any]) -> None:
         max_updates = joint_forward["max_updates"]
         if isinstance(max_updates, bool) or not isinstance(max_updates, int) or not 1 <= max_updates <= 6000:
             raise ValueError("core.training.joint_forward.max_updates must be an integer from 1 to 6000.")
+    if "campaign" in training:
+        campaign = _mapping(training["campaign"], label="core.training.campaign")
+        if workflow != "forward" or str(case.get("id", "")) != "ThermalChannel":
+            raise ValueError("The native full-case campaign is a ThermalChannel forward workflow.")
+        allowed_campaign = {
+            "name", "arm", "version", "parent", "schedule_total_epochs",
+            "require_full_epoch", "matched_fresh_initialization", "gpu_telemetry",
+            "structural_weight", "structural_ramp_start", "structural_ramp_end",
+            "microbatch_size",
+            "response_stencils",
+        }
+        _reject_unknown(campaign, allowed_campaign, label="core.training.campaign")
+        if int(campaign.get("schedule_total_epochs", 5000)) < int(training.get("epochs", 0)):
+            raise ValueError("Campaign schedule horizon must cover the stage stop.")
+        if campaign.get("require_full_epoch", True) and training.get("max_train_batches_per_epoch") is not None:
+            raise ValueError("Formal campaign profiles cannot cap training batches.")
     if workflow == "forward":
         _reject_unknown(model, {"core_honf"}, label="core.model")
         core_honf = _mapping(model.get("core_honf"), label="core.model.core_honf")

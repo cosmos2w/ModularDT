@@ -15,40 +15,31 @@ import argparse
 import copy
 import csv
 import hashlib
+import json
 import math
 import random
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
-import torch
 import numpy as np
+import torch
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
+from channelthermal.config import ChannelThermalHONFConfig
 from channelthermal.data.collation import ChannelThermalBatchCollator, ModuleCountBucketBatchSampler
 from channelthermal.data.datasets import GlobalChannelThermalDataset
-from honf_runtime.compat import (
-    autocast_context,
-    count_parameters,
-    current_timestamp,
-    ensure_dir,
-    make_grad_scaler,
-    load_trusted_checkpoint,
-    read_json,
-    recursive_to_device,
-    resolve_demo_path,
-    select_device,
-    set_seed,
-    strip_module_prefix,
-    write_json,
-)
-from honf_runtime.checkpoints import validate_checkpoint_identity
-from honf_forward_core.config import ROUTING_TYPED_TEMPERATURE_NAMES
-from honf_forward_core.training.diagnostics import HONF_DIAGNOSTIC_KEYS, compute_honf_diagnostics, organizer_regularization_loss
-from channelthermal.config import ChannelThermalHONFConfig
 from channelthermal.model import ChannelThermalHONFModel
-from channelthermal.training_tools.losses import channelthermal_field_mse
+from channelthermal.training.campaign import (
+    HYPERGRAPH_ARCHITECTURES,
+    CampaignMicrobatchLoader,
+    copy_matched_physical_initial_state,
+    gpu_contention_sample,
+    validate_campaign,
+    validate_campaign_resume,
+)
+from channelthermal.training.campaign_response import NativeCampaignResponse
 from channelthermal.training.checkpoints import (
     _file_sha256,
     _partial_initialize_model,
@@ -60,6 +51,7 @@ from channelthermal.training.checkpoints import (
 from channelthermal.training.epoch import (
     GRADIENT_DIAGNOSTIC_KEYS,
     INTERFACE_DIAGNOSTIC_KEYS,
+    _case_group_budget_settings,
     effective_local_loss_weights,
     effective_port_condition_settings,
     effective_port_global_weight,
@@ -72,7 +64,6 @@ from channelthermal.training.epoch import (
     port_cyclic_smoothness_loss,
     port_global_consistency_loss,
     predicted_consistency_weight_for_epoch,
-    _case_group_budget_settings,
     run_epoch,
 )
 from channelthermal.training.optimizer import (
@@ -88,6 +79,30 @@ from channelthermal.training.reporting import (
     repair_metrics_csv_for_append,
     save_global_loss_plots,
     write_metrics_row,
+)
+from channelthermal.training_tools.losses import channelthermal_field_mse
+from honf_forward_core.config import ROUTING_TYPED_TEMPERATURE_NAMES
+from honf_forward_core.training.diagnostics import (
+    HONF_DIAGNOSTIC_KEYS,
+    compute_honf_diagnostics,
+    organizer_regularization_loss,
+)
+from honf_forward_core.training.hypergraph_shadow import hard_value_soft_hypergraph_forward
+from honf_runtime.checkpoints import validate_checkpoint_identity
+from honf_runtime.compat import (
+    autocast_context,
+    count_parameters,
+    current_timestamp,
+    ensure_dir,
+    load_trusted_checkpoint,
+    make_grad_scaler,
+    read_json,
+    recursive_to_device,
+    resolve_demo_path,
+    select_device,
+    set_seed,
+    strip_module_prefix,
+    write_json,
 )
 
 
@@ -368,6 +383,10 @@ def run_from_config(
     training_cfg = cfg.get("training", {})
     loss_cfg = _resolve_training_loss_config(cfg.get("loss", {}), training_cfg)
     checkpoint_cfg = cfg.get("checkpointing", {})
+    campaign = validate_campaign(cfg, max_train_batches=getattr(args, "max_train_batches", None))
+    schedule_total_epochs = int(campaign.get("schedule_total_epochs", args.epochs or training_cfg.get("epochs", 200)))
+    if campaign.get("matched_fresh_initialization") and getattr(args, "initialize_checkpoint", None):
+        raise ValueError("The primary fresh campaign cannot initialize from a trained checkpoint.")
     ignored_organizer_keys = [
         key
         for key in loss_cfg
@@ -471,9 +490,43 @@ def run_from_config(
         collate_fn=collator,
     )
 
+    # Materialization and canonical copying occur before optimizer construction.
+    # The fork isolates constructor/materialization RNG from later training.
+    if campaign.get("matched_fresh_initialization") and not args.resume_checkpoint:
+        materialization_loader = CampaignMicrobatchLoader(train_loader, int(campaign.get("microbatch_size", batch_size)))
+        materialization_batch = next(iter(materialization_loader))
+        for key in ("_optimizer_start", "_optimizer_boundary", "_accumulation_weight", "_auxiliary_due"):
+            materialization_batch.pop(key, None)
+        materialization_batch = recursive_to_device(materialization_batch, device)
+        rng_devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
+        with torch.random.fork_rng(devices=rng_devices):
+            model.eval()
+            with torch.no_grad():
+                model(**make_model_inputs(materialization_batch, local_port_condition_mode="predicted", mixed_teacher_ratio=0.0,
+                                          return_predicted_port_outputs=False, return_port_global_consistency=False))
+            if model_config.core_honf.forward_architecture != "dense_pairwise_field":
+                canonical_config = copy.deepcopy(model_config)
+                canonical_config.core_honf.forward_architecture = "three_term_full_access_honf"
+                torch.manual_seed(0)
+                canonical = ChannelThermalHONFModel(canonical_config).to(device)
+                canonical.set_global_target_normalization(train_dataset.normalizer.stats, normalize_targets=bool(dataset_cfg.get("normalize_targets", False)))
+                canonical.eval()
+                with torch.no_grad():
+                    canonical(**make_model_inputs(materialization_batch, local_port_condition_mode="predicted", mixed_teacher_ratio=0.0,
+                                                  return_predicted_port_outputs=False, return_port_global_consistency=False))
+                matched_initialization = copy_matched_physical_initial_state(model, canonical)
+                del canonical
+            else:
+                matched_initialization = {"source": "fresh_native_Dense_seed0", "epoch": 0}
+        model.train()
+    else:
+        matched_initialization = None
+
     optimizer, optimizer_group_inventory = build_forward_optimizer(model, training_cfg)
     scaler = make_grad_scaler(device, bool(training_cfg.get("amp", False)))
     epochs = int(args.epochs if args.epochs is not None else training_cfg.get("epochs", 200))
+    if campaign and epochs > schedule_total_epochs:
+        raise ValueError("Requested campaign stop exceeds its unchanged absolute schedule horizon.")
     max_train_batches = args.max_train_batches if args.max_train_batches is not None else training_cfg.get("max_train_batches_per_epoch")
     max_val_batches = args.max_val_batches if args.max_val_batches is not None else training_cfg.get("max_val_batches")
     resume_checkpoint = resolve_demo_path(args.resume_checkpoint) if args.resume_checkpoint else None
@@ -498,6 +551,8 @@ def run_from_config(
         run_dir = ensure_dir(resume_checkpoint.parent)
     write_json(run_dir / "config_resolved.json", cfg)
     write_json(run_dir / "optimizer_group_inventory.json", optimizer_group_inventory)
+    if matched_initialization is not None:
+        write_json(run_dir / "initialization_inventory.json", matched_initialization)
     optimizer_inventory_announced = all(
         bool(group["scalar_count_complete"])
         for group in optimizer_group_inventory["groups"]
@@ -553,6 +608,13 @@ def run_from_config(
         "val_predicted_field_mse",
         "val_predicted_temperature_mse",
     ]
+    if campaign:
+        coverage_keys = ("epoch_cases_seen", "epoch_unique_cases", "epoch_batches", "epoch_native_batches", "epoch_optimizer_steps", "epoch_primary_field_queries", "epoch_full_case_pass")
+        fieldnames.extend(coverage_keys)
+        fieldnames.extend(f"val_{key}" for key in coverage_keys)
+        fieldnames.extend(("train_cases_per_second", "train_primary_field_queries_per_second", "schedule_total_epochs", "learning_rate"))
+        fieldnames.extend(("campaign_structural_cost", "campaign_structural_weight", "campaign_shadow_calls"))
+        fieldnames.extend(("response_loss", "response_coefficient", "response_examples", "response_wrapper_calls", "response_queries", "response_seconds"))
     if model_config.core_honf.forward_architecture == "task_trained_functional_coalescence_honf":
         detail_metric_keys = (
             "loss_functional_detail_complexity",
@@ -690,6 +752,7 @@ def run_from_config(
     if resume_checkpoint is not None:
         repair_metrics_csv_for_append(metrics_path)
         checkpoint = load_trusted_checkpoint(resume_checkpoint, map_location=device)
+        validate_campaign_resume(checkpoint, cfg)
         _validate_resume_checkpoint(
             checkpoint,
             model=model,
@@ -721,6 +784,7 @@ def run_from_config(
         best_predicted = float(best_payload.get("best_val_predicted_loss_total", math.inf))
         start_epoch = checkpoint_epoch + 1
         _restore_rng_state(checkpoint)
+        model.campaign_training_state = copy.deepcopy(checkpoint.get("campaign_training_state") or {})
         saved_selection = checkpoint.get("selection_state")
         if isinstance(saved_selection, dict) and saved_selection.get("epoch") is not None:
             selection_epoch = int(saved_selection["epoch"])
@@ -735,10 +799,11 @@ def run_from_config(
         print(f"[resume] loaded {resume_checkpoint}; continuing at epoch {start_epoch} / {epochs}")
 
     total_train_seconds = 0.0
+    response_callback = NativeCampaignResponse(model, train_dataset, dataset_cfg, campaign) if campaign and epochs > 100 else None
     total_val_seconds = 0.0
     peak_cuda_memory_mb = 0.0
     for epoch in range(start_epoch, epochs + 1):
-        model.set_training_progress(epoch=epoch, total_epochs=epochs)
+        model.set_training_progress(epoch=epoch, total_epochs=schedule_total_epochs)
         train_dataset.set_epoch(epoch)
         if hasattr(train_loader.batch_sampler, "set_epoch"):
             train_loader.batch_sampler.set_epoch(epoch)
@@ -749,9 +814,10 @@ def run_from_config(
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
         train_started = time.perf_counter()
+        gpu_before = gpu_contention_sample(device) if campaign.get("gpu_telemetry") else None
         train_metrics = run_epoch(
             model,
-            train_loader,
+            CampaignMicrobatchLoader(train_loader, int(campaign["microbatch_size"])) if campaign.get("microbatch_size") else train_loader,
             device,
             loss_cfg,
             optimizer=optimizer,
@@ -765,8 +831,28 @@ def run_from_config(
             predicted_consistency_weight=pred_consistency_weight,
             gradient_clip_norm=gradient_clip_norm,
             record_gradient_diagnostics=(epoch in {1, 2, 5, 10, 20} or epoch % 50 == 0),
+            require_full_case_pass=bool(campaign.get("require_full_epoch", False)),
+            case_weighted_metrics=bool(campaign),
+            forward_function=(lambda **inputs: hard_value_soft_hypergraph_forward(model, **inputs)) if campaign and model_config.core_honf.forward_architecture in HYPERGRAPH_ARCHITECTURES else None,
+            campaign_config=campaign,
+            absolute_epoch=epoch,
+            response_callback=response_callback,
         )
         train_wall_seconds = time.perf_counter() - train_started
+        if campaign:
+            train_metrics.update(
+                train_cases_per_second=train_metrics["epoch_cases_seen"] / max(train_wall_seconds, 1e-12),
+                train_primary_field_queries_per_second=train_metrics["epoch_primary_field_queries"] / max(train_wall_seconds, 1e-12),
+                schedule_total_epochs=float(schedule_total_epochs),
+                learning_rate=float(optimizer.param_groups[0]["lr"]),
+            )
+            with (run_dir / "epoch_telemetry.jsonl").open("a", encoding="utf-8") as telemetry:
+                telemetry.write(json.dumps({"epoch": epoch, "arm": campaign.get("arm"), "lineage": campaign,
+                                            "train_seconds": train_wall_seconds, "coverage": {key: train_metrics[key] for key in coverage_keys},
+                                            "gpu_before": gpu_before, "gpu_after": gpu_contention_sample(device) if campaign.get("gpu_telemetry") else None,
+                                            "response": getattr(model, "campaign_last_response_metrics", None),
+                                            "calibration_state": copy.deepcopy(getattr(model, "campaign_training_state", {})),
+                                            "query_scope": "primary sampled fluid field only; P0/P1/P2 auxiliary reads are additional work"}) + "\n")
         total_train_seconds += train_wall_seconds
         optimizer_group_inventory = refresh_optimizer_group_inventory(
             model,
@@ -792,6 +878,7 @@ def run_from_config(
             effective_interface_weight=eff_interface,
             predicted_consistency_weight=pred_consistency_weight,
             gradient_clip_norm=gradient_clip_norm,
+            case_weighted_metrics=bool(campaign),
         )
         if reuses_primary_validation_for_predicted_mode(effective_mode):
             predicted_val_metrics = val_metrics
@@ -831,6 +918,9 @@ def run_from_config(
             "val_wall_seconds": val_wall_seconds,
             "peak_cuda_memory_mb": epoch_peak_memory_mb,
         }
+        if not campaign:
+            # Retain historical CSV schemas for ordinary native runs.
+            row = {key: value for key, value in row.items() if not key.startswith(("epoch_", "val_epoch_"))}
         routing_keys = [key for key in row if key.startswith(("routing_", "val_routing_"))]
         if routing_keys:
             routing_row = {"epoch": epoch, **{key: row.pop(key) for key in sorted(routing_keys)}}

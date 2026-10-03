@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Dict
 
 import torch
 
@@ -39,6 +39,10 @@ class EncodedInterfaceCase:
     receiver_anchor_coords: torch.Tensor | None = None
     receiver_anchor_weights: torch.Tensor | None = None
     receiver_anchor_roles: torch.Tensor | None = None
+    module_source_ids: torch.Tensor | None = None
+    env_source_ids: torch.Tensor | None = None
+    module_characteristic_lengths: torch.Tensor | None = None
+    env_characteristic_lengths: torch.Tensor | None = None
 
     @property
     def sampling_layout(self) -> Any:

@@ -108,6 +108,9 @@ FORWARD_ARCHITECTURES = {
     "task_trained_functional_coalescence_honf",
     "source_conditioned_pairwise_honf",
     "adaptive_hyperedge_opening_honf",
+    "adaptive_receiver_hypergraph_honf",
+    "overlap_control_hypergraph_honf",
+    "local_overlap_hypergraph_honf",
 }
 
 LEGACY_ARCHITECTURE_KEYS = {
@@ -421,8 +424,12 @@ class InterfaceFieldConfig:
     functional_detail_hidden_dim: int = 32
     functional_detail_initial_logit: float = 1.6
     functional_detail_inference_mode: str = "auto"
+    # Consumed only by the opt-in shared-core campaign architectures.
+    hypergraph_options: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if not isinstance(self.hypergraph_options, dict):
+            raise TypeError("interface_model.hypergraph_options must be a dictionary.")
         if isinstance(self.routing, dict):
             self.routing = RoutingIndexConfig.from_dict(self.routing)
         if isinstance(self.case_group_budget, dict):
@@ -1218,17 +1225,10 @@ class UnifiedForwardConfig:
         if self.spatial_dim == 3:
             if self.coordinate_scale is None:
                 raise ValueError("spatial_dim=3 requires an explicit three-value coordinate_scale.")
-            if self.forward_architecture not in {
-                "legacy_honf",
-                "dense_pairwise_field",
-                "three_term_full_access_honf",
-                "adaptive_interaction_cover_honf",
-                "routed_pairwise_honf",
-                "fixed_group_pairwise_honf",
-            }:
+            from .interface_fields.capabilities import supported_spatial_dimensions
+            if 3 not in supported_spatial_dimensions(self.forward_architecture):
                 raise ValueError(
-                    "spatial_dim=3 requires legacy_honf, dense_pairwise_field, three_term_full_access_honf, adaptive_interaction_cover_honf, routed_pairwise_honf, "
-                    "or fixed_group_pairwise_honf."
+                    f"{self.forward_architecture} does not support spatial_dim=3."
                 )
             if self.forward_architecture == "legacy_honf" and self.organizer_mode != "fixed_projection":
                 raise ValueError("spatial_dim=3 legacy_honf requires fixed_projection organization.")
@@ -1323,6 +1323,8 @@ class UnifiedForwardConfig:
                 payload.pop(key, None)
             interface_payload = payload.get("interface_model")
             if isinstance(interface_payload, dict):
+                if not self.interface_model.hypergraph_options:
+                    interface_payload.pop("hypergraph_options", None)
                 if self.forward_architecture not in {
                     "sparse_incidence_group_control_honf",
                     "coalesced_sparse_incidence_honf",
@@ -1548,6 +1550,10 @@ class BatchData:
     receiver_anchor_coords: Optional[Any] = None
     receiver_anchor_weights: Optional[Any] = None
     receiver_anchor_roles: Optional[Any] = None
+    module_source_ids: Any = None
+    env_source_ids: Any = None
+    module_characteristic_lengths: Any = None
+    env_characteristic_lengths: Any = None
 
     @classmethod
     def from_dict(cls, payload: Dict[str, Any]) -> "BatchData":
@@ -1562,6 +1568,14 @@ class BatchData:
         # Keep the historical absent-measure representation unchanged.  A
         # supplied tensor is still described explicitly for adapter diagnostics.
         payload.pop("routing_geometry", None)
+        for name in (
+            "module_source_ids",
+            "env_source_ids",
+            "module_characteristic_lengths",
+            "env_characteristic_lengths",
+        ):
+            if getattr(self, name) is None:
+                payload.pop(name, None)
         if self.sampler_layout is None:
             payload.pop("sampler_layout", None)
         if self.env_weights is None:

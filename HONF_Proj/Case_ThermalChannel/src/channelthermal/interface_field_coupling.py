@@ -639,6 +639,8 @@ def forward_interface_field(
             metadata={},
             env_coords=env.env_coords,
             env_features=env.env_features,
+            module_source_ids=(structure or {}).get("module_source_ids"),
+            env_characteristic_lengths=env.env_characteristic_lengths,
             env_region_ids=getattr(env, "env_region_ids", None),
             env_hierarchy=getattr(env, "env_hierarchy", None),
             **batch_kwargs,

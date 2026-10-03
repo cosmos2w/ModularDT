@@ -45,6 +45,8 @@ class ChannelThermalEnvironment:
     env_weights: torch.Tensor | None = None
     # Optional regular-grid layout consumed only by the sampled reader.
     sampler_layout: RegularGridLayout | None = None
+    # Square root of the physical cell area, in the same coordinate units as xy.
+    env_characteristic_lengths: torch.Tensor | None = None
 
 
 class ChannelThermalEnvironmentBuilder:
@@ -208,6 +210,7 @@ class ChannelThermalEnvironmentBuilder:
             env_coords=coords.unsqueeze(0).expand(batch_size, -1, -1),
             env_features=features.unsqueeze(0).expand(batch_size, -1, -1),
             env_weights=cell_weights.unsqueeze(0).expand(batch_size, -1),
+            env_characteristic_lengths=cell_weights.sqrt().unsqueeze(0).expand(batch_size, -1),
             sampler_layout=sampler_layout,
             env_region_ids=env_region_ids,
             env_hierarchy=env_hierarchy,

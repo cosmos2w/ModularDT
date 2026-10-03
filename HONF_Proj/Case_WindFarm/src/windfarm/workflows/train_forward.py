@@ -133,6 +133,7 @@ def _as_device_batch(raw: Mapping[str, Any], device: torch.device):
         "module_centers", "module_present", "module_features", "global_context", "query_xy",
         "target_field", "env_coords", "env_features", "env_weights", "query_features",
         "receiver_anchor_coords", "receiver_anchor_weights", "receiver_anchor_roles",
+        "module_source_ids", "env_source_ids", "module_characteristic_lengths", "env_characteristic_lengths",
     ):
         value = payload.get(name)
         if value is not None and not torch.is_tensor(value):

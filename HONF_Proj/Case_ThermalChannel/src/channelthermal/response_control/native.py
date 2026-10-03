@@ -15,16 +15,18 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.nn.parameter import UninitializedParameter
-from torch.func import functional_call
 from torch import nn
+from torch.func import functional_call
+from torch.nn.parameter import UninitializedParameter
 
 from channelthermal.model import ChannelThermalHONFModel
+from honf_forward_core.interface_fields.capabilities import CAMPAIGN_ARCHITECTURES
 
 from .contracts import AbsolutePrediction, DesignInput, RoleQuery, role_receiver_world_xy
 
 NATIVE_RESPONSE_ARCHITECTURES = frozenset(
     {
+        *CAMPAIGN_ARCHITECTURES,
         "dense_pairwise_field",
         "sparse_incidence_group_control_honf",
         # Preserve the established conversion/refit path for historical runs.
@@ -97,6 +99,7 @@ class DifferentiableThermalOperator:
         normalization_stats: Mapping[str, Any],
         query_batch_size: int = 2048,
         capture_packet_inputs: bool = False,
+        organizer_shadow: bool = False,
     ) -> None:
         if query_batch_size <= 0:
             raise ValueError("query_batch_size must be positive.")
@@ -105,6 +108,7 @@ class DifferentiableThermalOperator:
         self.normalization_stats = dict(normalization_stats)
         self.query_batch_size = int(query_batch_size)
         self.capture_packet_inputs = bool(capture_packet_inputs)
+        self.organizer_shadow = bool(organizer_shadow)
         self.last_packet_inputs: Mapping[str, Any] | None = None
         self.normalize_inputs = bool(self.dataset_config.get("normalize_inputs", False))
         self.normalize_targets = bool(self.dataset_config.get("normalize_targets", False))
@@ -140,9 +144,8 @@ class DifferentiableThermalOperator:
         architecture = str(model.config.core_honf.forward_architecture)
         if architecture not in NATIVE_RESPONSE_ARCHITECTURES:
             raise ValueError(
-                "Response fitting supports intact dense_pairwise_field and "
-                "sparse_incidence_group_control_honf checkpoints, plus the "
-                "historical three_term_full_access_honf conversion target; "
+                "Response fitting requires one of the supported shared fine-interaction architectures "
+                f"{sorted(NATIVE_RESPONSE_ARCHITECTURES)}; "
                 f"got {architecture!r}."
             )
         if not model.local_coupling.has_local_surrogate:
@@ -453,6 +456,9 @@ class DifferentiableThermalOperator:
                         call_kwargs,
                         strict=True,
                     )
+                elif self.organizer_shadow:
+                    from honf_forward_core.training.hypergraph_shadow import hard_value_soft_hypergraph_forward
+                    output = hard_value_soft_hypergraph_forward(self.model, *call_args, **call_kwargs)
                 else:
                     output = self.model(*call_args, **call_kwargs)
                 prepared = output["prepared_state"]

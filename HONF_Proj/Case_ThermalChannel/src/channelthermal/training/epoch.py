@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 from typing import Any, Dict, Optional
 
 import torch
@@ -22,7 +23,6 @@ from honf_forward_core.training.diagnostics import (
     organizer_regularization_loss,
 )
 from honf_runtime.compat import autocast_context, recursive_to_device
-
 
 TASK_TRAINED_FUNCTIONAL_COALESCENCE = "task_trained_functional_coalescence_honf"
 
@@ -591,6 +591,12 @@ def run_epoch(
     predicted_consistency_weight: float,
     gradient_clip_norm: float = 0.0,
     record_gradient_diagnostics: bool = False,
+    forward_function: Any = None,
+    require_full_case_pass: bool = False,
+    case_weighted_metrics: bool = False,
+    campaign_config: Dict[str, Any] | None = None,
+    absolute_epoch: int = 0,
+    response_callback: Any = None,
 ) -> Dict[str, float]:
     """Run one train/validation epoch and return averaged loss/diagnostic scalars."""
 
@@ -599,6 +605,12 @@ def run_epoch(
     sums: Dict[str, float] = {}
     one_shot_metrics: Dict[str, float] = {}
     count = 0
+    metric_weight = 0
+    cases_seen: list[str] = []
+    field_query_points = 0
+    optimizer_steps = 0
+    native_batches = 0
+    response_metrics: Dict[str, Any] = {}
     sparsification = _routing_sparsification_settings(model)
     paircost_enabled = bool(getattr(sparsification, "enabled", False))
     budget_enabled, _budget_weight = _case_group_budget_settings(model, loss_cfg)
@@ -606,14 +618,22 @@ def run_epoch(
     for batch_idx, batch in enumerate(iterator, start=1):
         if max_batches is not None and batch_idx > int(max_batches):
             break
+        optimizer_start = bool(batch.pop("_optimizer_start", True))
+        optimizer_boundary = bool(batch.pop("_optimizer_boundary", True))
+        native_batches += int(optimizer_boundary)
+        accumulation_weight = float(batch.pop("_accumulation_weight", 1.0))
+        auxiliary_due = bool(batch.pop("_auxiliary_due", False))
         batch = recursive_to_device(batch, device)
         target = batch["field_targets"].float()
+        batch_cases = int(target.shape[0])
+        cases_seen.extend(str(value) for value in batch.get("case_id", []))
+        field_query_points += int(target.shape[0] * target.shape[1])
         with torch.set_grad_enabled(training):
             with autocast_context(device, amp):
                 port_global_weight = effective_port_global_weight(
                     loss_cfg, local_port_condition_mode, mixed_teacher_ratio
                 )
-                output = model(
+                output = (model if forward_function is None else forward_function)(
                     **make_model_inputs(
                         batch,
                         local_port_condition_mode=local_port_condition_mode,
@@ -634,6 +654,30 @@ def run_epoch(
                     predicted_consistency_weight=predicted_consistency_weight,
                 )
                 loss = loss_terms["loss"]
+                structural_cost = output.get("campaign_structural_cost")
+                structural_weight = 0.0
+                if training and campaign_config and torch.is_tensor(structural_cost):
+                    start = int(campaign_config.get("structural_ramp_start", 26))
+                    end = int(campaign_config.get("structural_ramp_end", 100))
+                    state = getattr(model, "campaign_training_state", {})
+                    if absolute_epoch >= start and len(state.get("structural_scale_samples", [])) < 5:
+                        parameters = [parameter for name, parameter in model.named_parameters()
+                                      if name.startswith("core.backend.organizer.") and parameter.requires_grad]
+                        if parameters and structural_cost.requires_grad:
+                            task_grad = torch.autograd.grad(loss, parameters, retain_graph=True, allow_unused=True)
+                            cost_grad = torch.autograd.grad(structural_cost, parameters, retain_graph=True, allow_unused=True)
+                            task_norm = sum(float(value.detach().square().sum()) for value in task_grad if value is not None) ** 0.5
+                            cost_norm = sum(float(value.detach().square().sum()) for value in cost_grad if value is not None) ** 0.5
+                            # An absent task signal cannot justify stronger pressure.
+                            scale = min(0.02 * task_norm / max(cost_norm, 1e-12), float(campaign_config.get("structural_weight", 0.001))) if task_norm > 1e-10 else 0.0
+                            state.setdefault("structural_scale_samples", []).append(scale)
+                            state["structural_scale"] = float(statistics.median(state["structural_scale_samples"]))
+                            state["last_task_organizer_gradient_norm"] = task_norm
+                            state["last_cost_organizer_gradient_norm"] = cost_norm
+                            model.campaign_training_state = state
+                    ramp = min(max((absolute_epoch - start + 1) / max(end - start + 1, 1), 0.0), 1.0)
+                    structural_weight = float(state.get("structural_scale", 0.0)) * ramp
+                    loss = loss + structural_weight * structural_cost
                 loss_field = loss_terms["loss_field"]
                 loss_internal = loss_terms["loss_internal_temperature"]
                 loss_interface = loss_terms["loss_interface"]
@@ -647,13 +691,17 @@ def run_epoch(
                 loss_paircost = loss_terms["loss_paircost"]
                 loss_group_budget = loss_terms["loss_group_budget"]
         if training:
-            optimizer.zero_grad(set_to_none=True)
+            if optimizer_start:
+                optimizer.zero_grad(set_to_none=True)
+            if auxiliary_due and response_callback is not None and absolute_epoch > 100:
+                response_loss, response_metrics = response_callback(absolute_epoch, loss, accumulation_weight)
+                loss = loss + response_loss
             clip_norm = float(gradient_clip_norm or 0.0)
-            capture_update = bool(record_gradient_diagnostics and batch_idx == 1)
+            capture_update = bool(record_gradient_diagnostics and optimizer_boundary and optimizer_steps == 0)
             routing_model = getattr(getattr(model.config, "core_honf", None), "forward_architecture", "") == "routed_pairwise_honf"
             if scaler is not None and scaler.is_enabled():
-                scaler.scale(loss).backward()
-                if clip_norm > 0.0 or capture_update:
+                scaler.scale(loss * accumulation_weight).backward()
+                if optimizer_boundary and (clip_norm > 0.0 or capture_update):
                     # AMP gradients must be unscaled before clipping; otherwise
                     # the threshold applies to scaled values and is meaningless.
                     scaler.unscale_(optimizer)
@@ -674,12 +722,16 @@ def run_epoch(
                             (name, value) for name, value in named_gradients
                             if name.startswith("core.backend.router.")
                         ])
-                if clip_norm > 0.0:
+                if optimizer_boundary and clip_norm > 0.0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
-                scaler.step(optimizer)
-                scaler.update()
+                if optimizer_boundary:
+                    scaler.step(optimizer)
+                    # A decreased GradScaler scale indicates a skipped nonfinite update.
+                    scale_before = float(scaler.get_scale())
+                    scaler.update()
+                    optimizer_steps += int(float(scaler.get_scale()) >= scale_before)
             else:
-                loss.backward()
+                (loss * accumulation_weight).backward()
                 named_gradients = [
                     (name, parameter.grad)
                     for name, parameter in model.named_parameters()
@@ -697,9 +749,11 @@ def run_epoch(
                             (name, value) for name, value in named_gradients
                             if name.startswith("core.backend.router.")
                         ])
-                if clip_norm > 0.0:
+                if optimizer_boundary and clip_norm > 0.0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
-                optimizer.step()
+                if optimizer_boundary:
+                    optimizer.step()
+                    optimizer_steps += 1
             if capture_update:
                 named_updates = [
                     (name, parameter.detach() - before[name])
@@ -801,6 +855,10 @@ def run_epoch(
                 for key in detail_metric_keys:
                     metric_tensors[key] = loss_terms[key]
             metrics = pack_scalar_metrics(metric_tensors)
+            if torch.is_tensor(structural_cost):
+                metrics["campaign_structural_cost"] = float(structural_cost.detach())
+                metrics["campaign_structural_weight"] = structural_weight
+                metrics["campaign_shadow_calls"] = float(output.get("campaign_shadow_calls", 0))
             metrics.update(
                 {
                     "effective_port_global_consistency_weight": float(port_global_weight),
@@ -876,7 +934,8 @@ def run_epoch(
                 # NaN is intentional and avoids fabricated K=1/zero metrics.
                 metrics.update({key: math.nan for key in HONF_DIAGNOSTIC_KEYS})
         for key, value in metrics.items():
-            sums[key] = sums.get(key, 0.0) + float(value)
+            sums[key] = sums.get(key, 0.0) + float(value) * (batch_cases if case_weighted_metrics else 1)
+        metric_weight += batch_cases if case_weighted_metrics else 1
         count += 1
         iterator.set_postfix(loss=f"{metrics['loss_total']:.3e}", field=f"{metrics['field_mse']:.3e}")
     if count == 0:
@@ -925,7 +984,23 @@ def run_epoch(
                 }
             )
         return empty_metrics
-    averaged = {key: value / count for key, value in sums.items()}
+    if require_full_case_pass:
+        expected = list(getattr(loader.dataset, "selected_case_ids", []))
+        if not expected or len(cases_seen) != len(expected) or sorted(cases_seen) != sorted(str(value) for value in expected):
+            raise RuntimeError("Campaign epoch did not visit each selected native case exactly once.")
+    averaged = {key: value / metric_weight for key, value in sums.items()}
+    averaged.update(
+        epoch_cases_seen=float(len(cases_seen)),
+        epoch_unique_cases=float(len(set(cases_seen))),
+        epoch_batches=float(count),
+        epoch_native_batches=float(native_batches),
+        epoch_optimizer_steps=float(optimizer_steps),
+        epoch_primary_field_queries=float(field_query_points),
+        epoch_full_case_pass=float(bool(cases_seen) and len(cases_seen) == len(loader.dataset) and len(set(cases_seen)) == len(loader.dataset)),
+    )
+    averaged.update({key: value for key, value in response_metrics.items() if isinstance(value, (int, float))})
+    if response_metrics:
+        model.campaign_last_response_metrics = response_metrics
     if training:
         averaged.update({key: math.nan for key in GRADIENT_DIAGNOSTIC_KEYS})
         averaged.update(one_shot_metrics)

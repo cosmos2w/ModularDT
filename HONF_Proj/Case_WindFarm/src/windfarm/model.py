@@ -17,6 +17,7 @@ from typing import Any
 import torch
 from honf_forward_core.config import BatchData, UnifiedForwardConfig
 from honf_forward_core.interface_fields import InterfaceFieldCore
+from honf_forward_core.interface_fields.capabilities import CAMPAIGN_ARCHITECTURES
 from honf_forward_core.model import HONFNeuralField
 from torch import nn
 
@@ -28,6 +29,7 @@ INTERFACE_FIELD_ARCHITECTURES = frozenset(
         "three_term_full_access_honf",
         "adaptive_interaction_cover_honf",
         "sparse_incidence_group_control_honf",
+        *CAMPAIGN_ARCHITECTURES,
     }
 )
 
@@ -91,6 +93,10 @@ def _as_batch(value: BatchData | Mapping[str, Any]) -> BatchData:
         "receiver_anchor_coords",
         "receiver_anchor_weights",
         "receiver_anchor_roles",
+        "module_source_ids",
+        "env_source_ids",
+        "module_characteristic_lengths",
+        "env_characteristic_lengths",
     }
     for name in tensor_fields:
         item = payload.get(name)
@@ -160,6 +166,16 @@ class WindFarmForwardModel(nn.Module):
         if callable(getter):
             return dict(getter())
         return {"epoch": None, "total_epochs": None}
+
+    def export_typed_hypergraph(self, prepared: PreparedWindFarmCase) -> dict[str, Any]:
+        """Export the shared input-only organization for inverse consumers."""
+
+        if prepared.architecture != self.architecture:
+            raise ValueError("Prepared WindFarm state belongs to another architecture.")
+        exporter = getattr(self.core, "export_typed_hypergraph", None)
+        if not callable(exporter) or prepared.dense_prepared is None:
+            raise TypeError("This architecture does not expose a typed hypergraph.")
+        return exporter(prepared.dense_prepared)
 
     def prepare_case(self, batch_value: BatchData | Mapping[str, Any]) -> PreparedWindFarmCase:
         """Encode one batch of layouts and prepare its reusable case state."""

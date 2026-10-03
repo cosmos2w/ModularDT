@@ -105,6 +105,13 @@ class NativeCase:
     def env_weights(self) -> np.ndarray:
         return self.environment.weights_D3
 
+    @property
+    def env_characteristic_lengths(self) -> np.ndarray:
+        """Cube root of the represented physical token volume, in rotor diameters."""
+
+        cell_volume_D3 = self.support.volume_D3 / float(np.prod(self.environment.token_shape))
+        return np.full(self.env_coords.shape[0], cell_volume_D3 ** (1.0 / 3.0), dtype=np.float32)
+
     def geometry_for_queries(self, query_coords_D: Any) -> dict[str, np.ndarray]:
         """Return query coordinates/features for arbitrary valid coordinates."""
 
@@ -383,6 +390,7 @@ class WindFarmNativeDataset:
             "env_coords": case.env_coords.copy(),
             "env_features": case.env_features.copy(),
             "env_weights": case.env_weights.copy(),
+            "env_characteristic_lengths": case.env_characteristic_lengths,
             "query_xy": query_xy,
             "query_features": query_features,
             "query_time": None,
@@ -431,6 +439,10 @@ def collate_windfarm(samples: list[Mapping[str, Any]]) -> dict[str, Any]:
         "case_name": [str(sample["case_name"]) for sample in samples],
         "metadata": [sample["metadata"] for sample in samples],
     }
+    if all("env_characteristic_lengths" in sample for sample in samples):
+        result["env_characteristic_lengths"] = np.stack([
+            np.asarray(sample["env_characteristic_lengths"], dtype=np.float32) for sample in samples
+        ])
     anchor_fields = (
         "receiver_anchor_coords",
         "receiver_anchor_weights",
@@ -499,6 +511,9 @@ def batch_to_batch_data(batch: Mapping[str, Any]) -> Any:
     }
     if "env_weights" in fields and batch.get("env_weights") is not None:
         payload["env_weights"] = batch["env_weights"]
+    for name in ("module_source_ids", "env_source_ids", "module_characteristic_lengths", "env_characteristic_lengths"):
+        if name in fields and batch.get(name) is not None:
+            payload[name] = batch[name]
     for name in (
         "receiver_anchor_coords",
         "receiver_anchor_weights",
@@ -575,6 +590,7 @@ def case_batch(
         env_features=torch.from_numpy(case.env_features[None].copy()),
         query_features=torch.from_numpy(geometry["query_features"][None].copy()),
         env_weights=torch.from_numpy(case.env_weights[None].copy()),
+        env_characteristic_lengths=torch.from_numpy(case.env_characteristic_lengths[None].copy()),
     )
     include_anchors = (
         case.receiver_anchor_coords is not None

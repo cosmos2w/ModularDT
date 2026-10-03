@@ -20,6 +20,7 @@ from .adaptive_interaction_cover import (
     MechanismPlan,
     compile_mechanism_execution_view,
 )
+from .capabilities import CAMPAIGN_ARCHITECTURES
 from .common import SharedInterfaceContext
 from .dense_pairwise import DensePairwiseField
 from .group_operator import SparseInterfaceHONF, SparseLayoutCache, packed_coarse_group_sources
@@ -353,6 +354,7 @@ class InterfaceFieldCore(nn.Module):
         self.receiver_fourier = FourierFeatures(None, int(config.query_fourier_frequencies))
         if config.forward_architecture in {
             "three_term_full_access_honf",
+            *CAMPAIGN_ARCHITECTURES,
             "adaptive_interaction_cover_honf",
             "fixed_group_pairwise_honf",
             "group_control_pairwise_honf",
@@ -423,6 +425,18 @@ class InterfaceFieldCore(nn.Module):
                 frequencies,
                 activation_checkpointing=bool(options.activation_checkpointing),
                 optional_native_policy=True,
+            )
+        elif config.forward_architecture in CAMPAIGN_ARCHITECTURES:
+            from .typed_hypergraph_field import TypedHypergraphField
+
+            self.backend = TypedHypergraphField(
+                hidden, int(options.message_hidden_dim), heads, frequencies,
+                architecture=config.forward_architecture,
+                spatial_dim=int(config.spatial_dim),
+                module_characteristic_length=float(config.module_radius),
+                control_dim=int(options.group_control_dim),
+                activation_checkpointing=bool(options.activation_checkpointing),
+                options=options.hypergraph_options,
             )
         elif config.forward_architecture == "three_term_full_access_honf":
             self.backend = DensePairwiseField(
@@ -848,6 +862,7 @@ class InterfaceFieldCore(nn.Module):
 
     def set_training_progress(self, *, epoch: int, total_epochs: int | None = None) -> None:
         if self.config.forward_architecture in {
+            *CAMPAIGN_ARCHITECTURES,
             "budgeted_group_control_honf",
             "coalesced_sparse_incidence_honf",
             "converged_identity_preserving_coalescence_honf",
@@ -860,6 +875,7 @@ class InterfaceFieldCore(nn.Module):
 
     def selection_state(self) -> dict[str, int | None]:
         if self.config.forward_architecture in {
+            *CAMPAIGN_ARCHITECTURES,
             "budgeted_group_control_honf",
             "coalesced_sparse_incidence_honf",
             "converged_identity_preserving_coalescence_honf",
@@ -1023,6 +1039,14 @@ class InterfaceFieldCore(nn.Module):
             receiver_anchor_coords=anchor_coords,
             receiver_anchor_weights=anchor_weights,
             receiver_anchor_roles=anchor_roles,
+            module_source_ids=batch.module_source_ids,
+            env_source_ids=batch.env_source_ids,
+            module_characteristic_lengths=(
+                batch.module_characteristic_lengths
+                if batch.module_characteristic_lengths is not None
+                else module_present.new_full(module_present.shape, float(self.config.module_radius))
+            ),
+            env_characteristic_lengths=batch.env_characteristic_lengths,
         )
 
     def prepare(
@@ -1094,6 +1118,12 @@ class InterfaceFieldCore(nn.Module):
                 cover_tree_cache_hits=tree_cache_hits,
                 return_routing_maps=bool(return_routing_maps),
             )
+        elif self.config.forward_architecture in CAMPAIGN_ARCHITECTURES:
+            backend_state = self.backend.prepare(
+                encoded, module_states,
+                interaction_context=interaction_context,
+                return_routing_maps=bool(return_routing_maps),
+            )
         elif self.config.forward_architecture == "sparse_interface_honf":
             if not isinstance(layout_cache, SparseLayoutCache):
                 raise ValueError("sparse_interface_honf requires a SparseLayoutCache built from module ports.")
@@ -1156,6 +1186,7 @@ class InterfaceFieldCore(nn.Module):
                 0
                 if self.config.forward_architecture in {
                     "three_term_full_access_honf",
+                    *CAMPAIGN_ARCHITECTURES,
                     "adaptive_interaction_cover_honf",
                     "fixed_group_pairwise_honf",
                     "group_control_pairwise_honf",
@@ -1210,6 +1241,7 @@ class InterfaceFieldCore(nn.Module):
             })
         elif self.config.forward_architecture in {
             "adaptive_interaction_cover_honf",
+            *CAMPAIGN_ARCHITECTURES,
             "fixed_group_pairwise_honf",
             "group_control_pairwise_honf",
             "phase_shared_group_control_honf",
@@ -1289,6 +1321,12 @@ class InterfaceFieldCore(nn.Module):
             if self.config.forward_architecture != "budgeted_group_control_honf"
             else backend_state.get("case_group_budget"),
         )
+
+    def export_typed_hypergraph(self, prepared: PreparedInterfaceField) -> dict[str, Any]:
+        """Common input-only inverse export, separate from the legacy organizer."""
+        if self.config.forward_architecture not in CAMPAIGN_ARCHITECTURES:
+            raise ValueError("typed hypergraph export requires a registered campaign architecture")
+        return self.backend.export_typed_state(prepared.backend_state)
 
     def build_layout(
         self,
@@ -1435,6 +1473,14 @@ class InterfaceFieldCore(nn.Module):
                 if not values or not all(torch.is_tensor(value) for value in values):
                     continue
                 first = values[0]
+                if key.startswith("hypergraph_") and key.endswith((
+                    "_unique_pairs", "_eligible_pairs", "_repeated_paths_removed",
+                    "_executed_rows", "_padded_rows", "_fine_calls",
+                    "_near_mandatory_pairs", "_near_full_pairs",
+                    "_structural_numerator", "_structural_denominator",
+                )):
+                    aux[key] = torch.stack(values).sum()
+                    continue
                 if key.startswith("cover_") and key.endswith((
                     "_raw_active_frontier_nodes",
                     "_source_bearing_active_frontier_nodes",

@@ -76,6 +76,7 @@ def save_checkpoint(
             "model_config": config_payload,
             "model_state_dict": model.state_dict(),
             "selection_state": model.selection_state(),
+            "campaign_training_state": copy.deepcopy(getattr(model, "campaign_training_state", {})),
             "optimizer_state_dict": None if optimizer is None else optimizer.state_dict(),
             "optimizer_group_inventory": copy.deepcopy(optimizer_group_inventory),
             "scaler_state_dict": None if scaler is None else scaler.state_dict(),

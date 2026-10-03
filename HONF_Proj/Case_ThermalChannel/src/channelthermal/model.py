@@ -137,6 +137,18 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
 
         return self.core.selection_state()
 
+    def export_typed_hypergraph(self, prepared: PreparedInterfaceChannelThermalCase) -> Dict[str, Any]:
+        """Export final-phase shared organization without the legacy plan adapter."""
+
+        if not isinstance(prepared, PreparedInterfaceChannelThermalCase):
+            raise TypeError("Typed export requires a prepared interface-field thermal case.")
+        if prepared.architecture != self.config.core_honf.forward_architecture:
+            raise ValueError("Prepared Thermal state belongs to another architecture.")
+        exporter = getattr(self.core, "export_typed_hypergraph", None)
+        if not callable(exporter):
+            raise TypeError("This architecture does not expose a typed hypergraph.")
+        return exporter(prepared.prepared)
+
     def extract_hypergraph_plan(
         self,
         organizer_aux: Dict[str, Any],
@@ -307,6 +319,8 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
             metadata={},
             env_coords=env.env_coords,
             env_features=env.env_features,
+            module_source_ids=(structure or {}).get("module_source_ids"),
+            env_characteristic_lengths=env.env_characteristic_lengths,
         )
         # Encode/organize only. The ChannelThermal local response changes
         # module tokens, so decoding a field here would be discarded work.
