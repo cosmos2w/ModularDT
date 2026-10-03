@@ -6,9 +6,11 @@ P0/P1/P2 coupling and the frozen Stage-A local surrogate. Run1804 selected
 e4738 remains an evaluation-only mature reference. Wind scientific training
 is paused; Wind is used for shared-core compatibility checks.
 
-**State: full-dataset screening and reviewed control continuation are running.**
-Snapshot at 2026-10-03 04:24 UTC: both controls and overlap e100 completed;
-H-tree completed e27; B-fine completed e387 on its way to 500 and H-local e78.
+**State: four e100 screens and the first e500 control are complete; the ladder continues.**
+Saved training snapshot at 2026-10-03 05:02 UTC: B-fine completed e500; B-native is at e114,
+H-tree e41, H-overlap e118 and H-local e111. Their exact e100 screens are
+complete except H-tree. The table and progress figure use the same saved snapshot.
+Physical results below also include evaluations completed after that snapshot.
 Work is on `agent/honf-core-next`. The initial
 finite portfolio is Runs 2201–2205; two repaired screens are available only
 when a concrete failure warrants them. No 5,000-epoch job is authorized to
@@ -16,11 +18,11 @@ start automatically.
 
 | Run | Strategy | Complete epoch | Sampled development field / T MSE | Current action |
 |---|---|---:|---|---|
-| 2201 | B-native | 100 | 0.10121 / 0.06007 | Screen and physical panel complete |
-| 2202 | B-fine | 387 | 0.04638 / 0.01840 | GPU1; exact e100→500 continuation |
-| 2203 | H-tree | 27 | 1.31840 / 0.45976 | GPU1; reviewed exact e8 engineering resume |
-| 2204 | H-overlap | 100 | 0.25209 / 0.25632 | Physical screen complete; 500 queued |
-| 2205 | H-local | 78 | 0.25544 / 0.13666 | GPU2; fresh full-dataset screen |
+| 2201 | B-native | 114 | 0.08819 / 0.03938 | GPU1; exact e100→500 continuation |
+| 2202 | B-fine | 500 | 0.02883 / 0.01547 | Exact500 and selected493 full90 physical evaluations complete |
+| 2203 | H-tree | 41 | 0.53763 / 0.38305 | GPU1; reviewed exact e8 engineering resume |
+| 2204 | H-overlap | 118 | 0.23558 / 0.24502 | GPU2; exact e100→500 continuation |
+| 2205 | H-local | 111 | 0.17072 / 0.10870 | GPU2; exact e100→500 continuation |
 
 These MSEs use the maintained normalized, sampled 90-case validation task;
 they are neither full-grid physical errors nor the final 89-case comparison.
@@ -129,15 +131,54 @@ focused repair/evaluation/manual-launch suite passes 118 tests; one optional
 native-resource test was skipped in that CPU suite. Actual native permission
 isolation and checkpoint/gradient audits were executed separately.
 
-The healthy B-fine e100 control is advancing to500 on GPU1 alongside H-tree,
-within verified memory headroom (about 29.8/49.1 GiB combined process memory).
-Their epochs after this launch are labelled **owned contention**; e8 tree
+The healthy B-fine e100 control advanced to 500 on GPU1 alongside H-tree,
+within verified memory headroom. Their epochs after this launch are labelled
+**owned contention**; e8 tree
 train/validation 411.81/36.48 s show a material effect. They are excluded from
 isolated speed rankings. B-fine e101 visited all 600 records with 13 steps and
 policy 2 active, plus one train-only response pair: 2 examples/4,324 role queries,
 0.571 s response forward work. Five training-family gradient calibrations all
 hit the conservative 0.1 coefficient cap; the e101–200 ramp is recorded rather
 than claiming the nominal 5% gradient target was reached.
+
+B-fine completed all 500 full epochs: 300,000 case visits, 307.2 million primary
+queries and 6,500 optimizer steps. Its exact e500 checkpoint has 120 active
+AdamW states at step 6,500, all four RNG streams, response calibration, policy 2
+and the unchanged 5,000-epoch schedule horizon. Both predeclared field and
+temperature selections within this stage actually select e493; immutable copies,
+hashes and the original selection metrics are retained. Exact e500 and selected
+e493 are evaluated separately throughout; selection is not relabelled as e500.
+
+After B-fine finished, GPU1 started B-native's strict e100→500 continuation.
+Its first ten response-active epochs average 28.73/2.15 seconds train/validation
+with 5,338 MiB maximum allocated memory. Exact e125 has all 181 active optimizer
+states at step 1,625 and preserved RNG/calibration/schedule state. H-tree remains
+on GPU1; recent complete epoch times around 160 seconds improve the forecast
+after the control handoff, but executor work remains unchanged. At 05:16 UTC
+GPU1 reports about 34.6 GiB used with 12.8 GiB free.
+
+H-overlap and H-local both continued from audited exact e100 states to 500 on
+GPU2, after their complete physical screens and memory checks. At 05:16 UTC
+GPU2 reports about 27.7 GiB used with 19.6 GiB free. Overlap's recent
+ten complete epochs have median total time 60.06 seconds; Local's first five
+response-active epochs have median 66.08 seconds. These are **owned contention**
+measurements, not isolated architecture rankings. Around e112/e105 these rates
+forecast roughly 6.4/7.3 more hours to 500, conditional on unchanged contention.
+A disposable CUDA projection prototype additionally occupied GPU2 during
+05:07:08–05:07:33 UTC; affected epoch intervals are recorded. It passed numerical
+parity but gave no consistent GPU timing gain, so it was not adopted and no
+trainer was restarted. Overlap's exact e125 audit passes finite model/optimizer,
+unchanged frozen Stage-A, all 600 cases per epoch and preserved structural
+calibration; new response runtime state is separately identified. Its validation
+field/T window means improve 0.27943/0.24426 at e101–110 to 0.24836/0.23420 at
+e116–125, while response loss rises 0.01953→0.02065. This establishes no response
+improvement.
+
+Local's exact e125 audit passes the same full-state and frozen-physics checks.
+Its e101–110 to e116–125 window means change field 0.19911→0.19627,
+temperature 0.09367→0.09769 and response loss 0.008490→0.007889. Thus early
+response improvement coexists with slightly worse temperature; the organizing
+strategy remains under its authorized 500-epoch review.
 
 H-overlap's first seven epochs measure median training/validation 42.58/1.20
 seconds and peak allocated memory 10.26 GiB. Its initial e100 screen forecast
@@ -151,16 +192,17 @@ Dense controls lack this typed ledger; primary query counts do not replace it.
 ## First complete physical screen and pre-pressure repair
 
 B-native exact e100, B-fine exact e100 and Run1804 selected e4738 were evaluated on the same
-18 input-selected development cases at their full native 64x128 grids.
+18 input-selected development cases at their full native 64x128 grids. The
+completed H-overlap and H-local screens use the same cases and physical evaluator.
 Case IDs are preserved for subsequent screens. Equal-case fluid RMSE is:
 
-| Field | B-native e100 | B-fine e100 | H-overlap e100 | Mature Run1804 e4738 |
-|---|---:|---:|---:|---:|
-| u | 0.0698578 | 0.0738634 | 0.0908794 | 0.00590808 |
-| v | 0.00511782 | 0.0106410 | 0.00976146 | 0.000337623 |
-| p | 0.0252665 | 0.0302576 | 0.0358716 | 0.00210899 |
-| omega | 0.217016 | 0.302935 | 0.303445 | 0.0258649 |
-| temperature | 1.43558 | 1.67576 | 3.27004 | 0.187831 |
+| Field | B-native e100 | B-fine e100 | H-overlap e100 | H-local e100 | Mature Run1804 e4738 |
+|---|---:|---:|---:|---:|---:|
+| u | 0.0698578 | 0.0738634 | 0.0908794 | 0.0769374 | 0.00590808 |
+| v | 0.00511782 | 0.0106410 | 0.00976146 | 0.0104132 | 0.000337623 |
+| p | 0.0252665 | 0.0302576 | 0.0358716 | 0.0391842 | 0.00210899 |
+| omega | 0.217016 | 0.302935 | 0.303445 | 0.286309 | 0.0258649 |
+| temperature | 1.43558 | 1.67576 | 3.27004 | 1.69682 | 0.187831 |
 
 These benchmark physical-scale quantities each retain their own units; they
 are not averaged into one physical scalar. B-fine is finite and improves
@@ -174,6 +216,32 @@ development population. Excluding duplicate0273, equal-case fluid u/T RMSE is
 0.005707/0.217622/0.344636. These full-population results are saved separately
 from the 18-case screen and will anchor the 500/1000 comparisons. They retain
 the same predicted ports, frozen Stage-A and previously exposed benchmark limits.
+
+B-fine's completed 500-epoch stage has now been evaluated on the same full
+population. All 90 native-grid predictions are finite for exact e500 and the
+stage's field-selected e493. The canonical 89-case equal-case comparison is:
+
+| Physical quantity | B-fine exact e500 | B-fine selected e493 | Mature selected e4738 |
+|---|---:|---:|---:|
+| Fluid u RMSE | 0.0265570 | 0.0254532 | 0.00572097 |
+| Fluid temperature RMSE | 0.849954 | 0.714392 | 0.218656 |
+| Near-fluid temperature RMSE | 0.778794 | 0.791955 | — |
+| Far-fluid temperature RMSE | 0.860734 | 0.694040 | — |
+| Surface-temperature RMSE | 0.739772 | 0.804033 | — |
+| q_normal proxy RMSE | 3.75080 | 3.69446 | — |
+| Material-peak RMSE | 0.637695 | 0.649535 | 0.346587 |
+| Pressure-difference absolute error | 0.00677007 | 0.00740678 | — |
+
+The complete per-case roles and separate compatibility90 aggregates are saved.
+Independent recomputation from all 270 case archives (these two versions and
+mature) matches 6,480 metrics and both aggregations within 4e-15, with identical
+references, input data and masks. Selecting e493 improves fluid temperature by
+15.95% relative to exact e500, but worsens near-fluid temperature, surface,
+material peak and pressure errors. It remains worse than mature on 13 of 14
+audited roles; the small effective-heat-transfer exception is not a general win.
+This supports continuing the healthy matched control, while preserving physical
+tradeoffs and the maturity difference. Existing-family finite-response reviews
+for both versions are in progress.
 
 Review found the original structural calibration's first five microbatches
 could belong to the same M bucket. Before e26 pressure, calibration policy 2
@@ -230,12 +298,12 @@ Figure index: [full-epoch training progress](../../diagnostics/generated/shared_
 
 ![Full-epoch training and measured elapsed work](../../diagnostics/generated/shared_core_campaign_20261002/figures/campaign_training_progress.png)
 
-The inspected snapshot contains 100/387/27/100/78 complete epochs for
+The inspected snapshot contains 114/500/41/118/111 complete epochs for
 B-native/B-fine/H-tree/H-overlap/H-local. Every displayed epoch has 600 distinct
 training cases, 13 optimizer steps and 614,400 primary sampled queries. B-fine
-e387 normalized sampled field/T MSE is 0.04638/0.01840; this is a continuing
-training trend, not a completed 500-epoch or full-grid physical result.
-Successful train/validation time sums are 0.741/1.464/1.822/1.214/1.053 hours;
+e500 normalized sampled field/T MSE is 0.02883/0.01547; the full-grid physical
+evaluation is reported separately above.
+Successful train/validation time sums are 0.861/1.916/2.469/1.494/1.559 hours;
 discarded partial work and storage replay overhead remain recorded separately.
 Owned contention and H-tree engineering changes affect timing. These curves
 establish actual model age and work, not sparse speedups or mature-equivalent
@@ -262,6 +330,16 @@ pairs, while each hard/soft whole-epoch path still executes 253,186,272 rows
 in 3,177 fine calls. This is a fidelity/support tradeoff with zero measured
 training executor saving. The healthy curve continues to 500; H-local tests
 the distinct near-access protection hypothesis from fresh initialization.
+
+H-local's completed 18-case e100 screen has temperature RMSE 1.69682,
+near/far 1.75737/1.67732, surface 1.67691 and material peak 1.53794. Its
+q_normal proxy RMSE is 4.76873 and pressure-difference error 0.01839. Local
+protection improves temperature and near/interface behavior versus H-overlap
+at the same training age, but does not generally beat Dense/Fine or mature.
+On the four directly captured native graph cases it selects 7,692,869 of
+7,743,578 eligible pairs (99.345%), preserving all positive near envelopes.
+It still executes 7,995,072 rows in 644 calls. The current policy therefore
+offers almost all-access support and no measured executor saving.
 
 ![Actual overlapping source groups and native executed work](../../diagnostics/generated/shared_core_campaign_20261002/figures/overlap_e100_graph_work.png)
 
@@ -310,11 +388,14 @@ organizer. Reconstruction from twelve saved native QE scopes matches the
 saved normal control probes and summaries bitwise. Physical inference for these two controls is pending the
 500-epoch reviews; helper tests alone establish no fidelity gain.
 
-Run1804 and both fresh e100 controls have completed finite-response evaluation
+Run1804, both fresh e100 controls and H-overlap/H-local exact e100 have completed finite-response evaluation
 on all eight existing non-training families (11 absolute states per family).
 Fields are decoded once and saved with physical increments, pressure and
 per-module peaks; the zero-change comparator and reference magnitudes remain
 separate. No response-relative quality is claimed without established floors.
+The two H screens' saved-array response audits are underway; the selected
+response figure below currently shows the three completed reference/control
+baselines, not the newly saved H comparisons.
 The mature local-inverse job also encountered ENOSPC on its eighth case;
 individual complete trials are retained and resume now skips verified arrays.
 Atomic numerical/JSON writes preserve previous complete files on interruption.
@@ -367,6 +448,18 @@ performed. The saved design trails contain sensors/peaks/pressure rather than
 full postoptimization field grids. The revised PDF master and embedding raster
 were visually inspected; superseded visual exports were replaced, while both
 numerical evaluation histories remain retained.
+
+CPU one-thread inference timing is also complete for mature e4738 and both
+e100 controls, using low/high-M cases 0274/0692, Q14/full8192, two warmups and
+five repetitions with checkpoint hashes unchanged. Complete-wrapper median
+seconds at low/high M are mature 0.385/0.418 (Q14), 1.245/1.418 (full grid);
+Dense100 0.388/0.371 and 1.231/1.341; Fine100 0.372/0.383 and 1.906/1.247.
+Prepared small-Q decode is about 0.0028–0.0033 seconds, excluding preparation.
+Raw samples, p90 and occupancy are saved; host load is shared with the four
+trainers, so these are CPU baselines rather than isolated or GPU speed rankings.
+Legacy Dense/Fine fine-executor rows and calls are unavailable in their current
+telemetry: they remain unmeasured, not zero. Finalist dense/rectangular GPU
+timing and physical-row comparisons are still required.
 
 ## Remaining ladder and delivery
 
