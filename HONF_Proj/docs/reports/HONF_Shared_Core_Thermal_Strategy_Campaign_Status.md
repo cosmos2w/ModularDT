@@ -8,41 +8,45 @@ is paused; Wind is used for shared-core compatibility checks.
 
 | Result | Measured gain so far | Measured miss / next decision |
 |---|---|---|
-| Predictor | Fine's selected1000-stage fluid T/u errors improve 21.24%/23.41% over its selected500-stage version. Native and Fine retain the legitimate predicted-port physics. | Fine's canonical89 T RMSE 0.56269 remains above mature 0.21866; heat-flux proxy, h and pressure tradeoffs remain. Complete the matched Native and H1000 comparisons. |
-| Organizer | Native Tree/Overlap/Local100 subset execution passes output/first-gradient parity. Overlap's selected292 stage500 graph has measurable utility: control-identity and full-access/fixed-control interventions each worsen 23 of 24 mean physical roles on the four-case panel. | Selected292 full-query subset execution reduces fine-reader rows by 4.70–11.77%, but complete-wrapper latency increases 19.69–23.37%. Geometry controls have mixed gains and misses; graph utility does not establish adequate absolute fidelity. Finalist evaluation remains pending. Training uses the dense masked reference. |
-| Inverse | Fine972's matched frozen observed/held means decline 35.66%/20.39% over thirty steps. | Heat RMSE rises 18.58% and endpoint-pressure error 69.54%; all graph/ungrouped updates are full-joint fallback. Finalist local inverse and qualified paired heads remain pending. |
+| Predictor | Both controls completed 1,000 epochs. Native selected e962 has canonical89 fluid T RMSE 0.39130 versus its prior selected e456 at 0.56072; Fine selected e972 improves T/u errors 21.24%/23.41% over its 500-stage selection. | Both trail mature T RMSE 0.21866. Surface, heat-flux proxy, h and pressure have separate tradeoffs. Complete the distinct H1000 comparisons. |
+| Organizer | Local selected e388 at stage500 has measured action: fixed-access zero controls worsen 20/24 role means; full access with saved controls and bounded geometry each worsen 21/24. Both Local500 versions pass native output/first-gradient parity. | Complete fine rows fall 20.7–40.0%, but full-query wrapper latency increases 4.32–10.30%. Absolute thermal errors still trail controls and mature. Local continues as an informative finalist; final qualification remains pending. Training uses the dense masked reference. |
+| Inverse | Native962 completed 108 frozen trials with observed/held means 2.27300→1.27515 and 2.40327→2.08658. Fine972's corresponding means decline 35.66%/20.39%. | Both Dense controls use full-joint fallback in graph/ungrouped modes and reproduce joint trajectories exactly. Fine heat RMSE and pressure worsen 18.58%/69.54%. Local one-step graph readiness is not final inverse quality. H1000 inverse and qualified paired heads remain pending. |
 
-**State: all five e100 screens, H-overlap's e500 review and B-fine's e1000 control are complete; the H finalist ladder continues.**
-Saved training snapshot at 2026-10-03 13:51 UTC: B-fine completed e1000;
-B-native is at e944, H-tree e300, H-overlap e500 and H-local e486. The table
-and inspected progress figure use this same snapshot. Tree completed its exact
-e100 physical and eight-family response screens and resumed to e500. Fine's
-immutable exact1000 and field-selected e972 have completed full90/canonical89
-physical evaluation, all eight response families and the matched 108-trial
-frozen inverse evaluation. Both earlier e493 selections remain preserved. Native subsequently
-completed exact e500; its immutable exact500/field-selected456 physical review
-is complete before continuation and migration. A completed control does not
-count toward the required two or three new H finalists. Overlap exited naturally
-at e500 at13:10 UTC. Its exact500 and field-selected actual292 have completed
-full90/canonical89 fields and eight-family responses; selected292 also has the
-ordinary and strict graph controls. The separate T-selected checkpoint is
-actual269. CPU topology and 36 one-step inverse trials per evaluated version
-establish execution/readiness, not final inverse quality. Full-query native
-CUDA parity/timing passes for both versions show row reductions and slower
-complete-wrapper latency. The measured stage500 assessment appears below.
-After this plotted snapshot, Local exited naturally at500 at14:06:27 UTC,
-with all20 full-state audit checks passing. Its immutable exact500 and shared
-field/T-selected actual388 are preserved. Field/response/graph evaluation is
-the next step; sampled late drift alone does not decide promotion.
-At the same 13:51 snapshot, the last twenty complete-epoch median/p90 elapsed
-seconds are Native34.15/36.03, Tree103.54/105.52 and Local66.23/74.18.
-Extrapolating those measured rates gives conditional next-stage finish ranges
-of approximately Native1000 at14:23–14:25 UTC, Tree500 at19:36–19:43 and
-Local500 at14:07–14:09. These ranges compare
-median/p90 rate extrapolations under current placement, not confidence bounds;
-evaluation/setup and subsequent contention changes are excluded. Full H500
-physical/graph review precedes promotion; the two or three H1000 results remain
-required and incomplete.
+**State: both controls completed 1,000 epochs; Local500 and Overlap500 reviews are complete. The distinct H finalist ladder continues.**
+The inspected saved snapshot at 2026-10-03 15:22 UTC contains Native1000,
+Fine1000, Tree354, Overlap500 and Local539. Native exited naturally with code 0
+at 14:20:48 UTC; its exact1000 and field-selected actual962 completed full90/
+canonical89 physical evaluation and eight response families. Selected962 also
+completed all 108 frozen inverse trials. Temperature selection is actual996,
+separately preserved. Fine's exact1000/field-selected972 physical and response
+evaluation and selected972 matched inverse are complete. Earlier control
+selections remain preserved. Completed controls do not count toward the two or
+three required new H finalists.
+
+Local exited naturally at 500 at 14:06:27 UTC and passed all 20 state-audit checks.
+Its exact500 and field-selected388 completed fields, responses, ordinary/strict
+graph controls, topology/readiness and native CUDA parity/timing. Temperature
+selection is also 388 with different weights; it is not substituted. After the
+measured review below, root promoted the same Run2205 lineage from exact500 to
+1000 at 14:49:43 UTC on GPU2. This is the first H finalist continuation. Exact525
+subsequently passed full optimizer/RNG/calibration/frozen Stage-A and case-coverage
+checks. No H1000 result is complete yet.
+
+Tree continues its exact100→500 lineage on GPU1; its exact350 state audit
+passes. Tree500 physical review precedes the second H1000 promotion. Overlap
+exited naturally at 500 at 13:10 UTC; exact500/field-selected292 reviews and
+native parity/timing are complete, with T-selected269 separately preserved.
+The third H1000 slot remains reserved for an informative complementary result.
+No extra candidate is justified by the current saved evidence.
+
+At the same 15:22 snapshot, the last twenty complete-epoch median/p90 elapsed
+seconds are Tree 101.97/103.28 and resumed Local 49.93/50.78. Conditional finish
+extrapolations are Tree500 at 19:31–19:34 UTC and Local1000 at 21:46–21:53 UTC.
+These are median/p90 rate extrapolations under current placement, not confidence
+bounds; setup/evaluation, checkpoint rendering and future contention are excluded.
+Controls have finished; their former forecasts are retained as historical
+evidence rather than current targets. The two or three H1000 measurements,
+final inverse comparison and qualified paired heads remain required.
 Work is on `agent/honf-core-next`. The initial
 finite portfolio is Runs 2201–2205; two repaired screens are available only
 when a concrete failure warrants them. No 5,000-epoch job is authorized to
@@ -50,11 +54,11 @@ start automatically.
 
 | Run | Strategy | Complete epoch at snapshot | Sampled development field / T MSE | Current action |
 |---|---|---:|---|---|
-| 2201 | B-native | 944 | 0.00811 / 0.00672 | Exact500 and physical review complete; GPU2 continuation to1000 |
+| 2201 | B-native | 1000 | 0.00690 / 0.00411 | Natural exit0; exact1000/selected962 fields, responses and selected inverse complete |
 | 2202 | B-fine | 1000 | 0.01175 / 0.01182 | Native exit0; immutable exact1000/selected972 evaluation complete |
-| 2203 | H-tree | 300 | 0.05410 / 0.05986 | GPU1; exact e100→500 continuation; monitor response-active trend |
+| 2203 | H-tree | 354 | 0.05288 / 0.04635 | GPU1; exact100→500; full saved-state audit passed350 |
 | 2204 | H-overlap | 500 | 0.60332 / 0.21109 | Native exit0; exact500/selected292 review complete; third-slot decision awaits cohort review |
-| 2205 | H-local | 486 | 0.14052 / 0.13113 | GPU2; exact e100→500 continuation; recent sampled uptick retained |
+| 2205 | H-local | 539 | 0.11329 / 0.08290 | GPU2; exact500→1000 first H finalist; full saved-state audit passed525 |
 
 These MSEs use the maintained normalized, sampled 90-case validation task;
 they are neither full-grid physical errors nor the final 89-case comparison.
@@ -848,12 +852,14 @@ Figure index: [full-epoch training progress](../../diagnostics/generated/shared_
 
 ![Full-epoch training and measured elapsed work](../../diagnostics/generated/shared_core_campaign_20261002/figures/campaign_training_progress.png)
 
-The inspected 13:51 UTC snapshot contains 944/1000/300/500/486 complete epochs for
+The inspected 15:22 UTC snapshot contains 1000/1000/354/500/539 complete epochs for
 B-native/B-fine/H-tree/H-overlap/H-local. Every displayed epoch has 600 distinct
 training cases, 13 optimizer steps and 614,400 primary sampled queries. B-fine
 e1000 normalized sampled field/T MSE is 0.01175/0.01182; the full-grid physical
 evaluation is reported separately above.
-Successful train/validation time sums are 9.106/4.400/11.116/9.608/10.359 hours;
+Native's exact1000 sampled field/T MSE is 0.00690/0.00411. These final control
+curves are measured development evidence; they do not count as H finalists.
+Successful train/validation time sums are 9.603/4.400/12.647/9.608/11.158 hours;
 discarded partial work and storage replay overhead remain recorded separately.
 Owned contention and H-tree engineering changes affect timing. These curves
 establish actual model age and work, not sparse speedups or mature-equivalent
@@ -867,6 +873,10 @@ An open circle marks the Local benchmark PID observed at Tree214. Overlap's
 benchmark fell between boundary samples, with no known epoch intersection.
 The source snapshot and complete numerical curves are retained; these concurrent
 elapsed sums are not exclusive GPU hours. Prior snapshot evidence is preserved.
+Local's exact500→1000 continuation begins at 501 on the same lineage, with
+native optimizer/RNG/calibration and horizon 5000 retained. Its lower observed
+epoch time after 500 is measured under changed GPU2 co-occupancy; no architecture speed gain
+is inferred. The numerical audit reconciles all 3393 displayed complete epochs.
 
 ![Measured native Tree executor work, latency and memory](../../diagnostics/generated/shared_core_campaign_20261002/figures/executor_work_vs_latency.png)
 
@@ -1464,3 +1474,164 @@ nonvacuous graph operation is not established inverse improvement. The
 and [frozen execution receipt](../../diagnostics/generated/shared_core_campaign_20261002/logs/h-overlap_stage500_field_selected_one_step_inverse_readiness_cpu1_observer.json)
 retain that limit. Final1000 graph qualification, matched inverse quality and
 any paired-head campaign remain pending the actual finalist review.
+
+## Measured Local500 review and finite continuation
+
+Local500 supplies a useful thermal and organizer comparison, with clear misses. Field-selected388 improves the physical means and thermal tails over exact500;
+fixed-reference controls expose learned action, but subset execution is slower
+and one-step inverse readiness does not establish inverse-design quality.
+Root therefore continued the existing Local lineage to 1000 as informative
+hypothesis testing, not a demonstrated speed gain or validated inverse design.
+
+The immutable Run2205 receipt separates exact500 from field-selected388. Temperature selection is also epoch388 but has different weights and is not
+substituted. All five native evaluation jobs completed with 334 frozen state
+tensors and unchanged checkpoint SHA/stat; evaluation source is `105676b`.
+The [completion receipt](../../diagnostics/generated/shared_core_campaign_20261002/logs/h-local_stage500_evaluation_completion.json)
+retains the 224 physical predictions, 134 phase archives and checkpoint identities.
+
+Predictor arithmetic reconciles all 24 maintained roles from actual arrays and
+masks with zero statistic discrepancy. Canonical89 excludes0273; compatibility90
+is separately retained. Equal-case means use native benchmark scales, not SI:
+
+| Role | Exact500 | Field-selected388 |
+|---|---:|---:|
+| Fluid temperature RMSE | 2.064795 | 1.370173 |
+| Near-fluid temperature RMSE | 2.066254 | 1.285821 |
+| Surface temperature RMSE | 2.014171 | 1.121311 |
+| Material temperature RMSE | 1.833866 | 1.006337 |
+| Module peak RMSE | 1.845799 | 1.008235 |
+| Fluid u RMSE | 0.073531 | 0.057135 |
+| q_normal proxy RMSE | 3.978034 | 3.934525 |
+| Inlet–outlet pressure AE | 0.020545 | 0.015787 |
+
+Temperature pooled/p90/max errors fall 2.134029/2.845462/3.710393 to
+1.436279/1.976316/3.053845; peak p90/max fall 3.236076/5.743295 to
+1.770928/3.434730. Selection still worsens u maximum 0.118985→0.130933
+and pressure maximum 0.047148→0.060551. Compatibility90 temperature means
+are 2.069276/1.366488. The [physical audit](../../diagnostics/generated/shared_core_campaign_20261002/evaluation/independent_h-local_stage500_physical_review.json)
+retains exact-M/Re strata and all-role tails. Local is thermally stronger than
+Overlap at this wave; selected388/292 and mature4738 remain unequal-age comparisons.
+
+Organizer evidence covers 90 × 3 phases × 5 routes at selected388. Allocated K
+is 8; admitted/nonempty K spans 1–8, with phase means 7.255556/7.011111/6.633333.
+Explicit rescue counts are P0/P1/P2 = 0/1/5: six preparations across five M10
+cases, not six cases or inverse/full-access fallback. Repeated binary membership
+support does not imply duplicate effective controls; exact membership-plus-control
+excess duplicates are zero. Near `positive_eligible_pairs` = 9,478,949 counts
+(near > 0) AND pair_valid entries; `full_eligible_pairs` = 2,554,898 counts
+(near == 1) AND pair_valid, a subset, not a denominator. Both sum 14,490 actual
+access calls, including repeated reads. No eligible receiver lacks a selected
+source; access fallback metadata is unavailable. The [population audit](../../diagnostics/generated/shared_core_campaign_20261002/graph_population/h-local_stage500_selected/independent_completed_review.json)
+keeps source measures, participation, context and explicit rescue separate.
+
+All three strict controls pass 644 calls each. Fixed-access zero controls worsen 20/24 four-case role means; full access with saved learned controls and bounded
+geometry each worsen 21/24. Their temperature/surface/peak RMSE changes are
++0.222456/+0.352507/+0.368031, +0.018856/+0.111794/+0.163508 and
++0.023772/+0.067875/+0.126627; pressure AE improves by 0.008781/0.012503/0.000343.
+Geometry changes 224 binary support and 11,687 weight positions, preserving
+both support degrees, exact-measure row tuples and protected near/invalid entries.
+It hits the candidate budget in 460/644 calls; neither global optimality nor
+physical causality is established. The [strict audit](../../diagnostics/generated/shared_core_campaign_20261002/graph_utility/h-local_stage500_selected_reference_actions/independent_saved_controls_review.json)
+separates changed permissions from controls; complete control tensors are unsaved.
+The fixed summary uses 600 disjoint training inputs and one uniform active root.
+
+Normal90 dense work is 179,889,120 fine rows/14,490 calls, with 6,068,130 padding
+rows and no eligible pairs skipped. Both CUDA2 checkpoints pass four native
+output/first-gradient gates before timing: 203 defined parameter gradients,
+live heat/query inputs, 109 frozen parameters and 35/161 actual access inventories.
+Original elementwise gates are retained; saved review recomputes norms, not raw tensors.
+
+| Checkpoint / M / Q8192 | Complete dense→subset s | Prepared P2 dense→subset s | Complete fine rows dense→subset |
+|---|---:|---:|---:|
+| Exact500 / 3 | 0.524979→0.571791 | 0.390540→0.428605 | 1,998,768→1,198,856 |
+| Exact500 / 10 | 0.549912→0.573684 | 0.390587→0.428778 | 1,998,768→1,262,888 |
+| Selected388 / 3 | 0.523554→0.571946 | 0.391489→0.432610 | 1,998,768→1,584,736 |
+| Selected388 / 10 | 0.522002→0.575792 | 0.389561→0.432070 | 1,998,768→1,314,188 |
+
+Five-repeat medians after two warmups show 20.7–40.0% fewer complete fine rows
+but slower full-Q latency; complete calls rise 161→164. Independent complete and
+prepared scopes must not be added. GPU2 had no other compute process at admission;
+TreeGPU1/shared-host inverse work remained active, with fixed dense-before-subset order.
+Timed allocated/extra peaks are 90.160/57.282 MiB; reserved 4,136 MiB includes
+parity cache, distinct from driver footprint and unrecorded total backward peak.
+[Exact](../../diagnostics/generated/shared_core_campaign_20261002/timing/h-local_e500_cuda2_verified/independent_review.md) and [selected](../../diagnostics/generated/shared_core_campaign_20261002/timing/h-local_stage500_selected_cuda2_verified/independent_review.md) audits retain all 16 rows; no isolated cross-arm speed rank follows.
+
+Both response versions complete eight existing families/88 absolute states/80 correlated perturbations. Selected388 temperature response RMSE 0.215254 improves
+exact500 0.273792 and zero-change 0.274135, but misses mature4738 0.116739/Fine972
+0.134477. Heat-only temperature/q-proxy errors 0.120195/0.334189 beat zero-change
+0.241760/0.939161; heat-null u/p errors 0.004123/0.001888 miss their zero references.
+Mean pressure increment AE 0.000630 misses zero-change 0.000278; heat-only pressure
+AE 0.000619 is adverse against zero. The [atlas audit](../../diagnostics/generated/shared_core_campaign_20261002/responses/independent_local_stage500_response_review.json) retains exposed calibration/final-review partitions, absolute errors and masks; analytic q_normal is a proxy, not new CFD.
+
+Inverse readiness is 12 cases × 1 start × 1 step per checkpoint, not 108 quality
+trials. All heats are feasible/nonnegative, with 12 proper graph updates and zero
+full-joint fallback. Selected388 observed means change 1.953392→joint 2.122060,
+graph 1.794419, ungrouped 1.751009; held means 2.025590→2.047184/1.807006/1.878345.
+Exact500 graph observed/held means change 2.791276/2.962778→2.635544/3.016513: held error worsens, and ungrouped ends lower at 2.538399/2.821286.
+Ungrouped matches block sizes; candidates/groups differ. Nine Jacobians are full
+fixed-total rank; three M10 tasks are rank 6/9. The [readiness summary](../../diagnostics/generated/shared_core_campaign_20261002/inverse_readiness/h-local_stage500_selected/summary.json) and [frozen receipt](../../diagnostics/generated/shared_core_campaign_20261002/logs/h-local_stage500_field_selected_one_step_inverse_readiness_cpu1_observer.json) preserve the surrogate-only limit.
+
+Root launched exact500→1000 at 14:49:43 UTC on source `105676b`, changing only
+training duration with horizon 5000, optimizer/RNG/calibration and frozen StageA
+preserved. Genuine501 covered 600 cases/13 updates/614,400 primary queries; this
+is startup verification, not 1000 completion. The [continuation manifest](../../diagnostics/generated/shared_core_campaign_20261002/../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_2205_20261002_231939_thermal_h-local_v1/resume_e500_to_e1000_source_manifest.json) records that boundary. Final cohort selection, matched inverse quality and generative qualification remain pending.
+
+The later [exact525 audit](../../diagnostics/generated/shared_core_campaign_20261002/logs/h-local_e525_checkpoint_audit.json)
+passes all 20 checks: 203 AdamW states at step 6,825, four RNG streams,
+109 unchanged frozen Stage-A tensors, continuous architecture/data/normalization,
+both completed calibrations, policy2 from101 and horizon5000. All 525 epochs
+have complete 600-case/13-step/614,400-query coverage. The first 25 resumed
+epochs provide continued execution evidence, not the required 1,000-epoch result.
+Validation temperature still has an adverse sampled trend in the 516–525
+window; cycled response stencils do not establish a matched physical response gain.
+Driver footprint 24,476 MiB and directly reported GPU2 free memory 23,875 MiB
+are recorded separately from maximum allocated 12,552.20 MiB; allocator reserved
+memory is not inferred from the driver footprint.
+
+## Measured Native1000 control, responses and frozen inverse
+
+Native continues the same Run 2201 from exact 500 to exact 1000, preserving its optimizer, four RNG streams, frozen Stage-A, normalization, calibration, common policy 2 from epoch 101 and 5000-epoch schedule horizon. The native run manifest records natural completion at **2026-10-03 14:20:48.261619 UTC, exit 0**; the periodic watcher observes the exited state at 14:21:13.441692, 25.180073 s later. These are distinct timestamps. Independent read-only selections retain exact 1000, field-selected 962 (age 38), and T-selected 996 (age 4); the stage 500 / 456 / 492 copies remain unchanged. Exact 1000 has 181 active AdamW states at 13000 updates, 543 finite state tensors and 109 Stage-A tensors unchanged versus 500 / 850. All 1000 epochs retain 600 training cases/13 optimizer boundaries/614400 primary field queries, plus 90 validation cases/92160 queries. The first 100 inactive response-loss CSV entries remain blank; all 900 active entries are finite. [Full state audit](../../diagnostics/generated/shared_core_campaign_20261002/../HONF_Forward_Runs/Run_2201_20261002_212406_thermal_b-native_v1/continuation_epoch1000_audit.json), [exit provenance](../../diagnostics/generated/shared_core_campaign_20261002/../HONF_Forward_Runs/Run_2201_20261002_212406_thermal_b-native_v1/natural_epoch1000_exit_reconciliation.json), [immutable selection receipt](../../diagnostics/generated/shared_core_campaign_20261002/../HONF_Forward_Runs/Run_2201_20261002_212406_thermal_b-native_v1/stage_1000_selection/selection_receipt.json).
+
+Predictor measurements complete 90 native-grid development cases for both exact 1000 and selected 962; the predeclared primary table excludes 0273 (89 cases), while compatibility 90 remains available. All 24 emitted physical roles are finite. These are benchmark physical scales, with dimensional units requiring generator metadata; q_normal is a proxy. Selected 962 improves fluid temperature/u by 30.22%/40.41% over the earlier selected 456, but full-field inlet–outlet pressure AE worsens 36.97%. It improves displayed thermal and velocity roles over Fine972, but fluid, surface, flux, material, peak and inlet–outlet pressure errors still exceed mature4738. Final-port h is lower than mature, while initial-port h is much worse. Selection worsens q_normal and both final-port errors relative to exact1000; training ages differ.
+
+| Canonical 89 quantity | Native exact 1000 | Native selected 962 | Fine selected 972 | Mature 4738 |
+|---|---:|---:|---:|---:|
+| Fluid temperature | 0.407971 | 0.391297 | 0.562692 | 0.218656 |
+| Fluid u | 0.014914 | 0.0132058 | 0.0194957 | 0.00572097 |
+| Surface temperature | 0.601342 | 0.497102 | 0.546184 | 0.448389 |
+| q_normal proxy | 2.86753 | 2.91374 | 3.33277 | 1.58291 |
+| Material temperature | 0.483583 | 0.422136 | 0.48302 | 0.340027 |
+| Material peak | 0.486303 | 0.440082 | 0.531433 | 0.346587 |
+| Full-field inlet–outlet pressure AE | 0.00553515 | 0.00505003 | 0.004701 | 0.00101383 |
+| Initial-port h_effective | 7.53054 | 7.69078 | 5.90367 | 2.77643 |
+| Final-port h_effective | 0.573637 | 0.591116 | 0.719937 | 0.614266 |
+| Final-port outside temperature | 0.722512 | 0.822126 | 0.878583 | 0.793893 |
+
+Each Native physical 90 execution directly measures 179,889,120 padded five-route fine-MLP input rows in 14,490 successful calls. This excludes attention, coarse/local physics, backward, hardware kernel counts and eligible/unique pairs; it establishes measured fine work, not executor savings or a latency advantage. The four unchanged GPU 2 field/response CLI jobs run sequentially from clean `105676b5`, ending 14:34:59.603930 UTC; 310 forward-state tensors/5,430,548 scalars remain bitwise unchanged with no trainable forward parameters or parameter gradients. [Physical/count audit](../../diagnostics/generated/shared_core_campaign_20261002/manual_commands/b_native_stage1000_GPU_saved_audit.json), [GPU completion receipts](../../diagnostics/generated/shared_core_campaign_20261002/logs/b-native_stage1000_GPU2_evaluation_completion.json).
+
+Responses complete eight previously exposed families (four calibration and four stored generated challenges at M 3 / 5 / 7 / 10), 88 absolute states and 80 correlated finite variants per checkpoint. Saved-array recomputation matches inputs, references, masks, quadrature and maintained metrics. Fluid T response improves over Native selected 456 (0.137524→0.127249), but stays above mature 0.116739. Selected pressure-increment error 0.000272374 is only marginally below zero change 0.000278366 and above mature 0.000197394. Among 16 heat-transfer variants, reference u/v/p/omega and pressure changes are exactly zero: selected u/p response RMSE 0.00176130 / 0.000644794 and pressure change 0.000311235 are adverse errors. Response floors remain unresolved; no relative-accuracy, causality or CFD-design claim follows.
+
+| Mean response RMSE over 80 finite variants | Native exact 1000 | Native selected 962 | Fine 972 | Mature 4738 | Zero change |
+|---|---:|---:|---:|---:|---:|
+| Fluid T | 0.127918 | 0.127249 | 0.134477 | 0.116739 | 0.274135 |
+| Surface T | 0.228244 | 0.228362 | 0.242463 | 0.229658 | 0.463527 |
+| q_normal proxy | 1.20301 | 1.18078 | 1.19107 | 1.27293 | 1.35045 |
+| Solid T | 0.217603 | 0.218093 | 0.227603 | 0.220178 | 0.454035 |
+
+Each 88-state Native response execution directly measures 175,891,584 padded fine-MLP rows/14,168 calls; instrumentation time is not uninstrumented benchmark latency. [Independent response review](../../diagnostics/generated/shared_core_campaign_20261002/responses/independent_native_stage1000_response_review.json).
+
+Inverse quality now completes **12 cases × 3 shared starts × 30 steps × 3 modes = 108 new trials**, CPU1/default seed 20261002, from selected 962. It ends 15:09:40.852231 UTC with exit 0 after 2616.768 s. Saved inputs, sensor coordinates/indices, public observations/held targets, material/pressure references, hidden reference heat and total are bit-identical to the frozen Fine 972 and mature 4738 CPU1 v2 panels; all 36 physical initial heat vectors and active masks match bitwise. The CLI injects no measurement noise. Internal block/permutation random draws are not persisted, so their direct byte-level equality cannot be retrospectively certified; matching seed, budget, native generation policy and saved initializations/masks are the available evidence.
+
+| Metric, equal 12-case/3-start mean | Native 962 initial → final | Worse Native /36 | Fine 972 initial → final (worse /36) | Mature 4738 initial → final (worse /36) |
+|---|---:|---:|---:|---:|
+| Observed temperature RMSE | 2.273 → 1.27515 | 3 | 2.02096 → 1.30027 (9) | 3.41301 → 2.04577 (10) |
+| Held temperature RMSE | 2.40327 → 2.08658 | 16 | 2.40524 → 1.9148 (11) | 3.73272 → 2.6432 (12) |
+| Material-peak RMSE | 4.6531 → 3.91942 | 11 | 4.64011 → 4.37014 (13) | 5.50964 → 4.55669 (14) |
+| Endpoint-pressure absolute error | 0.00777826 → 0.0087632 | 17 | 0.0057203 → 0.00969809 (23) | 0.0143276 → 0.00901929 (13) |
+| Hidden-heat RMSE, evaluation only | 0.582924 → 0.564391 | 14 | 0.582924 → 0.691228 (18) | 0.582924 → 0.548525 (14) |
+
+Each column uses 36 case/start trials per mode; graph and ungrouped have identical non-time arrays to joint across all 72 fallback trails, zero meaningful graph updates and 1080 full-joint fallback steps **per mode**. Their repeated outcomes add no independent grouping benefit. Native reduces observed, held, peak and hidden-heat mean errors by 43.90%/13.18%/15.77%/3.18%, but endpoint-pressure mean error worsens 12.66%; 16 / 36 held trials and 14 / 36 hidden-heat trials worsen. Six observed temperature sensors drive optimization; six disjoint held sensors and hidden module heats are evaluation-only. Peak and pressure metrics are frozen-surrogate predictions against stored references. Inverse pressure uses two saved inlet/outlet endpoints, distinct from physical full-field section pressure and response 8%-band pressure; these columns must not be conflated.
+
+Nine of 12 tasks have full local fixed-total rank; the three M 10 tasks 0692 / 0679 / 0685 have rank 6 in 9 free directions. Native full-rank condition numbers range 1.48080–116.720 at uniform heat (largest full-rank condition numbers: Fine972 743.377 and mature4738 5574.87); this local conditioning does not establish global identifiability. Independent SVD/rank/residual recomputation passes. All 108 trials have nonnegative heats, zero inactive-module heat, 31 saved states/30 updates and fixed-total feasibility. Float64 sums against public total give maximum absolute/relative drift 9.29832e-6 / 7.67925e-7; the earlier float32 summed trajectory-drift audit reports 9.53674e-6, a distinct reduction convention, not a changed trial. All 1296 floating trail arrays are finite; 3360 actual predictor calls include 12 Jacobian calls, with no reused trials. All 12 case checks and final 310-tensor parameter/buffer freeze pass, and checkpoint/receipt/source SHA-stat guards hold. No complete optimized field grids or new physical solves are saved, so these are frozen exposed-development inverse outcomes, not valid CFD designs. [Native inverse quality review](../../diagnostics/generated/shared_core_campaign_20261002/inverse/b-native_stage1000_selected/independent_inverse_review.json), [execution/freeze receipt](../../diagnostics/generated/shared_core_campaign_20261002/logs/b-native_stage1000_field_selected_full108_inverse_observer.json), [Fine 972 comparison](../../diagnostics/generated/shared_core_campaign_20261002/inverse/b-fine_stage1000_selected_cpu1/independent_inverse_review.json), [mature 4738 CPU1 v2 comparison](../../diagnostics/generated/shared_core_campaign_20261002/inverse/mature_e4738_single_thread_v2/independent_inverse_review.json).
+
+The predictor and inverse gains support retaining this control's measured learning progress while preserving pressure, flux-proxy, rank and null-response misses. Native provides no learned-organizer inverse evidence. Final cohort selection remains separate; no new run, training continuation, model call or 5000-epoch launch accompanies this saved-only audit.
