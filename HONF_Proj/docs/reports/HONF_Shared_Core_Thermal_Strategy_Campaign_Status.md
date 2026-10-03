@@ -9,12 +9,12 @@ is paused; Wind is used for shared-core compatibility checks.
 | Result | Measured gain so far | Measured miss / next decision |
 |---|---|---|
 | Predictor | Fine's selected1000-stage fluid T/u errors improve 21.24%/23.41% over its selected500-stage version. Native and Fine retain the legitimate predicted-port physics. | Fine's canonical89 T RMSE 0.56269 remains above mature 0.21866; heat-flux proxy, h and pressure tradeoffs remain. Complete the matched Native and H1000 comparisons. |
-| Organizer | Native Tree100 subset execution reduces full-query fine-reader rows by 73.56–77.06% after output/first-gradient parity. | Complete-wrapper latency increases 13.28–34.07% under recorded contention. Earlier strict bounded graph controls establish no all-role win; final-checkpoint utility remains pending. Training still uses the dense masked reference. |
+| Organizer | Native Tree/Overlap/Local100 subset execution passes output/first-gradient parity. Full-query fine-reader row reductions are 73.56–77.06% / 53.31–53.73% / 1.03–4.66%, respectively. | Complete-wrapper latency increases in each recorded test; device placement and contention differ across arms. Earlier strict bounded graph controls establish no all-role win; final-checkpoint utility remains pending. Training still uses the dense masked reference. |
 | Inverse | Fine972's matched frozen observed/held means decline 35.66%/20.39% over thirty steps. | Heat RMSE rises 18.58% and endpoint-pressure error 69.54%; all graph/ungrouped updates are full-joint fallback. Finalist local inverse and qualified paired heads remain pending. |
 
 **State: all five e100 screens and B-fine's e1000 control are complete; the H finalist ladder continues.**
-Saved training snapshot at 2026-10-03 09:58 UTC: B-fine completed e1000;
-B-native is at e584, H-tree e167, H-overlap e350 and H-local e317. The table
+Saved training snapshot at 2026-10-03 11:31 UTC: B-fine completed e1000;
+B-native is at e724, H-tree e220, H-overlap e422 and H-local e381. The table
 and inspected progress figure use this same snapshot. Tree completed its exact
 e100 physical and eight-family response screens and resumed to e500. Fine's
 immutable exact1000 and field-selected e972 have completed full90/canonical89
@@ -23,6 +23,15 @@ frozen inverse evaluation. Both earlier e493 selections remain preserved. Native
 completed exact e500; its immutable exact500/field-selected456 physical review
 is complete before continuation and migration. A completed control does not
 count toward the required two or three new H finalists.
+At the same 11:31 snapshot, the last twenty complete-epoch median/p90 elapsed
+seconds are Native39.63/40.29, Tree105.09/107.19, Overlap76.22/77.29 and
+Local86.55/88.16. Extrapolating those measured rates gives conditional next-stage
+finish ranges: Native1000 at14:34–14:37 UTC, Tree500 at19:42–19:52,
+Overlap500 at13:11–13:12 and Local500 at14:23–14:26. These ranges compare
+median/p90 rate extrapolations under current placement, not confidence bounds;
+evaluation/setup and subsequent contention changes are excluded. Full H500
+physical/graph review precedes promotion; the two or three H1000 results remain
+required and incomplete.
 Work is on `agent/honf-core-next`. The initial
 finite portfolio is Runs 2201–2205; two repaired screens are available only
 when a concrete failure warrants them. No 5,000-epoch job is authorized to
@@ -30,11 +39,11 @@ start automatically.
 
 | Run | Strategy | Complete epoch at snapshot | Sampled development field / T MSE | Current action |
 |---|---|---:|---|---|
-| 2201 | B-native | 584 | 0.01533 / 0.00963 | Exact500 and physical review complete; GPU2 continuation to1000 |
+| 2201 | B-native | 724 | 0.00964 / 0.01130 | Exact500 and physical review complete; GPU2 continuation to1000 |
 | 2202 | B-fine | 1000 | 0.01175 / 0.01182 | Native exit0; immutable exact1000/selected972 evaluation complete |
-| 2203 | H-tree | 167 | 0.15227 / 0.14715 | GPU1; exact e100→500 continuation; monitor response-active trend |
-| 2204 | H-overlap | 350 | 0.70829 / 0.27322 | GPU2; exact e100→500 continuation; review rising sampled field error |
-| 2205 | H-local | 317 | 0.16794 / 0.08208 | GPU2; exact e100→500 continuation |
+| 2203 | H-tree | 220 | 0.09815 / 0.09780 | GPU1; exact e100→500 continuation; monitor response-active trend |
+| 2204 | H-overlap | 422 | 0.80462 / 0.26488 | GPU2; exact e100→500 continuation; review rising sampled field error |
+| 2205 | H-local | 381 | 0.13339 / 0.07416 | GPU2; exact e100→500 continuation |
 
 These MSEs use the maintained normalized, sampled 90-case validation task;
 they are neither full-grid physical errors nor the final 89-case comparison.
@@ -130,6 +139,51 @@ measurement tests pass 78 checks with three optional native-resource skips;
 actual Native500 field/response execution separately validates the new direct
 row recorder. Fine-work hooks stay outside benchmark timing and do not count
 backward, attention or coarse/local work.
+
+Subsequent native Overlap100 and Local100 checks run on physical GPU1/logical
+cuda:0 alongside the unchanged Tree trainer, with one CPU thread, Q14/Q8192,
+M3 case0274/M10 case0692, receiver chunk128, two warmups and five repeats.
+All four output/first-gradient parity panels pass per arm at the same declared
+tolerances. Each includes 203 defined parameter gradients, caller heat/query
+gradients and all five typed routes across P0/P1/P2, including 35/161 actual
+access inventories at Q14/Q8192. Overall gradient
+relative L2 errors for M3 small/full and M10 small/full are
+3.55e-7/3.70e-7/2.48e-7/1.86e-7 for Overlap and
+1.59e-7/1.60e-7/6.73e-7/5.97e-7 for Local. All 334 model state tensors
+(3,994,148 scalars) remain bitwise unchanged in each check, and exact100
+checkpoint SHA/stat remain unchanged. These checks use clean source `bd8c5e6`.
+Independent saved-output review reconciles all 32 timing rows' five-sample
+min/median/p90 and native hook counts against the phase ledgers exactly. It
+recomputes saved gradient norm aggregates; raw gradients were not retained for
+a separate elementwise rerun, so the elementwise pass is the original native gate.
+
+| Exact100 arm / full-Q case | Complete-wrapper actual fine rows, Dense→subset | Calls | Complete-wrapper median seconds, Dense→subset | Prepared P2 median seconds, Dense→subset |
+|---|---:|---:|---:|---:|
+| Overlap / 0274 M3 | 1,998,768→924,772 (−53.73%) | 161→164 | 0.56315→0.71038 (+26.15%) | 0.43915→0.48298 |
+| Overlap / 0692 M10 | 1,998,768→933,200 (−53.31%) | 161→164 | 0.60496→0.67731 (+11.96%) | 0.45107→0.48804 |
+| Local / 0274 M3 | 1,998,768→1,905,708 (−4.66%) | 161→164 | 0.66856→0.82452 (+23.33%) | 0.48820→0.55732 |
+| Local / 0692 M10 | 1,998,768→1,978,088 (−1.03%) | 161→164 | 0.66546→0.76676 (+15.22%) | 0.50417→0.59672 |
+
+Native hooks measure successful five-route fine-MLP input rows including
+rectangle padding. Q counts caller field queries; complete-wrapper counts
+include auxiliary port/coupling reads. Prepared and complete timings are
+independent measurements. Local's M10 prepared Q14 median improves
+0.01151→0.00954 seconds, while its full-Q wrapper remains slower; this small
+scope does not establish an overall speedup. Dense is timed before subset in
+both checks. The earlier Tree test used GPU2 with two H trainers, so the three
+arms are separate execution checks, not an isolated architecture speed ranking.
+Final selected versions require their own measurements, and all forward
+training continues with the dense masked reference.
+
+Local benchmark PID1067864 runs 11:17:59.878–11:18:58.412 UTC; Overlap PID1069234
+runs 11:20:59.201–11:21:50.601 UTC. Tree's epoch214 `gpu_before` directly
+contains the Local PID; that epoch takes 115.10/4.28 seconds train/validation.
+The Overlap PID is absent at Tree's sampled boundaries. Loaded training records
+have no absolute epoch timestamps, so its within-epoch intersection cannot be
+reconstructed. Known benchmark intervals preclude interval-wide isolation;
+boundary absence and adjacent timings do not establish no contention or causal
+slowdown. Exact intervals and Tree epochs212–218 process lists/times are retained
+in `Run2203/gpu1_benchmark_contention_20261003.json`.
 
 Initial complete-epoch timing is
 reported with actual physical GPU 1/2 and external occupancy sampled per epoch.
@@ -766,12 +820,12 @@ Figure index: [full-epoch training progress](../../diagnostics/generated/shared_
 
 ![Full-epoch training and measured elapsed work](../../diagnostics/generated/shared_core_campaign_20261002/figures/campaign_training_progress.png)
 
-The inspected 09:58 UTC snapshot contains 584/1000/167/350/317 complete epochs for
+The inspected 11:31 UTC snapshot contains 724/1000/220/422/381 complete epochs for
 B-native/B-fine/H-tree/H-overlap/H-local. Every displayed epoch has 600 distinct
 training cases, 13 optimizer steps and 614,400 primary sampled queries. B-fine
 e1000 normalized sampled field/T MSE is 0.01175/0.01182; the full-grid physical
 evaluation is reported separately above.
-Successful train/validation time sums are 5.251/4.400/7.253/6.424/6.474 hours;
+Successful train/validation time sums are 6.789/4.400/8.794/7.951/8.013 hours;
 discarded partial work and storage replay overhead remain recorded separately.
 Owned contention and H-tree engineering changes affect timing. These curves
 establish actual model age and work, not sparse speedups or mature-equivalent
@@ -781,6 +835,10 @@ Timing diamonds mark the first complete epochs in GPU2's three-trainer
 placement: Fine501, Overlap162 and Local152. Squares mark Native joining GPU2
 at Native501, Overlap309 and Local282. Their affected H timing remains
 separate from architecture or sparse-work claims.
+An open circle marks the Local benchmark PID observed at Tree214. Overlap's
+benchmark fell between boundary samples, with no known epoch intersection.
+The source snapshot and complete numerical curves are retained; these concurrent
+elapsed sums are not exclusive GPU hours. Prior snapshot evidence is preserved.
 
 ![Measured native Tree executor work, latency and memory](../../diagnostics/generated/shared_core_campaign_20261002/figures/executor_work_vs_latency.png)
 
@@ -823,16 +881,23 @@ under the ignored evaluation directory.
 
 The geometry-selected leftmost/rightmost modules use all 64 saved native
 interface angles; material quantiles pool 30,960 active-module samples, while
-peaks and role errors include all ten modules. Fine100→selected493 surface,
-material and peak RMSE improve 1.902/1.588/1.552→0.7206/0.5578/0.6022, but
-q_normal proxy RMSE remains 3.274 versus mature1.321. Overlap100 has adverse
-material/peak errors 3.948/4.364 on this case. Pressure-difference errors are
+peaks and role errors include all ten modules. The six displayed versions are
+mature4738, Native field-selected456, Fine field-selected972, and Tree/Overlap/
+Local exact100. Fine972's surface/material/peak RMSE is 0.4722/0.4198/0.3910,
+below Native456's 0.6272/0.5101/0.5751 on this input, but above mature
+0.3219/0.2341/0.2005. Fine's q_normal proxy RMSE remains 2.996 versus
+mature1.321. Local100's surface/material/peak errors 1.370/1.171/1.257 are
+below Overlap100's 4.274/3.948/4.364, while its pressure-difference error
+0.01680 exceeds Overlap's 0.008403. Fine/Native/mature pressure-difference
+errors are 0.007453/0.01045/0.001101. Pressure-difference errors are
 shown alongside the full fluid-column means, with stored referenceΔp0.06534.
 Common inputs, reference fields, masks and native query indices are verified;
 no finite curve is clipped, and module slots retain physical identity. These
 unequal-age, exposed-development benchmark results show physical role tradeoffs,
 without implying SI accuracy, population superiority or independent design
-validation. PDF and PNG were visually inspected and redundant inspection
+validation. All 144 metric checks reconcile within 2.04e-14 for RMSE; the
+figure's FP64 pressure reduction differs from the native FP32 reduction by at
+most 1.32e-8. PDF and PNG were visually inspected and redundant inspection
 exports removed; all source arrays remain locally retained.
 
 H-overlap e100 is finite but worse than the same-age controls on fluid
