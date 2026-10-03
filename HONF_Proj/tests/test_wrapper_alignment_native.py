@@ -132,9 +132,11 @@ def test_native_thermal_replay_chunks_and_disposable_optimizer_step():
     with torch.no_grad():
         original = retained(**inputs)
         actual = model(**inputs, return_prepared_state=True)
-        for key in ("pred_field", "pred_interface", "pred_internal_temperature", "used_port_tokens"):
-            if key in original:
-                torch.testing.assert_close(actual[key], original[key], rtol=2e-5, atol=2e-5)
+        for key in ("pred_field", "pred_interface", "pred_internal_temperature", "pred_port_condition",
+                    "pred_port_condition_raw", "local_port_condition_used"):
+            assert key in original, f"Missing retained output: {key}"
+            assert key in actual, f"Missing current output: {key}"
+            torch.testing.assert_close(actual[key], original[key], rtol=2e-5, atol=2e-5)
         prepared = actual["prepared_state"]
         chunks = [model.decode_prepared(prepared, batch["query_xy"][:, i:i+3])["pred_field"] for i in range(0, 17, 3)]
         torch.testing.assert_close(torch.cat(chunks, 1), actual["pred_field"], rtol=2e-5, atol=2e-5)
