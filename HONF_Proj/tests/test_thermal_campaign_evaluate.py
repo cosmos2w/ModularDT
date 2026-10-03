@@ -9,11 +9,77 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
 
 _PATH = Path(__file__).resolve().parents[1] / "tools/thermal_campaign_evaluate.py"
 _SPEC = importlib.util.spec_from_file_location("thermal_campaign_evaluate", _PATH)
 evaluation = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(evaluation)
+
+
+@pytest.mark.parametrize("executor", [None, "dense_masked_reference", "rectangular_subset"])
+def test_prediction_work_covers_native_phases_matches_ledger_and_excludes_later_reads(executor):
+    from honf_forward_core.interface_fields.dense_pairwise import DensePairwiseField
+    from honf_forward_core.interface_fields.typed_hypergraph_field import TypedHypergraphField
+    from honf_forward_core.interface_fields.types import EncodedInterfaceCase
+
+    torch.manual_seed(13)
+    encoded = EncodedInterfaceCase(
+        module_tokens=torch.randn(1, 2, 8, requires_grad=True), env_tokens=torch.randn(1, 3, 8),
+        global_token=torch.randn(1, 8), module_centers=torch.rand(1, 2, 2),
+        env_coords=torch.rand(1, 3, 2), module_present=torch.ones(1, 2),
+        module_features=torch.randn(1, 2, 3), env_features=None,
+        env_weights=torch.ones(1, 3), coordinate_scale=torch.ones(1, 1, 2))
+    backend = (DensePairwiseField(8, 12, 2, 2) if executor is None else TypedHypergraphField(
+        8, 12, 2, 2, architecture="overlap_control_hypergraph_honf", spatial_dim=2,
+        module_characteristic_length=.03)).eval()
+    if executor:
+        backend.organizer.set_epoch(301)
+        backend.set_execution_mode(executor, receiver_chunk_size=1)
+    query, features = torch.rand(1, 2, 2), torch.rand(1, 2, 6)
+    ledgers = []
+
+    def predict():
+        outputs = []
+        for phase in range(3):
+            context = {"interaction_context": SimpleNamespace(phase=f"P{phase}")} if executor else {}
+            prepared = backend.prepare(encoded, encoded.module_tokens, **context)
+            output, auxiliary = backend.read(prepared, encoded, query, features)
+            ledgers.append({**prepared.get("hypergraph_ledger", {}), **auxiliary})
+            outputs.append(output)
+        return torch.stack(outputs)
+
+    reference = predict()
+    expected_gradient = torch.autograd.grad(reference.square().mean(), encoded.module_tokens)[0]
+    ledgers.clear()
+    prediction, work = evaluation.predict_with_fine_work(backend, predict)
+    torch.testing.assert_close(prediction, reference, rtol=0, atol=0)
+    actual_gradient = torch.autograd.grad(prediction.square().mean(), encoded.module_tokens)[0]
+    assert actual_gradient.abs().sum() > 0
+    torch.testing.assert_close(actual_gradient, expected_gradient, rtol=0, atol=0)
+    assert work["measured"] and "attention" in work["excluded"]
+    if executor:
+        for route, counts in work["routes"].items():
+            assert counts["padded_input_rows"] == sum(int(row[f"hypergraph_{route}_executed_rows"]) for row in ledgers)
+            assert counts["calls"] == sum(int(row[f"hypergraph_{route}_fine_calls"]) for row in ledgers)
+    else:
+        assert work["routes"] == {route: {"padded_input_rows": rows, "calls": 3}
+                                  for route, rows in {"MM": 12, "ME": 18, "EM": 18, "QM": 12, "QE": 18}.items()}
+    saved = copy.deepcopy(work)
+    predict()  # later export/anchor reconstruction must not extend the measured prediction
+    assert work == saved
+    assert all(not module._forward_hooks for module in (backend.mm_message, backend.env_geometry_bias))
+    with pytest.raises(RuntimeError, match="failed prediction"):
+        evaluation.predict_with_fine_work(backend, lambda: (_ for _ in ()).throw(RuntimeError("failed prediction")))
+    assert not backend.mm_message._forward_hooks
+
+
+def test_historical_prediction_work_is_explicitly_unmeasured_without_changing_result():
+    sentinel = object()
+    result, work = evaluation.predict_with_fine_work(SimpleNamespace(), lambda: sentinel)
+    assert result is sentinel
+    assert work["measured"] is False and work["routes"] is None
+    assert "five" in work["reason"].lower()
 
 
 def test_per_channel_physical_metrics_ports_peaks_and_pressure_keep_units_separate():

@@ -6,28 +6,29 @@ P0/P1/P2 coupling and the frozen Stage-A local surrogate. Run1804 selected
 e4738 remains an evaluation-only mature reference. Wind scientific training
 is paused; Wind is used for shared-core compatibility checks.
 
-**State: all five e100 screens and the first e500 control are complete; the ladder continues.**
-Saved training snapshot at 2026-10-03 07:25 UTC: B-fine is at e837; B-native is at e377,
-H-tree e94, H-overlap e226 and H-local e208. The table and progress figure use
-that same snapshot; Tree subsequently completed its exact e100 physical and
-eight-family response screens. Its reviewed exact e100→500 continuation has
-started and passed its first completed e101 audit.
-Results below also include evaluations and audited continuations completed
-after that snapshot. Fine has continued from exact500 on GPU2 and passed exact750;
-its requested 1000-stage training is active, while both immutable e493 selections
-are preserved. Completion of that stage is still pending.
+**State: all five e100 screens and B-fine's e1000 control are complete; the H finalist ladder continues.**
+Saved training snapshot at 2026-10-03 08:24 UTC: B-fine completed e1000;
+B-native is at e485, H-tree e113, H-overlap e268 and H-local e245. The table
+and inspected progress figure use this same snapshot. Tree completed its exact
+e100 physical and eight-family response screens and resumed to e500. Fine's
+immutable exact1000 and field-selected e972 have completed full90/canonical89
+physical evaluation, all eight response families and selected one-step inverse
+readiness. Both earlier e493 selections remain preserved. Native subsequently
+completed exact e500; its immutable exact500/field-selected456 physical review
+is complete before continuation and migration. A completed control does not
+count toward the required two or three new H finalists.
 Work is on `agent/honf-core-next`. The initial
 finite portfolio is Runs 2201–2205; two repaired screens are available only
 when a concrete failure warrants them. No 5,000-epoch job is authorized to
 start automatically.
 
-| Run | Strategy | Complete epoch | Sampled development field / T MSE | Current action |
+| Run | Strategy | Complete epoch at snapshot | Sampled development field / T MSE | Current action |
 |---|---|---:|---|---|
-| 2201 | B-native | 377 | 0.02595 / 0.02390 | GPU1; exact e100→500 continuation |
-| 2202 | B-fine | 837 | 0.01340 / 0.00870 | GPU2; reviewed exact e500→1000 continuation |
-| 2203 | H-tree | 94 | 0.26263 / 0.24883 | GPU1; subsequent exact e100→500 continuation |
-| 2204 | H-overlap | 226 | 0.24097 / 0.20869 | GPU2; exact e100→500 continuation |
-| 2205 | H-local | 208 | 0.14540 / 0.08667 | GPU2; exact e100→500 continuation |
+| 2201 | B-native | 485 | 0.01735 / 0.01468 | Subsequently exact500 and physical review complete; continue to1000 |
+| 2202 | B-fine | 1000 | 0.01175 / 0.01182 | Native exit0; immutable exact1000/selected972 evaluation complete |
+| 2203 | H-tree | 113 | 0.58706 / 0.44495 | GPU1; exact e100→500 continuation; monitor response-active trend |
+| 2204 | H-overlap | 268 | 0.17179 / 0.17376 | GPU2; exact e100→500 continuation |
+| 2205 | H-local | 245 | 0.17113 / 0.07796 | GPU2; exact e100→500 continuation |
 
 These MSEs use the maintained normalized, sampled 90-case validation task;
 they are neither full-grid physical errors nor the final 89-case comparison.
@@ -92,6 +93,27 @@ executed case-branch distinction; legitimate fallback physics remains available.
 The initial executor is a dense masked reference. Unique supported pairs,
 allocated rows, executed rows, invalid/padded rows and calls are distinct.
 Logical sparsity currently establishes no executor saving. Timing will be
+reported only after native executor parity passes. The benchmark now has an
+optional fail-before-timing gate covering low/high M, small/full query panels,
+all actual P0/P1/P2 outputs and prepared/read tensors, parameter/physical-heat/
+query first gradients, and bit-identical applied support/eligibility masks.
+It restores CPU/CUDA RNG, native parameter flags, gradients, hooks and execution
+mode, and checks frozen parameters/persistent buffers without optimization.
+Output tolerances are rtol/atol 2e-5/2e-5; first-gradient tolerances are
+2e-5/1e-6. These are separately declared contracts. On native Tree100 CPU1,
+both M3/M10 small-query probes pass, with 183 active parameter gradients and
+two input gradients, all fifteen route/phase masks identical, and unchanged
+frozen state. The preserved stricter 1e-6 output probe fails only the interface
+output, at maximum absolute error 7.24e-6; dense repeat is bitwise identical.
+Whole-wrapper FP64 casting is unsupported by native FP32 encoding, so its
+failed probe is retained separately from passing isolated fine-reader FP64
+tests. Full-query CUDA parity and measured latency remain pending. Focused
+measurement tests pass 78 checks with three optional native-resource skips;
+actual Native500 field/response execution separately validates the new direct
+row recorder. Fine-work hooks stay outside benchmark timing and do not count
+backward, attention or coarse/local work.
+
+Initial complete-epoch timing is
 reported with actual physical GPU 1/2 and external occupancy sampled per epoch.
 
 Control training/validation medians are approximately 24.5/1.75 seconds for
@@ -252,14 +274,54 @@ peak allocated memory 11,270.5 MiB. Its baseline+variant response uses 4,324
 extra queries/four actual wrappers (two hard and two soft), raw loss 0.008034,
 2.639 seconds, capped calibration 0.1 and initial ramp coefficient 0.001.
 Hard and soft response work are recorded separately; these are completion
-measurements, while a stable five-to-ten-epoch timing forecast remains pending.
+measurements. The first ten complete response-active epochs 101–110 measure
+mean train/validation 153.83/7.33 seconds under owned Native contention. The
+saved selected e110 retains all 185 active optimizer states at step 1,430, RNG,
+unchanged Stage-A and structural calibration, selection epoch 110/horizon 5000 and
+five completed response calibration samples. These ten epochs add forty
+actual wrapper calls/twenty examples/59,406 queries. At this placement rate,
+390 remaining epochs imply about 17.46 hours; changed placement requires a new
+measured forecast. A subsequent sampled e113 validation spike is retained and
+monitored; a single endpoint does not justify changing the training policy.
+
+Tree's exact e125 audit retains 185 active optimizer states all at step 1,625,
+four RNG streams, unchanged native configuration and all 109 frozen Stage-A
+tensors. Structural calibration remains bitwise equal to e100; all five
+response calibration samples and saved scales remain equal to e105. The
+e111–120 field/T validation means worsen by 37.1%/32.3% relative to e101–110,
+but the next ten complete epochs e118–127 recover to 0.26191/0.17374. The
+retained curve does not show monotonic collapse, so no new loss revision is
+introduced. All ten have 600 cases, 75 microbatches, 13 optimizer steps and
+614,400 primary queries. After Native exits GPU1, their mean train/validation
+time is 93.91/4.20 seconds. Only Tree appears in both recorded GPU1 boundary
+samples for each epoch; the shared host and GPU2 remain busy. The 373 remaining
+epochs to500 forecast 10.17 hours at this placement, superseding the earlier
+owned-Native timing forecast without claiming interval-wide GPU isolation.
+
+Native subsequently completes all 500 genuine epochs with 181 active AdamW
+states at step 6,500, four RNG streams, unchanged frozen Stage-A, normalization,
+native configuration, five response calibration samples and horizon 5000.
+Immutable exact500, field-selected actual456 and T-selected actual492 snapshots
+are byte-verified and read-only. The exact500 checkpoint remains the optimization
+parent for continuation; the T selection supplies no role in field-selected
+comparisons.
 
 Fine's exact e750 audit passes 450,000 training case visits, all 120 AdamW
 states at step 9,750, four RNG streams, unchanged frozen Stage-A/normalization
 and five response calibration records. The immutable field/T-selected e493
 snapshots remain read-only and unchanged. Recent complete epochs take a
-median 17.81 seconds under GPU2's three-job placement. This validates actual
-continuation; its exact/selected e1000 physical evaluation remains pending.
+median 17.81 seconds under GPU2's three-job placement. Fine subsequently
+completed exact e1000 with native exit 0 at 08:14:51 UTC: all 1,000 contiguous full
+epochs, 600,000 train and 90,000 validation case visits, 120 AdamW states all
+at step 13,000, all four RNG streams, unchanged Stage-A/normalization/dataset/
+calibration, policy 2 and horizon 5000. Immutable exact e1000, field-selected
+actual e972 (selector 0.00836234) and T-selected actual e971 (0.00658375) are
+byte-verified and read-only. The field selection alone is used for selected
+physical/response/inverse comparison; no T-selected role is substituted.
+Fine's final ten complete epochs take median 18.19 seconds under three-job
+GPU2 contention. After it exits, Overlap e262–266 and Local e239–243 measure
+median 62.01/68.03 seconds with two owned trainers and 19,911 MiB free; these
+regimes are reported separately.
 
 H-overlap's first seven epochs measure median training/validation 42.58/1.20
 seconds and peak allocated memory 10.26 GiB. Its initial e100 screen forecast
@@ -291,6 +353,13 @@ with training but still misses mature fidelity. Young-versus-mature accuracy
 does not isolate architecture and does not stop the healthy ladder. Saved
 evidence also includes near/far fluid, interfaces, material peaks and ports.
 
+The current packed H5 and inspected source case configuration do not assign
+SI units to these channels. Source case0692 declares the analytic-wake,
+shared-temperature-grid benchmark and zero inlet/wall reference temperature.
+Therefore figures and tables use native benchmark coordinate, velocity,
+pressure and temperature scales, without assigning m/s, Pa or kelvin. The
+interface q_normal remains a generator flux proxy.
+
 Tree100 is finite across all eighteen cases and all 24 maintained physical
 metrics. Its surface/q_normal/material/peak RMSE means are
 3.08500/5.44432/2.73101/3.24330; near/far T 2.89751/2.66118 and pressure-difference
@@ -307,6 +376,20 @@ skipped eligible rows. MM/ME K varies 3–8 while EM/QM/QE K is 8 in these twelv
 case-phases; proper multi-source groups occur in 3/12 MM, 12/12 ME, 11/12 EM and
 12/12 QM/QE scopes. This is a real typed graph with a fidelity miss and no
 measured sparse execution saving, not an established graph benefit.
+
+Tree's exact e100 also completes twelve strict reference-control comparisons
+on four of these cases. Saved-array recomputation matches all 288 role metrics
+exactly with identical geometry, references and masks. At fixed normal access,
+removing controls preserves all 644 native access calls and permissions
+bitwise, but increases four-case fluid T RMSE from 2.19761 to 2.55175. Full
+access with normal controls changes 5,917,211 native pairs and increases T to
+3.98775, while improving material-peak RMSE from 2.51116 to 1.69392. The
+bounded geometry action preserves receiver support cardinalities and weight
+multisets, changes 1,506 native pairs, and gives T 2.19857/surface 2.44559
+versus normal 2.19761/2.45752. No intervention wins all seven audited roles
+on any case. Thus controls affect the operator, but learned selection has no
+clear advantage over this bounded geometry comparison. This is neither a
+global geometry optimum nor a population graph-utility result.
 
 The immutable mature e4738 reference has also completed the full 90-case native
 development population. Excluding duplicate0273, equal-case fluid u/T RMSE is
@@ -349,6 +432,102 @@ T RMSE 0.06900, while retaining spurious velocity/pressure response where the
 benchmark has zero change. The field selection is not a universal response
 winner. The authorized matched-control extension to 1000 retains exact e500
 as its optimization parent, with both e493 selection snapshots preserved.
+
+Native's completed 500-stage exact500 and predeclared field-selected456 also
+complete all 90 native-grid cases. An independent saved-array audit reproduces
+all 24 physical roles, canonical89/compatibility90 aggregates, exact M/Re strata,
+inputs and masks with maximum metric discrepancy zero. The canonical89 results
+show the selection tradeoff:
+
+| Physical quantity | Native exact500 | Native selected456 | Mature selected4738 |
+|---|---:|---:|---:|
+| Fluid u RMSE | 0.021589 | 0.022163 | 0.00572097 |
+| Fluid temperature RMSE | 0.745890 | 0.560723 | 0.218656 |
+| Surface-temperature RMSE | 0.724999 | 0.672854 | 0.448389 |
+| q_normal proxy RMSE | 3.44221 | 3.49145 | 1.58291 |
+| Material-temperature RMSE | 0.556507 | 0.552987 | 0.340027 |
+| Material-peak RMSE | 0.517528 | 0.569771 | 0.346587 |
+| Pressure-difference absolute error | 0.004399 | 0.003687 | 0.00101383 |
+
+Selected456 improves fluid temperature but worsens velocity, flux proxy and
+material peak relative to exact500. Peak-error p90 increases 0.8027→0.9405;
+the worst case0295/M7 increases 1.2843→1.9916. All 90 actual predictions in
+each version execute 179,889,120 padded fine-MLP rows in 14,490 calls, measured
+directly with hooks. These counts exclude attention, policy, coarse/local
+physics, backward, graph export and eligible/unique-pair accounting.
+
+Both versions complete eight stored response families/88 absolute states and
+80 finite variants. Mean T response RMSE is exact500 0.135131/selected456
+0.137524 versus mature 0.116739 and zero-change 0.274135. Mean pressure errors
+0.000371/0.000381 exceed zero-change 0.000278. The sixteen heat-transfer
+responses improve T to 0.061288/0.064708 versus zero-change 0.241760, while
+spurious u/p responses remain 0.001477/0.000533 and 0.001472/0.000571 on null
+reference channels. Each 88-state execution directly measures 175,891,584
+padded fine rows/14,168 calls, reconciled by label and family. Evidence timers
+include instrumentation and are not uninstrumented benchmark latency.
+
+Selected456 completes twelve one-step readiness cases in three inverse modes.
+Nine have full fixed-total Jacobian rank; three M10 cases have rank six in nine
+free directions. The largest full-rank condition number is 297.78. Graph and
+ungrouped non-time trajectories are bitwise equal to joint, with zero meaningful
+graph steps and 24 fallback steps. Heat remains nonnegative with total drift
+at most 1.91e-6, but mean observed/held residuals worsen 1.6076→2.1965 and
+1.7674→2.0545. All three response/readiness process receipts preserve 310
+forward-state tensors/5,430,548 scalars bitwise, with no forward gradients or
+checkpoint mutation. Their evaluation source is base14577a0 plus the saved
+measurement-tool diff; this is not reported as a clean launch. These completed
+physical and response reviews support the authorized matched-control extension
+from exact500 to1000; one-step readiness remains distinct from inverse quality.
+
+B-fine's completed 1000-stage exact e1000 and predeclared field-selected e972
+have now completed the same full 90 native-grid cases. An independent audit
+recomputes every one of the 24 maintained physical roles, canonical89/
+compatibility90 aggregates, exact M/Re strata, inputs and masks with maximum
+metric discrepancy zero. The selected e972 is 28 epochs younger than exact1000;
+the separately preserved T-best e971 contributes no role to this comparison.
+
+| Canonical89 physical quantity | Fine exact e1000 | Fine selected e972 | Mature selected e4738 |
+|---|---:|---:|---:|
+| Fluid u RMSE | 0.0208118 | 0.0194957 | 0.00572097 |
+| Fluid temperature RMSE | 0.707640 | 0.562692 | 0.218656 |
+| Near-fluid temperature RMSE | 0.726882 | 0.548674 | 0.249451 |
+| Surface-temperature RMSE | 0.718738 | 0.546184 | 0.448389 |
+| q_normal proxy RMSE | 3.28969 | 3.33277 | 1.58291 |
+| Material-peak RMSE | 0.586344 | 0.531433 | 0.346587 |
+| Final-port h_effective RMSE | 0.656939 | 0.719937 | 0.614266 |
+| Pressure-difference absolute error | 0.00447348 | 0.00470100 | 0.00101383 |
+
+Selected e972 improves fluid temperature by 21.24% and u by 23.41% relative
+to the prior field-selected e493. Temperature p90/max declines from
+0.98257/1.33201 to 0.75860/0.95795. It still misses mature performance on these
+roles. Selection improves most displayed quantities over exact1000 but
+worsens q_normal, pressure difference and h_effective; h_effective also worsens
+relative to e493. These results demonstrate continued control learning while
+preserving the physical tradeoffs and different training ages.
+
+Both versions complete all eight stored response families/88 absolute states
+and 80 finite variants. Independent array recomputation matches response
+metrics within 8.88e-16 and pressure reductions exactly. All-variant fluid T
+response RMSE is exact1000 0.134809/selected972 0.134477/mature4738 0.116739;
+q_normal proxy response RMSE is 1.19217/1.19107/1.27294, respectively. Selected
+pressure-increment error is 0.000279963, slightly above the zero-change
+predictor's 0.000278366; exact1000 yields 0.000203173. For sixteen heat-transfer
+variants, selected T response RMSE is 0.073462 versus zero-change 0.241760,
+but spurious u/p response remains 0.001701/0.000448 where the reference is null.
+These are useful thermal responses with adverse flow/pressure behavior.
+Actual fine rows are unmeasured in these completed legacy-backend response
+archives; the available 264 preparations/880 wrapper reads are not row counts.
+
+The selected e972 one-step readiness panel completes twelve cases in the
+same three inverse modes. All 249 loaded forward-state tensors, including
+persistent buffers, remain bitwise unchanged in the execution receipt.
+Nine tasks have full fixed-total Jacobian rank; the three M10 tasks have
+rank six in nine free directions. The largest full-rank condition number is
+743.38. All non-time graph/ungrouped trajectories are bitwise equal to joint,
+with no meaningful graph update and 24 full-joint fallback steps. Public-total
+drift is at most 1.91e-6. Mean observed/held residuals worsen
+1.3615→1.7532 and 1.7225→1.8711 after one step, so this is execution/conditioning
+readiness with an inverse miss, not completed optimization quality.
 
 The input-only population audit finds finite development inputs within every
 training range, but 80/90 cases occupy sixteen M–Re combinations absent from
@@ -440,7 +619,7 @@ remain on data. Changes in unrelated occupancy are not attributed to this campai
 ## Selected measured figures
 
 Figure index: [full-epoch training progress](../../diagnostics/generated/shared_core_campaign_20261002/figures/campaign_training_progress.pdf),
-[screen fields and residuals](../../diagnostics/generated/shared_core_campaign_20261002/figures/predictor_screen_case0692.pdf),
+[selected control fields and residuals](../../diagnostics/generated/shared_core_campaign_20261002/figures/predictor_screen_case0692.pdf),
 [interface and material fidelity](../../diagnostics/generated/shared_core_campaign_20261002/figures/interface_material_case0692.pdf),
 [frozen finite responses](../../diagnostics/generated/shared_core_campaign_20261002/figures/reference_response_baseline.pdf),
 [mature inverse baseline](../../diagnostics/generated/shared_core_campaign_20261002/figures/mature_inverse_baseline.pdf),
@@ -448,12 +627,12 @@ Figure index: [full-epoch training progress](../../diagnostics/generated/shared_
 
 ![Full-epoch training and measured elapsed work](../../diagnostics/generated/shared_core_campaign_20261002/figures/campaign_training_progress.png)
 
-The inspected snapshot contains 377/837/94/226/208 complete epochs for
+The inspected 08:24 UTC snapshot contains 485/1000/113/268/245 complete epochs for
 B-native/B-fine/H-tree/H-overlap/H-local. Every displayed epoch has 600 distinct
 training cases, 13 optimizer steps and 614,400 primary sampled queries. B-fine
-e837 normalized sampled field/T MSE is 0.01340/0.00870; the full-grid physical
+e1000 normalized sampled field/T MSE is 0.01175/0.01182; the full-grid physical
 evaluation is reported separately above.
-Successful train/validation time sums are 3.238/3.588/4.837/3.858/3.943 hours;
+Successful train/validation time sums are 4.211/4.400/5.684/4.841/4.921 hours;
 discarded partial work and storage replay overhead remain recorded separately.
 Owned contention and H-tree engineering changes affect timing. These curves
 establish actual model age and work, not sparse speedups or mature-equivalent
@@ -463,18 +642,20 @@ Timing diamonds mark the first complete epochs in GPU2's three-trainer
 placement: Fine501, Overlap162 and Local152. Their slower H timing remains
 separate from architecture or sparse-work claims.
 
-![Native-grid screening fields and residuals for development case 0692](../../diagnostics/generated/shared_core_campaign_20261002/figures/predictor_screen_case0692.png)
+![Native-grid selected control fields and residuals for development case 0692](../../diagnostics/generated/shared_core_campaign_20261002/figures/predictor_screen_case0692.png)
 
-On this input-selected high-M case (M=10), B-fine e100 fluid RMSE is 0.089684
-for u and 2.07438 for temperature; mature Run1804 e4738 yields 0.0056393 and
-0.174727. Fine's immutable field-selected e493 improves these case errors to
-0.0283131 and 0.706880. The revised figure includes that selected version and
-its absolute residual maps alongside the preserved e100 and mature baselines.
+On this input-selected high-M case (M=10), mature Run1804 e4738 yields fluid
+u/T RMSE 0.0056393/0.174727. Fine's immutable field selections e493 and e972
+yield 0.0283131/0.706880 and 0.0199249/0.702979, respectively. Thus the later
+control improves u on this difficult case while T scarcely changes, despite
+its clearer canonical-population T improvement. The figure retains the mature
+baseline and displays both selected training stages and their residual maps;
+the earlier e100 numerical evidence and screen table remain available.
 The figure uses the stored exposed-development native-grid reference,
 benchmark physical units, shared value/residual ranges, white solid masks,
-predicted ports and the same frozen Stage-A model. It shows substantial young
-model errors near modules and in their downstream fields, with a clear reduction
-by the completed Fine500 stage. It does not isolate
+predicted ports and the same frozen Stage-A model. It shows residual errors
+near modules and in their downstream fields, including the remaining T miss
+at the completed Fine1000 stage. It does not isolate
 architecture from training age. Both the PDF master and small embedding raster
 were visually inspected after fixing clipped labels; numerical arrays remain
 under the ignored evaluation directory.

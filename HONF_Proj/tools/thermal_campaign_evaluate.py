@@ -32,6 +32,15 @@ REFERENCE_ACTIONS = {"control_identity_fixed_access": "control_identity",
                      "geometry_reference_actions": "geometry_reference_actions"}
 
 
+def predict_with_fine_work(backend, predict, *args, **kwargs):
+    """Record the actual prediction once, excluding subsequent graph exports."""
+    from thermal_campaign_benchmark import optional_fine_work
+
+    with optional_fine_work(backend) as fine_work:
+        prediction = predict(*args, **kwargs)
+    return prediction, fine_work
+
+
 def physical_errors(prediction, reference, mask=None):
     """Retain sufficient statistics so pooled and equal-case scores differ."""
     prediction, reference = np.asarray(prediction, dtype=np.float64), np.asarray(reference, dtype=np.float64)
@@ -411,7 +420,8 @@ def evaluate(args):
             with intervention(model, name):
                 with reference_capture if reference_capture is not None else nullcontext(), \
                      phase_capture if phase_capture is not None else nullcontext():
-                    prediction = predict_case(model, sample, device, query_batch_size=args.query_batch_size,
+                    prediction, fine_work = predict_with_fine_work(model.core.backend, predict_case,
+                        model, sample, device, query_batch_size=args.query_batch_size,
                         local_port_condition_mode="predicted", mixed_teacher_ratio=0,
                         return_routing_maps=True, return_prepared_state=index in graph_panel)
                 graph = None
@@ -458,6 +468,8 @@ def evaluate(args):
             row = {"case_id": case_id, "module_count": int((reference["structure"]["module_present"] > .5).sum()),
                 "physical_context": native_physical_context(reference["structure"]),
                 "intervention": name, "metrics": metrics, "complete_wrapper_seconds": seconds,
+                "complete_wrapper_seconds_scope": "Evidence timer includes fine-MLP work hooks when supported and any graph anchor reconstruction; not uninstrumented benchmark latency",
+                "fine_kernel_work": fine_work,
                 "work": work,
                 "work_scope": "Legacy prediction interaction_aux aggregated across external field query chunks; not summed complete-wrapper executor work",
                 "arrays": str(directory / "evidence.npz"), "graph_phase": 2 if graph is not None else None}
@@ -466,7 +478,7 @@ def evaluate(args):
                 np.savez_compressed(phase_path, **phase_capture.arrays)
                 row["phase_graph_arrays"] = str(phase_path)
                 row["phase_graph_scope"] = "P0/P1/P2 post-intervention source plans and actual native prepare/read receiver streams; no extra fine reads"
-                row["complete_wrapper_seconds_scope"] = "Includes phase-recording copies and anchor reconstruction; not uninstrumented speed evidence"
+                row["complete_wrapper_seconds_scope"] = "Evidence timer includes fine-MLP work hooks when supported, phase-recording copies and anchor reconstruction; not uninstrumented benchmark latency"
                 if name != "normal":
                     from honf_forward_core.evaluation.typed_work_evidence import compare_native_access
                     comparison_directory = reference_access_dir if reference_capture is not None else output

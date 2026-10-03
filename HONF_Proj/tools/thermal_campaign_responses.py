@@ -54,11 +54,42 @@ def response_channel_metrics(prediction, reference, valid, weights, names, units
     return result
 
 
+def predict_stencil_with_fine_work(backend, operator, stencil, **kwargs):
+    """Measure each actual absolute prediction; never repeat model inference."""
+    from channelthermal.response_control.algebra import predict_stencil
+    from thermal_campaign_benchmark import optional_fine_work
+
+    labels = ["baseline", *stencil.variants]
+    states = {}
+
+    def measured_operator(*args, **inputs):
+        label = labels[len(states)]
+        with optional_fine_work(backend) as work:
+            prediction = operator(*args, **inputs)
+        states[label] = work
+        return prediction
+
+    predictions = predict_stencil(measured_operator, stencil, **kwargs)
+    if list(states) != labels:
+        raise RuntimeError("Fine work must retain every absolute stencil prediction")
+    measured = all(work["measured"] for work in states.values())
+    totals = None
+    if measured:
+        totals = {route: {key: sum(work["routes"][route][key] for work in states.values())
+                          for key in ("padded_input_rows", "calls")}
+                  for route in next(iter(states.values()))["routes"]}
+    result = {"measured": measured, "routes": totals, "states": states,
+              "scope": "All successful absolute native predictions in this stencil; five-route padded fine MLP input rows and calls",
+              "excluded": "Eligible/unique pairs, attention, policy/coarse/local physics, backward and graph export"}
+    if not measured:
+        result["reason"] = "; ".join(sorted({work["reason"] for work in states.values() if not work["measured"]}))
+    return predictions, result
+
+
 def evaluate_responses(checkpoint_path, *, dataset_path, stencil_paths, output_dir, device="cpu", query_batch_size=1024):
     from channelthermal.data.datasets import GlobalChannelThermalDataset
     from channelthermal.evaluation.loading import load_model
     from channelthermal.interaction_evidence.response_atlas import load_response_atlas_stencil
-    from channelthermal.response_control.algebra import predict_stencil
     from channelthermal.response_control.contracts import DesignInput
     from channelthermal.response_control.native import DifferentiableThermalOperator
     from channelthermal.response_control.thermal import reduce_native_thermal_quantities
@@ -92,12 +123,14 @@ def evaluate_responses(checkpoint_path, *, dataset_path, stencil_paths, output_d
             torch.cuda.synchronize()
         started = perf_counter()
         with torch.no_grad(), CampaignForwardWork(model.core) as work:
-            predictions = predict_stencil(operator, stencil, device=device)
+            predictions, fine_work = predict_stencil_with_fine_work(model.core.backend, operator, stencil, device=device)
         if torch.device(device).type == "cuda":
             torch.cuda.synchronize()
         family = {"family_id": stencil.physical_family_id, "split": stencil.split.value,
             "stencil": str(Path(path).resolve()), "absolute_states": len(records),
             "complete_wrapper_seconds": perf_counter() - started, "forward_work": work.records,
+            "complete_wrapper_seconds_scope": "Evidence timer includes forward ledgers and fine-MLP work hooks when supported; not uninstrumented benchmark latency",
+            "fine_kernel_work": fine_work,
             "work_scope": "all absolute forward calls; no backward; default dense reference", "variants": []}
         quantities = {}
         arrays = {"labels": np.asarray(list(records))}

@@ -100,6 +100,185 @@ def test_low_high_m_selection_and_gpu_mapping(monkeypatch):
         benchmark.allowed_device("cuda:0")
 
 
+def _executor_probe_fixture(mutation=None):
+    """Small three-phase wrapper using the actual typed physical executors.
+
+    This verifies the probe itself; retained native checkpoint evidence is a
+    separate opt-in test and an admitted GPU measurement, not this fixture.
+    """
+    from honf_forward_core.interface_fields.adaptive_interaction_cover import InteractionContext
+    from honf_forward_core.interface_fields.typed_hypergraph_field import TypedHypergraphField
+    from honf_forward_core.interface_fields.types import EncodedInterfaceCase, InterfaceRead
+
+    class Core(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backend = TypedHypergraphField(8, 12, 2, 2,
+                architecture="local_overlap_hypergraph_honf", spatial_dim=2, module_characteristic_length=.03)
+
+        def prepare(self, encoded, phase):
+            state = self.backend.prepare(encoded, encoded.module_tokens,
+                interaction_context=InteractionContext(phase=phase))
+            return SimpleNamespace(backend_state=state, encoded=encoded, module_states=state["module_tokens"],
+                coarse_state=state["env_tokens"], interaction_aux=self.backend.preparation_aux(state))
+
+        def read(self, prepared, query):
+            context, auxiliary = self.backend.read(prepared.backend_state, prepared.encoded, query,
+                torch.cat((query, query.square(), query.sin()), -1))
+            return InterfaceRead(context, auxiliary)
+
+    class Wrapper(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.core, self.encoder = Core(), torch.nn.Linear(2, 8)
+            self.stage_a = torch.nn.Linear(8, 2).requires_grad_(False)
+            self.head = torch.nn.Linear(8, 4)
+            self.unused = torch.nn.Parameter(torch.randn(2))
+            self.register_buffer("env", torch.randn(1, 5, 8))
+            self.register_buffer("centres", torch.rand(1, 3, 2))
+            self.register_buffer("env_coords", torch.rand(1, 5, 2))
+
+        def forward(self, structure, query_xy, local_module_params):
+            heat = structure["heat_powers"]
+            tokens = self.encoder(torch.stack((heat, local_module_params[..., 0]), -1))
+            encoded = EncodedInterfaceCase(tokens, self.env, tokens.mean(1), self.centres, self.env_coords,
+                structure["module_present"], torch.cat((self.centres, heat[..., None]), -1),
+                None, torch.ones(1, 5), torch.ones(2), env_characteristic_lengths=torch.full((1, 5), .03))
+            contexts = [self.core.read(self.core.prepare(encoded, f"P{phase}"), query_xy).context for phase in range(3)]
+            field = self.head(contexts[2])
+            if self.core.backend.execution_mode == "rectangular_subset":
+                if mutation == "output":
+                    field = field + .01
+                if mutation == "gradient":
+                    field = field + .01 * (field - field.detach())
+                if mutation == "buffer":
+                    self.env.add_(.01)
+                if mutation == "raise":
+                    raise RuntimeError("intentional probe failure")
+            ports0, ports1 = self.head(contexts[0]), self.head(contexts[1])
+            return {"pred_field": field, "pred_interface": self.head(contexts[1]),
+                "pred_internal_temperature": self.stage_a(contexts[1]),
+                "pred_port_condition_raw": ports0, "pred_port_condition": ports1,
+                "local_port_condition_used": ports0, "module_response_latent": contexts[1],
+                **{name: field[..., :0] for name in benchmark.PARITY_OUTPUTS[7:]}}
+
+    torch.manual_seed(414)
+    model = Wrapper().eval()
+    arguments = {"structure": {"heat_powers": torch.tensor([[2., 3., 0.]]),
+        "module_present": torch.tensor([[1., 1., 0.]])}, "query_xy": torch.rand(1, 7, 2),
+        "local_module_params": torch.cat((torch.tensor([[[2.], [3.], [0.]]]), torch.zeros(1, 3, 6)), -1)}
+    with torch.no_grad():
+        model(**arguments)
+    flags = {name: value.requires_grad for name, value in model.named_parameters()}
+    model.requires_grad_(False)
+    return model, flags, arguments
+
+
+def test_executor_parity_actual_typed_first_gradients_and_restored_state():
+    torch.set_num_threads(1)
+    model, flags, arguments = _executor_probe_fixture()
+    model.core.backend.set_execution_mode("rectangular_subset", receiver_chunk_size=3)
+    rng = torch.get_rng_state().clone()
+    checked = benchmark.verify_executor_parity(model, arguments, {}, flags, receiver_chunk=2)
+    assert checked["passed"]
+    assert checked["tolerance"]["output"] == {"rtol": 2e-5, "atol": 2e-5}
+    assert checked["tolerance"]["first_gradient"] == {"rtol": 2e-5, "atol": 1e-6}
+    assert checked["active_parameter_gradient_tensors"] > 20
+    assert checked["active_input_gradient_names"] == ["input.physical_heat", "input.query_xy"]
+    assert checked["unused_gradient_names"]["dense_masked_reference"] == checked["unused_gradient_names"]["rectangular_subset"]
+    assert "unused" in checked["unused_gradient_names"]["dense_masked_reference"]
+    assert checked["native_frozen_parameter_names"] == ["stage_a.weight", "stage_a.bias"]
+    assert set(checked["adjoint"]["roles"]) == set(benchmark.ADJOINT_OUTPUTS)
+    assert checked["output_roles"]["pred_port_global_temperature_target"] == "non_predictive_port_target"
+    assert checked["output_roles"]["pred_port_global_consistency_mask"] == "non_predictive_port_mask"
+    assert {name.split(".")[0] for name in checked["output_checks"] if name.startswith("P")} == {"P0", "P1", "P2"}
+    assert checked["restored_frozen_state"]["state_dict_unchanged_bitwise"]
+    assert all(value["passed"] for value in checked["applied_support_inventory_checks"].values())
+    assert len(checked["applied_support_inventory_checks"]) == 15
+    assert model.core.backend.execution_mode == "rectangular_subset" and model.core.backend.execution_receiver_chunk == 3
+    assert all(not parameter.requires_grad and parameter.grad is None for parameter in model.parameters())
+    assert torch.equal(rng, torch.get_rng_state())
+    assert "prepare" not in model.core.__dict__ and "read" not in model.core.__dict__
+    assert "prepare" not in model.core.backend.__dict__ and "_access" not in model.core.backend.__dict__
+    for execution in checked["forward_support_and_work"].values():
+        assert set(execution["forward_work"]["hard"]) == {"P0", "P1", "P2"}
+        assert execution["fine_kernel_work"]["measured"]
+
+
+@pytest.mark.parametrize("mutation", ["output", "gradient"])
+def test_executor_parity_detects_value_and_gradient_only_mismatch(mutation):
+    model, flags, arguments = _executor_probe_fixture(mutation)
+    checked = benchmark.verify_executor_parity(model, arguments, {}, flags, receiver_chunk=2)
+    assert not checked["passed"]
+    if mutation == "gradient":
+        assert all(value["passed"] for value in checked["output_checks"].values())
+        assert not all(value["passed"] for value in checked["first_gradient_checks"].values())
+    else:
+        assert not checked["output_checks"]["pred_field"]["passed"]
+    assert checked["restored_frozen_state"]["passed"]
+
+
+@pytest.mark.parametrize("mutation", ["buffer", "raise"])
+def test_executor_parity_restores_hooks_flags_executor_on_exception(mutation):
+    model, flags, arguments = _executor_probe_fixture(mutation)
+    expected = "state tensor changed: env" if mutation == "buffer" else "intentional probe failure"
+    with pytest.raises(RuntimeError, match=expected):
+        benchmark.verify_executor_parity(model, arguments, {}, flags, receiver_chunk=2)
+    assert model.core.backend.execution_mode == "dense_masked_reference"
+    assert all(not value.requires_grad and value.grad is None for value in model.parameters())
+    assert "prepare" not in model.core.__dict__ and "read" not in model.core.__dict__
+
+
+def test_parity_heat_leaves_preserve_values_and_physical_normalization():
+    _, _, arguments = _executor_probe_fixture()
+    checkpoint = {"train_config": {"dataset": {"normalize_inputs": True}},
+        "global_normalization_stats": {"heat_power_mean": [7.], "heat_power_std": [2.]}}
+    live, leaves = benchmark.differentiable_arguments(arguments, checkpoint)
+    assert torch.equal(live["structure"]["heat_powers"], arguments["structure"]["heat_powers"])
+    assert torch.equal(live["local_module_params"], arguments["local_module_params"])
+    assert torch.equal(live["query_xy"], arguments["query_xy"])
+    gradient = torch.autograd.grad(live["structure"]["heat_powers"].sum() + live["local_module_params"][..., 0].sum(),
+        leaves["input.physical_heat"])[0]
+    torch.testing.assert_close(gradient, torch.tensor([[1.5, 1.5, .5]]))
+
+
+def test_parity_adjoint_treats_material_positions_as_one_temperature_channel():
+    outputs = {name: torch.ones(1, 2, 3) for name in benchmark.ADJOINT_OUTPUTS}
+    outputs["pred_internal_temperature"] = torch.tensor([[[2., 4., 6.], [1., 3., 5.]]])
+    weights, scales = benchmark.common_adjoint(outputs)
+    assert len(scales["pred_internal_temperature"]) == 1
+    assert scales["pred_internal_temperature"][0] == pytest.approx((91. / 6.) ** .5)
+    assert weights["pred_internal_temperature"].shape == (1, 2, 3)
+    assert not any(value.requires_grad for value in weights.values())
+
+
+def test_parity_nonfinite_values_fail_with_serializable_evidence():
+    checked = benchmark.tensor_error(torch.tensor([0., 1.]), torch.tensor([float("nan"), 1.]), rtol=2e-5, atol=1e-6)
+    assert not checked["passed"] and not checked["finite"]
+    import json
+    json.dumps(checked, allow_nan=False)
+
+
+def test_failed_executor_parity_never_starts_timing(monkeypatch, tmp_path):
+    model, flags, arguments = _executor_probe_fixture("gradient")
+    for name, value in model.named_parameters():
+        value.requires_grad_(flags[name])
+    reference = {"case_id": "0001", "structure": {"module_present": np.ones(2)}}
+    monkeypatch.setattr(benchmark, "load_native", lambda *_args, **_kwargs: (model, {}, [reference], [reference], tmp_path))
+    monkeypatch.setattr(benchmark, "low_high_indices", lambda *_args, **_kwargs: [0])
+    monkeypatch.setattr(benchmark, "query_panels", lambda *_args: [("small_inverse", np.zeros((7, 2)))])
+    monkeypatch.setattr(benchmark, "native_arguments", lambda *_args: arguments)
+    def timing_must_not_run(*_args, **_kwargs):
+        pytest.fail("Timing started after failed parity")
+    monkeypatch.setattr(benchmark, "benchmark_model_case", timing_must_not_run)
+    args = benchmark.parse_args(["--checkpoint", str(tmp_path / "model.pt"), "--output-dir", str(tmp_path), "--verify-executor-parity"])
+    with pytest.raises(RuntimeError, match="parity failed"):
+        benchmark.evaluate(args)
+    import json
+    saved = json.loads((tmp_path / "executor_parity.json").read_text())
+    assert not saved["passed"] and not (tmp_path / "timing.json").exists()
+
+
 def test_finite_differences_are_per_physical_channel_and_do_not_invent_topology():
     def forward(parameter):
         return {"fields": torch.arange(6, dtype=parameter.dtype).reshape(2, 3) * parameter,
