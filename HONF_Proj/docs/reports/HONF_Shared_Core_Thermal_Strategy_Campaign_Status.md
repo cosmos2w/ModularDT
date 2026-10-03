@@ -5,6 +5,9 @@ and three learned organizers while preserving Thermal's predicted-port
 P0/P1/P2 coupling and the frozen Stage-A local surrogate. Run1804 selected
 e4738 remains an evaluation-only mature reference. Wind scientific training
 is paused; Wind is used for shared-core compatibility checks.
+The [measured architecture map](../guides/Shared_Core_Thermal_Wind_Architecture_Map.md)
+separates shared interaction mathematics, allocated parameters and legitimate
+case-specific physical interfaces.
 
 | Result | Measured gain so far | Measured miss / next decision |
 |---|---|---|
@@ -30,7 +33,7 @@ selection is also 388 with different weights; it is not substituted. After the
 measured review below, root promoted the same Run2205 lineage from exact500 to
 1000 at 14:49:43 UTC on GPU2. This is the first H finalist continuation. Exact600
 subsequently passed full optimizer/RNG/calibration/frozen Stage-A and case-coverage
-checks. Later ordinary audits reach 875 with the same native bindings and complete
+checks. Later ordinary audits reach 950 with the same native bindings and complete
 case coverage. No H1000 result is complete yet.
 
 Tree completed exact500 with natural exit0 and passed its full state/binding audit.
@@ -39,7 +42,7 @@ preserved. All eleven native physical/graph/response/topology/readiness/CUDA
 review jobs are complete. Root promoted the same Run2203 exact top-level500
 parent to1000 at 20:05:35.726 UTC on GPU1 under loaded source `b3f93c9`.
 Genuine resumed501 passes full coverage and calibration continuity; exact525/550
-state audits remain later boundaries. This is the second H continuation, not
+state audits have passed. This is the second H continuation, not
 completed1000. The representation miss below remains part of the evidence. Overlap
 exited naturally at 500 at 13:10 UTC; exact500/field-selected292 reviews and
 native parity/timing are complete, with T-selected269 separately preserved.
@@ -68,17 +71,35 @@ start automatically.
 | 2202 | B-fine | 1000 | 0.01175 / 0.01182 | Native exit0; immutable exact1000/selected972 evaluation complete |
 | 2203 | H-tree | 508 | 0.02521 / 0.02075 | GPU1; exact500→1000 second H hypothesis; complete500 review and genuine501 startup proof |
 | 2204 | H-overlap | 500 | 0.60332 / 0.21109 | Native exit0; exact500/selected292 review complete; third-slot decision awaits cohort review |
-| 2205 | H-local | 878 | 0.06689 / 0.05805 | GPU2; exact500→1000 first H hypothesis; full saved-state audits passed875 |
+| 2205 | H-local | 878 | 0.06689 / 0.05805 | GPU2; exact500→1000 first H hypothesis; full saved-state audits passed950 |
 
 These MSEs use the maintained normalized, sampled 90-case validation task;
 they are neither full-grid physical errors nor the final 89-case comparison.
 Displayed CSV ages 508/878 are the newly inspected figure's frozen prefixes;
-Tree500 full-state proof and Local875 ordinary state proof are separately linked
+Tree550 full-state proof and Local950 ordinary state proof are separately linked
 below. Prior numerical snapshots remain archived. The saved-only figure audit
 checks 3,886 complete coverage rows and 19,430 numerical curve scalars.
 Every retained epoch has 600 unique cases, 75 microbatches, 13 native
 buckets/optimizer steps and 614,400 primary field queries. Exact e25/e50
 checkpoints are retained as reached.
+
+Later saved-state boundaries are [Tree550](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/continuation_epoch550_ordinary_state_audit.json)
+and [Local950](../../diagnostics/generated/shared_core_campaign_20261002/logs/h-local_e950_checkpoint_audit.json).
+Tree's 185 AdamW states all reach 7,150; Local's 203 reach 12,350. Both preserve
+four RNG streams, 109 frozen Stage-A tensors, calibration and the 5,000 schedule
+horizon. Their stopping target remains 1,000. Tree's entire native config
+differs from 500 only in epochs 500→1000, and all 12 global/eight local
+normalization arrays remain bitwise equal. Local passes all 20 native state
+checks plus eight checkpoint/helper read guards. The finite 525/550 and 925/950
+observers each finish with exit 0; both trainers remain live. These audits prove
+ordinary state/coverage continuity, not natural completion or final physical
+fidelity. Tree 541–550 mean train/validation times are 92.899/4.180 s;
+Local 941–950 median train+validation is 52.949 s. The recorded allocated peaks
+are 13,100.43/12,548.90 MiB. Direct boundary snapshots show 23,579/23,843 MiB free on
+GPU 1/2 with the respective owned trainer; an external GPU 0 job and shared-host
+activity remain observed. These are boundary samples, not isolated timing.
+The displayed progress figure stays explicitly frozen at 20:19; no new figure
+or forecast is inferred from these later checkpoint audits.
 
 All formal epochs must visit all 600 native training records exactly once;
 batch caps are rejected. Effective batch 48, primary sampled Q 1024, FP32,
@@ -183,8 +204,10 @@ remains. Neither efficiency audit makes model calls or changes trainer state.
   its native full-access dispatch. They are recorded as pre-existing failures;
   historical interaction equations were preserved.
 - Native retained Thermal e4738 and Wind e2475 replay, prepared chunking and
-  disposable optimizer steps passed at the declared 2e-5 tolerance. The frozen
-  Stage-A tensors stayed unchanged. Fresh tree/overlap/local wrappers each
+  disposable optimizer steps passed at the declared 2e-5 tolerance. A later
+  guarded rerun below supplies primary measured errors and repairs a silently
+  skipped port-output assertion. The frozen Stage-A tensors stayed unchanged.
+  Fresh tree/overlap/local wrappers each
   completed real optimizer steps with nonzero organizer gradients.
 - A later full-width H256 Wind check passed all three fresh architectures on
   real 3-D case `gen_0000_wd270` (M11/E512/Q4). All 98 physical first gradients
@@ -200,6 +223,25 @@ remains. Neither efficiency audit makes model calls or changes trainer state.
   normalized source weights. Thermal uses sqrt(cell area); Wind uses cube-root
   token-cell volume in rotor-diameter coordinates. Near-access scales are not
   inferred from dimensionless attention measures.
+
+The [retained CPU1 rerun](../../diagnostics/generated/shared_core_campaign_20261002/logs/retained_native_alignment_cpu1_ports/execution_receipt.json)
+finishes 21:30:30.089 UTC with exit 0, two passed tests and no skips, using clean
+`b5fd919` and actual native loaded ages 4738/2475. Six mandatory Thermal outputs
+(fluid, interface, material, final/raw/used ports) and Wind's field replay
+match exactly; prepared chunk maximum absolute errors are 9.536743e-7 and
+4.023314e-7. All nine assertions retain rtol/atol 2e-5/2e-5. The original test
+named nonexistent `used_port_tokens` and conditionally skipped it; the durable
+repair requires all three real port outputs and fails if any is absent.
+Both disposable steps change the field head with finite loss, while 109 frozen
+Thermal parameters and all 22 Thermal/five Wind named buffers remain bitwise
+unchanged. Wind has no frozen parameters, so that parameter check is vacuous.
+Source bytes, historical wrapper/core blobs and both checkpoint SHA/stat are
+preserved; 791 source archives and three historical blobs are byte-verified.
+The [earlier six-comparison rerun](../../diagnostics/generated/shared_core_campaign_20261002/logs/retained_native_alignment_cpu1/execution_receipt.json)
+is preserved with its narrower scope. Historical wrapper/core methods still
+share current fine dependencies, and Wind's disposable squared-output step
+checks execution rather than transfer accuracy. This adds no Wind scientific
+training or 5,000-epoch launch.
 
 B-fine allocates 140 trainable tensors (2,928,273 scalars), while 120 acquire
 AdamW state. The other 20 tensors (104,451 scalars) belong to retained
