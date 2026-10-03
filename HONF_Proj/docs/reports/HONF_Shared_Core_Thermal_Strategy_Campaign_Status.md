@@ -9,12 +9,12 @@ is paused; Wind is used for shared-core compatibility checks.
 | Result | Measured gain so far | Measured miss / next decision |
 |---|---|---|
 | Predictor | Both controls completed 1,000 epochs. Native selected e962 has canonical89 fluid T RMSE 0.39130 versus its prior selected e456 at 0.56072; Fine selected e972 improves T/u errors 21.24%/23.41% over its 500-stage selection. | Both trail mature T RMSE 0.21866. Surface, heat-flux proxy, h and pressure have separate tradeoffs. Complete the distinct H1000 comparisons. |
-| Organizer | Local selected e388 at stage500 has measured action: fixed-access zero controls worsen 20/24 role means; full access with saved controls and bounded geometry each worsen 21/24. Both Local500 versions pass native output/first-gradient parity. | Complete fine rows fall 20.7–40.0%, but full-query wrapper latency increases 4.32–10.30%. Absolute thermal errors still trail controls and mature. Local continues as an informative finalist; final qualification remains pending. Training uses the dense masked reference. |
-| Inverse | Native962 completed 108 frozen trials with observed/held means 2.27300→1.27515 and 2.40327→2.08658. Fine972's corresponding means decline 35.66%/20.39%. | Both Dense controls use full-joint fallback in graph/ungrouped modes and reproduce joint trajectories exactly. Fine heat RMSE and pressure worsen 18.58%/69.54%. Local one-step graph readiness is not final inverse quality. H1000 inverse and qualified paired heads remain pending. |
+| Organizer | Local selected e388 and Tree selected e467 have measured conditional action. Tree's strict fixed-access zero controls and full access with saved controls each worsen all 24 role means; native output/first-gradient gates pass. | Actual subset fine rows fall, but every paired Tree500 latency comparison is slower; full-query increases are 8.84–10.50%. Tree's rebuilt-atom hidden-context invariance fails. Tree and Local continue as distinct hypotheses; final qualification remains pending. Training uses the dense masked reference. |
+| Inverse | Native962 completed 108 frozen trials with observed/held means 2.27300→1.27515 and 2.40327→2.08658. Fine972's corresponding means decline 35.66%/20.39%. | Both Dense controls use full-joint fallback in graph/ungrouped modes and reproduce joint trajectories exactly. Fine heat RMSE and pressure worsen 18.58%/69.54%. Tree467 one-step graph improves observed error but worsens held error. H1000 inverse and qualified paired heads remain pending. |
 
-**State: both controls completed 1,000 epochs; Local500 and Overlap500 reviews are complete. The distinct H finalist ladder continues.**
-The inspected saved snapshot at 2026-10-03 17:44:51 UTC contains Native1000,
-Fine1000, Tree438, Overlap500 and Local701. Native exited naturally with code 0
+**State: both controls completed 1,000 epochs; all three H500 reviews are complete. Tree and Local are the two distinct H1000 continuations.**
+The inspected saved snapshot at 2026-10-03 20:19:25 UTC contains Native1000,
+Fine1000, Tree508, Overlap500 and Local878. Native exited naturally with code 0
 at 14:20:48 UTC; its exact1000 and field-selected actual962 completed full90/
 canonical89 physical evaluation and eight response families. Selected962 also
 completed all 108 frozen inverse trials. Temperature selection is actual996,
@@ -30,21 +30,30 @@ selection is also 388 with different weights; it is not substituted. After the
 measured review below, root promoted the same Run2205 lineage from exact500 to
 1000 at 14:49:43 UTC on GPU2. This is the first H finalist continuation. Exact600
 subsequently passed full optimizer/RNG/calibration/frozen Stage-A and case-coverage
-checks. Later ordinary audits reach 775 with the same native bindings and complete
+checks. Later ordinary audits reach 875 with the same native bindings and complete
 case coverage. No H1000 result is complete yet.
 
-Tree continues its exact100→500 lineage on GPU1; exact375/400 and the later exact475
-state and saved-binding audits pass. Tree500 physical review precedes the second H1000 promotion. Overlap
+Tree completed exact500 with natural exit0 and passed its full state/binding audit.
+Immutable exact500, field-selected467 and T-selected467 parents are separately
+preserved. All eleven native physical/graph/response/topology/readiness/CUDA
+review jobs are complete. Root promoted the same Run2203 exact top-level500
+parent to1000 at 20:05:35.726 UTC on GPU1 under loaded source `b3f93c9`.
+Genuine resumed501 passes full coverage and calibration continuity; exact525/550
+state audits remain later boundaries. This is the second H continuation, not
+completed1000. The representation miss below remains part of the evidence. Overlap
 exited naturally at 500 at 13:10 UTC; exact500/field-selected292 reviews and
 native parity/timing are complete, with T-selected269 separately preserved.
 The third H1000 slot remains reserved for an informative complementary result.
 No extra candidate is justified by the current saved evidence.
 
-At the same 17:44:51 snapshot, the last twenty complete-epoch median/p90 elapsed
-seconds are Tree 102.06/102.75 and resumed Local 52.80/54.16. Conditional finish
-extrapolations are Tree500 at 19:30–19:31 UTC and Local1000 at 22:08–22:15 UTC.
-These are median/p90 rate extrapolations under current placement, not confidence
-bounds; setup/evaluation, checkpoint rendering and future contention are excluded.
+At the same 20:19:25 snapshot, the last twenty complete-epoch median/p90 elapsed
+seconds are Tree 101.31/102.51 and resumed Local 52.75/53.67. Remaining-to1000
+extrapolations are Tree 13.85/14.01 hours and Local 1.79/1.82 hours.
+Tree's last20 window (489–508) mixes pre/post-resume epochs; its last10 also
+includes499–500. These are mixed-history forecasts, not a stable resumed-stage rate.
+The projections are conditional median/p90 rates, not confidence bounds or
+exclusive GPU time. Current partial-epoch time, startup/pause/checkpoint IO,
+discarded attempts, future evaluation and placement/contention changes are excluded.
 Controls have finished; their former forecasts are retained as historical
 evidence rather than current targets. The two or three H1000 measurements,
 final inverse comparison and qualified paired heads remain required.
@@ -57,16 +66,17 @@ start automatically.
 |---|---|---:|---|---|
 | 2201 | B-native | 1000 | 0.00690 / 0.00411 | Natural exit0; exact1000/selected962 fields, responses and selected inverse complete |
 | 2202 | B-fine | 1000 | 0.01175 / 0.01182 | Native exit0; immutable exact1000/selected972 evaluation complete |
-| 2203 | H-tree | 438 | 0.04000 / 0.02510 | GPU1; exact100→500; subsequent full saved-state/binding audit passed475 |
+| 2203 | H-tree | 508 | 0.02521 / 0.02075 | GPU1; exact500→1000 second H hypothesis; complete500 review and genuine501 startup proof |
 | 2204 | H-overlap | 500 | 0.60332 / 0.21109 | Native exit0; exact500/selected292 review complete; third-slot decision awaits cohort review |
-| 2205 | H-local | 701 | 0.11868 / 0.08252 | GPU2; exact500→1000 first H finalist; subsequent full saved-state audits passed775 |
+| 2205 | H-local | 878 | 0.06689 / 0.05805 | GPU2; exact500→1000 first H hypothesis; full saved-state audits passed875 |
 
 These MSEs use the maintained normalized, sampled 90-case validation task;
 they are neither full-grid physical errors nor the final 89-case comparison.
-Displayed CSV ages 438/701 remain the inspected figure's frozen snapshot;
-later saved-state audits reach 475/775 at 18:47/18:50 UTC. The curve and its
-conditional timing forecast have not been silently refreshed.
-Every completed control epoch has 600 unique cases, 75 microbatches, 13 native
+Displayed CSV ages 508/878 are the newly inspected figure's frozen prefixes;
+Tree500 full-state proof and Local875 ordinary state proof are separately linked
+below. Prior numerical snapshots remain archived. The saved-only figure audit
+checks 3,886 complete coverage rows and 19,430 numerical curve scalars.
+Every retained epoch has 600 unique cases, 75 microbatches, 13 native
 buckets/optimizer steps and 614,400 primary field queries. Exact e25/e50
 checkpoints are retained as reached.
 
@@ -947,14 +957,14 @@ Figure index: [full-epoch training progress](../../diagnostics/generated/shared_
 
 ![Full-epoch training and measured elapsed work](../../diagnostics/generated/shared_core_campaign_20261002/figures/campaign_training_progress.png)
 
-The inspected 17:44:51 UTC snapshot contains 1000/1000/438/500/701 complete epochs for
+The inspected 20:19:25 UTC snapshot contains 1000/1000/508/500/878 complete epochs for
 B-native/B-fine/H-tree/H-overlap/H-local. Every displayed epoch has 600 distinct
 training cases, 13 optimizer steps and 614,400 primary sampled queries. B-fine
 e1000 normalized sampled field/T MSE is 0.01175/0.01182; the full-grid physical
 evaluation is reported separately above.
 Native's exact1000 sampled field/T MSE is 0.00690/0.00411. These final control
 curves are measured development evidence; they do not count as H finalists.
-Retained successful train/validation time sums are 9.603/4.400/15.006/9.608/13.516 hours;
+Retained successful train/validation time sums are 9.603/4.400/16.979/9.608/16.081 hours;
 discarded complete/partial attempts and storage replay overhead remain recorded separately.
 Owned contention and H-tree engineering changes affect timing. These curves
 establish actual model age and work, not sparse speedups or mature-equivalent
@@ -967,11 +977,15 @@ separate from architecture or sparse-work claims.
 An open circle marks the Local benchmark PID observed at Tree214. Overlap's
 benchmark fell between boundary samples, with no known epoch intersection.
 The source snapshot and complete numerical curves are retained; these concurrent
-elapsed sums are not exclusive GPU hours. Prior snapshot evidence is preserved.
+elapsed sums are not exclusive GPU hours. Prior numerical snapshots are preserved;
+superseded visual exports are removed after promotion of the inspected replacement.
 Local's exact500→1000 continuation begins at 501 on the same lineage, with
 native optimizer/RNG/calibration and horizon 5000 retained. Its lower observed
 epoch time after 500 is measured under changed GPU2 co-occupancy; no architecture speed gain
-is inferred. The numerical audit reconciles all 3488 displayed complete epochs.
+is inferred. The Tree star marks genuine501 after exact top-level500 continuation
+at 20:05:35.726 UTC; it does not mark completion1000. The numerical audit reconciles
+all 3,886 displayed complete epochs, 19,430 curve values and 50,518 coverage-counter
+checks, independently against both captured and original native prefixes.
 
 ![Measured native Tree executor work, latency and memory](../../diagnostics/generated/shared_core_campaign_20261002/figures/executor_work_vs_latency.png)
 
@@ -1845,6 +1859,20 @@ The one-shot auditor exits naturally while the existing trainer continues;
 the loaded source is still `105676b5`, separately from current inverse/report
 changes. No completed H1000 or new physical measurement is inferred.
 
+The later [exact875 state audit](../../diagnostics/generated/shared_core_campaign_20261002/logs/h-local_e875_checkpoint_audit.json)
+passes all 20 checks; its [eight read guards](../../diagnostics/generated/shared_core_campaign_20261002/logs/h-local_e875_checkpoint_read_guard.json)
+preserve the ordinary875/exact500/helper SHA and stat. All 203 AdamW states are
+at 11,375 updates, with four RNG streams, 109 unchanged Stage-A tensors and both
+calibration contracts. All 875 full epochs account for 525,000 training and
+78,750 validation case passes. The 866–875 mean field/T/structural/response
+values are 0.0753253/0.0635696/0.517305/0.00924698. Against691–700 these change
+−25.42%/−23.92%/−6.85%/+32.30%: sampled fidelity improves while cycled-stencil
+response loss reverses adversely, without a matched physical response inference.
+Recent10 train+validation median is52.874 seconds; driver footprint/direct-free
+GPU2 observations remain 24,508/23,843 MiB. Loaded source `105676b5` is distinct
+from subsequent inverse/report commits. This state audit is separate from the
+figure's later878-row prefix and the pending1000 finalist evaluation.
+
 Tree's [exact375 ordinary audit](../../diagnostics/generated/shared_core_campaign_20261002/../HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/continuation_epoch375_ordinary_state_audit.json)
 and [saved bindings review](../../diagnostics/generated/shared_core_campaign_20261002/../HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/continuation_epoch375_saved_bindings_audit.json)
 retain 185 active AdamW states at 4,875 updates, four RNG streams, 109 unchanged
@@ -1946,3 +1974,69 @@ Each column uses 36 case/start trials per mode; graph and ungrouped have identic
 Nine of 12 tasks have full local fixed-total rank; the three M 10 tasks 0692 / 0679 / 0685 have rank 6 in 9 free directions. Native full-rank condition numbers range 1.48080–116.720 at uniform heat (largest full-rank condition numbers: Fine972 743.377 and mature4738 5574.87); this local conditioning does not establish global identifiability. Independent SVD/rank/residual recomputation passes. All 108 trials have nonnegative heats, zero inactive-module heat, 31 saved states/30 updates and fixed-total feasibility. Float64 sums against public total give maximum absolute/relative drift 9.29832e-6 / 7.67925e-7; the earlier float32 summed trajectory-drift audit reports 9.53674e-6, a distinct reduction convention, not a changed trial. All 1296 floating trail arrays are finite; 3360 actual predictor calls include 12 Jacobian calls, with no reused trials. All 12 case checks and final 310-tensor parameter/buffer freeze pass, and checkpoint/receipt/source SHA-stat guards hold. No complete optimized field grids or new physical solves are saved, so these are frozen exposed-development inverse outcomes, not valid CFD designs. [Native inverse quality review](../../diagnostics/generated/shared_core_campaign_20261002/inverse/b-native_stage1000_selected/independent_inverse_review.json), [execution/freeze receipt](../../diagnostics/generated/shared_core_campaign_20261002/logs/b-native_stage1000_field_selected_full108_inverse_observer.json), [Fine 972 comparison](../../diagnostics/generated/shared_core_campaign_20261002/inverse/b-fine_stage1000_selected_cpu1/independent_inverse_review.json), [mature 4738 CPU1 v2 comparison](../../diagnostics/generated/shared_core_campaign_20261002/inverse/mature_e4738_single_thread_v2/independent_inverse_review.json).
 
 The predictor and inverse gains support retaining this control's measured learning progress while preserving pressure, flux-proxy, rank and null-response misses. Native provides no learned-organizer inverse evidence. Final cohort selection remains separate; no new run, training continuation, model call or 5000-epoch launch accompanies this saved-only audit.
+
+## Measured Tree500 review and finite continuation
+
+Tree500 adds a distinct learned hierarchy with useful conditional actions, but no measured latency benefit or demonstrated inverse quality. Field-selected467 improves surface/material means and tails over exact500 while fluid T and q-proxy means worsen slightly. Root accepted the completed reviews and launched the second distinct H1000 continuation alongside Local; Overlap remains reserved.
+
+The original stage500 lineage loaded source `9eaf2a4`. Natural exit is recorded as 0 with the parent PID gone; the actual exit timestamp is unavailable. The immutable stage receipt preserves exact500, field-selected467 and T-selected467 as **three distinct byte sequences**; equal selected ages do not make the field and T parents interchangeable. All native reviews preserve 316 parameter/buffer tensors. Evaluation source and training launch lineage remain separate in the [eleven-job completion record](../../diagnostics/generated/shared_core_campaign_20261002/logs/tree_stage500_native_evaluation_completion.json) and [immutable selection receipt](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/stage_0500_selection/selection_receipt.json).
+
+The [exact500 state/binding audit](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/continuation_epoch500_ordinary_state_audit.json)
+preserves 185 active AdamW states at 6,500 updates, 555 finite optimizer slot
+tensors, all four RNG streams, 109 unchanged Stage-A tensors and the native
+normalization/calibration contracts. The model has 316 tensors/4,287,933 scalars;
+all 500 epochs retain 600 training cases/13 updates/614,400 primary queries and
+90 validation cases/92,160 queries. The [exit observation](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/continuation_epoch500_natural_exit_observation.json)
+records the already exited state at 19:30:03.698 UTC, rather than reconstructing
+an unavailable process-end timestamp.
+
+### Predictor: means, tails and finite responses
+
+Both parents have 90 finite normal cases and all 24 maintained roles. The primary table excludes 0273 (89 cases); compatibility90 remains separately retained. Entries below are equal-case RMSE means, followed by case-RMSE p90/max, in native benchmark units; pressure is full-field inlet/outlet section pressure-difference AE. Response band pressure and inverse endpoint pressure use separate reductions.
+
+| Physical role | Exact500 mean; p90 / max | Field467 mean; p90 / max |
+| --- | ---: | ---: |
+| Fluid T | 0.881500; 1.187148 / 2.206794 | 0.892862; 1.198006 / 1.693337 |
+| Near T | 0.878415; 1.195792 / 2.609516 | 0.838910; 1.107454 / 1.779134 |
+| Surface T | 0.889281; 1.256509 / 2.581918 | 0.730441; 0.925193 / 1.767566 |
+| Material T | 0.797940; 1.221193 / 2.838926 | 0.631267; 0.850585 / 2.058747 |
+| Material peak | 0.857808; 1.469996 / 3.551895 | 0.658864; 1.056976 / 2.658261 |
+| q-normal proxy | 3.615430; 4.484613 / 5.349721 | 3.618392; 4.530693 / 5.515391 |
+| Fluid u | 0.030349; 0.036177 / 0.044095 | 0.030216; 0.036223 / 0.038695 |
+| Pressure difference AE | 0.007706; 0.016142 / 0.027985 | 0.006965; 0.014442 / 0.029681 |
+
+Selected467 reduces pressure mean/p90 but increases its maximum. Pooled fluid T RMSE is 0.919465 / 0.919523 (exact / selected); compatibility90 equal-case T is 0.878174 / 0.889854. These denominators are distinct. Selected467 still trails the contextual mature4738 and completed Fine972 references on canonical89 fluid T (0.218656 / 0.562692), peak (0.346587 / 0.531433), and u (0.005721 / 0.019496). Ages and prior exposure differ; this is not a matched-age architecture ranking. The [saved-array physical review](../../diagnostics/generated/shared_core_campaign_20261002/evaluation/independent_h-tree_stage500_physical_review.json) retains all-role means, pooled errors, tails and M/Re strata.
+
+Each parent completes eight previously exposed response families: 88 absolute states and 80 deltas. Equal-variant mean delta RMSE is T 0.167999 / 0.185696, surface T 0.263460 / 0.272228, q-proxy 1.184837 / 1.207046, and u 0.006201 / 0.006698. Pressure-increment AE is 0.000611 / 0.000569; peak-increment AE is 0.178480 / 0.189705. Field467 does not dominate exact500. Mature4738 has lower T/u/pressure/peak response errors, while exact500 has lower q-proxy error (mature 1.272935).
+
+All 16 heat-transfer deltas beat zero response for T and q-proxy: exact/selected T 0.105648 / 0.118136 and q 0.310492 / 0.351683, versus zero 0.241760 / 0.939161. The heat-only reference flow/pressure increments are zero, yet Tree produces adverse u RMSE 0.002880 / 0.003414 and pressure AE 0.000545 / 0.000491. These are surrogate response misses, not beneficial physical coupling. The [response audit](../../diagnostics/generated/shared_core_campaign_20261002/responses/independent_tree_stage500_response_review.json) reconciles absolute states, deltas, masks, material peaks and pressure against the same archived references; no new physical solves were performed.
+
+### Organizer: actual action, conditional utility and work
+
+Selected467 exports real P0/P1/P2 plans for MM/ME/EM/QM/QE across all 90 normal cases. On canonical89, admitted nonempty K ranges from 3 to 8; proper multi-source groups and overlapping source unions are measured. Duplicate binary support is common, but the saved exact membership-density-plus-group-control duplicate count is zero in every phase/type. Binary support equality therefore does not authorize support-only deduplication. Memberships are physical-measure densities with live native source measures, not binary incidence. The [population audit](../../diagnostics/generated/shared_core_campaign_20261002/graph_population/h-tree_stage500_selected/population_graph_audit.json) preserves actual call scopes, M/Re strata and unavailable fields. Tree admission-rescue/fallback counts are not exported here and remain unavailable, not zero; query/auxiliary calls must not be collapsed into a fictitious unique-field-query denominator.
+
+The strict four-case panel (0291/0296/0647/0692) keeps saved native reference accesses authoritative. Normal learned actions beat fixed-access zero controls and full access with saved controls on all 24 equal-case role means. For example, normal T 0.802832 becomes 1.682925 / 1.796956; surface T 0.669363 becomes 1.952039 / 1.921821; peak 0.666400 becomes 2.053240 / 1.612521; pressure AE 0.004587 becomes 0.022512 / 0.010369.
+
+Bounded geometry action is mixed: normal is better on 13/24 role means. Geometry changes T to 0.847529, surface to 0.680463, peak to 0.672496 and pressure AE to 0.004939, but slightly improves q-proxy (2.730750 → 2.729572). It preserves binary row/column degrees, exact-measure row permission multisets and protected invalid/near entries; source-column weighted sums need not match. Across 644 calls it performs 37 support switches and 1,168 active tuple swaps, changing 90 support pairs and 2,061 weight positions; 616 calls hit the candidate budget. This is conditional learned utility, not global assignment optimality or physical causality. Stored control probes are sampled and receiver summaries are averages, not complete pair-control tensors. The [strict/ordinary action review](../../diagnostics/generated/shared_core_campaign_20261002/graph_utility/h-tree_stage500_selected_reference_actions/independent_saved_controls_review.json) keeps all 32 ordinary and 12 strict predictions separate; ordinary feedback can change both permissions and controls.
+
+Each 90-case dense-reference field evaluation measures **179,889,120 successful padded fine MLP rows / 14,490 calls**; canonical89 contributes 177,890,352 / 14,329. Each 88-state response evaluation measures 175,891,584 / 14,168. These actual hook counts exclude local/coarse/policy/attention/backward/export; they are not eligible or unique selected pairs.
+
+Native CUDA1 tests cover M3/10 × Q14/8192 × complete P0/P1/P2 and prepared-P2 scopes, with two warmups and five timed repeats per executor. Subset execution removes roughly 70–78% of actual padded rows across these scopes, yet **all 16 paired timing comparisons are slower**. Full-Q complete medians (dense → subset, seconds) are exact M3 0.467609 → 0.516701 and M10 0.470476 → 0.516368; selected M3 0.474446 → 0.516765 and M10 0.478300 → 0.520595. Prepared decode is separately measured and cannot be added to complete-wrapper latency.
+
+All eight native gates pass declared output rtol/atol 2e-5/2e-5 and first-gradient rtol/atol 2e-5/1e-6 before timing: 183 defined parameter gradients plus heat/query input gradients, 22 unused among 205 trainable tensors, and actual 35/161 access inventories. Original elementwise gates are retained; the independent saved review recomputes norms/counts/timings rather than rerunning elementwise arrays or RNG bytes, which were not archived. Timed allocated peaks span 36.21–91.81 MiB with resident state; reserved cache is 4,040 MiB and includes preceding parity allocations. Parity-backward peak is not separately archived. Driver memory is a separate scope. GPU1 had no co-resident trainer during these checks; Local trained on GPU2 with shared-host activity. Fixed dense-before-subset order and two exposed cases prevent a cross-arm speed rank. See the [native benchmark review](../../diagnostics/generated/shared_core_campaign_20261002/timing/independent_tree_stage500_benchmark_review.md).
+
+### Inverse and representation limits
+
+Each parent completes only 12 tasks × one start × one update: nine locally full-rank and three deficient fixed-total observation Jacobians. Graph/ungrouped have 12 recorded non-full blocks and zero full-joint fallbacks; matched initial heat/predictions and exact block sizes are retained. Exact500 graph improves observed 1.666303 → 1.491034 and held 1.924768 → 1.750645, but ungrouped held is lower (1.735705). Selected467 graph improves observed 1.649598 → 1.486706 while **held worsens** 1.831229 → 1.966403; ungrouped held is 1.945865. This is readiness, not the 108-trial quality protocol, validated designs or generative qualification. Heat remains nonnegative with fixed-total maximum errors 1.91e-6 / 9.54e-7; reported heat MAE uses the padded-vector denominator. See [exact readiness](../../diagnostics/generated/shared_core_campaign_20261002/inverse_readiness/h-tree_e500/independent_readiness_review.json), [selected readiness](../../diagnostics/generated/shared_core_campaign_20261002/inverse_readiness/h-tree_stage500_selected/independent_readiness_review.json) and their [saved review receipt](../../diagnostics/generated/shared_core_campaign_20261002/logs/tree_stage500_saved_readiness_review_execution.json).
+
+Permutation, inactive padding, query ordering/chunking and fixed-prepared atom splitting pass all four case/parent combinations. Organizer-rebuild atom splitting fails all four: maximum differences 0.0217912 / 0.0101552 (exact M3/M10) and 0.0110745 / 0.00674516 (selected). These compare **fine hidden contexts [B, 14, 256]**, not physical T errors or dimensional temperature units. The split copies E coordinates/features, halves source measure and duplicates an atom; fixed prepared actions/contextual keys/values are retained in the passing protocol, whereas the failing protocol rebuilds P2 preparation after native coupling.
+
+Source inspection identifies a plausible representation-sensitive chain: rebuilt EM receiver anchors gain an atom, discrete partitions/descriptors may change, and historical receiver boundaries use unweighted child-coordinate means, so physical-measure conservation alone does not preserve those boundaries. Rebuilt contextual E keys/values can then change. This is source-chain inference, not measured attribution of all four failures. Fixed-plan measure-aware integration passes; there is no evidence here of broken source-moment quadrature algebra. Tree100 recurrence is unavailable. The [topology audit](../../diagnostics/generated/shared_core_campaign_20261002/topology/independent_tree_stage500_saved_topology_review.json) and [source-only atom review](../../diagnostics/generated/shared_core_campaign_20261002/tmp/tree_stage500_atom_split_source_review.json) also retain real rebuilt switches, bounded invalid fixed branches and FP32 finite-difference limits; no continuity/no-jump claim follows.
+
+Units remain native benchmark T/u/p/heat and analytic q-normal proxy. The [bounded units provenance review](../../diagnostics/generated/shared_core_campaign_20261002/tmp/thermal_units_provenance_review_20261003.json) inspected current saved metadata and checked generator source; the actual May2026 generating revision was not audited. Dimensional SI units/conversions remain unknown; no new dimensional calibration or physical solve was performed.
+
+### Next step: two distinct hypotheses, not final qualification
+
+Root launched the same Run2203 exact **top-level500** parent on physical GPU1, PID 1294996, at 20:05:35.726 UTC under clean `b3f93c9`; optimizer/RNG, physics, full native stream and horizon 5000 are retained, with only the finite stopping stage extended to 1000. Field467/T467 are evaluation selections, not continuation resets. The [continuation manifest](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/resume_e500_to_e1000_source_manifest.json) binds the launch; the [first full 501 receipt](../../Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/continuation_epoch501_startup_receipt.json), observed at 20:11:18.821 UTC, passes training 600 cases / 75 microbatches / 13 optimizer steps / 614,400 primary queries and validation 90 cases / 2 batches / 92,160 queries under loaded `b3f93c9`. This verifies genuine resumed 501, not completion of 1000; the next full saved-state audit remains deferred to exact 525/550.
+
+Tree and Local are the two distinct new H1000 hypotheses; completed controls and mature4738 remain evaluation references, and Overlap is reserved. Continuation is informative testing of complementary hierarchy/locality behavior on the unchanged packed dataset despite the recorded representation miss. It does not establish speed, final H1000 selection, valid inverse designs, paired-head qualification or a 5000-epoch launch.
