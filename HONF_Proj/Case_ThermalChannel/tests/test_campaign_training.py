@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import runpy
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -12,6 +14,7 @@ from channelthermal.data.collation import ModuleCountBucketBatchSampler
 from channelthermal.training.campaign import (
     CampaignMicrobatchLoader,
     copy_matched_physical_initial_state,
+    gpu_contention_sample,
     record_structural_calibration,
     structural_calibration_candidate,
     validate_campaign,
@@ -27,6 +30,39 @@ def _config():
                          "campaign": {"arm": "H-tree", "schedule_total_epochs": 5000,
                                       "require_full_epoch": True, "matched_fresh_initialization": True}},
             "dataset": {"split": "train", "batch_size": 48}, "loss": {"value": 1.0}}
+
+
+@pytest.mark.parametrize("free_output", ["2, GPU-native, 7004, 622\n", "2, GPU-native, 7004, N/A\n"])
+def test_gpu_free_memory_uses_explicit_driver_value_without_changing_legacy_rows(monkeypatch, free_output):
+    devices = "2, GPU-native, 95, 41516, 49140\n"
+    processes = "GPU-native, 42, python, 12892\n"
+
+    def query(args, **kwargs):
+        if "memory.free" in args[1]:
+            return SimpleNamespace(stdout=free_output)
+        return SimpleNamespace(stdout=devices if "--query-gpu" in args[1] else processes)
+
+    monkeypatch.setattr(subprocess, "run", query)
+    sample = gpu_contention_sample(torch.device("cuda:0"))
+    assert sample["devices"] == [devices.strip()]
+    assert sample["compute_processes"] == [processes.strip()]
+    memory = sample["device_memory"][0]
+    assert memory["free_MiB"] == 7004 and memory["free_MiB"] != 49140 - 41516
+    assert memory["driver_reserved_MiB"] == (None if "N/A" in free_output else 622)
+    assert memory["uuid"] == "GPU-native" and memory["physical_index"] == 2
+
+
+def test_unavailable_explicit_free_memory_preserves_existing_contention_evidence(monkeypatch):
+    def query(args, **kwargs):
+        if "memory.free" in args[1]:
+            raise subprocess.CalledProcessError(1, args)
+        return SimpleNamespace(stdout="legacy device/process evidence\n")
+
+    monkeypatch.setattr(subprocess, "run", query)
+    sample = gpu_contention_sample(torch.device("cuda:0"))
+    assert "device_memory" not in sample and "device_memory_unavailable" in sample
+    assert sample["devices"] == ["legacy device/process evidence"]
+    assert sample["compute_processes"] == ["legacy device/process evidence"]
 
 
 def test_campaign_rejects_partial_epochs_and_schedule_reset():

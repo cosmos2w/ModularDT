@@ -177,6 +177,23 @@ def gpu_contention_sample(device: torch.device) -> dict[str, Any]:
         ).stdout.strip().splitlines()
     except (OSError, subprocess.SubprocessError) as error:
         sample["unavailable"] = str(error)
+    # Keep the legacy device rows intact. total-used includes driver-reserved
+    # memory on some systems and must not be interpreted as allocatable free.
+    try:
+        rows = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,uuid,memory.free,memory.reserved", "--format=csv,noheader,nounits"],
+            check=True, capture_output=True, text=True, timeout=5,
+        ).stdout.strip().splitlines()
+        sample["device_memory"] = []
+        for row in rows:
+            index, uuid, free, reserved = (value.strip() for value in row.split(","))
+            sample["device_memory"].append({"physical_index": int(index), "uuid": uuid,
+                "free_MiB": None if free == "N/A" else float(free),
+                "driver_reserved_MiB": None if reserved == "N/A" else float(reserved)})
+        sample["device_memory_scope"] = "Explicit nvidia-smi memory.free and memory.reserved; not total-minus-used or allocator cache"
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        sample.pop("device_memory", None)
+        sample["device_memory_unavailable"] = str(error)
     return sample
 
 

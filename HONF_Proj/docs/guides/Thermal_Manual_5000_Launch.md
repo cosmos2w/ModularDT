@@ -33,7 +33,12 @@ norms and coefficients, and selection state e1000/horizon5000. Dense and B-fine
 legitimately have no organizer selection or structural calibration. The actual
 B-fine e500 metadata passed calibration and native-configuration review;
 the complete launcher correctly rejects it as an e1000 parent. This partial
-software check does not verify a future finalist recipe.
+software check does not verify a future finalist recipe. The actual B-fine
+exact1000 checkpoint subsequently passes the complete read-only native
+configuration/calibration/optimizer/RNG guard with all 120 active optimizer
+states. No profile or workspace is created and no 5000 training is launched
+by that check. Actual selected H finalist preparation and small-query replay
+remain required before the final manual handoff.
 
 For fresh initialization, replace `--parent-checkpoint ...` with `--fresh --seed 0` and choose an unused run ID. Preparation writes one profile; the ordinary trainer reserves its new workspace when launched. Fresh seed0 reproduces matched initial weights in a separate run. It is not an independent-seed replication claim. The objective remains policy1 through epoch100 and policy2 from epoch101, matching the final screened continuation. Nonzero fresh replication seeds remain deferred.
 

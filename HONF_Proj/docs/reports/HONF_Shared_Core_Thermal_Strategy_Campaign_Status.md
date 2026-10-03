@@ -107,7 +107,19 @@ frozen state. The preserved stricter 1e-6 output probe fails only the interface
 output, at maximum absolute error 7.24e-6; dense repeat is bitwise identical.
 Whole-wrapper FP64 casting is unsupported by native FP32 encoding, so its
 failed probe is retained separately from passing isolated fine-reader FP64
-tests. Full-query CUDA parity and measured latency remain pending. Focused
+tests. The subsequent native GPU2 test completes all four low/high-M and
+small/full-query parity checks before timing. Overall gradient relative L2
+errors are 7.74e-7/6.72e-7 for M3 and 3.16e-7/2.33e-7 for M10, respectively;
+all outputs, first gradients, route/phase masks and frozen state pass their
+declared contracts. Immutable checkpoint SHA remains unchanged. Five repeats
+after two warmups measure wrapper and prepared decoding separately. Subset
+execution reduces full-grid fine rows from 1,998,768 to 458,596/528,548 for
+M3/M10, but complete-wrapper medians increase 1.030→1.381 and 1.145→1.297 seconds.
+GPU2 is shared with the two H trainers, with dense timed before subset during
+08:59:48–09:01:23 UTC. These observed contended samples show executable row
+reduction and no latency gain; they do not establish an isolated speed ranking.
+Training retains the dense masked executor. Final selected versions still
+require their own parity and timing evaluation. Focused
 measurement tests pass 78 checks with three optional native-resource skips;
 actual Native500 field/response execution separately validates the new direct
 row recorder. Fine-work hooks stay outside benchmark timing and do not count
@@ -305,6 +317,42 @@ Immutable exact500, field-selected actual456 and T-selected actual492 snapshots
 are byte-verified and read-only. The exact500 checkpoint remains the optimization
 parent for continuation; the T selection supplies no role in field-selected
 comparisons.
+
+Native's exact500→1000 continuation then starts on physical GPU2 at
+09:03:53 UTC from clean pushed source `6648c86`, preserving Run2201 and its
+immutable stage500 selections. The same saved one-device CUDA RNG maps to
+logical cuda:0 on GPU2; future kernel results under changed placement are not
+claimed bitwise equal. First e501 visits all 600 cases/75 microbatches/13 steps
+and 614,400 primary queries, with field/T MSE 0.0136621/0.00779840 and peak
+allocated memory 4,659.8 MiB. The first audited post-migration selected e504
+has all 181 optimizer states at step 6,552, all four RNG streams, unchanged
+native model configuration, frozen Stage-A and response calibration. Recursive
+comparison of the entire saved native training configuration finds only
+training.epochs 500→1000 changed. Organizer selection metadata is legitimately
+empty for Dense; the horizon5000 is read from its explicit campaign settings.
+Tree stays alone on GPU1. Native now shares GPU2 with Overlap and Local, so
+sustained three-trainer timing is measured separately. The observed 12,790 MiB
+Native nvidia-smi footprint and 7,106 MiB device free memory are driver-level
+measurements, not separate measurements of allocator cache or reserved memory.
+
+The first ten resumed Native epochs e501–510 retain complete finite coverage,
+with mean train/validation 35.13/2.81 seconds and maximum allocated peak
+5,140.8 MiB. They add twenty response wrapper calls/59,406 auxiliary queries
+at the unchanged coefficient 0.1. At this measured three-trainer rate, the
+490 remaining epochs forecast 5.16 hours, conditional on unchanged placement.
+An audit found that historical telemetry's total-minus-used included separately
+reserved driver memory. Those derived values are now explicitly labelled
+apparent remainders; historical actual free remains unavailable. Direct
+09:16 UTC query gives total/used/free 49,140/41,516/7,004 MiB and separately
+reserved 622 MiB. The reusable collector now records explicit memory.free and
+memory.reserved separately while preserving legacy device rows. Missing free
+readings retain the other contention evidence and remain unavailable. Current
+trainers are not restarted for this telemetry change; it applies at their next
+ordinary resume. Memory admission uses explicit device free memory.
+The campaign/launch-guard suite passes 46 tests, including unavailable reserved
+memory and failed free-query cases; a real read-only collector invocation
+records GPU2 free/reserved 7,004/622 MiB while retaining all legacy device and
+process evidence. The collector creates no CUDA model or optimizer.
 
 Fine's exact e750 audit passes 450,000 training case visits, all 120 AdamW
 states at step 9,750, four RNG streams, unchanged frozen Stage-A/normalization
@@ -623,7 +671,8 @@ Figure index: [full-epoch training progress](../../diagnostics/generated/shared_
 [interface and material fidelity](../../diagnostics/generated/shared_core_campaign_20261002/figures/interface_material_case0692.pdf),
 [frozen finite responses](../../diagnostics/generated/shared_core_campaign_20261002/figures/reference_response_baseline.pdf),
 [mature inverse baseline](../../diagnostics/generated/shared_core_campaign_20261002/figures/mature_inverse_baseline.pdf),
-[actual overlap graph and work](../../diagnostics/generated/shared_core_campaign_20261002/figures/overlap_e100_graph_work.pdf).
+[actual overlap graph and work](../../diagnostics/generated/shared_core_campaign_20261002/figures/overlap_e100_graph_work.pdf),
+[executed work versus latency](../../diagnostics/generated/shared_core_campaign_20261002/figures/executor_work_vs_latency.pdf).
 
 ![Full-epoch training and measured elapsed work](../../diagnostics/generated/shared_core_campaign_20261002/figures/campaign_training_progress.png)
 
@@ -641,6 +690,23 @@ response/native-denominator amendment without combining different field units.
 Timing diamonds mark the first complete epochs in GPU2's three-trainer
 placement: Fine501, Overlap162 and Local152. Their slower H timing remains
 separate from architecture or sparse-work claims.
+
+![Measured native Tree executor work, latency and memory](../../diagnostics/generated/shared_core_campaign_20261002/figures/executor_work_vs_latency.png)
+
+Native Tree exact e100 is evaluated on cases 0274/M3 and 0692/M10 at Q14 and
+Q8192. Full-query complete-wrapper fine-MLP rows decline by 77.06%/73.56%,
+while calls increase 161→164 and median latency increases by 34.07%/13.28%
+under the recorded GPU2 contention. Prepared P2 decode medians also increase
+0.671→0.726 and 0.717→0.783 seconds. Median complete-wrapper allocated memory
+increments change 44.90→38.58 MiB for M3 and 57.80→57.80 MiB for M10. These
+increments exclude resident baseline and do not describe total device demand.
+Every native parity gate passes before timing; parameters, persistent buffers
+and checkpoint bytes remain unchanged. Bars, individual repeats and min–p90
+whiskers expose the measurement scope and variation. This establishes actual
+fine-row savings for inference, with no measured latency benefit in this
+ordered, contended test. Training work and final selected checkpoints remain
+separate. The PDF and embedding raster are visually inspected; plotting uses
+saved numerical records only.
 
 ![Native-grid selected control fields and residuals for development case 0692](../../diagnostics/generated/shared_core_campaign_20261002/figures/predictor_screen_case0692.png)
 
