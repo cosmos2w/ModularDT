@@ -851,6 +851,7 @@ def run_from_config(
                                             "train_seconds": train_wall_seconds, "coverage": {key: train_metrics[key] for key in coverage_keys},
                                             "gpu_before": gpu_before, "gpu_after": gpu_contention_sample(device) if campaign.get("gpu_telemetry") else None,
                                             "response": getattr(model, "campaign_last_response_metrics", None),
+                                            "forward_work": getattr(model, "campaign_last_forward_work", None),
                                             "calibration_state": copy.deepcopy(getattr(model, "campaign_training_state", {})),
                                             "query_scope": "primary sampled fluid field only; P0/P1/P2 auxiliary reads are additional work"}) + "\n")
         total_train_seconds += train_wall_seconds

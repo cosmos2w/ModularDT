@@ -145,8 +145,11 @@ def test_native_thermal_replay_chunks_and_disposable_optimizer_step():
     metrics = run_epoch(model, loader, device, checkpoint["train_config"]["loss"], optimizer=optimizer, scaler=None,
                         amp=False, max_batches=1, local_port_condition_mode="predicted", mixed_teacher_ratio=0.,
                         effective_internal_temperature_weight=1., effective_interface_weight=.2,
-                        predicted_consistency_weight=.0005, gradient_clip_norm=1.)
+                        predicted_consistency_weight=.0005, gradient_clip_norm=1.,
+                        campaign_config={"require_full_epoch": False})
     assert metrics["epoch_optimizer_steps"] == 1
+    assert model.campaign_last_forward_work["native_training"]["hard"]["unlabelled"]["prepare_calls"] == 3
+    assert not model.campaign_last_forward_work["executor_ledger_available"]
     assert np.isfinite(metrics["loss_total"])
     assert not torch.equal(before, model.core.common.field_head.net[-1].weight)
     for name, parameter in model.named_parameters():
@@ -236,7 +239,8 @@ def test_fresh_thermal_matched_initialization_and_native_shadow_step(arm):
     from channelthermal.model import ChannelThermalHONFModel
     from channelthermal.plugin import create_plugin
     from channelthermal.training.campaign import copy_matched_physical_initial_state
-    from channelthermal.training.epoch import make_model_inputs
+    from channelthermal.training.campaign_work import CampaignForwardWork
+    from channelthermal.training.epoch import make_model_inputs, run_epoch
     from channelthermal.workflows.train_forward import build_model_config
 
     from honf_forward_core.training.hypergraph_shadow import hard_value_soft_hypergraph_forward
@@ -275,10 +279,18 @@ def test_fresh_thermal_matched_initialization_and_native_shadow_step(arm):
     model.set_training_progress(epoch=1, total_epochs=5000)
     frozen = {name: parameter.detach().clone() for name, parameter in model.named_parameters() if not parameter.requires_grad}
     optimizer = torch.optim.AdamW([parameter for parameter in model.parameters() if parameter.requires_grad], lr=3e-4)
-    output = hard_value_soft_hypergraph_forward(model, **inputs)
+    with CampaignForwardWork(model.core) as measured_work:
+        output = hard_value_soft_hypergraph_forward(model, **inputs)
+    work_snapshot = copy.deepcopy(measured_work.records)
+    assert set(work_snapshot) == {"hard", "soft"}
+    for mode in work_snapshot.values():
+        assert set(mode) == {"P0", "P1", "P2"}
+        assert all(phase["prepare_calls"] == 1 and phase["read_calls"] > 0 for phase in mode.values())
+        assert all(phase["ledgers"]["hypergraph_MM_executed_rows"] > 0 for phase in mode.values())
     loss = (output["pred_field"] - batch["field_targets"]).square().mean()
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
+    assert measured_work.records == work_snapshot  # Forward scope excludes backward recomputation.
     organizer_grad = sum(float(parameter.grad.abs().sum()) for name, parameter in model.named_parameters()
                          if name.startswith("core.backend.organizer.") and parameter.grad is not None)
     assert organizer_grad > 0
@@ -293,6 +305,22 @@ def test_fresh_thermal_matched_initialization_and_native_shadow_step(arm):
         assert exported["source_types"] == ("M", "E")
     print({"fresh_arm": arm, "case": batch["case_id"], "physical_tensors_matched": len(inventory["loaded"]),
            "loss": float(loss.detach()), "organizer_gradient_l1": organizer_grad})
+    if arm == "h-tree":
+        model.set_training_progress(epoch=26, total_epochs=5000)
+        native_loader = DataLoader(dataset, batch_size=1, collate_fn=ChannelThermalBatchCollator())
+        metrics = run_epoch(model, native_loader, device, cfg["loss"], optimizer=optimizer, scaler=None,
+                            amp=False, max_batches=1, local_port_condition_mode="predicted", mixed_teacher_ratio=0.,
+                            effective_internal_temperature_weight=1., effective_interface_weight=.2,
+                            predicted_consistency_weight=.0005, gradient_clip_norm=1.,
+                            campaign_config=cfg["training"]["campaign"], absolute_epoch=26,
+                            forward_function=lambda **values: hard_value_soft_hypergraph_forward(model, **values))
+        state = model.campaign_training_state
+        assert state["calibration_policy_version"] == 2
+        assert len(state["structural_calibration_samples"]) == 1
+        assert not state["structural_calibration_complete"]
+        assert metrics["campaign_structural_weight"] == 0.
+        assert state["structural_calibration_samples"][0]["task_organizer_gradient_norm"] > 0
+        print({"native_structural_calibration_sample": state["structural_calibration_samples"]})
     if arm == "h-overlap":
         from channelthermal.training.campaign_response import NativeCampaignResponse
 
@@ -305,6 +333,9 @@ def test_fresh_thermal_matched_initialization_and_native_shadow_step(arm):
         auxiliary, measured = response(101, value_loss, 1.)
         assert torch.isfinite(auxiliary)
         assert measured["response_examples"] == 2
+        assert set(measured["response_forward_work"]) == {"hard", "soft"}
+        assert all(phase["ledgers"]["hypergraph_QE_executed_rows"] > 0
+                   for mode in measured["response_forward_work"].values() for phase in mode.values())
         (value_loss + auxiliary).backward()
         optimizer.step()
         print({"response_native_integration": measured})

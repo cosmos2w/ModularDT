@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import os
+import statistics
 import subprocess
 from typing import Any
 
@@ -25,6 +26,48 @@ HYPERGRAPH_ARCHITECTURES = frozenset({
     "local_overlap_hypergraph_honf",
 })
 ORGANIZER_PREFIXES = ("core.backend.organizer.", "core.backend.control_gain.", "core.backend.control_score.")
+
+
+def structural_calibration_candidate(state: dict, counts: list[int], training_counts: list[int]) -> tuple[int, ...] | None:
+    """Select an unsampled training M stratum; mixed boundary batches wait."""
+
+    values = sorted({int(value) for value in training_counts})
+    if not values or not counts:
+        return None
+    number = min(5, len(values))
+    strata = [values[index * len(values) // number:(index + 1) * len(values) // number] for index in range(number)]
+    if state.get("structural_scale_samples") and not state.get("structural_calibration_samples"):
+        raise ValueError("Existing unstratified structural calibration requires an explicit policy-lineage migration.")
+    state["structural_calibration_policy"] = "training_module_count_strata_v2"
+    state["calibration_policy_version"] = 2
+    state.setdefault("structural_calibration_planned_strata", strata)
+    if state["structural_calibration_planned_strata"] != strata:
+        raise ValueError("Structural calibration training module-count strata changed on resume.")
+    sampled = {tuple(sample["stratum"]) for sample in state.get("structural_calibration_samples", [])}
+    for stratum in strata:
+        if set(counts).issubset(stratum) and tuple(stratum) not in sampled:
+            return tuple(stratum)
+    return None
+
+
+def record_structural_calibration(state: dict, stratum: tuple[int, ...], counts: list[int], *,
+                                  task_norm: float, cost_norm: float, max_weight: float,
+                                  epoch: int, native_batch: int) -> None:
+    """Bound pressure by observed task signal and retain its train-only basis."""
+
+    scale = min(.02 * task_norm / cost_norm, max_weight) if task_norm > 1e-10 and cost_norm > 1e-10 else 0.
+    state.setdefault("structural_calibration_samples", []).append({
+        "stratum": list(stratum), "observed_module_counts": sorted(set(counts)),
+        "epoch": epoch, "native_batch": native_batch,
+        "task_organizer_gradient_norm": task_norm, "cost_organizer_gradient_norm": cost_norm,
+        "coefficient": scale,
+    })
+    state.setdefault("structural_scale_samples", []).append(scale)
+    state["structural_scale"] = float(statistics.median(state["structural_scale_samples"]))
+    state["structural_calibration_observed_strata"] = [sample["stratum"] for sample in state["structural_calibration_samples"]]
+    state["structural_calibration_complete"] = len(state["structural_calibration_samples"]) == len(state["structural_calibration_planned_strata"])
+    state["last_task_organizer_gradient_norm"] = task_norm
+    state["last_cost_organizer_gradient_norm"] = cost_norm
 
 
 def validate_campaign(config: dict[str, Any], *, max_train_batches: int | None = None) -> dict[str, Any]:
@@ -69,6 +112,8 @@ def validate_campaign_resume(checkpoint: dict[str, Any], config: dict[str, Any])
             raise ValueError(f"Campaign resume changed training.{key}.")
     if not checkpoint.get("optimizer_state_dict") or not checkpoint.get("rng_state"):
         raise ValueError("Campaign continuation requires optimizer and RNG checkpoint state.")
+    if current_training.get("amp") and not checkpoint.get("scaler_state_dict"):
+        raise ValueError("AMP campaign continuation requires gradient-scaler checkpoint state.")
 
 
 def copy_matched_physical_initial_state(target: torch.nn.Module, canonical: torch.nn.Module) -> dict[str, Any]:

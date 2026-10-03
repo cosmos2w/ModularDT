@@ -22,6 +22,7 @@ from honf_forward_core.training.hypergraph_shadow import hard_value_soft_hypergr
 from honf_runtime.paths import resolve_path
 
 from .campaign import HYPERGRAPH_ARCHITECTURES
+from .campaign_work import CampaignForwardWork
 
 
 class _ResponseCall(nn.Module):
@@ -74,8 +75,9 @@ class NativeCampaignResponse:
         context = dict(pair.baseline.context.values)
         base_design = DesignInput.from_state(pair.baseline.design, device=device)
         trial_design = DesignInput.from_state(pair.variants[label].design, device=device)
-        base = call(self.wrapper, base_design, context, queries)
-        trial = call(self.wrapper, trial_design, context, queries)
+        with CampaignForwardWork(self.model.core) as measured_work:
+            base = call(self.wrapper, base_design, context, queries)
+            trial = call(self.wrapper, trial_design, context, queries)
         role_scales = {
             "fluid_fields": np.asarray(self.stats["field_std_by_channel"]),
             "interface": np.asarray(self.stats.get("interface_targets_std", self.stats.get("interface_target_std"))),
@@ -122,5 +124,7 @@ class NativeCampaignResponse:
             "response_examples": 2, "response_wrapper_calls": 4 if self.model.config.core_honf.forward_architecture in HYPERGRAPH_ARCHITECTURES else 2,
             "response_queries": 2 * sum(int(query.query_features.shape[0]) for query in queries.values()),
             "response_seconds": time.perf_counter() - started,
+            "response_forward_work": measured_work.records,
+            "response_work_scope": "actual forward calls including prepared query chunks; backward/recompute excluded",
             "response_reference": "stored analytic/shared-grid generator; q_normal proxy; absolute training scales",
         }

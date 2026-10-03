@@ -6,18 +6,18 @@ P0/P1/P2 coupling and the frozen Stage-A local surrogate. Run1804 selected
 e4738 remains an evaluation-only mature reference. Wind scientific training
 is paused; Wind is used for shared-core compatibility checks.
 
-**State: full-dataset control screening is running.** Snapshot: Dense e25 and
-three-term e57 completed. Work is on `agent/honf-core-next`. The initial
+**State: full-dataset screening is running.** Snapshot: Dense e75, three-term
+e100 and overlap e20 completed. Work is on `agent/honf-core-next`. The initial
 finite portfolio is Runs 2201–2205; two repaired screens are available only
 when a concrete failure warrants them. No 5,000-epoch job is authorized to
 start automatically.
 
 | Run | Strategy | Complete epoch | Sampled development field / T MSE | Current action |
 |---|---|---:|---|---|
-| 2201 | B-native | 25 | 0.33922 / 0.41169 | GPU 1 to e100; H-tree queued |
-| 2202 | B-fine | 57 | 0.62490 / 0.27502 | GPU 2 to e100; H-overlap queued |
+| 2201 | B-native | 75 | 0.23325 / 0.08480 | GPU 1 to e100; H-tree queued |
+| 2202 | B-fine | 100 | 0.21442 / 0.07559 | Screen complete; physical panel saved |
 | 2203 | H-tree | 0 | Pending | Native optimizer/gradient checks passed |
-| 2204 | H-overlap | 0 | Pending | Native optimizer/gradient checks passed |
+| 2204 | H-overlap | 20 | 1.33108 / 0.46559 | GPU 2 to e100 with exact e25 resume |
 | 2205 | H-local | 0 | Pending | Native optimizer/gradient checks passed |
 
 These MSEs use the maintained normalized, sampled 90-case validation task;
@@ -28,7 +28,7 @@ checkpoints are retained as reached.
 
 All formal epochs must visit all 600 native training records exactly once;
 batch caps are rejected. Effective batch 48, primary sampled Q 1024, FP32,
-Adam 3e-4/weight decay 1e-5, clipping 1, seed 0 are common. Microbatching preserves
+AdamW 3e-4/weight decay 1e-5, clipping 1, seed 0 are common. Microbatching preserves
 case-weighted accumulation into the original native bucket steps. Epoch and
 case/query/optimizer counters are saved separately. Schedule progress uses an
 absolute horizon rather than resetting at the 100/500/1000 stage boundaries.
@@ -70,14 +70,51 @@ allocated rows, executed rows, invalid/padded rows and calls are distinct.
 Logical sparsity currently establishes no executor saving. Timing will be
 reported with actual physical GPU 1/2 and external occupancy sampled per epoch.
 
-At this snapshot the last-ten-epoch median training/validation times are
-24.53/1.75 seconds for B-native and 10.97/0.90 seconds for B-fine. Peak allocated
-memory is about 4.53/4.15 GiB. GPUs 1/2 have no external GPU processes; host
-resources are shared with an unrelated GPU 0 job. Training to e100 is roughly
-33 minutes remaining for Dense and 9 minutes for B-fine, plus plotting/save
-overhead. Their remaining e1000 training+validation work is approximately
-7.12 and 3.11 GPU-hours respectively. H-strategy forecasts await 5–10 actual
-epochs; no control timing is substituted for their shadow/organizer cost.
+Control training/validation medians are approximately 24.5/1.75 seconds for
+B-native and 10.84/0.90 for B-fine. Peak allocated memory is about 4.53/4.15
+GiB. GPUs 1/2 have no external GPU processes at this snapshot; host resources
+are shared with an unrelated GPU 0 job. Dense has roughly 11 minutes to e100;
+B-fine completed e100. H-tree/H-local forecasts await actual complete epochs.
+
+H-overlap's first seven epochs measure median training/validation 42.58/1.20
+seconds and peak allocated memory 10.26 GiB. Its initial e100 screen forecast
+is about 73 minutes, plus periodic save/plot overhead; training to e1000 is
+about 12.2 GPU-hours at that rate before response work. Actual hard and soft
+forward work is recorded separately by P0/P1/P2. At e7 each path executes
+254,866,992 fine rows in 3,201 calls, with 225 preparations and 300 wrapper
+read calls. Backward checkpoint recomputation is outside this ledger scope.
+Dense controls lack this typed ledger; primary query counts do not replace it.
+
+## First complete physical screen and pre-pressure repair
+
+B-fine exact e100 and Run1804 selected e4738 were evaluated on the same
+18 input-selected development cases at their full native 64x128 grids.
+Case IDs are preserved for subsequent screens. Equal-case fluid RMSE is:
+
+| Field | B-fine e100 | Mature Run1804 e4738 |
+|---|---:|---:|
+| u | 0.0738634 | 0.00590808 |
+| v | 0.0106410 | 0.000337623 |
+| p | 0.0302576 | 0.00210899 |
+| omega | 0.302935 | 0.0258649 |
+| temperature | 1.67576 | 0.187831 |
+
+These benchmark physical-scale quantities each retain their own units; they
+are not averaged into one physical scalar. B-fine is finite and improves
+with training but still misses mature fidelity. Young-versus-mature accuracy
+does not isolate architecture and does not stop the healthy ladder. Saved
+evidence also includes near/far fluid, interfaces, material peaks and ports.
+
+Review found the original structural calibration's first five microbatches
+could belong to the same M bucket. Before e26 pressure, calibration policy 2
+collects one sample from each of five training-M strata and saves actual M,
+task/cost gradient norms and bounded coefficients. Pressure remains zero
+until all available strata are represented; absent task signal yields zero
+scale. H-overlap resumes from its exact e25 optimizer/RNG checkpoint; any
+computation begun after that save is discarded and recorded. H-tree/H-local
+start with the repaired calibration. This fixes the originally intended
+calibration scope before any pressure and consumes no additional screen.
+No development metric sets the coefficient.
 
 ## Remaining ladder and delivery
 

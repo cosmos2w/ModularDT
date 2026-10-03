@@ -10,6 +10,8 @@ from channelthermal.data.collation import ModuleCountBucketBatchSampler
 from channelthermal.training.campaign import (
     CampaignMicrobatchLoader,
     copy_matched_physical_initial_state,
+    record_structural_calibration,
+    structural_calibration_candidate,
     validate_campaign,
     validate_campaign_resume,
 )
@@ -51,6 +53,40 @@ def test_stage_resume_preserves_optimizer_schedule_and_task():
     checkpoint["optimizer_state_dict"] = None
     with pytest.raises(ValueError, match="optimizer and RNG"):
         validate_campaign_resume(checkpoint, config)
+
+
+def test_amp_resume_rejects_missing_scaler_state():
+    config = _config()
+    config["training"]["amp"] = True
+    checkpoint = {"train_config": copy.deepcopy(config), "optimizer_state_dict": {"state": 1}, "rng_state": {"torch": 1}}
+    with pytest.raises(ValueError, match="gradient-scaler"):
+        validate_campaign_resume(checkpoint, config)
+    checkpoint["scaler_state_dict"] = {"scale": 1024.}
+    validate_campaign_resume(checkpoint, config)
+
+
+def test_structural_calibration_spans_distinct_training_strata_and_records_norms():
+    training_counts = list(range(1, 11)) * 60
+    state = {}
+    assert structural_calibration_candidate(state, [2, 3], training_counts) is None
+    for count in (1, 3, 5, 7, 9):
+        stratum = structural_calibration_candidate(state, [count] * 8, training_counts)
+        assert stratum is not None
+        record_structural_calibration(state, stratum, [count] * 8, task_norm=2., cost_norm=100.,
+                                      max_weight=.001, epoch=26, native_batch=count)
+        assert structural_calibration_candidate(state, [count] * 8, training_counts) is None
+    assert state["structural_calibration_complete"]
+    assert len(state["structural_scale_samples"]) == 5
+    assert state["structural_scale"] == pytest.approx(.0004)
+    assert [sample["observed_module_counts"] for sample in state["structural_calibration_samples"]] == [[1], [3], [5], [7], [9]]
+    assert all(sample["task_organizer_gradient_norm"] == 2. for sample in state["structural_calibration_samples"])
+    # An absent task signal never turns a tiny structural gradient into pressure.
+    zero = {}
+    stratum = structural_calibration_candidate(zero, [3], [3])
+    record_structural_calibration(zero, stratum, [3], task_norm=0., cost_norm=1e-30,
+                                  max_weight=.001, epoch=26, native_batch=1)
+    assert zero["structural_scale"] == 0.
+    assert zero["structural_calibration_complete"]
 
 
 def test_native_bucket_epoch_and_query_stream_resume_by_absolute_epoch():

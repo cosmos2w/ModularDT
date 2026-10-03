@@ -62,14 +62,18 @@ def portfolio_profiles(*, first_run_id: int = 2201, stage: int = 100, microbatch
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--first-run-id", type=int, default=2201)
+    parser.add_argument("--first-run-id", type=int, default=None)
     parser.add_argument("--stage", type=int, choices=(100, 500, 1000, 5000), default=100)
     parser.add_argument("--microbatch-size", type=int, default=8)
+    parser.add_argument("--fresh", action="store_true", help="Manual independent fresh 5000 recipe; requires explicit unused run IDs.")
     args = parser.parse_args()
-    profiles = portfolio_profiles(first_run_id=args.first_run_id, stage=args.stage, microbatch_size=args.microbatch_size)
+    if args.fresh and (args.stage != 5000 or args.first_run_id is None):
+        parser.error("--fresh is a manual 5000 recipe and requires --stage 5000 plus explicit --first-run-id.")
+    profiles = portfolio_profiles(first_run_id=2201 if args.first_run_id is None else args.first_run_id,
+                                  stage=args.stage, microbatch_size=args.microbatch_size)
     output = args.output_dir.expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
-    if args.stage == 100:
+    if args.stage == 100 or args.fresh:
         for config in profiles.values():
             run_id = config["run"]["id"]
             conflicts = list((PROJECT_ROOT / "Trained_Results").rglob(f"Run_{run_id}_*"))
@@ -78,7 +82,7 @@ def main() -> int:
     for arm, config in profiles.items():
         path = output / f"{arm.lower()}_e{args.stage}.json"
         path.write_text(json.dumps(config, indent=2) + "\n")
-        suffix = "" if args.stage == 100 else " --resume-checkpoint PATH_TO_EXACT_PREVIOUS_STAGE_CHECKPOINT"
+        suffix = "" if args.stage == 100 or args.fresh else " --resume-checkpoint PATH_TO_EXACT_PREVIOUS_STAGE_CHECKPOINT"
         print(f"{arm}: CUDA_VISIBLE_DEVICES=1 python train.py --config {path} --device cuda:0{suffix} --dry-run")
     return 0
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-import statistics
+from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 import torch
@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from channelthermal.model import ChannelThermalHONFModel
+from channelthermal.training.campaign import record_structural_calibration, structural_calibration_candidate
+from channelthermal.training.campaign_work import CampaignForwardWork, merge_forward_work
 from channelthermal.training_tools.losses import (
     case_group_budget_loss,
     channelthermal_field_mse,
@@ -611,6 +613,7 @@ def run_epoch(
     optimizer_steps = 0
     native_batches = 0
     response_metrics: Dict[str, Any] = {}
+    forward_work: Dict[str, Any] = {}
     sparsification = _routing_sparsification_settings(model)
     paircost_enabled = bool(getattr(sparsification, "enabled", False))
     budget_enabled, _budget_weight = _case_group_budget_settings(model, loss_cfg)
@@ -633,15 +636,18 @@ def run_epoch(
                 port_global_weight = effective_port_global_weight(
                     loss_cfg, local_port_condition_mode, mixed_teacher_ratio
                 )
-                output = (model if forward_function is None else forward_function)(
-                    **make_model_inputs(
-                        batch,
-                        local_port_condition_mode=local_port_condition_mode,
-                        mixed_teacher_ratio=mixed_teacher_ratio,
-                        return_predicted_port_outputs=bool(predicted_consistency_weight > 0.0),
-                        return_port_global_consistency=bool(port_global_weight != 0.0),
+                with CampaignForwardWork(model.core) if training and campaign_config else nullcontext() as measured_work:
+                    output = (model if forward_function is None else forward_function)(
+                        **make_model_inputs(
+                            batch,
+                            local_port_condition_mode=local_port_condition_mode,
+                            mixed_teacher_ratio=mixed_teacher_ratio,
+                            return_predicted_port_outputs=bool(predicted_consistency_weight > 0.0),
+                            return_port_global_consistency=bool(port_global_weight != 0.0),
+                        )
                     )
-                )
+                if measured_work is not None:
+                    merge_forward_work(forward_work, measured_work.records)
                 loss_terms = assemble_channelthermal_loss_terms(
                     output,
                     batch,
@@ -660,7 +666,10 @@ def run_epoch(
                     start = int(campaign_config.get("structural_ramp_start", 26))
                     end = int(campaign_config.get("structural_ramp_end", 100))
                     state = getattr(model, "campaign_training_state", {})
-                    if absolute_epoch >= start and len(state.get("structural_scale_samples", [])) < 5:
+                    counts = [int(value) for value in batch["structure"]["module_present"].sum(-1).detach().cpu().tolist()]
+                    training_counts = list(getattr(loader.dataset, "selected_module_counts", counts))
+                    stratum = structural_calibration_candidate(state, counts, training_counts) if absolute_epoch >= start else None
+                    if stratum is not None:
                         parameters = [parameter for name, parameter in model.named_parameters()
                                       if name.startswith("core.backend.organizer.") and parameter.requires_grad]
                         if parameters and structural_cost.requires_grad:
@@ -668,15 +677,13 @@ def run_epoch(
                             cost_grad = torch.autograd.grad(structural_cost, parameters, retain_graph=True, allow_unused=True)
                             task_norm = sum(float(value.detach().square().sum()) for value in task_grad if value is not None) ** 0.5
                             cost_norm = sum(float(value.detach().square().sum()) for value in cost_grad if value is not None) ** 0.5
-                            # An absent task signal cannot justify stronger pressure.
-                            scale = min(0.02 * task_norm / max(cost_norm, 1e-12), float(campaign_config.get("structural_weight", 0.001))) if task_norm > 1e-10 else 0.0
-                            state.setdefault("structural_scale_samples", []).append(scale)
-                            state["structural_scale"] = float(statistics.median(state["structural_scale_samples"]))
-                            state["last_task_organizer_gradient_norm"] = task_norm
-                            state["last_cost_organizer_gradient_norm"] = cost_norm
-                            model.campaign_training_state = state
+                            record_structural_calibration(state, stratum, counts,
+                                task_norm=task_norm, cost_norm=cost_norm,
+                                max_weight=float(campaign_config.get("structural_weight", 0.001)),
+                                epoch=absolute_epoch, native_batch=native_batches + int(not optimizer_boundary))
+                    model.campaign_training_state = state
                     ramp = min(max((absolute_epoch - start + 1) / max(end - start + 1, 1), 0.0), 1.0)
-                    structural_weight = float(state.get("structural_scale", 0.0)) * ramp
+                    structural_weight = float(state.get("structural_scale", 0.0)) * ramp if state.get("structural_calibration_complete") else 0.0
                     loss = loss + structural_weight * structural_cost
                 loss_field = loss_terms["loss_field"]
                 loss_internal = loss_terms["loss_internal_temperature"]
@@ -1001,6 +1008,12 @@ def run_epoch(
     averaged.update({key: value for key, value in response_metrics.items() if isinstance(value, (int, float))})
     if response_metrics:
         model.campaign_last_response_metrics = response_metrics
+    if training and campaign_config:
+        model.campaign_last_forward_work = {
+            "native_training": forward_work,
+            "scope": "actual shared-core forward prepare/read calls; backend-returned ledgers; backward/recompute excluded",
+            "executor_ledger_available": bool(any(values["ledgers"] for phases in forward_work.values() for values in phases.values())),
+        }
     if training:
         averaged.update({key: math.nan for key in GRADIENT_DIAGNOSTIC_KEYS})
         averaged.update(one_shot_metrics)
