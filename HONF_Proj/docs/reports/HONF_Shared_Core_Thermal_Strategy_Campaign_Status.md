@@ -30,10 +30,11 @@ selection is also 388 with different weights; it is not substituted. After the
 measured review below, root promoted the same Run2205 lineage from exact500 to
 1000 at 14:49:43 UTC on GPU2. This is the first H finalist continuation. Exact600
 subsequently passed full optimizer/RNG/calibration/frozen Stage-A and case-coverage
-checks. No H1000 result is complete yet.
+checks. Later ordinary audits reach 675 with the same native bindings and complete
+case coverage. No H1000 result is complete yet.
 
-Tree continues its exact100→500 lineage on GPU1; exact375 and the later exact400
-state audits pass. Tree500 physical review precedes the second H1000 promotion. Overlap
+Tree continues its exact100→500 lineage on GPU1; exact375/400 and the later exact425
+state and saved-binding audits pass. Tree500 physical review precedes the second H1000 promotion. Overlap
 exited naturally at 500 at 13:10 UTC; exact500/field-selected292 reviews and
 native parity/timing are complete, with T-selected269 separately preserved.
 The third H1000 slot remains reserved for an informative complementary result.
@@ -56,9 +57,9 @@ start automatically.
 |---|---|---:|---|---|
 | 2201 | B-native | 1000 | 0.00690 / 0.00411 | Natural exit0; exact1000/selected962 fields, responses and selected inverse complete |
 | 2202 | B-fine | 1000 | 0.01175 / 0.01182 | Native exit0; immutable exact1000/selected972 evaluation complete |
-| 2203 | H-tree | 386 | 0.03516 / 0.02934 | GPU1; exact100→500; later full saved-state audit passed400 |
+| 2203 | H-tree | 386 | 0.03516 / 0.02934 | GPU1; exact100→500; later full saved-state and binding audits passed425 |
 | 2204 | H-overlap | 500 | 0.60332 / 0.21109 | Native exit0; exact500/selected292 review complete; third-slot decision awaits cohort review |
-| 2205 | H-local | 602 | 0.12787 / 0.11154 | GPU2; exact500→1000 first H finalist; later full saved-state audit passed625 |
+| 2205 | H-local | 602 | 0.12787 / 0.11154 | GPU2; exact500→1000 first H finalist; later full saved-state audit passed675 |
 
 These MSEs use the maintained normalized, sampled 90-case validation task;
 they are neither full-grid physical errors nor the final 89-case comparison.
@@ -924,6 +925,7 @@ Figure index: [full-epoch training progress](../../diagnostics/generated/shared_
 [frozen finite responses](../../diagnostics/generated/shared_core_campaign_20261002/figures/reference_response_baseline.pdf),
 [matched frozen inverse comparison](../../diagnostics/generated/shared_core_campaign_20261002/figures/frozen_inverse_comparison.pdf),
 [actual overlap graph and work](../../diagnostics/generated/shared_core_campaign_20261002/figures/overlap_e100_graph_work.pdf),
+[Local500 selected graph, near access and measured utility](../../diagnostics/generated/shared_core_campaign_20261002/figures/local_stage500_selected_graph.pdf),
 [executed work versus latency](../../diagnostics/generated/shared_core_campaign_20261002/figures/executor_work_vs_latency.pdf).
 
 ![Full-epoch training and measured elapsed work](../../diagnostics/generated/shared_core_campaign_20261002/figures/campaign_training_progress.png)
@@ -1055,6 +1057,47 @@ Normal/full-access/recomputed-zero-control/rewired fluid T RMSE is
 2.8432/3.5946/3.2341/3.2556; geometry yields 2.7734 but worsens surface T to
 3.5618 versus normal 2.9758. Full access improves peak error to 2.6891 versus
 normal 3.0238. Utility is mixed across fields and roles.
+
+![Local selected388 source groups, controls, near access and measured utility](../../diagnostics/generated/shared_core_campaign_20261002/figures/local_stage500_selected_graph.png)
+
+Run2205's stage500 field selection is actual388, not an exact500 or H1000
+graph. Case0692 (M10, Re140) admits group5 alone from eight allocated groups
+at every phase; P1/P2 use the recorded admission rescue. The maps show actual
+QM/QE source membership support and the middle row shows all five typed
+16-channel group-control vectors. Memberships are real densities, not binary
+incidences. The bottom-left panel shows one actual P2 QE receiver at
+(5.578125, 2.953125), call00031/row59: 13 of 192 eligible sources have positive
+near access, including four with fully protected access. Coordinates use the
+native benchmark frame; first QM/QE call receivers differ across phases.
+Archived pair-control probes sample four receivers and at most sixteen sources;
+receiver means and complete group vectors do not supply a full pair-control tensor.
+
+The strict utility panel uses the same selected weights on fixed cases
+0647/0291/0296/0692. Fixed-access zero controls worsen mean fluid/surface/peak
+temperature RMSE by 17.9%/33.9%/42.4%, while pressure-difference absolute error
+improves 38.9%. Bounded geometry changes 224 net support entries across these
+four cases, with none in 0692; it preserves the declared degrees, equal-measure
+row permutations and protected near entries. The complete CUDA2 wrapper at
+Q8192 uses 20.7%/34.3% fewer fine rows for M3/M10 but its five-repeat median
+latency increases 9.2%/10.3%. Fine calls increase 161→164. Shared-host execution
+and fixed dense-first order limit timing attribution. Native auxiliary reads
+are included in the case's 112,263 positive-near and 30,310 fully-near call
+entries; these are not unique physical pairs. All 24 physical roles on the
+sixteen saved strict-panel states reconcile exactly. These observations
+support useful but mixed forward graph action; they do not qualify final
+inverse reuse or establish physical causality. [Figure evidence and QA](../../diagnostics/generated/shared_core_campaign_20261002/figures/local_stage500_selected_graph_QA.json).
+
+A separate [fifteen-call arithmetic review](../../diagnostics/generated/shared_core_campaign_20261002/graph_population/h-local_stage500_selected/root_first_call_source_moments_review.json)
+reconstructs retained source moments from saved numerical evidence. The far
+density is normalized over eligible physical measure before
+`weight = near + (1-near)*far_weight`; controls use `(1-near)*far_control`.
+No normalization follows that blend. Support matches exactly; maximum weight
+and sampled-control differences are 6.14e-7 and 1.37e-6 under declared
+FP64-to-retained-FP32 tolerances, and every fully-near weight is exactly one.
+Row-normalizing a transposed prior can cancel source factors in one saved
+bottom-grid read. That limited calculation is not the six-observation public
+inverse task or its nonlinear learned attention. Final selected graph actions
+and inverse utility remain to be measured on the actual public tasks.
 
 Independent audit finds that the old prediction `interaction_aux` averages
 external field chunks and repeats preparation counts. Its saved scalar work
@@ -1676,7 +1719,8 @@ memory is not inferred from the driver footprint.
 The [exact600 ordinary checkpoint audit](../../diagnostics/generated/shared_core_campaign_20261002/logs/h-local_e600_checkpoint_audit.json)
 passes all 20 checks: 203 AdamW states at 7,800 updates, four RNG streams,
 109 frozen Stage-A tensors bitwise versus exact500, preserved normalization,
-both five-stratum calibrations and policy2/horizon5000. All 600 retained epochs
+original/revised five-stratum structural calibrations, five-sample response
+calibration and policy2/horizon5000. All 600 retained epochs
 have full 600-case/13-step/614,400-query coverage. In epochs 591–600, mean sampled field/T MSE is
 0.122596/0.100607 versus 0.110762/0.087670 in 566–575, while structural cost
 declines 0.574070→0.568636. This is adverse sampled fidelity despite lower
@@ -1695,6 +1739,22 @@ cost 0.579689: sampled fidelity improves versus 591–600 while structural cost
 increases. These changing windows show continued variation, not a matched
 physical gain or a reason to replace the pending 1,000-epoch review.
 
+The later [exact650 audit](../../diagnostics/generated/shared_core_campaign_20261002/logs/h-local_e650_checkpoint_audit.json)
+and [exact675 audit](../../diagnostics/generated/shared_core_campaign_20261002/logs/h-local_e675_checkpoint_audit.json)
+each pass all 20 checks. All 203 AdamW states reach 8,450 and 8,775 updates,
+respectively; four RNG streams, 109 frozen Stage-A tensors, original/revised
+five-stratum structural calibrations, five-sample response calibration,
+normalization, horizon5000 and policy2 lineage remain preserved.
+Every retained epoch still covers 600 unique cases/13 updates/614,400 primary
+queries. The 641–650 and 666–675 windows have mean sampled field/T MSE
+0.108511/0.085845 and 0.107620/0.085145; structural cost declines
+0.572118→0.562439. Response-loss means 0.009626→0.007439 use cycled stencils,
+so they do not establish a matched physical response gain. Recent10
+train+validation medians are 53.168 and 52.517 seconds; allocated peaks are
+12,448.98 and 12,544.38 MiB. Driver footprint 24,508 MiB and explicit GPU2
+free 23,843 MiB are separately observed. These are ordinary continuation
+proofs, not the required completed finalist review.
+
 Tree's [exact375 ordinary audit](../../diagnostics/generated/shared_core_campaign_20261002/../HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/continuation_epoch375_ordinary_state_audit.json)
 and [saved bindings review](../../diagnostics/generated/shared_core_campaign_20261002/../HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/continuation_epoch375_saved_bindings_audit.json)
 retain 185 active AdamW states at 4,875 updates, four RNG streams, 109 unchanged
@@ -1711,6 +1771,19 @@ epochs' coverage remain intact. Sampled field/T MSE is 0.034495/0.024031; recent
 mean train/validation times are 95.268/4.308 seconds. GPU1 direct free memory is
 33,693 MiB at observation. The finite400 watcher exits normally while the
 original trainer continues; no500 promotion or physical result is claimed.
+
+Tree's later [exact425 state audit](../../diagnostics/generated/shared_core_campaign_20261002/../HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/continuation_epoch425_ordinary_state_audit.json)
+and [saved-binding audit](../../diagnostics/generated/shared_core_campaign_20261002/../HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/continuation_epoch425_saved_bindings_audit.json)
+retain all 185 AdamW states at 5,525 updates, 555 finite optimizer tensors,
+four RNG streams and 109 unchanged Stage-A tensors. All twelve global/eight
+local normalization arrays, dataset identity/schema/fingerprint/metadata,
+feature schemas and frozen-surrogate bindings remain unchanged versus 400.
+Epochs 401–425 each cover 600 cases/75 microbatches/13 boundaries/614,400
+training queries and 90 validation cases/2 batches/92,160 queries. Model
+inventory is 316 tensors/4,287,933 scalars. Sampled field/T MSE is
+0.035459/0.024763; recent10 mean train/validation times are97.206/4.281 seconds.
+Direct GPU1 free 33,693 MiB is an observation, not an interval minimum or
+isolated-timing claim. Tree500 physical review still precedes continuation.
 
 ## Measured Native1000 control, responses and frozen inverse
 
