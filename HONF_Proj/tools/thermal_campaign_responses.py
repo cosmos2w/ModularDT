@@ -126,6 +126,7 @@ def evaluate_responses(checkpoint_path, *, dataset_path, stencil_paths, output_d
                 delta = predictions.finite(label, role).cpu().numpy()
                 arrays[f"{label}/{role}/delta_prediction"] = delta
                 arrays[f"{label}/{role}/delta_reference"] = block.delta
+                arrays[f"{label}/{role}/delta_valid"] = block.valid_mask
                 row["roles"][role] = response_channel_metrics(delta, block.delta, block.valid_mask,
                     block.quadrature_weights, block.channel_names, block.channel_units)
             pressure = float(quantities[label].pressure_drop - baseline.pressure_drop)

@@ -110,3 +110,20 @@ def test_missing_gradient_and_bad_permutation_are_not_accepted():
         fixed_total_heat_inference(_predictor, torch.zeros(2), torch.zeros(1), torch.ones(3, dtype=torch.bool),
             torch.tensor(1.), torch.ones(3) / 3, mode="ungrouped", steps=1,
             permutation_stream=(torch.tensor([0, 0, 2]),))
+
+
+def test_full_joint_fallback_matches_joint_with_a_permuted_control_stream():
+    def nonlinear(heat):
+        return {"observed": (heat[:3] + heat[:3].square()), "held": heat[3:], "groups": ()}
+
+    arguments = {"predictor": nonlinear, "observed": torch.tensor([.2, .8, .5]),
+        "held": torch.tensor([.5]), "active": torch.ones(4, dtype=torch.bool), "total": torch.tensor(2.),
+        "initial_fraction": torch.tensor([.100001, .299999, .350001, .249999]), "steps": 30,
+        "permutation_stream": (torch.tensor([2, 0, 3, 1]),) * 30}
+    joint = fixed_total_heat_inference(**arguments, mode="joint")
+    graph = fixed_total_heat_inference(**arguments, mode="graph")
+    random = fixed_total_heat_inference(**arguments, mode="ungrouped", block_size_stream=(4,) * 30)
+    for trail in (graph, random):
+        assert trail.group_fallback_steps == 30 and trail.meaningful_graph_steps == 0
+        assert torch.equal(torch.stack(trail.heat), torch.stack(joint.heat))
+        assert torch.equal(torch.stack(trail.observed_predictions), torch.stack(joint.observed_predictions))

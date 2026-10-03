@@ -6,8 +6,9 @@ P0/P1/P2 coupling and the frozen Stage-A local surrogate. Run1804 selected
 e4738 remains an evaluation-only mature reference. Wind scientific training
 is paused; Wind is used for shared-core compatibility checks.
 
-**State: full-dataset screening is running.** Snapshot at 2026-10-03 02:48 UTC:
-both controls e100 and overlap e59 completed; H-tree resumed its exact e2.
+**State: full-dataset screening and reviewed control continuation are running.**
+Snapshot at 2026-10-03 03:47 UTC: both controls and overlap e100 completed;
+H-tree completed e15; B-fine completed e240 on its way to 500 and H-local e35.
 Work is on `agent/honf-core-next`. The initial
 finite portfolio is Runs 2201–2205; two repaired screens are available only
 when a concrete failure warrants them. No 5,000-epoch job is authorized to
@@ -16,10 +17,10 @@ start automatically.
 | Run | Strategy | Complete epoch | Sampled development field / T MSE | Current action |
 |---|---|---:|---|---|
 | 2201 | B-native | 100 | 0.10121 / 0.06007 | Screen and physical panel complete |
-| 2202 | B-fine | 100 | 0.21442 / 0.07559 | Screen complete; physical panel saved |
-| 2203 | H-tree | 2 | 1.89847 at e1 / pending | GPU 1; exact e2 engineering resume |
-| 2204 | H-overlap | 59 | 0.35657 / 0.34376 | GPU 2; exact e55 storage recovery |
-| 2205 | H-local | 0 | Pending | Native optimizer/gradient checks passed |
+| 2202 | B-fine | 240 | 0.08034 / 0.02975 | GPU1; exact e100→500 continuation |
+| 2203 | H-tree | 15 | 1.58727 / 0.50713 | GPU1; reviewed exact e8 engineering resume |
+| 2204 | H-overlap | 100 | 0.25209 / 0.25632 | Physical screen complete; 500 queued |
+| 2205 | H-local | 35 | 0.54523 / 0.39154 | GPU2; fresh full-dataset screen |
 
 These MSEs use the maintained normalized, sampled 90-case validation task;
 they are neither full-grid physical errors nor the final 89-case comparison.
@@ -66,6 +67,15 @@ Training-family response pairs begin after 100 and their extra work is recorded.
   token-cell volume in rotor-diameter coordinates. Near-access scales are not
   inferred from dimensionless attention measures.
 
+B-fine allocates 140 trainable tensors (2,928,273 scalars), while 120 acquire
+AdamW state. The other 20 tensors (104,451 scalars) belong to retained
+`fallback_heads.internal_head` and `fallback_heads.interface_head`. Native
+`local_surrogate` execution uses frozen Stage-A outputs and bypasses those
+global fallback heads. Exact e200 optimizer mapping and a genuine native CPU
+B2/Q17 gradient calculation agree on precisely these 20 inactive tensors;
+all 120 active tensors have optimizer step 2,600. This is an allocated versus
+executed case-branch distinction; legitimate fallback physics remains available.
+
 The initial executor is a dense masked reference. Unique supported pairs,
 allocated rows, executed rows, invalid/padded rows and calls are distinct.
 Logical sparsity currently establishes no executor saving. Timing will be
@@ -75,7 +85,10 @@ Control training/validation medians are approximately 24.5/1.75 seconds for
 B-native and 10.84/0.90 for B-fine. Peak allocated memory is about 4.53/4.15
 GiB. GPUs 1/2 have no external GPU processes at this snapshot; host resources
 are shared with an unrelated GPU 0 job. Both controls completed e100.
-H-local forecasts await actual complete epochs. H-tree's first two complete
+H-local's first ten epochs have median train/validation 46.16/1.28 seconds
+and peak allocated memory 10,749 MiB. Its exact e25 full-state checkpoint is
+finite, and e26 persisted calibration version 2 with all five M strata.
+H-tree's first two complete
 epochs took 455.6/458.0 seconds for training and 25.3/25.4 for validation,
 with peak allocated memory about 11.0 GiB. Its first engineering repair batches
 node reductions and replaces scalar host sorting reads with equivalent lists.
@@ -84,7 +97,41 @@ one complete native48 optimizer boundary fell 32.75 to 23.04 s. All 185 first
 gradients and physical outputs passed declared tolerances. These bounded
 measurements are not complete-epoch timings. Exact e2 optimizer/RNG is retained;
 the stopped partial e3 (66/75 microbatches, 6:39 elapsed) is discarded and logged.
-Further equivalent batching is being investigated while training progresses.
+Five complete postresume e3–7 epochs average 308.99 s training and 14.86 s
+validation, a 32.83% observed total-time reduction against e1–2. Actual hard
+and soft executed rows remain dense.
+
+A second reviewed repair batches typed source/control heads across actual
+cases and propagates receiver-tree access by depth using fresh phase-owned
+geometry. Isolated GPU2 at immutable e2/native micro8/Q1024 measured hard+soft
+forward median 2.659→0.830 s and backward 1.132→0.189 s; one native48 optimizer
+boundary fell 23.87→7.31 s. All 185 first gradients pass (max absolute 4.42e-9),
+with physical output maximum 7.63e-6 across ports/fields/interfaces; allocated
+memory was about 5.3 GiB in that bounded replay. Empty-source, fixed-topology
+and physical gradient tests passed after correcting zero-width row padding.
+Exact e8 / all 104 AdamW steps/RNG/schedule state is the engineering parent.
+Five actual complete epochs after the second repair, e9–13, average 177.66 s
+training and 8.74 s validation, or 186.40 s total. Every epoch has 600 cases,
+75 microbatches, 13 native optimizer steps and 614,400 primary queries. Exact
+e13 has all 185 active AdamW states at step 169 and four saved RNG streams.
+These epochs share GPU1 with B-fine and establish a current forecast of about
+4.5 hours for the remaining e14–100, excluding later pressure/response changes.
+They are not isolated timing or sparse executor savings.
+The first ten resumed epochs e9–18 confirm this cost: mean train/validation
+177.26/9.09 s, total 186.35 s, with the same full-epoch counters. The current
+focused repair/evaluation/manual-launch suite passes 118 tests; one optional
+native-resource test was skipped in that CPU suite. Actual native permission
+isolation and checkpoint/gradient audits were executed separately.
+
+The healthy B-fine e100 control is advancing to500 on GPU1 alongside H-tree,
+within verified memory headroom (about 29.8/49.1 GiB combined process memory).
+Their epochs after this launch are labelled **owned contention**; e8 tree
+train/validation 411.81/36.48 s show a material effect. They are excluded from
+isolated speed rankings. B-fine e101 visited all 600 records with 13 steps and
+policy 2 active, plus one train-only response pair: 2 examples/4,324 role queries,
+0.571 s response forward work. Five training-family gradient calibrations all
+hit the conservative 0.1 coefficient cap; the e101–200 ramp is recorded rather
+than claiming the nominal 5% gradient target was reached.
 
 H-overlap's first seven epochs measure median training/validation 42.58/1.20
 seconds and peak allocated memory 10.26 GiB. Its initial e100 screen forecast
@@ -101,19 +148,26 @@ B-native exact e100, B-fine exact e100 and Run1804 selected e4738 were evaluated
 18 input-selected development cases at their full native 64x128 grids.
 Case IDs are preserved for subsequent screens. Equal-case fluid RMSE is:
 
-| Field | B-native e100 | B-fine e100 | Mature Run1804 e4738 |
-|---|---:|---:|---:|
-| u | 0.0698578 | 0.0738634 | 0.00590808 |
-| v | 0.00511782 | 0.0106410 | 0.000337623 |
-| p | 0.0252665 | 0.0302576 | 0.00210899 |
-| omega | 0.217016 | 0.302935 | 0.0258649 |
-| temperature | 1.43558 | 1.67576 | 0.187831 |
+| Field | B-native e100 | B-fine e100 | H-overlap e100 | Mature Run1804 e4738 |
+|---|---:|---:|---:|---:|
+| u | 0.0698578 | 0.0738634 | 0.0908794 | 0.00590808 |
+| v | 0.00511782 | 0.0106410 | 0.00976146 | 0.000337623 |
+| p | 0.0252665 | 0.0302576 | 0.0358716 | 0.00210899 |
+| omega | 0.217016 | 0.302935 | 0.303445 | 0.0258649 |
+| temperature | 1.43558 | 1.67576 | 3.27004 | 0.187831 |
 
 These benchmark physical-scale quantities each retain their own units; they
 are not averaged into one physical scalar. B-fine is finite and improves
 with training but still misses mature fidelity. Young-versus-mature accuracy
 does not isolate architecture and does not stop the healthy ladder. Saved
 evidence also includes near/far fluid, interfaces, material peaks and ports.
+
+The immutable mature e4738 reference has also completed the full 90-case native
+development population. Excluding duplicate0273, equal-case fluid u/T RMSE is
+0.005721/0.218656 and module material-peak RMSE 0.346587; compatibility90 yields
+0.005707/0.217622/0.344636. These full-population results are saved separately
+from the 18-case screen and will anchor the 500/1000 comparisons. They retain
+the same predicted ports, frozen Stage-A and previously exposed benchmark limits.
 
 Review found the original structural calibration's first five microbatches
 could belong to the same M bucket. Before e26 pressure, calibration policy 2
@@ -156,12 +210,16 @@ campaign evidence under that data directory's `generated_evidence`.
 Compatibility symlinks preserve all original workspace paths. Every relocated
 regular file was byte-compared before replacement. New H-local output uses a
 validated copy of its unchanged scientific profile with data placement only.
-No mature checkpoint or unrelated data was removed. Root retains about 1.5 GiB
-free; new campaign checkpoint/evidence writes use data's approximately 121 GiB.
+No mature checkpoint or unrelated data was removed. At this snapshot root has
+about 75 GiB and data 120 GiB free; all new campaign checkpoint/evidence writes
+remain on data. Changes in unrelated occupancy are not attributed to this campaign.
 
-## Selected measured figure
+## Selected measured figures
 
-Figure index: [screen fields and residuals, case 0692](../../diagnostics/generated/shared_core_campaign_20261002/figures/predictor_screen_case0692.pdf).
+Figure index: [screen fields and residuals](../../diagnostics/generated/shared_core_campaign_20261002/figures/predictor_screen_case0692.pdf),
+[frozen finite responses](../../diagnostics/generated/shared_core_campaign_20261002/figures/reference_response_baseline.pdf),
+[mature inverse baseline](../../diagnostics/generated/shared_core_campaign_20261002/figures/mature_inverse_baseline.pdf),
+[actual overlap graph and work](../../diagnostics/generated/shared_core_campaign_20261002/figures/overlap_e100_graph_work.pdf).
 
 ![Native-grid screening fields and residuals for development case 0692](../../diagnostics/generated/shared_core_campaign_20261002/figures/predictor_screen_case0692.png)
 
@@ -175,11 +233,47 @@ architecture from training age. Both the PDF master and small embedding raster
 were visually inspected after fixing clipped labels; numerical arrays remain
 under the ignored evaluation directory.
 
-Run1804's full frozen local heat-inference evaluation is running on CPU:
-12 development cases, three starts, 30 steps, joint/graph/size-matched ungrouped
-updates. Hidden allocations are evaluation-only and no independent physical
-solver is launched. Completed trails are saved individually; startup is not
-an inverse-quality result.
+H-overlap e100 is finite but worse than the same-age controls on fluid
+temperature and surface/material errors: near/far T RMSE 3.4390/3.1789,
+surface 3.4289, material 3.0983 and peak 3.5137. Its q_normal proxy RMSE 5.1202 is
+slightly below B-fine 5.3558. Hard QE support retains 44.48% of eligible logical
+pairs, while each hard/soft whole-epoch path still executes 253,186,272 rows
+in 3,177 fine calls. This is a fidelity/support tradeoff with zero measured
+training executor saving. The healthy curve continues to 500; H-local tests
+the distinct near-access protection hypothesis from fresh initialization.
+
+![Actual overlapping source groups and native executed work](../../diagnostics/generated/shared_core_campaign_20261002/figures/overlap_e100_graph_work.png)
+
+The top panels show case0692's M10 environmental source locations and two
+admitted QE groups at P0/P1/P2: 85 shared atoms in an 89-atom union. These are
+learned source memberships, not physical causality. The bottom panel sums
+directly recorded native accesses over four fixed development cases, all five
+routes and all three phases. Normal selects 3,508,819 of 7,743,578 eligible
+physical pairs, but every one of nine interventions executes 7,995,072 fine
+rows in 644 calls, including padding. There is no measured executor saving.
+Normal/full-access/recomputed-zero-control/rewired fluid T RMSE is
+2.8432/3.5946/3.2341/3.2556; geometry yields 2.7734 but worsens surface T to
+3.5618 versus normal 2.9758. Full access improves peak error to 2.6891 versus
+normal 3.0238. Utility is mixed across fields and roles.
+
+Independent audit finds that the old prediction `interaction_aux` averages
+external field chunks and repeats preparation counts. Its saved scalar work
+cannot establish complete-wrapper costs. Direct native phase recording and
+training telemetry are the authorities for work here. Recording transparently
+preserves all four normal physical outputs bitwise; instrumented elapsed times
+include copies/anchor reconstruction and are excluded from speed claims.
+The original zero-control intervention recomputes physical phases, so later
+learned access changes through feedback. A separate reference-access replay
+completed four native cases: all 644 actual P0/P1/P2 calls preserve normal
+weight/support/edge access/near/catalogue/receivers/diagnostics bitwise, and
+historical density reconstruction reproduces saved weights exactly. Controls
+and actual gain/score projection biases are disabled; current physical source
+values, local physics and ports are recomputed. Fixed-access zero controls
+worsen mean fluid T from 2.8432 to 3.2344 and surface T from 2.9758 to 3.2295,
+with a surface improvement in case0692. This isolates useful collective
+control action on this small exposed panel, with mixed case effects. Geometry
+and rewiring preserve some P0 membership multisets but fail whole-wrapper
+degree/weight matching; they do not establish a globally matched control win.
 
 Run1804 and both fresh e100 controls have completed finite-response evaluation
 on all eight existing non-training families (11 absolute states per family).
@@ -189,6 +283,55 @@ separate. No response-relative quality is claimed without established floors.
 The mature local-inverse job also encountered ENOSPC on its eighth case;
 individual complete trials are retained and resume now skips verified arrays.
 Atomic numerical/JSON writes preserve previous complete files on interruption.
+
+![Frozen native response errors and physical response maps](../../diagnostics/generated/shared_core_campaign_20261002/figures/reference_response_baseline.png)
+
+Across eight previously exposed non-training families, mean fluid-temperature
+finite-response RMSE for mature/Dense100/Fine100 is 0.06610/0.11562/0.12484
+on the 16 heat-transfer perturbations; zero change yields 0.24176. For the
+same perturbations the stored velocity response is exactly zero, but the
+models yield mean u-response RMSE 0.001231/0.003684/0.004631: all fail that
+generator-specific null control. Across all 80 perturbations, mean pressure
+increment error is 0.0001974/0.0003988/0.0006154 versus zero change 0.0002784.
+The bottom maps show family0310 heat-transfer-plus on 7,918 full-stencil-common
+fluid grid cells, with temperature response RMSE 0.07045 versus reference RMS
+0.30041. The maps use common signed scales and an absolute residual scale;
+no plotted finite cell is clipped. White masks exclude physical solids and
+noncommon stencil support. These are physical benchmark units and frozen
+predicted-port/Stage-A results, not CFD or response-relative validation.
+The figure shows a useful thermal-response baseline alongside spurious
+cross-field response and young-model pressure misses.
+
+![Complete frozen mature-reference heat optimization and identifiability](../../diagnostics/generated/shared_core_campaign_20261002/figures/mature_inverse_baseline.png)
+
+Run1804's frozen local heat-inference evaluation completed all 108 trials:
+12 development cases, three starts, 30 projected-Adam steps, joint/graph/
+size-matched ungrouped modes, six fitted and six disjoint held sensors.
+The selected figure uses the completed single-thread CPU/canonical-slot
+evaluation policy. Joint mean observed RMSE falls 3.4130 to 2.0458 (40.06%) and
+held RMSE 3.7327 to 2.6432 (29.19%) in temperature units. Material-peak RMSE
+falls 5.5096 to 4.5567 and pressure-difference absolute error 0.01433 to 0.009019.
+Median CPU one-thread joint trial time is 23.14 seconds, excluding checkpoint
+load and Jacobian precheck. All saved heat states are nonnegative; maximum
+relative total drift is 7.68e-7. Graph and ungrouped modes both use full-joint
+fallback on all 1,080 steps each, and all 72 fallback trial trajectories are
+bitwise identical to their joint counterpart. They establish no graph utility.
+Trajectories are nonmonotonic: held error worsens in 12/36 starts, observed
+error in 10/36 and peak error in 14/36. This setting does not establish robust
+convergence. Earlier two-thread trails remain preserved; repeated gradient
+roundoff of order 4.77e-7 amplified along the projected optimizer. Single-thread
+gradients and canonical block ordering remove that comparison artifact.
+The measured fixed-total Jacobian ranks are 2/4/6/6 for M3/5/7/10. The three
+M10 tasks have nine free directions and only six observations, so their
+allocations are locally nonidentifiable. One M7 task has condition number
+about 5,575 despite full numerical rank. Panel c's stored individual heat is
+evaluation-only, and its difference from recovered allocations does not by
+itself establish an incorrect design. Every proposed field, peak and pressure
+comes from the same frozen checkpoint; no independent physical solve was
+performed. The saved design trails contain sensors/peaks/pressure rather than
+full postoptimization field grids. The revised PDF master and embedding raster
+were visually inspected; superseded visual exports were replaced, while both
+numerical evaluation histories remain retained.
 
 ## Remaining ladder and delivery
 

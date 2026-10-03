@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from time import perf_counter
 
@@ -25,7 +25,8 @@ for source_root in (PROJECT_ROOT / "src", PROJECT_ROOT / "Case_ThermalChannel/sr
         sys.path.insert(0, str(source_root))
 
 INTERVENTIONS = ("normal", "full_access", "root_union", "control_identity",
-                 "geometry_control", "effective_rewire", "source_group_exchange", "fixed_frontier", "fixed_summary")
+                 "geometry_control", "effective_rewire", "source_group_exchange", "fixed_frontier", "fixed_summary",
+                 "control_identity_fixed_access")
 
 
 def physical_errors(prediction, reference, mask=None):
@@ -172,7 +173,8 @@ def intervention(model, name):
         return
     old_mode = backend.plan_intervention
     aliases = {"geometry_control": "geometry", "effective_rewire": "rewire",
-               "source_group_exchange": "exchange", "fixed_frontier": "fixed_structure"}
+               "source_group_exchange": "exchange", "fixed_frontier": "fixed_structure",
+               "control_identity_fixed_access": "control_identity"}
     backend.set_plan_intervention(aliases.get(name, name))
     try:
         yield
@@ -255,6 +257,15 @@ def evaluate(args):
     if output.is_relative_to(PROJECT_ROOT) and not any(output.is_relative_to(PROJECT_ROOT / root) for root in ("diagnostics", "Trained_Results")):
         raise ValueError("Generated evaluation evidence must live in ignored diagnostics or Trained_Results")
     output.mkdir(parents=True, exist_ok=True)
+    reference_access_dir = getattr(args, "reference_access_dir", None)
+    if "control_identity_fixed_access" in args.interventions:
+        reference_access_dir = reference_access_dir.expanduser().resolve()
+        reference_summary = json.loads((reference_access_dir / "summary.json").read_text())
+        if (Path(reference_summary["checkpoint"]).resolve() != checkpoint_path
+                or reference_summary["checkpoint_epoch"] != checkpoint["epoch"]
+                or reference_summary["split"] != args.split
+                or Path(reference_summary["dataset"]).resolve() != Path(dataset_path).resolve()):
+            raise ValueError("Reference access checkpoint/dataset/partition identity mismatch")
     if "fixed_summary" in args.interventions:
         if not hasattr(model.core.backend, "organizer"):
             raise ValueError("Universal fixed-summary intervention requires a typed candidate")
@@ -287,10 +298,21 @@ def evaluate(args):
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             start = perf_counter()
+            phase_capture = None
+            if getattr(args, "capture_phase_graphs", False):
+                from honf_forward_core.evaluation.typed_work_evidence import TypedWorkEvidenceRecorder
+                phase_capture = TypedWorkEvidenceRecorder(model.core.backend)
+            reference_capture = None
+            if name == "control_identity_fixed_access":
+                from honf_forward_core.evaluation.reference_access import FixedReferenceAccessReplay
+                reference_capture = FixedReferenceAccessReplay(model.core.backend,
+                    reference_access_dir / case_id / "normal" / "phase_graphs.npz")
             with intervention(model, name):
-                prediction = predict_case(model, sample, device, query_batch_size=args.query_batch_size,
-                    local_port_condition_mode="predicted", mixed_teacher_ratio=0,
-                    return_routing_maps=True, return_prepared_state=index in graph_panel)
+                with reference_capture if reference_capture is not None else nullcontext(), \
+                     phase_capture if phase_capture is not None else nullcontext():
+                    prediction = predict_case(model, sample, device, query_batch_size=args.query_batch_size,
+                        local_port_condition_mode="predicted", mixed_teacher_ratio=0,
+                        return_routing_maps=True, return_prepared_state=index in graph_panel)
                 graph = None
                 if index in graph_panel and hasattr(model.core.backend, "organizer"):
                     graph = model.export_typed_hypergraph(prediction["_prepared_state"])
@@ -334,7 +356,27 @@ def evaluate(args):
                     if "hypergraph" in key and np.asarray(value).ndim == 0 and np.issubdtype(np.asarray(value).dtype, np.number)}
             row = {"case_id": case_id, "module_count": int((reference["structure"]["module_present"] > .5).sum()),
                 "intervention": name, "metrics": metrics, "complete_wrapper_seconds": seconds,
-                "work": work, "arrays": str(directory / "evidence.npz"), "graph_phase": 2 if graph is not None else None}
+                "work": work,
+                "work_scope": "Legacy prediction interaction_aux aggregated across external field query chunks; not summed complete-wrapper executor work",
+                "arrays": str(directory / "evidence.npz"), "graph_phase": 2 if graph is not None else None}
+            if phase_capture is not None:
+                phase_path = directory / "phase_graphs.npz"
+                np.savez_compressed(phase_path, **phase_capture.arrays)
+                row["phase_graph_arrays"] = str(phase_path)
+                row["phase_graph_scope"] = "P0/P1/P2 post-intervention source plans and actual native prepare/read receiver streams; no extra fine reads"
+                row["complete_wrapper_seconds_scope"] = "Includes phase-recording copies and anchor reconstruction; not uninstrumented speed evidence"
+                if name != "normal":
+                    from honf_forward_core.evaluation.typed_work_evidence import compare_native_access
+                    comparison_directory = reference_access_dir if reference_capture is not None else output
+                    with np.load(comparison_directory / case_id / "normal" / "phase_graphs.npz", allow_pickle=False) as baseline:
+                        row["actual_native_pair_intervention"] = compare_native_access(baseline, phase_capture.arrays)
+            if reference_capture is not None:
+                row["reference_permission_source"] = str(reference_access_dir / case_id / "normal" / "phase_graphs.npz")
+                row["phase_plan_scope"] = "Current conditional organizer plans recomputed from live physical state; authoritative native access permissions replay saved normal plans"
+                row["reference_permission_scope"] = "All P0/P1/P2 native access density/weight/support/edge_access/near fixed; controls and gain/score biases disabled; physical source values/ports/local physics remain live"
+                row["reference_call_count"] = len(reference_capture.seen)
+                row["reference_density_scope"] = "Missing historical density reconstructed from saved normal membership/access/measures/validity/near with normalized weight/support validation"
+                row["reference_density_max_weight_reconstruction_error"] = reference_capture.density_reconstruction_max_weight_error
             if name != "normal" and graph is not None:
                 normal_path = output / case_id / "normal" / "evidence.npz"
                 changed = {}
@@ -391,6 +433,7 @@ def write_summary(output, rows, checkpoint_path, checkpoint, args, dataset_path,
         "channel_units": "benchmark physical scales; units must be read from generator metadata before dimensional claims",
         "reference_limit": "stored analytic-wake/shared-grid benchmark; q_normal is a proxy; no new physical solves",
         "fine_executor": args.executor,
+        "cpu_threads": torch.get_num_threads(),
         "executor_scope": "fine message/geometry rows and attention cells; policy moments/control projections remain dense",
         "port_mode": "predicted", "near_definition": "fluid within two native module radii",
         "planned_case_indices": indices, "completed_normal_cases": len(normal),
@@ -422,12 +465,21 @@ def parse_args(argv=None):
     parser.add_argument("--inverse-starts", type=int, default=3)
     parser.add_argument("--inverse-steps", type=int, default=30)
     parser.add_argument("--fixed-summary-train-cases", type=int, default=600)
+    parser.add_argument("--capture-phase-graphs", action="store_true",
+                        help="Save source plans and actual physical prepare/read access at every phase")
+    parser.add_argument("--reference-access-dir", type=Path,
+                        help="Saved normal evaluation directory for fixed-access identity isolation")
     args = parser.parse_args(argv)
     if min(args.panel_size, args.graph_panel_size, args.query_batch_size,
            args.fixed_summary_train_cases, args.executor_receiver_chunk) < 1:
         parser.error("panel and query sizes must be positive")
-    if args.interventions[0] != "normal" or len(set(args.interventions)) != len(args.interventions):
+    reference_only = args.interventions == ["control_identity_fixed_access"]
+    if (args.interventions[0] != "normal" and not reference_only) or len(set(args.interventions)) != len(args.interventions):
         parser.error("interventions must start with normal and must not repeat")
+    if "control_identity_fixed_access" in args.interventions and (args.reference_access_dir is None or not args.capture_phase_graphs):
+        parser.error("fixed-access identity requires --reference-access-dir and --capture-phase-graphs")
+    if reference_only and (args.panel_size > args.graph_panel_size or args.inverse_cases):
+        parser.error("reference-only utility requires all cases in the graph panel and no inverse run")
     if args.inverse_cases < 0 or min(args.inverse_starts, args.inverse_steps) <= 0:
         parser.error("inverse case count must be nonnegative and starts/steps positive")
     return args

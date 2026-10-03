@@ -13,6 +13,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .adaptive_interaction_cover import CaseLocalReceiverTree, ReceiverAnchorUniverse
+from .receiver_tree_access import build_receiver_tree_geometry, receiver_tree_access
 from .routing_index.sparse_projection import source_measure_sparsemax
 from .topology_probe import FixedTopologyInvalid, fixed_active_projection, validate_catalogue
 from .typed_hypergraph_state import (
@@ -176,7 +177,7 @@ class AdaptiveReceiverHypergraph(nn.Module):
         return roles
 
     def _index(self, encoded, states, case, tau, case_scale, summaries, global_token, measures, phase_features,
-               fixed_tree=None):
+               fixed_tree=None, *, encode_nodes=True):
         coords, mass, receiver_states = self._catalogue(encoded, self._continuous_input(states), case, tau)
         roles = self._receiver_roles(encoded, case, tau, coords.shape[0])
         if coords.shape[0] == 0:
@@ -225,7 +226,7 @@ class AdaptiveReceiverHypergraph(nn.Module):
             summaries["E"][case].expand(count, -1), global_token[case].expand(count, -1),
             pad_geometry(centers / case_scale), pad_geometry(extent / case_scale), statistics.expand(count, -1),
             centers.new_tensor(depths)[:, None] / max(self.max_depth, 1), phase_features.expand(count, -1), role_summary), -1)
-        return tree, centers, self.node_encoder(descriptors), depths
+        return tree, centers, self.node_encoder(descriptors) if encode_nodes else descriptors, depths
 
     def prepare(self, encoded: EncodedInterfaceCase, module_states: torch.Tensor,
                 *, phase: int = 0, soft: bool = False, capture_topology: bool = False,
@@ -254,91 +255,114 @@ class AdaptiveReceiverHypergraph(nn.Module):
         scale = encoded.coordinate_scale.reshape(-1, encoded.module_centers.shape[-1])
         if scale.shape[0] not in (1, batch):
             raise ValueError("coordinate scale must be global or supplied once per case")
-        # Three case-local catalogues; mechanisms retain separate source
-        # permissions/controls. No state is cached across coupling phases.
+        # Geometry remains case-owned. Encode all real node descriptors in
+        # one call; typed physics and source normalizations stay independent.
         index_cache = {}
-        all_source_logits, all_control_memberships = ({}, {}) if capture_topology else (None, None)
-        source_embeddings = {kind: self.source_encoder(z) for kind, z in sources.items()}
-        for tau in MECHANISMS:
-            route_memberships, route_controls, route_centres, route_trees, route_gates, route_logits, counts = [], [], [], [], [], [], []
-            recorded_logits, recorded_memberships = ({"M": [], "E": []}, {"M": [], "E": []}) if capture_topology else (None, None)
+        for tau in ("MM", "EM", "QM"):
+            receiver_kind = "M" if tau == "MM" else "E" if tau == "EM" else "Q"
             for case in range(batch):
                 case_scale = scale[0 if scale.shape[0] == 1 else case]
-                receiver_kind = "M" if tau in ("MM", "ME") else "E" if tau == "EM" else "Q"
-                key = case, receiver_kind
-                if key not in index_cache:
-                    index_cache[key] = self._index(encoded, module_states, case, tau, case_scale,
-                                                   summaries, global_token, measures, phase_features,
-                                                   None if fixed_topology is None else fixed_topology.strategy_data["trees"][tau][case])
-                tree, centers, embeddings, depths = index_cache[key]
-                logits = self.split_head(embeddings).squeeze(-1)
-                leaf_mask = torch.tensor([not node.is_leaf for node in tree.nodes], device=logits.device)
-                if fixed_topology is not None:
-                    split = fixed_topology.strategy_data["gates"][tau][case, :len(tree.nodes)].to(logits)
-                elif soft:
-                    split = torch.sigmoid(logits / self.temperature) * leaf_mask
-                elif exercise_depth is not None:
-                    split = torch.tensor([depth < exercise_depth for depth in depths], device=logits.device, dtype=logits.dtype) * leaf_mask
+                index_cache[case, receiver_kind] = self._index(encoded, module_states, case, tau, case_scale,
+                    summaries, global_token, measures, phase_features,
+                    None if fixed_topology is None else fixed_topology.strategy_data["trees"][tau][case],
+                    encode_nodes=False)
+        counts = [len(item[0].nodes) for item in index_cache.values()]
+        node_embeddings = self.node_encoder(torch.cat([item[2] for item in index_cache.values()])).split(counts)
+        for key, embedding in zip(index_cache, node_embeddings):
+            tree, centre, _, depths = index_cache[key]
+            index_cache[key] = tree, centre, embedding, depths
+        all_source_logits, all_control_memberships = ({}, {}) if capture_topology else (None, None)
+        source_embeddings = {kind: self.source_encoder(z) for kind, z in sources.items()}
+        valid_coords = {kind: torch.where(catalogue["source_valid"][kind][..., None], catalogue["source_coords"][kind],
+                                        torch.zeros_like(catalogue["source_coords"][kind])) for kind in ("M", "E")}
+        case_scale = scale.expand(batch, -1)[:, None, None]
+        for tau in MECHANISMS:
+            receiver_kind = "M" if tau in ("MM", "ME") else "E" if tau == "EM" else "Q"
+            indices = [index_cache[case, receiver_kind] for case in range(batch)]
+            route_trees = tuple(item[0] for item in indices)
+            lengths = [len(tree.nodes) for tree in route_trees]
+            node_cases = torch.tensor([case for case, length in enumerate(lengths) for _ in range(length)],
+                                      device=module_states.device)
+            packed_centers = torch.cat([item[1] for item in indices])
+            packed_embeddings = torch.cat([item[2] for item in indices])
+            node_valid = torch.arange(self.capacity, device=module_states.device)[None] < torch.tensor(
+                lengths, device=module_states.device)[:, None]
+            centers = torch.stack([F.pad(item[1], (0, 0, 0, self.capacity-length)) for item, length in zip(indices, lengths)])
+            embeddings = torch.stack([F.pad(item[2], (0, 0, 0, self.capacity-length)) for item, length in zip(indices, lengths)])
+            logits = self.split_head(embeddings).squeeze(-1)
+            logits = torch.where(node_valid, logits, torch.zeros_like(logits))
+            leaf_mask = torch.tensor([[not node.is_leaf for node in tree.nodes] + [False]*(self.capacity-length)
+                                      for tree, length in zip(route_trees, lengths)], device=logits.device)
+            if fixed_topology is not None:
+                split = fixed_topology.strategy_data["gates"][tau].to(logits)
+            elif soft:
+                split = torch.sigmoid(logits / self.temperature) * leaf_mask
+            elif exercise_depth is not None:
+                depth_mask = torch.tensor([[depth < exercise_depth for depth in item[3]] + [False]*(self.capacity-length)
+                                          for item, length in zip(indices, lengths)], device=logits.device)
+                split = depth_mask.to(logits.dtype) * leaf_mask
+            else:
+                split = (logits >= 0).to(logits.dtype) * leaf_mask
+            typed_membership, typed_summary, typed_mass, score_features, distances = {}, {}, {}, {}, {}
+            for kind, type_index in (("M", 0), ("E", 1)):
+                z = source_embeddings[kind][node_cases]
+                relative = (packed_centers[:, None] - valid_coords[kind][node_cases]) / case_scale[:, 0][node_cases]
+                kind_flag = logits.new_tensor([float(type_index == 0), float(type_index == 1)]).expand(relative.shape[:-1] + (2,))
+                score_features[kind] = torch.cat((packed_embeddings[:, None].expand(-1, z.shape[1], -1),
+                    z, pad_geometry(relative), kind_flag), -1)
+                distances[kind] = relative.square().sum(-1)
+            source_counts = [sources[kind].shape[1] for kind in ("M", "E")]
+            raw_scores = self.source_scores[tau](torch.cat((score_features["M"], score_features["E"]), 1)).squeeze(-1).split(source_counts, 1)
+            recorded_logits, recorded_memberships = ({}, {}) if capture_topology else (None, None)
+            for kind, raw in zip(("M", "E"), raw_scores):
+                scores = raw - self.geometry_strength[tau] * distances[kind]
+                if fixed_topology is None:
+                    density = _membership(scores[:, None], measures[kind][node_cases], soft=soft, temperature=self.temperature)[:, 0]
                 else:
-                    split = (logits >= 0).to(logits.dtype) * leaf_mask
-                typed_membership, typed_summary, typed_mass = {}, {}, {}
-                for kind, type_index in (("M", 0), ("E", 1)):
-                    z = source_embeddings[kind][case]
-                    source_coords = torch.where(catalogue["source_valid"][kind][case, :, None],
-                                                catalogue["source_coords"][kind][case],
-                                                torch.zeros_like(catalogue["source_coords"][kind][case]))
-                    relative = (centers[:, None] - source_coords[None]) / case_scale
-                    kind_flag = F.one_hot(torch.tensor(type_index, device=logits.device), 2).to(logits.dtype).expand(relative.shape[:2] + (2,))
-                    score_features = torch.cat((embeddings[:, None].expand(-1, z.shape[0], -1),
-                                                z[None].expand(len(tree.nodes), -1, -1), pad_geometry(relative), kind_flag), -1)
-                    scores = self.source_scores[tau](score_features).squeeze(-1) - self.geometry_strength[tau] * relative.square().sum(-1)
-                    if fixed_topology is None:
-                        density = _membership(scores[None], measures[kind][case:case+1], soft=soft,
-                                              temperature=self.temperature)[0]
-                    else:
+                    densities = []
+                    for case, case_scores in enumerate(scores.split(lengths)):
                         reference_logits = fixed_topology.strategy_data["all_source_logits"][tau][kind][case]
                         reference_density = fixed_topology.strategy_data["all_control_memberships"][tau][kind][case]
                         mu = measures[kind][case] / measures[kind][case].sum().clamp_min(1e-12)
-                        density = fixed_active_projection(scores, reference_logits, reference_density, mu)
-                    if capture_topology:
-                        recorded_logits[kind].append(scores)
-                        recorded_memberships[kind].append(density)
-                    member_mass = density * measures[kind][case, None]
-                    typed_membership[kind] = density
-                    typed_summary[kind] = _pool(sources[kind][case, None].expand(len(tree.nodes), -1, -1), member_mass)
-                    typed_mass[kind] = member_mass.sum(-1)
-                statistics = torch.stack((typed_mass["M"].log1p(), typed_mass["E"].log1p(),
-                                          (typed_mass["M"] > 0).to(logits.dtype), (typed_mass["E"] > 0).to(logits.dtype)), -1)
-                control = self.control_heads[tau](torch.cat((typed_summary["M"], typed_summary["E"], embeddings,
-                                                            statistics, phase_features.expand(len(tree.nodes), -1)), -1))
-                kind = "M" if tau in ("MM", "EM", "QM") else "E"
-                pad = self.capacity - len(tree.nodes)
-                membership = typed_membership[kind]
-                route_memberships.append(torch.cat((membership, membership.new_zeros((pad, membership.shape[-1]))), 0))
-                route_controls.append(F.pad(control, (0, 0, 0, pad)))
-                route_centres.append(F.pad(centers, (0, 0, 0, pad)))
-                route_trees.append(tree)
-                route_gates.append(F.pad(split, (0, pad)))
-                route_logits.append(F.pad(logits, (0, pad)))
-                # Count the actual frontier, excluding descendants of closed nodes.
+                        density = fixed_active_projection(case_scores, reference_logits, reference_density, mu)
+                        densities.append(density)
+                    density = torch.cat(densities)
+                if capture_topology:
+                    recorded_logits[kind] = list(scores.split(lengths))
+                    recorded_memberships[kind] = list(density.split(lengths))
+                member_mass = density * measures[kind][node_cases]
+                typed_membership[kind] = density
+                typed_summary[kind] = _pool(sources[kind][node_cases], member_mass)
+                typed_mass[kind] = member_mass.sum(-1)
+            statistics = torch.stack((typed_mass["M"].log1p(), typed_mass["E"].log1p(),
+                (typed_mass["M"] > 0).to(logits.dtype), (typed_mass["E"] > 0).to(logits.dtype)), -1)
+            control = self.control_heads[tau](torch.cat((typed_summary["M"], typed_summary["E"], packed_embeddings,
+                statistics, phase_features.expand(sum(lengths), -1)), -1))
+            controls[tau] = torch.stack([F.pad(value, (0, 0, 0, self.capacity-length))
+                                        for value, length in zip(control.split(lengths), lengths)])
+            kind = "M" if tau in ("MM", "EM", "QM") else "E"
+            memberships[tau] = torch.stack([torch.cat((value, value.new_zeros((self.capacity-length, value.shape[-1]))), 0)
+                                           for value, length in zip(typed_membership[kind].split(lengths), lengths)])
+            typed_centres[tau], trees[tau], gates[tau], split_logits[tau] = centers, route_trees, split, logits
+            counts = []
+            split_values = split.detach().cpu().tolist()
+            for tree, values in zip(route_trees, split_values):
                 pending, frontier = [0], 0
-                split_values = split.detach().cpu().tolist()
                 while pending:
                     index = pending.pop()
                     node = tree.nodes[index]
-                    if node.is_leaf or split_values[index] == 0:
+                    if node.is_leaf or values[index] == 0:
                         frontier += 1
                     else:
                         pending.extend((node.left, node.right))
                 counts.append(frontier)
-            memberships[tau], controls[tau] = torch.stack(route_memberships), torch.stack(route_controls)
-            typed_centres[tau], trees[tau] = torch.stack(route_centres), tuple(route_trees)
-            gates[tau], split_logits[tau] = torch.stack(route_gates), torch.stack(route_logits)
             frontier_counts[tau] = module_states.new_tensor(counts)
-            typed_admission[tau] = torch.stack([_frontier_admission(tree, gates[tau][case], self.capacity)
-                                                 for case, tree in enumerate(trees[tau])])
+            typed_admission[tau] = torch.stack([_frontier_admission(tree, split[case], self.capacity)
+                                               for case, tree in enumerate(route_trees)])
             if capture_topology:
                 all_source_logits[tau], all_control_memberships[tau] = recorded_logits, recorded_memberships
+        access_geometry = {kind: build_receiver_tree_geometry(trees[tau], self.capacity)
+                           for kind, tau in (("M", "MM"), ("E", "EM"), ("Q", "QM"))}
         admission = typed_admission["QM"]
         diagnostics = {"allocated_capacity": module_states.new_full((batch,), self.capacity),
                        "exploration": module_states.new_full((batch,), float(exercise_depth is not None)),
@@ -348,7 +372,7 @@ class AdaptiveReceiverHypergraph(nn.Module):
                                     admission=admission, phase=phase, diagnostics=diagnostics,
                                     strategy_data={"trees": trees, "gates": gates, "split_logits": split_logits,
                                                    "typed_centres": typed_centres, "typed_admission": typed_admission,
-                                                   "soft": soft, **probe_data}, **catalogue)
+                                                   "soft": soft, "access_geometry": access_geometry, **probe_data}, **catalogue)
 
     def access(self, state: TypedHypergraphState, receivers: torch.Tensor, mechanism: str,
                receiver_tokens: torch.Tensor | None = None, *, soft: bool = False,
@@ -363,11 +387,9 @@ class AdaptiveReceiverHypergraph(nn.Module):
         if receiver_kind is not None and receivers.shape[:2] == state.source_valid[receiver_kind].shape:
             receiver_valid = state.source_valid[receiver_kind]
             receivers = torch.where(receiver_valid[..., None], receivers, torch.zeros_like(receivers))
-        access = []
-        for case, tree in enumerate(state.strategy_data["trees"][tau]):
-            weights = tree.access(receivers[case], state.strategy_data["gates"][tau][case, :len(tree.nodes)])
-            access.append(F.pad(weights, (0, self.capacity - len(tree.nodes))))
-        edge_access = torch.stack(access)
+        index_kind = "M" if tau in ("MM", "ME") else "E" if tau == "EM" else "Q"
+        edge_access = receiver_tree_access(receivers, state.strategy_data["gates"][tau],
+                                    state.strategy_data["access_geometry"][index_kind], self.max_depth)
         if receiver_valid is not None:
             edge_access = torch.where(receiver_valid[..., None], edge_access, torch.zeros_like(edge_access))
         if fixed_receiver_access is not None:

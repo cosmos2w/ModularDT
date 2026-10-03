@@ -166,10 +166,12 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
     if output_dir.is_relative_to(PROJECT_ROOT) and not any(output_dir.is_relative_to(PROJECT_ROOT / root) for root in ("diagnostics", "Trained_Results")):
         raise ValueError("Inverse evidence must live under ignored diagnostics or Trained_Results")
     output_dir.mkdir(parents=True, exist_ok=True)
+    cpu_threads = torch.get_num_threads() if torch.device(device).type == "cpu" else None
     if resume and (output_dir / "summary.json").exists():
         previous = json.loads((output_dir / "summary.json").read_text())
         if (Path(previous["checkpoint"]).resolve() != Path(checkpoint_path).resolve()
                 or previous["checkpoint_epoch"] != checkpoint.get("epoch")
+                or previous.get("cpu_threads", cpu_threads) != cpu_threads
                 or any(previous[key] != value for key, value in
                        (("seed", seed), ("planned_cases", cases), ("starts", starts),
                         ("steps", steps), ("learning_rate", learning_rate)))):
@@ -272,6 +274,8 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
         atomic_json(output_dir / "summary.json", {"checkpoint": str(checkpoint_path),
             "checkpoint_epoch": checkpoint.get("epoch"), "seed": seed, "planned_cases": cases,
             "starts": starts, "steps": steps, "learning_rate": learning_rate,
+            "cpu_threads": cpu_threads,
+            "update_policy": "canonical physical-slot block reductions",
             "evidence_limit": "frozen surrogate observation matching; no new independent physical solve",
             "cases": summaries})
     return output_dir
@@ -287,15 +291,19 @@ def parse_args(argv=None):
     parser.add_argument("--starts", type=int, default=3)
     parser.add_argument("--steps", type=int, default=30)
     parser.add_argument("--learning-rate", type=float, default=.05)
+    parser.add_argument("--cpu-threads", type=int, default=1,
+                        help="Single-thread CPU gradients make repeated fallback comparisons reproducible")
     parser.add_argument("--resume-evaluation", action="store_true")
     args = parser.parse_args(argv)
-    if min(args.cases, args.starts, args.steps, args.learning_rate) <= 0:
+    if min(args.cases, args.starts, args.steps, args.learning_rate, args.cpu_threads) <= 0:
         parser.error("case/start/step counts and learning rate must be positive")
     return args
 
 
 if __name__ == "__main__":
     args = parse_args()
+    if torch.device(args.device).type == "cpu":
+        torch.set_num_threads(args.cpu_threads)
     print(evaluate_heat(args.checkpoint, dataset_path=args.dataset, output_dir=args.output_dir,
         device=args.device, cases=args.cases, starts=args.starts, steps=args.steps, learning_rate=args.learning_rate,
         resume=args.resume_evaluation))

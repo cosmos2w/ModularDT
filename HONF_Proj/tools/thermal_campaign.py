@@ -50,7 +50,7 @@ def portfolio_profiles(*, first_run_id: int = 2201, stage: int = 100, microbatch
                                        save_epoch_milestones=[*range(25, 1001, 25), 2500, 5000])
         # The first screen remains policy 1; reviewed stage continuations
         # explicitly amend the common physical objective at epoch 101.
-        if stage in (500, 1000):
+        if stage > 100:
             config["training"]["campaign"].update(
                 physical_loss_policy_version=2, native_loss_denominators_start_epoch=101,
             )

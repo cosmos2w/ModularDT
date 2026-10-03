@@ -335,7 +335,12 @@ class TypedHypergraphField(DensePairwiseField):
         aux["hypergraph_structural_numerator"] = cost * queries
         aux["hypergraph_structural_denominator"] = cost.new_tensor(queries)
         if return_routing_maps:
-            aux.update({f"hypergraph_{key}": value.detach() for key, value in metrics.items()})
+            # Preparation pairs were executed once and already belong to
+            # preparation_aux. Returning them in each query tile duplicates
+            # their counts when InterfaceFieldCore sums read work.
+            preparation_counts = {f"{tau}_unique_pairs" for tau in ("MM", "ME", "EM")}
+            aux.update({f"hypergraph_{key}": value.detach() for key, value in metrics.items()
+                        if key not in preparation_counts})
             for mechanism, access in (("QM", qm), ("QE", qe)):
                 aux[f"hypergraph_{mechanism}_weight"] = access.weight.detach()
                 aux[f"hypergraph_{mechanism}_edge_access"] = access.edge_access.detach()

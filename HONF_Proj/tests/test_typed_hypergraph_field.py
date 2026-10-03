@@ -99,6 +99,15 @@ def test_registered_core_multi_chunk_backward_and_exact_row_ledger(dimension):
     assert aux["hypergraph_QE_executed_rows"].item() == 2 * 11 * 7
     assert aux["hypergraph_QM_fine_calls"].item() == 4
     assert aux["hypergraph_QE_unique_pairs"].item() <= aux["hypergraph_QE_executed_rows"].item()
+    for tau in ("MM", "ME", "EM"):
+        key = f"hypergraph_{tau}_unique_pairs"
+        assert key not in aux  # preparation is not repeated for each read tile
+        assert prepared.interaction_aux[key].item() == prepared.backend_state["hypergraph_accesses"][tau].support.sum().item()
+    wide = core.decode_queries(prepared, batch.query_xy, receiver_chunk_size=30, return_routing_maps=True)
+    for tau in ("QM", "QE"):
+        for suffix in ("unique_pairs", "eligible_pairs", "executed_rows"):
+            key = f"hypergraph_{tau}_{suffix}"
+            assert aux[key].item() == wide[key].item()
 
 
 class _TinyWrapper(nn.Module):

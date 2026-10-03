@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import runpy
+from pathlib import Path
 
 import pytest
 import torch
@@ -171,3 +173,17 @@ def test_native_denominator_policy_has_one_explicit_epoch100_migration():
     later = {**saved, "epoch": 500, "train_config": copy.deepcopy(config)}
     config["training"]["epochs"] = 1000
     assert validate_campaign_resume(later, config) is None
+
+
+@pytest.mark.parametrize("stage", [100, 500, 1000, 5000])
+def test_generated_stage_profiles_preserve_the_postscreen_physical_objective(stage):
+    generate = runpy.run_path(str(Path(__file__).resolve().parents[2] / "tools/thermal_campaign.py"))["portfolio_profiles"]
+    profiles = generate(stage=stage)
+    assert len(profiles) == 5
+    for profile in profiles.values():
+        campaign = profile["training"]["campaign"]
+        assert profile["training"]["epochs"] == stage
+        assert campaign["schedule_total_epochs"] == 5000
+        assert campaign.get("physical_loss_policy_version", 1) == (1 if stage == 100 else 2)
+        if stage > 100:
+            assert campaign["native_loss_denominators_start_epoch"] == 101

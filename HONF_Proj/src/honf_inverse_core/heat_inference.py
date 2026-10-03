@@ -176,6 +176,10 @@ def fixed_total_heat_inference(predictor: HeatPrediction, observed: torch.Tensor
                     chosen = permutation[:group.numel()]
             else:
                 fallbacks += 1
+        # The proposal is a physical set. Canonical slot order also makes a
+        # full-size random control use the same FP32 reductions/projection as
+        # the joint fallback, rather than injecting permutation roundoff.
+        chosen = chosen.sort().values
         selected.append(chosen.detach().clone())
         previous = fractions.detach().clone()
         mask = torch.zeros_like(active, dtype=torch.bool)

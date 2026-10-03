@@ -76,6 +76,16 @@ its component sum equals the actual optimizer parameter population. The
 Thermal-owned coupling parameters remain present in all arms. Parameter
 count is not executed work or a latency measurement.
 
+Allocated trainable tensors also differ from active optimizer state. At exact
+B-fine e200, 120 of 140 tensors have AdamW state, all at step 2,600. A genuine
+native B2/Q17 backward and the checkpoint's parameter registration mapping
+both identify the other 20 tensors (104,451 scalars) as
+`fallback_heads.internal_head` and `fallback_heads.interface_head`. This
+configuration uses frozen Stage-A local outputs and bypasses those global
+fallback heads; all shared backend/encoder/native coupling parameters have
+gradients. Their weights remain bitwise unchanged from e100 to e200. The
+legitimate fallback branches remain available for other case configurations.
+
 ## Executed checks
 
 Retained Thermal Run1804 e4738 and Wind Run2103 e2475 replayed through the
