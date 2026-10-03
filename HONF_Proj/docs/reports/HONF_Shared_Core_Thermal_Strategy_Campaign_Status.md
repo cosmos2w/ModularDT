@@ -30,10 +30,10 @@ selection is also 388 with different weights; it is not substituted. After the
 measured review below, root promoted the same Run2205 lineage from exact500 to
 1000 at 14:49:43 UTC on GPU2. This is the first H finalist continuation. Exact600
 subsequently passed full optimizer/RNG/calibration/frozen Stage-A and case-coverage
-checks. Later ordinary audits reach 700 with the same native bindings and complete
+checks. Later ordinary audits reach 750 with the same native bindings and complete
 case coverage. No H1000 result is complete yet.
 
-Tree continues its exact100→500 lineage on GPU1; exact375/400 and the later exact425
+Tree continues its exact100→500 lineage on GPU1; exact375/400 and the later exact450
 state and saved-binding audits pass. Tree500 physical review precedes the second H1000 promotion. Overlap
 exited naturally at 500 at 13:10 UTC; exact500/field-selected292 reviews and
 native parity/timing are complete, with T-selected269 separately preserved.
@@ -57,13 +57,15 @@ start automatically.
 |---|---|---:|---|---|
 | 2201 | B-native | 1000 | 0.00690 / 0.00411 | Natural exit0; exact1000/selected962 fields, responses and selected inverse complete |
 | 2202 | B-fine | 1000 | 0.01175 / 0.01182 | Native exit0; immutable exact1000/selected972 evaluation complete |
-| 2203 | H-tree | 438 | 0.04000 / 0.02510 | GPU1; exact100→500; last full saved-state and binding audits passed425 |
+| 2203 | H-tree | 438 | 0.04000 / 0.02510 | GPU1; exact100→500; subsequent full saved-state and binding audits passed450 |
 | 2204 | H-overlap | 500 | 0.60332 / 0.21109 | Native exit0; exact500/selected292 review complete; third-slot decision awaits cohort review |
-| 2205 | H-local | 701 | 0.11868 / 0.08252 | GPU2; exact500→1000 first H finalist; last full saved-state audit passed700 |
+| 2205 | H-local | 701 | 0.11868 / 0.08252 | GPU2; exact500→1000 first H finalist; subsequent full saved-state audits passed750 |
 
 These MSEs use the maintained normalized, sampled 90-case validation task;
 they are neither full-grid physical errors nor the final 89-case comparison.
-Displayed CSV ages 438/701 are distinct from the latest saved-state audits 425/700.
+Displayed CSV ages 438/701 remain the inspected figure's frozen snapshot;
+later saved-state audits reach 450/750 at 18:05/18:28 UTC. The curve and its
+conditional timing forecast have not been silently refreshed.
 Every completed control epoch has 600 unique cases, 75 microbatches, 13 native
 buckets/optimizer steps and 614,400 primary field queries. Exact e25/e50
 checkpoints are retained as reached.
@@ -1485,6 +1487,25 @@ result; no 200/750/1500-update head campaign has started. The revision passes
 109 focused tests with two optional native-resource skips; native integration
 is measured separately. Ruff and diff checks pass.
 
+A later, real GPU2 serialization probe reproduces a resume defect: loading
+the paired payload with `map_location=cuda:0` moves both RNG byte tensors to
+CUDA, and both the CPU task generator and CUDA noise generator reject them
+with `TypeError: RNG state must be a torch.ByteTensor`. The durable fix loads
+the trusted paired checkpoint on CPU and explicitly restores noise RNG bytes
+on CPU; native model/AdamW restoration moves parameter values and moments to
+the current model device. The RNG algorithm/backend is preserved, not converted.
+The [reproduction receipt](../../diagnostics/generated/shared_core_campaign_20261002/tmp/rng_map_location_probe_20261003_1816.json)
+and [focused test receipt](../../diagnostics/generated/shared_core_campaign_20261002/logs/inverse_rng_resume_tests_20261003_1831.json)
+record actual execution. All 63 affected inverse tests pass, including real
+CPU/CUDA serialization, exact next task/time/noise and both heads' next update,
+AdamW values/devices and defensive restoration of a CUDA-mapped RNG tensor.
+These are tiny software fixtures, not trained campaign heads. The test process
+runs 18:29:56–18:30:00 UTC while Local1166832 is active on GPU2; elapsed wall time
+is 4.47 seconds. Boundary resource observations are recorded, without assigning
+a causal epoch slowdown. The earlier minimal API probe at 18:16 also records
+temporary GPU2 context memory. No field-training source, physics, checkpoint,
+optimizer or trainer process changes in this correction.
+
 ## Remaining ladder and delivery
 
 Screen all five arms at 100 complete epochs. Continue both controls and normally
@@ -1782,6 +1803,23 @@ gain. Recent10 train+validation median is 52.801 seconds and allocated peak
 state proof is distinct from the 701-row curve snapshot and does not complete
 the 1,000-epoch finalist requirement.
 
+Later [exact725](../../diagnostics/generated/shared_core_campaign_20261002/logs/h-local_e725_checkpoint_audit.json)
+and [exact750](../../diagnostics/generated/shared_core_campaign_20261002/logs/h-local_e750_checkpoint_audit.json)
+audits pass all 20 checks. All 203 AdamW states have 9,425/9,750 updates,
+four RNG streams, 109 bitwise-frozen Stage-A tensors, unchanged normalization,
+original/revised five-stratum structural calibrations and separate five-sample
+response calibration. All retained epochs still visit 600 cases with 13 updates
+and 614,400 primary queries. Against 691–700, sampled field/T/structural means
+in 716–725 improve 2.06%/6.61%/2.70%, but response loss worsens 57.62%; in
+741–750 the respective changes are −5.07%/−6.16%/−1.91%/−41.76%. Thus the
+response trend reverses across these cycled-stencil windows. Recent10 elapsed
+medians are 52.628/52.793 seconds, allocated peaks 12,438.89/12,217.15 MiB;
+driver footprint and direct free GPU2 memory remain separately observed at
+24,508/23,843 MiB. These normalized sampled measurements do not establish
+full-grid or matched-response gains, or H1000 completion. The trainer continues
+using loaded source `105676b5`; later report/inverse-fix commits do not replace
+its already loaded training code.
+
 Tree's [exact375 ordinary audit](../../diagnostics/generated/shared_core_campaign_20261002/../HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/continuation_epoch375_ordinary_state_audit.json)
 and [saved bindings review](../../diagnostics/generated/shared_core_campaign_20261002/../HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/continuation_epoch375_saved_bindings_audit.json)
 retain 185 active AdamW states at 4,875 updates, four RNG streams, 109 unchanged
@@ -1811,6 +1849,18 @@ inventory is 316 tensors/4,287,933 scalars. Sampled field/T MSE is
 0.035459/0.024763; recent10 mean train/validation times are97.206/4.281 seconds.
 Direct GPU1 free 33,693 MiB is an observation, not an interval minimum or
 isolated-timing claim. Tree500 physical review still precedes continuation.
+
+Tree's [exact450 state audit](../../diagnostics/generated/shared_core_campaign_20261002/../HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/continuation_epoch450_ordinary_state_audit.json)
+and [saved-binding audit](../../diagnostics/generated/shared_core_campaign_20261002/../HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/continuation_epoch450_saved_bindings_audit.json)
+pass with all 185 AdamW states at 5,850 updates, 555 finite slot tensors,
+four RNG streams and 109 Stage-A tensors bitwise versus400. All twelve global/
+eight local normalizers, dataset/schema/features and frozen-surrogate bindings
+remain identical. Coverage remains 600/75/13/614,400 per training epoch and
+90/2/92,160 with zero optimizer updates per validation epoch. Exact field/T
+MSE is 0.026700/0.021497; recent10 mean train/validation elapsed is
+97.637/4.235 seconds and peak allocated memory 13,082.24 MiB. GPU1 direct free
+33,693 MiB is a boundary observation. This saved-state proof does not replace
+the upcoming Tree500 physical gate or authorize an early H1000 quality claim.
 
 ## Measured Native1000 control, responses and frozen inverse
 

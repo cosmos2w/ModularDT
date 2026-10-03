@@ -182,7 +182,8 @@ class PairedHeatHeads:
         for name, model in self.models.items():
             model.load_state_dict(state["models"][name], strict=True)
             self.optimizers[name].load_state_dict(state["optimizers"][name])
-        self.generator.set_state(state["generator_state"])
+        # Generator state is a CPU byte tensor, including for CUDA generators.
+        self.generator.set_state(state["generator_state"].cpu())
         self.update, self.history = state["update"], list(state["history"])
 
 

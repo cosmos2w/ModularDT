@@ -1,4 +1,4 @@
-"""Bounded paired-head contracts; small CPU fixtures are not scientific runs."""
+"""Bounded paired-head contracts; small CPU/CUDA fixtures are not scientific runs."""
 
 import copy
 import importlib.util
@@ -75,6 +75,122 @@ def test_restore_preserves_paired_noise_optimizer_and_next_update():
         torch.testing.assert_close(parameter, restored.graph.state_dict()[name], atol=0, rtol=0)
     with pytest.raises(ValueError, match="schedule changed"):
         PairedHeatHeads(denoiser, steps=3).restore(state)
+
+
+def assert_restored_state_equal(expected, actual):
+    """Compare both head/optimizer values and devices after real serialization."""
+    if isinstance(expected, torch.Tensor):
+        assert actual.device == expected.device and actual.dtype == expected.dtype
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    elif isinstance(expected, dict):
+        assert actual.keys() == expected.keys()
+        for key, value in expected.items():
+            assert_restored_state_equal(value, actual[key])
+    elif isinstance(expected, (list, tuple)):
+        assert type(actual) is type(expected) and len(actual) == len(expected)
+        for expected_item, actual_item in zip(expected, actual, strict=True):
+            assert_restored_state_equal(expected_item, actual_item)
+    else:
+        assert actual == expected
+
+
+def assert_adamw_state_devices(heads, device):
+    for name, model in heads.models.items():
+        optimizer = heads.optimizers[name]
+        assert optimizer.state  # Both optimizers have completed a real update.
+        for parameter in model.parameters():
+            assert parameter.device == device
+        for parameter, state in optimizer.state.items():
+            assert state["step"].device.type == "cpu"  # Default AdamW is not capturable/fused.
+            for key in ("exp_avg", "exp_avg_sq"):
+                assert state[key].device == parameter.device
+                assert state[key].dtype == parameter.dtype
+
+
+def fixture_on_device(device):
+    from dataclasses import replace
+
+    with torch.device(device):
+        task, target, denoiser, calls = fixture()
+    original_provider = task.provider
+
+    def provider(heat, public):
+        # Keep fixture-created provider tensors on the backend without moving
+        # native AdamW's default noncapturable step counter off the CPU.
+        with torch.device(device):
+            return original_provider(heat, public)
+
+    return replace(task, provider=provider), target, denoiser, calls
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="CUDA is unavailable for the tiny serialized-resume fixture"))])
+def test_serialized_paired_resume_preserves_cpu_tasks_and_both_head_updates(tmp_path, device):
+    # Construction and provider-created tensors follow the same backend;
+    # the independent native task-selection generator always remains on CPU.
+    task, target, denoiser, _ = fixture_on_device(device)
+    first = PairedHeatHeads(denoiser, steps=2, seed=9)
+    task_stream = torch.Generator(device="cpu").manual_seed(10)
+    torch.randint(600, (), generator=task_stream, device="cpu")
+    first.step(task, target)
+    path = tmp_path / "paired_resume.pt"
+    save_heat_payload({"heads": first.checkpoint(), "task_stream": task_stream.get_state()}, path)
+
+    saved = tool_module().load_paired_resume(path)
+    assert saved["task_stream"].device.type == "cpu"
+    assert saved["heads"]["generator_state"].device.type == "cpu"
+    for model_state in saved["heads"]["models"].values():
+        assert all(value.device.type == "cpu" for value in model_state.values())
+    for optimizer_state in saved["heads"]["optimizers"].values():
+        assert all(value.device.type == "cpu" for state in optimizer_state["state"].values()
+                   for value in state.values() if isinstance(value, torch.Tensor))
+
+    restored = PairedHeatHeads(denoiser, steps=2, seed=300)
+    restored.restore(saved["heads"])
+    restored_tasks = torch.Generator(device="cpu").manual_seed(301)
+    restored_tasks.set_state(saved["task_stream"])
+    assert_restored_state_equal(first.checkpoint(), restored.checkpoint())
+    expected_index = torch.randint(600, (), generator=task_stream, device="cpu")
+    actual_index = torch.randint(600, (), generator=restored_tasks, device="cpu")
+    torch.testing.assert_close(actual_index, expected_index, atol=0, rtol=0)
+    torch.testing.assert_close(restored_tasks.get_state(), task_stream.get_state(), atol=0, rtol=0)
+
+    # Preview the next actual time/noise draws using independent generators
+    # so the paired update stream itself is not advanced by the assertion.
+    streams = []
+    for heads in (first, restored):
+        stream = torch.Generator(device=target.device)
+        stream.set_state(heads.generator.get_state())
+        streams.append((torch.rand((1,), generator=stream, device=target.device),
+                        torch.randn(target.shape, generator=stream, device=target.device)))
+    for expected, actual in zip(*streams, strict=True):
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    expected_row, actual_row = first.step(task, target), restored.step(task, target)
+    assert actual_row == expected_row
+    assert actual_row["time"] == streams[0][0].cpu().tolist()
+    assert first.update == restored.update == 2
+    assert_restored_state_equal(first.checkpoint(), restored.checkpoint())
+    for heads in (first, restored):
+        assert_adamw_state_devices(heads, target.device)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable for the mapped RNG fixture")
+def test_restore_accepts_cuda_mapped_rng_without_remapping_cpu_model_optimizer_payload(tmp_path):
+    task, target, denoiser, _ = fixture_on_device("cuda")
+    first = PairedHeatHeads(denoiser, steps=2, seed=9)
+    first.step(task, target)
+    path = tmp_path / "paired_resume.pt"
+    save_heat_payload({"heads": first.checkpoint()}, path)
+    saved = tool_module().load_paired_resume(path)
+    mapped_rng = copy.deepcopy(saved["heads"])
+    mapped_rng["generator_state"] = mapped_rng["generator_state"].to(target.device)
+    assert mapped_rng["generator_state"].is_cuda
+    assert all(value.device.type == "cpu" for state in mapped_rng["models"].values()
+               for value in state.values())
+    restored = PairedHeatHeads(denoiser, steps=2, seed=300)
+    restored.restore(mapped_rng)
+    assert_restored_state_equal(first.checkpoint(), restored.checkpoint())
+    assert_adamw_state_devices(restored, target.device)
 
 
 def test_public_observation_interventions_preserve_locations_and_clean_heat_absent():

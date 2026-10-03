@@ -245,11 +245,16 @@ def build_atlas_observation_task(model, checkpoint, public, normalization):
         observed=public.observed_rows, held=public.held_rows, observed_values=public.observed_temperatures)
 
 
+def load_paired_resume(path):
+    """Keep saved RNG bytes on CPU; model/optimizer restore handles devices."""
+    from honf_runtime.compat import load_trusted_checkpoint
+
+    return load_trusted_checkpoint(path, map_location="cpu")
+
+
 def run_comparison(args):
     from channelthermal.data.datasets import GlobalChannelThermalDataset
     from channelthermal.evaluation.loading import load_model
-
-    from honf_runtime.compat import load_trusted_checkpoint
 
     output = resolve_evidence_output(args.output_dir)
     if (output / "identity.json").exists() and not args.resume:
@@ -296,7 +301,7 @@ def run_comparison(args):
     identity["intervention_scope"] = "96 original draws: 12 tasks x4 noises x2 heads; three labelled same-weight/observation controls on4 eligible tasks x1 noise,12 extra draws; four valid-observation pairs x2 physical targets x2 heads x1 common noise,16 auxiliary draws"
     identity["training_probe_selection"] = {"case_id": first.case_id, "criteria": "known M>=2 and positive public total; no hidden individual allocation criterion"}
     if args.resume:
-        saved = load_trusted_checkpoint(args.resume, map_location=args.device)
+        saved = load_paired_resume(args.resume)
         if saved["identity"] != identity:
             raise ValueError("Resume changed the frozen checkpoint, data, normalization or head policy")
         heads.restore(saved["heads"]); task_stream.set_state(saved["task_stream"])
