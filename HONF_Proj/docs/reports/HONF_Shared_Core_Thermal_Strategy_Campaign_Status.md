@@ -29,7 +29,8 @@ three required new H finalists.
 Local exited naturally at 500 at 14:06:27 UTC and passed all 20 state-audit checks.
 Its exact500 and field-selected388 completed fields, responses, ordinary/strict
 graph controls, topology/readiness and native CUDA parity/timing. Temperature
-selection is also 388 with different weights; it is not substituted. After the
+selection is also 388, with identical model-state bytes but a separate selector
+archive; it is not substituted. After the
 measured review below, root promoted the same Run2205 lineage from exact500 to
 1000 at 14:49:43 UTC on GPU2. This is the first H finalist continuation. Exact600
 subsequently passed full optimizer/RNG/calibration/frozen Stage-A and case-coverage
@@ -1714,11 +1715,17 @@ and one-step inverse readiness does not establish inverse-design quality.
 Root therefore continued the existing Local lineage to 1000 as informative
 hypothesis testing, not a demonstrated speed gain or validated inverse design.
 
-The immutable Run2205 receipt separates exact500 from field-selected388. Temperature selection is also epoch388 but has different weights and is not
+The immutable Run2205 receipt separates exact500 from field-selected388. Temperature selection is also epoch388; its separate archive has identical model-state bytes and is not
 substituted. All five native evaluation jobs completed with 334 frozen state
 tensors and unchanged checkpoint SHA/stat; evaluation source is `105676b`.
 The [completion receipt](../../diagnostics/generated/shared_core_campaign_20261002/logs/h-local_stage500_evaluation_completion.json)
 retains the 224 physical predictions, 134 phase archives and checkpoint identities.
+The later [saved-state identity audit](../../diagnostics/generated/shared_core_campaign_20261002/tmp/local500_field_T_state_identity_root_review.json)
+checks all 334 model-state tensors/3,994,148 scalars byte for byte: field/T
+epoch388 states are identical, while the serialized archive SHA values differ.
+Both immutable input fingerprints remain unchanged. This corrects the earlier
+different-weights wording; different archive bytes alone do not establish
+different physical weights. No model calls or new field evaluation were needed.
 
 Predictor arithmetic reconciles all 24 maintained roles from actual arrays and
 masks with zero statistic discrepancy. Canonical89 excludes0273; compatibility90
