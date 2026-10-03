@@ -441,7 +441,14 @@ coverage persists; the latest ten epochs average 37.02/2.85 seconds for
 train/validation under the same three-trainer placement, with explicit GPU2
 free 6,990 MiB. Exact sampled field/T MSE 0.0099463/0.0066508 is an endpoint,
 not the completed e1000 physical comparison.
-Tree stays alone on GPU1. Native now shares GPU2 with Overlap and Local, so
+Exact750 subsequently passes with all 181 optimizer states at step9750,
+543 finite slot tensors, four RNG streams, unchanged full configuration/
+calibration and all 109 frozen Stage-A tensors. Its sampled field/T MSE is
+0.00733148/0.00425690; the recent ten-epoch means are 0.0116500/0.0131448,
+with train/validation averages 36.54/2.97 seconds and maximum sampled epoch
+allocated peak 4,984.7 MiB. Explicit GPU2 free remains 6,990 MiB.
+Tree's trainer remains on GPU1, with its two short benchmark-sharing intervals
+recorded separately. Native now shares GPU2 with Overlap and Local, so
 sustained three-trainer timing is measured separately. The observed 12,790 MiB
 Native nvidia-smi footprint and 7,106 MiB device free memory are driver-level
 measurements, not separate measurements of allocator cache or reserved memory.
@@ -1033,6 +1040,21 @@ padded rows, with zero skipped eligible rows. This is an evaluation-evidence
 addition; interaction equations, training and existing checkpoint states are
 unchanged. The next selected population captures will supply actual rescue
 measurements where the architecture exports them.
+
+A subsequent actual full-width native probe at clean `04dc2a6` verifies the
+recorder on Overlap exact100, development case0647/M3, CPU1 with no visible
+CUDA. All fifteen numeric P0/P1/P2 diagnostic arrays match observed native
+exports bitwise; admission rescue is explicitly false in every phase and all
+eight allocated groups are admitted. All five actual typed routes are present
+per phase, and hook totals reconcile to 1,998,768 fine rows in 161 calls.
+Six saved prediction/residual arrays and all 24 physical metrics are bitwise
+identical to the existing same-case e100 evidence, without another comparison
+forward. All 334 state tensors remain frozen; recorder methods/attribute
+ownership and checkpoint SHA/stat/mode0664 are unchanged. The native process
+exits0 at11:45:53 UTC; its instrumented timer is not benchmark latency.
+`evaluation/h-overlap_e100_recorder_probe/recorder_probe_QA.json` and the exact
+observer/execution receipt retain the evidence. This validates full-width
+recording on one case; it does not establish a population rescue rate.
 
 Actual e100 Overlap and Local invariance/path evaluations now cover native
 low/high-M cases 0274/0692. Module permutation, inactive padding, fixed-action
