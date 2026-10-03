@@ -6,10 +6,12 @@ P0/P1/P2 coupling and the frozen Stage-A local surrogate. Run1804 selected
 e4738 remains an evaluation-only mature reference. Wind scientific training
 is paused; Wind is used for shared-core compatibility checks.
 
-**State: four e100 screens and the first e500 control are complete; the ladder continues.**
+**State: all five e100 screens and the first e500 control are complete; the ladder continues.**
 Saved training snapshot at 2026-10-03 07:25 UTC: B-fine is at e837; B-native is at e377,
-H-tree e94, H-overlap e226 and H-local e208. Their exact e100 screens are
-complete except H-tree. The table and progress figure use the same saved snapshot.
+H-tree e94, H-overlap e226 and H-local e208. The table and progress figure use
+that same snapshot; Tree subsequently completed its exact e100 physical and
+eight-family response screens. Its reviewed exact e100→500 continuation has
+started and passed its first completed e101 audit.
 Results below also include evaluations and audited continuations completed
 after that snapshot. Fine has continued from exact500 on GPU2 and passed exact750;
 its requested 1000-stage training is active, while both immutable e493 selections
@@ -23,7 +25,7 @@ start automatically.
 |---|---|---:|---|---|
 | 2201 | B-native | 377 | 0.02595 / 0.02390 | GPU1; exact e100→500 continuation |
 | 2202 | B-fine | 837 | 0.01340 / 0.00870 | GPU2; reviewed exact e500→1000 continuation |
-| 2203 | H-tree | 94 | 0.26263 / 0.24883 | GPU1; reviewed exact e8 engineering resume |
+| 2203 | H-tree | 94 | 0.26263 / 0.24883 | GPU1; subsequent exact e100→500 continuation |
 | 2204 | H-overlap | 226 | 0.24097 / 0.20869 | GPU2; exact e100→500 continuation |
 | 2205 | H-local | 208 | 0.14540 / 0.08667 | GPU2; exact e100→500 continuation |
 
@@ -234,6 +236,24 @@ Its 200 response-active epochs contain 400 wrapper calls and 1,285,156 extra
 role queries. These confirm continuity and work; they do not replace Tree's
 remaining e100 screen or Native's e500 physical review.
 
+Tree's subsequent exact e100 audit passes all 100 full epochs, 185 active
+AdamW states at step 1,300 and four RNG streams. All 316 model-state tensors
+are finite, with native config, frozen Stage-A and five-stratum structural
+calibration preserved. Read-only stage100 copies retain exact e100, field-best
+actual e93 (selector 0.261186) and T-best actual e100 (0.203036). Root reviewed
+the finite 18-case physical screen and authorized continuation on GPU1 using
+the exact top-level e100 state, common policy2/101 amendment and unchanged
+5000 schedule. Source `9eaf2a4` was clean at launch; the existing run identity is
+retained. Last ten pre-response epochs took 153.66/7.25 seconds train/val
+under owned Native contention. The first genuine e101 completes all 600
+cases/13 steps, with 185 optimizer states at step 1,313, RNG, unchanged Stage-A
+and structural calibration. Measured train/validation is 153.87/7.43 seconds;
+peak allocated memory 11,270.5 MiB. Its baseline+variant response uses 4,324
+extra queries/four actual wrappers (two hard and two soft), raw loss 0.008034,
+2.639 seconds, capped calibration 0.1 and initial ramp coefficient 0.001.
+Hard and soft response work are recorded separately; these are completion
+measurements, while a stable five-to-ten-epoch timing forecast remains pending.
+
 Fine's exact e750 audit passes 450,000 training case visits, all 120 AdamW
 states at step 9,750, four RNG streams, unchanged frozen Stage-A/normalization
 and five response calibration records. The immutable field/T-selected e493
@@ -254,22 +274,39 @@ Dense controls lack this typed ledger; primary query counts do not replace it.
 
 B-native exact e100, B-fine exact e100 and Run1804 selected e4738 were evaluated on the same
 18 input-selected development cases at their full native 64x128 grids. The
-completed H-overlap and H-local screens use the same cases and physical evaluator.
+completed H-tree, H-overlap and H-local screens use the same cases and physical evaluator.
 Case IDs are preserved for subsequent screens. Equal-case fluid RMSE is:
 
-| Field | B-native e100 | B-fine e100 | H-overlap e100 | H-local e100 | Mature Run1804 e4738 |
-|---|---:|---:|---:|---:|---:|
-| u | 0.0698578 | 0.0738634 | 0.0908794 | 0.0769374 | 0.00590808 |
-| v | 0.00511782 | 0.0106410 | 0.00976146 | 0.0104132 | 0.000337623 |
-| p | 0.0252665 | 0.0302576 | 0.0358716 | 0.0391842 | 0.00210899 |
-| omega | 0.217016 | 0.302935 | 0.303445 | 0.286309 | 0.0258649 |
-| temperature | 1.43558 | 1.67576 | 3.27004 | 1.69682 | 0.187831 |
+| Field | B-native e100 | B-fine e100 | H-tree e100 | H-overlap e100 | H-local e100 | Mature Run1804 e4738 |
+|---|---:|---:|---:|---:|---:|---:|
+| u | 0.0698578 | 0.0738634 | 0.104391 | 0.0908794 | 0.0769374 | 0.00590808 |
+| v | 0.00511782 | 0.0106410 | 0.0122159 | 0.00976146 | 0.0104132 | 0.000337623 |
+| p | 0.0252665 | 0.0302576 | 0.0407222 | 0.0358716 | 0.0391842 | 0.00210899 |
+| omega | 0.217016 | 0.302935 | 0.328017 | 0.303445 | 0.286309 | 0.0258649 |
+| temperature | 1.43558 | 1.67576 | 2.70899 | 3.27004 | 1.69682 | 0.187831 |
 
 These benchmark physical-scale quantities each retain their own units; they
 are not averaged into one physical scalar. B-fine is finite and improves
 with training but still misses mature fidelity. Young-versus-mature accuracy
 does not isolate architecture and does not stop the healthy ladder. Saved
 evidence also includes near/far fluid, interfaces, material peaks and ports.
+
+Tree100 is finite across all eighteen cases and all 24 maintained physical
+metrics. Its surface/q_normal/material/peak RMSE means are
+3.08500/5.44432/2.73101/3.24330; near/far T 2.89751/2.66118 and pressure-difference
+error 0.0167104. It improves temperature over Overlap100 while missing the
+same-age controls and Local100, and has no fluid-role advantage over the
+fresh controls. A finite improving training curve supports continued study;
+it does not establish physical fidelity or useful organization.
+
+An independent saved-array audit reconciles all 24 metric keys and equal-case,
+pooled and tail aggregates exactly. Four-case actual P0/P1/P2 access records
+retain 1,826,367 of 7,743,578 eligible pairs; 5,917,211 are omitted logically.
+Execution nevertheless uses 7,995,072 padded fine rows/644 calls with zero
+skipped eligible rows. MM/ME K varies 3–8 while EM/QM/QE K is 8 in these twelve
+case-phases; proper multi-source groups occur in 3/12 MM, 12/12 ME, 11/12 EM and
+12/12 QM/QE scopes. This is a real typed graph with a fidelity miss and no
+measured sparse execution saving, not an established graph benefit.
 
 The immutable mature e4738 reference has also completed the full 90-case native
 development population. Excluding duplicate0273, equal-case fluid u/T RMSE is
@@ -610,6 +647,19 @@ with exactly zero stored u/p response, Local's spurious errors are
 execute 175,891,584 rows in 14,168 fine calls, with zero skipped rows. The
 selected response figure below currently shows the three reference/control
 baselines; the H comparisons above use their complete saved arrays.
+Tree100 has now also completed all eight families/88 absolute states and
+80 perturbations. Mean T/surface/q_normal/solid response RMSE is
+0.25076/0.38432/1.28385/0.35109, missing both fresh controls on T.
+Heat-transfer T response error 0.18174 improves on zero change 0.24176, but
+spurious u/p errors0.004290/0.001487 miss the recorded heat-null control.
+Mean pressure-increment error 0.0008040 misses zero change 0.0002784 and the
+fresh controls. These source-labelled absolute measurements are distinct
+from the later auxiliary inverse observation pairs and numerical smokes.
+Independent stored-atlas reconciliation covers 264 absolute role arrays and
+640 response-channel metrics within 8.9e-16, with exact pressure reduction.
+Tree responses execute 175,891,584 rows in 14,168 calls, with zero skipped rows;
+mature response executor work remains separately unmeasured in its legacy
+saved evaluation. Comparisons do not fill that missing measurement with zero.
 The mature local-inverse job also encountered ENOSPC on its eighth case;
 individual complete trials are retained and resume now skips verified arrays.
 Atomic numerical/JSON writes preserve previous complete files on interruption.
