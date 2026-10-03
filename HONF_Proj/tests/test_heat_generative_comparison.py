@@ -216,3 +216,20 @@ def test_generative_output_accepts_ignored_data_symlink_and_rejects_source_escap
     with pytest.raises(ValueError, match="non-output project path"):
         module.resolve_evidence_output(ignored / "source_escape/output")
     assert not (data / "inverse").exists()
+
+
+def test_paired_review_checks_forward_state_and_labels_recovered_draw_scope(tmp_path):
+    module = tool_module()
+    forward = torch.nn.Linear(2, 1).eval().requires_grad_(False)
+    snapshot = module.snapshot_forward_state(forward)
+    result = module.record_frozen_review(forward, snapshot, tmp_path / "review_0200",
+        update=200, draw_scope={"new_completed_draws": 0, "reused_saved_draws": 108})
+    assert result["passed"] and result["reused_saved_draws"] == 108
+    assert "not retrospectively certified" in result["verification_scope"]
+    assert (tmp_path / "review_0200/forward_freeze_verification.json").is_file()
+    with torch.no_grad():
+        forward.weight.add_(1.)
+    with pytest.raises(RuntimeError, match="state tensor changed: weight"):
+        module.record_frozen_review(forward, snapshot, tmp_path / "review_0750",
+            update=750, draw_scope={"new_completed_draws": 108, "reused_saved_draws": 0})
+    assert not (tmp_path / "review_0750").exists()

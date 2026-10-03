@@ -24,7 +24,13 @@ for source in (PROJECT_ROOT / "src", PROJECT_ROOT / "Case_ThermalChannel/src", P
         sys.path.insert(0, str(source))
 
 from thermal_campaign_evaluate import screen_indices
-from thermal_campaign_heat_inference import native_heat_predictor, sensor_panel
+from thermal_campaign_heat_inference import (
+    atomic_json,
+    native_heat_predictor,
+    sensor_panel,
+    snapshot_forward_state,
+    verify_frozen_forward,
+)
 
 from honf_inverse_core.heat_generative_comparison import (
     PairedHeatHeads,
@@ -184,6 +190,16 @@ def resolve_evidence_output(path):
     return resolved
 
 
+def record_frozen_review(model, snapshot, output, *, update, draw_scope):
+    """Verify this invocation without certifying recovered draws retroactively."""
+    result = {**verify_frozen_forward(model, snapshot), "head_update": update,
+        **draw_scope,
+        "verification_scope": "current invocation forward parameters/persistent buffers; reused saved draws are not retrospectively certified"}
+    output.mkdir(parents=True, exist_ok=True)
+    atomic_json(output / "forward_freeze_verification.json", result)
+    return result
+
+
 def run_comparison(args):
     from channelthermal.data.datasets import GlobalChannelThermalDataset
     from channelthermal.evaluation.loading import load_model
@@ -195,6 +211,8 @@ def run_comparison(args):
         raise ValueError("Existing paired-head evidence requires its explicit saved checkpoint continuation")
     model, checkpoint = load_model(args.checkpoint, torch.device(args.device))
     model.eval().requires_grad_(False)
+    frozen_snapshot = snapshot_forward_state(model)
+    verify_frozen_forward(model, frozen_snapshot)
     if not hasattr(model.core.backend, "organizer"):
         raise ValueError("A qualified typed organizer checkpoint is required")
     train = GlobalChannelThermalDataset(args.dataset, split="train", points_per_case=1,
@@ -236,7 +254,9 @@ def run_comparison(args):
     if args.evaluate_only:
         if not args.resume:
             raise ValueError("Evaluation recovery requires an exact paired-head checkpoint")
-        evaluate_draws(heads, model, checkpoint, dev, normalization, output / f"review_{heads.update:04d}", args)
+        review = output / f"review_{heads.update:04d}"
+        scope = evaluate_draws(heads, model, checkpoint, dev, normalization, review, args)
+        record_frozen_review(model, frozen_snapshot, review, update=heads.update, draw_scope=scope)
         return output
     validate_review_stage(heads.update, args.stop_update)
     (output / "identity.json").write_text(json.dumps(identity, indent=2)+"\n")
@@ -250,6 +270,7 @@ def run_comparison(args):
         with (output / "training.jsonl").open("a") as stream:
             stream.write(json.dumps(row)+"\n")
         if heads.update in {200, 750, args.stop_update}:
+            verify_frozen_forward(model, frozen_snapshot)
             # Review checkpoints are recoverable before potentially costly evaluation.
             save_heat_payload({"identity": identity, "heads": heads.checkpoint(), "task_stream": task_stream.get_state(),
                         "initial_conditioner": initial_check},
@@ -259,13 +280,16 @@ def run_comparison(args):
                 name: check["loss"][name]["original"]-initial_check["loss"][name]["original"]
                 for name in heads.models}
             (output / f"train_conditioner_{heads.update:04d}.json").write_text(json.dumps(check, indent=2)+"\n")
-            evaluate_draws(heads, model, checkpoint, dev, normalization, output / f"review_{heads.update:04d}", args)
+            review = output / f"review_{heads.update:04d}"
+            scope = evaluate_draws(heads, model, checkpoint, dev, normalization, review, args)
+            record_frozen_review(model, frozen_snapshot, review, update=heads.update, draw_scope=scope)
             print(f"review {heads.update}: complete paired updates and individual draw files", flush=True)
     return output
 
 
 def evaluate_draws(heads, model, checkpoint, dataset, normalization, output, args):
     control_tasks = []
+    new_draws = reused_draws = 0
     for index in screen_indices(dataset, 12):
         task, reference_heat, held = build_public_task(model, checkpoint, dataset[index], "development", normalization, dataset.channel_order)
         directory = output / task.case_id
@@ -297,12 +321,15 @@ def evaluate_draws(heads, model, checkpoint, dataset, normalization, output, arg
                     if (saved["case_id"] != task.case_id or not torch.equal(saved["initial_noise"], noise.cpu())
                             or "held_predictions" not in saved or len(saved["state_timesteps"]) != args.steps+1):
                         raise ValueError(f"Existing individual draw identity/integrity mismatch: {path}")
+                    reused_draws += 1
                     continue
                 save_heat_draw(head, task, held, initial_noise=noise, path=path, dense=dense,
                                observation_mode=observation, provider=provider)
+                new_draws += 1
     (output / "draw_scope.json").write_text(json.dumps({"original_tasks": 12, "noises_per_task": 4,
         "original_heads": ["graph", "full"], "intervention_tasks": control_tasks, "intervention_noises_per_task": 1,
         "interventions": ["graph_weight_full_access", "graph_observations_removed", "graph_observations_shuffled"]}, indent=2)+"\n")
+    return {"new_completed_draws": new_draws, "reused_saved_draws": reused_draws}
 
 
 def parse_args(argv=None):

@@ -214,6 +214,26 @@ temperature 0.09367→0.09769 and response loss 0.008490→0.007889. Thus early
 response improvement coexists with slightly worse temperature; the organizing
 strategy remains under its authorized 500-epoch review.
 
+Local's exact e175 audit retains complete coverage, optimizer/RNG, unchanged
+Stage-A and original structural calibration. Its e101–110→e166–175 field/T
+means improve 0.19911/0.09367→0.17058/0.07055, while response loss worsens
+0.00849→0.01602; recent complete epochs take a median 102.60 seconds under
+three-job contention. Fine's read-only observer later exits with code143, but its actual
+CUDA trainer/tmux remain alive with uninterrupted completed epochs; the
+observer event is recorded separately and compact milestone reads continue.
+
+Tree's exact e75 audit passes all 600-case epochs, 185 active AdamW states at
+step 975, four RNG streams and bitwise equality of all 109 frozen Stage-A
+tensors against the engineering e8 parent. Calibration v2 and all five strata
+are unchanged; selection75/horizon5000 and initial physical policy1 remain
+correct. Hard and separately measured soft each execute 253,186,272 fine
+rows in 3,177 calls over P0/P1/P2, with no skipped eligible rows. Native's
+exact e300 audit likewise passes complete epochs, 181 optimizer states at
+step 3,900, RNG, frozen Stage-A, policy2 and five response calibration samples.
+Its 200 response-active epochs contain 400 wrapper calls and 1,285,156 extra
+role queries. These confirm continuity and work; they do not replace Tree's
+remaining e100 screen or Native's e500 physical review.
+
 H-overlap's first seven epochs measure median training/validation 42.58/1.20
 seconds and peak allocated memory 10.26 GiB. Its initial e100 screen forecast
 is about 73 minutes, plus periodic save/plot overhead; training to e1000 is
@@ -285,6 +305,29 @@ T RMSE 0.06900, while retaining spurious velocity/pressure response where the
 benchmark has zero change. The field selection is not a universal response
 winner. The authorized matched-control extension to 1000 retains exact e500
 as its optimization parent, with both e493 selection snapshots preserved.
+
+The input-only population audit finds finite development inputs within every
+training range, but 80/90 cases occupy sixteen M–Re combinations absent from
+the 600-case training population. Canonical89 still has eighty such cases;
+this is joint coverage, not numeric-range extrapolation or a fresh test claim.
+The canonical M3/5/7/10 counts are 24/25/25/15, and exact Re50/80/100/140/150
+counts are 14/20/20/20/15. Inlet velocity and the non-viscosity material
+parameters are constant; viscosity varies with Re, so they cannot support
+independent context-effect conclusions here. The evaluator now reports
+exact M and Re strata separately, including pooled errors, equal-case means
+and tails; unavailable context remains explicitly counted. Saved-only
+backfills preserve all original ninety-case arrays and all-case aggregates.
+
+| M (cases) | Fine selected493 fluid T mean / p90 RMSE | Mature4738 fluid T mean / p90 RMSE |
+|---|---:|---:|
+| 3 (24) | 0.5341 / 0.6264 | 0.1323 / 0.1569 |
+| 5 (25) | 0.7041 / 0.8452 | 0.2204 / 0.3609 |
+| 7 (25) | 0.7752 / 0.9470 | 0.2994 / 0.4595 |
+| 10 (15) | 0.9187 / 1.0651 | 0.2194 / 0.2462 |
+
+These strata at different checkpoint ages show a broad maturity gap.
+They do not isolate module count from heat/context or architecture from
+training age; the eventual matched e1000 controls remain required.
 
 The selected e493 inverse-conditioning readiness panel is complete on the
 same twelve fixed-total heat tasks: six observed and six held sensors, a
@@ -654,6 +697,20 @@ skipped; the genuine native freeze smoke is executed separately. Ruff and
 diff checks pass. The generative evidence resolver also accepts the campaign's
 ignored workspace path through its data symlink, while rejecting source-path
 escapes; its actual campaign path resolves correctly without writes.
+
+The paired-generative workflow now verifies the same frozen state before
+saving review checkpoints and after each review, with new and reused draw
+counts distinguished. A disposable native Overlap100 CPU1 paired update on
+training case 0001 uses one measured provider call for both arms and leaves
+all 334 forward-state tensors/3,994,148 scalars bitwise unchanged. Normalization
+uses all 600 training records. This is integration evidence, not formal inverse
+head training, a 200-update review or finalist qualification; no generative
+campaign has begun.
+
+The current reporting/freezing revision passes 78 focused tests with two
+optional native-resource tests skipped; retained-native local and paired-head
+smokes and saved-array context backfills provide the separately measured
+integration evidence. Ruff and diff checks pass.
 
 ## Remaining ladder and delivery
 

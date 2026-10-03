@@ -116,6 +116,83 @@ def aggregate_physical(rows):
     return output
 
 
+def native_physical_context(structure):
+    """Save public physical inputs, keeping unavailable values JSON-safe."""
+    unavailable = {}
+
+    def scalar(key):
+        if key not in structure:
+            unavailable[key] = "missing"
+            return None
+        values = np.asarray(structure[key], dtype=np.float64)
+        if values.size != 1:
+            unavailable[key] = "invalid_shape"
+            return None
+        value = float(values.reshape(-1)[0])
+        if not np.isfinite(value):
+            unavailable[key] = "nonfinite"
+            return None
+        return value
+
+    heat = np.asarray(structure.get("heat_powers", []), dtype=np.float64)
+    if not heat.size or not np.isfinite(heat).all():
+        unavailable["public_total_heat"] = "missing" if not heat.size else "nonfinite"
+        total = None
+    else:
+        with np.errstate(over="ignore"):
+            total = float(heat.sum(dtype=np.float64))
+        if not np.isfinite(total):
+            unavailable["public_total_heat"] = "nonfinite"
+            total = None
+    material = np.asarray(structure.get("material_params", []), dtype=np.float64).reshape(-1)
+    if material.size != 6:
+        unavailable["material_params"] = "missing" if not material.size else "invalid_shape"
+        material_values, radius = None, None
+    else:
+        material_values = [float(value) if np.isfinite(value) else None for value in material]
+        if not np.isfinite(material).all():
+            unavailable["material_params"] = "nonfinite"
+        radius = material_values[-1]
+    if radius is None:
+        unavailable["module_radius"] = unavailable.get("material_params", "missing")
+    return {"re": scalar("re"), "u_in": scalar("u_in"), "public_total_heat": total,
+            "material_params": material_values, "module_radius": radius,
+            "unavailable_fields": unavailable}
+
+
+def aggregate_physical_strata(rows):
+    """Exact M/Re groups only; every row belongs to one bucket per dimension."""
+
+    def key(value, reason=None, *, integer=False):
+        if value is None:
+            return "unavailable_" + (reason or "missing")
+        if not isinstance(value, (int, float, np.number)) or isinstance(value, (bool, np.bool_)):
+            return "unavailable_invalid"
+        if not np.isfinite(value):
+            return "unavailable_nonfinite"
+        if integer:
+            return str(int(value)) if value >= 0 and float(value).is_integer() else "unavailable_invalid"
+        return str(float(value))
+
+    groups = {"by_module_count": {}, "by_re": {}}
+    for row in rows:
+        context = row.get("physical_context") or {}
+        reason = context.get("unavailable_fields", {}).get("re")
+        names = {"by_module_count": key(row.get("module_count"), integer=True),
+                 "by_re": key(context.get("re"), reason)}
+        for dimension, name in names.items():
+            groups[dimension].setdefault(name, []).append(row)
+    result = {"population_case_count": len(rows)}
+    for dimension, buckets in groups.items():
+        result[dimension] = {name: {"case_count": len(members),
+            "case_ids": [row["case_id"] for row in members], "metrics": aggregate_physical(members)}
+            for name, members in sorted(buckets.items(), key=lambda item: (
+                item[0].startswith("unavailable_"), float(item[0]) if not item[0].startswith("unavailable_") else item[0]))}
+        result[dimension + "_unavailable_cases"] = sum(
+            len(members) for name, members in buckets.items() if name.startswith("unavailable_"))
+    return result
+
+
 def screen_indices(dataset, count=18):
     """Round-robin M strata and span supported input context; no field targets."""
     strata = {}
@@ -379,6 +456,7 @@ def evaluate(args):
             work = {key: float(np.asarray(value)) for key, value in prediction.get("interaction_aux", {}).items()
                     if "hypergraph" in key and np.asarray(value).ndim == 0 and np.issubdtype(np.asarray(value).dtype, np.number)}
             row = {"case_id": case_id, "module_count": int((reference["structure"]["module_present"] > .5).sum()),
+                "physical_context": native_physical_context(reference["structure"]),
                 "intervention": name, "metrics": metrics, "complete_wrapper_seconds": seconds,
                 "work": work,
                 "work_scope": "Legacy prediction interaction_aux aggregated across external field query chunks; not summed complete-wrapper executor work",
@@ -470,6 +548,8 @@ def write_summary(output, rows, checkpoint_path, checkpoint, args, dataset_path,
         "planned_case_indices": indices, "completed_normal_cases": len(normal),
         "fixed_screen_configuration": str(args.panel_config) if args.panel_config is not None else None,
         "primary_excluding_0273": aggregate_physical(primary), "compatibility_including_0273": aggregate_physical(normal),
+        "physical_strata": {"primary_excluding_0273": aggregate_physical_strata(primary),
+                            "compatibility_including_0273": aggregate_physical_strata(normal)},
         "unavailable_interventions": ["independently_retrained_fixed_K"],
         "rows": rows}
     (output / "summary.json").write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")

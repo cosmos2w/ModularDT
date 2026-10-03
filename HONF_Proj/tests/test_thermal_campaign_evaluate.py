@@ -57,6 +57,89 @@ def test_equal_case_and_pooled_metrics_differ_without_dropping_failure():
     assert result["pooled_count"] == 10
 
 
+def test_public_native_context_has_exact_keys_and_keeps_nonfinite_inputs_explicit():
+    structure = {"re": np.asarray([140.]), "u_in": np.asarray([1.]),
+        "heat_powers": np.asarray([1., 2., 0.]),
+        "material_params": np.asarray([.006, .01, .02, 1., 1., .45])}
+    context = evaluation.native_physical_context(structure)
+    assert set(context) == {"re", "u_in", "public_total_heat", "material_params",
+                            "module_radius", "unavailable_fields"}
+    assert context["re"] == 140. and context["u_in"] == 1.
+    assert context["public_total_heat"] == 3. and context["module_radius"] == .45
+    assert context["material_params"] == structure["material_params"].tolist()
+    assert context["unavailable_fields"] == {}
+    structure["re"][0] = np.nan
+    structure["heat_powers"][0] = np.inf
+    structure["material_params"][-1] = np.nan
+    del structure["u_in"]
+    context = evaluation.native_physical_context(structure)
+    assert context["re"] is None and context["u_in"] is None
+    assert context["public_total_heat"] is None and context["module_radius"] is None
+    assert context["material_params"][-1] is None
+    assert context["unavailable_fields"] == {"re": "nonfinite", "u_in": "missing",
+        "public_total_heat": "nonfinite", "material_params": "nonfinite", "module_radius": "nonfinite"}
+    json.dumps(context, allow_nan=False)
+    overflow = evaluation.native_physical_context({"heat_powers": np.asarray([1e308, 1e308])})
+    assert overflow["public_total_heat"] is None
+    assert overflow["unavailable_fields"]["public_total_heat"] == "nonfinite"
+
+
+def test_exact_strata_reuse_role_aggregates_and_reconcile_every_case_with_missing_context():
+    one = evaluation.physical_errors(np.ones(1), np.zeros(1))
+    nine = evaluation.physical_errors(np.full(9, 3.), np.zeros(9))
+    two = evaluation.physical_errors(np.full(2, 2.), np.zeros(2))
+    rows = [
+        {"case_id": "0001", "module_count": 3, "physical_context": {"re": 80.}, "metrics": {"T": one}},
+        {"case_id": "0273", "module_count": 3, "physical_context": {"re": 80.}, "metrics": {"T": nine}},
+        {"case_id": "0002", "module_count": 5, "physical_context": {"re": 140.}, "metrics": {"T": two, "p": one}},
+        {"case_id": "0003", "module_count": None, "metrics": {"T": two}},
+        {"case_id": "0004", "module_count": 5,
+         "physical_context": {"re": None, "unavailable_fields": {"re": "nonfinite"}}, "metrics": {"T": one}},
+    ]
+    strata = evaluation.aggregate_physical_strata(rows)
+    assert strata["population_case_count"] == 5
+    for dimension in ("by_module_count", "by_re"):
+        assert sum(group["case_count"] for group in strata[dimension].values()) == 5
+        assert sorted(case for group in strata[dimension].values() for case in group["case_ids"]) == sorted(row["case_id"] for row in rows)
+    assert set(strata["by_module_count"]) == {"3", "5", "unavailable_missing"}
+    assert set(strata["by_re"]) == {"80.0", "140.0", "unavailable_missing", "unavailable_nonfinite"}
+    assert strata["by_module_count_unavailable_cases"] == 1
+    assert strata["by_re_unavailable_cases"] == 2
+    for key in (strata["by_module_count"]["3"], strata["by_re"]["80.0"]):
+        assert key["case_count"] == 2
+        assert key["metrics"]["T"]["equal_case_rmse_mean"] == 2.
+        assert key["metrics"]["T"]["equal_case_mae_mean"] == 2.
+        assert key["metrics"]["T"]["pooled_rmse"] == pytest.approx(np.sqrt(8.2))
+        assert key["metrics"]["T"]["pooled_mae"] == 2.8
+    assert strata["by_module_count"]["5"]["metrics"]["p"]["cases"] == 1
+    assert strata["by_module_count"]["5"]["case_count"] == 2
+    # Context failures do not alter the existing all-case metric denominator.
+    assert evaluation.aggregate_physical(rows)["T"]["pooled_count"] == 15
+
+
+def test_summary_strata_preserve_0273_compatibility_and_all_case_aggregates(tmp_path):
+    def row(case_id, error, module_count, re=None):
+        return {"case_id": case_id, "module_count": module_count, "intervention": "normal",
+            "physical_context": {"re": re},
+            "metrics": {"T": evaluation.physical_errors(np.asarray([error]), np.zeros(1))}}
+    rows = [row("0273", 100., 3, 50.), row("0001", 1., 3, 80.), row("0002", 3., 5)]
+    intervention = copy.deepcopy(rows[1])
+    intervention["intervention"] = "full_access"
+    rows.append(intervention)
+    args = SimpleNamespace(stage=500, split="test", executor="dense_masked_reference", panel_config=None)
+    evaluation.write_summary(tmp_path, rows, Path("unchanged_parent.pt"), {"epoch": 493},
+                             args, Path("dataset.h5"), [0, 1, 2], ["T"])
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    primary = summary["physical_strata"]["primary_excluding_0273"]
+    compatibility = summary["physical_strata"]["compatibility_including_0273"]
+    assert primary["population_case_count"] == 2 and compatibility["population_case_count"] == 3
+    assert "50.0" not in primary["by_re"] and compatibility["by_re"]["50.0"]["case_ids"] == ["0273"]
+    assert primary["by_re"]["unavailable_missing"]["case_ids"] == ["0002"]
+    assert summary["primary_excluding_0273"] == evaluation.aggregate_physical(rows[1:3])
+    assert summary["compatibility_including_0273"] == evaluation.aggregate_physical(rows[:3])
+    assert summary["rows"] == rows
+
+
 def test_screen_panel_uses_input_strata_and_excludes_known_duplicate():
     case_ids = ["0273", "0001", "0002", "0003", "0004", "0005", "0006"]
     groups = {case_id: {"module_present": np.ones(1 + index % 3),
