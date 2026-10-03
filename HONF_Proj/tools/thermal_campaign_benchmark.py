@@ -14,6 +14,7 @@ import json
 import os
 import resource
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from time import perf_counter
 
@@ -131,9 +132,26 @@ def load_native(checkpoint_path, dataset_path, device):
     return model, checkpoint, normalized, raw, path
 
 
+@contextmanager
+def optional_fine_work(backend):
+    """Keep historical backend timing available when route hooks do not apply."""
+    from honf_forward_core.evaluation.fine_kernel_work import FineKernelWork
+    try:
+        recorder = FineKernelWork(backend)
+    except (TypeError, ValueError) as error:
+        yield {"measured": False, "routes": None, "reason": str(error),
+               "scope": "Five-route fine MLP input rows unmeasured for this historical backend"}
+        return
+    result = {"measured": True}
+    with recorder:
+        yield result
+    result.update(recorder.snapshot())
+
+
 def benchmark_model_case(model, sample, raw_sample, device, *, repeats, warmup, small_queries=14):
     from channelthermal.training.campaign_work import CampaignForwardWork
     from thermal_campaign_heat_inference import sensor_panel
+
     sensors, _, _, _, _ = sensor_panel(raw_sample)
     if small_queries <= len(sensors):
         small = sensors[:small_queries]
@@ -149,15 +167,17 @@ def benchmark_model_case(model, sample, raw_sample, device, *, repeats, warmup, 
             wrapper = latency_samples(call, device, repeats=repeats, warmup=warmup)
             # A separate work pass avoids timing recorder synchronization and
             # supplies the reusable prepared state for decode-only repeats.
-            with CampaignForwardWork(model.core) as recorded:
+            with CampaignForwardWork(model.core) as recorded, optional_fine_work(model.core.backend) as fine_work:
                 result = call()
             prepared = result["prepared_state"]
             wrapper["forward_work"] = recorded.records
+            wrapper["fine_kernel_work"] = fine_work
             decoder = lambda prepared=prepared, query=arguments["query_xy"]: model.decode_prepared(prepared, query, return_routing_maps=False)
             decoded = latency_samples(decoder, device, repeats=repeats, warmup=warmup)
-            with CampaignForwardWork(model.core) as recorded_decode:
+            with CampaignForwardWork(model.core) as recorded_decode, optional_fine_work(model.core.backend) as fine_decode:
                 decoder()
             decoded["forward_work"] = recorded_decode.records
+            decoded["fine_kernel_work"] = fine_decode
             rows.extend(({"panel": panel, "queries": len(query), "scope": "complete_wrapper_P0_P1_P2", **wrapper},
                          {"panel": panel, "queries": len(query), "scope": "prepared_P2_decode_only", **decoded}))
             del prepared, result

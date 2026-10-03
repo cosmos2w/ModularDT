@@ -174,6 +174,19 @@ def evaluation_indices(dataset, args):
     return list(range(len(dataset)))
 
 
+def intervention_effectiveness(anchor_changes, native_comparison=None):
+    """Prefer actual native streams; separately label the P2 anchor diagnostic."""
+    anchor_effective = any(anchor_changes.values())
+    if native_comparison is None:
+        return {"effective_anchor_pair_intervention": anchor_effective,
+                "effective_pair_intervention": anchor_effective,
+                "effective_pair_intervention_scope": "P2 anchor support only; native streams unmeasured"}
+    return {"effective_anchor_pair_intervention": anchor_effective,
+            "effective_pair_intervention": any(row["changed_pairs"] > 0 for row in native_comparison.values()),
+            "effective_weight_intervention": any(row["max_absolute_weight_change"] > 0 for row in native_comparison.values()),
+            "effective_pair_intervention_scope": "Recorded actual native P0/P1/P2 receiver streams; anchors reported separately"}
+
+
 @contextmanager
 def intervention(model, name):
     """Same physical weights; preserve degree/weight and report actual pair work."""
@@ -381,6 +394,7 @@ def evaluate(args):
                     comparison_directory = reference_access_dir if reference_capture is not None else output
                     with np.load(comparison_directory / case_id / "normal" / "phase_graphs.npz", allow_pickle=False) as baseline:
                         row["actual_native_pair_intervention"] = compare_native_access(baseline, phase_capture.arrays)
+                    row.update(intervention_effectiveness({}, row["actual_native_pair_intervention"]))
             if reference_capture is not None:
                 row["reference_permission_source"] = str(reference_access_dir / case_id / "normal" / "phase_graphs.npz")
                 row["phase_plan_scope"] = "Current conditional organizer plans recomputed from live physical state; authoritative native access permissions replay saved normal plans"
@@ -403,7 +417,7 @@ def evaluate(args):
                             key = f"graph/anchor_support/{tau}"
                             changed[tau] = int(np.count_nonzero(support != baseline[key]))
                 row["changed_anchor_pairs"] = changed
-                row["effective_pair_intervention"] = any(changed.values())
+                row.update(intervention_effectiveness(changed, row.get("actual_native_pair_intervention")))
                 if normal_path.exists():
                     baseline_row = json.loads((normal_path.parent / "metrics.json").read_text())
                     row["work_delta_from_normal"] = {key: value - baseline_row["work"][key]

@@ -240,8 +240,27 @@ references, input data and masks. Selecting e493 improves fluid temperature by
 material peak and pressure errors. It remains worse than mature on 13 of 14
 audited roles; the small effective-heat-transfer exception is not a general win.
 This supports continuing the healthy matched control, while preserving physical
-tradeoffs and the maturity difference. Existing-family finite-response reviews
-for both versions are in progress.
+tradeoffs and the maturity difference. Both versions have also completed
+all eight existing-family finite-response evaluations, with all 88 absolute
+states saved and independent array audits. Across 80 perturbations, mean fluid
+temperature response RMSE is exact500 0.14467 and selected493 0.14657, versus
+Fine100 0.20682 and mature 0.11674. Mean pressure-increment absolute errors are
+0.0002597/0.0002673, below zero-change 0.0002784 on average but still above
+mature 0.0001974. Selected493 improves the 16 heat-transfer responses to
+T RMSE 0.06900, while retaining spurious velocity/pressure response where the
+benchmark has zero change. The field selection is not a universal response
+winner. The authorized matched-control extension to 1000 retains exact e500
+as its optimization parent, with both e493 selection snapshots preserved.
+
+The selected e493 inverse-conditioning readiness panel is complete on the
+same twelve fixed-total heat tasks: six observed and six held sensors, a
+uniform public-total start and one disposable heat-optimization step in each
+joint/graph/ungrouped mode. This is a readiness check, not a completed inverse
+quality evaluation. Numerical Jacobian ranks are 2/4/6/6 for M3/5/7/10;
+the three M10 tasks remain locally nonidentifiable (nine free directions,
+six observations), and M7 case0675 has condition number about 1,869. Forward
+and local-surrogate weights remain frozen. Full finalist inverse trials are
+still required at the selected 1000-stage versions.
 
 Review found the original structural calibration's first five microbatches
 could belong to the same M bucket. Before e26 pressure, calibration policy 2
@@ -314,10 +333,14 @@ response/native-denominator amendment without combining different field units.
 
 On this input-selected high-M case (M=10), B-fine e100 fluid RMSE is 0.089684
 for u and 2.07438 for temperature; mature Run1804 e4738 yields 0.0056393 and
-0.174727. The figure uses the stored exposed-development native-grid reference,
+0.174727. Fine's immutable field-selected e493 improves these case errors to
+0.0283131 and 0.706880. The revised figure includes that selected version and
+its absolute residual maps alongside the preserved e100 and mature baselines.
+The figure uses the stored exposed-development native-grid reference,
 benchmark physical units, shared value/residual ranges, white solid masks,
 predicted ports and the same frozen Stage-A model. It shows substantial young
-model errors near modules and in their downstream fields. It does not isolate
+model errors near modules and in their downstream fields, with a clear reduction
+by the completed Fine500 stage. It does not isolate
 architecture from training age. Both the PDF master and small embedding raster
 were visually inspected after fixing clipped labels; numerical arrays remain
 under the ignored evaluation directory.
@@ -385,17 +408,55 @@ is 32 support switches, 32 active-tuple swaps and 512 donor-source-pair checks
 per case/native access call; each check scans eligible partner rows. It is
 neither a global geometry optimum nor a newly constructed shared-group
 organizer. Reconstruction from twelve saved native QE scopes matches the
-saved normal control probes and summaries bitwise. Physical inference for these two controls is pending the
-500-epoch reviews; helper tests alone establish no fidelity gain.
+saved normal control probes and summaries bitwise. A four-case native Overlap
+e100 evaluation of both controls is now complete: every mode executes
+7,995,072 rows in 644 calls with no skipped rows. Full access preserves normal
+control probes/summaries bitwise across all 644 calls; its mean fluid T/surface/
+peak errors are 3.59439/3.15696/2.69175 versus normal 2.84319/2.97581/3.02384.
+Thus unrestricted access worsens fluid and surface while improving peaks.
+The strict geometry action changes only 252 binary pairs, with 7,795 changed
+weight positions, preserving both binary degrees and receiver weight multisets
+across all native streams. Its mean T/surface/peak errors are
+2.89440/3.14340/3.21553; this bounded matched action provides no thermal win on
+this small panel. Case0647 has weight/control reordering without a binary
+support change. Overlap has no near arrays here, so this near-protection check
+is vacuous; the separate Local evaluation tests positive near envelopes.
+Source-column weighted sums change in 198 of 644 calls, explicitly allowed
+and reported. These findings supersede an interpretation of the old geometry
+control as fully matched, and do not establish population utility. Actual
+500-epoch checkpoint reviews remain pending.
+
+Actual e100 Overlap and Local invariance/path evaluations now cover native
+low/high-M cases 0274/0692. Module permutation, inactive padding, fixed-action
+quadrature splitting, query order and prepared chunks pass declared tolerances;
+maximum observed context/field change is below 7.2e-7, with padding exactly
+zero. Their trained topology really changes on both fixed-total heat and
+small geometry paths. Eight bisections narrow one detected switch per path
+to parameter width 0.0004883; physical temperature changes across those
+brackets range about 3.1e-5–4.2e-4. These finite brackets do not prove cross-switch
+continuity or a finite jump. Fixed-topology affine continuation is invalid
+farther along some paths and is stopped explicitly rather than silently
+clamped. Within the unchanged local active set, autograd and central differences
+are saved separately by channel; decreasing epsilon from 0.01 to 0.0001
+increases FP32 cancellation errors, particularly for the q_normal proxy.
+These are frozen-surrogate numerical checks, not physical reference solves.
 
 Run1804, both fresh e100 controls and H-overlap/H-local exact e100 have completed finite-response evaluation
 on all eight existing non-training families (11 absolute states per family).
 Fields are decoded once and saved with physical increments, pressure and
 per-module peaks; the zero-change comparator and reference magnitudes remain
 separate. No response-relative quality is claimed without established floors.
-The two H screens' saved-array response audits are underway; the selected
-response figure below currently shows the three completed reference/control
-baselines, not the newly saved H comparisons.
+Saved-array response audits of all five versions independently recompute 3,200
+field/material response-channel metrics, 400 pressure and 2,500 module-peak
+scalars within 8.9e-16. Across all 80 perturbations, mean fluid-temperature
+finite-response RMSE is Local100 0.21737, Overlap100 0.26016, Fine100 0.20682,
+Dense100 0.19275 and mature 0.11674. Near protection improves this measure over
+Overlap but does not beat the same-age controls. On heat-transfer perturbations
+with exactly zero stored u/p response, Local's spurious errors are
+0.003629/0.001412 and Overlap's 0.002780/0.001081. Both H response evaluations
+execute 175,891,584 rows in 14,168 fine calls, with zero skipped rows. The
+selected response figure below currently shows the three reference/control
+baselines; the H comparisons above use their complete saved arrays.
 The mature local-inverse job also encountered ENOSPC on its eighth case;
 individual complete trials are retained and resume now skips verified arrays.
 Atomic numerical/JSON writes preserve previous complete files on interruption.
@@ -457,8 +518,17 @@ Dense100 0.388/0.371 and 1.231/1.341; Fine100 0.372/0.383 and 1.906/1.247.
 Prepared small-Q decode is about 0.0028–0.0033 seconds, excluding preparation.
 Raw samples, p90 and occupancy are saved; host load is shared with the four
 trainers, so these are CPU baselines rather than isolated or GPU speed rankings.
-Legacy Dense/Fine fine-executor rows and calls are unavailable in their current
-telemetry: they remain unmeasured, not zero. Finalist dense/rectangular GPU
+Legacy Dense/Fine rows and calls are unavailable in the earlier telemetry:
+they remain unmeasured there, not zero. A reusable evaluation-only hook recorder
+now counts actual inputs/calls at all five fine physical MLPs, including padding.
+Dense and each typed dense/rectangular backend preserve outputs and first
+gradients bitwise in 2-D/3-D tests; the typed counts match native ledgers.
+Native checkpoint tests verify hooks stay outside timed calls and backward.
+Unsupported historical backends retain timing with explicitly unmeasured work.
+This recorder excludes attention, coarse/local/policy work and eligible/unique
+pairs; it supplies a common fine-kernel comparison without inferring sparse
+hardware savings. The focused suite passes 39 tests including retained native
+resources, with Ruff and diff checks clean. Finalist dense/rectangular GPU
 timing and physical-row comparisons are still required.
 
 ## Remaining ladder and delivery

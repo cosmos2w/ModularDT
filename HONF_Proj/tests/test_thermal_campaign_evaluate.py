@@ -117,6 +117,29 @@ def test_reference_only_mature_stage_keeps_four_cases_and_normal_screen_keeps_al
     assert evaluation.evaluation_indices(Dataset(), args) == [3, 1, 7, 9]
 
 
+def test_native_reference_effectiveness_is_not_overwritten_by_missing_anchor_baseline():
+    # A reference-only directory has no normal P2 anchor archive. Actual native
+    # supports still change, as observed with e100 full access at P0/P1/P2.
+    evidence = evaluation.intervention_effectiveness({}, {
+        "P0/QE": {"changed_pairs": 77, "max_absolute_weight_change": 1.0},
+        "P2/QE": {"changed_pairs": 84, "max_absolute_weight_change": 2.0}})
+    assert evidence["effective_pair_intervention"]
+    assert evidence["effective_weight_intervention"]
+    assert not evidence["effective_anchor_pair_intervention"]
+    assert "actual native" in evidence["effective_pair_intervention_scope"]
+
+
+def test_native_weight_action_and_anchor_support_are_distinct():
+    evidence = evaluation.intervention_effectiveness({"QM": 3}, {
+        "P0/MM": {"changed_pairs": 0, "max_absolute_weight_change": .5}})
+    assert not evidence["effective_pair_intervention"]
+    assert evidence["effective_weight_intervention"]
+    assert evidence["effective_anchor_pair_intervention"]
+    fallback = evaluation.intervention_effectiveness({"QM": 3})
+    assert fallback["effective_pair_intervention"]
+    assert "unmeasured" in fallback["effective_pair_intervention_scope"]
+
+
 def test_inverse_trail_atomic_write_keeps_previous_complete_file_on_interruption(tmp_path, monkeypatch):
     from thermal_campaign_heat_inference import atomic_npz, completed_trial
     path = tmp_path / "trial.npz"
