@@ -13,8 +13,8 @@ is paused; Wind is used for shared-core compatibility checks.
 | Inverse | Fine972's matched frozen observed/held means decline 35.66%/20.39% over thirty steps. | Heat RMSE rises 18.58% and endpoint-pressure error 69.54%; all graph/ungrouped updates are full-joint fallback. Finalist local inverse and qualified paired heads remain pending. |
 
 **State: all five e100 screens and B-fine's e1000 control are complete; the H finalist ladder continues.**
-Saved training snapshot at 2026-10-03 11:31 UTC: B-fine completed e1000;
-B-native is at e724, H-tree e220, H-overlap e422 and H-local e381. The table
+Saved training snapshot at 2026-10-03 12:38 UTC: B-fine completed e1000;
+B-native is at e826, H-tree e259, H-overlap e475 and H-local e428. The table
 and inspected progress figure use this same snapshot. Tree completed its exact
 e100 physical and eight-family response screens and resumed to e500. Fine's
 immutable exact1000 and field-selected e972 have completed full90/canonical89
@@ -23,11 +23,11 @@ frozen inverse evaluation. Both earlier e493 selections remain preserved. Native
 completed exact e500; its immutable exact500/field-selected456 physical review
 is complete before continuation and migration. A completed control does not
 count toward the required two or three new H finalists.
-At the same 11:31 snapshot, the last twenty complete-epoch median/p90 elapsed
-seconds are Native39.63/40.29, Tree105.09/107.19, Overlap76.22/77.29 and
-Local86.55/88.16. Extrapolating those measured rates gives conditional next-stage
-finish ranges: Native1000 at14:34–14:37 UTC, Tree500 at19:42–19:52,
-Overlap500 at13:11–13:12 and Local500 at14:23–14:26. These ranges compare
+At the same 12:38 snapshot, the last twenty complete-epoch median/p90 elapsed
+seconds are Native38.98/39.83, Tree102.95/105.33, Overlap76.05/77.15 and
+Local86.51/87.52. Extrapolating those measured rates gives conditional next-stage
+finish ranges of approximately Native1000 at14:32–14:34 UTC, Tree500 at19:32–19:42,
+Overlap500 at13:10–13:11 and Local500 at14:22–14:24. These ranges compare
 median/p90 rate extrapolations under current placement, not confidence bounds;
 evaluation/setup and subsequent contention changes are excluded. Full H500
 physical/graph review precedes promotion; the two or three H1000 results remain
@@ -39,11 +39,11 @@ start automatically.
 
 | Run | Strategy | Complete epoch at snapshot | Sampled development field / T MSE | Current action |
 |---|---|---:|---|---|
-| 2201 | B-native | 724 | 0.00964 / 0.01130 | Exact500 and physical review complete; GPU2 continuation to1000 |
+| 2201 | B-native | 826 | 0.00958 / 0.01131 | Exact500 and physical review complete; GPU2 continuation to1000 |
 | 2202 | B-fine | 1000 | 0.01175 / 0.01182 | Native exit0; immutable exact1000/selected972 evaluation complete |
-| 2203 | H-tree | 220 | 0.09815 / 0.09780 | GPU1; exact e100→500 continuation; monitor response-active trend |
-| 2204 | H-overlap | 422 | 0.80462 / 0.26488 | GPU2; exact e100→500 continuation; review rising sampled field error |
-| 2205 | H-local | 381 | 0.13339 / 0.07416 | GPU2; exact e100→500 continuation |
+| 2203 | H-tree | 259 | 0.08167 / 0.07538 | GPU1; exact e100→500 continuation; monitor response-active trend |
+| 2204 | H-overlap | 475 | 0.68186 / 0.22151 | GPU2; exact e100→500 continuation; review persistent sampled field deficit |
+| 2205 | H-local | 428 | 0.10539 / 0.06686 | GPU2; exact e100→500 continuation |
 
 These MSEs use the maintained normalized, sampled 90-case validation task;
 they are neither full-grid physical errors nor the final 89-case comparison.
@@ -815,6 +815,16 @@ No mature checkpoint or unrelated data was removed. At this snapshot root has
 about 75 GiB and data 120 GiB free; all new campaign checkpoint/evidence writes
 remain on data. Changes in unrelated occupancy are not attributed to this campaign.
 
+A subsequent saved-file admission review at12:05 UTC measured 113.43 GiB free
+on data and 69.49 GiB on root. Inspection of 123 case/mode archive sizes and ZIP
+payload lengths gives a doubled observed-payload planning estimate of 9.31 GiB
+per H-stage evaluation, or 46.56–55.87 GiB for all three H500 evaluations plus
+two or three H1000 evaluations. This is a planning estimate, not a storage bound;
+future checkpoint retention, full inverse/generative outputs, unmeasured tails
+and unrelated writes are excluded. The reviewed 33 stage500 output paths are
+distinct and initially absent. No deletion or migration is warranted by this
+review; each actual launch still checks current free space and subsequent growth.
+
 ## Selected measured figures
 
 Figure index: [full-epoch training progress](../../diagnostics/generated/shared_core_campaign_20261002/figures/campaign_training_progress.pdf),
@@ -827,12 +837,12 @@ Figure index: [full-epoch training progress](../../diagnostics/generated/shared_
 
 ![Full-epoch training and measured elapsed work](../../diagnostics/generated/shared_core_campaign_20261002/figures/campaign_training_progress.png)
 
-The inspected 11:31 UTC snapshot contains 724/1000/220/422/381 complete epochs for
+The inspected 12:38 UTC snapshot contains 826/1000/259/475/428 complete epochs for
 B-native/B-fine/H-tree/H-overlap/H-local. Every displayed epoch has 600 distinct
 training cases, 13 optimizer steps and 614,400 primary sampled queries. B-fine
 e1000 normalized sampled field/T MSE is 0.01175/0.01182; the full-grid physical
 evaluation is reported separately above.
-Successful train/validation time sums are 6.789/4.400/8.794/7.951/8.013 hours;
+Successful train/validation time sums are 7.904/4.400/9.920/9.075/9.144 hours;
 discarded partial work and storage replay overhead remain recorded separately.
 Owned contention and H-tree engineering changes affect timing. These curves
 establish actual model age and work, not sparse speedups or mature-equivalent
