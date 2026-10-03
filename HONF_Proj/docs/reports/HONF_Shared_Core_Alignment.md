@@ -56,6 +56,26 @@ initial state tensors from a freshly materialized B-fine; their additional
 organizer parameters are materialized before optimizer construction. Final
 component inventories will be reported at the trained versions.
 
+The materialized native five-arm inventory now measures the following scalar
+counts (the same architecture counts apply at later checkpoints):
+
+| Component | B-native | B-fine | H-tree | H-overlap / H-local |
+|---|---:|---:|---:|---:|
+| Shared source encoders | 282,368 | 282,368 | 282,368 | 282,368 |
+| Fine MM/ME/EM | 1,074,944 | 1,074,944 | 1,074,944 | 1,074,944 |
+| QM/QE and field head | 726,153 | 790,665 | 790,665 | 790,665 |
+| Thermal coupling/fallback | 780,296 | 780,296 | 780,296 | 780,296 |
+| Dense coarse/local contexts | 1,531,648 | 0 | 0 | 0 |
+| Organizer | 0 | 0 | 324,315 | 30,507 |
+| Collective modulation | 0 | 0 | 204 | 204 |
+| Total trainable | 4,395,409 | 2,928,273 | 3,252,792 | 2,958,984 |
+| Frozen Stage-A | 1,035,139 | 1,035,139 | 1,035,139 | 1,035,139 |
+
+The reusable inventory tool measures parameters after native materialization;
+its component sum equals the actual optimizer parameter population. The
+Thermal-owned coupling parameters remain present in all arms. Parameter
+count is not executed work or a latency measurement.
+
 ## Executed checks
 
 Retained Thermal Run1804 e4738 and Wind Run2103 e2475 replayed through the

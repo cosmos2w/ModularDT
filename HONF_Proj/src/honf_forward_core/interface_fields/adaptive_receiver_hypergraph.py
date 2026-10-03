@@ -14,6 +14,7 @@ from torch.nn import functional as F
 
 from .adaptive_interaction_cover import CaseLocalReceiverTree, ReceiverAnchorUniverse
 from .routing_index.sparse_projection import source_measure_sparsemax
+from .topology_probe import FixedTopologyInvalid, fixed_active_projection, validate_catalogue
 from .typed_hypergraph_state import (
     TypedHypergraphState,
     TypedSourceAccess,
@@ -122,6 +123,12 @@ class AdaptiveReceiverHypergraph(nn.Module):
             raise ValueError("curriculum epochs start at one")
         self.training_epoch.fill_(int(epoch))
 
+    def _continuous_input(self, value: torch.Tensor) -> torch.Tensor:
+        # Training keeps the established organizer/physical gradient boundary.
+        # Frozen inverse evaluation still differentiates continuous physics at
+        # the selected discrete topology, including collective control moments.
+        return value.detach() if self.training else value
+
     def _exercise_depth(self) -> int | None:
         if not self.training:
             return None
@@ -142,15 +149,15 @@ class AdaptiveReceiverHypergraph(nn.Module):
             return encoded.module_centers[case, valid], encoded.module_present[case, valid], states[case, valid]
         if mechanism == "EM":
             valid = encoded.env_weights[case] > 0
-            return encoded.env_coords[case, valid], encoded.env_weights[case, valid], encoded.env_tokens[case, valid].detach()
+            return encoded.env_coords[case, valid], encoded.env_weights[case, valid], self._continuous_input(encoded.env_tokens[case, valid])
         coords, mass = encoded.receiver_anchor_coords, encoded.receiver_anchor_weights
         if coords is None:
             valid = encoded.env_weights[case] > 0
-            return encoded.env_coords[case, valid], encoded.env_weights[case, valid], encoded.env_tokens[case, valid].detach()
+            return encoded.env_coords[case, valid], encoded.env_weights[case, valid], self._continuous_input(encoded.env_tokens[case, valid])
         coords = coords if coords.ndim == 2 else coords[case]
         mass = coords.new_ones(coords.shape[0]) if mass is None else (mass if mass.ndim == 1 else mass[case])
         valid = mass > 0
-        tokens = encoded.global_token[case].detach().expand(int(valid.sum()), -1)
+        tokens = self._continuous_input(encoded.global_token[case]).expand(int(valid.sum()), -1)
         return coords[valid], mass[valid], tokens
 
     def _receiver_roles(self, encoded, case, mechanism, count):
@@ -168,50 +175,73 @@ class AdaptiveReceiverHypergraph(nn.Module):
             raise ValueError("receiver role codes must lie in [0,7]")
         return roles
 
-    def _index(self, encoded, states, case, tau, case_scale, summaries, global_token, measures, phase_features):
-        coords, mass, receiver_states = self._catalogue(encoded, states.detach(), case, tau)
+    def _index(self, encoded, states, case, tau, case_scale, summaries, global_token, measures, phase_features,
+               fixed_tree=None):
+        coords, mass, receiver_states = self._catalogue(encoded, self._continuous_input(states), case, tau)
         roles = self._receiver_roles(encoded, case, tau, coords.shape[0])
         if coords.shape[0] == 0:
             coords = states.new_zeros((1, encoded.module_centers.shape[-1]))
             mass = coords.new_ones(1)
             roles = torch.zeros(1, device=coords.device, dtype=torch.long)
             receiver_states = states.new_zeros((1, self.hidden_dim))
-        tree = CaseLocalReceiverTree.build(ReceiverAnchorUniverse(coords, mass, roles, case_scale),
-            max_nodes=self.capacity, min_leaf_anchors=1, overlap_fraction=self.overlap_fraction,
-            max_depth=self.max_depth)
-        centers, descriptors, depths = [], [], []
+        universe = ReceiverAnchorUniverse(coords, mass, roles, case_scale)
+        if fixed_tree is None:
+            tree = CaseLocalReceiverTree.build(universe, max_nodes=self.capacity, min_leaf_anchors=1,
+                overlap_fraction=self.overlap_fraction, max_depth=self.max_depth)
+        else:
+            if coords.shape != fixed_tree.universe.coordinates.shape or not torch.equal(roles, fixed_tree.universe.roles.to(roles)):
+                raise FixedTopologyInvalid("Fixed receiver-tree anchor IDs/roles changed")
+            tree = CaseLocalReceiverTree(universe, fixed_tree.nodes, fixed_tree.overlap_fraction, fixed_tree.capacity_saturated)
+        depths = []
         node_depths = {0: 0}
         for index, node in enumerate(tree.nodes):
-            ids = list(node.anchor_indices)
-            node_mass = mass[ids]
-            center = _pool(coords[ids], node_mass)
-            extent = coords[ids].amax(0) - coords[ids].amin(0)
-            receiver_summary = _pool(receiver_states[ids], node_mass)
-            role_summary = _pool(F.one_hot(roles[ids], 8).to(states.dtype), node_mass)
-            statistics = torch.stack((measures["M"][case].sum().log1p(), measures["E"][case].sum().log1p(),
-                                      (measures["M"][case].sum() > 0).to(states.dtype),
-                                      (measures["E"][case].sum() > 0).to(states.dtype)))
             depth = node_depths[index]
-            descriptors.append(torch.cat((receiver_summary, summaries["M"][case], summaries["E"][case], global_token[case],
-                                          pad_geometry(center / case_scale), pad_geometry(extent / case_scale), statistics,
-                                          center.new_tensor([depth / max(self.max_depth, 1)]), phase_features, role_summary)))
-            centers.append(center)
             depths.append(depth)
             if node.left is not None:
                 node_depths[node.left] = depth + 1
                 node_depths[node.right] = depth + 1
-        return tree, torch.stack(centers), self.node_encoder(torch.stack(descriptors)), depths
+        # Batch the same weighted node reductions. The fixed gather follows
+        # each node's original anchor order; padding contributes exact zeros.
+        # One transfer builds all integer node rows, instead of many tiny
+        # device indexing/reduction launches for every hierarchy node.
+        width = max(len(node.anchor_indices) for node in tree.nodes)
+        rows = [list(node.anchor_indices) + [0] * (width - len(node.anchor_indices)) for node in tree.nodes]
+        indices = torch.tensor(rows, device=coords.device, dtype=torch.long)
+        valid = torch.arange(width, device=coords.device)[None] < torch.tensor(
+            [len(node.anchor_indices) for node in tree.nodes], device=coords.device)[:, None]
+        node_mass = torch.where(valid, mass[indices], torch.zeros_like(mass[indices]))
+        selected_coords = coords[indices]
+        centers = _pool(selected_coords, node_mass)
+        low = torch.where(valid[..., None], selected_coords, torch.full_like(selected_coords, torch.inf)).amin(1)
+        high = torch.where(valid[..., None], selected_coords, torch.full_like(selected_coords, -torch.inf)).amax(1)
+        extent = high - low
+        receiver_summary = _pool(receiver_states[indices], node_mass)
+        role_summary = _pool(F.one_hot(roles[indices], 8).to(states.dtype), node_mass)
+        module_mass, env_mass = measures["M"][case].sum(), measures["E"][case].sum()
+        statistics = torch.stack((module_mass.log1p(), env_mass.log1p(), (module_mass > 0).to(states.dtype),
+                                  (env_mass > 0).to(states.dtype)))
+        count = len(tree.nodes)
+        descriptors = torch.cat((receiver_summary, summaries["M"][case].expand(count, -1),
+            summaries["E"][case].expand(count, -1), global_token[case].expand(count, -1),
+            pad_geometry(centers / case_scale), pad_geometry(extent / case_scale), statistics.expand(count, -1),
+            centers.new_tensor(depths)[:, None] / max(self.max_depth, 1), phase_features.expand(count, -1), role_summary), -1)
+        return tree, centers, self.node_encoder(descriptors), depths
 
     def prepare(self, encoded: EncodedInterfaceCase, module_states: torch.Tensor,
-                *, phase: int = 0, soft: bool = False) -> TypedHypergraphState:
+                *, phase: int = 0, soft: bool = False, capture_topology: bool = False,
+                fixed_topology: TypedHypergraphState | None = None) -> TypedHypergraphState:
         phase = int(phase)
         if phase not in (0, 1, 2):
             raise ValueError("physical phase must be 0, 1 or 2")
         if encoded.module_centers.shape[-1] not in (2, 3):
             raise ValueError("receiver hierarchies support 2-D and 3-D geometry")
         catalogue = build_source_catalogue(encoded, module_states)
-        sources = {"M": module_states.detach(), "E": encoded.env_tokens.detach()}
-        global_token = encoded.global_token.detach()
+        if fixed_topology is not None:
+            if self.training or soft or fixed_topology.phase != phase:
+                raise ValueError("Fixed topology is evaluation-only and requires a matching hard physical phase")
+            validate_catalogue(catalogue, fixed_topology)
+        sources = {"M": self._continuous_input(module_states), "E": self._continuous_input(encoded.env_tokens)}
+        global_token = self._continuous_input(encoded.global_token)
         measures = catalogue["source_measures"]
         sources = {kind: torch.where(catalogue["source_valid"][kind][..., None], z,
                                      torch.zeros_like(z)) for kind, z in sources.items()}
@@ -227,20 +257,25 @@ class AdaptiveReceiverHypergraph(nn.Module):
         # Three case-local catalogues; mechanisms retain separate source
         # permissions/controls. No state is cached across coupling phases.
         index_cache = {}
+        all_source_logits, all_control_memberships = ({}, {}) if capture_topology else (None, None)
         source_embeddings = {kind: self.source_encoder(z) for kind, z in sources.items()}
         for tau in MECHANISMS:
             route_memberships, route_controls, route_centres, route_trees, route_gates, route_logits, counts = [], [], [], [], [], [], []
+            recorded_logits, recorded_memberships = ({"M": [], "E": []}, {"M": [], "E": []}) if capture_topology else (None, None)
             for case in range(batch):
                 case_scale = scale[0 if scale.shape[0] == 1 else case]
                 receiver_kind = "M" if tau in ("MM", "ME") else "E" if tau == "EM" else "Q"
                 key = case, receiver_kind
                 if key not in index_cache:
                     index_cache[key] = self._index(encoded, module_states, case, tau, case_scale,
-                                                   summaries, global_token, measures, phase_features)
+                                                   summaries, global_token, measures, phase_features,
+                                                   None if fixed_topology is None else fixed_topology.strategy_data["trees"][tau][case])
                 tree, centers, embeddings, depths = index_cache[key]
                 logits = self.split_head(embeddings).squeeze(-1)
                 leaf_mask = torch.tensor([not node.is_leaf for node in tree.nodes], device=logits.device)
-                if soft:
+                if fixed_topology is not None:
+                    split = fixed_topology.strategy_data["gates"][tau][case, :len(tree.nodes)].to(logits)
+                elif soft:
                     split = torch.sigmoid(logits / self.temperature) * leaf_mask
                 elif exercise_depth is not None:
                     split = torch.tensor([depth < exercise_depth for depth in depths], device=logits.device, dtype=logits.dtype) * leaf_mask
@@ -257,8 +292,17 @@ class AdaptiveReceiverHypergraph(nn.Module):
                     score_features = torch.cat((embeddings[:, None].expand(-1, z.shape[0], -1),
                                                 z[None].expand(len(tree.nodes), -1, -1), pad_geometry(relative), kind_flag), -1)
                     scores = self.source_scores[tau](score_features).squeeze(-1) - self.geometry_strength[tau] * relative.square().sum(-1)
-                    density = _membership(scores[None], measures[kind][case:case+1], soft=soft,
-                                          temperature=self.temperature)[0]
+                    if fixed_topology is None:
+                        density = _membership(scores[None], measures[kind][case:case+1], soft=soft,
+                                              temperature=self.temperature)[0]
+                    else:
+                        reference_logits = fixed_topology.strategy_data["all_source_logits"][tau][kind][case]
+                        reference_density = fixed_topology.strategy_data["all_control_memberships"][tau][kind][case]
+                        mu = measures[kind][case] / measures[kind][case].sum().clamp_min(1e-12)
+                        density = fixed_active_projection(scores, reference_logits, reference_density, mu)
+                    if capture_topology:
+                        recorded_logits[kind].append(scores)
+                        recorded_memberships[kind].append(density)
                     member_mass = density * measures[kind][case, None]
                     typed_membership[kind] = density
                     typed_summary[kind] = _pool(sources[kind][case, None].expand(len(tree.nodes), -1, -1), member_mass)
@@ -278,10 +322,11 @@ class AdaptiveReceiverHypergraph(nn.Module):
                 route_logits.append(F.pad(logits, (0, pad)))
                 # Count the actual frontier, excluding descendants of closed nodes.
                 pending, frontier = [0], 0
+                split_values = split.detach().cpu().tolist()
                 while pending:
                     index = pending.pop()
                     node = tree.nodes[index]
-                    if node.is_leaf or float(split[index].detach()) == 0:
+                    if node.is_leaf or split_values[index] == 0:
                         frontier += 1
                     else:
                         pending.extend((node.left, node.right))
@@ -292,19 +337,23 @@ class AdaptiveReceiverHypergraph(nn.Module):
             frontier_counts[tau] = module_states.new_tensor(counts)
             typed_admission[tau] = torch.stack([_frontier_admission(tree, gates[tau][case], self.capacity)
                                                  for case, tree in enumerate(trees[tau])])
+            if capture_topology:
+                all_source_logits[tau], all_control_memberships[tau] = recorded_logits, recorded_memberships
         admission = typed_admission["QM"]
         diagnostics = {"allocated_capacity": module_states.new_full((batch,), self.capacity),
                        "exploration": module_states.new_full((batch,), float(exercise_depth is not None)),
                        **{f"{tau}_frontier_groups": count for tau, count in frontier_counts.items()}}
+        probe_data = {"all_source_logits": all_source_logits, "all_control_memberships": all_control_memberships} if capture_topology else {}
         return TypedHypergraphState(memberships=memberships, controls=controls, centres=typed_centres["QM"],
                                     admission=admission, phase=phase, diagnostics=diagnostics,
                                     strategy_data={"trees": trees, "gates": gates, "split_logits": split_logits,
                                                    "typed_centres": typed_centres, "typed_admission": typed_admission,
-                                                   "soft": soft}, **catalogue)
+                                                   "soft": soft, **probe_data}, **catalogue)
 
     def access(self, state: TypedHypergraphState, receivers: torch.Tensor, mechanism: str,
                receiver_tokens: torch.Tensor | None = None, *, soft: bool = False,
-               pair_valid: torch.Tensor | None = None) -> TypedSourceAccess:
+               pair_valid: torch.Tensor | None = None, capture_topology: bool = False,
+               fixed_receiver_access: dict | None = None) -> TypedSourceAccess:
         del receiver_tokens, soft
         tau = str(mechanism).upper()
         if tau not in MECHANISMS:
@@ -321,6 +370,14 @@ class AdaptiveReceiverHypergraph(nn.Module):
         edge_access = torch.stack(access)
         if receiver_valid is not None:
             edge_access = torch.where(receiver_valid[..., None], edge_access, torch.zeros_like(edge_access))
+        if fixed_receiver_access is not None:
+            active = fixed_receiver_access["edge_access"].to(edge_access) > 0
+            if bool((active & (edge_access <= 0)).any()):
+                raise FixedTopologyInvalid("Recorded tree receiver connection reached zero along the local path")
+            edge_access = torch.where(active, edge_access, torch.zeros_like(edge_access))
+            total = edge_access.sum(-1, keepdim=True)
+            original_total = fixed_receiver_access["edge_access"].to(edge_access).sum(-1, keepdim=True)
+            edge_access = edge_access * (original_total / torch.where(total > 0, total, torch.ones_like(total)))
         kind = "M" if tau in ("MM", "EM", "QM") else "E"
         if tau == "MM" and pair_valid is None:
             if receivers.shape[1] != state.source_coords["M"].shape[1]:

@@ -197,6 +197,7 @@ def _validate_core_sections(core: Mapping[str, Any]) -> None:
             "structural_weight", "structural_ramp_start", "structural_ramp_end",
             "microbatch_size",
             "response_stencils",
+            "native_loss_denominators_start_epoch", "physical_loss_policy_version",
         }
         _reject_unknown(campaign, allowed_campaign, label="core.training.campaign")
         if int(campaign.get("schedule_total_epochs", 5000)) < int(training.get("epochs", 0)):

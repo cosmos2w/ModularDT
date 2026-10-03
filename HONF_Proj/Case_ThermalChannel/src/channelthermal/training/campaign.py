@@ -14,12 +14,15 @@ from typing import Any
 
 import torch
 
+from .native_denominators import physical_denominator_masses, physical_normalization_weights
+
 CAMPAIGN_KEYS = {
     "name", "arm", "version", "parent", "schedule_total_epochs",
     "require_full_epoch", "matched_fresh_initialization", "gpu_telemetry",
     "structural_weight", "structural_ramp_start", "structural_ramp_end",
     "microbatch_size",
     "response_stencils",
+    "native_loss_denominators_start_epoch", "physical_loss_policy_version",
 }
 HYPERGRAPH_ARCHITECTURES = frozenset({
     "adaptive_receiver_hypergraph_honf", "overlap_control_hypergraph_honf",
@@ -90,10 +93,15 @@ def validate_campaign(config: dict[str, Any], *, max_train_batches: int | None =
     if settings.get("matched_fresh_initialization", False) and int(training.get("seed", -1)) != 0:
         raise ValueError("The primary matched fresh campaign uses seed 0.")
     settings["schedule_total_epochs"] = horizon
+    if settings.get("native_loss_denominators_start_epoch") is not None:
+        if int(settings["native_loss_denominators_start_epoch"]) != 101 or settings.get("physical_loss_policy_version") != 2:
+            raise ValueError("Native denominator policy 2 begins at epoch 101 after the common initial 100-epoch screen.")
+    elif settings.get("physical_loss_policy_version", 1) != 1:
+        raise ValueError("Physical loss policy 2 requires its explicit native denominator activation epoch.")
     return settings
 
 
-def validate_campaign_resume(checkpoint: dict[str, Any], config: dict[str, Any]) -> None:
+def validate_campaign_resume(checkpoint: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
     """Keep data/task/optimizer policy and absolute schedule unchanged at stage resumes."""
 
     current = config.get("training", {}).get("campaign")
@@ -102,8 +110,21 @@ def validate_campaign_resume(checkpoint: dict[str, Any], config: dict[str, Any])
     saved = checkpoint.get("train_config", {})
     saved_training = saved.get("training", {})
     current_training = config.get("training", {})
-    if saved_training.get("campaign") != current:
-        raise ValueError("Campaign resume cannot reset or silently amend its schedule/lineage.")
+    amendment = None
+    saved_campaign = saved_training.get("campaign") or {}
+    if saved_campaign != current:
+        policy_keys = {"native_loss_denominators_start_epoch", "physical_loss_policy_version"}
+        previous = {key: value for key, value in saved_campaign.items() if key not in policy_keys}
+        requested = {key: value for key, value in current.items() if key not in policy_keys}
+        if (previous != requested or int(checkpoint.get("epoch", 0)) != 100
+                or saved_campaign.get("physical_loss_policy_version", 1) != 1
+                or saved_campaign.get("native_loss_denominators_start_epoch") is not None
+                or current.get("physical_loss_policy_version") != 2
+                or current.get("native_loss_denominators_start_epoch") != 101):
+            raise ValueError("Campaign resume cannot reset or silently amend its schedule/lineage.")
+        amendment = {"physical_loss_policy_from": 1, "physical_loss_policy_to": 2,
+                     "checkpoint_epoch": 100, "activation_epoch": 101,
+                     "scope": "explicit common native query/module/valid-port denominators; architecture version unchanged"}
     for section in ("dataset", "loss"):
         if saved.get(section) != config.get(section):
             raise ValueError(f"Campaign resume changed {section}; record a separate training-policy version.")
@@ -114,6 +135,7 @@ def validate_campaign_resume(checkpoint: dict[str, Any], config: dict[str, Any])
         raise ValueError("Campaign continuation requires optimizer and RNG checkpoint state.")
     if current_training.get("amp") and not checkpoint.get("scaler_state_dict"):
         raise ValueError("AMP campaign continuation requires gradient-scaler checkpoint state.")
+    return amendment
 
 
 def copy_matched_physical_initial_state(target: torch.nn.Module, canonical: torch.nn.Module) -> dict[str, Any]:
@@ -161,16 +183,18 @@ def gpu_contention_sample(device: torch.device) -> dict[str, Any]:
 class CampaignMicrobatchLoader:
     """Split native bucket batches while preserving case-weighted optimizer steps."""
 
-    def __init__(self, loader: Any, microbatch_size: int):
+    def __init__(self, loader: Any, microbatch_size: int, *, native_loss_denominators: bool = False):
         self.loader = loader
         self.dataset = loader.dataset
         self.microbatch_size = int(microbatch_size)
+        self.native_loss_denominators = native_loss_denominators
         if self.microbatch_size <= 0:
             raise ValueError("Campaign microbatch_size must be positive.")
 
     def __iter__(self):
         for batch_index, batch in enumerate(self.loader):
             count = int(batch["field_targets"].shape[0])
+            native_masses = physical_denominator_masses(batch) if self.native_loss_denominators else None
             def sliced(value: Any, start: int, stop: int, count: int = count) -> Any:
                 if torch.is_tensor(value) and value.ndim and value.shape[0] == count:
                     return value[start:stop]
@@ -185,5 +209,7 @@ class CampaignMicrobatchLoader:
                 result["_optimizer_start"] = start == 0
                 result["_optimizer_boundary"] = stop == count
                 result["_accumulation_weight"] = (stop - start) / count
+                if native_masses is not None:
+                    result["_native_loss_normalization_weights"] = physical_normalization_weights(result, native_masses, (stop-start)/count)
                 result["_auxiliary_due"] = batch_index == len(self.loader) - 1 and stop == count
                 yield result

@@ -1,0 +1,15 @@
+{
+  "source": "existing physical_response_atlas_20260926",
+  "partition_label": "four exposed calibration families and four stored generated challenges; not a fresh test",
+  "selection": "all established non-training families at M3, M5, M7 and M10",
+  "stencils": [
+    "project://diagnostics/generated/interactions/physical_response_atlas_20260926/families/calibration_0310_responses.npz",
+    "project://diagnostics/generated/interactions/physical_response_atlas_20260926/families/calibration_0325_responses.npz",
+    "project://diagnostics/generated/interactions/physical_response_atlas_20260926/families/calibration_0340_responses.npz",
+    "project://diagnostics/generated/interactions/physical_response_atlas_20260926/families/calibration_0355_responses.npz",
+    "project://diagnostics/generated/interactions/physical_response_atlas_20260926/families/final_review_generated_M3_seed20260929_responses.npz",
+    "project://diagnostics/generated/interactions/physical_response_atlas_20260926/families/final_review_generated_M5_seed20260931_responses.npz",
+    "project://diagnostics/generated/interactions/physical_response_atlas_20260926/families/final_review_generated_M7_seed20260933_responses.npz",
+    "project://diagnostics/generated/interactions/physical_response_atlas_20260926/families/final_review_generated_M10_seed20260936_responses.npz"
+  ]
+}

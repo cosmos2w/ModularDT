@@ -92,12 +92,14 @@ def fixed_total_heat_inference(predictor: HeatPrediction, observed: torch.Tensor
                               initial_fraction: torch.Tensor, *, mode: str = "joint",
                               steps: int = 30, learning_rate: float = .05,
                               block_stream: tuple[float, ...] | None = None,
-                              permutation_stream: tuple[torch.Tensor, ...] | None = None) -> HeatInferenceTrail:
+                              permutation_stream: tuple[torch.Tensor, ...] | None = None,
+                              block_size_stream: tuple[int, ...] | None = None) -> HeatInferenceTrail:
     """Projected Adam with fixed-total block proposals and same-sized controls.
 
     ``graph`` selects an actual input-only source group. ``ungrouped`` chooses
-    the same number of active modules from a caller-specified permutation
-    stream. The group is fixed during each proposal; the next prediction
+    the number of active modules recorded on the graph trajectory when
+    ``block_size_stream`` is supplied, from a caller-specified permutation
+    stream. Otherwise sizes follow its own current groups. The group is fixed during each proposal; the next prediction
     rebuilds connectivity. If no useful group exists, use a full joint step
     and report the fallback separately.
     """
@@ -112,6 +114,13 @@ def fixed_total_heat_inference(predictor: HeatPrediction, observed: torch.Tensor
     fractions = _project_simplex(initial_fraction[None], active[None])[0].detach().requires_grad_()
     optimizer = torch.optim.Adam((fractions,), lr=learning_rate)
     ids = torch.nonzero(active.bool(), as_tuple=False).flatten()
+    deterministic = ids.numel() == 1 or float(total) == 0
+    if block_size_stream is not None:
+        if mode != "ungrouped":
+            raise ValueError("A recorded block-size stream applies only to ungrouped controls")
+        if not deterministic and (len(block_size_stream) < steps or any(
+                not isinstance(size, int) or not 2 <= size <= ids.numel() for size in block_size_stream[:steps])):
+            raise ValueError("Recorded block sizes must cover every step and lie between two and active M")
     block_stream = block_stream or tuple(0.0 for _ in range(steps))
     permutation_stream = permutation_stream or tuple(ids for _ in range(steps))
     if len(block_stream) < steps or len(permutation_stream) < steps:
@@ -120,7 +129,6 @@ def fixed_total_heat_inference(predictor: HeatPrediction, observed: torch.Tensor
     peaks, pressure, selected, elapsed = [], [], [], []
     meaningful, fallbacks, actual_steps = 0, 0, 0
     start = perf_counter()
-    deterministic = ids.numel() == 1 or float(total) == 0
     for iteration in range((0 if deterministic else steps) + 1):
         heat = fractions * total
         prediction = predictor(heat)
@@ -147,7 +155,15 @@ def fixed_total_heat_inference(predictor: HeatPrediction, observed: torch.Tensor
         chosen = ids
         if mode != "joint":
             nontrivial = tuple(group for group in groups if group.numel() < ids.numel())
-            if nontrivial:
+            if mode == "ungrouped" and block_size_stream is not None:
+                size = block_size_stream[iteration]
+                meaningful += int(size < ids.numel())
+                fallbacks += int(size == ids.numel())
+                permutation = torch.as_tensor(permutation_stream[iteration], device=ids.device)
+                if not torch.equal(permutation.sort().values, ids):
+                    raise ValueError("Ungrouped stream must permute every active physical module exactly once")
+                chosen = permutation[:size]
+            elif nontrivial:
                 index = min(len(nontrivial) - 1, int(block_stream[iteration] * len(nontrivial)))
                 group = nontrivial[index]
                 meaningful += 1

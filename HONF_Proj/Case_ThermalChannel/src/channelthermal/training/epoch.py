@@ -186,7 +186,8 @@ def interface_loss(output: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dict
     return (per_value * mask).sum() / (mask.sum() * pred.new_tensor(float(pred.shape[-2] * pred.shape[-1]))).clamp_min(1.0e-6)
 
 
-def port_condition_loss(output: Dict[str, Any], batch: Dict[str, Any], loss_cfg: Dict[str, Any]) -> torch.Tensor:
+def port_condition_loss(output: dict[str, Any], batch: dict[str, Any], loss_cfg: dict[str, Any], *,
+                        temperature_normalization_weight: float = 1., h_normalization_weight: float = 1.) -> torch.Tensor:
     """Perform the port condition loss operation used by this module."""
 
     pred = output["pred_port_condition"]
@@ -211,6 +212,10 @@ def port_condition_loss(output: Dict[str, Any], batch: Dict[str, Any], loss_cfg:
     else:
         raise ValueError(f"port_h_loss_type must be 'mse' or 'smooth_l1', got {h_loss_type!r}.")
     loss_h = (h_error * h_mask).sum() / h_mask.sum().clamp_min(1.0e-6)
+    if temperature_normalization_weight != 1.:
+        loss_t = loss_t * temperature_normalization_weight
+    if h_normalization_weight != 1.:
+        loss_h = loss_h * h_normalization_weight
     return float(loss_cfg.get("port_temperature_weight", 1.0)) * loss_t + float(loss_cfg.get("port_h_weight", 1.0)) * loss_h
 
 
@@ -392,6 +397,7 @@ def assemble_channelthermal_loss_terms(
     effective_internal_temperature_weight: float,
     effective_interface_weight: float,
     predicted_consistency_weight: float,
+    native_normalization_weights: dict[str, float] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Assemble the physical objective and the optional induced-pair term.
 
@@ -411,6 +417,9 @@ def assemble_channelthermal_loss_terms(
         field_names=model.config.channelthermal.field_names,
         point_weights=point_weights,
     )
+    normalization = native_normalization_weights or {"field": 1., "module": 1., "valid_h": 1.}
+    if native_normalization_weights is not None:
+        loss_field = loss_field * normalization["field"]
     zero = output["pred_field"].new_zeros(())
     loss_internal = internal_loss(output, batch) if effective_internal_temperature_weight != 0.0 else zero
     loss_interface = interface_loss(output, batch, loss_cfg) if effective_interface_weight != 0.0 else zero
@@ -421,7 +430,9 @@ def assemble_channelthermal_loss_terms(
         loss_cfg.get("port_supervised_weight", loss_cfg.get("port_condition_weight", 0.0))
     )
     port_smoothness_weight = float(loss_cfg.get("port_smoothness_weight", 0.0))
-    loss_port = port_condition_loss(output, batch, loss_cfg) if port_supervised_weight != 0.0 else zero
+    loss_port = port_condition_loss(output, batch, loss_cfg,
+        temperature_normalization_weight=normalization["module"],
+        h_normalization_weight=normalization["valid_h"]) if port_supervised_weight != 0.0 else zero
     loss_port_smoothness = (
         port_cyclic_smoothness_loss(output, batch) if port_smoothness_weight != 0.0 else zero
     )
@@ -444,6 +455,14 @@ def assemble_channelthermal_loss_terms(
         pred_cons_internal = zero
         pred_cons_interface = zero
         loss_predicted_consistency = zero
+    if native_normalization_weights is not None:
+        loss_internal = loss_internal * normalization["module"]
+        loss_interface = loss_interface * normalization["module"]
+        loss_port_smoothness = loss_port_smoothness * normalization["module"]
+        loss_port_global = loss_port_global * normalization["module"]
+        pred_cons_internal = pred_cons_internal * normalization["module"]
+        pred_cons_interface = pred_cons_interface * normalization["module"]
+        loss_predicted_consistency = loss_predicted_consistency * normalization["module"]
     loss_org = organizer_regularization(output, loss_cfg)
 
     budget_enabled, budget_weight = _case_group_budget_settings(model, loss_cfg)
@@ -626,6 +645,7 @@ def run_epoch(
         native_batches += int(optimizer_boundary)
         accumulation_weight = float(batch.pop("_accumulation_weight", 1.0))
         auxiliary_due = bool(batch.pop("_auxiliary_due", False))
+        native_normalization_weights = batch.pop("_native_loss_normalization_weights", None)
         batch = recursive_to_device(batch, device)
         target = batch["field_targets"].float()
         batch_cases = int(target.shape[0])
@@ -658,6 +678,7 @@ def run_epoch(
                     effective_internal_temperature_weight=effective_internal_temperature_weight,
                     effective_interface_weight=effective_interface_weight,
                     predicted_consistency_weight=predicted_consistency_weight,
+                    native_normalization_weights=native_normalization_weights,
                 )
                 loss = loss_terms["loss"]
                 structural_cost = output.get("campaign_structural_cost")

@@ -89,7 +89,9 @@
         "project://diagnostics/generated/interactions/physical_response_atlas_20260926/families/train_0335_responses.npz",
         "project://diagnostics/generated/interactions/physical_response_atlas_20260926/families/train_0348_responses.npz",
         "project://diagnostics/generated/interactions/physical_response_atlas_20260926/families/train_0350_responses.npz"
-      ]
+      ],
+      "physical_loss_policy_version": 2,
+      "native_loss_denominators_start_epoch": 101
     }
   },
   "checkpointing": {

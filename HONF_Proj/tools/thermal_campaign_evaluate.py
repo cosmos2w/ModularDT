@@ -20,12 +20,12 @@ import numpy as np
 import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-for source_root in (PROJECT_ROOT / "src", PROJECT_ROOT / "Case_ThermalChannel/src"):
+for source_root in (PROJECT_ROOT / "src", PROJECT_ROOT / "Case_ThermalChannel/src", PROJECT_ROOT / "tools"):
     if str(source_root) not in sys.path:
         sys.path.insert(0, str(source_root))
 
 INTERVENTIONS = ("normal", "full_access", "root_union", "control_identity",
-                 "geometry_control", "effective_rewire", "source_group_exchange", "fixed_frontier")
+                 "geometry_control", "effective_rewire", "source_group_exchange", "fixed_frontier", "fixed_summary")
 
 
 def physical_errors(prediction, reference, mask=None):
@@ -127,12 +127,15 @@ def screen_indices(dataset, count=18):
     for modules, entries in strata.items():
         entries.sort()
         # Endpoints first, then progressively cover each context-sorted stratum.
-        order = []
-        for position in np.linspace(0, len(entries) - 1, len(entries)).astype(int):
-            if position not in order:
-                order.append(position)
-        if len(order) > 1:
-            order = [order[0], order[-1], *order[1:-1]]
+        order = [0] if len(entries) == 1 else [0, len(entries) - 1]
+        gaps = [(0, len(entries) - 1)]
+        while gaps:
+            left, right = max(gaps, key=lambda interval: (interval[1] - interval[0], -interval[0]))
+            gaps.remove((left, right))
+            if right - left > 1:
+                middle = (left + right) // 2
+                order.append(middle)
+                gaps.extend(((left, middle), (middle, right)))
         strata[modules] = [entries[position][1] for position in order]
     selected = []
     while len(selected) < count and any(strata.values()):
@@ -140,6 +143,22 @@ def screen_indices(dataset, count=18):
             if strata[modules] and len(selected) < count:
                 selected.append(strata[modules].pop(0))
     return selected
+
+
+def fixed_screen_indices(dataset, panel_path, count):
+    """Replay the input-only panel used by the first completed screen."""
+    specification = json.loads(Path(panel_path).read_text())
+    if specification["split"] != dataset.split:
+        raise ValueError("Fixed campaign panel belongs to a different partition")
+    case_ids = specification["case_ids"]
+    if len(set(case_ids)) != len(case_ids) or any(str(value).lstrip("0") == "273" for value in case_ids):
+        raise ValueError("Fixed screen IDs repeat or contain the known development duplicate")
+    lookup = {str(case_id): index for index, case_id in enumerate(dataset.selected_case_ids)}
+    if any(case_id not in lookup for case_id in case_ids):
+        raise ValueError("Fixed campaign panel is missing from this dataset")
+    if count > len(case_ids):
+        raise ValueError("Requested fixed screen exceeds its predeclared size")
+    return [lookup[case_id] for case_id in case_ids[:count]]
 
 
 @contextmanager
@@ -171,6 +190,38 @@ def _arrays(prefix, value, output):
             _arrays(f"{prefix}/{key}", child, output)
 
 
+def calibrate_training_summary(model, checkpoint, dataset_path, *, count=600):
+    """Collect P0/P1/P2 controls from training physical inputs, without labels."""
+    from channelthermal.data.datasets import GlobalChannelThermalDataset
+    from thermal_campaign_heat_inference import native_heat_predictor, sensor_panel
+
+    from honf_forward_core.interface_fields.training_population_summary import TrainingPopulationSummaryAccumulator
+    dataset = GlobalChannelThermalDataset(dataset_path, split="train", points_per_case=1,
+        random_point_sampling=False, include_grid=True)
+    organizer = model.core.backend.organizer
+    accumulator = TrainingPopulationSummaryAccumulator()
+    original = organizer.prepare
+    selected = list(range(len(dataset))) if count >= len(dataset) else screen_indices(dataset, count)
+
+    def collect(*args, **kwargs):
+        state = original(*args, **kwargs)
+        accumulator.add(state, partition=dataset.split)
+        return state
+
+    organizer.prepare = collect
+    try:
+        with torch.no_grad():
+            for index in selected:
+                sample = dataset[index]
+                sensors, _, _, observed_rows, held_rows = sensor_panel(sample)
+                predictor, _ = native_heat_predictor(model, checkpoint, sample, sensors, observed_rows, held_rows)
+                heat = torch.as_tensor(sample["structure"]["heat_powers"], device=next(model.parameters()).device)
+                predictor(heat)
+    finally:
+        organizer.prepare = original
+    return accumulator.finish(), [str(dataset.selected_case_ids[index]) for index in selected]
+
+
 def evaluate(args):
     from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer
     from channelthermal.evaluation.loading import load_model
@@ -181,6 +232,11 @@ def evaluate(args):
     checkpoint_path = args.checkpoint.expanduser().resolve()
     device = torch.device(args.device)
     model, checkpoint = load_model(checkpoint_path, device)
+    executor = getattr(model.core.backend, "set_execution_mode", None)
+    if callable(executor):
+        executor(args.executor, receiver_chunk_size=args.executor_receiver_chunk)
+    elif args.executor != "dense_masked_reference":
+        raise ValueError("The rectangular subset executor is supported by typed campaign candidates only")
     dataset_config = checkpoint.get("train_config", {}).get("dataset", {})
     dataset_path = resolve_demo_path(args.dataset or dataset_config["packed_h5_path"])
     stats = {key: np.asarray(value, dtype=np.float32) for key, value in checkpoint.get("global_normalization_stats", {}).items()}
@@ -192,14 +248,38 @@ def evaluate(args):
         random_point_sampling=False, include_grid=True)
     if normalized.selected_case_ids != raw.selected_case_ids:
         raise ValueError("Normalized and physical dataset indices differ")
-    indices = screen_indices(raw, args.panel_size) if args.stage == 100 else list(range(len(raw)))
+    indices = (fixed_screen_indices(raw, args.panel_config, args.panel_size)
+               if args.stage == 100 and args.panel_config is not None else
+               screen_indices(raw, args.panel_size) if args.stage == 100 else list(range(len(raw))))
     output = args.output_dir.expanduser().resolve()
     if output.is_relative_to(PROJECT_ROOT) and not any(output.is_relative_to(PROJECT_ROOT / root) for root in ("diagnostics", "Trained_Results")):
         raise ValueError("Generated evaluation evidence must live in ignored diagnostics or Trained_Results")
     output.mkdir(parents=True, exist_ok=True)
+    if "fixed_summary" in args.interventions:
+        if not hasattr(model.core.backend, "organizer"):
+            raise ValueError("Universal fixed-summary intervention requires a typed candidate")
+        summary, calibration_ids = calibrate_training_summary(model, checkpoint, dataset_path,
+            count=args.fixed_summary_train_cases)
+        model.core.backend.training_population_summary = summary
+        controls = {f"P{phase}/{tau}": value.cpu().numpy() for phase, values in summary.controls.items()
+                    for tau, value in values.items()}
+        np.savez_compressed(output / "training_summary_controls.npz", **controls)
+        (output / "training_summary_calibration.json").write_text(json.dumps({
+            "partition": "train", "case_ids": calibration_ids, "phase_case_counts": summary.case_counts,
+            "source_bearing_case_counts": summary.source_bearing_case_counts,
+            "operator": "universal root, uniform valid-source membership, fixed typed controls; fine values/geometry remain live",
+            "work_matching": "not work matched; universal full-access work reported"}, indent=2) + "\n")
     rows = []
     channel_order = list(raw.channel_order)
-    graph_panel = set(screen_indices(raw, min(args.graph_panel_size, len(raw))))
+    if args.panel_config is not None:
+        fixed_size = len(json.loads(args.panel_config.read_text())["case_ids"])
+        graph_indices = fixed_screen_indices(raw, args.panel_config, min(args.graph_panel_size, fixed_size))
+        if args.graph_panel_size > fixed_size:
+            graph_indices = list(dict.fromkeys(
+                [*graph_indices, *screen_indices(raw, len(raw))]))[:args.graph_panel_size]
+    else:
+        graph_indices = screen_indices(raw, min(args.graph_panel_size, len(raw)))
+    graph_panel = set(graph_indices)
     for index in indices:
         sample, reference = normalized[index], raw[index]
         case_id = str(reference["case_id"])
@@ -265,6 +345,32 @@ def evaluate(args):
                             changed[tau] = int(np.count_nonzero(support != baseline[key]))
                 row["changed_anchor_pairs"] = changed
                 row["effective_pair_intervention"] = any(changed.values())
+                if normal_path.exists():
+                    baseline_row = json.loads((normal_path.parent / "metrics.json").read_text())
+                    row["work_delta_from_normal"] = {key: value - baseline_row["work"][key]
+                        for key, value in work.items() if key in baseline_row["work"]}
+                    pairs = {key: delta for key, delta in row["work_delta_from_normal"].items() if key.endswith("unique_pairs")}
+                    row["unique_pair_work_matched"] = bool(pairs) and all(delta == 0 for delta in pairs.values())
+                    with np.load(normal_path, allow_pickle=False) as baseline:
+                        row["source_group_incidence_comparison"] = {}
+                        for tau in plan.memberships:
+                            key = f"graph/source_membership/{tau}"
+                            before, after = baseline[key], arrays[key]
+                            kind = "M" if tau in ("MM", "EM", "QM") else "E"
+                            mu = arrays[f"graph/source_measures/{kind}"][:, None]
+                            admitted_key = f"graph/typed_admission/{tau}"
+                            before_admission = baseline[admitted_key] if admitted_key in baseline else baseline["graph/group_admission"]
+                            after_admission = arrays.get(admitted_key, arrays["graph/group_admission"])
+                            row["source_group_incidence_comparison"][tau] = {
+                                "normal_positive_incidence": int(np.count_nonzero(before)),
+                                "intervention_positive_incidence": int(np.count_nonzero(after)),
+                                "normal_admitted_positive_incidence": int(np.count_nonzero(before * (before_admission > 0)[..., None])),
+                                "intervention_admitted_positive_incidence": int(np.count_nonzero(after * (after_admission > 0)[..., None])),
+                                "membership_multiset_equal": bool(np.allclose(np.sort(before, axis=-1), np.sort(after, axis=-1))),
+                                "all_group_membership_multiset_equal": bool(np.allclose(np.sort(before.reshape(before.shape[0], -1), axis=-1),
+                                                                                         np.sort(after.reshape(after.shape[0], -1), axis=-1))),
+                                "normal_group_mass": (before * mu).sum(-1).tolist(),
+                                "intervention_group_mass": (after * mu).sum(-1).tolist()}
             rows.append(row)
             (directory / "metrics.json").write_text(json.dumps(row, indent=2, allow_nan=False) + "\n")
             write_summary(output, rows, checkpoint_path, checkpoint, args, dataset_path, indices, channel_order)
@@ -284,10 +390,13 @@ def write_summary(output, rows, checkpoint_path, checkpoint, args, dataset_path,
         "evidence_partition": "previously exposed development", "channel_order": channel_order,
         "channel_units": "benchmark physical scales; units must be read from generator metadata before dimensional claims",
         "reference_limit": "stored analytic-wake/shared-grid benchmark; q_normal is a proxy; no new physical solves",
+        "fine_executor": args.executor,
+        "executor_scope": "fine message/geometry rows and attention cells; policy moments/control projections remain dense",
         "port_mode": "predicted", "near_definition": "fluid within two native module radii",
         "planned_case_indices": indices, "completed_normal_cases": len(normal),
+        "fixed_screen_configuration": str(args.panel_config) if args.panel_config is not None else None,
         "primary_excluding_0273": aggregate_physical(primary), "compatibility_including_0273": aggregate_physical(normal),
-        "unavailable_interventions": ["training_population_fixed_summary", "independently_retrained_fixed_K"],
+        "unavailable_interventions": ["independently_retrained_fixed_K"],
         "rows": rows}
     (output / "summary.json").write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
 
@@ -301,14 +410,21 @@ def parse_args(argv=None):
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--panel-size", type=int, default=18)
+    parser.add_argument("--panel-config", type=Path,
+                        default=PROJECT_ROOT / "src/config_core/evaluation/thermal_campaign_e100_panel.json")
     parser.add_argument("--graph-panel-size", type=int, default=4)
     parser.add_argument("--query-batch-size", type=int, default=1024)
+    parser.add_argument("--executor", choices=("dense_masked_reference", "rectangular_subset"),
+                        default="dense_masked_reference")
+    parser.add_argument("--executor-receiver-chunk", type=int, default=128)
     parser.add_argument("--interventions", nargs="+", choices=INTERVENTIONS, default=["normal"])
     parser.add_argument("--inverse-cases", type=int, default=0)
     parser.add_argument("--inverse-starts", type=int, default=3)
     parser.add_argument("--inverse-steps", type=int, default=30)
+    parser.add_argument("--fixed-summary-train-cases", type=int, default=600)
     args = parser.parse_args(argv)
-    if min(args.panel_size, args.graph_panel_size, args.query_batch_size) < 1:
+    if min(args.panel_size, args.graph_panel_size, args.query_batch_size,
+           args.fixed_summary_train_cases, args.executor_receiver_chunk) < 1:
         parser.error("panel and query sizes must be positive")
     if args.interventions[0] != "normal" or len(set(args.interventions)) != len(args.interventions):
         parser.error("interventions must start with normal and must not repeat")

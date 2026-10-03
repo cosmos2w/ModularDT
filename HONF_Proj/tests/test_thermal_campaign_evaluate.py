@@ -1,6 +1,9 @@
 """Physical metrics and input-only development panel selection."""
 
+import copy
 import importlib.util
+import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -72,3 +75,94 @@ def test_empty_region_and_bad_shapes_are_explicit():
     assert metric["count"] == 0 and metric["rmse"] is None
     with pytest.raises(ValueError, match="shapes differ"):
         evaluation.physical_errors(np.zeros(2), np.zeros(3))
+
+
+def test_small_context_panel_covers_endpoints_then_interior():
+    ids = [f"{index:04d}" for index in range(9)]
+    groups = {case_id: {"module_present": np.ones(3), "heat_powers": np.asarray([index]),
+        "material_parameters": SimpleNamespace(attrs={"u_in": index})} for index, case_id in enumerate(ids)}
+    dataset = SimpleNamespace(selected_case_ids=ids, h5={"cases": groups})
+    assert evaluation.screen_indices(dataset, count=3) == [0, 8, 4]
+
+
+def test_fixed_campaign_screen_preserves_case_identity_across_index_order(tmp_path):
+    panel = tmp_path / "panel.json"
+    panel.write_text(json.dumps({"split": "test", "case_ids": ["0003", "0001"]}))
+    dataset = SimpleNamespace(split="test", selected_case_ids=["0001", "0002", "0003"])
+    assert evaluation.fixed_screen_indices(dataset, panel, 2) == [2, 0]
+    dataset.selected_case_ids.reverse()
+    assert evaluation.fixed_screen_indices(dataset, panel, 2) == [0, 2]
+    with pytest.raises(ValueError, match="predeclared size"):
+        evaluation.fixed_screen_indices(dataset, panel, 3)
+
+
+def test_inverse_trail_atomic_write_keeps_previous_complete_file_on_interruption(tmp_path, monkeypatch):
+    from thermal_campaign_heat_inference import atomic_npz, completed_trial
+    path = tmp_path / "trial.npz"
+    values = np.ones((4, 2))
+    atomic_npz(path, iterations=np.arange(4), heat=values,
+               observed_predictions=values, held_predictions=values)
+    record = {"optimizer_steps": 3}
+    assert completed_trial(path, record, steps=3)
+    previous = path.read_bytes()
+
+    def interrupted(stream, **_arrays):
+        stream.write(b"partial checkpoint")
+        raise OSError("simulated interrupted disk write")
+
+    monkeypatch.setattr(np, "savez_compressed", interrupted)
+    with pytest.raises(OSError, match="interrupted disk"):
+        atomic_npz(path, iterations=np.arange(4))
+    assert path.read_bytes() == previous
+    assert completed_trial(path, record, steps=3)
+    assert not completed_trial(path, record, steps=30)
+    corrupt = tmp_path / "corrupt.npz"
+    corrupt.write_bytes(b"partial archive")
+    assert not completed_trial(corrupt, record, steps=3)
+
+
+@pytest.mark.skipif(not os.environ.get("HONF_ALIGNMENT_THERMAL_CHECKPOINT"), reason="Needs retained native Thermal resources")
+def test_native_train_only_summary_calibration_and_held_input_intervention():
+    import torch
+    from channelthermal.data.datasets import GlobalChannelThermalDataset
+    from channelthermal.evaluation.loading import load_model
+    from thermal_campaign_heat_inference import native_heat_predictor, sensor_panel
+
+    from honf_forward_core.interface_fields.core import InterfaceFieldCore
+
+    model, checkpoint = load_model(Path(os.environ["HONF_ALIGNMENT_THERMAL_CHECKPOINT"]), torch.device("cpu"))
+    model.config.core_honf.forward_architecture = "adaptive_receiver_hypergraph_honf"
+    model.core = InterfaceFieldCore(model.config.core_honf)
+    model.eval()
+    dataset_path = checkpoint["train_config"]["dataset"]["packed_h5_path"]
+    summary, ids = evaluation.calibrate_training_summary(model, checkpoint, dataset_path, count=2)
+    train = GlobalChannelThermalDataset(dataset_path, split="train", points_per_case=1, include_grid=True)
+    held = GlobalChannelThermalDataset(dataset_path, split="test", points_per_case=1, include_grid=True)
+    assert set(ids).issubset(set(train.selected_case_ids)) and not set(ids).intersection(held.selected_case_ids)
+    assert summary.case_counts == {0: 2, 1: 2, 2: 2}
+    model.core.backend.training_population_summary = summary
+    sample = held[0]
+    sensors, _, _, observed, unseen = sensor_panel(sample)
+    predictor, _ = native_heat_predictor(model, checkpoint, sample, sensors, observed, unseen)
+    heat = torch.as_tensor(sample["structure"]["heat_powers"])
+    with torch.no_grad(), evaluation.intervention(model, "fixed_summary"):
+        prediction = predictor(heat)
+    assert torch.isfinite(prediction["observed"]).all()
+    assert model.core.backend.plan_intervention == "normal"
+    model.requires_grad_(False)
+    caller_heat = heat.clone().requires_grad_()
+    with evaluation.intervention(model, "fixed_summary"):
+        live = predictor(caller_heat)
+        gradient, = torch.autograd.grad(live["observed"].sum(), caller_heat)
+    assert torch.isfinite(gradient).all() and gradient.abs().sum() > 0
+    assert all(parameter.grad is None for parameter in model.parameters())
+    damaged = copy.deepcopy(sample)
+    for key in ("steady_field", "interface_target", "module_internal_temperature_points", "teacher_port_tokens"):
+        damaged[key][...] = np.nan
+    damaged["interface_condition"][..., 3:] = np.nan
+    damaged["structure"]["heat_powers"] += 1000
+    no_labels, _ = native_heat_predictor(model, checkpoint, damaged, sensors, observed, unseen)
+    with torch.no_grad(), evaluation.intervention(model, "fixed_summary"):
+        target_free = no_labels(heat)
+    for key in ("observed", "held", "peaks", "pressure"):
+        torch.testing.assert_close(target_free[key], live[key])

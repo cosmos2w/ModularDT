@@ -12,6 +12,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from zipfile import BadZipFile
 
 import numpy as np
 import torch
@@ -22,6 +23,39 @@ for source in (PROJECT_ROOT / "src", PROJECT_ROOT / "Case_ThermalChannel/src", P
         sys.path.insert(0, str(source))
 
 from thermal_campaign_evaluate import screen_indices
+
+
+def atomic_json(path, payload):
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
+    temporary.replace(path)
+
+
+def atomic_npz(path, **arrays):
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("wb") as stream:
+        np.savez_compressed(stream, **arrays)
+    temporary.replace(path)
+
+
+def completed_trial(path, record, *, steps):
+    """Only skip a saved trial whose arrays agree with its completed receipt."""
+    if record is None or not path.is_file():
+        return False
+    try:
+        with np.load(path, allow_pickle=False) as arrays:
+            iterations = arrays["iterations"]
+            expected = int(record["optimizer_steps"]) + 1
+            return (expected in (1, steps + 1) and len(iterations) == expected
+                    and int(iterations[-1]) == expected - 1
+                    and arrays["heat"].shape[0] == expected
+                    and arrays["observed_predictions"].shape[0] == expected
+                    and arrays["held_predictions"].shape[0] == expected
+                    and np.isfinite(arrays["heat"]).all()
+                    and np.isfinite(arrays["observed_predictions"]).all()
+                    and np.isfinite(arrays["held_predictions"]).all())
+    except (OSError, ValueError, KeyError, EOFError, BadZipFile):
+        return False
 
 
 def sensor_panel(sample):
@@ -53,7 +87,8 @@ def sensor_panel(sample):
     return coordinates[indices].astype(np.float32), np.asarray(indices), names, np.arange(0, 12, 2), np.arange(1, 12, 2)
 
 
-def native_heat_predictor(model, checkpoint, sample, sensors, observed_rows, held_rows):
+def native_heat_predictor(model, checkpoint, sample, sensors, observed_rows, held_rows, *,
+                          positions_override=None, context_override=None):
     from channelthermal.response_control.contracts import DesignInput, RoleQuery
     from channelthermal.response_control.native import DifferentiableThermalOperator
     active = np.asarray(sample["structure"]["module_present"]) > .5
@@ -65,6 +100,10 @@ def native_heat_predictor(model, checkpoint, sample, sensors, observed_rows, hel
     for name in ("re", "u_in", "domain_length_x", "domain_length_y"):
         context[name] = float(np.asarray(sample["structure"][name]).reshape(-1)[0])
     positions = torch.as_tensor(sample["structure"]["module_centers"], dtype=torch.float32, device=device)
+    if positions_override is not None:
+        positions = positions_override
+    if context_override is not None:
+        context.update(context_override)
     valid = torch.as_tensor(active, device=device)
     ports = np.asarray(sample["interface_condition"])[active, :, :3]
     local = np.asarray(sample["module_internal_query_points"])
@@ -108,12 +147,13 @@ def native_heat_predictor(model, checkpoint, sample, sensors, observed_rows, hel
                         groups.append(support.detach())
         return {"observed": fields[observed_rows, temperature], "held": fields[held_rows, temperature],
                 "peaks": solid[..., 0].max(-1).values, "pressure": fields[-2, pressure] - fields[-1, pressure],
+                "fields": fields, "interface": result.role_values["interface"], "solid": solid[..., 0],
                 "groups": tuple(groups)}
     return predict, valid
 
 
 def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", cases=12, starts=3,
-                  steps=30, learning_rate=.05, seed=20261002):
+                  steps=30, learning_rate=.05, seed=20261002, resume=False):
     from channelthermal.data.datasets import GlobalChannelThermalDataset
     from channelthermal.evaluation.loading import load_model
 
@@ -126,6 +166,14 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
     if output_dir.is_relative_to(PROJECT_ROOT) and not any(output_dir.is_relative_to(PROJECT_ROOT / root) for root in ("diagnostics", "Trained_Results")):
         raise ValueError("Inverse evidence must live under ignored diagnostics or Trained_Results")
     output_dir.mkdir(parents=True, exist_ok=True)
+    if resume and (output_dir / "summary.json").exists():
+        previous = json.loads((output_dir / "summary.json").read_text())
+        if (Path(previous["checkpoint"]).resolve() != Path(checkpoint_path).resolve()
+                or previous["checkpoint_epoch"] != checkpoint.get("epoch")
+                or any(previous[key] != value for key, value in
+                       (("seed", seed), ("planned_cases", cases), ("starts", starts),
+                        ("steps", steps), ("learning_rate", learning_rate)))):
+            raise ValueError("Inverse evidence resume changed checkpoint or evaluation budget")
     summaries = []
     for index in screen_indices(dataset, cases):
         sample = dataset[index]
@@ -147,11 +195,18 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
                 "rank": identification["rank"], "free_dimensions": identification["free_dimensions"],
                 "condition_number": identification["condition_number"] if np.isfinite(identification["condition_number"]) else None,
                 "rank_tolerance": identification["rank_tolerance"], "trials": []}
-        np.savez_compressed(case_dir / "task.npz", sensors=sensors, grid_rows=grid_rows,
+        if resume and (case_dir / "summary.json").exists():
+            previous = json.loads((case_dir / "summary.json").read_text())
+            if any(previous[key] != info[key] for key in ("case_id", "checkpoint_epoch", "sensor_names", "observed_rows", "held_rows")):
+                raise ValueError("Inverse evidence resume changed physical case or sensors")
+            info["trials"] = previous["trials"]
+        atomic_npz(case_dir / "task.npz", sensors=sensors, grid_rows=grid_rows,
             observation=targets[observed_rows].cpu().numpy(), held=targets[held_rows].cpu().numpy(),
             singular_values=identification["singular_values"].cpu().numpy(), jacobian=identification["jacobian"].cpu().numpy(),
             reference_heat=np.asarray(sample["structure"]["heat_powers"]), total_heat=total.cpu().numpy(),
-            reference_material_peaks=np.asarray(sample["module_internal_temperature_points"])[active.cpu().numpy()].max(-1))
+            reference_material_peaks=np.asarray(sample["module_internal_temperature_points"])[active.cpu().numpy()].max(-1),
+            reference_pressure_difference=np.asarray(sample["steady_field"]).reshape(-1, len(field_names))[grid_rows[-2], field_names.index("p")]
+                - np.asarray(sample["steady_field"]).reshape(-1, len(field_names))[grid_rows[-1], field_names.index("p")])
         generator = torch.Generator().manual_seed(seed + int(case_id))
         for start in range(starts):
             fractions = initial.clone()
@@ -160,34 +215,65 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
                 fractions[active_ids] = draw / draw.sum()
             block_stream = tuple(float(value) for value in torch.rand(steps, generator=generator))
             permutations = tuple(active_ids[torch.randperm(active_ids.numel(), generator=generator).to(device)] for _ in range(steps))
+            graph_sizes = None
             for mode in ("joint", "graph", "ungrouped"):
+                path = case_dir / f"start_{start:02d}_{mode}.npz"
+                existing = next((row for row in info["trials"] if row["start"] == start and row["mode"] == mode), None)
+                if resume and completed_trial(path, existing, steps=steps):
+                    if mode == "graph":
+                        with np.load(path, allow_pickle=False) as saved:
+                            graph_sizes = tuple(int(size) for size in saved["selected_block_size"])
+                    print(f"{case_id} start {start} {mode}: retained complete saved trial", flush=True)
+                    continue
+                if resume and path.exists():
+                    failed = path.with_name(path.stem + ".failed_previous_attempt.npz")
+                    if failed.exists():
+                        raise ValueError(f"Preserved failed trial already exists: {failed}")
+                    path.replace(failed)
+                info["trials"] = [row for row in info["trials"] if not (row["start"] == start and row["mode"] == mode)]
                 trail = fixed_total_heat_inference(predictor, targets[observed_rows], targets[held_rows], active,
                     total, fractions, mode=mode, steps=steps, learning_rate=learning_rate,
-                    block_stream=block_stream, permutation_stream=permutations)
-                path = case_dir / f"start_{start:02d}_{mode}.npz"
-                np.savez_compressed(path, heat=torch.stack(trail.heat).cpu().numpy(), iterations=trail.iterations,
+                    block_stream=block_stream, permutation_stream=permutations,
+                    block_size_stream=graph_sizes if mode == "ungrouped" else None)
+                sizes = tuple(int(group.numel()) for group in trail.selected_modules)
+                if mode == "graph":
+                    graph_sizes = sizes
+                if mode == "ungrouped" and sizes != graph_sizes:
+                    raise RuntimeError("Ungrouped control did not reproduce recorded graph block sizes")
+                atomic_npz(path, heat=torch.stack(trail.heat).cpu().numpy(), iterations=trail.iterations,
                     observed_rmse=trail.observed_rmse, held_rmse=trail.held_rmse,
                     observed_predictions=torch.stack(trail.observed_predictions).cpu().numpy(),
                     held_predictions=torch.stack(trail.held_predictions).cpu().numpy(),
+                    observed_residual=torch.stack(trail.observed_predictions).cpu().numpy() - targets[observed_rows].cpu().numpy(),
+                    held_residual=torch.stack(trail.held_predictions).cpu().numpy() - targets[held_rows].cpu().numpy(),
                     peaks=torch.stack(trail.peaks).cpu().numpy(), pressure=torch.stack(trail.pressure).cpu().numpy(),
                     selected_module_mask=np.stack([np.isin(np.arange(active.numel()), values.cpu().numpy()) for values in trail.selected_modules])
                         if trail.selected_modules else np.zeros((0, active.numel()), dtype=bool),
+                    selected_block_size=np.asarray(sizes, dtype=np.int64),
+                    material_peak_residual=torch.stack(trail.peaks).cpu().numpy()
+                        - np.asarray(sample["module_internal_temperature_points"])[active.cpu().numpy()].max(-1),
+                    pressure_difference_residual=torch.stack(trail.pressure).cpu().numpy()
+                        - (np.asarray(sample["steady_field"]).reshape(-1, len(field_names))[grid_rows[-2], field_names.index("p")]
+                           - np.asarray(sample["steady_field"]).reshape(-1, len(field_names))[grid_rows[-1], field_names.index("p")]),
                     elapsed_seconds=trail.elapsed_seconds)
                 info["trials"].append({"start": start, "mode": mode, "trail": str(path),
                     "optimizer_steps": trail.optimizer_steps, "meaningful_graph_steps": trail.meaningful_graph_steps,
                     "full_joint_fallback_steps": trail.group_fallback_steps,
+                    "selected_block_sizes": sizes,
+                    "recorded_graph_size_match": sizes == graph_sizes if mode == "ungrouped" else None,
+                    "trajectory_matching_limit": "same initialization, budget, random stream and exact graph-trail cardinalities; candidate heats and physical group identities differ; graph topology rebuilds between proposals",
                     "observed_rmse_initial": trail.observed_rmse[0], "observed_rmse_final": trail.observed_rmse[-1],
                     "held_rmse_initial": trail.held_rmse[0], "held_rmse_final": trail.held_rmse[-1],
                     "elapsed_seconds": trail.elapsed_seconds[-1], "total_feasible": bool(torch.allclose(trail.heat[-1].sum(), total)),
                     "nonnegative": bool((trail.heat[-1] >= 0).all()), "surrogate_only": True})
-                (case_dir / "summary.json").write_text(json.dumps(info, indent=2, allow_nan=False) + "\n")
+                atomic_json(case_dir / "summary.json", info)
                 print(f"{case_id} start {start} {mode}: saved {trail.optimizer_steps} steps", flush=True)
         summaries.append(info)
-        (output_dir / "summary.json").write_text(json.dumps({"checkpoint": str(checkpoint_path),
+        atomic_json(output_dir / "summary.json", {"checkpoint": str(checkpoint_path),
             "checkpoint_epoch": checkpoint.get("epoch"), "seed": seed, "planned_cases": cases,
             "starts": starts, "steps": steps, "learning_rate": learning_rate,
             "evidence_limit": "frozen surrogate observation matching; no new independent physical solve",
-            "cases": summaries}, indent=2, allow_nan=False) + "\n")
+            "cases": summaries})
     return output_dir
 
 
@@ -201,6 +287,7 @@ def parse_args(argv=None):
     parser.add_argument("--starts", type=int, default=3)
     parser.add_argument("--steps", type=int, default=30)
     parser.add_argument("--learning-rate", type=float, default=.05)
+    parser.add_argument("--resume-evaluation", action="store_true")
     args = parser.parse_args(argv)
     if min(args.cases, args.starts, args.steps, args.learning_rate) <= 0:
         parser.error("case/start/step counts and learning rate must be positive")
@@ -210,4 +297,5 @@ def parse_args(argv=None):
 if __name__ == "__main__":
     args = parse_args()
     print(evaluate_heat(args.checkpoint, dataset_path=args.dataset, output_dir=args.output_dir,
-        device=args.device, cases=args.cases, starts=args.starts, steps=args.steps, learning_rate=args.learning_rate))
+        device=args.device, cases=args.cases, starts=args.starts, steps=args.steps, learning_rate=args.learning_rate,
+        resume=args.resume_evaluation))

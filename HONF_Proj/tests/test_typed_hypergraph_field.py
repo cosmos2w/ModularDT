@@ -177,6 +177,84 @@ def test_full_access_intervention_preserves_normal_pair_controls():
     torch.testing.assert_close(full.control, normal.control)
 
 
+@pytest.mark.parametrize("mode", ["full_access", "root_union"])
+def test_exported_access_interventions_preserve_mm_self_and_receiver_validity(mode):
+    encoded = _encoded()
+    model = _typed().eval()
+    model.set_plan_intervention(mode)
+    prepared = model.prepare(encoded, encoded.module_tokens)
+    exported = model.export_typed_state(prepared)
+    access = exported["receiver_access"](encoded.module_centers, "MM")
+    expected = ((encoded.module_present[:, :, None] > .5) & (encoded.module_present[:, None] > .5)
+                & ~torch.eye(4, dtype=torch.bool)[None])
+    torch.testing.assert_close(access.support, expected)
+
+
+@pytest.mark.parametrize("dimension", [2, 3])
+@pytest.mark.parametrize("architecture", [
+    "adaptive_receiver_hypergraph_honf", "overlap_control_hypergraph_honf", "local_overlap_hypergraph_honf",
+])
+def test_rectangular_executor_preserves_values_first_gradients_and_measures_actual_rows(dimension, architecture):
+    encoded = _encoded(dimension)
+    encoded = replace(encoded, env_characteristic_lengths=torch.full_like(encoded.env_weights, .03))
+    dense = TypedHypergraphField(8, 12, 2, 2, architecture=architecture, spatial_dim=dimension,
+                                module_characteristic_length=.03).double().eval()
+    encoded = replace(encoded, **{name: value.double() for name, value in vars(encoded).items()
+                                  if torch.is_tensor(value) and value.is_floating_point()})
+    query = torch.rand(2, 7, dimension, dtype=torch.float64)
+    features = torch.rand(2, 7, 6, dtype=torch.float64)
+    with torch.no_grad():
+        dense.read(dense.prepare(encoded, encoded.module_tokens), encoded, query, features)
+        for gain in dense.control_gain.values():
+            gain.weight.normal_(0, .2)
+        dense.control_score.weight.normal_(0, .2)
+    subset = deepcopy(dense)
+    subset.set_execution_mode("rectangular_subset", receiver_chunk_size=3)
+    results, input_gradients, ledgers = {}, {}, {}
+    for name, model in (("dense", dense), ("subset", subset)):
+        # A controlled valid sparse typed plan exercises actual omitted rows.
+        original_prepare = model.organizer.prepare
+
+        def sparse_prepare(*args, _prepare=original_prepare, **kwargs):
+            plan = _prepare(*args, **kwargs)
+            memberships = {}
+            for mechanism, value in plan.memberships.items():
+                mask = torch.ones_like(value)
+                mask[..., 1::2] = 0
+                memberships[mechanism] = value * mask
+            return replace(plan, memberships=memberships)
+
+        model.organizer.prepare = sparse_prepare
+        module = encoded.module_tokens.clone().requires_grad_()
+        environment = encoded.env_tokens.clone().requires_grad_()
+        coordinates = query.clone().requires_grad_()
+        record = replace(encoded, module_tokens=module, env_tokens=environment)
+        state = model.prepare(record, module)
+        value, work = model.read(state, record, coordinates, features)
+        value.square().sum().backward()
+        results[name] = value
+        input_gradients[name] = (module.grad, environment.grad, coordinates.grad)
+        ledgers[name] = {**state["hypergraph_ledger"], **work}
+    torch.testing.assert_close(results["subset"], results["dense"], rtol=1e-9, atol=1e-10)
+    for actual, expected in zip(input_gradients["subset"], input_gradients["dense"]):
+        torch.testing.assert_close(actual, expected, rtol=1e-8, atol=1e-9)
+    for (_, actual), (_, expected) in zip(subset.named_parameters(), dense.named_parameters()):
+        if actual.grad is not None or expected.grad is not None:
+            torch.testing.assert_close(actual.grad, expected.grad, rtol=1e-8, atol=1e-9)
+    saved = 0
+    for mechanism in ("MM", "ME", "EM", "QM", "QE"):
+        work = ledgers["subset"]
+        rows = work[f"hypergraph_{mechanism}_executed_rows"]
+        allocated = work[f"hypergraph_{mechanism}_allocated_rows"]
+        assert rows <= allocated
+        assert work[f"hypergraph_{mechanism}_padded_rows"] >= 0
+        assert work[f"hypergraph_{mechanism}_skipped_eligible_pairs"] >= 0
+        assert work[f"hypergraph_{mechanism}_unique_pairs"] <= rows
+        saved += int(allocated - rows)
+    assert saved > 0
+    assert ledgers["subset"]["hypergraph_QE_attention_cells"] <= ledgers["dense"]["hypergraph_QE_attention_cells"]
+
+
 def test_collective_controls_receive_task_gradients_after_gain_learns():
     encoded = _encoded()
     model = _TinyWrapper().train()
@@ -202,10 +280,22 @@ def test_export_keeps_prepared_intervention_when_live_backend_mode_changes():
     prepared = model.prepare(encoded, encoded.module_tokens)
     exported = model.export_typed_state(prepared)
     query = torch.rand(2, 4, 2)
+    features = torch.rand(2, 4, 6)
     before = exported["receiver_access"](query, "QE")
+    prediction_before, work_before = model.read(prepared, encoded, query, features)
     model.set_plan_intervention("normal")
+    model.set_execution_mode("rectangular_subset", receiver_chunk_size=2)
     after = exported["receiver_access"](query, "QE")
+    delayed_export = model.export_typed_state(prepared)
+    delayed_access = delayed_export["receiver_access"](query, "QE")
+    prediction_after, work_after = model.read(prepared, encoded, query, features)
     torch.testing.assert_close(before.weight, after.weight)
     torch.testing.assert_close(after.control, torch.zeros_like(after.control))
+    torch.testing.assert_close(delayed_access.control, after.control)
+    torch.testing.assert_close(prediction_after, prediction_before, rtol=0, atol=0)
+    assert delayed_export["executor"] == "dense_masked_reference"
+    for mechanism in ("QM", "QE"):
+        key = f"hypergraph_{mechanism}_executed_rows"
+        torch.testing.assert_close(work_after[key], work_before[key])
     live = model._access(prepared["hypergraph_plan"], query, "QE")
     assert not torch.allclose(live.control, after.control)

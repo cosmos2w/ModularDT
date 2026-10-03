@@ -1476,6 +1476,8 @@ class InterfaceFieldCore(nn.Module):
                 if key.startswith("hypergraph_") and key.endswith((
                     "_unique_pairs", "_eligible_pairs", "_repeated_paths_removed",
                     "_executed_rows", "_padded_rows", "_fine_calls",
+                    "_allocated_rows", "_executed_eligible_pairs", "_skipped_eligible_pairs",
+                    "_attention_cells",
                     "_near_mandatory_pairs", "_near_full_pairs",
                     "_structural_numerator", "_structural_denominator",
                 )):

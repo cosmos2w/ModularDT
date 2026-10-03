@@ -66,6 +66,7 @@ from channelthermal.training.epoch import (
     predicted_consistency_weight_for_epoch,
     run_epoch,
 )
+from channelthermal.training.native_denominators import native_denominators_enabled
 from channelthermal.training.optimizer import (
     _optimizer_group_record,
     _optimizer_inventory_digest,
@@ -752,7 +753,7 @@ def run_from_config(
     if resume_checkpoint is not None:
         repair_metrics_csv_for_append(metrics_path)
         checkpoint = load_trusted_checkpoint(resume_checkpoint, map_location=device)
-        validate_campaign_resume(checkpoint, cfg)
+        campaign_resume_amendment = validate_campaign_resume(checkpoint, cfg)
         _validate_resume_checkpoint(
             checkpoint,
             model=model,
@@ -785,6 +786,10 @@ def run_from_config(
         start_epoch = checkpoint_epoch + 1
         _restore_rng_state(checkpoint)
         model.campaign_training_state = copy.deepcopy(checkpoint.get("campaign_training_state") or {})
+        if campaign_resume_amendment is not None:
+            model.campaign_training_state["physical_loss_policy_amendment"] = {
+                **campaign_resume_amendment, "source_checkpoint": str(resume_checkpoint),
+            }
         saved_selection = checkpoint.get("selection_state")
         if isinstance(saved_selection, dict) and saved_selection.get("epoch") is not None:
             selection_epoch = int(saved_selection["epoch"])
@@ -817,7 +822,8 @@ def run_from_config(
         gpu_before = gpu_contention_sample(device) if campaign.get("gpu_telemetry") else None
         train_metrics = run_epoch(
             model,
-            CampaignMicrobatchLoader(train_loader, int(campaign["microbatch_size"])) if campaign.get("microbatch_size") else train_loader,
+            CampaignMicrobatchLoader(train_loader, int(campaign["microbatch_size"]),
+                native_loss_denominators=native_denominators_enabled(campaign, epoch)) if campaign.get("microbatch_size") else train_loader,
             device,
             loss_cfg,
             optimizer=optimizer,
@@ -852,6 +858,7 @@ def run_from_config(
                                             "gpu_before": gpu_before, "gpu_after": gpu_contention_sample(device) if campaign.get("gpu_telemetry") else None,
                                             "response": getattr(model, "campaign_last_response_metrics", None),
                                             "forward_work": getattr(model, "campaign_last_forward_work", None),
+                                            "active_physical_loss_policy": 2 if native_denominators_enabled(campaign, epoch) else 1,
                                             "calibration_state": copy.deepcopy(getattr(model, "campaign_training_state", {})),
                                             "query_scope": "primary sampled fluid field only; P0/P1/P2 auxiliary reads are additional work"}) + "\n")
         total_train_seconds += train_wall_seconds

@@ -59,11 +59,15 @@ def test_fixed_summary_changes_actual_trained_reader_and_reports_dense_work():
     accumulator = TrainingPopulationSummaryAccumulator()
     accumulator.add(train, partition="train")
     summary = accumulator.finish()
+    with pytest.raises(ValueError, match="calibration"):
+        model.set_plan_intervention("fixed_summary")
+    model.training_population_summary = summary
     held = replace(encoded, env_tokens=encoded.env_tokens + 1.)
     prepared = model.prepare(held, held.module_tokens)
     query, features = torch.rand(1, 7, 2), torch.rand(1, 7, 6)
     normal, _ = model.read(prepared, held, query, features)
-    fixed = {**prepared, "hypergraph_plan": summary.apply(prepared["hypergraph_plan"])}
+    model.set_plan_intervention("fixed_summary")
+    fixed = model.prepare(held, held.module_tokens)
     altered, _ = model.read(fixed, held, query, features)
     assert not torch.allclose(normal, altered)
     baseline_access = model._access(prepared["hypergraph_plan"], query, "QE")

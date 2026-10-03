@@ -187,6 +187,12 @@ class CaseLocalReceiverTree:
         coordinates = (universe.coordinates / universe.coordinate_scale).detach().cpu()
         weights = universe.weights.detach().cpu()
         roles = universe.roles.detach().cpu()
+        # Sorting runs on the host. Convert its scalar keys once, preserving
+        # their exact stored values and stable tie order. Prefix/cut sums and
+        # extent/axis selection retain the original tensor arithmetic.
+        coordinate_values = coordinates.tolist()
+        weight_values = weights.tolist()
+        role_values = roles.tolist()
 
         def refine(index: int, indices: tuple[int, ...], depth: int) -> None:
             nonlocal saturated
@@ -207,16 +213,16 @@ class CaseLocalReceiverTree:
             ordered = sorted(
                 indices,
                 key=lambda item: (
-                    float(coordinates[item, axis]),
-                    *tuple(float(value) for value in coordinates[item]),
-                    int(roles[item]),
+                    coordinate_values[item][axis],
+                    *coordinate_values[item],
+                    role_values[item],
                 ),
             )
             half_mass = float(weights[list(ordered)].sum()) / 2.0
             accumulated = 0.0
             cut = 1
             for position, anchor_id in enumerate(ordered[:-1], start=1):
-                accumulated += float(weights[anchor_id])
+                accumulated += weight_values[anchor_id]
                 cut = position
                 if accumulated >= half_mass:
                     break

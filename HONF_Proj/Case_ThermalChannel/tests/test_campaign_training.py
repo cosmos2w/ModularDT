@@ -15,6 +15,7 @@ from channelthermal.training.campaign import (
     validate_campaign,
     validate_campaign_resume,
 )
+from channelthermal.training.native_denominators import native_denominators_enabled
 from torch import nn
 
 
@@ -142,3 +143,31 @@ def test_matched_initializer_rejects_physical_shape_drift():
     assert torch.equal(target.weight, canonical.weight)
     with pytest.raises(ValueError, match="unmatched tensors"):
         copy_matched_physical_initial_state(nn.Linear(3, 3), canonical)
+
+
+def test_native_denominator_policy_has_one_explicit_epoch100_migration():
+    config = _config()
+    saved = {"train_config": copy.deepcopy(config), "epoch": 100,
+             "optimizer_state_dict": {"state": 1}, "rng_state": {"torch": 1}}
+    config["training"]["epochs"] = 500
+    config["training"]["campaign"].update(physical_loss_policy_version=2, native_loss_denominators_start_epoch=101)
+    amendment = validate_campaign_resume(saved, config)
+    assert amendment["activation_epoch"] == 101
+    explicit_default = copy.deepcopy(saved)
+    explicit_default["train_config"]["training"]["campaign"]["physical_loss_policy_version"] = 1
+    assert validate_campaign_resume(explicit_default, config) == amendment
+    assert not native_denominators_enabled(config["training"]["campaign"], 100)
+    assert native_denominators_enabled(config["training"]["campaign"], 101)
+    for epoch in (25, 99, 101, 500):
+        changed = copy.deepcopy(saved)
+        changed["epoch"] = epoch
+        with pytest.raises(ValueError, match="schedule/lineage"):
+            validate_campaign_resume(changed, config)
+    for key, value in (("physical_loss_policy_version", 3), ("native_loss_denominators_start_epoch", 100), ("arm", "another")):
+        changed = copy.deepcopy(config)
+        changed["training"]["campaign"][key] = value
+        with pytest.raises(ValueError, match="schedule/lineage"):
+            validate_campaign_resume(saved, changed)
+    later = {**saved, "epoch": 500, "train_config": copy.deepcopy(config)}
+    config["training"]["epochs"] = 1000
+    assert validate_campaign_resume(later, config) is None

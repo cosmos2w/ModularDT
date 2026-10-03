@@ -72,6 +72,33 @@ def test_single_module_is_deterministic_zero_free_dimension():
         torch.tensor([3.]), torch.tensor([3.]), active, torch.tensor(3.), torch.tensor([1.]), steps=30)
     assert trail.optimizer_steps == 0 and trail.iterations == (0,)
     torch.testing.assert_close(trail.heat[0], torch.tensor([3.]))
+    matched = fixed_total_heat_inference(lambda value: {"observed": value, "held": value},
+        torch.tensor([3.]), torch.tensor([3.]), active, torch.tensor(3.), torch.tensor([1.]),
+        mode="ungrouped", steps=30, block_size_stream=())
+    assert matched.optimizer_steps == 0
+
+
+def test_recorded_graph_cardinalities_match_even_when_candidate_groups_change():
+    def conditional(heat):
+        group = [0, 1] if float(heat[0].detach()) >= 1 else [0, 1, 2]
+        return {"observed": heat[:2], "held": heat[2:], "groups": (group,)}
+
+    arguments = {"predictor": conditional, "observed": torch.tensor([.2, 1.8]), "held": torch.tensor([1., 1.]),
+        "active": torch.ones(4, dtype=torch.bool), "total": torch.tensor(4.), "initial_fraction": torch.ones(4) / 4,
+        "steps": 5, "permutation_stream": (torch.tensor([3, 2, 1, 0]),) * 5}
+    graph = fixed_total_heat_inference(**arguments, mode="graph")
+    sizes = tuple(int(group.numel()) for group in graph.selected_modules)
+    assert set(sizes) == {2, 3}
+    ungrouped = fixed_total_heat_inference(**arguments, mode="ungrouped", block_size_stream=sizes)
+    assert tuple(int(group.numel()) for group in ungrouped.selected_modules) == sizes
+    unmatched = fixed_total_heat_inference(**arguments, mode="ungrouped")
+    assert tuple(int(group.numel()) for group in unmatched.selected_modules) != sizes
+    for step, chosen in enumerate(ungrouped.selected_modules):
+        outside = torch.ones(4, dtype=torch.bool)
+        outside[chosen] = False
+        torch.testing.assert_close(ungrouped.heat[step+1][outside], ungrouped.heat[step][outside])
+    with pytest.raises(ValueError, match="Recorded block sizes"):
+        fixed_total_heat_inference(**arguments, mode="ungrouped", block_size_stream=(2,))
 
 
 def test_missing_gradient_and_bad_permutation_are_not_accepted():

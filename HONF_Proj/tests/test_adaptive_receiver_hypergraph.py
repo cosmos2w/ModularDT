@@ -133,7 +133,7 @@ def test_padding_and_module_permutation_preserve_native_rows():
 def test_soft_restores_hard_omission_without_encoder_gradient_and_resumes_curriculum():
     encoded = _case()
     states = encoded.module_tokens.clone().requires_grad_()
-    organizer = AdaptiveReceiverHypergraph(8).eval()
+    organizer = AdaptiveReceiverHypergraph(8).train()
     with torch.no_grad():
         organizer.geometry_strength["QE"].fill_(8)
     query = torch.tensor([[[0.05, 0.05]]])
@@ -153,6 +153,36 @@ def test_soft_restores_hard_omission_without_encoder_gradient_and_resumes_curric
     assert int(reloaded.training_epoch) == 301 and int(reloaded.exercise_counter) == 17
     reloaded.eval()
     assert reloaded.prepare(encoded, states).diagnostics["exploration"].item() == 0
+
+
+def test_frozen_eval_control_moment_keeps_caller_owned_heat_gradient():
+    encoded = _case()
+    organizer = AdaptiveReceiverHypergraph(8).double().eval().requires_grad_(False)
+    with torch.no_grad():
+        organizer.control_heads["QM"][-1].weight.normal_(0, .2)
+    heat = torch.tensor([[.3, .5, .7, .9]], dtype=torch.float64, requires_grad=True)
+    direction = torch.tensor([[1., -1., .5, -.5]], dtype=heat.dtype)
+    basis = encoded.module_tokens.double()
+    encoded = replace(encoded, module_tokens=basis, env_tokens=encoded.env_tokens.double(),
+        global_token=encoded.global_token.double(), module_centers=encoded.module_centers.double(),
+        env_coords=encoded.env_coords.double(), module_present=encoded.module_present.double(),
+        env_weights=encoded.env_weights.double(), coordinate_scale=encoded.coordinate_scale.double(),
+        receiver_anchor_coords=encoded.receiver_anchor_coords.double(),
+        receiver_anchor_weights=encoded.receiver_anchor_weights.double())
+
+    def moment(value):
+        states = basis * value[..., None]
+        case = replace(encoded, module_tokens=states, global_token=states.mean(1))
+        plan = organizer.prepare(case, states)
+        return organizer.access(plan, encoded.receiver_anchor_coords, "QM").control[..., 0].sum()
+
+    gradient, = torch.autograd.grad(moment(heat), heat)
+    assert torch.isfinite(gradient).all() and gradient.abs().sum() > 1e-6
+    epsilon = 1e-5
+    finite_difference = (moment(heat.detach() + epsilon * direction) -
+                         moment(heat.detach() - epsilon * direction)) / (2 * epsilon)
+    torch.testing.assert_close((gradient * direction).sum(), finite_difference, rtol=1e-4, atol=1e-7)
+    assert heat.grad is None and all(parameter.grad is None for parameter in organizer.parameters())
 
 
 def test_quadrature_atom_split_preserves_query_action_and_collective_control():

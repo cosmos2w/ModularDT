@@ -18,6 +18,7 @@ from honf_forward_core.nn import MLP
 
 from .case_group_budget import CaseGroupGate
 from .routing_index.sparse_projection import masked_sparsemax, source_measure_sparsemax
+from .topology_probe import FixedTopologyInvalid, fixed_active_projection, validate_catalogue
 from .typed_hypergraph_state import (
     MECHANISMS,
     SOURCE_TYPE,
@@ -174,11 +175,17 @@ class OverlapControlHypergraph(nn.Module):
         soft: bool = False,
         deterministic: bool | None = None,
         gate_noise: torch.Tensor | None = None,
+        capture_topology: bool = False,
+        fixed_topology: TypedHypergraphState | None = None,
     ) -> TypedHypergraphState:
         phase = _phase_index(phase)
         if encoded.module_centers.shape[-1] != self.spatial_dim:
             raise ValueError("Encoded geometry does not match organizer spatial dimension.")
         catalogue = build_source_catalogue(encoded, module_states)
+        if fixed_topology is not None:
+            if self.training or soft or fixed_topology.phase != phase:
+                raise ValueError("Fixed topology is evaluation-only and requires a matching hard physical phase")
+            validate_catalogue(catalogue, fixed_topology)
         centres, extent = self._propose_centres(encoded, catalogue)
         batch = module_states.shape[0]
         context = self.context_projection(encoded.global_token)
@@ -194,7 +201,13 @@ class OverlapControlHypergraph(nn.Module):
             score = self.source_scores[tau](feature).squeeze(-1)
             score = score + torch.einsum("bsc,kc->bks", source, self.proposals) / math.sqrt(self.control_dim) - relative.square().sum(dim=-1)
             source_logits[tau] = score
-            memberships[tau] = _source_density(score, catalogue["source_measures"][kind], soft=soft, temperature=self.soft_temperature)
+            if fixed_topology is None:
+                memberships[tau] = _source_density(score, catalogue["source_measures"][kind], soft=soft, temperature=self.soft_temperature)
+            else:
+                mu = catalogue["source_measures"][kind]
+                mu = mu / mu.sum(-1, keepdim=True).clamp_min(torch.finfo(mu.dtype).tiny)
+                memberships[tau] = fixed_active_projection(score, fixed_topology.strategy_data["source_logits"][tau],
+                    fixed_topology.memberships[tau], mu)
             # All controls summarize both source types separately. A group's
             # opposite-type population uses the corresponding typed route.
         for tau in MECHANISMS:
@@ -217,6 +230,14 @@ class OverlapControlHypergraph(nn.Module):
         gate_logits = self.admission_gate.network(gate_input).squeeze(-1)
         budget = self.admission_gate.build_budget(gate_logits, noise=gate_noise, deterministic=soft or (not self.training if deterministic is None else deterministic))
         admission = torch.sigmoid(gate_logits).clamp_min(torch.finfo(gate_logits.dtype).tiny) if soft else budget.z
+        if fixed_topology is not None:
+            reference = fixed_topology.admission.to(admission)
+            rescue = fixed_topology.diagnostics["admission_rescue"][:, None]
+            interior = (reference > 0) & (reference < 1) & ~rescue
+            live_gate = torch.sigmoid(gate_logits) * (self.admission_gate.stretch_upper - self.admission_gate.stretch_lower) + self.admission_gate.stretch_lower
+            if bool((interior & ((live_gate < 0) | (live_gate > 1))).any()):
+                raise FixedTopologyInvalid("Admission continuation left its recorded clipping region")
+            admission = torch.where(interior, live_gate, (reference > 0).to(admission.dtype))
         return TypedHypergraphState(
             memberships=memberships, controls=controls, centres=centres,
             admission=admission, phase=phase,
@@ -234,6 +255,8 @@ class OverlapControlHypergraph(nn.Module):
         *,
         soft: bool = False,
         pair_valid: torch.Tensor | None = None,
+        capture_topology: bool = False,
+        fixed_receiver_access: dict | None = None,
     ) -> TypedSourceAccess:
         if mechanism not in SOURCE_TYPE:
             raise ValueError(f"Unknown typed mechanism {mechanism!r}.")
@@ -250,11 +273,18 @@ class OverlapControlHypergraph(nn.Module):
         live = gates > 0
         safe_gates = torch.where(live, gates, torch.ones_like(gates))
         logits = logits + safe_gates.log()
-        edge_access = _masked_softmax(logits, live, self.soft_temperature) if soft else masked_sparsemax(logits, live)
+        if fixed_receiver_access is None:
+            edge_access = _masked_softmax(logits, live, self.soft_temperature) if soft else masked_sparsemax(logits, live)
+        else:
+            edge_access = fixed_active_projection(logits, fixed_receiver_access["receiver_logits"],
+                fixed_receiver_access["edge_access"], torch.ones_like(state.admission))
         source_type = SOURCE_TYPE[mechanism]
         lengths = torch.where(state.source_valid[source_type], state.source_lengths[source_type], torch.ones_like(state.source_lengths[source_type]))
         near = smooth_near_envelope(receivers, state.source_coords[source_type], lengths, inner=self.near_inner, outer=self.near_outer) if self.local_access else None
-        return source_moments(edge_access, state.memberships[mechanism], state.controls[mechanism], state.source_measures[source_type], state.source_valid[source_type], pair_valid=pair_valid, near=near)
+        result = source_moments(edge_access, state.memberships[mechanism], state.controls[mechanism], state.source_measures[source_type], state.source_valid[source_type], pair_valid=pair_valid, near=near)
+        if capture_topology:
+            result.diagnostics["receiver_logits"] = logits
+        return result
 
     def export(self, state: TypedHypergraphState) -> dict[str, Any]:
         exported = state.export()

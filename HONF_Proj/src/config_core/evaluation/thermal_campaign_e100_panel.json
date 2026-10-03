@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "split": "test",
+  "partition_label": "previously exposed development",
+  "selection": "input-only round-robin M strata, context midpoint and endpoints; frozen at the first e100 control evaluation",
+  "excluded_duplicate": "0273",
+  "case_ids": [
+    "0647", "0291", "0296", "0692",
+    "0641", "0649", "0677", "0679",
+    "0276", "0651", "0670", "0682",
+    "0636", "0287", "0676", "0680",
+    "0277", "0286"
+  ]
+}

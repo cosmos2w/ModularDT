@@ -48,6 +48,12 @@ def portfolio_profiles(*, first_run_id: int = 2201, stage: int = 100, microbatch
         }
         config["checkpointing"].update(save_latest_every_epochs=25,
                                        save_epoch_milestones=[*range(25, 1001, 25), 2500, 5000])
+        # The first screen remains policy 1; reviewed stage continuations
+        # explicitly amend the common physical objective at epoch 101.
+        if stage in (500, 1000):
+            config["training"]["campaign"].update(
+                physical_loss_policy_version=2, native_loss_denominators_start_epoch=101,
+            )
         config["run"].update(id=f"{first_run_id + offset:04d}", name=f"thermal_{arm.lower()}_v1")
         config["_note"] = (
             "Native full-case seed0 campaign; Stage-A frozen; same effective batch48 and Q1024. "

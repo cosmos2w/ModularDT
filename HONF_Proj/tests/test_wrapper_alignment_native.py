@@ -339,3 +339,71 @@ def test_fresh_thermal_matched_initialization_and_native_shadow_step(arm):
         (value_loss + auxiliary).backward()
         optimizer.step()
         print({"response_native_integration": measured})
+
+
+@pytest.mark.skipif(not os.environ.get("HONF_ALIGNMENT_THERMAL_CHECKPOINT"), reason="Needs native local Thermal resources")
+def test_native_mixed_module_batch_exact_denominator_loss_and_physical_gradient_parity():
+    from channelthermal.data.collation import ChannelThermalBatchCollator, ModuleCountBucketBatchSampler
+    from channelthermal.data.datasets import GlobalChannelThermalDataset
+    from channelthermal.evaluation.loading import load_model
+    from channelthermal.training.campaign import CampaignMicrobatchLoader
+    from channelthermal.training.epoch import assemble_channelthermal_loss_terms, make_model_inputs
+
+    device = torch.device("cpu")
+    model, checkpoint = load_model(Path(os.environ["HONF_ALIGNMENT_THERMAL_CHECKPOINT"]), device)
+    config = checkpoint["train_config"]
+    dataset = GlobalChannelThermalDataset(config["dataset"]["packed_h5_path"], split="train", points_per_case=17,
+        normalize_inputs=True, normalize_targets=True, random_point_sampling=True, seed=0, include_grid=False)
+    dataset.set_epoch(26)
+    sampler = ModuleCountBucketBatchSampler(dataset.selected_module_counts, batch_size=48, seed=0)
+    sampler.set_epoch(26)
+    native = next(iter(DataLoader(dataset, batch_sampler=sampler, collate_fn=ChannelThermalBatchCollator())))
+    assert native["field_targets"].shape[:2] == (48, 17)
+    assert len(set(native["module_count"].tolist())) > 1
+    model.train()
+    model.set_training_progress(epoch=100, total_epochs=5000)
+    parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
+
+    def physical_loss(batch, normalization=None):
+        output = model(**make_model_inputs(batch, local_port_condition_mode="predicted", mixed_teacher_ratio=0.,
+                                          return_predicted_port_outputs=True, return_port_global_consistency=True))
+        return assemble_channelthermal_loss_terms(output, batch, model, config["loss"],
+            local_port_condition_mode="predicted", mixed_teacher_ratio=0.,
+            effective_internal_temperature_weight=1., effective_interface_weight=.2,
+            predicted_consistency_weight=.05, native_normalization_weights=normalization)["loss_physical"]
+
+    def gradient(loss):
+        values = torch.autograd.grad(loss, parameters, allow_unused=True)
+        return torch.cat([torch.zeros(parameter.numel()) if value is None else value.reshape(-1)
+                          for parameter, value in zip(parameters, values)])
+
+    full_loss = physical_loss(native)
+    reference_loss = float(full_loss.detach())
+    reference_gradient = gradient(full_loss)
+
+    class OneNativeBatch:
+        dataset = None
+        def __len__(self):
+            return 1
+        def __iter__(self):
+            yield copy.deepcopy(native)
+
+    seen, steps = [], 0
+    accumulated_loss = 0.
+    accumulated_gradient = torch.zeros_like(reference_gradient)
+    for batch in CampaignMicrobatchLoader(OneNativeBatch(), 8, native_loss_denominators=True):
+        normalization = batch.pop("_native_loss_normalization_weights")
+        weight = batch.pop("_accumulation_weight")
+        steps += int(batch.pop("_optimizer_boundary"))
+        batch.pop("_optimizer_start")
+        batch.pop("_auxiliary_due")
+        seen.extend(batch["case_id"])
+        value = physical_loss(batch, normalization) * weight
+        accumulated_loss += float(value.detach())
+        accumulated_gradient += gradient(value)
+    assert seen == native["case_id"] and steps == 1
+    assert accumulated_loss == pytest.approx(reference_loss, rel=2e-5, abs=2e-6)
+    relative_gradient_error = torch.linalg.vector_norm(accumulated_gradient-reference_gradient) / torch.linalg.vector_norm(reference_gradient)
+    assert float(relative_gradient_error) < 2e-5
+    print({"native_M": native["module_count"].tolist(), "Q": 17, "full_loss": reference_loss,
+           "exact_accumulated_loss": accumulated_loss, "physical_gradient_relative_error": float(relative_gradient_error)})
