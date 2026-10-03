@@ -342,6 +342,19 @@ Mean train/validation 96.03/4.28 seconds forecast 9.75 hours for the remaining
 shared host. This measured window supports continued training; its noisy
 single endpoints do not define physical fidelity or a sparse speedup.
 
+Tree's ordinary exact e200 audit preserves all 185 optimizer states at step2600,
+all 555 slot tensors finite, four RNG streams, selection epoch200/horizon5000,
+the complete configuration/calibration lineage and all 109 frozen Stage-A
+tensors. Every checked epoch visits all 600 cases with 75 microbatches,
+13 updates and 614,400 primary queries. Consecutive twenty-epoch field means
+for 141–160/161–180/181–200 decline 0.193227→0.155170→0.137368; T means decline
+0.132232→0.117940→0.096902. The latest window improves field/T by 11.47%/17.84%,
+while structural cost falls 1.74% to 0.393687 and the response coefficient
+reaches 0.1 at e200. Recent ten-epoch train/validation means are 100.22/4.41 seconds,
+with maximum allocated peak 13,194.7 MiB and explicit GPU1 free 33,701 MiB.
+These sampled learning trends justify the ongoing e500 review; they do not
+replace full-grid physical or graph-utility measurements.
+
 Native subsequently completes all 500 genuine epochs with 181 active AdamW
 states at step 6,500, four RNG streams, unchanged frozen Stage-A, normalization,
 native configuration, five response calibration samples and horizon 5000.
@@ -367,6 +380,13 @@ steps 6,825/7,150, all four RNG streams, frozen Stage-A and complete
 configuration/calibration lineage; every intervening epoch has finite full
 600-case coverage. The latter ten epochs average 35.32/2.94 seconds for
 train/validation under recorded GPU2 owned contention.
+By exact e650, all 181 states reach step8450, all 543 slot tensors remain finite,
+four RNG streams and all 109 frozen Stage-A tensors remain intact, and the
+complete configuration/calibration lineage is unchanged. Full 600-case
+coverage persists; the latest ten epochs average 37.02/2.85 seconds for
+train/validation under the same three-trainer placement, with explicit GPU2
+free 6,990 MiB. Exact sampled field/T MSE 0.0099463/0.0066508 is an endpoint,
+not the completed e1000 physical comparison.
 Tree stays alone on GPU1. Native now shares GPU2 with Overlap and Local, so
 sustained three-trainer timing is measured separately. The observed 12,790 MiB
 Native nvidia-smi footprint and 7,106 MiB device free memory are driver-level
@@ -931,6 +951,24 @@ all five actual typed links and demonstrate a nonzero same-weight graph/full
 effect at the selected finalist; the local heat block helper alone does not
 qualify that generative comparison.
 
+The evaluation recorder now also saves exported native plan diagnostics for
+each P0/P1/P2 phase, including Overlap/Local's actual admission-rescue flag.
+The population auditor counts a recorded rescue once per case/phase, rather
+than once per typed route; old archives explicitly retain unavailable rescue
+counts instead of inferred zeros. Near access remains a separate measurement.
+Disposable real Overlap tests force both all-open/no-rescue and all-closed/
+rescued gates across all three phases, preserving exact field outputs,
+persistent model state and restored methods. The focused recorder/reference/
+geometry/evaluator suite passes 62 tests with one optional native-resource
+skip: the train-only calibration replay requires
+`HONF_ALIGNMENT_THERMAL_CHECKPOINT`, which is unset in this test invocation.
+Ruff and diff checks pass. The old four-case population rehearsal still
+reconciles all 60 route records, 644 calls, 7,995,072 fine rows and 251,494
+padded rows, with zero skipped eligible rows. This is an evaluation-evidence
+addition; interaction equations, training and existing checkpoint states are
+unchanged. The next selected population captures will supply actual rescue
+measurements where the architecture exports them.
+
 Actual e100 Overlap and Local invariance/path evaluations now cover native
 low/high-M cases 0274/0692. Module permutation, inactive padding, fixed-action
 quadrature splitting, query order and prepared chunks pass declared tolerances;
@@ -965,8 +1003,9 @@ Overlap but does not beat the same-age controls. On heat-transfer perturbations
 with exactly zero stored u/p response, Local's spurious errors are
 0.003629/0.001412 and Overlap's 0.002780/0.001081. Both H response evaluations
 execute 175,891,584 rows in 14,168 fine calls, with zero skipped rows. The
-selected response figure below currently shows the three reference/control
-baselines; the H comparisons above use their complete saved arrays.
+selected response figure below now shows mature4738, Fine field-selected972
+and Native stage500 field-selected456; the H100 comparisons above use their
+complete saved arrays. The control training ages remain unequal at this review.
 Tree100 has now also completed all eight families/88 absolute states and
 80 perturbations. Mean T/surface/q_normal/solid response RMSE is
 0.25076/0.38432/1.28385/0.35109, missing both fresh controls on T.
@@ -986,21 +1025,30 @@ Atomic numerical/JSON writes preserve previous complete files on interruption.
 
 ![Frozen native response errors and physical response maps](../../diagnostics/generated/shared_core_campaign_20261002/figures/reference_response_baseline.png)
 
-Across eight previously exposed non-training families, mean fluid-temperature
-finite-response RMSE for mature/Dense100/Fine100 is 0.06610/0.11562/0.12484
-on the 16 heat-transfer perturbations; zero change yields 0.24176. For the
-same perturbations the stored velocity response is exactly zero, but the
-models yield mean u-response RMSE 0.001231/0.003684/0.004631: all fail that
-generator-specific null control. Across all 80 perturbations, mean pressure
-increment error is 0.0001974/0.0003988/0.0006154 versus zero change 0.0002784.
-The bottom maps show family0310 heat-transfer-plus on 7,918 full-stencil-common
-fluid grid cells, with temperature response RMSE 0.07045 versus reference RMS
-0.30041. The maps use common signed scales and an absolute residual scale;
-no plotted finite cell is clipped. White masks exclude physical solids and
-noncommon stencil support. These are physical benchmark units and frozen
-predicted-port/Stage-A results, not CFD or response-relative validation.
-The figure shows a useful thermal-response baseline alongside spurious
-cross-field response and young-model pressure misses.
+Across eight previously exposed atlas families (four calibration and four
+final-review), mean fluid-temperature response RMSE for mature4738 /
+Fine-selected972 / Native-selected456 is 0.11674/0.13448/0.13752 over all 80
+perturbations. On the sixteen heat-transfer perturbations it is
+0.06610/0.07346/0.06471 versus zero change 0.24176; heat-flux-proxy RMSE is
+0.57396/0.35217/0.33575. All stored heat-only u/v/p/omega responses are exactly
+zero, while mean model u RMSE is 0.001231/0.001701/0.001472 and p RMSE
+0.0004970/0.0004479/0.0005709: all fail these generator-specific nulls.
+Across all 80, mean pressure-increment absolute error is
+0.0001974/0.0002800/0.0003806 versus zero change 0.0002784, so Fine972 slightly
+misses zero change and Native456 clearly misses it. Equal-variant mean
+module-peak-increment error is 0.16486/0.16508/0.16218 temperature units.
+The bottom maps show family0310 heat-transfer-plus on 7,918 common fluid
+cells: temperature response RMSE 0.07045/0.06504/0.06509 versus reference
+RMS 0.30041. Stored response and signed model residuals share the scale
+[-1.14170,1.14170]; no finite plotted cell is clipped. White masks exclude
+physical solids and noncommon full-stencil support. PDF and PNG are inspected,
+and all 1,920 saved response-channel equations reconcile within 8.9e-16;
+independent pressure reductions differ by at most 4.5e-8 in FP32. The figure
+supports selective thermal-response gains alongside cross-field and pressure
+misses at unequal training ages. Native analytic/shared-grid benchmark scales,
+`q_normal` proxy status, unresolved response floors and frozen predicted-port/
+Stage-A physics limit these claims; no independent solve, CFD, response-relative
+accuracy or inverse quality is established.
 
 ![Matched frozen mature and Fine heat optimization, pressure and identifiability](../../diagnostics/generated/shared_core_campaign_20261002/figures/frozen_inverse_comparison.png)
 
@@ -1119,6 +1167,32 @@ all 334 forward-state tensors/3,994,148 scalars bitwise unchanged. Normalization
 uses all 600 training records. This is integration evidence, not formal inverse
 head training, a 200-update review or finalist qualification; no generative
 campaign has begun.
+
+A separate native-consumer rehearsal at exact Overlap100 uses the fixed
+M3/5/7/10 cases 0647/0291/0296/0692 and three caller-owned public-total seeds:
+uniform and opposite geometry-rank allocations. After centered noise at
+time 0.5, their current simplex-projected noisy candidates reach the native
+provider, matching the planned `candidate_projected` policy. It does not read
+hidden reference heat or held temperatures for the measurement.
+All five source-normalized graph routes differ from their full-link controls
+in all twelve records; QM/QE transpose normalizations are also retained.
+The same untrained seed0, width96, two-layer inverse head gives graph/full
+centered-heat velocity RMS differences 0.01113–0.06457 and normalized
+observation-value gradient norms 0.000411–0.008107. Both arms retain identical
+frozen embeddings and head weights. Independent saved-array reductions
+reproduce link/velocity/observation summaries within 6.6e-8, and the current
+simplex candidate within 1.5e-7; maximum public-total error is 5.4e-7 with
+nonnegative allocations and zero padding. This establishes a nonvacuous
+native consumer operation at e100,
+not inverse task improvement or final qualification. No head optimizer,
+sampling trajectory or physical solve is created. All 334 forward-state
+tensors/3,994,148 scalars and the checkpoint bytes remain unchanged. The CPU1
+measurement completes in 14.71 seconds from clean source `642c654`; saved
+source, matrices, outputs and observation derivatives are in
+`generative_readiness/h-overlap_e100_candidate_projected_rehearsal`. An earlier
+fixed-public-proxy link rehearsal remains separately retained. Repeat this
+check on the actual selected finalist and combine it with the same-weight
+physical utility and population graph evidence before paired-head training.
 
 The reporting/freezing revision passes 78 focused tests with two
 optional native-resource tests skipped; retained-native local and paired-head

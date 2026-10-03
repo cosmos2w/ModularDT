@@ -103,6 +103,7 @@ class TypedWorkEvidenceRecorder(AbstractContextManager):
                 "source_membership",
                 "group_controls",
                 "group_centres",
+                "diagnostics",
             ):
                 _flatten(f"{prefix}/{name}", exported[name], self.arrays)
             for name in ("typed_admission", "typed_centres"):

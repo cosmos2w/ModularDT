@@ -6,7 +6,10 @@ import torch
 from torch import nn
 
 from honf_forward_core.evaluation.typed_work_evidence import TypedWorkEvidenceRecorder, compare_native_access
+from honf_forward_core.interface_fields.adaptive_interaction_cover import InteractionContext
+from honf_forward_core.interface_fields.typed_hypergraph_field import TypedHypergraphField
 from honf_forward_core.interface_fields.typed_hypergraph_state import TypedHypergraphState, TypedSourceAccess
+from honf_forward_core.interface_fields.types import EncodedInterfaceCase
 
 
 class Backend(nn.Module):
@@ -71,6 +74,57 @@ def test_recorder_restores_methods_on_exception_and_rejects_training():
     with pytest.raises(RuntimeError), TypedWorkEvidenceRecorder(backend):
         raise RuntimeError("probe interrupted")
     assert "prepare" not in backend.__dict__ and "_access" not in backend.__dict__
+
+
+@pytest.mark.parametrize("rescue", [False, True])
+def test_real_overlap_phase_diagnostics_are_copied_without_changing_outputs(rescue):
+    generator = torch.Generator().manual_seed(37)
+    encoded = EncodedInterfaceCase(
+        module_tokens=torch.randn(1, 3, 8, generator=generator),
+        env_tokens=torch.randn(1, 4, 8, generator=generator),
+        global_token=torch.randn(1, 8, generator=generator),
+        module_centers=torch.rand(1, 3, 2, generator=generator),
+        env_coords=torch.rand(1, 4, 2, generator=generator),
+        module_present=torch.ones(1, 3),
+        module_features=torch.randn(1, 3, 3, generator=generator),
+        env_features=None,
+        env_weights=torch.ones(1, 4),
+        coordinate_scale=torch.ones(1, 1, 2),
+    )
+    backend = TypedHypergraphField(
+        8, 12, 2, 2, architecture="overlap_control_hypergraph_honf",
+        spatial_dim=2, module_characteristic_length=0.1, options={"group_count": 3},
+    ).eval()
+    backend.organizer.set_epoch(301)
+    with torch.no_grad():
+        gate = backend.organizer.admission_gate.network.net[-1]
+        gate.weight.zero_()
+        gate.bias.fill_(-100 if rescue else 100)
+        query = torch.rand(1, 5, 2, generator=generator)
+        features = torch.rand(1, 5, 6, generator=generator)
+        baseline = []
+        for phase in range(3):
+            state = backend.prepare(encoded, encoded.module_tokens,
+                                    interaction_context=InteractionContext(phase=f"P{phase}"))
+            baseline.append(backend.read(state, encoded, query, features)[0].clone())
+        frozen_state = {key: value.clone() for key, value in backend.state_dict().items()}
+        with TypedWorkEvidenceRecorder(backend) as record:
+            for phase in range(3):
+                state = backend.prepare(encoded, encoded.module_tokens,
+                                        interaction_context=InteractionContext(phase=f"P{phase}"))
+                actual, _ = backend.read(state, encoded, query, features)
+                torch.testing.assert_close(actual, baseline[phase], rtol=0, atol=0)
+                diagnostics = state["hypergraph_plan"].export()["diagnostics"]
+                assert bool(diagnostics["admission_rescue"][0]) is rescue
+                assert int(diagnostics["admitted_groups"][0]) == (1 if rescue else 3)
+                for name, value in diagnostics.items():
+                    np.testing.assert_array_equal(record.arrays[f"phase/P{phase}/diagnostics/{name}"], value.numpy())
+        for key, value in backend.state_dict().items():
+            torch.testing.assert_close(value, frozen_state[key], rtol=0, atol=0)
+    assert all(name not in backend.__dict__ for name in ("prepare", "_access", "_ledger"))
+    # Saved diagnostics are snapshots rather than views of the returned plan.
+    diagnostics["admission_rescue"].logical_not_()
+    assert bool(record.arrays["phase/P2/diagnostics/admission_rescue"][0]) is rescue
 
 
 def test_native_pair_audit_checks_identity_geometry_cardinality_and_weight_multisets():
