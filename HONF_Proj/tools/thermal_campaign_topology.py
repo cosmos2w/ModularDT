@@ -420,8 +420,17 @@ def _rebuild_representation_arrays(capture, builder):
     count = builder.base.env_weights.shape[-1]
     parents, fractions = builder.parents, builder.fractions
     for phase, state in capture.states.items():
+        for kind, coordinates in state.source_coords.items():
+            tensors[f"P{phase}/source_coords_{kind}"] = (
+                _pullback_atom_axis(coordinates, parents, fractions, 1, count) if kind == "E" else coordinates)
         for tau, control in state.controls.items():
             tensors[f"P{phase}/{tau}/group_controls"] = control
+            member = state.memberships[tau]
+            tensors[f"P{phase}/{tau}/value_donors"] = (
+                _pullback_atom_axis(member, parents, fractions, -1, count) if SOURCE_TYPE[tau] == "E" else member)
+            for name in ("typed_centres", "typed_admission"):
+                if tau in state.strategy_data.get(name, {}):
+                    tensors[f"P{phase}/{tau}/{name}"] = state.strategy_data[name][tau]
             donors = getattr(state, "control_memberships", {})
             for kind, member in donors.get(tau, {}).items():
                 tensors[f"P{phase}/{tau}/control_donors_{kind}"] = (
@@ -431,6 +440,11 @@ def _rebuild_representation_arrays(capture, builder):
                 for case, tree in enumerate(trees):
                     geometry = state.strategy_data["access_geometry"]["M" if tau in ("MM", "ME") else "E" if tau == "EM" else "Q"]
                     tensors[f"P{phase}/{tau}/case{case}/boundaries"] = geometry["boundary"][case]
+                    for name in ("axes", "parents", "left", "depths", "leaves", "valid", "overlap"):
+                        tensors[f"P{phase}/{tau}/case{case}/geometry_{name}"] = geometry[name][case]
+                    points = [tree.universe.coordinates[list(node.anchor_indices)] for node in tree.nodes]
+                    tensors[f"P{phase}/{tau}/case{case}/node_bbox_min"] = torch.stack([point.amin(0) for point in points])
+                    tensors[f"P{phase}/{tau}/case{case}/node_bbox_max"] = torch.stack([point.amax(0) for point in points])
                     if tree.canonical_index is not None:
                         tensors[f"P{phase}/{tau}/case{case}/index_coords"] = tree.canonical_index.coordinates
                         tensors[f"P{phase}/{tau}/case{case}/index_mass"] = tree.canonical_index.weights
