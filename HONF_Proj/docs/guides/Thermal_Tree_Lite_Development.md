@@ -413,3 +413,35 @@ role must validate and reuse sealed Pair900 results without repeating its
 trajectories or rank probes. Native ledger elapsed timestamps are cumulative,
 not per-call durations. Preserve the 18-hour aggregate ceiling, 00:05:36 UTC
 measurement cutoff and final closeout hour when refreshing the forecast.
+
+### Tree 900 monitoring review
+
+GPU 1 completed Tree's epoch-900 all-22 normal evaluation with exit 0 at
+21:57:58 UTC, taking 23.762028 seconds including loading and closeout.
+The literal checkpoint SHA256 is
+`6e68919f4390cb87da844be20b19fdef75ff8c5fbd003375521cface18725692`.
+Across the nine retained parent/child checkpoints through 900, the sampled
+native field selector chooses provisional **900**, with MSE 0.03972594.
+It improves 12.96% over 700 and 33.19% over 800. Final selection still awaits
+the actual 1000 checkpoint; this review releases no selected-weight deep work.
+
+Full-grid equal-case physical statistics improve 19 of 24 roles versus both
+700 and 800. All five fluid channels improve, while material and surface
+temperature regress. Surface RMSE is also 2.71% worse than Tree500.
+Against matched Pair900, Tree improves 14 of 24 aggregate roles and six of
+eight core roles. Fluid/material/surface temperature RMSE is
+1.215061/1.226645/1.427279, lower by 17.62%/6.41%/5.95%.
+Their paired wins/ties/losses are 17/0/5, 10/0/12 and 11/0/11.
+Material's positive mean reduction 0.083956 coexists with a negative median
+-0.037886; M10 material and surface each improve only one of four cases.
+Streamwise velocity and vorticity remain 25.87%/20.18% worse than Pair900,
+with 1/0/21 and 0/0/22 paired wins/ties/losses. These are exposed-development
+tradeoffs, without field-wide deterioration or uniform organizer superiority.
+
+Accepted work through Tree900/Pair1000/Fine500 totals 300,000 current-round
+case visits, 8,000 ordinary optimizer updates and 307,200,000 primary fluid
+queries. The healthy authorized continuation proceeds unchanged. Endpoint
+normal1000 and null1000 are sequential on GPU 1; null waits for the normal
+process's epoch-1000 exit-0 receipt and a fresh device/headroom check.
+Final Tree organizer/response measurements and the 24 remaining inverse
+trails remain pending under the existing resource and closeout limits.
