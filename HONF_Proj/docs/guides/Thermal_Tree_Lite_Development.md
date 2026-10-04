@@ -311,3 +311,43 @@ forecast scenarios are retained under
 `/data/wanglz/ModularDT/thermal_development/tree_lite_20261004/`. Final
 selected-weight organizer, response and 32-trail inverse results remain
 pending; completed 500 training and preparation do not complete those tasks.
+
+### Forecast revision after the first continuation updates
+
+Tree's first five continuation epochs average 38.9060 s, with a 39.3623 s
+maximum, on its exclusive GPU. Pair averages 7.9330 s with an 8.2866 s
+maximum. These are complete native train/validation epoch timers, including
+scheduled auxiliary work; checkpoint/export and process loading remain
+separate. They establish startup and measured cost, not completion.
+
+The actual Tree 500 full-grid normal evaluation with organization statistics
+and four detailed phase-graph/field exports takes 40.0165 s as a process.
+Its maximum instrumented wrapper is 2.11049 s, versus the earlier 1.48022 s
+proxy without that capture scope. This is a wider diagnostic scope, not a
+measured slowdown of the bare operator. Applying the wider proxy only to
+whole-rebuild/P0QM, full-grid utility and context diagnostics adds 332.780 s
+to their planning allowances; the bare inverse, Q14 attribution, prepared
+reads and Q256 null/force proxies are unchanged.
+
+Retaining the existing bounded failure-review margins therefore requires
+100.97 aggregate process-minutes. The revised planning reserve is **105
+aggregate minutes** within the same 18-hour ceiling, with no additional
+experiment or automatic retry. This leaves all earlier margins intact.
+The normal/null endpoint release gate is 120 elapsed seconds, counted once;
+matching selected-checkpoint evidence is reused and its associated allowance
+is transferred, not charged again.
+
+Including that gate, the conservative diagnostic-sensitivity late critical
+path is 45.35 minutes for matching endpoint evidence, or 48.59 minutes when
+an earlier selected checkpoint needs its missing panels. At the 17:39
+current-cost forecast, those scenarios finish near 23:47:42 and 23:50:56;
+the historical slower-rate/earlier-selector scenario finishes near 00:04:29,
+only about one minute before the science cutoff. These are explicit timing
+assumptions and an alert condition, not guaranteed deadlines. Refresh both
+the current and historical scenarios at each retained review; preserve the
+00:05:36 cutoff and final closeout hour.
+
+Pair 600's native field selector regresses to 0.091173 from 0.072215 at 500,
+and seven of eight full-grid tracked roles worsen. Its selected retained
+checkpoint remains 500. Record this miss, review subsequent saved windows,
+and do not tune or terminate from this single window.
