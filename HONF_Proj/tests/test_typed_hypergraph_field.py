@@ -88,7 +88,7 @@ def test_registered_core_multi_chunk_backward_and_exact_row_ledger(dimension):
         case_name="typed-hypergraph-test", metadata={},
         env_coords=encoded.env_coords, env_features=torch.randn(2, 7, 3), env_weights=encoded.env_weights)
     inputs = core.encode_case(batch)
-    prepared = core.prepare(inputs, inputs.module_tokens)
+    prepared = core.prepare(inputs, inputs.module_tokens, return_routing_maps=True)
     output = core.decode_queries(prepared, batch.query_xy, receiver_chunk_size=3, return_routing_maps=True)
     output["pred_field"].square().mean().backward()
     assert any(parameter.grad is not None and parameter.grad.abs().sum() > 0 for parameter in core.parameters())
@@ -238,8 +238,8 @@ def test_rectangular_executor_preserves_values_first_gradients_and_measures_actu
         environment = encoded.env_tokens.clone().requires_grad_()
         coordinates = query.clone().requires_grad_()
         record = replace(encoded, module_tokens=module, env_tokens=environment)
-        state = model.prepare(record, module)
-        value, work = model.read(state, record, coordinates, features)
+        state = model.prepare(record, module, return_routing_maps=True)
+        value, work = model.read(state, record, coordinates, features, return_routing_maps=True)
         value.square().sum().backward()
         results[name] = value
         input_gradients[name] = (module.grad, environment.grad, coordinates.grad)

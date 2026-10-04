@@ -1,7 +1,7 @@
 """Transparent evaluation-only recording of actual typed native access calls."""
 
-from contextlib import AbstractContextManager
 import json
+from contextlib import AbstractContextManager
 
 import numpy as np
 import torch
@@ -34,6 +34,24 @@ def control_summary(control):
     }
 
 
+def projected_action_summary(projected):
+    """Explicit small affine-action summaries, never full control vectors."""
+    return {name.replace("control_", "projected_action_", 1): value
+            for name, value in control_summary(projected).items()}
+
+
+def project_diagnostic_control(backend, control, mechanism, *, mode="normal"):
+    """Project an already materialized explicit diagnostic access."""
+    gains = getattr(backend, "control_gain", None)
+    if gains is None:
+        return None
+    gain = gains[mechanism](control.to(gains[mechanism].weight.dtype))
+    if mechanism == "QE":
+        score = backend.control_score(control.to(backend.control_score.weight.dtype))
+        gain = torch.cat((score, gain), -1)
+    return torch.zeros_like(gain) if mode == "control_identity" else gain
+
+
 class TypedWorkEvidenceRecorder(AbstractContextManager):
     """Record post-intervention plans and source weights without extra reads.
 
@@ -52,13 +70,14 @@ class TypedWorkEvidenceRecorder(AbstractContextManager):
 
     def __enter__(self):
         names = ["prepare", "_access"]
+        if callable(getattr(self.backend, "_numerical_access", None)):
+            names.append("_numerical_access")
         if callable(getattr(self.backend, "_ledger", None)):
             names.append("_ledger")
         self._owned = {name: name in self.backend.__dict__ for name in names}
         self._original = {name: getattr(self.backend, name) for name in self._owned}
 
-        def access(plan, receivers, mechanism, *args, **kwargs):
-            value = self._original["_access"](plan, receivers, mechanism, *args, **kwargs)
+        def record(value, plan, receivers, mechanism, *, mode=None):
             tau = str(mechanism).upper()
             route = (int(plan.phase), tau)
             index = self._counts.get(route, 0)
@@ -83,9 +102,35 @@ class TypedWorkEvidenceRecorder(AbstractContextManager):
             _flatten(f"{prefix}/diagnostics", value.diagnostics, self.arrays)
             # Keep small deterministic probes and complete per-receiver control
             # summaries rather than the large R x S x 16 tensor.
-            for name, tensor in control_summary(value.control).items():
-                _flatten(f"{prefix}/{name}", tensor, self.arrays)
+            if hasattr(value, "control"):
+                for name, tensor in control_summary(value.control).items():
+                    _flatten(f"{prefix}/{name}", tensor, self.arrays)
+                projected = project_diagnostic_control(self.backend, value.control, tau,
+                    mode=mode or getattr(self.backend, "plan_intervention", "normal"))
+            else:
+                projected = value.projected
+            if projected is not None:
+                for name, tensor in projected_action_summary(projected).items():
+                    _flatten(f"{prefix}/{name}", tensor, self.arrays)
+                self.arrays[f"{prefix}/projected_action_semantics"] = np.asarray(
+                    "affine gain" if tau != "QE" else "affine score channels followed by affine gain channels")
             return value
+
+        def access(plan, receivers, mechanism, *args, **kwargs):
+            value = self._original["_access"](plan, receivers, mechanism, *args, **kwargs)
+            return record(value, plan, receivers, mechanism, mode=kwargs.get("mode"))
+
+        def numerical_access(plan, receivers, mechanism, *args, **kwargs):
+            route = (int(plan.phase), str(mechanism).upper())
+            before = self._counts.get(route, 0)
+            value = self._original["_numerical_access"](plan, receivers, mechanism, *args, **kwargs)
+            prefix = f"access/P{route[0]}/{route[1]}/{before:05d}"
+            # A full-control fallback calls the wrapped public _access once.
+            # Deduplicate only that nested call, never a reused Python object
+            # address from an earlier numerical chunk.
+            if self._counts.get(route, 0) > before and self._access_prefixes.get(id(value)) == prefix:
+                return value
+            return record(value, plan, receivers, mechanism, mode=kwargs.get("mode"))
 
         def prepare(*args, **kwargs):
             state = self._original["prepare"](*args, **kwargs)
@@ -116,6 +161,8 @@ class TypedWorkEvidenceRecorder(AbstractContextManager):
             return state
 
         self.backend.prepare, self.backend._access = prepare, access
+        if "_numerical_access" in self._original:
+            self.backend._numerical_access = numerical_access
         if "_ledger" in self._original:
 
             def ledger(mechanism, source_access, work):
@@ -162,6 +209,8 @@ def compare_native_access(reference, changed):
                 "per_receiver_support_cardinality_equal": True,
                 "control_probe_equal": True,
                 "control_receiver_summary_equal": True,
+                "projected_action_probe_equal": True,
+                "projected_action_receiver_summary_equal": True,
                 "normal_eligible_pairs": 0,
                 "intervention_eligible_pairs": 0,
             },
@@ -181,13 +230,23 @@ def compare_native_access(reference, changed):
                 if eligible_key in arrays
                 else int(arrays[f"{prefix}/source_valid"].sum() * arrays[f"{prefix}/receivers"].shape[1])
             )
-        row["control_probe_equal"] &= bool(
-            np.array_equal(reference[f"{prefix}/control_probe"], changed[f"{prefix}/control_probe"])
-        )
-        row["control_receiver_summary_equal"] &= all(
-            np.array_equal(reference[f"{prefix}/{name}"], changed[f"{prefix}/{name}"])
-            for name in ("control_receiver_max_abs", "control_receiver_nonzero_count", "control_source_channel_mean")
-        )
+        for representation in ("control", "projected_action"):
+            probe_key = f"{prefix}/{representation}_probe"
+            probe_stat = f"{representation}_probe_equal"
+            summary_stat = f"{representation}_receiver_summary_equal"
+            if probe_key not in reference or probe_key not in changed:
+                row[probe_stat] = None
+                row[summary_stat] = None
+                continue
+            # Project-before-mixture changes FP operation order within the
+            # tested tolerance; control-vector legacy comparisons stay exact.
+            def equal(before, after, _representation=representation):
+                return (np.allclose(before, after, atol=1e-6, rtol=1e-6)
+                        if _representation == "projected_action" else np.array_equal(before, after))
+            row[probe_stat] &= bool(equal(reference[probe_key], changed[probe_key]))
+            row[summary_stat] &= all(equal(reference[f"{prefix}/{name}"], changed[f"{prefix}/{name}"])
+                for name in (f"{representation}_receiver_max_abs", f"{representation}_receiver_nonzero_count",
+                             f"{representation}_source_channel_mean"))
         row["normal_positive_pairs"] += int(np.count_nonzero(before))
         row["intervention_positive_pairs"] += int(np.count_nonzero(after))
         row["changed_pairs"] += int(np.count_nonzero(before != after))
@@ -201,4 +260,4 @@ def compare_native_access(reference, changed):
     return routes
 
 
-__all__ = ["TypedWorkEvidenceRecorder", "compare_native_access", "control_summary"]
+__all__ = ["TypedWorkEvidenceRecorder", "compare_native_access", "control_summary", "project_diagnostic_control", "projected_action_summary"]

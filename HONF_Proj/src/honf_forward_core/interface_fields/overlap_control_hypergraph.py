@@ -264,7 +264,7 @@ class OverlapControlHypergraph(nn.Module):
         soft: bool = False,
         pair_valid: torch.Tensor | None = None,
         capture_topology: bool = False,
-        fixed_receiver_access: dict | None = None,
+        fixed_receiver_access: dict | None = None, prepared_action=None, include_diagnostics=True, detach_permissions=False,
     ) -> TypedSourceAccess:
         if mechanism not in SOURCE_TYPE:
             raise ValueError(f"Unknown typed mechanism {mechanism!r}.")
@@ -292,7 +292,11 @@ class OverlapControlHypergraph(nn.Module):
         source_type = SOURCE_TYPE[mechanism]
         lengths = torch.where(state.source_valid[source_type], state.source_lengths[source_type], torch.ones_like(state.source_lengths[source_type]))
         near = smooth_near_envelope(receivers, state.source_coords[source_type], lengths, inner=self.near_inner, outer=self.near_outer) if self.local_access else None
-        result = source_moments(edge_access, state.memberships[mechanism], state.controls[mechanism], state.source_measures[source_type], state.source_valid[source_type], pair_valid=pair_valid, near=near)
+        if detach_permissions:
+            edge_access = edge_access.detach()
+            if near is not None:
+                near = near.detach()
+        result = source_moments(edge_access, state.memberships[mechanism], state.controls[mechanism], state.source_measures[source_type], state.source_valid[source_type], pair_valid=pair_valid, near=near, prepared_action=prepared_action, include_diagnostics=include_diagnostics)
         if capture_topology:
             result.diagnostics["receiver_logits"] = logits
         return result

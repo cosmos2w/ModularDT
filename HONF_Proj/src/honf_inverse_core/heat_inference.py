@@ -20,6 +20,97 @@ from .models.centered_simplex_velocity import _project_simplex
 HeatPrediction = Callable[[torch.Tensor], Mapping[str, object]]
 
 
+class UnsupportedHeatTotal(ValueError):
+    """The public total has no allocation inside the declared heat bounds."""
+
+
+def heat_feasibility_tolerance(total, active_count, heat_bounds, *, dtype):
+    """Four native rounding units for sum, cast and fraction restoration.
+
+    Bounds stay fixed. A boundary public sum can differ from its exact real
+    sum by this amount; retained physical allocations must expose their signed
+    total residual and stay inside the original representable heat caps.
+    """
+    lower, upper = (float(value) for value in heat_bounds)
+    scale = max(1., abs(float(total)), int(active_count) * max(abs(lower), abs(upper)))
+    return 4. * torch.finfo(dtype).eps * scale
+
+
+@torch.no_grad()
+def project_capped_heat(values: torch.Tensor, active: torch.Tensor, total: torch.Tensor,
+                        heat_bounds: tuple[float, float], *, native_dtype=None) -> torch.Tensor:
+    """Project onto physical heat caps and a native-precision fixed total.
+
+    Solve the scalar water-filling threshold in FP64, then cast the completed
+    allocation. Feasible native inputs remain unchanged when their signed
+    real-sum residual fits ``heat_feasibility_tolerance``; no heat cap moves.
+    This helper is for optimizer proposals, not a differentiable
+    physical response or a topology derivative.
+    """
+    lower, upper = (float(value) for value in heat_bounds)
+    if not 0 <= lower <= upper or not torch.isfinite(torch.tensor([lower, upper], dtype=torch.float64)).all():
+        raise ValueError("Heat bounds must be finite, nonnegative and ordered")
+    if values.ndim != 1 or values.shape != active.shape or total.numel() != 1:
+        raise ValueError("Physical heat and active mask must be [M], with scalar total")
+    if not bool(torch.isfinite(values).all()) or not bool(torch.isfinite(total).all()):
+        raise ValueError("Heat projection requires finite inputs")
+    ids = torch.nonzero(active.bool(), as_tuple=False).flatten()
+    count, requested = ids.numel(), float(total)
+    if not count:
+        raise ValueError("Heat projection requires active modules")
+    tolerance = heat_feasibility_tolerance(total, count, heat_bounds, dtype=native_dtype or values.dtype)
+    if requested < count * lower - tolerance or requested > count * upper + tolerance:
+        raise UnsupportedHeatTotal(
+            f"Public total {requested:.17g} is outside [{count * lower:.17g}, {count * upper:.17g}] "
+            f"for {count} active modules and frozen heat bounds [{lower:.17g}, {upper:.17g}] "
+            f"(native summation tolerance {tolerance:.17g})")
+    # Preserve an already feasible native allocation, including an endpoint
+    # whose FP32 public sum rounds to the neighboring representable number.
+    selected = values[ids]
+    if bool(((selected >= lower) & (selected <= upper)).all()) and abs(float(
+            selected.double().sum() - total.double())) <= tolerance:
+        output = torch.zeros_like(values)
+        output[ids] = selected
+        return output
+    source = values[ids].to(torch.float64)
+    left, right = source.min() - upper, source.max() - lower
+    # Endpoint rounding affects total feasibility, never the physical caps.
+    target = total.to(device=values.device, dtype=torch.float64).reshape(()).clamp(count * lower, count * upper)
+    for _ in range(80):
+        threshold = (left + right) * .5
+        above = (source - threshold).clamp(lower, upper).sum() > target
+        left = torch.where(above, threshold, left)
+        right = torch.where(above, right, threshold)
+    projected = (source - (left + right) * .5).clamp(lower, upper)
+    output = torch.zeros_like(values)
+    output[ids] = projected.to(values.dtype)
+    if abs(float(output.double().sum() - total.double())) > tolerance:
+        raise RuntimeError("Capped projection total residual exceeds the declared native summation tolerance")
+    return output
+
+
+def public_heat_starts(active, total, *, starts=2, seed=0, heat_bounds=None):
+    """Uniform and seeded public allocations; no hidden heat is accepted."""
+    if starts < 1:
+        raise ValueError("At least one public start is required")
+    ids = torch.nonzero(active.bool(), as_tuple=False).flatten()
+    if not ids.numel():
+        raise ValueError("Public heat starts require active modules")
+    initial = active.to(total.dtype) / ids.numel()
+    generator = torch.Generator().manual_seed(int(seed))
+    output = []
+    for index in range(starts):
+        fraction = initial.clone()
+        if index:
+            draw = torch.rand(ids.numel(), generator=generator, dtype=total.dtype).to(active.device) + .2
+            fraction[ids] = draw / draw.sum()
+        heat = fraction * total
+        if heat_bounds is not None:
+            heat = project_capped_heat(heat, active, total, heat_bounds)
+        output.append(heat)
+    return tuple(output)
+
+
 def fixed_total_basis(active: torch.Tensor, *, dtype: torch.dtype) -> torch.Tensor:
     """Orthonormal Helmert columns in physical module order; M=1 has none."""
     ids = torch.nonzero(active.bool(), as_tuple=False).flatten()
@@ -91,6 +182,12 @@ class HeatInferenceTrail:
     vjp_calls: tuple[int, ...] = ()
     trial_evaluations: tuple[int, ...] = ()
     step_receipts: tuple[dict, ...] = ()
+    status: str = "completed"
+    unsupported_reason: str | None = None
+    heat_bounds: tuple[float, float] | None = None
+    feasibility_tolerance: float | None = None
+    total_residual: tuple[float, ...] = ()
+    bound_excess: tuple[float, ...] = ()
 
 
 def fixed_total_heat_inference(predictor: HeatPrediction, observed: torch.Tensor,
@@ -214,7 +311,8 @@ def bounded_trust_heat_inference(predictor: HeatPrediction, observed: torch.Tens
                                 initial_fraction: torch.Tensor, *, mode="joint", steps=10,
                                 learning_rate=.05, proposal_predictor=None,
                                 block_stream=None, permutation_stream=None,
-                                block_size_stream=None) -> HeatInferenceTrail:
+                                block_size_stream=None, heat_bounds=None,
+                                state_callback=None) -> HeatInferenceTrail:
     """Simplex-tangent trust proposals, at most two observed-only trials.
 
     ``learning_rate`` is a maximum change in an allocation fraction per local
@@ -223,6 +321,10 @@ def bounded_trust_heat_inference(predictor: HeatPrediction, observed: torch.Tens
     is rebuilt under the ordinary operator; a worse rebuilt observed value
     is rejected. Held observations never select a proposal or step radius.
     Every attempted forward (including invalid topology) and VJP is charged.
+    Optional physical ``heat_bounds`` apply to starts and every block proposal.
+    An infeasible public total returns an unsupported trail before model access.
+    ``state_callback`` receives each retained state immediately, including the
+    initial state, accepted steps, rejected steps and cumulative call charges.
     """
     if mode not in {"joint", "graph", "ungrouped"} or not 0 <= steps <= 10 or not 0 < learning_rate <= .25:
         raise ValueError("Trust inference requires a declared mode, at most ten steps and radius in (0,.25].")
@@ -240,15 +342,43 @@ def bounded_trust_heat_inference(predictor: HeatPrediction, observed: torch.Tens
     if block_size_stream is not None and (mode != "ungrouped" or len(block_size_stream) < steps or
         any(not isinstance(size, int) or not 2 <= size <= ids.numel() for size in block_size_stream[:steps])):
         raise ValueError("Recorded block sizes must cover every random-control step")
-    fractions = _project_simplex(initial_fraction[None], active[None])[0].detach().requires_grad_()
+    if heat_bounds is None:
+        fractions = _project_simplex(initial_fraction[None], active[None])[0]
+    else:
+        try:
+            initial_heat = project_capped_heat(initial_fraction * total, active, total, heat_bounds)
+        except UnsupportedHeatTotal as exc:
+            return HeatInferenceTrail(mode, (), (), (), (), (), (), (), (), (), (),
+                0, 0, 0, status="unsupported", unsupported_reason=str(exc),
+                heat_bounds=tuple(float(value) for value in heat_bounds),
+                feasibility_tolerance=heat_feasibility_tolerance(total, ids.numel(), heat_bounds,
+                                                               dtype=initial_fraction.dtype))
+        # Wide allocation ratios restore FP32 physical cap endpoints exactly
+        # after division/multiplication, without changing physical kernels.
+        fractions = initial_heat.double() / total.double() if float(total) > 0 else torch.zeros_like(initial_fraction).double()
+    fractions = fractions.detach().requires_grad_()
     forward_count, vjp_count = 0, 0
+    tolerance = (heat_feasibility_tolerance(total, ids.numel(), heat_bounds, dtype=initial_fraction.dtype)
+                 if heat_bounds is not None else None)
+    residuals, bound_excesses = [], []
+
+    def physical_heat(values):
+        heat = values * total
+        if heat_bounds is not None:
+            heat = heat.to(initial_fraction.dtype)
+            lower, upper = heat_bounds
+            excess = torch.maximum((lower - heat[ids]).clamp_min(0).max(),
+                                   (heat[ids] - upper).clamp_min(0).max())
+            if float(excess) != 0. or abs(float(heat.double().sum() - total.double())) > tolerance:
+                raise RuntimeError("Fraction restoration violated frozen heat caps or native summation tolerance")
+        return heat
 
     def call(values, reference=None, *, proposal=False):
         nonlocal forward_count
         forward_count += 1
         if proposal and proposal_predictor is not None:
-            return proposal_predictor(values * total, reference)
-        return predictor(values * total)
+            return proposal_predictor(physical_heat(values), reference)
+        return predictor(physical_heat(values))
 
     heat_rows, obs_error, held_error, obs_rows, held_rows = [], [], [], [], []
     peaks, pressure, selected, elapsed, forwards, vjps, trials, receipts = [], [], [], [], [], [], [], []
@@ -277,7 +407,15 @@ def bounded_trust_heat_inference(predictor: HeatPrediction, observed: torch.Tens
         obs, unseen = prediction["observed"], prediction["held"]
         if not torch.is_tensor(obs) or not torch.is_tensor(unseen) or not bool(torch.isfinite(obs).all() and torch.isfinite(unseen).all()):
             raise ValueError("Surrogate sensor predictions must be finite tensors")
-        heat_rows.append((fractions * total).detach().clone())
+        retained_heat = physical_heat(fractions).detach().clone()
+        heat_rows.append(retained_heat)
+        residuals.append(float(retained_heat.double().sum() - total.double()))
+        if heat_bounds is not None:
+            lower, upper = heat_bounds
+            bound_excesses.append(float(torch.maximum((lower-retained_heat[ids]).clamp_min(0).max(),
+                                                       (retained_heat[ids]-upper).clamp_min(0).max())))
+        else:
+            bound_excesses.append(0.)
         obs_error.append(float(_rmse(obs, observed).detach()))
         held_error.append(float(_rmse(unseen, held).detach()))
         obs_rows.append(obs.detach().clone())
@@ -289,6 +427,14 @@ def bounded_trust_heat_inference(predictor: HeatPrediction, observed: torch.Tens
         elapsed.append(perf_counter() - started)
         forwards.append(forward_count)
         vjps.append(vjp_count)
+        if state_callback is not None:
+            state_callback({"iteration": len(heat_rows) - 1,
+                "heat": heat_rows[-1], "observed": obs_rows[-1], "held": held_rows[-1],
+                "observed_rmse": obs_error[-1], "held_rmse": held_error[-1],
+                "forward_calls": forward_count, "vjp_calls": vjp_count,
+                "accepted_steps": accepted, "receipt": receipts[-1] if receipts else None,
+                "total_residual": residuals[-1], "bound_excess": bound_excesses[-1],
+                "feasibility_tolerance": tolerance})
 
     prediction = call(fractions)
     append(prediction)
@@ -335,9 +481,15 @@ def bounded_trust_heat_inference(predictor: HeatPrediction, observed: torch.Tens
         if float(scale) > 0 and float(subtotal) > 0:
             for trial, radius in enumerate((learning_rate, learning_rate * .5), 1):
                 candidate = previous.clone()
-                projected = _project_simplex(((previous[chosen] + radius * direction) / subtotal)[None],
-                    torch.ones((1, chosen.numel()), device=active.device, dtype=torch.bool))[0]
-                candidate[chosen] = projected * subtotal
+                if heat_bounds is None:
+                    projected = _project_simplex(((previous[chosen] + radius * direction) / subtotal)[None],
+                        torch.ones((1, chosen.numel()), device=active.device, dtype=torch.bool))[0]
+                    candidate[chosen] = projected * subtotal
+                else:
+                    block_heat = (previous[chosen] + radius * direction) * total
+                    candidate[chosen] = project_capped_heat(block_heat,
+                        torch.ones_like(chosen, dtype=torch.bool), subtotal * total, heat_bounds,
+                        native_dtype=initial_fraction.dtype) / total
                 actual_delta = candidate[chosen] - previous[chosen]
                 largest = actual_delta.abs().max()
                 if float(largest) > radius:
@@ -388,7 +540,8 @@ def bounded_trust_heat_inference(predictor: HeatPrediction, observed: torch.Tens
     return HeatInferenceTrail(mode, tuple(heat_rows), tuple(range(len(heat_rows))), tuple(obs_error), tuple(held_error),
         tuple(obs_rows), tuple(held_rows), tuple(peaks), tuple(pressure), tuple(selected), tuple(elapsed),
         attempted, meaningful, fallbacks, accepted, attempted - accepted, tuple(forwards), tuple(vjps),
-        tuple(trials), tuple(receipts))
+        tuple(trials), tuple(receipts), heat_bounds=tuple(float(value) for value in heat_bounds) if heat_bounds is not None else None,
+        feasibility_tolerance=tolerance, total_residual=tuple(residuals), bound_excess=tuple(bound_excesses))
 
 
-__all__ = ["HeatInferenceTrail", "fixed_total_basis", "fixed_total_heat_inference", "bounded_trust_heat_inference", "observation_identifiability"]
+__all__ = ["HeatInferenceTrail", "UnsupportedHeatTotal", "bounded_trust_heat_inference", "fixed_total_basis", "fixed_total_heat_inference", "heat_feasibility_tolerance", "observation_identifiability", "project_capped_heat", "public_heat_starts"]

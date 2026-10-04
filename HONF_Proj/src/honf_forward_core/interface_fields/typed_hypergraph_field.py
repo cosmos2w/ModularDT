@@ -13,16 +13,30 @@ from dataclasses import replace
 import torch
 from torch import nn
 
-from honf_forward_core.training.hypergraph_shadow import detach_tree
+from honf_forward_core.training.hypergraph_shadow import (
+    bridge_local_context,
+    detach_tree,
+    local_attention_context,
+    local_modulated_sum,
+)
 
 from .dense_pairwise import DensePairwiseField
 from .hypergraph_interventions import fixed_structure_intervention, membership_intervention
-from .typed_hypergraph_state import SOURCE_TYPE, TypedSourceAccess, source_moments, structural_cost
+from .typed_hypergraph_state import (
+    SOURCE_TYPE,
+    ProjectedSourceAccess,
+    TypedSourceAccess,
+    prepare_projected_action,
+    prepare_structural_cost,
+    source_moments,
+    structural_cost,
+)
 from .types import EncodedInterfaceCase
 
 
 class TypedHypergraphField(DensePairwiseField):
     phase_diagnostic_prefix = "hypergraph_"
+    supports_local_context_shadow = True
 
     def __init__(self, hidden_dim: int, message_hidden_dim: int, num_heads: int,
                  fourier_frequencies: int, *, architecture: str, spatial_dim: int,
@@ -52,6 +66,8 @@ class TypedHypergraphField(DensePairwiseField):
             nn.init.zeros_(module.weight)
             nn.init.zeros_(module.bias)
         self.permission_mode = "hard"
+        self.control_execution = "projected"
+        self.training_gradient_mode = "whole_wrapper_shadow_v1"
         self.execution_mode = "dense_masked_reference"
         self.execution_receiver_chunk = 128
         self.plan_intervention = "normal"
@@ -154,17 +170,85 @@ class TypedHypergraphField(DensePairwiseField):
             access = detach_tree(access)
         return access
 
-    def _modulate(self, messages, access: TypedSourceAccess, mechanism: str, *, mode=None):
+    def _prepare_actions(self, plan, *, detach_projection=False):
+        actions = {}
+        for mechanism in plan.memberships:
+            gain = self.control_gain[mechanism]
+            if mechanism == "QE":
+                weight = torch.cat((self.control_score.weight, gain.weight), 0)
+                bias = torch.cat((self.control_score.bias, gain.bias), 0)
+            else:
+                weight, bias = gain.weight, gain.bias
+            actions[mechanism] = prepare_projected_action(
+                plan.memberships[mechanism], plan.controls[mechanism], weight, bias,
+                detach_projection=detach_projection)
+        return actions
+
+    def _numerical_access(self, plan, receivers, mechanism, actions, receiver_tokens=None,
+                          pair_valid=None, *, mode=None, soft=None, diagnostics=False):
+        """Small-channel action path; full vectors remain public export only."""
         mode = self.plan_intervention if mode is None else mode
-        if self.permission_mode == "soft":
-            control = access.control.to(self.control_gain[mechanism].weight.dtype)
-            weight = access.weight.to(messages.dtype)
+        soft = bool(plan.strategy_data["soft"]) if soft is None else soft
+        if actions is None:
+            return self._access(plan, receivers, mechanism, receiver_tokens, pair_valid,
+                                mode=mode, soft=soft)
+        access = self.organizer.access(plan, receivers, mechanism, receiver_tokens,
+            soft=soft, pair_valid=pair_valid, prepared_action=actions[mechanism],
+            include_diagnostics=diagnostics, detach_permissions=self.training and not soft)
+        if mode in {"full_access", "root_union"}:
+            kind = SOURCE_TYPE[mechanism]
+            member = (plan.source_valid[kind][:, None].to(receivers.dtype) if mode == "full_access"
+                      else (plan.memberships[mechanism].sum(1, keepdim=True) > 0).to(receivers.dtype))
+            controls = plan.controls[mechanism].mean(1, keepdim=True)
+            gain = self.control_gain[mechanism]
+            if mechanism == "QE":
+                weight = torch.cat((self.control_score.weight, gain.weight), 0)
+                bias = torch.cat((self.control_score.bias, gain.bias), 0)
+            else:
+                weight, bias = gain.weight, gain.bias
+            action = prepare_projected_action(member, controls, weight, bias)
+            original = access.projected
+            original_diagnostics = access.diagnostics
+            access = source_moments(receivers.new_ones((*receivers.shape[:2], 1)), member,
+                controls, plan.source_measures[kind], plan.source_valid[kind],
+                pair_valid=original_diagnostics["pair_valid"], near=access.near,
+                prepared_action=action, include_diagnostics=diagnostics)
+            if "receiver_measures" in original_diagnostics:
+                access.diagnostics["receiver_measures"] = original_diagnostics["receiver_measures"]
+            if mode == "full_access":
+                access = replace(access, projected=original)
+        if mode == "control_identity":
+            access = replace(access, projected=torch.zeros_like(access.projected))
+        # Hard organizer paths stay detached, while physical projections remain
+        # live. Detach the plan in prepare, not its projected physical action.
+        return access
+
+    def _modulate(self, messages, access: TypedSourceAccess, mechanism: str, *, mode=None, soft=None):
+        mode = self.plan_intervention if mode is None else mode
+        soft = self.permission_mode == "soft" if soft is None else soft
+        weight = access.weight.to(messages.dtype) if soft else access.weight
+        if isinstance(access, ProjectedSourceAccess):
+            gain = access.projected
         else:
-            control, weight = access.control, access.weight
-        gain = self.control_gain[mechanism](control)
+            control = (access.control.to(self.control_gain[mechanism].weight.dtype)
+                       if soft else access.control)
+            gain = self.control_gain[mechanism](control)
         if mode == "control_identity":
             gain = torch.zeros_like(gain)
         return messages * (1.0 + torch.tanh(gain)) * weight[..., None]
+
+    def _reduce_messages(self, messages, access, mechanism, *, soft_access=None,
+                         source_measure=None, mode=None, soft=None):
+        hard = self._modulate(messages, access, mechanism, mode=mode, soft=soft)
+        if source_measure is not None:
+            hard = hard * source_measure[..., None]
+        hard = hard.sum(2)
+        if soft_access is None:
+            return hard
+        soft = local_modulated_sum(messages.detach(), soft_access.weight,
+                                   soft_access.projected,
+                                   None if source_measure is None else source_measure.detach())
+        return bridge_local_context(hard, soft)
 
     @staticmethod
     def _ledger(mechanism, access, work):
@@ -184,6 +268,10 @@ class TypedHypergraphField(DensePairwiseField):
                 return_routing_maps=False, interaction_context=None):
         phase = int(str(getattr(interaction_context, "phase", "P0"))[-1])
         soft = self.permission_mode == "soft"
+        local_shadow = (self.training and torch.is_grad_enabled() and not soft
+                        and self.training_gradient_mode == "local_context_shadow_v1")
+        if local_shadow and (self.plan_intervention != "normal" or self.execution_mode != "dense_masked_reference"):
+            raise ValueError("Local-context shadow requires the ordinary hard dense training operator")
         if phase == 0:
             self._phase_costs = []
         plan = self.organizer.prepare(encoded, module_states, phase=phase, soft=soft)
@@ -203,27 +291,41 @@ class TypedHypergraphField(DensePairwiseField):
                     & ~torch.eye(modules, device=centres.device, dtype=torch.bool)[None])
         me_valid = (present[:, :, None] > .5).expand(-1, -1, environments)
         em_valid = (present[:, None] > .5).expand(-1, environments, -1)
-        mm_access = self._access(plan, centres, "MM", module_states, mm_valid)
-        me_access = self._access(plan, centres, "ME", module_states, me_valid)
-        em_access = self._access(plan, env, "EM", encoded.env_tokens, em_valid)
+        actions = self._prepare_actions(plan) if self.control_execution == "projected" else None
+        soft_plan = (self.organizer.prepare(detach_tree(encoded), module_states.detach(), phase=phase, soft=True)
+                     if local_shadow else None)
+        soft_actions = self._prepare_actions(soft_plan, detach_projection=True) if local_shadow else None
+        soft_accesses = {}
+        if local_shadow:
+            for tau, points, tokens, valid in (("MM", centres, module_states, mm_valid),
+                    ("ME", centres, module_states, me_valid), ("EM", env, encoded.env_tokens, em_valid)):
+                soft_accesses[tau] = self._numerical_access(soft_plan, points.detach(), tau,
+                    soft_actions, tokens.detach(), valid, mode="normal", soft=True)
+        mm_access = self._numerical_access(plan, centres, "MM", actions, module_states, mm_valid,
+                                           diagnostics=return_routing_maps)
+        me_access = self._numerical_access(plan, centres, "ME", actions, module_states, me_valid,
+                                           diagnostics=return_routing_maps)
+        em_access = self._numerical_access(plan, env, "EM", actions, encoded.env_tokens, em_valid,
+                                           diagnostics=return_routing_maps)
         relative = (centres[:, :, None] - centres[:, None]) / encoded.coordinate_scale
         mm, mm_work = self._fine_mlp(self.mm_message, (
             module_states[:, :, None].expand(-1, -1, modules, -1),
             module_states[:, None].expand(-1, modules, -1, -1), self.relative_fourier(relative)),
             mm_access, self.hidden_dim)
-        a_mm = self._modulate(mm, mm_access, "MM").sum(2) / (1.0 + count[..., None])
+        a_mm = self._reduce_messages(mm, mm_access, "MM", soft_access=soft_accesses.get("MM")) / (1.0 + count[..., None])
         relative = (centres[:, :, None] - env[:, None]) / encoded.coordinate_scale
         me, me_work = self._fine_mlp(self.me_message, (
             module_states[:, :, None].expand(-1, -1, environments, -1),
             encoded.env_tokens[:, None].expand(-1, modules, -1, -1), self.relative_fourier(relative)),
             me_access, self.hidden_dim)
-        a_me = (self._modulate(me, me_access, "ME") * encoded.env_weights[:, None, :, None]).sum(2)
+        a_me = self._reduce_messages(me, me_access, "ME", soft_access=soft_accesses.get("ME"),
+                                     source_measure=encoded.env_weights[:, None])
         a_me = a_me / encoded.env_weights.sum(1)[:, None, None].clamp_min(1.e-12)
         em, em_work = self._fine_mlp(self.em_message, (
             encoded.env_tokens[:, :, None].expand(-1, -1, modules, -1),
             module_states[:, None].expand(-1, environments, -1, -1),
             self.relative_fourier(-relative.transpose(1, 2))), em_access, self.hidden_dim)
-        a_em = self._modulate(em, em_access, "EM").sum(2) / (1.0 + count[..., None])
+        a_em = self._reduce_messages(em, em_access, "EM", soft_access=soft_accesses.get("EM")) / (1.0 + count[..., None])
         contextual_modules = (module_states + self.module_update(torch.cat((
             module_states, a_mm, a_me, encoded.global_token[:, None].expand(-1, modules, -1)), -1))) * present[..., None]
         contextual_env = encoded.env_tokens + self.env_update(torch.cat((
@@ -233,9 +335,17 @@ class TypedHypergraphField(DensePairwiseField):
         for mechanism, access, work in (("MM", mm_access, mm_work),
                                        ("ME", me_access, me_work), ("EM", em_access, em_work)):
             ledger.update(self._ledger(mechanism, access, work))
+        preparation_accesses = {"MM": mm_access, "ME": me_access, "EM": em_access}
+        structural_plan = soft_plan if local_shadow else plan
+        structural_accesses = soft_accesses if local_shadow else preparation_accesses
+        structural = prepare_structural_cost(structural_accesses, structural_plan) if self.training else None
         return {"module_tokens": contextual_modules, "env_tokens": contextual_env,
+                "hypergraph_actions": actions, "hypergraph_action_plan": plan, "hypergraph_structural_preparation": structural,
+                "hypergraph_soft_plan": soft_plan, "hypergraph_soft_actions": soft_actions,
+                "hypergraph_soft_accesses": soft_accesses,
+                "hypergraph_training_gradient_mode": self.training_gradient_mode,
                 "projected_key": key, "projected_value": value, "hypergraph_plan": plan,
-                "hypergraph_accesses": {"MM": mm_access, "ME": me_access, "EM": em_access},
+                "hypergraph_accesses": preparation_accesses,
                 "hypergraph_ledger": ledger, "hypergraph_phase": phase,
                 "hypergraph_executor": self.execution_mode,
                 "hypergraph_receiver_chunk": self.execution_receiver_chunk,
@@ -272,8 +382,25 @@ class TypedHypergraphField(DensePairwiseField):
         soft = bool(plan.strategy_data["soft"])
         execution_mode = state["hypergraph_executor"]
         receiver_chunk = state["hypergraph_receiver_chunk"]
-        qm = self._access(plan, receivers, "QM", mode=mode, soft=soft)
-        qe = self._access(plan, receivers, "QE", mode=mode, soft=soft)
+        actions = state.get("hypergraph_actions")
+        if actions is not None and state.get("hypergraph_action_plan", plan) is not plan:
+            # Explicit diagnostic source refinement/rebinding must rebuild its
+            # current action rather than consume an old phase projection.
+            actions = self._prepare_actions(plan)
+            state["hypergraph_actions"] = actions
+            state["hypergraph_action_plan"] = plan
+            state["hypergraph_structural_preparation"] = None
+        qm = self._numerical_access(plan, receivers, "QM", actions, mode=mode, soft=soft,
+                                    diagnostics=return_routing_maps)
+        qe = self._numerical_access(plan, receivers, "QE", actions, mode=mode, soft=soft,
+                                    diagnostics=return_routing_maps)
+        soft_plan = state.get("hypergraph_soft_plan")
+        soft_qm = soft_qe = None
+        if soft_plan is not None:
+            soft_qm = self._numerical_access(soft_plan, receivers.detach(), "QM", state["hypergraph_soft_actions"],
+                                            mode="normal", soft=True)
+            soft_qe = self._numerical_access(soft_plan, receivers.detach(), "QE", state["hypergraph_soft_actions"],
+                                            mode="normal", soft=True)
         batch, queries, _ = receivers.shape
         modules = state["module_tokens"].shape[1]
         environments = state["env_tokens"].shape[1]
@@ -282,7 +409,7 @@ class TypedHypergraphField(DensePairwiseField):
             state["module_tokens"][:, None].expand(-1, queries, -1, -1),
             self.relative_fourier(relative), encoded.global_token[:, None, None].expand(-1, queries, modules, -1)),
             qm, self.hidden_dim, execution_mode=execution_mode, receiver_chunk_size=receiver_chunk)
-        module_context = self.query_module_output(self._modulate(messages, qm, "QM", mode=mode).sum(2)
+        module_context = self.query_module_output(self._reduce_messages(messages, qm, "QM", mode=mode, soft_access=soft_qm, soft=soft)
             / (1.0 + encoded.module_present.sum(1)[:, None, None]))
         if environments:
             relative = (receivers[:, :, None] - encoded.env_coords[:, None]) / encoded.coordinate_scale
@@ -293,15 +420,19 @@ class TypedHypergraphField(DensePairwiseField):
             query = self.env_attention.project_query(self.env_query(receiver_features))
             safe_weight = torch.where(qe.support, encoded.env_weights[:, None] * qe.weight,
                                       torch.ones_like(qe.weight))
-            control = qe.control.to(self.control_score.weight.dtype) if self.permission_mode == "soft" else qe.control
-            modulation = self.control_score(control).permute(0, 3, 1, 2)
-            gain = self.control_gain["QE"](control).permute(0, 3, 1, 2)
+            if isinstance(qe, ProjectedSourceAccess):
+                modulation, gain = qe.projected.split(self.env_attention.num_heads, -1)
+                modulation, gain = modulation.permute(0, 3, 1, 2), gain.permute(0, 3, 1, 2)
+            else:
+                control = qe.control.to(self.control_score.weight.dtype)
+                modulation = self.control_score(control).permute(0, 3, 1, 2)
+                gain = self.control_gain["QE"](control).permute(0, 3, 1, 2)
             if mode == "control_identity":
                 modulation, gain = torch.zeros_like(modulation), torch.zeros_like(gain)
             # Keep the logarithm inside the wide permission chain. Casting a
             # tiny positive weight first would recreate FP32 reciprocal overflow.
             log_weight = safe_weight.log()[:, None]
-            if self.permission_mode == "soft":
+            if soft:
                 log_weight = log_weight.to(query.dtype)
             if execution_mode == "dense_masked_reference":
                 score = torch.matmul(query, state["projected_key"].transpose(-1, -2))
@@ -330,22 +461,42 @@ class TypedHypergraphField(DensePairwiseField):
                     context[case, :, start:stop] = torch.matmul(weighted, value)
                     cells += (stop - start) * sources.numel() * self.env_attention.num_heads
                 qe_work["attention_cells"] = cells
+            if soft_qe is not None:
+                soft_score, soft_gain = soft_qe.projected.split(self.env_attention.num_heads, -1)
+                soft_context = local_attention_context(query.detach(), state["projected_key"].detach(),
+                    state["projected_value"].detach(), bias.detach(), soft_qe.weight, soft_qe.support,
+                    soft_score, soft_gain, encoded.env_weights.detach())
+                context = bridge_local_context(context, soft_context)
             context = context.transpose(1, 2).reshape(batch, queries, self.hidden_dim)
             environment_context = self.env_attention.output(context)
             # An empty eligible row supplies no fabricated source/output bias.
-            environment_context = environment_context * qe.support.any(-1)[..., None]
+            if soft_qe is None:
+                environment_context = environment_context * qe.support.any(-1)[..., None]
+            else:
+                # Hard empty rows have zero context and no output bias. Keep
+                # the soft context derivative open for eligible omitted donors
+                # instead of masking it again after the completed-context bridge.
+                environment_context = environment_context - (self.env_attention.output.bias
+                    * (~qe.support.any(-1))[..., None])
         else:
             attention = None
             environment_context = module_context.new_zeros(module_context.shape)
             qe_work = {"executed_rows": 0, "allocated_rows": 0, "executed_eligible_pairs": 0,
                        "fine_calls": 0, "attention_cells": 0}
         accesses = {**state["hypergraph_accesses"], "QM": qm, "QE": qe}
-        cost, metrics = structural_cost(accesses, plan)
+        metrics = {}
+        cost = None
+        if self.training or return_routing_maps:
+            cost_accesses = ({**state["hypergraph_soft_accesses"], "QM": soft_qm, "QE": soft_qe}
+                             if soft_plan is not None else accesses)
+            cost, metrics = structural_cost(cost_accesses, soft_plan if soft_plan is not None else plan,
+                preparation=state.get("hypergraph_structural_preparation"))
         self.last_structural_cost = cost
         aux = {**self._ledger("QM", qm, qm_work), **self._ledger("QE", qe, qe_work)}
         # Live numerator/denominator scalars combine across uneven query tiles.
-        aux["hypergraph_structural_numerator"] = cost * queries
-        aux["hypergraph_structural_denominator"] = cost.new_tensor(queries)
+        if cost is not None:
+            aux["hypergraph_structural_numerator"] = cost * queries
+            aux["hypergraph_structural_denominator"] = cost.new_tensor(queries)
         if return_routing_maps:
             # Preparation pairs were executed once and already belong to
             # preparation_aux. Returning them in each query tile duplicates

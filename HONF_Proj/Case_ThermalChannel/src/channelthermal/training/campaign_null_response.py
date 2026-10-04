@@ -17,7 +17,7 @@ from channelthermal.response_control.native import DifferentiableThermalOperator
 from channelthermal.response_control.thermal import pressure_drop_from_field
 
 from .campaign import HYPERGRAPH_ARCHITECTURES
-from .campaign_work import CampaignForwardWork, merge_forward_work
+from .campaign_work import CampaignForwardWork, measured_wrapper_calls, merge_forward_work
 
 NULL_CHANNELS = ("u", "v", "p", "omega")
 
@@ -101,9 +101,11 @@ def null_role_queries(sample, field_names, *, device, fluid_count=256):
 class NativeHeatNullResponse:
     """Two eligible train cases per epoch; one fixed train-only calibration."""
 
-    def __init__(self, model, dataset, dataset_config, settings):
+    def __init__(self, model, dataset, dataset_config, settings, *,
+                 organizer_gradient_policy="whole_wrapper_shadow_v1"):
         self.model, self.dataset_config = model, dataset_config
         self.settings = dict(settings)
+        self.organizer_gradient_policy = organizer_gradient_policy
         if self.settings.get("benchmark_verified") is not True:
             raise ValueError("Heat-null auxiliary requires recorded source/stored-control verification.")
         if self.settings.get("cases_per_epoch", 2) != 2 or self.settings.get("fluid_queries", 256) != 256:
@@ -158,7 +160,8 @@ class NativeHeatNullResponse:
             trial = DesignInput(design.module_positions, design.module_heating + torch.as_tensor(direction, dtype=design.module_heating.dtype, device=device), design.module_present)
             queries = null_role_queries(sample, self.model.config.channelthermal.field_names, device=device)
             operator = DifferentiableThermalOperator(self.model, sample, dataset_config=self.dataset_config,
-                normalization_stats=self.stats, query_batch_size=256, organizer_shadow=hypergraph)
+                normalization_stats=self.stats, query_batch_size=256, organizer_shadow=hypergraph,
+                organizer_gradient_policy=self.organizer_gradient_policy)
             with CampaignForwardWork(self.model.core) as measured:
                 before = operator(design, context, queries).role_values["fluid_fields"]
                 after = operator(trial, context, queries).role_values["fluid_fields"]
@@ -186,10 +189,13 @@ class NativeHeatNullResponse:
                 heat_null_calibration_scope="one training-only gradient calibration; at most ten percent")
             self.model.campaign_training_state = state
         coefficient = float(state["heat_null_coefficient"])
+        wrapper_calls = measured_wrapper_calls(forward_records)
+        whole_shadow = hypergraph and self.organizer_gradient_policy == "whole_wrapper_shadow_v1"
         return coefficient * auxiliary / accumulation_weight, {
             "heat_null_loss": float(auxiliary.detach()), "heat_null_coefficient": coefficient,
             "heat_null_cases": descriptions, "heat_null_eligible_train_cases": len(self.eligible),
-            "heat_null_wrapper_calls": len(losses) * (4 if hypergraph else 2),
+            "heat_null_wrapper_calls": wrapper_calls if wrapper_calls is not None else len(losses) * 2 * (2 if whole_shadow else 1),
+            "heat_null_wrapper_count_basis": "measured native P0 preparations" if wrapper_calls is not None else "named organizer gradient policy; unlabelled backend",
             "heat_null_primary_fluid_queries": len(losses) * 2 * 256,
             "heat_null_role_queries": queries_charged, "heat_null_seconds": time.perf_counter() - started,
             "heat_null_forward_work": forward_records,

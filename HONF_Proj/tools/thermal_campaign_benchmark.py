@@ -227,7 +227,8 @@ def phase_outputs(core):
 def source_access_masks(backend):
     """Actual applied pair-support and eligibility masks, outside timing."""
     masks, counts, phase = {}, {}, "P0"
-    originals = {name: (name in backend.__dict__, getattr(backend, name)) for name in ("prepare", "_access")}
+    access_method = "_numerical_access" if callable(getattr(backend, "_numerical_access", None)) else "_access"
+    originals = {name: (name in backend.__dict__, getattr(backend, name)) for name in ("prepare", access_method)}
 
     def prepare(*args, **kwargs):
         nonlocal phase
@@ -235,7 +236,7 @@ def source_access_masks(backend):
         return originals["prepare"][1](*args, **kwargs)
 
     def access(*args, **kwargs):
-        output = originals["_access"][1](*args, **kwargs)
+        output = originals[access_method][1](*args, **kwargs)
         route = args[2] if len(args) > 2 else kwargs["mechanism"]
         index = counts.get((phase, route), 0)
         counts[phase, route] = index + 1
@@ -244,7 +245,8 @@ def source_access_masks(backend):
             "eligible": output.diagnostics["pair_valid"].detach().cpu().clone()}
         return output
 
-    backend.prepare, backend._access = prepare, access
+    backend.prepare = prepare
+    setattr(backend, access_method, access)
     try:
         yield masks
     finally:

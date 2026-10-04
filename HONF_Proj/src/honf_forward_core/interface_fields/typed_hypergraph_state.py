@@ -58,6 +58,39 @@ class TypedSourceAccess:
 
 
 @dataclass(frozen=True)
+class PreparedProjectedAction:
+    """Phase-current linear actions, before receiver expansion and bias.
+
+    This is an internal numerical record. It contains no physical field values
+    and must be rebuilt after changes to weights or phase-current states.
+    """
+    source_moment: torch.Tensor
+    bias: torch.Tensor
+
+
+@dataclass(frozen=True)
+class ProjectedSourceAccess:
+    """Reader action with small projected channels; not a graph export."""
+    density: torch.Tensor
+    weight: torch.Tensor
+    projected: torch.Tensor
+    support: torch.Tensor
+    edge_access: torch.Tensor
+    near: torch.Tensor | None = None
+    diagnostics: dict[str, torch.Tensor] = field(default_factory=dict)
+
+
+def prepare_projected_action(membership, controls, weight, bias, *, detach_projection=False):
+    """Project each group once, retaining the wide permission moment chain."""
+    if detach_projection:
+        weight, bias = weight.detach(), bias.detach()
+    linear = torch.nn.functional.linear(controls.to(weight.dtype), weight)
+    dtype = torch.promote_types(membership.dtype, linear.dtype)
+    moment = membership.to(dtype)[..., None] * linear.to(dtype)[:, :, None, :]
+    return PreparedProjectedAction(moment, bias)
+
+
+@dataclass(frozen=True)
 class TypedHypergraphState:
     memberships: dict[str, torch.Tensor]
     controls: dict[str, torch.Tensor]
@@ -146,7 +179,9 @@ def source_moments(
     *,
     pair_valid: torch.Tensor | None = None,
     near: torch.Tensor | None = None,
-) -> TypedSourceAccess:
+    prepared_action: PreparedProjectedAction | None = None,
+    include_diagnostics: bool = True,
+) -> TypedSourceAccess | ProjectedSourceAccess:
     """Deduplicate group paths and normalize access density on eligible mass.
 
     Uniform positive density gives weight one independently of K. A local
@@ -175,9 +210,15 @@ def source_moments(
     if pair_valid is not None:
         valid = valid & torch.broadcast_to(pair_valid.to(torch.bool), (edge_access.shape[0], edge_access.shape[1], membership.shape[2]))
     membership = torch.where(source_valid[:, None, :], membership, torch.zeros_like(membership))
-    density = torch.einsum("brk,bks->brs", edge_access, membership)
+    density = torch.bmm(edge_access, membership)
     density = torch.where(valid, density, torch.zeros_like(density))
-    moment = torch.einsum("brk,bks,bkc->brsc", edge_access, membership, controls)
+    if prepared_action is None:
+        moment = torch.einsum("brk,bks,bkc->brsc", edge_access, membership, controls)
+    else:
+        # The prepared [B,K,S,P] tensor has P=1 or 2*heads, never C=16.
+        source_moment = prepared_action.source_moment.to(permission_dtype)
+        moment = torch.bmm(edge_access, source_moment.flatten(2)).reshape(
+            *density.shape, source_moment.shape[-1])
     positive = density > 0
     safe_density = torch.where(positive, density, torch.ones_like(density))
     control = torch.where(positive[..., None], moment / safe_density[..., None], torch.zeros_like(moment))
@@ -191,17 +232,22 @@ def source_moments(
         control = control * (1.0 - near[..., None])
     weight = torch.where(valid, weight, torch.zeros_like(weight))
     support = valid & (weight > 0)
-    paths = torch.einsum("brk,bks->brs", (edge_access > 0).to(density.dtype), (membership > 0).to(density.dtype))
     diagnostics = {
-        "unique_pairs": support.sum(),
-        "far_unique_pairs": (valid & positive).sum(),
-        "repeated_paths_removed": (torch.where(valid, paths, torch.zeros_like(paths)) - (valid & positive).to(paths.dtype)).sum(),
         "eligible_pairs": valid.expand_as(density).sum(),
         "pair_valid": valid.expand_as(density),
     }
-    if near is not None:
+    if include_diagnostics:
+        paths = torch.bmm((edge_access > 0).to(density.dtype), (membership > 0).to(density.dtype))
+        diagnostics["unique_pairs"] = support.sum()
+        diagnostics["far_unique_pairs"] = (valid & positive).sum()
+        diagnostics["repeated_paths_removed"] = (torch.where(valid, paths, torch.zeros_like(paths)) - (valid & positive).to(paths.dtype)).sum()
+    if near is not None and include_diagnostics:
         diagnostics["near_mandatory_pairs"] = (near > 0).sum()
         diagnostics["near_full_pairs"] = (near == 1).sum()
+    if prepared_action is not None:
+        # Original zero controls project to bias even on newly admitted pairs.
+        projected = control.to(prepared_action.bias.dtype) + prepared_action.bias
+        return ProjectedSourceAccess(density, weight, projected, support, edge_access, near, diagnostics)
     return TypedSourceAccess(density, weight, control, support, edge_access, near, diagnostics)
 
 
@@ -232,7 +278,7 @@ def _case_measure_fraction(values, measure, valid):
     return fraction.sum() / present.to(fraction.dtype).sum().clamp_min(1)
 
 
-def _measure_structural_cost(accesses, state, incidence_coefficient, group_coefficient):
+def _measure_structural_cost(accesses, state, incidence_coefficient, group_coefficient, preparation=None):
     """Physical pair integral and dual-donor pooling occupancy, case balanced."""
     version = state.strategy_data.get("structural_measure_policy_version", 2)
     if isinstance(version, bool) or version not in (1, 2):
@@ -249,7 +295,13 @@ def _measure_structural_cost(accesses, state, incidence_coefficient, group_coeff
         return (torch.stack(terms) * flags).sum() / flags.sum().clamp_min(1)
 
     terms, pair_eligible, metrics = [], [], {}
+    if preparation is not None:
+        terms = list(preparation["pair_terms"])
+        pair_eligible = list(preparation["pair_eligible"])
+        metrics = dict(preparation["metrics"])
     for tau, access in accesses.items():
+        if preparation is not None and tau in preparation["mechanisms"]:
+            continue
         kind = SOURCE_TYPE[tau]
         valid = access.diagnostics.get("pair_valid", state.source_valid[kind][:, None].expand_as(access.density))
         receiver_mass = access.diagnostics.get("receiver_measures", state.strategy_data.get("receiver_measures", {}).get(tau))
@@ -273,6 +325,11 @@ def _measure_structural_cost(accesses, state, incidence_coefficient, group_coeff
         metrics[f"{tau}_control_pool_rows"] = access.density.new_zeros((), dtype=torch.long)
     anchor = state.admission
     pair_cost = eligible_mean(terms, pair_eligible)
+    if preparation is not None:
+        metrics["smooth_pair_cost"] = pair_cost
+        constant = (float(incidence_coefficient) * metrics["smooth_incidence_cost"]
+                    + float(group_coefficient) * metrics["smooth_group_cost"])
+        return pair_cost + constant, metrics
 
     def incidence_fraction(tau, kind, member):
         active = state.strategy_data.get("typed_admission", {}).get(tau, anchor)
@@ -320,17 +377,19 @@ def _measure_structural_cost(accesses, state, incidence_coefficient, group_coeff
     return cost, metrics
 
 
-def structural_cost(accesses: dict[str, TypedSourceAccess], state: TypedHypergraphState, *, incidence_coefficient: float = 0.05, group_coefficient: float = 0.01) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+def structural_cost(accesses: dict[str, TypedSourceAccess], state: TypedHypergraphState, *, incidence_coefficient: float = 0.05, group_coefficient: float = 0.01, preparation=None) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Balanced smooth work proxy; exact support counts stay separate.
 
     A single dense edge pays for dense pair occupancy, rather than earning
     sparsity merely by being called K=1. This is not an executor time model.
     """
     if state.strategy_data.get("measure_consistent", False):
-        return _measure_structural_cost(accesses, state, incidence_coefficient, group_coefficient)
-    terms = []
-    metrics = {}
+        return _measure_structural_cost(accesses, state, incidence_coefficient, group_coefficient, preparation)
+    terms = [] if preparation is None else list(preparation["pair_terms"])
+    metrics = {} if preparation is None else dict(preparation["metrics"])
     for mechanism, access in accesses.items():
+        if preparation is not None and mechanism in preparation["mechanisms"]:
+            continue
         kind = SOURCE_TYPE[mechanism]
         valid = access.diagnostics.get("pair_valid", state.source_valid[kind][:, None].expand_as(access.density))
         count = access.diagnostics["eligible_pairs"].clamp_min(1)
@@ -348,6 +407,11 @@ def structural_cost(accesses: dict[str, TypedSourceAccess], state: TypedHypergra
         metrics[f"{mechanism}_unique_pairs"] = access.support.sum()
     anchor = state.admission
     pair_cost = torch.stack(terms).mean() if terms else anchor.sum() * 0.0
+    if preparation is not None:
+        metrics["smooth_pair_cost"] = pair_cost
+        constant = (float(incidence_coefficient) * metrics["smooth_incidence_cost"]
+                    + float(group_coefficient) * metrics["smooth_group_cost"])
+        return pair_cost + constant, metrics
     incidence_terms = []
     for mechanism, member in state.memberships.items():
         valid_sources = state.source_valid[SOURCE_TYPE[mechanism]]
@@ -363,4 +427,31 @@ def structural_cost(accesses: dict[str, TypedSourceAccess], state: TypedHypergra
     return cost, metrics
 
 
-__all__ = ["MECHANISMS", "SOURCE_TYPE", "TypedHypergraphState", "TypedSourceAccess", "build_source_catalogue", "masked_max", "masked_mean", "pad_geometry", "smooth_near_envelope", "source_moments", "structural_cost", "structural_pressure"]
+def prepare_structural_cost(accesses, state, *, incidence_coefficient=0.05, group_coefficient=0.01):
+    """Cache live phase-constant terms; preserve the original per-chunk loss.
+
+    Read chunks still contribute cost*query_count to the existing aggregation.
+    Candidate incidence and preparation pair penalties are computed once and
+    receive the identical aggregate weighting, rather than one extra copy per
+    receiver chunk.
+    """
+    _cost, metrics = structural_cost(accesses, state,
+        incidence_coefficient=incidence_coefficient, group_coefficient=group_coefficient)
+    terms, eligible = [], []
+    for tau, access in accesses.items():
+        terms.append(metrics[f"{tau}_smooth_pair_fraction"])
+        kind = SOURCE_TYPE[tau]
+        valid = access.diagnostics["pair_valid"]
+        receiver_kind = "M" if tau in ("MM", "ME") else "E" if tau == "EM" else None
+        receiver_mass = access.diagnostics.get("receiver_measures",
+            state.strategy_data.get("receiver_measures", {}).get(tau))
+        if receiver_mass is None:
+            receiver_mass = (state.source_measures[receiver_kind] if receiver_kind is not None
+                             else access.density.new_ones(access.density.shape[:2]))
+        measure = receiver_mass[..., None] * state.source_measures[kind][:, None]
+        eligible.append((valid & (measure > 0)).any())
+    return {"mechanisms": tuple(accesses), "pair_terms": tuple(terms),
+            "pair_eligible": tuple(eligible), "metrics": metrics}
+
+
+__all__ = ["MECHANISMS", "SOURCE_TYPE", "PreparedProjectedAction", "ProjectedSourceAccess", "TypedHypergraphState", "TypedSourceAccess", "build_source_catalogue", "masked_max", "masked_mean", "pad_geometry", "prepare_projected_action", "prepare_structural_cost", "smooth_near_envelope", "source_moments", "structural_cost", "structural_pressure"]

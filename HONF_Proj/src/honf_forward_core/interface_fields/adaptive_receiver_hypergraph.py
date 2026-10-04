@@ -506,7 +506,7 @@ class AdaptiveReceiverHypergraph(nn.Module):
     def access(self, state: TypedHypergraphState, receivers: torch.Tensor, mechanism: str,
                receiver_tokens: torch.Tensor | None = None, *, soft: bool = False,
                pair_valid: torch.Tensor | None = None, capture_topology: bool = False,
-               fixed_receiver_access: dict | None = None) -> TypedSourceAccess:
+               fixed_receiver_access: dict | None = None, prepared_action=None, include_diagnostics=True, detach_permissions=False) -> TypedSourceAccess:
         del receiver_tokens, soft
         tau = str(mechanism).upper()
         if tau not in MECHANISMS:
@@ -539,8 +539,10 @@ class AdaptiveReceiverHypergraph(nn.Module):
             pair_valid = state.source_valid["M"][:, :, None]
         elif tau == "EM" and pair_valid is None and receivers.shape[1] == state.source_valid["E"].shape[1]:
             pair_valid = state.source_valid["E"][:, :, None]
+        if detach_permissions:
+            edge_access = edge_access.detach()
         access = source_moments(edge_access, state.memberships[tau], state.controls[tau],
-                              state.source_measures[kind], state.source_valid[kind], pair_valid=pair_valid)
+                              state.source_measures[kind], state.source_valid[kind], pair_valid=pair_valid, prepared_action=prepared_action, include_diagnostics=include_diagnostics)
         if self.measure_consistent:
             # Native M/E routes use their owned physical measure. Queried
             # points use an explicitly declared equal-point counting measure.

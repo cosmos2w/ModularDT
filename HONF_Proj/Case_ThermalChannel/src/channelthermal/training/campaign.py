@@ -25,6 +25,7 @@ CAMPAIGN_KEYS = {
     "native_loss_denominators_start_epoch", "physical_loss_policy_version",
     "heat_null_response",
     "structural_measure_policy_version",
+    "organizer_gradient_policy",
 }
 HYPERGRAPH_ARCHITECTURES = frozenset({
     "adaptive_receiver_hypergraph_honf", "overlap_control_hypergraph_honf",
@@ -124,6 +125,20 @@ def validate_campaign(config: dict[str, Any], *, max_train_batches: int | None =
     if settings.get("matched_fresh_initialization", False) and int(training.get("seed", -1)) != 0:
         raise ValueError("The primary matched fresh campaign uses seed 0.")
     settings["schedule_total_epochs"] = horizon
+    gradient_policy = settings.get("organizer_gradient_policy", "whole_wrapper_shadow_v1")
+    if gradient_policy not in {"whole_wrapper_shadow_v1", "local_context_shadow_v1"}:
+        raise ValueError("Unknown organizer gradient policy.")
+    if gradient_policy == "local_context_shadow_v1":
+        parent = settings.get("parent")
+        if (config.get("model", {}).get("core_honf", {}).get("forward_architecture")
+                != "faithful_receiver_hypergraph_honf"
+                or not isinstance(parent, dict)
+                or set(parent) != {"checkpoint", "epoch", "from", "to"}
+                or not isinstance(parent.get("checkpoint"), str) or not parent["checkpoint"].startswith("/")
+                or parent.get("epoch") != 200
+                or parent.get("from") != "whole_wrapper_shadow_v1" or parent.get("to") != gradient_policy
+                or horizon != 1000 or settings.get("physical_loss_policy_version") != 2):
+            raise ValueError("Local-context shadow requires an explicit exact-e200 Tree-F child lineage.")
     if settings.get("native_loss_denominators_start_epoch") is not None:
         if int(settings["native_loss_denominators_start_epoch"]) != 101 or settings.get("physical_loss_policy_version") != 2:
             raise ValueError("Native denominator policy 2 begins at epoch 101 after the common initial 100-epoch screen.")
@@ -134,11 +149,10 @@ def validate_campaign(config: dict[str, Any], *, max_train_batches: int | None =
     option = core.get("interface_model", {}).get("hypergraph_options", {}).get("structural_measure_policy_version", 1)
     if core.get("forward_architecture") == "faithful_receiver_hypergraph_honf" and option == 2 and measure_policy != 2:
         raise ValueError("Eligible-mechanism model option 2 requires an explicit reviewed campaign policy.")
-    if measure_policy is not None:
-        if (measure_policy != 2 or option != 2
-                or core.get("forward_architecture") != "faithful_receiver_hypergraph_honf"
-                or settings.get("native_loss_denominators_start_epoch") != 101):
-            raise ValueError("Eligible-mechanism policy 2 requires its explicit reviewed Tree-F epoch101 option.")
+    if measure_policy is not None and (measure_policy != 2 or option != 2
+            or core.get("forward_architecture") != "faithful_receiver_hypergraph_honf"
+            or settings.get("native_loss_denominators_start_epoch") != 101):
+        raise ValueError("Eligible-mechanism policy 2 requires its explicit reviewed Tree-F epoch101 option.")
     null = settings.get("heat_null_response")
     if null is not None:
         if not isinstance(null, dict) or null.get("benchmark_verified") is not True:
@@ -148,8 +162,12 @@ def validate_campaign(config: dict[str, Any], *, max_train_batches: int | None =
                 or not 0 < float(null.get("fraction", .1)) <= .25):
             raise ValueError("Heat-null auxiliary follows the reviewed epoch101 two-case Q256 protocol.")
         if config.get("model", {}).get("core_honf", {}).get("forward_architecture") not in {
-                "faithful_receiver_hypergraph_honf", "direct_pairwise_control_honf"}:
-            raise ValueError("This heat-null amendment is restricted to the reviewed Tree-F/Pair-F pair.")
+                "faithful_receiver_hypergraph_honf", "direct_pairwise_control_honf", "three_term_full_access_honf"}:
+            raise ValueError("This heat-null amendment requires a reviewed source-local Tree-F/Pair-F/Fine-F backend.")
+        if core.get("forward_architecture") == "three_term_full_access_honf" and (
+                settings.get("arm") != "Fine-F" or settings.get("structural_weight") != 0.0
+                or config.get("model", {}).get("channelthermal", {}).get("global_feature_schema") != "source_local_v3"):
+            raise ValueError("Fine-F heat-null exposure requires the source_local_v3 backbone and no structural objective.")
     return settings
 
 
@@ -164,6 +182,42 @@ def validate_campaign_resume(checkpoint: dict[str, Any], config: dict[str, Any])
     current_training = config.get("training", {})
     amendment = None
     saved_campaign = saved_training.get("campaign") or {}
+    if saved_campaign != current:
+        old_gradient = saved_campaign.get("organizer_gradient_policy", "whole_wrapper_shadow_v1")
+        new_gradient = current.get("organizer_gradient_policy", "whole_wrapper_shadow_v1")
+        gradient_keys = {"organizer_gradient_policy", "parent"}
+        previous_gradient = {key: value for key, value in saved_campaign.items() if key not in gradient_keys}
+        requested_gradient = {key: value for key, value in current.items() if key not in gradient_keys}
+        gradient_transition = (old_gradient == "whole_wrapper_shadow_v1"
+            and new_gradient == "local_context_shadow_v1" and int(checkpoint.get("epoch", 0)) == 200
+            and previous_gradient == requested_gradient and saved_campaign.get("parent") is None
+            and checkpoint.get("model_config", {}).get("core_honf", {}).get("forward_architecture")
+                == "faithful_receiver_hypergraph_honf")
+        if gradient_transition:
+            validate_campaign(config)
+            amendment = {"organizer_gradient_policy": {"from": old_gradient, "to": new_gradient,
+                "checkpoint_epoch": 200, "activation_epoch": 201, "parent": copy.deepcopy(current["parent"])}}
+        elif new_gradient != old_gradient or saved_campaign.get("parent") != current.get("parent"):
+            raise ValueError("Campaign resume cannot reset or silently amend its schedule/lineage.")
+        if not gradient_transition:
+            amendment = _validate_physical_campaign_amendment(checkpoint, saved_campaign, current)
+    for section in ("dataset", "loss"):
+        if saved.get(section) != config.get(section):
+            raise ValueError(f"Campaign resume changed {section}; record a separate training-policy version.")
+    for key in ("seed", "learning_rate", "organizer_learning_rate", "weight_decay", "amp", "gradient_clip_norm", "port_curriculum"):
+        if saved_training.get(key) != current_training.get(key):
+            raise ValueError(f"Campaign resume changed training.{key}.")
+    if not checkpoint.get("optimizer_state_dict") or not checkpoint.get("rng_state"):
+        raise ValueError("Campaign continuation requires optimizer and RNG checkpoint state.")
+    if current_training.get("amp") and not checkpoint.get("scaler_state_dict"):
+        raise ValueError("AMP campaign continuation requires gradient-scaler checkpoint state.")
+    return amendment
+
+
+def _validate_physical_campaign_amendment(checkpoint: dict, saved_campaign: dict, current: dict) -> dict:
+    """Keep the earlier common e101 objective amendment isolated from child policy changes."""
+
+    amendment = None
     if saved_campaign != current:
         policy_keys = {"native_loss_denominators_start_epoch", "physical_loss_policy_version", "heat_null_response",
                        "structural_measure_policy_version"}
@@ -187,16 +241,6 @@ def validate_campaign_resume(checkpoint: dict[str, Any], config: dict[str, Any])
                 "from": 1, "to": 2, "activation_epoch": 101,
                 "scope": "exclude entirely ineligible mechanisms from the physical-measure mean; recalibrate training-only pressure",
             }
-    for section in ("dataset", "loss"):
-        if saved.get(section) != config.get(section):
-            raise ValueError(f"Campaign resume changed {section}; record a separate training-policy version.")
-    for key in ("seed", "learning_rate", "organizer_learning_rate", "weight_decay", "amp", "gradient_clip_norm", "port_curriculum"):
-        if saved_training.get(key) != current_training.get(key):
-            raise ValueError(f"Campaign resume changed training.{key}.")
-    if not checkpoint.get("optimizer_state_dict") or not checkpoint.get("rng_state"):
-        raise ValueError("Campaign continuation requires optimizer and RNG checkpoint state.")
-    if current_training.get("amp") and not checkpoint.get("scaler_state_dict"):
-        raise ValueError("AMP campaign continuation requires gradient-scaler checkpoint state.")
     return amendment
 
 

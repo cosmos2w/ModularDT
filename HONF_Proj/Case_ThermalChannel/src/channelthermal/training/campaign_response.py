@@ -22,7 +22,7 @@ from honf_forward_core.training.hypergraph_shadow import hard_value_soft_hypergr
 from honf_runtime.paths import resolve_path
 
 from .campaign import HYPERGRAPH_ARCHITECTURES
-from .campaign_work import CampaignForwardWork
+from .campaign_work import CampaignForwardWork, measured_wrapper_calls
 
 
 class _ResponseCall(nn.Module):
@@ -71,7 +71,8 @@ class NativeCampaignResponse:
         if settings.get("heat_null_response") is not None:
             from .campaign_null_response import NativeHeatNullResponse
 
-            self.heat_null = NativeHeatNullResponse(model, dataset, dataset_config, settings["heat_null_response"])
+            self.heat_null = NativeHeatNullResponse(model, dataset, dataset_config, settings["heat_null_response"],
+                organizer_gradient_policy=settings.get("organizer_gradient_policy", "whole_wrapper_shadow_v1"))
 
     def __call__(self, epoch: int, native_loss: torch.Tensor, accumulation_weight: float) -> tuple[torch.Tensor, dict]:
         started = time.perf_counter()
@@ -84,7 +85,12 @@ class NativeCampaignResponse:
         pair = sampled.stencil
         device = native_loss.device
         queries = role_queries_from_stencil(pair, device=device)
-        call = hard_value_soft_hypergraph_forward if self.model.config.core_honf.forward_architecture in HYPERGRAPH_ARCHITECTURES else lambda model, *args: model(*args)
+        if self.model.config.core_honf.forward_architecture in HYPERGRAPH_ARCHITECTURES:
+            def call(model, *args):
+                return hard_value_soft_hypergraph_forward(model, *args,
+                    gradient_policy=self.settings.get("organizer_gradient_policy", "whole_wrapper_shadow_v1"))
+        else:
+            call = lambda model, *args: model(*args)
         context = dict(pair.baseline.context.values)
         base_design = DesignInput.from_state(pair.baseline.design, device=device)
         trial_design = DesignInput.from_state(pair.variants[label].design, device=device)
@@ -132,10 +138,14 @@ class NativeCampaignResponse:
         ramp = min(max((epoch - 100) / 100, 0), 1)
         coefficient = state.get("response_scale", 0.) * ramp
         total_loss = response_loss * coefficient / accumulation_weight
+        wrapper_calls = measured_wrapper_calls(measured_work.records)
+        whole_shadow = (self.model.config.core_honf.forward_architecture in HYPERGRAPH_ARCHITECTURES
+                        and self.settings.get("organizer_gradient_policy", "whole_wrapper_shadow_v1") == "whole_wrapper_shadow_v1")
         metrics = {
             "response_family": pair.physical_family_id, "response_variant": label,
             "response_loss": float(response_loss.detach()), "response_coefficient": coefficient,
-            "response_examples": 2, "response_wrapper_calls": 4 if self.model.config.core_honf.forward_architecture in HYPERGRAPH_ARCHITECTURES else 2,
+            "response_examples": 2, "response_wrapper_calls": wrapper_calls if wrapper_calls is not None else 2 * (2 if whole_shadow else 1),
+            "response_wrapper_count_basis": "measured native P0 preparations" if wrapper_calls is not None else "named organizer gradient policy; unlabelled backend",
             "response_queries": 2 * sum(int(query.query_features.shape[0]) for query in queries.values()),
             "response_seconds": time.perf_counter() - started,
             "response_forward_work": measured_work.records,

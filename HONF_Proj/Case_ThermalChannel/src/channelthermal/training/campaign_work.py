@@ -86,3 +86,15 @@ def merge_forward_work(total: dict, measured: dict) -> None:
                 result[key] += values[key]
             for key, value in values["ledgers"].items():
                 result["ledgers"][key] = result["ledgers"].get(key, 0.) + value
+
+
+def measured_wrapper_calls(records: dict) -> int | None:
+    """Count complete Thermal wrappers from measured native P0 preparation.
+
+    P0 occurs once per physical wrapper, including the separate whole-wrapper
+    shadow. Additional receiver reads and checkpoint replay do not increment
+    it. Historical unlabelled backends cannot establish this count.
+    """
+    if not records or any("P0" not in phases for phases in records.values()):
+        return None
+    return sum(int(phases["P0"]["prepare_calls"]) for phases in records.values())

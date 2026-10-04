@@ -101,6 +101,7 @@ class DifferentiableThermalOperator:
         query_batch_size: int = 2048,
         capture_packet_inputs: bool = False,
         organizer_shadow: bool = False,
+        organizer_gradient_policy: str = "whole_wrapper_shadow_v1",
     ) -> None:
         if query_batch_size <= 0:
             raise ValueError("query_batch_size must be positive.")
@@ -110,6 +111,7 @@ class DifferentiableThermalOperator:
         self.query_batch_size = int(query_batch_size)
         self.capture_packet_inputs = bool(capture_packet_inputs)
         self.organizer_shadow = bool(organizer_shadow)
+        self.organizer_gradient_policy = organizer_gradient_policy
         self.last_packet_inputs: Mapping[str, Any] | None = None
         self.normalize_inputs = bool(self.dataset_config.get("normalize_inputs", False))
         self.normalize_targets = bool(self.dataset_config.get("normalize_targets", False))
@@ -459,7 +461,8 @@ class DifferentiableThermalOperator:
                     )
                 elif self.organizer_shadow:
                     from honf_forward_core.training.hypergraph_shadow import hard_value_soft_hypergraph_forward
-                    output = hard_value_soft_hypergraph_forward(self.model, *call_args, **call_kwargs)
+                    output = hard_value_soft_hypergraph_forward(self.model, *call_args,
+                        gradient_policy=self.organizer_gradient_policy, **call_kwargs)
                 else:
                     output = self.model(*call_args, **call_kwargs)
                 prepared = output["prepared_state"]

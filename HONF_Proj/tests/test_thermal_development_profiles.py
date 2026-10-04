@@ -81,6 +81,30 @@ def test_faithfulness_named_profiles_have_bounded_candidates_and_separate_dense_
     assert dense["Dense-new"]["training"]["epochs"] == 1000
 
 
+def test_fine_maturation_control_has_source_local_inputs_and_common_auxiliary_schedule():
+    from channelthermal.training.campaign import validate_campaign
+
+
+    config = development.maturation_profiles(manifest=manifest(("0348",)), stage=100)["Fine-F"]
+    assert config["model"]["core_honf"]["forward_architecture"] == "three_term_full_access_honf"
+    assert config["case"]["config"].endswith("case_source_local.json")
+    assert config["run"]["id"] == "3301"
+    campaign = config["training"]["campaign"]
+    assert campaign["structural_weight"] == 0.0
+    assert campaign["schedule_total_epochs"] == 1000
+    assert campaign["native_loss_denominators_start_epoch"] == 101
+    assert campaign["heat_null_response"] == {"benchmark_verified": True, "cases_per_epoch": 2,
+                                              "fluid_queries": 256, "fraction": .1}
+    assert len(campaign["response_stencils"]) == 1
+    # Native schema restrictions remain separate from profile preparation.
+    effective = copy.deepcopy(config)
+    effective["model"]["channelthermal"] = {"global_feature_schema": "source_local_v3"}
+    validate_campaign(effective)
+    effective["model"]["channelthermal"]["global_feature_schema"] = "legacy"
+    with pytest.raises(ValueError, match="source_local_v3"):
+        validate_campaign(effective)
+
+
 def test_limited_available_response_diversity_is_not_expanded_by_excluded_cases():
     profiles = development.development_profiles(manifest=manifest(("0304",)), stage=1000)
     assert all(len(config["training"]["campaign"]["response_stencils"]) == 1 for config in profiles.values())

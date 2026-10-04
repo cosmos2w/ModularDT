@@ -31,6 +31,7 @@ FAITHFULNESS_ARMS = {
     "Pair-F": "direct_pairwise_control_honf",
     "Dense-new": "dense_pairwise_field",
 }
+MATURATION_ARMS = {"Fine-F": "three_term_full_access_honf"}
 
 
 def validate_generated_output(value) -> Path:
@@ -187,9 +188,38 @@ def evaluation_dataset_kwargs(manifest: dict | None, split: str) -> dict:
     return {"case_ids": development_case_ids(manifest, split)}
 
 
+def maturation_profiles(*, first_run_id: int = 3301, stage: int = 100,
+                        manifest: dict | None = None, manifest_path: str = DEFAULT_MANIFEST,
+                        run_output_root: str = DEFAULT_RUN_ROOT,
+                        microbatch_size: int = 8) -> dict[str, dict]:
+    """Prepare the single fresh source-local backbone sufficiency control.
+
+    The profile carries policy2 from preparation, but its denominator/atlas/null
+    exposure still activates only at e101. Preparation does not authorize a
+    fresh arm's e100 review or any conditional e1000 continuation.
+    """
+    if stage not in (100, 500, 1000):
+        raise ValueError("Fine-F preparation stops are 100,500 or a separately budgeted1000.")
+    config = copy.deepcopy(development_profiles(first_run_id=first_run_id, stage=stage,
+        manifest=manifest, manifest_path=manifest_path, run_output_root=run_output_root,
+        microbatch_size=microbatch_size)["B-fine"])
+    config["case"]["config"] = "project://Case_ThermalChannel/configs/case_source_local.json"
+    config["profile_name"] = "thermal_tree_lite25_fine-f_v1"
+    config["run"].update(id=f"{first_run_id:04d}", name="thermal_tree_lite25_fine-f_v1")
+    config["training"]["campaign"].update(name="thermal_tree_lite25_v1", arm="Fine-F",
+        structural_weight=0.0, physical_loss_policy_version=2, native_loss_denominators_start_epoch=101,
+        heat_null_response={"benchmark_verified": True, "cases_per_epoch": 2,
+                            "fluid_queries": 256, "fraction": .1})
+    config["_note"] = ("Fresh common B-fine seed0 physical initializer, source_local_v3, fixed25_v1; "
+        "full-access fine backbone without Tree/Pair heads or structural objective. Fewer parameters; "
+        "same absolute1000 schedule and e101 denominator/selected-train atlas/tiny heat-null exposure. "
+        "Review e100 before continuing through500. No full-source or formal training.")
+    return {"Fine-F": config}
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--arm", nargs="+", choices=(*ARMS, *FAITHFULNESS_ARMS), required=True,
+    parser.add_argument("--arm", nargs="+", choices=(*ARMS, *FAITHFULNESS_ARMS, *MATURATION_ARMS), required=True,
                         help="Only these explicitly named arms are prepared; no trainer is launched.")
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--dataset", required=True, type=Path)
@@ -212,9 +242,10 @@ def main(argv=None) -> int:
     dataset_path = args.dataset.expanduser().resolve()
     manifest = load_development_manifest(manifest_path, dataset_path)
     faithful = any(arm in FAITHFULNESS_ARMS for arm in args.arm)
-    if faithful and any(arm in ARMS for arm in args.arm):
-        raise ValueError("Prepare legacy portfolio names and faithfulness names in separate explicit invocations")
-    generator = faithfulness_profiles if faithful else development_profiles
+    maturation = any(arm in MATURATION_ARMS for arm in args.arm)
+    if ((faithful or maturation) and any(arm in ARMS for arm in args.arm)) or (faithful and maturation):
+        raise ValueError("Prepare legacy, faithfulness and maturation arm names in separate explicit invocations")
+    generator = maturation_profiles if maturation else faithfulness_profiles if faithful else development_profiles
     profiles = generator(first_run_id=args.first_run_id, stage=args.stage,
         manifest=manifest, manifest_path=str(manifest_path), microbatch_size=args.microbatch_size,
         run_output_root=str(validate_generated_output(args.run_output_root)))

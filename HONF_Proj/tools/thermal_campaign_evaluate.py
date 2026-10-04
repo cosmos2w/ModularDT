@@ -455,6 +455,12 @@ def evaluate(args):
             if capture_case_phases(args, index, graph_panel):
                 from honf_forward_core.evaluation.typed_work_evidence import TypedWorkEvidenceRecorder
                 phase_capture = TypedWorkEvidenceRecorder(model.core.backend)
+            organization_capture = None
+            if getattr(args, "organization_summary", False) and hasattr(model.core.backend, "organizer"):
+                from honf_forward_core.evaluation.organization_statistics import TypedOrganizationStatistics
+                organization_capture = TypedOrganizationStatistics(model.core.backend,
+                    signature_tolerance=args.action_signature_tolerance,
+                    signature_capacity=args.action_signature_capacity)
             reference_capture = None
             if name in REFERENCE_ACTIONS:
                 from honf_forward_core.evaluation.reference_access import FixedReferenceAccessReplay
@@ -462,6 +468,7 @@ def evaluate(args):
                     reference_access_dir / case_id / "normal" / "phase_graphs.npz", mode=REFERENCE_ACTIONS[name])
             with intervention(model, name):
                 with reference_capture if reference_capture is not None else nullcontext(), \
+                     organization_capture if organization_capture is not None else nullcontext(), \
                      phase_capture if phase_capture is not None else nullcontext():
                     prediction, fine_work = predict_with_fine_work(model.core.backend, predict_case,
                         model, sample, device, query_batch_size=args.query_batch_size,
@@ -520,6 +527,9 @@ def evaluate(args):
                 "arrays": str(directory / "evidence.npz") if archive_fields else None,
                 "field_array_scope": args.resolved_field_array_scope,
                 "graph_phase": 2 if graph is not None else None}
+            if organization_capture is not None:
+                row["organization_statistics"] = organization_capture.summary()
+                row["complete_wrapper_seconds_scope"] = "Evidence timer includes scalar organization statistics and any detailed recording; not uninstrumented benchmark latency"
             if phase_capture is not None:
                 phase_path = directory / "phase_graphs.npz"
                 np.savez_compressed(phase_path, **phase_capture.arrays)
@@ -655,6 +665,11 @@ def parse_args(argv=None):
                         help="auto saves representative development cases only, preserving historical full archives.")
     parser.add_argument("--phase-graph-scope", choices=("auto", "all", "panel"), default="auto",
                         help="auto bounds development phase graphs to the representative diagnostic panel.")
+    parser.add_argument("--organization-summary", action="store_true",
+                        help="Stream scalar plan/action/support statistics from the same native predictions")
+    parser.add_argument("--action-signature-tolerance", type=float, default=1e-6)
+    parser.add_argument("--action-signature-capacity", type=int, default=4096,
+                        help="Bound transient complete action signatures per phase/route; saturation is a lower bound")
     parser.add_argument("--reference-access-dir", type=Path,
                         help="Saved normal evaluation directory for fixed-access identity isolation")
     args = parser.parse_args(argv)
@@ -666,6 +681,8 @@ def parse_args(argv=None):
     if min(args.panel_size, args.graph_panel_size, args.query_batch_size,
            args.fixed_summary_train_cases, args.executor_receiver_chunk) < 1:
         parser.error("panel and query sizes must be positive")
+    if not np.isfinite(args.action_signature_tolerance) or args.action_signature_tolerance <= 0 or args.action_signature_capacity < 1:
+        parser.error("positive finite action signature tolerance and capacity required")
     reference_only = all(name in REFERENCE_ACTIONS for name in args.interventions)
     if (args.interventions[0] != "normal" and not reference_only) or len(set(args.interventions)) != len(args.interventions):
         parser.error("interventions must start with normal and must not repeat")

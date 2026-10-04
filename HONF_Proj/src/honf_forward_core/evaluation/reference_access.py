@@ -10,7 +10,7 @@ import torch
 from honf_forward_core.interface_fields.typed_hypergraph_state import source_moments
 
 from .geometry_budget import geometry_action_budget
-from .typed_work_evidence import control_summary
+from .typed_work_evidence import control_summary, project_diagnostic_control, projected_action_summary
 
 
 class FixedReferenceAccessReplay(AbstractContextManager):
@@ -50,6 +50,13 @@ class FixedReferenceAccessReplay(AbstractContextManager):
         self._owned = "_access" in self.backend.__dict__
         self._original = self.backend._access
         self._previous_mode = self.backend.plan_intervention
+        self._previous_control_execution = getattr(self.backend, "control_execution", None)
+        self._numerical_owned = "_numerical_access" in self.backend.__dict__
+        self._numerical_original = getattr(self.backend, "_numerical_access", None)
+        if self._previous_control_execution is not None:
+            # Full vectors are deliberate only inside this explicit diagnostic
+            # intervention context; ordinary inference keeps projected actions.
+            self.backend.control_execution = "full_control"
         self.backend.set_plan_intervention("control_identity" if self.mode == "control_identity" else "normal")
 
         def access(plan, receivers, mechanism, *args, **kwargs):
@@ -125,7 +132,14 @@ class FixedReferenceAccessReplay(AbstractContextManager):
                     pair_valid=tensor("diagnostics/pair_valid"),
                     near=near,
                 ).control
-                for name, observed in control_summary(normal_control).items():
+                if f"{prefix}/control_probe" in self.reference:
+                    summaries = control_summary(normal_control)
+                else:
+                    projected = project_diagnostic_control(self.backend, normal_control, route[1])
+                    if projected is None:
+                        raise ValueError("Projected reference requires the native physical projection")
+                    summaries = projected_action_summary(projected)
+                for name, observed in summaries.items():
                     expected = tensor(name)
                     if observed.dtype.is_floating_point:
                         equal = torch.allclose(observed, expected, atol=1e-6, rtol=1e-6)
@@ -170,6 +184,11 @@ class FixedReferenceAccessReplay(AbstractContextManager):
             )
 
         self.backend._access = access
+        if callable(self._numerical_original):
+            def numerical_access(plan, receivers, mechanism, actions, *args, **kwargs):
+                kwargs.pop("diagnostics", None)
+                return self.backend._access(plan, receivers, mechanism, *args, **kwargs)
+            self.backend._numerical_access = numerical_access
         return self
 
     def __exit__(self, exception_type, *_args):
@@ -177,6 +196,13 @@ class FixedReferenceAccessReplay(AbstractContextManager):
             self.backend._access = self._original
         else:
             delattr(self.backend, "_access")
+        if callable(self._numerical_original):
+            if self._numerical_owned:
+                self.backend._numerical_access = self._numerical_original
+            else:
+                delattr(self.backend, "_numerical_access")
+        if self._previous_control_execution is not None:
+            self.backend.control_execution = self._previous_control_execution
         self.backend.set_plan_intervention(self._previous_mode)
         if self._file is not None:
             self._file.close()

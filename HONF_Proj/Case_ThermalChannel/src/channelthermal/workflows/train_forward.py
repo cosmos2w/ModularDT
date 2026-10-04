@@ -911,9 +911,17 @@ def run_from_config(
         model.campaign_training_state = copy.deepcopy(checkpoint.get("campaign_training_state") or {})
         amend_structural_calibration(model.campaign_training_state, campaign_resume_amendment)
         if campaign_resume_amendment is not None:
-            model.campaign_training_state["physical_loss_policy_amendment"] = {
-                **campaign_resume_amendment, "source_checkpoint": str(resume_checkpoint),
-            }
+            policy_change = campaign_resume_amendment.get("organizer_gradient_policy")
+            if policy_change is not None:
+                model.campaign_training_state["organizer_gradient_policy_amendment"] = {
+                    **policy_change, "source_checkpoint": str(resume_checkpoint),
+                }
+            physical_change = {key: value for key, value in campaign_resume_amendment.items()
+                               if key != "organizer_gradient_policy"}
+            if physical_change:
+                model.campaign_training_state["physical_loss_policy_amendment"] = {
+                    **physical_change, "source_checkpoint": str(resume_checkpoint),
+                }
         saved_selection = checkpoint.get("selection_state")
         if isinstance(saved_selection, dict) and saved_selection.get("epoch") is not None:
             selection_epoch = int(saved_selection["epoch"])
@@ -966,7 +974,7 @@ def run_from_config(
             record_gradient_diagnostics=(epoch in {1, 2, 5, 10, 20} or epoch % 50 == 0),
             require_full_case_pass=bool(campaign.get("require_full_epoch", False)),
             case_weighted_metrics=bool(campaign),
-            forward_function=(lambda **inputs: hard_value_soft_hypergraph_forward(model, **inputs)) if campaign and model_config.core_honf.forward_architecture in HYPERGRAPH_ARCHITECTURES else None,
+            forward_function=(lambda **inputs: hard_value_soft_hypergraph_forward(model, gradient_policy=campaign.get("organizer_gradient_policy", "whole_wrapper_shadow_v1"), **inputs)) if campaign and model_config.core_honf.forward_architecture in HYPERGRAPH_ARCHITECTURES else None,
             campaign_config=campaign,
             absolute_epoch=epoch,
             response_callback=response_callback,
