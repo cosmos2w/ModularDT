@@ -201,3 +201,22 @@ panel without the Tree organization/phase-graph options. Reuse completed
 and protocol are unchanged; require `completed_normal_cases=22` before
 calling the statistical panel complete. All these are exposed development
 measurements. No full-data formal launch is supplied or started here.
+
+The required known-null panel at 300/500, and a final 1000 if authorized,
+uses the maintained response evaluator separately from normal accuracy:
+
+```bash
+CUDA_VISIBLE_DEVICES=PHYSICAL_GPU python tools/thermal_campaign_responses.py \
+  --checkpoint EXACT_RETAINED_CHECKPOINT \
+  --dataset /data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5 \
+  --heat-null-development --evaluation-scope development \
+  --development-manifest /data/wanglz/ModularDT/thermal_development/fixed25_v1/manifest.json \
+  --null-query-count 256 --amplitudes .1 .2 --device cuda:0 \
+  --output-dir NEW_EXTERNAL_NULL_DIRECTORY
+```
+
+This measures all 22 exposed validation cases, retains detailed arrays only
+for the same four representatives, and adds 64 fixed pressure-section rows
+to the Q256 fluid panel. Reuse an existing complete result with identical
+checkpoint, query panel and amplitudes. The known-zero reference applies to
+u/v/p/omega; nonzero thermal changes remain model-only sensitivities.
