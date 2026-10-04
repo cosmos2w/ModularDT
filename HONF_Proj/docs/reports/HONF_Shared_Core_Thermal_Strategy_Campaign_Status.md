@@ -2458,9 +2458,22 @@ One actual CPU1 Q14 replay of fixed0274 completes all P0/P1/P2 calls with 10
 finite outputs and 334 unchanged tensors/3,994,148 scalars. All original and
 created source/profile/workspace/parent SHA/stat guards pass. The [actual
 preparation/parser/replay completion](../../diagnostics/generated/shared_core_campaign_20261002/manual5000_audit/h-local_2505_2605_manual_preparation_completion.json)
-is source-bound to `cd65144`; any repair-source refresh requires a separately
-reviewed replay. No optimizer construction, first gradient, update or 5000
-training was executed, and printed `--yes` launch commands were never run.
+is source-bound to `cd65144`; that original evidence remains preserved.
+A separately admitted [repaired-source replay and saved-output comparison](../../diagnostics/generated/shared_core_campaign_20261002/manual5000_audit/h-local_actual_exact1000_prepared_parent_q14_d9_revalidation_v2/saved_output_comparison_and_acceptance.json)
+completed naturally with exit 0 at 2026-10-04 01:53:17 UTC under clean
+`115d0f0`, whose scientific runtime is `d9a3646`. The [root numeric review](../../diagnostics/generated/shared_core_campaign_20261002/tmp/root_Local_Q14_D9_saved_numeric_review.json)
+confirms exactly one native Q14 forward, one prepare/read call in each P0/P1/P2,
+334 unchanged tensors / 3,994,148 scalars and all 801 source/profile/config/parent
+SHA/stat guards unchanged. All seven nonempty outputs / 51,814 scalars and the
+14 query coordinates match the original CD replay bitwise; three empty optional
+port-global outputs are explicitly reported separately. The copied exact1000
+parent retains all 203 Adam metadata states, four RNG streams and calibration;
+field-selected995 is not substituted as the continuation parent.
+No optimizer construction, first gradient, update or 5000 training was executed.
+Unchanged helper tests and native parser dry-runs were not repeated, and printed
+`--yes` launch commands were never run. The CPU1 replay was measured on the
+shared host with live Tree training; it does not establish speed, future optimizer
+resume-step correctness or long-run fidelity/stability.
 These are provisional exploratory recipes pending the joint final cohort,
 not a selected best-parent handoff or a changed tracked guide. Final Tree1000,
 joint finalist selection and the qualified paired-head outcome remain required.
