@@ -12,10 +12,10 @@ case-specific physical interfaces.
 | Result | Measured gain so far | Measured miss / next decision |
 |---|---|---|
 | Predictor | Controls and Local completed 1,000 epochs. Local field995 improves 19/24 role means over its prior field388, including u 17.28%, q-normal proxy 10.74% and section-pressure difference 58.01%. Native962 fluid T RMSE is 0.39130 versus prior456 at 0.56072. | Local995 fluid T worsens 9.70% to 1.503109; both final Local parents trail mature4738 on all 24 means. Local995 temperature-response error 0.437247 exceeds zero change 0.274135. Tree1000 and the final cohort comparison remain incomplete. |
-| Organizer | Local995 has measured typed actions; strict fixed-access zero controls worsen all 24 role means. Its selected logical support is 46.66% of eligible pairs, and native subset output/first-gradient gates pass. | Dense execution still performs 179,889,120 rows/14,490 calls over 90 cases. All eight selected995 subset timing contrasts are slower; full-Q complete-wrapper increases are 8.27%/9.20%. Full access with retained controls improves 18/24 means, and geometry changes weights but not support. Tree recovery passes exact 607; final Tree1000 graph qualification remains required. |
+| Organizer | Local995 has measured typed actions; strict fixed-access zero controls worsen all 24 role means. Its selected logical support is 46.66% of eligible pairs, and native subset output/first-gradient gates pass. | Dense execution still performs 179,889,120 rows/14,490 calls over 90 cases. All eight selected995 subset timing contrasts are slower; full-Q complete-wrapper increases are 8.27%/9.20%. Full access with retained controls improves 18/24 means, and geometry changes weights but not support. Tree recovery passes ordinary625 state checks; final Tree1000 graph qualification remains required. |
 | Inverse | Local995 completed 108 frozen trials; graph observed/held means 1.780933/3.514133 improve on its joint 1.858104/3.945353. Its graph makes 1,014 proper subset steps and 66 full-joint fallbacks. Native962/Fine972 matched panels are complete. | Size-matched ungrouped is better than Local graph on mean observed/held/peak/pressure errors. Local graph hidden-heat RMSE worsens 7.79% from initialization. Public 36 graph-action records have zero head updates; qualified paired heads and final finalist selection remain pending. Dense control graph modes remain full-joint fallbacks. |
 
-**State: both controls and Local completed 1,000 epochs; all eleven Local final review jobs completed. Original Tree Run2203 failed during 607 after 606 complete epochs. Recovered Run2303 completed exact 607 with natural exit 0 and all 19 state checks passed, then resumed toward 1000 under repaired source `d9a3646`; Tree1000 completion and joint finalist qualification remain pending.**
+**State: both controls and Local completed 1,000 epochs; all eleven Local final review jobs completed. Original Tree Run2203 failed during 607 after 606 complete epochs. Recovered Run2303 completed exact 607 with natural exit 0 and all 19 state checks passed, then resumed toward 1000 under repaired source `d9a3646`. The later ordinary625 audit passes 19/19 state checks; Tree1000 completion and joint finalist qualification remain pending.**
 The historical saved snapshot at 2026-10-03 20:19:25 UTC contains Native1000,
 Fine1000, Tree508, Overlap500 and Local878. Native exited naturally with code 0
 at 14:20:48 UTC; its exact1000 and field-selected actual962 completed full90/
@@ -88,7 +88,7 @@ start automatically.
 | 2201 | B-native | 1000 | 0.00690 / 0.00411 | Natural exit0; exact1000/selected962 fields, responses and selected inverse complete |
 | 2202 | B-fine | 1000 | 0.01175 / 0.01182 | Native exit0; immutable exact1000/selected972 evaluation complete |
 | 2203 | H-tree, original | 606 | 0.02481 / 0.01724 | Failed during607; trusted exact600 parent retained; failed lineage is not marked completed |
-| 2303 | H-tree, numerical recovery of 2203 | 611 | 0.02041 / 0.01190 | Exact 607 passed 19/19 with exit 0; same Run2303 now continues toward 1000 under loaded d9a3646; completion pending |
+| 2303 | H-tree, numerical recovery of 2203 | 639 | 0.01817 / 0.01394 | Dated 2026-10-04 01:42:40 UTC snapshot; ordinary625 passed 19/19 saved-state checks; same Run2303 continues toward 1000 under loaded d9a3646; completion pending |
 | 2204 | H-overlap | 500 | 0.60332 / 0.21109 | Native exit0; exact500/selected292 review complete; third-slot decision awaits cohort review |
 | 2205 | H-local | 1000 | 0.06280 / 0.05778 | Natural exit0; immutable exact1000/field995/T388; all eleven final native jobs complete |
 
@@ -2407,6 +2407,38 @@ Run2203, its601–606/discarded work and healthy595/596/556 selections remain
 preserved in the [recovery plan](../../diagnostics/generated/shared_core_campaign_20261002/failure_evidence/tree_e607_20261003T231056Z/tree_exact600_lineage_recovery_launch_plan.md).
 Tree1000 completion, final native evaluation and the uniform public-total paired
 head qualification remain pending; recovery adds no new architecture.
+
+### Ordinary625 state proof and continuing native coverage
+
+The later [ordinary625 full-state audit](../../diagnostics/generated/shared_core_campaign_20261002/failure_evidence/tree_e607_20261003T231056Z/ordinary625_full_state_audit_d9a3646/ordinary625_full_state_audit.json)
+and [root saved-numeric review](../../diagnostics/generated/shared_core_campaign_20261002/failure_evidence/tree_e607_20261003T231056Z/root_actual625_saved_numeric_review_d9a3646.json)
+pass all 19 checks. The immutable ordinary625 parent SHA is
+`399f31293695d7f2615140e2320eee0ac12011ca89eb903cbe8ef8de01d60db1`.
+All 316 state tensors / 4,287,933 scalars and 555 Adam slots are finite;
+185 Adam step counters are exactly 8,125, with 234 actual updates since 607.
+The 109 frozen Stage-A tensors, 20 normalization arrays and entire response
+calibration remain bitwise equal to 607. Four RNG streams, including the one
+CUDA stream, are present. The sole resolved configuration difference from 607
+is the declared total stop from 607 to 1,000; horizon5000 remains the schedule horizon.
+
+Each of the 18 new epochs 608–625 covers all 600 training cases / 75
+microbatches / 13 optimizer boundaries / 614,400 queries and all 90 validation
+cases / 2 batches / 92,160 queries. All four auxiliary response-wrapper calls
+per epoch and unchanged calibration are recorded. These are native epochs,
+with the original 600 history retained exactly. Sampled validation field/T MSE
+at 625 is 0.0249683/0.0333234; the state audit does not establish a physical
+fidelity gain.
+
+The later read-only monitor snapshot at 2026-10-04 01:42:40.691770 UTC reports
+639 complete epochs, 416 optimizer boundaries since 607 and finite named
+physical metrics throughout the new prefix. Native PID 1428716 is alive on GPU1;
+no checkpoint payload was loaded by that monitor. The separately retained
+[saved CSV row639 binding](../../diagnostics/generated/shared_core_campaign_20261002/tmp/root_tree639_saved_csv_row_report_binding.json)
+records sampled field/T MSE 0.0181699/0.0139435. This is a dated progress
+snapshot, not a natural 1,000-epoch exit or a full-state audit of 639. The loaded
+training source remains `d9a3646`; the later `f18d69f` report commit changes
+only this Markdown file. Tree1000, its final selected-weight comparisons
+and the qualified paired-head experiment remain outstanding.
 
 ## Provisional Local manual5000 preparation
 
