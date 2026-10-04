@@ -14,20 +14,22 @@ from .typed_work_evidence import control_summary, project_diagnostic_control, pr
 
 
 class FixedReferenceAccessReplay(AbstractContextManager):
-    """Replay permissions alone, leaving all current physical source values live.
+    """Replay saved permissions or actions while keeping physical values live.
 
     Source/receiver identity, geometry, measure and eligibility must match at
     every phase/route/call. Current organizer plans are still computed and are
     not reference plans; returned access tensors are the authoritative replay.
     Older recorder files lack density: reconstruct it from their saved normal
     membership/access and verify their normalized weight and support equations.
+    ``normal_fixed_actions`` retains both normal permissions and pair controls,
+    allowing a changed prescribed context to be evaluated at fixed actions.
     """
 
     def __init__(self, backend, reference, *, mode="control_identity"):
         if backend.training:
             raise ValueError("Reference access replay is evaluation-only")
         self.backend = backend
-        if mode not in {"control_identity", "full_access_fixed_controls", "geometry_reference_actions"}:
+        if mode not in {"control_identity", "normal_fixed_actions", "full_access_fixed_controls", "geometry_reference_actions"}:
             raise ValueError("Unknown reference action mode")
         self.mode = mode
         self._file = np.load(Path(reference), allow_pickle=False) if isinstance(reference, (str, Path)) else None
@@ -153,7 +155,7 @@ class FixedReferenceAccessReplay(AbstractContextManager):
                     density = valid.to(weight.dtype)
                     weight = density.clone()
                     support = valid.clone()
-                else:
+                elif self.mode == "geometry_reference_actions":
                     (density, weight, support, control), statistics = geometry_action_budget(
                         density,
                         weight,
@@ -167,10 +169,11 @@ class FixedReferenceAccessReplay(AbstractContextManager):
                         tensor("source_ids"),
                     )
                     self.action_statistics[prefix] = statistics
-                diagnostics["unique_pairs"] = support.sum()
-                diagnostics["far_unique_pairs"] = (valid & (density > 0)).sum()
-                # Source-resolved actions do not assert a new shared-group path decomposition.
-                diagnostics.pop("repeated_paths_removed", None)
+                if self.mode != "normal_fixed_actions":
+                    diagnostics["unique_pairs"] = support.sum()
+                    diagnostics["far_unique_pairs"] = (valid & (density > 0)).sum()
+                    # Reassigned source actions have no new shared-group path decomposition.
+                    diagnostics.pop("repeated_paths_removed", None)
             self.seen.add(prefix)
             return replace(
                 current,

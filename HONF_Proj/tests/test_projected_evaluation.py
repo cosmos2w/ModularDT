@@ -81,7 +81,7 @@ def test_full_control_diagnostic_recorder_preserves_legacy_keys_and_matches_smal
             assert value.shape[-1] == 16
 
 
-@pytest.mark.parametrize("mode", ["control_identity", "full_access_fixed_controls", "geometry_reference_actions"])
+@pytest.mark.parametrize("mode", ["control_identity", "normal_fixed_actions", "full_access_fixed_controls", "geometry_reference_actions"])
 def test_projected_reference_replay_is_effective_and_restores_numerical_reader(mode):
     backend, encoded, queries, features = _fixture()
     with torch.no_grad():
@@ -97,9 +97,47 @@ def test_projected_reference_replay_is_effective_and_restores_numerical_reader(m
         assert any((a-b).abs().max() > 1e-5 for a, b in zip(original, intervened))
         assert all(np.count_nonzero(value) == 0 for key, value in result.arrays.items()
                    if key.endswith("/projected_action_probe"))
-    elif mode == "full_access_fixed_controls":
+    elif mode in {"normal_fixed_actions", "full_access_fixed_controls"}:
         comparison = compare_native_access(normal.arrays, result.arrays)
         assert all(row["projected_action_probe_equal"] for row in comparison.values())
+        if mode == "normal_fixed_actions":
+            assert all(row["max_absolute_weight_change"] == 0 and row["changed_pairs"] == 0
+                       for row in comparison.values())
+            for a, b in zip(original, intervened):
+                torch.testing.assert_close(a, b, rtol=2e-5, atol=2e-6)
+
+
+def test_normal_actions_stay_fixed_when_live_physical_source_states_change():
+    backend, encoded, queries, features = _fixture()
+    with torch.no_grad():
+        with TypedWorkEvidenceRecorder(backend) as normal:
+            original = _run(backend, encoded, queries, features)
+        changed = replace(encoded, module_tokens=encoded.module_tokens + 0.4, env_tokens=encoded.env_tokens - 0.3)
+        with (
+            FixedReferenceAccessReplay(backend, normal.arrays, mode="normal_fixed_actions"),
+            TypedWorkEvidenceRecorder(backend) as result,
+        ):
+            actual = _run(backend, changed, queries, features)
+    assert any((a-b).abs().max() > 1e-5 for a, b in zip(original, actual))
+    comparison = compare_native_access(normal.arrays, result.arrays)
+    assert all(row["max_absolute_weight_change"] == 0 and row["changed_pairs"] == 0 and row["projected_action_probe_equal"]
+               for row in comparison.values())
+    assert backend.control_execution == "projected" and backend.plan_intervention == "normal"
+
+
+def test_normal_action_replay_rejects_projected_control_drift_and_restores():
+    backend, encoded, queries, features = _fixture()
+    with torch.no_grad():
+        with TypedWorkEvidenceRecorder(backend) as normal:
+            _run(backend, encoded, queries, features)
+        normal.arrays["access/P0/MM/00000/projected_action_probe"].flat[0] += 1
+        with (
+            pytest.raises(ValueError, match="reconstructed control projected_action_probe mismatch"),
+            FixedReferenceAccessReplay(backend, normal.arrays, mode="normal_fixed_actions"),
+        ):
+            _run(backend, encoded, queries, features)
+    assert backend.control_execution == "projected" and backend.plan_intervention == "normal"
+    assert all(name not in backend.__dict__ for name in ("_access", "_numerical_access", "prepare", "_ledger"))
 
 
 def test_explicit_diagnostic_plan_rebinding_rebuilds_prepared_actions_once():

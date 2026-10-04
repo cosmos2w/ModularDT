@@ -108,18 +108,20 @@ def test_allphase_permissions_bitexact_controls_zero_and_live_values_differ(hist
         "source_measures",
         "source_valid",
         "diagnostics/pair_valid",
+        "density",
         "weight",
         "support",
         "near",
     ],
 )
-def test_reference_mismatches_fail_and_restore_mode_and_methods(field):
+@pytest.mark.parametrize("mode", ["control_identity", "normal_fixed_actions"])
+def test_reference_mismatches_fail_and_restore_mode_and_methods(field, mode):
     backend = Backend().eval()
     normal = reference(backend, phases=1)
     key = f"access/P0/MM/00000/{field}"
     normal[key] = normal[key].copy()
     normal[key].flat[0] = not normal[key].flat[0] if normal[key].dtype == np.bool_ else normal[key].flat[0] + 1
-    with pytest.raises(ValueError, match="mismatch"), FixedReferenceAccessReplay(backend, normal):
+    with pytest.raises(ValueError, match="mismatch"), FixedReferenceAccessReplay(backend, normal, mode=mode):
         plan = backend.prepare(0)["hypergraph_plan"]
         backend._access(plan, plan.source_coords["M"], "MM")
     assert backend.plan_intervention == "normal" and "_access" not in backend.__dict__
@@ -144,7 +146,7 @@ def test_missing_extra_and_soft_streams_rejected_and_restored():
         FixedReferenceAccessReplay(backend, normal)
 
 
-@pytest.mark.parametrize("mode", ["full_access_fixed_controls", "geometry_reference_actions"])
+@pytest.mark.parametrize("mode", ["normal_fixed_actions", "full_access_fixed_controls", "geometry_reference_actions"])
 def test_reference_controls_kept_normal_bias_mode_and_physical_gradient(mode):
     backend = Backend().eval()
     normal = reference(backend)
@@ -152,6 +154,7 @@ def test_reference_controls_kept_normal_bias_mode_and_physical_gradient(mode):
     with FixedReferenceAccessReplay(backend, normal, mode=mode), TypedWorkEvidenceRecorder(backend) as recorded:
         for phase in range(3):
             plan = backend.prepare(phase)["hypergraph_plan"]
+            plan = replace(plan, controls={name: value * 7 for name, value in plan.controls.items()})
             value = backend._access(plan, plan.source_coords["M"], "MM")
             assert backend.plan_intervention == "normal"
             (value.weight * backend.live_value).sum().backward()
@@ -161,7 +164,7 @@ def test_reference_controls_kept_normal_bias_mode_and_physical_gradient(mode):
     assert backend.live_value.grad.abs() > 0 and backend.plan_intervention == "normal"
     for phase in range(3):
         prefix = f"access/P{phase}/MM/00000"
-        if mode == "full_access_fixed_controls":
+        if mode in {"normal_fixed_actions", "full_access_fixed_controls"}:
             for key in (
                 "control_probe",
                 "control_receiver_max_abs",
@@ -169,19 +172,23 @@ def test_reference_controls_kept_normal_bias_mode_and_physical_gradient(mode):
                 "control_source_channel_mean",
             ):
                 np.testing.assert_array_equal(normal[f"{prefix}/{key}"], recorded.arrays[f"{prefix}/{key}"])
+        if mode == "normal_fixed_actions":
+            for key in ("density", "weight", "support", "edge_access", "near"):
+                np.testing.assert_array_equal(normal[f"{prefix}/{key}"], recorded.arrays[f"{prefix}/{key}"])
 
 
 @pytest.mark.parametrize(
     "name",
     ["control_probe", "control_receiver_max_abs", "control_receiver_nonzero_count", "control_source_channel_mean"],
 )
-def test_reference_control_reconstruction_guards(name):
+@pytest.mark.parametrize("mode", ["normal_fixed_actions", "full_access_fixed_controls"])
+def test_reference_control_reconstruction_guards(name, mode):
     backend = Backend().eval()
     normal = reference(backend, phases=1)
     normal[f"access/P0/MM/00000/{name}"].flat[0] += 1
     with (
         pytest.raises(ValueError, match="reconstructed control"),
-        FixedReferenceAccessReplay(backend, normal, mode="full_access_fixed_controls"),
+        FixedReferenceAccessReplay(backend, normal, mode=mode),
     ):
         plan = backend.prepare(0)["hypergraph_plan"]
         backend._access(plan, plan.source_coords["M"], "MM")
@@ -223,7 +230,7 @@ class EmptyBackend(Backend):
 
 
 @pytest.mark.parametrize("kind,receivers,sources", [("M", 2, 0), ("E", 2, 0), ("M", 0, 2), ("E", 0, 2), ("M", 0, 0)])
-@pytest.mark.parametrize("mode", ["control_identity", "full_access_fixed_controls", "geometry_reference_actions"])
+@pytest.mark.parametrize("mode", ["control_identity", "normal_fixed_actions", "full_access_fixed_controls", "geometry_reference_actions"])
 def test_empty_source_types_and_receiver_axes_record_and_reconstruct(kind, receivers, sources, mode):
     backend = EmptyBackend(kind, sources).eval()
     queries = torch.zeros(1, receivers, 2)

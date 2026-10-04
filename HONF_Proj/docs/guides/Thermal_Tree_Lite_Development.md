@@ -121,6 +121,15 @@ fields/interfaces/material residuals, heat-null increments and auxiliary
 gradient scale. Positive held-geometry heat-response labels remain absent;
 do not substitute null evidence or launch the proposed new solves.
 
+For the bounded prescribed-context test, `FixedReferenceAccessReplay` accepts
+`normal_fixed_actions`: it holds saved normal density, access and full pair
+controls fixed while the current physical states remain live. Compare ordinary
+and replayed actions at the same changed context, with the complete seen public
+context tuple chosen from selected-training inputs. Preserve geometry, heats,
+queries and every recorded phase/route/source/receiver identity; a stream or
+reconstruction mismatch fails the test. This is frozen-weight action reliance,
+not physical accuracy against the original-context reference or causal proof.
+
 Bound inverse reuse to four representatives, two public starts, Tree joint/
 graph/size-matched random proposals and the strongest nongroup joint control,
 at most10 attempts each. Project heat into the capped simplex using global
