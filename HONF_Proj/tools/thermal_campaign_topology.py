@@ -625,7 +625,8 @@ def trained_control_locality(model, sample, raw_sample, *, directory=None):
                for route, donors in state.control_memberships.items()}
     if manipulated:
         members[tau][kind][0, group, excluded] = 0
-    fixed = replace(state, control_memberships=members)
+    fixed = replace(state, control_memberships={route: {donor: value.detach() for donor, value in donors.items()}
+                                              for route, donors in state.control_memberships.items()})
     m = modules.detach().clone().requires_grad_()
     e = encoded.env_tokens.detach().clone().requires_grad_()
 
@@ -636,6 +637,33 @@ def trained_control_locality(model, sample, raw_sample, *, directory=None):
     jac_m, jac_e = torch.autograd.functional.jacobian(vector, (m, e), vectorize=False)
     jacobian = jac_m if kind == "M" else jac_e
     per_source_norm = jacobian[:, 0].square().sum((0, 2)).sqrt()
+    actual_inventory = {}
+    for donor, jac in (("M", jac_m), ("E", jac_e)):
+        member = state.control_memberships[tau][donor][0, group]
+        norm = jac[:, 0].square().sum((0, 2)).sqrt()
+        valid = state.source_valid[donor][0]
+        def donor_rows(mask, donor=donor, member=member, norm=norm):
+            return [{"source_slot": int(slot), "source_id": int(state.source_ids[donor][0, slot]),
+                     "edge_id": f"P0/{tau}/g{group}/{donor}:{int(state.source_ids[donor][0, slot])}",
+                     "coordinates": state.source_coords[donor][0, slot].cpu().tolist(),
+                     "control_membership": float(member[slot]), "control_jacobian_norm": float(norm[slot])}
+                    for slot in torch.nonzero(mask, as_tuple=False).flatten().tolist()]
+        actual_inventory[donor] = {"tested_valid_source_count": int(valid.sum()),
+            "tested_excluded_source_count": int((valid & (member == 0)).sum()),
+            "excluded_sources": donor_rows(valid & (member == 0)),
+            "positive_control_donors_with_nonzero_jacobian": donor_rows(valid & (member > 0) & (norm > 0))}
+    actual_exclusion_available = any(value["tested_excluded_source_count"] for value in actual_inventory.values())
+    manipulated_result = None
+    if manipulated:
+        fixed = replace(state, control_memberships=members)
+        diagnostic_m, diagnostic_e = torch.autograd.functional.jacobian(vector, (m, e), vectorize=False)
+        diagnostic_jac = diagnostic_m if kind == "M" else diagnostic_e
+        diagnostic_norm = diagnostic_jac[:, 0].square().sum((0, 2)).sqrt()
+        manipulated_result = {"origin": "explicitly manipulated conditional diagnostic; not trained exclusion evidence",
+            "donor_type": kind, "excluded_source_slot": excluded, "admitted_source_slot": admitted,
+            "excluded_control_derivative_norm": float(diagnostic_norm[excluded]),
+            "excluded_control_derivative_zero": bool(diagnostic_norm[excluded] == 0),
+            "admitted_control_derivative_norm": float(diagnostic_norm[admitted])}
     # Rebuild the richer planner using the same actual content. For an M
     # donor, read a DIFFERENT target source logit: the derivative can then
     # arrive through planning summaries, not that donor's direct token slot.
@@ -664,18 +692,25 @@ def trained_control_locality(model, sample, raw_sample, *, directory=None):
                     "actually_excluded_control_donor_entries": int((valid & (member == 0)).sum())}
                 arrays[f"P{phase}/{route}/control_membership_{donor}"] = member.cpu().numpy()
     payload = {"available": True, "case_id": str(raw_sample["case_id"]), "phase": "P0", "mechanism": tau,
-        "group": group, "donor_type": kind, "excluded_donor_slot": excluded, "admitted_donor_slot": admitted,
+        "group": group, "donor_type": kind, "excluded_donor_slot": excluded if not manipulated else None, "admitted_donor_slot": admitted,
         "exclusion_origin": "explicitly manipulated conditional diagnostic" if manipulated else "actual learned zero control membership",
-        "excluded_control_derivative_norm": float(per_source_norm[excluded]),
+        "actual_conditional_exclusion_test_available": actual_exclusion_available,
+        "actual_conditional_exclusion_test_status": "measured actual excluded donors" if actual_exclusion_available else "vacuous/unavailable: no valid source excluded from the tested M or E control donor sets",
+        "actual_tested_control_donors": actual_inventory,
+        "manipulated_conditional_diagnostic": manipulated_result,
+        "excluded_control_derivative_norm": float(per_source_norm[excluded]) if not manipulated else None,
         "admitted_control_derivative_norm": float(per_source_norm[admitted]),
-        "excluded_control_derivative_zero": bool(per_source_norm[excluded] == 0),
+        "excluded_control_derivative_zero": bool(per_source_norm[excluded] == 0) if not manipulated else None,
         "admitted_control_derivative_nonzero": bool(per_source_norm[admitted] > 0),
         "separate_rebuilt_planner_derivative_norm": planning_norm,
         "separate_rebuilt_planner_derivative_nonzero": planning_norm > 0,
-        "planner_probe": "different admitted source logit at the same group, with the omitted donor's input content live",
+        "planner_probe": "different admitted source logit at the same group, with the tested donor's input content live; hypothetical exclusion is separate when no actual zero membership exists",
+        "planner_probe_source": {"donor_type": kind, "source_slot": excluded,
+            "source_id": int(state.source_ids[kind][0, excluded]),
+            "actual_control_membership": float(state.control_memberships[tau][kind][0, group, excluded])},
         "ancestry_and_actual_donor_inventory": inventory,
         "charged_work": {"native_wrapper_calls": 1, "separate_organizer_rebuilds": 1,
-                         "control_vector_vjps": organizer.control_dim},
+                         "control_vector_vjps": organizer.control_dim * (2 if manipulated else 1)},
         "limits": "Conditional token-content derivatives are computational attribution; P1/P2 states carry disclosed upstream ancestry; no physical-causality claim"}
     if directory is not None:
         directory = output_directory(directory)

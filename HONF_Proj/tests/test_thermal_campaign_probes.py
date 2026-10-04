@@ -355,7 +355,10 @@ def test_control_locality_probe_discloses_manipulated_exclusion_and_restores_pha
     monkeypatch.setattr(topology, "sensor_panel", lambda sample: (query[0].numpy(), None, None, None, None))
     monkeypatch.setattr(topology, "native_arguments", lambda *args: {"query_xy": query})
     measured, arrays = topology.trained_control_locality(model, {}, {"case_id": "unit_fixture"})
-    assert measured["excluded_control_derivative_zero"]
+    assert measured["excluded_control_derivative_zero"] is None
+    assert not measured["actual_conditional_exclusion_test_available"]
+    assert measured["manipulated_conditional_diagnostic"]["excluded_control_derivative_zero"]
+    assert all(value["tested_excluded_source_count"] == 0 for value in measured["actual_tested_control_donors"].values())
     assert measured["exclusion_origin"] == "explicitly manipulated conditional diagnostic"
     assert set(measured["ancestry_and_actual_donor_inventory"]) == {"P0", "P1", "P2"}
     assert "P2/QE/control_membership_E" in arrays and "P0/QM/control_membership_M" in arrays
