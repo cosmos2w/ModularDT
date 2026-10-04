@@ -46,6 +46,15 @@ Integer executed rows and control-pooling work remain separate from these
 representation costs. Legacy boundaries and checkpoint semantics remain
 available through the old architecture identifier.
 
+The retained e100 derivative audit found a second representation issue:
+fine-row min/max bounds distribute an equal-tie coordinate subgradient by
+row count. Tree-F now takes node extrema over canonical coordinate/role
+blocks, whose coordinates distribute derivatives by physical child mass.
+Exact-refinement bound values stay unchanged; the legacy path remains
+unchanged. Preserve the original trained failure and the separate same-weight
+derivative verification. This is a derivative implementation repair, not
+additional training exposure or a new predictor fit.
+
 The first screen binds `structural_measure_policy_version=1`: physical
 integrals are case balanced and the final mean includes every mechanism,
 including a zero MM term for an entirely self-only M1 batch. This records
@@ -115,6 +124,58 @@ continuous physics, then rebuild after accepted steps. Persist complete
 trails, charged forward/VJP calls, accepted/rejected steps and feasibility.
 Disclose fallback and rank limits; candidate predictions are surrogate
 evidence, not independently verified physical designs.
+
+### Actual first-screen review, 2026-10-04
+
+Tree-L Run3103, Tree-F Run3204 and Pair-F Run3202 completed100. Each visited
+15,000 selected cases, made400 ordinary updates and queried15.36 million
+primary fluid points. Tree-F Run3201 was intentionally censored after a
+native mass-cut near-tie failure; its work and saved evidence remain separate.
+
+| Exact e100, all22 equal-case mean RMSE | Tree-L | Tree-F | Pair-F | Dense-D25 |
+|---|---:|---:|---:|---:|
+| Fluid temperature |4.52385 |5.47149 |4.36374 |5.34786 |
+| Material temperature |3.50903 |3.74484 |3.79236 |4.22994 |
+| Surface temperature |4.11126 |4.32049 |4.51310 |4.56745 |
+| Inlet/outlet pressure difference |0.135377 |0.120159 |0.114684 |0.054518 |
+
+These are native dataset units on exposed development validation. Tree-F
+does not establish added predictor/organizer value at100. Removing its
+collective control at fixed access improves four-case fluid-temperature
+RMSE from5.16400 to4.74483. Every measured intervention changes zero binary
+native pairs and zero fine rows; density/control changes are nevertheless
+nonzero. All actual control donor catalogues have full support, making an
+actual excluded-donor zero-path test unavailable. Admitted-control and
+planner Jacobians are nonzero; the separately manipulated exclusion test
+is a diagnostic property, not trained sparse-locality evidence.
+
+All22 whole-rebuild permutation/unequal-refinement predictions and effective
+representation quantities pass their declared floating tolerance. The four
+representative split-coordinate VJPs fail before the extrema derivative
+repair; feature/mass/length VJPs and permutations pass. Native field-loss
+probes give finite nonzero Tree/Pair control gradients, including the
+Tree hard-value/soft-organizer training route. These probes do not establish
+functional usefulness. Known-null RMS flow increments remain nonzero;
+Tree-F is1.69/2.56/1.94/2.74 times Pair-F in u/v/p/omega. Both retain nonzero
+model-only thermal sensitivity. No held nonzero-response family exists
+inside the selected150/22 cases.
+
+The reviewed next step is a matched extension **only to200**, conditional
+on verified same-weight coordinate derivatives and the measured execution
+check. It tests the planned common physical/null-response objective at101,
+with the explicit Tree structural-cost amendment and training-only
+recalibration. It does not assume an organizer benefit or authorize automatic
+continuation to500. Review200 before selecting any later boundary.
+
+Observed first-screen process allocation was Tree-L0.827h, Tree-F1.647h,
+Pair-F0.227h; Tree-F shared GPU2 with Dense. Dense continues its separately
+authorized1000. Proposed continuation puts Tree-F on GPU1 beside an
+untouched external13GiB process and Pair-F on GPU2 beside Dense11GiB.
+Expected next100 is approximately40–110 minutes for Tree-F and14–25 minutes
+for Pair-F, subject to measured contention; revise after five resumed epochs.
+The conservative additional400 ceiling from first-screen allocation is
+6.59 Tree-F and0.91 Pair-F process hours, not exclusive GPU compute time.
+Merge co-resident allocation intervals instead of adding their GPU hours.
 
 ## Resources and closeout
 

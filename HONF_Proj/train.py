@@ -22,11 +22,10 @@ from honf_runtime.paths import resolve_path
 from honf_runtime.registry import load_case_plugin, require_model_family
 from honf_runtime.run_store import RunStore
 
-
 DEFAULT_CONFIG = "project://src/config_core/forward/enhanced_honf_pairwise.json"
 
 
-def _validate_managed_resume(run_dir: Path, bundle, workflow: str) -> dict | None:
+def _validate_managed_resume(run_dir: Path, bundle, workflow: str, *, model_matches=None) -> dict | None:
     """Validate immutable run identity/config sections before managed resume."""
 
     manifest_path = run_dir / "run_manifest.json"
@@ -49,10 +48,13 @@ def _validate_managed_resume(run_dir: Path, bundle, workflow: str) -> dict | Non
     if resolved_path.exists():
         saved = json.loads(resolved_path.read_text(encoding="utf-8"))
         for section in ("model", "dataset", "loss", "case"):
-            if saved.get(section) != bundle.effective.get(section):
+            same = saved.get(section) == bundle.effective.get(section)
+            if not same and section == "model" and model_matches is not None:
+                same = model_matches(saved.get(section) or {}, bundle.effective.get(section) or {}, bundle)
+            if not same:
                 raise ValueError(
                     f"Resume configuration section {section!r} differs from the original run. "
-                    "Only runtime/training-duration overrides may change."
+                    "Only runtime/training-duration overrides or the declared cost-policy amendment may change."
                 )
     return manifest
 
@@ -158,7 +160,8 @@ def main() -> int:
 
     if args.resume_checkpoint:
         run_dir = _resolve_resume_run_dir(resolve_path(args.resume_checkpoint))
-        resume_manifest = _validate_managed_resume(run_dir, bundle, workflow)
+        resume_manifest = _validate_managed_resume(run_dir, bundle, workflow,
+            model_matches=getattr(plugin, "managed_resume_model_matches", None))
         managed_resume = resume_manifest is not None
         if resume_manifest is not None:
             request = replace(

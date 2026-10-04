@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from honf_forward_core.interface_fields.adaptive_receiver_hypergraph import AdaptiveReceiverHypergraph
+
 from .test_adaptive_receiver_hypergraph import _case
 
 
@@ -113,3 +114,32 @@ def test_empty_control_types_export_absence_and_zero_summary(modules, environmen
     rebuilt = model.recompute_controls(state, encoded, encoded.module_tokens)
     for tau in state.controls:
         torch.testing.assert_close(rebuilt[tau], state.controls[tau])
+
+
+@pytest.mark.parametrize("soft", [False, True])
+def test_tied_receiver_extrema_refinement_preserves_full_organizer_coordinate_vjp(soft):
+    encoded = _double(_case(environment=5))
+    base_coords = torch.tensor([[[0., 0.], [0., 1.], [1., 0.], [1., 1.], [2., .5]]], dtype=torch.float64)
+    base_mass = torch.tensor([[.7, 1.2, 2., .8, 1.5]], dtype=torch.float64)
+    model = _trained_like()
+    query = base_coords.new_tensor([[[.2, .3], [.8, .6], [1.5, .4]]])
+    values, gradients = [], []
+    for split in (False, True):
+        coords, mass = base_coords.clone().requires_grad_(), base_mass.clone().requires_grad_()
+        parent = torch.tensor([4, 3, 2, 1, 0, 0]) if split else torch.arange(5)
+        fractions = mass.new_tensor([1., 1., 1., 1., .3, .7]) if split else mass.new_ones(5)
+        case = replace(encoded, env_coords=coords[:, parent], env_weights=mass[:, parent] * fractions,
+            env_tokens=encoded.env_tokens[:, parent], receiver_anchor_coords=None, receiver_anchor_weights=None)
+        state = model.prepare(case, case.module_tokens, soft=soft)
+        moments = []
+        for tau in ("QM", "QE"):
+            access = model.access(state, query, tau)
+            source_mass = case.module_present if tau == "QM" else case.env_weights
+            moments.append((access.control * access.weight[..., None] * source_mass[:, None, :, None]).sum(-2).flatten())
+        value = torch.cat([state.controls[tau].flatten() for tau in state.controls] + moments)
+        values.append(value)
+        projection = torch.linspace(.1, 1., value.numel(), dtype=value.dtype)
+        gradients.append(torch.autograd.grad((value * projection).sum(), (coords, mass)))
+    torch.testing.assert_close(values[0], values[1], atol=1e-10, rtol=1e-10)
+    for baseline, refined in zip(gradients[0], gradients[1]):
+        torch.testing.assert_close(baseline, refined, atol=1e-10, rtol=1e-10)

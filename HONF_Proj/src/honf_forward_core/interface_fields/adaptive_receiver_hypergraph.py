@@ -82,6 +82,31 @@ def _frontier_admission(tree: CaseLocalReceiverTree, gates: torch.Tensor,
     return F.pad(torch.stack(active), (0, capacity - len(tree.nodes)))
 
 
+def _receiver_node_extrema(tree: CaseLocalReceiverTree, coords: torch.Tensor,
+                           indices: torch.Tensor, valid: torch.Tensor):
+    """Extrema over distinct coordinate/role blocks preserve tie derivatives.
+
+    Fine-row extrema have identical values under exact atom refinement, but
+    their equal-tie subgradient depends on the number of duplicate rows.
+    Canonical coordinates pull each block's derivative back by child mass.
+    Historical trees retain their original fine-row convention.
+    """
+    if tree.measure_consistent:
+        view = tree.canonical_index
+        atom_blocks = {atom: block for block, atoms in enumerate(view.block_atoms) for atom in atoms}
+        node_blocks = [sorted({atom_blocks[atom] for atom in node.anchor_indices}) for node in tree.nodes]
+        width = max(map(len, node_blocks))
+        indices = torch.tensor([row + [0] * (width - len(row)) for row in node_blocks],
+                               device=coords.device, dtype=torch.long)
+        valid = torch.arange(width, device=coords.device)[None] < torch.tensor(
+            [len(row) for row in node_blocks], device=coords.device)[:, None]
+        coords = view.coordinates
+    selected = coords[indices]
+    low = torch.where(valid[..., None], selected, torch.full_like(selected, torch.inf)).amin(1)
+    high = torch.where(valid[..., None], selected, torch.full_like(selected, -torch.inf)).amax(1)
+    return low, high
+
+
 class AdaptiveReceiverHypergraph(nn.Module):
     """Five typed receiver hierarchies, independent of requested query batches.
 
@@ -241,8 +266,7 @@ class AdaptiveReceiverHypergraph(nn.Module):
         node_mass = torch.where(valid, mass[indices], torch.zeros_like(mass[indices]))
         selected_coords = coords[indices]
         centers = _pool(selected_coords, node_mass, exact_mass=self.measure_consistent)
-        low = torch.where(valid[..., None], selected_coords, torch.full_like(selected_coords, torch.inf)).amin(1)
-        high = torch.where(valid[..., None], selected_coords, torch.full_like(selected_coords, -torch.inf)).amax(1)
+        low, high = _receiver_node_extrema(tree, coords, indices, valid)
         extent = high - low
         receiver_summary = _pool(receiver_states[indices], node_mass, exact_mass=self.measure_consistent)
         role_summary = _pool(F.one_hot(roles[indices], 8).to(states.dtype), node_mass, exact_mass=self.measure_consistent)

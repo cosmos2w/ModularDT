@@ -239,13 +239,17 @@ def evaluate_path(model, checkpoint, sample, directory, kind, *, points=17, ampl
 
 
 def numerical_check(before, after, *, rtol=2e-5, atol=2e-6):
+    discrete = not before.is_floating_point() and not before.is_complex()
+    if discrete:
+        before, after = before.to(torch.float64), after.to(torch.float64)
     delta = (after - before).detach()
     finite = bool(torch.isfinite(before).all() & torch.isfinite(after).all())
     margin = delta.abs() / (atol + rtol * before.detach().abs())
     return {"finite": finite, "max_abs": (float(delta.abs().max()) if delta.numel() else 0.) if finite else None,
         "rmse": (float(delta.square().mean().sqrt()) if delta.numel() else 0.) if finite else None,
         "max_tolerance_ratio": (float(margin.max()) if margin.numel() else 0.) if finite else None,
-        "passed": bool(torch.allclose(before, after, rtol=rtol, atol=atol)), "rtol": rtol, "atol": atol}
+        "passed": bool(torch.equal(before, after) if discrete else torch.allclose(before, after, rtol=rtol, atol=atol)),
+        "comparison": "exact discrete metadata" if discrete else "floating allclose", "rtol": rtol, "atol": atol}
 
 
 class RefinedEnvironmentBuilder:

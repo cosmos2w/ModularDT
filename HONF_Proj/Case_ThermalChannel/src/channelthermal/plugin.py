@@ -84,6 +84,15 @@ class ThermalChannelPlugin:
     version = "0.1.0"
     local_module_specs = {THERMAL_DISK_SPEC.module_id: THERMAL_DISK_SPEC}
 
+    def managed_resume_model_matches(self, saved: dict, current: dict, bundle: ConfigBundle) -> bool:
+        """Delegate the narrow campaign model option to its native policy check."""
+        if (bundle.effective.get("workflow") != "forward"
+                or bundle.effective.get("model_family") != "honf_forward"):
+            return False
+        from .training.campaign import managed_model_matches
+        return managed_model_matches(saved, current,
+            campaign=bundle.effective.get("training", {}).get("campaign") or {})
+
     @staticmethod
     def _reject_unknown(payload: Mapping[str, Any], allowed: set[str], label: str) -> None:
         unknown = sorted(key for key in payload if key not in allowed and not str(key).startswith("_"))

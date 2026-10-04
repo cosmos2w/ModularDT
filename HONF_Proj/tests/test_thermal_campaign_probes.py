@@ -367,6 +367,16 @@ def test_control_locality_probe_discloses_manipulated_exclusion_and_restores_pha
     assert "decode_queries" not in model.core.__dict__
 
 
+@pytest.mark.parametrize("dtype", [torch.int64, torch.bool])
+def test_numerical_geometry_check_accepts_discrete_native_metadata(dtype):
+    reference = torch.tensor([0, 1, 0], dtype=dtype)
+    assert topology.numerical_check(reference, reference.clone())["passed"]
+    changed = torch.tensor([0, 0, 0], dtype=dtype)
+    measured = topology.numerical_check(reference, changed)
+    assert not measured["passed"] and measured["max_abs"] == 1.
+    assert measured["rmse"] == pytest.approx(3. ** -.5)
+
+
 @pytest.mark.parametrize("architecture", ["adaptive_receiver_hypergraph_honf", "overlap_control_hypergraph_honf", "local_overlap_hypergraph_honf"])
 def test_fine_invariants_and_physical_atom_split_definition(architecture):
     from honf_forward_core.interface_fields.typed_hypergraph_field import TypedHypergraphField

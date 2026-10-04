@@ -34,6 +34,34 @@ ORGANIZER_PREFIXES = ("core.backend.organizer.", "core.backend.control_gain.", "
                       "core.backend.pair_controls.")
 
 
+def managed_model_matches(saved: dict, current: dict, *, campaign: dict) -> bool:
+    """Compare original run models before the native checkpoint resume check.
+
+    The native workflow still validates the exact checkpoint epoch, objective
+    amendment, architecture, optimizer and RNG before a resumed update. A run's
+    original resolved config stays at policy1 after an approved continuation,
+    so this preliminary comparison also supports later policy2 checkpoints.
+    """
+    if saved == current:
+        return True
+    previous, requested = copy.deepcopy(saved), copy.deepcopy(current)
+    old_core, new_core = previous.get("core_honf", {}), requested.get("core_honf", {})
+    if (old_core.get("forward_architecture") != "faithful_receiver_hypergraph_honf"
+            or new_core.get("forward_architecture") != "faithful_receiver_hypergraph_honf"):
+        return False
+    old_options = old_core.setdefault("interface_model", {}).setdefault("hypergraph_options", {})
+    new_options = new_core.setdefault("interface_model", {}).setdefault("hypergraph_options", {})
+    old_version = old_options.setdefault("structural_measure_policy_version", 1)
+    new_version = new_options.setdefault("structural_measure_policy_version", 1)
+    if old_version == 1 and new_version == 2:
+        if (campaign.get("structural_measure_policy_version") != 2
+                or campaign.get("physical_loss_policy_version") != 2
+                or campaign.get("native_loss_denominators_start_epoch") != 101):
+            return False
+        old_options["structural_measure_policy_version"] = 2
+    return previous == requested
+
+
 def structural_calibration_candidate(state: dict, counts: list[int], training_counts: list[int]) -> tuple[int, ...] | None:
     """Select an unsampled training M stratum; mixed boundary batches wait."""
 
