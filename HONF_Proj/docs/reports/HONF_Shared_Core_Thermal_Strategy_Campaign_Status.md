@@ -1,4 +1,4 @@
-# Shared-core Thermal strategy campaign: live status
+# Shared-core Thermal strategy campaign: 500-epoch decision and record
 
 The campaign trains a fresh native Dense control, a fresh three-term control,
 and three learned organizers while preserving Thermal's predicted-port
@@ -8,6 +8,46 @@ is paused; Wind is used for shared-core compatibility checks.
 The [measured architecture map](../guides/Shared_Core_Thermal_Wind_Architecture_Map.md)
 separates shared interaction mathematics, allocated parameters and legitimate
 case-specific physical interfaces.
+
+**Current scope, 2026-10-04: conclude from the completed 500 cohort.** The user
+ended the wait for a second H1000 model. All five arms completed 500 genuine
+full-dataset epochs. Exact500 and their predeclared field selections are the
+primary comparison; mature Run1804 selected4738 remains contextual. Already
+completed Native/Fine/Local 1000 measurements are supplementary. Further
+forward and paired-head training are not launched for this delivery.
+
+| Result | Completed500 conclusion | Miss / decision |
+|---|---|---|
+| Predictor | Selected native Dense456 has the lowest fresh-arm fluid T RMSE, 0.560723; Fine493 is 0.714392. Tree467 is the strongest new organizer at 0.892862, versus Local388 at 1.370173 and Overlap292 at 3.147519. | Every new organizer trails the fresh controls on fluid T. Mature4738 is 0.218656 at a different age. Retain Tree as exploratory organizing research; Overlap is not a fidelity finalist. |
+| Organizer | Tree's strict four-case normal actions beat zero controls and full access at the same saved physical weights on 24/24 role means. Local's protected-near variant is stronger than unrestricted Overlap. | Geometry utility is mixed; learned support is not physical causality. All H500 full-Q subset timings are slower despite fewer executed fine rows. No sparse speedup is established. |
+| Inverse | All five500 arms have a completed 12-task/one-start/one-step readiness comparison. Tree/Local graphs execute real proper blocks. | The500 cohort has no 108-trial/30-step quality measurement or trained paired-head result. Tree467's graph improves observed but worsens held residual; Local388's graph does not consistently beat size-matched random. Report readiness only. |
+
+Root sent SIGINT only to the freshly verified native Tree PID 1428716 at
+**2026-10-04 02:27:21.276168 UTC**. Native RunStore ended at 02:27:21.341304 with
+`KeyboardInterrupt`, last complete epoch 666; the original pane subsequently
+exited 130 and both trainer/wrapper processes were absent. The manifest's
+`failed`/exit1 label is the native representation of this intentional user
+stop, not a failure of the completed 500 stage. Existing checkpoints, including
+ordinary 650/latest, remain preserved; interruption creates no fresh checkpoint.
+No other process was signalled. [Stop preflight](../../diagnostics/generated/shared_core_campaign_20261002/tmp/root_user500_stop_preflight_20261004.json),
+[signal record](../../diagnostics/generated/shared_core_campaign_20261002/tmp/root_user500_stop_SIGINT_20261004.json),
+[verified termination](../../diagnostics/generated/shared_core_campaign_20261002/tmp/root_user500_stop_completion_20261004.json)
+and the [saved 666 coverage/source record](../../diagnostics/generated/shared_core_campaign_20261002/failure_evidence/tree_e607_20261003T231056Z/user_scope_close_main500_20261004T022823971287Z/scope_close_saved_prefix_receipt.json)
+retain the boundary. No checkpoint payload was read for the stop.
+
+The manual launcher now accepts an explicit reviewed stage 500 or 1000 while
+retaining its default1000 behavior. It rejects a selected 467 parent for an
+exact 500 continuation and preserves the5,000-epoch horizon/calibration. Fifty focused
+CPU tests pass. Actual Tree500 preparation/parser/native replay and the concise
+inspected500 report are the remaining packaging work; no optimization process
+is launched by that verification.
+
+## Historical campaign record under the earlier1000 target
+
+The following dated progress, promotions, forecasts and pending1000 descriptions
+record the original assignment. The current500 scope above supersedes those
+future requirements; completed measurements and their literal run ages remain
+valid at their stated partitions and checkpoints.
 
 | Result | Measured gain so far | Measured miss / next decision |
 |---|---|---|

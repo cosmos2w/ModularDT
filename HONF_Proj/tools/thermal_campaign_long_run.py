@@ -37,13 +37,20 @@ PORTFOLIO_ARCHITECTURES = {
 }
 
 
-def build_profile(core: dict, *, run_id: str, output_root: Path, fresh: bool, seed: int = 0) -> dict:
-    """Extend only the selected e1000 profile's duration and run placement."""
+def _validate_completed_stage(completed_stage: int) -> None:
+    if completed_stage not in (500, 1000):
+        raise ValueError("Choose a reviewed completed stage of 500 or 1000.")
 
+
+def build_profile(core: dict, *, run_id: str, output_root: Path, fresh: bool, seed: int = 0,
+                  completed_stage: int = 1000) -> dict:
+    """Extend only the reviewed stage profile's duration and run placement."""
+
+    _validate_completed_stage(completed_stage)
     if core.get("workflow") != "forward" or core.get("model_family") != "honf_forward":
         raise ValueError("Manual campaign support requires a forward HONF profile.")
-    if int(core["training"]["epochs"]) != 1000:
-        raise ValueError("Select a reviewed e1000 source profile; finalist selection remains manual.")
+    if core["training"]["epochs"] != completed_stage:
+        raise ValueError(f"Select a reviewed e{completed_stage} source profile; finalist selection remains manual.")
     if seed != 0 or int(core["training"].get("seed", -1)) != 0:
         raise ValueError("This matched campaign supports fresh seed0 only; nonzero replicas are a separate policy.")
     if fresh and core["training"].get("init_checkpoint_path"):
@@ -62,10 +69,10 @@ def build_profile(core: dict, *, run_id: str, output_root: Path, fresh: bool, se
     if not str(run_id).isdigit():
         raise ValueError("Choose an explicit numeric run ID.")
     profile["run"].update(id=str(run_id).zfill(4), output_root=str(output_root.resolve()),
-                           name=f"thermal_{campaign['arm'].lower()}_{'fresh_seed0' if fresh else 'continue1000'}_e5000")
+                           name=f"thermal_{campaign['arm'].lower()}_{'fresh_seed0' if fresh else f'continue{completed_stage}'}_e5000")
     profile["_note"] = ("Manual selected-arm 5000 recipe; no automatic launch or finalist selection. "
         + ("Fresh seed0 initialization, policy1 through100 and policy2 from101; not an independent-seed replicate."
-           if fresh else "Exact e1000 optimizer/RNG/calibration continuation in a new workspace; parent directory preserved."))
+           if fresh else f"Exact e{completed_stage} optimizer/RNG/calibration continuation in a new workspace; parent directory preserved."))
     return profile
 
 
@@ -88,9 +95,10 @@ def resolved_native_model_config(native_config: dict) -> dict:
     return model_config.to_dict()
 
 
-def validate_parent_calibration(checkpoint: dict, native_config: dict) -> None:
-    """Reject incomplete learned calibration rather than recalibrate at epoch1001."""
+def validate_parent_calibration(checkpoint: dict, native_config: dict, *, completed_stage: int = 1000) -> None:
+    """Reject incomplete learned calibration rather than recalibrate on resume."""
 
+    _validate_completed_stage(completed_stage)
     state = checkpoint.get("campaign_training_state")
     if not isinstance(state, dict) or not state:
         raise ValueError("Continuation requires completed saved campaign calibration.")
@@ -120,8 +128,8 @@ def validate_parent_calibration(checkpoint: dict, native_config: dict) -> None:
     architecture = native_config["model"]["core_honf"]["forward_architecture"]
     if architecture not in HYPERGRAPH_ARCHITECTURES:
         return
-    if checkpoint.get("selection_state") != {"epoch": 1000, "total_epochs": 5000}:
-        raise ValueError("Hypergraph continuation requires saved epoch1000 selection and horizon5000.")
+    if checkpoint.get("selection_state") != {"epoch": completed_stage, "total_epochs": 5000}:
+        raise ValueError(f"Hypergraph continuation requires saved epoch{completed_stage} selection and horizon5000.")
     values = sorted(set(_native_metadata_dataset(native_config).selected_module_counts))
     strata = [values[index * len(values) // 5:(index + 1) * len(values) // 5] for index in range(5)]
     planned = state.get("structural_calibration_planned_strata")
@@ -148,7 +156,7 @@ def validate_parent_calibration(checkpoint: dict, native_config: dict) -> None:
                 or not same(record.get("coefficient"), scale)
                 or not isinstance(counts, list) or not counts
                 or any(not isinstance(value, int) or value not in record["stratum"] for value in counts)
-                or not isinstance(record.get("epoch"), int) or not 26 <= record["epoch"] <= 1000
+                or not isinstance(record.get("epoch"), int) or not 26 <= record["epoch"] <= completed_stage
                 or not isinstance(record.get("native_batch"), int) or record["native_batch"] < 1):
             raise ValueError("Saved structural calibration has invalid norms, coefficient or training-input provenance.")
         coefficient = min(.02 * task_norm / cost_norm, maximum) if task_norm > 1e-10 and cost_norm > 1e-10 else 0.
@@ -160,11 +168,12 @@ def validate_parent_calibration(checkpoint: dict, native_config: dict) -> None:
         raise ValueError("Saved structural calibration scale or last gradient norms are inconsistent.")
 
 
-def validate_parent_checkpoint(checkpoint: dict, native_config: dict) -> dict:
+def validate_parent_checkpoint(checkpoint: dict, native_config: dict, *, completed_stage: int = 1000) -> dict:
     """Validate full continuation state without creating a model or optimizer."""
 
-    if int(checkpoint.get("epoch", -1)) != 1000:
-        raise ValueError("Continuation requires the exact completed epoch1000 checkpoint.")
+    _validate_completed_stage(completed_stage)
+    if checkpoint.get("epoch") != completed_stage:
+        raise ValueError(f"Continuation requires the exact completed epoch{completed_stage} checkpoint.")
     if not checkpoint.get("model_state_dict") or not checkpoint.get("model_config"):
         raise ValueError("Continuation requires full saved model weights and configuration.")
     validate_campaign_resume(checkpoint, native_config)
@@ -184,8 +193,9 @@ def validate_parent_checkpoint(checkpoint: dict, native_config: dict) -> dict:
         raise ValueError("Continuation changed training policy beyond duration or run placement.")
     if ChannelThermalHONFConfig.from_dict(checkpoint["model_config"]).to_dict() != resolved_native_model_config(native_config):
         raise ValueError("Continuation changed the native model configuration or Stage-A binding.")
-    validate_parent_calibration(checkpoint, native_config)
-    return {"checkpoint_epoch": 1000, "next_epoch": 1001, "stop_epoch": 5000,
+    validate_parent_calibration(checkpoint, native_config, completed_stage=completed_stage)
+    return {"completed_stage_epoch": completed_stage, "checkpoint_epoch": completed_stage,
+            "next_epoch": completed_stage + 1, "stop_epoch": 5000,
             "schedule_total_epochs": 5000, "physical_loss_policy_version": 2,
             "active_optimizer_states": len(optimizer["state"]), "RNG_streams": sorted(checkpoint["rng_state"]),
             "calibration_preserved": True}
@@ -204,16 +214,19 @@ def launch_commands(profile_path: Path, *, physical_gpu: int, checkpoint: Path |
 
 
 def prepare_launch(profile_path: Path, *, run_id: str, output_root: Path, physical_gpu: int,
-                   fresh: bool, parent_checkpoint: Path | None = None, prepare: bool = False, seed: int = 0) -> dict:
+                   fresh: bool, parent_checkpoint: Path | None = None, prepare: bool = False, seed: int = 0,
+                   completed_stage: int = 1000) -> dict:
     """Validate one selected recipe; materialize artifacts only when requested."""
 
+    _validate_completed_stage(completed_stage)
     if fresh == (parent_checkpoint is not None):
-        raise ValueError("Choose fresh initialization or an exact e1000 parent, exclusively.")
+        raise ValueError(f"Choose fresh initialization or an exact e{completed_stage} parent, exclusively.")
     profile_path = profile_path.expanduser().resolve()
     source = load_config_bundle(profile_path)
     if source.effective["case"]["id"] != "ThermalChannel":
         raise ValueError("This launcher supports the native Thermal campaign only.")
-    profile = build_profile(source.core, run_id=run_id, output_root=output_root, fresh=fresh, seed=seed)
+    profile = build_profile(source.core, run_id=run_id, output_root=output_root, fresh=fresh, seed=seed,
+                            completed_stage=completed_stage)
     profile["case"]["config"] = str(source.case_source)
     effective = copy.deepcopy(source.effective)
     effective["training"]["epochs"] = 5000
@@ -233,15 +246,16 @@ def prepare_launch(profile_path: Path, *, run_id: str, output_root: Path, physic
                   or any(list(root.glob(f"Run_{request.run_id}_*")) for root in existing_roots)):
         raise ValueError("Fresh initialization requires an unused run ID.")
     parent = None
-    lineage = {"mode": "fresh_seed0" if fresh else "exact1000_continuation", "source_profile": str(profile_path.resolve()),
+    lineage = {"mode": "fresh_seed0" if fresh else f"exact{completed_stage}_continuation",
+               "completed_stage_epoch": completed_stage, "source_profile": str(profile_path.resolve()),
                "physical_gpu": physical_gpu, "logical_device": "cuda:0", "training_launched": False}
     if parent_checkpoint is not None:
         parent_checkpoint = parent_checkpoint.expanduser().resolve()
         checkpoint = load_trusted_checkpoint(parent_checkpoint, map_location="cpu")
         native = plugin._forward_config(provisional, request, proposal.path)
-        lineage.update(validate_parent_checkpoint(checkpoint, native))
+        lineage.update(validate_parent_checkpoint(checkpoint, native, completed_stage=completed_stage))
         lineage["parent_checkpoint"] = str(parent_checkpoint)
-        parent = proposal.path / "continuation_parent_epoch_1000_model.pt"
+        parent = proposal.path / f"continuation_parent_epoch_{completed_stage}_model.pt"
     generated = output_root.resolve() / "launch_profiles" / f"{request.run_id}_{request.run_name}.json"
     commands = launch_commands(generated, physical_gpu=physical_gpu, checkpoint=parent)
     if prepare:
@@ -257,13 +271,16 @@ def prepare_launch(profile_path: Path, *, run_id: str, output_root: Path, physic
             manifest = json.loads(manifest_path.read_text())
             manifest["continuation"] = lineage
             atomic_write_json(manifest_path, manifest)
-    return {"prepared": prepare, "profile": str(generated), "new_workspace": str(proposal.path) if parent is not None else "created by ordinary trainer at launch",
+    return {"prepared": prepare, "completed_stage_epoch": completed_stage, "profile": str(generated),
+            "new_workspace": str(proposal.path) if parent is not None else "created by ordinary trainer at launch",
             "lineage": lineage, "launch_facts": facts, **commands}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profile", type=Path, required=True, help="One manually selected reviewed e1000 core profile.")
+    parser.add_argument("--profile", type=Path, required=True, help="One manually selected reviewed completed-stage core profile.")
+    parser.add_argument("--completed-stage", type=int, choices=(500, 1000), default=1000,
+                        help="Exact reviewed parent/source-profile stage; defaults to 1000.")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--output-root", type=Path, required=True, help="Explicit data-backed RunStore root.")
     parser.add_argument("--physical-gpu", type=int, choices=(1, 2), required=True)
@@ -277,7 +294,7 @@ def main() -> int:
     args = parser.parse_args()
     print(json.dumps(prepare_launch(args.profile, run_id=args.run_id, output_root=args.output_root,
         physical_gpu=args.physical_gpu, fresh=args.fresh, parent_checkpoint=args.parent_checkpoint,
-        prepare=args.prepare, seed=args.seed), indent=2))
+        prepare=args.prepare, seed=args.seed, completed_stage=args.completed_stage), indent=2))
     return 0
 
 
