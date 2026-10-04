@@ -169,7 +169,7 @@ normalizer/model/optimizer/RNG lineage, records the literal parent digest and
 copies its unchanged checkpoint into a new RunStore workspace. It does not
 initialize from a historical full-data model.
 
-The current recipes stop at 500 and use logical `cuda:0`. Their bindings are:
+The primary recipes stop at 500 and use logical `cuda:0`. Their bindings are:
 
 | Model | Profile under `/data/wanglz/ModularDT/thermal_development` | Run under `HONF_Forward_Runs/ThermalChannel/HONF_Forward_Runs` | Physical GPU |
 |---|---|---|---|
@@ -189,8 +189,8 @@ CUDA_VISIBLE_DEVICES=PHYSICAL_GPU python train.py --config BOUND_PROFILE \
 
 Use `--yes` in place of `--dry-run` for an authorized recovery on an available
 device. The fresh Fine 100 review and exact 100→500 continuation preserve the
-same e101 denominator/atlas/null schedule. A 1000 recipe remains conditional
-on the completed 500 review and remaining explicit budget.
+same e101 denominator/atlas/null schedule. A 1000 recipe requires the completed
+500 review and remaining explicit budget; this round's decision is below.
 
 Final Tree 500 evaluation uses one all-22 normal pass, including lightweight
 organization statistics, and detailed arrays/phase graphs only for the four
@@ -231,3 +231,83 @@ for the same four representatives, and adds 64 fixed pressure-section rows
 to the Q256 fluid panel. Reuse an existing complete result with identical
 checkpoint, query panel and amplitudes. The known-zero reference applies to
 u/v/p/omega; nonzero thermal changes remain model-only sensitivities.
+
+## Completed 500 review and approved continuation
+
+All three primary arms completed 500 with successful trainer exits. Tree's
+retained native field MSE on all 22 sampled validation cases decreases from
+0.170335 at 200 to 0.143338 at 300, 0.091236 at 400 and 0.067738 at 500;
+its selected retained checkpoint through 500 is 500. Unsaved epochs do not
+enter selection.
+The full-grid physical statistics give the following equal-case mean RMSEs
+over the same 22 exposed development cases, in native benchmark units:
+
+| Role at exact 500 | Tree | Pair | Fine | Dense read-only |
+|---|---:|---:|---:|---:|
+| fluid u |0.078214|0.048286|0.054539|0.039925|
+| fluid v |0.006068|0.006343|0.006264|0.004954|
+| fluid p |0.021913|0.020935|0.019760|0.018629|
+| fluid omega |0.228151|0.254696|0.244876|0.182963|
+| fluid temperature |1.758742|1.706414|1.790461|1.100098|
+| material temperature |1.252626|1.462747|1.836435|1.040032|
+| surface temperature |1.389610|1.749967|1.966665|1.206524|
+| q_normal proxy |4.631226|4.388414|4.345345|4.076007|
+
+Tree improves all eight roles over 200. Between 400 and 500, fluid temperature
+is nearly flat, u worsens, and material/surface temperature, v, p, omega and
+the flux proxy improve. Tree's four gains and four misses versus Pair 500
+are a cross-field tradeoff, not universal superiority. Dense 500 remains
+better on all eight aggregates, with the previously disclosed backbone,
+input, capacity and objective differences. This is one-seed exposed
+development evidence; no significance or independent-test claim follows.
+
+The predeclared nongroup selector chooses Pair: best retained field MSE on
+all 22 sampled validation cases through 500 is 0.072215 versus Fine
+0.073647, both at 500. On 2026-10-04 at 17:29 UTC, the completed 500 review
+approved **Tree 3302 and
+Pair 3202 only** for exact 500 to 1000 continuation. Fine remains at 500. The
+question is whether matched additional exposure strengthens Tree's
+material/interface advantage while recovering its flow and thermal misses
+relative to the trained Pair control. It is not a request to force K or
+retune the weak null objective.
+
+The actual Tree 500 checkpoint SHA is
+`d662cc58f90c0bda22e638ea65d312cd8b66043a1fbfaa7023c8225015bdb2a2`.
+CPU preflight verifies the same run, age 500, horizon 1000, optimizer,
+normalizer and RNG metadata, with no campaign-policy amendment. Native
+execution still supplies the actual continuation evidence. Profiles are
+`tree_lite_20261004/profiles_conditional_e1000/tree_exact_resume_e1000.json`
+and `pair_exact_resume_e1000.json` under the external development root;
+resume each matching run's `epoch_0500_model.pt` with the ordinary command
+above. Tree uses physical GPU 2 and Pair physical GPU 1.
+Both native continuations started at 17:30:13 UTC and their first updates
+were finite. This is startup verification, not completed 1000 evidence.
+
+The 17:27 budget snapshot is 6.405262 aggregate associated process-hours.
+Recent Tree 481–500 mean/max is 40.3764/40.8132 s; the conservative sole GPU 2
+388–500 maximum is 41.0353 s, excluding the fully charged evaluation-contended
+epoch 401 at 47.3038 s. The forecast includes separate 120 s/model loading and
+120 s/model checkpoint/plot/bookkeeping allowances, lightweight cadence,
+and 95 aggregate process-minutes for the selected final package. These are
+planning allowances, not measured runtime bounds. With a 17:28 forecast
+launch, the sole GPU 2 scenario totals 15.1054 of 18 hours and finishes the
+parallel measurement package near 23:55, about ten minutes before the
+00:05:36 science cutoff. Actual launch delay must update this forecast.
+
+This decision depends on keeping Tree training alone on GPU 2: queue Tree's
+600–1000 normal cadence on GPU 1 after Pair releases it. Execute selected
+Pair force/atlas/inverse 8 early on GPU 1; after actual Tree selection, run its
+inverse 24 on GPU 1 concurrently with its sequential diagnostics on GPU 2.
+The adjusted late critical path reserve is 41.04 elapsed minutes. A serial
+95-minute package or persistent observed evaluation contention would miss
+the reserved closeout and is not the authorized schedule. Recheck measured
+cost after the first five continuation epochs and every 100; notify the
+coordinator when completion plus the late package threatens 00:05:36, the
+18-hour ceiling, or numerical health. Keep the final elapsed hour for
+inspected figures, report and repository closeout.
+
+The local decision, actual 500 review, strict resume receipts and both
+forecast scenarios are retained under
+`/data/wanglz/ModularDT/thermal_development/tree_lite_20261004/`. Final
+selected-weight organizer, response and 32-trail inverse results remain
+pending; completed 500 training and preparation do not complete those tasks.
