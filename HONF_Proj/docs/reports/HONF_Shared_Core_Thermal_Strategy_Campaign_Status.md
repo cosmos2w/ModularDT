@@ -38,9 +38,26 @@ retain the boundary. No checkpoint payload was read for the stop.
 The manual launcher now accepts an explicit reviewed stage 500 or 1000 while
 retaining its default1000 behavior. It rejects a selected 467 parent for an
 exact 500 continuation and preserves the5,000-epoch horizon/calibration. Fifty focused
-CPU tests pass. Actual Tree500 preparation/parser/native replay and the concise
-inspected500 report are the remaining packaging work; no optimization process
-is launched by that verification.
+CPU tests pass. Actual Tree500 continuation/fresh preparation and both native
+dry-run parsers passed at source `5c06293`; the copied exact500 parent retains
+185 Adam states at step6500, RNG4 and calibration, with next epoch501 and
+horizon5000. The actual CPU1 case0274/Q14 native P0/P1/P2 replay also passed:
+all316 persistent model tensors/4,287,933 scalars (including Stage-A109) stayed
+bitwise frozen, seven nonempty outputs were finite and all801 guards stayed
+unchanged. No optimizer, gradient, RNG restoration or training update occurred.
+These are bounded native startup checks, not future optimization or convergence
+measurements. The [manual guide](../guides/Thermal_Manual_5000_Launch.md) contains
+the tested, unexecuted Tree continuation and matched fresh alternatives.
+
+The [final 500-epoch conclusions](HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md)
+are the authoritative campaign decision. Six selected PDF masters and small
+Markdown companions were inspected against saved numerical evidence for
+training, fields/residuals, interfaces/materials, actual graphs/work, responses
+and inverse trails; their [short figure index](../../diagnostics/generated/shared_core_campaign_20261002/figures/final_stage500_conclusions/INDEX.md)
+remains in ignored artifact storage. All complete-wrapper subset timings are
+slower; two Q14 prepared-only contrasts are slightly faster and are explicitly
+reported. The matched500 inverse evidence is readiness only. Wind remains
+paused; no campaign trainer, paired head or 5,000-epoch job was restarted.
 
 ## Historical campaign record under the earlier1000 target
 

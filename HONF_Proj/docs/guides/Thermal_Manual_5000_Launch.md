@@ -1,45 +1,62 @@
-# Provisional manual Thermal 5000-epoch launches
+# Manual Thermal 5,000-epoch recipes after the completed 500 review
 
-Choose the final one or two architecture names only after the common 1000-epoch review. No finalist has been selected by this guide, and no 5000-epoch training has been launched. The launcher prepares one explicitly selected profile per invocation.
+The user closed this campaign at 500 epochs on 2026-10-04. **No further campaign training or 5,000-epoch launch was performed.** The [final conclusions](../reports/HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md) select one exploratory organizer, **H-tree**, for a possible later manual experiment: it is the strongest new organizer on physical temperature fidelity and has useful conditional graph actions. Fresh Dense is more accurate; Tree has no measured sparse speedup and its inverse readiness is mixed. Longer training is not established to help.
 
-Run from the ModularDT environment with the native packages available:
+Continuation and fresh seed 0 below are two alternatives for the same architecture, not independent finalists. Existing Local exact 1000 preparations remain supplementary historical artifacts.
 
-```bash
-export PYTHONPATH="$PWD/src:$PWD/Case_ThermalChannel/src"
+## Actual preparation and bounded verification
+
+The durable [launcher](../../tools/thermal_campaign_long_run.py) accepts `--completed-stage 500` or `1000` (default 1000); its 50 focused CPU tests passed. Actual Tree 500 continuation/fresh preparation and both printed native `train.py --dry-run` commands exited 0 at source `5c06293fcbcc157ac54918fbfa06089fb69cec64`. Preparation checked complete native configuration, case physics and frozen Stage-A binding; only duration and placement changed. Preparation and parsers constructed no model or optimizer.
+
+Run2503 contains a byte-identical copy of the original Run2203 **top-level exact 500** parent, not selected467 or recovered Run2303 state:
+
+```text
+/data/wanglz/ModularDT/shared_core_campaign_20261002/HONF_Forward_Runs/Run_2203_20261002_220934_thermal_h-tree_v1/epoch_0500_model.pt
+SHA256 0a2d68b9af8706cf9608f504c9afc517b1ad2914b81bd7bf4bed476cad0b5ada
 ```
 
-The examples below assume the current directory is `HONF_Proj`. Replace `FINALIST`, `NEW_RUN_ID`, and `EXACT_E1000_CHECKPOINT` after reviewing saved physical metrics, responses, actual hard/soft work, and the retained epoch-1000 state.
+The copy preserves 185 active Adam states at step 6500, all four RNG streams, physical policy 2, completed response/structural calibration and selection epoch 500/horizon 5000. Continuation starts at **501**, with the absolute schedule horizon 5000 unchanged. Every epoch must visit all 600 training and 90 exposed-development cases; batch caps are absent, AMP is disabled and predicted ports remain active throughout. Fresh seed 0 retains policy 1 through 100 and policy 2 from 101, matching the original amendment.
 
-For continuation, first validate without writes:
+An actual **CPU1 case0274, 14-query native forward** from the copied parent exited 0 at 2026-10-04 02:49:04 UTC. P0/P1/P2 each prepared once, all seven nonempty prediction/latent outputs were finite, and 316 persistent model tensors/4,287,933 scalars (including frozen Stage-A109) stayed bitwise unchanged. Three disabled outputs were explicitly zero-width. All 801 source/parent/recipe guards stayed unchanged. No optimizer, RNG restore, first-gradient or training update occurred. This tests loading and bounded forward execution; future optimization, GPU gradients, full-dataset fidelity, convergence and 5,000 completion remain untested.
+
+Receipts: [preparation/parser exits](../../diagnostics/generated/shared_core_campaign_20261002/tmp/manual_h_tree500_preparation_20261004/actual_preparation_execution_receipt.json), [native replay](../../diagnostics/generated/shared_core_campaign_20261002/tmp/manual_h_tree500_Q14_native_replay/bounded_replay_receipt.json), [saved-array/state review](../../diagnostics/generated/shared_core_campaign_20261002/tmp/manual_h_tree500_preparation_20261004/Q14_replay_saved_review.json), [50-test receipt](../../diagnostics/generated/shared_core_campaign_20261002/tmp/manual500_helper_tests_20261004/implementation_test_receipt.json).
+
+## Ready exact 500 continuation: Run2503
+
+The profile and copied parent below are already prepared in a new standard RunStore workspace; the original Run2203 is unchanged. **Manual launch only; this command was not executed.** Replacing `--yes` with `--dry-run` gives the exact parser command that passed.
 
 ```bash
-python tools/thermal_campaign_long_run.py \
-  --profile src/config_core/forward/thermal_campaign/FINALIST_e1000.json \
-  --run-id NEW_RUN_ID --physical-gpu 1 \
-  --output-root /data/wanglz/ModularDT/thermal_manual5000 \
-  --parent-checkpoint EXACT_E1000_CHECKPOINT --dry-run
+rtk proxy env CUDA_VISIBLE_DEVICES=2 \
+  PYTHONPATH=/home/wanglz/Desktop/src/ModularDT/HONF_Proj/src:/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_ThermalChannel/src \
+  /home/wanglz/miniconda3/envs/ModularDT/bin/python \
+  /home/wanglz/Desktop/src/ModularDT/HONF_Proj/train.py \
+  --config /data/wanglz/ModularDT/thermal_manual5000/launch_profiles/2503_thermal_h-tree_continue500_e5000.json \
+  --device cuda:0 \
+  --resume-checkpoint /data/wanglz/ModularDT/thermal_manual5000/ThermalChannel/HONF_Forward_Runs/Run_2503_20261003_224123_thermal_h-tree_continue500_e5000/continuation_parent_epoch_500_model.pt \
+  --yes
 ```
 
-Add `--prepare` in place of `--dry-run` to create one profile and a new standard RunStore workspace. The unchanged epoch-1000 checkpoint is copied into that workspace, and its parent path is recorded in the manifest. The finished parent folder remains unchanged. Run the printed `validate_command`, inspect its resolved data/local-surrogate/output paths, and then use the printed `launch_command` only after manual authorization. Select physical GPU1 or GPU2 explicitly; both appear to the trainer as logical `cuda:0`.
+Physical GPU2 maps to logical `cuda:0`. A later GPU1 placement uses `CUDA_VISIBLE_DEVICES=1` with the same logical device; record placement and rerun the parser check. Inspect current contention before launching, retain affected timing and leave unrelated jobs running.
 
-Continuation runs epochs1001–5000 with saved weights, optimizer, RNG, calibration, curriculum and the unchanged absolute 5000-epoch horizon. Physical denominator policy2 is already active and must match the parent. Preparation compares the complete native model configuration, including CaseThermal physics and Stage-A binding, resolving auto dimensions from a one-query metadata sample. Only duration and run placement may change. It uses the existing trusted checkpoint loader and performs no predictive replay. Tests check state preservation using small synthetic checkpoints and never construct a training optimizer. A real retained epoch-1000 parser/load and small-query replay remains required when that checkpoint exists.
+## Ready fresh alternative: Run2603, seed 0
 
-Preparation rejects missing or incomplete calibration rather than recalibrating
-at epoch1001. Every parent must preserve the explicit policy1→2 amendment at
-e100/101, five finite response samples, their saved gradient norms and bounded
-median coefficient. An H parent additionally needs completed structural
-calibration v2 over all five training-M strata, consistent sample provenance,
-norms and coefficients, and selection state e1000/horizon5000. Dense and B-fine
-legitimately have no organizer selection or structural calibration. The actual
-B-fine e500 metadata passed calibration and native-configuration review;
-the complete launcher correctly rejects it as an e1000 parent. This partial
-software check does not verify a future finalist recipe. The actual B-fine
-exact1000 checkpoint subsequently passes the complete read-only native
-configuration/calibration/optimizer/RNG guard with all 120 active optimizer
-states. No profile or workspace is created and no 5000 training is launched
-by that check. Actual selected H finalist preparation and small-query replay
-remain required before the final manual handoff.
+Fresh preparation wrote the profile only; the ordinary trainer reserves a new Run2603 workspace on launch. Its parser check with `--dry-run` passed. Seed 0 matches initial weights in a distinct run; it is **not independent-seed replication** or a promise to reproduce the historical trajectory after source revisions. **Manual launch only; this command was not executed:**
 
-For fresh initialization, replace `--parent-checkpoint ...` with `--fresh --seed 0` and choose an unused run ID. Preparation writes one profile; the ordinary trainer reserves its new workspace when launched. Fresh seed0 reproduces matched initial weights in a separate run. It is not an independent-seed replication claim. The objective remains policy1 through epoch100 and policy2 from epoch101, matching the final screened continuation. Nonzero fresh replication seeds remain deferred.
+```bash
+rtk proxy env CUDA_VISIBLE_DEVICES=2 \
+  PYTHONPATH=/home/wanglz/Desktop/src/ModularDT/HONF_Proj/src:/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_ThermalChannel/src \
+  /home/wanglz/miniconda3/envs/ModularDT/bin/python \
+  /home/wanglz/Desktop/src/ModularDT/HONF_Proj/train.py \
+  --config /data/wanglz/ModularDT/thermal_manual5000/launch_profiles/2603_thermal_h-tree_fresh_seed0_e5000.json \
+  --device cuda:0 --yes
+```
 
-No launcher invocation chooses architectures, starts a subprocess trainer, or automatically continues another arm. For later recovery, pass the new workspace's top-level native `latest_model.pt` or `epoch_NNNN_model.pt` to the ordinary trainer and keep its generated profile. The native workflow places resumed outputs beside the selected checkpoint; these top-level paths preserve the intended workspace. Evaluations retain the original parent lineage.
+To recreate either preparation elsewhere, use tracked profile `src/config_core/forward/thermal_campaign/h-tree_e500.json` with `tools/thermal_campaign_long_run.py --completed-stage 500 --physical-gpu 2 --output-root ... --run-id ... --prepare`, supplying the original exact 500 parent or `--fresh --seed 0`. Choose unused run/output identities. The helper refuses existing preparations, copies the parent into a new workspace and never starts the trainer. Generated profiles and outputs remain in ignored external artifact storage.
+
+## Cost, review and recovery
+
+Tree's saved stage 500 epochs 481–500 had median train+validation elapsed **102.013223 seconds/epoch**. At that historical rate, 4,500 additional epochs would take **127.52 hours**, excluding setup, checkpoint/preview IO, evaluations, interruptions and future contention/source changes. This is a conditional elapsed-time extrapolation, not exclusive GPU time or a completion guarantee. The campaign was closed because waiting longer was unacceptable; these recipes do not schedule that cost.
+
+Profiles retain all existing best-field/best-temperature/best-predicted selectors, latest saves every 25 epochs, milestones every 25 through 1000 then 2500/5000, and previews every 50. If manually launched later, review coverage, finite physical/gradient metrics, responses and organizer utility at 750/1000 before deciding whether to continue toward 2500/5000. Both recipes use repaired Tree soft-training normalization from `d9a3646`; hard quadrature measures and physical loss floors are preserved. A continuation from 500 under repaired source is a declared new lineage segment, not retroactive evidence about historical 500 behavior.
+
+Ctrl-C creates no extra checkpoint. For a later interruption, inspect the **new** workspace's actual saved epoch and resume with its own top-level `latest_model.pt` or `epoch_NNNN_model.pt` and generated profile. Never resume from a selection/evaluation subfolder or overwrite the finished original 500 workspace. Wind training remains paused; these recipes do not launch Wind, paired heads, CFD validation or extra portfolio candidates.
