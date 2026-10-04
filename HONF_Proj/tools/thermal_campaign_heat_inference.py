@@ -184,26 +184,38 @@ def native_heat_predictor(model, checkpoint, sample, sensors, observed_rows, hel
 
 
 def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", cases=12, starts=3,
-                  steps=30, learning_rate=.05, seed=20261002, resume=False):
-    from channelthermal.data.datasets import GlobalChannelThermalDataset
+                  steps=30, learning_rate=.05, seed=20261002, resume=False,
+                  evaluation_scope="auto", development_manifest=None):
+    from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer
     from channelthermal.evaluation.loading import load_model
+    from thermal_development import evaluation_dataset_kwargs, resolve_evaluation_manifest, validate_generated_output
 
     from honf_inverse_core.heat_inference import fixed_total_heat_inference, observation_identifiability
     model, checkpoint = load_model(Path(checkpoint_path), torch.device(device))
     model.eval().requires_grad_(False)
     frozen_snapshot = snapshot_forward_state(model)
     initial_freeze_check = verify_frozen_forward(model, frozen_snapshot)
+    dataset_config = checkpoint.get("train_config", {}).get("dataset", {})
+    manifest = resolve_evaluation_manifest(dataset_config,
+        dataset_path, scope=evaluation_scope, manifest_path=development_manifest)
+    subset_sha256 = manifest["manifest_sha256"] if manifest is not None else None
+    stats = {key: np.asarray(value, dtype=np.float32) for key, value
+             in checkpoint.get("global_normalization_stats", {}).items()}
+    if (manifest is not None or dataset_config.get("development_manifest")
+            or dataset_config.get("development_subset")) and not stats:
+        raise ValueError("Development inverse evaluation requires saved selected-training normalization.")
     dataset = GlobalChannelThermalDataset(dataset_path, split="test", points_per_case=1,
-        random_point_sampling=False, include_grid=True)
-    output_dir = Path(output_dir).expanduser().resolve()
-    if output_dir.is_relative_to(PROJECT_ROOT) and not any(output_dir.is_relative_to(PROJECT_ROOT / root) for root in ("diagnostics", "Trained_Results")):
-        raise ValueError("Inverse evidence must live under ignored diagnostics or Trained_Results")
+        random_point_sampling=False, include_grid=True, normalizer=H5Normalizer(stats) if stats else None,
+        **evaluation_dataset_kwargs(manifest, "test"))
+    output_dir = validate_generated_output(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     cpu_threads = torch.get_num_threads() if torch.device(device).type == "cpu" else None
     if resume and (output_dir / "summary.json").exists():
         previous = json.loads((output_dir / "summary.json").read_text())
         if (Path(previous["checkpoint"]).resolve() != Path(checkpoint_path).resolve()
                 or previous["checkpoint_epoch"] != checkpoint.get("epoch")
+                or previous.get("development_manifest_sha256") != subset_sha256
+                or previous.get("evaluation_scope", "auto") != evaluation_scope
                 or previous.get("cpu_threads", cpu_threads) != cpu_threads
                 or any(previous[key] != value for key, value in
                        (("seed", seed), ("planned_cases", cases), ("starts", starts),
@@ -326,6 +338,8 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
         summaries.append(info)
         atomic_json(output_dir / "summary.json", {"checkpoint": str(checkpoint_path),
             "checkpoint_epoch": checkpoint.get("epoch"), "seed": seed, "planned_cases": cases,
+            "evaluation_scope": evaluation_scope, "development_manifest_sha256": subset_sha256,
+            "available_test_case_ids": list(dataset.selected_case_ids),
             "starts": starts, "steps": steps, "learning_rate": learning_rate,
             "cpu_threads": cpu_threads,
             "update_policy": "canonical physical-slot block reductions",
@@ -356,6 +370,8 @@ def parse_args(argv=None):
     parser.add_argument("--cpu-threads", type=int, default=1,
                         help="Single-thread CPU gradients make repeated fallback comparisons reproducible")
     parser.add_argument("--resume-evaluation", action="store_true")
+    parser.add_argument("--evaluation-scope", choices=("auto", "development", "formal-full"), default="auto")
+    parser.add_argument("--development-manifest", type=Path)
     args = parser.parse_args(argv)
     if min(args.cases, args.starts, args.steps, args.learning_rate, args.cpu_threads) <= 0:
         parser.error("case/start/step counts and learning rate must be positive")
@@ -368,4 +384,5 @@ if __name__ == "__main__":
         torch.set_num_threads(args.cpu_threads)
     print(evaluate_heat(args.checkpoint, dataset_path=args.dataset, output_dir=args.output_dir,
         device=args.device, cases=args.cases, starts=args.starts, steps=args.steps, learning_rate=args.learning_rate,
-        resume=args.resume_evaluation))
+        resume=args.resume_evaluation, evaluation_scope=args.evaluation_scope,
+        development_manifest=args.development_manifest))

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "seed": 20261004,
+    "fraction": 0.25,
+    "excluded_test_case_ids": ["0273"],
+    "re_band_bounds": [70.0, 130.0],
+    "heat_strata": 3
+  }
+}

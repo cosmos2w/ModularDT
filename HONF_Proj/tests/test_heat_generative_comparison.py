@@ -313,6 +313,72 @@ def test_conditioner_probe_skips_single_module_and_zero_public_total():
     assert module.eligible_training_probe(dataset)["case_id"] == "eligible"
 
 
+def test_inverse_normalization_explicit_training_membership_preserves_full_default(monkeypatch):
+    module = tool_module()
+    monkeypatch.setattr(module, "sensor_panel", lambda sample: (
+        np.zeros((14, 2)), np.arange(14), (), np.arange(6), np.arange(6, 12)))
+    structure = {name: np.ones(1) for name in ("module_present", "material_params", "re", "u_in", "domain_length_x", "domain_length_y")}
+    structure.update(module_centers=np.zeros((1, 2)), heat_powers=np.asarray([2.]))
+    records = [{"case_id": case_id, "structure": structure, "steady_field": np.full((14, 1), value)}
+               for case_id, value in (("train_a", 2.), ("train_b", 4.))]
+
+    class Dataset:
+        split = "train"
+        channel_order = ("temperature",)
+
+        def __len__(self):
+            return len(records)
+
+        def __getitem__(self, index):
+            return records[index]
+
+    dataset = Dataset()
+    normalization = module.TrainOnlyNormalization.fit(dataset, expected_case_ids=("train_a", "train_b"))
+    assert normalization.case_ids == ("train_a", "train_b")
+    assert normalization.sensor_mean[-1] == 3.
+    assert normalization.metadata()["records"] == 2
+    for ids in (("train_a", "held"), ("train_a", "train_a"), ()):
+        with pytest.raises(ValueError, match="training case IDs|training records"):
+            module.TrainOnlyNormalization.fit(dataset, expected_case_ids=ids)
+    with pytest.raises(ValueError, match="600 training"):
+        module.TrainOnlyNormalization.fit(dataset)
+    dataset.split = "test"
+    with pytest.raises(ValueError, match="training records"):
+        module.TrainOnlyNormalization.fit(dataset, expected_case_ids=("train_a", "train_b"))
+
+
+def test_generative_datasets_use_checkpoint_subset_and_shared_saved_normalizer(monkeypatch):
+    module = tool_module()
+    import thermal_development
+    from channelthermal.data import datasets
+
+    manifest = {"manifest_sha256": "a" * 64,
+        "partitions": {"train": {"case_ids": ["train_a", "train_b"]}, "test": {"case_ids": ["held"]}}}
+    resolutions, calls = [], []
+
+    def resolve(config, path):
+        resolutions.append((config, path))
+        return manifest
+
+    monkeypatch.setattr(thermal_development, "resolve_evaluation_manifest", resolve)
+    monkeypatch.setattr(datasets, "GlobalChannelThermalDataset", lambda path, **kwargs: calls.append(kwargs) or kwargs)
+    checkpoint = {"train_config": {"dataset": {"development_manifest_sha256": "a" * 64}},
+                  "global_normalization_stats": {"field_mean_by_channel": [0.]}}
+    train, dev, actual = module.build_generative_datasets(checkpoint, "fixture.h5")
+    assert actual is manifest
+    assert resolutions == [(checkpoint["train_config"]["dataset"], "fixture.h5")]
+    assert train["case_ids"] == ("train_a", "train_b")
+    assert dev["case_ids"] == ("held",)
+    assert train["normalizer"] is dev["normalizer"]
+    assert all(not row["normalize_inputs"] and not row["normalize_targets"] for row in calls)
+    with pytest.raises(ValueError, match="selected-training"):
+        module.build_generative_datasets({"train_config": checkpoint["train_config"]}, "fixture.h5")
+    monkeypatch.setattr(thermal_development, "resolve_evaluation_manifest", lambda *args: None)
+    calls.clear()
+    module.build_generative_datasets({}, "fixture.h5")
+    assert all("case_ids" not in row for row in calls)
+
+
 def test_generative_output_accepts_ignored_data_symlink_and_rejects_source_escape(tmp_path, monkeypatch):
     module = tool_module()
     project = tmp_path / "project"

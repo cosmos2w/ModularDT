@@ -39,7 +39,8 @@ CASE_TOP_LEVEL_KEYS = {
     "local_modules",
     "_note",
 }
-CORE_CASE_KEYS = {"id", "config", "dataset_id", "local_module_id"}
+CORE_CASE_KEYS = {"id", "config", "dataset_id", "local_module_id", "dataset"}
+CORE_CASE_DATASET_KEYS = {"development_manifest", "development_manifest_sha256"}
 CORE_TRAINING_KEYS = {
     "seed",
     "device",
@@ -110,6 +111,7 @@ CHECKPOINTING_KEYS = {
     "save_best_field_mse",
     "save_best_temperature_mse",
     "save_best_predicted",
+    "save_best_every_epochs",
     "save_latest",
     "save_latest_every_epochs",
     "save_epoch_milestones",
@@ -163,6 +165,8 @@ def _validate_core_sections(core: Mapping[str, Any]) -> None:
     run = _mapping(core.get("run"), label="core.run")
     model = _mapping(core.get("model"), label="core.model")
     _reject_unknown(case, CORE_CASE_KEYS, label="core.case")
+    _reject_unknown(_mapping(case.get("dataset", {}), label="core.case.dataset"),
+                    CORE_CASE_DATASET_KEYS, label="core.case.dataset")
     _reject_unknown(training, CORE_TRAINING_KEYS, label="core.training")
     _reject_unknown(checkpointing, CHECKPOINTING_KEYS, label="core.checkpointing")
     _reject_unknown(run, RUN_KEYS, label="core.run")
@@ -248,6 +252,10 @@ def _validate_core_sections(core: Mapping[str, Any]) -> None:
         or save_latest_every_epochs <= 0
     ):
         raise ValueError("core.checkpointing.save_latest_every_epochs must be a positive integer.")
+    save_best_every_epochs = checkpointing.get("save_best_every_epochs", 1)
+    if (isinstance(save_best_every_epochs, bool) or not isinstance(save_best_every_epochs, int)
+            or save_best_every_epochs <= 0):
+        raise ValueError("core.checkpointing.save_best_every_epochs must be a positive integer.")
     milestones = checkpointing.get("save_epoch_milestones", [])
     if (
         not isinstance(milestones, list)
@@ -334,6 +342,9 @@ def load_config_bundle(
 
     core_resolved = copy.deepcopy(core)
     case_resolved = copy.deepcopy(case)
+    # Dataset membership belongs to the case adapter. Core development profiles
+    # bind only these selectors; source placement remains registry-owned.
+    case_resolved.setdefault("dataset", {}).update(copy.deepcopy(case_ref.get("dataset", {})))
     experiment_path = None
     experiment: dict[str, Any] = {}
     if experiment_overlay is not None:
@@ -413,7 +424,7 @@ def load_config_bundle(
             "selection": {
                 key: copy.deepcopy(value)
                 for key, value in case_ref.items()
-                if key not in {"id", "config"}
+                if key not in {"id", "config", "dataset"}
             },
         },
         "run": copy.deepcopy(run_cfg),

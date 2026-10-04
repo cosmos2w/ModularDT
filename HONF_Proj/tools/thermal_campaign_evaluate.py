@@ -254,10 +254,40 @@ def fixed_screen_indices(dataset, panel_path, count):
 def evaluation_indices(dataset, args):
     """Bound reference-only controls at every stage; retain mature full screens."""
     reference_only = all(name in REFERENCE_ACTIONS for name in args.interventions)
-    if args.stage == 100 or reference_only:
+    if (getattr(args, "resolved_dataset_scope", None) == "development"
+            and not getattr(args, "quick_diagnostic", False) and not reference_only):
+        return list(range(len(dataset)))
+    if args.stage == 100 or reference_only or getattr(args, "quick_diagnostic", False):
         return (fixed_screen_indices(dataset, args.panel_config, args.panel_size)
                 if args.panel_config is not None else screen_indices(dataset, args.panel_size))
     return list(range(len(dataset)))
+
+
+def configure_evaluation_scope(args, manifest):
+    """Bound expensive development archives without shrinking its metric cohort."""
+    development = manifest is not None
+    args.resolved_dataset_scope = "development" if development else "formal-full"
+    args.resolved_field_array_scope = getattr(args, "save_field_arrays", "auto")
+    if args.resolved_field_array_scope == "auto":
+        args.resolved_field_array_scope = "panel" if development else "all"
+    args.resolved_phase_graph_scope = getattr(args, "phase_graph_scope", "auto")
+    if args.resolved_phase_graph_scope == "auto":
+        args.resolved_phase_graph_scope = "panel" if development else "all"
+    if development and not getattr(args, "panel_config_explicit", False):
+        args.panel_config = None
+    if development and not getattr(args, "fixed_summary_train_cases_explicit", False):
+        args.fixed_summary_train_cases = 10
+    args.development_manifest_binding = manifest
+
+
+def save_case_arrays(args, index, graph_panel):
+    scope = getattr(args, "resolved_field_array_scope", "all")
+    return scope == "all" or (scope == "panel" and index in graph_panel)
+
+
+def capture_case_phases(args, index, graph_panel):
+    return (getattr(args, "capture_phase_graphs", False)
+            and (getattr(args, "resolved_phase_graph_scope", "all") == "all" or index in graph_panel))
 
 
 def intervention_effectiveness(anchor_changes, native_comparison=None):
@@ -306,12 +336,19 @@ def _arrays(prefix, value, output):
 
 def calibrate_training_summary(model, checkpoint, dataset_path, *, count=600):
     """Collect P0/P1/P2 controls from training physical inputs, without labels."""
-    from channelthermal.data.datasets import GlobalChannelThermalDataset
+    from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer
     from thermal_campaign_heat_inference import native_heat_predictor, sensor_panel
+    from thermal_development import evaluation_dataset_kwargs, resolve_evaluation_manifest
 
     from honf_forward_core.interface_fields.training_population_summary import TrainingPopulationSummaryAccumulator
+    manifest = resolve_evaluation_manifest(checkpoint.get("train_config", {}).get("dataset", {}), dataset_path)
+    stats = {key: np.asarray(value, dtype=np.float32) for key, value in checkpoint.get("global_normalization_stats", {}).items()}
+    if (manifest is not None or checkpoint.get("train_config", {}).get("dataset", {}).get("development_manifest")
+            or checkpoint.get("train_config", {}).get("dataset", {}).get("development_subset")) and not stats:
+        raise ValueError("Development summaries require saved selected-training global normalization stats")
     dataset = GlobalChannelThermalDataset(dataset_path, split="train", points_per_case=1,
-        random_point_sampling=False, include_grid=True)
+        random_point_sampling=False, include_grid=True, normalizer=H5Normalizer(stats) if stats else None,
+        **evaluation_dataset_kwargs(manifest, "train"))
     organizer = model.core.backend.organizer
     accumulator = TrainingPopulationSummaryAccumulator()
     original = organizer.prepare
@@ -341,6 +378,7 @@ def evaluate(args):
     from channelthermal.evaluation.loading import load_model
     from channelthermal.evaluation.prepared import predict_case
     from channelthermal.evaluation.results import denormalize_predictions
+    from thermal_development import evaluation_dataset_kwargs, resolve_evaluation_manifest, validate_generated_output
 
     from honf_runtime.compat import resolve_demo_path
     checkpoint_path = args.checkpoint.expanduser().resolve()
@@ -353,19 +391,24 @@ def evaluate(args):
         raise ValueError("The rectangular subset executor is supported by typed campaign candidates only")
     dataset_config = checkpoint.get("train_config", {}).get("dataset", {})
     dataset_path = resolve_demo_path(args.dataset or dataset_config["packed_h5_path"])
+    manifest = resolve_evaluation_manifest(dataset_config, dataset_path,
+        scope=getattr(args, "dataset_scope", "auto"), manifest_path=getattr(args, "development_manifest", None))
+    selection = evaluation_dataset_kwargs(manifest, args.split)
+    configure_evaluation_scope(args, manifest)
     stats = {key: np.asarray(value, dtype=np.float32) for key, value in checkpoint.get("global_normalization_stats", {}).items()}
+    if (manifest is not None or dataset_config.get("development_manifest") or dataset_config.get("development_subset")) and not stats:
+        raise ValueError("Development evaluation requires saved selected-training global normalization stats")
+    normalizer = H5Normalizer(stats) if stats else None
     normalized = GlobalChannelThermalDataset(dataset_path, split=args.split, points_per_case=1,
-        random_point_sampling=False, include_grid=True, normalizer=H5Normalizer(stats) if stats else None,
+        random_point_sampling=False, include_grid=True, normalizer=normalizer,
         normalize_inputs=bool(dataset_config.get("normalize_inputs", False)),
-        normalize_targets=bool(dataset_config.get("normalize_targets", False)))
+        normalize_targets=bool(dataset_config.get("normalize_targets", False)), **selection)
     raw = GlobalChannelThermalDataset(dataset_path, split=args.split, points_per_case=1,
-        random_point_sampling=False, include_grid=True)
+        random_point_sampling=False, include_grid=True, normalizer=normalizer, **selection)
     if normalized.selected_case_ids != raw.selected_case_ids:
         raise ValueError("Normalized and physical dataset indices differ")
     indices = evaluation_indices(raw, args)
-    output = args.output_dir.expanduser().resolve()
-    if output.is_relative_to(PROJECT_ROOT) and not any(output.is_relative_to(PROJECT_ROOT / root) for root in ("diagnostics", "Trained_Results")):
-        raise ValueError("Generated evaluation evidence must live in ignored diagnostics or Trained_Results")
+    output = validate_generated_output(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     reference_access_dir = getattr(args, "reference_access_dir", None)
     if any(name in REFERENCE_ACTIONS for name in args.interventions):
@@ -409,7 +452,7 @@ def evaluate(args):
                 torch.cuda.synchronize(device)
             start = perf_counter()
             phase_capture = None
-            if getattr(args, "capture_phase_graphs", False):
+            if capture_case_phases(args, index, graph_panel):
                 from honf_forward_core.evaluation.typed_work_evidence import TypedWorkEvidenceRecorder
                 phase_capture = TypedWorkEvidenceRecorder(model.core.backend)
             reference_capture = None
@@ -462,7 +505,9 @@ def evaluate(args):
                     _arrays(f"graph/{tau}_anchor_access", access.edge_access, arrays)
                     pair_masks[tau] = access.support.detach().cpu().numpy()
                 _arrays("graph/anchor_support", pair_masks, arrays)
-            np.savez_compressed(directory / "evidence.npz", **arrays)
+            archive_fields = save_case_arrays(args, index, graph_panel)
+            if archive_fields:
+                np.savez_compressed(directory / "evidence.npz", **arrays)
             work = {key: float(np.asarray(value)) for key, value in prediction.get("interaction_aux", {}).items()
                     if "hypergraph" in key and np.asarray(value).ndim == 0 and np.issubdtype(np.asarray(value).dtype, np.number)}
             row = {"case_id": case_id, "module_count": int((reference["structure"]["module_present"] > .5).sum()),
@@ -472,7 +517,9 @@ def evaluate(args):
                 "fine_kernel_work": fine_work,
                 "work": work,
                 "work_scope": "Legacy prediction interaction_aux aggregated across external field query chunks; not summed complete-wrapper executor work",
-                "arrays": str(directory / "evidence.npz"), "graph_phase": 2 if graph is not None else None}
+                "arrays": str(directory / "evidence.npz") if archive_fields else None,
+                "field_array_scope": args.resolved_field_array_scope,
+                "graph_phase": 2 if graph is not None else None}
             if phase_capture is not None:
                 phase_path = directory / "phase_graphs.npz"
                 np.savez_compressed(phase_path, **phase_capture.arrays)
@@ -541,7 +588,9 @@ def evaluate(args):
     if args.inverse_cases:
         from thermal_campaign_heat_inference import evaluate_heat
         evaluate_heat(checkpoint_path, dataset_path=dataset_path, output_dir=output / "heat_inference",
-            device=args.device, cases=args.inverse_cases, starts=args.inverse_starts, steps=args.inverse_steps)
+            device=args.device, cases=args.inverse_cases, starts=args.inverse_starts, steps=args.inverse_steps,
+            evaluation_scope=getattr(args, "dataset_scope", "auto"),
+            development_manifest=getattr(args, "development_manifest", None))
     return output
 
 
@@ -550,7 +599,13 @@ def write_summary(output, rows, checkpoint_path, checkpoint, args, dataset_path,
     primary = [row for row in normal if row["case_id"].lstrip("0") != "273"]
     payload = {"checkpoint": str(checkpoint_path), "checkpoint_epoch": checkpoint.get("epoch"),
         "requested_stage": args.stage, "dataset": str(dataset_path), "split": args.split,
-        "evidence_partition": "previously exposed development", "channel_order": channel_order,
+        "evidence_partition": ("fixed-quarter previously exposed development" if getattr(args, "resolved_dataset_scope", None) == "development"
+                               else "previously exposed development"), "channel_order": channel_order,
+        "dataset_scope": getattr(args, "resolved_dataset_scope", "formal-full"),
+        "development_manifest_binding": getattr(args, "development_manifest_binding", None),
+        "quick_diagnostic": getattr(args, "quick_diagnostic", False),
+        "field_array_scope": getattr(args, "resolved_field_array_scope", "all"),
+        "phase_graph_scope": getattr(args, "resolved_phase_graph_scope", "all"),
         "channel_units": "benchmark physical scales; units must be read from generator metadata before dimensional claims",
         "reference_limit": "stored analytic-wake/shared-grid benchmark; q_normal is a proxy; no new physical solves",
         "fine_executor": args.executor,
@@ -572,6 +627,12 @@ def parse_args(argv=None):
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--dataset")
     parser.add_argument("--split", default="test")
+    parser.add_argument("--evaluation-scope", dest="dataset_scope", choices=("auto", "development", "formal-full"), default="auto",
+                        help="Bound development checkpoints default to their fixed subset; formal-full is explicit.")
+    parser.add_argument("--development-manifest", type=Path,
+                        help="Explicit fixed development selection; must match a checkpoint binding when present.")
+    parser.add_argument("--quick-diagnostic", action="store_true",
+                        help="Explicitly use a small panel instead of the entire selected development metric cohort.")
     parser.add_argument("--stage", type=int, choices=(100, 500, 1000), required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -590,9 +651,18 @@ def parse_args(argv=None):
     parser.add_argument("--fixed-summary-train-cases", type=int, default=600)
     parser.add_argument("--capture-phase-graphs", action="store_true",
                         help="Save source plans and actual physical prepare/read access at every phase")
+    parser.add_argument("--save-field-arrays", choices=("auto", "all", "panel", "none"), default="auto",
+                        help="auto saves representative development cases only, preserving historical full archives.")
+    parser.add_argument("--phase-graph-scope", choices=("auto", "all", "panel"), default="auto",
+                        help="auto bounds development phase graphs to the representative diagnostic panel.")
     parser.add_argument("--reference-access-dir", type=Path,
                         help="Saved normal evaluation directory for fixed-access identity isolation")
     args = parser.parse_args(argv)
+    command_line = sys.argv[1:] if argv is None else argv
+    args.panel_config_explicit = any(value == "--panel-config" or value.startswith("--panel-config=") for value in command_line)
+    args.fixed_summary_train_cases_explicit = any(value == "--fixed-summary-train-cases" or value.startswith("--fixed-summary-train-cases=") for value in command_line)
+    if args.dataset_scope == "formal-full" and args.development_manifest is not None:
+        parser.error("formal-full cannot also request --development-manifest")
     if min(args.panel_size, args.graph_panel_size, args.query_batch_size,
            args.fixed_summary_train_cases, args.executor_receiver_chunk) < 1:
         parser.error("panel and query sizes must be positive")

@@ -168,6 +168,119 @@ def should_save_milestone_checkpoint(
     }
 
 
+def should_save_best_checkpoint(epoch: int, total_epochs: int, checkpoint_config: dict[str, Any]) -> bool:
+    """Select best aliases only at retained review boundaries, or at the stop."""
+
+    cadence = int(checkpoint_config.get("save_best_every_epochs", 1))
+    if cadence < 1:
+        raise ValueError("save_best_every_epochs must be positive.")
+    return epoch % cadence == 0 or epoch == total_epochs
+
+
+def resolve_development_training(config: dict[str, Any], *, max_train_batches=None, max_val_batches=None,
+                                 effective_epochs=None):
+    """Bind the fixed subset before normalization; historical full runs are unchanged."""
+
+    from channelthermal.data.development_split import resolve_development_manifest
+
+    dataset_config = config["dataset"]
+    manifest = resolve_development_manifest(dataset_config,
+        dataset_config.get("packed_h5_path", "./Case_ThermalChannel/Dataset/links/thermal_channel_global_v1.h5"))
+    if manifest is None:
+        if dataset_config.get("development_subset") is not None:
+            raise ValueError("Saved development membership requires its explicit manifest binding.")
+        return None
+    training = config["training"]
+    campaign = training.get("campaign") or {}
+    if campaign.get("require_full_epoch") is not True or campaign.get("schedule_total_epochs") != 1000:
+        raise ValueError("Development requires complete selected epochs and its explicit horizon1000.")
+    if any(value is not None for value in (max_train_batches, max_val_batches,
+            training.get("max_train_batches_per_epoch"), training.get("max_val_batches"))):
+        raise ValueError("Development subset epochs cannot use train or validation batch caps.")
+    if dataset_config.get("allow_train_as_validation"):
+        raise ValueError("Development requires its disjoint selected validation partition.")
+    if dataset_config.get("train_split", "train") != "train" or dataset_config.get("val_split", "test") not in ("test", "val"):
+        raise ValueError("Development requires original train and disjoint test/val splits.")
+    if training.get("init_checkpoint_path"):
+        raise ValueError("Development requires fresh initialization; checkpoint transfer is a separate protocol.")
+    stop = int(training["epochs"] if effective_epochs is None else effective_epochs)
+    paths = campaign.get("response_stencils", [])
+    if len(paths) > 4 or (stop > 100 and not paths):
+        raise ValueError("Development after epoch100 requires one to four selected-train response stencils.")
+    checkpointing = config.setdefault("checkpointing", {})
+    for key, expected in {"save_best": False, "save_best_field_mse": True,
+                          "save_best_temperature_mse": False, "save_best_predicted": False,
+                          "save_latest": True}.items():
+        if checkpointing.setdefault(key, expected) is not expected:
+            raise ValueError("Development retains only field-best and latest checkpoint aliases.")
+    for key in ("save_latest_every_epochs", "save_best_every_epochs"):
+        if checkpointing.setdefault(key, 100) != 100:
+            raise ValueError("Development checkpoint and best-alias cadence must be 100 epochs.")
+    milestones = checkpointing.setdefault("save_epoch_milestones", list(range(100, int(training["epochs"]) + 1, 100)))
+    if (not isinstance(milestones, list)
+            or any(isinstance(value, bool) or not isinstance(value, int) or value < 100 or value % 100 for value in milestones)
+            or len(set(milestones)) != len(milestones)):
+        raise ValueError("Development retained milestones must be multiples of 100; no inherited25 saves.")
+    if training.setdefault("plot_every_epochs", 100) != 100:
+        raise ValueError("Development plot cadence must be 100 epochs.")
+    dataset_config["development_subset"] = copy.deepcopy(manifest)
+    return manifest
+
+
+def validate_development_resume(checkpoint: dict[str, Any], dataset_config: dict[str, Any], *, normalizer=None) -> None:
+    """Prevent full/development or changed-membership resumes before applying state."""
+
+    saved = (checkpoint.get("train_config") or {}).get("dataset") or {}
+    current_binding = dataset_config.get("development_subset")
+    saved_binding = saved.get("development_subset")
+    if dataset_config.get("development_manifest") and current_binding is None:
+        raise ValueError("Development resume is missing validated current membership.")
+    if saved.get("development_manifest") and saved_binding is None:
+        raise ValueError("Development checkpoint is missing saved membership.")
+    if current_binding is None and saved_binding is None:
+        return
+    if not isinstance(current_binding, dict) or not isinstance(saved_binding, dict) or current_binding != saved_binding:
+        raise ValueError("Resume development manifest identity or selected membership changed.")
+    for source, binding in ((dataset_config, current_binding), (saved, saved_binding)):
+        digest = source.get("development_manifest_sha256")
+        if (not source.get("development_manifest") or not isinstance(digest, str) or len(digest) != 64
+                or binding.get("manifest_sha256") != digest):
+            raise ValueError("Development resume requires explicit consistent manifest/digest metadata.")
+    if any(saved.get(key) != dataset_config.get(key) for key in
+           ("development_manifest_sha256", "dataset_id", "dataset_schema", "dataset_fingerprint")):
+        raise ValueError("Resume development manifest/dataset identity changed.")
+    if normalizer is not None:
+        stats = checkpoint.get("global_normalization_stats")
+        if not isinstance(stats, dict) or set(stats) != set(normalizer.stats):
+            raise ValueError("Development resume normalization inventory is incomplete or changed.")
+
+
+def build_training_datasets(config: dict[str, Any], development=None):
+    """Fit train normalization after exact selection and share it with validation."""
+
+    from channelthermal.data.development_split import development_case_ids
+
+    dataset_cfg, training_cfg = config["dataset"], config["training"]
+    train_split, val_split = dataset_cfg.get("train_split", "train"), dataset_cfg.get("val_split", "test")
+    if development is not None and val_split == "val":
+        val_split = "test"
+    train_selection = {"case_ids": development_case_ids(development, train_split)} if development is not None else {}
+    val_selection = {"case_ids": development_case_ids(development, val_split)} if development is not None else {}
+    common = {"normalize_inputs": bool(dataset_cfg.get("normalize_inputs", False)),
+              "normalize_targets": bool(dataset_cfg.get("normalize_targets", False)),
+              "require_converged": bool(dataset_cfg.get("require_converged", False))}
+    dataset_path = dataset_cfg.get("packed_h5_path", "./Case_ThermalChannel/Dataset/links/thermal_channel_global_v1.h5")
+    train_dataset = GlobalChannelThermalDataset(dataset_path, split=train_split,
+        points_per_case=dataset_cfg.get("points_per_case", 4096),
+        random_point_sampling=bool(dataset_cfg.get("random_point_sampling", True)),
+        seed=int(training_cfg.get("seed", 42)), **common, **train_selection)
+    val_dataset = GlobalChannelThermalDataset(dataset_path, split=val_split,
+        points_per_case=dataset_cfg.get("val_points_per_case", dataset_cfg.get("points_per_case", 4096)),
+        random_point_sampling=False, seed=int(training_cfg.get("seed", 42)) + 1000,
+        normalizer=train_dataset.normalizer, **common, **val_selection)
+    return train_dataset, val_dataset
+
+
 def resolve_run_id(args_value: Any, cfg: Dict[str, Any], training_cfg: Dict[str, Any]) -> str:
     """Resolve Run_ID with CLI override first, then template settings.
 
@@ -383,7 +496,12 @@ def run_from_config(
     dataset_cfg = cfg.get("dataset", {})
     training_cfg = cfg.get("training", {})
     loss_cfg = _resolve_training_loss_config(cfg.get("loss", {}), training_cfg)
+    development = resolve_development_training(cfg, max_train_batches=getattr(args, "max_train_batches", None),
+                                               max_val_batches=getattr(args, "max_val_batches", None),
+                                               effective_epochs=args.epochs or training_cfg.get("epochs"))
     checkpoint_cfg = cfg.get("checkpointing", {})
+    if development is not None and getattr(args, "initialize_checkpoint", None):
+        raise ValueError("Development requires fresh initialization; checkpoint transfer is a separate protocol.")
     campaign = validate_campaign(cfg, max_train_batches=getattr(args, "max_train_batches", None))
     schedule_total_epochs = int(campaign.get("schedule_total_epochs", args.epochs or training_cfg.get("epochs", 200)))
     if campaign.get("matched_fresh_initialization") and getattr(args, "initialize_checkpoint", None):
@@ -401,28 +519,12 @@ def run_from_config(
         )
     set_seed(int(training_cfg.get("seed", 42)))
     device = select_device(args.device or training_cfg.get("device"))
+    development_checkpoint = None
+    if development is not None and args.resume_checkpoint:
+        development_checkpoint = load_trusted_checkpoint(resolve_demo_path(args.resume_checkpoint), map_location=device)
+        validate_development_resume(development_checkpoint, dataset_cfg)
 
-    train_dataset = GlobalChannelThermalDataset(
-        dataset_cfg.get("packed_h5_path", "./Case_ThermalChannel/Dataset/links/thermal_channel_global_v1.h5"),
-        split=dataset_cfg.get("train_split", "train"),
-        points_per_case=dataset_cfg.get("points_per_case", 4096),
-        normalize_inputs=bool(dataset_cfg.get("normalize_inputs", False)),
-        normalize_targets=bool(dataset_cfg.get("normalize_targets", False)),
-        random_point_sampling=bool(dataset_cfg.get("random_point_sampling", True)),
-        seed=int(training_cfg.get("seed", 42)),
-        require_converged=bool(dataset_cfg.get("require_converged", False)),
-    )
-    val_dataset = GlobalChannelThermalDataset(
-        dataset_cfg.get("packed_h5_path", "./Case_ThermalChannel/Dataset/links/thermal_channel_global_v1.h5"),
-        split=dataset_cfg.get("val_split", "test"),
-        points_per_case=dataset_cfg.get("val_points_per_case", dataset_cfg.get("points_per_case", 4096)),
-        normalize_inputs=bool(dataset_cfg.get("normalize_inputs", False)),
-        normalize_targets=bool(dataset_cfg.get("normalize_targets", False)),
-        random_point_sampling=False,
-        seed=int(training_cfg.get("seed", 42)) + 1000,
-        require_converged=bool(dataset_cfg.get("require_converged", False)),
-        normalizer=train_dataset.normalizer,
-    )
+    train_dataset, val_dataset = build_training_datasets(cfg, development)
     if len(val_dataset) == 0:
         if bool(dataset_cfg.get("allow_train_as_validation", False)):
             print("[warning] validation split is empty; explicitly reusing training data.")
@@ -752,7 +854,9 @@ def run_from_config(
             )
     if resume_checkpoint is not None:
         repair_metrics_csv_for_append(metrics_path)
-        checkpoint = load_trusted_checkpoint(resume_checkpoint, map_location=device)
+        checkpoint = (development_checkpoint if development_checkpoint is not None else
+                      load_trusted_checkpoint(resume_checkpoint, map_location=device))
+        validate_development_resume(checkpoint, dataset_cfg, normalizer=train_dataset.normalizer)
         campaign_resume_amendment = validate_campaign_resume(checkpoint, cfg)
         _validate_resume_checkpoint(
             checkpoint,
@@ -803,6 +907,8 @@ def run_from_config(
         )
         print(f"[resume] loaded {resume_checkpoint}; continuing at epoch {start_epoch} / {epochs}")
 
+    if development is not None:
+        write_json(run_dir / "development_subset.json", development)
     total_train_seconds = 0.0
     response_callback = NativeCampaignResponse(model, train_dataset, dataset_cfg, campaign) if campaign and epochs > 100 else None
     total_val_seconds = 0.0
@@ -860,6 +966,10 @@ def run_from_config(
                                             "forward_work": getattr(model, "campaign_last_forward_work", None),
                                             "active_physical_loss_policy": 2 if native_denominators_enabled(campaign, epoch) else 1,
                                             "calibration_state": copy.deepcopy(getattr(model, "campaign_training_state", {})),
+                                            "development_subset": ({"manifest_sha256": development["manifest_sha256"],
+                                                                    "train_cases": len(train_dataset),
+                                                                    "validation_cases": len(val_dataset)}
+                                                                   if development is not None else None),
                                             "query_scope": "primary sampled fluid field only; P0/P1/P2 auxiliary reads are additional work"}) + "\n")
         total_train_seconds += train_wall_seconds
         optimizer_group_inventory = refresh_optimizer_group_inventory(
@@ -887,6 +997,7 @@ def run_from_config(
             predicted_consistency_weight=pred_consistency_weight,
             gradient_clip_norm=gradient_clip_norm,
             case_weighted_metrics=bool(campaign),
+            require_full_case_pass=development is not None,
         )
         if reuses_primary_validation_for_predicted_mode(effective_mode):
             predicted_val_metrics = val_metrics
@@ -937,20 +1048,21 @@ def run_from_config(
         total_metric = float(row["val_loss_total"])
         field_metric = float(row["val_field_mse"])
         temp_metric = float(row["val_temperature_mse"])
-        if math.isfinite(total_metric) and total_metric < best_total:
+        retain_best = should_save_best_checkpoint(epoch, epochs, checkpoint_cfg)
+        if retain_best and math.isfinite(total_metric) and total_metric < best_total:
             best_total = total_metric
             if bool(checkpoint_cfg.get("save_best", True)):
                 save_checkpoint(run_dir / "best_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
-        if math.isfinite(field_metric) and field_metric < best_field:
+        if retain_best and math.isfinite(field_metric) and field_metric < best_field:
             best_field = field_metric
             if bool(checkpoint_cfg.get("save_best_field_mse", True)):
                 save_checkpoint(run_dir / "best_by_field_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_field, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
-        if math.isfinite(temp_metric) and temp_metric < best_temperature:
+        if retain_best and math.isfinite(temp_metric) and temp_metric < best_temperature:
             best_temperature = temp_metric
             if bool(checkpoint_cfg.get("save_best_temperature_mse", True)):
                 save_checkpoint(run_dir / "best_by_temperature_mse_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_temperature, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         predicted_metric = float(row["val_predicted_loss_total"])
-        if math.isfinite(predicted_metric) and predicted_metric < best_predicted:
+        if retain_best and math.isfinite(predicted_metric) and predicted_metric < best_predicted:
             best_predicted = predicted_metric
             if bool(checkpoint_cfg.get("save_best_predicted", True)):
                 save_checkpoint(run_dir / "best_predicted_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_predicted, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)

@@ -76,9 +76,13 @@ class TrainOnlyNormalization:
     case_ids: tuple[str, ...]
 
     @classmethod
-    def fit(cls, dataset):
-        if len(dataset) != 600 or dataset.split != "train":
-            raise ValueError("Scientific inverse normalization requires exactly the 600 training records")
+    def fit(cls, dataset, *, expected_case_ids=None):
+        expected = None if expected_case_ids is None else tuple(str(value) for value in expected_case_ids)
+        if expected is not None and (not expected or len(set(expected)) != len(expected)):
+            raise ValueError("Inverse normalization requires distinct explicit training case IDs")
+        if dataset.split != "train" or len(dataset) != (600 if expected is None else len(expected)):
+            scope = "exactly the 600 training records" if expected is None else "the explicit selected training records"
+            raise ValueError(f"Scientific inverse normalization requires {scope}")
         modules, sensors, ids = [], [], []
         for index in range(len(dataset)):
             sample = dataset[index]
@@ -90,6 +94,8 @@ class TrainOnlyNormalization:
                 grid_rows[observed], list(dataset.channel_order).index("temperature")]
             sensors.append(np.concatenate((coordinates[observed], values[:, None]), -1))
             ids.append(str(sample["case_id"]))
+        if len(set(ids)) != len(ids) or (expected is not None and set(ids) != set(expected)):
+            raise ValueError("Inverse normalization records differ from the explicit training case IDs")
         module, sensor = np.concatenate(modules), np.concatenate(sensors)
         return cls(module.mean(0), module.std(0).clip(1e-6), sensor.mean(0), sensor.std(0).clip(1e-6), tuple(ids))
 
@@ -252,8 +258,28 @@ def load_paired_resume(path):
     return load_trusted_checkpoint(path, map_location="cpu")
 
 
+def build_generative_datasets(checkpoint, dataset_path):
+    """Use checkpoint-bound cohorts and normalization while retaining physical values."""
+    from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer
+    from thermal_development import evaluation_dataset_kwargs, resolve_evaluation_manifest
+
+    config = checkpoint.get("train_config", {}).get("dataset", {})
+    manifest = resolve_evaluation_manifest(config, dataset_path)
+    stats = {key: np.asarray(value, dtype=np.float32)
+             for key, value in checkpoint.get("global_normalization_stats", {}).items()}
+    if manifest is not None and not stats:
+        raise ValueError("Development inverse heads require saved selected-training global normalization stats")
+    normalizer = H5Normalizer(stats) if stats else None
+    common = {"points_per_case": 1, "random_point_sampling": False, "include_grid": True,
+              "normalize_inputs": False, "normalize_targets": False, "normalizer": normalizer}
+    train = GlobalChannelThermalDataset(dataset_path, split="train", **common,
+                                      **evaluation_dataset_kwargs(manifest, "train"))
+    dev = GlobalChannelThermalDataset(dataset_path, split="test", **common,
+                                    **evaluation_dataset_kwargs(manifest, "test"))
+    return train, dev, manifest
+
+
 def run_comparison(args):
-    from channelthermal.data.datasets import GlobalChannelThermalDataset
     from channelthermal.evaluation.loading import load_model
 
     output = resolve_evidence_output(args.output_dir)
@@ -265,12 +291,10 @@ def run_comparison(args):
     verify_frozen_forward(model, frozen_snapshot)
     if not hasattr(model.core.backend, "organizer"):
         raise ValueError("A qualified typed organizer checkpoint is required")
-    train = GlobalChannelThermalDataset(args.dataset, split="train", points_per_case=1,
-                                      random_point_sampling=False, include_grid=True)
-    dev = GlobalChannelThermalDataset(args.dataset, split="test", points_per_case=1,
-                                    random_point_sampling=False, include_grid=True)
+    train, dev, manifest = build_generative_datasets(checkpoint, args.dataset)
     alternative_pairs = load_alternative_observation_panel(args.alternative_observation_panel)
-    normalization = TrainOnlyNormalization.fit(train)
+    expected_ids = None if manifest is None else tuple(manifest["partitions"]["train"]["case_ids"])
+    normalization = TrainOnlyNormalization.fit(train, expected_case_ids=expected_ids)
     probe_sample = eligible_training_probe(train)
     first, first_target, _ = build_public_task(model, checkpoint, probe_sample, "train", normalization, train.channel_order)
     with torch.no_grad():
@@ -298,6 +322,12 @@ def run_comparison(args):
         "alternative_observation_pairs": [[dict(public.metadata) for public, _hidden in pair]
                                           for pair in alternative_pairs],
         "alternative_observation_limit": "four auxiliary archived baseline/heat-transfer-plus pairs preserve geometry/material/context/public total within pair; original twelve native tasks remain separate; all records previously exposed"}
+    if manifest is not None:
+        identity["development_subset"] = {"manifest_sha256": manifest["manifest_sha256"],
+            "train_case_ids": list(expected_ids),
+            "test_case_ids": list(manifest["partitions"]["test"]["case_ids"]),
+            "review_case_ids": [str(dev[index]["case_id"]) for index in screen_indices(dev, 12)],
+            "scope": "checkpoint-bound development training and native review cohort; archived alternative pairs are separate"}
     identity["intervention_scope"] = "96 original draws: 12 tasks x4 noises x2 heads; three labelled same-weight/observation controls on4 eligible tasks x1 noise,12 extra draws; four valid-observation pairs x2 physical targets x2 heads x1 common noise,16 auxiliary draws"
     identity["training_probe_selection"] = {"case_id": first.case_id, "criteria": "known M>=2 and positive public total; no hidden individual allocation criterion"}
     if args.resume:

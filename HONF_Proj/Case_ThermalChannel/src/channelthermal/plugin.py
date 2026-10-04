@@ -28,6 +28,7 @@ DATASET_KEYS = {
     "module_count_bucket_size_multiplier",
     "normalize_inputs", "normalize_targets", "random_point_sampling",
     "require_converged", "allow_train_as_validation",
+    "development_manifest", "development_manifest_sha256",
 }
 LOCAL_COUPLING_KEYS = {
     "use_local_surrogate", "freeze_local_surrogate", "local_surrogate_checkpoint",
@@ -184,6 +185,26 @@ class ThermalChannelPlugin:
             "dataset sha256": resource.fingerprint,
         }
         if request.workflow == "forward":
+            from .data.development_split import development_case_ids
+            from .workflows.train_forward import resolve_development_training
+
+            inspected = copy.deepcopy(bundle.effective)
+            inspected["dataset"]["packed_h5_path"] = str(resource.path)
+            development = resolve_development_training(inspected, effective_epochs=request.epochs,
+                max_train_batches=request.max_train_batches, max_val_batches=request.max_val_batches)
+            if development is not None:
+                if request.initialize_checkpoint or inspected["training"].get("init_checkpoint_path"):
+                    raise ValueError("Development requires fresh initialization; checkpoint transfer is a separate protocol.")
+                train_count = len(development_case_ids(development, "train"))
+                test_count = len(development_case_ids(development, "test"))
+                batch = int(inspected["dataset"].get("batch_size", inspected["training"].get("batch_size", 4)))
+                facts.update({
+                    "development manifest sha256": development["manifest_sha256"],
+                    "selected dataset splits": {"train": train_count, "test": test_count},
+                    "normalization scope": "selected training cases only; validation uses training stats",
+                    "native optimizer batches per epoch": (train_count + batch - 1) // batch,
+                    "development schedule epochs": inspected["training"]["campaign"]["schedule_total_epochs"],
+                })
             configured_initialization = (
                 bundle.effective.get("training", {}).get("init_checkpoint_path")
                 if request.resume_checkpoint is None

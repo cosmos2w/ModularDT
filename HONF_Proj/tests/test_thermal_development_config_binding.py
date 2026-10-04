@@ -1,0 +1,41 @@
+"""Exercise native profile composition, rather than only inspecting helper JSON."""
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+TOOLS = Path(__file__).resolve().parents[1] / "tools"
+sys.path.insert(0, str(TOOLS))
+
+from channelthermal.plugin import create_plugin
+from thermal_development import development_profiles
+
+from honf_runtime.config_loader import load_config_bundle
+
+
+@pytest.mark.parametrize("arm", ["B-native", "B-fine", "H-tree", "H-overlap", "H-local"])
+def test_bound_core_profile_composes_exact_membership_into_native_case_config(tmp_path, arm):
+    selected = {"manifest_sha256": "a" * 64, "partitions": {"train": {"case_ids": ["0348"]}}}
+    profile = development_profiles(manifest=selected, manifest_path=str(tmp_path / "manifest.json"))[arm]
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps(profile))
+    bundle = load_config_bundle(path)
+    create_plugin().validate_config(bundle)
+    binding = profile["case"]["dataset"]
+    assert all(bundle.effective["dataset"][key] == value for key, value in binding.items())
+    assert all(bundle.case["dataset"][key] == value for key, value in binding.items())
+    assert bundle.effective["dataset"]["batch_size"] == 48
+    assert bundle.effective["dataset"]["val_split"] == "test"
+    assert "dataset" not in bundle.effective["case"]["selection"]
+
+
+@pytest.mark.parametrize("override", [{"packed_h5_path": "arbitrary.h5"}, {"val_split": "train"}, {"typo": 1}])
+def test_core_dataset_binding_does_not_bypass_case_contract(tmp_path, override):
+    profile = development_profiles()["H-tree"]
+    profile["case"]["dataset"].update(override)
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps(profile))
+    with pytest.raises(ValueError, match="Unknown core.case.dataset"):
+        load_config_bundle(path)

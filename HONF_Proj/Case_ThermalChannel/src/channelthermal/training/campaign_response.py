@@ -48,11 +48,19 @@ class NativeCampaignResponse:
         paths = [resolve_path(path) for path in settings.get("response_stencils", [])]
         if not paths:
             raise ValueError("Campaign response exposure requires established train-family stencils.")
-        stencils = [load_response_atlas_stencil(Path(path))[0] for path in paths]
+        loaded = [load_response_atlas_stencil(Path(path)) for path in paths]
+        stencils = [stencil for stencil, _metadata in loaded]
         if any(stencil.split is not EvidenceSplit.TRAIN for stencil in stencils):
             raise ValueError("Campaign auxiliary response cannot consume development/final-review references.")
         if len({stencil.physical_family_id for stencil in stencils}) != len(stencils):
             raise ValueError("Campaign response families must be unique.")
+        development = dataset_config.get("development_subset")
+        if development is not None:
+            from channelthermal.data.development_split import development_case_ids
+
+            selected = set(development_case_ids(development, "train"))
+            if len(stencils) > 4 or any(metadata.get("anchor_id") not in selected for _stencil, metadata in loaded):
+                raise ValueError("Development response exposure requires at most four selected training anchors.")
         self.model, self.stencils = model, stencils
         self.stats = dataset.normalizer.stats
         self.wrapper = _ResponseCall(model, dataset[0], dataset_config, self.stats)

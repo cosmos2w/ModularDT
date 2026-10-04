@@ -63,6 +63,25 @@ def _select_indices(splits: Sequence[str], split: str) -> List[int]:
     return [idx for idx, item in enumerate(splits) if str(item).lower() == split]
 
 
+def _select_case_indices(
+    ids: Sequence[str], splits: Sequence[str], split: str, case_ids: Sequence[str] | None,
+) -> List[int]:
+    """Filter original membership before case access or normalization fitting."""
+    eligible = _select_indices(splits, split)
+    if case_ids is None:
+        return eligible
+    if isinstance(case_ids, (str, bytes)):
+        raise ValueError("case_ids must be a nonempty sequence of unique case strings.")
+    requested = list(case_ids)
+    if not requested or not all(isinstance(value, str) for value in requested) or len(requested) != len(set(requested)):
+        raise ValueError("case_ids must be a nonempty sequence of unique case strings.")
+    lookup = {ids[index]: index for index in eligible}
+    outside = [value for value in requested if value not in lookup]
+    if outside:
+        raise ValueError(f"Selected case IDs are missing or outside the original {split} partition: {outside}")
+    return [lookup[value] for value in requested]
+
+
 def _local_disk_query_points(mask: np.ndarray) -> np.ndarray:
     """Perform the local disk query points operation used by this module."""
 
@@ -284,6 +303,50 @@ class _RunningFeatureMoments:
         return mean.astype(np.float32), safe_std_np(np.sqrt(variance).astype(np.float32))
 
 
+def _fit_selected_global_normalizer(h5: h5py.File, case_ids: Sequence[str]) -> H5Normalizer:
+    """Stream supervised native values from selected training groups only."""
+    width = int(h5.attrs.get("field_dim", len(CHANNEL_ORDER)))
+    names = decode_string_array(h5.get("interface_condition_feature_names", np.asarray(GLOBAL_INTERFACE_CONDITION_FEATURE_NAMES, dtype="S"))[...])
+    if "h_effective" not in names:
+        names = list(names) + ["h_effective"]
+    moments = {"field": _RunningFeatureMoments(width), "heat_power": _RunningFeatureMoments(1),
+               "interface_condition": _RunningFeatureMoments(len(names)), "interface_target": _RunningFeatureMoments(2),
+               "internal_temperature": _RunningFeatureMoments(1)}
+    for case_id in case_ids:
+        group = h5["cases"][case_id]
+        active = np.asarray(group["module_present"][...]) > 0.5
+        samples = np.asarray(group["sampled_points"][...])
+        moments["field"].update(samples[:, 2:2 + width])
+        moments["heat_power"].update(np.asarray(group["heat_powers"][...])[active])
+        condition = _condition_with_h_effective_fallback(np.asarray(group["interface_condition"][...]), names)
+        moments["interface_condition"].update(condition[active])
+        moments["interface_target"].update(np.asarray(group["interface_target"][...])[active])
+        mask = np.asarray(group["module_internal_mask"][...]).astype(bool)
+        moments["internal_temperature"].update(np.asarray(group["module_internal_temperature"][...])[active][:, mask])
+    stats = {}
+    for key, values in moments.items():
+        mean, std = values.mean_std()
+        suffix = "_by_channel" if key == "field" else ""
+        stats[key + "_mean" + suffix], stats[key + "_std" + suffix] = mean, std
+    stats["sampled_point_mean_by_channel"] = stats["field_mean_by_channel"].copy()
+    stats["sampled_point_std_by_channel"] = stats["field_std_by_channel"].copy()
+    return H5Normalizer(stats)
+
+
+def fit_global_normalizer(packed_h5_path: str | Path, case_ids: Sequence[str]) -> H5Normalizer:
+    """Fit all twelve native global stats from explicit original training IDs.
+
+    Field moments use all stored sampled training points, independent of the
+    stochastic query subsampler. Padding is excluded for module-owned values.
+    Frozen Stage-A normalization is a separate checkpoint-owned transform.
+    """
+    with h5py.File(resolve_demo_path(packed_h5_path), "r") as h5:
+        ids = decode_string_array(h5["case_ids"][...])
+        splits = decode_string_array(h5["splits"][...])
+        indices = _select_case_indices(ids, splits, "train", case_ids)
+        return _fit_selected_global_normalizer(h5, [ids[index] for index in indices])
+
+
 def fit_local_normalizer(datasets: Iterable[Dataset]) -> H5Normalizer:
     """Fit one Stage-A normalizer over raw training samples from all sources.
 
@@ -463,6 +526,7 @@ class GlobalModuleAlignmentDataset(Dataset):
         normalize_targets: bool = False,
         include_grid: bool = False,
         normalizer: Optional[H5Normalizer] = None,
+        case_ids: Sequence[str] | None = None,
     ):
         """Initialize GlobalModuleAlignmentDataset and its required state."""
 
@@ -478,6 +542,7 @@ class GlobalModuleAlignmentDataset(Dataset):
         self.port_input_feature_names = list(LOCAL_PORT_INPUT_FEATURE_NAMES)
         self.interface_target_names = list(LOCAL_INTERFACE_TARGET_NAMES)
         self.local_target_roughness_names = []
+        requested_case_ids = case_ids
         with h5py.File(self.path, "r") as h5:
             if "case_ids" in h5 and "splits" in h5:
                 case_ids = decode_string_array(h5["case_ids"][...])
@@ -485,7 +550,9 @@ class GlobalModuleAlignmentDataset(Dataset):
             else:
                 case_ids = sorted(h5["cases"].keys())
                 splits = [_decode_scalar_string(h5["cases"][key].attrs.get("split", "all")) for key in case_ids]
-            root_indices = _select_indices(splits, self.split)
+            root_indices = _select_case_indices(case_ids, splits, self.split, requested_case_ids)
+            if requested_case_ids is not None and normalizer is None and self.split.lower() != "train":
+                raise ValueError("Selected validation/test alignment cases require the injected training-only normalizer.")
             self.case_ids = case_ids
             self.records: List[tuple[str, int]] = []
             for root_idx in root_indices:
@@ -696,6 +763,7 @@ class GlobalChannelThermalDataset(Dataset):
         include_structure_targets: bool = False,
         require_converged: bool = False,
         normalizer: Optional[H5Normalizer] = None,
+        case_ids: Sequence[str] | None = None,
     ):
         """Initialize GlobalChannelThermalDataset and its required state."""
 
@@ -714,7 +782,7 @@ class GlobalChannelThermalDataset(Dataset):
         if not self.path.exists():
             raise FileNotFoundError(f"Global channel thermal packed dataset not found: {self.path}")
         with h5py.File(self.path, "r") as h5:
-            packed_normalizer = H5Normalizer.from_h5(h5)
+            packed_normalizer = H5Normalizer.from_h5(h5) if case_ids is None else H5Normalizer({})
             self.normalizer = normalizer if normalizer is not None else packed_normalizer
             self.channel_order = decode_string_array(h5.get("channel_order", np.asarray(CHANNEL_ORDER, dtype="S"))[...])
             self.interface_condition_feature_names = decode_string_array(
@@ -731,7 +799,21 @@ class GlobalChannelThermalDataset(Dataset):
                 h_proxy_idx = _feature_indices(self.interface_condition_feature_names, ("h_proxy",), (6,))[0]
                 self.interface_condition_feature_names = list(self.interface_condition_feature_names) + ["h_effective"]
                 _append_h_effective_stat_fallback(self.normalizer, h_proxy_idx)
-            sample_case_id = next(iter(h5["cases"].keys()), None)
+            if "case_ids" in h5 and "splits" in h5:
+                root_case_ids = decode_string_array(h5["case_ids"][...])
+                root_splits = decode_string_array(h5["splits"][...])
+            else:
+                root_case_ids = sorted(h5["cases"].keys())
+                root_splits = [_decode_scalar_string(h5["cases"][key].attrs.get("split", "all")) for key in root_case_ids]
+            self.case_ids = root_case_ids
+            self.splits = root_splits
+            self.indices = _select_case_indices(self.case_ids, self.splits, self.split, case_ids)
+            self.selected_case_ids = [self.case_ids[idx] for idx in self.indices]
+            if case_ids is not None and normalizer is None:
+                if self.split.lower() != "train":
+                    raise ValueError("Selected validation/test cases require the injected training-only normalizer.")
+                self.normalizer = _fit_selected_global_normalizer(h5, self.selected_case_ids)
+            sample_case_id = (self.selected_case_ids[0] if self.selected_case_ids else None) if case_ids is not None else next(iter(h5["cases"].keys()), None)
             self._has_interface_condition_valid_mask = (
                 sample_case_id is not None and "interface_condition_valid_mask" in h5["cases"][sample_case_id]
             )
@@ -759,17 +841,6 @@ class GlobalChannelThermalDataset(Dataset):
             self.interface_target_names = decode_string_array(
                 h5.get("interface_target_names", np.asarray(GLOBAL_INTERFACE_TARGET_NAMES, dtype="S"))[...]
             )
-            if "case_ids" in h5 and "splits" in h5:
-                root_case_ids = decode_string_array(h5["case_ids"][...])
-                root_splits = decode_string_array(h5["splits"][...])
-            else:
-                root_case_ids = sorted(h5["cases"].keys())
-                root_splits = [_decode_scalar_string(h5["cases"][key].attrs.get("split", "all")) for key in root_case_ids]
-            self.case_ids = root_case_ids
-            self.splits = root_splits
-            root_indices = _select_indices(self.splits, self.split)
-            self.indices = [root_indices[idx] for idx in range(len(root_indices))]
-            self.selected_case_ids = [self.case_ids[idx] for idx in self.indices]
             self.field_dim = int(h5.attrs.get("field_dim", len(self.channel_order)))
             self.max_num_modules = int(h5.attrs.get("max_modules", 0))
             self.n_interface_points = int(h5.attrs.get("n_interface_points", 0))
@@ -777,7 +848,7 @@ class GlobalChannelThermalDataset(Dataset):
             self.material_param_dim = 6
             self.target_mode = _decode_scalar_string(h5.attrs.get("target_mode", "unknown"))
             converged_by_case: Dict[str, bool] = {}
-            for case_id in self.case_ids:
+            for case_id in self.case_ids if case_ids is None else self.selected_case_ids:
                 group = h5["cases"][case_id]
                 if "converged" in group.attrs:
                     converged_by_case[case_id] = bool(group.attrs["converged"])
@@ -787,6 +858,8 @@ class GlobalChannelThermalDataset(Dataset):
                     converged_by_case[case_id] = bool(runtime.get("converged", False))
             self.converged_by_case = converged_by_case
             if self.require_converged:
+                if case_ids is not None and any(not self.converged_by_case[value] for value in self.selected_case_ids):
+                    raise ValueError("Fixed development case IDs include an unconverged case; membership cannot silently shrink.")
                 self.selected_case_ids = [
                     case_id for case_id in self.selected_case_ids if self.converged_by_case.get(case_id, False)
                 ]

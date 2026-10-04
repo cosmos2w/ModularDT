@@ -39,10 +39,9 @@ def allowed_device(value):
 
 
 def output_directory(value):
-    output = Path(value).expanduser().resolve()
-    if output.is_relative_to(PROJECT_ROOT) and not any(output.is_relative_to(PROJECT_ROOT / name)
-            for name in ("diagnostics", "Trained_Results")):
-        raise ValueError("Numerical evidence must live under ignored diagnostics or Trained_Results")
+    from thermal_development import validate_generated_output
+
+    output = validate_generated_output(value)
     output.mkdir(parents=True, exist_ok=True)
     return output
 
@@ -115,9 +114,10 @@ def native_arguments(model, sample, query, device):
         "return_prepared_state": True}
 
 
-def load_native(checkpoint_path, dataset_path, device, *, freeze=True):
+def load_native(checkpoint_path, dataset_path, device, *, freeze=True, dataset_scope="auto"):
     from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer
     from channelthermal.evaluation.loading import load_model
+    from thermal_development import evaluation_dataset_kwargs, resolve_evaluation_manifest
 
     from honf_runtime.compat import resolve_demo_path
     model, checkpoint = load_model(Path(checkpoint_path), device)
@@ -126,11 +126,20 @@ def load_native(checkpoint_path, dataset_path, device, *, freeze=True):
         model.requires_grad_(False)
     settings = checkpoint.get("train_config", {}).get("dataset", {})
     path = resolve_demo_path(dataset_path or settings["packed_h5_path"])
+    manifest = resolve_evaluation_manifest(settings, path, scope=dataset_scope)
+    selection = evaluation_dataset_kwargs(manifest, "test")
     stats = {key: np.asarray(value, dtype=np.float32) for key, value in checkpoint.get("global_normalization_stats", {}).items()}
+    if (manifest is not None or settings.get("development_manifest") or settings.get("development_subset")) and not stats:
+        raise ValueError("Development evaluation requires saved selected-training global normalization stats")
+    normalizer = H5Normalizer(stats) if stats else None
     normalized = GlobalChannelThermalDataset(path, split="test", points_per_case=1, random_point_sampling=False,
-        include_grid=True, normalizer=H5Normalizer(stats) if stats else None,
-        normalize_inputs=bool(settings.get("normalize_inputs", False)), normalize_targets=bool(settings.get("normalize_targets", False)))
-    raw = GlobalChannelThermalDataset(path, split="test", points_per_case=1, random_point_sampling=False, include_grid=True)
+        include_grid=True, normalizer=normalizer,
+        normalize_inputs=bool(settings.get("normalize_inputs", False)), normalize_targets=bool(settings.get("normalize_targets", False)),
+        **selection)
+    raw = GlobalChannelThermalDataset(path, split="test", points_per_case=1, random_point_sampling=False, include_grid=True,
+        normalizer=normalizer, **selection)
+    if normalized.selected_case_ids != raw.selected_case_ids:
+        raise ValueError("Normalized and physical dataset indices differ")
     return model, checkpoint, normalized, raw, path
 
 
@@ -474,7 +483,8 @@ def evaluate(args):
     device = allowed_device(args.device)
     if device.type == "cpu":
         torch.set_num_threads(args.cpu_threads)
-    model, checkpoint, normalized, raw, path = load_native(args.checkpoint, args.dataset, device, freeze=False)
+    model, checkpoint, normalized, raw, path = load_native(args.checkpoint, args.dataset, device,
+        freeze=False, dataset_scope=getattr(args, "dataset_scope", "auto"))
     native_flags = {name: parameter.requires_grad for name, parameter in model.named_parameters()}
     model.requires_grad_(False)
     output = output_directory(args.output_dir)
@@ -542,6 +552,8 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--dataset")
+    parser.add_argument("--evaluation-scope", dest="dataset_scope", choices=("auto", "development", "formal-full"), default="auto",
+                        help="Use checkpoint-bound development cases by default; formal-full is explicit.")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--cases", type=int, default=2)
