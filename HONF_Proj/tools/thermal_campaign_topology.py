@@ -28,7 +28,7 @@ from thermal_campaign_benchmark import allowed_device, load_native, low_high_ind
 from thermal_campaign_heat_inference import native_heat_predictor, sensor_panel
 
 from honf_forward_core.interface_fields.topology_probe import FixedTopologyInvalid, OrganizerTopologyProbe
-from honf_forward_core.interface_fields.typed_hypergraph_state import SOURCE_TYPE, structural_cost
+from honf_forward_core.interface_fields.typed_hypergraph_state import SOURCE_TYPE, source_moments, structural_cost
 
 
 def topology_arrays(record):
@@ -462,6 +462,16 @@ def _rebuild_representation_arrays(capture, builder):
         for (access_phase, tau, index), access in capture.accesses.items():
             if access_phase != phase:
                 continue
+            if not hasattr(access, "control"):
+                # Actual native reads retain only affine projected actions.
+                # Reconstruct full vectors solely for this representation
+                # diagnostic; physical execution and its input VJP stay on
+                # the projected path captured above.
+                kind = SOURCE_TYPE[tau]
+                reconstructed = source_moments(access.edge_access, state.memberships[tau], state.controls[tau],
+                    state.source_measures[kind], state.source_valid[kind],
+                    pair_valid=access.diagnostics["pair_valid"], near=access.near)
+                access = replace(reconstructed, diagnostics=access.diagnostics)
             first_accesses.setdefault(tau, access)
             for name, value in (("density", access.density), ("control_moment", access.density[..., None] * access.control)):
                 if SOURCE_TYPE[tau] == "E":

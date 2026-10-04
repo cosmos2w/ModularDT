@@ -324,6 +324,55 @@ def test_whole_wrapper_environment_refuses_measure_fallback_and_nonfinite_eviden
     json.dumps(measured, allow_nan=False)
 
 
+def test_whole_rebuild_representation_extractor_reconstructs_actual_projected_controls_without_changing_vjp():
+    from .test_projected_evaluation import _fixture
+
+    backend, encoded, query, features = _fixture()
+    with torch.no_grad():
+        for head in backend.organizer.control_heads.values():
+            final = head.net[-1] if hasattr(head, "net") else head[-1]
+            final.weight.normal_(0, .2)
+            final.bias.normal_(0, .1)
+    query.requires_grad_()
+
+    class Core(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backend = backend
+
+        def decode_queries(self, prepared, receivers, **kwargs):
+            return {"pred_field": self.backend.read(prepared, encoded, receivers, features)[0]}
+
+    core = Core()
+    model = SimpleNamespace(core=core)
+    builder = SimpleNamespace(base=SimpleNamespace(env_weights=encoded.env_weights),
+        parents=torch.arange(encoded.env_weights.shape[-1]), fractions=torch.ones(encoded.env_weights.shape[-1]))
+    with topology._NativeRebuildCapture(model) as projected_capture:
+        prepared = backend.prepare(encoded, encoded.module_tokens)
+        projected = core.decode_queries(prepared, query)["pred_field"]
+    assert all(hasattr(value, "projected") for value in projected_capture.accesses.values())
+    before = torch.autograd.grad(projected.square().sum(), query, retain_graph=True)[0]
+    actual = topology._rebuild_representation_arrays(projected_capture, builder)
+    after = torch.autograd.grad(projected.square().sum(), query)[0]
+    torch.testing.assert_close(before, after, rtol=0, atol=0)
+    backend.control_execution = "full_control"
+    try:
+        with topology._NativeRebuildCapture(model) as reference_capture:
+            prepared = backend.prepare(encoded, encoded.module_tokens)
+            reference = core.decode_queries(prepared, query)["pred_field"]
+        expected = topology._rebuild_representation_arrays(reference_capture, builder)
+    finally:
+        backend.control_execution = "projected"
+    torch.testing.assert_close(projected, reference, rtol=2e-5, atol=2e-6)
+    assert actual.keys() == expected.keys()
+    for name in actual:
+        torch.testing.assert_close(actual[name], expected[name], rtol=2e-5, atol=2e-6)
+    assert any(name.endswith("/control_moment") for name in actual)
+    assert "P0/structural_cost" in actual
+    assert "access" not in backend.organizer.__dict__
+    assert "decode_queries" not in core.__dict__
+
+
 def test_control_locality_probe_discloses_manipulated_exclusion_and_restores_phase_hooks(monkeypatch):
     from honf_forward_core.interface_fields.adaptive_receiver_hypergraph import AdaptiveReceiverHypergraph
 
