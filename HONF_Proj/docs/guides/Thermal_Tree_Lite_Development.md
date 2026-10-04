@@ -43,6 +43,25 @@ closeout. Use only physical GPUs1/2 in the ModularDT environment. Record the
 existing external GPU1 job and actual memory/throughput contention; preserve
 it. No new solves, Wind training, source-population expansion or formal run.
 
+The saved physical references use prescribed analytic-wake flow and
+numerically advanced temperature on a shared fluid/solid grid. All 22 selected
+ordinary validation targets use one recorded thermal-convergence frame.
+TRAIN 0348 reuses eleven historical thermal reference states whose original
+sidecars record convergence; this campaign performs no new reference solve.
+The stopping evidence concerns temporal change, without mesh-convergence or
+Navier–Stokes certification. The recorded reference adapter identifies a local
+ignored generator tree without an exact historical source revision.
+
+The benchmark flow omits temperature/heat feedback. Its fixed-geometry/context
+heat-to-flow null therefore applies to this reference model. Errors retain
+dataset-native units; no SI conversion is recorded. The input named
+`heat_powers` assigns a source amplitude to each solid cell of a module.
+The inverse constraint `sum_i q_i = Q_total` fixes the public sum of these
+amplitudes, without an integrated-watt or energy-conservation calibration.
+Keep the existing training caps, public totals and inverse algorithms; this
+clarifies their physical meaning. The q-normal reference remains a sampled
+temperature-jump proxy, with its existing interface-conductivity scaling.
+
 ## Exact numerical path and derivative policy
 
 For receiver access A, membership B and group control h, retain pair density
