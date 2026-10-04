@@ -351,3 +351,46 @@ Pair 600's native field selector regresses to 0.091173 from 0.072215 at 500,
 and seven of eight full-grid tracked roles worsen. Its selected retained
 checkpoint remains 500. Record this miss, review subsequent saved windows,
 and do not tune or terminate from this single window.
+
+### Completed Pair extension and selected-weight reuse
+
+Pair 3202 completed epoch 1000 with exit 0 at 18:47:21 UTC. Its ten retained
+100-epoch monitoring checkpoints select **900** by the frozen all-22 native
+field-MSE rule: 0.036990 at 900 versus 0.048938 at 1000. The temperature-only
+sampled MSE improves at 1000, but does not replace that rule. The literal
+selected checkpoint is `epoch_0900_model.pt`, SHA256
+`4c022fa760908cb5bb886c839fd17e56ab44fb4ac5db64b669e228162b842c74`.
+Its best-field alias has identical model tensors and saved age despite a
+different serialization hash. Endpoint 1000 normal/null measurements remain
+separate from selected 900 evidence.
+
+The existing selected-900 normal all-22 panel was reused. Five bounded
+processes filled only missing four-case detail and selected null statistics,
+then measured three training-only force points, the stored TRAIN 0348 atlas
+and eight joint inverse trails. All exited 0; full associated process
+lifetimes total 102.296 seconds, with monitor margins recorded separately.
+A saved-only independent audit passes 634 checks. These measurements add no
+physical solve or new training arm.
+
+Pair900's weighted null/native force ratios are 0.079294%/0.086056%/0.069778%
+at input seeds 101/300/500, with all restoration checks passing. Both signed
+heat transfers improve the stored fluid/interface/material response errors
+over the zero-change baseline, on one exposed training family only. Held
+differing-heat physical-reference families remain zero.
+
+Its eight capped-simplex inverse trails make 80 attempts: 27 accepted,
+53 rejected, zero invalid trials and zero failed native calls. Actual work
+is 234 forwards and 104 VJPs including shared rank probes. Observed-sensor
+RMSE improves in 8/8 trails, held-sensor RMSE in 6/8 and hidden-heat RMSE in
+5/8. Both starts for 0291 worsen held error. The M10 sensor Jacobian has rank
+6/9; heat recovery remains underdetermined. All states satisfy the frozen
+training caps and public-total tolerance, with maximum measured total
+residual 5.364418e-7. Neither feasibility nor sensor improvement establishes
+a valid physical design.
+
+Tree's continuation is still active. Its final selected weights, organizer
+tests, response and remaining 24 inverse trails are pending. The late Tree
+role must validate and reuse sealed Pair900 results without repeating its
+trajectories or rank probes. Native ledger elapsed timestamps are cumulative,
+not per-call durations. Preserve the 18-hour aggregate ceiling, 00:05:36 UTC
+measurement cutoff and final closeout hour when refreshing the forecast.
