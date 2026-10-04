@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from textwrap import dedent
 from types import SimpleNamespace
 
 import pytest
@@ -53,3 +58,75 @@ def test_standalone_checkpoint_keeps_its_parent_as_resume_directory(tmp_path) ->
     checkpoint.write_bytes(b"fixture")
 
     assert _resolve_resume_run_dir(checkpoint) == tmp_path
+
+
+@pytest.mark.parametrize("history_name", ["metrics.csv", "loss_history.csv"])
+def test_resumed_completed_run_records_nonzero_exit_on_plugin_exception(tmp_path, history_name) -> None:
+    run_dir = tmp_path / "Run_completed_fixture"
+    run_dir.mkdir()
+    checkpoint = run_dir / "latest_model.pt"
+    checkpoint.write_bytes(b"fixture, never loaded")
+    manifest = {
+        "case_id": "Fixture",
+        "model_family": "honf_forward",
+        "workflow": "forward",
+        "run_id": "fixture",
+        "status": "completed",
+        "exit_code": 0,
+        "started_at": "original-start",
+        "ended_at": "previous-completion",
+        "checkpoints": {"latest": str(checkpoint)},
+    }
+    (run_dir / "run_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (run_dir / history_name).write_text("epoch,val_loss_total\n605,0.5\n606,0.4\n", encoding="utf-8")
+    code = dedent(
+        """
+        import json
+        import sys
+        from types import SimpleNamespace
+        import train
+
+        def fail_training(bundle, request, *, run_dir):
+            running = json.loads((run_dir / "run_manifest.json").read_text())
+            assert running["status"] == "running" and running["ended_at"] is None
+            assert request.run_id == "fixture"
+            raise ValueError("injected continuation failure")
+
+        bundle = SimpleNamespace(
+            effective={"case": {"id": "Fixture"}, "model_family": "honf_forward",
+                       "workflow": "forward", "Run_ID": "new-id", "run": {"name": "fixture"}},
+            case={"plugin": "fixture:plugin"},
+        )
+        plugin = SimpleNamespace(case_id="Fixture", validate_config=lambda bundle: None,
+                                 inspect_launch=lambda bundle, request: {}, train=fail_training)
+        train.load_config_bundle = lambda *args, **kwargs: bundle
+        train.load_case_plugin = lambda path: plugin
+        train.print_launch_summary = lambda *args, **kwargs: None
+        sys.argv = ["train.py", "--resume-checkpoint", sys.argv[1], "--yes"]
+        raise SystemExit(train.main())
+        """
+    )
+    project_root = Path(__file__).resolve().parents[1]
+    environment = dict(os.environ, PYTHONPATH=str(project_root / "src"), CUDA_VISIBLE_DEVICES="")
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(checkpoint)],
+        cwd=project_root,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "ValueError: injected continuation failure" in result.stderr
+    failed = json.loads((run_dir / "run_manifest.json").read_text())
+    assert failed["status"] == "failed"
+    assert failed["exit_code"] == result.returncode
+    assert failed["last_completed_epoch"] == 606
+    assert failed["error_type"] == "ValueError"
+    assert failed["error_message"] == "injected continuation failure"
+    assert "ValueError: injected continuation failure" in failed["traceback"]
+    assert failed["started_at"] == manifest["started_at"]
+    assert failed["ended_at"] not in (None, manifest["ended_at"])
+    assert failed["checkpoints"] == manifest["checkpoints"]
+    assert failed["resumed_from"] == str(checkpoint.resolve())

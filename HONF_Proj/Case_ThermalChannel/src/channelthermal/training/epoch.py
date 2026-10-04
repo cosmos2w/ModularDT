@@ -778,7 +778,11 @@ def run_epoch(
                             if name.startswith("core.backend.router.")
                         ])
                 if optimizer_boundary and clip_norm > 0.0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
+                    # Campaign FP32 updates must stop before a nonfinite
+                    # adjoint can corrupt ordinary optimizer/checkpoint state.
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), clip_norm, error_if_nonfinite=bool(campaign_config)
+                    )
                 if optimizer_boundary:
                     optimizer.step()
                     optimizer_steps += 1

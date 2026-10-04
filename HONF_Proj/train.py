@@ -214,6 +214,7 @@ def main() -> int:
             RunStore.update_status(
                 Path(run_dir),
                 "failed",
+                exit_code=1,
                 error_type=type(exc).__name__,
                 error_message=str(exc),
                 traceback=traceback.format_exc(),

@@ -34,8 +34,11 @@ from .typed_hypergraph_state import (
 from .types import EncodedInterfaceCase
 
 
-def _masked_softmax(logits: torch.Tensor, valid: torch.Tensor, temperature: float) -> torch.Tensor:
-    """Strictly positive eligible shadow permissions; empty rows stay zero."""
+def _masked_softmax(logits: torch.Tensor, valid: torch.Tensor, temperature: float,
+                    *, minimum: float | None = None) -> torch.Tensor:
+    """FP64 shadow permissions with the original neural dtype's floor."""
+    minimum = torch.finfo(logits.dtype).tiny if minimum is None else minimum
+    logits = logits.to(torch.float64)
     valid = torch.broadcast_to(valid, logits.shape)
     if logits.shape[-1] == 0:
         return torch.zeros_like(logits)
@@ -44,8 +47,8 @@ def _masked_softmax(logits: torch.Tensor, valid: torch.Tensor, temperature: floa
     selected = torch.where(occupied, selected, torch.zeros_like(selected))
     # Prevent dtype underflow from recreating exact hard zeros in the shadow.
     probability = torch.softmax(selected, dim=-1)
-    probability = torch.where(valid, probability.clamp_min(torch.finfo(logits.dtype).tiny), torch.zeros_like(probability))
-    return probability / probability.sum(dim=-1, keepdim=True).clamp_min(torch.finfo(logits.dtype).tiny)
+    probability = torch.where(valid, probability.clamp_min(minimum), torch.zeros_like(probability))
+    return probability / probability.sum(dim=-1, keepdim=True).clamp_min(minimum)
 
 
 def _phase_index(phase: int | str) -> int:
@@ -57,13 +60,18 @@ def _phase_index(phase: int | str) -> int:
 
 def _source_density(logits: torch.Tensor, measures: torch.Tensor, *, soft: bool, temperature: float) -> torch.Tensor:
     """Physical-measure density preserves an identical quadrature atom split."""
+    score_floor = torch.finfo(logits.dtype).tiny
+    measure_floor = torch.finfo(measures.dtype).tiny
+    if soft:
+        logits = logits.to(torch.float64)
+        measures = measures.to(torch.float64)
     if logits.shape[-1] == 0:
         return torch.zeros_like(logits)
-    normalized = measures / measures.sum(dim=-1, keepdim=True).clamp_min(torch.finfo(measures.dtype).tiny)
+    normalized = measures / measures.sum(dim=-1, keepdim=True).clamp_min(measure_floor)
     valid = (measures > 0)[:, None].expand_as(logits)
     if not soft:
         return source_measure_sparsemax(logits, normalized, valid).density.to(logits.dtype)
-    probability = _masked_softmax(logits, valid, temperature)
+    probability = _masked_softmax(logits, valid, temperature, minimum=score_floor)
     denominator = (probability * normalized[:, None]).sum(dim=-1, keepdim=True)
     return probability / torch.where(denominator > 0, denominator, torch.ones_like(denominator))
 
@@ -218,18 +226,18 @@ class OverlapControlHypergraph(nn.Module):
                 mass = memberships[route] * catalogue["source_measures"][kind][:, None]
                 total = mass.sum(dim=-1)
                 safe_source = torch.where(catalogue["source_valid"][kind][..., None], states[kind], torch.zeros_like(states[kind]))
-                summary = torch.einsum("bks,bsc->bkc", mass, safe_source) / torch.where(total > 0, total, torch.ones_like(total))[..., None]
-                typed_summary[kind], typed_mass[kind] = summary, total
+                summary = torch.einsum("bks,bsc->bkc", mass, safe_source.to(mass.dtype)) / torch.where(total > 0, total, torch.ones_like(total))[..., None]
+                typed_summary[kind], typed_mass[kind] = summary.to(states[kind].dtype), total
             receiver = typed_summary["M"] if tau in ("MM", "ME") else typed_summary["E"] if tau == "EM" else 0.5 * (typed_summary["M"] + typed_summary["E"])
             mass_features = torch.stack((typed_mass["M"].log1p(), typed_mass["E"].log1p(), (typed_mass["M"] > 0).to(module_states.dtype), (typed_mass["E"] > 0).to(module_states.dtype)), dim=-1)
             mechanism = torch.nn.functional.one_hot(torch.full((batch, self.group_count), MECHANISMS.index(tau), device=module_states.device), 5).to(module_states.dtype)
-            control_input = torch.cat((typed_summary["M"], typed_summary["E"], receiver, context[:, None].expand(-1, self.group_count, -1), mass_features, phase_features[:, None].expand(-1, self.group_count, -1), mechanism), dim=-1)
+            control_input = torch.cat((typed_summary["M"], typed_summary["E"], receiver, context[:, None].expand(-1, self.group_count, -1), mass_features.to(module_states.dtype), phase_features[:, None].expand(-1, self.group_count, -1), mechanism), dim=-1)
             controls[tau] = self.control_heads[tau](control_input)
             summaries[tau], masses[tau] = typed_summary, typed_mass
         gate_input = torch.cat((summaries["MM"]["M"], summaries["ME"]["E"], context[:, None].expand(-1, self.group_count, -1), module_states.new_full((batch, self.group_count, 1), phase / 2), self.proposals[None].expand(batch, -1, -1)), dim=-1)
         gate_logits = self.admission_gate.network(gate_input).squeeze(-1)
         budget = self.admission_gate.build_budget(gate_logits, noise=gate_noise, deterministic=soft or (not self.training if deterministic is None else deterministic))
-        admission = torch.sigmoid(gate_logits).clamp_min(torch.finfo(gate_logits.dtype).tiny) if soft else budget.z
+        admission = torch.sigmoid(gate_logits.to(torch.float64)).clamp_min(torch.finfo(gate_logits.dtype).tiny) if soft else budget.z
         if fixed_topology is not None:
             reference = fixed_topology.admission.to(admission)
             rescue = fixed_topology.diagnostics["admission_rescue"][:, None]
@@ -269,12 +277,15 @@ class OverlapControlHypergraph(nn.Module):
         receiver = torch.zeros((batch, receiver_count, self.control_dim), device=receivers.device, dtype=context.dtype) if receiver_tokens is None else self.source_projection[kind](receiver_tokens)
         features = torch.cat((receiver[:, :, None].expand(-1, -1, self.group_count, -1), self.proposals[None, None].expand(batch, receiver_count, -1, -1), context[:, None, None].expand(-1, receiver_count, self.group_count, -1), pad_geometry(relative), state.strategy_data["phase_features"][:, None, None].expand(-1, receiver_count, self.group_count, -1)), dim=-1)
         logits = self.receiver_scores[mechanism](features).squeeze(-1) - relative.square().sum(dim=-1)
+        receiver_floor = torch.finfo(logits.dtype).tiny
+        if soft:
+            logits = logits.to(torch.float64)
         gates = state.admission[:, None].expand_as(logits)
         live = gates > 0
         safe_gates = torch.where(live, gates, torch.ones_like(gates))
         logits = logits + safe_gates.log()
         if fixed_receiver_access is None:
-            edge_access = _masked_softmax(logits, live, self.soft_temperature) if soft else masked_sparsemax(logits, live)
+            edge_access = _masked_softmax(logits, live, self.soft_temperature, minimum=receiver_floor) if soft else masked_sparsemax(logits, live)
         else:
             edge_access = fixed_active_projection(logits, fixed_receiver_access["receiver_logits"],
                 fixed_receiver_access["edge_access"], torch.ones_like(state.admission))

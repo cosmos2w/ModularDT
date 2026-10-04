@@ -28,16 +28,28 @@ from .types import EncodedInterfaceCase
 MECHANISMS = ("MM", "ME", "EM", "QM", "QE")
 
 
-def _pool(states: torch.Tensor, mass: torch.Tensor) -> torch.Tensor:
+def _pool(states: torch.Tensor, mass: torch.Tensor, *, soft_precision: bool = False) -> torch.Tensor:
+    if not soft_precision:
+        denominator = mass.sum(-1, keepdim=True)
+        safe = torch.where(mass[..., None] > 0, states, torch.zeros_like(states))
+        return (safe * mass[..., None]).sum(-2) / denominator.clamp_min(1e-12)
+    floor = states.new_tensor(1e-12).to(torch.float64)
+    mass = mass.to(torch.float64)
     denominator = mass.sum(-1, keepdim=True)
-    safe = torch.where(mass[..., None] > 0, states, torch.zeros_like(states))
-    return (safe * mass[..., None]).sum(-2) / denominator.clamp_min(1e-12)
+    safe = torch.where(mass[..., None] > 0, states, torch.zeros_like(states)).to(torch.float64)
+    summary = (safe * mass[..., None]).sum(-2) / denominator.clamp_min(floor)
+    return summary.to(states.dtype)
 
 
 def _membership(scores: torch.Tensor, measure: torch.Tensor, *, soft: bool,
                 temperature: float) -> torch.Tensor:
     """Measure-aware density: splitting an identical source atom preserves it."""
-    normalized = measure / measure.sum(-1, keepdim=True).clamp_min(1e-12)
+    score_floor = torch.finfo(scores.dtype).tiny
+    measure_floor = measure.new_tensor(1e-12)
+    if soft:
+        scores = scores.to(torch.float64)
+        measure = measure.to(torch.float64)
+    normalized = measure / measure.sum(-1, keepdim=True).clamp_min(measure_floor.to(measure.dtype))
     valid = (measure > 0)[:, None, :].expand_as(scores)
     if scores.shape[-1] == 0:
         return scores
@@ -48,9 +60,9 @@ def _membership(scores: torch.Tensor, measure: torch.Tensor, *, soft: bool,
     positive = torch.where(valid, shifted.exp(), torch.zeros_like(scores))
     # A positive permission on every eligible source allows restoration of a
     # source whose hard sparsemax entry has become exactly zero.
-    positive = torch.where(valid, positive.clamp_min(torch.finfo(scores.dtype).tiny), positive)
+    positive = torch.where(valid, positive.clamp_min(score_floor), positive)
     denominator = (positive * normalized[:, None]).sum(-1, keepdim=True)
-    return positive / denominator.clamp_min(torch.finfo(scores.dtype).tiny)
+    return positive / denominator.clamp_min(score_floor)
 
 
 def _frontier_admission(tree: CaseLocalReceiverTree, gates: torch.Tensor,
@@ -246,7 +258,7 @@ class AdaptiveReceiverHypergraph(nn.Module):
         measures = catalogue["source_measures"]
         sources = {kind: torch.where(catalogue["source_valid"][kind][..., None], z,
                                      torch.zeros_like(z)) for kind, z in sources.items()}
-        summaries = {kind: _pool(sources[kind], measures[kind]) for kind in ("M", "E")}
+        summaries = {kind: _pool(sources[kind], measures[kind], soft_precision=soft) for kind in ("M", "E")}
         phase_features = F.one_hot(torch.tensor(phase, device=module_states.device), 3).to(module_states.dtype)
         batch = module_states.shape[0]
         memberships, controls, typed_centres, trees, gates, split_logits, typed_admission = {}, {}, {}, {}, {}, {}, {}
@@ -296,7 +308,7 @@ class AdaptiveReceiverHypergraph(nn.Module):
             if fixed_topology is not None:
                 split = fixed_topology.strategy_data["gates"][tau].to(logits)
             elif soft:
-                split = torch.sigmoid(logits / self.temperature) * leaf_mask
+                split = torch.sigmoid(logits.to(torch.float64) / self.temperature) * leaf_mask
             elif exercise_depth is not None:
                 depth_mask = torch.tensor([[depth < exercise_depth for depth in item[3]] + [False]*(self.capacity-length)
                                           for item, length in zip(indices, lengths)], device=logits.device)
@@ -332,12 +344,12 @@ class AdaptiveReceiverHypergraph(nn.Module):
                     recorded_memberships[kind] = list(density.split(lengths))
                 member_mass = density * measures[kind][node_cases]
                 typed_membership[kind] = density
-                typed_summary[kind] = _pool(sources[kind][node_cases], member_mass)
+                typed_summary[kind] = _pool(sources[kind][node_cases], member_mass, soft_precision=soft)
                 typed_mass[kind] = member_mass.sum(-1)
             statistics = torch.stack((typed_mass["M"].log1p(), typed_mass["E"].log1p(),
                 (typed_mass["M"] > 0).to(logits.dtype), (typed_mass["E"] > 0).to(logits.dtype)), -1)
             control = self.control_heads[tau](torch.cat((typed_summary["M"], typed_summary["E"], packed_embeddings,
-                statistics, phase_features.expand(sum(lengths), -1)), -1))
+                statistics.to(logits.dtype), phase_features.expand(sum(lengths), -1)), -1))
             controls[tau] = torch.stack([F.pad(value, (0, 0, 0, self.capacity-length))
                                         for value, length in zip(control.split(lengths), lengths)])
             kind = "M" if tau in ("MM", "EM", "QM") else "E"
@@ -389,7 +401,8 @@ class AdaptiveReceiverHypergraph(nn.Module):
             receivers = torch.where(receiver_valid[..., None], receivers, torch.zeros_like(receivers))
         index_kind = "M" if tau in ("MM", "ME") else "E" if tau == "EM" else "Q"
         edge_access = receiver_tree_access(receivers, state.strategy_data["gates"][tau],
-                                    state.strategy_data["access_geometry"][index_kind], self.max_depth)
+                                    state.strategy_data["access_geometry"][index_kind], self.max_depth,
+                                    soft_precision=bool(state.strategy_data["soft"]))
         if receiver_valid is not None:
             edge_access = torch.where(receiver_valid[..., None], edge_access, torch.zeros_like(edge_access))
         if fixed_receiver_access is not None:

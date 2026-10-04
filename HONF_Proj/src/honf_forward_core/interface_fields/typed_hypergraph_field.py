@@ -154,10 +154,15 @@ class TypedHypergraphField(DensePairwiseField):
 
     def _modulate(self, messages, access: TypedSourceAccess, mechanism: str, *, mode=None):
         mode = self.plan_intervention if mode is None else mode
-        gain = self.control_gain[mechanism](access.control)
+        if self.permission_mode == "soft":
+            control = access.control.to(self.control_gain[mechanism].weight.dtype)
+            weight = access.weight.to(messages.dtype)
+        else:
+            control, weight = access.control, access.weight
+        gain = self.control_gain[mechanism](control)
         if mode == "control_identity":
             gain = torch.zeros_like(gain)
-        return messages * (1.0 + torch.tanh(gain)) * access.weight[..., None]
+        return messages * (1.0 + torch.tanh(gain)) * weight[..., None]
 
     @staticmethod
     def _ledger(mechanism, access, work):
@@ -286,11 +291,16 @@ class TypedHypergraphField(DensePairwiseField):
             query = self.env_attention.project_query(self.env_query(receiver_features))
             safe_weight = torch.where(qe.support, encoded.env_weights[:, None] * qe.weight,
                                       torch.ones_like(qe.weight))
-            modulation = self.control_score(qe.control).permute(0, 3, 1, 2)
-            gain = self.control_gain["QE"](qe.control).permute(0, 3, 1, 2)
+            control = qe.control.to(self.control_score.weight.dtype) if self.permission_mode == "soft" else qe.control
+            modulation = self.control_score(control).permute(0, 3, 1, 2)
+            gain = self.control_gain["QE"](control).permute(0, 3, 1, 2)
             if mode == "control_identity":
                 modulation, gain = torch.zeros_like(modulation), torch.zeros_like(gain)
+            # Keep the logarithm inside the wide permission chain. Casting a
+            # tiny positive weight first would recreate FP32 reciprocal overflow.
             log_weight = safe_weight.log()[:, None]
+            if self.permission_mode == "soft":
+                log_weight = log_weight.to(query.dtype)
             if execution_mode == "dense_masked_reference":
                 score = torch.matmul(query, state["projected_key"].transpose(-1, -2))
                 score = score / math.sqrt(self.env_attention.head_dim)

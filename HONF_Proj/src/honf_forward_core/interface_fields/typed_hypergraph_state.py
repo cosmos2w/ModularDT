@@ -149,6 +149,18 @@ def source_moments(
         raise ValueError("Typed group axes must align.")
     if source_measures.shape != membership.shape[:1] + membership.shape[2:] or source_valid.shape != source_measures.shape:
         raise ValueError("Source measures and validity must align on [B,S].")
+    # Soft organizers supply FP64 permissions. Keep the complete union,
+    # quotient and normalization chain in that dtype, including controls and
+    # physical measures; casting before a quotient can overflow its VJP even
+    # when the normalized forward value and final score gradient are finite.
+    permission_dtype = torch.promote_types(edge_access.dtype, membership.dtype)
+    if permission_dtype == torch.float64:
+        edge_access = edge_access.to(permission_dtype)
+        membership = membership.to(permission_dtype)
+        controls = controls.to(permission_dtype)
+        source_measures = source_measures.to(permission_dtype)
+        if near is not None:
+            near = near.to(permission_dtype)
     valid = source_valid[:, None, :].to(torch.bool)
     if pair_valid is not None:
         valid = valid & torch.broadcast_to(pair_valid.to(torch.bool), (edge_access.shape[0], edge_access.shape[1], membership.shape[2]))

@@ -243,7 +243,9 @@ def test_deliberately_omitted_fine_environment_source_has_finite_restore_derivat
     restored = source_moments(soft_access.edge_access.detach(), restored_membership, soft.controls['QE'].detach(), case.env_weights, soft.source_valid['E'])
     restored_prediction = (restored.weight * case.env_weights[:, None] * values).sum(-1) / case.env_weights.sum(-1, keepdim=True)
     assert restored_prediction.mean() > prediction.detach().mean()
-    torch.testing.assert_close((restored_prediction.mean() - prediction.detach().mean()) / .01, derivative, rtol=.02, atol=1e-6)
+    # Soft permission arithmetic is wide; the original score leaf stays FP32.
+    # Compare the numerical derivative in the permission result's dtype.
+    torch.testing.assert_close((restored_prediction.mean() - prediction.detach().mean()) / .01, derivative.to(prediction.dtype), rtol=.02, atol=1e-6)
 
 
 @pytest.mark.parametrize('soft', [False, True])

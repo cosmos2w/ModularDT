@@ -5,7 +5,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-
 from channelthermal.training import epoch as epoch_module
 from channelthermal.workflows.train_forward import (
     pack_scalar_metrics,
@@ -52,7 +51,8 @@ def test_scalar_metrics_are_packed_without_changing_values() -> None:
 class _EpochFixtureModel:
     def __init__(self) -> None:
         self.config = SimpleNamespace(
-            channelthermal=SimpleNamespace(field_names=["temperature"])
+            channelthermal=SimpleNamespace(field_names=["temperature"]),
+            core_honf=SimpleNamespace(forward_architecture="dense_pairwise_honf"),
         )
 
     def train(self, training: bool) -> None:
@@ -106,3 +106,86 @@ def test_run_epoch_owns_runtime_metric_dependencies(monkeypatch) -> None:
     assert metrics["loss_total"] == pytest.approx(1.0)
     assert metrics["field_mse"] == pytest.approx(1.0)
     assert math.isnan(empty_metrics["loss_total"])
+
+
+class _BadAdjoint(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, value):
+        return value.clone()
+
+    @staticmethod
+    def backward(ctx, gradient):
+        return torch.full_like(gradient, float("nan"))
+
+
+class _TrainingEpochFixture(torch.nn.Module):
+    def __init__(self, *, bad_adjoint: bool) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(1.0))
+        self.bad_adjoint = bad_adjoint
+        self.config = SimpleNamespace(
+            channelthermal=SimpleNamespace(field_names=["temperature"]),
+            core_honf=SimpleNamespace(forward_architecture="dense_pairwise_honf"),
+        )
+        self.core = SimpleNamespace(prepare=lambda *_a, **_k: None, read=lambda *_a, **_k: None)
+
+    def forward(self, **_inputs):
+        value = _BadAdjoint.apply(self.weight) if self.bad_adjoint else self.weight
+        prediction = value.expand(1, 2, 1).clone()
+        return {
+            "pred_field": prediction,
+            "pred_internal_temperature": prediction.new_empty((1, 0, 1)),
+            "pred_interface": prediction.new_empty((1, 0, 1)),
+            "pred_port_condition": prediction.new_empty((1, 0, 5)),
+        }
+
+
+@pytest.mark.parametrize("bad_adjoint", [False, True])
+def test_campaign_aborts_nonfinite_adjoint_before_optimizer_step(monkeypatch, bad_adjoint):
+    """A finite forward must not corrupt an ordinary optimizer via a bad VJP."""
+    monkeypatch.setattr(epoch_module, "channelthermal_field_mse",
+        lambda prediction, target, *_args, **_kwargs: (prediction - target).square().mean())
+    monkeypatch.setattr(epoch_module, "organizer_regularization",
+        lambda output, _loss_cfg: output["pred_field"].new_zeros(()))
+    monkeypatch.setattr(epoch_module, "compute_honf_diagnostics", lambda *_args, **_kwargs: {})
+    model = _TrainingEpochFixture(bad_adjoint=bad_adjoint)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+    steps = []
+    ordinary_step = optimizer.step
+
+    def counted_step(*args, **kwargs):
+        steps.append(True)
+        return ordinary_step(*args, **kwargs)
+
+    monkeypatch.setattr(optimizer, "step", counted_step)
+    batch = {
+        "field_targets": torch.zeros((1, 2, 1)),
+        "query_xy": torch.zeros((1, 2, 2)),
+        "structure": {"module_present": torch.ones((1, 1))},
+        "case_id": ["fixture"],
+    }
+    class Loader(list):
+        def __init__(self, items):
+            super().__init__(items)
+            self.dataset = items
+
+    common = {
+        "model": model, "loader": Loader([batch]), "device": torch.device("cpu"), "loss_cfg": {},
+        "optimizer": optimizer, "scaler": None, "amp": False, "max_batches": None,
+        "local_port_condition_mode": "predicted", "mixed_teacher_ratio": 0.0,
+        "effective_internal_temperature_weight": 0.0, "effective_interface_weight": 0.0,
+        "predicted_consistency_weight": 0.0, "gradient_clip_norm": 5.0,
+        "campaign_config": {"arm": "h-tree"},
+    }
+    if bad_adjoint:
+        with pytest.raises(RuntimeError, match="non-finite"):
+            epoch_module.run_epoch(**common)
+        assert steps == []
+        assert optimizer.state == {}
+        assert model.weight.item() == 1.0
+    else:
+        metrics = epoch_module.run_epoch(**common)
+        assert steps == [True]
+        assert metrics["loss_total"] == pytest.approx(1.0)
+        assert model.weight.item() == pytest.approx(0.8)
+        assert torch.isfinite(optimizer.state[model.weight]["momentum_buffer"]).all()
