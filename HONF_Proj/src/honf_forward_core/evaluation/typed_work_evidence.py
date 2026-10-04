@@ -1,6 +1,7 @@
 """Transparent evaluation-only recording of actual typed native access calls."""
 
 from contextlib import AbstractContextManager
+import json
 
 import numpy as np
 import torch
@@ -101,11 +102,15 @@ class TypedWorkEvidenceRecorder(AbstractContextManager):
                 "source_lengths",
                 "group_admission",
                 "source_membership",
+                "control_membership",
+                "control_presence",
                 "group_controls",
                 "group_centres",
                 "diagnostics",
             ):
                 _flatten(f"{prefix}/{name}", exported[name], self.arrays)
+            self.arrays[f"{prefix}/dependency_provenance_json"] = np.asarray(json.dumps(
+                exported.get("dependency_provenance", {}), sort_keys=True))
             for name in ("typed_admission", "typed_centres"):
                 _flatten(f"{prefix}/{name}", plan.strategy_data.get(name, {}), self.arrays)
             return state

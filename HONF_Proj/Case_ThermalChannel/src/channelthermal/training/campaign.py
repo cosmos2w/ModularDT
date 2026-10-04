@@ -23,12 +23,15 @@ CAMPAIGN_KEYS = {
     "microbatch_size",
     "response_stencils",
     "native_loss_denominators_start_epoch", "physical_loss_policy_version",
+    "heat_null_response",
+    "structural_measure_policy_version",
 }
 HYPERGRAPH_ARCHITECTURES = frozenset({
     "adaptive_receiver_hypergraph_honf", "overlap_control_hypergraph_honf",
-    "local_overlap_hypergraph_honf",
+    "local_overlap_hypergraph_honf", "faithful_receiver_hypergraph_honf",
 })
-ORGANIZER_PREFIXES = ("core.backend.organizer.", "core.backend.control_gain.", "core.backend.control_score.")
+ORGANIZER_PREFIXES = ("core.backend.organizer.", "core.backend.control_gain.", "core.backend.control_score.",
+                      "core.backend.pair_controls.")
 
 
 def structural_calibration_candidate(state: dict, counts: list[int], training_counts: list[int]) -> tuple[int, ...] | None:
@@ -98,6 +101,27 @@ def validate_campaign(config: dict[str, Any], *, max_train_batches: int | None =
             raise ValueError("Native denominator policy 2 begins at epoch 101 after the common initial 100-epoch screen.")
     elif settings.get("physical_loss_policy_version", 1) != 1:
         raise ValueError("Physical loss policy 2 requires its explicit native denominator activation epoch.")
+    measure_policy = settings.get("structural_measure_policy_version")
+    core = config.get("model", {}).get("core_honf", {})
+    option = core.get("interface_model", {}).get("hypergraph_options", {}).get("structural_measure_policy_version", 1)
+    if core.get("forward_architecture") == "faithful_receiver_hypergraph_honf" and option == 2 and measure_policy != 2:
+        raise ValueError("Eligible-mechanism model option 2 requires an explicit reviewed campaign policy.")
+    if measure_policy is not None:
+        if (measure_policy != 2 or option != 2
+                or core.get("forward_architecture") != "faithful_receiver_hypergraph_honf"
+                or settings.get("native_loss_denominators_start_epoch") != 101):
+            raise ValueError("Eligible-mechanism policy 2 requires its explicit reviewed Tree-F epoch101 option.")
+    null = settings.get("heat_null_response")
+    if null is not None:
+        if not isinstance(null, dict) or null.get("benchmark_verified") is not True:
+            raise ValueError("Heat-null auxiliary requires explicit verified benchmark provenance.")
+        if (settings.get("native_loss_denominators_start_epoch") != 101
+                or null.get("cases_per_epoch", 2) != 2 or null.get("fluid_queries", 256) != 256
+                or not 0 < float(null.get("fraction", .1)) <= .25):
+            raise ValueError("Heat-null auxiliary follows the reviewed epoch101 two-case Q256 protocol.")
+        if config.get("model", {}).get("core_honf", {}).get("forward_architecture") not in {
+                "faithful_receiver_hypergraph_honf", "direct_pairwise_control_honf"}:
+            raise ValueError("This heat-null amendment is restricted to the reviewed Tree-F/Pair-F pair.")
     return settings
 
 
@@ -113,18 +137,28 @@ def validate_campaign_resume(checkpoint: dict[str, Any], config: dict[str, Any])
     amendment = None
     saved_campaign = saved_training.get("campaign") or {}
     if saved_campaign != current:
-        policy_keys = {"native_loss_denominators_start_epoch", "physical_loss_policy_version"}
+        policy_keys = {"native_loss_denominators_start_epoch", "physical_loss_policy_version", "heat_null_response",
+                       "structural_measure_policy_version"}
         previous = {key: value for key, value in saved_campaign.items() if key not in policy_keys}
         requested = {key: value for key, value in current.items() if key not in policy_keys}
         if (previous != requested or int(checkpoint.get("epoch", 0)) != 100
                 or saved_campaign.get("physical_loss_policy_version", 1) != 1
                 or saved_campaign.get("native_loss_denominators_start_epoch") is not None
+                or saved_campaign.get("heat_null_response") is not None
+                or saved_campaign.get("structural_measure_policy_version", 1) != 1
                 or current.get("physical_loss_policy_version") != 2
                 or current.get("native_loss_denominators_start_epoch") != 101):
             raise ValueError("Campaign resume cannot reset or silently amend its schedule/lineage.")
         amendment = {"physical_loss_policy_from": 1, "physical_loss_policy_to": 2,
                      "checkpoint_epoch": 100, "activation_epoch": 101,
                      "scope": "explicit common native query/module/valid-port denominators; architecture version unchanged"}
+        if current.get("heat_null_response") is not None:
+            amendment["heat_null_response"] = copy.deepcopy(current["heat_null_response"])
+        if current.get("structural_measure_policy_version") == 2:
+            amendment["structural_measure_policy"] = {
+                "from": 1, "to": 2, "activation_epoch": 101,
+                "scope": "exclude entirely ineligible mechanisms from the physical-measure mean; recalibrate training-only pressure",
+            }
     for section in ("dataset", "loss"):
         if saved.get(section) != config.get(section):
             raise ValueError(f"Campaign resume changed {section}; record a separate training-policy version.")
@@ -136,6 +170,16 @@ def validate_campaign_resume(checkpoint: dict[str, Any], config: dict[str, Any])
     if current_training.get("amp") and not checkpoint.get("scaler_state_dict"):
         raise ValueError("AMP campaign continuation requires gradient-scaler checkpoint state.")
     return amendment
+
+
+def amend_structural_calibration(state: dict, amendment: dict | None) -> None:
+    """Preserve the first-screen calibration before the explicit cost change."""
+    if not amendment or "structural_measure_policy" not in amendment:
+        return
+    keys = {key for key in state if key.startswith("structural_calibration_") or key in {
+        "structural_scale", "structural_scale_samples", "calibration_policy_version",
+        "last_task_organizer_gradient_norm", "last_cost_organizer_gradient_norm"}}
+    state["structural_measure_policy_1_calibration"] = {key: copy.deepcopy(state.pop(key)) for key in sorted(keys)}
 
 
 def copy_matched_physical_initial_state(target: torch.nn.Module, canonical: torch.nn.Module) -> dict[str, Any]:

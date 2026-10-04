@@ -23,6 +23,7 @@ Module feature columns:
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import torch
 
 
@@ -92,17 +93,30 @@ class ChannelThermalInputAdapter:
     )
 
     global_context_names = padding_invariant_global_context_names
+    source_local_feature_names = tuple(
+        {"heat_case_relative": "heat_train_scaled",
+         "abs_heat_case_relative": "abs_heat_train_scaled"}.get(name, name)
+        for name in feature_names
+    )
+    # Keep the existing input width so common physical tensors can receive the
+    # same initializer. These four named slots are exact zero, never heat.
+    source_local_global_context_names = tuple(
+        "reserved_no_heat_" + name if "heat" in name else name
+        for name in padding_invariant_global_context_names
+    )
 
     def __init__(
         self,
         *,
         global_feature_schema: str = "padding_invariant_v2",
         legacy_active_fraction_reference_slots: int | None = None,
+        fixed_heat_scale: float | None = None,
     ) -> None:
         """Select the padding-invariant schema or the legacy checkpoint transform."""
 
         self.global_feature_schema = str(global_feature_schema)
         self.legacy_active_fraction_reference_slots = legacy_active_fraction_reference_slots
+        self.fixed_heat_scale = fixed_heat_scale
         if self.global_feature_schema == "legacy_v1":
             if (
                 legacy_active_fraction_reference_slots is None
@@ -112,8 +126,14 @@ class ChannelThermalInputAdapter:
             self.global_context_names = self.legacy_global_context_names
         elif self.global_feature_schema == "padding_invariant_v2":
             self.global_context_names = self.padding_invariant_global_context_names
+        elif self.global_feature_schema == "source_local_v3":
+            if fixed_heat_scale is None or not math.isfinite(float(fixed_heat_scale)) or float(fixed_heat_scale) <= 0:
+                raise ValueError("source_local_v3 requires a finite positive training-fitted fixed_heat_scale.")
+            self.global_context_names = self.source_local_global_context_names
+            self.feature_names = self.source_local_feature_names
         else:
             raise ValueError(f"Unsupported ChannelThermal global feature schema: {self.global_feature_schema!r}.")
+        self.content_context_names = tuple(name for name in self.global_context_names if not name.startswith("reserved_no_heat_"))
 
     def __call__(
         self,
@@ -141,7 +161,8 @@ class ChannelThermalInputAdapter:
         active_count = active_count_raw.clamp_min(1.0)
         heat_active = heat_powers * active
         max_abs = heat_active.abs().amax(dim=1, keepdim=True).clamp_min(1.0e-6)
-        heat_case_relative = heat_powers / max_abs
+        denominator = heat_powers.new_tensor(float(self.fixed_heat_scale)) if self.global_feature_schema == "source_local_v3" else max_abs
+        heat_case_relative = heat_powers / denominator
         abs_heat_case_relative = heat_case_relative.abs()
 
         mat = self._pad_material(material_params, 6)
@@ -192,6 +213,12 @@ class ChannelThermalInputAdapter:
                 ],
                 dim=-1,
             )
+            if self.global_feature_schema == "source_local_v3":
+                # Select by the public schema, not fragile positional guesses.
+                allowed = global_context.new_tensor([
+                    float("heat" not in name) for name in self.padding_invariant_global_context_names
+                ])
+                global_context = global_context * allowed
         return ChannelThermalAdapterOutput(
             global_context=global_context,
             module_features=module_features,
@@ -236,3 +263,32 @@ class ChannelThermalInputAdapter:
             return value[..., :width]
         pad = value.new_zeros(*value.shape[:-1], width - value.shape[-1])
         return torch.cat([value, pad], dim=-1)
+
+
+def fit_source_local_heat_scale(packed_h5_path, train_case_ids, normalizer=None) -> float:
+    """Maximum active absolute heat on the declared training membership only.
+
+    The adapter consumes dataset-scaled heat; provide the training normalizer
+    exactly when the dataset normalizes inputs. Validation never enters this
+    fit. The resulting scalar belongs in the run/checkpoint configuration.
+    """
+    import h5py
+    import numpy as np
+
+    ids = tuple(str(case_id) for case_id in train_case_ids)
+    if not ids or len(set(ids)) != len(ids):
+        raise ValueError("A nonempty unique training membership is required to fit heat scale.")
+    maximum = 0.0
+    with h5py.File(packed_h5_path, "r") as handle:
+        for case_id in ids:
+            group = handle["cases"][case_id]
+            heat = np.asarray(group["heat_powers"][...], dtype=np.float64)
+            active = np.asarray(group["module_present"][...]) > .5
+            if normalizer is not None:
+                heat = normalizer.normalize_heat_power(heat)
+            values = np.abs(heat[active])
+            if not np.isfinite(values).all():
+                raise ValueError(f"Nonfinite training heat in selected case {case_id}.")
+            if values.size:
+                maximum = max(maximum, float(values.max()))
+    return max(maximum, 1.0e-6)

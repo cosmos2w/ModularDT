@@ -266,6 +266,45 @@ def test_saved_normalizer_is_still_independently_validated_before_state_applicat
         _validate_resume_checkpoint(checkpoint, model=object(), model_config=model_config, dataset=dataset, dataset_config={})
 
 
+def test_measure_cost_option_cannot_bypass_strict_model_resume():
+    from channelthermal.config import ChannelThermalHONFConfig
+
+    from honf_forward_core.config import InterfaceFieldConfig
+
+    initial = ChannelThermalHONFConfig()
+    initial.core_honf.forward_architecture = "faithful_receiver_hypergraph_honf"
+    initial.core_honf.interface_model = InterfaceFieldConfig()
+    initial.channelthermal.internal_prediction_mode = "global_head"
+    payload = initial.to_dict()
+    dataset = SimpleNamespace(channel_order=["T"], interface_condition_feature_names=["x"],
+        interface_target_names=["T"], normalizer=SimpleNamespace(stats={}))
+    checkpoint = {"case_id": "ThermalChannel", "model_family": "honf_forward", "workflow": "forward",
+        "epoch": 100, "model_config": payload}
+    current = ChannelThermalHONFConfig.from_dict(payload)
+    current.core_honf.interface_model.hypergraph_options["structural_measure_policy_version"] = 1
+    inputs = {"model": object(), "model_config": current, "dataset": dataset, "dataset_config": {}}
+    _validate_resume_checkpoint(checkpoint, **inputs)
+    current.core_honf.interface_model.hypergraph_options["structural_measure_policy_version"] = 2
+    with pytest.raises(ValueError, match="configuration"):
+        _validate_resume_checkpoint(checkpoint, **inputs)
+    amendment = {"structural_measure_policy": {"from": 1, "to": 2, "activation_epoch": 101}}
+    _validate_resume_checkpoint(checkpoint, campaign_amendment=amendment, **inputs)
+    current.core_honf.hidden_dim += 1
+    with pytest.raises(ValueError, match="configuration"):
+        _validate_resume_checkpoint(checkpoint, campaign_amendment=amendment, **inputs)
+
+
+def test_reviewed_measure_policy_cannot_enter_a_fresh_training_workflow(fixed_manifest):
+    config, _ = fixed_manifest
+    config["model"] = {"core_honf": {"forward_architecture": "faithful_receiver_hypergraph_honf",
+        "interface_model": {"hypergraph_options": {"structural_measure_policy_version": 2}}}}
+    config["training"]["campaign"].update(physical_loss_policy_version=2,
+        native_loss_denominators_start_epoch=101, structural_measure_policy_version=2)
+    args = SimpleNamespace(epochs=None, resume_checkpoint=None)
+    with pytest.raises(ValueError, match="cannot start fresh"):
+        training.run_from_config(config, args)
+
+
 def test_selected150_cases_keep_four_native_boundaries_and_153600_primary_queries():
     ids = [f"selected_{i}" for i in range(150)]
     batches = [{"case_id": ids[start:start + 48], "field_targets": torch.zeros(min(48, 150 - start), 1024, 5)}

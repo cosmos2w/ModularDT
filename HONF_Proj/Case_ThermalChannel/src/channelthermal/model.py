@@ -71,6 +71,7 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
         self.input_adapter = ChannelThermalInputAdapter(
             global_feature_schema=str(config.channelthermal.global_feature_schema),
             legacy_active_fraction_reference_slots=config.channelthermal.legacy_active_fraction_reference_slots,
+            fixed_heat_scale=config.channelthermal.fixed_heat_scale,
         )
         self.environment_builder = ChannelThermalEnvironmentBuilder()
         self.global_normalize_targets = False
@@ -321,6 +322,8 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
             env_features=env.env_features,
             module_source_ids=(structure or {}).get("module_source_ids"),
             env_characteristic_lengths=env.env_characteristic_lengths,
+            env_weights=(getattr(env, "env_weights", None) if self.config.core_honf.forward_architecture in
+                         {"faithful_receiver_hypergraph_honf", "direct_pairwise_control_honf"} else None),
         )
         # Encode/organize only. The ChannelThermal local response changes
         # module tokens, so decoding a field here would be discarded work.

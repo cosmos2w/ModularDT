@@ -99,6 +99,8 @@ def save_checkpoint(
                 "interface_target_names": list(dataset.interface_target_names),
                 "module_feature_names": list(model.input_adapter.feature_names),
                 "global_context_names": list(model.input_adapter.global_context_names),
+                "content_context_names": list(model.input_adapter.content_context_names),
+                "fixed_heat_scale": model.input_adapter.fixed_heat_scale,
             },
             "global_normalization_config": {
                 "normalize_inputs": bool(train_config.get("dataset", {}).get("normalize_inputs", False)),
@@ -147,6 +149,7 @@ def _validate_resume_checkpoint(
     model_config: ChannelThermalHONFConfig,
     dataset: GlobalChannelThermalDataset,
     dataset_config: Dict[str, Any],
+    campaign_amendment: Dict[str, Any] | None = None,
 ) -> None:
     """Reject architecture, schema, or normalization drift before resume."""
 
@@ -163,6 +166,18 @@ def _validate_resume_checkpoint(
         )
     saved_config = dict(checkpoint.get("model_config") or {})
     normalized_saved_config = ChannelThermalHONFConfig.from_dict(saved_config).to_dict() if saved_config else {}
+    if normalized_saved_config:
+        old_core, new_core = normalized_saved_config["core_honf"], current_config["core_honf"]
+        if old_core.get("forward_architecture") == new_core.get("forward_architecture") == "faithful_receiver_hypergraph_honf":
+            old_options = old_core["interface_model"].setdefault("hypergraph_options", {})
+            new_options = new_core["interface_model"].setdefault("hypergraph_options", {})
+            old_version = old_options.setdefault("structural_measure_policy_version", 1)
+            new_version = new_options.setdefault("structural_measure_policy_version", 1)
+            policy = (campaign_amendment or {}).get("structural_measure_policy", {})
+            if (old_version == 1 and new_version == 2 and int(checkpoint.get("epoch", 0)) == 100
+                    and policy.get("from") == 1 and policy.get("to") == 2
+                    and policy.get("activation_epoch") == 101):
+                old_options["structural_measure_policy_version"] = 2
     if normalized_saved_config and normalized_saved_config != current_config:
         raise ValueError("Resume checkpoint forward architecture/configuration does not match this launch.")
     expected_schemas = {

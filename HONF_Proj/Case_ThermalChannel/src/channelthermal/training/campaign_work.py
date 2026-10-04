@@ -24,17 +24,19 @@ class CampaignForwardWork(AbstractContextManager):
     def _record(self, kind: str, output: Any, prepared: Any = None) -> None:
         mode = getattr(self.core.backend, "permission_mode", "hard")
         state = getattr(prepared if prepared is not None else output, "backend_state", {})
-        phase = f"P{state['hypergraph_phase']}" if isinstance(state, dict) and "hypergraph_phase" in state else "unlabelled"
+        phase_number = state.get("hypergraph_phase", state.get("pair_phase")) if isinstance(state, dict) else None
+        phase = f"P{phase_number}" if phase_number is not None else "unlabelled"
         record = self.records.setdefault(mode, {}).setdefault(phase, {"prepare_calls": 0, "read_calls": 0, "ledgers": {}})
         record[kind + "_calls"] += 1
         auxiliary = getattr(output, "interaction_aux", {})
         for key, value in auxiliary.items():
             # These are the scalar integer/count diagnostics from the executed
             # backend, aggregated by the shared read across its actual chunks.
-            if not key.startswith("hypergraph_") or not any(key.endswith(suffix) for suffix in (
+            if not key.startswith(("hypergraph_", "pair_")) or not any(key.endswith(suffix) for suffix in (
                 "unique_pairs", "eligible_pairs", "repeated_paths_removed",
                 "near_mandatory_pairs", "near_full_pairs", "executed_rows", "padded_rows", "fine_calls",
                 "allocated_rows", "executed_eligible_pairs", "skipped_eligible_pairs", "attention_cells",
+                "control_calls",
             )):
                 continue
             if torch.is_tensor(value) and value.numel() == 1:

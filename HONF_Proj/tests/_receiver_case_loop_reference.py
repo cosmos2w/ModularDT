@@ -62,7 +62,7 @@ def case_loop_prepare(self, encoded: EncodedInterfaceCase, module_states: torch.
             if fixed_topology is not None:
                 split = fixed_topology.strategy_data["gates"][tau][case, :len(tree.nodes)].to(logits)
             elif soft:
-                split = torch.sigmoid(logits / self.temperature) * leaf_mask
+                split = torch.sigmoid(logits.to(torch.float64) / self.temperature) * leaf_mask
             elif exercise_depth is not None:
                 split = torch.tensor([depth < exercise_depth for depth in depths], device=logits.device, dtype=logits.dtype) * leaf_mask
             else:
@@ -91,12 +91,13 @@ def case_loop_prepare(self, encoded: EncodedInterfaceCase, module_states: torch.
                     recorded_memberships[kind].append(density)
                 member_mass = density * measures[kind][case, None]
                 typed_membership[kind] = density
-                typed_summary[kind] = _pool(sources[kind][case, None].expand(len(tree.nodes), -1, -1), member_mass)
+                typed_summary[kind] = _pool(sources[kind][case, None].expand(len(tree.nodes), -1, -1), member_mass,
+                                            soft_precision=soft)
                 typed_mass[kind] = member_mass.sum(-1)
             statistics = torch.stack((typed_mass["M"].log1p(), typed_mass["E"].log1p(),
                                       (typed_mass["M"] > 0).to(logits.dtype), (typed_mass["E"] > 0).to(logits.dtype)), -1)
             control = self.control_heads[tau](torch.cat((typed_summary["M"], typed_summary["E"], embeddings,
-                                                        statistics, phase_features.expand(len(tree.nodes), -1)), -1))
+                                                        statistics.to(logits.dtype), phase_features.expand(len(tree.nodes), -1)), -1))
             kind = "M" if tau in ("MM", "EM", "QM") else "E"
             pad = self.capacity - len(tree.nodes)
             membership = typed_membership[kind]

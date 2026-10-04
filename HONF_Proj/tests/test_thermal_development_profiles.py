@@ -58,6 +58,29 @@ def test_zero_response_anchor_allows_initial100_but_refuses_continuation():
         development.development_profiles(stage=5000)
 
 
+def test_faithfulness_named_profiles_have_bounded_candidates_and_separate_dense_budget():
+    initial = development.faithfulness_profiles(manifest=manifest(("0348",)))
+    assert set(initial) == {"Tree-L", "Tree-F", "Pair-F", "Dense-new"}
+    assert initial["Tree-F"]["run"]["id"] == "3201"
+    assert initial["Pair-F"]["run"]["id"] == "3202"
+    for arm in ("Tree-F", "Pair-F"):
+        assert initial[arm]["case"]["config"].endswith("case_source_local.json")
+        assert initial[arm]["training"]["epochs"] == 100
+    assert "channelthermal" not in initial["Tree-L"]["model"]
+    for age in (200, 300, 400, 500):
+        extended = development.faithfulness_profiles(stage=age, manifest=manifest(("0348",)))
+        assert "Tree-L" not in extended
+        for arm in ("Tree-F", "Pair-F"):
+            campaign = extended[arm]["training"]["campaign"]
+            assert campaign["schedule_total_epochs"] == 1000
+            assert campaign["physical_loss_policy_version"] == 2
+            assert campaign["native_loss_denominators_start_epoch"] == 101
+            assert len(campaign["response_stencils"]) == 1
+    dense = development.faithfulness_profiles(stage=1000, manifest=manifest(("0348",)))
+    assert set(dense) == {"Dense-new"}
+    assert dense["Dense-new"]["training"]["epochs"] == 1000
+
+
 def test_limited_available_response_diversity_is_not_expanded_by_excluded_cases():
     profiles = development.development_profiles(manifest=manifest(("0304",)), stage=1000)
     assert all(len(config["training"]["campaign"]["response_stencils"]) == 1 for config in profiles.values())

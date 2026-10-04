@@ -31,6 +31,7 @@ NATIVE_RESPONSE_ARCHITECTURES = frozenset(
         "sparse_incidence_group_control_honf",
         # Preserve the established conversion/refit path for historical runs.
         "three_term_full_access_honf",
+        "direct_pairwise_control_honf",
     }
 )
 

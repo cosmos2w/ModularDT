@@ -9,6 +9,7 @@ specific to ChannelThermal, while `core_honf` remains reusable across domains.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import math
 from typing import Any, Dict
 
 from honf_forward_core.config import UnifiedForwardConfig
@@ -22,6 +23,7 @@ class ChannelThermalSpecificConfig:
     material_param_dim: int = 6
     heat_scale: float = 1.0
     global_feature_schema: str = "padding_invariant_v2"
+    fixed_heat_scale: float | None = None
     legacy_active_fraction_reference_slots: int | None = None
     use_local_surrogate: bool = False
     local_surrogate_checkpoint_path: str | None = None
@@ -49,8 +51,12 @@ class ChannelThermalSpecificConfig:
             raise ValueError("The current ChannelThermal material schema has exactly 6 values.")
         if float(self.heat_scale) <= 0.0:
             raise ValueError("heat_scale must be positive.")
-        if self.global_feature_schema not in {"legacy_v1", "padding_invariant_v2"}:
-            raise ValueError("global_feature_schema must be 'legacy_v1' or 'padding_invariant_v2'.")
+        if self.global_feature_schema not in {"legacy_v1", "padding_invariant_v2", "source_local_v3"}:
+            raise ValueError("Unsupported ChannelThermal global_feature_schema.")
+        if self.global_feature_schema == "source_local_v3" and (
+            self.fixed_heat_scale is None or not math.isfinite(float(self.fixed_heat_scale)) or float(self.fixed_heat_scale) <= 0
+        ):
+            raise ValueError("source_local_v3 requires a finite positive training-fitted fixed_heat_scale.")
         if self.global_feature_schema == "legacy_v1":
             if (
                 self.legacy_active_fraction_reference_slots is None

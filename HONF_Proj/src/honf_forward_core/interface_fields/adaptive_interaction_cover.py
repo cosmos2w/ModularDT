@@ -18,6 +18,7 @@ from typing import Any, Literal
 
 import torch
 
+from .receiver_measure_index import ReceiverMeasureIndex, canonical_receiver_index
 from .routing_index.types import PackedPairs
 
 InteractionMechanism = Literal["MM", "ME", "EM", "QM", "QE"]
@@ -163,6 +164,8 @@ class CaseLocalReceiverTree:
     nodes: tuple[CandidateNode, ...]
     overlap_fraction: float
     capacity_saturated: bool
+    measure_consistent: bool = False
+    canonical_index: ReceiverMeasureIndex | None = None
 
     @classmethod
     def build(
@@ -173,6 +176,7 @@ class CaseLocalReceiverTree:
         min_leaf_anchors: int = 4,
         overlap_fraction: float = 0.06,
         max_depth: int | None = None,
+        measure_consistent: bool = False,
     ) -> CaseLocalReceiverTree:
         if max_nodes < 1 or min_leaf_anchors < 1:
             raise ValueError("tree capacity and minimum leaf size must be positive")
@@ -193,6 +197,62 @@ class CaseLocalReceiverTree:
         coordinate_values = coordinates.tolist()
         weight_values = weights.tolist()
         role_values = roles.tolist()
+
+        if measure_consistent:
+            view = canonical_receiver_index(universe.coordinates, universe.weights, universe.roles)
+            block_coordinates = (view.coordinates / universe.coordinate_scale).detach().cpu()
+            # Accumulate canonical masses in wide precision for deterministic
+            # cuts; construction is discrete and never a content reduction.
+            block_weights = view.weights.detach().to(torch.float64).cpu()
+            block_values = block_coordinates.tolist()
+            block_roles = view.roles.detach().cpu().tolist()
+
+            def refine_blocks(index, blocks, depth):
+                nonlocal saturated
+                if len(blocks) <= min_leaf_anchors or (max_depth is not None and depth >= max_depth):
+                    return
+                subset = block_coordinates[list(blocks)]
+                extent = subset.max(0).values - subset.min(0).values
+                axis_order = sorted(range(len(extent)), key=lambda axis: (-float(extent[axis]), axis))
+                for axis in axis_order:
+                    if float(extent[axis]) <= 0:
+                        continue
+                    ordered = sorted(blocks, key=lambda block: (block_values[block][axis],
+                                     *block_values[block], block_roles[block]))
+                    # A cut lies strictly between distinct coordinate levels.
+                    # Even different roles at one point remain on one side.
+                    cuts = [position for position in range(1, len(ordered))
+                            if block_values[ordered[position-1]][axis] < block_values[ordered[position]][axis]]
+                    if cuts:
+                        break
+                else:
+                    return
+                if len(nodes) + 2 > max_nodes:
+                    saturated = True
+                    return
+                cumulative = block_weights[ordered].cumsum(0)
+                half = cumulative[-1] / 2
+                distances = [(position, float((cumulative[position-1] - half).abs())) for position in cuts]
+                closest = min(distance for _, distance in distances)
+                # Equal physical mass can differ by a few input-dtype ulps
+                # after atom splitting and adapter normalization. Resolve
+                # numerically tied cuts by geometric order, rather than turn
+                # harmless quadrature roundoff into a finite partition jump.
+                tolerance = 8 * torch.finfo(universe.weights.dtype).eps * float(cumulative[-1])
+                cut = next(position for position, distance in distances if distance <= closest + tolerance)
+                left_blocks, right_blocks = tuple(ordered[:cut]), tuple(ordered[cut:])
+                left_ids = tuple(atom for block in left_blocks for atom in view.block_atoms[block])
+                right_ids = tuple(atom for block in right_blocks for atom in view.block_atoms[block])
+                left, right = len(nodes), len(nodes) + 1
+                nodes.extend((CandidateNode(left_ids), CandidateNode(right_ids)))
+                nodes[index] = CandidateNode(nodes[index].anchor_indices, left, right, axis)
+                refine_blocks(left, left_blocks, depth + 1)
+                refine_blocks(right, right_blocks, depth + 1)
+
+            root_ids = tuple(atom for atoms in view.block_atoms for atom in atoms)
+            nodes.append(CandidateNode(root_ids))
+            refine_blocks(0, tuple(range(len(view.block_atoms))), 0)
+            return cls(universe, tuple(nodes), overlap_fraction, saturated, True, view)
 
         def refine(index: int, indices: tuple[int, ...], depth: int) -> None:
             nonlocal saturated
@@ -238,6 +298,22 @@ class CaseLocalReceiverTree:
         refine(0, root_ids, 0)
         return cls(universe, tuple(nodes), overlap_fraction, saturated)
 
+    def split_boundary(self, node_index: int) -> torch.Tensor:
+        """Live weighted child centroid boundary, or exact legacy convention."""
+        node = self.nodes[node_index]
+        if node.is_leaf:
+            raise ValueError("A leaf has no receiver split boundary")
+        axis = self.universe.coordinates[:, node.split_axis]
+        centers = []
+        for child in (node.left, node.right):
+            ids = list(self.nodes[child].anchor_indices)
+            if self.measure_consistent:
+                mass = self.universe.weights[ids]
+                centers.append((axis[ids] * mass).sum() / mass.sum())
+            else:
+                centers.append(axis[ids].mean())
+        return (centers[0] + centers[1]) / 2.0
+
     def access(self, queries: torch.Tensor, split_gates: torch.Tensor) -> torch.Tensor:
         """Return nonnegative receiver access [Q,N] with row sum one.
 
@@ -276,13 +352,8 @@ class CaseLocalReceiverTree:
             else:
                 gate = smooth_gate
             result[index] = incoming * (1.0 - gate)
-            left_ids = self.nodes[node.left].anchor_indices
-            right_ids = self.nodes[node.right].anchor_indices
             axis = node.split_axis
-            anchor_axis = self.universe.coordinates[:, axis]
-            left_center = anchor_axis[list(left_ids)].mean()
-            right_center = anchor_axis[list(right_ids)].mean()
-            boundary = (left_center + right_center) / 2.0
+            boundary = self.split_boundary(index)
             overlap = self.overlap_fraction * self.universe.coordinate_scale[axis]
             left_weight = endpoint_smoothstep((boundary + overlap / 2.0 - queries[:, axis]) / overlap)
             descend(node.left, incoming * gate * left_weight)
@@ -1109,6 +1180,7 @@ class MechanismPlan:
                 ],
                 "overlap_fraction": self.tree.overlap_fraction,
                 "capacity_saturated": self.tree.capacity_saturated,
+                **({"measure_consistent": True} if self.tree.measure_consistent else {}),
                 "environment_count": self.environment_count,
                 "default_permission": "full_access_bypass",
                 "explicit_permission_keys": sorted(
@@ -1163,6 +1235,7 @@ class MechanismPlan:
                 ],
                 "overlap_fraction": self.tree.overlap_fraction,
                 "capacity_saturated": self.tree.capacity_saturated,
+                **({"measure_consistent": True} if self.tree.measure_consistent else {}),
             },
             "split_gates": self.split_gates.detach().cpu().tolist(),
             "module_present": self.module_present.detach().cpu().tolist(),
@@ -1220,6 +1293,9 @@ class MechanismPlan:
             nodes,
             float(tree_payload["overlap_fraction"]),
             bool(tree_payload["capacity_saturated"]),
+            bool(tree_payload.get("measure_consistent", False)),
+            (canonical_receiver_index(universe.coordinates, universe.weights, universe.roles)
+             if tree_payload.get("measure_consistent", False) else None),
         )
         permissions_payload = payload.get("permissions", {})
         if not isinstance(permissions_payload, Mapping):
@@ -1514,10 +1590,7 @@ def compile_mechanism_execution_view(
             continue
         assert node.right is not None and node.split_axis is not None
         axis = node.split_axis
-        anchor_axis = typed.tree.universe.coordinates[:, axis]
-        left_center = anchor_axis[list(typed.tree.nodes[node.left].anchor_indices)].mean()
-        right_center = anchor_axis[list(typed.tree.nodes[node.right].anchor_indices)].mean()
-        split_boundaries[index] = (left_center + right_center) / 2.0
+        split_boundaries[index] = typed.tree.split_boundary(index)
         overlap_widths[index] = (
             typed.tree.overlap_fraction * typed.tree.universe.coordinate_scale[axis]
         )

@@ -88,6 +88,7 @@ FORWARD_ARCHITECTURES = {
     "legacy_honf",
     "dense_pairwise_field",
     "three_term_full_access_honf",
+    "direct_pairwise_control_honf",
     "adaptive_interaction_cover_honf",
     "geometry_latent_field",
     "sparse_interface_honf",
@@ -109,6 +110,7 @@ FORWARD_ARCHITECTURES = {
     "source_conditioned_pairwise_honf",
     "adaptive_hyperedge_opening_honf",
     "adaptive_receiver_hypergraph_honf",
+    "faithful_receiver_hypergraph_honf",
     "overlap_control_hypergraph_honf",
     "local_overlap_hypergraph_honf",
 }

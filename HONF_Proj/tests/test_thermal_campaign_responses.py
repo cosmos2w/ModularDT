@@ -1,6 +1,7 @@
 """Finite-response magnitudes and failures must survive reporting."""
 
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -101,3 +102,44 @@ def test_nonfinite_and_empty_responses_are_reported_and_bad_quadrature_rejected(
     with pytest.raises(ValueError, match="quadrature"):
         responses.response_channel_metrics(target, target, np.ones_like(target, bool),
             np.asarray([1., -1.]), ["T"], ["K"])
+
+
+def test_input_selected_transfers_preserve_totals_range_and_padding():
+    positions = np.asarray([[1., 0.], [2., 1.], [3., 2.], [0., 0.]])
+    heat = np.asarray([1., 1.3, 1.6, 0.])
+    variants = responses.fixed_total_transfers(positions, heat, [1, 1, 1, 0], lower=.5, upper=2.)
+    assert len(variants) == 8
+    assert {tuple(row["donors"]) for row in variants} == {(0, 2), (0, 1)}
+    for variant in variants:
+        assert variant["heat"].sum() == pytest.approx(heat.sum())
+        assert .5 <= variant["heat"][:3].min() <= variant["heat"][:3].max() <= 2.
+        assert variant["heat"][3] == 0
+    assert responses.fixed_total_transfers(positions[:1], heat[:1], [1], lower=.5, upper=2.) == []
+
+
+def test_subset_response_audit_reads_selected_inputs_only_and_separates_duplicates(tmp_path):
+    import h5py
+
+    path = tmp_path / "cases.h5"
+    with h5py.File(path, "w") as handle:
+        cases = handle.create_group("cases")
+        for case_id, heat in (("a", [1., 2.]), ("b", [1.2, 1.8]), ("duplicate", [1., 2.])):
+            group = cases.create_group(case_id)
+            group["module_present"] = [1, 1]
+            group["module_centers"] = [[1., 1.], [2., 2.]]
+            group["heat_powers"] = heat
+            group["case_config_json"] = json.dumps({"domain": {"lx": 3.}, "flow": {"re": 90.},
+                "thermal": {"fluid_k": 1., "heat_power_max": 2.}}).encode()
+            group.attrs["converged"] = True
+        # Invalid excluded inputs must never be inspected.
+        cases.create_group("excluded")
+    manifest = {"partitions": {"train": {"case_ids": ["a"]}, "test": {"case_ids": ["b"]}},
+                "manifest_sha256": "test-manifest"}
+    result = responses.audit_subset_response_pairs(path, manifest)
+    assert result["held_response_family_count"] == 1
+    assert result["excluded_cases_read"] == 0
+    assert result["matched_nonzero_response_families"][0]["different_heat_pairs"][0]["partitions"] == ["train", "test"]
+    manifest["partitions"]["test"]["case_ids"] = ["duplicate"]
+    duplicate = responses.audit_subset_response_pairs(path, manifest)
+    assert duplicate["held_response_family_count"] == 0
+    assert duplicate["identical_heat_layout_context_duplicates"]

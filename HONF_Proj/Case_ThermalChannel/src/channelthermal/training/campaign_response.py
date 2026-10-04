@@ -67,6 +67,11 @@ class NativeCampaignResponse:
         self.sampling = ReceiverSamplingConfig(max_fluid_queries=1024, solid_queries_per_module=128,
                                                hot_solid_points_per_module=16, random_seed=0)
         self.settings = settings
+        self.heat_null = None
+        if settings.get("heat_null_response") is not None:
+            from .campaign_null_response import NativeHeatNullResponse
+
+            self.heat_null = NativeHeatNullResponse(model, dataset, dataset_config, settings["heat_null_response"])
 
     def __call__(self, epoch: int, native_loss: torch.Tensor, accumulation_weight: float) -> tuple[torch.Tensor, dict]:
         started = time.perf_counter()
@@ -126,7 +131,8 @@ class NativeCampaignResponse:
             self.model.campaign_training_state = state
         ramp = min(max((epoch - 100) / 100, 0), 1)
         coefficient = state.get("response_scale", 0.) * ramp
-        return response_loss * coefficient / accumulation_weight, {
+        total_loss = response_loss * coefficient / accumulation_weight
+        metrics = {
             "response_family": pair.physical_family_id, "response_variant": label,
             "response_loss": float(response_loss.detach()), "response_coefficient": coefficient,
             "response_examples": 2, "response_wrapper_calls": 4 if self.model.config.core_honf.forward_architecture in HYPERGRAPH_ARCHITECTURES else 2,
@@ -136,3 +142,8 @@ class NativeCampaignResponse:
             "response_work_scope": "actual forward calls including prepared query chunks; backward/recompute excluded",
             "response_reference": "stored analytic/shared-grid generator; q_normal proxy; absolute training scales",
         }
+        if self.heat_null is not None:
+            null_loss, null_metrics = self.heat_null(epoch, native_loss, accumulation_weight)
+            total_loss = total_loss + null_loss
+            metrics.update(null_metrics)
+        return total_loss, metrics

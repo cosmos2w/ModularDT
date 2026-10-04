@@ -25,6 +25,12 @@ from thermal_campaign import ARMS, portfolio_profiles
 
 DEFAULT_MANIFEST = "/data/wanglz/ModularDT/thermal_development/fixed25_v1/manifest.json"
 DEFAULT_RUN_ROOT = "/data/wanglz/ModularDT/thermal_development/HONF_Forward_Runs"
+FAITHFULNESS_ARMS = {
+    "Tree-L": "adaptive_receiver_hypergraph_honf",
+    "Tree-F": "faithful_receiver_hypergraph_honf",
+    "Pair-F": "direct_pairwise_control_honf",
+    "Dense-new": "dense_pairwise_field",
+}
 
 
 def validate_generated_output(value) -> Path:
@@ -120,6 +126,58 @@ def resolve_evaluation_manifest(dataset_config: dict, dataset_path, *, scope: st
     return manifest
 
 
+def faithfulness_profiles(*, first_run_id: int = 3200, stage: int = 100,
+                          manifest: dict | None = None,
+                          manifest_path: str = DEFAULT_MANIFEST,
+                          run_output_root: str = DEFAULT_RUN_ROOT,
+                          microbatch_size: int = 8) -> dict[str, dict]:
+    """Prepare the three named fresh controls and explicitly budgeted Dense.
+
+    Tree-L has only its initial 100 screen. Tree-F/Pair-F accept saved review
+    ages through 500 under the absolute 1000 schedule. Dense-new is the user's
+    separately authorized 1000-epoch subset reference, with no warm start.
+    This function prepares recipes; it never authorizes or launches extension.
+    """
+    if stage not in (100, 200, 300, 400, 500, 1000):
+        raise ValueError("Faithfulness review ages are 100,200,300,400,500; Dense may use 1000.")
+    ordinary = development_profiles(first_run_id=first_run_id, stage=100,
+        manifest=manifest, manifest_path=manifest_path, run_output_root=run_output_root,
+        microbatch_size=microbatch_size)
+    profiles = {}
+    for offset, (arm, architecture) in enumerate(FAITHFULNESS_ARMS.items()):
+        if (arm == "Tree-L" and stage != 100) or (arm != "Dense-new" and stage > 500):
+            continue
+        config = copy.deepcopy(ordinary["B-native" if arm == "Dense-new" else "H-tree"])
+        config["profile_name"] = f"thermal_faithfulness25_{arm.lower()}_v1"
+        config["model"]["core_honf"]["forward_architecture"] = architecture
+        config["training"]["epochs"] = stage
+        campaign = config["training"]["campaign"]
+        campaign.update(name="thermal_faithfulness25_v1", arm=arm)
+        if stage > 100:
+            campaign.update(physical_loss_policy_version=2, native_loss_denominators_start_epoch=101)
+        if arm in {"Tree-F", "Pair-F"}:
+            # Domain-owned semantics stay in the case profile. Training
+            # preparation fits its selected-train-only scale before model
+            # construction and records it in resolved run configuration.
+            config["case"]["config"] = "project://Case_ThermalChannel/configs/case_source_local.json"
+        if arm == "Pair-F":
+            config["model"]["core_honf"]["interface_model"]["hypergraph_options"] = {"pair_control_width": 80}
+        if arm == "Tree-F":
+            config["model"]["core_honf"]["interface_model"].setdefault("hypergraph_options", {})[
+                "structural_measure_policy_version"] = 1
+        config["run"].update(id=f"{first_run_id + offset:04d}", name=f"thermal_faithfulness25_{arm.lower()}_v1")
+        config["_note"] = (
+            f"{arm}: fresh seed0 fixed25_v1 150/22 control; train-only normalization, "
+            "Q1024 FP32 effective batch48, common B-fine physical initializer. "
+            "Absolute development schedule1000; checkpoints/field selection/plots every100. "
+            "Tree-L stops100; Tree-F/Pair-F stop100 then require documented review before paired "
+            "100-epoch continuation through at most500. Dense-new separately authorized1000. "
+            "No full-data resume, formal launch, new solves or Wind training."
+        )
+        profiles[arm] = config
+    return profiles
+
+
 def evaluation_dataset_kwargs(manifest: dict | None, split: str) -> dict:
     """Apply the same exact membership to normalized and raw native datasets."""
     if manifest is None:
@@ -131,13 +189,13 @@ def evaluation_dataset_kwargs(manifest: dict | None, split: str) -> dict:
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--arm", nargs="+", choices=tuple(ARMS), required=True,
+    parser.add_argument("--arm", nargs="+", choices=(*ARMS, *FAITHFULNESS_ARMS), required=True,
                         help="Only these explicitly named arms are prepared; no trainer is launched.")
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--dataset", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--first-run-id", required=True, type=int)
-    parser.add_argument("--stage", type=int, choices=(100, 500, 1000), default=100)
+    parser.add_argument("--stage", type=int, choices=(100, 200, 300, 400, 500, 1000), default=100)
     parser.add_argument("--microbatch-size", type=int, default=8)
     parser.add_argument("--run-output-root", type=Path, default=Path(DEFAULT_RUN_ROOT))
     args = parser.parse_args(argv)
@@ -153,10 +211,16 @@ def main(argv=None) -> int:
     manifest_path = args.manifest.expanduser().resolve()
     dataset_path = args.dataset.expanduser().resolve()
     manifest = load_development_manifest(manifest_path, dataset_path)
-    profiles = development_profiles(first_run_id=args.first_run_id, stage=args.stage,
+    faithful = any(arm in FAITHFULNESS_ARMS for arm in args.arm)
+    if faithful and any(arm in ARMS for arm in args.arm):
+        raise ValueError("Prepare legacy portfolio names and faithfulness names in separate explicit invocations")
+    generator = faithfulness_profiles if faithful else development_profiles
+    profiles = generator(first_run_id=args.first_run_id, stage=args.stage,
         manifest=manifest, manifest_path=str(manifest_path), microbatch_size=args.microbatch_size,
         run_output_root=str(validate_generated_output(args.run_output_root)))
     for arm in args.arm:
+        if arm not in profiles:
+            raise ValueError(f"{arm} is outside its authorized preparation age at epoch{args.stage}")
         if dataset_path != registry_dataset_path(profiles[arm]):
             raise ValueError("Supplied dataset differs from the native registry path; update the established catalogue location before preparing profiles")
     output = validate_generated_output(args.output_dir)
@@ -181,7 +245,7 @@ def main(argv=None) -> int:
                 for p in config["training"]["campaign"]["response_stencils"]],
             "response_case_count": len(config["training"]["campaign"]["response_stencils"]),
             "response_diversity": "Available selected-train atlas anchors only; no forced case inclusion"}
-        suffix = "" if args.stage == 100 else " --resume-checkpoint PATH_TO_EXACT_DEVELOPMENT_PARENT"
+        suffix = "" if args.stage == 100 or arm == "Dense-new" else " --resume-checkpoint PATH_TO_EXACT_DEVELOPMENT_PARENT"
         print(f"{arm}: python train.py --config {shlex.quote(str(path))} --device cpu{suffix} --dry-run")
     (output / "preparation_index.json").write_text(json.dumps(index, indent=2) + "\n")
     return 0

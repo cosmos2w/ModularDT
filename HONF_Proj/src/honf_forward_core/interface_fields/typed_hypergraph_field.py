@@ -31,8 +31,10 @@ class TypedHypergraphField(DensePairwiseField):
         super().__init__(hidden_dim, message_hidden_dim, num_heads, fourier_frequencies,
                          activation_checkpointing=activation_checkpointing)
         settings = dict(options or {})
-        if architecture == "adaptive_receiver_hypergraph_honf":
+        if architecture in {"adaptive_receiver_hypergraph_honf", "faithful_receiver_hypergraph_honf"}:
             from .adaptive_receiver_hypergraph import AdaptiveReceiverHypergraph
+            if architecture == "faithful_receiver_hypergraph_honf":
+                settings.update(faithful_controls=True, measure_consistent=True)
             self.organizer = AdaptiveReceiverHypergraph(hidden_dim, spatial_dim=spatial_dim,
                                                        control_dim=control_dim, **settings)
         else:

@@ -291,6 +291,79 @@ def test_finite_differences_are_per_physical_channel_and_do_not_invent_topology(
     assert max(rows[0]["derivative_error"]["fields"]["max_abs_by_channel"]) < 1e-5
 
 
+@pytest.mark.parametrize("variant", ["original", "permutation", "split_equal", "split_unequal", "split_multiple"])
+def test_whole_wrapper_environment_equivalence_preserves_explicit_measure_and_length(variant):
+    from channelthermal.environment import ChannelThermalEnvironment
+    coords = torch.tensor([[[0., 0.], [1., .2], [3., .4]]], dtype=torch.float64)
+    features = torch.arange(21, dtype=torch.float64).reshape(1, 3, 7)
+    mass = torch.tensor([[.4, 1.5, 2.3]], dtype=torch.float64)
+    lengths = torch.tensor([[.7, .3, 1.1]], dtype=torch.float64)
+    environment = ChannelThermalEnvironment(coords, features, env_weights=mass, env_characteristic_lengths=lengths)
+    builder = topology.RefinedEnvironmentBuilder(lambda **kwargs: environment, variant, gradients=True)
+    actual = builder(batch_size=1)
+    torch.testing.assert_close(actual.env_weights.sum(1), mass.sum(1), atol=1e-14, rtol=1e-14)
+    torch.testing.assert_close(actual.env_characteristic_lengths, lengths[:, builder.parents], atol=0, rtol=0)
+    torch.testing.assert_close(actual.env_features, features[:, builder.parents], atol=0, rtol=0)
+    integral = (actual.env_features[..., 0] * actual.env_weights).sum()
+    grad_feature, grad_mass = torch.autograd.grad(integral, (builder.base.env_features, builder.base.env_weights))
+    torch.testing.assert_close(grad_feature[..., 0], mass, atol=1e-14, rtol=1e-14)
+    torch.testing.assert_close(grad_mass, features[..., 0], atol=1e-14, rtol=1e-14)
+    mapped = topology._pullback_atom_axis(actual.env_features, builder.parents, builder.fractions, 1, 3)
+    torch.testing.assert_close(mapped, features, atol=1e-14, rtol=1e-14)
+
+
+def test_whole_wrapper_environment_refuses_measure_fallback_and_nonfinite_evidence_is_serializable():
+    from channelthermal.environment import ChannelThermalEnvironment
+    builder = topology.RefinedEnvironmentBuilder(lambda **kwargs: ChannelThermalEnvironment(
+        torch.zeros(1, 2, 2), torch.zeros(1, 2, 7)), "split_equal")
+    with pytest.raises(ValueError, match="adapter-owned masses"):
+        builder()
+    import json
+    measured = topology.numerical_check(torch.ones(2), torch.tensor([torch.nan, torch.inf]))
+    assert not measured["passed"] and not measured["finite"]
+    json.dumps(measured, allow_nan=False)
+
+
+def test_control_locality_probe_discloses_manipulated_exclusion_and_restores_phase_hooks(monkeypatch):
+    from honf_forward_core.interface_fields.adaptive_receiver_hypergraph import AdaptiveReceiverHypergraph
+
+    from .test_adaptive_receiver_hypergraph import _case
+
+    class Core(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.backend = torch.nn.Module()
+            self.backend.organizer = AdaptiveReceiverHypergraph(8, organizer_dim=16, faithful_controls=True,
+                measure_consistent=True).eval()
+
+        def decode_queries(self, prepared, query, **kwargs):
+            return {"pred_field": query}
+
+    class Wrapper(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.core = Core()
+            self.encoded = _case()
+
+        def forward(self, query_xy):
+            for phase in range(3):
+                self.core.backend.organizer.prepare(self.encoded, self.encoded.module_tokens, phase=phase)
+            return {"pred_field": query_xy}
+
+    model = Wrapper().eval()
+    query = torch.ones(1, 7, 2)
+    monkeypatch.setattr(topology, "sensor_panel", lambda sample: (query[0].numpy(), None, None, None, None))
+    monkeypatch.setattr(topology, "native_arguments", lambda *args: {"query_xy": query})
+    measured, arrays = topology.trained_control_locality(model, {}, {"case_id": "unit_fixture"})
+    assert measured["excluded_control_derivative_zero"]
+    assert measured["exclusion_origin"] == "explicitly manipulated conditional diagnostic"
+    assert set(measured["ancestry_and_actual_donor_inventory"]) == {"P0", "P1", "P2"}
+    assert "P2/QE/control_membership_E" in arrays and "P0/QM/control_membership_M" in arrays
+    assert "prepare" not in model.core.backend.organizer.__dict__
+    assert "access" not in model.core.backend.organizer.__dict__
+    assert "decode_queries" not in model.core.__dict__
+
+
 @pytest.mark.parametrize("architecture", ["adaptive_receiver_hypergraph_honf", "overlap_control_hypergraph_honf", "local_overlap_hypergraph_honf"])
 def test_fine_invariants_and_physical_atom_split_definition(architecture):
     from honf_forward_core.interface_fields.typed_hypergraph_field import TypedHypergraphField

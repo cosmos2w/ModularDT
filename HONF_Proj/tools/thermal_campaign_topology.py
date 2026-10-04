@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from contextlib import AbstractContextManager
 from dataclasses import replace
 from itertools import pairwise
 from pathlib import Path
@@ -27,6 +28,7 @@ from thermal_campaign_benchmark import allowed_device, load_native, low_high_ind
 from thermal_campaign_heat_inference import native_heat_predictor, sensor_panel
 
 from honf_forward_core.interface_fields.topology_probe import FixedTopologyInvalid, OrganizerTopologyProbe
+from honf_forward_core.interface_fields.typed_hypergraph_state import SOURCE_TYPE, structural_cost
 
 
 def topology_arrays(record):
@@ -238,9 +240,434 @@ def evaluate_path(model, checkpoint, sample, directory, kind, *, points=17, ampl
 
 def numerical_check(before, after, *, rtol=2e-5, atol=2e-6):
     delta = (after - before).detach()
-    return {"finite": bool(torch.isfinite(after).all()), "max_abs": float(delta.abs().max()) if delta.numel() else 0.,
-        "rmse": float(delta.square().mean().sqrt()) if delta.numel() else 0.,
+    finite = bool(torch.isfinite(before).all() & torch.isfinite(after).all())
+    margin = delta.abs() / (atol + rtol * before.detach().abs())
+    return {"finite": finite, "max_abs": (float(delta.abs().max()) if delta.numel() else 0.) if finite else None,
+        "rmse": (float(delta.square().mean().sqrt()) if delta.numel() else 0.) if finite else None,
+        "max_tolerance_ratio": (float(margin.max()) if margin.numel() else 0.) if finite else None,
         "passed": bool(torch.allclose(before, after, rtol=rtol, atol=atol)), "rtol": rtol, "atol": atol}
+
+
+class RefinedEnvironmentBuilder:
+    """Equivalent atom catalogue for an entire native wrapper rebuild.
+
+    The original builder owns physical geometry/features/lengths. Explicit
+    child masses prevent the core's historical area/E fallback from changing
+    the measure. Fine atoms and every P0/P1/P2 preparation are rebuilt.
+    """
+
+    def __init__(self, original, variant, *, gradients=False):
+        self.original, self.variant, self.gradients = original, variant, gradients
+        self.base = None
+
+    def __getattr__(self, name):
+        return getattr(self.original, name)
+
+    def __call__(self, **kwargs):
+        environment = self.original(**kwargs)
+        if environment.env_weights is None or environment.env_characteristic_lengths is None:
+            raise ValueError("Whole-rebuild equivalence requires adapter-owned masses and physical lengths")
+        if self.gradients:
+            values = {name: getattr(environment, name).detach().clone().requires_grad_()
+                      for name in ("env_coords", "env_features", "env_weights", "env_characteristic_lengths")}
+            environment = replace(environment, **values)
+        self.base = environment
+        count, device = environment.env_weights.shape[-1], environment.env_weights.device
+        split = {}
+        if self.variant == "split_equal":
+            split[0] = (.5, .5)
+        elif self.variant == "split_unequal":
+            split[0] = (.3, .7)
+        elif self.variant == "split_multiple":
+            split = {atom: (.3, .7) for atom in sorted({0, count // 2, count - 1})}
+        elif self.variant not in ("original", "permutation"):
+            raise ValueError(f"Unknown atom-equivalence variant {self.variant!r}")
+        parents, fractions = [], []
+        for atom in range(count):
+            children = split.get(atom, (1.,))
+            parents.extend([atom] * len(children))
+            fractions.extend(children)
+        if self.variant == "permutation":
+            parents.reverse()
+        self.parents = torch.tensor(parents, device=device)
+        self.fractions = environment.env_weights.new_tensor(fractions)
+        values = {name: (None if getattr(environment, name) is None else getattr(environment, name)[:, self.parents])
+                  for name in ("env_coords", "env_features", "env_region_ids", "env_characteristic_lengths")}
+        values["env_weights"] = environment.env_weights[:, self.parents] * self.fractions
+        self.refined = replace(environment, **values)
+        return self.refined
+
+
+class _NativeRebuildCapture(AbstractContextManager):
+    """Local live phase/access/decode capture; restores every monkeypatch."""
+
+    def __init__(self, model, *, fixed=None, annotate_measure=True):
+        self.model, self.fixed = model, fixed
+        self.annotate_measure = annotate_measure
+        self.states, self.accesses, self.decodes, self.counts = {}, {}, {}, {}
+        self.input_states = {}
+        self.explicit_measure_annotation = False
+        self.encoded_environment_measures = None
+
+    def __enter__(self):
+        self.organizer = getattr(self.model.core.backend, "organizer", None)
+        self.originals, self.owned = {}, {}
+        methods = [(self.model.core, "decode_queries")]
+        if hasattr(self.model.core, "encode_case"):
+            methods.append((self.model.core, "encode_case"))
+        if self.organizer is not None:
+            methods += [(self.organizer, "prepare"), (self.organizer, "access")]
+        for owner, name in methods:
+            self.originals[name] = getattr(owner, name)
+            self.owned[name] = name in owner.__dict__
+        self.methods = methods
+
+        def prepare(*args, **kwargs):
+            phase = int(str(kwargs.get("phase", 0)).removeprefix("P"))
+            kwargs["capture_topology"] = True
+            if self.fixed is not None:
+                kwargs["fixed_topology"] = self.fixed.states[phase]
+            state = self.originals["prepare"](*args, **kwargs)
+            if phase in self.states:
+                raise ValueError("Whole-wrapper invariance expects one organizer preparation per physical phase")
+            self.states[phase] = state
+            self.input_states[phase] = (args[0], args[1])
+            return state
+
+        def access(state, receivers, mechanism, *args, **kwargs):
+            tau = str(mechanism).upper()
+            route = state.phase, tau
+            index = self.counts.get(route, 0)
+            self.counts[route] = index + 1
+            key = *route, index
+            kwargs["capture_topology"] = True
+            if self.fixed is not None:
+                recorded = self.fixed.accesses[key]
+                kwargs["fixed_receiver_access"] = {"edge_access": recorded.edge_access.detach()}
+            value = self.originals["access"](state, receivers, mechanism, *args, **kwargs)
+            self.accesses[key] = value
+            return value
+
+        def decode(prepared, *args, **kwargs):
+            value = self.originals["decode_queries"](prepared, *args, **kwargs)
+            context = kwargs.get("interaction_context")
+            phase = getattr(context, "phase", None) or "unspecified"
+            role = getattr(context, "receiver_role", None) or "unspecified"
+            key = f"{phase}/{role}/read{len(self.decodes)}"
+            self.decodes[key] = value["pred_field"]
+            return value
+
+        def encode(batch, *args, **kwargs):
+            builder = self.model.environment_builder
+            if self.annotate_measure and batch.env_weights is None and isinstance(builder, RefinedEnvironmentBuilder):
+                # Historical Thermal paths ignore the builder's optional
+                # mass metadata. Bind it explicitly ONLY for this physical
+                # equivalence diagnostic; otherwise area/E changes on split.
+                batch = replace(batch, env_weights=builder.refined.env_weights)
+                self.explicit_measure_annotation = True
+            value = self.originals["encode_case"](batch, *args, **kwargs)
+            self.encoded_environment_measures = value.env_weights
+            return value
+
+        self.model.core.decode_queries = decode
+        if "encode_case" in self.originals:
+            self.model.core.encode_case = encode
+        if self.organizer is not None:
+            self.organizer.prepare, self.organizer.access = prepare, access
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        for owner, name in self.methods:
+            if self.owned[name]:
+                setattr(owner, name, self.originals[name])
+            else:
+                delattr(owner, name)
+        return False
+
+
+def _pullback_atom_axis(value, parents, fractions, axis, count):
+    """Mass-fraction average children onto their original physical parent."""
+    moved = value.movedim(axis, 0)
+    scale = fractions.reshape((-1,) + (1,) * (moved.ndim - 1))
+    reduced = value.new_zeros((count, *moved.shape[1:])).index_add(0, parents, moved * scale)
+    return reduced.movedim(0, axis)
+
+
+def _wrapper_physical_outputs(result, capture, checkpoint):
+    """Use checkpoint-owned output transform; ports retain declared features."""
+    from channelthermal.response_control.native import _physical_output
+    settings = checkpoint.get("train_config", {}).get("dataset", {}) if checkpoint else {}
+    stats = checkpoint.get("global_normalization_stats", {}) if checkpoint else {}
+    normalized = bool(settings.get("normalize_targets", False))
+    mapping = {"pred_field": ("field_mean_by_channel", "field_std_by_channel"),
+               "pred_internal_temperature": ("internal_temperature_mean", "internal_temperature_std"),
+               "pred_interface": (("interface_targets_mean", "interface_targets_std") if "interface_targets_mean" in stats
+                                  else ("interface_target_mean", "interface_target_std"))}
+    output = {}
+    for name, keys in mapping.items():
+        if torch.is_tensor(result.get(name)):
+            output[name] = _physical_output(result[name], stats, *keys, normalize_targets=normalized)
+    for name in ("pred_port_condition", "pred_port_condition_raw", "local_port_condition_used"):
+        if torch.is_tensor(result.get(name)):
+            output[name] = result[name]
+    for key, value in capture.decodes.items():
+        output[f"phase_decode/{key}"] = _physical_output(value, stats, *mapping["pred_field"], normalize_targets=normalized)
+    return output
+
+
+def _rebuild_representation_arrays(capture, builder):
+    tensors = {}
+    count = builder.base.env_weights.shape[-1]
+    parents, fractions = builder.parents, builder.fractions
+    for phase, state in capture.states.items():
+        for tau, control in state.controls.items():
+            tensors[f"P{phase}/{tau}/group_controls"] = control
+            donors = getattr(state, "control_memberships", {})
+            for kind, member in donors.get(tau, {}).items():
+                tensors[f"P{phase}/{tau}/control_donors_{kind}"] = (
+                    _pullback_atom_axis(member, parents, fractions, -1, count) if kind == "E" else member)
+            trees = state.strategy_data.get("trees", {}).get(tau)
+            if trees:
+                for case, tree in enumerate(trees):
+                    geometry = state.strategy_data["access_geometry"]["M" if tau in ("MM", "ME") else "E" if tau == "EM" else "Q"]
+                    tensors[f"P{phase}/{tau}/case{case}/boundaries"] = geometry["boundary"][case]
+                    if tree.canonical_index is not None:
+                        tensors[f"P{phase}/{tau}/case{case}/index_coords"] = tree.canonical_index.coordinates
+                        tensors[f"P{phase}/{tau}/case{case}/index_mass"] = tree.canonical_index.weights
+                        tensors[f"P{phase}/{tau}/case{case}/index_roles"] = tree.canonical_index.roles.to(control.dtype)
+                        block_count = tree.canonical_index.coordinates.shape[0]
+                        support = control.new_zeros((len(tree.nodes), block_count))
+                        for node, candidate in enumerate(tree.nodes):
+                            support[node, tree.canonical_index.atom_to_block[list(candidate.anchor_indices)]] = 1
+                        tensors[f"P{phase}/{tau}/case{case}/canonical_node_support"] = support
+        first_accesses = {}
+        for (access_phase, tau, index), access in capture.accesses.items():
+            if access_phase != phase:
+                continue
+            first_accesses.setdefault(tau, access)
+            for name, value in (("density", access.density), ("control_moment", access.density[..., None] * access.control)):
+                if SOURCE_TYPE[tau] == "E":
+                    value = _pullback_atom_axis(value, parents, fractions, 2, count)
+                if tau == "EM":
+                    value = _pullback_atom_axis(value, parents, fractions, 1, count)
+                tensors[f"P{phase}/{tau}/read{index}/{name}"] = value
+        cost, metrics = structural_cost(first_accesses, state)
+        tensors[f"P{phase}/structural_cost"] = cost
+        for name, value in metrics.items():
+            if "smooth" in name:
+                tensors[f"P{phase}/structural/{name}"] = value
+    tensors["input/total_environment_mass"] = builder.base.env_weights[:, builder.parents].mul(builder.fractions).sum(-1)
+    if capture.encoded_environment_measures is not None:
+        tensors["input/encoded_parent_environment_mass"] = _pullback_atom_axis(
+            capture.encoded_environment_measures / builder.fractions[None], builder.parents,
+            builder.fractions, 1, count)
+    return tensors
+
+
+def whole_wrapper_invariance(model, sample, raw_sample, *, checkpoint=None, directory=None,
+                             detailed=False, gradients=False):
+    """Measure complete native Thermal source equivalence on supplied cases.
+
+    Memberships/encoder/ports/frozen Stage-A/P0/P1/P2 all rebuild each time.
+    The caller selects only protocol-authorized cases; this function never
+    reads or enlarges dataset membership. Detailed mode adds equal and
+    multiple splits; light all22 mode uses permutation and a 30/70 split.
+    """
+    if model.training:
+        raise ValueError("Whole-wrapper invariance is evaluation-only")
+    if gradients and not detailed:
+        raise ValueError("First-gradient checks are limited to the detailed representative panel")
+    device = next(model.parameters()).device
+    sensors, _, _, _, _ = sensor_panel(raw_sample)
+    arguments = native_arguments(model, sample, sensors, device)
+    original_builder = model.environment_builder
+    native_wrapper_calls = 0
+
+    def evaluate_variant(variant, *, differentiate=False, reference=None, annotate_measure=True):
+        nonlocal native_wrapper_calls
+        builder = RefinedEnvironmentBuilder(original_builder, variant, gradients=differentiate)
+        model.environment_builder = builder
+        try:
+            with torch.set_grad_enabled(differentiate), _NativeRebuildCapture(model, fixed=reference,
+                annotate_measure=annotate_measure) as capture:
+                result = model(**arguments)
+                native_wrapper_calls += 1
+                physical = _wrapper_physical_outputs(result, capture, checkpoint)
+                representation = _rebuild_representation_arrays(capture, builder)
+                derivative = {}
+                if differentiate:
+                    # A deterministic linear physical-output probe. The base
+                    # catalogue stays original-shaped before the refinement,
+                    # so autograd performs the correct child pullback.
+                    objective = sum(value.mean() for value in physical.values() if value.numel())
+                    names = ("env_coords", "env_features", "env_weights", "env_characteristic_lengths")
+                    inputs = tuple(getattr(builder.base, name) for name in names)
+                    values = torch.autograd.grad(objective, inputs, allow_unused=True)
+                    capture.gradient_unused = [name for name, value in zip(names, values) if value is None]
+                    derivative = {name: (torch.zeros_like(source) if value is None else value)
+                                  for name, source, value in zip(names, inputs, values)}
+            return physical, representation, derivative, capture, builder
+        finally:
+            model.environment_builder = original_builder
+
+    original, baseline_representation, _, baseline_capture, base_builder = evaluate_variant("original")
+    arrays = {f"original/physical/{key}": value.detach().cpu().numpy() for key, value in original.items()}
+    arrays.update({f"original/representation/{key}": value.detach().cpu().numpy() for key, value in baseline_representation.items()})
+    annotation_check = None
+    if baseline_capture.explicit_measure_annotation:
+        ordinary, _, _, _, _ = evaluate_variant("original", annotate_measure=False)
+        annotation_check = {key: numerical_check(value, ordinary[key], atol=2e-5) for key, value in original.items()}
+        arrays.update({f"ordinary_unannotated/physical/{key}": value.detach().cpu().numpy() for key, value in ordinary.items()})
+    variants = ["permutation", "split_unequal"]
+    if detailed:
+        variants = ["permutation", "split_equal", "split_unequal", "split_multiple"]
+    baseline_grad = None
+    if gradients:
+        _, _, baseline_grad, _, _ = evaluate_variant("original", differentiate=True, reference=baseline_capture)
+    checks = {}
+    for variant in variants:
+        physical, representation, _, capture, builder = evaluate_variant(variant)
+        measured = {"physical": {key: numerical_check(value, physical[key], atol=2e-5) for key, value in original.items()},
+                    "physical_fine_core_threshold": {key: numerical_check(value, physical[key]) for key, value in original.items()},
+                    "representation": {key: numerical_check(value, representation[key])
+                        if key in representation and value.shape == representation[key].shape else {"passed": False, "shape_changed": True}
+                        for key, value in baseline_representation.items()},
+                    "parent_map": builder.parents.cpu().tolist(), "child_mass_fractions": builder.fractions.cpu().tolist()}
+        if gradients:
+            try:
+                _, _, actual_grad, _, _ = evaluate_variant(variant, differentiate=True, reference=capture)
+                measured["fixed_topology_first_gradients"] = {name: numerical_check(value, actual_grad[name], atol=1e-6)
+                    for name, value in baseline_grad.items()}
+                arrays.update({f"{variant}/gradient/{name}": value.detach().cpu().numpy() for name, value in actual_grad.items()})
+            except FixedTopologyInvalid as error:
+                measured["fixed_topology_first_gradients"] = {"invalid": str(error), "passed": False}
+        arrays.update({f"{variant}/physical/{key}": value.detach().cpu().numpy() for key, value in physical.items()})
+        arrays.update({f"{variant}/representation/{key}": value.detach().cpu().numpy() for key, value in representation.items()})
+        checks[variant] = measured
+    if baseline_grad is not None:
+        arrays.update({f"original/gradient/{name}": value.detach().cpu().numpy() for name, value in baseline_grad.items()})
+    arrays["input/environment_coords"] = base_builder.base.env_coords.detach().cpu().numpy()
+    arrays["input/environment_mass"] = base_builder.base.env_weights.detach().cpu().numpy()
+    arrays["input/environment_lengths"] = base_builder.base.env_characteristic_lengths.detach().cpu().numpy()
+    payload = {"case_id": str(raw_sample["case_id"]), "checks": checks,
+        "scope": "complete native encoder, organizer, autonomous ports, frozen Stage-A and all P0/P1/P2 rebuilds",
+        "historical_explicit_measure_annotation": baseline_capture.explicit_measure_annotation,
+        "historical_adapter_limit": "When annotation is required, the historical ordinary adapter does not natively transport refined weights; without this diagnostic binding, its uniform area/E fallback changes quadrature on split",
+        "annotation_baseline_vs_ordinary_native": annotation_check,
+        "native_wrapper_calls": native_wrapper_calls,
+        "phases_measured": sorted(baseline_capture.states), "queries": len(sensors),
+        "query_selection": "fixed input-only named physical sensor panel; query batches do not define the tree",
+        "structural_scope": "case-balanced physical measures; first actual access per typed route in each phase",
+        "physical_output_units": ("checkpoint-owned native benchmark transform" if checkpoint is not None else "model output units; no checkpoint transform supplied"),
+        "tolerance_policy": "Native physical outputs use maintained complete-wrapper atol2e-5/rtol2e-5; inherited fine-core atol2e-6 is also reported separately without concealing near-zero roundoff failures",
+        "gradient_scope": "separately frozen native active topology for each representation; deterministic linear physical-output probe with child coordinate/feature gradients summed and mass gradients fraction-weighted",
+        "reference_limit": "same-checkpoint numerical equivalence; no physical response solve or candidate design reference"}
+    if directory is not None:
+        directory = output_directory(directory)
+        np.savez_compressed(directory / "whole_wrapper_invariance.npz", **arrays)
+        (directory / "whole_wrapper_invariance.json").write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
+    return payload, arrays
+
+
+def trained_control_locality(model, sample, raw_sample, *, directory=None):
+    """Conditional P0 content derivatives at actual trained control weights.
+
+    Donor weights and receiver geometry stay fixed for attribution. A
+    separately rebuilt planner is tested independently. Any forced exclusion
+    is explicitly a manipulated diagnostic, never learned sparse support.
+    """
+    if model.training:
+        raise ValueError("Conditional trained-control attribution requires evaluation mode")
+    organizer = getattr(model.core.backend, "organizer", None)
+    if organizer is None or not getattr(organizer, "faithful_controls", False):
+        return {"available": False, "reason": "Checkpoint has no membership-local collective controls"}, {}
+    device = next(model.parameters()).device
+    sensors, _, _, _, _ = sensor_panel(raw_sample)
+    with torch.no_grad(), _NativeRebuildCapture(model) as capture:
+        model(**native_arguments(model, sample, sensors, device))
+    state = capture.states[0]
+    encoded, modules = capture.input_states[0]
+    tau = "QM"
+    admission = state.strategy_data["typed_admission"][tau]
+    groups = torch.nonzero(admission[0] > 0, as_tuple=False).flatten().tolist()
+    selected = None
+    for group in groups:
+        for kind in ("M", "E"):
+            member = state.control_memberships[tau][kind][0, group]
+            omitted = torch.nonzero(state.source_valid[kind][0] & (member == 0), as_tuple=False).flatten()
+            admitted = torch.nonzero(state.source_valid[kind][0] & (member > 0), as_tuple=False).flatten()
+            if omitted.numel() and admitted.numel():
+                selected = group, kind, int(omitted[0]), int(admitted[0]), False
+                break
+        if selected is not None:
+            break
+    if selected is None:
+        group = groups[0]
+        kind = "M" if int(state.source_valid["M"][0].sum()) >= 2 else "E"
+        sources = torch.nonzero(state.source_valid[kind][0], as_tuple=False).flatten()
+        selected = group, kind, int(sources[0]), int(sources[1]), True
+    group, kind, excluded, admitted, manipulated = selected
+    members = {route: {donor: value.detach().clone() for donor, value in donors.items()}
+               for route, donors in state.control_memberships.items()}
+    if manipulated:
+        members[tau][kind][0, group, excluded] = 0
+    fixed = replace(state, control_memberships=members)
+    m = modules.detach().clone().requires_grad_()
+    e = encoded.env_tokens.detach().clone().requires_grad_()
+
+    def vector(module_content, environment_content):
+        live = replace(encoded, env_tokens=environment_content)
+        return organizer.recompute_controls(fixed, live, module_content)[tau][0, group]
+
+    jac_m, jac_e = torch.autograd.functional.jacobian(vector, (m, e), vectorize=False)
+    jacobian = jac_m if kind == "M" else jac_e
+    per_source_norm = jacobian[:, 0].square().sum((0, 2)).sqrt()
+    # Rebuild the richer planner using the same actual content. For an M
+    # donor, read a DIFFERENT target source logit: the derivative can then
+    # arrive through planning summaries, not that donor's direct token slot.
+    refreshed = organizer.prepare(replace(encoded, env_tokens=e), m, phase=0, capture_topology=True)
+    target_kind = kind
+    planning_scalar = refreshed.strategy_data["all_source_logits"][tau][target_kind][0][group, admitted]
+    source = m if kind == "M" else e
+    planning_grad = torch.autograd.grad(planning_scalar, source, allow_unused=True)[0]
+    planning_norm = 0. if planning_grad is None else float(planning_grad[0, excluded].norm())
+    arrays = {"source_coords_M": state.source_coords["M"].cpu().numpy(),
+              "source_coords_E": state.source_coords["E"].cpu().numpy(),
+              "conditional_control_jacobian_M": jac_m.detach().cpu().numpy(),
+              "conditional_control_jacobian_E": jac_e.detach().cpu().numpy(),
+              "conditional_source_derivative_norm": per_source_norm.detach().cpu().numpy(),
+              "actual_group_admission": admission.cpu().numpy()}
+    inventory = {}
+    for phase, phase_state in capture.states.items():
+        inventory[f"P{phase}"] = {"dependency_provenance": phase_state.dependency_provenance, "routes": {}}
+        for route, donors in phase_state.control_memberships.items():
+            active = phase_state.strategy_data["typed_admission"][route] > 0
+            inventory[f"P{phase}"]["routes"][route] = {}
+            for donor, member in donors.items():
+                valid = phase_state.source_valid[donor][:, None] & active[..., None]
+                inventory[f"P{phase}"]["routes"][route][donor] = {
+                    "admitted_control_donor_entries": int((valid & (member > 0)).sum()),
+                    "actually_excluded_control_donor_entries": int((valid & (member == 0)).sum())}
+                arrays[f"P{phase}/{route}/control_membership_{donor}"] = member.cpu().numpy()
+    payload = {"available": True, "case_id": str(raw_sample["case_id"]), "phase": "P0", "mechanism": tau,
+        "group": group, "donor_type": kind, "excluded_donor_slot": excluded, "admitted_donor_slot": admitted,
+        "exclusion_origin": "explicitly manipulated conditional diagnostic" if manipulated else "actual learned zero control membership",
+        "excluded_control_derivative_norm": float(per_source_norm[excluded]),
+        "admitted_control_derivative_norm": float(per_source_norm[admitted]),
+        "excluded_control_derivative_zero": bool(per_source_norm[excluded] == 0),
+        "admitted_control_derivative_nonzero": bool(per_source_norm[admitted] > 0),
+        "separate_rebuilt_planner_derivative_norm": planning_norm,
+        "separate_rebuilt_planner_derivative_nonzero": planning_norm > 0,
+        "planner_probe": "different admitted source logit at the same group, with the omitted donor's input content live",
+        "ancestry_and_actual_donor_inventory": inventory,
+        "charged_work": {"native_wrapper_calls": 1, "separate_organizer_rebuilds": 1,
+                         "control_vector_vjps": organizer.control_dim},
+        "limits": "Conditional token-content derivatives are computational attribution; P1/P2 states carry disclosed upstream ancestry; no physical-causality claim"}
+    if directory is not None:
+        directory = output_directory(directory)
+        np.savez_compressed(directory / "trained_control_locality.npz", **arrays)
+        (directory / "trained_control_locality.json").write_text(json.dumps(payload, indent=2, allow_nan=False) + "\n")
+    return payload, arrays
 
 
 def fine_core_invariance(backend, encoded, states, queries, features):
@@ -355,7 +782,14 @@ def evaluate(args):
     model, checkpoint, normalized, raw, dataset_path = load_native(args.checkpoint, args.dataset, device)
     output = output_directory(args.output_dir)
     rows = []
-    for index in low_high_indices(raw, count=args.cases):
+    if getattr(args, "case_ids", None) is not None:
+        requested = [str(value).zfill(4) for value in args.case_ids]
+        if len(set(requested)) != len(requested) or any(value not in raw.selected_case_ids for value in requested):
+            raise ValueError("Explicit topology cases must be unique members of the bound evaluation partition")
+        indices = [raw.selected_case_ids.index(value) for value in requested]
+    else:
+        indices = low_high_indices(raw, count=args.cases)
+    for index in indices:
         sample, reference = normalized[index], raw[index]
         directory = output / str(reference["case_id"])
         directory.mkdir(parents=True, exist_ok=True)
@@ -386,6 +820,7 @@ def parse_args(argv=None):
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--cases", type=int, default=2)
+    parser.add_argument("--case-ids", nargs="+", help="Explicit cases within the checkpoint-bound evaluation partition")
     parser.add_argument("--paths", nargs="+", choices=("heat", "geometry", "u_in"), default=["heat", "geometry"])
     parser.add_argument("--points", type=int, default=17)
     parser.add_argument("--amplitude", type=float, default=.2)

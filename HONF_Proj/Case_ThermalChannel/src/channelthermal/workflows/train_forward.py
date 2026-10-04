@@ -34,6 +34,7 @@ from channelthermal.model import ChannelThermalHONFModel
 from channelthermal.training.campaign import (
     HYPERGRAPH_ARCHITECTURES,
     CampaignMicrobatchLoader,
+    amend_structural_calibration,
     copy_matched_physical_initial_state,
     gpu_contention_sample,
     validate_campaign,
@@ -375,6 +376,7 @@ CHANNELTHERMAL_KEYS = {
     "material_param_dim",
     "heat_scale",
     "global_feature_schema",
+    "fixed_heat_scale",
     "legacy_active_fraction_reference_slots",
     "internal_prediction_mode",
     "fallback_internal_query_dim",
@@ -427,6 +429,17 @@ def build_model_config(payload: Dict[str, Any], dataset: GlobalChannelThermalDat
         channel_payload.get("default_num_interface_points"),
         dataset.n_interface_points or 64,
     )
+    if channel_payload.get("global_feature_schema") == "source_local_v3":
+        from channelthermal.input_adapter import fit_source_local_heat_scale
+
+        fitted_scale = fit_source_local_heat_scale(
+            dataset.path, dataset.selected_case_ids,
+            normalizer=dataset.normalizer if dataset.normalize_inputs else None,
+        ) * float(channel_payload.get("heat_scale", 1.0))
+        declared_scale = channel_payload.get("fixed_heat_scale")
+        if declared_scale is not None and not np.isclose(float(declared_scale), fitted_scale, rtol=1e-6, atol=1e-8):
+            raise ValueError("Source-local heat scale differs from its selected-training fit.")
+        channel_payload["fixed_heat_scale"] = fitted_scale
     return ChannelThermalHONFConfig.from_dict({"core_honf": core_payload, "channelthermal": channel_payload})
 
 
@@ -503,6 +516,8 @@ def run_from_config(
     if development is not None and getattr(args, "initialize_checkpoint", None):
         raise ValueError("Development requires fresh initialization; checkpoint transfer is a separate protocol.")
     campaign = validate_campaign(cfg, max_train_batches=getattr(args, "max_train_batches", None))
+    if campaign.get("structural_measure_policy_version") == 2 and not getattr(args, "resume_checkpoint", None):
+        raise ValueError("Reviewed structural measure policy 2 requires a saved continuation checkpoint; it cannot start fresh.")
     schedule_total_epochs = int(campaign.get("schedule_total_epochs", args.epochs or training_cfg.get("epochs", 200)))
     if campaign.get("matched_fresh_initialization") and getattr(args, "initialize_checkpoint", None):
         raise ValueError("The primary fresh campaign cannot initialize from a trained checkpoint.")
@@ -864,6 +879,7 @@ def run_from_config(
             model_config=model_config,
             dataset=train_dataset,
             dataset_config=dataset_cfg,
+            campaign_amendment=campaign_resume_amendment,
         )
         _validate_optimizer_resume_compatibility(checkpoint, optimizer_group_inventory)
         model.load_state_dict(strip_module_prefix(checkpoint["model_state_dict"]), strict=True)
@@ -890,6 +906,7 @@ def run_from_config(
         start_epoch = checkpoint_epoch + 1
         _restore_rng_state(checkpoint)
         model.campaign_training_state = copy.deepcopy(checkpoint.get("campaign_training_state") or {})
+        amend_structural_calibration(model.campaign_training_state, campaign_resume_amendment)
         if campaign_resume_amendment is not None:
             model.campaign_training_state["physical_loss_policy_amendment"] = {
                 **campaign_resume_amendment, "source_checkpoint": str(resume_checkpoint),

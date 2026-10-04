@@ -118,8 +118,30 @@ def sensor_panel(sample):
     return coordinates[indices].astype(np.float32), np.asarray(indices), names, np.arange(0, 12, 2), np.arange(1, 12, 2)
 
 
+def explicit_case_panel(dataset, cases, case_ids=None):
+    """Resolve an optional fixed input-selected panel inside bound validation."""
+    if case_ids is None:
+        return screen_indices(dataset, cases), None
+    requested = tuple(str(case_id) for case_id in case_ids)
+    if len(requested) != cases or len(set(requested)) != len(requested):
+        raise ValueError("Explicit inverse case IDs must be unique and their count must equal cases")
+    selected = {str(case_id): index for index, case_id in enumerate(dataset.selected_case_ids)}
+    missing = [case_id for case_id in requested if case_id not in selected]
+    if missing:
+        raise ValueError(f"Explicit inverse cases are outside checkpoint-bound selected validation: {missing}")
+    return [selected[case_id] for case_id in requested], requested
+
+
+def validate_case_panel_resume(previous, requested):
+    """A saved trajectory panel cannot silently change membership or order."""
+    saved = previous.get("requested_case_ids")
+    saved = tuple(str(case_id) for case_id in saved) if saved is not None else None
+    if saved != requested:
+        raise ValueError("Inverse evidence resume changed the explicit input-selected case panel")
+
+
 def native_heat_predictor(model, checkpoint, sample, sensors, observed_rows, held_rows, *,
-                          positions_override=None, context_override=None):
+                          positions_override=None, context_override=None, capture_topology=False):
     from channelthermal.response_control.contracts import DesignInput, RoleQuery
     from channelthermal.response_control.native import DifferentiableThermalOperator
     active = np.asarray(sample["structure"]["module_present"]) > .5
@@ -158,17 +180,49 @@ def native_heat_predictor(model, checkpoint, sample, sensors, observed_rows, hel
     observed_rows = torch.as_tensor(observed_rows, device=device)
     held_rows = torch.as_tensor(held_rows, device=device)
 
-    def predict(heat):
+    def predict(heat, fixed_topology=None):
+        from contextlib import nullcontext
+        from honf_forward_core.interface_fields.topology_probe import OrganizerTopologyProbe
         captured = []
         hook = model.register_forward_hook(lambda _module, _args, output: captured.append(output.get("prepared_state")))
+        organizer = getattr(model.core.backend, "organizer", None)
+        topology = OrganizerTopologyProbe(organizer, fixed_topology) if organizer is not None and (capture_topology or fixed_topology is not None) else nullcontext()
         try:
-            result = operator(DesignInput(positions, heat, valid), context, role_queries)
+            with topology as scope:
+                result = operator(DesignInput(positions, heat, valid), context, role_queries)
         finally:
             hook.remove()
         fields = result.role_values["fluid_fields"]
         solid = result.role_values["solid_temperature"].reshape(slots.size, local.shape[0], -1)
         groups = []
-        if captured and captured[0] is not None and hasattr(model.core.backend, "organizer"):
+        donor_receipts = []
+        topology_record = scope.record if isinstance(scope, OrganizerTopologyProbe) else None
+        if topology_record is not None:
+            # Module heat is the optimized coordinate. Environmental donors
+            # are retained separately as declared dependency/ancestry data;
+            # they are not re-labelled as independent physical heat slots.
+            for phase in (0, 1):
+                plan = topology_record.states.get(phase)
+                if plan is None:
+                    continue
+                for tau in plan.memberships:
+                    admission = plan.strategy_data.get("typed_admission", {}).get(tau, plan.admission)
+                    for group in torch.nonzero(admission[0] > 0, as_tuple=False).flatten():
+                        module_support = torch.zeros_like(valid)
+                        if tau in ("MM", "EM", "QM"):
+                            module_support |= plan.memberships[tau][0, group] > 0
+                        typed = plan.control_memberships.get(tau, {})
+                        if "M" in typed:
+                            module_support |= typed["M"][0, group] > 0
+                        support = torch.nonzero(module_support & valid, as_tuple=False).flatten()
+                        environmental = torch.nonzero(typed["E"][0, group] > 0, as_tuple=False).flatten() if "E" in typed else torch.empty(0, dtype=torch.long)
+                        donor_receipts.append({"phase": phase, "mechanism": tau, "group": int(group),
+                            "module_value_or_control_donors": support.cpu().tolist(),
+                            "environmental_control_donors": environmental.cpu().tolist(),
+                            "ancestry": plan.dependency_provenance.get("upstream_ancestry", "legacy phase-current state")})
+                        if 2 <= support.numel() < int(valid.sum()):
+                            groups.append(support.detach())
+        elif captured and captured[0] is not None and hasattr(model.core.backend, "organizer"):
             plan = captured[0].prepared.backend_state["hypergraph_plan"]
             for tau in ("MM", "EM", "QM"):
                 admission = plan.strategy_data.get("typed_admission", {}).get(tau, plan.admission)
@@ -179,18 +233,29 @@ def native_heat_predictor(model, checkpoint, sample, sensors, observed_rows, hel
         return {"observed": fields[observed_rows, temperature], "held": fields[held_rows, temperature],
                 "peaks": solid[..., 0].max(-1).values, "pressure": fields[-2, pressure] - fields[-1, pressure],
                 "fields": fields, "interface": result.role_values["interface"], "solid": solid[..., 0],
-                "groups": tuple(groups)}
+                "groups": tuple(groups), "topology_record": topology_record,
+                "control_donor_receipts": donor_receipts}
     return predict, valid
 
 
 def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", cases=12, starts=3,
                   steps=30, learning_rate=.05, seed=20261002, resume=False,
-                  evaluation_scope="auto", development_manifest=None):
+                  evaluation_scope="auto", development_manifest=None,
+                  update_policy="legacy_adam", modes=None, case_ids=None):
     from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer
     from channelthermal.evaluation.loading import load_model
     from thermal_development import evaluation_dataset_kwargs, resolve_evaluation_manifest, validate_generated_output
 
-    from honf_inverse_core.heat_inference import fixed_total_heat_inference, observation_identifiability
+    from honf_inverse_core.heat_inference import fixed_total_heat_inference, bounded_trust_heat_inference, observation_identifiability
+    if update_policy not in {"legacy_adam", "bounded_trust"}:
+        raise ValueError("Unknown heat-inference update policy")
+    modes = tuple(modes or ("joint", "graph", "ungrouped"))
+    if not modes or len(set(modes)) != len(modes) or any(mode not in {"joint", "graph", "ungrouped"} for mode in modes):
+        raise ValueError("Inverse modes must be unique supported modes")
+    if "ungrouped" in modes and ("graph" not in modes or modes.index("graph") > modes.index("ungrouped")):
+        raise ValueError("Size-matched random controls require a preceding graph trajectory")
+    if update_policy == "bounded_trust" and (cases > 4 or starts > 2 or steps > 10):
+        raise ValueError("Faithfulness inverse review is bounded to four cases, two starts and ten attempted steps")
     model, checkpoint = load_model(Path(checkpoint_path), torch.device(device))
     model.eval().requires_grad_(False)
     frozen_snapshot = snapshot_forward_state(model)
@@ -207,32 +272,37 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
     dataset = GlobalChannelThermalDataset(dataset_path, split="test", points_per_case=1,
         random_point_sampling=False, include_grid=True, normalizer=H5Normalizer(stats) if stats else None,
         **evaluation_dataset_kwargs(manifest, "test"))
+    panel_indices, requested_case_ids = explicit_case_panel(dataset, cases, case_ids)
     output_dir = validate_generated_output(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     cpu_threads = torch.get_num_threads() if torch.device(device).type == "cpu" else None
     if resume and (output_dir / "summary.json").exists():
         previous = json.loads((output_dir / "summary.json").read_text())
+        validate_case_panel_resume(previous, requested_case_ids)
         if (Path(previous["checkpoint"]).resolve() != Path(checkpoint_path).resolve()
                 or previous["checkpoint_epoch"] != checkpoint.get("epoch")
                 or previous.get("development_manifest_sha256") != subset_sha256
                 or previous.get("evaluation_scope", "auto") != evaluation_scope
                 or previous.get("cpu_threads", cpu_threads) != cpu_threads
+                or previous.get("update_policy", "legacy_adam") != update_policy
+                or tuple(previous.get("modes", ("joint", "graph", "ungrouped"))) != modes
                 or any(previous[key] != value for key, value in
                        (("seed", seed), ("planned_cases", cases), ("starts", starts),
                         ("steps", steps), ("learning_rate", learning_rate)))):
             raise ValueError("Inverse evidence resume changed checkpoint or evaluation budget")
     summaries = []
-    for index in screen_indices(dataset, cases):
+    for index in panel_indices:
         sample = dataset[index]
         case_id = str(sample["case_id"])
         sensors, grid_rows, names, observed_rows, held_rows = sensor_panel(sample)
-        native_predictor, active = native_heat_predictor(model, checkpoint, sample, sensors, observed_rows, held_rows)
+        native_predictor, active = native_heat_predictor(model, checkpoint, sample, sensors, observed_rows, held_rows,
+            capture_topology=update_policy == "bounded_trust")
         predictor_calls = 0
 
-        def predictor(heat, _native_predictor=native_predictor):
+        def predictor(heat, fixed_topology=None, _native_predictor=native_predictor):
             nonlocal predictor_calls
             predictor_calls += 1
-            return _native_predictor(heat)
+            return _native_predictor(heat, fixed_topology=fixed_topology)
         field_names = list(dataset.channel_order)
         targets = torch.as_tensor(sample["steady_field"].reshape(-1, len(field_names))[grid_rows, field_names.index("temperature")],
                                   device=device, dtype=torch.float32)
@@ -249,6 +319,10 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
                 "rank": identification["rank"], "free_dimensions": identification["free_dimensions"],
                 "condition_number": identification["condition_number"] if np.isfinite(identification["condition_number"]) else None,
                 "rank_tolerance": identification["rank_tolerance"], "trials": []}
+        info["shared_identifiability_charged_calls"] = {"forward": jacobian_predictor_calls,
+            "vjp": len(observed_rows) if identification["free_dimensions"] else 0,
+            "scope": "one ordinary wrapper forward and one reverse Jacobian row per observed sensor; shared across case trajectories"}
+        info["trajectory_charged_call_scope"] = "actual attempted trajectory wrapper forwards plus observation VJPs; shared identifiability separately reported"
         if resume and (case_dir / "summary.json").exists():
             previous = json.loads((case_dir / "summary.json").read_text())
             if any(previous[key] != info[key] for key in ("case_id", "checkpoint_epoch", "sensor_names", "observed_rows", "held_rows")):
@@ -267,11 +341,13 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
             fractions = initial.clone()
             if start:
                 draw = torch.rand(active_ids.numel(), generator=generator).to(device)
+                if update_policy == "bounded_trust":
+                    draw = draw + .2  # strictly interior, common input-seeded start
                 fractions[active_ids] = draw / draw.sum()
             block_stream = tuple(float(value) for value in torch.rand(steps, generator=generator))
             permutations = tuple(active_ids[torch.randperm(active_ids.numel(), generator=generator).to(device)] for _ in range(steps))
             graph_sizes = None
-            for mode in ("joint", "graph", "ungrouped"):
+            for mode in modes:
                 path = case_dir / f"start_{start:02d}_{mode}.npz"
                 existing = next((row for row in info["trials"] if row["start"] == start and row["mode"] == mode), None)
                 if resume and completed_trial(path, existing, steps=steps):
@@ -288,10 +364,12 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
                         raise ValueError(f"Preserved failed trial already exists: {failed}")
                     path.replace(failed)
                 info["trials"] = [row for row in info["trials"] if not (row["start"] == start and row["mode"] == mode)]
-                trail = fixed_total_heat_inference(predictor, targets[observed_rows], targets[held_rows], active,
+                inference = bounded_trust_heat_inference if update_policy == "bounded_trust" else fixed_total_heat_inference
+                trust_kwargs = {"proposal_predictor": lambda heat, reference: predictor(heat, fixed_topology=reference)} if update_policy == "bounded_trust" else {}
+                trail = inference(predictor, targets[observed_rows], targets[held_rows], active,
                     total, fractions, mode=mode, steps=steps, learning_rate=learning_rate,
                     block_stream=block_stream, permutation_stream=permutations,
-                    block_size_stream=graph_sizes if mode == "ungrouped" else None)
+                    block_size_stream=graph_sizes if mode == "ungrouped" else None, **trust_kwargs)
                 executed_trials.append({"start": start, "mode": mode})
                 sizes = tuple(int(group.numel()) for group in trail.selected_modules)
                 if mode == "graph":
@@ -313,10 +391,17 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
                     pressure_difference_residual=torch.stack(trail.pressure).cpu().numpy()
                         - (np.asarray(sample["steady_field"]).reshape(-1, len(field_names))[grid_rows[-2], field_names.index("p")]
                            - np.asarray(sample["steady_field"]).reshape(-1, len(field_names))[grid_rows[-1], field_names.index("p")]),
-                    elapsed_seconds=trail.elapsed_seconds)
+                    elapsed_seconds=trail.elapsed_seconds, charged_forward_calls=np.asarray(trail.forward_calls),
+                    charged_vjp_calls=np.asarray(trail.vjp_calls),
+                    charged_calls=np.asarray(trail.forward_calls) + np.asarray(trail.vjp_calls),
+                    trial_evaluations=np.asarray(trail.trial_evaluations))
                 info["trials"].append({"start": start, "mode": mode, "trail": str(path),
                     "execution_in_current_invocation": "newly_executed_trial",
                     "optimizer_steps": trail.optimizer_steps, "meaningful_graph_steps": trail.meaningful_graph_steps,
+                    "attempted_updates": trail.optimizer_steps, "accepted_steps": trail.accepted_steps,
+                    "rejected_steps": trail.rejected_steps, "step_receipts": trail.step_receipts,
+                    "charged_forward_calls": trail.forward_calls[-1] if trail.forward_calls else None,
+                    "charged_vjp_calls": trail.vjp_calls[-1] if trail.vjp_calls else None,
                     "full_joint_fallback_steps": trail.group_fallback_steps,
                     "selected_block_sizes": sizes,
                     "recorded_graph_size_match": sizes == graph_sizes if mode == "ungrouped" else None,
@@ -340,9 +425,12 @@ def evaluate_heat(checkpoint_path, *, dataset_path, output_dir, device="cpu", ca
             "checkpoint_epoch": checkpoint.get("epoch"), "seed": seed, "planned_cases": cases,
             "evaluation_scope": evaluation_scope, "development_manifest_sha256": subset_sha256,
             "available_test_case_ids": list(dataset.selected_case_ids),
+            "requested_case_ids": requested_case_ids,
             "starts": starts, "steps": steps, "learning_rate": learning_rate,
+            "modes": modes,
             "cpu_threads": cpu_threads,
-            "update_policy": "canonical physical-slot block reductions",
+            "update_policy": update_policy,
+            "proposal_policy": "observed-only; first/half-radius at most two trials; fixed discrete topology, live continuous physics; ordinary rebuild after acceptance" if update_policy == "bounded_trust" else "historical projected Adam",
             "forward_freeze_verification": {
                 "initial_loaded_state": initial_freeze_check,
                 "verified_cases_current_invocation": len(summaries),
@@ -372,6 +460,9 @@ def parse_args(argv=None):
     parser.add_argument("--resume-evaluation", action="store_true")
     parser.add_argument("--evaluation-scope", choices=("auto", "development", "formal-full"), default="auto")
     parser.add_argument("--development-manifest", type=Path)
+    parser.add_argument("--update-policy", choices=("legacy_adam", "bounded_trust"), default="legacy_adam")
+    parser.add_argument("--modes", nargs="+", choices=("joint", "graph", "ungrouped"))
+    parser.add_argument("--case-ids", nargs="+", help="Fixed input-selected IDs; every ID must belong to checkpoint-bound selected validation")
     args = parser.parse_args(argv)
     if min(args.cases, args.starts, args.steps, args.learning_rate, args.cpu_threads) <= 0:
         parser.error("case/start/step counts and learning rate must be positive")
@@ -385,4 +476,5 @@ if __name__ == "__main__":
     print(evaluate_heat(args.checkpoint, dataset_path=args.dataset, output_dir=args.output_dir,
         device=args.device, cases=args.cases, starts=args.starts, steps=args.steps, learning_rate=args.learning_rate,
         resume=args.resume_evaluation, evaluation_scope=args.evaluation_scope,
-        development_manifest=args.development_manifest))
+        development_manifest=args.development_manifest, update_policy=args.update_policy, modes=args.modes,
+        case_ids=args.case_ids))

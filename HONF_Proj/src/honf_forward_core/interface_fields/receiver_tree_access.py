@@ -8,7 +8,7 @@ from .adaptive_interaction_cover import endpoint_smoothstep
 def build_receiver_tree_geometry(trees, capacity):
     """Build fresh continuous boundaries and discrete indices for one phase.
 
-    Boundaries retain the historical unweighted child-coordinate means.
+    Each tree declares weighted or historical unweighted child centroids.
     Nothing here persists outside the caller-owned prepared state.
     """
     axes = []
@@ -40,14 +40,7 @@ def build_receiver_tree_geometry(trees, capacity):
                     parent[child] = index
                     isleft[child] = left_child
                     depth[child] = depth[index] + 1
-                anchor_axis = tree.universe.coordinates[:, node.split_axis]
-                bounds.append(
-                    (
-                        anchor_axis[list(tree.nodes[node.left].anchor_indices)].mean()
-                        + anchor_axis[list(tree.nodes[node.right].anchor_indices)].mean()
-                    )
-                    / 2
-                )
+                bounds.append(tree.split_boundary(index))
                 widths.append(tree.overlap_fraction * tree.universe.coordinate_scale[node.split_axis])
         boundary.append(torch.nn.functional.pad(torch.stack(bounds), (0, capacity - n)))
         overlap.append(torch.nn.functional.pad(torch.stack(widths), (0, capacity - n), value=1.0))

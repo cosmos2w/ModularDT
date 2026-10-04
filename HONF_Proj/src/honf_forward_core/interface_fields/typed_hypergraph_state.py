@@ -71,6 +71,10 @@ class TypedHypergraphState:
     source_lengths: dict[str, torch.Tensor] | None = None
     diagnostics: dict[str, torch.Tensor] = field(default_factory=dict)
     strategy_data: dict[str, Any] = field(default_factory=dict)
+    # Value donors alone do not disclose collective control information.
+    control_memberships: dict[str, dict[str, torch.Tensor]] = field(default_factory=dict)
+    control_presence: dict[str, dict[str, torch.Tensor]] = field(default_factory=dict)
+    dependency_provenance: dict[str, Any] = field(default_factory=dict)
 
     @property
     def group_count(self) -> int:
@@ -93,12 +97,18 @@ class TypedHypergraphState:
             "source_lengths": self.source_lengths,
             "group_admission": self.admission,
             "source_membership": self.memberships,
+            "value_membership": self.memberships,
+            "control_membership": self.control_memberships,
+            "control_presence": self.control_presence,
             "group_controls": self.controls,
             "group_centres": self.centres,
             "phase": self.phase,
+            "structural_measure_policy_version": self.strategy_data.get("structural_measure_policy_version"),
             "topology_semantics": "input-recomputed; freeze connectivity for a local inverse proposal",
-            "control_input_provenance": "pre-interaction source states, signed geometry, prescribed global context, phase",
+            "control_input_provenance": ", ".join(self.dependency_provenance["control_content"])
+                if self.dependency_provenance else "phase-current source states, signed geometry, declared global context, phase",
             "diagnostics": self.diagnostics,
+            "dependency_provenance": self.dependency_provenance,
         }
 
 
@@ -211,12 +221,113 @@ def structural_pressure(epoch: int) -> float:
     return min(1.0, max(0.0, (int(epoch) - 25) / 75.0))
 
 
+def _case_measure_fraction(values, measure, valid):
+    """Normalize within each eligible case before averaging cases."""
+    measure = torch.where(valid, torch.broadcast_to(measure, values.shape), torch.zeros_like(values))
+    axes = tuple(range(1, values.ndim))
+    total = measure.sum(axes)
+    integral = (torch.where(valid, values, torch.zeros_like(values)) * measure).sum(axes)
+    present = total > 0
+    fraction = integral / torch.where(present, total, torch.ones_like(total))
+    return fraction.sum() / present.to(fraction.dtype).sum().clamp_min(1)
+
+
+def _measure_structural_cost(accesses, state, incidence_coefficient, group_coefficient):
+    """Physical pair integral and dual-donor pooling occupancy, case balanced."""
+    version = state.strategy_data.get("structural_measure_policy_version", 2)
+    if isinstance(version, bool) or version not in (1, 2):
+        raise ValueError("Structural measure policy version must be 1 or 2")
+
+    def eligible_mean(terms, eligible):
+        if not terms:
+            return state.admission.sum() * 0
+        if version == 1:
+            # Preserve the exact e1-100 Tree-F3204 reduction. Version two is
+            # an explicit objective amendment, never an implicit reload fix.
+            return torch.stack(terms).mean()
+        flags = torch.stack(eligible).to(terms[0].dtype)
+        return (torch.stack(terms) * flags).sum() / flags.sum().clamp_min(1)
+
+    terms, pair_eligible, metrics = [], [], {}
+    for tau, access in accesses.items():
+        kind = SOURCE_TYPE[tau]
+        valid = access.diagnostics.get("pair_valid", state.source_valid[kind][:, None].expand_as(access.density))
+        receiver_mass = access.diagnostics.get("receiver_measures", state.strategy_data.get("receiver_measures", {}).get(tau))
+        if receiver_mass is None:
+            receiver_kind = "M" if tau in ("MM", "ME") else "E" if tau == "EM" else None
+            # Query counting measure is declared separately from environmental
+            # quadrature. Native random-query training uses equal query mass.
+            receiver_mass = (state.source_measures[receiver_kind] if receiver_kind is not None
+                             else access.density.new_ones(access.density.shape[:2]))
+        if receiver_mass.shape != access.density.shape[:2]:
+            raise ValueError("Structural receiver measures must align on [B,R]")
+        product_measure = receiver_mass[..., None] * state.source_measures[kind][:, None]
+        occupancy = -torch.expm1(-3.0 * access.density)
+        if access.near is not None:
+            occupancy = access.near + (1.0 - access.near) * occupancy
+        term = _case_measure_fraction(occupancy, product_measure, valid)
+        terms.append(term)
+        pair_eligible.append((valid & (product_measure > 0)).any())
+        metrics[f"{tau}_smooth_pair_fraction"] = term
+        metrics[f"{tau}_unique_pairs"] = access.support.sum()
+        metrics[f"{tau}_control_pool_rows"] = access.density.new_zeros((), dtype=torch.long)
+    anchor = state.admission
+    pair_cost = eligible_mean(terms, pair_eligible)
+
+    def incidence_fraction(tau, kind, member):
+        active = state.strategy_data.get("typed_admission", {}).get(tau, anchor)
+        valid_nodes = state.strategy_data.get("node_valid", {}).get(tau)
+        if valid_nodes is None:
+            trees = state.strategy_data.get("trees", {}).get(tau)
+            if trees is not None:
+                lengths = member.new_tensor([len(tree.nodes) for tree in trees], dtype=torch.long)
+                valid_nodes = torch.arange(member.shape[1], device=member.device)[None] < lengths[:, None]
+            else:
+                valid_nodes = torch.ones_like(active, dtype=torch.bool)
+        valid = state.source_valid[kind][:, None] & valid_nodes[..., None]
+        occupancy = -torch.expm1(-3.0 * member) * active[..., None]
+        mass = state.source_measures[kind][:, None]
+        # The organizer pools ALL candidate nodes before frontier selection.
+        # Count padded source slots that the packed reduction actually visits;
+        # padded node slots are appended only after these computations.
+        rows = valid_nodes.sum() * member.shape[-1]
+        return _case_measure_fraction(occupancy, mass, valid), rows, (valid & (mass > 0)).any()
+
+    value_fractions = [incidence_fraction(tau, SOURCE_TYPE[tau], member)
+                       for tau, member in state.memberships.items()]
+    donors = getattr(state, "control_memberships", {}) or state.strategy_data.get("control_memberships", {})
+    control_terms, control_eligible = [], []
+    for tau, typed_members in donors.items():
+        typed_terms, typed_eligible, rows = [], [], anchor.new_zeros((), dtype=torch.long)
+        for kind, member in typed_members.items():
+            term, count, present = incidence_fraction(tau, kind, member)
+            typed_terms.append(term)
+            typed_eligible.append(present)
+            rows = rows + count
+        if typed_terms:
+            control_terms.append(eligible_mean(typed_terms, typed_eligible))
+            control_eligible.append(torch.stack(typed_eligible).any())
+        metrics[f"{tau}_control_pool_rows"] = rows
+    value_incidence = eligible_mean([item[0] for item in value_fractions], [item[2] for item in value_fractions])
+    control_incidence = eligible_mean(control_terms, control_eligible) if control_terms else value_incidence
+    # The active-frontier penalty remains separate from physical access and
+    # control-pooling occupancy. Capacity is declared, never source row count.
+    groups = anchor.mean()
+    cost = pair_cost + float(incidence_coefficient) * control_incidence + float(group_coefficient) * groups
+    metrics.update(smooth_pair_cost=pair_cost, smooth_incidence_cost=control_incidence,
+                   smooth_value_incidence_cost=value_incidence, smooth_control_incidence_cost=control_incidence,
+                   smooth_group_cost=groups)
+    return cost, metrics
+
+
 def structural_cost(accesses: dict[str, TypedSourceAccess], state: TypedHypergraphState, *, incidence_coefficient: float = 0.05, group_coefficient: float = 0.01) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     """Balanced smooth work proxy; exact support counts stay separate.
 
     A single dense edge pays for dense pair occupancy, rather than earning
     sparsity merely by being called K=1. This is not an executor time model.
     """
+    if state.strategy_data.get("measure_consistent", False):
+        return _measure_structural_cost(accesses, state, incidence_coefficient, group_coefficient)
     terms = []
     metrics = {}
     for mechanism, access in accesses.items():

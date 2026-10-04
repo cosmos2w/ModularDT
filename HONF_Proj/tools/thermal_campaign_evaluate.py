@@ -633,7 +633,7 @@ def parse_args(argv=None):
                         help="Explicit fixed development selection; must match a checkpoint binding when present.")
     parser.add_argument("--quick-diagnostic", action="store_true",
                         help="Explicitly use a small panel instead of the entire selected development metric cohort.")
-    parser.add_argument("--stage", type=int, choices=(100, 500, 1000), required=True)
+    parser.add_argument("--stage", type=int, choices=tuple(range(100, 1001, 100)), required=True)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--panel-size", type=int, default=18)

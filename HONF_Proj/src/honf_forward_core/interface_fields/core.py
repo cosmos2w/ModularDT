@@ -354,6 +354,7 @@ class InterfaceFieldCore(nn.Module):
         self.receiver_fourier = FourierFeatures(None, int(config.query_fourier_frequencies))
         if config.forward_architecture in {
             "three_term_full_access_honf",
+            "direct_pairwise_control_honf",
             *CAMPAIGN_ARCHITECTURES,
             "adaptive_interaction_cover_honf",
             "fixed_group_pairwise_honf",
@@ -438,6 +439,17 @@ class InterfaceFieldCore(nn.Module):
                 activation_checkpointing=bool(options.activation_checkpointing),
                 options=options.hypergraph_options,
             )
+        elif config.forward_architecture == "direct_pairwise_control_honf":
+            from .direct_pairwise_control import DirectPairwiseControlField
+
+            settings = dict(options.hypergraph_options)
+            self.backend = DirectPairwiseControlField(
+                hidden, int(options.message_hidden_dim), heads, frequencies,
+                control_hidden_dim=settings.pop("pair_control_width", 80),
+                activation_checkpointing=bool(options.activation_checkpointing),
+            )
+            if settings:
+                raise ValueError(f"Unknown direct pair-control options: {sorted(settings)}")
         elif config.forward_architecture == "three_term_full_access_honf":
             self.backend = DensePairwiseField(
                 hidden,
@@ -1118,7 +1130,7 @@ class InterfaceFieldCore(nn.Module):
                 cover_tree_cache_hits=tree_cache_hits,
                 return_routing_maps=bool(return_routing_maps),
             )
-        elif self.config.forward_architecture in CAMPAIGN_ARCHITECTURES:
+        elif self.config.forward_architecture in {*CAMPAIGN_ARCHITECTURES, "direct_pairwise_control_honf"}:
             backend_state = self.backend.prepare(
                 encoded, module_states,
                 interaction_context=interaction_context,
@@ -1186,6 +1198,7 @@ class InterfaceFieldCore(nn.Module):
                 0
                 if self.config.forward_architecture in {
                     "three_term_full_access_honf",
+                    "direct_pairwise_control_honf",
                     *CAMPAIGN_ARCHITECTURES,
                     "adaptive_interaction_cover_honf",
                     "fixed_group_pairwise_honf",
@@ -1241,6 +1254,7 @@ class InterfaceFieldCore(nn.Module):
             })
         elif self.config.forward_architecture in {
             "adaptive_interaction_cover_honf",
+            "direct_pairwise_control_honf",
             *CAMPAIGN_ARCHITECTURES,
             "fixed_group_pairwise_honf",
             "group_control_pairwise_honf",
@@ -1473,9 +1487,10 @@ class InterfaceFieldCore(nn.Module):
                 if not values or not all(torch.is_tensor(value) for value in values):
                     continue
                 first = values[0]
-                if key.startswith("hypergraph_") and key.endswith((
+                if key.startswith(("hypergraph_", "pair_")) and key.endswith((
                     "_unique_pairs", "_eligible_pairs", "_repeated_paths_removed",
                     "_executed_rows", "_padded_rows", "_fine_calls",
+                    "_control_calls",
                     "_allocated_rows", "_executed_eligible_pairs", "_skipped_eligible_pairs",
                     "_attention_cells",
                     "_near_mandatory_pairs", "_near_full_pairs",

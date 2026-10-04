@@ -194,7 +194,8 @@ def phase_outputs(core):
 
     def capture(kind, output, prepared):
         state = getattr(prepared, "backend_state", {})
-        phase = f"P{int(state['hypergraph_phase'])}" if "hypergraph_phase" in state else "unlabelled"
+        phase_id = state.get("hypergraph_phase", state.get("pair_phase"))
+        phase = f"P{int(phase_id)}" if phase_id is not None else "unlabelled"
         index = counts.get((phase, kind), 0)
         counts[phase, kind] = index + 1
         attributes = ("module_states", "coarse_state") if kind == "prepare" else ("context",)
