@@ -733,6 +733,10 @@ def run_from_config(
         fieldnames.extend(("train_cases_per_second", "train_primary_field_queries_per_second", "schedule_total_epochs", "learning_rate"))
         fieldnames.extend(("campaign_structural_cost", "campaign_structural_weight", "campaign_shadow_calls"))
         fieldnames.extend(("response_loss", "response_coefficient", "response_examples", "response_wrapper_calls", "response_queries", "response_seconds"))
+        if campaign.get("heat_null_response") is not None:
+            fieldnames.extend(("heat_null_loss", "heat_null_coefficient", "heat_null_seconds",
+                "heat_null_eligible_train_cases", "heat_null_wrapper_calls",
+                "heat_null_primary_fluid_queries", "heat_null_role_queries"))
     if model_config.core_honf.forward_architecture == "task_trained_functional_coalescence_honf":
         detail_metric_keys = (
             "loss_functional_detail_complexity",
@@ -868,7 +872,6 @@ def run_from_config(
                 f"initialized_zero={len(initialization_inventory.get('initialized', []))}"
             )
     if resume_checkpoint is not None:
-        repair_metrics_csv_for_append(metrics_path)
         checkpoint = (development_checkpoint if development_checkpoint is not None else
                       load_trusted_checkpoint(resume_checkpoint, map_location=device))
         validate_development_resume(checkpoint, dataset_cfg, normalizer=train_dataset.normalizer)
@@ -922,6 +925,7 @@ def run_from_config(
             epoch=selection_epoch,
             total_epochs=None if selection_total is None else int(selection_total),
         )
+        fieldnames = repair_metrics_csv_for_append(metrics_path, fieldnames)
         print(f"[resume] loaded {resume_checkpoint}; continuing at epoch {start_epoch} / {epochs}")
 
     if development is not None:

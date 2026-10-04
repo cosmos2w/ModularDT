@@ -177,6 +177,19 @@ The conservative additional400 ceiling from first-screen allocation is
 6.59 Tree-F and0.91 Pair-F process hours, not exclusive GPU compute time.
 Merge co-resident allocation intervals instead of adding their GPU hours.
 
+The first continuation attempt exposed a telemetry integration fault: the
+seven new null-loss scalar columns were absent from the existing CSV schema.
+Pair-F completed101 train/validation but failed before recording that row or
+saving a checkpoint; Tree-F was interrupted during its11th microbatch to
+avoid the same failure. Both restart from their intact100 checkpoints.
+Retain attempted work separately: Pair150 visits/four updates/153,600 primary
+queries, and Tree80–88 visits/one completed optimizer boundary/81,920–90,112
+primary queries. Auxiliary work lost before persistence is unavailable, not
+zero. The logging repair declares the columns and extends the historical
+header after resume validation, retaining every old cell and a raw backup;
+old epochs receive blank auxiliary cells. It changes no objective or model
+state. Keep the failed logs/exits locally under the campaign evidence root.
+
 ## Resources and closeout
 
 Use physical GPUs1/2 and the ModularDT environment. Record actual devices,

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import csv
+import io
 import math
 from collections.abc import Iterable
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 from honf_forward_core.training.diagnostics import HONF_DIAGNOSTIC_KEYS
@@ -15,7 +17,7 @@ from honf_runtime.compat import read_json
 def write_metrics_row(path: Path, fieldnames: Iterable[str], row: dict[str, Any]) -> None:
     """Write metrics row."""
 
-    exists = path.exists()
+    exists = path.exists() and path.stat().st_size > 0
     with path.open("a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=list(fieldnames))
         if not exists:
@@ -23,17 +25,44 @@ def write_metrics_row(path: Path, fieldnames: Iterable[str], row: dict[str, Any]
         writer.writerow(row)
 
 
-def repair_metrics_csv_for_append(path: Path) -> None:
-    """Repair metrics csv for append."""
+def repair_metrics_csv_for_append(path: Path, fieldnames: Iterable[str] | None = None) -> list[str] | None:
+    """Repair append framing and extend a declared resume schema losslessly.
 
+    Preserve the historical column order and every stored cell. New objective
+    columns are blank for old epochs, and the original file is backed up before
+    an atomic schema replacement. Undeclared row fields still fail on append.
+    """
+
+    requested = list(fieldnames) if fieldnames is not None else None
     if not path.exists():
-        return
+        return requested
     raw = path.read_bytes()
     repaired = raw.replace(b"\x00", b"")
     if repaired and not repaired.endswith(b"\n"):
         repaired += b"\n"
+    if requested is not None and repaired:
+        rows = list(csv.reader(io.StringIO(repaired.decode("utf-8"))))
+        original = rows[0]
+        additions = [name for name in requested if name not in original]
+        actual = original + additions
+        if additions:
+            if len(set(original)) != len(original) or any(len(row) != len(original) for row in rows[1:]):
+                raise ValueError("Cannot extend malformed metrics CSV; preserve and inspect its historical rows.")
+            backup = path.with_name(path.name + ".before_schema_extension")
+            if not backup.exists():
+                backup.write_bytes(raw)
+            with NamedTemporaryFile("w", newline="", encoding="utf-8", dir=path.parent,
+                                    prefix=path.name + ".", delete=False) as stream:
+                temporary = Path(stream.name)
+                writer = csv.writer(stream)
+                writer.writerow(actual)
+                writer.writerows(row + [""] * len(additions) for row in rows[1:])
+            temporary.replace(path)
+            return actual
+        requested = actual
     if repaired != raw:
         path.write_bytes(repaired)
+    return requested
 
 
 def best_metrics_payload(row: dict[str, Any], best_total: float, best_field: float, best_temperature: float, best_predicted: float) -> dict[str, float]:
