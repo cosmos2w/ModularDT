@@ -550,8 +550,10 @@ def whole_wrapper_invariance(model, sample, raw_sample, *, checkpoint=None, dire
     if detailed:
         variants = ["permutation", "split_equal", "split_unequal", "split_multiple"]
     baseline_grad = None
+    baseline_gradient_unused = None
     if gradients:
-        _, _, baseline_grad, _, _ = evaluate_variant("original", differentiate=True, reference=baseline_capture)
+        _, _, baseline_grad, gradient_capture, _ = evaluate_variant("original", differentiate=True, reference=baseline_capture)
+        baseline_gradient_unused = gradient_capture.gradient_unused
     checks = {}
     for variant in variants:
         physical, representation, _, capture, builder = evaluate_variant(variant)
@@ -563,9 +565,15 @@ def whole_wrapper_invariance(model, sample, raw_sample, *, checkpoint=None, dire
                     "parent_map": builder.parents.cpu().tolist(), "child_mass_fractions": builder.fractions.cpu().tolist()}
         if gradients:
             try:
-                _, _, actual_grad, _, _ = evaluate_variant(variant, differentiate=True, reference=capture)
+                _, _, actual_grad, gradient_capture, _ = evaluate_variant(variant, differentiate=True, reference=capture)
                 measured["fixed_topology_first_gradients"] = {name: numerical_check(value, actual_grad[name], atol=1e-6)
                     for name, value in baseline_grad.items()}
+                measured["fixed_topology_first_gradient_usage"] = {
+                    name: {"baseline_autograd_unused": name in baseline_gradient_unused,
+                           "variant_autograd_unused": name in gradient_capture.gradient_unused,
+                           "both_used": name not in baseline_gradient_unused and name not in gradient_capture.gradient_unused}
+                    for name in baseline_grad
+                }
                 arrays.update({f"{variant}/gradient/{name}": value.detach().cpu().numpy() for name, value in actual_grad.items()})
             except FixedTopologyInvalid as error:
                 measured["fixed_topology_first_gradients"] = {"invalid": str(error), "passed": False}
@@ -589,6 +597,7 @@ def whole_wrapper_invariance(model, sample, raw_sample, *, checkpoint=None, dire
         "physical_output_units": ("checkpoint-owned native benchmark transform" if checkpoint is not None else "model output units; no checkpoint transform supplied"),
         "tolerance_policy": "Native physical outputs use maintained complete-wrapper atol2e-5/rtol2e-5; inherited fine-core atol2e-6 is also reported separately without concealing near-zero roundoff failures",
         "gradient_scope": "separately frozen native active topology for each representation; deterministic linear physical-output probe with child coordinate/feature gradients summed and mass gradients fraction-weighted",
+        "gradient_unused_policy": "Unused inputs are represented as zero arrays for numerical comparison; per-direction autograd usage is recorded separately, and unused-zero agreement is not evidence of a used derivative path",
         "reference_limit": "same-checkpoint numerical equivalence; no physical response solve or candidate design reference"}
     if directory is not None:
         directory = output_directory(directory)

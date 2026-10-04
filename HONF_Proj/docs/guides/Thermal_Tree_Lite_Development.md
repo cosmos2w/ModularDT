@@ -120,6 +120,8 @@ value/control/planner dependencies, trained organizer interventions, native
 fields/interfaces/material residuals, heat-null increments and auxiliary
 gradient scale. Positive held-geometry heat-response labels remain absent;
 do not substitute null evidence or launch the proposed new solves.
+Whole-rebuild gradient checks record each input direction's autograd usage.
+Report unused-zero agreement separately from agreement on used derivative paths.
 
 For the bounded prescribed-context test, `FixedReferenceAccessReplay` accepts
 `normal_fixed_actions`: it holds saved normal density, access and full pair
