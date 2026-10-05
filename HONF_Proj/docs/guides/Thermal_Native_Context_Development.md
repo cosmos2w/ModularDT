@@ -14,6 +14,8 @@ Fresh initialization matches materialized native coarse/local/fine/head tensors 
 
 Tree-C retains projected control execution and `local_context_shadow_v1`. Global-C uses ordinary task gradients for its differentiable global controls. Neither repeats the complete physical wrapper to obtain an organizer gradient. Phase-current controls and physical states are rebuilt after changed heat, geometry or context.
 
+The configured `predicted_consistency_weight=0.05` remains for compatibility, but the additional predicted-consistency loss is zero in pure predicted-port mode. The wrapper emits the auxiliary replay outputs only in teacher/mixed modes; the loss returns zero when those outputs are absent. A nonzero logged scheduled coefficient therefore does not establish an active loss or gradient contribution. The primary internal/interface losses already use predicted ports. Port-global consistency and the separately scheduled TRAIN0348 response are distinct components; report their actual telemetry separately.
+
 ## Data, horizon and review gates
 
 Use the existing [fixed development protocol](Thermal_Model_Development_Protocol.md) and `/data/wanglz/ModularDT/thermal_development/fixed25_v1/manifest.json`: 150 selected training cases, 22 canonical validation cases, selection seed 20261004, initialization/query seed zero, FP32, Q1024, effective batch 48 and one absolute 1,000-epoch schedule. Fit global normalization on the selected training cases only; preserve Stage-A's checkpoint-owned normalization. The four detailed representatives are 0277, 0291, 0294 and 0687. Validation M=3/5/7/10 counts are 6/6/6/4; selected training has only four cases in each of these categories. This repeatedly exposed development panel is not an independent test population.
