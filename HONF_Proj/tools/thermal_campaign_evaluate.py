@@ -298,6 +298,10 @@ def capture_case_phases(args, index, graph_panel):
             and (getattr(args, "resolved_phase_graph_scope", "all") == "all" or index in graph_panel))
 
 
+def capture_native_context_arrays(args, index, graph_panel):
+    return index in graph_panel and not getattr(args, "native_context_scalars_only", False)
+
+
 def intervention_effectiveness(anchor_changes, native_comparison=None):
     """Prefer actual native streams; separately label the P2 anchor diagnostic."""
     anchor_effective = any(anchor_changes.values())
@@ -473,7 +477,7 @@ def evaluate(args):
             if getattr(args, "native_context_evidence", False):
                 from honf_forward_core.evaluation.native_context_evidence import NativeContextEvidence
                 native_context_capture = NativeContextEvidence(model.core,
-                    save_arrays=index in graph_panel)
+                    save_arrays=capture_native_context_arrays(args, index, graph_panel))
             reference_capture = None
             if name in REFERENCE_ACTIONS:
                 from honf_forward_core.evaluation.reference_access import (
@@ -670,7 +674,8 @@ def parse_args(argv=None):
                         help="Explicit fixed development selection; must match a checkpoint binding when present.")
     parser.add_argument("--quick-diagnostic", action="store_true",
                         help="Explicitly use a small panel instead of the entire selected development metric cohort.")
-    parser.add_argument("--stage", type=int, choices=tuple(range(100, 1001, 100)), required=True)
+    parser.add_argument("--stage", type=int, choices=(*range(100, 1001, 100), 5000), required=True,
+                        help="Monitoring stage label; 5000 explicitly supports completed formal runs.")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--panel-size", type=int, default=18)
@@ -696,6 +701,8 @@ def parse_args(argv=None):
                         help="Stream scalar plan/action/support statistics from the same native predictions")
     parser.add_argument("--native-context-evidence", action="store_true",
                         help="Observe native coarse/local paths once; scalar all-case evidence and representative arrays")
+    parser.add_argument("--native-context-scalars-only", action="store_true",
+                        help="With native context evidence, keep all-case scalar summaries without representative context arrays")
     parser.add_argument("--action-signature-tolerance", type=float, default=1e-6)
     parser.add_argument("--action-signature-capacity", type=int, default=4096,
                         help="Bound transient complete action signatures per phase/route; saturation is a lower bound")
@@ -707,6 +714,8 @@ def parse_args(argv=None):
     args.fixed_summary_train_cases_explicit = any(value == "--fixed-summary-train-cases" or value.startswith("--fixed-summary-train-cases=") for value in command_line)
     if args.dataset_scope == "formal-full" and args.development_manifest is not None:
         parser.error("formal-full cannot also request --development-manifest")
+    if args.native_context_scalars_only and not args.native_context_evidence:
+        parser.error("--native-context-scalars-only requires --native-context-evidence")
     if min(args.panel_size, args.graph_panel_size, args.query_batch_size,
            args.fixed_summary_train_cases, args.executor_receiver_chunk) < 1:
         parser.error("panel and query sizes must be positive")

@@ -257,7 +257,8 @@ def test_fixed_campaign_screen_preserves_case_identity_across_index_order(tmp_pa
         evaluation.fixed_screen_indices(dataset, panel, 3)
 
 
-def test_reference_only_mature_stage_keeps_four_cases_and_normal_screen_keeps_all90(tmp_path):
+@pytest.mark.parametrize("stage", [500, 1000, 5000])
+def test_reference_only_mature_stage_keeps_four_cases_and_normal_screen_keeps_all90(tmp_path, stage):
     class Dataset:
         split = "test"
         selected_case_ids = tuple(f"{index:04d}" for index in range(90))
@@ -267,7 +268,7 @@ def test_reference_only_mature_stage_keeps_four_cases_and_normal_screen_keeps_al
 
     panel = tmp_path / "panel.json"
     panel.write_text(json.dumps({"split": "test", "case_ids": ["0003", "0001", "0007", "0009"]}))
-    args = SimpleNamespace(stage=500, panel_config=panel, panel_size=4,
+    args = SimpleNamespace(stage=stage, panel_config=panel, panel_size=4,
         interventions=["geometry_reference_actions", "full_access_fixed_controls"])
     assert evaluation.evaluation_indices(Dataset(), args) == [3, 1, 7, 9]
     args.interventions = ["normal"]
@@ -276,6 +277,59 @@ def test_reference_only_mature_stage_keeps_four_cases_and_normal_screen_keeps_al
     assert evaluation.evaluation_indices(Dataset(), args) == list(range(90))
     args.stage = 100
     assert evaluation.evaluation_indices(Dataset(), args) == [3, 1, 7, 9]
+
+
+def test_formal5000_cli_keeps_original90_and_canonical89_without_inference(tmp_path):
+    command = ["--checkpoint", "selected.pt", "--output-dir", str(tmp_path),
+               "--stage", "5000", "--evaluation-scope", "formal-full",
+               "--save-field-arrays", "panel", "--phase-graph-scope", "panel"]
+    args = evaluation.parse_args(command)
+    evaluation.configure_evaluation_scope(args, None)
+    indices = evaluation.evaluation_indices(list(range(90)), args)
+    assert indices == list(range(90))
+    assert sum(evaluation.save_case_arrays(args, index, {1, 4, 8, 20}) for index in indices) == 4
+    one = evaluation.physical_errors(np.ones(1), np.zeros(1))
+    ids = ["0273", *(f"{index:04d}" for index in range(1, 90))]
+    rows = [{"case_id": identity, "intervention": "normal", "metrics": {"T": one}} for identity in ids]
+    evaluation.write_summary(tmp_path, rows, Path("selected.pt"), {"epoch": 5000},
+                             args, Path("dataset.h5"), indices, ["T"])
+    summary = json.loads((tmp_path / "summary.json").read_text())
+    assert summary["requested_stage"] == summary["checkpoint_epoch"] == 5000
+    assert summary["completed_normal_cases"] == 90 and summary["dataset_scope"] == "formal-full"
+    assert summary["primary_excluding_0273"]["T"]["cases"] == 89
+    assert summary["compatibility_including_0273"]["T"]["cases"] == 90
+    with pytest.raises(SystemExit):
+        evaluation.parse_args([*command, "--development-manifest", "quarter.json"])
+    with pytest.raises(SystemExit):
+        evaluation.parse_args([*command, "--stage", "1500"])
+
+
+def test_native_context_scalar_only_keeps_metric_cohort_and_disables_panel_archives(tmp_path):
+    from honf_forward_core.evaluation.native_context_evidence import NativeContextEvidence
+    from honf_forward_core.interface_fields.common import SharedInterfaceContext
+
+    command = ["--checkpoint", "selected.pt", "--output-dir", str(tmp_path), "--stage", "500",
+               "--save-field-arrays", "none", "--native-context-evidence"]
+    args = evaluation.parse_args(command)
+    assert not args.native_context_scalars_only
+    panel = {1, 4, 8, 20}
+    assert sum(evaluation.capture_native_context_arrays(args, index, panel) for index in range(22)) == 4
+    args = evaluation.parse_args([*command, "--native-context-scalars-only"])
+    evaluation.configure_evaluation_scope(args, {"manifest_sha256": "a" * 64})
+    assert evaluation.evaluation_indices(list(range(22)), args) == list(range(22))
+    assert not any(evaluation.save_case_arrays(args, index, panel) for index in range(22))
+    # Constructor-only sentinel: no model initialization or physical forward.
+    common = object.__new__(SharedInterfaceContext)
+    common.__dict__["coarse_module_source"] = "module_states"
+    core = SimpleNamespace(training=False, common=common)
+    for index in range(22):
+        recorder = NativeContextEvidence(core,
+            save_arrays=evaluation.capture_native_context_arrays(args, index, panel))
+        recorder._save("physical_rows", torch.ones(2))
+        assert not recorder.save_arrays and recorder.arrays == {}
+    with pytest.raises(SystemExit):
+        evaluation.parse_args(["--checkpoint", "selected.pt", "--output-dir", str(tmp_path),
+                               "--stage", "500", "--native-context-scalars-only"])
 
 
 def test_native_reference_effectiveness_is_not_overwritten_by_missing_anchor_baseline():
