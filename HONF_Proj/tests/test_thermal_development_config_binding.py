@@ -48,6 +48,7 @@ def test_explicit_normalization_policy_composes_into_case_and_effective_dataset(
     path = tmp_path / "profile.json"
     path.write_text(json.dumps(profile))
     bundle = load_config_bundle(path)
+    create_plugin().validate_config(bundle)
     assert bundle.case["dataset"]["normalization_policy"] == policy
     assert bundle.effective["dataset"]["normalization_policy"] == policy
 

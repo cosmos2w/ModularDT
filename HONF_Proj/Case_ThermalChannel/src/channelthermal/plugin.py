@@ -28,7 +28,7 @@ DATASET_KEYS = {
     "module_count_bucket_size_multiplier",
     "normalize_inputs", "normalize_targets", "random_point_sampling",
     "require_converged", "allow_train_as_validation",
-    "development_manifest", "development_manifest_sha256",
+    "development_manifest", "development_manifest_sha256", "normalization_policy",
 }
 LOCAL_COUPLING_KEYS = {
     "use_local_surrogate", "freeze_local_surrogate", "local_surrogate_checkpoint",
