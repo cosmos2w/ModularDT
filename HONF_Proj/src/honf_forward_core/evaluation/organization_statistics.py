@@ -103,6 +103,18 @@ class TypedOrganizationStatistics(AbstractContextManager):
                 "additional_age": tensor.additional_age, "sparse_fraction": tensor.sparse_fraction,
                 "admission": tensor.admission.detach().cpu().tolist(),
                 "scope": "actual tensor control-information groups; positive support at soft/blended ages; dense physical values"}
+            if hasattr(self.backend, "tensor_query_interaction"):
+                self.phases[phase]["query_interaction"] = {
+                    "mode": self.backend.tensor_query_interaction.mode,
+                    "corrected_routes": ["QM", "QE"], "unchanged_routes": ["MM", "ME", "EM"],
+                    "reference_rows": int(tensor.reference_weights["Q"].shape[-1]),
+                    "positive_reference_rows": int((tensor.reference_weights["Q"] > 0).sum()),
+                    "reference_origin": tensor.reference_origin,
+                    "mean_access": tensor.mean_access.detach().cpu().tolist(),
+                    "mean_density": {kind: values.detach().cpu().tolist()
+                                     for kind, values in tensor.mean_density.items()},
+                    "semantics": "actual C/S/R/I before residual tanh; signed compensation is not donor admission",
+                }
             return
         routes = {}
         for tau, membership in plan.memberships.items():
@@ -167,7 +179,10 @@ class TypedOrganizationStatistics(AbstractContextManager):
         mass_count = mass_pairs.sum() * projected.shape[-1]
         projected_sum = (projected.double().square() * mass_pairs[..., None]).sum()
         gain = projected[..., projected.shape[-1] // 2:] if tau == "QE" else projected
-        gain_sum = ((1. + torch.tanh(gain.double())).square() * mass_pairs[..., None]).sum()
+        executed_contrast = getattr(value, "executed_gain_contrast", None)
+        effective_gain = ((1 + value.base_gain_tanh) + executed_contrast if executed_contrast is not None
+                          else 1. + torch.tanh(gain.double()))
+        gain_sum = (effective_gain.double().square() * mass_pairs[..., None]).sum()
         gain_count = mass_pairs.sum() * gain.shape[-1]
         # Count every actual receiver row, including separately charged repeated
         # reads. Native support percentage uses eligible pairs, not padding.
@@ -190,6 +205,25 @@ class TypedOrganizationStatistics(AbstractContextManager):
         row["access_calls"] += 1
         for name, number in zip(names, packed):
             row[name] += number
+        if getattr(value, "query_components", None) is not None:
+            query = row.setdefault("query_interaction", {"square_sums": {}, "scalar_measure_sum": 0.,
+                "effective_gain_contrast_square_sum": 0., "gain_scalar_measure_sum": 0.,
+                "semantics": "physical receiver/source product measure and native eligibility; C/S/R/I before residual tanh; I_used and preactivation are executed intervention values"})
+            for name in ("C", "S", "R", "I", "I_used"):
+                component = value.query_components[name]
+                square = float((component.double().square() * mass_pairs[..., None]).sum())
+                query["square_sums"][name] = query["square_sums"].get(name, 0.) + square
+            for name, component in (("preactivation", value.preactivation),
+                                    ("residual_post_tanh", value.residual_projected)):
+                square = float((component.double().square() * mass_pairs[..., None]).sum())
+                query["square_sums"][name] = query["square_sums"].get(name, 0.) + square
+            base_gain = value.base_projected
+            if tau == "QE": base_gain = base_gain[..., base_gain.shape[-1] // 2:]
+            contrast = (executed_contrast.double() if executed_contrast is not None else
+                        torch.tanh(gain.double()) - torch.tanh(base_gain.double()))
+            query["effective_gain_contrast_square_sum"] += float((contrast.square() * mass_pairs[..., None]).sum())
+            query["gain_scalar_measure_sum"] += float(gain_count)
+            query["scalar_measure_sum"] += float(mass_count)
         representation = "projected" if hasattr(value, "projected") else "full_control"
         row[f"{representation}_numerical_pair_rows"] = row.get(f"{representation}_numerical_pair_rows", 0) + value.weight.numel()
         row["projected_action_channels"] = projected.shape[-1]
@@ -293,6 +327,14 @@ class TypedOrganizationStatistics(AbstractContextManager):
             row["projected_action_semantics"] = "affine score then gain channels" if key.endswith("QE") else "affine gain"
             row["native_support_fraction"] = row["positive_value_pairs"] / row["eligible_pairs"] if row["eligible_pairs"] else None
             row["positive_measure_support_fraction"] = row["positive_measure_value_pairs"] / row["positive_measure_eligible_pairs"] if row["positive_measure_eligible_pairs"] else None
+            if "query_interaction" in row:
+                query = row["query_interaction"]
+                query["rms"] = {name: math.sqrt(square / query["scalar_measure_sum"])
+                                if query["scalar_measure_sum"] else None
+                                for name, square in query["square_sums"].items()}
+                query["effective_gain_contrast_rms"] = math.sqrt(
+                    query["effective_gain_contrast_square_sum"] / query["gain_scalar_measure_sum"]
+                ) if query["gain_scalar_measure_sum"] else None
         return result
 
 

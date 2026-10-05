@@ -227,9 +227,12 @@ def main() -> int:
     if (Path(run_dir) / "run_manifest.json").exists():
         checkpoint_inventory = RunStore.finalize_artifacts(Path(run_dir))
         metric_summary = RunStore.metric_summary(Path(run_dir))
+        current_status = json.loads((Path(run_dir) / "run_manifest.json").read_text()).get("status")
+        final_status = (current_status if status == 0 and current_status == "stopped_resumable"
+                        else "completed" if status == 0 else "failed")
         RunStore.update_status(
             Path(run_dir),
-            "completed" if status == 0 else "failed",
+            final_status,
             exit_code=status,
             checkpoints=checkpoint_inventory,
             **metric_summary,

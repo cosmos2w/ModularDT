@@ -86,8 +86,10 @@ def _diagnostic_parameter_group(name: str) -> str:
 
 def _diagnostic_detail_group(name: str) -> str | None:
     """Split sparse learning from its bypasses; retain historical backend totals."""
-    residual_prefix = "core.backend.tensor_residual."
-    if name.startswith(residual_prefix):
+    residual_prefix = next((prefix for prefix in (
+        "core.backend.tensor_residual.", "core.backend.tensor_query_interaction.",
+    ) if name.startswith(prefix)), None)
+    if residual_prefix is not None:
         block = name.removeprefix(residual_prefix).split(".", 1)[0]
         if block == "gamma":
             return "residual_projection"
@@ -97,7 +99,7 @@ def _diagnostic_detail_group(name: str) -> str | None:
             return "residual_admission"
         if block in {"source_descriptor", "donor_scorer"}:
             return "residual_donor"
-        if block in {"receiver_key", "group_key"}:
+        if block in {"receiver_key", "group_key", "relative_score"}:
             return "residual_receiver"
     if name.startswith("core.common.coarse"):
         return "coarse"

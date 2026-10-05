@@ -85,6 +85,7 @@ from channelthermal.training.reporting import (
     save_global_loss_plots,
     write_metrics_row,
 )
+from channelthermal.training.stop_request import acknowledge_stop, stop_requested
 from channelthermal.training_tools.losses import channelthermal_field_mse
 from honf_forward_core.config import ROUTING_TYPED_TEMPERATURE_NAMES
 from honf_forward_core.training.diagnostics import (
@@ -535,6 +536,8 @@ def run_from_config(
             and cfg.get("model", {}).get("core_honf", {}).get("forward_architecture") != "native_context_tree_honf"):
         raise ValueError("Reviewed structural measure policy 2 requires a saved continuation checkpoint; it cannot start fresh.")
     schedule_total_epochs = int(campaign.get("schedule_total_epochs", args.epochs or training_cfg.get("epochs", 200)))
+    interface_fit = bool(campaign.get("interface_fit"))
+    physical_epoch_offset = int(campaign.get("interface_fit", {}).get("backbone_epoch", 0))
     if campaign.get("matched_fresh_initialization") and getattr(args, "initialize_checkpoint", None):
         raise ValueError("The primary fresh campaign cannot initialize from a trained checkpoint.")
     ignored_organizer_keys = [
@@ -789,6 +792,8 @@ def run_from_config(
             fieldnames.extend(("heat_null_loss", "heat_null_coefficient", "heat_null_seconds",
                 "heat_null_eligible_train_cases", "heat_null_wrapper_calls",
                 "heat_null_primary_fluid_queries", "heat_null_role_queries"))
+        if interface_fit:
+            fieldnames.extend(("fit_epoch", "frozen_backbone_epoch", "physical_objective_epoch"))
     if model_config.core_honf.forward_architecture == "task_trained_functional_coalescence_honf":
         detail_metric_keys = (
             "loss_functional_detail_complexity",
@@ -937,6 +942,9 @@ def run_from_config(
             campaign_amendment=campaign_resume_amendment,
         )
         _validate_optimizer_resume_compatibility(checkpoint, optimizer_group_inventory)
+        if interface_fit:
+            from channelthermal.training.interface_fit import validate_interface_fit_resume
+            validate_interface_fit_resume(checkpoint, model, campaign)
         model.load_state_dict(strip_module_prefix(checkpoint["model_state_dict"]), strict=True)
         optimizer_group_inventory = refresh_optimizer_group_inventory(
             model,
@@ -991,17 +999,22 @@ def run_from_config(
     if development is not None:
         write_json(run_dir / "development_subset.json", development)
     total_train_seconds = 0.0
-    response_callback = NativeCampaignResponse(model, train_dataset, dataset_cfg, campaign) if campaign and epochs > 100 else None
+    response_callback = NativeCampaignResponse(model, train_dataset, dataset_cfg, campaign) if campaign and epochs + physical_epoch_offset > 100 else None
     total_val_seconds = 0.0
     peak_cuda_memory_mb = 0.0
+    last_completed_epoch = start_epoch - 1
+    stopped_resumable = False
     for epoch in range(start_epoch, epochs + 1):
+        physical_epoch = epoch + physical_epoch_offset
         model.set_training_progress(epoch=epoch, total_epochs=schedule_total_epochs)
+        if interface_fit:
+            model.campaign_training_state["interface_fit_attachment"]["fit_epoch"] = epoch
         train_dataset.set_epoch(epoch)
         if hasattr(train_loader.batch_sampler, "set_epoch"):
             train_loader.batch_sampler.set_epoch(epoch)
-        effective_mode, effective_ratio = effective_port_condition_settings(epoch, training_cfg)
+        effective_mode, effective_ratio = effective_port_condition_settings(physical_epoch, training_cfg)
         eff_internal, eff_interface = effective_local_loss_weights(loss_cfg, effective_mode, effective_ratio)
-        pred_consistency_weight = predicted_consistency_weight_for_epoch(epoch, loss_cfg)
+        pred_consistency_weight = predicted_consistency_weight_for_epoch(physical_epoch, loss_cfg)
         gradient_clip_norm = float(training_cfg.get("gradient_clip_norm", 0.0) or 0.0)
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats(device)
@@ -1010,7 +1023,7 @@ def run_from_config(
         train_metrics = run_epoch(
             model,
             CampaignMicrobatchLoader(train_loader, int(campaign["microbatch_size"]),
-                native_loss_denominators=native_denominators_enabled(campaign, epoch)) if campaign.get("microbatch_size") else train_loader,
+                native_loss_denominators=native_denominators_enabled(campaign, physical_epoch)) if campaign.get("microbatch_size") else train_loader,
             device,
             loss_cfg,
             optimizer=optimizer,
@@ -1030,7 +1043,7 @@ def run_from_config(
             case_weighted_metrics=bool(campaign),
             forward_function=(lambda **inputs: hard_value_soft_hypergraph_forward(model, gradient_policy=campaign.get("organizer_gradient_policy", "whole_wrapper_shadow_v1"), **inputs)) if campaign and model_config.core_honf.forward_architecture in HYPERGRAPH_ARCHITECTURES else None,
             campaign_config=campaign,
-            absolute_epoch=epoch,
+            absolute_epoch=physical_epoch,
             response_callback=response_callback,
         )
         train_wall_seconds = time.perf_counter() - train_started
@@ -1041,13 +1054,16 @@ def run_from_config(
                 schedule_total_epochs=float(schedule_total_epochs),
                 learning_rate=float(optimizer.param_groups[0]["lr"]),
             )
+            if interface_fit:
+                train_metrics.update(fit_epoch=epoch, frozen_backbone_epoch=physical_epoch_offset,
+                                     physical_objective_epoch=physical_epoch)
             with (run_dir / "epoch_telemetry.jsonl").open("a", encoding="utf-8") as telemetry:
                 telemetry.write(json.dumps({"epoch": epoch, "arm": campaign.get("arm"), "lineage": campaign,
                                             "train_seconds": train_wall_seconds, "coverage": {key: train_metrics[key] for key in coverage_keys},
                                             "gpu_before": gpu_before, "gpu_after": gpu_contention_sample(device) if campaign.get("gpu_telemetry") else None,
                                             "response": getattr(model, "campaign_last_response_metrics", None),
                                             "forward_work": getattr(model, "campaign_last_forward_work", None),
-                                            "active_physical_loss_policy": 2 if native_denominators_enabled(campaign, epoch) else 1,
+                                            "active_physical_loss_policy": 2 if native_denominators_enabled(campaign, physical_epoch) else 1,
                                             "calibration_state": copy.deepcopy(getattr(model, "campaign_training_state", {})),
                                             "development_subset": ({"manifest_sha256": development["manifest_sha256"],
                                                                     "train_cases": len(train_dataset),
@@ -1149,7 +1165,8 @@ def run_from_config(
             best_predicted = predicted_metric
             if bool(checkpoint_cfg.get("save_best_predicted", True)):
                 save_checkpoint(run_dir / "best_predicted_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_predicted, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
-        if should_save_latest_checkpoint(epoch, epochs, checkpoint_cfg):
+        stop_at_boundary = stop_requested(run_dir)
+        if stop_at_boundary or should_save_latest_checkpoint(epoch, epochs, checkpoint_cfg):
             save_checkpoint(run_dir / "latest_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
         if should_save_milestone_checkpoint(epoch, checkpoint_cfg):
             save_checkpoint(run_dir / f"epoch_{epoch:04d}_model.pt", model=model, model_config=model_config, train_config=cfg, dataset=train_dataset, epoch=epoch, best_metric=best_total, optimizer=optimizer, scaler=scaler, best_metrics=best_metrics_payload(row, best_total, best_field, best_temperature, best_predicted), optimizer_group_inventory=optimizer_group_inventory)
@@ -1164,6 +1181,12 @@ def run_from_config(
             f"val={row['val_loss_total']:.4e} val_field={row['val_field_mse']:.4e} "
             f"val_temp={row['val_temperature_mse']:.4e} val_pred={row['val_predicted_loss_total']:.4e}"
         )
+        last_completed_epoch = epoch
+        if stop_at_boundary:
+            acknowledge_stop(run_dir, epoch=epoch)
+            stopped_resumable = True
+            print(f"[stopped] latest checkpoint saved at completed epoch {epoch}; resumable stop requested")
+            break
 
     write_json(
         run_dir / "summary.json",
@@ -1174,7 +1197,9 @@ def run_from_config(
             "best_val_field_mse": best_field,
             "best_val_temperature_mse": best_temperature,
             "best_val_predicted_loss_total": best_predicted,
-            "epochs": epochs,
+            "epochs": last_completed_epoch,
+            "requested_epochs": epochs,
+            "status": "stopped_resumable" if stopped_resumable else "completed",
             "train_cases": len(train_dataset),
             "val_cases": len(val_dataset),
             "model_config": model_config.to_dict(),

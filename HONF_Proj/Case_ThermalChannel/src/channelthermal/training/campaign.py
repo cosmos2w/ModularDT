@@ -26,6 +26,7 @@ CAMPAIGN_KEYS = {
     "heat_null_response",
     "structural_measure_policy_version",
     "organizer_gradient_policy",
+    "interface_fit",
 }
 HYPERGRAPH_ARCHITECTURES = frozenset({
     "adaptive_receiver_hypergraph_honf", "overlap_control_hypergraph_honf",
@@ -131,11 +132,16 @@ def validate_campaign(config: dict[str, Any], *, max_train_batches: int | None =
     if gradient_policy not in {"whole_wrapper_shadow_v1", "local_context_shadow_v1", "ordinary_task_v1"}:
         raise ValueError("Unknown organizer gradient policy.")
     if architecture in NATIVE_CONTEXT_ARCHITECTURES:
+        from .interface_fit import interface_fit_enabled, validate_interface_fit_campaign
         expected = "local_context_shadow_v1" if architecture == "native_context_tree_honf" else "ordinary_task_v1"
         dataset = config.get("dataset", {})
         development = bool(dataset.get("development_manifest") or dataset.get("development_subset"))
         expected_horizon = 1000 if development else 5000
-        if (gradient_policy != expected or settings.get("parent") is not None or horizon != expected_horizon
+        if settings.get("interface_fit") or interface_fit_enabled(config.get("model", {})):
+            if architecture != "native_context_global_control_honf":
+                raise ValueError("Frozen query-interface fits attach only to G-fast.")
+            validate_interface_fit_campaign(settings, config)
+        elif (gradient_policy != expected or settings.get("parent") is not None or horizon != expected_horizon
                 or not settings.get("matched_fresh_initialization")
                 or settings.get("heat_null_response") != {"coefficient": 0.0}
                 or config.get("model", {}).get("channelthermal", {}).get("global_feature_schema") != "source_local_v3"):

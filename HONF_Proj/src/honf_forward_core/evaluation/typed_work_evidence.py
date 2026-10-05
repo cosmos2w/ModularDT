@@ -114,6 +114,22 @@ class TypedWorkEvidenceRecorder(AbstractContextManager):
                     _flatten(f"{prefix}/{name}", tensor, self.arrays)
                 self.arrays[f"{prefix}/projected_action_semantics"] = np.asarray(
                     "affine gain" if tau != "QE" else "affine score channels followed by affine gain channels")
+            if getattr(value, "query_components", None) is not None:
+                # Actual small-channel tensors, with source/receiver coordinates
+                # above. Signed reference compensation is not donor support.
+                _flatten(f"{prefix}/query_components", value.query_components, self.arrays)
+                for name in ("preactivation", "residual_projected", "base_projected"):
+                    _flatten(f"{prefix}/{name}", getattr(value, name), self.arrays)
+                gain = projected[..., projected.shape[-1] // 2:] if tau == "QE" else projected
+                executed_contrast = getattr(value, "executed_gain_contrast", None)
+                effective_gain = (1 + value.base_gain_tanh) + executed_contrast if executed_contrast is not None else 1 + torch.tanh(gain)
+                _flatten(f"{prefix}/effective_gain", effective_gain, self.arrays)
+                if executed_contrast is not None:
+                    _flatten(f"{prefix}/executed_gain_contrast", executed_contrast, self.arrays)
+                if tau == "QE":
+                    _flatten(f"{prefix}/effective_score", value.residual_projected[..., :projected.shape[-1] // 2], self.arrays)
+                self.arrays[f"{prefix}/query_component_semantics"] = np.asarray(
+                    "C/S/R/I before residual tanh; I_used reflects intervention; preactivation is executed correction; gain includes frozen base and outer tanh")
             return value
 
         def access(plan, receivers, mechanism, *args, **kwargs):
@@ -169,10 +185,21 @@ class TypedWorkEvidenceRecorder(AbstractContextManager):
                 self.arrays[f"{prefix}/additional_age"] = np.asarray(exported["additional_age"])
                 self.arrays[f"{prefix}/sparse_fraction"] = np.asarray(exported["sparse_fraction"])
                 self.arrays[f"{prefix}/control_presence_scope"] = np.asarray("base Global-C full-access value plan")
+                if "query_interaction" in exported:
+                    query = {name: item for name, item in exported["query_interaction"].items()
+                             if not callable(item)}
+                    _flatten(f"{prefix}/query_interaction", query, self.arrays)
+                    for name, item in query.items():
+                        if not torch.is_tensor(item) and not isinstance(item, dict):
+                            self.arrays[f"{prefix}/query_interaction/{name}"] = np.asarray(item)
+                    phase = exported["tensor_residual"]["phase"]
+                    _flatten(f"{prefix}/source_only", phase.source_only, self.arrays)
+                    self.arrays[f"{prefix}/control_presence_scope"] = np.asarray(
+                        "QM/QE actual query-interface M/E control donors; MM/ME/EM frozen G-fast base")
             self.arrays[f"{prefix}/dependency_provenance_json"] = np.asarray(json.dumps(
                 exported.get("dependency_provenance", {}), sort_keys=True))
             for name in ("typed_admission", "typed_centres"):
-                _flatten(f"{prefix}/{name}", plan.strategy_data.get(name, {}), self.arrays)
+                _flatten(f"{prefix}/{name}", exported.get(name, plan.strategy_data.get(name, {})), self.arrays)
             return state
 
         self.backend.prepare, self.backend._access = prepare, access

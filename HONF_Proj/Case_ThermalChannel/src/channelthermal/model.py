@@ -98,6 +98,10 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
         path = config.channelthermal.local_surrogate_checkpoint_path
         if bool(attach_local_from_checkpoint) and bool(config.channelthermal.use_local_surrogate) and path:
             self.local_coupling.attach_from_checkpoint(path, freeze=bool(config.channelthermal.freeze_local_surrogate), map_location="cpu")
+        query_options = getattr(getattr(config.core_honf, "interface_model", None), "hypergraph_options", {})
+        if query_options.get("tensor_query_interaction") is True:
+            from honf_forward_core.interface_fields.tensor_query_interaction import freeze_query_interaction_backbone
+            freeze_query_interaction_backbone(self)
 
     def set_global_target_normalization(self, stats: Optional[Dict[str, Any]], *, normalize_targets: bool) -> None:
         """Store global target statistics used by local/global consistency paths."""

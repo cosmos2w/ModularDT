@@ -433,7 +433,14 @@ class InterfaceFieldCore(nn.Module):
 
             backend_type = TypedHypergraphField
             backend_options = dict(options.hypergraph_options)
-            if backend_options.pop("tensor_source_residual", False):
+            source_residual = backend_options.pop("tensor_source_residual", False)
+            query_interaction = backend_options.pop("tensor_query_interaction", False)
+            if source_residual and query_interaction:
+                raise ValueError("Select only one tensor interface backend")
+            if query_interaction:
+                from .tensor_query_interaction import TensorQueryInteractionField
+                backend_type = TensorQueryInteractionField
+            elif source_residual:
                 from .tensor_source_group_residual import TensorSourceGroupResidualField
                 backend_type = TensorSourceGroupResidualField
             self.backend = backend_type(
