@@ -303,6 +303,19 @@ def copy_matched_physical_initial_state(target: torch.nn.Module, canonical: torc
     return {"source": "fresh_materialized_B-fine_seed0", "epoch": 0, "loaded": loaded, "organizer_independent": excluded}
 
 
+def canonical_initialization_config(model_config: Any) -> Any:
+    """Select a fresh reference without leaking architecture-specific options."""
+    canonical = copy.deepcopy(model_config)
+    if canonical.core_honf.forward_architecture in NATIVE_CONTEXT_ARCHITECTURES:
+        canonical.core_honf.forward_architecture = "native_context_global_control_honf"
+        options = canonical.core_honf.interface_model.hypergraph_options
+        canonical.core_honf.interface_model.hypergraph_options = {key: value for key, value in options.items()
+                                                                 if key == "organizer_dim"}
+    else:
+        canonical.core_honf.forward_architecture = "three_term_full_access_honf"
+    return canonical
+
+
 def heat_null_training_enabled(settings: dict) -> bool:
     """Explicit zero-weight native-context controls perform no null TRAIN calls."""
     null = settings.get("heat_null_response")

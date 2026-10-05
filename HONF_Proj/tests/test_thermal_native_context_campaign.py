@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from channelthermal.training.campaign import (
+    canonical_initialization_config,
     copy_matched_native_context_initial_state,
     heat_null_training_enabled,
     validate_campaign,
@@ -136,6 +137,59 @@ def fixture_model(extra_tree=False):
     if extra_tree:
         model.core.backend.organizer.tree = torch.nn.Linear(2, 2)
     return model
+
+
+def test_native_canonical_factory_removes_tree_only_options_without_changing_native_context():
+    model_config = SimpleNamespace(core_honf=SimpleNamespace(forward_architecture="native_context_tree_honf",
+        hidden_dim=256, interface_model=SimpleNamespace(coarse_latent_count=8, local_radius_factor=2.5,
+            hypergraph_options={"structural_measure_policy_version": 2, "organizer_dim": 16})))
+    canonical = canonical_initialization_config(model_config)
+    assert canonical.core_honf.forward_architecture == "native_context_global_control_honf"
+    assert canonical.core_honf.interface_model.hypergraph_options == {"organizer_dim": 16}
+    assert canonical.core_honf.hidden_dim == model_config.core_honf.hidden_dim
+    assert canonical.core_honf.interface_model.coarse_latent_count == 8
+    assert canonical.core_honf.interface_model.local_radius_factor == 2.5
+    assert model_config.core_honf.interface_model.hypergraph_options == {"structural_measure_policy_version": 2, "organizer_dim": 16}
+
+
+def test_production_canonical_factory_materializes_and_matches_low_high_native_core():
+    from honf_forward_core.config import BatchData, InterfaceFieldConfig, UnifiedForwardConfig
+    from honf_forward_core.interface_fields.common import SharedInterfaceContext
+    from honf_forward_core.interface_fields.core import InterfaceFieldCore
+
+    torch.set_num_threads(1)
+    config = SimpleNamespace(core_honf=UnifiedForwardConfig(spatial_dim=2, coordinate_scale=[1., 1.],
+        boundary_feature_mode="none", periodic_axes=[], field_dim=3, hidden_dim=8,
+        forward_architecture="native_context_tree_honf", interface_model=InterfaceFieldConfig(
+            message_hidden_dim=12, attention_heads=2, coarse_latent_count=4, coarse_blocks=1,
+            relative_fourier_frequencies=2, receiver_chunk_size=3,
+            hypergraph_options={"organizer_dim": 16, "structural_measure_policy_version": 2})))
+    canonical_config = canonical_initialization_config(config)
+    models = []
+    for options in (config, canonical_config):
+        model = torch.nn.Module()
+        model.core = InterfaceFieldCore(options.core_honf).eval()
+        assert isinstance(model.core.common, SharedInterfaceContext)
+        models.append(model)
+    generator = torch.Generator().manual_seed(7)
+    panels = [BatchData(module_centers=torch.rand(1, count, 2, generator=generator),
+        module_present=torch.ones(1, count), module_features=torch.randn(1, count, 3, generator=generator),
+        global_context=torch.randn(1, 8, generator=generator), query_xy=torch.rand(1, 5, 2, generator=generator),
+        target_field=None, query_time=None, case_name="factory-test", metadata={},
+        env_coords=torch.rand(1, 7, 2, generator=generator), env_features=torch.randn(1, 7, 3, generator=generator),
+        env_weights=torch.ones(1, 7)) for count in (1, 4)]
+    def forward(model, batch):
+        encoded = model.core.encode_case(batch)
+        return model.core.decode_queries(model.core.prepare(encoded, encoded.module_tokens), batch.query_xy)["pred_field"]
+    for model in models:
+        for panel in panels:
+            forward(model, panel)
+    receipt = copy_matched_native_context_initial_state(models[0], models[1])
+    assert receipt["exact_common_tensors_equal"]
+    assert models[0].core.backend.organizer.control_heads["MM"][0].out_features == 16
+    assert models[1].core.backend.organizer.control_heads["MM"][0].out_features == 16
+    for panel in panels:
+        torch.testing.assert_close(forward(models[0], panel), forward(models[1], panel), rtol=1e-5, atol=1e-6)
 
 
 def test_materialized_copy_matches_context_physical_and_control_heads_but_preserves_tree():

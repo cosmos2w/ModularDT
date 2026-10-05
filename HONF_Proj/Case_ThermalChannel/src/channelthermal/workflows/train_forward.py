@@ -36,6 +36,7 @@ from channelthermal.training.campaign import (
     NATIVE_CONTEXT_ARCHITECTURES,
     CampaignMicrobatchLoader,
     amend_structural_calibration,
+    canonical_initialization_config,
     copy_matched_native_context_initial_state,
     copy_matched_physical_initial_state,
     gpu_contention_sample,
@@ -637,9 +638,7 @@ def run_from_config(
                     model(**make_model_inputs(batch, local_port_condition_mode="predicted", mixed_teacher_ratio=0.0,
                                               return_predicted_port_outputs=False, return_port_global_consistency=False))
             if model_config.core_honf.forward_architecture != "dense_pairwise_field":
-                canonical_config = copy.deepcopy(model_config)
-                canonical_config.core_honf.forward_architecture = (
-                    "native_context_global_control_honf" if native_context else "three_term_full_access_honf")
+                canonical_config = canonical_initialization_config(model_config)
                 torch.manual_seed(0)
                 canonical = ChannelThermalHONFModel(canonical_config).to(device)
                 canonical.set_global_target_normalization(train_dataset.normalizer.stats, normalize_targets=bool(dataset_cfg.get("normalize_targets", False)))
