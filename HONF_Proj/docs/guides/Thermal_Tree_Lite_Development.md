@@ -1,5 +1,12 @@
 # Thermal Tree execution and maturation
 
+The authorized campaign is complete. Tree and Pair reached 1,000 epochs,
+Fine reached 500, and both Tree and Pair select their saved epoch-900 weights.
+The [final measured report](../reports/HONF_Tree_Lite_Execution_and_Maturation_Report.md)
+contains the all-22 comparisons, six inspected figures and measured misses.
+The reviews below retain their dated planning state; their earlier pending
+statements do not authorize another continuation.
+
 This round continues the retained fixed-quarter Tree-F and Pair-F from exact
 epoch 200 to total epoch 500 and trains one fresh source-local Fine-F control
 to 500. It tests a cheaper implementation of the same hard Tree operator and
@@ -445,3 +452,81 @@ normal1000 and null1000 are sequential on GPU 1; null waits for the normal
 process's epoch-1000 exit-0 receipt and a fresh device/headroom check.
 Final Tree organizer/response measurements and the 24 remaining inverse
 trails remain pending under the existing resource and closeout limits.
+
+## Completed selected-weight measurements and closeout
+
+Tree3302 completed epoch 1000 with exit 0 at 23:04:50 UTC. The unchanged
+saved-checkpoint field selector chooses epoch 900, MSE 0.03972594, over the
+1000 endpoint's 0.04013288. The literal selected SHA is
+`6e68919f4390cb87da844be20b19fdef75ff8c5fbd003375521cface18725692`;
+all 318 model-state entries match the best-field alias bitwise. Root checked
+the ten eligible parent/child milestones, model configuration, dataset
+fingerprint and both normalizers. Pair also selects 900; Fine remains 500.
+Final normal1000 and null1000 ran sequentially, with exit 0 for each. Selected
+900 accuracy and deep evidence use the actual 900 checkpoint, not endpoint
+graphs. The system-Python null watcher failed before spawning native work;
+its preserved delay was resolved with the ModularDT interpreter.
+
+At selected 900, Tree improves 14/24 equal-case mean roles and six of eight
+core roles against Pair900. Fluid/material/interface temperature gains are
+17.62%/6.41%/5.95%, while streamwise velocity and vorticity are
+25.87%/20.18% worse. Material's median reduction remains negative and M10
+material/interface each win only one of four cases. Dense1000 remains
+stronger on all eight core means, with its context/backbone/objective
+differences disclosed. The endpoint1000 Tree/Pair comparison is separate.
+
+The selected Tree whole-rebuild panel executes 98 wrappers: representation
+checks pass 21,372/21,372, physical-output checks pass 408/416 and tighter
+fine-core checks pass 397/416. Eight physical failures concern interface
+aggregate tensors, with max absolute deviations 5.817413e-5 to 1.525879e-4;
+their channel attribution and numerical cause are unproven. All 48 actually
+used coordinate/feature/mass derivative comparisons pass. Sixteen length
+comparisons are unused on both paths and are not used-gradient evidence.
+Native conditional content exclusions are measured on all four
+representatives, with admitted paths live; separate planner probes retain
+all-source dependence. No logical-support reduction is claimed as fine
+executor pruning. Trained control identity and rewiring worsen prediction,
+but the geometry reference is essentially tied with normal organization.
+
+The changed-context experiment measures four cases/eight wrappers but exits
+1 because the final forward-pre-hook restoration guard is false. Other
+recorded restoration guards pass. The differing hooks were not archived,
+so its mechanism is unproven and complete restoration is not certified.
+No retry erases this failure. Context-action effects are model-only, with
+no changed-context physical reference.
+
+The final null22, three isolated auxiliary-force points and eleven stored
+TRAIN0348 atlas states are complete. Tree's weighted-null/native force
+ratios are 0.063016%/0.149368%/0.174837%; they remain weak and are not a
+history of training impulses. Both heat signs improve fluid/interface/
+material response over zero-change in this one exposed training family.
+There is still no held nonzero response truth and no new solve.
+
+All 32 bounded inverse trails are complete: Tree joint/graph/random 24 and
+sealed Pair joint 8, reused without rank replay. Actual work is 945 attempted
+forwards/368 VJPs, including shared ranks. Tree retains 320 topology-invalid
+trial forwards, with no coding/runtime failure or failed VJP. Pair improves
+observed/held/hidden-source errors in 8/8, 6/8 and 5/8; Tree has lower final
+absolute held means but different starting errors. Graph does not clearly
+beat the matched random control, and both block methods worsen mean hidden
+source error. Retained inputs satisfy fixed caps/public sums, while M10
+rank6/9 and held misses preclude unique recovery or valid-design claims.
+
+Accepted current-round exposure is 315,000 train visits, 8,400 optimizer
+updates, 322,560,000 primary train queries and 47,308,800 primary validation
+queries. Scheduled response/null callbacks and actual fine/projection work
+have separate counters. Historical parents and discarded old attempts remain
+separately labelled. The final science ledger charges 13.57683269984 of 18
+aggregate associated process-hours. It retains 72 identified PID allocations
+plus four conservative early attempt windows without exact PID lifetimes;
+these bounds are not relabelled as exact compute time. Both scientific GPU
+lanes finished before the 00:05:36 UTC cutoff, leaving CPU report closeout
+inside the 12-hour deadline. Active GPU compute is unmeasured.
+
+No further training or native measurement is required by this plan. Preserve
+the selected/latest/milestone checkpoints, numerical arrays and local
+receipts. The six retained PDF masters and Markdown PNG companions stay
+ignored; durable implementation/tests/guides/report are committed and pushed
+with the full outgoing-history and artifact-hook audit. Future independent
+physical response validation or full-data training is a separate user
+decision with its own identity and budget.
