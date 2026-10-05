@@ -62,6 +62,8 @@ GRADIENT_DIAGNOSTIC_GROUPS = (
     # their established interpretation.
     "regional_prepare", "regional_receiver", "direct_module",
     "coarse_group_source", "coarse_env_source",
+    "residual_projection", "residual_content", "residual_admission",
+    "residual_donor", "residual_receiver",
 )
 GRADIENT_DIAGNOSTIC_KEYS = (
     "preclip_gradient_norm",
@@ -84,6 +86,19 @@ def _diagnostic_parameter_group(name: str) -> str:
 
 def _diagnostic_detail_group(name: str) -> str | None:
     """Split sparse learning from its bypasses; retain historical backend totals."""
+    residual_prefix = "core.backend.tensor_residual."
+    if name.startswith(residual_prefix):
+        block = name.removeprefix(residual_prefix).split(".", 1)[0]
+        if block == "gamma":
+            return "residual_projection"
+        if block in {"content_encoder", "collective"}:
+            return "residual_content"
+        if block in {"group_descriptor", "admission_head"}:
+            return "residual_admission"
+        if block in {"source_descriptor", "donor_scorer"}:
+            return "residual_donor"
+        if block in {"receiver_key", "group_key"}:
+            return "residual_receiver"
     if name.startswith("core.common.coarse"):
         return "coarse"
     if name.startswith("core.common.local"):

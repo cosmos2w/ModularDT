@@ -431,14 +431,19 @@ class InterfaceFieldCore(nn.Module):
         elif config.forward_architecture in CAMPAIGN_ARCHITECTURES:
             from .typed_hypergraph_field import TypedHypergraphField
 
-            self.backend = TypedHypergraphField(
+            backend_type = TypedHypergraphField
+            backend_options = dict(options.hypergraph_options)
+            if backend_options.pop("tensor_source_residual", False):
+                from .tensor_source_group_residual import TensorSourceGroupResidualField
+                backend_type = TensorSourceGroupResidualField
+            self.backend = backend_type(
                 hidden, int(options.message_hidden_dim), heads, frequencies,
                 architecture=config.forward_architecture,
                 spatial_dim=int(config.spatial_dim),
                 module_characteristic_length=float(config.module_radius),
                 control_dim=int(options.group_control_dim),
                 activation_checkpointing=bool(options.activation_checkpointing),
-                options=options.hypergraph_options,
+                options=backend_options,
             )
         elif config.forward_architecture == "direct_pairwise_control_honf":
             from .direct_pairwise_control import DirectPairwiseControlField
@@ -1132,10 +1137,12 @@ class InterfaceFieldCore(nn.Module):
                 return_routing_maps=bool(return_routing_maps),
             )
         elif self.config.forward_architecture in {*CAMPAIGN_ARCHITECTURES, "direct_pairwise_control_honf"}:
+            tensor_kwargs = ({"phase_shared_state": phase_shared_state}
+                             if getattr(self.backend, "shares_tensor_plan", False) else {})
             backend_state = self.backend.prepare(
                 encoded, module_states,
                 interaction_context=interaction_context,
-                return_routing_maps=bool(return_routing_maps),
+                return_routing_maps=bool(return_routing_maps), **tensor_kwargs,
             )
         elif self.config.forward_architecture == "sparse_interface_honf":
             if not isinstance(layout_cache, SparseLayoutCache):

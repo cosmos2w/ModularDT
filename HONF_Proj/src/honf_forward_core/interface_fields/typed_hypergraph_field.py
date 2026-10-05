@@ -45,7 +45,10 @@ class TypedHypergraphField(DensePairwiseField):
         super().__init__(hidden_dim, message_hidden_dim, num_heads, fourier_frequencies,
                          activation_checkpointing=activation_checkpointing)
         settings = dict(options or {})
+        self.global_fast_reader = bool(settings.pop("global_fast_reader", False))
         self.live_task_controls = architecture == "native_context_global_control_honf"
+        if self.global_fast_reader and not self.live_task_controls:
+            raise ValueError("Global fast reader requires the native global-control architecture")
         self.uses_structural_objective = not self.live_task_controls
         if architecture in {"adaptive_receiver_hypergraph_honf", "faithful_receiver_hypergraph_honf",
                             "native_context_tree_honf"}:
@@ -195,9 +198,15 @@ class TypedHypergraphField(DensePairwiseField):
                 bias = torch.cat((self.control_score.bias, gain.bias), 0)
             else:
                 weight, bias = gain.weight, gain.bias
-            actions[mechanism] = prepare_projected_action(
-                plan.memberships[mechanism], plan.controls[mechanism], weight, bias,
-                detach_projection=detach_projection)
+            if self.global_fast_reader:
+                if detach_projection:
+                    weight, bias = weight.detach(), bias.detach()
+                actions[mechanism] = torch.nn.functional.linear(
+                    plan.controls[mechanism].to(weight.dtype), weight, bias)
+            else:
+                actions[mechanism] = prepare_projected_action(
+                    plan.memberships[mechanism], plan.controls[mechanism], weight, bias,
+                    detach_projection=detach_projection)
         return actions
 
     def _numerical_access(self, plan, receivers, mechanism, actions, receiver_tokens=None,
@@ -208,6 +217,12 @@ class TypedHypergraphField(DensePairwiseField):
         if actions is None:
             return self._access(plan, receivers, mechanism, receiver_tokens, pair_valid,
                                 mode=mode, soft=soft)
+        if self.global_fast_reader:
+            access = self.organizer.numerical_access(plan, receivers, mechanism,
+                actions[mechanism], pair_valid=pair_valid, include_diagnostics=diagnostics)
+            if mode == "control_identity":
+                access = replace(access, projected=torch.zeros_like(access.projected))
+            return access
         access = self.organizer.access(plan, receivers, mechanism, receiver_tokens,
             soft=soft, pair_valid=pair_valid, prepared_action=actions[mechanism],
             include_diagnostics=diagnostics,
@@ -256,6 +271,18 @@ class TypedHypergraphField(DensePairwiseField):
 
     def _reduce_messages(self, messages, access, mechanism, *, soft_access=None,
                          source_measure=None, mode=None, soft=None):
+        if getattr(access, "case_constant_action", False):
+            # Move only the shared gain through the native sum. It must stay
+            # before QM's biased output affine and all nonlinear updates.
+            weighted = messages * access.weight[..., None]
+            if source_measure is not None:
+                weighted = weighted * source_measure[..., None]
+            reduced = weighted.sum(2)
+            gain = access.projected[:, 0, 0]
+            mode = self.plan_intervention if mode is None else mode
+            if mode == "control_identity":
+                gain = torch.zeros_like(gain)
+            return reduced * (1.0 + torch.tanh(gain[:, None]))
         hard = self._modulate(messages, access, mechanism, mode=mode, soft=soft)
         if source_measure is not None:
             hard = hard * source_measure[..., None]
@@ -281,8 +308,13 @@ class TypedHypergraphField(DensePairwiseField):
             **counts,
         }.items()}
 
+    def _prepare_organizer_plan(self, encoded, module_states, *, phase, soft, phase_shared_state=None):
+        if phase_shared_state is not None:
+            raise ValueError("This organizer does not accept a shared tensor plan")
+        return self.organizer.prepare(encoded, module_states, phase=phase, soft=soft)
+
     def prepare(self, encoded: EncodedInterfaceCase, module_states: torch.Tensor, *,
-                return_routing_maps=False, interaction_context=None):
+                return_routing_maps=False, interaction_context=None, phase_shared_state=None):
         phase = int(str(getattr(interaction_context, "phase", "P0"))[-1])
         soft = self.permission_mode == "soft"
         local_shadow = (self.training and torch.is_grad_enabled() and not soft
@@ -291,7 +323,8 @@ class TypedHypergraphField(DensePairwiseField):
             raise ValueError("Local-context shadow requires the ordinary hard dense training operator")
         if phase == 0:
             self._phase_costs = []
-        plan = self.organizer.prepare(encoded, module_states, phase=phase, soft=soft)
+        plan = self._prepare_organizer_plan(encoded, module_states, phase=phase, soft=soft,
+                                            phase_shared_state=phase_shared_state)
         plan = membership_intervention(plan, self.plan_intervention)
         if self.plan_intervention == "fixed_structure":
             plan = fixed_structure_intervention(plan)
@@ -430,6 +463,7 @@ class TypedHypergraphField(DensePairwiseField):
         module_context = self.query_module_output(self._reduce_messages(messages, qm, "QM", mode=mode, soft_access=soft_qm, soft=soft)
             / (1.0 + encoded.module_present.sum(1)[:, None, None]))
         if environments:
+            case_constant_qe = getattr(qe, "case_constant_action", False)
             relative = (receivers[:, :, None] - encoded.env_coords[:, None]) / encoded.coordinate_scale
             bias, qe_work = self._fine_mlp(self.env_geometry_bias, (self.relative_fourier(relative),),
                                          qe, self.env_attention.num_heads, execution_mode=execution_mode,
@@ -445,6 +479,11 @@ class TypedHypergraphField(DensePairwiseField):
                 control = qe.control.to(self.control_score.weight.dtype)
                 modulation = self.control_score(control).permute(0, 3, 1, 2)
                 gain = self.control_gain["QE"](control).permute(0, 3, 1, 2)
+            if getattr(qe, "residual_projected", None) is not None:
+                # Tensor-H scores contain only the receiver/source contrast.
+                # The case/head-constant base score cancels in unique-source
+                # softmax and must remain absent from its numerical logits.
+                modulation = qe.residual_projected[..., :self.env_attention.num_heads].permute(0, 3, 1, 2)
             if mode == "control_identity":
                 modulation, gain = torch.zeros_like(modulation), torch.zeros_like(gain)
             # Keep the logarithm inside the wide permission chain. Casting a
@@ -456,9 +495,18 @@ class TypedHypergraphField(DensePairwiseField):
                 score = torch.matmul(query, state["projected_key"].transpose(-1, -2))
                 score = score / math.sqrt(self.env_attention.head_dim)
                 score = score + bias + log_weight
-                score = score + modulation
+                if not case_constant_qe:
+                    score = score + modulation
                 attention = self._masked_attention(score, qe.support)
-                context = torch.matmul(attention * (1.0 + torch.tanh(gain)), state["projected_value"])
+                if getattr(qe, "base_projected", None) is not None:
+                    context = self._tensor_attention_context(attention, state["projected_value"], gain, qe)
+                elif case_constant_qe:
+                    # A source-independent score cancels; head gain belongs
+                    # after the head context and before the output affine.
+                    context = torch.matmul(attention, state["projected_value"])
+                    context = context * (1.0 + torch.tanh(gain[..., :1]))
+                else:
+                    context = torch.matmul(attention * (1.0 + torch.tanh(gain)), state["projected_value"])
                 qe_work["attention_cells"] = batch * queries * environments * self.env_attention.num_heads
             else:
                 attention = query.new_zeros((batch, self.env_attention.num_heads, queries, environments))
@@ -471,12 +519,16 @@ class TypedHypergraphField(DensePairwiseField):
                     score = score / math.sqrt(self.env_attention.head_dim)
                     score = score + bias[case, :, start:stop].index_select(2, sources)
                     score = score + log_weight[case, :, start:stop].index_select(2, sources)
-                    score = score + modulation[case, :, start:stop].index_select(2, sources)
+                    if not case_constant_qe:
+                        score = score + modulation[case, :, start:stop].index_select(2, sources)
                     active = qe.support[case, start:stop].index_select(1, sources)
                     block_attention = self._masked_attention(score[None], active[None])[0]
                     attention[case, :, start:stop].index_copy_(2, sources, block_attention)
-                    weighted = block_attention * (1.0 + torch.tanh(gain[case, :, start:stop].index_select(2, sources)))
-                    context[case, :, start:stop] = torch.matmul(weighted, value)
+                    if case_constant_qe:
+                        context[case, :, start:stop] = torch.matmul(block_attention, value) * (1.0 + torch.tanh(gain[case, :, :1, :1]))
+                    else:
+                        weighted = block_attention * (1.0 + torch.tanh(gain[case, :, start:stop].index_select(2, sources)))
+                        context[case, :, start:stop] = torch.matmul(weighted, value)
                     cells += (stop - start) * sources.numel() * self.env_attention.num_heads
                 qe_work["attention_cells"] = cells
             if soft_qe is not None:

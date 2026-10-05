@@ -16,12 +16,19 @@ from .topology_probe import FixedTopologyInvalid, validate_catalogue
 from .typed_hypergraph_state import (
     MECHANISMS,
     SOURCE_TYPE,
+    ProjectedSourceAccess,
     TypedHypergraphState,
     build_source_catalogue,
     masked_mean,
     pad_geometry,
     source_moments,
 )
+
+
+class GlobalSourceAccess(ProjectedSourceAccess):
+    """Native eligibility with one case action, never an expanded pair action."""
+
+    case_constant_action = True
 
 
 class GlobalControlHypergraph(nn.Module):
@@ -163,6 +170,41 @@ class GlobalControlHypergraph(nn.Module):
                 "interpretation": "conditional computational dependencies; full access is not physical causality"})
         return replace(state, controls=self.recompute_controls(state, encoded, module_states))
 
+    def numerical_access(self, state, receivers, mechanism, projected_action, *,
+                         pair_valid=None, include_diagnostics=False):
+        """Exact full-access one-group algebra, without density/moment bmm.
+
+        Semantic exports still use :meth:`access`. The compact projected action
+        includes the affine projection bias and is shared by every eligible
+        pair; zero/invalid pairs remain masked by the native reader.
+        """
+        tau = str(mechanism).upper()
+        if tau not in MECHANISMS:
+            raise ValueError(f"unknown typed mechanism {mechanism!r}")
+        kind = SOURCE_TYPE[tau]
+        receiver_kind = "M" if tau in ("MM", "ME") else "E" if tau == "EM" else None
+        edge = receivers.new_ones((*receivers.shape[:2], 1))
+        valid = state.source_valid[kind][:, None].expand(-1, receivers.shape[1], -1)
+        if receiver_kind is not None:
+            receiver_valid = state.source_valid[receiver_kind]
+            if receivers.shape[:2] != receiver_valid.shape:
+                raise ValueError("Global native receiver axis must match its physical catalogue")
+            edge = edge * receiver_valid[..., None]
+            valid = valid & receiver_valid[..., None]
+            if tau == "MM":
+                valid = valid & ~torch.eye(receivers.shape[1], device=receivers.device, dtype=torch.bool)[None]
+        if pair_valid is not None:
+            valid = valid & torch.broadcast_to(pair_valid.to(torch.bool), valid.shape)
+        weight = valid.to(receivers.dtype)
+        diagnostics = {"eligible_pairs": valid.sum(), "pair_valid": valid,
+                       "receiver_measures": state.source_measures[receiver_kind]
+                       if receiver_kind is not None else receivers.new_ones(receivers.shape[:2])}
+        if include_diagnostics:
+            diagnostics.update(unique_pairs=valid.sum(), far_unique_pairs=valid.sum(),
+                               repeated_paths_removed=valid.new_zeros((), dtype=torch.long))
+        return GlobalSourceAccess(weight, weight, projected_action[:, :, None], valid,
+                                  edge, diagnostics=diagnostics)
+
     def access(self, state, receivers, mechanism, receiver_tokens=None, *, soft=False,
                pair_valid=None, prepared_action=None, include_diagnostics=True, detach_permissions=False,
                capture_topology=False, fixed_receiver_access=None):
@@ -197,4 +239,4 @@ class GlobalControlHypergraph(nn.Module):
         return access
 
 
-__all__ = ["GlobalControlHypergraph"]
+__all__ = ["GlobalControlHypergraph", "GlobalSourceAccess"]

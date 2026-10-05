@@ -65,6 +65,45 @@ class TypedOrganizationStatistics(AbstractContextManager):
         phase = f"P{plan.phase}"
         if phase in self.phases:
             raise ValueError("Expected one native preparation per physical phase")
+        if hasattr(self.backend, "tensor_residual"):
+            tensor = plan.strategy_data["tensor_source_plan"]
+            actions = plan.strategy_data["tensor_phase_actions"]
+            active = tensor.admission > 0
+            donors = {}
+            for kind, density in tensor.density.items():
+                mass = density * tensor.measures[kind][:, None]
+                bearing = active & (mass.sum(-1) > 0)
+                donors[kind] = {
+                    "active_source_bearing_groups": int(bearing.sum()),
+                    "positive_group_source_pairs": int(((density > 0) & active[..., None]).sum()),
+                    "hhi_sum": float(mass.square().sum(-1)[bearing].sum()),
+                    "maximum_source_fraction": float(mass[bearing].amax()) if bool(bearing.any()) else None,
+                    "measure": "case-owned normalized physical source measure times donor density",
+                }
+            routes = {}
+            for tau, gamma in actions.gamma.items():
+                kind = "M" if tau in {"MM", "EM", "QM"} else "E"
+                membership = tensor.density[kind]
+                self._distinct(f"{phase}/{tau}/groups", torch.cat((membership, gamma), -1)[active].detach().cpu().numpy())
+                routes[tau] = {
+                    "allocated_group_slots": int(active.numel()),
+                    "real_candidate_nodes": int(tensor.valid.sum()),
+                    "active_frontier_groups": int(active.sum()),
+                    "positive_control_memberships": int(((membership > 0) & active[..., None]).sum()),
+                    "control_donors": donors,
+                    "group_projected_square_sum": float(gamma[active].double().square().sum()),
+                    "group_projected_scalar_count": int(gamma[active].numel()),
+                    "group_projected_semantics": "new residual gamma before receiver access and pre-tanh centering",
+                    "prepared_action_input_group_rows": int(active.numel()),
+                    "prepared_projected_source_moment_rows": int(membership.numel()),
+                    "physical_value_access": "unchanged full native source plan with native eligibility",
+                }
+            self.phases[phase] = {"routes": routes,
+                "dependency_provenance": self.backend.export_typed_state(state)["dependency_provenance"],
+                "additional_age": tensor.additional_age, "sparse_fraction": tensor.sparse_fraction,
+                "admission": tensor.admission.detach().cpu().tolist(),
+                "scope": "actual tensor control-information groups; positive support at soft/blended ages; dense physical values"}
+            return
         routes = {}
         for tau, membership in plan.memberships.items():
             admission = plan.strategy_data.get("typed_admission", {}).get(tau, plan.admission)

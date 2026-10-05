@@ -27,7 +27,7 @@ for source_root in (PROJECT_ROOT / "src", PROJECT_ROOT / "Case_ThermalChannel/sr
 INTERVENTIONS = ("normal", "full_access", "root_union", "control_identity",
                  "geometry_control", "effective_rewire", "source_group_exchange", "fixed_frontier", "fixed_summary",
                  "control_identity_fixed_access", "full_access_fixed_controls", "geometry_reference_actions",
-                 "route_uniform_projected_actions")
+                 "route_uniform_projected_actions", "tensor_zero_residual", "tensor_mean_access", "tensor_remove_group")
 REFERENCE_ACTIONS = {"control_identity_fixed_access": "control_identity",
                      "full_access_fixed_controls": "full_access_fixed_controls",
                      "geometry_reference_actions": "geometry_reference_actions",
@@ -319,6 +319,19 @@ def intervention_effectiveness(anchor_changes, native_comparison=None):
 def intervention(model, name):
     """Same physical weights; preserve degree/weight and report actual pair work."""
     backend = model.core.backend
+    if name.startswith("tensor_"):
+        residual = getattr(backend, "tensor_residual", None)
+        if residual is None:
+            raise ValueError("Tensor residual intervention requires a Tensor-H checkpoint")
+        modes = {"tensor_zero_residual": "zero_residual", "tensor_mean_access": "mean_access",
+                 "tensor_remove_group": "remove_group"}
+        old_residual, old_removed = residual.intervention, residual.removed_group
+        residual.intervention, residual.removed_group = modes[name], None
+        try:
+            yield
+        finally:
+            residual.intervention, residual.removed_group = old_residual, old_removed
+        return
     if not hasattr(backend, "organizer"):
         if name != "normal":
             raise ValueError("Organizer intervention requires a typed candidate checkpoint")
@@ -550,6 +563,14 @@ def evaluate(args):
                 "arrays": str(directory / "evidence.npz") if archive_fields else None,
                 "field_array_scope": args.resolved_field_array_scope,
                 "graph_phase": 2 if graph is not None else None}
+            if name.startswith("tensor_"):
+                row["tensor_intervention_scope"] = {
+                    "tensor_zero_residual": "Zero gamma; current Global-C/coarse/local/fine values retained",
+                    "tensor_mean_access": "Reference receiver-measure mean access; centering recomputed consistently",
+                    "tensor_remove_group": "Remove input-only admission argmax gamma contribution without renormalizing or changing fine physical sources",
+                }[name]
+                if name == "tensor_remove_group" and graph is not None:
+                    row["removed_proposal_index"] = graph["tensor_residual"]["plan"].admission.argmax(-1).detach().cpu().tolist()
             if organization_capture is not None:
                 row["organization_statistics"] = organization_capture.summary()
                 row["complete_wrapper_seconds_scope"] = "Evidence timer includes scalar organization statistics and any detailed recording; not uninstrumented benchmark latency"

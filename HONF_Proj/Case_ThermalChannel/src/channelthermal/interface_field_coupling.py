@@ -555,7 +555,7 @@ def forward_interface_field(
         "budgeted_group_control_honf",
         "occupancy_adaptive_group_control_honf",
         "mass_competitive_group_control_honf",
-    }
+    } or bool(getattr(model.core.backend, "shares_tensor_plan", False))
     if architecture in {"regional_response_honf", "hierarchical_regional_honf"}:
         environment_kwargs["response_region_block_shape"] = tuple(
             model.config.core_honf.interface_model.response_region_block_shape

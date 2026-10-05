@@ -138,7 +138,10 @@ class TypedWorkEvidenceRecorder(AbstractContextManager):
             prefix = f"phase/P{plan.phase}"
             if f"{prefix}/group_admission" in self.arrays:
                 raise ValueError("Expected one native preparation per physical phase")
-            exported = plan.export()
+            # Tensor-H's numerical control organization differs from the
+            # full-access Global-C value plan carried underneath it.
+            exported = (self.backend.export_typed_state(state)
+                        if hasattr(self.backend, "tensor_residual") else plan.export())
             for name in (
                 "source_ids",
                 "source_coords",
@@ -154,6 +157,18 @@ class TypedWorkEvidenceRecorder(AbstractContextManager):
                 "diagnostics",
             ):
                 _flatten(f"{prefix}/{name}", exported[name], self.arrays)
+            if "tensor_residual" in exported:
+                for name in ("base_route_controls", "value_membership", "control_donor_measures",
+                             "residual_gamma", "global_centering", "reference_receiver_coords",
+                             "reference_receiver_weights"):
+                    _flatten(f"{prefix}/{name}", exported[name], self.arrays)
+                tensor_plan = exported["tensor_residual"]["plan"]
+                for name in ("centres", "valid", "descriptors", "keys", "admission", "density",
+                             "measures", "global_state", "coordinate_scale"):
+                    _flatten(f"{prefix}/tensor_source_plan/{name}", getattr(tensor_plan, name), self.arrays)
+                self.arrays[f"{prefix}/additional_age"] = np.asarray(exported["additional_age"])
+                self.arrays[f"{prefix}/sparse_fraction"] = np.asarray(exported["sparse_fraction"])
+                self.arrays[f"{prefix}/control_presence_scope"] = np.asarray("base Global-C full-access value plan")
             self.arrays[f"{prefix}/dependency_provenance_json"] = np.asarray(json.dumps(
                 exported.get("dependency_provenance", {}), sort_keys=True))
             for name in ("typed_admission", "typed_centres"):

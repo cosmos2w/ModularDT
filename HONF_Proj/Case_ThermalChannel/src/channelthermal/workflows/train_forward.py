@@ -1023,7 +1023,9 @@ def run_from_config(
             effective_interface_weight=eff_interface,
             predicted_consistency_weight=pred_consistency_weight,
             gradient_clip_norm=gradient_clip_norm,
-            record_gradient_diagnostics=(epoch in {1, 2, 5, 10, 20} or epoch % 50 == 0),
+            record_gradient_diagnostics=(epoch in {1, 2, 5, 10, 20} or epoch % 50 == 0
+                or (getattr(model, "campaign_training_state", {}).get("matched_continuation_attachment")
+                    and epoch - 500 in {1, 2, 5, 10, 20})),
             require_full_case_pass=bool(campaign.get("require_full_epoch", False)),
             case_weighted_metrics=bool(campaign),
             forward_function=(lambda **inputs: hard_value_soft_hypergraph_forward(model, gradient_policy=campaign.get("organizer_gradient_policy", "whole_wrapper_shadow_v1"), **inputs)) if campaign and model_config.core_honf.forward_architecture in HYPERGRAPH_ARCHITECTURES else None,

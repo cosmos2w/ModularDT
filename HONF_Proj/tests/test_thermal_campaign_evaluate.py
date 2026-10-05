@@ -17,6 +17,27 @@ evaluation = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(evaluation)
 
 
+@pytest.mark.parametrize("name,mode", [("tensor_zero_residual", "zero_residual"),
+                                     ("tensor_mean_access", "mean_access"),
+                                     ("tensor_remove_group", "remove_group")])
+def test_tensor_intervention_restores_mode_and_removal_on_exception(name, mode):
+    residual = SimpleNamespace(intervention="normal", removed_group=3)
+    backend = SimpleNamespace(tensor_residual=residual)
+    model = SimpleNamespace(core=SimpleNamespace(backend=backend))
+    with pytest.raises(RuntimeError, match="ownership fixture"), evaluation.intervention(model, name):
+        assert residual.intervention == mode
+        assert residual.removed_group is None
+        raise RuntimeError("ownership fixture")
+    assert residual.intervention == "normal"
+    assert residual.removed_group == 3
+
+
+def test_tensor_intervention_rejects_base_checkpoint():
+    model = SimpleNamespace(core=SimpleNamespace(backend=SimpleNamespace()))
+    with pytest.raises(ValueError, match="Tensor-H checkpoint"), evaluation.intervention(model, "tensor_zero_residual"):
+        pass
+
+
 @pytest.mark.parametrize("executor", [None, "dense_masked_reference", "rectangular_subset"])
 def test_prediction_work_covers_native_phases_matches_ledger_and_excludes_later_reads(executor):
     from honf_forward_core.interface_fields.dense_pairwise import DensePairwiseField
