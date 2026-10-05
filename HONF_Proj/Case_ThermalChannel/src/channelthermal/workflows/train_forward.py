@@ -29,7 +29,7 @@ from tqdm.auto import tqdm
 
 from channelthermal.config import ChannelThermalHONFConfig
 from channelthermal.data.collation import ChannelThermalBatchCollator, ModuleCountBucketBatchSampler
-from channelthermal.data.datasets import GlobalChannelThermalDataset
+from channelthermal.data.datasets import GlobalChannelThermalDataset, fit_global_normalizer
 from channelthermal.model import ChannelThermalHONFModel
 from channelthermal.training.campaign import (
     HYPERGRAPH_ARCHITECTURES,
@@ -260,12 +260,21 @@ def validate_development_resume(checkpoint: dict[str, Any], dataset_config: dict
 
 
 def build_training_datasets(config: dict[str, Any], development=None):
-    """Fit train normalization after exact selection and share it with validation."""
+    """Share training transforms; development always fits its selected train IDs.
+
+    Full-data loading keeps historical packed statistics unless train_only is
+    explicit. That opt-in fits the original training view before validation.
+    """
 
     from channelthermal.data.development_split import development_case_ids
 
     dataset_cfg, training_cfg = config["dataset"], config["training"]
     train_split, val_split = dataset_cfg.get("train_split", "train"), dataset_cfg.get("val_split", "test")
+    normalization_policy = dataset_cfg.get("normalization_policy", "packed")
+    if normalization_policy not in ("packed", "train_only"):
+        raise ValueError("Dataset normalization_policy must be 'packed' or 'train_only'.")
+    if normalization_policy == "train_only" and train_split != "train":
+        raise ValueError("train_only normalization requires the original train split.")
     if development is not None and val_split == "val":
         val_split = "test"
     train_selection = {"case_ids": development_case_ids(development, train_split)} if development is not None else {}
@@ -278,6 +287,9 @@ def build_training_datasets(config: dict[str, Any], development=None):
         points_per_case=dataset_cfg.get("points_per_case", 4096),
         random_point_sampling=bool(dataset_cfg.get("random_point_sampling", True)),
         seed=int(training_cfg.get("seed", 42)), **common, **train_selection)
+    if normalization_policy == "train_only" and development is None:
+        train_dataset.normalizer = fit_global_normalizer(dataset_path, train_dataset.selected_case_ids)
+        dataset_cfg["normalization_fit_case_ids"] = list(train_dataset.selected_case_ids)
     val_dataset = GlobalChannelThermalDataset(dataset_path, split=val_split,
         points_per_case=dataset_cfg.get("val_points_per_case", dataset_cfg.get("points_per_case", 4096)),
         random_point_sampling=False, seed=int(training_cfg.get("seed", 42)) + 1000,

@@ -39,3 +39,38 @@ def test_core_dataset_binding_does_not_bypass_case_contract(tmp_path, override):
     path.write_text(json.dumps(profile))
     with pytest.raises(ValueError, match="Unknown core.case.dataset"):
         load_config_bundle(path)
+
+
+@pytest.mark.parametrize("policy", ["packed", "train_only"])
+def test_explicit_normalization_policy_composes_into_case_and_effective_dataset(tmp_path, policy):
+    profile = development_profiles()["H-tree"]
+    profile["case"]["dataset"]["normalization_policy"] = policy
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps(profile))
+    bundle = load_config_bundle(path)
+    assert bundle.case["dataset"]["normalization_policy"] == policy
+    assert bundle.effective["dataset"]["normalization_policy"] == policy
+
+
+@pytest.mark.parametrize("origin", ["core", "case", "experiment"])
+def test_merged_normalization_policy_rejects_invalid_values_from_each_source(tmp_path, origin):
+    profile = development_profiles()["H-tree"]
+    profile["case"]["dataset"]["normalization_policy"] = "packed"
+    overlay = None
+    if origin == "core":
+        profile["case"]["dataset"]["normalization_policy"] = "typo"
+    elif origin == "case":
+        profile["case"]["dataset"].pop("normalization_policy")
+        case_path = TOOLS.parent / "Case_ThermalChannel/configs/case_default.json"
+        case = json.loads(case_path.read_text())
+        case["dataset"]["normalization_policy"] = "typo"
+        local_case = tmp_path / "case.json"
+        local_case.write_text(json.dumps(case))
+        profile["case"]["config"] = str(local_case)
+    else:
+        overlay = tmp_path / "experiment.json"
+        overlay.write_text(json.dumps({"schema_version": 1, "case": {"dataset": {"normalization_policy": "typo"}}}))
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps(profile))
+    with pytest.raises(ValueError, match="normalization_policy"):
+        load_config_bundle(path, experiment_overlay=overlay)

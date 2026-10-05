@@ -40,7 +40,7 @@ CASE_TOP_LEVEL_KEYS = {
     "_note",
 }
 CORE_CASE_KEYS = {"id", "config", "dataset_id", "local_module_id", "dataset"}
-CORE_CASE_DATASET_KEYS = {"development_manifest", "development_manifest_sha256"}
+CORE_CASE_DATASET_KEYS = {"development_manifest", "development_manifest_sha256", "normalization_policy"}
 CORE_TRAINING_KEYS = {
     "seed",
     "device",
@@ -345,8 +345,8 @@ def load_config_bundle(
 
     core_resolved = copy.deepcopy(core)
     case_resolved = copy.deepcopy(case)
-    # Dataset membership belongs to the case adapter. Core development profiles
-    # bind only these selectors; source placement remains registry-owned.
+    # Dataset membership and normalization belong to the case adapter.
+    # Source placement remains registry-owned.
     case_resolved.setdefault("dataset", {}).update(copy.deepcopy(case_ref.get("dataset", {})))
     experiment_path = None
     experiment: dict[str, Any] = {}
@@ -389,6 +389,10 @@ def load_config_bundle(
         _merge_existing(core_resolved, core_patch, label="core")
         _merge_existing(case_resolved, case_patch, label="case")
         _validate_core_sections(core_resolved)
+
+    normalization_policy = case_resolved.get("dataset", {}).get("normalization_policy", "packed")
+    if normalization_policy not in ("packed", "train_only"):
+        raise ValueError("Dataset normalization_policy must be 'packed' or 'train_only'.")
 
     applied = {key: value for key, value in dict(overrides or {}).items() if value is not None}
     if "device" in applied:

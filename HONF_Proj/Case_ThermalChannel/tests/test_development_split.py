@@ -162,6 +162,56 @@ def test_selected_normalizer_ignores_unselected_heldout_and_padding(native):
         dataset.close()
 
 
+def test_full_train_only_fit_replaces_packed_stats_before_validation_and_heat_scale(tmp_path):
+    from channelthermal.input_adapter import fit_source_local_heat_scale
+    from channelthermal.workflows.train_forward import build_training_datasets
+
+    path = tmp_path / "formal.h5"
+    with h5py.File(path, "w") as h5:
+        _case(h5, "a", "train", value=2.0)
+        _case(h5, "b", "train", value=4.0)
+        _case(h5, "c", "test", value=1e8)
+        _root(h5, ["a", "b", "c"], ["train", "train", "test"])
+    config = {"dataset": {"packed_h5_path": str(path), "normalization_policy": "train_only",
+                          "normalize_inputs": True, "normalize_targets": True},
+              "training": {"seed": 0}}
+    train, val = build_training_datasets(config)
+    try:
+        assert train.selected_case_ids == ["a", "b"] and val.selected_case_ids == ["c"]
+        assert config["dataset"]["normalization_fit_case_ids"] == ["a", "b"]
+        assert len(train.normalizer.stats) == 12
+        for key, value in train.normalizer.stats.items():
+            np.testing.assert_array_equal(value, np.full_like(value, 3.0 if "mean" in key else 1.0))
+        assert val.normalizer is train.normalizer
+        np.testing.assert_array_equal(val.normalizer.normalize_fields(np.full((1, 5), 8.0)), np.full((1, 5), 5.0))
+        assert fit_source_local_heat_scale(path, train.selected_case_ids, train.normalizer) == 1.0
+        assert fit_source_local_heat_scale(path, train.selected_case_ids) == 4.0
+    finally:
+        train.close()
+        val.close()
+
+
+def test_development_train_only_reuses_selected_constructor_fit(native, monkeypatch):
+    from channelthermal.workflows import train_forward
+
+    def no_second_fit(*args, **kwargs):
+        pytest.fail("Development already fits selected training IDs in its constructor.")
+
+    monkeypatch.setattr(train_forward, "fit_global_normalizer", no_second_fit)
+    config = {"dataset": {"packed_h5_path": str(native), "normalization_policy": "train_only"},
+              "training": {"seed": 0}}
+    development = {"partitions": {"train": {"case_ids": ["a"]}, "test": {"case_ids": ["c"]}}}
+    train, val = train_forward.build_training_datasets(config, development)
+    try:
+        assert train.selected_case_ids == ["a"] and val.selected_case_ids == ["c"]
+        assert val.normalizer is train.normalizer
+        np.testing.assert_array_equal(train.normalizer.stats["field_mean_by_channel"], np.full(5, 2.0))
+        assert "normalization_fit_case_ids" not in config["dataset"]
+    finally:
+        train.close()
+        val.close()
+
+
 @pytest.mark.parametrize("ids", [[], ["a", "a"], ["c"], ["missing"], "a", [1]])
 def test_native_selection_rejects_invalid_membership_before_target_access(native, ids):
     with pytest.raises(ValueError, match="case|partition"):

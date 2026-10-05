@@ -125,6 +125,15 @@ def test_full_training_configuration_and_dataset_defaults_remain_unchanged(monke
     assert training.should_save_latest_checkpoint(25, 1000, before["checkpointing"])
 
 
+@pytest.mark.parametrize("policy,split", [("typo", "train"), (None, "train"), (["train_only"], "train"),
+                                         ("train_only", "test"), ("train_only", "all")])
+def test_normalization_policy_rejected_before_dataset_creation(monkeypatch, policy, split):
+    config = {"dataset": {"normalization_policy": policy, "train_split": split}, "training": {}}
+    monkeypatch.setattr(training, "GlobalChannelThermalDataset", lambda *args, **kwargs: pytest.fail("Dataset constructed."))
+    with pytest.raises(ValueError, match="normalization|train split"):
+        training.build_training_datasets(config)
+
+
 @pytest.mark.parametrize("section,key,value", [
     ("checkpointing", "save_latest_every_epochs", 25),
     ("checkpointing", "save_best_every_epochs", 1),
