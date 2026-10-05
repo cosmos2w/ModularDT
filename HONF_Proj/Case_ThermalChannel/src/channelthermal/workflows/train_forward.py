@@ -33,8 +33,10 @@ from channelthermal.data.datasets import GlobalChannelThermalDataset
 from channelthermal.model import ChannelThermalHONFModel
 from channelthermal.training.campaign import (
     HYPERGRAPH_ARCHITECTURES,
+    NATIVE_CONTEXT_ARCHITECTURES,
     CampaignMicrobatchLoader,
     amend_structural_calibration,
+    copy_matched_native_context_initial_state,
     copy_matched_physical_initial_state,
     gpu_contention_sample,
     validate_campaign,
@@ -516,7 +518,8 @@ def run_from_config(
     if development is not None and getattr(args, "initialize_checkpoint", None):
         raise ValueError("Development requires fresh initialization; checkpoint transfer is a separate protocol.")
     campaign = validate_campaign(cfg, max_train_batches=getattr(args, "max_train_batches", None))
-    if campaign.get("structural_measure_policy_version") == 2 and not getattr(args, "resume_checkpoint", None):
+    if (campaign.get("structural_measure_policy_version") == 2 and not getattr(args, "resume_checkpoint", None)
+            and cfg.get("model", {}).get("core_honf", {}).get("forward_architecture") != "native_context_tree_honf"):
         raise ValueError("Reviewed structural measure policy 2 requires a saved continuation checkpoint; it cannot start fresh.")
     schedule_total_epochs = int(campaign.get("schedule_total_epochs", args.epochs or training_cfg.get("epochs", 200)))
     if campaign.get("matched_fresh_initialization") and getattr(args, "initialize_checkpoint", None):
@@ -616,26 +619,64 @@ def run_from_config(
         for key in ("_optimizer_start", "_optimizer_boundary", "_accumulation_weight", "_auxiliary_due"):
             materialization_batch.pop(key, None)
         materialization_batch = recursive_to_device(materialization_batch, device)
+        native_context = model_config.core_honf.forward_architecture in NATIVE_CONTEXT_ARCHITECTURES
+        materialization_batches = [materialization_batch]
+        materialization_cases = []
+        if native_context:
+            counts = train_dataset.selected_module_counts
+            indices = list(dict.fromkeys((min(range(len(counts)), key=counts.__getitem__),
+                                         max(range(len(counts)), key=counts.__getitem__))))
+            materialization_batches = [recursive_to_device(collator([train_dataset[index]]), device) for index in indices]
+            materialization_cases = [{"case_id": train_dataset.selected_case_ids[index], "module_count": int(counts[index])}
+                                     for index in indices]
         rng_devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
         with torch.random.fork_rng(devices=rng_devices):
             model.eval()
             with torch.no_grad():
-                model(**make_model_inputs(materialization_batch, local_port_condition_mode="predicted", mixed_teacher_ratio=0.0,
-                                          return_predicted_port_outputs=False, return_port_global_consistency=False))
+                for batch in materialization_batches:
+                    model(**make_model_inputs(batch, local_port_condition_mode="predicted", mixed_teacher_ratio=0.0,
+                                              return_predicted_port_outputs=False, return_port_global_consistency=False))
             if model_config.core_honf.forward_architecture != "dense_pairwise_field":
                 canonical_config = copy.deepcopy(model_config)
-                canonical_config.core_honf.forward_architecture = "three_term_full_access_honf"
+                canonical_config.core_honf.forward_architecture = (
+                    "native_context_global_control_honf" if native_context else "three_term_full_access_honf")
                 torch.manual_seed(0)
                 canonical = ChannelThermalHONFModel(canonical_config).to(device)
                 canonical.set_global_target_normalization(train_dataset.normalizer.stats, normalize_targets=bool(dataset_cfg.get("normalize_targets", False)))
                 canonical.eval()
                 with torch.no_grad():
-                    canonical(**make_model_inputs(materialization_batch, local_port_condition_mode="predicted", mixed_teacher_ratio=0.0,
-                                                  return_predicted_port_outputs=False, return_port_global_consistency=False))
-                matched_initialization = copy_matched_physical_initial_state(model, canonical)
+                    for batch in materialization_batches:
+                        canonical(**make_model_inputs(batch, local_port_condition_mode="predicted", mixed_teacher_ratio=0.0,
+                                                      return_predicted_port_outputs=False, return_port_global_consistency=False))
+                if native_context:
+                    matched_initialization = copy_matched_native_context_initial_state(model, canonical)
+                    comparisons = []
+                    with torch.no_grad():
+                        for panel, batch in zip(materialization_cases, materialization_batches):
+                            inputs = make_model_inputs(batch, local_port_condition_mode="predicted", mixed_teacher_ratio=0.0,
+                                                       return_predicted_port_outputs=False, return_port_global_consistency=False)
+                            output, reference = model(**inputs), canonical(**inputs)
+                            differences = {}
+                            for name in ("pred_field", "pred_interface", "pred_internal_temperature", "pred_port_condition"):
+                                if name not in output or name not in reference:
+                                    raise ValueError(f"Initial native wrapper identity lacks physical output {name}.")
+                                left, right = output[name], reference[name]
+                                if left.shape != right.shape or not torch.isfinite(left).all() or not torch.isfinite(right).all():
+                                    raise ValueError(f"Initial native wrapper identity has invalid physical output {name}.")
+                                differences[name] = float((left - right).abs().max()) if left.numel() else 0.0
+                                torch.testing.assert_close(left, right, rtol=1e-5, atol=1e-6)
+                            comparisons.append({**panel, "max_absolute_output_difference": differences})
+                    matched_initialization.update(materialization_panels=comparisons, optimizer_constructed_after_materialization=True)
+                else:
+                    matched_initialization = copy_matched_physical_initial_state(model, canonical)
                 del canonical
             else:
                 matched_initialization = {"source": "fresh_native_Dense_seed0", "epoch": 0}
+        if native_context:
+            # Different organizer constructors consume different random draws.
+            # Common tensors are copied above; training starts from the same RNG.
+            set_seed(0)
+            matched_initialization["training_rng_seed_after_materialization"] = 0
         model.train()
     else:
         matched_initialization = None

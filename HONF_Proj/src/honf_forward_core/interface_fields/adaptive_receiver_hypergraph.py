@@ -317,7 +317,21 @@ class AdaptiveReceiverHypergraph(nn.Module):
 
     def prepare(self, encoded: EncodedInterfaceCase, module_states: torch.Tensor,
                 *, phase: int = 0, soft: bool = False, capture_topology: bool = False,
-                fixed_topology: TypedHypergraphState | None = None) -> TypedHypergraphState:
+                fixed_topology: TypedHypergraphState | None = None,
+                topology_mode: str = "fixed_active_set") -> TypedHypergraphState:
+        """Prepare ordinary actions or an explicitly named local continuation.
+
+        Historical fixed-active-set replay continues the source projection
+        affinely on its recorded positive set and can reject negative density.
+        ``fixed_frontier_live_membership`` retains tree identities and split
+        gates while projecting current source scores normally. Its donor
+        support may change; it is not the historical affine continuation.
+        Receiver connectivity is bound separately by ``access`` replay.
+        """
+        if topology_mode not in {"fixed_active_set", "fixed_frontier_live_membership"}:
+            raise ValueError(f"Unknown topology continuation mode: {topology_mode!r}")
+        if fixed_topology is None and topology_mode != "fixed_active_set":
+            raise ValueError("Fixed-frontier continuation requires a reference topology")
         phase = int(phase)
         if phase not in (0, 1, 2):
             raise ValueError("physical phase must be 0, 1 or 2")
@@ -413,7 +427,7 @@ class AdaptiveReceiverHypergraph(nn.Module):
             recorded_logits, recorded_memberships = ({}, {}) if capture_topology else (None, None)
             for kind, raw in zip(("M", "E"), raw_scores):
                 scores = raw - self.geometry_strength[tau] * distances[kind]
-                if fixed_topology is None:
+                if fixed_topology is None or topology_mode == "fixed_frontier_live_membership":
                     density = _membership(scores[:, None], measures[kind][node_cases], soft=soft, temperature=self.temperature)[:, 0]
                 else:
                     densities = []
@@ -500,6 +514,7 @@ class AdaptiveReceiverHypergraph(nn.Module):
                                                    "soft": soft, "access_geometry": access_geometry,
                                                    "measure_consistent": self.measure_consistent,
                                                    "structural_measure_policy_version": self.structural_measure_policy_version,
+                                                   "topology_continuation_mode": topology_mode if fixed_topology is not None else "ordinary",
                                                    "control_geometry": control_geometry, "node_valid": all_node_valid,
                                                    **probe_data}, **catalogue)
 

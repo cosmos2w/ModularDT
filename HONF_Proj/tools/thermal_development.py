@@ -32,6 +32,7 @@ FAITHFULNESS_ARMS = {
     "Dense-new": "dense_pairwise_field",
 }
 MATURATION_ARMS = {"Fine-F": "three_term_full_access_honf"}
+NATIVE_CONTEXT_ARMS = {"Tree-C": "native_context_tree_honf", "Global-C": "native_context_global_control_honf"}
 
 
 def validate_generated_output(value) -> Path:
@@ -217,9 +218,52 @@ def maturation_profiles(*, first_run_id: int = 3301, stage: int = 100,
     return {"Fine-F": config}
 
 
+def native_context_profiles(*, first_run_id: int = 3401, stage: int = 100,
+                            manifest: dict | None = None, manifest_path: str = DEFAULT_MANIFEST,
+                            run_output_root: str = DEFAULT_RUN_ROOT, microbatch_size: int = 8) -> dict[str, dict]:
+    """Prepare the paired native-context question without authorizing any training."""
+    if stage not in (100, 200, 300, 400, 500, 1000):
+        raise ValueError("Native-context preparation uses declared100-cadence stops through500 or separately reviewed1000.")
+    ordinary = development_profiles(first_run_id=first_run_id, stage=100, manifest=manifest,
+        manifest_path=manifest_path, run_output_root=run_output_root, microbatch_size=microbatch_size)
+    profiles = {}
+    for offset, (arm, architecture) in enumerate(NATIVE_CONTEXT_ARMS.items()):
+        config = copy.deepcopy(ordinary["H-tree"])
+        config["case"]["config"] = "project://Case_ThermalChannel/configs/case_source_local.json"
+        config["profile_name"] = f"thermal_native_context25_{arm.lower()}_v1"
+        config["model"]["core_honf"]["forward_architecture"] = architecture
+        config["training"]["epochs"] = stage
+        campaign = config["training"]["campaign"]
+        campaign.update(name="thermal_native_context25_v1", arm=arm, heat_null_response={"coefficient": 0.0},
+                        organizer_gradient_policy="local_context_shadow_v1" if arm == "Tree-C" else "ordinary_task_v1",
+                        structural_weight=.001 if arm == "Tree-C" else 0.0, physical_loss_policy_version=1)
+        # Only the established selected-training0348 atlas is admitted here.
+        campaign["response_stencils"] = [path for path in campaign["response_stencils"]
+                                         if Path(path).name == "train_0348_responses.npz"]
+        if stage > 100:
+            if not campaign["response_stencils"]:
+                raise ValueError("Native-context continuation requires the established selected-train0348 atlas.")
+            campaign.update(physical_loss_policy_version=2, native_loss_denominators_start_epoch=101)
+        if arm == "Tree-C":
+            campaign["structural_measure_policy_version"] = 2
+            config["model"]["core_honf"]["interface_model"]["hypergraph_options"] = {"structural_measure_policy_version": 2}
+        else:
+            config["model"]["core_honf"]["interface_model"]["hypergraph_options"] = {}
+        config["run"].update(id=f"{first_run_id + offset:04d}", name=config["profile_name"])
+        config["_note"] = ("Fresh matched seed0 native SharedInterfaceContext coarse/local with source_local_v3 fine; "
+            "common native/context/control tensors copied after low/high-M wrapper materialization before optimizer. "
+            "Fixed25_v1 150train22validation Q1024 FP32 effective48/micro8, absolute1000 schedule; "
+            "100-cadence checkpoints/field selector/plots. Tree-C local-context shadow and structural measure2; "
+            "Global-C ordinary task gradients, full access, zero frozen QE score, no structural term. "
+            "Old null TRAIN coefficient0 skips native calls; atlas off through100, common denominator/0348 exposure at101. "
+            "Review paired100 before500; optional1000 requires explicit evidence and budget; no formal launch.")
+        profiles[arm] = config
+    return profiles
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--arm", nargs="+", choices=(*ARMS, *FAITHFULNESS_ARMS, *MATURATION_ARMS), required=True,
+    parser.add_argument("--arm", nargs="+", choices=(*ARMS, *FAITHFULNESS_ARMS, *MATURATION_ARMS, *NATIVE_CONTEXT_ARMS), required=True,
                         help="Only these explicitly named arms are prepared; no trainer is launched.")
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--dataset", required=True, type=Path)
@@ -243,9 +287,10 @@ def main(argv=None) -> int:
     manifest = load_development_manifest(manifest_path, dataset_path)
     faithful = any(arm in FAITHFULNESS_ARMS for arm in args.arm)
     maturation = any(arm in MATURATION_ARMS for arm in args.arm)
-    if ((faithful or maturation) and any(arm in ARMS for arm in args.arm)) or (faithful and maturation):
+    native_context = any(arm in NATIVE_CONTEXT_ARMS for arm in args.arm)
+    if sum((faithful, maturation, native_context, any(arm in ARMS for arm in args.arm))) > 1:
         raise ValueError("Prepare legacy, faithfulness and maturation arm names in separate explicit invocations")
-    generator = maturation_profiles if maturation else faithfulness_profiles if faithful else development_profiles
+    generator = native_context_profiles if native_context else maturation_profiles if maturation else faithfulness_profiles if faithful else development_profiles
     profiles = generator(first_run_id=args.first_run_id, stage=args.stage,
         manifest=manifest, manifest_path=str(manifest_path), microbatch_size=args.microbatch_size,
         run_output_root=str(validate_generated_output(args.run_output_root)))

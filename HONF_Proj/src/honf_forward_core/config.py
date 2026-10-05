@@ -111,6 +111,8 @@ FORWARD_ARCHITECTURES = {
     "adaptive_hyperedge_opening_honf",
     "adaptive_receiver_hypergraph_honf",
     "faithful_receiver_hypergraph_honf",
+    "native_context_tree_honf",
+    "native_context_global_control_honf",
     "overlap_control_hypergraph_honf",
     "local_overlap_hypergraph_honf",
 }

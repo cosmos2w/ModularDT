@@ -352,7 +352,8 @@ class InterfaceFieldCore(nn.Module):
         self.env_encoder = LazyMLP(hidden, num_layers=2, include_zero_dropout=True)
         self.position_fourier = FourierFeatures(None, int(config.position_fourier_frequencies))
         self.receiver_fourier = FourierFeatures(None, int(config.query_fourier_frequencies))
-        if config.forward_architecture in {
+        native_context_architectures = {"native_context_tree_honf", "native_context_global_control_honf"}
+        if config.forward_architecture not in native_context_architectures and config.forward_architecture in {
             "three_term_full_access_honf",
             "direct_pairwise_control_honf",
             *CAMPAIGN_ARCHITECTURES,
@@ -1196,7 +1197,7 @@ class InterfaceFieldCore(nn.Module):
             "forward_architecture": self.config.forward_architecture,
             "coarse_latent_count": (
                 0
-                if self.config.forward_architecture in {
+                if not isinstance(self.common, SharedInterfaceContext) and self.config.forward_architecture in {
                     "three_term_full_access_honf",
                     "direct_pairwise_control_honf",
                     *CAMPAIGN_ARCHITECTURES,

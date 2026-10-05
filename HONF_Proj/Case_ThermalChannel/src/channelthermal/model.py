@@ -323,7 +323,8 @@ class ChannelThermalHONFModel(ChannelThermalModelSupportMixin, nn.Module):
             module_source_ids=(structure or {}).get("module_source_ids"),
             env_characteristic_lengths=env.env_characteristic_lengths,
             env_weights=(getattr(env, "env_weights", None) if self.config.core_honf.forward_architecture in
-                         {"faithful_receiver_hypergraph_honf", "direct_pairwise_control_honf"} else None),
+                         {"faithful_receiver_hypergraph_honf", "direct_pairwise_control_honf",
+                          "native_context_tree_honf", "native_context_global_control_honf"} else None),
         )
         # Encode/organize only. The ChannelThermal local response changes
         # module tokens, so decoding a field here would be discarded work.

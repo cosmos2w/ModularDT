@@ -305,9 +305,15 @@ class RefinedEnvironmentBuilder:
 class _NativeRebuildCapture(AbstractContextManager):
     """Local live phase/access/decode capture; restores every monkeypatch."""
 
-    def __init__(self, model, *, fixed=None, annotate_measure=True):
+    def __init__(self, model, *, fixed=None, annotate_measure=True,
+                 topology_mode="fixed_active_set"):
         self.model, self.fixed = model, fixed
         self.annotate_measure = annotate_measure
+        if topology_mode not in {"fixed_active_set", "fixed_frontier_live_membership"}:
+            raise ValueError(f"Unknown topology continuation mode: {topology_mode!r}")
+        if fixed is None and topology_mode != "fixed_active_set":
+            raise ValueError("Fixed-frontier continuation requires a reference capture")
+        self.topology_mode = topology_mode
         self.states, self.accesses, self.decodes, self.counts = {}, {}, {}, {}
         self.input_states = {}
         self.explicit_measure_annotation = False
@@ -331,6 +337,8 @@ class _NativeRebuildCapture(AbstractContextManager):
             kwargs["capture_topology"] = True
             if self.fixed is not None:
                 kwargs["fixed_topology"] = self.fixed.states[phase]
+                if self.topology_mode != "fixed_active_set":
+                    kwargs["topology_mode"] = self.topology_mode
             state = self.originals["prepare"](*args, **kwargs)
             if phase in self.states:
                 raise ValueError("Whole-wrapper invariance expects one organizer preparation per physical phase")
@@ -347,7 +355,10 @@ class _NativeRebuildCapture(AbstractContextManager):
             kwargs["capture_topology"] = True
             if self.fixed is not None:
                 recorded = self.fixed.accesses[key]
-                kwargs["fixed_receiver_access"] = {"edge_access": recorded.edge_access.detach()}
+                kwargs["fixed_receiver_access"] = {
+                    "edge_access": recorded.edge_access.detach(),
+                    "support": recorded.support.detach(),
+                }
             value = self.originals["access"](state, receivers, mechanism, *args, **kwargs)
             self.accesses[key] = value
             return value

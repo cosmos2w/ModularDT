@@ -26,10 +26,12 @@ for source_root in (PROJECT_ROOT / "src", PROJECT_ROOT / "Case_ThermalChannel/sr
 
 INTERVENTIONS = ("normal", "full_access", "root_union", "control_identity",
                  "geometry_control", "effective_rewire", "source_group_exchange", "fixed_frontier", "fixed_summary",
-                 "control_identity_fixed_access", "full_access_fixed_controls", "geometry_reference_actions")
+                 "control_identity_fixed_access", "full_access_fixed_controls", "geometry_reference_actions",
+                 "route_uniform_projected_actions")
 REFERENCE_ACTIONS = {"control_identity_fixed_access": "control_identity",
                      "full_access_fixed_controls": "full_access_fixed_controls",
-                     "geometry_reference_actions": "geometry_reference_actions"}
+                     "geometry_reference_actions": "geometry_reference_actions",
+                     "route_uniform_projected_actions": "route_uniform_projected_actions"}
 
 
 def predict_with_fine_work(backend, predict, *args, **kwargs):
@@ -109,16 +111,22 @@ def aggregate_physical(rows):
     """Never combine different physical channels into a scalar score."""
     output = {}
     for key in sorted({key for row in rows for key in row["metrics"]}):
-        values = [row["metrics"][key] for row in rows if key in row["metrics"]]
+        role_rows = [row for row in rows if key in row["metrics"]]
+        values = [row["metrics"][key] for row in role_rows]
         valid = [value for value in values if value["finite"] and value["count"] > 0]
         count = sum(value["count"] for value in valid)
         errors = np.asarray([value["rmse"] for value in valid])
         output[key] = {"cases": len(valid), "nonfinite_cases": sum(not value["finite"] for value in values),
             "empty_cases": sum(value["count"] == 0 for value in values),
             "equal_case_rmse_mean": float(errors.mean()) if errors.size else None,
+            "equal_case_rmse_median": float(np.median(errors)) if errors.size else None,
             "equal_case_mae_mean": float(np.mean([value["mae"] for value in valid])) if valid else None,
             "case_rmse_p90": float(np.quantile(errors, .9)) if errors.size else None,
             "case_rmse_max": float(errors.max()) if errors.size else None,
+            "worst_case_ids": [str(row["case_id"]) for row in role_rows
+                if "case_id" in row and row["metrics"][key]["finite"]
+                and row["metrics"][key]["count"] > 0
+                and row["metrics"][key]["rmse"] == float(errors.max())] if errors.size else [],
             "pooled_rmse": float(np.sqrt(sum(value["squared_error_sum"] for value in valid) / count)) if count else None,
             "pooled_mae": sum(value["absolute_error_sum"] for value in valid) / count if count else None,
             "pooled_count": count}
@@ -316,7 +324,7 @@ def intervention(model, name):
     aliases = {"geometry_control": "geometry", "effective_rewire": "rewire",
                "source_group_exchange": "exchange", "fixed_frontier": "fixed_structure",
                "control_identity_fixed_access": "control_identity", "full_access_fixed_controls": "normal",
-               "geometry_reference_actions": "normal"}
+               "geometry_reference_actions": "normal", "route_uniform_projected_actions": "normal"}
     backend.set_plan_intervention(aliases.get(name, name))
     try:
         yield
@@ -461,15 +469,26 @@ def evaluate(args):
                 organization_capture = TypedOrganizationStatistics(model.core.backend,
                     signature_tolerance=args.action_signature_tolerance,
                     signature_capacity=args.action_signature_capacity)
+            native_context_capture = None
+            if getattr(args, "native_context_evidence", False):
+                from honf_forward_core.evaluation.native_context_evidence import NativeContextEvidence
+                native_context_capture = NativeContextEvidence(model.core,
+                    save_arrays=index in graph_panel)
             reference_capture = None
             if name in REFERENCE_ACTIONS:
-                from honf_forward_core.evaluation.reference_access import FixedReferenceAccessReplay
-                reference_capture = FixedReferenceAccessReplay(model.core.backend,
-                    reference_access_dir / case_id / "normal" / "phase_graphs.npz", mode=REFERENCE_ACTIONS[name])
+                from honf_forward_core.evaluation.reference_access import (
+                    FixedReferenceAccessReplay,
+                    ProjectedRouteUniformReplay,
+                )
+                reference_path = reference_access_dir / case_id / "normal" / "phase_graphs.npz"
+                reference_capture = (ProjectedRouteUniformReplay(model.core.backend, reference_path)
+                    if name == "route_uniform_projected_actions" else FixedReferenceAccessReplay(
+                        model.core.backend, reference_path, mode=REFERENCE_ACTIONS[name]))
             with intervention(model, name):
                 with reference_capture if reference_capture is not None else nullcontext(), \
                      organization_capture if organization_capture is not None else nullcontext(), \
-                     phase_capture if phase_capture is not None else nullcontext():
+                     phase_capture if phase_capture is not None else nullcontext(), \
+                     native_context_capture if native_context_capture is not None else nullcontext():
                     prediction, fine_work = predict_with_fine_work(model.core.backend, predict_case,
                         model, sample, device, query_batch_size=args.query_batch_size,
                         local_port_condition_mode="predicted", mixed_teacher_ratio=0,
@@ -530,6 +549,13 @@ def evaluate(args):
             if organization_capture is not None:
                 row["organization_statistics"] = organization_capture.summary()
                 row["complete_wrapper_seconds_scope"] = "Evidence timer includes scalar organization statistics and any detailed recording; not uninstrumented benchmark latency"
+            if native_context_capture is not None:
+                row["native_context_evidence"] = native_context_capture.summary()
+                row["complete_wrapper_seconds_scope"] = "Instrumented evidence timer; native context/statistics recording and graph reconstruction are excluded from uninstrumented benchmark claims"
+                if native_context_capture.save_arrays:
+                    context_path = directory / "native_context.npz"
+                    np.savez_compressed(context_path, **native_context_capture.arrays)
+                    row["native_context_arrays"] = str(context_path)
             if phase_capture is not None:
                 phase_path = directory / "phase_graphs.npz"
                 np.savez_compressed(phase_path, **phase_capture.arrays)
@@ -549,6 +575,7 @@ def evaluate(args):
                     "control_identity_fixed_access": "All P0/P1/P2 native access density/weight/support/edge_access/near fixed; controls and gain/score biases disabled; physical source values/ports/local physics remain live",
                     "full_access_fixed_controls": "All P0/P1/P2 eligible density/weight/support full and uniform; normal source controls and projection biases retained; physical source values/ports/local physics remain live",
                     "geometry_reference_actions": "All P0/P1/P2 normal joint permission/control tuples reassigned toward physical geometry at fixed receiver/source binary degrees and row tuple multisets; normal projection biases and physical source values/ports/local physics remain live",
+                    "route_uniform_projected_actions": "All P0/P1/P2 saved normal fine permissions fixed; one pre-tanh affine control per case/phase/route weighted by receiver measure times source measure times normal fine weight over the complete native call stream; physical values/ports/local physics remain live",
                 }[name]
                 row["reference_group_access_scope"] = "Saved edge_access is reference group provenance; authoritative returned source permissions may be reassigned independently of shared groups"
                 row["source_resolved_action_statistics"] = reference_capture.action_statistics
@@ -667,6 +694,8 @@ def parse_args(argv=None):
                         help="auto bounds development phase graphs to the representative diagnostic panel.")
     parser.add_argument("--organization-summary", action="store_true",
                         help="Stream scalar plan/action/support statistics from the same native predictions")
+    parser.add_argument("--native-context-evidence", action="store_true",
+                        help="Observe native coarse/local paths once; scalar all-case evidence and representative arrays")
     parser.add_argument("--action-signature-tolerance", type=float, default=1e-6)
     parser.add_argument("--action-signature-capacity", type=int, default=4096,
                         help="Bound transient complete action signatures per phase/route; saturation is a lower bound")

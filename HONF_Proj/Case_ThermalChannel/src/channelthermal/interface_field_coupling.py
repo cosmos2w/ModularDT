@@ -571,7 +571,8 @@ def forward_interface_field(
     ntheta = model._infer_ntheta(interface_condition, teacher_port_tokens)
     physical_port_xy = _port_coordinates(model, adapter.module_centers, ntheta)
     batch_kwargs: dict[str, Any] = {}
-    if architecture in {"hypergraph_quadrature_honf", "faithful_receiver_hypergraph_honf", "direct_pairwise_control_honf"}:
+    if architecture in {"hypergraph_quadrature_honf", "faithful_receiver_hypergraph_honf", "direct_pairwise_control_honf",
+                        "native_context_tree_honf", "native_context_global_control_honf"}:
         # The regular-grid measure/layout are opt-in metadata. Historical
         # readers intentionally retain their existing dense fallback path and
         # checkpoint-facing behavior even though the adapter can provide the
@@ -580,7 +581,8 @@ def forward_interface_field(
             env_weights=getattr(env, "env_weights", None),
             sampler_layout=getattr(env, "sampler_layout", None),
         )
-    if architecture in {"adaptive_interaction_cover_honf", "faithful_receiver_hypergraph_honf"}:
+    if architecture in {"adaptive_interaction_cover_honf", "faithful_receiver_hypergraph_honf", "native_context_tree_honf",
+                        "native_context_global_control_honf"}:
         # A fixed case receiver universe is assembled from input geometry,
         # independently of the current decoder query chunk. Each role has
         # unit total measure; padded module anchors have zero weight and are

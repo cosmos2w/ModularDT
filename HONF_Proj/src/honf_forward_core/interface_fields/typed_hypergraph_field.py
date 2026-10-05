@@ -45,19 +45,28 @@ class TypedHypergraphField(DensePairwiseField):
         super().__init__(hidden_dim, message_hidden_dim, num_heads, fourier_frequencies,
                          activation_checkpointing=activation_checkpointing)
         settings = dict(options or {})
-        if architecture in {"adaptive_receiver_hypergraph_honf", "faithful_receiver_hypergraph_honf"}:
+        self.live_task_controls = architecture == "native_context_global_control_honf"
+        self.uses_structural_objective = not self.live_task_controls
+        if architecture in {"adaptive_receiver_hypergraph_honf", "faithful_receiver_hypergraph_honf",
+                            "native_context_tree_honf"}:
             from .adaptive_receiver_hypergraph import AdaptiveReceiverHypergraph
-            if architecture == "faithful_receiver_hypergraph_honf":
+            if architecture in {"faithful_receiver_hypergraph_honf", "native_context_tree_honf"}:
                 settings.update(faithful_controls=True, measure_consistent=True)
             self.organizer = AdaptiveReceiverHypergraph(hidden_dim, spatial_dim=spatial_dim,
                                                        control_dim=control_dim, **settings)
-        else:
+        elif self.live_task_controls:
+            from .global_control_hypergraph import GlobalControlHypergraph
+            self.organizer = GlobalControlHypergraph(hidden_dim, spatial_dim=spatial_dim,
+                                                     control_dim=control_dim, **settings)
+        elif architecture in {"overlap_control_hypergraph_honf", "local_overlap_hypergraph_honf"}:
             from .overlap_control_hypergraph import OverlapControlHypergraph
             self.organizer = OverlapControlHypergraph(
                 hidden_dim, spatial_dim, control_dim=control_dim,
                 local_access=architecture == "local_overlap_hypergraph_honf",
                 module_characteristic_length=module_characteristic_length, **settings,
             )
+        else:
+            raise ValueError(f"Unknown typed hypergraph architecture: {architecture}")
         self.control_gain = nn.ModuleDict({name: nn.Linear(control_dim, 1)
                                           for name in ("MM", "ME", "EM", "QM")})
         self.control_gain["QE"] = nn.Linear(control_dim, num_heads)
@@ -68,6 +77,13 @@ class TypedHypergraphField(DensePairwiseField):
         self.permission_mode = "hard"
         self.control_execution = "projected"
         self.training_gradient_mode = "whole_wrapper_shadow_v1"
+        if architecture == "native_context_tree_honf":
+            self.training_gradient_mode = "local_context_shadow_v1"
+        elif self.live_task_controls:
+            self.training_gradient_mode = "ordinary_task_v1"
+            self.supports_local_context_shadow = False
+            # One source-independent QE score cancels in source softmax.
+            self.control_score.requires_grad_(False)
         self.execution_mode = "dense_masked_reference"
         self.execution_receiver_chunk = 128
         self.plan_intervention = "normal"
@@ -166,7 +182,7 @@ class TypedHypergraphField(DensePairwiseField):
                 access = replace(access, control=original_control)
         if mode == "control_identity":
             access = replace(access, control=torch.zeros_like(access.control))
-        if self.training and not soft:
+        if self.training and not soft and not self.live_task_controls:
             access = detach_tree(access)
         return access
 
@@ -194,7 +210,8 @@ class TypedHypergraphField(DensePairwiseField):
                                 mode=mode, soft=soft)
         access = self.organizer.access(plan, receivers, mechanism, receiver_tokens,
             soft=soft, pair_valid=pair_valid, prepared_action=actions[mechanism],
-            include_diagnostics=diagnostics, detach_permissions=self.training and not soft)
+            include_diagnostics=diagnostics,
+            detach_permissions=self.training and not soft and not self.live_task_controls)
         if mode in {"full_access", "root_union"}:
             kind = SOURCE_TYPE[mechanism]
             member = (plan.source_valid[kind][:, None].to(receivers.dtype) if mode == "full_access"
@@ -280,7 +297,7 @@ class TypedHypergraphField(DensePairwiseField):
             plan = fixed_structure_intervention(plan)
         if self.plan_intervention == "fixed_summary":
             plan = self.training_population_summary.apply(plan)
-        if self.training and not soft:
+        if self.training and not soft and not self.live_task_controls:
             plan = detach_tree(plan)
         _batch, modules, _ = module_states.shape
         environments = encoded.env_tokens.shape[1]
@@ -338,7 +355,8 @@ class TypedHypergraphField(DensePairwiseField):
         preparation_accesses = {"MM": mm_access, "ME": me_access, "EM": em_access}
         structural_plan = soft_plan if local_shadow else plan
         structural_accesses = soft_accesses if local_shadow else preparation_accesses
-        structural = prepare_structural_cost(structural_accesses, structural_plan) if self.training else None
+        structural = (prepare_structural_cost(structural_accesses, structural_plan)
+                      if self.training and self.uses_structural_objective else None)
         return {"module_tokens": contextual_modules, "env_tokens": contextual_env,
                 "hypergraph_actions": actions, "hypergraph_action_plan": plan, "hypergraph_structural_preparation": structural,
                 "hypergraph_soft_plan": soft_plan, "hypergraph_soft_actions": soft_actions,
@@ -486,7 +504,7 @@ class TypedHypergraphField(DensePairwiseField):
         accesses = {**state["hypergraph_accesses"], "QM": qm, "QE": qe}
         metrics = {}
         cost = None
-        if self.training or return_routing_maps:
+        if self.uses_structural_objective and (self.training or return_routing_maps):
             cost_accesses = ({**state["hypergraph_soft_accesses"], "QM": soft_qm, "QE": soft_qe}
                              if soft_plan is not None else accesses)
             cost, metrics = structural_cost(cost_accesses, soft_plan if soft_plan is not None else plan,

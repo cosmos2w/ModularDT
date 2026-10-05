@@ -21,7 +21,7 @@ from channelthermal.response_control.thermal import pressure_drop_from_field
 from honf_forward_core.training.hypergraph_shadow import hard_value_soft_hypergraph_forward
 from honf_runtime.paths import resolve_path
 
-from .campaign import HYPERGRAPH_ARCHITECTURES
+from .campaign import HYPERGRAPH_ARCHITECTURES, heat_null_training_enabled
 from .campaign_work import CampaignForwardWork, measured_wrapper_calls
 
 
@@ -68,7 +68,7 @@ class NativeCampaignResponse:
                                                hot_solid_points_per_module=16, random_seed=0)
         self.settings = settings
         self.heat_null = None
-        if settings.get("heat_null_response") is not None:
+        if heat_null_training_enabled(settings):
             from .campaign_null_response import NativeHeatNullResponse
 
             self.heat_null = NativeHeatNullResponse(model, dataset, dataset_config, settings["heat_null_response"],

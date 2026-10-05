@@ -29,8 +29,9 @@ CAMPAIGN_KEYS = {
 }
 HYPERGRAPH_ARCHITECTURES = frozenset({
     "adaptive_receiver_hypergraph_honf", "overlap_control_hypergraph_honf",
-    "local_overlap_hypergraph_honf", "faithful_receiver_hypergraph_honf",
+    "local_overlap_hypergraph_honf", "faithful_receiver_hypergraph_honf", "native_context_tree_honf",
 })
+NATIVE_CONTEXT_ARCHITECTURES = frozenset({"native_context_tree_honf", "native_context_global_control_honf"})
 ORGANIZER_PREFIXES = ("core.backend.organizer.", "core.backend.control_gain.", "core.backend.control_score.",
                       "core.backend.pair_controls.")
 
@@ -126,9 +127,24 @@ def validate_campaign(config: dict[str, Any], *, max_train_batches: int | None =
         raise ValueError("The primary matched fresh campaign uses seed 0.")
     settings["schedule_total_epochs"] = horizon
     gradient_policy = settings.get("organizer_gradient_policy", "whole_wrapper_shadow_v1")
-    if gradient_policy not in {"whole_wrapper_shadow_v1", "local_context_shadow_v1"}:
+    architecture = config.get("model", {}).get("core_honf", {}).get("forward_architecture")
+    if gradient_policy not in {"whole_wrapper_shadow_v1", "local_context_shadow_v1", "ordinary_task_v1"}:
         raise ValueError("Unknown organizer gradient policy.")
-    if gradient_policy == "local_context_shadow_v1":
+    if architecture in NATIVE_CONTEXT_ARCHITECTURES:
+        expected = "local_context_shadow_v1" if architecture == "native_context_tree_honf" else "ordinary_task_v1"
+        dataset = config.get("dataset", {})
+        development = bool(dataset.get("development_manifest") or dataset.get("development_subset"))
+        expected_horizon = 1000 if development else 5000
+        if (gradient_policy != expected or settings.get("parent") is not None or horizon != expected_horizon
+                or not settings.get("matched_fresh_initialization")
+                or settings.get("heat_null_response") != {"coefficient": 0.0}
+                or config.get("model", {}).get("channelthermal", {}).get("global_feature_schema") != "source_local_v3"):
+            raise ValueError("Native-context controls require matched fresh source_local_v3 initialization and their declared task-gradient policy.")
+        if architecture == "native_context_global_control_honf" and settings.get("structural_weight") != 0.0:
+            raise ValueError("Global-C has no structural objective.")
+    elif gradient_policy == "ordinary_task_v1":
+        raise ValueError("Ordinary task policy is declared only for the native-context Global-C control.")
+    elif gradient_policy == "local_context_shadow_v1":
         parent = settings.get("parent")
         if (config.get("model", {}).get("core_honf", {}).get("forward_architecture")
                 != "faithful_receiver_hypergraph_honf"
@@ -147,14 +163,19 @@ def validate_campaign(config: dict[str, Any], *, max_train_batches: int | None =
     measure_policy = settings.get("structural_measure_policy_version")
     core = config.get("model", {}).get("core_honf", {})
     option = core.get("interface_model", {}).get("hypergraph_options", {}).get("structural_measure_policy_version", 1)
-    if core.get("forward_architecture") == "faithful_receiver_hypergraph_honf" and option == 2 and measure_policy != 2:
+    if architecture in {"faithful_receiver_hypergraph_honf", "native_context_tree_honf"} and option == 2 and measure_policy != 2:
         raise ValueError("Eligible-mechanism model option 2 requires an explicit reviewed campaign policy.")
     if measure_policy is not None and (measure_policy != 2 or option != 2
-            or core.get("forward_architecture") != "faithful_receiver_hypergraph_honf"
-            or settings.get("native_loss_denominators_start_epoch") != 101):
+            or architecture not in {"faithful_receiver_hypergraph_honf", "native_context_tree_honf"}
+            or (architecture == "faithful_receiver_hypergraph_honf"
+                and settings.get("native_loss_denominators_start_epoch") != 101)):
         raise ValueError("Eligible-mechanism policy 2 requires its explicit reviewed Tree-F epoch101 option.")
     null = settings.get("heat_null_response")
     if null is not None:
+        if architecture in NATIVE_CONTEXT_ARCHITECTURES:
+            if null != {"coefficient": 0.0}:
+                raise ValueError("Native-context comparison disables the old heat-null TRAIN objective with explicit coefficient zero.")
+            return settings
         if not isinstance(null, dict) or null.get("benchmark_verified") is not True:
             raise ValueError("Heat-null auxiliary requires explicit verified benchmark provenance.")
         if (settings.get("native_loss_denominators_start_epoch") != 101
@@ -226,8 +247,15 @@ def _validate_physical_campaign_amendment(checkpoint: dict, saved_campaign: dict
         if (previous != requested or int(checkpoint.get("epoch", 0)) != 100
                 or saved_campaign.get("physical_loss_policy_version", 1) != 1
                 or saved_campaign.get("native_loss_denominators_start_epoch") is not None
-                or saved_campaign.get("heat_null_response") is not None
-                or saved_campaign.get("structural_measure_policy_version", 1) != 1
+                or (saved_campaign.get("heat_null_response") is not None
+                    and not (checkpoint.get("model_config", {}).get("core_honf", {}).get("forward_architecture")
+                             in NATIVE_CONTEXT_ARCHITECTURES
+                             and saved_campaign.get("heat_null_response") == current.get("heat_null_response") == {"coefficient": 0.0}))
+                or (saved_campaign.get("structural_measure_policy_version", 1) != 1
+                    and not (checkpoint.get("model_config", {}).get("core_honf", {}).get("forward_architecture")
+                             == "native_context_tree_honf"
+                             and saved_campaign.get("structural_measure_policy_version")
+                             == current.get("structural_measure_policy_version") == 2))
                 or current.get("physical_loss_policy_version") != 2
                 or current.get("native_loss_denominators_start_epoch") != 101):
             raise ValueError("Campaign resume cannot reset or silently amend its schedule/lineage.")
@@ -236,7 +264,7 @@ def _validate_physical_campaign_amendment(checkpoint: dict, saved_campaign: dict
                      "scope": "explicit common native query/module/valid-port denominators; architecture version unchanged"}
         if current.get("heat_null_response") is not None:
             amendment["heat_null_response"] = copy.deepcopy(current["heat_null_response"])
-        if current.get("structural_measure_policy_version") == 2:
+        if current.get("structural_measure_policy_version") == 2 and saved_campaign.get("structural_measure_policy_version", 1) == 1:
             amendment["structural_measure_policy"] = {
                 "from": 1, "to": 2, "activation_epoch": 101,
                 "scope": "exclude entirely ineligible mechanisms from the physical-measure mean; recalibrate training-only pressure",
@@ -273,6 +301,36 @@ def copy_matched_physical_initial_state(target: torch.nn.Module, canonical: torc
         raise ValueError(f"Fresh common physical initial state has unmatched tensors: {unmatched}")
     target.load_state_dict(current, strict=True)
     return {"source": "fresh_materialized_B-fine_seed0", "epoch": 0, "loaded": loaded, "organizer_independent": excluded}
+
+
+def heat_null_training_enabled(settings: dict) -> bool:
+    """Explicit zero-weight native-context controls perform no null TRAIN calls."""
+    null = settings.get("heat_null_response")
+    return null is not None and null != {"coefficient": 0.0}
+
+
+def copy_matched_native_context_initial_state(target: torch.nn.Module, canonical: torch.nn.Module) -> dict[str, Any]:
+    """Match materialized physical/context tensors and meaningfully shared controls."""
+    shared_controls = ("core.backend.organizer.control_geometry_encoder.", "core.backend.organizer.control_heads.",
+                       "core.backend.control_gain.", "core.backend.control_score.")
+    source, current = canonical.state_dict(), target.state_dict()
+    loaded, excluded = [], []
+    for name, value in current.items():
+        if name.startswith(ORGANIZER_PREFIXES) and not name.startswith(shared_controls):
+            excluded.append(name)
+            continue
+        if name not in source or source[name].shape != value.shape:
+            raise ValueError(f"Fresh common native-context initial tensor is missing or differently shaped: {name}")
+        current[name] = source[name].detach().clone()
+        loaded.append(name)
+    target.load_state_dict(current, strict=True)
+    if not all(torch.equal(target.state_dict()[name], source[name]) for name in loaded):
+        raise ValueError("Fresh native-context tensor copy failed its exact comparison.")
+    if not any(name.startswith(shared_controls[0]) for name in loaded) or not any(name.startswith(shared_controls[1]) for name in loaded):
+        raise ValueError("Matched native-context initialization lacks materialized common control geometry/heads.")
+    return {"source": "fresh_materialized_Global-C_seed0", "epoch": 0,
+            "loaded": [{"name": name, "shape": list(source[name].shape)} for name in loaded],
+            "exact_common_tensors_equal": True, "tree_specific_organizer_independent": excluded}
 
 
 def gpu_contention_sample(device: torch.device) -> dict[str, Any]:

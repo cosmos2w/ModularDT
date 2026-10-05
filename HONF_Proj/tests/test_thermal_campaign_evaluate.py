@@ -123,6 +123,18 @@ def test_equal_case_and_pooled_metrics_differ_without_dropping_failure():
     assert result["pooled_count"] == 10
 
 
+def test_case_median_and_worst_identity_preserve_ties_and_exclude_failures():
+    rows = [{"case_id": identity, "metrics": {"T": evaluation.physical_errors(
+        np.full(count, error), np.zeros(count))}}
+        for identity, count, error in (("0001", 100, 1.), ("0002", 1, 7.),
+                                      ("0003", 1, 7.), ("0004", 1, np.nan))]
+    result = evaluation.aggregate_physical(rows)["T"]
+    assert result["equal_case_rmse_median"] == 7.
+    assert result["worst_case_ids"] == ["0002", "0003"]
+    assert result["nonfinite_cases"] == 1
+    assert result["pooled_rmse"] != result["equal_case_rmse_median"]
+
+
 def test_public_native_context_has_exact_keys_and_keeps_nonfinite_inputs_explicit():
     structure = {"re": np.asarray([140.]), "u_in": np.asarray([1.]),
         "heat_powers": np.asarray([1., 2., 0.]),

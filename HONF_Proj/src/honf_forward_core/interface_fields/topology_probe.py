@@ -1,8 +1,11 @@
 """Evaluation-only continuation of a recorded discrete organizer topology.
 
-No soft permissions replace the hard operator. Active source/group sets are
-fixed while their affine sparsemax continuation and physical controls remain
-live. Negative continuation values terminate the local validity region.
+No soft permissions replace the hard operator. The historical default fixes
+active source/group sets while their affine sparsemax continuation and
+physical controls remain live. Negative continuation values terminate that
+mathematical branch, rather than establish physical design infeasibility.
+The explicitly named fixed-frontier mode keeps receiver organization while
+recomputing ordinary source projections; source donor support can change.
 """
 
 from contextlib import AbstractContextManager
@@ -66,13 +69,25 @@ class OrganizerTopologyProbe(AbstractContextManager):
     A record is local to a complete wrapper call. Physical receiver rows must
     retain their order/shape. Methods are restored even if a branch exits its
     valid region; this context never changes training behavior or checkpoints.
+    ``fixed_frontier_live_membership`` is receiver-tree-only and requires an
+    existing record. Its live source projection is distinct from the default
+    fixed-active-set continuation; receiver connectivity remains recorded.
     """
 
-    def __init__(self, organizer, reference=None):
+    def __init__(self, organizer, reference=None, *, topology_mode="fixed_active_set"):
         if organizer.training:
             raise ValueError("Topology probes require an evaluation organizer")
+        if topology_mode not in {"fixed_active_set", "fixed_frontier_live_membership"}:
+            raise ValueError(f"Unknown topology continuation mode: {topology_mode!r}")
+        if topology_mode != "fixed_active_set":
+            from .adaptive_receiver_hypergraph import AdaptiveReceiverHypergraph
+            if reference is None:
+                raise ValueError("Fixed-frontier continuation requires a reference record")
+            if not isinstance(organizer, AdaptiveReceiverHypergraph):
+                raise ValueError("Fixed-frontier live membership requires a receiver-tree organizer")
         self.organizer = organizer
         self.reference = reference
+        self.topology_mode = topology_mode
         self.record = OrganizerTopologyRecord({}, {})
         self._counts = {}
 
@@ -88,6 +103,8 @@ class OrganizerTopologyProbe(AbstractContextManager):
             kwargs["capture_topology"] = True
             if self.reference is not None:
                 kwargs["fixed_topology"] = self.reference.states[phase]
+                if self.topology_mode != "fixed_active_set":
+                    kwargs["topology_mode"] = self.topology_mode
             state = self._originals["prepare"](*args, **kwargs)
             self.record.states[phase] = detach_tree(state)
             return state
