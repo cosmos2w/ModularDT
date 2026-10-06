@@ -235,6 +235,132 @@ def summarize_families(families):
             "stored_pool_decisions": decisions}
 
 
+def compare_saved_responses(parent, candidate, *, common_flow_stds):
+    """Compare identical saved physical directions without another model read.
+
+    Scales must come from the common selected-training parent normalizer.
+    Zero physical increments have absolute errors, never relative accuracy.
+    """
+    flow = ("u", "v", "p", "omega")
+    scales = {channel: float(common_flow_stds[channel]) for channel in flow}
+    if any(not np.isfinite(value) or value <= 0 for value in scales.values()):
+        raise ValueError("Common selected-training flow standard deviations must be positive and finite")
+    if parent["manifest_fingerprint"] != candidate["manifest_fingerprint"]:
+        raise ValueError("Saved response manifest identity differs")
+    before = {family["case_id"]: family for family in parent["families"]}
+    after = {family["case_id"]: family for family in candidate["families"]}
+    if len(before) != len(parent["families"]) or len(after) != len(candidate["families"]) or before.keys() != after.keys():
+        raise ValueError("Saved response family identity differs or is duplicated")
+    rows, secondary, pressure_rows, module_rows = [], [], [], []
+
+    def paired_metric(old, new):
+        return {"parent": old, "candidate": new,
+                "improvement_percent": 100 * (1 - new / old) if old > 0 else None}
+
+    for case_id, old_family in before.items():
+        new_family = after[case_id]
+        if old_family["physical_family_id"] != new_family["physical_family_id"]:
+            raise ValueError("Saved response physical family identity differs")
+        old_absolute = {row["state"]: row for row in old_family["absolute"]}
+        new_absolute = {row["state"]: row for row in new_family["absolute"]}
+        if (old_absolute.keys() != new_absolute.keys() or len(old_absolute) != len(old_family["absolute"])
+                or len(new_absolute) != len(new_family["absolute"])):
+            raise ValueError("Saved response actual state directions differ")
+        for state, old_state in old_absolute.items():
+            new_state = new_absolute[state]
+            for key in ("heat", "centres", "reference_functionals"):
+                if old_state[key] != new_state[key]:
+                    raise ValueError(f"Saved response actual {key} differs")
+        old_finite = {(row["baseline_state"], row["state"]): row for row in old_family["finite"]}
+        new_finite = {(row["baseline_state"], row["state"]): row for row in new_family["finite"]}
+        if (old_finite.keys() != new_finite.keys() or len(old_finite) != len(old_family["finite"])
+                or len(new_finite) != len(new_family["finite"])):
+            raise ValueError("Saved response finite directions differ")
+        compared_roles = {role for row in old_finite.values() for role in row["roles"]}
+        identity_names = ("query_features", "valid_mask", "quadrature_weights", "channel_names", "channel_units", "query_ids", "receiver_module_ids")
+        required_keys = {f"{role}/{name}" for role in compared_roles for name in identity_names}
+        required_keys.update(f"{state}/{role}/reference" for state in old_absolute for role in compared_roles)
+        required_keys.update(f"{state}/{role}/delta_reference_FP64" for _, state in old_finite for role in compared_roles)
+        with np.load(old_family["arrays"], allow_pickle=False) as old_arrays, np.load(new_family["arrays"], allow_pickle=False) as new_arrays:
+            checked_keys = {key for key in old_arrays.files if key.endswith((*identity_names, "delta_reference_FP64", "/reference"))}
+            candidate_keys = {key for key in new_arrays.files if key.endswith((*identity_names, "delta_reference_FP64", "/reference"))}
+            if not required_keys.issubset(checked_keys) or checked_keys != candidate_keys:
+                raise ValueError("Saved response required reference/query identity keys are missing or differ")
+            for key in checked_keys:
+                equal = key in new_arrays
+                if equal:
+                    options = {} if old_arrays[key].dtype.kind in "OUS" else {"equal_nan": True}
+                    equal = np.array_equal(old_arrays[key], new_arrays[key], **options)
+                if not equal:
+                    raise ValueError(f"Saved response native reference/query identity differs: {key}")
+        for (baseline, state), old_finite_row in old_finite.items():
+            new_finite_row = new_finite[(baseline, state)]
+            if old_finite_row["roles"].keys() != new_finite_row["roles"].keys():
+                raise ValueError("Saved response native roles differ")
+            for role, channels in old_finite_row["roles"].items():
+                if channels.keys() != new_finite_row["roles"][role].keys():
+                    raise ValueError("Saved response native channels differ")
+                for channel, old_metric in channels.items():
+                    new_metric = new_finite_row["roles"][role][channel]
+                    for key in ("count", "unit", "reference_rms", "reference_signed_mean"):
+                        if old_metric[key] != new_metric[key]:
+                            raise ValueError(f"Saved response metric reference differs: {key}")
+                    row = {"case_id": case_id, "baseline_state": baseline, "state": state,
+                           "role": role, "channel": channel, "unit": old_metric["unit"],
+                           "rmse": paired_metric(old_metric["rmse"], new_metric["rmse"]),
+                           "reference_rms": old_metric["reference_rms"],
+                           "reference_signed_mean": old_metric["reference_signed_mean"],
+                           "parent_prediction_signed_mean": old_metric["prediction_signed_mean"],
+                           "candidate_prediction_signed_mean": new_metric["prediction_signed_mean"],
+                           "sign_floor_status": "Unresolved physical/grid sign floor; signed means are descriptive"}
+                    if role == "fluid_fields" and channel in flow:
+                        row["common_train_std"] = scales[channel]
+                        row["rmse_common_train_scaled"] = paired_metric(old_metric["rmse"] / scales[channel], new_metric["rmse"] / scales[channel])
+                        row["relative_accuracy_to_zero"] = "undefined" if old_metric["reference_rms"] == 0 else "not used for null qualification"
+                    (rows if baseline == "baseline" else secondary).append(row)
+            old_pressure = old_finite_row["pressure_drop_8pct_response"]
+            new_pressure = new_finite_row["pressure_drop_8pct_response"]
+            if old_pressure["reference"] != new_pressure["reference"] or old_pressure["unit"] != new_pressure["unit"]:
+                raise ValueError("Saved native pressure functional reference differs")
+            pressure_rows.append({"case_id": case_id, "baseline_state": baseline, "state": state,
+                                  "reference": old_pressure["reference"], "parent_prediction": old_pressure["prediction"],
+                                  "candidate_prediction": new_pressure["prediction"], "unit": old_pressure["unit"],
+                                  "absolute_error_native": paired_metric(old_pressure["absolute_error"], new_pressure["absolute_error"]),
+                                  "absolute_error_common_train_scaled": paired_metric(old_pressure["absolute_error"] / scales["p"], new_pressure["absolute_error"] / scales["p"]),
+                                  "common_train_pressure_std": scales["p"], "functional": "full native valid 8% inlet/outlet bands"})
+            if old_finite_row["module_peak_changes"].keys() != new_finite_row["module_peak_changes"].keys():
+                raise ValueError("Saved module peak identities differ")
+            for module_id, old_module in old_finite_row["module_peak_changes"].items():
+                new_module = new_finite_row["module_peak_changes"][module_id]
+                if (old_module["unchanged_own_heat"] != new_module["unchanged_own_heat"] or old_module["reference"] != new_module["reference"]
+                        or old_module["unit"] != new_module["unit"]):
+                    raise ValueError("Saved unchanged-own-heat module reference differs")
+                if old_module["unchanged_own_heat"]:
+                    module_rows.append({"case_id": case_id, "baseline_state": baseline, "state": state, "module_id": module_id,
+                                        "reference": old_module["reference"], "parent_prediction": old_module["prediction"],
+                                        "candidate_prediction": new_module["prediction"], "unit": old_module["unit"],
+                                        "absolute_error_native": paired_metric(old_module["absolute_error"], new_module["absolute_error"])})
+    aggregates = []
+    for role, channel in sorted({(row["role"], row["channel"]) for row in rows}):
+        selected = [row for row in rows if (row["role"], row["channel"]) == (role, channel)]
+        aggregate = {"role": role, "channel": channel, "layout_count": len({row["case_id"] for row in selected}),
+                     "finite_direction_count": len(selected), "unit": selected[0]["unit"],
+                     "macro_mean_state_rmse_native": paired_metric(float(np.mean([row["rmse"]["parent"] for row in selected])), float(np.mean([row["rmse"]["candidate"] for row in selected])))}
+        if role == "fluid_fields" and channel in flow:
+            native = aggregate["macro_mean_state_rmse_native"]
+            aggregate["macro_rmse_common_train_scaled"] = paired_metric(native["parent"] / scales[channel], native["candidate"] / scales[channel])
+            aggregate["raw_90_percent_reduction"] = native["improvement_percent"] >= 90 if native["improvement_percent"] is not None else None
+            aggregate["physical_null_reference"] = all(row["reference_rms"] == 0 for row in selected)
+            aggregate["qualification"] = "Absolute raw reduction only; certified numerical response floor unavailable"
+        aggregates.append(aggregate)
+    return {"parent_checkpoint": parent["checkpoint"], "candidate_checkpoint": candidate["checkpoint"],
+            "manifest_fingerprint": parent["manifest_fingerprint"], "identical_saved_reference_queries_directions": True,
+            "scale_basis": "caller-supplied common selected-training parent flow normalizer", "common_flow_stds": scales,
+            "primary_response_aggregates": aggregates, "primary_response_rows": rows, "secondary_span_rows": secondary,
+            "pressure_drop_8pct_rows": pressure_rows, "unchanged_own_heat_module_rows": module_rows,
+            "new_model_calls": 0, "new_solver_attempts": 0}
+
+
 def parent_field_gate(parent, candidate):
     """Predeclared per-field mean and tail warnings; no aggregate-MSE hiding."""
     audit_field_comparability(parent, candidate)

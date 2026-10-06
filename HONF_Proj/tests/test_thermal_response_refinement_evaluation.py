@@ -14,6 +14,7 @@ from thermal_response_refinement_evaluation import (
     aggregate_response_rows,
     audit_field_comparability,
     compare_heat_null,
+    compare_saved_responses,
     finite_metrics,
     load_atlas_families,
     load_counted_families,
@@ -167,3 +168,64 @@ def test_real_atlas_cohorts_are_complete_and_reject_duplicate_physical_family():
         load_atlas_families(paths[:-1] + paths[:1], pair, "development")
     with pytest.raises(ValueError, match="physical-family identity"):
         load_atlas_families(paths, pair, "fit")
+
+
+def test_saved_response_comparison_scales_null_and_rejects_changed_heat_and_queries(tmp_path):
+    arrays = tmp_path / "reference.npz"
+    identity = {"fluid_fields/query_features": np.array([[0., 1.]]),
+                "fluid_fields/valid_mask": np.array([[True]]),
+                "fluid_fields/quadrature_weights": np.array([1.]),
+                "fluid_fields/channel_names": np.array(["p"]),
+                "fluid_fields/channel_units": np.array(["pressure"]),
+                "fluid_fields/query_ids": np.array(["q0"]),
+                "fluid_fields/receiver_module_ids": np.array([], dtype=str),
+                "baseline/fluid_fields/reference": np.array([[1.]]),
+                "plus/fluid_fields/reference": np.array([[1.]]),
+                "plus/fluid_fields/delta_reference_FP64": np.array([[0.]])}
+    np.savez(arrays, **identity)
+    metric = {"count": 1, "unit": "pressure", "reference_rms": 0., "reference_signed_mean": 0.,
+              "prediction_signed_mean": -.2, "rmse": .2}
+    pressure = {"reference": 0., "prediction": -.2, "absolute_error": .2, "unit": "pressure"}
+    module = {"reference": -.1, "prediction": -.3, "absolute_error": .2, "unit": "temperature", "unchanged_own_heat": True}
+    family = {"case_id": "a", "physical_family_id": "family:a", "arrays": str(arrays),
+              "absolute": [{"state": state, "heat": heat, "centres": [[0., 0.], [1., 0.]],
+                            "reference_functionals": {"maximum_material_temperature": 10.}}
+                           for state, heat in (("baseline", [1., 2.]), ("plus", [1.1, 1.9]))],
+              "finite": [{"baseline_state": "baseline", "state": "plus", "roles": {"fluid_fields": {"p": metric}},
+                          "pressure_drop_8pct_response": pressure, "module_peak_changes": {"m2": module}}]}
+    parent = {"manifest_fingerprint": "fixed", "checkpoint": "parent.pt", "families": [family]}
+    candidate = copy.deepcopy(parent)
+    candidate["checkpoint"] = "candidate.pt"
+    candidate["families"][0]["finite"][0]["roles"]["fluid_fields"]["p"]["rmse"] = .1
+    scales = {channel: .5 for channel in ("u", "v", "p", "omega")}
+    compared = compare_saved_responses(parent, candidate, common_flow_stds=scales)
+    aggregate = compared["primary_response_aggregates"][0]
+    assert aggregate["macro_rmse_common_train_scaled"]["parent"] == .4
+    assert aggregate["macro_mean_state_rmse_native"]["improvement_percent"] == 50
+    assert aggregate["raw_90_percent_reduction"] is False
+    assert compared["primary_response_rows"][0]["relative_accuracy_to_zero"] == "undefined"
+    assert compared["pressure_drop_8pct_rows"][0]["absolute_error_common_train_scaled"]["parent"] == .4
+    assert compared["unchanged_own_heat_module_rows"][0]["module_id"] == "m2"
+    candidate["families"][0]["absolute"][1]["heat"] = [1.2, 1.8]
+    with pytest.raises(ValueError, match="actual heat"):
+        compare_saved_responses(parent, candidate, common_flow_stds=scales)
+    candidate = copy.deepcopy(parent)
+    changed_arrays = tmp_path / "changed.npz"
+    np.savez(changed_arrays, **{**identity, "fluid_fields/query_features": np.array([[1., 1.]])})
+    candidate["families"][0]["arrays"] = str(changed_arrays)
+    with pytest.raises(ValueError, match="reference/query identity"):
+        compare_saved_responses(parent, candidate, common_flow_stds=scales)
+    with pytest.raises(ValueError, match="positive and finite"):
+        compare_saved_responses(parent, parent, common_flow_stds={**scales, "p": 0})
+    np.savez(arrays, **{key: value for key, value in identity.items() if key != "fluid_fields/valid_mask"})
+    with pytest.raises(ValueError, match="required reference/query identity keys"):
+        compare_saved_responses(parent, parent, common_flow_stds=scales)
+    np.savez(arrays, **identity)
+    candidate = copy.deepcopy(parent)
+    candidate["families"][0]["finite"][0]["pressure_drop_8pct_response"]["unit"] = "other_pressure"
+    with pytest.raises(ValueError, match="pressure functional reference"):
+        compare_saved_responses(parent, candidate, common_flow_stds=scales)
+    candidate = copy.deepcopy(parent)
+    candidate["families"][0]["finite"][0]["module_peak_changes"]["m2"]["unit"] = "other_temperature"
+    with pytest.raises(ValueError, match="unchanged-own-heat module reference"):
+        compare_saved_responses(parent, candidate, common_flow_stds=scales)
