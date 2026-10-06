@@ -366,7 +366,30 @@ Source: [authoritative shared-core500 conclusions](HONF_Shared_Core_Thermal_500_
 
 ## 7. Fifth milestone: representation faithfulness and runtime become testable properties
 
-**3–5 October.** Fixed-quarter Tree-F versus Pair-F then tests stronger physical and representation contracts. A receiver tree should depend on the physical measure, rather than arbitrary enumeration of quadrature atoms. Splitting one source $(y,w)$ into colocated sources $(y,w_1),(y,w_2)$ with $w_1+w_2=w$ should preserve the operator, with correctly pulled-back derivatives. Permuting physical source order should also preserve it.
+**3–5 October.** This stage repairs equivalent-representation contracts and reduces Tree implementation overhead on fixed-quarter data. It yields two distinct successes: measured rebuilt output/derivative agreement at Tree-F200, and cheaper execution of retained weights with Tree-Lite. Temperature gains against Pair are partial; Dense remains the stronger broad predictor, later numerical misses persist, and inverse blocks do not show a clear advantage.
+
+### 7.1 Model origins, names and comparison identity
+
+The F label identifies the faithfulness-stage models; Pair-F is the direct-pair control in that stage, not a claim that every later artifact automatically satisfies every faithfulness test. L in Tree-L denotes the legacy Tree control, while Lite denotes the subsequent implementation reduction. These identities must not be confused with the previous full-data H-tree2203 campaign.
+
+| Model | Origin and retained age | What it means / what it controls |
+| --- | --- | --- |
+| **Tree-L / Run3103** | Fresh legacy H-tree on fixed25_v1; stops at 100. | Carries the earlier receiver-tree strategy into the new data protocol; identifies legacy representation sensitivity. It is not a continuation of full-data2203. |
+| **Tree-F / Run3204** | Fresh faithfulness-stage Tree, common compatible B-fine physical initialization; reviewed through 200. | Makes the receiver index and structural objective measure-aware, separates control donors from all-source planning, and exposes both module/environment donors and phase ancestry. Coordinate-tie derivative repairs are declared. |
+| **Pair-F / Run3202** | Independently trained direct-pair modulation from compatible fresh physical initialization; 200, then continuation through 1000 with selected 900. | Same source-local three-term fine backbone and source-local inputs, but direct pair controls replace collective Tree organization. Width80 was chosen from parameter counts before outcomes. |
+| **Dense-D25 / Run3101** | Fresh Run1804-like Dense on the same quarter-data selection; completes 1000. | Strong native-context reference with coarse/local paths, global-heat features and case-relative heat scaling. It is not mature full-data1804. |
+| **Tree-Lite / Run3302** | Starts from exact Tree3204 e200; local organizer shadow begins at 201; completes 1000, selected 900. | Continues the Tree physical/organizer state while lowering repeated control projection and diagnostic work and changing organizer training derivatives. No physical fine-source pruning is implied. |
+| **Fine-F / Run3301** | Fresh full-access B-fine initialization; completes and selects 500. | Additional backbone-sufficiency control: same source-local three-term reader, full access and no modulation head. Compare it at500, not as a900/1000 matched-age control. |
+
+Tree-F/Tree-Lite have **3,336,120** active trainable scalars, Pair-F **3,207,565**, Fine-F **2,928,273**, and Dense-D25 **4,395,409**; all share **1,035,139** frozen Stage-A scalars. Pair is about 3.85% smaller than Tree-F, so capacity is close but not identical. Neither fresh candidate inherits mature1804 physical weights. The field reader retains $C(q)=C_g(q)+C_M(q)+C_E(q)$ in Tree/Pair/Fine; Dense retains additional native context. Reuse of the same fine backbone does not make their controllers or Dense's input paths identical.
+
+Fixed25_v1 freezes **150 training / 22 exposed validation cases**, training-only global normalization, initialization/query seed 0, Q1024 primary queries, effective batch48 and the absolute 1000 schedule. Each development epoch visits 150 cases with **four ordinary optimizer boundaries**, rather than the prior full-data 600-case epoch. Thus 200 is **30,000 primary case visits / 800 ordinary updates**, and 1000 is **150,000 / 4,000**, with atlas/null/shadow work accounted separately. Detailed panels use only 0277/0291/0294/0687. Validation remains exposed development evidence.
+
+Tree-F and Pair-F share the declared physical/response amendment at 101, including a selected-training atlas and heat-null checks; Tree also has its structural objective. Dense has disclosed architecture/input differences and no new null penalty. It is a strong benchmark, not a one-factor or equal-capacity organizer ablation. Checkpoints are monitored every 100 epochs, with selection over saved milestones only. Exact200 contracts, same-weight e200 runtime checks, equal-age500 comparisons and selected 900 results answer different questions.
+
+### 7.2 Faithfulness means the same physical measure gives the same operator
+
+A receiver tree should depend on the physical measure, rather than arbitrary enumeration of quadrature atoms. Splitting one source $(y,w)$ into colocated sources $(y,w_1),(y,w_2)$ with $w_1+w_2=w$ should preserve the operator, with correctly pulled-back derivatives. Permuting physical source order should also preserve it.
 
 These tests are stronger than holding an already prepared plan fixed: the organizer must be rebuilt. They expose all-source planning, both module/environment control donors, eligibility and phase ancestry. At the original200 stage, Tree-F passes all 22 rebuilt physical/effective-representation checks and **64/64** detailed derivative checks. Original failed derivatives and legacy failures remain documented; tolerance passes are not silently widened.
 
@@ -374,7 +397,21 @@ These tests are stronger than holding an already prepared plan fixed: the organi
 
 **Figure 11 — a genuine mathematical contract improvement.** Fixed25 Tree-F200 uses actual saved atoms, measures, rebuilds, and derivative directions. The all 22 representation checks and 64/64 detailed derivative checks pass after the declared repairs. This establishes the measured representation contract at that state; it does not establish correct held physical responses or sparsity. [PDF master](../../diagnostics/generated/tree_faithfulness_20261004/figures/03_equivalent_representation_and_derivatives.pdf).
 
+### 7.3 Predictor and organizer gains, with their matched controls
+
 Tree-F200 improves fluid/material/surface temperature means **30.4%/35.0%/32.1%** versus equally trained Pair-F200. Pair retains better flow/pressure-functional/effective-h results. Geometry-matched replacement changes representative fluid-T error only **0.119%**, so trained control reliance is stronger than evidence for unique grouping. The heat-null behavior worsens from 100→200 and no held positive response truth is available within that stage's data. The reviewed stop200 is a scientific boundary, not an assertion that more epochs cannot learn.
+
+The measured contrasts are best read by stage, rather than merging early contracts with later accuracy:
+
+| Experiment / comparison | Retain as a gain | Miss or comparison limit |
+| --- | --- | --- |
+| **Tree-F200 versus Pair-F200**, all 22 | Fluid/material/surface temperature means improve 30.4%/35.0%/32.1%; the thermal benefit is an independently trained comparison. | Pair is better on u/v/p/omega, pressure functional and effective h; Dense200 remains stronger on broad roles. |
+| **Same-weight Tree-F200 interventions** | Trained control removal worsens thermal accuracy; controls are connected and used. | Geometry-matched replacement changes representative fluid-T error only 0.119%; reliance does not prove unique learned grouping. |
+| **Tree-Lite500 versus Pair500/Fine500** | Material/surface means improve 14.36%/20.59% versus Pair and 31.79%/29.34% versus Fine. | Fluid-T is 3.07% worse than Pair, only 1.77% better than Fine; u loses on 22/22 cases against both. Tree's aggregate material advantage over Pair misses all four M10 cases. |
+| **Selected Tree900 versus Pair900** | Fluid/material/surface means improve 17.62%/6.41%/5.95%. | Flow and high-M/material-tail comparisons miss; Dense-D25 is better on all eight core means. This is saved-cadence selection, not exact1000 evidence. |
+| **Response checks** | Known-null tests expose spurious dependencies; stored training-atlas measurements remain available. | Heat-null leakage worsens100→200; held nonzero physical response labels are absent, so reconstruction gains cannot establish held response transfer. |
+
+### 7.4 Tree-Lite lowers implementation cost, while changing organizer training
 
 Tree-Lite later reduces repeated projection/diagnostic work and uses local soft organizer reductions around a hard physical pass. Its linear lowering projects the small group controls before receiver/source expansion:
 
@@ -394,6 +431,8 @@ Tree and Pair complete 1000; saved-cadence field selection picks900 for both. Se
 
 Do not transfer the earlier faithfulness pass to every later artifact. The retained Lite state has **eight whole-rebuild physical q-proxy tolerance failures**. A historical hook-restoration guard failure is later explained by 14 self-removing LazyLinear initialization prehooks; post-materialization normal and exception exits preserve the hook inventory and output. This resolves that guard explanation, not the eight physical tolerance misses. QE fine support is100%; physical fine rows are not pruned.
 
+### 7.5 Inverse reuse: feasible input constraints, weak recovery and charged failures
+
 Its **32 bounded ten-attempt inverse trails** use four cases, two input-only starts, and four modes. The frozen heat inverse minimizes observed-sensor error subject to a capped fixed-sum simplex:
 
 $$
@@ -406,6 +445,10 @@ Held sensors and hidden true heats are evaluation-only. The fixed-sum tangent sp
 ![All bounded inverse heat trails against attempted native calls, heat constraints and identifiability](../../diagnostics/generated/tree_lite_20261004/figures/inverse_final_panel.png)
 
 **Figure 13 — retain the complete inverse trails, including attempted work.** All32 trails, caps, sum residuals, hidden-heat misses, and initial rank limits are saved. Charged invalid calls remain in work accounting. Observed and held temperatures come from stored benchmark references on exposed layouts; proposed heat allocations are scored with frozen surrogates and have no independent physical solve. There are no held nonzero physical perturbation labels or independently validated new designs. [PDF master](../../diagnostics/generated/tree_lite_20261004/figures/inverse_final_panel.pdf).
+
+The four inverse modes are **Tree joint** (all feasible heat directions together), **Tree graph** (graph-block proposals), **Tree random** (random-block control), and **Pair joint**. Each has eight trails from the same four cases/two input-only starts. Pair improves observed error on 8/8 joint trails; Tree's lower absolute mean final held error is not stronger improvement because initial errors differ. Hidden-heat recovery also favors Pair. The 320 Tree topology-invalid forwards comprise 104/127/89 for joint/graph/random and remain charged; failed proposals are not successful designs. Heat caps and fixed sum are input constraints, not certified watts or energy conservation. Candidate allocations have no independent physical-reference solve.
+
+**What this milestone changes:** equivalent-representation checks can now fail or pass with declared tolerances and derivative mappings; implementation savings can be measured at retained weights. Those are separate achievements. The strongest remaining needs are later-state q-proxy consistency, physical response/null fidelity, grouping value against equally trained simple controls, and inverse information/conditioning. Earlier passing contracts and cheaper calls do not resolve these needs.
 
 Sources: [faithful Tree development](HONF_Tree_Faithfulness_Fixed25_Development_Report.md) and [Tree-Lite](HONF_Tree_Lite_Execution_and_Maturation_Report.md).
 
