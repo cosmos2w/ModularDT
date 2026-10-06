@@ -807,7 +807,11 @@ def run_from_config(
         if forward_refinement:
             fieldnames.extend(("refinement_epoch", "interface_prefit_epoch", "physical_objective_epoch",
                                "auxiliary_absolute_loss", "thermal_response_loss", "q_proxy_response_loss",
-                               "null_step_fraction", "null_step_heat", "null_case_id"))
+                               "null_step_fraction", "null_step_heat", "null_case_id",
+                               "response_thermal_loss", "response_q_proxy_loss", "response_auxiliary_absolute_loss",
+                               "response_auxiliary_absolute_weight", "heat_null_loss", "heat_null_coefficient",
+                               "heat_null_wrapper_calls", "heat_null_primary_fluid_queries", "heat_null_role_queries",
+                               "heat_null_seconds", "refinement_auxiliary_seconds", "refinement_total_wrapper_calls"))
     if model_config.core_honf.forward_architecture == "task_trained_functional_coalescence_honf":
         detail_metric_keys = (
             "loss_functional_detail_complexity",
