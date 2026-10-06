@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import sys
 from collections import defaultdict
@@ -534,7 +535,84 @@ def joint_intervention(model, mode):
         module.intervention = original
 
 
-def evaluate_families(checkpoint_path, families, dataset_path, output_dir, *, device="cpu", intervention="normal"):
+class CountedPhaseGraphArrays(dict):
+    """Retain three actual phase plans and only their first QM/QE accesses."""
+
+    def __init__(self):
+        super().__init__()
+        self.discarded_arrays = 0
+
+    def __setitem__(self, key, value):
+        parts = key.split("/")
+        phase = len(parts) >= 3 and parts[0] == "phase" and parts[1] in {"P0", "P1", "P2"}
+        access = (len(parts) >= 5 and parts[0] == "access" and parts[1] in {"P0", "P1", "P2"}
+                  and parts[2] in {"QM", "QE"} and parts[3] == "00000")
+        if phase or access:
+            super().__setitem__(key, value)
+        else:
+            self.discarded_arrays += 1
+
+
+def validate_phase_graph_capture(families, intervention, case_id):
+    """Only the predeclared counted 0291 normal baseline can be captured."""
+    if case_id is None:
+        return
+    if case_id != "0291" or intervention != "normal":
+        raise ValueError("Phase graph capture requires counted normal baseline0291")
+    matching = [records for case, records in families if case == case_id]
+    if len(matching) != 1 or "baseline" not in matching[0]:
+        raise ValueError("Phase graph capture requires exactly one counted0291 baseline")
+    baseline = matching[0]["baseline"]
+    if baseline.design.physical_family_id != "receiver_interaction_fixed4:0291":
+        raise ValueError("Phase graph capture is restricted to the counted fixed4 reference family")
+
+
+def save_counted_phase_graph(capture, record, family_dir, summary, checkpoint_path):
+    """Save actual baseline accesses and exact input/query provenance only."""
+    arrays = capture.arrays
+    centers = np.asarray([module.position_xy for module in record.design.active_modules], dtype=np.float32)
+    fluid_xy = np.asarray(record.output.roles["fluid_fields"].query_features[:, :2], dtype=np.float32)
+    for phase in ("P0", "P1", "P2"):
+        valid = arrays[f"phase/{phase}/source_valid/M"][0].astype(bool)
+        if not np.array_equal(arrays[f"phase/{phase}/source_coords/M"][0, valid], centers):
+            raise ValueError("Captured phase graph changes counted module coordinates/order")
+    receivers = arrays["access/P2/QM/00000/receivers"][0]
+    if not np.array_equal(receivers, fluid_xy[:len(receivers)]):
+        raise ValueError("Captured first P2 QM receiver coordinates/order differ from counted fluid queries")
+    query_identity = {}
+    for role, value in record.output.roles.items():
+        identities = {}
+        for key in ("query_features", "valid_mask", "quadrature_weights", "query_ids", "receiver_module_ids", "channel_names", "channel_units"):
+            item = getattr(value, key)
+            array = np.asarray(item if item is not None else ())
+            digest = hashlib.sha256()
+            digest.update(str((array.shape, array.dtype.str)).encode())
+            digest.update(np.ascontiguousarray(array).tobytes())
+            identities[key] = {"shape": list(array.shape), "dtype": array.dtype.str, "sha256": digest.hexdigest()}
+        query_identity[role] = identities
+    with Path(checkpoint_path).open("rb") as stream:
+        checkpoint_sha = hashlib.file_digest(stream, "sha256").hexdigest()
+    provenance = {"case_id": record.design.anchor_id, "state": "baseline", "record_id": record.record_id,
+        "physical_family_id": record.design.physical_family_id, "source_partition": record.design.split.value,
+        "intervention": "normal", "checkpoint": summary["checkpoint"], "checkpoint_epoch": summary["checkpoint_epoch"],
+        "checkpoint_sha256": checkpoint_sha, "manifest_fingerprint": summary["manifest_fingerprint"],
+        "active_module_ids": list(record.design.active_module_ids), "centres": centers.astype(float).tolist(),
+        "heat": [module.heating for module in record.design.active_modules], "context": dict(record.context.values),
+        "query_identity": query_identity, "query_batch_size": 1024,
+        "displayed_first_P2_QM_receiver_count": len(receivers), "first_P2_QM_matches_counted_fluid_order_FP32": True,
+        "graph_source": "existing counted0291 normal baseline native wrapper; not the nominal packed-H5 field call",
+        "scope": "actual P0/P1/P2 plans and first QM/QE access per phase only; later chunks and MM/ME/EM accesses omitted",
+        "new_wrapper_calls_for_capture": 0, "new_solver_attempts": 0,
+        "retained_arrays": len(arrays), "discarded_arrays": arrays.discarded_arrays,
+        "instrumentation_scope": "existing recorder hooks; filtered retained dictionary; transient recorder copies remain; not latency evidence"}
+    path = Path(family_dir) / "phase_graphs.npz"
+    np.savez_compressed(path, **arrays, provenance_json=np.asarray(json.dumps(provenance, sort_keys=True)))
+    write_json(path.with_suffix(".provenance.json"), provenance)
+    return {"phase_graph_arrays": str(path), "phase_graph_provenance": provenance,
+            "phase_graph_provenance_file": str(path.with_suffix(".provenance.json"))}
+
+
+def evaluate_families(checkpoint_path, families, dataset_path, output_dir, *, device="cpu", intervention="normal", capture_phase_graph_case=None):
     """Frozen complete-wrapper reads; model sees designs/context/queries only."""
     import h5py
     import torch
@@ -545,6 +623,7 @@ def evaluate_families(checkpoint_path, families, dataset_path, output_dir, *, de
     from thermal_campaign_heat_inference import snapshot_forward_state, verify_frozen_forward
     from thermal_development import resolve_evaluation_manifest, validate_generated_output
 
+    validate_phase_graph_capture(families, intervention, capture_phase_graph_case)
     output_dir = validate_generated_output(output_dir)
     if (output_dir / "summary.json").exists():
         raise ValueError("Preserve previous evidence: use a new output directory")
@@ -559,7 +638,8 @@ def evaluate_families(checkpoint_path, families, dataset_path, output_dir, *, de
     summary = {"checkpoint": str(Path(checkpoint_path).resolve()), "checkpoint_epoch": checkpoint["epoch"],
                "intervention": intervention, "manifest_fingerprint": manifest["manifest_sha256"],
                "solver_attempts": 0, "inverse_search_calls": 0, "optimizer_updates": 0, "wrapper_calls": 0,
-               "scope": "stored analytic/shared-grid responses, exposed development evidence; no CFD claim", "families": []}
+               "scope": "stored analytic/shared-grid responses, exposed development evidence; no CFD claim", "families": [],
+               "phase_graph_capture_case": capture_phase_graph_case, "phase_graph_capture_wrapper_calls": 0}
     state = checkpoint.get("campaign_training_state", {})
     summary["lineage"] = {key: state[key] for key in ("interface_fit_attachment", "forward_refinement_attachment") if key in state}
     with h5py.File(dataset_path, "r") as packed:
@@ -577,13 +657,21 @@ def evaluate_families(checkpoint_path, families, dataset_path, output_dir, *, de
             family = {"case_id": case_id, "physical_family_id": first.design.physical_family_id, "absolute": [], "finite": [],
                       "baseline_available": "baseline" in records, "source_partition": first.design.split.value}
             family_started = perf_counter()
+            family_dir = output_dir / case_id
+            family_dir.mkdir(exist_ok=True)
             for label, record in records.items():
                 # Query IDs/coordinates and typed receiver joins are checked by
                 # the response record contracts, never replaced by solved inputs.
                 if torch.device(device).type == "cuda":
                     torch.cuda.synchronize()
                 wrapper_started = perf_counter()
-                with torch.no_grad(), joint_intervention(model, intervention), optional_fine_work(model.core.backend) as work:
+                capture = None
+                if case_id == capture_phase_graph_case and label == "baseline":
+                    from honf_forward_core.evaluation.typed_work_evidence import TypedWorkEvidenceRecorder
+                    capture = TypedWorkEvidenceRecorder(model.core.backend)
+                    capture.arrays = CountedPhaseGraphArrays()
+                with torch.no_grad(), joint_intervention(model, intervention), optional_fine_work(model.core.backend) as work, \
+                        capture if capture is not None else contextlib.nullcontext():
                     output = operator(DesignInput.from_state(record.design, device=device), context, queries)
                 if torch.device(device).type == "cuda":
                     torch.cuda.synchronize()
@@ -598,6 +686,10 @@ def evaluate_families(checkpoint_path, families, dataset_path, output_dir, *, de
                        "centres": [list(module.position_xy) for module in record.design.modules],
                        "complete_wrapper_seconds": perf_counter() - wrapper_started,
                        "timer_scope": "complete native call plus instrumented fine-work hooks and CPU output copy; not bare latency"}
+                if capture is not None:
+                    row.update(save_counted_phase_graph(capture, record, family_dir, summary, checkpoint_path))
+                    row["timer_scope"] += "; this baseline also records bounded phase-graph evidence"
+                    summary["phase_graph_capture_wrapper_calls"] += 1
                 for role, value in record.output.roles.items():
                     row["roles"][role], _, _ = finite_metrics(predictions[label][role], value.values, value)
                     arrays[f"{label}/{role}/prediction"] = predictions[label][role]
@@ -633,8 +725,6 @@ def evaluate_families(checkpoint_path, families, dataset_path, output_dir, *, de
                     arrays[f"{role}/{key}"] = getattr(value, key)
                 for key in ("channel_names", "channel_units", "query_ids", "receiver_module_ids"):
                     arrays[f"{role}/{key}"] = np.asarray(getattr(value, key) or (), dtype=str)
-            family_dir = output_dir / case_id
-            family_dir.mkdir(exist_ok=True)
             np.savez_compressed(family_dir / "evidence.npz", **arrays)
             reference_maxima = {row["state"]: row["reference_functionals"]["maximum_material_temperature"] for row in family["absolute"]}
             prediction_maxima = {row["state"]: row["prediction_functionals"]["maximum_material_temperature"] for row in family["absolute"]}
@@ -667,6 +757,8 @@ def main(argv=None):
     counted.add_argument("--output-dir", type=Path, required=True)
     counted.add_argument("--device", default="cpu")
     counted.add_argument("--intervention", choices=("normal", "zero_joint"), default="normal")
+    counted.add_argument("--capture-phase-graph-case", choices=("0291",),
+                         help="Record the existing normal0291 baseline wrapper only; no additional model call")
     preparation = subparsers.add_parser("prepare-counted", help="CPU receiver/input/pool audit; no model reads")
     preparation.add_argument("--request", type=Path, required=True)
     preparation.add_argument("--records-dir", type=Path, required=True)
@@ -681,6 +773,8 @@ def main(argv=None):
     atlas.add_argument("--device", default="cpu")
     atlas.add_argument("--intervention", choices=("normal", "zero_joint"), default="normal")
     args = parser.parse_args(argv)
+    if args.command == "counted" and args.capture_phase_graph_case is not None and args.intervention != "normal":
+        parser.error("--capture-phase-graph-case requires counted --intervention normal")
     if args.command == "dashboard":
         from thermal_development import validate_generated_output
         summaries = {}
@@ -699,7 +793,8 @@ def main(argv=None):
             from thermal_development import validate_generated_output
             write_json(validate_generated_output(args.output), prepare_counted_replay(families))
         else:
-            evaluate_families(args.checkpoint, families, dataset_path, args.output_dir, device=args.device, intervention=args.intervention)
+            evaluate_families(args.checkpoint, families, dataset_path, args.output_dir, device=args.device,
+                              intervention=args.intervention, capture_phase_graph_case=args.capture_phase_graph_case)
     return 0
 
 

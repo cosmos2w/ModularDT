@@ -1,6 +1,7 @@
 """Scientific denominator, wide arithmetic and finite-pool decision contracts."""
 
 import copy
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 from thermal_response_refinement_evaluation import (
+    CountedPhaseGraphArrays,
     aggregate_response_rows,
     audit_field_comparability,
     compare_heat_null,
@@ -20,8 +22,10 @@ from thermal_response_refinement_evaluation import (
     load_counted_families,
     main,
     prepare_counted_replay,
+    save_counted_phase_graph,
     stored_pool_decision,
     validate_heat_records,
+    validate_phase_graph_capture,
 )
 
 
@@ -229,3 +233,66 @@ def test_saved_response_comparison_scales_null_and_rejects_changed_heat_and_quer
     candidate["families"][0]["finite"][0]["module_peak_changes"]["m2"]["unit"] = "other_temperature"
     with pytest.raises(ValueError, match="unchanged-own-heat module reference"):
         compare_saved_responses(parent, candidate, common_flow_stds=scales)
+
+
+def test_counted_phase_capture_rejects_other_states_and_interventions_before_model_read(tmp_path):
+    arguments = ["counted", "--request", str(tmp_path / "no_request.json"),
+                 "--records-dir", str(tmp_path), "--checkpoint", str(tmp_path / "no_model.pt"),
+                 "--output-dir", str(tmp_path / "outputs"), "--capture-phase-graph-case", "0291"]
+    with pytest.raises(SystemExit) as rejected:
+        main(arguments + ["--intervention", "zero_joint"])
+    assert rejected.value.code == 2
+    assert not (tmp_path / "outputs").exists()
+    baseline = SimpleNamespace(design=SimpleNamespace(physical_family_id="receiver_interaction_fixed4:0291"))
+    families = [("0291", {"baseline": baseline, "transfer_plus": baseline})]
+    validate_phase_graph_capture(families, "normal", "0291")
+    for intervention, case in (("zero_joint", "0291"), ("normal", "0294")):
+        with pytest.raises(ValueError, match="normal baseline0291"):
+            validate_phase_graph_capture(families, intervention, case)
+    with pytest.raises(ValueError, match="exactly one"):
+        validate_phase_graph_capture([("0291", {"transfer_plus": baseline})], "normal", "0291")
+    baseline.design.physical_family_id = "stored_family:0291"
+    with pytest.raises(ValueError, match="counted fixed4"):
+        validate_phase_graph_capture(families, "normal", "0291")
+
+
+def test_counted_phase_graph_retains_first_actual_access_and_exact_provenance(tmp_path):
+    from channelthermal.interaction_evidence.types import DesignState, ModuleState, OperatingContext, RoleOutput
+
+    centers = np.array([[1., 2.], [3., 4.]], dtype=np.float32)
+    xy = np.array([[.25, .5], [.75, .5], [1.25, .5]], dtype=np.float64)
+    role = RoleOutput("fluid_fields", xy, np.ones((3, 1)), ("temperature",), ("dataset temperature units",),
+                      np.ones((3, 1), dtype=bool), np.ones(3), ("q0", "q1", "q2"), None, "eulerian")
+    design = DesignState("0291", "receiver_interaction_fixed4:0291", "development",
+                         tuple(ModuleState(f"0291:module:{index}", tuple(center), float(index + 1)) for index, center in enumerate(centers)))
+    record = SimpleNamespace(record_id="counted0291_baseline", design=design, context=OperatingContext({"re": 150.}),
+                             output=SimpleNamespace(roles={"fluid_fields": role}))
+    arrays = CountedPhaseGraphArrays()
+    for phase in ("P0", "P1", "P2"):
+        arrays[f"phase/{phase}/source_valid/M"] = np.array([[True, True, False]])
+        arrays[f"phase/{phase}/source_coords/M"] = np.concatenate((centers, np.zeros((1, 2), dtype=np.float32)))[None]
+        arrays[f"phase/{phase}/source_coords/E"] = np.array([[[.5, .5]]], dtype=np.float32)
+        for mechanism in ("QM", "QE"):
+            arrays[f"access/{phase}/{mechanism}/00000/receivers"] = xy[:2].astype(np.float32)[None]
+            arrays[f"access/{phase}/{mechanism}/00001/receivers"] = xy[2:].astype(np.float32)[None]
+        arrays[f"access/{phase}/MM/00000/receivers"] = centers[None]
+    assert arrays.discarded_arrays == 9
+    assert not any("/00001/" in key or "/MM/" in key for key in arrays)
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"exact saved checkpoint bytes, no model")
+    summary_data = {"checkpoint": str(checkpoint), "checkpoint_epoch": 500, "manifest_fingerprint": "fixed"}
+    capture = SimpleNamespace(arrays=arrays)
+    saved = save_counted_phase_graph(capture, record, tmp_path, summary_data, checkpoint)
+    provenance = saved["phase_graph_provenance"]
+    assert provenance["case_id"] == "0291" and provenance["state"] == "baseline"
+    assert provenance["heat"] == [1., 2.] and provenance["context"] == {"re": 150.}
+    assert provenance["new_wrapper_calls_for_capture"] == 0
+    assert provenance["first_P2_QM_matches_counted_fluid_order_FP32"]
+    assert provenance["query_identity"]["fluid_fields"]["query_features"]["shape"] == [3, 2]
+    assert json.loads(Path(saved["phase_graph_provenance_file"]).read_text()) == provenance
+    with np.load(saved["phase_graph_arrays"]) as stored:
+        assert json.loads(str(stored["provenance_json"].item())) == provenance
+        assert np.array_equal(stored["access/P2/QM/00000/receivers"][0], xy[:2].astype(np.float32))
+    arrays["access/P2/QM/00000/receivers"] = xy[1:3].astype(np.float32)[None]
+    with pytest.raises(ValueError, match="receiver coordinates/order"):
+        save_counted_phase_graph(capture, record, tmp_path, summary_data, checkpoint)
