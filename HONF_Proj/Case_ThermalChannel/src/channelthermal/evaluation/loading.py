@@ -117,6 +117,11 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[ChannelTher
     """Load model."""
 
     checkpoint = load_trusted_checkpoint(checkpoint_path, map_location="cpu")
+    if checkpoint.get("source_response_identity") is not None:
+        raise ValueError(
+            "Source-response checkpoints require channelthermal.source_response.load_source_response_model; "
+            "the historical loader assumes a Stage-A and port-refinement trajectory."
+        )
     # The child owns a distinct flow-only inventory while its frozen thermal
     # parent still follows the original strict reconstruction path below.
     if checkpoint.get("dependency_identity") is not None:

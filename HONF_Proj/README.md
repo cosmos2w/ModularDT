@@ -15,6 +15,12 @@ The profile registry recommends `src/config_core/forward/stage7_structured_conte
 
 Stage-1–6 exchangeable, adaptive, entmax, additive, and gathered modes remain loadable for compatibility and research, but they are not the default scientific platform.
 
+The opt-in [Thermal source-response interface](docs/guides/Thermal_Source_Response.md)
+prepares geometry-dependent temperature kernels and applies heating separately,
+with a frozen heat-independent flow reader. Its independently trained direct
+and grouped readouts, native role extraction and measured limitations are
+documented in the [consolidation and maturation report](docs/reports/HONF_Response_Operator_Consolidation_and_Maturation_Report.md).
+
 ## 1. Quick start
 
 Run commands from `HONF_Proj` in the `ModularDT` environment.

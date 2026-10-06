@@ -3,6 +3,7 @@
 import argparse
 import copy
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -24,6 +25,20 @@ from torch.utils.data import default_collate
 
 from honf_runtime.compat import load_trusted_checkpoint, recursive_to_device, set_seed
 from honf_runtime.run_store import atomic_write_json
+
+FLOW_CHILD_SCHEDULE = {"identity": "d_sep_schedule_child1500_v1", "parent_absolute_epoch": 1000,
+    "additional_epochs": 1500, "warmup_epochs": 20, "hold_until_additional_epoch": 500,
+    "warmup_initial_lr": 1e-6, "maximum_lr": 1e-4, "final_lr": 1e-6}
+
+
+def flow_child_learning_rate(additional_epoch):
+    """Declared new schedule; the historical zero-floor schedule is untouched."""
+    age = int(additional_epoch)
+    if age <= 20:
+        return 1e-6 + (1e-4 - 1e-6) * max(age - 1, 0) / 19
+    if age <= 500:
+        return 1e-4
+    return 1e-6 + .5 * (1e-4 - 1e-6) * (1 + math.cos(math.pi * min(age - 500, 1000) / 1000))
 
 
 def read_cases(parent, split):
@@ -92,10 +107,16 @@ def main(argv=None):
     parser.add_argument("--parent", required=True)
     parser.add_argument("--policy", required=True, choices=("D-sep", "D-open"))
     parser.add_argument("--output", required=True)
-    parser.add_argument("--epochs", type=int, default=100, choices=(100, 500, 1000))
+    parser.add_argument("--epochs", type=int, default=100, choices=(100, 500, 1000, 1500, 2500))
     parser.add_argument("--resume")
+    parser.add_argument("--schedule-parent", help="Opt-in new D-sep1500-epoch schedule child from literal1000.")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args(argv)
+    is_child = args.schedule_parent is not None
+    if is_child and (args.policy != "D-sep" or args.epochs not in (1500, 2500)):
+        raise ValueError("The schedule child is D-sep only, absolute stop1500 or2500.")
+    if not is_child and args.epochs not in (100, 500, 1000):
+        raise ValueError("Historical flow fits retain their original100/500/1000 stops.")
     start = perf_counter()
     started_unix = time()
     torch.set_num_threads(1); set_seed(0)
@@ -124,6 +145,25 @@ def main(argv=None):
         "validation_case_ids": [row["case_id"] for row in val_cases],
         "learning_rate": 3e-4, "weight_decay": 1e-5, "gradient_clip": 1., "flow_channels": ["u", "v", "p", "omega"]}
     begin, best, history, process_seconds = 0, float("inf"), [], 0.
+    if is_child:
+        schedule_parent_path = Path(args.schedule_parent).resolve()
+        schedule_parent = load_trusted_checkpoint(schedule_parent_path, map_location="cpu")
+        if (schedule_parent.get("dependency_policy") != "D-sep" or schedule_parent.get("epoch") != 1000
+                or schedule_parent.get("fit_identity") != identity):
+            raise ValueError("Schedule child requires the literal matched D-sep1000 parent and unchanged data/reader identity.")
+        identity.update(schedule_total_epochs=2500, schedule_child=FLOW_CHILD_SCHEDULE,
+            schedule_parent_checkpoint=str(schedule_parent_path), schedule_parent_sha256=_file_sha256(schedule_parent_path))
+        model.load_state_dict(schedule_parent["flow_state_dict"], strict=True)
+        optimizer.load_state_dict(schedule_parent["optimizer_state_dict"])
+        for group in optimizer.param_groups:
+            group["lr"] = group["initial_lr"] = 1e-6
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer,
+            lr_lambda=lambda completed: flow_child_learning_rate(completed + 1) / 1e-6)
+        begin = 1000
+        atomic_write_json(output / "schedule_attachment.json", {"parent_checkpoint": str(schedule_parent_path),
+            "parent_sha256": identity["schedule_parent_sha256"], "new_schedule": FLOW_CHILD_SCHEDULE,
+            "retained_optimizer_step": 4000, "new_optimizer_steps": 6000,
+            "change": "new LR/groupinitial_lr only; literal source tensors/moments/data/normalization retained"})
     if args.resume:
         saved = load_trusted_checkpoint(args.resume, map_location="cpu")
         if saved["fit_identity"] != identity:
@@ -141,6 +181,7 @@ def main(argv=None):
     atomic_write_json(output / "run_manifest.json", {"status": "running", "policy": args.policy, "epochs": args.epochs})
     for epoch in range(begin + 1, args.epochs + 1):
         epoch_start = perf_counter()
+        used_learning_rate = optimizer.param_groups[0]["lr"]
         order = np.random.default_rng(epoch).permutation(len(train_cases))
         total_loss, gradient_norms = 0., []
         model.train()
@@ -163,7 +204,8 @@ def main(argv=None):
         row = {"epoch": epoch, "train_flow_mse": total_loss / len(train_cases),
             "train_seconds": perf_counter() - epoch_start, "case_visits": len(train_cases),
             "optimizer_updates": 4, "queries": len(train_cases) * 1024,
-            "gradient_norm_mean": float(np.mean(gradient_norms)), "learning_rate": optimizer.param_groups[0]["lr"]}
+            "gradient_norm_mean": float(np.mean(gradient_norms)),
+            "learning_rate": used_learning_rate if is_child else optimizer.param_groups[0]["lr"]}
         requested_stop = stop_requested(output)
         review = epoch % 100 == 0 or epoch == args.epochs or requested_stop
         if review:

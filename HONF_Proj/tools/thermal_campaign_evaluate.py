@@ -695,7 +695,7 @@ def parse_args(argv=None):
                         help="Explicit fixed development selection; must match a checkpoint binding when present.")
     parser.add_argument("--quick-diagnostic", action="store_true",
                         help="Explicitly use a small panel instead of the entire selected development metric cohort.")
-    parser.add_argument("--stage", type=int, choices=(*range(100, 1001, 100), 5000), required=True,
+    parser.add_argument("--stage", type=int, choices=(*range(100, 1001, 100), 1500, 2000, 2500, 5000), required=True,
                         help="Monitoring stage label; 5000 explicitly supports completed formal runs.")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output-dir", type=Path, required=True)
