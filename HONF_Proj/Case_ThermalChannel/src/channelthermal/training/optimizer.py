@@ -56,6 +56,11 @@ def build_forward_optimizer(
 ) -> tuple[torch.optim.AdamW, Dict[str, Any]]:
     """Build AdamW with the historical groups or an explicit v5 controller group."""
 
+    if training_config.get("campaign", {}).get("forward_refinement"):
+        from .refinement_policy import build_refinement_optimizer
+
+        return build_refinement_optimizer(model, training_config)
+
     learning_rate = float(training_config.get("learning_rate", 2.0e-4))
     weight_decay = float(training_config.get("weight_decay", 1.0e-5))
     organizer_learning_rate = training_config.get("organizer_learning_rate")

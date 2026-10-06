@@ -635,6 +635,7 @@ def run_epoch(
     campaign_config: Dict[str, Any] | None = None,
     absolute_epoch: int = 0,
     response_callback: Any = None,
+    response_epoch: int | None = None,
 ) -> Dict[str, float]:
     """Run one train/validation epoch and return averaged loss/diagnostic scalars."""
 
@@ -738,8 +739,10 @@ def run_epoch(
         if training:
             if optimizer_start:
                 optimizer.zero_grad(set_to_none=True)
-            if auxiliary_due and response_callback is not None and absolute_epoch > 100:
-                response_loss, response_metrics = response_callback(absolute_epoch, loss, accumulation_weight)
+            callback_epoch = absolute_epoch if response_epoch is None else response_epoch
+            auxiliary_active = absolute_epoch > 100 if response_epoch is None else callback_epoch >= 1
+            if auxiliary_due and response_callback is not None and auxiliary_active:
+                response_loss, response_metrics = response_callback(callback_epoch, loss, accumulation_weight)
                 loss = loss + response_loss
             clip_norm = float(gradient_clip_norm or 0.0)
             capture_update = bool(record_gradient_diagnostics and optimizer_boundary and optimizer_steps == 0)

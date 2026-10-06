@@ -50,6 +50,7 @@ def validate_interface_fit_campaign(settings: dict, config: dict) -> None:
             or options.get("query_interaction_mode") not in {"add", "joint"}
             or settings.get("arm") != {"add": "H-add", "joint": "H-joint"}.get(options.get("query_interaction_mode"))
             or options.get("query_interface_parent_epoch", 1000) != 1000
+            or options.get("query_admission_mode", "curriculum") != "curriculum"
             or declaration.get("backbone_epoch") != 1000
             or declaration.get("parameter_prefix") != FIT_PARAMETER_PREFIX
             or parent.get("kind") != FIT_KIND or parent.get("epoch") != 1000

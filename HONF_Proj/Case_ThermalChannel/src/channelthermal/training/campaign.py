@@ -27,6 +27,7 @@ CAMPAIGN_KEYS = {
     "structural_measure_policy_version",
     "organizer_gradient_policy",
     "interface_fit",
+    "forward_refinement", "response_addendum", "response_refinement",
 }
 HYPERGRAPH_ARCHITECTURES = frozenset({
     "adaptive_receiver_hypergraph_honf", "overlap_control_hypergraph_honf",
@@ -137,7 +138,10 @@ def validate_campaign(config: dict[str, Any], *, max_train_batches: int | None =
         dataset = config.get("dataset", {})
         development = bool(dataset.get("development_manifest") or dataset.get("development_subset"))
         expected_horizon = 1000 if development else 5000
-        if settings.get("interface_fit") or interface_fit_enabled(config.get("model", {})):
+        if settings.get("forward_refinement"):
+            from .refinement_policy import validate_refinement_campaign
+            validate_refinement_campaign(settings, config)
+        elif settings.get("interface_fit") or interface_fit_enabled(config.get("model", {})):
             if architecture != "native_context_global_control_honf":
                 raise ValueError("Frozen query-interface fits attach only to G-fast.")
             validate_interface_fit_campaign(settings, config)
@@ -179,6 +183,10 @@ def validate_campaign(config: dict[str, Any], *, max_train_batches: int | None =
     null = settings.get("heat_null_response")
     if null is not None:
         if architecture in NATIVE_CONTEXT_ARCHITECTURES:
+            if settings.get("forward_refinement"):
+                # The opt-in refinement validator owns its case-specific null
+                # declaration. Historical frozen/fresh guards remain below.
+                return settings
             if null != {"coefficient": 0.0}:
                 raise ValueError("Native-context comparison disables the old heat-null TRAIN objective with explicit coefficient zero.")
             return settings

@@ -210,7 +210,10 @@ def resolve_development_training(config: dict[str, Any], *, max_train_batches=No
         raise ValueError("Development requires fresh initialization; checkpoint transfer is a separate protocol.")
     stop = int(training["epochs"] if effective_epochs is None else effective_epochs)
     paths = campaign.get("response_stencils", [])
-    if len(paths) > 4 or (stop > 100 and not paths):
+    if campaign.get("forward_refinement"):
+        from channelthermal.training.response_refinement import validate_response_addendum
+        validate_response_addendum(campaign, {**dataset_config, "development_subset": manifest})
+    elif len(paths) > 4 or (stop > 100 and not paths):
         raise ValueError("Development after epoch100 requires one to four selected-train response stencils.")
     checkpointing = config.setdefault("checkpointing", {})
     for key, expected in {"save_best": False, "save_best_field_mse": True,
@@ -537,7 +540,11 @@ def run_from_config(
         raise ValueError("Reviewed structural measure policy 2 requires a saved continuation checkpoint; it cannot start fresh.")
     schedule_total_epochs = int(campaign.get("schedule_total_epochs", args.epochs or training_cfg.get("epochs", 200)))
     interface_fit = bool(campaign.get("interface_fit"))
+    forward_refinement = bool(campaign.get("forward_refinement"))
     physical_epoch_offset = int(campaign.get("interface_fit", {}).get("backbone_epoch", 0))
+    if forward_refinement:
+        declaration = campaign["forward_refinement"]
+        physical_epoch_offset = int(declaration["backbone_epoch"]) + int(declaration["interface_prefit_epoch"])
     if campaign.get("matched_fresh_initialization") and getattr(args, "initialize_checkpoint", None):
         raise ValueError("The primary fresh campaign cannot initialize from a trained checkpoint.")
     ignored_organizer_keys = [
@@ -695,6 +702,9 @@ def run_from_config(
     else:
         matched_initialization = None
 
+    if forward_refinement:
+        from channelthermal.training.refinement_policy import apply_refinement_policy
+        apply_refinement_policy(model)
     optimizer, optimizer_group_inventory = build_forward_optimizer(model, training_cfg)
     scaler = make_grad_scaler(device, bool(training_cfg.get("amp", False)))
     epochs = int(args.epochs if args.epochs is not None else training_cfg.get("epochs", 200))
@@ -794,6 +804,10 @@ def run_from_config(
                 "heat_null_primary_fluid_queries", "heat_null_role_queries"))
         if interface_fit:
             fieldnames.extend(("fit_epoch", "frozen_backbone_epoch", "physical_objective_epoch"))
+        if forward_refinement:
+            fieldnames.extend(("refinement_epoch", "interface_prefit_epoch", "physical_objective_epoch",
+                               "auxiliary_absolute_loss", "thermal_response_loss", "q_proxy_response_loss",
+                               "null_step_fraction", "null_step_heat", "null_case_id"))
     if model_config.core_honf.forward_architecture == "task_trained_functional_coalescence_honf":
         detail_metric_keys = (
             "loss_functional_detail_complexity",
@@ -946,6 +960,9 @@ def run_from_config(
             from channelthermal.training.interface_fit import validate_interface_fit_resume
             validate_interface_fit_resume(checkpoint, model, campaign)
         model.load_state_dict(strip_module_prefix(checkpoint["model_state_dict"]), strict=True)
+        if forward_refinement:
+            from channelthermal.training.refinement_policy import validate_refinement_resume
+            validate_refinement_resume(checkpoint, model, campaign, config=cfg)
         optimizer_group_inventory = refresh_optimizer_group_inventory(
             model,
             optimizer_group_inventory,
@@ -999,9 +1016,17 @@ def run_from_config(
     if development is not None:
         write_json(run_dir / "development_subset.json", development)
     total_train_seconds = 0.0
-    response_callback = NativeCampaignResponse(model, train_dataset, dataset_cfg, campaign) if campaign and epochs + physical_epoch_offset > 100 else None
+    if forward_refinement:
+        from channelthermal.training.response_refinement import NativeResponseRefinement
+        response_callback = NativeResponseRefinement(model, train_dataset, dataset_cfg, campaign)
+    else:
+        response_callback = NativeCampaignResponse(model, train_dataset, dataset_cfg, campaign) if campaign and epochs + physical_epoch_offset > 100 else None
     total_val_seconds = 0.0
     peak_cuda_memory_mb = 0.0
+    refinement_frozen_state = None
+    if forward_refinement:
+        from channelthermal.training.refinement_policy import capture_refinement_frozen_state
+        refinement_frozen_state = capture_refinement_frozen_state(model)
     last_completed_epoch = start_epoch - 1
     stopped_resumable = False
     for epoch in range(start_epoch, epochs + 1):
@@ -1009,6 +1034,8 @@ def run_from_config(
         model.set_training_progress(epoch=epoch, total_epochs=schedule_total_epochs)
         if interface_fit:
             model.campaign_training_state["interface_fit_attachment"]["fit_epoch"] = epoch
+        if forward_refinement:
+            model.campaign_training_state["forward_refinement_attachment"]["refinement_epoch"] = epoch
         train_dataset.set_epoch(epoch)
         if hasattr(train_loader.batch_sampler, "set_epoch"):
             train_loader.batch_sampler.set_epoch(epoch)
@@ -1045,6 +1072,7 @@ def run_from_config(
             campaign_config=campaign,
             absolute_epoch=physical_epoch,
             response_callback=response_callback,
+            response_epoch=epoch if forward_refinement else None,
         )
         train_wall_seconds = time.perf_counter() - train_started
         if campaign:
@@ -1056,6 +1084,9 @@ def run_from_config(
             )
             if interface_fit:
                 train_metrics.update(fit_epoch=epoch, frozen_backbone_epoch=physical_epoch_offset,
+                                     physical_objective_epoch=physical_epoch)
+            if forward_refinement:
+                train_metrics.update(refinement_epoch=epoch, interface_prefit_epoch=100,
                                      physical_objective_epoch=physical_epoch)
             with (run_dir / "epoch_telemetry.jsonl").open("a", encoding="utf-8") as telemetry:
                 telemetry.write(json.dumps({"epoch": epoch, "arm": campaign.get("arm"), "lineage": campaign,
@@ -1148,6 +1179,9 @@ def run_from_config(
         field_metric = float(row["val_field_mse"])
         temp_metric = float(row["val_temperature_mse"])
         retain_best = should_save_best_checkpoint(epoch, epochs, checkpoint_cfg)
+        if refinement_frozen_state is not None and (retain_best or stop_requested(run_dir)):
+            from channelthermal.training.refinement_policy import assert_refinement_frozen_state
+            assert_refinement_frozen_state(model, refinement_frozen_state)
         if retain_best and math.isfinite(total_metric) and total_metric < best_total:
             best_total = total_metric
             if bool(checkpoint_cfg.get("save_best", True)):

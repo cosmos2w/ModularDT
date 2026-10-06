@@ -64,9 +64,12 @@ class TensorQueryInteraction(TensorSourceGroupResidual):
     """One wrapper-owned source plan and cached positive-panel access mean."""
 
     def __init__(self, hidden_dim, num_heads, *, mode='joint', distance_alpha=.25,
-                 distance_length=.25, background_zero_bias=True, geometry_length=.25):
+                 distance_length=.25, background_zero_bias=True, geometry_length=.25,
+                 admission_mode='curriculum'):
         if mode not in ('add', 'joint'):
             raise ValueError('query_interaction_mode must be add or joint')
+        if admission_mode not in ('curriculum', 'soft'):
+            raise ValueError('query_admission_mode must be curriculum or soft')
         if not math.isfinite(distance_alpha) or distance_alpha < 0:
             raise ValueError('query distance alpha must be finite and nonnegative')
         if not math.isfinite(distance_length) or distance_length <= 0:
@@ -78,8 +81,12 @@ class TensorQueryInteraction(TensorSourceGroupResidual):
         nn.init.zeros_(self.relative_score[-1].weight)
         nn.init.zeros_(self.relative_score[-1].bias)
         self.mode = mode
+        self.admission_mode = admission_mode
         self.distance_alpha, self.distance_length = float(distance_alpha), float(distance_length)
         self.background_zero_bias = bool(background_zero_bias)
+
+    def admission_sparse_fraction(self):
+        return 0. if self.admission_mode == 'soft' else super().admission_sparse_fraction()
 
     def access(self, plan, receivers, mechanism, *, intervention=None):
         if mechanism not in QUERY_ROUTES:
@@ -192,6 +199,7 @@ class TensorQueryInteractionField(TensorSourceGroupResidualField):
         alpha = settings.pop('query_distance_alpha', .25)
         length = settings.pop('query_distance_length', .25)
         background = settings.pop('query_background_zero_bias', True)
+        admission_mode = settings.pop('query_admission_mode', 'curriculum')
         self.frozen_backbone_epoch = int(settings.pop('query_interface_parent_epoch', 1000))
         geometry = settings.pop('residual_geometry_length', .25)
         TypedHypergraphField.__init__(self, *args, options=settings, **kwargs)
@@ -199,7 +207,7 @@ class TensorQueryInteractionField(TensorSourceGroupResidualField):
             raise ValueError('Query interaction requires native G-fast global control')
         self.tensor_query_interaction = TensorQueryInteraction(args[0], args[2], mode=mode,
             distance_alpha=alpha, distance_length=length, background_zero_bias=background,
-            geometry_length=geometry)
+            geometry_length=geometry, admission_mode=admission_mode)
         self.fit_epoch, self.fit_total_epochs = 0, None
         self.set_training_progress(epoch=0)
         self.freeze_backbone()
@@ -289,6 +297,7 @@ class TensorQueryInteractionField(TensorSourceGroupResidualField):
         return {**exported, 'base_route_controls': base.controls,
             'tensor_residual': {'plan': plan, 'phase': phase},
             'query_interaction': {'mode': self.tensor_query_interaction.mode,
+                'admission_mode': self.tensor_query_interaction.admission_mode,
                 'components': lambda receivers, tau: self.tensor_query_interaction.components(phase, receivers, tau),
                 'mean_access': plan.mean_access, 'mean_density': plan.mean_density,
                 'reference_ids': plan.reference_ids, 'reference_roles': plan.reference_roles,

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "profile_name": "thermal_response_refinement25_h-joint_v1",
+  "workflow": "forward",
+  "model_family": "honf_forward",
+  "model": {
+    "core_honf": {
+      "interface_model": {
+        "hypergraph_options": {"query_interaction_mode": "joint", "query_admission_mode": "soft"}
+      }
+    }
+  },
+  "training": {
+    "seed": 0,
+    "epochs": 100,
+    "learning_rate": 0.00001,
+    "organizer_learning_rate": null,
+    "weight_decay": 0.00001,
+    "amp": false,
+    "plot_every_epochs": 100,
+    "campaign": {
+      "name": "thermal_response_refinement25_v1",
+      "arm": "H-joint",
+      "matched_fresh_initialization": false,
+      "schedule_total_epochs": 1000,
+      "parent": {"kind": "physical_response_refinement_from_fit100", "epoch": 100, "checkpoint": null},
+      "forward_refinement": {
+        "policy_version": "query_physical_v1",
+        "backbone_epoch": 1000,
+        "interface_prefit_epoch": 100,
+        "admission_mode": "soft",
+        "organizer_learning_rate": 0.0001,
+        "physical_learning_rate": 0.00001,
+        "weight_decay": 0.00001
+      }
+    }
+  },
+  "checkpointing": {
+    "save_best": false,
+    "save_best_field_mse": true,
+    "save_best_temperature_mse": false,
+    "save_best_predicted": false,
+    "save_latest": true,
+    "save_best_every_epochs": 100,
+    "save_latest_every_epochs": 100,
+    "save_epoch_milestones": [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+  },
+  "run": {"id": "3802", "name": "thermal_response_refinement25_h-joint_v1", "output_root": null},
+  "_note": "Unbound override template. thermal_response_refinement.py inherits the exact H-joint fit100 model/data/loss and requires a shared train-only calibration JSON before writing a native run. Initial stop100; matched extension500 follows its review. No solver or launch."
+}

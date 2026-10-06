@@ -80,6 +80,10 @@ class TensorSourceGroupResidual(nn.Module):
     def set_epoch(self, absolute_epoch):
         self.additional_age = max(0, int(absolute_epoch) - self.parent_epoch)
 
+    def admission_sparse_fraction(self):
+        """Historical curriculum, independently overridable by an explicit mode."""
+        return min(1., max(0., (self.additional_age - 100) / 100.))
+
     @staticmethod
     def _normalize(measure):
         return measure / measure.sum(-1, keepdim=True).clamp_min(torch.finfo(measure.dtype).tiny)
@@ -104,7 +108,7 @@ class TensorSourceGroupResidual(nn.Module):
             encoded.global_token[:, None].expand(-1, centres.shape[1], -1),
             pad_geometry(normalized), background), -1))
         logits = self.admission_head(descriptors).squeeze(-1)
-        fraction = min(1., max(0., (self.additional_age - 100) / 100.))
+        fraction = self.admission_sparse_fraction()
         soft_admission = self._masked_softmax(logits, valid)
         admission = (soft_admission if fraction == 0 else
                      (1 - fraction) * soft_admission + fraction * masked_sparsemax(logits, valid))
