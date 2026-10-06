@@ -285,7 +285,33 @@ Sources: [controlled maturation](HONF_Controlled_Maturation_and_Action_Aware_Org
 
 ## 6. Fourth milestone: the five-arm native campaign provides a real fresh-model comparison
 
-**2–4 October.** The shared-core campaign compares fresh Native, Fine, Tree, Overlap, and Local arms in the complete Thermal wrapper. It preserves frozen Stage-A, predicted ports, and P0/P1/P2 while replacing the interaction backend. Native retains Dense coarse/local contexts; Fine removes them and uses the three-term fine reader; H arms add typed access/control organizations. The [shared-core alignment](HONF_Shared_Core_Alignment.md) explains what is shared with Wind and what remains case-owned. Shared code is not transfer-accuracy evidence.
+**2–4 October.** This campaign moves from interventions on inherited models to a five-arm fresh-training comparison inside the complete Thermal wrapper. The important result is a stronger comparison, rather than a new overall winner: fresh Native leads the principal physical errors, Tree is the strongest new H candidate, and reduced executed fine rows still do not deliver faster complete calls.
+
+### 6.1 What the five names mean
+
+Two baselines separate the prediction architecture from the organizer. Three H arms then test different organizations of the same fine-source reader. B means baseline; H denotes a hypergraph-organized arm. Native means the case's original complete Dense architecture, Fine means individual-source reading, Tree means a receiver hierarchy, Overlap means groups may share members, and Local means explicitly protected near access with far controls.
+
+| Arm / run | Concrete structure | Question tested |
+| --- | --- | --- |
+| **Native / B-native / 2201** | Fresh Dense architecture in the Run1804 family, retaining coarse and local field contexts alongside fine interactions; no learned H organizer. | What can the original complete architecture learn at the same fresh training horizon? |
+| **Fine / B-fine / 2202** | Full-access fine-source reader with the three-term field context; removes Native's coarse/local field branches. | Can individual-source detail replace the richer native context without adding an organizer? |
+| **Tree / H-tree / 2203** | Fine reader plus an input-conditioned, depth-three receiver tree that creates typed source-access and group-control plans. | Does organizing receivers hierarchically provide useful access/control decisions? |
+| **Overlap / H-overlap / 2204** | Fine reader plus eight provisional group proposals, conditional admission, source membership, access and controls; groups may overlap. | Can flexible shared membership organize interactions more effectively? |
+| **Local / H-local / 2205** | The overlap/fine equations with explicit near-access protection and far controls, using physical lengths supplied by the case adapter. | Does protecting nearby information make learned organization more reliable? |
+
+Fine and the H arms retain
+
+$$
+C(q)=C_g(q)+C_M(q)+C_E(q).
+$$
+
+Here $C_g$ supplies the global/background context and $C_M,C_E$ read individual module and environment source states. H group controls modulate those fine messages; decoded group averages do not replace the individual physical values. Fine is not a finer spatial mesh, and Local's near-access protection is different from Native's removed local-context branch. Overlap is permitted shared membership, not necessarily a disjoint partition. A Tree is a computational receiver organization, not an inferred physical causal tree.
+
+The five typed routes are **MM** (module receivers reading modules), **ME** (module receivers reading environment), **EM** (environment receivers reading modules), **QM** (field queries reading modules), and **QE** (field queries reading environment). Plans are formed from current pre-interaction inputs and refreshed within **P0/P1/P2**, the Thermal coupling stages. All arms preserve predicted ports and the same frozen Stage-A local surrogate. The [shared-core alignment](HONF_Shared_Core_Alignment.md) maps these shared interactions to the case-owned Thermal and Wind wrappers; shared implementation does not establish cross-case transfer accuracy.
+
+Native has **4,395,409** trainable scalars, Fine **2,928,273**, Tree **3,252,792**, and Overlap/Local **2,958,984** each. The common frozen Stage-A contains another **1,035,139** scalars. The H arms inherit compatible physical/local **initial** tensors from freshly materialized Fine, not trained mature1804 weights. Capacity differs intentionally: this is a common-horizon architecture comparison, not an equal-parameter ablation that identifies the sole effect of removing one branch.
+
+### 6.2 What the fresh comparison establishes
 
 All five complete 500 full-data epochs: **300,000 primary case visits and 6,500 updates per arm**. Field selection is predeclared within the first500, giving Native456/Fine493/Tree467/Overlap292/Local388. Exact500 and these selected ages must be shown separately. The authoritative canonical89-case means are:
 
@@ -298,15 +324,43 @@ All five complete 500 full-data epochs: **300,000 primary case visits and 6,500 
 | Local388 | 1.370173 | 0.057135 | 1.121311 | 1.008235 | 0.015787 |
 | Mature1804 at 4738, contextual | 0.218656 | 0.005721 | 0.448389 | 0.346587 | 0.001014 |
 
+The canonical89 panel excludes 0273; the compatibility90 panel is retained separately. Both are previously exposed development data. Native456 and Tree467 identify selected epochs, not new architecture names. Selection minimizes sampled validation field MSE, so it need not improve every physical functional or tail.
+
 These native-unit means are not the pooled normalized L2 scores in Section1. Native is the strongest fresh control on these main measures; Tree is the strongest new H candidate, with mixed selector effects. Successful logged train+validation totals are Native **4.345 h**, Fine **1.916 h**, Tree **16.763 h**, Overlap **9.608 h**, Local **10.615 h**. Contention, interruptions, and engineering changes prevent an isolated architecture speed ranking from those historical totals.
+
+![Selected fresh Native, Fine, Tree, Overlap and Local temperature, velocity and pressure fields with absolute residuals on M10 case0692](../../diagnostics/generated/shared_core_campaign_20261002/figures/final_stage500_conclusions/02_physical_case0692.png)
+
+**Figure 8 — see the spatial fidelity gap behind the means.** Previously exposed case0692 has **M10/Re140**, with **7,464 common fluid cells**. Columns compare the stored reference, five field-selected fresh parents and mature1804 e4738; paired rows show T/u/p and absolute prediction-minus-reference residuals. Shared channel scales are unclipped, so brighter residual regions indicate larger errors rather than a rescaled color range. Selected Native/Fine/Tree/Overlap/Local fluid-T RMSEs are **0.64588/0.70688/0.90267/2.0917/1.5266**, versus mature1804 **0.17473**, in dataset temperature units. This example makes the field deficits spatially visible; it does not replace the canonical89 population table or constitute an equal-age mature comparison. White disks are solid modules. Stored analytic/shared-grid benchmark, predicted ports and frozen Stage-A; no new physical solves or verified SI conversion. [Original Figure 2](HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md); [PDF master](../../diagnostics/generated/shared_core_campaign_20261002/figures/final_stage500_conclusions/02_physical_case0692.pdf).
+
+Native wins these principal population measures; removing its extra contexts has not preserved its accuracy. Tree has a mixed comparison with Fine: better mean surface temperature (**0.730441 versus 0.804033**), worse fluid temperature (**0.892862 versus 0.714392**), and slightly worse material peak (**0.658864 versus 0.649535**). Local improves substantially over Overlap but remains behind the controls. The distinct capacities and nonlinear training prevent attributing these outcomes uniquely to a single branch or protection mechanism.
+
+Responses remain a separate test. Every exact and field-selected parent completes eight existing families, **88 absolute states and 80 correlated perturbations**. These are previously exposed calibration/final-review records, not 80 independent experiments.
+
+![Matched finite responses, heat-null flow and pressure checks, and signed temperature-change errors across the five fresh arms and mature1804](../../diagnostics/generated/shared_core_campaign_20261002/figures/final_stage500_conclusions/05_responses.png)
+
+**Figure 9 — accurate field values do not guarantee faithful changes or nulls.** C3/C5/C7/C10 denote the four stored calibration families and R3/R5/R7/R10 the four final-review families; their numbers are module counts. Upper panels compare finite-response RMSEs for fluid/surface/material temperature and normal heat-flux proxy; lower errors are better, and gray marks show a zero-change predictor. Middle panels include heat-transfer variants whose stored velocity/pressure changes are exactly zero, plus pressure and module-peak increment errors. Bottom maps use stored 0310 `heat_transfer_plus` on **7,918 common fluid cells**: reference temperature change, then signed predicted-change-minus-reference-change errors for mature1804/Tree/Local, with one common scale. Mean fluid-T response RMSE is **0.137524/0.146574/0.185696/0.260419/0.215254** for selected Native/Fine/Tree/Overlap/Local, versus **0.116739** mature1804 and **0.274135** zero-change. All arms retain spurious flow or pressure changes on the heat-null variants. This demonstrates response and dependency misses, not derivative accuracy, resolved response floors or inverse-design quality. Dataset-native units, q-normal proxy, stored analytic/shared-grid references; no new independent solves. [Original Figure 5](HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md); [PDF master](../../diagnostics/generated/shared_core_campaign_20261002/figures/final_stage500_conclusions/05_responses.pdf).
+
+Field selection improves temperature-response RMSE for Overlap/Local but worsens it for Native/Fine/Tree relative to exact 500. Thus a better selected absolute field is not a response guarantee; heat-null fidelity must be measured explicitly.
+
+### 6.3 Useful group actions and actual row savings, with slower execution
+
+On a strict four-case same-weight panel, normal Tree actions beat fixed-access zero controls and full access retaining learned controls on **24/24 role means**. This establishes conditional reliance on the organizer. Geometry-matched controls have mixed effects; it does not establish unique grouping superiority over simpler organizations or better complete models than Native.
 
 Actual rectangular subset execution reduces rows, but **every H500 complete-wrapper timing contrast is slower** than its dense execution mode. For selected Tree, dense→subset full-Q medians are **0.474446→0.516765 s at M3**, **0.478300→0.520595 s at M10**. Native parity precedes timing; narrower prepared-only exceptions do not overturn complete-call results.
 
 ![Actual shared-core group actions, physical utility, fine work and complete latency](../../diagnostics/generated/shared_core_campaign_20261002/figures/final_stage500_conclusions/04_graph_utility_work.png)
 
-**Figure 8 — useful organization and a slower executor can coexist.** Actual selected Tree467/Local388 plans on 0692 show measured memberships and protected near permissions. Tree has eight active QE groups at each phase; Local has one active group with 93/93/94 environment donors. Subset rows are reduced, yet the complete-wrapper timings above worsen. Group actions are computational controls, not physical causal regions. [PDF master](../../diagnostics/generated/shared_core_campaign_20261002/figures/final_stage500_conclusions/04_graph_utility_work.pdf).
+**Figure 10 — useful organization and a slower executor can coexist.** Actual selected Tree467/Local388 plans on 0692 show measured memberships and protected near permissions. Tree has eight active QE groups at each phase; Local has one active group with 93/93/94 environment donors. Subset rows are reduced, yet the complete-wrapper timings above worsen. Group actions are computational controls, not physical causal regions. [PDF master](../../diagnostics/generated/shared_core_campaign_20261002/figures/final_stage500_conclusions/04_graph_utility_work.pdf).
 
-The campaign's inverse boundary is modest: **12 public tasks ×1 start ×1 update ×3 modes**, or36 readiness trials per evaluated parent, plus rank diagnostics. Nine fixed-total observation Jacobians are full-rank; three M10 tasks have rank6 in nine free heat directions. Feasibility and differentiability do not establish identifiability or design quality. The later Native/Fine/Local1000 results are supplementary; Tree intentionally stops at 666 after its repair history. No5,000-epoch campaign was launched.
+The representation contract also has a concrete miss: splitting an environment atom into colocated atoms with the same total measure passes with preparation fixed, but fails **all four case/parent checks when the organizer is rebuilt**. The physical input is equivalent, yet the computed hidden context changes. This motivates the next milestone's rebuilt measure/derivative faithfulness checks; it is not a temperature-error measurement.
+
+### 6.4 Inverse readiness and the remaining decision
+
+The campaign's inverse boundary is modest: **12 public tasks ×1 start ×1 update ×3 modes**, or36 readiness trials per evaluated parent, plus rank diagnostics. Nine fixed-total observation Jacobians are full-rank; three M10 tasks have rank6 in nine free heat directions. Feasibility and differentiability do not establish identifiability or design quality. Tree467 reduces mean observed error after one update but worsens held-sensor error; Local388 improves both, with mixed differences against ungrouped controls. These one-step trials demonstrate working graph updates, not a matched multi-start inverse-quality study. There is no newly solver-validated design claim.
+
+The later Native/Fine/Local1000 results are supplementary; Tree intentionally stops at 666 after its repair history. No5,000-epoch campaign was launched.
+
+Source: [authoritative shared-core500 conclusions](HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md), including exact/selected tables, response/null results, strict controls and inverse scope.
 
 **Milestone lesson:** removing native context and adding an organizer are separate model changes. Tree's controlled usefulness cannot be promoted into a broad fidelity or speed win over the fresh Native control.
 
@@ -318,7 +372,7 @@ These tests are stronger than holding an already prepared plan fixed: the organi
 
 ![Measure-preserving source representations, rebuilt tree boundaries and pulled-back derivatives](../../diagnostics/generated/tree_faithfulness_20261004/figures/03_equivalent_representation_and_derivatives.png)
 
-**Figure 9 — a genuine mathematical contract improvement.** Fixed25 Tree-F200 uses actual saved atoms, measures, rebuilds, and derivative directions. The all 22 representation checks and 64/64 detailed derivative checks pass after the declared repairs. This establishes the measured representation contract at that state; it does not establish correct held physical responses or sparsity. [PDF master](../../diagnostics/generated/tree_faithfulness_20261004/figures/03_equivalent_representation_and_derivatives.pdf).
+**Figure 11 — a genuine mathematical contract improvement.** Fixed25 Tree-F200 uses actual saved atoms, measures, rebuilds, and derivative directions. The all 22 representation checks and 64/64 detailed derivative checks pass after the declared repairs. This establishes the measured representation contract at that state; it does not establish correct held physical responses or sparsity. [PDF master](../../diagnostics/generated/tree_faithfulness_20261004/figures/03_equivalent_representation_and_derivatives.pdf).
 
 Tree-F200 improves fluid/material/surface temperature means **30.4%/35.0%/32.1%** versus equally trained Pair-F200. Pair retains better flow/pressure-functional/effective-h results. Geometry-matched replacement changes representative fluid-T error only **0.119%**, so trained control reliance is stronger than evidence for unique grouping. The heat-null behavior worsens from 100→200 and no held positive response truth is available within that stage's data. The reviewed stop200 is a scientific boundary, not an assertion that more epochs cannot learn.
 
@@ -336,7 +390,7 @@ Tree and Pair complete 1000; saved-cadence field selection picks900 for both. Se
 
 ![Interleaved Tree-Lite native timing, training allocation and explanatory profiler activity](../../diagnostics/generated/tree_lite_20261004/figures/figure4_runtime.png)
 
-**Figure 10 — real implementation savings, with the remaining cost visible.** Original/lowered exact e200 weights are compared on the actual M1/M12 native Q8192 panels; this is distinct from selected 900 predictor evidence. Native hard-output/input-derivative checks precede interleaved timing. Training-boundary savings include the intentional switch from whole-wrapper to local organizer shadow derivatives. High-M wrapper latency falls **54.20%**, the training boundary **18.78%**, and training allocated peak **40.63%**, **12.10→7.18 GiB**. Tree remains2.25× Pair in the wrapper benchmark. Profiler kernel activities79780→28744 explain removed work but are not uninstrumented runtime or learned source pruning. [PDF master](../../diagnostics/generated/tree_lite_20261004/figures/figure4_runtime.pdf).
+**Figure 12 — real implementation savings, with the remaining cost visible.** Original/lowered exact e200 weights are compared on the actual M1/M12 native Q8192 panels; this is distinct from selected 900 predictor evidence. Native hard-output/input-derivative checks precede interleaved timing. Training-boundary savings include the intentional switch from whole-wrapper to local organizer shadow derivatives. High-M wrapper latency falls **54.20%**, the training boundary **18.78%**, and training allocated peak **40.63%**, **12.10→7.18 GiB**. Tree remains2.25× Pair in the wrapper benchmark. Profiler kernel activities79780→28744 explain removed work but are not uninstrumented runtime or learned source pruning. [PDF master](../../diagnostics/generated/tree_lite_20261004/figures/figure4_runtime.pdf).
 
 Do not transfer the earlier faithfulness pass to every later artifact. The retained Lite state has **eight whole-rebuild physical q-proxy tolerance failures**. A historical hook-restoration guard failure is later explained by 14 self-removing LazyLinear initialization prehooks; post-materialization normal and exception exits preserve the hook inventory and output. This resolves that guard explanation, not the eight physical tolerance misses. QE fine support is100%; physical fine rows are not pruned.
 
@@ -351,7 +405,7 @@ Held sensors and hidden true heats are evaluation-only. The fixed-sum tangent sp
 
 ![All bounded inverse heat trails against attempted native calls, heat constraints and identifiability](../../diagnostics/generated/tree_lite_20261004/figures/inverse_final_panel.png)
 
-**Figure 11 — retain the complete inverse trails, including attempted work.** All32 trails, caps, sum residuals, hidden-heat misses, and initial rank limits are saved. Charged invalid calls remain in work accounting. Observed and held temperatures come from stored benchmark references on exposed layouts; proposed heat allocations are scored with frozen surrogates and have no independent physical solve. There are no held nonzero physical perturbation labels or independently validated new designs. [PDF master](../../diagnostics/generated/tree_lite_20261004/figures/inverse_final_panel.pdf).
+**Figure 13 — retain the complete inverse trails, including attempted work.** All32 trails, caps, sum residuals, hidden-heat misses, and initial rank limits are saved. Charged invalid calls remain in work accounting. Observed and held temperatures come from stored benchmark references on exposed layouts; proposed heat allocations are scored with frozen surrogates and have no independent physical solve. There are no held nonzero physical perturbation labels or independently validated new designs. [PDF master](../../diagnostics/generated/tree_lite_20261004/figures/inverse_final_panel.pdf).
 
 Sources: [faithful Tree development](HONF_Tree_Faithfulness_Fixed25_Development_Report.md) and [Tree-Lite](HONF_Tree_Lite_Execution_and_Maturation_Report.md).
 
@@ -391,7 +445,7 @@ where $c$ is a weighted grand mean over the declared fixed receiver/source refer
 
 ![Actual Tensor-H donor groups, receiver access and source-resolved control actions](../../diagnostics/generated/lean_reset_20261005/figures/04a_organizer_groups.png)
 
-**Figure 12 — donor sparsity is separate from a receiver-dependent interaction.** Exact1000 fixed-quarter exports show two admitted groups on each displayed case, from 4/6/8/11 valid proposals. Selected M/E donor counts are2/109,3/121,5/112,4/101. Receiver access varies weakly; every admitted group has positive access at eligible receivers. Fine physical values remain dense, and planning/centering/coarse/local/phase paths still carry information. [Two-page PDF master](../../diagnostics/generated/lean_reset_20261005/figures/04_organizer.pdf).
+**Figure 14 — donor sparsity is separate from a receiver-dependent interaction.** Exact1000 fixed-quarter exports show two admitted groups on each displayed case, from 4/6/8/11 valid proposals. Selected M/E donor counts are2/109,3/121,5/112,4/101. Receiver access varies weakly; every admitted group has positive access at eligible receivers. Fine physical values remain dense, and planning/centering/coarse/local/phase paths still carry information. [Two-page PDF master](../../diagnostics/generated/lean_reset_20261005/figures/04_organizer.pdf).
 
 Replacing receiver access by its reference mean changes fixed-four core metrics by at most0.003%. The later direct decomposition shows the old source-only term dominates, and removing its small query joint term slightly improves the two tested truth errors. This is the reason to test an explicit joint interface rather than infer a physical interaction from Tensor-H's formula or picture.
 
@@ -432,7 +486,7 @@ Twelve counted reference attempts produce **11 converged states**;0277's fresh b
 
 ![Measured primary thermal responses, unchanged-heat receiver peaks and heat-null controls](../../diagnostics/generated/receiver_interaction_20261005/figures/05b_response_comparison.png)
 
-**Figure 13 — response supervision is judged against changed physical states.** On the six primary transfers, selected Add300/Joint100 fluid/surface/material response RMSEs are **0.046788/0.068408/0.067737** and **0.043707/0.058247/0.057535**. Retained Tensor-H is stronger at **0.027871/0.033235/0.034309**. Both selected interfaces get both 0291 fluid mean directions wrong. Exact-null flow errors are absolute leakage, not relative error to zero. These exposed benchmark states do not certify CFD fidelity, new inverse designs, or module-position responses. [PDF master](../../diagnostics/generated/receiver_interaction_20261005/figures/05_physical_response.pdf).
+**Figure 15 — response supervision is judged against changed physical states.** On the six primary transfers, selected Add300/Joint100 fluid/surface/material response RMSEs are **0.046788/0.068408/0.067737** and **0.043707/0.058247/0.057535**. Retained Tensor-H is stronger at **0.027871/0.033235/0.034309**. Both selected interfaces get both 0291 fluid mean directions wrong. Exact-null flow errors are absolute leakage, not relative error to zero. These exposed benchmark states do not certify CFD fidelity, new inverse designs, or module-position responses. [PDF master](../../diagnostics/generated/receiver_interaction_20261005/figures/05_physical_response.pdf).
 
 This audit supplies the previously missing positive changed-heat truth for these exposed layouts. Earlier statements that no such fixed-four reference had been executed are historical preparation status and are now superseded. The missing0277 baseline remains missing: its ordinary H5 field cannot be substituted for the failed counted-response baseline.
 
@@ -469,7 +523,7 @@ Dense-D25 uses `padding_invariant_v2`; the native candidate lineages use `source
 
 ![Latest selected 500 native fluid-temperature references, predictions and signed residuals](../../diagnostics/generated/response_refinement_20261005/figures/02_native_fields.png)
 
-**Figure 14 — the absolute field improvement is visible.** Saved all 22 statistics and fixed0277/0291/0294/0687 Q8192 fields use original coordinates and masks, with shared unclipped per-case field/residual scales. Add/Joint fluid-T mean RMSE is0.770312/0.779114 in dataset temperature units. The ordinary0277 H5 field is available here; its fresh counted-response baseline is still unavailable. Better absolute fields do not establish correct heat-response directions. [Four-page physical-field PDF](../../diagnostics/generated/response_refinement_20261005/figures/02_native_fields.pdf).
+**Figure 16 — the absolute field improvement is visible.** Saved all 22 statistics and fixed0277/0291/0294/0687 Q8192 fields use original coordinates and masks, with shared unclipped per-case field/residual scales. Add/Joint fluid-T mean RMSE is0.770312/0.779114 in dataset temperature units. The ordinary0277 H5 field is available here; its fresh counted-response baseline is still unavailable. Better absolute fields do not establish correct heat-response directions. [Four-page physical-field PDF](../../diagnostics/generated/response_refinement_20261005/figures/02_native_fields.pdf).
 
 ### 10.2 Organizer: small joint effects, unchanged fine work
 
@@ -477,7 +531,7 @@ The independently co-adapted Joint improves DEV fluid/material response error ov
 
 ![Actual counted0291 donor memberships, receiver subset, signed joint control and I-removal response utility](../../diagnostics/generated/response_refinement_20261005/figures/04_organizer_response_utility.png)
 
-**Figure 15 — inspect the actual response-producing computation.** Selected Joint500 on the counted0291 baseline has five module sources and 192 environment sources. Donor integrals are1.000000/0.99999994; signed I is shown separately from nonnegative membership. The receiver map covers only the first128 P2 QM receivers along the lower boundary, not the full fluid grid. On0291 plus, I-removal worsens response RMSE **0.078612→0.078849**, yet both means remain negative against positive truth. Thus small operational utility can coexist with the wrong physical direction. [PDF master](../../diagnostics/generated/response_refinement_20261005/figures/04_organizer_response_utility.pdf).
+**Figure 17 — inspect the actual response-producing computation.** Selected Joint500 on the counted0291 baseline has five module sources and 192 environment sources. Donor integrals are1.000000/0.99999994; signed I is shown separately from nonnegative membership. The receiver map covers only the first128 P2 QM receivers along the lower boundary, not the full fluid grid. On0291 plus, I-removal worsens response RMSE **0.078612→0.078849**, yet both means remain negative against positive truth. Thus small operational utility can coexist with the wrong physical direction. [PDF master](../../diagnostics/generated/response_refinement_20261005/figures/04_organizer_response_utility.pdf).
 
 Complete measured cost is also explicit. For actual B8/Q1024 M1/M12, inference overhead against G-fast is about **21–22%**, passing the predeclared1.5× scope. B1/Q8192 full-grid inference is **1.63–1.68×** and input forward+VJP **1.75–1.88×**, failing that bound if generalized to full-grid. The new arms are not a speedup, and no current matched 1401/mature1804 timing was run. Summed train+validation is about **1.553 h per arm**, excluding inherited prefit, startup, and standalone evaluation.
 
@@ -493,7 +547,7 @@ Fixed-four primary fluid/surface/material response RMSE improves to **0.037067/0
 
 ![Both signs of 0291 finite thermal transfer, predictions and response residuals](../../diagnostics/generated/response_refinement_20261005/figures/03_finite_responses_0291_both_signs.png)
 
-**Figure 16 — a substantial sign failure survives improved fields.** Identical saved native receivers and selected 500 checkpoints show both signs of one heat-transfer direction. The reference and prediction means above have opposite signs in both arms; this is not explained by a tiny response denominator. The comparisons are exposed local benchmark responses, not an independent test or a full fixed-sum Jacobian. [Five-page response PDF](../../diagnostics/generated/response_refinement_20261005/figures/03_finite_responses.pdf).
+**Figure 18 — a substantial sign failure survives improved fields.** Identical saved native receivers and selected 500 checkpoints show both signs of one heat-transfer direction. The reference and prediction means above have opposite signs in both arms; this is not explained by a tiny response denominator. The comparisons are exposed local benchmark responses, not an independent test or a full fixed-sum Jacobian. [Five-page response PDF](../../diagnostics/generated/response_refinement_20261005/figures/03_finite_responses.pdf).
 
 Under this **specific analytic-wake Thermal generator**, a heat-only perturbation has true $\Delta(u,v,p,\omega)=0$. A correct dependency response therefore requires
 
@@ -513,7 +567,7 @@ $$
 
 ![Stored physical heat allocations, candidate rankings and realized finite-pool material-maximum regret](../../diagnostics/generated/response_refinement_20261005/figures/05_stored_heat_choices.png)
 
-**Figure 17 — useful finite reuse, without a validated continuous inverse claim.** Both new arms choose plus for 0291/0294/0687 and minus for secondary0277, with zero realized regret in the existing pools. Primary best-to-next reference gaps are **0.390348/0.235369/0.028889** dataset temperature units;0277's two-point gap is0.092199. Older G-fast/Tensor already make the same choices. Biased absolute maxima remain visible, there is no new candidate or search, and the failed0277 baseline cannot be recovered from this ranking. [PDF master](../../diagnostics/generated/response_refinement_20261005/figures/05_stored_heat_choices.pdf).
+**Figure 19 — useful finite reuse, without a validated continuous inverse claim.** Both new arms choose plus for 0291/0294/0687 and minus for secondary0277, with zero realized regret in the existing pools. Primary best-to-next reference gaps are **0.390348/0.235369/0.028889** dataset temperature units;0277's two-point gap is0.092199. Older G-fast/Tensor already make the same choices. Biased absolute maxima remain visible, there is no new candidate or search, and the failed0277 baseline cannot be recovered from this ranking. [PDF master](../../diagnostics/generated/response_refinement_20261005/figures/05_stored_heat_choices.pdf).
 
 The STOP500 decision and checkpoint selection were sealed before the final fixed-four replay. No1000 extension followed, and no additional solver attempt was made;326/326 remains the count. This is an evidence-based stop on the specific unresolved dependency question, not proof of a universal learning plateau or exhausted capacity.
 
@@ -546,7 +600,7 @@ For a future model decision, require a declared common comparison: identical pri
 
 ## 12. Short figure and evidence index
 
-The seventeen figures above are selected existing exports; this review creates no duplicate scientific images. Available PDF masters remain the retained detailed view and existing PNG exports support direct Markdown display. Figures 3 and 4 reuse original raster-only summary exports; no PDF master was saved for those two charts. Figures were visually inspected during the review; all image and master links were checked. Generated figures, numerical arrays, checkpoints and audit/preview helpers stay local and ignored. A bare Git clone contains the review and source-report index but requires the preserved scientific artifact roots to show its figures.
+The nineteen figures above are selected existing exports; this review creates no duplicate scientific images. Available PDF masters remain the retained detailed view and existing PNG exports support direct Markdown display. Figures 3 and 4 reuse original raster-only summary exports; no PDF master was saved for those two charts. Figures were visually inspected during the review; all image and master links were checked. Generated figures, numerical arrays, checkpoints and audit/preview helpers stay local and ignored. A bare Git clone contains the review and source-report index but requires the preserved scientific artifact roots to show its figures.
 
 | Figure | Question answered | Primary evidence owner |
 | --- | --- | --- |
@@ -557,15 +611,17 @@ The seventeen figures above are selected existing exports; this review creates n
 | 5 | Does baseline correction repair inverse choices? | Frozen1804 stored paired trials and retrospective finite-union selection |
 | 6 | Can a predicted-feasible recommendation violate its constraint? | Train0318 exact saved −1/−1 pressure prediction and local reference |
 | 7 | Does physical adaptation or access cause the deficit? | Focused diagnosis, aligned absolute/finite vectors |
-| 8 | Do useful group actions save complete-call time? | Shared-core canonical89/compatibility90 and same-arm executor controls |
-| 9 | Is the organizer invariant to equivalent source measures? | Tree-F200 rebuilt22 and detailed derivative audit |
-| 10 | What real overhead did Lite remove? | Same-weight native parity and interleaved cost/profiler evidence |
-| 11 | What happened on every bounded inverse attempt? | Tree/Pair selected 900 frozen trails and charged native work |
-| 12 | Are sparse control donors a genuinely joint receiver interaction? | Tensor-H1000 actual plans, densities and access |
-| 13 | Which model predicts the changed-heat truth best? | Counted326 audit, six primary responses and null controls |
-| 14 | Are the latest absolute field gains spatially credible? | Refinement selected 500 all 22 and fixed-four native arrays |
-| 15 | Does the actual counted-response joint control add utility? | Counted0291 graph provenance and same-state I-removal |
-| 16 | Are physical response directions now correct? | Both signs of 0291 on exact aligned receivers |
-| 17 | Are stored candidate choices useful? | Common solved pools, native material maxima and regret |
+| 8 | Where do the five fresh models miss the physical field? | Shared-core selected case0692 aligned T/u/p and absolute residuals |
+| 9 | Do fresh field gains preserve finite responses and heat-null behavior? | Eight stored response families, null controls and0310 signed maps |
+| 10 | Do useful group actions save complete-call time? | Shared-core canonical89/compatibility90 and same-arm executor controls |
+| 11 | Is the organizer invariant to equivalent source measures? | Tree-F200 rebuilt22 and detailed derivative audit |
+| 12 | What real overhead did Lite remove? | Same-weight native parity and interleaved cost/profiler evidence |
+| 13 | What happened on every bounded inverse attempt? | Tree/Pair selected 900 frozen trails and charged native work |
+| 14 | Are sparse control donors a genuinely joint receiver interaction? | Tensor-H1000 actual plans, densities and access |
+| 15 | Which model predicts the changed-heat truth best? | Counted326 audit, six primary responses and null controls |
+| 16 | Are the latest absolute field gains spatially credible? | Refinement selected 500 all 22 and fixed-four native arrays |
+| 17 | Does the actual counted-response joint control add utility? | Counted0291 graph provenance and same-state I-removal |
+| 18 | Are physical response directions now correct? | Both signs of 0291 on exact aligned receivers |
+| 19 | Are stored candidate choices useful? | Common solved pools, native material maxima and regret |
 
 The [directory index](README.md) lists all 20 current reports in storyline order and separates conclusions, historical status, supporting math, and older baselines. Where earlier reports say an experiment is scheduled, prepared, or unexecuted, use its dated result only; later completion/stop receipts control current status. No proposed recipe in those documents is an authorization to launch it.

@@ -1,6 +1,6 @@
 # HONF report reading map
 
-Start with the [two-week milestone review, 22 September–6 October2026](HONF_Two_Week_Milestone_Review_2026-10-06.md). It connects the mathematical changes, mature1401/1804 anchors, predictor tradeoffs, actual execution, and inverse-response evidence, with seventeen selected existing figures.
+Start with the [two-week milestone review, 22 September–6 October2026](HONF_Two_Week_Milestone_Review_2026-10-06.md). It connects the mathematical changes, mature1401/1804 anchors, predictor tradeoffs, actual execution, and inverse-response evidence, with nineteen selected existing figures.
 
 The review covers **20 pre-existing current top-level reports**, plus the September mature comparison and relevant archived studies. The count excludes this index, the new milestone review, helper command/findings documents, and the older nested Wind2500 baseline report. The original reports remain in place. This index organizes the reading order; it does not promote a research model or authorize experiments.
 
@@ -52,4 +52,4 @@ Older archived reports retain historical value; `_bk` means archival location, n
 
 Keep literal run/checkpoint age, exact versus selected policy, full-data versus fixed25 membership, normalization/input representation, exposed validation versus physical-reference scope, and complete versus prepared timing attached to every claim. Parameter count, logical support, unique pairs, actual rows and elapsed time are separate evidence. A local derivative check, a small inverse readiness step, or a correct finite-pool ranking is not independently validated inverse design.
 
-All scientific figures used by the milestone review are already saved and visually inspected. Available PDF masters and existing raster exports are reused; two original summary charts have no saved PDF master. The review's short figure index selects seventeen figures, including five for the response-and-decision milestone, without duplicating or deleting historical exports. Generated artifacts remain local and ignored under the repository upload rule; restore the preserved artifact roots when viewing the committed Markdown from another machine.
+All scientific figures used by the milestone review are already saved and visually inspected. Available PDF masters and existing raster exports are reused; two original summary charts have no saved PDF master. The review's short figure index selects nineteen figures, including five for the response-and-decision milestone, without duplicating or deleting historical exports. Generated artifacts remain local and ignored under the repository upload rule; restore the preserved artifact roots when viewing the committed Markdown from another machine.
