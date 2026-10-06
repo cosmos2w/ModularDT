@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 from thermal_response_refinement_evaluation import (
     aggregate_response_rows,
     audit_field_comparability,
+    compare_heat_null,
     finite_metrics,
     load_counted_families,
     prepare_counted_replay,
@@ -83,6 +84,34 @@ def test_finite_metrics_widen_before_subtraction_and_apply_quadrature_mask():
     assert result["T"]["rmse"] == 4
     assert result["T"]["reference_signed_mean"] == 14
     assert result["T"]["prediction_signed_mean"] == 16
+
+
+def test_heat_null_uses_identical_steps_and_does_not_promote_floor_limited_reduction():
+    parent = {"development_manifest_sha256": "fixed", "query_count": 256, "amplitudes": [.1, .2],
+              "train_heat_range": [0, 1], "cases": [
+                  {"case_id": f"{index:04d}", "module_count": 3, "eligible": True, "variants": [
+                      {"label": "minus", "donors": [0, 2], "fraction_of_feasible_bound": .1, "signed_heat_transfer": -.02},
+                      {"label": "plus", "donors": [0, 2], "fraction_of_feasible_bound": .1, "signed_heat_transfer": .02}]}
+                  for index in range(22)], "equal_case_channels": {
+                      channel: {"mean_rms_change_native": 1e-6} for channel in ("u", "v", "p", "omega")}}
+    candidate = copy.deepcopy(parent)
+    for channel in candidate["equal_case_channels"]:
+        candidate["equal_case_channels"][channel]["mean_rms_change_native"] = 1e-8
+    result = compare_heat_null(parent, candidate, numerical_floors={channel: 1e-5 for channel in ("u", "v", "p", "omega")})
+    assert result["relative_error_to_zero"] == "undefined"
+    assert result["channels"]["p"]["reduction_percent"] == 99
+    assert result["channels"]["p"]["at_least_90_percent_reduction"] is None
+    candidate["amplitudes"] = [.2]
+    with pytest.raises(ValueError, match="amplitudes"):
+        compare_heat_null(parent, candidate)
+    candidate["amplitudes"] = [.1, .2]
+    candidate["cases"][0]["variants"][0]["signed_heat_transfer"] = -.01
+    with pytest.raises(ValueError, match="actual signed_heat_transfer"):
+        compare_heat_null(parent, candidate)
+    candidate["cases"][0]["variants"][0]["signed_heat_transfer"] = -.02
+    candidate["cases"][0]["query_xy_sha256"] = "changed"
+    with pytest.raises(ValueError, match="reported query_xy_sha256"):
+        compare_heat_null(parent, candidate)
 
 
 def test_heat_record_receiver_mismatch_is_rejected():

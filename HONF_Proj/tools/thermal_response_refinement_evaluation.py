@@ -249,6 +249,62 @@ def parent_field_gate(parent, candidate):
     return result
 
 
+def compare_heat_null(parent, candidate, *, numerical_floors=None):
+    """Matched raw heat-only leakage reduction, never relative error to zero."""
+    for key in ("development_manifest_sha256", "query_count", "amplitudes", "train_heat_range"):
+        if parent[key] != candidate[key]:
+            raise ValueError(f"Heat-null comparison differs in {key}")
+    parent_cases = {row["case_id"]: row for row in parent["cases"]}
+    candidate_cases = {row["case_id"]: row for row in candidate["cases"]}
+    if set(parent_cases) != set(candidate_cases) or len(parent_cases) != 22:
+        raise ValueError("Heat-null comparison requires the identical fixed22 cases")
+    detailed_query_cases = []
+    for case_id, old in parent_cases.items():
+        new = candidate_cases[case_id]
+        if (old["eligible"] != new["eligible"] or old["module_count"] != new["module_count"]
+                or len(old["variants"]) != len(new["variants"])):
+            raise ValueError("Heat-null comparison changed eligible cases or transfer directions")
+        for before, after in zip(old["variants"], new["variants"]):
+            for key in ("label", "donors", "fraction_of_feasible_bound", "signed_heat_transfer"):
+                if key not in before or key not in after or before[key] != after[key]:
+                    raise ValueError(f"Heat-null comparison changed actual {key} on {case_id}")
+            for key in ("heat_total_error", "heat", "heat_delta", "pressure_functional"):
+                if before.get(key) != after.get(key):
+                    raise ValueError(f"Heat-null comparison changed reported {key} on {case_id}")
+        for key in ("query_xy_sha256", "fluid_grid_rows_sha256", "pressure_grid_rows_sha256", "query_identity"):
+            if old.get(key) != new.get(key):
+                raise ValueError(f"Heat-null comparison changed reported {key} on {case_id}")
+        if bool(old.get("detail_arrays")) != bool(new.get("detail_arrays")):
+            raise ValueError("Heat-null comparison changed the detailed representative query panel")
+        if old.get("detail_arrays"):
+            with np.load(old["detail_arrays"], allow_pickle=False) as before, np.load(new["detail_arrays"], allow_pickle=False) as after:
+                keys = ("query_xy", "baseline_heat", "fluid_grid_rows", "pressure_grid_rows", "field_scales_train")
+                heat_keys = tuple(f"{variant['label']}/heat" for variant in old["variants"])
+                for key in (*keys, *heat_keys):
+                    if not np.array_equal(before[key], after[key]):
+                        raise ValueError(f"Heat-null comparison changed saved query/input {key} on {case_id}")
+            detailed_query_cases.append(case_id)
+    result = {}
+    for channel in ("u", "v", "p", "omega"):
+        old = parent["equal_case_channels"][channel]["mean_rms_change_native"]
+        new = candidate["equal_case_channels"][channel]["mean_rms_change_native"]
+        floor = None if numerical_floors is None else numerical_floors[channel]
+        if floor is not None and (floor < 0 or not np.isfinite(floor)):
+            raise ValueError("Heat-null numerical floors must be finite and nonnegative")
+        limited = floor is not None and old <= floor
+        reduction = 100 * (1 - new / old) if old > 0 else None
+        result[channel] = {"parent_mean_rms_native": old, "candidate_mean_rms_native": new,
+                           "reduction_percent": reduction, "predeclared_numerical_floor_native": floor,
+                           "parent_floor_limited": limited, "at_least_90_percent_reduction":
+                           None if limited or reduction is None else reduction >= 90,
+                           "floor_status": "No numerical floor declared" if floor is None else "Declared numerical warning floor; exact physical reference is zero"}
+    return {"scope": "equal-case mean model RMS increment on identical finite heat steps; physical benchmark target zero",
+            "relative_error_to_zero": "undefined", "channels": result,
+            "actual_per_case_transfer_pairs_fractions_and_increments_verified": True,
+            "saved_query_identity_verified_case_ids": sorted(detailed_query_cases),
+            "query_identity_limit": "Detailed saved arrays and any reported hashes checked exactly; remaining cases retain common deterministic sampler declaration, not an independently saved runtime query stream"}
+
+
 def load_counted_families(request_path, records_dir):
     """Read exact stored request outcomes, preserving absent 0277 baseline."""
     from channelthermal.interaction_evidence.reference_adapter import operating_context_from_config
