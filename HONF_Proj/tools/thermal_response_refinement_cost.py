@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Matched complete native-wrapper timing and physical-input VJP cost.
 
-Three frozen checkpoints share one GPU and identical inputs. Timed calls have
+Declared frozen checkpoints share one GPU and identical inputs. Timed calls have
 no work/graph hooks. A separate call verifies P0/P1/P2 and actual fine work.
 There are no prepared-decode timings, optimizer updates, or solver calls.
 """
@@ -68,6 +68,19 @@ def memory_result(device, baseline):
             "cuda_peak_reserved_bytes": torch.cuda.max_memory_reserved(device)}
 
 
+def authorized_device(value, physical_gpu_ids=None):
+    """Keep the old campaign default; accept an explicit newer authorization."""
+    if physical_gpu_ids is None:
+        return allowed_device(value)
+    device = torch.device(value)
+    if device.type == "cuda":
+        visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+        physical = visible.split(",")[device.index or 0].strip() if visible else str(device.index or 0)
+        if physical not in {str(index) for index in physical_gpu_ids}:
+            raise ValueError("Measurement device is outside the explicitly authorized physical GPUs")
+    return device
+
+
 def prepare_inputs(saved, device):
     from channelthermal.data.collation import ChannelThermalBatchCollator
     from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer
@@ -111,12 +124,13 @@ def prepare_inputs(saved, device):
     return inputs, metadata, manifest, stats
 
 
-def benchmark(checkpoints, output_dir, *, device="cuda:0", repeats=5, warmup=1, vjp_repeats=2):
+def benchmark(checkpoints, output_dir, *, device="cuda:0", repeats=5, warmup=1, vjp_repeats=2,
+              physical_gpu_ids=None, receiver_chunks=None):
     from channelthermal.evaluation.loading import load_model
     from thermal_campaign_heat_inference import snapshot_forward_state, verify_frozen_forward
     from thermal_development import validate_generated_output
 
-    device = allowed_device(device)
+    device = authorized_device(device, physical_gpu_ids)
     if repeats != 5 or vjp_repeats != 2 or warmup < 1:
         raise ValueError("Refinement cost uses exactly five warmed repetitions and two whole-wrapper input VJPs")
     output_dir = validate_generated_output(output_dir)
@@ -135,6 +149,11 @@ def benchmark(checkpoints, output_dir, *, device="cuda:0", repeats=5, warmup=1, 
         for name, path in checkpoints.items():
             model, saved = load_model(Path(path), device)
             model.eval().requires_grad_(False)
+            if receiver_chunks is not None:
+                chunk = int(receiver_chunks[name])
+                model.core.backend.set_execution_mode(model.core.backend.execution_mode,
+                                                      receiver_chunk_size=chunk)
+                model.core.receiver_chunk_size = chunk
             models[name], saved_states[name] = model, saved
             snapshots[name] = snapshot_forward_state(model)
         inputs, panels, manifest, stats = prepare_inputs(saved_states["G-fast"], device)
@@ -154,6 +173,8 @@ def benchmark(checkpoints, output_dir, *, device="cuda:0", repeats=5, warmup=1, 
         for condition, arguments in inputs.items():
             condition_rows = {name: {"arm": name, "checkpoint": str(Path(checkpoints[name]).resolve()),
                 "checkpoint_epoch": saved_states[name]["epoch"], "condition": condition, **panels[condition],
+                "receiver_chunk_size": models[name].core.backend.execution_receiver_chunk,
+                "core_receiver_chunk_size": models[name].core.receiver_chunk_size,
                 "inference_samples": [], "input_vjp_samples": []} for name in models}
             # Warm-up every model under exactly the later native flags.
             for _ in range(warmup):
@@ -230,7 +251,7 @@ def benchmark(checkpoints, output_dir, *, device="cuda:0", repeats=5, warmup=1, 
         result = {"rows": rows, "ratios": ratios, "alternating_orders": orders, "manifest_fingerprint": manifest["manifest_sha256"],
                   "frozen_state": frozen, "scope": "complete native P0/P1/P2 FP32 wrappers; five alternating warmed timings and two complete heat/query-input VJPs per arm/condition",
                   "timing_excludes": "input staging, checkpoint loading, output export, work/graph hooks; those occur outside timed calls",
-                  "memory_scope": "three models and all condition inputs resident together; extra CUDA allocation subtracts that common invocation baseline",
+                  "memory_scope": "all declared models and condition inputs resident together; extra CUDA allocation subtracts that common invocation baseline",
                   "work_scope": "one additional instrumented full forward per condition; backward work unmeasured; dense/global paths retained",
                   "optimizer_updates": 0, "solver_calls": 0}
         write_json(output_dir / "cost.json", result)
@@ -249,11 +270,21 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--g-fast", type=Path, required=True)
     parser.add_argument("--h-add", type=Path, required=True)
-    parser.add_argument("--h-joint", type=Path, required=True)
+    parser.add_argument("--h-joint", type=Path)
+    parser.add_argument("--dependency-independent", type=Path, help="Optional learned D-sep composed checkpoint")
+    parser.add_argument("--dependency-open", type=Path, help="Optional matched D-open composed checkpoint")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--physical-gpu-ids", help="Explicit authorization, comma-separated physical GPU indices; default is legacy campaign 1,2")
+    parser.add_argument("--receiver-chunk-size", type=int, help="Apply this matched receiver tile to every arm")
     args = parser.parse_args(argv)
-    benchmark({"G-fast": args.g_fast, "H-add": args.h_add, "H-joint": args.h_joint}, args.output_dir, device=args.device)
+    checkpoints = {"G-fast": args.g_fast, "H-add": args.h_add}
+    checkpoints.update({name: checkpoint for name, checkpoint in (
+        ("H-joint", args.h_joint), ("D-sep", args.dependency_independent),
+        ("D-open", args.dependency_open)) if checkpoint is not None})
+    benchmark(checkpoints, args.output_dir, device=args.device,
+              physical_gpu_ids=args.physical_gpu_ids.split(",") if args.physical_gpu_ids else None,
+              receiver_chunks={name: args.receiver_chunk_size for name in checkpoints} if args.receiver_chunk_size else None)
     return 0
 
 

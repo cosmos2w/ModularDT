@@ -139,6 +139,8 @@ class TypedWorkEvidenceRecorder(AbstractContextManager):
         def numerical_access(plan, receivers, mechanism, *args, **kwargs):
             route = (int(plan.phase), str(mechanism).upper())
             before = self._counts.get(route, 0)
+            if hasattr(self.backend, "tensor_query_interaction"):
+                kwargs["diagnostics"] = True
             value = self._original["_numerical_access"](plan, receivers, mechanism, *args, **kwargs)
             prefix = f"access/P{route[0]}/{route[1]}/{before:05d}"
             # A full-control fallback calls the wrapped public _access once.

@@ -165,26 +165,37 @@ class TensorQueryInteraction(TensorSourceGroupResidual):
         return QueryInteractionPhase(plan, content, gamma, constant, {}, source_only,
                                       source_moments, receiver_moments)
 
-    def components(self, phase, receivers, tau):
+    def components(self, phase, receivers, tau, *, diagnostics=True, query_access=None):
+        """Compute executed terms; materialize unused I only for diagnostics.
+
+        The public component inspection remains complete by default. Native
+        reads explicitly omit diagnostic work, and pass one call-local access
+        tensor shared by QM/QE for the identical receiver object.
+        """
         plan, g = phase.plan, phase.gamma[tau]
-        access = self.access(plan, receivers, tau)
+        access = self.access(plan, receivers, tau) if query_access is None else query_access
         centered_a = access - plan.mean_access[:, None]
         receiver = torch.bmm(centered_a, phase.receiver_moments[tau])[:, :, None]
         source = phase.source_only[tau][:, None]
         shape = (g.shape[0], receivers.shape[1], plan.density[SOURCE_TYPE[tau]].shape[-1], g.shape[-1])
-        joint = torch.bmm(centered_a, phase.source_moments[tau]).reshape(shape)
-        used_joint = joint if self.mode == 'joint' else joint * 0
-        if self.intervention == 'zero_joint': used_joint = joint * 0
-        elif self.intervention == 'remove_joint_group':
+        joint = (torch.bmm(centered_a, phase.source_moments[tau]).reshape(shape)
+                 if diagnostics or self.mode == 'joint' else None)
+        used_joint = joint if self.mode == 'joint' else None
+        if self.intervention == 'zero_joint': used_joint = None
+        elif self.intervention == 'remove_joint_group' and self.mode == 'joint':
             selected = self.removed_group
             if selected is None: selected = plan.admission.argmax(-1)
             keep = ~F.one_hot(selected, plan.admission.shape[-1]).bool()
             used_joint = torch.bmm(centered_a * keep[:, None], phase.source_moments[tau]).reshape(shape)
-            if self.mode == 'add': used_joint = used_joint * 0
-        elif self.intervention not in ('normal', 'zero_corrections'):
+        elif self.intervention not in ('normal', 'zero_corrections', 'remove_joint_group'):
             raise ValueError('Unknown query-interaction intervention')
-        preactivation = source + receiver + used_joint
+        preactivation = source + receiver
+        if used_joint is not None: preactivation = preactivation + used_joint
         if self.intervention == 'zero_corrections': preactivation = preactivation * 0
+        # Small broadcast zero represents the absent executed interaction.
+        # In ordinary Add reads no query-by-source joint tensor is allocated.
+        if used_joint is None:
+            used_joint = joint * 0 if diagnostics else torch.zeros_like(receiver)
         return {'C': phase.centering[tau][:, None, None], 'S': source, 'R': receiver,
                 'I': joint, 'I_used': used_joint, 'access': access}, preactivation
 
@@ -235,13 +246,22 @@ class TensorQueryInteractionField(TensorSourceGroupResidualField):
         # age, while inherited global-control progress remains frozen at e1000.
         return {'epoch': self.fit_epoch, 'total_epochs': self.fit_total_epochs}
 
+    def _query_access_pair(self, plan, receivers, actions, *, mode, soft, diagnostics):
+        phase = plan.strategy_data['tensor_phase_actions']
+        query_access = self.tensor_query_interaction.access(phase.plan, receivers, 'QM')
+        return tuple(self._numerical_access(plan, receivers, tau, actions,
+            mode=mode, soft=soft, diagnostics=diagnostics, query_access=query_access)
+            for tau in QUERY_ROUTES)
+
     def _numerical_access(self, plan, receivers, mechanism, actions, receiver_tokens=None,
-                          pair_valid=None, *, mode=None, soft=None, diagnostics=False):
+                          pair_valid=None, *, mode=None, soft=None, diagnostics=False,
+                          query_access=None):
         base = TypedHypergraphField._numerical_access(self, plan, receivers, mechanism, actions,
             receiver_tokens, pair_valid, mode=mode, soft=soft, diagnostics=diagnostics)
         if mechanism not in QUERY_ROUTES: return base
         phase = plan.strategy_data['tensor_phase_actions']
-        components, preactivation = self.tensor_query_interaction.components(phase, receivers, mechanism)
+        components, preactivation = self.tensor_query_interaction.components(phase, receivers, mechanism,
+            diagnostics=diagnostics, query_access=query_access)
         preactivation = preactivation * base.support[..., None]
         residual = torch.tanh(preactivation)
         base_projected = base.projected

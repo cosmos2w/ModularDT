@@ -2,10 +2,46 @@
 
 ## Physical problem
 
-Each case is a steady incompressible channel flow containing a padded,
-variable-size collection of circular heated solid modules. The reference
-solution couples fluid momentum and energy transport to solid conduction. At a
-module boundary, fluid and solid temperatures and outward heat flux interact.
+The intended application is steady channel flow containing a padded,
+variable-size collection of circular heated solid modules, with fluid energy
+transport and solid conduction interacting at module boundaries. The active
+benchmark labels use a more limited generator: a prescribed analytic wake
+velocity/pressure approximation followed by temperature evolution on one
+shared fluid/solid grid. They are not a coupled Navier–Stokes CFD reference.
+
+The locally inspected generator is
+`1_Demo_ChannelThermal/src/simulate_channelthermal.py`. All 690 packed case
+configurations inspected on 2026-10-06 use `flow_model="analytic_wake"`,
+`apply_projection=false`, `nu=null`, and `viscosity_scale=1`. Velocity,
+pressure and vorticity read layout, radius, domain/grid geometry and prescribed
+inlet/Reynolds context; they do not read heating or temperature. The outlet
+pressure mean fixes the pressure gauge. The optional projection routine also
+has no thermal input, but is inactive in these packed cases. This dependency
+applies to this benchmark variant; it does not establish heat-independent
+flow for buoyant or temperature-dependent flow applications.
+
+The thermal grid uses fixed fluid/solid diffusivities, upwind advection by the
+prescribed flow, solid-cell heat deposition, inlet/wall Dirichlet temperature
+and a zero-gradient outlet. At a fixed layout, context and common integration
+step count, its temperature update is affine in module heating. The saved
+converged-final extraction uses input-dependent stopping tolerances and FP32
+storage, so saved endpoint superposition remains a measured numerical property,
+not an exact certified steady/grid-error claim. No temperature-dependent
+coefficients, buoyancy or radiation are used by the inspected generator.
+
+`q_normal` is a sampled shared-grid flux proxy,
+`-k_interface*(T_outside-T_surface)/delta`, with harmonic interface conductivity;
+it is not a independently solved conjugate-interface flux. The raw
+`h_proxy=abs(q_normal)/(abs(T_surface-T_outside)+1e-6)` and the preprocessed
+`h_effective=q_normal/(T_surface-T_outside)` have ratio, epsilon, clipping and
+validity-mask semantics. They may depend on heating even though flow does not.
+The effective denominator is clamped below the configured epsilon and its
+value is clipped to the configured range. Outside temperature, surface
+temperature, `h_effective` and flux proxy are distinct quantities; none may be
+silently substituted for another.
+
+The source and saved-state audit is recorded in
+[the dependency and thermal-response audit](../../docs/reports/HONF_Dependency_Correct_Source_Audit.md).
 
 The global learned field is ordered as:
 

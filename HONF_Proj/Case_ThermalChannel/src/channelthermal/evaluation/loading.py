@@ -117,6 +117,12 @@ def load_model(checkpoint_path: Path, device: torch.device) -> tuple[ChannelTher
     """Load model."""
 
     checkpoint = load_trusted_checkpoint(checkpoint_path, map_location="cpu")
+    # The child owns a distinct flow-only inventory while its frozen thermal
+    # parent still follows the original strict reconstruction path below.
+    if checkpoint.get("dependency_identity") is not None:
+        from channelthermal.dependency_flow import load_dependency_model
+
+        return load_dependency_model(checkpoint_path, device, checkpoint=checkpoint)
     validate_checkpoint_identity(
         checkpoint,
         case_id="ThermalChannel",

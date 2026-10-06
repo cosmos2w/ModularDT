@@ -9,7 +9,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from thermal_response_refinement_cost import alternating_orders, benchmark, prepare_inputs
+from thermal_response_refinement_cost import alternating_orders, authorized_device, benchmark, prepare_inputs
 
 
 def test_alternating_repetitions_preserve_all_arms_and_change_position():
@@ -26,6 +26,16 @@ def test_alternating_repetitions_preserve_all_arms_and_change_position():
 def test_cost_horizon_is_fixed_before_any_model_load(tmp_path):
     with pytest.raises(ValueError, match="exactly five"):
         benchmark({}, tmp_path, device="cpu", repeats=4)
+
+
+def test_cost_physical_device_requires_explicit_new_authorization(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,2")
+    with pytest.raises(ValueError, match="physical GPU"):
+        authorized_device("cuda:0")
+    assert authorized_device("cuda:0", (0, 2)) == torch.device("cuda:0")
+    assert authorized_device("cuda:1", (0, 2)) == torch.device("cuda:1")
+    with pytest.raises(ValueError, match="explicitly authorized"):
+        authorized_device("cuda:0", (2,))
 
 
 def test_real_saved_parent_prepares_complete_native_conditions_without_model_calls():

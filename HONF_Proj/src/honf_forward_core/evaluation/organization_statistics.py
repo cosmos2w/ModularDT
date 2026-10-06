@@ -265,6 +265,8 @@ class TypedOrganizationStatistics(AbstractContextManager):
             return state
 
         def access(plan, receivers, tau, *args, **kwargs):
+            if hasattr(self.backend, "tensor_query_interaction"):
+                kwargs["diagnostics"] = True
             value = self._originals[access_name](plan, receivers, tau, *args, **kwargs)
             self._access_routes[id(value)] = f"P{plan.phase}/{tau}"
             return self._access(plan, receivers, tau, value)

@@ -197,10 +197,11 @@ def test_checkpoint_selection_progress_preserves_fit_age_and_frozen_host(age, fr
     assert plan.additional_age == age and plan.sparse_fraction == fraction
 
 
-def test_actual_component_recording_and_statistics_without_extra_physical_reads():
+@pytest.mark.parametrize('mode', ['add', 'joint'])
+def test_actual_component_recording_and_statistics_without_extra_physical_reads(mode):
     from honf_forward_core.evaluation.organization_statistics import TypedOrganizationStatistics
     from honf_forward_core.evaluation.typed_work_evidence import TypedWorkEvidenceRecorder
-    model, encoded = field().eval(), record()
+    model, encoded = field(mode).eval(), record()
     nonzero(model)
     query = torch.rand(2, 3, 2, dtype=torch.float64)
     reference = read(model, encoded, query)
@@ -208,7 +209,7 @@ def test_actual_component_recording_and_statistics_without_extra_physical_reads(
         result = read(model, encoded, query)
     assert torch.equal(result, reference)
     assert recorder.arrays['phase/P0/query_interaction/reference_ids'].shape == encoded.receiver_anchor_weights.shape
-    assert recorder.arrays['phase/P0/query_interaction/mode'].item() == 'joint'
+    assert recorder.arrays['phase/P0/query_interaction/mode'].item() == mode
     prefixes = [name.removesuffix('/preactivation') for name in recorder.arrays if name.endswith('/preactivation')]
     assert prefixes and all('/QM/' in p or '/QE/' in p for p in prefixes)
     for prefix in prefixes:
@@ -283,3 +284,84 @@ def test_stable_outer_tanh_contrast_formula_gradients_and_exact_float32_zero():
     result = model._reduce_messages(messages, access, 'QM')
     grads = torch.autograd.grad(result.square().sum(), tuple(model.tensor_query_interaction.gamma['QM'].parameters()))
     assert any(g.abs().max() > 0 for g in grads)
+
+
+@pytest.mark.parametrize('mode', ['add', 'joint'])
+@pytest.mark.parametrize('intervention', ['normal', 'zero_joint', 'remove_joint_group', 'zero_corrections'])
+def test_lazy_components_preserve_legacy_values_and_input_parameter_gradients(mode, intervention):
+    """The execution repair changes neither nonlinear ordering nor AD values."""
+    from types import MethodType
+
+    from torch.nn import functional as F
+
+    from honf_forward_core.interface_fields.typed_hypergraph_state import SOURCE_TYPE
+
+    def legacy_components(self, phase, receivers, tau, **unused):
+        plan, g = phase.plan, phase.gamma[tau]
+        access = self.access(plan, receivers, tau)
+        centered_a = access - plan.mean_access[:, None]
+        receiver = torch.bmm(centered_a, phase.receiver_moments[tau])[:, :, None]
+        source = phase.source_only[tau][:, None]
+        shape = (g.shape[0], receivers.shape[1], plan.density[SOURCE_TYPE[tau]].shape[-1], g.shape[-1])
+        joint = torch.bmm(centered_a, phase.source_moments[tau]).reshape(shape)
+        used = joint if self.mode == 'joint' else joint * 0
+        if self.intervention == 'zero_joint': used = joint * 0
+        elif self.intervention == 'remove_joint_group':
+            selected = self.removed_group
+            if selected is None: selected = plan.admission.argmax(-1)
+            keep = ~F.one_hot(selected, plan.admission.shape[-1]).bool()
+            used = torch.bmm(centered_a * keep[:, None], phase.source_moments[tau]).reshape(shape)
+            if self.mode == 'add': used = used * 0
+        correction = source + receiver + used
+        if self.intervention == 'zero_corrections': correction = correction * 0
+        return {'C': phase.centering[tau][:, None, None], 'S': source, 'R': receiver,
+                'I': joint, 'I_used': used, 'access': access}, correction
+
+    torch.manual_seed(121)
+    candidate, reference = field(mode), field(mode)
+    for model in (candidate, reference):
+        read(model, record(), torch.rand(2, 5, 2, dtype=torch.float64))
+    nonzero(candidate); reference.load_state_dict(candidate.state_dict())
+    reference.tensor_query_interaction.components = MethodType(legacy_components, reference.tensor_query_interaction)
+    reference._query_access_pair = MethodType(TypedHypergraphField._query_access_pair, reference)
+    candidate.tensor_query_interaction.intervention = intervention
+    reference.tensor_query_interaction.intervention = intervention
+    encoded = record()
+    leaves = (encoded.module_tokens.clone().requires_grad_(), encoded.module_centers.clone().requires_grad_(),
+              torch.rand(2, 5, 2, dtype=torch.float64, requires_grad=True))
+    encoded = replace(encoded, module_tokens=leaves[0], module_centers=leaves[1])
+    left, right = read(candidate, encoded, leaves[2]), read(reference, encoded, leaves[2])
+    torch.testing.assert_close(left, right, atol=2e-12, rtol=2e-10)
+    for model, value in ((candidate, left), (reference, right)):
+        inputs = leaves + tuple(model.tensor_query_interaction.gamma['QM'].parameters())
+        gradients = torch.autograd.grad(value.square().sum(), inputs, retain_graph=True)
+        if model is candidate: actual = gradients
+        else:
+            for a, b in zip(actual, gradients):
+                torch.testing.assert_close(a, b, atol=2e-12, rtol=2e-10)
+
+
+def test_add_skips_joint_product_and_reuses_only_current_read_access(monkeypatch):
+    model, encoded = field('add'), record()
+    nonzero(model)
+    state = model.prepare(encoded, encoded.module_tokens)
+    residual = model.tensor_query_interaction
+    phase = state['hypergraph_plan'].strategy_data['tensor_phase_actions']
+    products, accesses = [], []
+    original_bmm, original_access = torch.bmm, residual.access
+    def bmm(left, right):
+        if any(right is tensor for tensor in phase.source_moments.values()): products.append(right)
+        return original_bmm(left, right)
+    def access(*args, **kwargs):
+        accesses.append(args[1])
+        return original_access(*args, **kwargs)
+    monkeypatch.setattr(torch, 'bmm', bmm)
+    monkeypatch.setattr(residual, 'access', access)
+    query = torch.rand(2, 5, 2, dtype=torch.float64)
+    features = torch.cat((query, query.square(), query.sin()), -1)
+    model.read(state, encoded, query, features)
+    assert not products and accesses == [query]
+    model.read(state, encoded, query, features)
+    assert len(accesses) == 2  # No access/autograd graph survives a read call.
+    parts, _ = residual.components(phase, query, 'QM')
+    assert len(products) == 1 and parts['I'] is not None

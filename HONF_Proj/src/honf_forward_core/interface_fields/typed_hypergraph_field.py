@@ -427,6 +427,10 @@ class TypedHypergraphField(DensePairwiseField):
                 self._access(plan, receivers, mechanism, receiver_tokens, mode=mode, soft=soft),
                 "work": state["hypergraph_ledger"], "executor": state["hypergraph_executor"]}
 
+    def _query_access_pair(self, plan, receivers, actions, *, mode, soft, diagnostics):
+        return tuple(self._numerical_access(plan, receivers, tau, actions,
+            mode=mode, soft=soft, diagnostics=diagnostics) for tau in ("QM", "QE"))
+
     def read(self, state, encoded, receivers, receiver_features, *, return_routing_maps=False):
         plan = state["hypergraph_plan"]
         mode = state["hypergraph_intervention"]
@@ -441,10 +445,8 @@ class TypedHypergraphField(DensePairwiseField):
             state["hypergraph_actions"] = actions
             state["hypergraph_action_plan"] = plan
             state["hypergraph_structural_preparation"] = None
-        qm = self._numerical_access(plan, receivers, "QM", actions, mode=mode, soft=soft,
-                                    diagnostics=return_routing_maps)
-        qe = self._numerical_access(plan, receivers, "QE", actions, mode=mode, soft=soft,
-                                    diagnostics=return_routing_maps)
+        qm, qe = self._query_access_pair(plan, receivers, actions, mode=mode, soft=soft,
+                                        diagnostics=return_routing_maps)
         soft_plan = state.get("hypergraph_soft_plan")
         soft_qm = soft_qe = None
         if soft_plan is not None:

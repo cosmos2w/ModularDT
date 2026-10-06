@@ -19,6 +19,13 @@ from honf_runtime.checkpoints import validate_checkpoint_identity
 from honf_runtime.compat import strip_module_prefix
 
 
+def atomic_save_checkpoint_payload(path: Path, payload: Dict[str, Any]) -> None:
+    """Shared atomic writer for explicitly identified case-owned checkpoints."""
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save(payload, temporary_path)
+    temporary_path.replace(path)
+
+
 def save_checkpoint(
     path: Path,
     *,
@@ -123,9 +130,7 @@ def save_checkpoint(
                 "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             },
     }
-    temporary_path = path.with_suffix(path.suffix + ".tmp")
-    torch.save(payload, temporary_path)
-    temporary_path.replace(path)
+    atomic_save_checkpoint_payload(path, payload)
 
 
 def _restore_rng_state(checkpoint: Dict[str, Any]) -> None:
