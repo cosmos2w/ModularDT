@@ -19,19 +19,19 @@ The maintained `query_physical_v1` allowlist trains `core.backend.tensor_query_i
 
 `query_admission_mode="soft"` fixes the numerical admission/donor formulation independently of refinement age while retaining learned input-dependent memberships. Plans remain fresh functions of each design input and are shared through that wrapper's physical phases. Old checkpoints retain the default `curriculum` formulation, and historical `interface_fit` guards reject a silent switch to this refinement mode.
 
-The initial profiles stop at 100 new epochs. Resume the exact saved milestone after the paired 100 review supports continuation to 500; any 1000 extension requires the separately declared evidence and remaining budget. For example, using the actual saved paths from the mapping:
+The initial profiles stop at 100 new epochs. Resume the exact saved milestone after the paired 100 review supports continuation to 500; any 1000 extension requires the separately declared evidence and remaining budget. The following are the exact commands used for the reviewed 100-to-500 continuation in this round, run from `HONF_Proj`:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 /home/wanglz/miniconda3/envs/ModularDT/bin/python train.py \
-  --config /data/.../preparation/h-add_refinement100.json \
-  --resume-checkpoint /data/.../Run_3801_.../epoch_0100_model.pt \
+  --config /data/wanglz/ModularDT/thermal_development/response_refinement_20261005/preparation/h-add_refinement100.json \
+  --resume-checkpoint /data/wanglz/ModularDT/thermal_development/response_refinement_20261005/ThermalChannel/HONF_Forward_Runs/Run_3801_20261005_214458_thermal_response_refinement25_h-add_v1/epoch_0100_model.pt \
   --epochs 500 --device cuda:0 --yes
 CUDA_VISIBLE_DEVICES=2 /home/wanglz/miniconda3/envs/ModularDT/bin/python train.py \
-  --config /data/.../preparation/h-joint_refinement100.json \
-  --resume-checkpoint /data/.../Run_3802_.../epoch_0100_model.pt \
+  --config /data/wanglz/ModularDT/thermal_development/response_refinement_20261005/preparation/h-joint_refinement100.json \
+  --resume-checkpoint /data/wanglz/ModularDT/thermal_development/response_refinement_20261005/ThermalChannel/HONF_Forward_Runs/Run_3802_20261005_214502_thermal_response_refinement25_h-joint_v1/epoch_0100_model.pt \
   --epochs 500 --device cuda:0 --yes
 ```
 
-The ellipses above are placeholders; use the exact mapped run paths. Ordinary resume rejects changed trainable scope, admission mode, normalization, primary identity, response addendum/content, objective declaration, coefficients, or parent lineage. It retains optimizer state after initial attachment. Keep only latest, best-field, and declared 100-epoch milestones/plots; numerical artifacts and figures stay in ignored local paths.
+These commands document the existing run histories; do not launch a duplicate trainer over a live or completed run. For another authorized refinement, use its exact mapped paths and supported saved age. Ordinary resume rejects changed trainable scope, admission mode, normalization, primary identity, response addendum/content, objective declaration, coefficients, or parent lineage. It retains optimizer state after initial attachment. Keep only latest, best-field, and declared 100-epoch milestones/plots; numerical artifacts and figures stay in ignored local paths.
 
 No new solver attempt, inverse generator, design search, or formal full-data run belongs to this workflow. The cumulative physical-reference ledger remains 326/326. CPU tests and preparation receipts establish software contracts; actual learning, physical responses, runtime, organizer utility, and stored-pool decisions require their separately recorded measurements under the [response refinement plan](../../UpgradePlan/HONF_Response_Competent_Forward_Refinement_Plan.md).
