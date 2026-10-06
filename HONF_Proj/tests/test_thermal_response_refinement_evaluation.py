@@ -15,7 +15,9 @@ from thermal_response_refinement_evaluation import (
     audit_field_comparability,
     compare_heat_null,
     finite_metrics,
+    load_atlas_families,
     load_counted_families,
+    main,
     prepare_counted_replay,
     stored_pool_decision,
     validate_heat_records,
@@ -139,3 +141,29 @@ def test_real_saved_counted_panel_preserves_missing_baseline_without_solver():
     assert result["new_solver_attempts"] == result["new_model_calls"] == 0
     assert result["physical_reference_attempts_cumulative"] == 326
     assert result["families"][0]["candidate_states"] == ["transfer_minus", "transfer_plus"]
+
+
+def test_atlas_cli_rejects_unasked_direction_and_partial_cohort_before_model_read(tmp_path):
+    arguments = ["atlas", "--checkpoint", str(tmp_path / "no_model.pt"), "--dataset", str(tmp_path / "no_data.h5"),
+                 "--output-dir", str(tmp_path / "outputs"), "--cohort", "development"]
+    for index in range(4):
+        arguments += ["--stencil", str(tmp_path / f"family{index}.npz")]
+    with pytest.raises(ValueError, match="exactly heat_transfer_minus"):
+        main(arguments + ["--variant", "heat_transfer_minus", "--variant", "another_heat_direction"])
+    with pytest.raises(ValueError, match="exactly four"):
+        load_atlas_families([tmp_path / "one.npz"] * 3, ["heat_transfer_minus", "heat_transfer_plus"], "development")
+    assert not (tmp_path / "outputs").exists()
+
+
+def test_real_atlas_cohorts_are_complete_and_reject_duplicate_physical_family():
+    atlas = Path(__file__).resolve().parents[1] / "diagnostics/generated/interactions/physical_response_atlas_20260926/families"
+    ids = ("0304", "0320", "0335", "0350")
+    paths = [atlas / f"train_{anchor}_responses.npz" for anchor in ids]
+    if not all(path.exists() for path in paths):
+        pytest.skip("Existing local response-development atlas is unavailable")
+    pair = ["heat_transfer_minus", "heat_transfer_plus"]
+    assert [anchor for anchor, _ in load_atlas_families(paths, pair, "development")] == list(ids)
+    with pytest.raises(ValueError, match="distinct families"):
+        load_atlas_families(paths[:-1] + paths[:1], pair, "development")
+    with pytest.raises(ValueError, match="physical-family identity"):
+        load_atlas_families(paths, pair, "fit")

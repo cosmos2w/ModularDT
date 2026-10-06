@@ -367,6 +367,31 @@ def load_counted_families(request_path, records_dir):
     return families, request["source_dataset"]
 
 
+def load_atlas_families(paths, variants, cohort):
+    """Resolve only the complete predeclared cohort and its exact heat pair."""
+    from channelthermal.interaction_evidence.response_atlas import load_response_atlas_stencil
+
+    if len(variants) != 2 or set(variants) != {"heat_transfer_minus", "heat_transfer_plus"}:
+        raise ValueError("Atlas evaluation requires exactly heat_transfer_minus and heat_transfer_plus")
+    allowed = {"0001", "0318", "0333", "0348"} if cohort == "fit" else {"0304", "0320", "0335", "0350"}
+    if cohort not in {"fit", "development"} or len(paths) != 4:
+        raise ValueError("Atlas macro family means require exactly four declared families in one cohort")
+    families = []
+    for path in paths:
+        stencil, _ = load_response_atlas_stencil(path)
+        anchor = stencil.baseline.design.anchor_id
+        expected_family = "duplicate_family:0001+0273" if anchor == "0001" else f"stored_family:{anchor}"
+        if (anchor not in allowed or stencil.split.value != "train" or stencil.source.value != "reference_solver"
+                or stencil.physical_family_id != expected_family):
+            raise ValueError("Atlas evaluation requires the declared original-TRAIN anchor and physical-family identity")
+        records = {"baseline": stencil.baseline, **{label: stencil.variants[label] for label in variants}}
+        validate_heat_records(records)
+        families.append((anchor, records))
+    if {anchor for anchor, _ in families} != allowed:
+        raise ValueError("Atlas evaluation must contain each of the four declared distinct families exactly once")
+    return families
+
+
 @contextlib.contextmanager
 def joint_intervention(model, mode):
     if mode == "normal":
@@ -520,7 +545,8 @@ def main(argv=None):
     preparation.add_argument("--request", type=Path, required=True)
     preparation.add_argument("--records-dir", type=Path, required=True)
     preparation.add_argument("--output", type=Path, required=True)
-    atlas = subparsers.add_parser("atlas", help="Read declared heat-only endpoints of existing response-development families")
+    atlas = subparsers.add_parser("atlas", help="Read declared heat-only endpoints of existing fit or response-development families")
+    atlas.add_argument("--cohort", choices=("fit", "development"), default="development")
     atlas.add_argument("--stencil", type=Path, action="append", required=True)
     atlas.add_argument("--variant", action="append", required=True)
     atlas.add_argument("--checkpoint", type=Path, required=True)
@@ -539,20 +565,7 @@ def main(argv=None):
             summaries[name] = json.loads(Path(path).read_text())
         write_json(validate_generated_output(args.output), field_dashboard(summaries))
     elif args.command == "atlas":
-        from channelthermal.interaction_evidence.response_atlas import load_response_atlas_stencil
-        families = []
-        for path in args.stencil:
-            stencil, _ = load_response_atlas_stencil(path)
-            if (stencil.baseline.design.anchor_id not in {"0304", "0320", "0335", "0350"}
-                    or stencil.split.value != "train"):
-                raise ValueError("Response-development evaluation is restricted to four declared withheld families")
-            if len(args.variant) != 2 or len(set(args.variant)) != 2:
-                raise ValueError("Select exactly two opposite stored heat directions")
-            records = {"baseline": stencil.baseline, **{label: stencil.variants[label] for label in args.variant}}
-            validate_heat_records(records)
-            families.append((stencil.baseline.design.anchor_id, records))
-        if len({case_id for case_id, _ in families}) != len(families):
-            raise ValueError("Response-development families must not repeat")
+        families = load_atlas_families(args.stencil, args.variant, args.cohort)
         evaluate_families(args.checkpoint, families, args.dataset, args.output_dir, device=args.device, intervention=args.intervention)
     else:
         families, dataset_path = load_counted_families(args.request, args.records_dir)
