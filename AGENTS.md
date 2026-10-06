@@ -5,6 +5,12 @@
 - If forbidden files are already in unpublished commits, rebuild the outgoing history before pushing. Preserve a local backup first, and leave the working checkout synchronized with the pushed branch.
 - Run `git config core.hooksPath .githooks` in this clone so the repository pre-push artifact gate runs. Review its result and the outgoing file list; the gate supplements the required human audit.
 
+# Report source formatting (strict)
+
+- Write every prose paragraph in every report on a single continuous source line. Never hard-wrap report text to a fixed column width; use the editor or renderer's visual wrapping instead.
+- Preserve blank lines between paragraphs and the required structure of headings, lists, tables, fenced code, display math, and figure embeds. Figure captions are prose paragraphs and must also remain on one source line.
+- When revising or formatting a report, preserve this rule and check that no prose paragraph contains inserted line breaks. Configure any formatter used on reports to preserve unwrapped prose.
+
 # Scientific experiment reporting
 
 - Begin final experiment reports with a plain-language account of what changed, then state gains, misses, measured evidence, and next steps separately for predictor, organizer, and inverse results. Distinguish completed measurements from startup checks, surrogate checks, and untested claims.
