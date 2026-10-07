@@ -192,9 +192,10 @@ def scalar_scale(stats, key, channel=None):
     return max(float(value[0 if channel is None else channel]), 1e-6)
 
 
-def reconstruction_terms(model, batch, stats, q_proxy_coefficient=.05):
+def reconstruction_terms(model, batch, stats, q_proxy_coefficient=.05, *, environment_flow_features=None):
     prepared = model.prepare_native(batch["structure"], batch["query_xy"],
-        local_query_points=batch["module_internal_query_points"], ntheta=16)
+        local_query_points=batch["module_internal_query_points"], ntheta=16,
+        environment_flow_features=environment_flow_features)
     prediction = model.apply_native(prepared, batch["structure"]["heat_powers"])
     weight = batch["point_weights"]
     fluid = ((prediction["fluid_temperature"][..., 0] - batch["field_targets"][..., 4]) /
@@ -285,7 +286,7 @@ def response_scales(families):
     }.items()}
 
 
-def response_loss(model, family, epoch, device, scales, budget=BUDGET):
+def response_loss(model, family, epoch, device, scales, budget=BUDGET, *, environment_flow_features=None):
     index = TRAIN_FAMILIES.index(family["family_id"])
     rng = np.random.default_rng(index * 104729 + epoch * 1000003)
     valid_fluid = np.flatnonzero(family["fluid_valid"])
@@ -296,7 +297,8 @@ def response_loss(model, family, epoch, device, scales, budget=BUDGET):
     structure = {name: torch.as_tensor(value, device=device)[None] for name, value in family["structure"].items()}
     fluid = torch.as_tensor(family["fluid_xy"][fluid_ids], device=device)[None]
     local = torch.as_tensor(family["material_local"][material_ids], device=device)[None]
-    prepared = model.prepare_native(structure, fluid, local_query_points=local, ntheta=16)
+    prepared = model.prepare_native(structure, fluid, local_query_points=local, ntheta=16,
+        environment_flow_features=environment_flow_features)
     delta = model.apply_native(prepared, torch.as_tensor(family["heat_increment"], device=device)[None], increment=True)
     tensor = lambda value: torch.as_tensor(value, device=device, dtype=torch.float32)
     fluid_target = tensor(family["deltas"]["fluid_fields"][fluid_ids, 4])

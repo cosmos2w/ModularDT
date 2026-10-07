@@ -22,6 +22,7 @@ from honf_forward_core.model import HONFNeuralField
 from torch import nn
 
 from .normalization import VelocityNormalizer
+from .shared_interaction import WindFarmSharedInteractionModel
 
 INTERFACE_FIELD_ARCHITECTURES = frozenset(
     {
@@ -32,6 +33,7 @@ INTERFACE_FIELD_ARCHITECTURES = frozenset(
         *CAMPAIGN_ARCHITECTURES,
     }
 )
+SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE = "source_resolved_nonlinear"
 
 
 def build_windfarm_forward_config(payload: Mapping[str, Any]) -> UnifiedForwardConfig:
@@ -355,4 +357,44 @@ class WindFarmForwardModel(nn.Module):
         return prepared
 
 
-__all__ = ["PreparedWindFarmCase", "WindFarmForwardModel", "build_windfarm_forward_config"]
+def build_windfarm_model(
+    payload: Mapping[str, Any],
+    *,
+    velocity_transform: VelocityNormalizer | None = None,
+) -> nn.Module:
+    """Build an existing Wind family or the explicit shared-core pilot family.
+
+    ``source_resolved_nonlinear`` is deliberately selected outside
+    ``UnifiedForwardConfig``: it has its own prepared-scene API and executes
+    the reusable source-resolved context/readout directly. All historical
+    architecture payloads retain their existing configuration and dispatch.
+    """
+
+    resolved = copy.deepcopy(dict(payload))
+    architecture = str(resolved.get("forward_architecture", "legacy_honf"))
+    if architecture != SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE:
+        return WindFarmForwardModel(
+            build_windfarm_forward_config(resolved),
+            velocity_transform=velocity_transform,
+        )
+    if velocity_transform is None:
+        raise ValueError("The source-resolved nonlinear WindFarm family requires a train-only velocity transform.")
+    allowed = {"forward_architecture", "hidden", "message", "max_sources"}
+    unexpected = sorted(set(resolved) - allowed)
+    if unexpected:
+        raise ValueError(f"Unsupported source-resolved nonlinear WindFarm recipe fields: {unexpected}.")
+    return WindFarmSharedInteractionModel(
+        velocity_transform=velocity_transform,
+        hidden=int(resolved.get("hidden", 64)),
+        message=int(resolved.get("message", 64)),
+        max_sources=int(resolved.get("max_sources", 30)),
+    )
+
+
+__all__ = [
+    "SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE",
+    "PreparedWindFarmCase",
+    "WindFarmForwardModel",
+    "build_windfarm_forward_config",
+    "build_windfarm_model",
+]

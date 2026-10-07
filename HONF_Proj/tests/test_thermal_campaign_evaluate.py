@@ -132,6 +132,48 @@ def test_per_channel_physical_metrics_ports_peaks_and_pressure_keep_units_separa
     np.testing.assert_array_equal(masks["near_mask"] | masks["far_mask"], masks["fluid_mask"])
 
 
+def test_input_declared_downstream_stratum_uses_only_inlet_direction_and_geometry():
+    x, y = np.meshgrid(np.linspace(0, 10, 21), np.linspace(-4, 4, 17))
+    reference = np.zeros((*x.shape, 5))
+    sample = {"x_grid": x, "y_grid": y, "steady_field": reference,
+        "structure": {"module_centers": np.asarray([[2., 0.]]), "module_present": np.asarray([1.]),
+                      "u_in": np.asarray([1.]), "material_params": np.asarray([0., 0., 0., 0., 0., .5])},
+        "interface_target": np.zeros((1, 4, 2)),
+        "module_internal_temperature_points": np.zeros((1, 3)),
+        "teacher_port_tokens": np.zeros((1, 4, 5))}
+    prediction = {"pred_field_grid": reference.copy(), "pred_interface": np.zeros((1, 4, 2)),
+        "pred_internal_temperature": np.zeros((1, 3)), "pred_port_condition": np.zeros((1, 4, 5))}
+    metrics, masks = evaluation.physical_case_metrics(sample, prediction,
+        ["u", "v", "p", "omega", "temperature"])
+    expected = (masks["fluid_mask"] & (x - 2. > 1.) & (x - 2. <= 3.) & (np.abs(y) <= 1.))
+    np.testing.assert_array_equal(masks["downstream_mask"], expected)
+    assert masks["downstream_mask"].any()
+    assert not (masks["downstream_mask"] & masks["near_mask"]).any()
+    assert not (masks["downstream_mask"] & ~masks["far_mask"]).any()
+    assert metrics["downstream/temperature"]["count"] == int(expected.sum())
+    assert metrics["downstream/temperature"]["rmse"] == 0.
+    sample["structure"]["u_in"] = np.asarray([0.])
+    metrics, masks = evaluation.physical_case_metrics(sample, prediction,
+        ["u", "v", "p", "omega", "temperature"])
+    assert not masks["downstream_mask"].any()
+    assert metrics["downstream/temperature"]["count"] == 0
+    sample["structure"]["u_in"] = np.asarray([1.])
+    sample["structure"]["module_centers"] = np.asarray([[2., 0.], [4.5, 0.]])
+    sample["structure"]["module_present"] = np.asarray([1., 1.])
+    sample["interface_target"] = np.zeros((2, 4, 2))
+    sample["module_internal_temperature_points"] = np.zeros((2, 3))
+    sample["teacher_port_tokens"] = np.zeros((2, 4, 5))
+    prediction["pred_interface"] = np.zeros((2, 4, 2))
+    prediction["pred_internal_temperature"] = np.zeros((2, 3))
+    prediction["pred_port_condition"] = np.zeros((2, 4, 5))
+    _, masks = evaluation.physical_case_metrics(sample, prediction,
+        ["u", "v", "p", "omega", "temperature"])
+    # x=3.5 is downstream of source 0, but within 2r of source 1.
+    assert masks["near_mask"][8, 7]
+    assert not masks["downstream_mask"][8, 7]
+    assert not (masks["downstream_mask"] & masks["near_mask"]).any()
+
+
 def test_equal_case_and_pooled_metrics_differ_without_dropping_failure():
     first = evaluation.physical_errors(np.asarray([1.]), np.zeros(1))
     second = evaluation.physical_errors(np.full(9, 3.), np.zeros(9))

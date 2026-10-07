@@ -75,9 +75,25 @@ def physical_case_metrics(sample, predictions, channel_order):
     for centre in centres:
         distance = np.minimum(distance, np.hypot(sample["x_grid"] - centre[0], sample["y_grid"] - centre[1]))
     near, far = fluid & (distance <= 2 * radius), fluid & (distance > 2 * radius)
+    # An input-declared downstream diagnostic band: prescribed inlet direction,
+    # source centers, module radius, and fluid mask only. It excludes the near
+    # region (downwind distance starts beyond 2r) and may overlap the broader
+    # far region by construction.
+    downstream = np.zeros_like(fluid, dtype=bool)
+    u_in = np.asarray(sample.get("structure", {}).get("u_in", [])).reshape(-1)
+    if u_in.size and np.isfinite(u_in[0]) and u_in[0] != 0:
+        direction = float(np.sign(u_in[0]))
+        x_grid, y_grid = np.asarray(sample["x_grid"]), np.asarray(sample["y_grid"])
+        for centre in centres:
+            dx = direction * (x_grid - centre[0])
+            dy = np.abs(y_grid - centre[1])
+            downstream |= (fluid & (dx > 2 * radius) & (dx <= 6 * radius)
+                           & (dy <= 2 * radius))
+        downstream &= far
     metrics = {}
     for index, name in enumerate(channel_order[:field.shape[-1]]):
-        for region, mask in (("fluid", fluid), ("near", near), ("far", far)):
+        for region, mask in (("fluid", fluid), ("near", near), ("far", far),
+                             ("downstream", downstream)):
             metrics[f"{region}/{name}"] = physical_errors(field[..., index], reference[..., index], mask)
     interface = np.asarray(predictions["pred_interface"])
     if interface.size:
@@ -104,7 +120,8 @@ def physical_case_metrics(sample, predictions, channel_order):
             delta = np.asarray([field[..., index][inlet].mean() - field[..., index][outlet].mean()])
             target_delta = np.asarray([reference[..., index][inlet].mean() - reference[..., index][outlet].mean()])
             metrics["inlet_outlet_pressure_difference"] = physical_errors(delta, target_delta)
-    return metrics, {"fluid_mask": fluid, "near_mask": near, "far_mask": far}
+    return metrics, {"fluid_mask": fluid, "near_mask": near, "far_mask": far,
+                     "downstream_mask": downstream}
 
 
 def aggregate_physical(rows):
@@ -729,8 +746,12 @@ def parse_args(argv=None):
                         help="Bound transient complete action signatures per phase/route; saturation is a lower bound")
     parser.add_argument("--reference-access-dir", type=Path,
                         help="Saved normal evaluation directory for fixed-access identity isolation")
-    args = parser.parse_args(argv)
-    command_line = sys.argv[1:] if argv is None else argv
+    command_line = list(sys.argv[1:] if argv is None else argv)
+    stage_options = [value for value in command_line
+                     if value == "--stage" or value.startswith("--stage=")]
+    if len(stage_options) > 1:
+        parser.error("--stage may be supplied only once")
+    args = parser.parse_args(command_line)
     args.panel_config_explicit = any(value == "--panel-config" or value.startswith("--panel-config=") for value in command_line)
     args.fixed_summary_train_cases_explicit = any(value == "--fixed-summary-train-cases" or value.startswith("--fixed-summary-train-cases=") for value in command_line)
     if args.dataset_scope == "formal-full" and args.development_manifest is not None:

@@ -1,5 +1,7 @@
 # Shared Thermal/Wind core and physical interfaces
 
+The new source-resolved interaction family is documented in [Shared source-resolved interaction core and receiver packets](Shared_Interaction_Core_and_Receiver_Packets.md). Its Thermal affine and Wind nonlinear readouts execute `InteractionContextCore` directly with separate dataset weights. The `InterfaceFieldCore` families and retained compatibility evidence below describe the older implementation; they are not evidence for the new Wind learning pilot or learned packet study.
+
 ThermalChannel and WindFarm share the learned interaction implementation. Their
 case adapters retain different physical coordinates, targets, normalization and
 coupling. Compatibility checks establish that these interfaces execute correctly;

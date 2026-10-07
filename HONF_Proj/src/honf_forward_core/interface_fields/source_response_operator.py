@@ -11,62 +11,16 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 import torch
-from torch import nn
 
-
-def _mlp(inputs, outputs, hidden):
-    return nn.Sequential(nn.Linear(inputs, hidden), nn.SiLU(), nn.Linear(hidden, outputs))
-
-
-def _score_mlp(inputs, hidden):
-    # A final scalar bias would cancel exactly in normalized memberships.
-    return nn.Sequential(nn.Linear(inputs, hidden), nn.SiLU(), nn.Linear(hidden, 1, bias=False))
-
-
-def _geometry(value):
-    frequency = value.new_tensor([math.pi * 2 ** index for index in range(4)])
-    phase = value[..., None] * frequency
-    return torch.cat((value, phase.sin().flatten(-2), phase.cos().flatten(-2)), -1)
-
-
-def _normalized_measure(measure, present):
-    mass = measure * present
-    return mass / mass.sum(-1, keepdim=True).clamp_min(torch.finfo(mass.dtype).tiny)
-
-
-def _versions(tensors):
-    return tuple((tensor, tensor._version) for tensor in tensors if tensor is not None)
-
-
-def _check_versions(versions):
-    if any(tensor._version != version for tensor, version in versions):
-        raise ValueError('Prepared response context/receiver tensors changed; rebuild this request.')
-
-
-@dataclass
-class PreparedResponseContext:
-    source_states: torch.Tensor
-    environment_states: torch.Tensor
-    global_state: torch.Tensor
-    centers: torch.Tensor
-    source_lengths: torch.Tensor
-    present: torch.Tensor
-    source_measure: torch.Tensor
-    environment_coords: torch.Tensor
-    environment_present: torch.Tensor
-    environment_measure: torch.Tensor
-    lengths: torch.Tensor
-    source_ids: torch.Tensor
-    group_states: torch.Tensor | None
-    group_centers: torch.Tensor | None
-    group_lengths: torch.Tensor | None
-    group_present: torch.Tensor | None
-    source_membership: torch.Tensor | None
-    environment_membership: torch.Tensor | None
-    input_versions: tuple
-
-    def assert_fresh(self):
-        _check_versions(self.input_versions)
+from .interaction_core import (
+    InteractionContextCore,
+    PreparedResponseContext,
+    _check_versions,
+    _geometry,
+    _mlp,
+    _score_mlp,
+    _versions,
+)
 
 
 @dataclass
@@ -126,7 +80,7 @@ class ResponseApplication:
     receipt: dict
 
 
-class SourceResponseOperator(nn.Module):
+class SourceResponseOperator(InteractionContextCore):
     """Prepare nonlinear context/kernel once; apply affine physical forcing.
 
     Current forcing is absent from ``prepare_context`` and receiver reads.
@@ -134,11 +88,14 @@ class SourceResponseOperator(nn.Module):
     forcing maps make the *forcing law* nonlinear, and are explicitly labeled;
     the exported kernel then differentiates the mapped forcing coordinates.
     """
+    output_law = 'affine'
     def __init__(self, source_width, context_width, environment_width, *, mode='direct',
                  spatial_dim=2, hidden=64, message=64, output_width=1, query_width=0,
                  background_mode=True, zero_offset=True, forcing_scale=1., far_hidden=None,
                  max_sources=None):
-        super().__init__()
+        super().__init__(source_width, context_width, environment_width,
+            spatial_dim=spatial_dim, hidden=hidden, message=message,
+            query_width=query_width, max_sources=max_sources)
         if mode not in ('direct', 'group') or spatial_dim not in (2, 3):
             raise ValueError('Response mode must be direct/group with 2-D or 3-D geometry.')
         if min(source_width, context_width, environment_width, hidden, message, output_width) < 1 or query_width < 0:
@@ -153,13 +110,6 @@ class SourceResponseOperator(nn.Module):
         read_width = 2 * hidden + 3 * relative_width + query_width
         # Every common module is registered/initialized before arm-specific
         # modules. Equal RNG seeds give exactly identical common tensors.
-        self.source_encoder = _mlp(source_width + context_width, hidden, hidden)
-        self.environment_encoder = _mlp(environment_width + context_width, hidden, hidden)
-        self.module_messages = nn.ModuleList([_mlp(2 * hidden + relative_width, message, hidden) for _ in range(2)])
-        self.environment_messages = nn.ModuleList([_mlp(2 * hidden + relative_width, message, hidden) for _ in range(2)])
-        self.source_updates = nn.ModuleList([_mlp(hidden + 2 * message + context_width, hidden, hidden) for _ in range(2)])
-        self.environment_updates = nn.ModuleList([_mlp(2 * hidden + message + context_width, hidden, hidden) for _ in range(2)])
-        self.global_encoder = _mlp(2 * hidden + context_width, hidden, hidden)
         self.near_head = _mlp(read_width, output_width, hidden)
         self.offset_head = None if zero_offset else _mlp(hidden + relative_width + query_width, output_width, hidden)
         score_hidden = max(8, hidden // 2)
@@ -182,87 +132,11 @@ class SourceResponseOperator(nn.Module):
             'background_mode': bool(background_mode), 'zero_offset': bool(zero_offset),
             'forcing_scale': float(forcing_scale), 'far_hidden': far_hidden, 'max_sources': max_sources}
 
-    @staticmethod
-    def _validate_shape(value, shape, name):
-        if tuple(value.shape) != tuple(shape):
-            raise ValueError(f'{name} shape must be {tuple(shape)}, received {tuple(value.shape)}.')
-        if not bool(torch.isfinite(value).all()):
-            raise ValueError(f'{name} must contain finite values.')
-
-    def prepare_context(self, sources, context, centers, present, lengths, source_lengths,
-                        source_measures=None, environment_tokens=None, environment_coords=None,
-                        environment_present=None, environment_measures=None, source_ids=None):
-        """Explicit geometry/prescribed tensors; no current forcing argument.
-
-        sources[B,M,F], context[B,C], centers[B,M,D], present/measures[B,M],
-        lengths[B,D], source_lengths[B,M] or [B,M,1], environments[B,N,F_E].
-        Missing environmental type is represented by an empty donor catalogue.
-        """
-        batch, modules, dimension = centers.shape
-        if dimension != self.spatial_dim or (self.max_sources is not None and modules > self.max_sources):
-            raise ValueError('Source coordinates/capacity disagree with the response configuration.')
-        if source_lengths.ndim == 3: source_lengths = source_lengths.squeeze(-1)
-        self._validate_shape(centers, (batch, modules, self.spatial_dim), 'centers')
-        self._validate_shape(sources, (batch, modules, self.config['source_width']), 'sources')
-        self._validate_shape(context, (batch, self.config['context_width']), 'context')
-        self._validate_shape(present, (batch, modules), 'present')
-        self._validate_shape(lengths, (batch, dimension), 'lengths')
-        self._validate_shape(source_lengths, (batch, modules), 'source_lengths')
-        if bool((lengths <= 0).any()) or bool(((source_lengths <= 0) & (present > 0)).any()):
-            raise ValueError('Domain lengths and active source characteristic lengths must be positive.')
-        if bool(((present < 0) | (present > 1)).any()):
-            raise ValueError('present must lie between zero and one.')
-        source_measures = torch.ones_like(present) if source_measures is None else source_measures
-        self._validate_shape(source_measures, present.shape, 'source_measures')
-        if bool((source_measures < 0).any()) or bool(((source_measures <= 0) & (present > 0)).any()):
-            raise ValueError('Source measures must be positive for active sources and nonnegative elsewhere.')
-        if environment_tokens is None:
-            environment_tokens = sources.new_empty(batch, 0, self.config['environment_width'])
-            environment_coords = centers.new_empty(batch, 0, dimension)
-        if environment_coords is None: raise ValueError('Environmental tokens require their physical coordinates.')
-        environments = environment_tokens.shape[1]
-        environment_present = sources.new_ones(batch, environments) if environment_present is None else environment_present
-        environment_measures = torch.ones_like(environment_present) if environment_measures is None else environment_measures
-        self._validate_shape(environment_tokens, (batch, environments, self.config['environment_width']), 'environment_tokens')
-        self._validate_shape(environment_coords, (batch, environments, dimension), 'environment_coords')
-        self._validate_shape(environment_present, (batch, environments), 'environment_present')
-        self._validate_shape(environment_measures, (batch, environments), 'environment_measures')
-        if bool((environment_measures < 0).any()) or bool(((environment_present < 0) | (environment_present > 1)).any()):
-            raise ValueError('Environmental measures must be nonnegative and presence must lie in [0,1].')
-        source_ids = torch.arange(modules, device=centers.device)[None].expand(batch, -1) if source_ids is None else source_ids
-        self._validate_shape(source_ids, (batch, modules), 'source_ids')
-        versions = _versions((sources, context, centers, present, lengths, source_lengths, source_measures,
-            environment_tokens, environment_coords, environment_present, environment_measures, source_ids))
-        source_mass = _normalized_measure(source_measures, present)
-        environment_mass = _normalized_measure(environment_measures, environment_present)
-        source_context = context[:, None].expand(-1, modules, -1)
-        environment_context = context[:, None].expand(-1, environments, -1)
-        state = self.source_encoder(torch.cat((sources, source_context), -1)) * present[..., None]
-        environment = self.environment_encoder(torch.cat((environment_tokens, environment_context), -1)) * environment_present[..., None]
-        relative_mm = _geometry((centers[:, :, None] - centers[:, None]) / lengths[:, None, None])
-        relative_me = _geometry((centers[:, :, None] - environment_coords[:, None]) / lengths[:, None, None])
-        relative_em = _geometry((environment_coords[:, :, None] - centers[:, None]) / lengths[:, None, None])
-        self_mask = 1 - torch.eye(modules, device=centers.device, dtype=centers.dtype)[None]
-        donor_mass = source_mass[:, None] * self_mask
-        donor_mass = donor_mass / donor_mass.sum(-1, keepdim=True).clamp_min(torch.finfo(state.dtype).tiny)
-        for module_message, environment_message, source_update, environment_update in zip(
-                self.module_messages, self.environment_messages, self.source_updates, self.environment_updates):
-            left = state[:, :, None].expand(-1, -1, modules, -1)
-            right = state[:, None].expand(-1, modules, -1, -1)
-            module_aggregate = (module_message(torch.cat((left, right, relative_mm), -1)) * donor_mass[..., None]).sum(2)
-            env_aggregate = (environment_message(torch.cat((state[:, :, None].expand(-1, -1, environments, -1),
-                environment[:, None].expand(-1, modules, -1, -1), relative_me), -1)) * environment_mass[:, None, :, None]).sum(2)
-            source_aggregate = (environment_message(torch.cat((environment[:, :, None].expand(-1, -1, modules, -1),
-                state[:, None].expand(-1, environments, -1, -1), relative_em), -1)) * source_mass[:, None, :, None]).sum(2)
-            env_pool = (environment * environment_mass[..., None]).sum(1)[:, None].expand(-1, environments, -1)
-            state = (state + source_update(torch.cat((state, module_aggregate, env_aggregate, source_context), -1))) * present[..., None]
-            environment = (environment + environment_update(torch.cat((environment, source_aggregate, env_pool, environment_context), -1))) * environment_present[..., None]
-        global_state = self.global_encoder(torch.cat(((state * source_mass[..., None]).sum(1),
-            (environment * environment_mass[..., None]).sum(1), context), -1))
-        prepared = PreparedResponseContext(state, environment, global_state, centers,
-            source_lengths, present, source_mass, environment_coords, environment_present,
-            environment_mass, lengths, source_ids, None, None, None, None, None, None, versions)
-        if self.mode == 'group': prepared = self._prepare_groups(prepared)
+    def prepare_context(self, *args, **kwargs):
+        prepared = super().prepare_context(*args, **kwargs)
+        if self.mode == 'group':
+            prepared = self._prepare_groups(prepared)
+        prepared.owner = id(self)
         return prepared
 
     @staticmethod
@@ -298,26 +172,8 @@ class SourceResponseOperator(nn.Module):
         return replace(context, group_states=group_states, group_centers=centers,
             group_lengths=lengths, group_present=present, source_membership=b_m, environment_membership=b_e)
 
-    @staticmethod
-    def near_weight(receivers, centers, source_lengths, present):
-        distance = torch.linalg.vector_norm(receivers[:, :, None] - centers[:, None], dim=-1)
-        scaled = distance / source_lengths[:, None].clamp_min(1e-12)
-        transition = ((scaled - 2) / 2).clamp(0, 1)
-        return (1 - transition.square() * (3 - 2 * transition)) * present[:, None]
-
-    def _read_features(self, context, query, source_states, centers, source_lengths, features):
-        count = centers.shape[1]
-        domain_query = _geometry(query / context.lengths[:, None])
-        delta = query[:, :, None] - centers[:, None]
-        relative = torch.cat((_geometry(delta / context.lengths[:, None, None]),
-            _geometry(delta / source_lengths[:, None, :, None].clamp_min(1e-12))), -1)
-        return torch.cat((source_states[:, None].expand(-1, query.shape[1], -1, -1),
-            context.global_state[:, None, None].expand(-1, query.shape[1], count, -1),
-            domain_query[:, :, None].expand(-1, -1, count, -1), relative,
-            features[:, :, None].expand(-1, -1, count, -1)), -1)
-
     def prepare_receivers(self, context, receivers, receiver_features=None, receiver_ids=None, chunk_size=512):
-        context.assert_fresh()
+        self.assert_owned(context)
         batch, queries, _dimension = receivers.shape
         self._validate_shape(receivers, (context.centers.shape[0], queries, self.spatial_dim), 'receivers')
         if chunk_size < 1: raise ValueError('chunk_size must be positive.')
@@ -364,6 +220,65 @@ class SourceResponseOperator(nn.Module):
 
     def read_kernel(self, context, receivers, **kwargs):
         return self.prepare_receivers(context, receivers, **kwargs).dense_kernel()
+
+    def prepare_receivers_subset(self, context, receivers, source_keep,
+                                 receiver_features=None, receiver_ids=None, chunk_size=512):
+        """Experimental incremental read; gather admitted pairs before fine MLPs.
+
+        Context ancestry remains full. Every near source is protected. This
+        method gives no absolute-field or physical omission certificate.
+        """
+        self.assert_owned(context)
+        if self.mode != 'direct':
+            raise ValueError('Physical-source subset execution requires direct mode.')
+        batch, queries, _ = receivers.shape
+        self._validate_shape(receivers, (context.centers.shape[0], queries, self.spatial_dim), 'receivers')
+        self._validate_shape(source_keep, (batch, queries, context.centers.shape[1]), 'source_keep')
+        if source_keep.dtype != torch.bool or chunk_size < 1:
+            raise ValueError('Subset membership must be boolean and chunk_size positive.')
+        features = receivers.new_empty(batch, queries, 0) if receiver_features is None else receiver_features
+        self._validate_shape(features, (batch, queries, self.query_width), 'receiver_features')
+        ids = torch.arange(queries, device=receivers.device)[None].expand(batch, -1) if receiver_ids is None else receiver_ids
+        self._validate_shape(ids, (batch, queries), 'receiver_ids')
+        weights, near_values, near_indices, far_values, offsets = [], [], [], [], []
+        fine_rows = 0
+        for start in range(0, queries, chunk_size):
+            query, feature = receivers[:, start:start + chunk_size], features[:, start:start + chunk_size]
+            weight = self.near_weight(query, context.centers, context.source_lengths, context.present)
+            near_selected = (weight > 0).nonzero(as_tuple=True)
+            keep = (source_keep[:, start:start + chunk_size] | (weight > 0)) & (context.present[:, None] > 0)
+            admitted = keep.nonzero(as_tuple=True)
+            fine_rows += int(admitted[0].numel())
+            far = query.new_zeros(batch, query.shape[1], context.centers.shape[1], self.output_width)
+            far = far.index_put(admitted, self.far_head(self._read_selected_features(context, query, feature, admitted)))
+            near = self.near_head(self._read_selected_features(context, query, feature, near_selected))
+            weights.append(weight)
+            near_values.append(near)
+            near_indices.append(torch.stack((near_selected[0], near_selected[1] + start, near_selected[2])))
+            far_values.append(far)
+            if self.zero_offset:
+                offsets.append(query.new_zeros(batch, query.shape[1], self.output_width))
+            else:
+                offsets.append(self.offset_head(torch.cat((context.global_state[:, None].expand(-1, query.shape[1], -1),
+                    _geometry(query / context.lengths[:, None]), feature), -1)))
+        if queries:
+            far, weight = torch.cat(far_values, 1), torch.cat(weights, 1)
+            index, near = torch.cat(near_indices, 1), torch.cat(near_values, 0)
+            offset = torch.cat(offsets, 1)
+        else:
+            far = receivers.new_empty(batch, 0, context.centers.shape[1], self.output_width)
+            weight = receivers.new_empty(batch, 0, context.centers.shape[1])
+            index = torch.empty(3, 0, dtype=torch.long, device=receivers.device)
+            near = receivers.new_empty(0, self.output_width)
+            offset = receivers.new_empty(batch, 0, self.output_width)
+        response = PreparedSourceResponse(context, receivers, ids, offset, weight, index, near,
+            far, None, None, None, None, self.forcing_scale, self.mode,
+            _versions((receivers, features, ids, source_keep)))
+        response.execution_receipt = {'mode': 'packet_experimental', 'fine_rows': fine_rows,
+            'near_rows': int(index.shape[1]), 'full_far_rows': batch * queries * context.centers.shape[1],
+            'context_ancestry': 'full source/source and source/environment context',
+            'validity': 'increment-only; caller owns action domain and exact baseline'}
+        return response
 
     @staticmethod
     def _apply_linear(response, forcing, compression=None):
@@ -534,3 +449,7 @@ class SourceResponseOperator(nn.Module):
     def forward(self, context, receivers, forcing, **kwargs):
         response = self.prepare_receivers(context, receivers, **kwargs)
         return self.apply_forcing(response, forcing)
+
+    def predict(self, prepared, receivers, controls, **kwargs):
+        """Consumer read with separately applicable physical scalar controls."""
+        return self.forward(prepared, receivers, controls, **kwargs)
