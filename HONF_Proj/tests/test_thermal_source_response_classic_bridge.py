@@ -18,7 +18,7 @@ from thermal_source_response_evaluate import (
 )
 
 
-@pytest.mark.parametrize("classic_id", ("Run1804", "Run1502", "Run1804_e5000_latest", "Run1502_e5000_latest"))
+@pytest.mark.parametrize("classic_id", tuple(CLASSIC_IDENTITIES))
 def test_classic_bridge_accepts_only_the_retained_checkpoint_identity(classic_id):
     identity = CLASSIC_IDENTITIES[classic_id]
     checkpoint = {"epoch": identity["epoch"]}
@@ -41,6 +41,20 @@ def test_classic_bridge_accepts_only_the_retained_checkpoint_identity(classic_id
     ),
 )
 def test_classic_bridge_rejects_wrong_age_or_weights(classic_id, checkpoint, digest, reason):
+    with pytest.raises(ValueError, match=reason):
+        validate_classic_selection(classic_id, checkpoint, digest)
+
+
+@pytest.mark.parametrize(
+    "classic_id,checkpoint,digest,reason",
+    (
+        ("Run1401", {"epoch": 5000}, CLASSIC_IDENTITIES["Run1401"]["sha256"], "must be e4585"),
+        ("Run1401", {"epoch": 4585}, "0" * 64, "SHA-256"),
+        ("Run1401_e5000_latest", {"epoch": 4585}, CLASSIC_IDENTITIES["Run1401_e5000_latest"]["sha256"], "must be e5000"),
+        ("Run1401_e5000_latest", {"epoch": 5000}, "0" * 64, "SHA-256"),
+    ),
+)
+def test_run1401_best_and_literal_e5000_identities_are_distinct(classic_id, checkpoint, digest, reason):
     with pytest.raises(ValueError, match=reason):
         validate_classic_selection(classic_id, checkpoint, digest)
 

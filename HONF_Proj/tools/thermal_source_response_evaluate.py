@@ -47,6 +47,16 @@ FIXED4 = ("0277", "0291", "0294", "0687")
 CHANNELS = ("u", "v", "p", "omega", "temperature")
 FIXED25_MANIFEST_SHA256 = "933b0138ba2f8447a1ecadfe31fd0bb2cb4a05607d3ac3d9f0dc79419f196044"
 CLASSIC_IDENTITIES = {
+    "Run1401": {
+        "epoch": 4585,
+        "sha256": "5be150bd6b4fc79599af62c767fba84490ba50edcc8cc8ce85026ae27a1846b3",
+    },
+    # This identity is the literal root epoch_5000_model.pt milestone; its
+    # exact digest distinguishes it from the separate checkpoints/latest.pt.
+    "Run1401_e5000_latest": {
+        "epoch": 5000,
+        "sha256": "cee978f0461db928b72c3b6b66cb0ef56647674f82d6ef2660a8380754a829d6",
+    },
     "Run1804": {
         "epoch": 4738,
         "sha256": "71ed480ff0396813491c650dd11d887195174019b373fbd9a1fb25505142c066",
