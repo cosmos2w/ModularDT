@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Measure an opt-in response model using existing native observations only.
+"""Evaluate source-response models and replay retained classics on saved data.
 
-This adapter reports unsupported initial-port history explicitly. It never
-executes the old thermal wrapper, launches a reference solver, or fits a model.
+Classic bridge mode uses each checkpoint's strict native loader, TRAIN
+normalization, predicted-port path and local surrogate. No mode launches a
+reference solver or fits a model.
 """
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -41,6 +43,25 @@ from honf_runtime.run_store import atomic_write_json
 
 FIXED4 = ("0277", "0291", "0294", "0687")
 CHANNELS = ("u", "v", "p", "omega", "temperature")
+FIXED25_MANIFEST_SHA256 = "933b0138ba2f8447a1ecadfe31fd0bb2cb4a05607d3ac3d9f0dc79419f196044"
+CLASSIC_IDENTITIES = {
+    "Run1804": {
+        "epoch": 4738,
+        "sha256": "71ed480ff0396813491c650dd11d887195174019b373fbd9a1fb25505142c066",
+    },
+    "Run1804_e5000_latest": {
+        "epoch": 5000,
+        "sha256": "9d0b83c562cecc2ffc52c3a08c993dfa8f47ae0e769f54ed6ffdd966047d63d9",
+    },
+    "Run1502": {
+        "epoch": 4794,
+        "sha256": "08d86a573c7f7d86463bde231eb9f84a745602fca2b8f97142f39540d33a85bb",
+    },
+    "Run1502_e5000_latest": {
+        "epoch": 5000,
+        "sha256": "20af85200796f639039d4853425fe91ee76e19e7caf5b5b68863badfe7690895",
+    },
+}
 
 
 def synchronize(device):
@@ -62,6 +83,25 @@ def numpy_value(value):
     return value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else np.asarray(value)
 
 
+def classic_input_sample_for_heat(normalized_sample, raw_sample, heat, normalizer, *, normalize_inputs):
+    """Replace only known physical heating, retaining the checkpoint's input transform."""
+    sample = copy.deepcopy(normalized_sample)
+    present = np.asarray(raw_sample["structure"]["module_present"], dtype=np.float32) > .5
+    heat = np.asarray(heat, dtype=np.float32)
+    if heat.shape != (int(present.sum()),) or not np.isfinite(heat).all():
+        raise ValueError("Counted heating must provide one finite value per active physical source")
+    slot_heat = np.zeros_like(np.asarray(raw_sample["structure"]["heat_powers"], dtype=np.float32))
+    slot_heat[present] = heat
+    sample["structure"]["heat_powers"] = normalizer.normalize_heat_power(slot_heat) if normalize_inputs else slot_heat
+    local_params = np.array(sample["local_module_params"], dtype=np.float32, copy=True)
+    if local_params.shape[0] != slot_heat.shape[0] or local_params.shape[-1] < 3:
+        raise ValueError("Historical local-surrogate parameter catalogue does not match physical sources")
+    local_params[:, 0] = slot_heat
+    local_params[~present] = 0
+    sample["local_module_params"] = local_params
+    return sample
+
+
 def load_native_cases(checkpoint, split="test"):
     config = checkpoint["train_config"]["dataset"]
     path = resolve_demo_path(config["packed_h5_path"])
@@ -76,6 +116,300 @@ def load_native_cases(checkpoint, split="test"):
         random_point_sampling=False, include_grid=True, normalizer=normalizer,
         normalize_inputs=False, normalize_targets=False, case_ids=ids)
     return dataset, manifest, path
+
+
+def validate_classic_selection(classic_id, checkpoint, checkpoint_sha256):
+    """Require the selected historic checkpoint identity recorded in the report."""
+    if classic_id not in CLASSIC_IDENTITIES:
+        raise ValueError(f"Unknown historical comparison identity: {classic_id!r}")
+    expected = CLASSIC_IDENTITIES[classic_id]
+    epoch = checkpoint.get("epoch", checkpoint.get("current_epoch"))
+    if epoch != expected["epoch"]:
+        raise ValueError(f"{classic_id} selected checkpoint must be e{expected['epoch']}, got {epoch!r}")
+    if checkpoint_sha256 != expected["sha256"]:
+        raise ValueError(f"{classic_id} selected checkpoint SHA-256 does not match the retained identity")
+    return {"classic_id": classic_id, "epoch": expected["epoch"], "sha256": expected["sha256"]}
+
+
+def load_classic_native_cases(checkpoint, manifest_path):
+    """Load the shared DEV22 with the classic checkpoint's own input transform."""
+    from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer
+    from thermal_development import evaluation_dataset_kwargs, resolve_evaluation_manifest
+
+    from honf_runtime.compat import resolve_demo_path
+
+    dataset_config = checkpoint.get("train_config", {}).get("dataset", {})
+    if not dataset_config.get("packed_h5_path"):
+        raise ValueError("Historical checkpoint has no packed dataset binding")
+    path = resolve_demo_path(dataset_config["packed_h5_path"])
+    manifest = resolve_evaluation_manifest(dataset_config, path,
+        scope="development", manifest_path=Path(manifest_path))
+    if manifest["manifest_sha256"] != FIXED25_MANIFEST_SHA256:
+        raise ValueError("Historical bridge requires the retained fixed25_v1 membership")
+    stats = checkpoint.get("global_normalization_stats", {})
+    if not stats:
+        raise ValueError("Historical bridge requires the checkpoint's native TRAIN normalization")
+    normalizer = H5Normalizer({key: np.asarray(value, dtype=np.float32) for key, value in stats.items()})
+    selection = evaluation_dataset_kwargs(manifest, "test")
+    normalized = GlobalChannelThermalDataset(path, split="test", points_per_case=1,
+        random_point_sampling=False, include_grid=True, normalizer=normalizer,
+        normalize_inputs=bool(dataset_config.get("normalize_inputs", False)),
+        normalize_targets=bool(dataset_config.get("normalize_targets", False)), **selection)
+    raw = GlobalChannelThermalDataset(path, split="test", points_per_case=1,
+        random_point_sampling=False, include_grid=True, normalizer=normalizer, **selection)
+    if normalized.selected_case_ids != raw.selected_case_ids:
+        raise ValueError("Normalized and physical DEV22 case IDs differ")
+    case_ids = tuple(str(value) for value in raw.selected_case_ids)
+    if len(case_ids) != 22 or len(set(case_ids)) != 22:
+        raise ValueError(f"Historical bridge expected 22 unique fixed25_v1 validation cases, got {len(case_ids)}")
+    if not set(FIXED4).issubset(case_ids):
+        raise ValueError("The fixed physical-field representative panel is absent from DEV22")
+    return normalized, raw, manifest, path
+
+
+def classic_field_evaluation(model, checkpoint, output, device, *, classic_id, manifest_path):
+    """Replay one retained classic through its native predicted-port/local path."""
+    from channelthermal.evaluation.prepared import predict_case
+    from channelthermal.evaluation.results import denormalize_predictions
+
+    normalized, raw, manifest, path = load_classic_native_cases(checkpoint, manifest_path)
+    dataset_config = checkpoint.get("train_config", {}).get("dataset", {})
+    summary = {
+        "model": classic_id,
+        "checkpoint_epoch": int(checkpoint.get("epoch", checkpoint.get("current_epoch"))),
+        "dataset": str(path),
+        "split": "test",
+        "dataset_scope": "fixed25_v1 exposed development validation",
+        "development_manifest_sha256": manifest["manifest_sha256"],
+        "development_case_ids": [str(value) for value in raw.selected_case_ids],
+        "input_normalization": "checkpoint-native global TRAIN statistics and normalize_inputs setting",
+        "target_normalization": "checkpoint-native global TRAIN statistics, denormalized before physical metrics",
+        "port_mode": "native predicted-port trajectory with complete embedded or configured local surrogate",
+        "scope": "22 repeatedly exposed fixed25_v1 validation cases; stored analytic-wake/shared-grid benchmark units",
+        "not_applicable_roles": {},
+        "rows": [],
+        "solver_attempts": 0,
+        "optimizer_updates": 0,
+        "native_classic_calls": 0,
+    }
+    for index in range(len(raw)):
+        normalized_sample, reference = normalized[index], raw[index]
+        case_id = str(reference["case_id"])
+        synchronize(device)
+        started = perf_counter()
+        with torch.no_grad():
+            prediction = predict_case(model, normalized_sample, device,
+                query_batch_size=1024, local_port_condition_mode="predicted", mixed_teacher_ratio=0)
+        synchronize(device)
+        elapsed = perf_counter() - started
+        prediction = denormalize_predictions(prediction, normalized,
+            bool(dataset_config.get("normalize_targets", False)))
+        prediction = {key: numpy_value(value) for key, value in prediction.items()}
+        metrics, masks = physical_case_metrics(reference, prediction, CHANNELS)
+        module_count = int(numpy_value(reference["structure"]["module_present"]).sum())
+        summary["rows"].append({"case_id": case_id, "intervention": "normal",
+            "module_count": module_count, "metrics": metrics,
+            "complete_native_predicted_port_local_call_seconds": elapsed})
+        summary["native_classic_calls"] += 1
+        if case_id in FIXED4:
+            evidence = {
+                "reference_field": numpy_value(reference["steady_field"]),
+                "prediction_field": numpy_value(prediction["pred_field_grid"]),
+                "residual_field": numpy_value(prediction["pred_field_grid"])
+                    - numpy_value(reference["steady_field"])[..., :len(CHANNELS)],
+                "fluid_mask": masks["fluid_mask"],
+                "near_mask": masks["near_mask"],
+                "far_mask": masks["far_mask"],
+                "x_grid": numpy_value(reference["x_grid"]),
+                "y_grid": numpy_value(reference["y_grid"]),
+                "module_centers": numpy_value(reference["structure"]["module_centers"]),
+                "module_present": numpy_value(reference["structure"]["module_present"]),
+                "heat_powers": numpy_value(reference["structure"]["heat_powers"]),
+                "material_params": numpy_value(reference["structure"]["material_params"]),
+                "reference_internal_temperature": numpy_value(reference["module_internal_temperature_points"]),
+                "prediction_internal_temperature": prediction["pred_internal_temperature"],
+                "reference_interface": numpy_value(reference["interface_target"]),
+                "prediction_interface": prediction["pred_interface"],
+                "reference_ports": numpy_value(reference["teacher_port_tokens"]),
+                "prediction_port_condition": prediction["pred_port_condition"],
+                "prediction_port_condition_raw": prediction["pred_port_condition_raw"],
+                **{f"{key}_mask": value for key, value in masks.items()},
+            }
+            np.savez_compressed(output / f"{case_id}_fields.npz", **evidence)
+        print(json.dumps({"model": classic_id, "case_id": case_id,
+            "fluid_temperature_rmse": metrics["fluid/temperature"]["rmse"],
+            "seconds": elapsed}), flush=True)
+    summary["equal_case_metrics"] = aggregate_physical(summary["rows"])
+    summary["physical_eight_rows"] = {
+        key: summary["equal_case_metrics"][key]
+        for key in ("fluid/u", "fluid/v", "fluid/p", "fluid/omega", "fluid/temperature",
+                    "surface_temperature", "material_temperature", "module_material_peak")
+    }
+    summary["module_count_strata"] = {
+        f"M{count}": aggregate_physical([row for row in summary["rows"] if row["module_count"] == count])
+        for count in sorted({row["module_count"] for row in summary["rows"]})
+    }
+    summary["timing_scope"] = (
+        "One unsmoothed evaluation call per case after H5 sample retrieval; includes the full predicted-port/local-surrogate path and output copy, excludes checkpoint loading and dataset I/O."
+    )
+    return summary
+
+
+def classic_counted_response_evaluation(model, checkpoint, output, device, *, classic_id,
+                                        manifest_path, request_path, records_dir):
+    """Replay only the retained counted heat states through a classic's native path.
+
+    Geometry and receiver coordinates must join exactly to fixed25_v1. Heating is
+    replaced by each saved physical input and normalized with this checkpoint's
+    own TRAIN statistics. The evaluator does not substitute physical port targets
+    into the predicted-port path and does not create a missing 0277 baseline.
+    """
+    from channelthermal.evaluation.prepared import predict_case
+    from channelthermal.evaluation.results import denormalize_predictions
+
+    normalized, raw, manifest, dataset_path = load_classic_native_cases(checkpoint, manifest_path)
+    families, _ = load_counted_families(request_path, records_dir)
+    if tuple(case_id for case_id, _ in families) != FIXED4:
+        raise ValueError("Historical response replay requires the exact fixed4 counted family order")
+    by_id = {str(raw[index]["case_id"]): index for index in range(len(raw))}
+    if not set(FIXED4).issubset(by_id):
+        raise ValueError("fixed25_v1 DEV22 does not contain every counted response layout")
+    dataset_config = checkpoint.get("train_config", {}).get("dataset", {})
+    normalize_inputs = bool(dataset_config.get("normalize_inputs", False))
+    normalize_targets = bool(dataset_config.get("normalize_targets", False))
+    summary = {
+        "model": classic_id,
+        "dataset": str(dataset_path),
+        "split": "test",
+        "dataset_scope": "fixed25_v1 exposed development validation; same retained counted physical receivers",
+        "development_manifest_sha256": manifest["manifest_sha256"],
+        "normalization": "checkpoint-native TRAIN input and target transforms; physical outputs denormalized before differencing",
+        "port_mode": "native predicted-port trajectory with complete embedded or configured local surrogate",
+        "physical_reference": "existing counted analytic-wake/shared-grid records; not CFD",
+        "families": [], "primary_baseline_relative_state_count": 0,
+        "secondary_0277_endpoint_state_count": 0,
+        "solver_attempts": 0, "optimizer_updates": 0,
+        "native_classic_calls": 0,
+    }
+    for case_id, records in families:
+        validate_heat_records(records)
+        if case_id not in FIXED4:
+            raise ValueError(f"Unexpected counted response case {case_id}")
+        index = by_id[case_id]
+        norm_sample, raw_sample = normalized[index], raw[index]
+        present = np.asarray(raw_sample["structure"]["module_present"]) > .5
+        centers = np.asarray(raw_sample["structure"]["module_centers"], dtype=np.float64)[present]
+        first = next(iter(records.values()))
+        source_ids = first.design.active_module_ids
+        record_centers = np.asarray([module.position_xy for module in first.design.modules], dtype=np.float64)
+        if tuple(source_ids) != tuple(f"{case_id}:module:{slot}" for slot in range(len(source_ids))):
+            raise ValueError(f"Counted source order does not match historical physical slot order for {case_id}")
+        if centers.shape != record_centers.shape or not np.array_equal(centers, record_centers):
+            raise ValueError(f"Historical DEV input geometry differs from counted receiver geometry for {case_id}")
+        context = first.context.values
+        material = np.asarray(raw_sample["structure"]["material_params"], dtype=np.float64)
+        expected_material = np.asarray([context[key] for key in
+            ("nu", "solid_alpha", "fluid_alpha", "solid_k", "fluid_k", "module_radius")])
+        if not np.array_equal(material, expected_material):
+            raise ValueError(f"Historical DEV material context differs from counted records for {case_id}")
+        fluid_role = first.output.roles["fluid_fields"]
+        grid_xy = np.stack((np.asarray(raw_sample["x_grid"]).reshape(-1),
+                            np.asarray(raw_sample["y_grid"]).reshape(-1)), -1)
+        if not np.array_equal(np.asarray(fluid_role.query_features), grid_xy):
+            raise ValueError(f"Historical DEV fluid grid differs from counted query ordering for {case_id}")
+        m = len(source_ids)
+        ntheta = first.output.roles["interface"].query_features.shape[0] // m
+        expected_theta = np.tile(np.arange(ntheta, dtype=np.float64) * (2 * np.pi / ntheta), m)
+        if not np.allclose(first.output.roles["interface"].query_features[:, 0], expected_theta, rtol=0, atol=5e-7):
+            raise ValueError(f"Counted port-angle ordering differs from historical fixed-angle path for {case_id}")
+        local_points = np.asarray(norm_sample["module_internal_query_points"])
+        material_role = first.output.roles["solid_temperature"]
+        receivers = np.asarray(material_role.receiver_module_ids)
+        if local_points.ndim != 2 or receivers.shape != (material_role.query_features.shape[0],):
+            raise ValueError(f"Historical DEV material query catalogue is not aligned for {case_id}")
+        for slot, source_id in enumerate(source_ids):
+            rows = np.flatnonzero(receivers == source_id)
+            if rows.size != local_points.shape[0] or not np.allclose(material_role.query_features[rows], local_points, rtol=0, atol=5e-8):
+                raise ValueError(f"Historical DEV material receivers differ for {case_id}/{source_id}")
+
+        predictions, physical_references, absolute = {}, {}, []
+        for label, record in records.items():
+            physical_heat = np.asarray([module.heating for module in record.design.modules], dtype=np.float32)
+            state_sample = classic_input_sample_for_heat(norm_sample, raw_sample, physical_heat,
+                normalized.normalizer, normalize_inputs=normalize_inputs)
+            synchronize(device)
+            call_started = perf_counter()
+            with torch.no_grad():
+                prediction = predict_case(model, state_sample, device,
+                    query_batch_size=1024, local_port_condition_mode="predicted", mixed_teacher_ratio=0)
+            synchronize(device)
+            elapsed = perf_counter() - call_started
+            prediction = denormalize_predictions(prediction, normalized, normalize_targets)
+            pred_field = np.asarray(prediction["pred_field_grid"])
+            if pred_field.reshape(-1, pred_field.shape[-1]).shape != fluid_role.values.shape:
+                raise ValueError(f"Historical predicted field shape differs from saved receiver role for {case_id}")
+            predicted_roles = {
+                "fluid_fields": pred_field.reshape(-1, pred_field.shape[-1]),
+                "interface": np.asarray(prediction["pred_interface"])[:m].reshape(-1, 2),
+                "solid_temperature": np.asarray(prediction["pred_internal_temperature"])[:m].reshape(-1, 1),
+            }
+            expected_rows = {name: role.values.shape for name, role in record.output.roles.items()}
+            for role_name, values in predicted_roles.items():
+                if values.shape != expected_rows[role_name]:
+                    raise ValueError(f"Historical predicted {role_name} receiver rows differ for {case_id}: {values.shape} != {expected_rows[role_name]}")
+                predictions[(label, role_name)] = values.astype(np.float64)
+                physical_references[(label, role_name)] = np.asarray(record.output.roles[role_name].values, dtype=np.float64)
+            summary["native_classic_calls"] += 1
+            absolute.append({"state": label, "heat": physical_heat.tolist(), "seconds": elapsed})
+            print(json.dumps({"model": classic_id, "case_id": case_id, "state": label,
+                              "seconds": elapsed}), flush=True)
+        baseline = "baseline" if "baseline" in records else "transfer_minus"
+        finite = []
+        base_record = records[baseline]
+        for label, record in records.items():
+            if label == baseline:
+                continue
+            row = {"state": label, "baseline_state": baseline,
+                   "scope": "primary baseline-relative" if baseline == "baseline" else "secondary minus-to-plus span",
+                   "delta_heat": (np.asarray([module.heating for module in record.design.modules], dtype=np.float64)
+                                  - np.asarray([module.heating for module in base_record.design.modules], dtype=np.float64)).tolist(),
+                   "roles": {}}
+            for role_name, role in record.output.roles.items():
+                base_prediction = predictions[(baseline, role_name)]
+                state_prediction = predictions[(label, role_name)]
+                response = finite_metrics(state_prediction, physical_references[(label, role_name)], role,
+                    baseline_prediction=base_prediction, baseline_reference=physical_references[(baseline, role_name)])[0]
+                row["roles"][role_name] = {
+                    "absolute_state_error": finite_metrics(state_prediction, physical_references[(label, role_name)], role)[0],
+                    "finite_response": response,
+                }
+            finite.append(row)
+        family_dir = output / case_id
+        family_dir.mkdir(exist_ok=False)
+        arrays = {f"{label}/{role_name}/prediction": predictions[(label, role_name)]
+                  for label in records for role_name in records[label].output.roles}
+        for row in finite:
+            label = row["state"]
+            for role_name in records[label].output.roles:
+                arrays[f"{label}/{role_name}/delta_prediction_FP64"] = predictions[(label, role_name)] - predictions[(baseline, role_name)]
+                arrays[f"{label}/{role_name}/delta_reference_FP64"] = physical_references[(label, role_name)] - physical_references[(baseline, role_name)]
+        for role_name, role in first.output.roles.items():
+            arrays[f"{role_name}/query_features"] = role.query_features
+            arrays[f"{role_name}/valid_mask"] = role.valid_mask
+            arrays[f"{role_name}/quadrature_weights"] = role.quadrature_weights
+        np.savez_compressed(family_dir / "evidence.npz", **arrays)
+        family = {"case_id": case_id, "baseline_state": baseline,
+                  "scope": "primary baseline-relative" if baseline == "baseline" else "secondary 0277 minus-to-plus only",
+                  "source_ids": list(source_ids), "states": absolute, "finite": finite,
+                  "arrays": str(family_dir / "evidence.npz")}
+        atomic_write_json(family_dir / "summary.json", family)
+        summary["families"].append(family)
+        if case_id == "0277":
+            summary["secondary_0277_endpoint_state_count"] += len(records)
+        else:
+            summary["primary_baseline_relative_state_count"] += len(records)
+    summary["timing_scope"] = "Complete old native predicted-port/local-surrogate calls on each saved fixed receiver state; includes repeated field chunking, excludes checkpoint loading and H5/record I/O."
+    return summary
 
 
 def field_evaluation(model, checkpoint, output, device, *, detailed=True):
@@ -260,7 +594,11 @@ def main(argv=None):
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--scalars-only", action="store_true")
-    parser.add_argument("--mode", choices=("fields", "responses"), default="fields")
+    parser.add_argument("--mode", choices=("fields", "responses", "classic-fields", "classic-responses"), default="fields")
+    parser.add_argument("--classic-id", choices=tuple(CLASSIC_IDENTITIES),
+        help="Exact retained classic identity required by a classic mode.")
+    parser.add_argument("--development-manifest", type=Path,
+        help="Exact shared fixed25_v1 manifest required by a classic mode.")
     parser.add_argument("--cohort", choices=("fit", "development", "counted"), default="development")
     parser.add_argument("--atlas-dir", type=Path, default=ROOT / "diagnostics/generated/interactions/physical_response_atlas_20260926/families")
     parser.add_argument("--request", type=Path)
@@ -268,15 +606,37 @@ def main(argv=None):
     args = parser.parse_args(argv)
     started_unix, started = time(), perf_counter()
     torch.set_num_threads(1)
-    from channelthermal.source_response import load_source_response_model
     output = validate_generated_output(args.output_dir)
-    if (output / "summary.json").exists():
+    if output.exists() and any(output.iterdir()):
         raise FileExistsError("Preserve measured evidence: choose a fresh output directory.")
     output.mkdir(parents=True, exist_ok=True)
-    model, checkpoint = load_source_response_model(args.checkpoint, args.device)
+    checkpoint_path = args.checkpoint.expanduser().resolve()
+    if args.mode.startswith("classic-"):
+        if args.classic_id is None or args.development_manifest is None:
+            parser.error("classic modes require --classic-id and --development-manifest")
+        from channelthermal.evaluation.loading import load_model
+
+        model, checkpoint = load_model(checkpoint_path, torch.device(args.device))
+        identity = validate_classic_selection(args.classic_id, checkpoint,
+            _file_sha256(checkpoint_path))
+    else:
+        from channelthermal.source_response import load_source_response_model
+
+        model, checkpoint = load_source_response_model(checkpoint_path, args.device)
     model.eval().requires_grad_(False)
     before = model_digest(model)
-    if args.mode == "fields":
+    if args.mode == "classic-fields":
+        summary = classic_field_evaluation(model, checkpoint, output, args.device,
+            classic_id=args.classic_id, manifest_path=args.development_manifest)
+        summary["selected_checkpoint_identity"] = identity
+    elif args.mode == "classic-responses":
+        if args.request is None or args.records_dir is None:
+            parser.error("classic-responses requires its exact saved --request and --records-dir")
+        summary = classic_counted_response_evaluation(model, checkpoint, output, args.device,
+            classic_id=args.classic_id, manifest_path=args.development_manifest,
+            request_path=args.request, records_dir=args.records_dir)
+        summary["selected_checkpoint_identity"] = identity
+    elif args.mode == "fields":
         summary = field_evaluation(model, checkpoint, output, args.device, detailed=not args.scalars_only)
     else:
         if args.cohort == "counted":
@@ -289,7 +649,7 @@ def main(argv=None):
                 ("heat_transfer_minus", "heat_transfer_plus"), args.cohort)
         summary = response_evaluation(model, families, output, args.device, cohort=args.cohort)
         summary["checkpoint_epoch"] = checkpoint["epoch"]
-    summary.update(checkpoint=str(args.checkpoint.resolve()),checkpoint_sha256=_file_sha256(args.checkpoint),
+    summary.update(checkpoint=str(checkpoint_path),checkpoint_sha256=_file_sha256(checkpoint_path),
                    frozen_state_unchanged=model_digest(model)==before)
     if not summary["frozen_state_unchanged"]:
         raise RuntimeError("Evaluation changed the frozen response model.")
@@ -297,7 +657,8 @@ def main(argv=None):
     atomic_write_json(output / "receipt.json", {"start_unix": started_unix, "end_unix": time(),
         "elapsed_seconds": perf_counter()-started, "pid": os.getpid(), "device": args.device,
         "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"), "status": "completed",
-        "optimizer_updates": 0, "solver_attempts": 0, "old_thermal_wrapper_calls": 0})
+        "optimizer_updates": 0, "solver_attempts": 0,
+        "native_classic_calls": summary.get("native_classic_calls", 0)})
     return 0
 
 

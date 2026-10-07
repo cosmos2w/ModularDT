@@ -154,6 +154,34 @@ def test_prepared_stale_geometry_ids_and_receiver_catalog_rejected():
         model.apply_native(p, torch.ones(1, 2))
 
 
+@pytest.mark.parametrize('mode', ['direct', 'group'])
+def test_precise_native_small_increments_and_physical_kernel_vjp(mode):
+    model = thermal(mode)
+    s = structure()
+    p = model.prepare_native(s, torch.tensor([[[1.1, 1.3], [4.1, 2.2]]]),
+                             local_query_points=torch.zeros(1, 2, 2), ntheta=4)
+    heat = torch.tensor([[0.8000000001, 1.2000000003]], dtype=torch.float64, requires_grad=True)
+    delta = torch.tensor([[1e-8, -1e-8]], dtype=torch.float64)
+    kwargs = {'accumulation_dtype': torch.float64}
+    baseline = model.apply_native(p, heat, **kwargs)
+    changed = model.apply_native(p, heat + delta, **kwargs)
+    increment = model.apply_native(p, delta, increment=True, **kwargs)
+    kernels = model.export_native_kernels(p, **kwargs)
+    for key in ('fluid_temperature', 'pred_interface', 'pred_internal_temperature'):
+        assert increment[key].dtype == torch.float64
+        torch.testing.assert_close(changed[key] - baseline[key], increment[key], atol=1e-14, rtol=1e-6)
+    for key, kernel in [('fluid_temperature', kernels['fluid']),
+                        ('pred_interface', torch.cat((kernels['surface'], kernels['q_normal']), -1))]:
+        actual = torch.autograd.grad(baseline[key].sum(), heat, retain_graph=True)[0]
+        expected = kernel.sum(dim=tuple(i for i in range(1, kernel.ndim) if i != kernel.ndim - 2))
+        torch.testing.assert_close(actual, expected, atol=1e-13, rtol=1e-13)
+    assert 'module_material_peak' not in increment
+    assert 'pred_port_condition' not in increment
+    s['module_centers'].add_(0.1)
+    with pytest.raises(ValueError, match='Geometry/context changed'):
+        model.apply_native(p, delta, increment=True, **kwargs)
+
+
 def test_discrete_balance_zero_constant_adjoint_and_sampled_all_column_parity():
     s = structure()
     nx, ny = 16, 8

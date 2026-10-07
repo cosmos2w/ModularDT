@@ -284,7 +284,7 @@ def prepared_forcing_cost(model, saved, arguments, condition, device, *, receipt
     errors = {name: tensor_error(changed[name] - reference[name], increment[name], rtol=2e-5, atol=2e-6)
         for name in ('fluid_temperature', 'pred_interface', 'pred_internal_temperature')}
     errors['final_port_outside_temperature'] = tensor_error(changed['pred_port_condition'][..., 3:4] - reference['pred_port_condition'][..., 3:4],
-        increment['pred_port_condition'][..., 3:4], rtol=2e-5, atol=2e-6)
+        increment['outside_temperature'], rtol=2e-5, atol=2e-6)
     del reference, changed, increment, cold
     def run(scope):
         with torch.no_grad():

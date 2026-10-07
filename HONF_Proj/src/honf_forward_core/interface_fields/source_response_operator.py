@@ -100,18 +100,22 @@ class PreparedSourceResponse:
         self.context.assert_fresh()
         _check_versions(self.receiver_versions)
 
-    def dense_kernel(self):
+    def dense_kernel(self, *, accumulation_dtype=None):
         """Explicit source-resolved export, in derivative units per forcing."""
         self.assert_fresh()
+        cast = lambda value: value if accumulation_dtype is None else value.to(accumulation_dtype)
+        if accumulation_dtype not in (None, torch.float32, torch.float64):
+            raise ValueError('Response accumulation dtype must be float32 or float64.')
         if self.mode == 'direct':
-            far = self.far_kernel
+            far = cast(self.far_kernel)
         else:
-            far = torch.einsum('bqeo,bem->bqmo', self.receiver_functions, self.source_membership)
-        kernel = far * (1 - self.near_weight[..., None])
+            far = torch.einsum('bqeo,bem->bqmo', cast(self.receiver_functions), cast(self.source_membership))
+        weight = cast(self.near_weight)
+        kernel = far * (1 - weight[..., None])
         if self.near_indices.numel():
             batch, query, source = self.near_indices
             kernel = kernel.index_put((batch, query, source),
-                kernel[batch, query, source] + self.near_weight[batch, query, source, None] * self.near_values)
+                kernel[batch, query, source] + weight[batch, query, source, None] * cast(self.near_values))
         return kernel / self.forcing_scale
 
 
@@ -387,16 +391,20 @@ class SourceResponseOperator(nn.Module):
             result = result.index_put((batch, query), correction, accumulate=True)
         return result
 
-    def apply_forcing(self, response, forcing, *, forcing_map: Callable | None = None, return_contributions=False):
+    def apply_forcing(self, response, forcing, *, forcing_map: Callable | None = None, return_contributions=False,
+                      accumulation_dtype=None):
         mapped = forcing if forcing_map is None else forcing_map(forcing)
-        values = response.offset + self._apply_linear(response, mapped)
+        if accumulation_dtype is None:
+            values = response.offset + self._apply_linear(response, mapped)
+        else:
+            values = response.offset.to(accumulation_dtype) + self._apply_precise(response, mapped, accumulation_dtype)
         if not return_contributions: return values
-        contributions = response.dense_kernel() * mapped[:, None, :, None]
+        contributions = response.dense_kernel(accumulation_dtype=accumulation_dtype) * mapped[:, None, :, None]
         return ResponseApplication(values, contributions, {'forcing_law': 'affine' if forcing_map is None else 'explicit caller nonlinear map',
             'kernel_coordinates': 'physical forcing' if forcing_map is None else 'mapped forcing', 'physical_solves': 0})
 
     def apply_increment(self, response, delta_forcing, *, compression=None,
-                        forcing_map: Callable | None = None, baseline_forcing=None):
+                        forcing_map: Callable | None = None, baseline_forcing=None, accumulation_dtype=None):
         if forcing_map is not None:
             if baseline_forcing is None: raise ValueError('Nonlinear forcing increments require an explicit baseline.')
             delta_forcing = forcing_map(baseline_forcing + delta_forcing) - forcing_map(baseline_forcing)
@@ -407,7 +415,18 @@ class SourceResponseOperator(nn.Module):
                 raise ValueError('Compressed increment exceeds its declared forcing radii.')
             if bool((active_delta.sum(-1).abs() > epsilon * active_delta.abs().sum(-1).clamp_min(1)).any()):
                 raise ValueError('This response compression bound requires balanced forcing increments.')
+        if accumulation_dtype is not None:
+            if compression is not None:
+                raise ValueError('Precise source-resolved application does not use grouped compression.')
+            return self._apply_precise(response, delta_forcing, accumulation_dtype)
         return self._apply_linear(response, delta_forcing, compression)
+
+    @staticmethod
+    def _apply_precise(response, forcing, dtype):
+        if forcing.shape != response.context.present.shape or not bool(torch.isfinite(forcing).all()):
+            raise ValueError('Forcing must be finite [B,M] aligned with the prepared source IDs.')
+        kernel = response.dense_kernel(accumulation_dtype=dtype)
+        return torch.einsum('bqmo,bm->bqo', kernel, forcing.to(dtype))
 
     def export_response_operator(self, response):
         return {'K': response.dense_kernel(), 'offset': response.offset,

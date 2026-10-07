@@ -33,11 +33,7 @@ P0/P1/P2 thermal trajectory in this family.
 ## Loading and replay
 
 Use `channelthermal.source_response.load_source_response_model(path, device)`.
-The historical loader rejects the new capability explicitly. Loading checks
-the flow checkpoint digest, dependency capability, normalization and primary
-development membership. The thermal checkpoint contains the new thermal
-weights and the literal frozen flow-partner path/digest; it does not contain a
-second complete thermal model.
+The historical loader rejects the new capability explicitly. Development loading retains the literal fixed25_v1 membership and matching normalization checks; formal loading instead requires the exact full-TRAIN data, normalization and canonical89/original90 validation bindings. Startup composition is limited to matching disposable e1–e3 checkpoints, while formal composition permits monitored thermal ages only with the exact e5000 flow partner. The thermal checkpoint contains the new thermal weights and the literal frozen flow-partner path/digest; it does not contain a second complete thermal model.
 
 The case model supports native samples and already saved response records:
 
@@ -84,6 +80,24 @@ stop, use the existing stop-request interface; do not overwrite a checkpoint
 or change a running recipe.
 
 ## Evaluation and interpretation
+
+R-direct with the heat-independent D-sep flow reader is the preferred response-family research reference. R-group remains an independently trained scientific control, and Run3801 plus all historical models remain intact. The manual formal recipe is described in `Thermal_RDirect_Formal5000.md`; preparing that recipe does not launch it or establish general inverse-design validity.
+
+For small heat changes, pass `accumulation_dtype=torch.float64` to `apply_record_increment`, `apply_record`, `apply_native`, or `thermal.export_native_kernels`. This explicitly forms source-resolved coefficients in FP64 from the learned FP32 coefficients, interpolates the coefficients in FP64, computes harmonic-conductivity outside-minus-surface q coefficients before contraction, and contracts with physical heat without an intermediate FP32 heat cast. Model preparation and training remain FP32. This improves arithmetic on the estimated kernel, not the physical accuracy of that kernel. Kernel arrays are transient; the caller must price their formation and temporary storage. The original default FP32 execution remains available.
+
+```python
+precise_increment = model.apply_record_increment(
+    prepared, physical_delta_heat, accumulation_dtype=torch.float64
+)
+precise_endpoint = model.apply_record(
+    prepared, physical_heat, accumulation_dtype=torch.float64
+)
+physical_kernels = model.thermal.export_native_kernels(
+    prepared["thermal"], accumulation_dtype=torch.float64
+)
+```
+
+The increment API returns only linear native roles and the structurally zero flow increment. Material peaks, effective h, and other nonlinear reductions require the original two endpoint calculations; no ratio of incremental temperatures is reported as an effective-h increment. Geometry or receiver changes invalidate preparation and require rebuilding with live coordinates. `tools/thermal_source_response_precision.py` audits four saved TRAIN cases followed by the four fixed representatives, retaining strict legacy FP32 endpoint failures separately from precise fixed-kernel endpoint and physical-kernel/VJP checks. It never fits weights or invokes a physical solve.
 
 `tools/thermal_source_response_evaluate.py` measures all22 native fields or
 saved `fit`, `development`, and `counted` response cohorts. The evaluator
