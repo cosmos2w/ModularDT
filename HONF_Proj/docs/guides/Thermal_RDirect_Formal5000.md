@@ -1,5 +1,7 @@
 # Manual R-direct full-TRAIN research recipe
 
+**Authorized launch update, 2026-10-07.** The user subsequently requested the two fresh formal stages. Run3901 trains ordinary D-sep on GPU 0; Run3902 trains fresh R-direct on GPU 2 after the exact Run3901 e5000 flow endpoint is available. Actual run identities, tmux sessions, checkpoint retention and the first-ten-epoch review are recorded in the [formal launch record](../reports/Thermal_RDirect_Formal5000_Launch_20261007.md). The startup-only measurements below describe the earlier readiness round and are preserved as historical evidence.
+
 **Model and launch decision.** R-direct with a freshly trained D-sep flow reader is the preferred response-family research reference for a manually launched full-TRAIN run. R-group remains an independently trained control, Run3801 remains the incumbent, and this recipe does not claim general inverse-design or grouping superiority. The formal5000 training stages were not launched; the only new full-TRAIN fits in this work were explicitly labelled startup benchmarks capped at three epochs.
 
 ## Bound recipe
@@ -39,10 +41,10 @@ rtk "$PYTHON" "$PROJECT/tools/thermal_formal_dsep_flow_fit.py" \
   --output "$FLOW" --run-identity formal5000 --prepare-only
 ```
 
-Start the full D-sep stage manually on GPU 2. Keep this launch running in one terminal. From a second terminal, read `active_process.json` and `history.json` to monitor it; create `stop_requested` to stop at the next completed epoch boundary. The script saves the latest optimizer state before acknowledging the request.
+Start the full D-sep stage manually on GPU 0. Keep this launch running in one terminal. From a second terminal, read `active_process.json` and `history.json` to monitor it; create `stop_requested` to stop at the next completed epoch boundary. The script saves the latest optimizer state before acknowledging the request.
 
 ```bash
-rtk env CUDA_VISIBLE_DEVICES=2 "$PYTHON" "$PROJECT/tools/thermal_formal_dsep_flow_fit.py" \
+rtk env CUDA_VISIBLE_DEVICES=0 "$PYTHON" "$PROJECT/tools/thermal_formal_dsep_flow_fit.py" \
   --parent "$PARENT" \
   --profile-file "$PROJECT/src/config_core/forward/thermal_source_response/d-sep_full5000.json" \
   --output "$FLOW" --run-identity formal5000 \
@@ -59,7 +61,7 @@ rtk cat "$FLOW/active_process.json"
 Resume the same D-sep identity from its latest checkpoint after the process reports `stopped_resumable`. Keep the profile, run identity, source checkpoint, output path, and device-visible GPU mapping unchanged.
 
 ```bash
-rtk env CUDA_VISIBLE_DEVICES=2 "$PYTHON" "$PROJECT/tools/thermal_formal_dsep_flow_fit.py" \
+rtk env CUDA_VISIBLE_DEVICES=0 "$PYTHON" "$PROJECT/tools/thermal_formal_dsep_flow_fit.py" \
   --parent "$PARENT" \
   --profile-file "$PROJECT/src/config_core/forward/thermal_source_response/d-sep_full5000.json" \
   --output "$FLOW" --run-identity formal5000 \
@@ -76,7 +78,7 @@ rtk "$PYTHON" "$PROJECT/tools/thermal_source_response_fit.py" \
   --atlas-directory "$ATLAS" --operator-decision "$OPERATOR" --prepare-only
 ```
 
-Start R-direct manually on an authorized GPU and keep the launch running in one terminal. From a second terminal, monitor `active_process.json`, `history.json`, and the 100-epoch validation files; request an epoch-boundary stop by creating `stop_requested` in the thermal run directory. Resume with the same recipe, exact e5000 flow partner, output directory, identity, profile, and device mapping.
+Start R-direct manually on GPU 2 and keep the launch running in one terminal. From a second terminal, monitor `active_process.json`, `history.json`, and the 100-epoch validation files; request an epoch-boundary stop by creating `stop_requested` in the thermal run directory. Resume with the same recipe, exact e5000 flow partner, output directory, identity, profile, and device mapping.
 
 ```bash
 rtk env CUDA_VISIBLE_DEVICES=2 "$PYTHON" "$PROJECT/tools/thermal_source_response_fit.py" \

@@ -39,6 +39,22 @@ def test_formal_profiles_validate_and_require_best_field_checkpointing(name, val
         validator(bad)
 
 
+@pytest.mark.parametrize(("name", "validator"), [
+    ("d-sep_full5000.json", validate_flow_profile),
+    ("r-direct_full5000.json", validate_thermal_profile),
+])
+def test_formal_retention_subset_keeps_monitoring_and_rejects_invalid_ages(name, validator):
+    profile = _profile(name)
+    profile["checkpointing"]["milestone_epochs"] = [100, 500, 1000, 2500, 5000]
+    assert validator(profile)["checkpointing"]["monitoring_interval_epochs"] == 100
+    for ages in ([], [500, 5000], [100, 500], [100, 100, 5000],
+                 [100, 250, 5000], [100, 5000, 5100], [100, 5000.0], [5000, 100]):
+        invalid = copy.deepcopy(profile)
+        invalid["checkpointing"]["milestone_epochs"] = ages
+        with pytest.raises(ValueError, match="milestones"):
+            validator(invalid)
+
+
 def test_formal_train_config_drops_development_identity_and_binds_full_scope():
     train_ids = [f"train-{index:03d}" for index in range(600)]
     data_binding = {"scope": "all_original_train", "training_case_ids": train_ids,
@@ -84,11 +100,17 @@ def test_formal_flow_partner_rejects_changed_membership_or_normalizer_values():
 
 
 def test_formal_resume_binds_existing_output_identity_before_writes(tmp_path):
-    identity = {"run_identity": "formal5000", "profile_sha256": "profile-a"}
+    identity = {"run_identity": "formal5000", "profile_sha256": "profile-a",
+        "flow_reader_config": {"heat_columns": (4,)}}
     output = tmp_path / "empty_run"
     output.mkdir()
     ensure_formal_resume_identity(output, "fit_identity.json", identity)
-    assert json.loads((output / "fit_identity.json").read_text()) == identity
+    assert json.loads((output / "fit_identity.json").read_text()) == {
+        **identity, "flow_reader_config": {"heat_columns": [4]}}
+    ensure_formal_resume_identity(output, "fit_identity.json", identity)
+    with pytest.raises(ValueError, match="different run identity"):
+        ensure_formal_resume_identity(output, "fit_identity.json", {
+            **identity, "flow_reader_config": {"heat_columns": (3,)}})
 
     retained = output / "latest_model.pt"
     retained.write_bytes(b"existing checkpoint")

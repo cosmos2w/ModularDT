@@ -40,6 +40,7 @@ from thermal_formal_profile import (
     initialize_formal_output,
     stats_sha256,
     validate_formal_bindings,
+    validate_formal_milestones,
 )
 
 from honf_runtime.compat import load_trusted_checkpoint, recursive_to_device, set_seed
@@ -161,9 +162,7 @@ def validate_formal_profile(profile):
             or profile["checkpointing"]["save_best_field"] is not True):
         raise ValueError("Formal source-response monitoring must save latest/best state every 100 epochs.")
     horizon = int(schedule["horizon_epochs"])
-    expected_milestones = list(range(100, horizon + 1, 100))
-    if [int(value) for value in profile["checkpointing"]["milestone_epochs"]] != expected_milestones:
-        raise ValueError("Formal source-response milestones must be every 100 epochs through the endpoint.")
+    validate_formal_milestones(profile["checkpointing"], horizon)
     return profile
 
 
@@ -852,6 +851,8 @@ def run_formal(args, start, started):
                  "normalization_stats_sha256": stats_sha256(stats)})
         history.append(row)
         save_seconds = 0.
+        if epoch == 10 and not review:
+            plot_history(history, output / "thermal_learning.pdf")
         if review:
             improved = score < best and epoch % int(profile["checkpointing"]["monitoring_interval_epochs"]) == 0
             if epoch % int(profile["checkpointing"]["monitoring_interval_epochs"]) == 0:

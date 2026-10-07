@@ -25,9 +25,11 @@ for source in (ROOT / "src", ROOT / "Case_ThermalChannel/src", ROOT / "tools"):
 
 from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer
 from channelthermal.data.development_split import development_case_ids, resolve_development_manifest
+from channelthermal.source_response import FORMAL_RESPONSE_PROFILE_NAMES
 from channelthermal.training.checkpoints import _file_sha256
 from thermal_campaign_evaluate import aggregate_physical, physical_case_metrics
 from thermal_development import validate_generated_output
+from thermal_formal_profile import bind_formal_validation, bind_original_train
 from thermal_response_refinement_evaluation import (
     finite_metrics,
     load_atlas_families,
@@ -167,31 +169,216 @@ def load_classic_native_cases(checkpoint, manifest_path):
     return normalized, raw, manifest, path
 
 
-def classic_field_evaluation(model, checkpoint, output, device, *, classic_id, manifest_path):
+def _canonical_sha256(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+        allow_nan=False).encode("utf-8")).hexdigest()
+
+
+def formal_panel_case_ids(validation_binding, panel):
+    """Return the sealed canonical89 or compatibility90 IDs in source order."""
+    if panel not in ("canonical89", "original90"):
+        raise ValueError(f"Unknown formal validation panel: {panel!r}")
+    primary = validation_binding.get("primary_case_ids")
+    compatibility = validation_binding.get("compatibility_case_ids")
+    duplicate = validation_binding.get("excluded_training_duplicate_case_id")
+    if (validation_binding.get("primary_scope") != "original_test_excluding_train_duplicate"
+            or validation_binding.get("compatibility_scope") != "original_test_all_rows"
+            or duplicate != "0273"
+            or not isinstance(primary, list) or not isinstance(compatibility, list)
+            or len(primary) != 89 or len(compatibility) != 90
+            or len(set(primary)) != len(primary) or len(set(compatibility)) != len(compatibility)
+            or duplicate in primary or duplicate not in compatibility
+            or primary != [case_id for case_id in compatibility if case_id != duplicate]
+            or validation_binding.get("primary_case_count") != 89
+            or validation_binding.get("compatibility_case_count") != 90
+            or validation_binding.get("primary_case_ids_sha256") != _canonical_sha256(primary)
+            or validation_binding.get("compatibility_case_ids_sha256") != _canonical_sha256(compatibility)):
+        raise ValueError("Formal checkpoint does not seal the expected canonical89/original90 panel memberships.")
+    return list(primary if panel == "canonical89" else compatibility)
+
+
+def validate_formal_evaluation_checkpoint(checkpoint, *, panel):
+    """Rebind a trusted, final R-direct checkpoint to the current packed-H5 catalog."""
+    if (checkpoint.get("formal_workflow_scope") != "formal_full_train_v1"
+            or bool(checkpoint.get("startup_benchmark"))
+            or int(checkpoint.get("epoch", 0)) != 5000):
+        raise ValueError("Formal 89/90 evaluation requires a non-startup R-direct e5000 checkpoint.")
+    recipe = checkpoint.get("fit_identity", {}).get("recipe", {})
+    profile = recipe.get("profile", {})
+    profile_data = profile.get("data", {})
+    validation_profile = profile_data.get("formal_validation", {})
+    if (recipe.get("identity") != "thermal_source_response_r_direct_formal5000_v1"
+            or recipe.get("preferred_response_family") != "R-direct"
+            or profile.get("profile_name") not in FORMAL_RESPONSE_PROFILE_NAMES
+            or profile_data.get("expected_train_case_count") != 600
+            or validation_profile.get("primary_scope") != "original_test_excluding_train_duplicate"
+            or validation_profile.get("compatibility_scope") != "original_test_all_rows"
+            or validation_profile.get("expected_primary_case_count") != 89
+            or validation_profile.get("expected_compatibility_case_count") != 90
+            or validation_profile.get("excluded_training_duplicate_case_id") != "0273"):
+        raise ValueError("Checkpoint does not declare the maintained full-TRAIN R-direct evaluation profile.")
+    data_binding = checkpoint.get("formal_dataset_binding", {})
+    normalization_binding = checkpoint.get("formal_normalization_binding", {})
+    validation_binding = checkpoint.get("formal_validation_binding", {})
+    dataset_config = checkpoint.get("train_config", {}).get("dataset", {})
+    configured_path = dataset_config.get("packed_h5_path")
+    if not configured_path:
+        raise ValueError("Formal checkpoint has no packed-H5 input binding.")
+    path = resolve_demo_path(configured_path).resolve()
+    if (data_binding.get("dataset_path") != str(path)
+            or dataset_config.get("formal_dataset_binding") != data_binding
+            or dataset_config.get("formal_normalization_binding") != normalization_binding
+            or dataset_config.get("formal_validation_binding") != validation_binding
+            or validation_binding.get("source_metadata_sha256") != data_binding.get("source_metadata_sha256")):
+        raise ValueError("Formal checkpoint input and validation bindings are inconsistent.")
+    actual_data_binding, _ = bind_original_train(
+        path, expected_count=profile_data["expected_train_case_count"],
+        dataset_id=data_binding.get("dataset_id"))
+    actual_validation_binding, _, _ = bind_formal_validation(
+        path, expected_primary_count=validation_profile["expected_primary_case_count"],
+        expected_compatibility_count=validation_profile["expected_compatibility_case_count"],
+        duplicate_case_id=validation_profile["excluded_training_duplicate_case_id"])
+    if actual_data_binding != data_binding:
+        raise ValueError("Current packed-H5 TRAIN inputs/metadata differ from the formal checkpoint binding.")
+    if actual_validation_binding != validation_binding:
+        raise ValueError("Current packed-H5 validation inputs/metadata differ from the formal 89/90 binding.")
+    ids = formal_panel_case_ids(validation_binding, panel)
+    return {
+        "panel": panel,
+        "case_ids": ids,
+        "case_count": len(ids),
+        "case_ids_sha256": _canonical_sha256(ids),
+        "formal_dataset_binding_sha256": _canonical_sha256(data_binding),
+        "formal_normalization_binding_sha256": _canonical_sha256(normalization_binding),
+        "formal_validation_binding_sha256": _canonical_sha256(validation_binding),
+        "source_metadata_sha256": actual_data_binding["source_metadata_sha256"],
+        "dataset_path": str(path),
+        "duplicate_case_id": validation_profile["excluded_training_duplicate_case_id"],
+    }
+
+
+def load_formal_native_cases(checkpoint, panel):
+    """Load physical formal-panel cases with the R-direct full-TRAIN transform."""
+    scope = validate_formal_evaluation_checkpoint(checkpoint, panel=panel)
+    normalizer = H5Normalizer(checkpoint["global_normalization_stats"])
+    dataset = GlobalChannelThermalDataset(scope["dataset_path"], split="test", points_per_case=1,
+        random_point_sampling=False, include_grid=True, normalizer=normalizer,
+        normalize_inputs=False, normalize_targets=False, case_ids=scope["case_ids"])
+    if [str(value) for value in dataset.selected_case_ids] != scope["case_ids"]:
+        raise ValueError("Formal physical reader case order differs from the sealed checkpoint panel.")
+    return dataset, scope
+
+
+def load_classic_formal_native_cases(checkpoint, formal_scope):
+    """Read the same physical receivers with a retained classic's own transforms."""
+    from channelthermal.data.datasets import GlobalChannelThermalDataset, H5Normalizer
+
+    from honf_runtime.compat import resolve_demo_path
+
+    dataset_config = checkpoint.get("train_config", {}).get("dataset", {})
+    configured_path = dataset_config.get("packed_h5_path")
+    if not configured_path:
+        raise ValueError("Historical checkpoint has no packed-H5 dataset binding.")
+    path = resolve_demo_path(configured_path).resolve()
+    if str(path) != formal_scope["dataset_path"]:
+        raise ValueError("Historical checkpoint and formal reference do not use the same packed H5.")
+    stats = checkpoint.get("global_normalization_stats", {})
+    if not stats:
+        raise ValueError("Historical checkpoint has no checkpoint-native TRAIN normalization.")
+    for name, values in stats.items():
+        if not np.isfinite(np.asarray(values)).all():
+            raise ValueError(f"Historical checkpoint has non-finite normalization values in {name}.")
+    normalizer = H5Normalizer({key: np.asarray(value, dtype=np.float32) for key, value in stats.items()})
+    selection = {"case_ids": formal_scope["case_ids"]}
+    normalized = GlobalChannelThermalDataset(path, split="test", points_per_case=1,
+        random_point_sampling=False, include_grid=True, normalizer=normalizer,
+        normalize_inputs=bool(dataset_config.get("normalize_inputs", False)),
+        normalize_targets=bool(dataset_config.get("normalize_targets", False)), **selection)
+    raw = GlobalChannelThermalDataset(path, split="test", points_per_case=1,
+        random_point_sampling=False, include_grid=True, normalizer=normalizer,
+        normalize_inputs=False, normalize_targets=False, **selection)
+    if normalized.selected_case_ids != raw.selected_case_ids:
+        raise ValueError("Normalized and physical formal receiver IDs differ for the historical checkpoint.")
+    if [str(value) for value in raw.selected_case_ids] != formal_scope["case_ids"]:
+        raise ValueError("Historical physical reader case order differs from the formal receiver panel.")
+    return normalized, raw, path
+
+
+def _attach_formal_scope(summary, formal_scope):
+    panel = formal_scope["panel"]
+    summary.update({
+        "dataset_scope": "formal full-TRAIN recipe validation: canonical89 primary" if panel == "canonical89"
+            else "formal full-TRAIN recipe compatibility validation: original90 including the TRAIN duplicate",
+        "formal_validation_panel": panel,
+        "formal_validation_case_ids": formal_scope["case_ids"],
+        "formal_validation_case_count": formal_scope["case_count"],
+        "formal_validation_case_ids_sha256": formal_scope["case_ids_sha256"],
+        "formal_dataset_binding_sha256": formal_scope["formal_dataset_binding_sha256"],
+        "formal_normalization_binding_sha256": formal_scope["formal_normalization_binding_sha256"],
+        "formal_validation_binding_sha256": formal_scope["formal_validation_binding_sha256"],
+        "source_metadata_sha256": formal_scope["source_metadata_sha256"],
+        "excluded_training_duplicate_case_id": formal_scope["duplicate_case_id"],
+        "physical_reference_scope": "saved analytic-wake/shared-grid packed-H5 references; no new solver calls",
+    })
+
+
+def formal_physical_aggregates(rows, panel):
+    """Keep the content duplicate out of primary errors for either model family."""
+    if panel not in ("canonical89", "original90"):
+        raise ValueError("Unknown formal physical aggregation panel.")
+    primary = [row for row in rows if row["case_id"] != "0273"]
+    result = {"primary_excluding_0273": aggregate_physical(primary)}
+    if panel == "original90":
+        result["compatibility_including_0273"] = aggregate_physical(rows)
+    return result
+
+
+def classic_field_evaluation(model, checkpoint, output, device, *, classic_id, manifest_path=None,
+                             formal_scope=None):
     """Replay one retained classic through its native predicted-port/local path."""
     from channelthermal.evaluation.prepared import predict_case
     from channelthermal.evaluation.results import denormalize_predictions
 
-    normalized, raw, manifest, path = load_classic_native_cases(checkpoint, manifest_path)
+    if formal_scope is None:
+        normalized, raw, manifest, path = load_classic_native_cases(checkpoint, manifest_path)
+        panel_summary = {
+            "dataset_scope": "fixed25_v1 exposed development validation",
+            "development_manifest_sha256": manifest["manifest_sha256"],
+            "development_case_ids": [str(value) for value in raw.selected_case_ids],
+            "scope": "22 repeatedly exposed fixed25_v1 validation cases; stored analytic-wake/shared-grid benchmark units",
+        }
+    else:
+        normalized, raw, path = load_classic_formal_native_cases(checkpoint, formal_scope)
+        panel_summary = {
+            "formal_validation_panel": formal_scope["panel"],
+            "formal_validation_case_ids": formal_scope["case_ids"],
+            "formal_validation_case_count": formal_scope["case_count"],
+            "formal_validation_case_ids_sha256": formal_scope["case_ids_sha256"],
+            "formal_validation_binding_sha256": formal_scope["formal_validation_binding_sha256"],
+            "source_metadata_sha256": formal_scope["source_metadata_sha256"],
+            "excluded_training_duplicate_case_id": formal_scope["duplicate_case_id"],
+            "dataset_scope": "formal full-TRAIN recipe validation",
+            "scope": "same sealed original-test physical receivers as the formal R-direct reference; classic-native normalization and predicted-port/local-surrogate calls",
+            "physical_reference_scope": "saved analytic-wake/shared-grid packed-H5 references; no new solver calls",
+        }
     dataset_config = checkpoint.get("train_config", {}).get("dataset", {})
     summary = {
         "model": classic_id,
         "checkpoint_epoch": int(checkpoint.get("epoch", checkpoint.get("current_epoch"))),
         "dataset": str(path),
         "split": "test",
-        "dataset_scope": "fixed25_v1 exposed development validation",
-        "development_manifest_sha256": manifest["manifest_sha256"],
-        "development_case_ids": [str(value) for value in raw.selected_case_ids],
         "input_normalization": "checkpoint-native global TRAIN statistics and normalize_inputs setting",
         "target_normalization": "checkpoint-native global TRAIN statistics, denormalized before physical metrics",
         "port_mode": "native predicted-port trajectory with complete embedded or configured local surrogate",
-        "scope": "22 repeatedly exposed fixed25_v1 validation cases; stored analytic-wake/shared-grid benchmark units",
         "not_applicable_roles": {},
         "rows": [],
         "solver_attempts": 0,
         "optimizer_updates": 0,
         "native_classic_calls": 0,
+        **panel_summary,
     }
+    if formal_scope is not None:
+        _attach_formal_scope(summary, formal_scope)
     for index in range(len(raw)):
         normalized_sample, reference = normalized[index], raw[index]
         case_id = str(reference["case_id"])
@@ -240,6 +427,8 @@ def classic_field_evaluation(model, checkpoint, output, device, *, classic_id, m
             "fluid_temperature_rmse": metrics["fluid/temperature"]["rmse"],
             "seconds": elapsed}), flush=True)
     summary["equal_case_metrics"] = aggregate_physical(summary["rows"])
+    if formal_scope is not None:
+        summary.update(formal_physical_aggregates(summary["rows"], formal_scope["panel"]))
     summary["physical_eight_rows"] = {
         key: summary["equal_case_metrics"][key]
         for key in ("fluid/u", "fluid/v", "fluid/p", "fluid/omega", "fluid/temperature",
@@ -412,16 +601,28 @@ def classic_counted_response_evaluation(model, checkpoint, output, device, *, cl
     return summary
 
 
-def field_evaluation(model, checkpoint, output, device, *, detailed=True):
-    dataset, manifest, path = load_native_cases(checkpoint)
-    summary = {"checkpoint_epoch": checkpoint["epoch"], "dataset": str(path),
-        "split": "test", "dataset_scope": "development", "channel_order": list(CHANNELS),
-        "development_manifest_binding": manifest, "port_mode": "native_shared_grid_extraction",
-        "scope": "22 repeatedly exposed validation cases; analytic-wake/shared-grid benchmark units",
-        "not_applicable_roles": {"initial_port/outside_temperature": "New response core has no initial-port refinement trajectory",
-                                 "initial_port/h_effective": "New response core has no initial-port refinement trajectory"},
-        "rows": [], "solver_attempts": 0, "optimizer_updates": 0,
-        "old_thermal_wrapper_calls": 0, "native_candidate_calls": 0}
+def field_evaluation(model, checkpoint, output, device, *, detailed=True, formal_panel=None):
+    if formal_panel is None:
+        dataset, manifest, path = load_native_cases(checkpoint)
+        summary = {"checkpoint_epoch": checkpoint["epoch"], "dataset": str(path),
+            "split": "test", "dataset_scope": "development", "channel_order": list(CHANNELS),
+            "development_manifest_binding": manifest, "port_mode": "native_shared_grid_extraction",
+            "scope": "22 repeatedly exposed validation cases; analytic-wake/shared-grid benchmark units",
+            "not_applicable_roles": {"initial_port/outside_temperature": "New response core has no initial-port refinement trajectory",
+                                     "initial_port/h_effective": "New response core has no initial-port refinement trajectory"},
+            "rows": [], "solver_attempts": 0, "optimizer_updates": 0,
+            "old_thermal_wrapper_calls": 0, "native_candidate_calls": 0}
+    else:
+        dataset, formal_scope = load_formal_native_cases(checkpoint, formal_panel)
+        path = Path(formal_scope["dataset_path"])
+        summary = {"checkpoint_epoch": checkpoint["epoch"], "dataset": str(path),
+            "split": "test", "channel_order": list(CHANNELS),
+            "port_mode": "native_shared_grid_extraction",
+            "not_applicable_roles": {"initial_port/outside_temperature": "New response core has no initial-port refinement trajectory",
+                                     "initial_port/h_effective": "New response core has no initial-port refinement trajectory"},
+            "rows": [], "solver_attempts": 0, "optimizer_updates": 0,
+            "old_thermal_wrapper_calls": 0, "native_candidate_calls": 0}
+        _attach_formal_scope(summary, formal_scope)
     for index in range(len(dataset)):
         sample = dataset[index]
         case_id = str(sample["case_id"])
@@ -454,7 +655,10 @@ def field_evaluation(model, checkpoint, output, device, *, detailed=True):
             np.savez_compressed(output / f"{case_id}_fields.npz", **evidence)
         print(json.dumps({"case_id": case_id, "fluid_temperature_rmse": metrics["fluid/temperature"]["rmse"],
                           "seconds": elapsed}), flush=True)
-    summary["primary_excluding_0273"] = aggregate_physical(summary["rows"])
+    if formal_panel is not None:
+        summary.update(formal_physical_aggregates(summary["rows"], formal_panel))
+    else:
+        summary["primary_excluding_0273"] = aggregate_physical(summary["rows"])
     summary["physical_strata"] = {f"M{count}": aggregate_physical([r for r in summary["rows"] if r["module_count"] == count])
         for count in sorted({r["module_count"] for r in summary["rows"]})}
     return summary
@@ -599,11 +803,36 @@ def main(argv=None):
         help="Exact retained classic identity required by a classic mode.")
     parser.add_argument("--development-manifest", type=Path,
         help="Exact shared fixed25_v1 manifest required by a classic mode.")
+    parser.add_argument("--formal-panel", choices=("canonical89", "original90"),
+        help="Opt in to the sealed full-TRAIN R-direct formal validation panel.")
+    parser.add_argument("--formal-reference-checkpoint", type=Path,
+        help="Trusted non-startup R-direct e5000 checkpoint that seals the physical formal panel for classic replay.")
     parser.add_argument("--cohort", choices=("fit", "development", "counted"), default="development")
     parser.add_argument("--atlas-dir", type=Path, default=ROOT / "diagnostics/generated/interactions/physical_response_atlas_20260926/families")
     parser.add_argument("--request", type=Path)
     parser.add_argument("--records-dir", type=Path)
     args = parser.parse_args(argv)
+    if args.formal_panel is not None and args.mode not in ("fields", "classic-fields"):
+        parser.error("--formal-panel is supported only for fields and classic-fields modes.")
+    if args.mode == "classic-fields":
+        if args.classic_id is None:
+            parser.error("classic-fields requires --classic-id")
+        if args.formal_panel is None and args.development_manifest is None:
+            parser.error("classic-fields requires --development-manifest unless --formal-panel is selected")
+        if args.formal_panel is not None and args.formal_reference_checkpoint is None:
+            parser.error("formal classic-fields requires --formal-reference-checkpoint")
+        if args.formal_panel is not None and args.development_manifest is not None:
+            parser.error("--development-manifest cannot be combined with --formal-panel")
+    elif args.mode == "classic-responses":
+        if args.classic_id is None or args.development_manifest is None:
+            parser.error("classic-responses requires --classic-id and --development-manifest")
+    elif args.classic_id is not None or args.development_manifest is not None:
+        parser.error("--classic-id and --development-manifest are only valid in classic modes")
+    if args.formal_reference_checkpoint is not None and not (
+            args.mode == "classic-fields" and args.formal_panel is not None):
+        parser.error("--formal-reference-checkpoint is only valid for formal classic-fields")
+    if args.formal_panel is not None and args.mode == "fields" and args.development_manifest is not None:
+        parser.error("--development-manifest does not apply to formal fields")
     started_unix, started = time(), perf_counter()
     torch.set_num_threads(1)
     output = validate_generated_output(args.output_dir)
@@ -611,24 +840,41 @@ def main(argv=None):
         raise FileExistsError("Preserve measured evidence: choose a fresh output directory.")
     output.mkdir(parents=True, exist_ok=True)
     checkpoint_path = args.checkpoint.expanduser().resolve()
+    formal_scope = None
     if args.mode.startswith("classic-"):
-        if args.classic_id is None or args.development_manifest is None:
-            parser.error("classic modes require --classic-id and --development-manifest")
         from channelthermal.evaluation.loading import load_model
 
         model, checkpoint = load_model(checkpoint_path, torch.device(args.device))
         identity = validate_classic_selection(args.classic_id, checkpoint,
             _file_sha256(checkpoint_path))
+        if args.formal_panel is not None:
+            from channelthermal.source_response import load_source_response_model
+
+            reference_path = args.formal_reference_checkpoint.expanduser().resolve()
+            reference_model, reference_checkpoint = load_source_response_model(reference_path, "cpu")
+            formal_scope = validate_formal_evaluation_checkpoint(reference_checkpoint,
+                panel=args.formal_panel)
+            del reference_model
     else:
         from channelthermal.source_response import load_source_response_model
 
         model, checkpoint = load_source_response_model(checkpoint_path, args.device)
+        if args.formal_panel is not None:
+            formal_scope = validate_formal_evaluation_checkpoint(checkpoint, panel=args.formal_panel)
     model.eval().requires_grad_(False)
     before = model_digest(model)
     if args.mode == "classic-fields":
         summary = classic_field_evaluation(model, checkpoint, output, args.device,
-            classic_id=args.classic_id, manifest_path=args.development_manifest)
+            classic_id=args.classic_id, manifest_path=args.development_manifest,
+            formal_scope=formal_scope)
         summary["selected_checkpoint_identity"] = identity
+        if formal_scope is not None:
+            summary["formal_reference_checkpoint"] = {
+                "path": str(reference_path),
+                "epoch": 5000,
+                "sha256": _file_sha256(reference_path),
+                "response_family": "R-direct",
+            }
     elif args.mode == "classic-responses":
         if args.request is None or args.records_dir is None:
             parser.error("classic-responses requires its exact saved --request and --records-dir")
@@ -637,7 +883,8 @@ def main(argv=None):
             request_path=args.request, records_dir=args.records_dir)
         summary["selected_checkpoint_identity"] = identity
     elif args.mode == "fields":
-        summary = field_evaluation(model, checkpoint, output, args.device, detailed=not args.scalars_only)
+        summary = field_evaluation(model, checkpoint, output, args.device,
+            detailed=not args.scalars_only, formal_panel=args.formal_panel)
     else:
         if args.cohort == "counted":
             if args.request is None or args.records_dir is None:

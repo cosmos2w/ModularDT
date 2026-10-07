@@ -141,6 +141,27 @@ def test_formal_loader_accepts_monitored_thermal_prefix_with_exact_flow_endpoint
     assert model.thermal.core.config["mode"] == "direct"
 
 
+def test_formal_loader_accepts_sealed_retained_milestone_profile_names(tmp_path):
+    thermal_path, thermal, flow_path, flow = _formal_pair(tmp_path)
+    thermal["fit_identity"]["recipe"]["profile"]["profile_name"] += "_retained_milestones"
+    flow["formal_profile"]["profile_name"] += "_retained_milestones"
+    atomic_save_checkpoint_payload(flow_path, flow)
+    thermal["flow_checkpoint_sha256"] = hashlib.sha256(flow_path.read_bytes()).hexdigest()
+    model, _ = load_source_response_model(thermal_path, checkpoint=thermal, device="cpu")
+    assert model.thermal.core.config["mode"] == "direct"
+
+    bad = copy.deepcopy(thermal)
+    bad["fit_identity"]["recipe"]["profile"]["profile_name"] = "unknown_formal_architecture"
+    with pytest.raises(ValueError, match="sealed R-direct"):
+        load_source_response_model(thermal_path, checkpoint=bad, device="cpu")
+
+    flow["formal_profile"]["profile_name"] = "unknown_flow_architecture"
+    atomic_save_checkpoint_payload(flow_path, flow)
+    thermal["flow_checkpoint_sha256"] = hashlib.sha256(flow_path.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="ordinary D-sep flow profile"):
+        load_source_response_model(thermal_path, checkpoint=thermal, device="cpu")
+
+
 @pytest.mark.parametrize("thermal_epoch", [0, 5001])
 def test_formal_loader_rejects_thermal_age_outside_full_profile(tmp_path, thermal_epoch):
     thermal_path, _, _, _ = _formal_pair(tmp_path, thermal_epoch=thermal_epoch, flow_epoch=5000)

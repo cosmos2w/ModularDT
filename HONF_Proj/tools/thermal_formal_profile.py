@@ -18,6 +18,18 @@ FORMAL_TRAIN_SCOPE = "formal_full_train_v1"
 NORMALIZATION_ID = "global_h5_original_train_only_v1"
 
 
+def validate_formal_milestones(checkpointing: Mapping[str, Any], horizon: int) -> None:
+    """Allow explicitly bound retention milestones without changing monitoring."""
+    milestones = checkpointing["milestone_epochs"]
+    interval = checkpointing["monitoring_interval_epochs"]
+    if (not isinstance(milestones, list) or not milestones
+            or any(type(epoch) is not int or epoch <= 0 or epoch > horizon
+                   or epoch % interval for epoch in milestones)
+            or milestones != sorted(set(milestones))
+            or milestones[0] != interval or milestones[-1] != horizon):
+        raise ValueError("Formal milestones must be ordered unique monitoring ages including the first review and endpoint.")
+
+
 def initialize_formal_output(path: str | Path, *, prepare_only: bool) -> Path:
     """Create a formal run directory without overwriting prepared or saved state."""
     output = Path(path).expanduser().resolve()
@@ -36,8 +48,11 @@ def ensure_formal_resume_identity(path: str | Path, filename: str,
         raise ValueError("Unsupported formal output identity filename.")
     output = Path(path)
     identity_path = output / filename
+    # JSON round-trips tuple-valued reader settings as lists. Compare the exact
+    # serialized identity while checkpoint-to-checkpoint checks keep their types.
+    serialized_expected = json.loads(json.dumps(dict(expected)))
     if identity_path.exists():
-        if not identity_path.is_file() or json.loads(identity_path.read_text()) != dict(expected):
+        if not identity_path.is_file() or json.loads(identity_path.read_text()) != serialized_expected:
             raise ValueError("Formal resume rejects an output directory with a different run identity.")
         return
     if next(output.iterdir(), None) is not None:

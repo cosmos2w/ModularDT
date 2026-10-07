@@ -35,6 +35,7 @@ from thermal_formal_profile import (
     formal_train_config,
     initialize_formal_output,
     stats_sha256,
+    validate_formal_milestones,
 )
 
 from honf_runtime.compat import load_trusted_checkpoint, recursive_to_device, set_seed
@@ -81,8 +82,7 @@ def _validate_profile(profile):
             or profile["checkpointing"]["save_best_field"] is not True):
         raise ValueError("Formal D-sep must preserve latest/best state and 100-epoch monitoring checkpoints.")
     horizon = int(profile["schedule"]["horizon_epochs"])
-    if [int(value) for value in profile["checkpointing"]["milestone_epochs"]] != list(range(100, horizon + 1, 100)):
-        raise ValueError("Formal D-sep milestones must be every100 through the declared endpoint.")
+    validate_formal_milestones(profile["checkpointing"], horizon)
     return profile
 
 
@@ -437,6 +437,8 @@ def main(argv=None):
             atomic_write_json(output / "history.json", history)
         else:
             history.append(row)
+            if epoch == 10:
+                _plot_history(history, output / "flow_learning.pdf")
         receipt["case_visits"] += case_visits
         receipt["optimizer_updates"] += updates
         receipt["training_seconds"] += train_seconds

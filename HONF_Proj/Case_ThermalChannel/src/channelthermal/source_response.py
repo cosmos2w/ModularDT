@@ -22,6 +22,14 @@ SOURCE_RESPONSE_ID = "thermal_source_response_v1"
 SOURCE_RESPONSE_CAPABILITY = "channelthermal_shared_grid_affine_source_v1"
 SOURCE_WIDTH, CONTEXT_WIDTH, ENVIRONMENT_WIDTH = 8, 14, 8
 FIELD_ORDER = ("u", "v", "p", "omega", "temperature")
+FORMAL_RESPONSE_PROFILE_NAMES = frozenset({
+    "thermal_source_response_r_direct_full5000_v1",
+    "thermal_source_response_r_direct_full5000_v1_retained_milestones",
+})
+FORMAL_FLOW_PROFILE_NAMES = frozenset({
+    "thermal_source_response_d_sep_full5000_v1",
+    "thermal_source_response_d_sep_full5000_v1_retained_milestones",
+})
 CONTEXT_KEYS = (
     "module_centers",
     "module_present",
@@ -657,12 +665,12 @@ def load_source_response_model(path, device="cpu", checkpoint=None):
                 or recipe.get("identity") != "thermal_source_response_r_direct_formal5000_v1"
                 or recipe.get("mode") != "direct"
                 or recipe.get("preferred_response_family") != "R-direct"
-                or response_profile.get("profile_name") != "thermal_source_response_r_direct_full5000_v1"
+                or response_profile.get("profile_name") not in FORMAL_RESPONSE_PROFILE_NAMES
                 or config["core"].get("mode") != "direct"):
             raise ValueError("Full-TRAIN loading supports only the sealed R-direct research identity.")
         if flow_saved.get("formal_workflow_scope") != "formal_full_train_v1":
             raise ValueError("A formal thermal component requires a formal full-TRAIN flow partner.")
-        if (flow_profile.get("profile_name") != "thermal_source_response_d_sep_full5000_v1"
+        if (flow_profile.get("profile_name") not in FORMAL_FLOW_PROFILE_NAMES
                 or flow_profile != flow_identity.get("profile")
                 or int(flow_profile.get("schedule", {}).get("horizon_epochs", 0)) != 5000):
             raise ValueError("Formal R-direct requires the maintained full5000 ordinary D-sep flow profile.")
