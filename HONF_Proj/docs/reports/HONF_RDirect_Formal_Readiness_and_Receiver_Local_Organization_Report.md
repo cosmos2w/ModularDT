@@ -21,6 +21,8 @@ The four sections below follow the requested presentation order: **1 Accuracy �
 | Organization | Figures 8–11 | What information is grouped, routed or retained by physical source? |
 | Structural response | Figures 12–16 | What happens after moving obstacles or changing heating? |
 
+For an architectural reading, **Sections 3.1.1–3.1.6** summarize each model and trace structural inputs through encoders, organization/context layers and output heads to physical fields, including the classical physical phases and the R-Direct heating Jacobian. The mathematical exposition is in this report; the existing presentation deck contains the sixteen selected figure pages.
+
 ## Comparison contract
 
 The primary population is all **89 canonical source-TEST cases**: original TEST0273 is excluded because its inputs duplicate TRAIN0001. The original90 compatibility panel includes that duplicate and is kept separate. Both were repeatedly exposed to validation and monitoring, so neither is a blind test. Shared physical receivers, fluid masks, near/far definitions, interface/material queries and ordered case IDs are preserved. The fixed detailed layouts are 0277/M3, 0291/M5, 0294/M7 and 0687/M10. References are the existing analytic-wake/shared-grid generator and saved alternatives; there is no independent CFD certification or cross-seed population study.
@@ -130,6 +132,94 @@ HONF1502’s zero associations do not currently remove rectangular reader work, 
 | What a small drawn support means | Small positive weights | Dense learned messages | Exact zero routing, full rectangular execution | Post-fit bounded cover; full prediction retained |
 
 The classical P0 → frozen Stage-A local response → P1 refinement → P2 final organization/field read remains a meaningful global–local decomposition. It couples predicted interfaces to a reusable local model and then corrects those interfaces. The current `SourceResponseThermalModel` does **not** use that chain; the older `DependencySeparatedThermalModel` is a different implementation and should not be confused with the current source-response system. Its flow output is composed alongside the thermal output, not supplied as the thermal reader’s input. Thermal discrete-residual training uses saved TRAIN velocities, not D-sep-predicted velocities. Removing the chain changes the physical modeling assumptions, so lower resource cost does not demonstrate that the former interface design was unnecessary.
+
+#### 3.1.1 Shared notation: structure in, physical fields out
+
+The following equations describe the **checkpoint-bound architectures compared here**, at the level of learned blocks rather than every affine layer. They explain how Figure 8 becomes a field reconstruction. Let the input structure be a masked module set, prescribed material and operating conditions, and heating; let the output be the field at requested physical coordinates:
+
+$$\begin{array}{l}\mathcal S=(\{(\mathbf c_i,m_i,h_i)\}_{i=1}^{M_{\mathrm{pad}}},\boldsymbol\mu,\mathbf b),\\ \mathbf x_q\in\Omega,\\ \widehat{\mathbf y}(\mathbf x_q)=[\hat u,\hat v,\hat p,\hat\omega,\hat T](\mathbf x_q).\end{array}$$
+
+Here, center coordinates are $\mathbf c_i$, presence masks are $m_i$, heating powers are $h_i$, $\boldsymbol\mu$ contains material coefficients/radius, and $\mathbf b$ contains prescribed conditions such as Reynolds number, inlet velocity and domain lengths. Padded absent modules contribute zero. Environment tokens represent spatial samples and input-derived geometry/context, with coordinates $\mathbf e_j$ and quadrature weights $w_j$; they are not observed target fields. Encoders map these inputs to module states $\mathbf z_i$, environment states $\mathbf v_j$ and global context $\mathbf g$; Fourier/relative-coordinate features supply the receiver geometry. Below, $E,\Phi,\Psi,D$ denote learned neural blocks, and $\varepsilon$ denotes a numerical denominator safeguard. These equations describe neural reconstruction, not an independent PDE solve or a proof that its residual vanishes.
+
+| Model | Input-to-intermediate path | Receiver/output path | One-sentence interpretation |
+|---|---|---|---|
+| HONF1401 | Encoded modules/environment → six learned hyperedge summaries | Query-to-hyperedge routing plus enabled pairwise/global/local contexts → field heads | Compress information into latent interaction channels, then read them spatially. |
+| Dense1804 | Encoded modules/environment → dense MM/ME/EM contextual messages | Fine module messages and environment attention, plus coarse/local branches → field heads | Preserve contextual fine sources and read them directly at each receiver. |
+| HONF1502 | Fine contextual sources → twelve sparse-incidence groups with 16-dimensional controls | Sparse query routes control fine-source messages/attention → field heads | Use groups to control access to source values, rather than replace every source by a group value. |
+| R-Direct + D-sep | Heat-independent layout context → physical-source temperature kernels; separate flow states | Kernel × physical heating → shared temperature grid/role extraction; flow decoder → composition | Separate nonlinear geometry preparation from linear heating application. |
+
+#### 3.1.2 Classical physical phases: organization is inside a larger predictor
+
+For **1401, 1804 and 1502**, the organization/reader blocks below operate within the retained thermal wrapper. Use $\mathcal O_r$ for phase-r organization, $p^{(r)}$ for interface-port tokens, $L_A$ for the frozen local Stage-A model, and $F$ for fusion of its response into module states. The deployed predicted-port path with one refinement is:
+
+$$\begin{array}{l}\mathcal S\xrightarrow{E}(\mathbf z^{(0)},\mathbf v,\mathbf g)\xrightarrow{\mathcal O_0,P_{\mathrm{port}}}p^{(0)},\\ \ell^{(0)}=L_A(\boldsymbol\mu,\mathbf h,p^{(0)}),\\ \mathbf z^{(1)}=F(\mathbf z^{(0)},\ell^{(0)}).\end{array}$$
+
+$$\begin{array}{l}o^{(1)}=D_{\mathrm{outside}}(\mathcal O_1(\mathbf z^{(1)},\mathbf v,\mathbf g)),\\ p^{(1)}=R_{\mathrm{port}}(\mathbf z^{(1)},p^{(0)},o^{(1)},\ell^{(0)}),\\ \ell^{(1)}=L_A(\boldsymbol\mu,\mathbf h,p^{(1)}),\\ \mathbf z^{(2)}=F(\mathbf z^{(0)},\ell^{(1)}).\end{array}$$
+
+$$\begin{array}{l}\widehat{\mathbf y}_{\mathrm{norm}}(\mathbf x)=D_{\mathrm{field}}(\mathbf x,\mathcal O_2(\mathbf z^{(2)},\mathbf v,\mathbf g)),\\ \widehat{\mathbf y}_{\mathrm{phys}}=\boldsymbol\mu_y+\boldsymbol\sigma_y\odot\widehat{\mathbf y}_{\mathrm{norm}}.\end{array}$$
+
+Thus P0 predicts provisional ports, P1 reads outside temperatures after the first local response and refines the ports, and P2 reads the final field after refreshing the local response. Local solid/interface predictions also use the local-response outputs and wrapper assembly. $\boldsymbol\mu_y,\boldsymbol\sigma_y$ are checkpoint-native TRAIN field statistics, distinct from material parameters $\boldsymbol\mu$. Frozen Stage-A parameters still permit gradients through their inputs during training. The three models differ in how $\mathcal O_r,D$ organize/read information, while retaining this physical coupling chain.
+
+#### 3.1.3 HONF1401: latent hyperedge summaries and query reads
+
+**Summary:** each present module and each environment token distributes information across six latent hyperedges. For a given physical phase, let $A^M\in\mathbb R^{M_{\mathrm{pad}}\times6}$ and $A^E\in\mathbb R^{N_E\times6}$ be learned memberships; softmax normalizes each present source row over hyperedges. A simplified but implementation-faithful summary/read is:
+
+$$\begin{array}{l}A^M_{ik}=m_i\,\operatorname{softmax}_k(a^M_{ik}),\\ A^E_{jk}=\operatorname{softmax}_k(a^E_{jk}),\\ \mathbf H_k=\Phi_H\!\left(\frac{\sum_i A^M_{ik}\Phi_M(\mathbf z_i)}{\sum_i A^M_{ik}+\varepsilon}+\frac{\sum_j w_j A^E_{jk}\Phi_E(\mathbf v_j)}{\sum_j w_j A^E_{jk}+\varepsilon}\right).\end{array}$$
+
+$$\begin{array}{l}\alpha_{qk}=\operatorname{softmax}_k\!\left(\frac{Q(\mathbf x_q)^\top K(\mathbf H_k)}{\sqrt d}+b_{qk}^{\mathrm{geom}}\right),\\ \mathbf c_H(\mathbf x_q)=\sum_{k=1}^{6}\alpha_{qk}V(\mathbf H_k).\end{array}$$
+
+$$\widehat{\mathbf y}_{\mathrm{norm}}(\mathbf x_q)=D_{1401}\!\left(\operatorname{LN}[\mathbf c_H+\mathbf c_{\mathrm{pair}}+\mathbf c_{\mathrm{global}}+\mathbf c_{\mathrm{direct}}+\mathbf c_{\mathrm{near}}]\right).$$
+
+The last equation includes the enabled auxiliary contexts, with their projections/gates absorbed into $\mathbf c$; it deliberately avoids portraying the six hyperedges as the entire predictor. Module–environment context enters the source states, and learned geometry/mechanism features enter routing and pairwise reads. The output heads predict field channels (including any configured mean/residual split), followed by wrapper assembly and denormalization. H0–H5 are latent slots, not heater identities, and positive normalized routes need not be physical transport fractions.
+
+#### 3.1.4 Dense1804: contextual fine sources and dense receiver reads
+
+**Summary:** retain individual fine module/environment states and contextualize them with typed dense messages. MM denotes module→module, ME environment→module, and EM module→environment. Writing $N_M=\sum_i m_i$, $\delta_{is}$ for relative-coordinate features, and folding global conditioning into $\Psi$, one preparation pass has the form:
+
+$$\begin{array}{l}\mathbf a_i^{MM}=\frac{\sum_{l\ne i}m_l\Psi_{MM}(\mathbf z_i,\mathbf z_l,\delta_{il})}{1+N_M},\\ \mathbf a_i^{ME}=\frac{\sum_j w_j\Psi_{ME}(\mathbf z_i,\mathbf v_j,\delta_{ij})}{\sum_jw_j+\varepsilon},\\ \mathbf a_j^{EM}=\frac{\sum_i m_i\Psi_{EM}(\mathbf v_j,\mathbf z_i,\delta_{ji})}{1+N_M}.\end{array}$$
+
+$$\begin{array}{l}\mathbf z'_i=m_i[\mathbf z_i+\Phi_M(\mathbf z_i,\mathbf a_i^{MM},\mathbf a_i^{ME},\mathbf g)],\\ \mathbf v'_j=\mathbf v_j+\Phi_E(\mathbf v_j,\mathbf a_j^{EM},\mathbf g).\end{array}$$
+
+At each receiver, fine module messages and multihead environment attention supply the main context. The following attention expression shows one head; actual head concatenation/output projection is absorbed into $\Phi_E^{\mathrm{out}}$:
+
+$$\begin{array}{l}\mathbf c_M(\mathbf x_q)=\Phi_M^{\mathrm{out}}\!\left(\frac{\sum_i m_i\Psi_{QM}(\mathbf z'_i,\mathbf x_q-\mathbf c_i,\mathbf g)}{1+N_M}\right),\\ a_{qj}=\operatorname{softmax}_j\!\left(\frac{Q_q^\top K_j}{\sqrt{d_h}}+b_{qj}^{\mathrm{geom}}+\log w_j\right),\\ \mathbf c_E(\mathbf x_q)=\Phi_E^{\mathrm{out}}\!\left(\sum_j a_{qj}V_j\right).\end{array}$$
+
+$$\widehat{\mathbf y}_{\mathrm{norm}}(\mathbf x_q)=D_{\mathrm{modern}}(\mathbf x_q,\mathbf c_M,\mathbf c_E,\mathbf c_{\mathrm{coarse}},\mathbf c_{\mathrm{local}},\mathbf g).$$
+
+The field heads read the fused main $(\mathbf c_M,\mathbf c_E)$, eight-token coarse, local and global contexts; their learned projections/gates are omitted here for readability. This preparation/read repeats within the classical phases. There is no learned hyperedge identity to interpret: fine source values, geometry and nonlinear contextual messages carry the interactions, and every valid source participates in the dense computation.
+
+#### 3.1.5 HONF1502: sparse group controls over fine-source values
+
+**Summary:** use twelve group slots to sparsify associations while keeping the Dense1804-style fine source states. Source memberships $B^M,B^E$ use entmax15, query routes $\alpha_q$ use sparsemax, and the final environment-membership refinement uses sparsemax in this literal 1502 configuration. These normalizers can produce exact zeros. Group controls $\mathbf t_k\in\mathbb R^{16}$ are learned from membership-weighted module/environment moments, with a final tanh; they are not the full-width physical source values. For either source type $s$:
+
+$$\begin{array}{l}\rho_{qs}=\sum_{k=1}^{12}\alpha_{qk}B_{sk},\\ \boldsymbol\zeta_{qs}=\sum_{k=1}^{12}\alpha_{qk}B_{sk}\mathbf t_k.\end{array}$$
+
+Here $\rho$ controls source access and $\boldsymbol\zeta$ supplies a source-specific control moment inside the nonlinear module message or environment score modulation. For normalized source measures $\omega_i^M=m_i/N_M$, define the module weighted sum and overlap mass:
+
+$$\begin{array}{l}\mathbf U_q=\sum_i\omega_i^M\rho_{qi}\Psi_{QM}(\mathbf z'_i,\mathbf x_q-\mathbf c_i,\boldsymbol\zeta_{qi}),\\ \kappa_q^M=\sum_i\omega_i^M\rho_{qi},\\ \mathbf c_M(q)=12\left[\frac{N_M}{1+N_M}W_M\mathbf U_q+\kappa_q^M\mathbf b_M\right].\end{array}$$
+
+For environment tokens, the reader adds $\log\rho_{qj}+\log\omega_j^E$ to the controlled content/geometry score and masks $\rho_{qj}=0$ before softmax. Its output is scaled by $12\kappa_q^E$, where $\kappa_q^E=\sum_j\omega_j^E\rho_{qj}$; unsupported rows return zero. The final field heads follow the $D_{\mathrm{modern}}$ structure above, with separately trained weights, fusing these controlled fine-source contexts with coarse/local/global paths and the classical wrapper. Consequently, a sparse group route is neither a low-rank temperature factorization nor evidence that execution skipped the corresponding rectangular tensor rows. The saved implementation measured here retains that rectangular work.
+
+#### 3.1.6 R-Direct + D-sep: nonlinear layout preparation, linear heating application
+
+**Summary:** remove the classical phases and construct two parallel predictors. The D-sep input excludes heating; its encoded geometry/operating context passes through two source–source updates, followed by a receiver-relative source read, a background branch and a four-channel decoder:
+
+$$\begin{array}{l}\mathbf f_i^{(0)}=E_F(\mathbf c_i,\boldsymbol\mu,\mathbf b,m_i),\\ \mathbf f_i^{(r+1)}=m_i\!\left[\mathbf f_i^{(r)}+\Phi_F\!\left(\mathbf f_i^{(r)},\frac{\sum_{l\ne i}m_l\Psi_F(\mathbf f_i^{(r)},\mathbf f_l^{(r)},\mathbf c_i-\mathbf c_l)}{\max(N_M-1,1)}\right)\right],\\ r=0,1.\end{array}$$
+
+$$[\hat u,\hat v,\hat p,\hat\omega]_{\mathrm{norm}}(\mathbf x)=D_F\!\left(\frac{\sum_i m_i\Psi_{QF}(\mathbf f_i^{(2)},\mathbf x-\mathbf c_i)}{\max(N_M,1)}+\mathbf c_{\mathrm{background}}(\mathbf x,\mathbf b),\mathbf x,\mathbf b\right).$$
+
+The thermal branch independently encodes heating-free source/environment inputs, then performs two rounds of source–source, environment→source and source→environment contextual updates. Its near and far heads predict **one scalar coefficient per physical heater per grid receiver**, using these whole-layout states, global context and receiver-relative geometry:
+
+$$\begin{array}{l}K_i(\mathbf x;\mathcal G)=\frac{m_i}{s_h}\left[\beta_i(\mathbf x)K_i^{\mathrm{near}}(\mathbf x;\mathcal G)+(1-\beta_i(\mathbf x))K_i^{\mathrm{far}}(\mathbf x;\mathcal G)\right],\\ \hat T_{\mathrm{grid}}(\mathbf x)=\sum_i K_i(\mathbf x;\mathcal G)h_i.\end{array}$$
+
+Here $\mathcal G=(\{\mathbf c_i,m_i\},\boldsymbol\mu,\mathbf b)$ excludes heating, $s_h$ is the frozen forcing scale, and the smooth near weight $\beta_i$ equals one within two radii and zero beyond four radii. The benchmark's zero inlet/wall/initial temperature makes the offset zero; this is a capability restriction, not a claim that arbitrary boundary conditions have zero background. Native stencil extraction $\mathcal E_r$ turns the same learned grid into fluid, solid, surface and outside temperatures; q/effective-h are subsequent algebraic proxies:
+
+$$\begin{array}{l}\hat T_r=\mathcal E_r\hat T_{\mathrm{grid}},\\ \hat q=-\frac{k_{\mathrm{harm}}}{\delta}(\hat T_{\mathrm{outside}}-\hat T_{\mathrm{surface}}),\\ \widehat{\mathbf y}(\mathbf x)=[\operatorname{denorm}(D_F)(\mathbf x),\mathcal E_{\mathrm{fluid}}\hat T_{\mathrm{grid}}(\mathbf x)].\end{array}$$
+
+Flow is denormalized using its TRAIN statistics; thermal extraction is already in native temperature units after forcing-scale conversion. The thermal branch does not consume predicted flow in this compared model. At fixed $\mathcal G$, its temperature Jacobian is exactly the prepared kernel matrix, $\partial\hat T/\partial h_i=K_i$, giving $\Delta\hat T=K\Delta\mathbf h$. Geometry/material/operating changes require rebuilding K and the flow states. This exact model identity explains reusable heating responses and source-local covers; it does not guarantee that each learned column equals a true physical Green's function.
+
+**Implementation anchors.** The classical phase map follows [ChannelThermalModel](../../Case_ThermalChannel/src/channelthermal/model.py); the organization/read equations follow [legacy organizer](../../src/honf_forward_core/organizer.py), [legacy decoder](../../src/honf_forward_core/decoder.py), [DensePairwiseField](../../src/honf_forward_core/interface_fields/dense_pairwise.py), [group-control router](../../src/honf_forward_core/interface_fields/group_control_router.py) and [group-control reader](../../src/honf_forward_core/interface_fields/group_control_pairwise.py). The composed response follows [D-sep adapter](../../Case_ThermalChannel/src/channelthermal/dependency_flow.py), [geometry flow reader](../../src/honf_forward_core/interface_fields/geometry_flow_field.py), [source-response operator](../../src/honf_forward_core/interface_fields/source_response_operator.py) and [native thermal adapter](../../Case_ThermalChannel/src/channelthermal/source_response.py). Configuration-specific slot counts, normalizers and active branches refer to the saved runs in Appendix B; these links locate implementation families, whose later options need not belong to those checkpoints.
+
 
 ### 3.2 Measured organization on the same physical layout
 
