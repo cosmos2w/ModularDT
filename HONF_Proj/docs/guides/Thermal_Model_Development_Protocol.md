@@ -6,7 +6,7 @@ This changes the development budget, not the native Thermal physics. Frozen Stag
 
 ## Fixed membership
 
-The read-only generated manifest is [fixed25_v1/manifest.json](/data/wanglz/ModularDT/thermal_development/fixed25_v1/manifest.json). It references the existing [packed dataset](/data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5); it does not copy cases or field arrays.
+The read-only generated manifest is [fixed25_v1/manifest.json](../../../../../../../../data/wanglz/ModularDT/thermal_development/fixed25_v1/manifest.json). It references the existing [packed dataset](../../../../../../../../data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5); it does not copy cases or field arrays.
 
 - Selection seed: `20261004`; model/query seed: `0`.
 - Semantic manifest SHA256: `933b0138ba2f8447a1ecadfe31fd0bb2cb4a05607d3ac3d9f0dc79419f196044`.
@@ -30,7 +30,7 @@ The catalog record supplies the native dataset ID/fingerprint; the packed HDF5 d
 | 12 | 88 | 22 | 0 | 0 |
 | **Total** | **600** | **150** | **89** | **22** |
 
-Selection allocates counts proportionally by M using largest remainders. Within each M it preserves available Reynolds bands `Re≤70`, `70<Re≤130`, and `Re>130`, then samples without replacement across within-band total-heat rank terciles where the quota permits. All ten training M categories and all four validation M categories remain represented. All available M/Re bands are represented in this manifest. A one- or two-case stratum cannot represent all three heat bins; full exact-Re/layout coverage is not claimed. Selection reads physical inputs and original partitions only, never fields, losses or model errors. The complete strata table is in the local [generation receipt](/data/wanglz/ModularDT/thermal_development/fixed25_v1/generation_receipt.md).
+Selection allocates counts proportionally by M using largest remainders. Within each M it preserves available Reynolds bands `Re≤70`, `70<Re≤130`, and `Re>130`, then samples without replacement across within-band total-heat rank terciles where the quota permits. All ten training M categories and all four validation M categories remain represented. All available M/Re bands are represented in this manifest. A one- or two-case stratum cannot represent all three heat bins; full exact-Re/layout coverage is not claimed. Selection reads physical inputs and original partitions only, never fields, losses or model errors. The complete strata table is in the local [generation receipt](../../../../../../../../data/wanglz/ModularDT/thermal_development/fixed25_v1/generation_receipt.md).
 
 The fixed validation set is repeatedly exposed development evidence. Report per-field and per-M metrics with sample counts; four or six cases per validation M give limited precision. Do not repeatedly redraw a better-looking validation cohort. Keep full canonical validation for a final formal check, with original 90-case compatibility results separately labelled if needed.
 
@@ -50,7 +50,7 @@ Case/primary-query work falls to approximately one quarter; actual training spee
 
 ## Preparation and manual launch
 
-Use the `ModularDT` environment from the project directory. The tracked [selection specification](../../src/config_core/data/thermal_development25_v1.json), [manifest builder](../../tools/thermal_development_split.py), [profile helper](../../tools/thermal_development.py) and [development templates](../../src/config_core/forward/thermal_development/) are durable. Generated memberships, bound configurations and receipts stay outside Git. Templates are deliberately unbound; materialize them before launch.
+Use the `ModularDT` environment from the project directory. The tracked [selection specification](../../src/config_core/data/thermal_development25_v1.json), [manifest builder](../../tools/thermal_development_split.py), [profile helper](../../tools/thermal_development.py) and [development templates](../../src/config_core/forward/thermal_development) are durable. Generated memberships, bound configurations and receipts stay outside Git. Templates are deliberately unbound; materialize them before launch.
 
 The current manifest already exists. On a fresh machine, create it once with the same source/spec; the tool refuses to overwrite an existing manifest:
 
@@ -58,16 +58,16 @@ The current manifest already exists. On a fresh machine, create it once with the
 conda activate ModularDT
 cd /home/wanglz/Desktop/src/ModularDT/HONF_Proj
 python tools/thermal_development_split.py \
-  --dataset /data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5 \
-  --output /data/wanglz/ModularDT/thermal_development/fixed25_v1/manifest.json
+  --dataset ../../../../../../../../data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5 \
+  --output ../../../../../../../../data/wanglz/ModularDT/thermal_development/fixed25_v1/manifest.json
 ```
 
 For example, prepare only Tree, then inspect its launch. `--first-run-id` is the first ID of the maintained five-arm mapping; 3101 maps Tree to **3103**. Choose unused IDs when starting actual work. Preparation writes configurations and prints dry-run commands; it launches no models:
 
 ```bash
 python tools/thermal_development.py --arm H-tree \
-  --manifest /data/wanglz/ModularDT/thermal_development/fixed25_v1/manifest.json \
-  --dataset /data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5 \
+  --manifest ../../../../../../../../data/wanglz/ModularDT/thermal_development/fixed25_v1/manifest.json \
+  --dataset ../../../../../../../../data/wanglz/ModularDT/1_ChannelThermal/Processed_ChannelThermal_Dataset/packed_dataset.h5 \
   --first-run-id 3101 --stage 100 \
   --output-dir /data/wanglz/ModularDT/thermal_development/tree_preparation_e100
 CUDA_VISIBLE_DEVICES=1 python train.py \
@@ -99,6 +99,6 @@ Frozen heat inference and shared benchmark/topology loaders inherit the checkpoi
 
 ## Verification record
 
-The local [CPU verification receipt](/data/wanglz/ModularDT/thermal_development/fixed25_v1/cpu_loader_verification.json) records an actual selected-train normalization fit and native loader traversal: 150 unique training cases, 22 unique validation cases, 19 microbatches, four optimizer boundaries, 153,600/22,528 primary queries and one shared train normalizer. With one CPU thread, fitting took 0.457 s, training-data traversal 0.729 s and validation-data traversal 0.102 s. These are data-path measurements; no native model, optimizer update or checkpoint was executed.
+The local [CPU verification receipt](../../../../../../../../data/wanglz/ModularDT/thermal_development/fixed25_v1/cpu_loader_verification.json) records an actual selected-train normalization fit and native loader traversal: 150 unique training cases, 22 unique validation cases, 19 microbatches, four optimizer boundaries, 153,600/22,528 primary queries and one shared train normalizer. With one CPU thread, fitting took 0.457 s, training-data traversal 0.729 s and validation-data traversal 0.102 s. These are data-path measurements; no native model, optimizer update or checkpoint was executed.
 
 The combined CPU suite passed **199 tests**; two CUDA fixture tests were skipped and six native-forward/resource tests were deliberately excluded. A synthetic missing-mask fixture emitted its expected compatibility warning. Tests cover deterministic M/Re/heat stratification, source/membership tampering, excluded-case isolation, normalization leakage and Stage-A invariance, full selected-case accounting, checkpoint cadence/best selection, resume identity, actual native profile composition, profile fairness and bounded evaluation scope. All five actual bound development profiles passed metadata-only native dry-runs and reported 150/22 selected cases, four optimizer batches and horizon 1,000. Their proposed run output root remained absent. These checks validate preparation separately from scientific training completion. Generated manifests, profiles, receipts and future scientific outputs remain local under the repository upload rule.

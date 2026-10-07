@@ -1,6 +1,6 @@
 # Manual Thermal 5,000-epoch recipes after the completed 500 review
 
-The user closed this campaign at 500 epochs on 2026-10-04. **No further campaign training or 5,000-epoch launch was performed.** The [final conclusions](../reports/HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md) select one exploratory organizer, **H-tree**, for a possible later manual experiment: it is the strongest new organizer on physical temperature fidelity and has useful conditional graph actions. Fresh Dense is more accurate; Tree has no measured sparse speedup and its inverse readiness is mixed. Longer training is not established to help.
+The user closed this campaign at 500 epochs on 2026-10-04. **No further campaign training or 5,000-epoch launch was performed.** The [final conclusions](../reports/_bk/20261004_030300Z_HONF_Shared_Core_Thermal_500_Epoch_Conclusions.md) select one exploratory organizer, **H-tree**, for a possible later manual experiment: it is the strongest new organizer on physical temperature fidelity and has useful conditional graph actions. Fresh Dense is more accurate; Tree has no measured sparse speedup and its inverse readiness is mixed. Longer training is not established to help.
 
 Continuation and fresh seed 0 below are two alternatives for the same architecture, not independent finalists. Existing Local exact 1000 preparations remain supplementary historical artifacts.
 

@@ -19,7 +19,7 @@ The opt-in [Thermal source-response interface](docs/guides/Thermal_Source_Respon
 prepares geometry-dependent temperature kernels and applies heating separately,
 with a frozen heat-independent flow reader. Its independently trained direct
 and grouped readouts, native role extraction and measured limitations are
-documented in the [consolidation and maturation report](docs/reports/HONF_Response_Operator_Consolidation_and_Maturation_Report.md).
+documented in the [consolidation and maturation report](docs/reports/_bk/20261006_191613Z_HONF_Response_Operator_Consolidation_and_Maturation_Report.md).
 
 ## 1. Quick start
 
@@ -395,7 +395,7 @@ The reusable compatibility references are:
 ## 11. Documentation and extension boundary
 
 - [Model_Explain.md](Model_Explain.md): current model mathematics and code map.
-- [docs/architecture/](docs/architecture/): maintained ownership and
+- [docs/architecture](docs/architecture): maintained ownership and
   compatibility contracts.
 - [configuration.md](docs/configuration.md): strict configuration rules.
 - [checkpoints.md](docs/checkpoints.md): checkpoint and resume

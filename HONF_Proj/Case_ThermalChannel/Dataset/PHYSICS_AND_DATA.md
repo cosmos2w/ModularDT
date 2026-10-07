@@ -41,7 +41,7 @@ temperature, `h_effective` and flux proxy are distinct quantities; none may be
 silently substituted for another.
 
 The source and saved-state audit is recorded in
-[the dependency and thermal-response audit](../../docs/reports/HONF_Dependency_Correct_Source_Audit.md).
+[the dependency and thermal-response audit](../../docs/reports/_bk/20261006_154229Z_HONF_Dependency_Correct_Source_Audit.md).
 
 The global learned field is ordered as:
 

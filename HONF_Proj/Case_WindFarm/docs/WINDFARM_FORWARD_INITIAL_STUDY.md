@@ -351,7 +351,7 @@ count; native output count affects requested query work rather than creating
 millions of environmental tokens. The previously recorded chunk/repeat checks
 establish the numerical consistency of chunk 1024 versus training chunk 128.
 
-Raw timings, every repeat and memory measurements: [classic](/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_study/timing/classic/timing_evidence.json), [dense](/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_study/timing/dense/timing_evidence.json).
+Raw timings, every repeat and memory measurements: [classic](../diagnostics/generated/forward_velocity_study/timing/classic/timing_evidence.json), [dense](../diagnostics/generated/forward_velocity_study/timing/dense/timing_evidence.json).
 
 ## Completed prediction evidence
 
@@ -489,16 +489,16 @@ in 3-D. Dense figures show environmental attention and context norms. Only
 512 routing receivers are retained per case. Neither plot identifies physical
 edge labels; a context norm is not a calibrated physical contribution.
 
-- [classic: native_z_slice.png](/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_study/native_case_checks/classic/gen_0142_wd270/native_z_slice.png)
-- [classic: native_y_slice.png](/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_study/native_case_checks/classic/gen_0142_wd270/native_y_slice.png)
-- [classic: native_x_slice.png](/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_study/native_case_checks/classic/gen_0142_wd270/native_x_slice.png)
-- [classic: vertical_profile.png](/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_study/native_case_checks/classic/gen_0142_wd270/vertical_profile.png)
-- [classic: routing.png](/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_study/native_case_checks/classic/gen_0142_wd270/routing.png)
-- [dense: native_z_slice.png](/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_study/native_case_checks/dense/gen_0142_wd270/native_z_slice.png)
-- [dense: native_y_slice.png](/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_study/native_case_checks/dense/gen_0142_wd270/native_y_slice.png)
-- [dense: native_x_slice.png](/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_study/native_case_checks/dense/gen_0142_wd270/native_x_slice.png)
-- [dense: vertical_profile.png](/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_study/native_case_checks/dense/gen_0142_wd270/vertical_profile.png)
-- [dense: routing.png](/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_study/native_case_checks/dense/gen_0142_wd270/routing.png)
+- [classic: native_z_slice.png](../diagnostics/generated/forward_velocity_study/native_case_checks/classic/gen_0142_wd270/native_z_slice.png)
+- [classic: native_y_slice.png](../diagnostics/generated/forward_velocity_study/native_case_checks/classic/gen_0142_wd270/native_y_slice.png)
+- [classic: native_x_slice.png](../diagnostics/generated/forward_velocity_study/native_case_checks/classic/gen_0142_wd270/native_x_slice.png)
+- [classic: vertical_profile.png](../diagnostics/generated/forward_velocity_study/native_case_checks/classic/gen_0142_wd270/vertical_profile.png)
+- [classic: routing.png](../diagnostics/generated/forward_velocity_study/native_case_checks/classic/gen_0142_wd270/routing.png)
+- [dense: native_z_slice.png](../diagnostics/generated/forward_velocity_study/native_case_checks/dense/gen_0142_wd270/native_z_slice.png)
+- [dense: native_y_slice.png](../diagnostics/generated/forward_velocity_study/native_case_checks/dense/gen_0142_wd270/native_y_slice.png)
+- [dense: native_x_slice.png](../diagnostics/generated/forward_velocity_study/native_case_checks/dense/gen_0142_wd270/native_x_slice.png)
+- [dense: vertical_profile.png](../diagnostics/generated/forward_velocity_study/native_case_checks/dense/gen_0142_wd270/vertical_profile.png)
+- [dense: routing.png](../diagnostics/generated/forward_velocity_study/native_case_checks/dense/gen_0142_wd270/routing.png)
 
 ## Representation and sampling diagnostics
 
@@ -566,7 +566,7 @@ velocity baseline at this budget. It has 3,628,551 trainable parameters versus
 versus 2264.434 MiB. Training wall times came from different contended GPUs
 and do not establish controlled speed or efficiency superiority.
 
-![Training and validation learning curves](/home/wanglz/Desktop/src/ModularDT/HONF_Proj/Case_WindFarm/diagnostics/generated/forward_velocity_study/paired_comparison/learning_curves.png)
+![Training and validation learning curves](../diagnostics/generated/forward_velocity_study/paired_comparison/learning_curves.png)
 
 ## Artifacts, commands and departures
 

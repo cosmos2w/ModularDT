@@ -278,7 +278,7 @@ GPU-slot hours (GPU 1 1.1206/GPU 2 4.0205), including failed/censored attempts
 and the 109.49-second dense pause. Probes/evaluation/inverse have separate
 scopes and active GPU compute hours remain unmeasured. Full receipts,
 tails, per-M results and selected measured figures are in the
-[completed development report](../reports/HONF_Tree_Faithfulness_Fixed25_Development_Report.md)
+[completed development report](../reports/_bk/20261004_091519Z_HONF_Tree_Faithfulness_Fixed25_Development_Report.md)
 and ignored local campaign evidence.
 
 ## Resources and closeout

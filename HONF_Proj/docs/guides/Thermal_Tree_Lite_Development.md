@@ -2,7 +2,7 @@
 
 The authorized campaign is complete. Tree and Pair reached 1,000 epochs,
 Fine reached 500, and both Tree and Pair select their saved epoch-900 weights.
-The [final measured report](../reports/HONF_Tree_Lite_Execution_and_Maturation_Report.md)
+The [final measured report](../reports/_bk/20261005_000328Z_HONF_Tree_Lite_Execution_and_Maturation_Report.md)
 contains the all-22 comparisons, six inspected figures and measured misses.
 The reviews below retain their dated planning state; their earlier pending
 statements do not authorize another continuation.

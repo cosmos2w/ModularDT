@@ -23,7 +23,10 @@ HONF_Proj/HONF_Forward_Upgrade_Codex_Goal_Plan.md
 /1_Demo_ChannelThermal/
 /Unified_Forward_Model_0/
 /HONF_Proj/diagnostics/
-/HONF_Proj/UpgradePlan/
+# Version reviewed work-plan Markdown; keep all other plan-directory artifacts local.
+/HONF_Proj/UpgradePlan/**
+!/HONF_Proj/UpgradePlan/**/
+!/HONF_Proj/UpgradePlan/**/*.md
 /HONF_Proj/Trained_Results/
 /HONF_Proj/docs/reports/run1503_v3_organizer_diagnostics/
 /HONF_Proj/tools/diagnostics/render_run1505_*.py
