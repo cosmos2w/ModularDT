@@ -36,8 +36,10 @@ FORMAL_SCHEMA_VERSION = 1
 FORMAL_DATASET_SCOPE = "formal_full_train_v1"
 FORMAL_ARCHITECTURE = {"hidden": 64, "message": 64, "background_mode": True}
 REFINEMENT_ARCHITECTURE = {"base_width": 16, "router_hidden": 32}
+SUPPORTED_FORMAL_SAMPLING_VERSION = "case_epoch_v1"
+SUPPORTED_FORMAL_SAMPLING_VERSIONS = ("legacy_packed_v1", SUPPORTED_FORMAL_SAMPLING_VERSION)
 
-from channelthermal.training.unified_task import ThermalRefinementTask
+from channelthermal.training.unified_task import ThermalRefinementTask, _resolve_query_budget
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -60,6 +62,12 @@ def _tensor_state_sha256(model: torch.nn.Module) -> str:
 
 def _json_stats(stats: Mapping[str, Any]) -> dict[str, Any]:
     return {name: np.asarray(value, dtype=np.float32).tolist() for name, value in sorted(stats.items())}
+
+
+def _validate_formal_sampling_version(value: Any) -> str:
+    if value not in SUPPORTED_FORMAL_SAMPLING_VERSIONS:
+        raise ValueError("Thermal formal sampling version must be legacy_packed_v1 or case_epoch_v1.")
+    return str(value)
 
 
 def _load_formal_sources(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -244,6 +252,11 @@ def prepare_recipe(config: Mapping[str, Any], *, metadata_only: bool = False) ->
     context = metadata["context"]
     flow = context["flow"]
     profile = metadata["profile"]
+    training_budget, query_budget_override = _resolve_query_budget(
+        profile["budget"], config.get("query_budget_override"))
+    sampling_version = config.get("sampling_version")
+    if sampling_version is not None:
+        sampling_version = _validate_formal_sampling_version(sampling_version)
     dataset_path = context["dataset_path"]
     stats = metadata["saved_normalization_stats"]
     normalization_binding = dict(metadata["normalization_binding"])
@@ -349,7 +362,7 @@ def prepare_recipe(config: Mapping[str, Any], *, metadata_only: bool = False) ->
         "fresh_refined_state_sha256": fresh_model_hash,
         "architecture": {"core": context["core_config"], "adapter": context["adapter_config"],
                          "refinement": REFINEMENT_ARCHITECTURE},
-        "budget": dict(profile["budget"]),
+        "budget": training_budget,
         "schedule": {"total_epochs": 5000, "hold_through_epoch": 2000, "final_lr": 3.0e-6,
                      "common_stages": {"warmup_epochs": 500, "open_through_epoch": 600,
                                        "soft_through_epoch": 800},
@@ -367,6 +380,14 @@ def prepare_recipe(config: Mapping[str, Any], *, metadata_only: bool = False) ->
                       "response_reference_context": "formal3902 only; not used as an independent selector"},
         "solver_attempts": 0,
     }
+    if query_budget_override is not None:
+        # Keep coefficient calibration and all exposed validation queries on
+        # the established Q1024 profile while TRAIN alone uses the override.
+        result["training_query_budget_override"] = query_budget_override
+        result["calibration_budget"] = dict(profile["budget"])
+        result["validation_budget"] = dict(profile["budget"])
+    if sampling_version is not None:
+        result["sampling_version"] = sampling_version
     validate_recipe(result)
     return result
 
@@ -377,6 +398,19 @@ def validate_recipe(recipe: Mapping[str, Any]) -> dict[str, Any]:
     if recipe.get("schema_version") != FORMAL_SCHEMA_VERSION or recipe.get("dataset_scope") != FORMAL_DATASET_SCOPE:
         raise ValueError("Thermal formal recipe has an unknown schema or dataset scope.")
     metadata = _validated_metadata(recipe)
+    profile = metadata["profile"]
+    expected_budget, query_budget_override = _resolve_query_budget(
+        profile["budget"], recipe.get("training_query_budget_override"))
+    if recipe.get("budget") != expected_budget:
+        raise ValueError("Thermal formal training budget differs from the permitted profile/query override.")
+    if query_budget_override is None:
+        if "calibration_budget" in recipe or "validation_budget" in recipe:
+            raise ValueError("Default Thermal formal recipes must retain the single established query budget.")
+    elif (recipe.get("calibration_budget") != dict(profile["budget"])
+          or recipe.get("validation_budget") != dict(profile["budget"])):
+        raise ValueError("Thermal calibration and exposed validation budgets must remain at the baseline profile.")
+    if "sampling_version" in recipe:
+        _validate_formal_sampling_version(recipe["sampling_version"])
     for field, expected in (("dataset_binding", metadata["dataset_binding"]),
                             ("validation_binding", metadata["validation_binding"]),
                             ("training_case_ids", metadata["training_case_ids"]),
@@ -444,7 +478,7 @@ class FormalThermalRefinementTask(ThermalRefinementTask):
         super().__init__(*args, **kwargs)
 
     def identity_payload(self) -> Mapping[str, Any]:
-        return {
+        payload = {
             "task": "ThermalChannel",
             "dataset_split": FORMAL_DATASET_SCOPE,
             "dataset_binding": self.formal_recipe["dataset_binding"],
@@ -476,6 +510,14 @@ class FormalThermalRefinementTask(ThermalRefinementTask):
             "stored_uv_supervision_only": True,
             "solver_attempts": 0,
         }
+        if "training_query_budget_override" in self.formal_recipe:
+            payload["training_query_budget"] = dict(self.formal_recipe["budget"])
+            payload["calibration_query_budget"] = dict(self.formal_recipe["calibration_budget"])
+            payload["validation_query_budget"] = dict(self.formal_recipe["validation_budget"])
+        if self.formal_recipe.get("sampling_version") == SUPPORTED_FORMAL_SAMPLING_VERSION:
+            payload["manifest_fingerprint"] = str(
+                self.formal_recipe["dataset_binding"]["training_case_ids_sha256"])
+        return payload
 
     def reduce_native_metrics(self, records: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
         rows = [row for record in records for row in record["case_rows"]]
@@ -620,6 +662,8 @@ def create_task(recipe: Mapping[str, Any]):
         manifest={"manifest_sha256": recipe["dataset_binding"]["training_case_ids_sha256"]},
         train_families=families, development_families=(), balances=balances,
         optimizer_seed=None, device=recipe.get("device", "cpu"), stats=stats, recipe=provider_recipe,
+        validation_budget=recipe.get("validation_budget"),
+        calibration_budget=recipe.get("calibration_budget"),
         formal_recipe=recipe, startup_benchmark=startup_benchmark,
     )
     return model, provider, None

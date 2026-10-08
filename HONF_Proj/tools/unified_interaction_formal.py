@@ -56,7 +56,8 @@ def _read(path):
     return value
 
 
-def _profile(task, *, startup_benchmark=False, monitoring=None, microbatch_cases=None, versioned_wind=False):
+def _profile(task, *, startup_benchmark=False, monitoring=None, microbatch_cases=None,
+             versioned_wind=False, sampling_version=None):
     from honf_runtime.unified_training import EngineConfig, SelectionPolicy
 
     micro, effective, seed = ((8, 48, 0) if task == 'thermal'
@@ -65,10 +66,15 @@ def _profile(task, *, startup_benchmark=False, monitoring=None, microbatch_cases
         if type(microbatch_cases) is not int or not 1 <= microbatch_cases <= effective:
             raise ValueError('Explicit microbatch size must be an integer inside the unchanged effective batch.')
         micro = microbatch_cases
+    selected_sampling_version = "case_epoch_v1" if task == "wind" and versioned_wind else "legacy_packed_v1"
+    if sampling_version is not None:
+        if task != "thermal" or sampling_version not in ("legacy_packed_v1", "case_epoch_v1"):
+            raise ValueError("Thermal execution config has an unsupported sampling version.")
+        selected_sampling_version = sampling_version
     config = EngineConfig(seed=seed, microbatch_cases=micro, effective_cases=effective,
         total_epochs=5000, warmup_epochs=500, open_through_epoch=600,
         soft_through_epoch=800, monitor_every=100, gradient_clip=1.0,
-        sampling_version=("case_epoch_v1" if task == "wind" and versioned_wind else "legacy_packed_v1"))
+        sampling_version=selected_sampling_version)
     if monitoring is not None:
         required = {'validation_every', 'validation_epochs', 'checkpoint_epochs', 'latest_every', 'curve_every'}
         if set(monitoring) != required:
@@ -78,7 +84,7 @@ def _profile(task, *, startup_benchmark=False, monitoring=None, microbatch_cases
         config = EngineConfig(seed=seed, microbatch_cases=micro, effective_cases=effective,
             total_epochs=5000, warmup_epochs=500, open_through_epoch=600,
             soft_through_epoch=800, monitor_every=monitoring['validation_every'], gradient_clip=1.0,
-            sampling_version=("case_epoch_v1" if task == "wind" and versioned_wind else "legacy_packed_v1"),
+            sampling_version=selected_sampling_version,
             monitor_epochs=tuple(monitoring['validation_epochs']),
             checkpoint_epochs=tuple(monitoring['checkpoint_epochs']),
             latest_every=monitoring['latest_every'], curve_every=monitoring['curve_every'])
@@ -88,6 +94,30 @@ def _profile(task, *, startup_benchmark=False, monitoring=None, microbatch_cases
     # Native response metrics remain dataset-owned, separately reported.
     selection = SelectionPolicy(field_metric='field_score', response_guard_metric=None)
     return config, selection
+
+
+def _execution_config(recipe):
+    """Validate optional per-recipe engine settings; absence preserves old defaults."""
+    value = recipe.get('execution_config')
+    if value is None:
+        if (recipe.get('task') == 'thermal'
+                and recipe['dataset_recipe'].get('sampling_version') is not None):
+            raise ValueError('Thermal task sampling override requires a matching outer execution_config.')
+        return {}
+    if recipe.get('task') != 'thermal' or not isinstance(value, dict):
+        raise ValueError('Only Thermal formal recipes accept an execution_config object.')
+    if set(value) - {'microbatch_cases', 'sampling_version'}:
+        raise ValueError('Formal execution_config contains unsupported settings.')
+    if 'microbatch_cases' in value and type(value['microbatch_cases']) is not int:
+        raise ValueError('Formal microbatch_cases must be an integer.')
+    if ('sampling_version' in value
+            and value['sampling_version'] not in ('legacy_packed_v1', 'case_epoch_v1')):
+        raise ValueError('Thermal formal sampling config must be legacy_packed_v1 or case_epoch_v1.')
+    native_sampling = recipe['dataset_recipe'].get('sampling_version')
+    sealed_sampling = value.get('sampling_version')
+    if native_sampling != sealed_sampling:
+        raise ValueError('Outer execution sampler differs from the sealed Thermal task recipe.')
+    return dict(value)
 
 
 def _load_recipe(path):
@@ -109,7 +139,10 @@ def _load_recipe(path):
         raise ValueError('Formal workflow readiness, fresh-state or horizon contract differs.')
     _factory(recipe['task']).validate_recipe(native)
     versioned_wind = recipe['task'] == 'wind' and recipe['dataset_recipe'].get('wind_training_recipe') is not None
-    _profile(recipe['task'], monitoring=recipe.get('monitoring'), versioned_wind=versioned_wind)
+    execution = _execution_config(recipe)
+    _profile(recipe['task'], monitoring=recipe.get('monitoring'), versioned_wind=versioned_wind,
+             microbatch_cases=execution.get('microbatch_cases'),
+             sampling_version=execution.get('sampling_version'))
     recipe['recipe_sha256'] = saved_sha
     return recipe
 
@@ -125,6 +158,12 @@ def prepare(args):
         'latest_every': args.latest_every, 'curve_every': args.curve_every,
     }
     _paths()
+    thermal_fluid_queries = getattr(args, 'thermal_fluid_queries', None)
+    microbatch_cases = getattr(args, 'microbatch_cases', None)
+    sampling_version = getattr(args, 'sampling_version', None)
+    if args.task != 'thermal' and any(value is not None for value in (
+            thermal_fluid_queries, microbatch_cases, sampling_version)):
+        raise ValueError('Thermal query and execution overrides are Thermal-only.')
     wind_recipe_id = getattr(args, 'wind_recipe_id', None)
     wind_recipe_json = getattr(args, 'wind_recipe_json', None)
     if args.task != 'wind' and (wind_recipe_id is not None or wind_recipe_json is not None):
@@ -138,13 +177,19 @@ def prepare(args):
     else:
         wind_training_recipe = None
     versioned_wind = args.task == 'wind' and (wind_recipe_id is not None or wind_recipe_json is not None)
-    _profile(args.task, monitoring=monitoring, versioned_wind=versioned_wind)
+    engine_config, _ = _profile(args.task, monitoring=monitoring, versioned_wind=versioned_wind,
+                                microbatch_cases=microbatch_cases, sampling_version=sampling_version)
     config = {'seed': 0 if args.task == 'thermal' else 42,
               'output_dir': str(output.parent / 'prepared_data')}
     if wind_recipe_id is not None:
         config['wind_recipe_id'] = wind_recipe_id
     elif wind_training_recipe is not None:
         config['wind_recipe'] = wind_training_recipe
+    if thermal_fluid_queries is not None:
+        config['query_budget_override'] = {'fluid_queries': thermal_fluid_queries}
+    if args.task == 'thermal' and any(value is not None for value in (
+            thermal_fluid_queries, microbatch_cases, sampling_version)):
+        config['sampling_version'] = engine_config.sampling_version
     for name in ('flow_checkpoint', 'data_root', 'dataset_path'):
         value = getattr(args, name, None)
         if value:
@@ -161,6 +206,15 @@ def prepare(args):
             'horizon_epochs': 5000, 'fine_hold_through_epoch': 2000,
             'new_solver_attempts': 0}
         recipe['monitoring'] = monitoring
+        execution_config = {}
+        if args.task == 'thermal' and any(value is not None for value in (
+                thermal_fluid_queries, microbatch_cases, sampling_version)):
+            execution_config = {
+                'microbatch_cases': engine_config.microbatch_cases,
+                'sampling_version': engine_config.sampling_version,
+            }
+        if execution_config:
+            recipe['execution_config'] = execution_config
         recipe['recipe_sha256'] = _canonical_sha(recipe)
         recipe_path = output if len(arms) == 1 else output.with_name(f'{output.stem}_{arm}{output.suffix or ".json"}')
         if recipe_path.exists():
@@ -176,7 +230,9 @@ def dry_run(args):
     os.environ['CUDA_VISIBLE_DEVICES'] = ''
     recipe = _load_recipe(args.recipe)
     versioned_wind = recipe['task'] == 'wind' and recipe['dataset_recipe'].get('wind_training_recipe') is not None
-    config, selection = _profile(recipe['task'], monitoring=recipe.get('monitoring'), versioned_wind=versioned_wind)
+    execution = _execution_config(recipe)
+    config, selection = _profile(recipe['task'], monitoring=recipe.get('monitoring'), versioned_wind=versioned_wind,
+        microbatch_cases=execution.get('microbatch_cases'), sampling_version=execution.get('sampling_version'))
     return {'status': 'formal_metadata_and_parser_checked',
         'recipe_sha256': recipe['recipe_sha256'],
         'ready_for_training': recipe['ready_for_training'],
@@ -199,10 +255,14 @@ def train(args, *, resume=False):
     if not resume and output.exists() and next(output.iterdir(), None) is not None:
         raise ValueError('A formal start requires a new empty run directory; use exact resume for saved runs.')
     versioned_wind = recipe['task'] == 'wind' and recipe['dataset_recipe'].get('wind_training_recipe') is not None
+    execution = _execution_config(recipe)
+    requested_microbatch = getattr(args, 'microbatch_cases', None) if resume else None
     config, selection = _profile(recipe['task'], startup_benchmark=args.startup_benchmark,
                                  monitoring=recipe.get('monitoring'),
                                  versioned_wind=versioned_wind,
-                                 microbatch_cases=getattr(args, 'microbatch_cases', None))
+                                 microbatch_cases=(requested_microbatch if requested_microbatch is not None
+                                                   else execution.get('microbatch_cases')),
+                                 sampling_version=execution.get('sampling_version'))
     if args.startup_benchmark and not 1 <= args.stop_after <= 3:
         raise ValueError('The separately labelled manual startup benchmark is limited to three complete epochs.')
     if not 1 <= args.stop_after <= 5000:
@@ -246,6 +306,12 @@ def build_parser():
     prep.add_argument('--flow-checkpoint')
     prep.add_argument('--data-root')
     prep.add_argument('--dataset-path')
+    prep.add_argument('--thermal-fluid-queries', type=int,
+        help='Thermal TRAIN query count; calibration and validation remain at the baseline profile')
+    prep.add_argument('--microbatch-cases', type=int,
+        help='seal the Thermal engine microbatch for a new recipe; effective batch remains 48')
+    prep.add_argument('--sampling-version', choices=('case_epoch_v1',),
+        help='seal prefix-stable per-case Thermal query sampling for matched query budgets')
     prep.add_argument('--wind-recipe-id', choices=(
         'wind_w0_scalar_q1024_v1', 'wind_w1_component_q1024_v1', 'wind_w2_component_q4096_v1',
         'wind_w3_component_q1024_h128_v1'))

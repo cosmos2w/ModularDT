@@ -68,6 +68,19 @@ CUDA_VISIBLE_DEVICES=2 python tools/unified_interaction_formal.py resume --recip
 
 The maintained implementation is [unified_interaction_formal.py](../../tools/unified_interaction_formal.py), with dataset factories [Thermal](../../Case_ThermalChannel/src/channelthermal/training/unified_formal.py) and [Wind](../../Case_WindFarm/src/windfarm/training/unified_formal.py). The [development guide](Unified_Interaction_Training_and_Refinement.md) describes the shared numerical contracts and retained histories.
 
+### Measured Thermal query and packing choices for a fresh run
+
+New Thermal recipes can seal `--thermal-fluid-queries`, `--microbatch-cases` and `--sampling-version case_epoch_v1` during `prepare`. Query overrides affect TRAIN primary fluid queries and the TRAIN response addendum; loss-coefficient calibration and exposed primary/response validation keep the established Q1024 budget. Material queries remain 32 per module, surface stride remains 4 and the qualified operator retains 128 rows per case. The effective batch stays 48 regardless of microbatch size. The outer execution settings and native sampler binding must agree; all options omitted preserve the existing recipe defaults and identity. These options do not change a saved recipe or promote its checkpoint.
+
+Choose the query count from a separately labelled, matched fixed25_v1 comparison and measured complete costs, then fit fresh transforms on all 600 TRAIN cases for the formal run. Query-budget arms must share initialization, optimizer schedule, case order, effective batch and fixed exposed validation. With `case_epoch_v1`, each case/epoch stream is independent of packing and query sets have a common prefix. Larger microbatches can still change FP32 accumulation order. Keep the established hard gate unless its own transfer evidence supports a different mathematical recipe.
+
+```bash
+rtk proxy env CUDA_VISIBLE_DEVICES='' conda run -n ModularDT python tools/unified_interaction_formal.py prepare --task thermal --arm adaptive_detail --recipe diagnostics/generated/manual_thermal_measured_query5000/recipe.json --thermal-fluid-queries 2048 --microbatch-cases 48 --sampling-version case_epoch_v1 --validation-every 100 --validation-epochs 100 --checkpoint-epochs 100 500 1000 2000 2500 5000 --latest-every 100 --curve-every 100
+rtk proxy env CUDA_VISIBLE_DEVICES='' conda run -n ModularDT python tools/unified_interaction_formal.py dry-run --recipe diagnostics/generated/manual_thermal_measured_query5000/recipe.json
+```
+
+The command demonstrates a sealed option, not a universal Q2048 recommendation. Its dry run checks bindings and configuration without optimizer progress. A formal start must use a new run directory and fresh weights/moments after the actual query decision.
+
 ## Selected Wind W3C1 handoff for one future manual Full/Adaptive pair
 
 The selected fixed24_v1 development recipe is `wind_w3_component_q1024_h128_v1`: component-balanced physical-role supervision at Q1024, H128/message128, E8, with the sealed compact C1 gate `[0.35, 0.65]` for Adaptive. The Full arm uses normative all-fine execution and ignores the adaptive route; it remains a separate mathematical control. Adaptive computes `B + g*(F-B)` with `g=near+(1-near)*smoothstep(clip((p-0.35)/0.30,0,1))`; `selected` and `dense_masked` are alternative executors for the same Adaptive function, while `all_fine` is not that function.

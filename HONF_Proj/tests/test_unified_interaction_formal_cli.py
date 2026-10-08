@@ -92,6 +92,114 @@ def test_versioned_development_profile_uses_measured_effective24_packing():
         24, 24, 'case_epoch_v1')
 
 
+def test_thermal_formal_engine_defaults_remain_legacy_and_effective48():
+    default, _ = cli._profile('thermal')
+    sealed_legacy, _ = cli._profile('thermal', sampling_version='legacy_packed_v1')
+    candidate, _ = cli._profile('thermal', microbatch_cases=24, sampling_version='case_epoch_v1')
+    assert (default.microbatch_cases, default.effective_cases, default.sampling_version) == (
+        8, 48, 'legacy_packed_v1')
+    assert sealed_legacy == default
+    assert (candidate.microbatch_cases, candidate.effective_cases, candidate.sampling_version) == (
+        24, 48, 'case_epoch_v1')
+
+
+def test_thermal_query_and_execution_overrides_are_sealed(tmp_path, monkeypatch):
+    class Factory:
+        def prepare_recipe(self, config, *, metadata_only):
+            assert config['query_budget_override'] == {'fluid_queries': 2048}
+            assert config['sampling_version'] == 'case_epoch_v1'
+            assert metadata_only is True
+            return {'ready_for_training': False, 'sampling_version': config['sampling_version'],
+                    'query_budget_override': config['query_budget_override']}
+
+        def validate_recipe(self, native):
+            return {'ready_for_training': native['ready_for_training']}
+
+        def create_task(self, native):
+            raise AssertionError('Metadata dry run constructed a formal model.')
+
+    monkeypatch.setattr(cli, '_factory', lambda task: Factory())
+    path = tmp_path / 'thermal_q2048.json'
+    args = cli.build_parser().parse_args([
+        'prepare', '--task', 'thermal', '--arm', 'adaptive_detail', '--recipe', str(path),
+        '--metadata-only', '--thermal-fluid-queries', '2048', '--microbatch-cases', '24',
+        '--sampling-version', 'case_epoch_v1',
+    ])
+    prepared = cli.prepare(args)
+    recipe = json.loads(Path(prepared['recipe']).read_text())
+    assert recipe['dataset_recipe']['query_budget_override'] == {'fluid_queries': 2048}
+    assert recipe['dataset_recipe']['sampling_version'] == 'case_epoch_v1'
+    assert recipe['execution_config'] == {'microbatch_cases': 24, 'sampling_version': 'case_epoch_v1'}
+    result = cli.dry_run(cli.build_parser().parse_args(['dry-run', '--recipe', prepared['recipe']]))
+    assert (result['engine_config']['microbatch_cases'], result['engine_config']['effective_cases'],
+            result['engine_config']['sampling_version']) == (24, 48, 'case_epoch_v1')
+
+
+def test_thermal_native_sampler_without_outer_seal_is_rejected(tmp_path, monkeypatch):
+    class Factory:
+        def validate_recipe(self, native):
+            return {'ready_for_training': False}
+
+    monkeypatch.setattr(cli, '_factory', lambda task: Factory())
+    recipe = _recipe()
+    recipe['task'] = 'thermal'
+    recipe['dataset_recipe']['sampling_version'] = 'case_epoch_v1'
+    path = _save(tmp_path, recipe)
+    with pytest.raises(ValueError, match='outer execution_config'):
+        cli._load_recipe(path)
+
+
+def test_thermal_outer_sampler_must_match_native_sampler():
+    recipe = _recipe()
+    recipe['task'] = 'thermal'
+    recipe['dataset_recipe']['sampling_version'] = 'case_epoch_v1'
+    recipe['execution_config'] = {'microbatch_cases': 8, 'sampling_version': 'legacy_packed_v1'}
+    with pytest.raises(ValueError, match='Outer execution sampler'):
+        cli._execution_config(recipe)
+
+
+def test_thermal_query_override_seals_resolved_default_execution_settings(tmp_path, monkeypatch):
+    class Factory:
+        def prepare_recipe(self, config, *, metadata_only):
+            assert config['query_budget_override'] == {'fluid_queries': 2048}
+            assert config['sampling_version'] == 'legacy_packed_v1'
+            assert metadata_only is True
+            return {'ready_for_training': False, 'sampling_version': config['sampling_version']}
+
+        def validate_recipe(self, native):
+            return {'ready_for_training': native['ready_for_training']}
+
+    monkeypatch.setattr(cli, '_factory', lambda task: Factory())
+    path = tmp_path / 'thermal_query_only.json'
+    args = cli.build_parser().parse_args([
+        'prepare', '--task', 'thermal', '--arm', 'adaptive_detail', '--recipe', str(path),
+        '--metadata-only', '--thermal-fluid-queries', '2048',
+    ])
+    prepared = cli.prepare(args)
+    recipe = json.loads(Path(prepared['recipe']).read_text())
+    assert recipe['execution_config'] == {'microbatch_cases': 8, 'sampling_version': 'legacy_packed_v1'}
+    result = cli.dry_run(cli.build_parser().parse_args(['dry-run', '--recipe', prepared['recipe']]))
+    assert (result['engine_config']['microbatch_cases'], result['engine_config']['sampling_version']) == (
+        8, 'legacy_packed_v1')
+
+
+def test_wind_native_sampling_metadata_does_not_use_thermal_execution_guard():
+    recipe = _recipe()
+    recipe['dataset_recipe']['sampling_version'] = 'wind_native_future_v1'
+    assert cli._execution_config(recipe) == {}
+
+
+def test_thermal_query_and_execution_overrides_are_rejected_for_wind(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, '_factory', lambda task: pytest.fail('Thermal options reached the Wind factory.'))
+    args = cli.build_parser().parse_args([
+        'prepare', '--task', 'wind', '--arm', 'adaptive_detail', '--recipe', str(tmp_path / 'wind.json'),
+        '--thermal-fluid-queries', '2048',
+    ])
+    with pytest.raises(ValueError, match='Thermal query and execution overrides'):
+        cli.prepare(args)
+    assert not list(tmp_path.iterdir())
+
+
 @pytest.mark.parametrize('key,value', [
     ('ready_for_training', True), ('horizon_epochs', 2500),
     ('development_weights_loaded', True), ('new_solver_attempts', 1),

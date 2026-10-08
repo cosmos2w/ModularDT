@@ -63,6 +63,28 @@ THERMAL_GATE_COMPACT_C1_VERSION = "compact_c1_v1"
 THERMAL_GATE_COMPACT_C1_TRANSITION = (0.35, 0.65)
 THERMAL_TRANSFER_EPOCHS = 500
 THERMAL_TRANSFER_LR = 3.0e-6
+THERMAL_QUERY_BUDGET_OVERRIDE_KEYS = frozenset({"fluid_queries", "material_queries_per_module"})
+
+
+def _resolve_query_budget(
+    profile_budget: Mapping[str, Any], override: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], dict[str, int] | None]:
+    """Apply only native query-count overrides; physical and batch guards stay fixed."""
+    budget = dict(profile_budget)
+    if override is None:
+        return budget, None
+    if not isinstance(override, Mapping) or not override:
+        raise ValueError("Thermal query-budget override must be a nonempty object.")
+    keys = set(override)
+    if keys - THERMAL_QUERY_BUDGET_OVERRIDE_KEYS:
+        raise ValueError("Thermal query-budget overrides may change only fluid/material query counts.")
+    resolved: dict[str, int] = {}
+    for name, value in override.items():
+        if type(value) is not int or value < 1:
+            raise ValueError(f"Thermal {name} override must be a positive integer.")
+        resolved[name] = value
+    budget.update(resolved)
+    return budget, resolved
 
 
 def _resolve_gate_binding(
@@ -794,6 +816,8 @@ class ThermalRefinementTask:
         device: torch.device | str,
         stats: Mapping[str, Any] | None = None,
         recipe: Mapping[str, Any] | None = None,
+        validation_budget: Mapping[str, Any] | None = None,
+        calibration_budget: Mapping[str, Any] | None = None,
         gate_version: str = THERMAL_GATE_HARD_VERSION,
         gate_transition: Sequence[float] | None = None,
         development_refinement_parent: Mapping[str, Any] | None = None,
@@ -829,6 +853,9 @@ class ThermalRefinementTask:
         self.development_optimizer_seed: Mapping[str, Any] | None = None
         self.development_parent_rng_state: Mapping[str, Any] | None = None
         self.budget = dict(self.recipe["budget"])
+        self.validation_budget = self.budget if validation_budget is None else dict(validation_budget)
+        self.calibration_budget = self.budget if calibration_budget is None else dict(calibration_budget)
+        self._separate_query_budgets = validation_budget is not None or calibration_budget is not None
         self.response_scales = dict(self.recipe["calibration"]["response_scales"])
         self.response_coefficient = float(self.recipe["calibration"]["response_coefficient"])
         self.operator_coefficient = float(self.recipe["calibration"]["operator_coefficient"])
@@ -910,6 +937,9 @@ class ThermalRefinementTask:
             "training_objective": "inherited native fluid/surface/material T + .05 q proxy + parent-calibrated TRAIN response + qualified operator residual; plus fixed-scale base approximation and staged adaptive terms",
             "solver_attempts": 0,
         }
+        if self._separate_query_budgets:
+            payload["validation_query_budget"] = dict(self.validation_budget)
+            payload["calibration_query_budget"] = dict(self.calibration_budget)
         if self.gate_version == THERMAL_GATE_COMPACT_C1_VERSION:
             payload.update({
                 "gate_version": self.gate_version,
@@ -923,15 +953,19 @@ class ThermalRefinementTask:
         del epoch, seed
         return self._train_ids
 
-    def _response_sample(self, family: Mapping[str, Any], *, training: bool, key: SamplingKey | None) -> dict[str, Any]:
+    def _response_sample(
+        self, family: Mapping[str, Any], *, training: bool, key: SamplingKey | None,
+        budget: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        sample_budget = (self.budget if training else self.validation_budget) if budget is None else budget
         if training:
             if key is None:
                 raise ValueError("TRAIN response sampling requires its engine-owned SamplingKey.")
             family_id = str(family["family_id"])
             if key.sampling_version == SamplingKey.CASE_EPOCH_VERSION:
                 valid_fluid = np.flatnonzero(np.asarray(family["fluid_valid"], dtype=bool))
-                fluid_count = int(self.budget["fluid_queries"])
-                material_count = int(self.budget["material_queries_per_module"])
+                fluid_count = int(sample_budget["fluid_queries"])
+                material_count = int(sample_budget["material_queries_per_module"])
                 if len(valid_fluid) < fluid_count or len(family["material_local"]) < material_count:
                     raise ValueError("Thermal response family has insufficient fixed receiver coverage.")
                 fluid_ids = valid_fluid[key.native_indices(
@@ -949,13 +983,13 @@ class ThermalRefinementTask:
             rng = np.random.default_rng(0x5448524D + family_index * 104729)
         if not training or key is None or key.sampling_version != SamplingKey.CASE_EPOCH_VERSION:
             valid_fluid = np.flatnonzero(np.asarray(family["fluid_valid"], dtype=bool))
-            fluid_count = int(self.budget["fluid_queries"])
-            material_count = int(self.budget["material_queries_per_module"])
+            fluid_count = int(sample_budget["fluid_queries"])
+            material_count = int(sample_budget["material_queries_per_module"])
             if len(valid_fluid) < fluid_count or len(family["material_local"]) < material_count:
                 raise ValueError("Thermal response family has insufficient fixed receiver coverage.")
             fluid_ids = rng.choice(valid_fluid, fluid_count, replace=False)
             material_ids = rng.choice(len(family["material_local"]), material_count, replace=False)
-        surface_stride = int(self.budget.get("surface_stride", RESPONSE_SURFACE_STRIDE))
+        surface_stride = int(sample_budget.get("surface_stride", RESPONSE_SURFACE_STRIDE))
         tensor = lambda value: torch.as_tensor(value, dtype=torch.float32)
         return {
             "family_id": str(family["family_id"]),
@@ -974,21 +1008,23 @@ class ThermalRefinementTask:
 
     def _prepare_response_sample(
         self, family: Mapping[str, Any], *, training: bool, key: SamplingKey | None,
+        budget: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        return self._response_sample(family, training=training, key=key)
+        return self._response_sample(family, training=training, key=key, budget=budget)
 
     def _batch_from_indices(
         self, case_indices: Sequence[int], epoch: int, *, key: SamplingKey | None,
-        training: bool, include_response: bool,
+        training: bool, include_response: bool, budget: Mapping[str, Any] | None = None,
     ) -> TaskBatch:
         indices = tuple(int(index) for index in case_indices)
+        sample_budget = (self.budget if training else self.validation_budget) if budget is None else budget
         sample, primary_sampling_hash = _sample_primary(
             self.training_cases if training else self.validation_cases,
             indices,
             epoch=epoch,
             key=key,
             training=training,
-            budget=self.budget,
+            budget=sample_budget,
             device=self.device,
         )
         raw_structure = sample["structure"]
@@ -997,7 +1033,8 @@ class ThermalRefinementTask:
         if include_response and key is not None and key.microbatch_index == 0:
             family_index = (key.epoch + key.update_index) % len(TRAIN_RESPONSE_IDS)
             response_sample = self._prepare_response_sample(
-                self._train_family_by_id[TRAIN_RESPONSE_IDS[family_index]], training=True, key=key)
+                self._train_family_by_id[TRAIN_RESPONSE_IDS[family_index]], training=True, key=key,
+                budget=sample_budget)
         response_structure = None if response_sample is None else response_sample["structure"]
         fluid_xy = sample["query_xy"]
         local = sample["module_internal_query_points"]
@@ -1426,9 +1463,11 @@ class ThermalRefinementTask:
         return result
 
     def validation_batches(self):
-        for start in range(0, len(self.validation_cases), int(self.budget["microbatch_cases"])):
-            indices = range(start, min(start + int(self.budget["microbatch_cases"]), len(self.validation_cases)))
-            yield self._batch_from_indices(indices, 0, key=None, training=False, include_response=False)
+        validation_microbatch = int(self.validation_budget["microbatch_cases"])
+        for start in range(0, len(self.validation_cases), validation_microbatch):
+            indices = range(start, min(start + validation_microbatch, len(self.validation_cases)))
+            yield self._batch_from_indices(indices, 0, key=None, training=False, include_response=False,
+                                           budget=self.validation_budget)
 
     @staticmethod
     def _per_case_native_metrics(
@@ -1636,7 +1675,8 @@ class ThermalRefinementTask:
         ids = [str(value) for value in self.recipe["calibration"]["calibration_case_ids"]]
         indices = [self._train_index_by_id[value] for value in ids]
         key = SamplingKey(0, 600, 0, 0, "thermal_cost_calibration", "adaptive_detail")
-        return self._batch_from_indices(indices, 600, key=key, training=True, include_response=False)
+        return self._batch_from_indices(indices, 600, key=key, training=True, include_response=False,
+                                        budget=self.calibration_budget)
 
     def calibrate_expected_work_weight(self, model: ThermalSourceResponse) -> Mapping[str, Any]:
         if self._expected_work_calibration is not None:
@@ -1781,6 +1821,12 @@ def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, ThermalRefinement
         raise ValueError("Retained parent does not bind the expected fixed25 qualified operator objective and flow partner.")
     if flow.get("dependency_identity") != "thermal_dependency_flow_v1":
         raise ValueError("Retained D-sep endpoint has an unexpected Thermal flow identity.")
+    training_budget, query_budget_override = _resolve_query_budget(
+        recipe["budget"], config.get("query_budget_override"))
+    provider_recipe = dict(recipe)
+    provider_recipe["budget"] = training_budget
+    validation_budget = dict(recipe["budget"]) if query_budget_override is not None else None
+    calibration_budget = dict(recipe["budget"]) if query_budget_override is not None else None
     training_cases, manifest = read_primary(parent, "train")
     validation_cases, validation_manifest = read_primary(parent, "test")
     if manifest["manifest_sha256"] != validation_manifest["manifest_sha256"] or manifest["manifest_sha256"] != FIXED25_FINGERPRINT:
@@ -1824,6 +1870,9 @@ def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, ThermalRefinement
         balances=balances,
         optimizer_seed=optimizer_seed,
         device=config.get("device", "cpu"),
+        recipe=provider_recipe,
+        validation_budget=validation_budget,
+        calibration_budget=calibration_budget,
         gate_version=str(config.get("gate_version", THERMAL_GATE_HARD_VERSION)),
         gate_transition=config.get("gate_transition"),
         development_refinement_parent=(

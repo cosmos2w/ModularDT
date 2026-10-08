@@ -47,6 +47,30 @@ def _thermal_sampling_case():
     }
 
 
+def _thermal_response_validation_family():
+    fluid_count, material_count = 80, 40
+    return {
+        "family_id": "0304",
+        "structure": {
+            "module_centers": np.asarray([[1.0, 2.0]], dtype=np.float32),
+            "module_present": np.asarray([1.0], dtype=np.float32),
+            "material_params": np.asarray([[1.0, 2.0, 3.0]], dtype=np.float32),
+        },
+        "fluid_xy": np.arange(fluid_count * 2, dtype=np.float32).reshape(fluid_count, 2),
+        "fluid_valid": np.ones(fluid_count, dtype=bool),
+        "material_local": np.arange(material_count * 2, dtype=np.float32).reshape(material_count, 2),
+        "heat_increment": np.ones((1,), dtype=np.float32),
+        "deltas": {
+            "fluid_fields": np.zeros((fluid_count, 5), dtype=np.float32),
+            "interface": np.zeros((8, 1), dtype=np.float32),
+            "solid_temperature": np.zeros((1, material_count), dtype=np.float32),
+        },
+        "module_count": 1,
+        "interface_valid": np.ones((8, 1), dtype=bool),
+        "material_valid": np.ones((1, material_count), dtype=bool),
+    }
+
+
 def test_thermal_case_epoch_sampler_is_packing_independent_and_prefix_stable():
     case = _thermal_sampling_case()
     short_budget = {"fluid_queries": 12, "material_queries_per_module": 8, "surface_stride": 2}
@@ -226,6 +250,55 @@ def test_thermal_validation_terms_use_native_hard_output_and_available_expected_
     assert float(terms["expected_work"].numerator) == 2.25
     assert float(terms["expected_work"].denominator) == 4.0
     assert terms["expected_work"].weight == 0.4
+
+
+def test_training_query_override_keeps_real_primary_and_response_validation_at_baseline_q():
+    baseline_budget = {"fluid_queries": 12, "material_queries_per_module": 8,
+                       "surface_stride": 2, "microbatch_cases": 1}
+    candidate_budget = {**baseline_budget, "fluid_queries": 24, "material_queries_per_module": 16}
+    case = _thermal_sampling_case()
+    case["structure"]["heat_powers"] = np.ones((1,), dtype=np.float32)
+    family = _thermal_response_validation_family()
+
+    def provider_for(training_budget):
+        provider = object.__new__(ThermalRefinementTask)
+        provider.training_cases = (case,)
+        provider.validation_cases = (case,)
+        provider.budget = dict(training_budget)
+        provider.validation_budget = dict(baseline_budget)
+        provider.calibration_budget = dict(baseline_budget)
+        provider.recipe = {"calibration": {"calibration_case_ids": [case["case_id"]]}}
+        provider._train_index_by_id = {case["case_id"]: 0}
+        provider.device = torch.device("cpu")
+        provider._validation_samples = 0
+        provider._training_samples = 0
+        return provider
+
+    baseline = provider_for(baseline_budget)
+    candidate = provider_for(candidate_budget)
+    baseline_batch = next(baseline.validation_batches())
+    candidate_batch = next(candidate.validation_batches())
+    assert baseline_batch.receivers.fluid_xy.shape == candidate_batch.receivers.fluid_xy.shape == (1, 12, 2)
+    assert (baseline_batch.receivers.local_query_points.shape
+            == candidate_batch.receivers.local_query_points.shape == (1, 8, 2))
+    torch.testing.assert_close(baseline_batch.receivers.fluid_xy, candidate_batch.receivers.fluid_xy)
+    torch.testing.assert_close(baseline_batch.targets.field_targets, candidate_batch.targets.field_targets)
+    torch.testing.assert_close(baseline_batch.targets.material_targets, candidate_batch.targets.material_targets)
+
+    baseline_calibration = baseline._calibration_batches()
+    candidate_calibration = candidate._calibration_batches()
+    assert baseline_calibration.receivers.fluid_xy.shape == candidate_calibration.receivers.fluid_xy.shape == (1, 12, 2)
+    assert (baseline_calibration.receivers.local_query_points.shape
+            == candidate_calibration.receivers.local_query_points.shape == (1, 8, 2))
+    torch.testing.assert_close(baseline_calibration.receivers.fluid_xy, candidate_calibration.receivers.fluid_xy)
+    torch.testing.assert_close(baseline_calibration.targets.field_targets, candidate_calibration.targets.field_targets)
+
+    baseline_response = baseline._response_sample(family, training=False, key=None)
+    candidate_response = candidate._response_sample(family, training=False, key=None)
+    assert candidate_response["fluid_ids"].shape == baseline_response["fluid_ids"].shape == (12,)
+    assert candidate_response["material_ids"].shape == baseline_response["material_ids"].shape == (8,)
+    np.testing.assert_array_equal(candidate_response["fluid_ids"], baseline_response["fluid_ids"])
+    np.testing.assert_array_equal(candidate_response["material_ids"], baseline_response["material_ids"])
 
 
 def test_wind_validation_terms_use_role_scales_and_measured_route_probability():
