@@ -226,7 +226,7 @@ def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, fiel
     axes = figure.subplots(math.ceil((len(names) + 1) / 2), 2, squeeze=False).ravel()
     for axis, name in zip(axes, names):
         rows = [row for row in history if name in row["train_losses"]]
-        axis.plot([row["epoch"] for row in rows], [row["train_losses"][name] for row in rows])
+        axis.plot([row["epoch"] for row in rows], [row["train_losses"][name] for row in rows], ".-")
         axis.set(title=name, xlabel="Completed epoch", ylabel="Native objective term")
         axis.grid(alpha=0.2)
     validation = [row for row in history if "validation" in row]
