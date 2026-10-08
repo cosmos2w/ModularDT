@@ -117,7 +117,7 @@ def _role_counts_for_query_count(query_count: int) -> dict[str, int]:
         name: query_count * int(DEFAULT_ROLE_QUERY_COUNTS[name]) / base_total
         for name in ROLE_NAMES
     }
-    counts = {name: int(math.floor(exact[name])) for name in ROLE_NAMES}
+    counts = {name: math.floor(exact[name]) for name in ROLE_NAMES}
     remainder = query_count - sum(counts.values())
     order = sorted(ROLE_NAMES, key=lambda name: (-(exact[name] - counts[name]), ROLE_NAMES.index(name)))
     for name in order[:remainder]:
@@ -1254,6 +1254,7 @@ class WindRefinementTask:
             chunk_size=self.query_tile_size,
             gate_version=self.gate_version,
             gate_transition=self.gate_transition,
+            collect_pair_arrays=(not bool(model.training) and mode == "adaptive"),
         )
         if isinstance(predictions, Mapping):
             main_standardized = predictions["values"]
@@ -2100,6 +2101,6 @@ __all__ = [
     "WindTargets",
     "_fit_train_role_scales",
     "_role_counts_for_query_count",
-    "resolve_wind_recipe",
     "create_task",
+    "resolve_wind_recipe",
 ]

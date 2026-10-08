@@ -204,7 +204,6 @@ def test_wind_scale_calibration_keeps_w0_variance_and_w1_profile_residual_rules(
     class Cache:
         def get(self, case):
             del case
-            return None
 
         def summary(self):
             return {"hits": 0, "misses": 0, "cached_bytes": 0}
@@ -426,6 +425,8 @@ def test_wind_predictor_does_not_claim_an_unpaid_adaptive_full_replay():
     assert adaptive.full_mps is None
     assert adaptive_state["phase"] == "hard"
     assert adaptive_state["temperature"] == pytest.approx(0.55)
+    assert adaptive_state["pair_arrays_collected"] is True
+    assert "probability" in adaptive_state and "protected" in adaptive_state
 
     full, _ = provider.predict_native(model, scene, receivers, "full_detail", "soft", epoch=700)
     assert full.full_mps is full.main_mps

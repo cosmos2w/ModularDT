@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -187,6 +188,205 @@ def test_refined_context_rejects_mutated_train_profile_and_jvp_restores_fixed_ro
     profile.values_mps[0, 0] += 0.5
     with pytest.raises(ValueError, match="background profile changed; rebuild"):
         model.predict_physical_case(case, prepared, receivers)
+
+
+def _compact_c1_adapter_fixture():
+    torch.manual_seed(991)
+    case = _case()
+    model = WindFarmRefinedInteractionModel(
+        velocity_transform=_normalizer(),
+        background_profile=_profile(),
+        hidden=16,
+        message=12,
+    )
+    scene = wind_scene_from_case(case)
+    receivers = torch.tensor(
+        [[[8.0, 2.0, 1.0], [9.0, 1.8, 1.2], [10.0, 2.2, 1.4], [11.0, 2.0, 1.6]]]
+    )
+    # Retain deterministic pair variation while shifting its median probability
+    # to 0.5. The resulting C1 route has both zero and fractional corrections.
+    with torch.no_grad():
+        router_output = model.core.refinement.router[-1]
+        router_output.weight.copy_(torch.randn_like(router_output.weight) * 4.0)
+        router_output.bias.zero_()
+    _, initial = model.predict_refined_batch(
+        scene,
+        receivers,
+        execution_mode="adaptive",
+        phase="hard",
+        training_signal=False,
+        gate_version="compact_c1_v1",
+        gate_transition=(0.35, 0.65),
+        collect_pair_arrays=True,
+    )
+    with torch.no_grad():
+        logits = torch.logit(initial["probability"].clamp(1e-6, 1.0 - 1e-6))
+        model.core.refinement.router[-1].bias.sub_(torch.median(logits))
+    _, routed = model.predict_refined_batch(
+        scene,
+        receivers,
+        execution_mode="adaptive",
+        phase="hard",
+        training_signal=False,
+        gate_version="compact_c1_v1",
+        gate_transition=(0.35, 0.65),
+        collect_pair_arrays=True,
+    )
+    assert routed["fine_rows"] < routed["active_pairs"]
+    assert torch.any((routed["gate_weight"] > 0) & (routed["gate_weight"] < 1))
+    assert torch.any(routed["gate_weight"] == 0)
+    centers = torch.as_tensor(case.module_centers[None].copy()).requires_grad_()
+    prepared = model.prepare_case(case, centers=centers)
+    return case, model, prepared, receivers
+
+
+@pytest.mark.parametrize("wrt", ("centers", "receivers"))
+def test_public_compact_c1_linearization_matches_finite_difference_and_restores_policy(wrt: str) -> None:
+    case, model, prepared, receivers = _compact_c1_adapter_fixture()
+    model.core.set_execution(
+        mode="adaptive",
+        phase="hard",
+        temperature=1.0,
+        training_signal=True,
+        execution_backend="selected",
+        gate_version="compact_c1_v1",
+        gate_transition=(0.35, 0.65),
+    )
+    original_policy = model.core.refinement_policy
+    if wrt == "centers":
+        tangent = torch.zeros_like(prepared.scene.centers)
+        tangent[0, 0, 0] = 1.0
+        base = prepared.scene.centers.detach().clone()
+    else:
+        tangent = torch.zeros_like(receivers)
+        tangent[0, 1, 0] = 1.0
+        base = receivers.clone()
+
+    linearized = model.linearize_case(
+        prepared,
+        receivers,
+        tangent,
+        wrt=wrt,
+    )
+    assert model.core.refinement_policy is original_policy
+    assert original_policy.gate_version == "compact_c1_v1"
+    assert original_policy.training_signal is True
+
+    def predict_at(changed: torch.Tensor) -> torch.Tensor:
+        if wrt == "centers":
+            centers = changed
+            query = receivers
+        else:
+            centers = prepared.scene.centers.detach()
+            query = changed
+        scene = wind_scene_from_case(case, centers=centers)
+        prediction, _ = model.predict_refined_batch(
+            scene,
+            query,
+            execution_mode="adaptive",
+            phase="hard",
+            training_signal=False,
+            gate_version="compact_c1_v1",
+            gate_transition=(0.35, 0.65),
+            collect_pair_arrays=False,
+        )
+        return model._physical_from_standardized(prediction.values, query)
+
+    epsilon = 2e-3
+    expected_value = predict_at(base)
+    finite_difference = (predict_at(base + epsilon * tangent) - predict_at(base - epsilon * tangent)) / (
+        2.0 * epsilon
+    )
+    torch.testing.assert_close(linearized["values"], expected_value, atol=2e-6, rtol=2e-6)
+    torch.testing.assert_close(linearized["jvp"], finite_difference, atol=2e-4, rtol=8e-3)
+
+
+def test_refined_wind_adapter_omits_pair_exports_by_default_and_can_collect_them_explicitly() -> None:
+    case = _case()
+    model = WindFarmRefinedInteractionModel(
+        velocity_transform=_normalizer(), background_profile=_profile(), hidden=16, message=12
+    )
+    scene = wind_scene_from_case(case)
+    receivers = torch.tensor([[[8.0, 2.0, 1.0], [9.0, 2.0, 1.1]]])
+    _, ordinary = model.predict_refined_batch(
+        scene,
+        receivers,
+        execution_mode="adaptive",
+        phase="hard",
+        training_signal=False,
+    )
+    assert ordinary["pair_arrays_collected"] is False
+    assert all(name not in ordinary for name in ("base", "fine", "probability", "keep", "protected"))
+    _, exported = model.predict_refined_batch(
+        scene,
+        receivers,
+        execution_mode="adaptive",
+        phase="hard",
+        training_signal=False,
+        collect_pair_arrays=True,
+    )
+    assert exported["pair_arrays_collected"] is True
+    assert all(name in exported for name in ("base", "fine", "probability", "keep", "protected"))
+
+
+def test_pair_export_flag_preserves_training_objective_and_input_gradients() -> None:
+    torch.manual_seed(20261008)
+    initial = WindFarmRefinedInteractionModel(
+        velocity_transform=_normalizer(), background_profile=_profile(), hidden=16, message=12
+    )
+    models = (initial, copy.deepcopy(initial))
+    case = _case()
+    base_centers = torch.as_tensor(case.module_centers[None].copy())
+    base_receivers = torch.tensor([[[8.0, 2.0, 1.0], [9.0, 2.0, 1.1]]])
+    observed = []
+    parameter_names = tuple(name for name, _ in initial.named_parameters())
+    for model, collect_pair_arrays in zip(models, (False, True), strict=True):
+        centers = base_centers.clone().requires_grad_()
+        scene = wind_scene_from_case(case, centers=centers)
+        receivers = base_receivers.clone().requires_grad_()
+        prediction, auxiliary = model.predict_refined_batch(
+            scene,
+            receivers,
+            execution_mode="adaptive",
+            phase="hard",
+            training_signal=True,
+            gate_version="compact_c1_v1",
+            gate_transition=(0.35, 0.65),
+            collect_pair_arrays=collect_pair_arrays,
+        )
+        assert prediction.full_values is not None
+        assert auxiliary["pair_arrays_collected"] is collect_pair_arrays
+        loss = (
+            prediction.values.square().sum()
+            + prediction.full_values.square().sum()
+            + 0.1 * auxiliary["base_numerator"]
+            + 0.2 * auxiliary["expected_work_numerator"]
+            + 0.05 * auxiliary["router_importance_numerator"]
+        )
+        parameters = tuple(parameter for _, parameter in model.named_parameters())
+        gradients = torch.autograd.grad(
+            loss, (receivers, centers, *parameters), allow_unused=True
+        )
+        observed.append((prediction, auxiliary, gradients))
+    ordinary, exported = observed
+    torch.testing.assert_close(ordinary[0].values, exported[0].values, atol=0, rtol=0)
+    torch.testing.assert_close(ordinary[0].full_values, exported[0].full_values, atol=0, rtol=0)
+    for key in (
+        "base_numerator",
+        "base_denominator",
+        "expected_work_numerator",
+        "expected_work_denominator",
+        "router_importance_numerator",
+        "router_importance_denominator",
+    ):
+        torch.testing.assert_close(ordinary[1][key], exported[1][key], atol=0, rtol=0)
+    assert len(parameter_names) == len(ordinary[2]) - 2
+    for left, right in zip(ordinary[2], exported[2], strict=True):
+        if left is None or right is None:
+            assert left is None and right is None
+        else:
+            assert torch.isfinite(left).all() and torch.isfinite(right).all()
+            torch.testing.assert_close(left, right, atol=0, rtol=0)
 
 
 def test_wind_native_scene_batch_is_target_free_and_pads_only_inactive_sources() -> None:
