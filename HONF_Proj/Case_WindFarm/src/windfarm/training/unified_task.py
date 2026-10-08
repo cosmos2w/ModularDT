@@ -872,14 +872,18 @@ class WindRefinementTask:
                 raise ValueError(f"Wind microbatch has no valid receiver components for role {role!r}.")
             denominators[f"native_role/{role}"] = float(component_count)
 
-        scene = _as_scene_batch(batch.scene_inputs, torch.device("cpu"))
-        query_tensor = torch.as_tensor(receivers, dtype=torch.float32)
-        near = InteractionContextCore.near_weight(
-            query_tensor,
-            scene.centers,
-            scene.source_lengths,
-            scene.present,
-        ) > 0
+        # Protected locality is a strict >0 test of the FP32 smooth near
+        # weight. CPU/CUDA roundoff at its boundary can change one pair;
+        # use the predictor's device and 512-receiver read chunks rather
+        # than weakening the engine's denominator consistency check.
+        scene = _as_scene_batch(batch.scene_inputs, self.device)
+        query_tensor = torch.as_tensor(receivers, device=self.device, dtype=torch.float32)
+        near = torch.cat([
+            InteractionContextCore.near_weight(
+                query_chunk, scene.centers, scene.source_lengths, scene.present,
+            ) > 0
+            for query_chunk in query_tensor.split(512, dim=1)
+        ], dim=1)
         active = scene.present[:, None, :] > 0
         active_pairs = int(active.expand_as(near).sum().item())
         protected_pairs = int((near & active).sum().item())

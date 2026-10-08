@@ -45,6 +45,8 @@ The formal Wind provider allows a lazy128GiB host cache for native geometry cata
 
 When stderr is attached to a terminal, the engine displays a `tqdm` progress bar there. In tmux, stdout may append to a console log while stderr remains attached to the pane, for example with `>> diagnostics/generated/manual_wind5000/wind_console.log`; do not merge stderr into that file if the live bar should remain visible.
 
+Wind's target-independent loss prepass evaluates protected near-source pairs on the predictor's device using the same 512-receiver chunks. The strict positive near-weight test can otherwise count a boundary pair differently on CPU and CUDA in FP32. This keeps loss denominators consistent without changing the near-weight law, receiver samples, router objective or the engine's consistency tolerance. Recovery after a failure restores the last saved optimizer state; logged updates beyond that checkpoint must be replayed, since progress records do not contain their weights or optimizer moments.
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/unified_interaction_formal.py start --recipe diagnostics/generated/manual_thermal5000/recipe.json --run-dir Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_NEW_thermal_adaptive_full5000 --device cuda:0 --stop-after 5000
 CUDA_VISIBLE_DEVICES=2 python tools/unified_interaction_formal.py start --recipe diagnostics/generated/manual_wind5000/recipe.json --run-dir Trained_Results/WindFarm/HONF_Forward_Runs/Run_NEW_wind_adaptive_full5000 --device cuda:0 --stop-after 5000

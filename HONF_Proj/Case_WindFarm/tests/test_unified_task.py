@@ -337,6 +337,132 @@ def math_isfinite(value: float) -> bool:
     return bool(np.isfinite(float(value)))
 
 
+@pytest.mark.parametrize(
+    "device_name",
+    [
+        pytest.param("cpu", id="cpu"),
+        pytest.param(
+            "cuda",
+            id="cuda",
+            marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable."),
+        ),
+    ],
+)
+def test_open_router_importance_denominator_matches_live_read_on_provider_device(
+    monkeypatch, device_name: str
+):
+    """The TRAIN denominator must count the exact FP32 pairs used by the readout."""
+    from windfarm.geometry import global_geometry_features
+
+    device = torch.device(device_name)
+    if device.type == "cuda":
+        device = torch.device("cuda", torch.cuda.current_device())
+    provider = _provider()
+    provider.device = device
+
+    original_run = provider.view.run
+    boundary_center = np.asarray([6.1097913, 6.1475134, 0.875], dtype=np.float32)
+
+    def mixed_source_count_case(row: int):
+        case = original_run(row)
+        case.module_centers[0] = boundary_center
+        if row == 0:
+            # A one-source row is padded to the two-source batch capacity.
+            case.module_centers = case.module_centers[:1].copy()
+            case.module_present = case.module_present[:1].copy()
+            case.module_features = case.module_features[:1].copy()
+            case.n_turbines = 1
+            case.global_context = global_geometry_features(
+                case.support, case.wind_direction_deg, case.n_turbines
+            )
+        return case
+
+    monkeypatch.setattr(provider.view, "run", mixed_source_count_case)
+
+    near_below = np.nextafter(np.float32(4.0), np.float32(0.0))
+    near_above = np.nextafter(np.float32(4.0), np.float32(np.inf))
+    coordinates = np.repeat(np.asarray([[18.0, 18.0, 0.875]], dtype=np.float32), 1024, axis=0)
+    coordinates[:6] = np.asarray(
+        [
+            [near_below, 0.0, 0.875],
+            [4.0, 0.0, 0.875],
+            [near_above, 0.0, 0.875],
+            [near_below, 0.0, 0.875],
+            [4.0, 0.0, 0.875],
+            [near_above, 0.0, 0.875],
+        ],
+        dtype=np.float32,
+    ) + boundary_center - np.asarray([0.0, 0.0, 0.875], dtype=np.float32)
+    # Native e519 boundary pair: CPU near_weight=0, GPU2=2**-24.
+    # This made the old CPU prepass differ from the live CUDA denominator.
+    coordinates[6] = np.asarray([6.0283365, 4.9475636, 4.689722], dtype=np.float32)
+    coordinates[7] = boundary_center
+
+    def fake_native_sample(case, rng, role_query_counts, *, catalogue_cache):
+        del rng, catalogue_cache
+        return SimpleNamespace(
+            coordinates_D=coordinates.copy(),
+            # Deliberately target-independent; denominator construction must
+            # use only the sealed scene and the sampled physical queries.
+            target_mps=np.zeros((1024, 3), dtype=np.float32),
+            flat_indices=np.arange(1024, dtype=np.int64),
+            role_sample_counts=dict(role_query_counts),
+        )
+
+    monkeypatch.setattr(unified_task_module, "sample_native_role_queries", fake_native_sample)
+    batch = provider.make_batch(
+        (0, 1), SamplingKey(42, 1, 0, 0, "open", "adaptive_detail")
+    )
+    assert batch.scene_inputs[0].module_centers.shape == (1, 3)
+    assert batch.scene_inputs[1].module_centers.shape == (2, 3)
+
+    near_calls: list[tuple[torch.device, int]] = []
+    original_near_weight = unified_task_module.InteractionContextCore.near_weight
+
+    def record_near_weight(receivers, centers, source_lengths, present):
+        near_calls.append((receivers.device, int(receivers.shape[1])))
+        return original_near_weight(receivers, centers, source_lengths, present)
+
+    monkeypatch.setattr(
+        unified_task_module.InteractionContextCore,
+        "near_weight",
+        staticmethod(record_near_weight),
+    )
+    denominators = provider.loss_denominators(
+        (batch,), phase="open", arm="adaptive_detail"
+    )
+    # The predictor's protected-locality calculation uses the same device and
+    # bounded receiver reads. Comparing only the final count would not catch a
+    # regression that silently moves this prepass back to CPU or processes all
+    # 1024 receivers in one allocation.
+    assert near_calls == [(device, 512), (device, 512)]
+
+    model = WindFarmRefinedInteractionModel(
+        velocity_transform=_normalizer(),
+        background_profile=_profile(),
+        hidden=16,
+        message=12,
+    ).to(device)
+    model.train()
+    scene = provider.make_scene(batch.scene_inputs)
+    assert torch.equal(
+        scene.present.detach().cpu(), torch.tensor([[1.0, 0.0], [1.0, 1.0]])
+    )
+    _, auxiliary = provider.predict_native(
+        model,
+        scene,
+        batch.receivers,
+        execution_mode="adaptive_detail",
+        phase="open",
+        epoch=501,
+        temperature=1.0,
+    )
+    actual = int(auxiliary["router_importance_denominator"].detach().item())
+    predicted = int(denominators["router_importance_loss"])
+    assert 0 < predicted < 1024 * 3
+    assert actual == predicted
+
+
 def test_formal_wind_task_assembles_eight_case_batch_with_separate_limit(monkeypatch):
     provider = _provider()
     sampled_rows: list[int] = []
