@@ -16,33 +16,36 @@ from windfarm.splits import make_group_split
 from windfarm.training.unified_formal import WindFormalRefinementTask
 from windfarm.training.unified_task import (
     DEFAULT_ROLE_QUERY_COUNTS,
+    WIND_GATE_COMPACT_C1_TRANSITION,
+    WIND_GATE_COMPACT_C1_VERSION,
     WIND_W0_RECIPE_ID,
     WIND_W1_RECIPE_ID,
     WIND_W2_RECIPE_ID,
+    WIND_W3_RECIPE_ID,
     WindReceiverInputs,
     WindRefinementTask,
     WindTargets,
-    _fit_train_role_scales,
     _as_scene_batch,
+    _fit_train_role_scales,
     _query_sampling_sha256,
     _read_fixed_rows,
     _role_ids,
-    _role_counts_for_query_count,
-    resolve_wind_recipe,
     _scene_inputs,
     _stable_json_sha256,
+    resolve_wind_recipe,
 )
 
 
 @pytest.mark.parametrize(
-    ("recipe_id", "query_count", "objective"),
+    ("recipe_id", "query_count", "objective", "hidden"),
     [
-        (WIND_W0_RECIPE_ID, 1024, "scalar_role"),
-        (WIND_W1_RECIPE_ID, 1024, "component_role"),
-        (WIND_W2_RECIPE_ID, 4096, "component_role"),
+        (WIND_W0_RECIPE_ID, 1024, "scalar_role", 64),
+        (WIND_W1_RECIPE_ID, 1024, "component_role", 64),
+        (WIND_W2_RECIPE_ID, 4096, "component_role", 64),
+        (WIND_W3_RECIPE_ID, 1024, "component_role", 128),
     ],
 )
-def test_versioned_wind_recipes_seal_exact_role_mixture_and_sampler(recipe_id, query_count, objective):
+def test_versioned_wind_recipes_seal_exact_role_mixture_and_sampler(recipe_id, query_count, objective, hidden):
     recipe = resolve_wind_recipe(recipe_id)
     assert recipe is not None
     assert recipe["query_count"] == query_count
@@ -50,6 +53,9 @@ def test_versioned_wind_recipes_seal_exact_role_mixture_and_sampler(recipe_id, q
     assert recipe["objective"] == objective
     assert recipe["dataset_profile"] == "wind_shared_fixed24_v1"
     assert recipe["sampling_version"] == SamplingKey.CASE_EPOCH_VERSION
+    assert recipe["model"]["hidden"] == hidden
+    assert recipe["model"]["message"] == hidden
+    assert recipe["model"]["environment_token_shape"] == [2, 2, 2]
     if query_count == 4096:
         assert recipe["role_query_counts"] == {
             name: 4 * count for name, count in DEFAULT_ROLE_QUERY_COUNTS.items()
@@ -66,6 +72,60 @@ def test_wind_recipe_rejects_unsealed_query_counts_and_legacy_profile_is_unchang
     with pytest.raises(ValueError, match="canonical mixture"):
         resolve_wind_recipe(recipe=recipe)
     assert unified_task_module.resolve_wind_recipe() is None
+
+
+def _compact_gate_recipe(recipe_id: str = WIND_W1_RECIPE_ID) -> dict:
+    recipe = resolve_wind_recipe(recipe_id)
+    assert recipe is not None
+    recipe.pop("recipe_sha256")
+    recipe["gate_version"] = WIND_GATE_COMPACT_C1_VERSION
+    recipe["gate_transition"] = list(WIND_GATE_COMPACT_C1_TRANSITION)
+    recipe["recipe_sha256"] = _stable_json_sha256(recipe)
+    return recipe
+
+
+def test_compact_c1_wind_recipe_is_opt_in_strict_and_hash_bound():
+    legacy = resolve_wind_recipe(WIND_W1_RECIPE_ID)
+    assert legacy is not None
+    assert "gate_version" not in legacy and "gate_transition" not in legacy
+
+    compact = resolve_wind_recipe(recipe=_compact_gate_recipe())
+    assert compact is not None
+    assert compact["gate_version"] == WIND_GATE_COMPACT_C1_VERSION
+    assert compact["gate_transition"] == [0.35, 0.65]
+    assert compact["recipe_sha256"] != legacy["recipe_sha256"]
+
+    missing_transition = _compact_gate_recipe()
+    missing_transition.pop("gate_transition")
+    missing_transition.pop("recipe_sha256")
+    with pytest.raises(ValueError, match="requires its sealed gate_transition"):
+        resolve_wind_recipe(recipe=missing_transition)
+
+    altered_transition = _compact_gate_recipe()
+    altered_transition["gate_transition"] = [0.3, 0.7]
+    altered_transition["recipe_sha256"] = _stable_json_sha256(
+        {key: value for key, value in altered_transition.items() if key != "recipe_sha256"}
+    )
+    with pytest.raises(ValueError, match="sealed to the TRAIN-diagnosed"):
+        resolve_wind_recipe(recipe=altered_transition)
+
+
+def test_compact_c1_provider_forwards_gate_without_adding_legacy_identity_fields():
+    provider = _provider(_compact_gate_recipe())
+    provider._message_scale = 1.0
+    case = _case()
+    scene = _as_scene_batch((_scene_inputs(case),), torch.device("cpu"))
+    receivers = WindReceiverInputs(
+        coordinates_D=np.asarray([[[0.5, 0.2, 0.875], [4.0, 1.0, 1.1]]], dtype=np.float32),
+        role_ids=np.asarray([[0, 1]], dtype=np.int8),
+    )
+    model = WindFarmRefinedInteractionModel(
+        velocity_transform=_normalizer(), background_profile=_profile(), hidden=16, message=12
+    )
+    model.eval()
+    provider.predict_native(model, scene, receivers, "adaptive_detail", "hard", epoch=900)
+    assert model.core.refinement_policy.gate_version == WIND_GATE_COMPACT_C1_VERSION
+    assert model.core.refinement_policy.gate_transition == WIND_GATE_COMPACT_C1_TRANSITION
 
 
 def test_component_objective_changes_training_denominator_but_common_validation_stays_scalar():
@@ -674,3 +734,10 @@ def test_formal_wind_task_assembles_eight_case_batch_with_separate_limit(monkeyp
     formal._message_scale = 1.0
     assert "max_microbatch_cases" not in provider.identity_payload()
     assert "max_microbatch_cases" not in formal.identity_payload()
+    assert "gate_version" not in provider.identity_payload()
+    compact_provider = _provider(_compact_gate_recipe())
+    compact_provider.view.token_shape = (2, 2, 2)
+    compact_provider._message_scale = 1.0
+    compact_identity = compact_provider.identity_payload()
+    assert compact_identity["resolved_recipe"]["gate_version"] == WIND_GATE_COMPACT_C1_VERSION
+    assert compact_identity["resolved_recipe"]["gate_transition"] == [0.35, 0.65]

@@ -245,13 +245,22 @@ def _command_dry_run(args: argparse.Namespace) -> int:
 
 
 def _command_start(args: argparse.Namespace) -> int:
+    route_branch_path = getattr(args, "mathematical_route_branch_json", None)
+    if route_branch_path and (args.arm == "warmup" or not args.branch_from):
+        raise ValueError("A mathematical route declaration is start-only for a new matched warmup child.")
     if args.arm == "warmup" and args.branch_from:
         raise ValueError("The shared warmup starts from its retained task parent, not a branch checkpoint.")
     if args.arm != "warmup" and not args.branch_from:
         raise ValueError("Full-detail and Adaptive-detail start only from the shared warmup checkpoint.")
+    mathematical_route_branch = None
+    if route_branch_path:
+        mathematical_route_branch = _read_json(Path(route_branch_path).expanduser().resolve())
     model, provider, optimizer_seed, engine, identity = _build(args)
     output = Path(args.output_dir).expanduser().resolve() if args.output_dir else _output_dir(
         args.task, args.run_id, args.arm)
+    fit_options: dict[str, Any] = {}
+    if mathematical_route_branch is not None:
+        fit_options["mathematical_route_branch"] = mathematical_route_branch
     result = engine.fit(
         model,
         provider,
@@ -261,6 +270,7 @@ def _command_start(args: argparse.Namespace) -> int:
         stop_after=args.stop_after,
         optimizer_seed=optimizer_seed,
         branch_from_checkpoint=args.branch_from,
+        **fit_options,
     )
     print(json.dumps(result, indent=2, sort_keys=True, default=_json_default))
     return 0
@@ -361,7 +371,7 @@ def _task_args(parser: argparse.ArgumentParser, *, output: bool = False) -> None
     parser.add_argument("--seed", type=int, default=None,
                         help="profile default: Thermal 0, Wind 42; matched arms share the sealed value")
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--recipe-id", help="versioned Wind recipe ID, for example wind_w1_component_q1024_v1")
+    parser.add_argument("--recipe-id", help="versioned Wind recipe ID, for example wind_w3_component_q1024_h128_v1")
     parser.add_argument("--recipe-json", help="strict resolved Wind recipe JSON for a custom declared variant")
     parser.add_argument("--query-tile-size", type=int, choices=(512, 2048, 8192))
     parser.add_argument("--execution-backend", choices=("selected", "dense_masked"))
@@ -388,6 +398,10 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--arm", choices=("warmup", "full_detail", "adaptive_detail"), default="warmup")
     start.add_argument("--stop-after", type=int, required=True)
     start.add_argument("--branch-from")
+    start.add_argument(
+        "--mathematical-route-branch-json",
+        help="sealed declaration for a new matched child gate amendment; valid only with --branch-from",
+    )
     start.set_defaults(handler=_command_start)
 
     resume = subparsers.add_parser("resume", help="exactly resume the same arm from its latest checkpoint")

@@ -359,6 +359,70 @@ def _sampling_dataset_id(provider_identity: Mapping[str, Any]) -> str:
     return f"{dataset}:{digest}"
 
 
+def _branch_mathematical_route_amendment(
+    saved: Mapping[str, Any], current: Mapping[str, Any], declaration: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Permit one explicit gate-only child binding; never loosen exact resume.
+
+    Models, moments, normalization, memberships, native objectives, query work,
+    sampling, optimizer groups and schedules must keep their warmup bindings.
+    The only permitted scientific intervention is the diagnosed compact gate.
+    """
+    required = {"kind", "from_gate_version", "to_gate_version", "gate_transition",
+                "evidence_path", "evidence_sha256", "reason"}
+    if (set(declaration) != required or declaration["kind"] != "compact_c1_gate_branch"
+            or declaration["from_gate_version"] != "hard_v1"
+            or declaration["to_gate_version"] != "compact_c1_v1"
+            or list(declaration["gate_transition"]) != [0.35, 0.65]
+            or not isinstance(declaration["reason"], str) or not declaration["reason"].strip()):
+        raise ValueError("A mathematical branch requires the sealed compact C1 declaration.")
+    evidence_path = Path(declaration["evidence_path"]).expanduser().resolve()
+    evidence_bytes = evidence_path.read_bytes()
+    if hashlib.sha256(evidence_bytes).hexdigest() != declaration["evidence_sha256"]:
+        raise ValueError("Mathematical route diagnosis no longer matches its declared hash.")
+    evidence = json.loads(evidence_bytes)
+    if (evidence.get("TEST_read") is not False or evidence.get("optimizer_updates") != 0
+            or evidence.get("solver_attempts") != 0
+            or "TRAIN" not in str(evidence.get("partition", ""))
+            or not any(row.get("consequential") is True for row in evidence.get("rows", []))):
+        raise ValueError("The compact gate requires a consequential input-only TRAIN seam diagnosis.")
+    amended = copy.deepcopy(dict(current))
+    parent_provider = saved.get("provider_identity")
+    child_provider = amended.get("provider_identity")
+    if not isinstance(parent_provider, Mapping) or not isinstance(child_provider, dict):
+        raise TypeError("A mathematical branch requires both sealed provider identities.")
+    parent_recipe = parent_provider.get("resolved_recipe")
+    child_recipe = child_provider.get("resolved_recipe")
+    if isinstance(parent_recipe, Mapping) and isinstance(child_recipe, dict):
+        if (parent_recipe.get("gate_version", "hard_v1") != "hard_v1"
+                or child_recipe.get("gate_version") != "compact_c1_v1"
+                or list(child_recipe.get("gate_transition", ())) != [0.35, 0.65]):
+            raise ValueError("The child recipe must change only hard_v1 to the sealed compact C1 gate.")
+        for name in ("gate_version", "gate_transition", "recipe_id", "recipe_sha256"):
+            if name in parent_recipe:
+                child_recipe[name] = copy.deepcopy(parent_recipe[name])
+            else:
+                child_recipe.pop(name, None)
+        child_provider["resolved_recipe_sha256"] = parent_provider["resolved_recipe_sha256"]
+        for name in ("wind_recipe_id", "wind_recipe_sha256"):
+            if name in saved:
+                amended[name] = saved[name]
+    else:
+        if (parent_provider.get("gate_version", "hard_v1") != "hard_v1"
+                or child_provider.get("gate_version") != "compact_c1_v1"
+                or list(child_provider.get("gate_transition", ())) != [0.35, 0.65]):
+            raise ValueError("The child provider must declare the sealed compact C1 gate.")
+        for name in ("gate_version", "gate_transition"):
+            if name in parent_provider:
+                child_provider[name] = copy.deepcopy(parent_provider[name])
+            else:
+                child_provider.pop(name, None)
+    if amended != saved:
+        raise ValueError("A mathematical route branch cannot change any other experiment binding.")
+    return {**dict(declaration), "evidence_path": str(evidence_path),
+            "preserved_contract": "exact warmup weights, moments, data, objective, query streams and absolute schedules"}
+
+
 def _render_loss_curves(history: Sequence[Mapping[str, Any]], output: Path, field_metric: str) -> None:
     """Write grouped TRAIN/VALIDATION curves and preserve historical metric meaning."""
     from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -1317,6 +1381,7 @@ class TrainingEngine:
         branch_from_checkpoint: str | Path | None = None,
         clean_stop_name: str = "CLEAN_STOP_REQUEST.json",
         allow_microbatch_change: bool = False,
+        mathematical_route_branch: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Fit one warmup or arm segment and save exact epoch-boundary state."""
 
@@ -1353,6 +1418,10 @@ class TrainingEngine:
             raise ValueError("A run cannot be both an exact resume and a new branch.")
         if allow_microbatch_change and resume_checkpoint is None:
             raise ValueError("A microbatch amendment requires an existing run's latest checkpoint.")
+        if mathematical_route_branch is not None and (
+                branch_from_checkpoint is None or resume_checkpoint is not None
+                or allow_microbatch_change or arm not in ("full_detail", "adaptive_detail")):
+            raise ValueError("A mathematical route declaration applies only to a new matched warmup child.")
         source_path = (
             resolve_checkpoint(output, resume_checkpoint)
             if resume_checkpoint is not None
@@ -1393,8 +1462,12 @@ class TrainingEngine:
             sealed_identity["sampling_dataset_id"] = sampling_dataset_id
         amendment = None
         if source_payload is not None:
-            amendment = _resume_identity_amendment(source_payload.get("experiment_identity", {}), sealed_identity,
-                allow_microbatch_change=allow_microbatch_change)
+            if mathematical_route_branch is not None:
+                amendment = _branch_mathematical_route_amendment(
+                    source_payload.get("experiment_identity", {}), sealed_identity, mathematical_route_branch)
+            else:
+                amendment = _resume_identity_amendment(source_payload.get("experiment_identity", {}), sealed_identity,
+                    allow_microbatch_change=allow_microbatch_change)
             if resume_checkpoint is not None:
                 if source_payload.get("arm") != arm:
                     raise ValueError("Exact resume arm differs from the saved checkpoint.")
@@ -1433,10 +1506,13 @@ class TrainingEngine:
                 "preserved_optimizer_updates": sum(int(row["optimizer_updates"]) for row in history),
                 "recorded_unix": time.time()}
             resume_amendments.append(amendment)
-            _atomic_json(layout.write_path(f"microbatch_amendment_epoch_{start_epoch:04d}.json"), amendment)
+            amendment_name = ("mathematical_route_amendment" if mathematical_route_branch is not None
+                              else "microbatch_amendment")
+            _atomic_json(layout.write_path(f"{amendment_name}_epoch_{start_epoch:04d}.json"), amendment)
         best_field = float(source_payload.get("best_field_score", float("inf"))) if source_payload else float("inf")
         best_guarded = float(source_payload.get("best_response_guarded_score", float("inf"))) if source_payload else float("inf")
-        branch_parent = None
+        branch_parent = (copy.deepcopy(source_payload.get("branch_parent"))
+                         if source_payload is not None and resume_checkpoint is not None else None)
         if branch_from_checkpoint is not None:
             branch_parent = {
                 "path": str(source_path),
@@ -1700,6 +1776,8 @@ class TrainingEngine:
                         provider_training_state=getattr(provider, "training_state_dict", dict)())
                     if resume_amendments:
                         payload["resume_amendments"] = resume_amendments
+                    if branch_parent is not None:
+                        payload["branch_parent"] = branch_parent
                     _atomic_json(layout.write_path("history.json"), history)
                     if milestone:
                         _atomic_torch_save(layout.write_path(f"epoch_{epoch:04d}_model.pt"), payload)

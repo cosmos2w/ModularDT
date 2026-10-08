@@ -119,7 +119,8 @@ def _canonical_relative(name: str | Path, *, category: str | None = None) -> Pat
         "fit_summary.json",
         "progress.json",
         "resource_sessions.json",
-    } or lower.startswith(("clean_stop_consumed_", "first10_forecast", "microbatch_amendment_", "stage_receipt_")):
+    } or lower.startswith(("clean_stop_consumed_", "first10_forecast", "microbatch_amendment_",
+                            "mathematical_route_amendment_", "stage_receipt_")):
         return Path("logs") / basename
     if lower in {
         "formal_profile_binding.json",

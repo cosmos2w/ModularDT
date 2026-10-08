@@ -25,6 +25,8 @@ class RefinementPolicy:
     temperature: float = 1.0
     training_signal: bool = False
     execution_backend: str = 'selected'
+    gate_version: str = 'hard_v1'
+    gate_transition: tuple[float, float] = (0.35, 0.65)
 
     def __post_init__(self):
         if self.mode not in ('all_fine', 'adaptive', 'all_base', 'nearest', 'upstream', 'shuffle'):
@@ -37,6 +39,12 @@ class RefinementPolicy:
             raise ValueError('Router temperature must be positive and finite.')
         if self.execution_backend not in ('selected', 'dense_masked'):
             raise ValueError('Refinement execution backend must be selected or dense_masked.')
+        if self.gate_version not in ('hard_v1', 'compact_c1_v1'):
+            raise ValueError('Unknown refinement mathematical gate version.')
+        if (len(self.gate_transition) != 2
+                or not all(math.isfinite(value) for value in self.gate_transition)
+                or not 0 < self.gate_transition[0] < self.gate_transition[1] < 1):
+            raise ValueError('Gate transition must be two increasing probabilities inside (0,1).')
 
 
 class SourceRefinement(nn.Module):
@@ -87,7 +95,15 @@ class SourceRefinement(nn.Module):
         return base, probability
 
     @staticmethod
-    def route(context, query, probability, protected, policy, fixed_route=None):
+    def continuous_weight(probability, near_weight, policy):
+        """C1 correction weight with exact zero support and fully fine inner near reads."""
+        lower, upper = policy.gate_transition
+        transition = ((probability - lower) / (upper - lower)).clamp(0, 1)
+        optional = transition.square() * (3 - 2 * transition)
+        return near_weight + (1 - near_weight) * optional
+
+    @staticmethod
+    def route(context, query, probability, protected, policy, fixed_route=None, *, near_weight=None):
         active = (context.present[:, None] > 0).expand_as(probability)
         if fixed_route is not None:
             if policy.mode != 'adaptive' or policy.phase != 'hard' or policy.training_signal:
@@ -95,7 +111,12 @@ class SourceRefinement(nn.Module):
             if fixed_route.shape != active.shape or fixed_route.dtype != torch.bool:
                 raise ValueError('A fixed route must be boolean [B,Q,M] in physical source order.')
             return (fixed_route | protected) & active
-        learned = ((probability >= policy.threshold) | protected) & active
+        if policy.gate_version == 'compact_c1_v1':
+            if near_weight is None:
+                raise ValueError('Continuous refinement requires its live geometric near weight.')
+            learned = (SourceRefinement.continuous_weight(probability, near_weight, policy) > 0) & active
+        else:
+            learned = ((probability >= policy.threshold) | protected) & active
         if policy.mode == 'all_fine' or policy.phase == 'open':
             return active
         if policy.mode == 'all_base':
@@ -121,6 +142,27 @@ class SourceRefinement(nn.Module):
         priority = priority.masked_fill(~eligible, torch.inf)
         ranks = priority.argsort(dim=-1, stable=True).argsort(dim=-1, stable=True)
         return (protected | (eligible & (ranks < additional[..., None]))) & active
+
+    @staticmethod
+    def deployed_weight(context, probability, near_weight, protected, keep, policy):
+        if policy.gate_version != 'compact_c1_v1':
+            return None
+        active = (context.present[:, None] > 0).expand_as(probability)
+        raw = SourceRefinement.continuous_weight(probability, near_weight, policy)
+        if policy.mode == 'all_fine' or policy.phase == 'open':
+            return active.to(probability)
+        if policy.mode == 'all_base':
+            return near_weight * active
+        if policy.mode == 'adaptive':
+            return raw * keep
+        # Assignment interventions retain protected paths and the complete
+        # multiset of positive optional weights, as well as their support size.
+        optional = raw * (active & ~protected)
+        ordered_weights = optional.sort(dim=-1, descending=True).values
+        selected = keep & ~protected & active
+        positions = selected.to(torch.int64).cumsum(-1).sub(1).clamp_min(0)
+        reassigned = ordered_weights.gather(-1, positions) * selected
+        return torch.where(protected, raw, reassigned) * active
 
     def auxiliary(self, base, fine, probability, protected, context, keep, *, fine_rows):
         active = (context.present[:, None] > 0).expand_as(probability)
@@ -150,16 +192,27 @@ class SourceRefinement(nn.Module):
         }
 
 
-def _combine(base, fine, probability, keep, protected, policy):
+def _combine(base, fine, probability, keep, protected, policy, gate_weight=None):
     if policy.mode == 'all_fine' or policy.phase == 'open':
         value = fine
+    elif policy.gate_version == 'compact_c1_v1':
+        if gate_weight is None:
+            raise ValueError('Continuous refinement must retain its deployed gate factors.')
+        blend = gate_weight[..., None]
+        mixed = base + blend * (fine - base)
+        # Exact fully fine inner reads; the C1 weight has zero derivative at 1.
+        value = torch.where(blend == 1, fine, mixed)
     elif policy.phase == 'soft' and policy.mode == 'adaptive':
         blend = torch.where(protected, torch.ones_like(probability), probability)
         value = base + blend[..., None] * (fine - base)
     else:
         value = torch.where(keep[..., None], fine, base)
-    if policy.training_signal and policy.mode != 'all_fine' and policy.phase != 'soft':
-        surrogate = (probability - probability.detach()) * ~protected
+    if policy.training_signal and policy.mode != 'all_fine' and (
+            policy.phase != 'soft' or policy.gate_version == 'compact_c1_v1'):
+        recovery = ~protected
+        if policy.gate_version == 'compact_c1_v1' and policy.phase != 'open':
+            recovery = recovery & ~keep
+        surrogate = (probability - probability.detach()) * recovery
         value = value + surrogate[..., None] * (fine - base).detach()
     return value
 
@@ -175,7 +228,8 @@ class _RefinementMixin:
                                   'residual_scale': residual_scale}
 
     def set_execution(self, mode='all_fine', *, phase='hard', threshold=0.5,
-                      temperature=1.0, training_signal=False, execution_backend='selected'):
+                      temperature=1.0, training_signal=False, execution_backend='selected',
+                      gate_version='hard_v1', gate_transition=(0.35, 0.65)):
         self.refinement_policy = RefinementPolicy(
             mode=mode,
             phase=phase,
@@ -183,6 +237,8 @@ class _RefinementMixin:
             temperature=temperature,
             training_signal=training_signal,
             execution_backend=execution_backend,
+            gate_version=gate_version,
+            gate_transition=tuple(gate_transition),
         )
         return self
 
@@ -217,7 +273,8 @@ class _RefinementMixin:
             )
             route = None if fixed_route is None else fixed_route[:, block_start:block_stop]
             block_keep = self.refinement.route(
-                context, block_query, block_probability, block_protected, policy, route
+                context, block_query, block_probability, block_protected, policy, route,
+                near_weight=block_weight,
             )
             use_start, use_stop = max(start, block_start), min(stop, block_stop)
             local_start, local_stop = use_start - block_start, use_stop - block_start
@@ -263,13 +320,14 @@ class PreparedRefinementResponse(PreparedSourceResponse):
     keep: torch.Tensor | None = None
     protected: torch.Tensor | None = None
     policy: RefinementPolicy | None = None
+    gate_weight: torch.Tensor | None = None
 
     def __post_init__(self):
         self._refinement_binding = self._binding()
 
     def _binding(self):
         return (id(self.policy), tuple((name, id(getattr(self, name))) for name in
-                ('base_far', 'fine_far', 'probability', 'keep', 'protected')))
+                ('base_far', 'fine_far', 'probability', 'keep', 'protected', 'gate_weight')))
 
     def assert_fresh(self):
         super().assert_fresh()
@@ -284,7 +342,7 @@ class PreparedRefinementResponse(PreparedSourceResponse):
             raise ValueError('Response accumulation dtype must be float32 or float64.')
         far = _combine(self.base_far.to(accumulation_dtype), self.fine_far.to(accumulation_dtype),
             self.probability.to(accumulation_dtype), self.keep, self.protected,
-            self.policy)
+            self.policy, None if self.gate_weight is None else self.gate_weight.to(accumulation_dtype))
         # The existing near blending and division then widen their factors too.
         return PreparedSourceResponse(**{name: getattr(self, name)
             for name in PreparedSourceResponse.__dataclass_fields__ if name != 'far_kernel'},
@@ -315,7 +373,7 @@ class RefinedSourceResponseOperator(_RefinementMixin, SourceResponseOperator):
     def prepare_receivers(self, context, receivers, receiver_features=None, receiver_ids=None,
                           chunk_size=512, *, route_chunk_size=512, fixed_route=None):
         policy = self.refinement_policy
-        if (policy.mode == 'all_fine' or (policy.mode == 'adaptive' and policy.threshold == 0)) and not policy.training_signal and fixed_route is None:
+        if (policy.mode == 'all_fine' or (policy.gate_version == 'hard_v1' and policy.mode == 'adaptive' and policy.threshold == 0)) and not policy.training_signal and fixed_route is None:
             return super().prepare_receivers(context, receivers, receiver_features,
                                             receiver_ids, chunk_size)
         self.assert_owned(context)
@@ -337,12 +395,15 @@ class RefinedSourceResponseOperator(_RefinementMixin, SourceResponseOperator):
         full = super().prepare_receivers(context, receivers, features, ids, chunk_size) if needs_full else None
         source_features = self.refinement.source_features(context)
         fars, bases, fines, probabilities, keeps, protecteds = [], [], [], [], [], []
-        weights, near_indices, near_values, records = [], [], [], []
+        weights, gate_weights, near_indices, near_values, records = [], [], [], [], []
         for start in range(0, queries, chunk_size):
             stop = min(start + chunk_size, queries)
             query, feature, protected, base, probability, keep, weight = self._route_fields(
                 context, receivers, features, source_features, policy,
                 start=start, stop=stop, route_chunk_size=route_chunk_size, fixed_route=fixed_route,
+            )
+            gate_weight = self.refinement.deployed_weight(
+                context, probability, weight, protected, keep, policy
             )
             if full is not None:
                 fine = full.far_kernel[:, start:start + chunk_size]
@@ -356,7 +417,7 @@ class RefinedSourceResponseOperator(_RefinementMixin, SourceResponseOperator):
                 fine_rows = selected[0].numel()
                 near_selected = protected.nonzero(as_tuple=True)
                 near = self.near_head(self._read_selected_features(context, query, feature, near_selected))
-            if (full is None and not policy.training_signal
+            if (full is None and not policy.training_signal and policy.gate_version == 'hard_v1'
                     and policy.phase in ('hard', 'open')):
                 # In the selected hard/open path, unselected fine slots are
                 # exact copies of the base tensor. Their already-scattered
@@ -364,8 +425,10 @@ class RefinedSourceResponseOperator(_RefinementMixin, SourceResponseOperator):
                 # second full-sized clone/where pair.
                 far = fine
             else:
-                far = _combine(base, fine, probability, keep, protected, policy)
+                far = _combine(base, fine, probability, keep, protected, policy, gate_weight)
             weights.append(weight)
+            if gate_weight is not None:
+                gate_weights.append(gate_weight)
             near_indices.append(torch.stack((near_selected[0], near_selected[1] + start, near_selected[2])))
             near_values.append(near)
             fars.append(far); bases.append(base); fines.append(fine)
@@ -378,12 +441,15 @@ class RefinedSourceResponseOperator(_RefinementMixin, SourceResponseOperator):
             far = torch.cat(fars, 1); base = torch.cat(bases, 1); fine = torch.cat(fines, 1)
             probability = torch.cat(probabilities, 1); keep = torch.cat(keeps, 1); protected = torch.cat(protecteds, 1)
             weight = torch.cat(weights, 1); near_index = torch.cat(near_indices, 1); near = torch.cat(near_values, 0)
+            gate_weight = torch.cat(gate_weights, 1) if gate_weights else None
         else:
             far = base = fine = receivers.new_empty(batch, 0, context.centers.shape[1], self.output_width)
             weight = probability = receivers.new_empty(batch, 0, context.centers.shape[1])
             keep = protected = torch.empty_like(weight, dtype=torch.bool)
             near_index = torch.empty(3, 0, device=receivers.device, dtype=torch.long)
             near = receivers.new_empty(0, self.output_width)
+            gate_weight = (receivers.new_empty(batch, 0, context.centers.shape[1])
+                           if policy.gate_version == 'compact_c1_v1' else None)
         offset = receivers.new_zeros(batch, queries, self.output_width)
         if not self.zero_offset:
             offset = self.offset_head(torch.cat((context.global_state[:, None].expand(-1, queries, -1),
@@ -395,11 +461,12 @@ class RefinedSourceResponseOperator(_RefinementMixin, SourceResponseOperator):
                                               full.near_values, full.offset)
         response = PreparedRefinementResponse(context, receivers, ids, offset, weight, near_index, near,
             far, None, None, None, None, self.forcing_scale, self.mode,
-            _versions((receivers, features, ids, fixed_route, base, fine, probability, keep, protected)),
-            base, fine, probability, keep, protected, policy)
+            _versions((receivers, features, ids, fixed_route, base, fine, probability, keep, protected, gate_weight)),
+            base, fine, probability, keep, protected, policy, gate_weight)
         response.full_response = full
         response.refinement_aux = {'base': base, 'fine': fine, 'probability': probability,
             'keep': keep, 'protected': protected,
+            'gate_weight': gate_weight,
             'active_pairs': int((context.present > 0).sum().detach()) * queries,
             'fine_rows': batch * queries * context.centers.shape[1] if full is not None else int(keep.sum().detach()),
             'cheap_rows': batch * queries * context.centers.shape[1],
@@ -448,7 +515,7 @@ class RefinedNonlinearFieldReadout(_RefinementMixin, NonlinearFieldReadout):
             raise ValueError('chunk_size and route_chunk_size must be positive.')
         if fixed_route is not None and (fixed_route.dtype != torch.bool or fixed_route.shape != (batch, queries, prepared.centers.shape[1])):
             raise ValueError('Fixed route must be boolean [B,Q,M].')
-        if (policy.mode == 'all_fine' or (policy.mode == 'adaptive' and policy.threshold == 0)) and not policy.training_signal and fixed_route is None:
+        if (policy.mode == 'all_fine' or (policy.gate_version == 'hard_v1' and policy.mode == 'adaptive' and policy.threshold == 0)) and not policy.training_signal and fixed_route is None:
             return RefinementPrediction(super().predict(prepared, receivers, features, chunk_size=chunk_size), None,
                 {'fine_rows': batch * queries * prepared.centers.shape[1],
                  'active_pairs': int((prepared.present > 0).sum().detach()) * queries,
@@ -460,9 +527,12 @@ class RefinedNonlinearFieldReadout(_RefinementMixin, NonlinearFieldReadout):
         near_count = receivers.new_zeros((), dtype=torch.int64)
         for start in range(0, queries, chunk_size):
             stop = min(start + chunk_size, queries)
-            query, feature, protected, base, probability, keep, _ = self._route_fields(
+            query, feature, protected, base, probability, keep, near_weight = self._route_fields(
                 prepared, receivers, features, source_features, policy,
                 start=start, stop=stop, route_chunk_size=route_chunk_size, fixed_route=fixed_route,
+            )
+            gate_weight = self.refinement.deployed_weight(
+                prepared, probability, near_weight, protected, keep, policy
             )
             if (policy.training_signal or policy.phase == 'soft'
                     or policy.execution_backend == 'dense_masked'):
@@ -475,13 +545,14 @@ class RefinedNonlinearFieldReadout(_RefinementMixin, NonlinearFieldReadout):
                 fine_rows = selected[0].numel()
             if (policy.execution_backend == 'selected'
                     and not policy.training_signal
+                    and policy.gate_version == 'hard_v1'
                     and policy.phase in ('hard', 'open')):
                 # The selected tensor starts as B and replaces exactly the
                 # kept rows with F, so it already equals B + g(F-B) for the
                 # deployed hard/open route.
                 mixed = fine
             else:
-                mixed = _combine(base, fine, probability, keep, protected, policy)
+                mixed = _combine(base, fine, probability, keep, protected, policy, gate_weight)
             common = (prepared.global_state[:, None].expand(-1, query.shape[1], -1),
                       _geometry(query / prepared.lengths[:, None]), feature)
             outputs.append(self.field_head(torch.cat(((mixed * prepared.source_measure[:, None, :, None]).sum(2), *common), -1)))
@@ -495,12 +566,14 @@ class RefinedNonlinearFieldReadout(_RefinementMixin, NonlinearFieldReadout):
             near_count = near_count + protected.sum()
             if collect_pair_arrays:
                 export.append({'base': base, 'fine': fine, 'probability': probability,
-                               'keep': keep, 'protected': protected})
+                               'keep': keep, 'protected': protected, 'gate_weight': gate_weight})
         output = torch.cat(outputs, 1) if outputs else receivers.new_empty(batch, 0, self.output_width)
         full = torch.cat(full_outputs, 1) if full_outputs else None
         self._refinement_auxiliary.extend(records)
         aux = {name: torch.cat([item[name] for item in export], 1) for name in
                ('base', 'fine', 'probability', 'keep', 'protected')} if export else {}
+        if export and export[0]['gate_weight'] is not None:
+            aux['gate_weight'] = torch.cat([item['gate_weight'] for item in export], 1)
         aux.update(fine_rows=paid_rows,
                    active_pairs=int((prepared.present > 0).sum().detach()) * queries,
                    cheap_rows=batch * queries * prepared.centers.shape[1],
@@ -508,13 +581,14 @@ class RefinedNonlinearFieldReadout(_RefinementMixin, NonlinearFieldReadout):
                    selected_detail_rows=int(selected_count.detach()),
                    near_rows=int(near_count.detach()),
                    pair_arrays_collected=bool(collect_pair_arrays),
-                   complete_fine_values=policy.training_signal or policy.phase == 'soft')
+                   complete_fine_values=(policy.training_signal or policy.phase == 'soft'
+                                         or policy.execution_backend == 'dense_masked'))
         return RefinementPrediction(output, full, aux)
 
     def predict(self, prepared, receivers, receiver_features=None, *, chunk_size=512,
                 return_messages=False, fixed_route=None):
         policy = self.refinement_policy
-        if (policy.mode == 'all_fine' or (policy.mode == 'adaptive' and policy.threshold == 0)) and not policy.training_signal and fixed_route is None:
+        if (policy.mode == 'all_fine' or (policy.gate_version == 'hard_v1' and policy.mode == 'adaptive' and policy.threshold == 0)) and not policy.training_signal and fixed_route is None:
             return super().predict(prepared, receivers, receiver_features, chunk_size=chunk_size,
                                    return_messages=return_messages)
         result = self.read_refinement(prepared, receivers, receiver_features, chunk_size=chunk_size,
@@ -522,6 +596,6 @@ class RefinedNonlinearFieldReadout(_RefinementMixin, NonlinearFieldReadout):
         if return_messages:
             aux = result.auxiliary
             messages = _combine(aux['base'], aux['fine'], aux['probability'], aux['keep'],
-                                aux['protected'], policy) * prepared.present[:, None, :, None]
+                                aux['protected'], policy, aux.get('gate_weight')) * prepared.present[:, None, :, None]
             return result.values, messages
         return result.values

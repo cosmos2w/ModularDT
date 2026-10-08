@@ -45,14 +45,18 @@ def test_metadata_dry_run_never_constructs_task(tmp_path, monkeypatch):
     assert result['engine_config']['total_epochs'] == 5000
 
 
-def test_manual_wind_pair_shares_one_prepared_recipe_and_case_epoch_binding(tmp_path, monkeypatch):
+@pytest.mark.parametrize("wind_recipe_id", [
+    'wind_w1_component_q1024_v1',
+    'wind_w3_component_q1024_h128_v1',
+])
+def test_manual_wind_pair_shares_one_prepared_recipe_and_case_epoch_binding(tmp_path, monkeypatch, wind_recipe_id):
     class Factory:
         def prepare_recipe(self, config, *, metadata_only):
-            assert config['wind_recipe_id'] == 'wind_w1_component_q1024_v1'
+            assert config['wind_recipe_id'] == wind_recipe_id
             assert metadata_only is True
-            return {'recipe_id': 'prepared-w1', 'recipe_sha256': 'native-recipe-sha',
+            return {'recipe_id': f'prepared-{wind_recipe_id}', 'recipe_sha256': 'native-recipe-sha',
                     'ready_for_training': False,
-                    'wind_training_recipe': {'recipe_id': 'wind_w1_component_q1024_v1'}}
+                    'wind_training_recipe': {'recipe_id': wind_recipe_id}}
 
         def validate_recipe(self, native):
             return {'ready_for_training': native['ready_for_training']}
@@ -64,7 +68,7 @@ def test_manual_wind_pair_shares_one_prepared_recipe_and_case_epoch_binding(tmp_
     path = tmp_path / 'wind_pair.json'
     args = cli.build_parser().parse_args([
         'prepare', '--task', 'wind', '--arm', 'both', '--recipe', str(path),
-        '--wind-recipe-id', 'wind_w1_component_q1024_v1', '--metadata-only',
+        '--wind-recipe-id', wind_recipe_id, '--metadata-only',
     ])
     prepared = cli.prepare(args)
     assert prepared['optimizer_started'] is False

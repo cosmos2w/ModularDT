@@ -64,7 +64,11 @@ DEFAULT_ROLE_QUERY_COUNTS = {
 WIND_W0_RECIPE_ID = "wind_w0_scalar_q1024_v1"
 WIND_W1_RECIPE_ID = "wind_w1_component_q1024_v1"
 WIND_W2_RECIPE_ID = "wind_w2_component_q4096_v1"
+WIND_W3_RECIPE_ID = "wind_w3_component_q1024_h128_v1"
 WIND_RECIPE_SCHEMA_VERSION = 1
+WIND_GATE_HARD_VERSION = "hard_v1"
+WIND_GATE_COMPACT_C1_VERSION = "compact_c1_v1"
+WIND_GATE_COMPACT_C1_TRANSITION = (0.35, 0.65)
 WIND_ROLE_SCALE_CALIBRATION_QUERY_COUNTS = dict(DEFAULT_ROLE_QUERY_COUNTS)
 WIND_COMPONENT_SCALE_MINIMUM_MPS = 1.0e-3
 WIND_COMPONENT_SCALE_FRACTION_OF_SCALAR = 0.10
@@ -124,16 +128,17 @@ def _role_counts_for_query_count(query_count: int) -> dict[str, int]:
 
 
 def _builtin_wind_recipe(recipe_id: str) -> dict[str, Any]:
-    """Return one of the three versioned, fresh-initialization screen recipes."""
+    """Return a versioned fresh-init screen recipe or the selected width follow-up."""
 
     definitions = {
-        WIND_W0_RECIPE_ID: (1024, "scalar_role", "train_role_target_component_variance_v1"),
-        WIND_W1_RECIPE_ID: (1024, "component_role", "train_role_profile_residual_rms_v1"),
-        WIND_W2_RECIPE_ID: (4096, "component_role", "train_role_profile_residual_rms_v1"),
+        WIND_W0_RECIPE_ID: (1024, "scalar_role", "train_role_target_component_variance_v1", 64, 64),
+        WIND_W1_RECIPE_ID: (1024, "component_role", "train_role_profile_residual_rms_v1", 64, 64),
+        WIND_W2_RECIPE_ID: (4096, "component_role", "train_role_profile_residual_rms_v1", 64, 64),
+        WIND_W3_RECIPE_ID: (1024, "component_role", "train_role_profile_residual_rms_v1", 128, 128),
     }
     if recipe_id not in definitions:
         raise ValueError(f"Unknown versioned Wind development recipe {recipe_id!r}.")
-    query_count, objective, scale_rule = definitions[recipe_id]
+    query_count, objective, scale_rule, hidden, message = definitions[recipe_id]
     return {
         "schema_version": WIND_RECIPE_SCHEMA_VERSION,
         "recipe_id": recipe_id,
@@ -147,8 +152,8 @@ def _builtin_wind_recipe(recipe_id: str) -> dict[str, Any]:
         "calibration_layout_count": _MESSAGE_CALIBRATION_LAYOUT_COUNT,
         "model": {
             "forward_architecture": REFINED_SOURCE_RESOLVED_NONLINEAR_ARCHITECTURE,
-            "hidden": 64,
-            "message": 64,
+            "hidden": hidden,
+            "message": message,
             "environment_token_shape": [2, 2, 2],
             "max_sources": 30,
             "base_width": 16,
@@ -181,8 +186,12 @@ def resolve_wind_recipe(
             "query_count", "role_query_counts", "calibration_query_count", "calibration_role_query_counts",
             "calibration_layout_count", "model", "execution_backend", "query_tile_size", "sampling_version",
         }
-        if set(resolved) != required:
+        fields = set(resolved)
+        gate_fields = {"gate_version", "gate_transition"}
+        if fields not in (required, required | {"gate_version"}, required | gate_fields):
             raise ValueError("Resolved Wind recipe fields do not match the strict recipe schema.")
+        if "gate_transition" in fields and "gate_version" not in fields:
+            raise ValueError("A Wind gate transition requires an explicit gate version.")
         if recipe_id is not None and resolved["recipe_id"] != recipe_id:
             raise ValueError("Wind recipe ID does not match the supplied resolved recipe payload.")
     else:
@@ -237,6 +246,18 @@ def resolve_wind_recipe(
         raise ValueError(f"Wind query tile size must be one of {WIND_ALLOWED_QUERY_TILES}.")
     if resolved["sampling_version"] != SamplingKey.CASE_EPOCH_VERSION:
         raise ValueError("New Wind recipes require packing-independent case_epoch_v1 sampling.")
+    gate_version = str(resolved.get("gate_version", WIND_GATE_HARD_VERSION))
+    if gate_version not in {WIND_GATE_HARD_VERSION, WIND_GATE_COMPACT_C1_VERSION}:
+        raise ValueError("Wind gate version must be hard_v1 or compact_c1_v1.")
+    if gate_version == WIND_GATE_COMPACT_C1_VERSION:
+        if "gate_transition" not in resolved:
+            raise ValueError("compact_c1_v1 requires its sealed gate_transition interval.")
+        transition = tuple(float(value) for value in resolved["gate_transition"])
+        if transition != WIND_GATE_COMPACT_C1_TRANSITION:
+            raise ValueError("compact_c1_v1 is sealed to the TRAIN-diagnosed [0.35, 0.65] transition.")
+        resolved["gate_transition"] = list(transition)
+    elif "gate_transition" in resolved:
+        raise ValueError("Only compact_c1_v1 may bind a gate_transition interval.")
     resolved["role_query_counts"] = role_counts
     resolved["calibration_role_query_counts"] = calibration_counts
     resolved["model"] = {**model, "environment_token_shape": list(shape)}
@@ -708,6 +729,14 @@ class WindRefinementTask:
         )
         self.message_width = int(message_width)
         self.recipe = None if recipe is None else dict(recipe)
+        self.gate_version = (
+            WIND_GATE_HARD_VERSION if self.recipe is None else str(self.recipe.get("gate_version", WIND_GATE_HARD_VERSION))
+        )
+        self.gate_transition = (
+            WIND_GATE_COMPACT_C1_TRANSITION
+            if self.recipe is None or "gate_transition" not in self.recipe
+            else tuple(float(value) for value in self.recipe["gate_transition"])
+        )
         self.execution_backend = "selected" if self.recipe is None else str(self.recipe["execution_backend"])
         self.query_tile_size = 512 if self.recipe is None else int(self.recipe["query_tile_size"])
         self.sampling_version = (
@@ -1223,6 +1252,8 @@ class WindRefinementTask:
             temperature=float(temperature),
             execution_backend=self.execution_backend,
             chunk_size=self.query_tile_size,
+            gate_version=self.gate_version,
+            gate_transition=self.gate_transition,
         )
         if isinstance(predictions, Mapping):
             main_standardized = predictions["values"]
@@ -2061,6 +2092,7 @@ __all__ = [
     "WIND_W0_RECIPE_ID",
     "WIND_W1_RECIPE_ID",
     "WIND_W2_RECIPE_ID",
+    "WIND_W3_RECIPE_ID",
     "WindPredictions",
     "WindReceiverInputs",
     "WindRefinementTask",

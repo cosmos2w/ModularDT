@@ -31,6 +31,7 @@ from honf_runtime.unified_training import (
     SamplingKey,
     ScheduleSpec,
     TaskBatch,
+    restore_rng_state,
 )
 
 from ..source_response import CONTEXT_KEYS, ThermalSourceResponse
@@ -57,6 +58,32 @@ EXPECTED_WORK_TARGET_SHARE = 0.05
 EXPECTED_WORK_WEIGHT_CAP = 0.1
 RESPONSE_SURFACE_STRIDE = 4
 OPERATOR_ROWS_PER_CASE = 128
+THERMAL_GATE_HARD_VERSION = "hard_v1"
+THERMAL_GATE_COMPACT_C1_VERSION = "compact_c1_v1"
+THERMAL_GATE_COMPACT_C1_TRANSITION = (0.35, 0.65)
+THERMAL_TRANSFER_EPOCHS = 500
+THERMAL_TRANSFER_LR = 3.0e-6
+
+
+def _resolve_gate_binding(
+    gate_version: str = THERMAL_GATE_HARD_VERSION,
+    gate_transition: Sequence[float] | None = None,
+) -> tuple[str, tuple[float, float]]:
+    """Validate the explicit C1 option while preserving legacy hard defaults."""
+
+    version = str(gate_version)
+    if version == THERMAL_GATE_HARD_VERSION:
+        if gate_transition is not None:
+            raise ValueError("Thermal hard_v1 does not bind a compact gate transition.")
+        return version, THERMAL_GATE_COMPACT_C1_TRANSITION
+    if version != THERMAL_GATE_COMPACT_C1_VERSION:
+        raise ValueError("Thermal gate version must be hard_v1 or compact_c1_v1.")
+    if gate_transition is None:
+        raise ValueError("Thermal compact_c1_v1 requires its explicit gate_transition interval.")
+    transition = tuple(float(value) for value in gate_transition)
+    if transition != THERMAL_GATE_COMPACT_C1_TRANSITION:
+        raise ValueError("Thermal compact_c1_v1 is sealed to [0.35, 0.65].")
+    return version, transition
 
 
 @dataclass(frozen=True)
@@ -281,6 +308,157 @@ def _recipe_optimizer_identity(
         "state_by_name_sha256": _tensor_digest(optimizer_seed["state_by_name"]),
         "parameter_count": len(optimizer_seed["state_by_name"]),
     }
+
+
+def _json_sha256(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _resolve_development_refinement_parent_binding(
+    config: Mapping[str, Any],
+) -> tuple[Path | None, str | None]:
+    path_value = config.get("development_refinement_parent")
+    sha256_value = config.get("development_refinement_parent_sha256")
+    if (path_value is None) != (sha256_value is None):
+        raise ValueError(
+            "Thermal development_refinement_parent and its required SHA-256 must be supplied together."
+        )
+    if path_value is None:
+        return None, None
+    if not isinstance(sha256_value, str) or len(sha256_value) != 64:
+        raise ValueError("Thermal development parent binding requires a full 64-character SHA-256.")
+    try:
+        bytes.fromhex(sha256_value)
+    except ValueError as error:
+        raise ValueError("Thermal development parent SHA-256 must contain only hexadecimal digits.") from error
+    path = Path(path_value).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError("The explicitly bound Thermal development refinement parent does not exist.")
+    return path, sha256_value
+
+
+def _validate_development_refinement_parent_header(
+    checkpoint: Mapping[str, Any], *, path: Path, expected_sha256: str,
+) -> tuple[dict[str, Any], Mapping[str, Any], Mapping[str, Any]]:
+    """Reject formal, stale, wrong-arm, and wrong-task Thermal parent states."""
+
+    actual_sha256 = _sha256(path)
+    if actual_sha256 != expected_sha256:
+        raise ValueError("Thermal development parent checkpoint SHA-256 does not match the required binding.")
+    identity = checkpoint.get("experiment_identity")
+    if not isinstance(identity, Mapping):
+        raise TypeError("Thermal development parent lacks a sealed unified experiment identity mapping.")
+    if (checkpoint.get("workflow") != "unified_interaction_refinement"
+            or identity.get("workflow") != "unified_interaction_refinement"
+            or identity.get("task") != "ThermalChannel"
+            or identity.get("development_profile") != "fixed25_v1"
+            or identity.get("run_id") != "thermal_adaptive_refine_20261007"
+            or checkpoint.get("arm") != "adaptive_detail"
+            or type(checkpoint.get("epoch")) is not int
+            or checkpoint.get("epoch") != 2500
+            or type(checkpoint.get("current_epoch")) is not int
+            or checkpoint.get("current_epoch") != 2500):
+        raise ValueError(
+            "Thermal transfer parent must be the sealed fixed25_v1 epoch-2500 adaptive DEVELOPMENT checkpoint."
+        )
+    provider_identity = identity.get("provider_identity")
+    if not isinstance(provider_identity, Mapping):
+        raise TypeError("Thermal development parent lacks its provider/data/objective identity mapping.")
+    if (provider_identity.get("task") != "ThermalChannel"
+            or provider_identity.get("dataset_split") != "fixed25_v1"
+            or provider_identity.get("manifest_fingerprint") != FIXED25_FINGERPRINT
+            or provider_identity.get("gate_version", THERMAL_GATE_HARD_VERSION) != THERMAL_GATE_HARD_VERSION
+            or provider_identity.get("gate_transition") is not None):
+        raise ValueError("Thermal transfer parent provider binding is not the preserved fixed25 hard_v1 recipe.")
+    if identity.get("engine_config", {}).get("total_epochs") != 2500:
+        raise ValueError("Thermal transfer parent identity does not declare the 2500-epoch development horizon.")
+    for key in ("model_state_dict", "optimizer_state_by_name", "provider_training_state", "rng_state"):
+        if not isinstance(checkpoint.get(key), Mapping):
+            raise TypeError(f"Thermal development parent is missing its exact {key} state mapping.")
+    return dict(identity), provider_identity, checkpoint["provider_training_state"]
+
+
+def _provider_identity_for_transfer_comparison(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove only the declared new-child lineage and gate-version fields."""
+
+    result = copy.deepcopy(dict(value))
+    for key in ("development_refinement_parent", "gate_version", "gate_transition"):
+        result.pop(key, None)
+    return result
+
+
+def _validate_development_provider_identity(
+    source: Mapping[str, Any], active: Mapping[str, Any],
+) -> None:
+    if (_provider_identity_for_transfer_comparison(source)
+            != _provider_identity_for_transfer_comparison(active)):
+        raise ValueError(
+            "Thermal development parent provider/data/normalizer/response/objective binding differs from the active task."
+        )
+
+
+def _development_optimizer_seed(
+    checkpoint: Mapping[str, Any], model: nn.Module, provider: ThermalRefinementTask,
+) -> tuple[dict[str, Any], str]:
+    """Validate and return all named AdamW state for the new age-1 child."""
+
+    payload = checkpoint["optimizer_state_by_name"]
+    state_by_name = payload.get("state_by_name")
+    source_groups = payload.get("groups")
+    specs = tuple(provider.optimizer_groups(model, "adaptive_detail", "warmup"))
+    expected_groups = [{"name": spec.name, "parameter_names": list(spec.parameter_names)} for spec in specs]
+    if source_groups != expected_groups:
+        raise ValueError("Thermal development parent optimizer group membership differs from its child model.")
+    if checkpoint.get("optimizer_group_names") != [spec.name for spec in specs]:
+        raise ValueError("Thermal development parent optimizer group names/order are not the sealed fine/refinement pair.")
+    if not isinstance(state_by_name, Mapping):
+        raise TypeError("Thermal development parent named AdamW states must be a mapping.")
+    parameters = {name: parameter for name, parameter in model.named_parameters() if parameter.requires_grad}
+    if len(parameters) != 65 or set(state_by_name) != set(parameters):
+        raise ValueError("Thermal development parent must provide all 65 trainable named AdamW states.")
+    for name, parameter in parameters.items():
+        state = state_by_name[name]
+        if not isinstance(state, Mapping) or not {"step", "exp_avg", "exp_avg_sq"}.issubset(state):
+            raise ValueError(f"Thermal development parent moments are incomplete for {name!r}.")
+        for moment_name in ("exp_avg", "exp_avg_sq"):
+            moment = state[moment_name]
+            if (not torch.is_tensor(moment) or tuple(moment.shape) != tuple(parameter.shape)
+                    or not bool(torch.isfinite(moment).all())):
+                raise ValueError(f"Thermal development parent {moment_name} is invalid for {name!r}.")
+        step = state["step"]
+        if torch.is_tensor(step):
+            if step.numel() != 1 or not bool(torch.isfinite(step).all()) or float(step.item()) < 1:
+                raise ValueError(f"Thermal development parent AdamW step is invalid for {name!r}.")
+        elif not isinstance(step, (int, float)) or not math.isfinite(float(step)) or float(step) < 1:
+            raise ValueError(f"Thermal development parent AdamW step is invalid for {name!r}.")
+    optimizer_seed = copy.deepcopy(dict(payload))
+    return optimizer_seed, _tensor_digest(state_by_name)
+
+
+def _validate_inherited_provider_training_state(
+    state: Mapping[str, Any], *, temperature_std: float, base_loss_weight: float,
+) -> str:
+    """Require the source-only work calibration and fixed loss scale to transfer intact."""
+
+    calibration = state.get("expected_work_calibration")
+    if not isinstance(calibration, Mapping):
+        raise TypeError("Thermal development parent TRAIN-only expected-work calibration must be a mapping.")
+    if (not math.isclose(float(state.get("temperature_std", float("nan"))), temperature_std,
+                         rel_tol=0.0, abs_tol=0.0)
+            or not math.isclose(float(state.get("base_loss_weight", float("nan"))), base_loss_weight,
+                                rel_tol=0.0, abs_tol=0.0)
+            or not math.isclose(float(state.get("expected_work_weight", float("nan"))),
+                                float(calibration.get("coefficient", float("nan"))),
+                                rel_tol=0.0, abs_tol=0.0)):
+        raise ValueError("Thermal development parent provider training scales do not match its fixed TRAIN binding.")
+    if (calibration.get("stage") != "thermal_expected_work_calibration"
+            or calibration.get("absolute_epoch") != 601
+            or calibration.get("arm") != "adaptive_detail"
+            or calibration.get("validation_values_read") is not False
+            or calibration.get("stored_uv_used_for_calibration") is not False):
+        raise ValueError("Thermal development parent expected-work calibration is not the retained TRAIN-only receipt.")
+    return _tensor_digest(state)
 
 
 def _structure_only(structure: Mapping[str, Any]) -> dict[str, Any]:
@@ -616,6 +794,9 @@ class ThermalRefinementTask:
         device: torch.device | str,
         stats: Mapping[str, Any] | None = None,
         recipe: Mapping[str, Any] | None = None,
+        gate_version: str = THERMAL_GATE_HARD_VERSION,
+        gate_transition: Sequence[float] | None = None,
+        development_refinement_parent: Mapping[str, Any] | None = None,
     ) -> None:
         self.model = model
         self.parent_model = None if parent_model is None else parent_model.eval().requires_grad_(False)
@@ -641,6 +822,12 @@ class ThermalRefinementTask:
             recipe = parent["fit_identity"]["recipe"]
         self.stats = stats
         self.recipe = dict(recipe)
+        self.gate_version, self.gate_transition = _resolve_gate_binding(gate_version, gate_transition)
+        self.development_refinement_parent = (
+            None if development_refinement_parent is None else copy.deepcopy(dict(development_refinement_parent))
+        )
+        self.development_optimizer_seed: Mapping[str, Any] | None = None
+        self.development_parent_rng_state: Mapping[str, Any] | None = None
         self.budget = dict(self.recipe["budget"])
         self.response_scales = dict(self.recipe["calibration"]["response_scales"])
         self.response_coefficient = float(self.recipe["calibration"]["response_coefficient"])
@@ -672,8 +859,15 @@ class ThermalRefinementTask:
     def parent_optimizer_seed(self) -> Mapping[str, Any] | None:
         return copy.deepcopy(self.optimizer_seed)
 
+    @property
+    def training_optimizer_seed(self) -> Mapping[str, Any] | None:
+        """Return the inherited moments for this run's declared starting state."""
+
+        seed = self.development_optimizer_seed if self.development_optimizer_seed is not None else self.optimizer_seed
+        return copy.deepcopy(seed)
+
     def identity_payload(self) -> Mapping[str, Any]:
-        return {
+        payload = {
             "task": "ThermalChannel",
             "dataset_split": "fixed25_v1",
             "manifest_fingerprint": self.manifest["manifest_sha256"],
@@ -716,6 +910,14 @@ class ThermalRefinementTask:
             "training_objective": "inherited native fluid/surface/material T + .05 q proxy + parent-calibrated TRAIN response + qualified operator residual; plus fixed-scale base approximation and staged adaptive terms",
             "solver_attempts": 0,
         }
+        if self.gate_version == THERMAL_GATE_COMPACT_C1_VERSION:
+            payload.update({
+                "gate_version": self.gate_version,
+                "gate_transition": list(self.gate_transition),
+            })
+        if self.development_refinement_parent is not None:
+            payload["development_refinement_parent"] = copy.deepcopy(self.development_refinement_parent)
+        return payload
 
     def epoch_cases(self, epoch: int, seed: int) -> Sequence[str]:
         del epoch, seed
@@ -879,7 +1081,9 @@ class ThermalRefinementTask:
         setter = getattr(model.core, "set_execution", None)
         if callable(setter):
             setter(mode=core_mode, phase=core_phase, threshold=float(threshold),
-                   temperature=float(temperature), training_signal=bool(training))
+                   temperature=float(temperature), training_signal=bool(training),
+                   gate_version=getattr(self, "gate_version", THERMAL_GATE_HARD_VERSION),
+                   gate_transition=getattr(self, "gate_transition", THERMAL_GATE_COMPACT_C1_TRANSITION))
         elif core_mode != "all_fine":
             raise TypeError("Thermal route controls require the opt-in refined source-response core.")
 
@@ -1321,7 +1525,9 @@ class ThermalRefinementTask:
         model.eval()
         if hasattr(model.core, "set_execution"):
             model.core.set_execution(mode=execution_mode, phase="hard", temperature=temperature,
-                                     threshold=0.5, training_signal=False)
+                                     threshold=0.5, training_signal=False,
+                                     gate_version=self.gate_version,
+                                     gate_transition=self.gate_transition)
         role_values = {name: [] for name in ("fluid", "surface", "material")}
         family_rows = []
         try:
@@ -1392,12 +1598,22 @@ class ThermalRefinementTask:
             (refinement_names if name.startswith("core.refinement.") else fine_names).append(name)
         if not fine_names or not refinement_names:
             raise ValueError("Thermal task must retain the parent fine parameters and add one refinement group.")
-        fine_schedule = ScheduleSpec(
-            peak_lr=5.0e-5, warmup_start_lr=3.0e-6, warmup_epochs=20,
-            hold_through_epoch=1000, total_epochs=2500, final_lr=3.0e-6)
-        refinement_schedule = ScheduleSpec(
-            peak_lr=3.0e-4, warmup_start_lr=3.0e-4, warmup_epochs=0,
-            hold_through_epoch=1000, total_epochs=2500, final_lr=3.0e-6)
+        if self.development_refinement_parent is not None:
+            # This is a fresh 500-epoch child clock with inherited moments.
+            # Both parameter groups use the same constant LR by design.
+            fine_schedule = refinement_schedule = ScheduleSpec(
+                peak_lr=THERMAL_TRANSFER_LR, warmup_start_lr=THERMAL_TRANSFER_LR,
+                warmup_epochs=0, hold_through_epoch=THERMAL_TRANSFER_EPOCHS - 1,
+                total_epochs=THERMAL_TRANSFER_EPOCHS, final_lr=THERMAL_TRANSFER_LR)
+        else:
+            # Preserve the sealed default identity and schedule for every
+            # non-transfer Thermal run.
+            fine_schedule = ScheduleSpec(
+                peak_lr=5.0e-5, warmup_start_lr=3.0e-6, warmup_epochs=20,
+                hold_through_epoch=1000, total_epochs=2500, final_lr=3.0e-6)
+            refinement_schedule = ScheduleSpec(
+                peak_lr=3.0e-4, warmup_start_lr=3.0e-4, warmup_epochs=0,
+                hold_through_epoch=1000, total_epochs=2500, final_lr=3.0e-6)
         weight_decay = float(self.recipe["weight_decay"])
         return (
             OptimizerGroupSpec("thermal_fine", tuple(fine_names), fine_schedule, weight_decay=weight_decay),
@@ -1524,11 +1740,12 @@ class ThermalRefinementTask:
 def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, ThermalRefinementTask, Mapping[str, Any]]:
     """Load exact retained parent bindings and make the refined child model."""
 
+    config = dict(config)
+    development_parent_path, development_parent_sha256 = _resolve_development_refinement_parent_binding(config)
     from thermal_source_response_fit import build_balances, read_primary
 
     from honf_runtime.compat import load_trusted_checkpoint, set_seed
 
-    config = dict(config)
     parent_path = Path(config.get("parent_checkpoint", DEFAULT_PARENT_CHECKPOINT)).expanduser().resolve()
     flow_path = Path(config.get("flow_checkpoint", DEFAULT_FLOW_CHECKPOINT)).expanduser().resolve()
     atlas_directory = Path(config.get("atlas_directory", DEFAULT_ATLAS_DIRECTORY)).expanduser().resolve()
@@ -1541,6 +1758,18 @@ def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, ThermalRefinement
         raise ValueError("Thermal refinement must use the exact retained R-direct2500/D-sep2500 parents.")
     parent = load_trusted_checkpoint(parent_path, map_location="cpu")
     flow = load_trusted_checkpoint(flow_path, map_location="cpu")
+    development_parent = None
+    development_identity = None
+    development_source_provider_identity = None
+    if development_parent_path is not None:
+        development_parent = load_trusted_checkpoint(development_parent_path, map_location="cpu")
+        development_identity, development_source_provider_identity, _ = (
+            _validate_development_refinement_parent_header(
+                development_parent,
+                path=development_parent_path,
+                expected_sha256=development_parent_sha256,
+            )
+        )
     if (parent.get("epoch") != 2500 or parent.get("fit_identity", {}).get("mode") != "direct"
             or flow.get("epoch") != 2500 or flow.get("dependency_policy") != "D-sep"):
         raise ValueError("Thermal refinement parents must be the literal R-direct2500 and D-sep2500 development endpoints.")
@@ -1574,6 +1803,11 @@ def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, ThermalRefinement
     child_names = [name for name, _ in child_model.named_parameters()]
     if child_names[:len(parent_names)] != parent_names or len(child_names) <= len(parent_names):
         raise ValueError("Refinement must preserve every parent parameter name and append new small parameters.")
+    if development_parent is not None:
+        # This is a fresh 500-epoch child age. The exact source model is loaded
+        # strictly; its historical epoch count is provenance, not the child's
+        # optimizer or sampler clock.
+        child_model.load_state_dict(development_parent["model_state_dict"], strict=True)
     balances = build_balances(training_cases) if recipe["operator_decision"]["operator_constraint"] == "qualified" else []
     provider = ThermalRefinementTask(
         model=child_model,
@@ -1590,5 +1824,56 @@ def create_task(config: Mapping[str, Any]) -> tuple[nn.Module, ThermalRefinement
         balances=balances,
         optimizer_seed=optimizer_seed,
         device=config.get("device", "cpu"),
+        gate_version=str(config.get("gate_version", THERMAL_GATE_HARD_VERSION)),
+        gate_transition=config.get("gate_transition"),
+        development_refinement_parent=(
+            None if development_parent is None else {
+                "path": str(development_parent_path),
+                "sha256": str(development_parent_sha256),
+                "epoch": int(development_parent["epoch"]),
+                "arm": str(development_parent["arm"]),
+                "run_id": str(development_identity["run_id"]),
+                "development_profile": str(development_identity["development_profile"]),
+                "source_provider_identity_sha256": _json_sha256(development_source_provider_identity),
+            }
+        ),
     )
-    return child_model, provider, optimizer_seed
+    if development_parent is not None:
+        development_optimizer_seed, moments_sha256 = _development_optimizer_seed(
+            development_parent, child_model, provider)
+        development_provider_state = development_parent["provider_training_state"]
+        provider_state_sha256 = _validate_inherited_provider_training_state(
+            development_provider_state,
+            temperature_std=provider.temperature_std,
+            base_loss_weight=provider.base_loss_weight,
+        )
+        source_normalization_sha256 = development_source_provider_identity.get("normalization_stats_sha256")
+        if source_normalization_sha256 != _tensor_digest(provider.stats):
+            raise ValueError("Thermal development parent normalization differs from the active fixed25 provider.")
+        provider.development_optimizer_seed = development_optimizer_seed
+        provider.development_parent_rng_state = copy.deepcopy(development_parent["rng_state"])
+        provider.development_refinement_parent.update({
+            "optimizer_moment_state_by_name_sha256": moments_sha256,
+            "optimizer_moment_parameter_count": len(development_optimizer_seed["state_by_name"]),
+            "provider_training_state_sha256": provider_state_sha256,
+            "inherited_expected_work_weight": float(development_provider_state["expected_work_weight"]),
+            "inherited_calibration_epoch": int(
+                development_provider_state["expected_work_calibration"]["absolute_epoch"]
+            ),
+            "child_schedule": {
+                "age_origin": 1,
+                "epochs": THERMAL_TRANSFER_EPOCHS,
+                "learning_rate": THERMAL_TRANSFER_LR,
+                "both_parameter_groups": True,
+            },
+        })
+        provider.load_training_state_dict(development_provider_state)
+        active_provider_identity = provider.identity_payload()
+        _validate_development_provider_identity(
+            development_source_provider_identity, active_provider_identity)
+        if ("python" not in provider.development_parent_rng_state
+                or "numpy" not in provider.development_parent_rng_state
+                or "torch_cpu" not in provider.development_parent_rng_state):
+            raise ValueError("Thermal development parent RNG state is incomplete for exact matched initialization.")
+        restore_rng_state(provider.development_parent_rng_state)
+    return child_model, provider, provider.training_optimizer_seed

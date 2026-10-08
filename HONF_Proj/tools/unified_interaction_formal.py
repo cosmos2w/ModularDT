@@ -247,7 +247,8 @@ def build_parser():
     prep.add_argument('--data-root')
     prep.add_argument('--dataset-path')
     prep.add_argument('--wind-recipe-id', choices=(
-        'wind_w0_scalar_q1024_v1', 'wind_w1_component_q1024_v1', 'wind_w2_component_q4096_v1'))
+        'wind_w0_scalar_q1024_v1', 'wind_w1_component_q1024_v1', 'wind_w2_component_q4096_v1',
+        'wind_w3_component_q1024_h128_v1'))
     prep.add_argument('--wind-recipe-json', help='strict resolved versioned Wind training recipe JSON')
     prep.add_argument('--validation-every', type=int, default=500)
     prep.add_argument('--validation-epochs', type=int, nargs='*', default=[100])

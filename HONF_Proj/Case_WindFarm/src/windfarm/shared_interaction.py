@@ -635,6 +635,8 @@ class WindFarmRefinedInteractionModel(WindFarmSharedInteractionModel):
         execution_backend: str = "selected",
         chunk_size: int = 512,
         route_chunk_size: int = 512,
+        gate_version: str = "hard_v1",
+        gate_transition: tuple[float, float] = (0.35, 0.65),
     ) -> tuple[Any, dict[str, Any]]:
         if not isinstance(self.core, RefinedNonlinearFieldReadout):
             raise TypeError("Wind refinement adapter lost its shared nonlinear readout.")
@@ -646,6 +648,8 @@ class WindFarmRefinedInteractionModel(WindFarmSharedInteractionModel):
             temperature=float(temperature),
             training_signal=bool(training_signal),
             execution_backend=str(execution_backend),
+            gate_version=str(gate_version),
+            gate_transition=tuple(float(value) for value in gate_transition),
         )
         context = self.core.prepare(scene)
         features = _wind_receiver_features_from_scene(scene, receivers_D)

@@ -12,7 +12,10 @@ from windfarm.normalization import VelocityNormalizer, VerticalProfileBaseline
 from windfarm.training import unified_formal
 from windfarm.training.unified_task import (
     DEFAULT_ROLE_QUERY_COUNTS,
+    WIND_GATE_COMPACT_C1_TRANSITION,
+    WIND_GATE_COMPACT_C1_VERSION,
     WIND_W1_RECIPE_ID,
+    WIND_W3_RECIPE_ID,
     resolve_wind_recipe,
 )
 
@@ -108,6 +111,29 @@ def test_metadata_only_recipe_binds_full_seed42_split_without_training_ready_sta
         unified_formal.create_task(recipe)
 
 
+def test_manual_formal_metadata_binds_selected_w3_width_without_reading_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    data_root = _fake_dataset(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        unified_formal,
+        "fit_velocity_statistics",
+        lambda *args, **kwargs: pytest.fail("metadata-only W3 preparation must not read target values"),
+    )
+
+    recipe = unified_formal.prepare_recipe(
+        {**_config(tmp_path, data_root), "wind_recipe_id": WIND_W3_RECIPE_ID},
+        metadata_only=True,
+    )
+
+    assert recipe["status"] == "metadata_only_not_ready"
+    assert recipe["target_values_read"] is False
+    assert recipe["wind_training_recipe"]["recipe_id"] == WIND_W3_RECIPE_ID
+    assert recipe["model"]["hidden"] == 128
+    assert recipe["model"]["message"] == 128
+    assert recipe["model"]["environment_token_shape"] == [2, 2, 2]
+
+
 def test_full_prepare_fits_only_420_original_train_rows_and_binds_transform(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -157,6 +183,23 @@ def test_full_prepare_fits_only_420_original_train_rows_and_binds_transform(
     assert validation["ready_for_training"] is True
     assert validation["normalization_fit_performed"] is False
     assert validation["source_rows"] == {"train": 420, "validation": 90, "test_metadata_only": 90}
+
+
+def test_manual_formal_recipe_preserves_explicit_compact_gate_binding(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    data_root = _fake_dataset(tmp_path, monkeypatch)
+    training_recipe = resolve_wind_recipe(WIND_W1_RECIPE_ID)
+    assert training_recipe is not None
+    training_recipe.pop("recipe_sha256")
+    training_recipe["gate_version"] = WIND_GATE_COMPACT_C1_VERSION
+    training_recipe["gate_transition"] = list(WIND_GATE_COMPACT_C1_TRANSITION)
+    training_recipe["recipe_sha256"] = unified_formal._stable_digest(training_recipe)
+    config = _config(tmp_path, data_root)
+    config["wind_training_recipe"] = training_recipe
+
+    formal_recipe, _, _ = unified_formal._metadata_recipe(config)
+    bound = formal_recipe["wind_training_recipe"]
+    assert bound["gate_version"] == WIND_GATE_COMPACT_C1_VERSION
+    assert bound["gate_transition"] == [0.35, 0.65]
 
 
 def test_versioned_formal_recipe_uses_shared_four_layout_train_calibration(

@@ -8,6 +8,8 @@ The opt-in implementation is [interaction_refinement.py](../../src/honf_forward_
 
 For each receiver/source pair, the executed read is `B + g*(F-B)`. A hard route evaluates the expensive fine head only on selected pairs during inference. Every original positive-support near pair remains selected. The diagnostic `all_base` setting uses the coarse read outside this protected near support; it keeps those near reads fine. Unselected sources retain their cheap read and their effects on the contextual states. Environmental contextualization remains full; the source gate does not prune environment records. Physical source IDs remain attached to individual reads rather than an averaged latent bank.
 
+The default gate remains `hard_v1`, preserving existing recipes, checkpoint identities and inference behavior. The opt-in `compact_c1_v1` gate uses the fixed transition `(0.35, 0.65)` to blend the same `B + g*(F-B)` adaptive function continuously around the former hard threshold; protected near pairs retain unit fine weight. It is available only through a declared new matched child branch from the shared warmup, with a hashed TRAIN-only seam diagnosis. Exact resume remains bound to the saved gate and identity, and the branch may not change model, data, objective, sampling, work, optimizer or schedule bindings.
+
 | Responsibility | Thermal | Wind |
 | --- | --- | --- |
 | Inference inputs | Geometry, materials and prescribed boundary/flow conditions | Native turbine geometry, direction, prescribed conditions, support features and measures |

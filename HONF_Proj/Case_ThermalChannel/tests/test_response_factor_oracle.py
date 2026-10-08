@@ -252,7 +252,8 @@ def test_all_unaries_plus_top1_pair_retains_unit_weights_and_freezes_pair_per_ba
 
 def test_unmeasured_pair_pressure_increment_is_zero_but_unary_pressure_is_retained(monkeypatch) -> None:
     design, context, ids, state = _fixture()
-    device = torch.device("cuda:2")
+    assert torch.cuda.is_available(), "this integration test requires the allocated CUDA device"
+    device = torch.device("cuda:0")
     model = AnchoredResponseFactorOperator(
         module_feature_dim=2, design_dim=3, context_dim=10, delta_dim=3, hidden_dim=24
     ).to(device)

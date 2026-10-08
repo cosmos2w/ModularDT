@@ -478,6 +478,118 @@ def test_shared_warmup_branches_and_exact_resume_reproduce_same_endpoint(tmp_pat
     ]
 
 
+def _compact_declaration(tmp_path):
+    evidence = tmp_path / "train_seams.json"
+    evidence.write_text(json.dumps({"partition": "two input-selected TRAIN scenes",
+        "TEST_read": False, "optimizer_updates": 0, "solver_attempts": 0,
+        "rows": [{"consequential": True}]}), encoding="utf-8")
+    return {"kind": "compact_c1_gate_branch", "from_gate_version": "hard_v1",
+        "to_gate_version": "compact_c1_v1", "gate_transition": [0.35, 0.65],
+        "evidence_path": str(evidence),
+        "evidence_sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        "reason": "Input-only TRAIN seam exceeds the declared physical threshold."}
+
+
+def _wind_gate_identities():
+    parent = {"run_id": "matched", "wind_recipe_id": "balanced_v1",
+        "wind_recipe_sha256": "parent-recipe", "sampling_dataset_id": "wind:frozen",
+        "provider_identity": {"manifest_sha256": "fixed24", "normalizer": "train-only",
+            "resolved_recipe_sha256": "parent-recipe",
+            "resolved_recipe": {"recipe_id": "balanced_v1", "recipe_sha256": "parent-recipe",
+                "query_count": 1024, "hidden_dim": 64, "native_objective": "component_balanced_v1"}},
+        "engine_config": {"effective_cases": 24, "microbatch_cases": 24,
+            "sampling_version": "case_epoch_v1", "total_epochs": 2500},
+        "optimizer_schedule_contract": [{"peak_lr": 5e-5, "hold_through_epoch": 1000}]}
+    child = copy.deepcopy(parent)
+    child["wind_recipe_id"] = "balanced_c1_v1"
+    child["wind_recipe_sha256"] = "child-recipe"
+    child["provider_identity"]["resolved_recipe_sha256"] = "child-recipe"
+    child["provider_identity"]["resolved_recipe"].update(recipe_id="balanced_c1_v1",
+        recipe_sha256="child-recipe", gate_version="compact_c1_v1", gate_transition=[0.35, 0.65])
+    return parent, child
+
+
+def test_compact_branch_preserves_every_other_wind_binding(tmp_path):
+    parent, child = _wind_gate_identities()
+    before = copy.deepcopy(child)
+    receipt = runtime._branch_mathematical_route_amendment(parent, child, _compact_declaration(tmp_path))
+    assert receipt["to_gate_version"] == "compact_c1_v1"
+    assert child == before
+
+
+@pytest.mark.parametrize("binding", ["manifest", "normalizer", "objective", "queries", "width",
+    "effective_batch", "microbatch", "sampler", "schedule", "run"])
+def test_compact_branch_rejects_other_scientific_changes(tmp_path, binding):
+    parent, child = _wind_gate_identities()
+    provider = child["provider_identity"]
+    recipe = provider["resolved_recipe"]
+    if binding == "manifest": provider["manifest_sha256"] = "different"
+    elif binding == "normalizer": provider["normalizer"] = "different"
+    elif binding == "objective": recipe["native_objective"] = "different"
+    elif binding == "queries": recipe["query_count"] = 4096
+    elif binding == "width": recipe["hidden_dim"] = 128
+    elif binding == "effective_batch": child["engine_config"]["effective_cases"] = 48
+    elif binding == "microbatch": child["engine_config"]["microbatch_cases"] = 6
+    elif binding == "sampler": child["engine_config"]["sampling_version"] = "legacy_v1"
+    elif binding == "schedule": child["optimizer_schedule_contract"][0]["peak_lr"] = 1e-4
+    else: child["run_id"] = "different"
+    with pytest.raises(ValueError, match="any other experiment binding"):
+        runtime._branch_mathematical_route_amendment(parent, child, _compact_declaration(tmp_path))
+
+
+@pytest.mark.parametrize("bad_evidence", ["hash", "test", "updates", "solves", "partition", "consequential"])
+def test_compact_branch_requires_unmodified_input_only_train_diagnosis(tmp_path, bad_evidence):
+    parent, child = _wind_gate_identities()
+    declaration = _compact_declaration(tmp_path)
+    evidence = Path(declaration["evidence_path"])
+    payload = json.loads(evidence.read_text())
+    if bad_evidence == "test": payload["TEST_read"] = True
+    elif bad_evidence == "updates": payload["optimizer_updates"] = 1
+    elif bad_evidence == "solves": payload["solver_attempts"] = 1
+    elif bad_evidence == "partition": payload["partition"] = "DEV"
+    elif bad_evidence == "consequential": payload["rows"][0]["consequential"] = False
+    evidence.write_text(json.dumps(payload) + " ", encoding="utf-8")
+    if bad_evidence != "hash":
+        declaration["evidence_sha256"] = hashlib.sha256(evidence.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="diagnosis|TRAIN seam"):
+        runtime._branch_mathematical_route_amendment(parent, child, declaration)
+
+
+def test_compact_child_records_amendment_and_keeps_exact_resume_strict(tmp_path):
+    class GateProvider(_ToyProvider):
+        def __init__(self, gate="hard_v1"):
+            super().__init__()
+            self.gate = gate
+
+        def identity_payload(self):
+            payload = super().identity_payload()
+            if self.gate != "hard_v1":
+                payload.update(gate_version=self.gate, gate_transition=[0.35, 0.65])
+            return payload
+
+    engine = TrainingEngine(_config(), device="cpu", selection=SelectionPolicy())
+    engine.fit(nn.Linear(1, 1), GateProvider(), tmp_path / "parent", identity={"run": "gate"},
+        arm="warmup", stop_after=2)
+    parent = _checkpoint(tmp_path / "parent")
+    child_dir = tmp_path / "child"
+    engine.fit(nn.Linear(1, 1), GateProvider("compact_c1_v1"), child_dir,
+        identity={"run": "gate"}, arm="adaptive_detail", stop_after=3,
+        branch_from_checkpoint=parent, mathematical_route_branch=_compact_declaration(tmp_path))
+    payload = torch.load(_checkpoint(child_dir), map_location="cpu", weights_only=False)
+    assert payload["branch_parent"]["sha256"] == hashlib.sha256(parent.read_bytes()).hexdigest()
+    assert payload["resume_amendments"][-1]["source_epoch"] == 2
+    assert payload["experiment_identity"]["provider_identity"]["gate_version"] == "compact_c1_v1"
+    assert _artifact(child_dir, "mathematical_route_amendment_epoch_0003.json").is_file()
+    with pytest.raises(ValueError, match="different|differs|identity|Identity"):
+        engine.fit(nn.Linear(1, 1), GateProvider(), child_dir, identity={"run": "gate"},
+            arm="adaptive_detail", stop_after=4, resume_checkpoint=_checkpoint(child_dir))
+    engine.fit(nn.Linear(1, 1), GateProvider("compact_c1_v1"), child_dir,
+        identity={"run": "gate"}, arm="adaptive_detail", stop_after=4,
+        resume_checkpoint=_checkpoint(child_dir))
+    resumed = torch.load(_checkpoint(child_dir), map_location="cpu", weights_only=False)
+    assert resumed["branch_parent"] == payload["branch_parent"]
+
+
 def test_sampling_key_uses_matched_arm_independent_query_seeds():
     full = SamplingKey(17, 601, 2, 1, "soft", "full_detail")
     adaptive = SamplingKey(17, 601, 2, 1, "soft", "adaptive_detail")
