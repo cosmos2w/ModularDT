@@ -46,6 +46,7 @@ from .unified_task import (
 
 FORMAL_RECIPE_ID = "windfarm_original_seed42_fulltrain_refinement_v1"
 FORMAL_HORIZON = 5000
+FORMAL_ROLE_CATALOGUE_CACHE_MAX_BYTES = 128 * 1024**3
 FORMAL_HOLD_THROUGH_EPOCH = 2000
 FORMAL_WARMUP_EPOCHS = 500
 FORMAL_OPEN_THROUGH_EPOCH = 600
@@ -685,7 +686,9 @@ def create_task(
         seed=42,
         device=device,
         role_query_counts=DEFAULT_ROLE_QUERY_COUNTS,
-        catalogue_cache_bytes=DEFAULT_ROLE_CATALOGUE_CACHE_MAX_BYTES,
+        # Full TRAIN and first-validation geometry share this lazy cache.
+        # Its capacity is sealed by the provider identity, not preallocated.
+        catalogue_cache_bytes=FORMAL_ROLE_CATALOGUE_CACHE_MAX_BYTES,
         message_width=64,
         formal_recipe=sealed,
         startup_benchmark=startup_benchmark,

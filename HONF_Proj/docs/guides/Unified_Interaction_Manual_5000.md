@@ -41,6 +41,8 @@ The preparation options `--validation-every`, `--validation-epochs`, `--checkpoi
 
 For the full5000 horizon, Thermal visits600 cases per epoch in75 microbatches and13 optimizer updates, including a24-case final update:3,000,000 case visits and65,000 updates total. Wind visits420 direction rows per epoch in105 microbatches and18 updates, including a12-case final update:2,100,000 case visits and90,000 updates total. `progress.json` records completed optimizer updates within a cold first epoch; `history.json` and the final summary retain completed-epoch counters. These counters, query budgets, source/partition hashes, units and validation IDs must accompany later comparisons with historical runs.
 
+The formal Wind provider allows a lazy128GiB host cache for native geometry catalogues, shared by TRAIN and the first validation construction; it does not preallocate that capacity or change query sampling. Check available host memory before launch. The capacity is recorded in the provider identity and checked on exact resume. TRAIN transform preparation retains its existing64GiB cache; cold catalogue construction can take several minutes before the first optimizer update and before the first completed-epoch curve.
+
 ```bash
 CUDA_VISIBLE_DEVICES=0 python tools/unified_interaction_formal.py start --recipe diagnostics/generated/manual_thermal5000/recipe.json --run-dir Trained_Results/ThermalChannel/HONF_Forward_Runs/Run_NEW_thermal_adaptive_full5000 --device cuda:0 --stop-after 5000
 CUDA_VISIBLE_DEVICES=2 python tools/unified_interaction_formal.py start --recipe diagnostics/generated/manual_wind5000/recipe.json --run-dir Trained_Results/WindFarm/HONF_Forward_Runs/Run_NEW_wind_adaptive_full5000 --device cuda:0 --stop-after 5000
